@@ -56,7 +56,12 @@ export function createWorkImageService({
                 ON stage.operation_id = publication.operation_id
                AND stage.person_id = publication.person_id
                AND stage.intent_sha256 = publication.intent_sha256
+              LEFT JOIN actor_profile_image_revocations revocation
+                ON revocation.operation_id = publication.operation_id
+               AND revocation.person_id = publication.person_id
+               AND revocation.intent_sha256 = publication.intent_sha256
               WHERE publication.person_id = ?
+                AND revocation.operation_id IS NULL
             )
             SELECT * FROM avatar_candidates
             ORDER BY
@@ -139,7 +144,12 @@ export function createWorkImageService({
                 ON stage.operation_id = publication.operation_id
                AND stage.person_id = publication.person_id
                AND stage.intent_sha256 = publication.intent_sha256
+              LEFT JOIN actor_profile_image_revocations revocation
+                ON revocation.operation_id = publication.operation_id
+               AND revocation.person_id = publication.person_id
+               AND revocation.intent_sha256 = publication.intent_sha256
               WHERE publication.person_id = ?
+                AND revocation.operation_id IS NULL
             )
             SELECT * FROM avatar_candidates
             WHERE 1 = 1 ${source ? "AND source = ?" : ""}

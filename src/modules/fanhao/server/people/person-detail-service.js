@@ -55,6 +55,7 @@ export function personRecordWithRelatedLocalWorks(person, localWorks = []) {
 
 export function createPersonDetailService({
   actorProfileMergeCandidates,
+  actorProfilePublicationLifecycleService = null,
   actorProfileRow,
   adminCoreMutationService,
   coreLocalWorkIdsForPeople = () => [],
@@ -140,6 +141,20 @@ export function createPersonDetailService({
 
   function retryActorProfileOperation(operationId) {
     return adminCoreMutationService.retryActorProfileOperation(operationId);
+  }
+
+  function revokeActorProfileVersion(personId, operationId, options = {}) {
+    return actorProfilePublicationLifecycleService?.revokeVersion(personId, operationId, options) || null;
+  }
+
+  function collectRevokedActorProfileImages() {
+    if (!actorProfilePublicationLifecycleService?.isReady?.()) {
+      const error = new Error("人物头像撤销服务尚未就绪");
+      error.code = "ACTOR_PROFILE_LIFECYCLE_NOT_READY";
+      error.statusCode = 503;
+      throw error;
+    }
+    return actorProfilePublicationLifecycleService.drainRevoked();
   }
 
   function setCover(personId, body) {
@@ -325,11 +340,13 @@ export function createPersonDetailService({
   return {
     actorProfileOperation,
     actorProfilePayload,
+    collectRevokedActorProfileImages,
     coverBodyLimit,
     deleteLocalFiles,
     detailPayload,
     mergeIntoTarget,
     retryActorProfileOperation,
+    revokeActorProfileVersion,
     setCover,
     updateActorProfile
   };

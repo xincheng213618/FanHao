@@ -49,8 +49,9 @@ for (const [name, source] of [["worker", mediaWorker], ["inline", mediaResponse]
   assert.match(source, /receipt\.intent_sha256 = intent\.intent_sha256[\s\S]*stage\.intent_sha256 = receipt\.intent_sha256/, `${name} versioned media reader must validate the completed main receipt and immutable stage digest`);
   assert.match(source, /image_receipt\.step = 'image_stage'[\s\S]*image_receipt\.intent_sha256 = intent\.intent_sha256[\s\S]*intent\.kind = 'actor_profile_upsert'/, `${name} versioned media reader must bind the actor-profile image receipt and handler kind`);
 }
-assert.match(mediaResponse, /version \? "public, max-age=31536000, immutable" : "no-store"/, "only receipt-validated versioned avatar bytes may use an immutable cache policy");
-assert.match(mediaResponse, /const row = version[\s\S]*cachedMediaBlobRow[\s\S]*: await blobStore\.actorAvatar\(personId, ""\)/, "unversioned current avatars must bypass the process media cache");
+assert.match(mediaResponse, /actorAvatarVersion\(personId, version\)[\s\S]*status === "revoked"[\s\S]*forgetMediaBlobRow/, "a versioned avatar must consult durable revoke authority and evict any stale process entry before serving bytes");
+assert.match(mediaResponse, /version \? "private, no-store" : "no-store"/, "versioned avatar responses must not create a new immutable browser copy after revoke support exists");
+assert.match(mediaResponse, /row = await blobStore\.actorAvatar\(personId, ""\)/, "unversioned current avatars must bypass the process media cache");
 
 const publicPersonBody = presenter.slice(presenter.indexOf("function publicPerson("), presenter.indexOf("function publicMediaFile("));
 assert.match(publicPersonBody, /publicActorProfileSnapshot\(profileRow\)/);

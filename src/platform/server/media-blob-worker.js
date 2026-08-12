@@ -5,7 +5,8 @@ import { hasSqliteTables } from "./sqlite-schema.js";
 
 function hasActorProfilePublicationReadModel(db) {
   return hasSqliteTables(db, "main", [
-    "actor_profile_publications", "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
+    "actor_profile_publications", "actor_profile_image_revocations",
+    "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
   ]) && hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"]);
 }
 
@@ -15,6 +16,11 @@ attachCoreImageStore(db, { dbPath: workerData.imageDbPath });
 
 const coreImageQuery = db.prepare("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?");
 const hasPublishedActorAvatars = hasActorProfilePublicationReadModel(db);
+const revokedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
+  SELECT 1 AS revoked
+  FROM actor_profile_image_revocations
+  WHERE person_id = ? AND operation_id = ?
+`) : null;
 const completedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
   SELECT stage.image_blob, stage.mime
   FROM cross_store_intents intent
@@ -33,9 +39,14 @@ const completedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
   JOIN fanhao_images.actor_profile_image_staging stage
     ON stage.operation_id = intent.op_id
    AND stage.intent_sha256 = receipt.intent_sha256
+  LEFT JOIN actor_profile_image_revocations revocation
+    ON revocation.operation_id = intent.op_id
+   AND revocation.person_id = stage.person_id
+   AND revocation.intent_sha256 = stage.intent_sha256
   WHERE intent.kind = 'actor_profile_upsert'
     AND stage.person_id = ?
     AND stage.operation_id = ?
+    AND revocation.operation_id IS NULL
 `) : null;
 const currentActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
   WITH avatar_candidates AS (
@@ -57,7 +68,12 @@ const currentActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
       ON stage.operation_id = publication.operation_id
      AND stage.person_id = publication.person_id
      AND stage.intent_sha256 = publication.intent_sha256
+    LEFT JOIN actor_profile_image_revocations revocation
+      ON revocation.operation_id = publication.operation_id
+     AND revocation.person_id = publication.person_id
+     AND revocation.intent_sha256 = publication.intent_sha256
     WHERE publication.person_id = ?
+      AND revocation.operation_id IS NULL
   )
   SELECT image_blob, mime
   FROM avatar_candidates
@@ -140,6 +156,14 @@ function runAction(action, message) {
     return hasPublishedActorAvatars
       ? currentActorAvatarQuery.get(personId, personId) || null
       : currentActorAvatarQuery.get(personId) || null;
+  }
+  if (action === "actorAvatarVersion") {
+    const personId = Number(message.personId);
+    const version = String(message.version || "");
+    if (!version) return { status: "missing", row: null };
+    if (revokedActorAvatarVersionQuery?.get(personId, version)) return { status: "revoked", row: null };
+    const row = completedActorAvatarVersionQuery?.get(personId, version) || null;
+    return { status: row ? "available" : "missing", row };
   }
   if (action === "workCover") return workCoverQuery.get(Number(message.workId)) || null;
   if (action === "remoteImage") return remoteImageQuery.get(String(message.url || "")) || null;

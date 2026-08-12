@@ -70,12 +70,37 @@ export function createMediaResponseService({
 
   async function serveActorAvatar(res, personId, options = {}) {
     const version = String(options.version || "");
-    const row = version
-      ? await cachedMediaBlobRow(`actor:${personId}:${version}`, () => blobStore.actorAvatar(personId, version))
-      : await blobStore.actorAvatar(personId, "");
+    let row = null;
+    if (version) {
+      const key = `actor:${personId}:${version}`;
+      const authority = typeof blobStore.actorAvatarVersion === "function"
+        ? await blobStore.actorAvatarVersion(personId, version)
+        : await blobStore.actorAvatar(personId, version).then((value) => ({ status: value ? "available" : "missing", row: value }));
+      if (authority?.status === "revoked") {
+        forgetMediaBlobRow(key);
+        res.writeHead(410, {
+          "Cache-Control": "private, no-store",
+          "Content-Length": "0"
+        });
+        res.end();
+        return;
+      }
+      if (authority?.status !== "available" || !authority.row) {
+        forgetMediaBlobRow(key);
+        notFound(res);
+        return;
+      }
+      // The durable tombstone is checked before this process cache on every
+      // versioned request. That keeps a pre-revoke cached BLOB from surviving
+      // a logical revoke in the same server process.
+      row = mediaBlobCache.get(key)?.row || authority.row;
+      rememberMediaBlobRow(key, authority.row);
+    } else {
+      row = await blobStore.actorAvatar(personId, "");
+    }
     if (!serveBlobRow(res, row, {
       defaultMime: "image/jpeg",
-      cacheControl: version ? "public, max-age=31536000, immutable" : "no-store"
+      cacheControl: version ? "private, no-store" : "no-store"
     })) {
       notFound(res);
     }
@@ -114,6 +139,13 @@ export function createMediaResponseService({
       mediaBlobCache.delete(oldestKey);
       mediaBlobCacheBytes -= oldest?.bytes || 0;
     }
+  }
+
+  function forgetMediaBlobRow(key) {
+    const previous = mediaBlobCache.get(key);
+    if (!previous) return;
+    mediaBlobCache.delete(key);
+    mediaBlobCacheBytes -= previous.bytes || 0;
   }
 
   function mediaBlobRowBytes(row) {
@@ -628,7 +660,8 @@ function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCore
       if (version) {
         const db = getCoreDb();
         if (!hasSqliteTables(db, "main", [
-          "actor_profile_publications", "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
+          "actor_profile_publications", "actor_profile_image_revocations",
+          "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
         ]) || !hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"])) return null;
         return db.prepare(`
           SELECT stage.image_blob, stage.mime
@@ -648,12 +681,34 @@ function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCore
           JOIN fanhao_images.actor_profile_image_staging stage
             ON stage.operation_id = intent.op_id
            AND stage.intent_sha256 = receipt.intent_sha256
+          LEFT JOIN actor_profile_image_revocations revocation
+            ON revocation.operation_id = intent.op_id
+           AND revocation.person_id = stage.person_id
+           AND revocation.intent_sha256 = stage.intent_sha256
           WHERE intent.kind = 'actor_profile_upsert'
             AND stage.person_id = ?
             AND stage.operation_id = ?
+            AND revocation.operation_id IS NULL
         `).get(Number(personId), String(version)) || null;
       }
       return corePersonAvatarRow(personId);
+    },
+    async actorAvatarVersion(personId, version) {
+      const db = getCoreDb();
+      if (!hasSqliteTables(db, "main", [
+        "actor_profile_publications", "actor_profile_image_revocations",
+        "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
+      ]) || !hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"])) {
+        return { status: "missing", row: null };
+      }
+      const revoked = db.prepare(`
+        SELECT 1 AS revoked
+        FROM actor_profile_image_revocations
+        WHERE person_id = ? AND operation_id = ?
+      `).get(Number(personId), String(version));
+      if (revoked) return { status: "revoked", row: null };
+      const row = await this.actorAvatar(personId, version);
+      return { status: row ? "available" : "missing", row };
     },
     async cachedRemoteUrls(remoteUrls) {
       const cached = [];

@@ -43,6 +43,7 @@ export function createFanhaoDependencies(deps) {
       "adminCoreMutationService",
       "actorMovieStamp",
       "actorProfileMergeCandidates",
+      "actorProfilePublicationLifecycleService",
       "actorProfileRow",
       "actorMissingSearchWorks",
       "actorMissingSearchWorksForPeople",

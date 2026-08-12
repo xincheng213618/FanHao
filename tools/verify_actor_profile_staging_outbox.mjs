@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createAdminCoreMutationService } from "../src/modules/fanhao/server/admin/admin-core-mutation-service.js";
+import { createActorProfilePublicationLifecycleService } from "../src/modules/fanhao/server/people/actor-profile-publication-lifecycle-service.js";
 import { createCrossStoreOutboxService } from "../src/modules/fanhao/server/library/cross-store-outbox-service.js";
 import { ACTOR_PROFILE_CACHE_TABLES } from "../src/modules/fanhao/server/library/cache-contracts.js";
 import { readTableStampRow } from "../src/modules/fanhao/server/library/table-stamp-query.js";
@@ -406,6 +407,20 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     const inlineHistorical = await readInlineActorAvatar(fixture, blockedId);
     assert.equal(inlineHistorical.statusCode, 200);
     assert.equal(inlineHistorical.bytes, "blocked-avatar", "the inline media reader and a fresh worker must agree on historical completed versions");
+    const lifecycle = createActorProfilePublicationLifecycleService({
+      autoDrainOnStart: false,
+      imageDbPath: fixture.imageDbPath,
+      mainDbPath: fixture.mainDbPath,
+      warn: () => {}
+    });
+    lifecycle.start();
+    lifecycle.revokeVersion(1, blockedId, { reason: "fixture-revoke" });
+    lifecycle.close();
+    const revokedWorkerProbe = await runMediaProbe(fixture, blockedId);
+    assert.equal(revokedWorkerProbe.bytes, "", "a fresh media worker must deny a tombstoned historical version even while its stage still exists");
+    const revokedInline = await readInlineActorAvatar(fixture, blockedId);
+    assert.equal(revokedInline.statusCode, 410, "the inline media reader must expose the existing gone-version contract");
+    assert.equal(revokedInline.bytes, "");
 
     runtime.manualCover.replaceManualPersonAvatar(2, {
       sourceType: "local", localPath: "", remoteUrl: "", mime: "image/manual",
@@ -579,8 +594,8 @@ async function verifyActorAvatarCacheContract() {
   const historicalAgain = await read("completed-op");
   assert.equal(historical.bytes, "historical-stage");
   assert.equal(historicalAgain.bytes, "historical-stage", "the completed immutable version may remain cached by its operation token");
-  assert.equal(immutableReads, 1);
-  assert.equal(historical.cacheControl, "public, max-age=31536000, immutable");
+  assert.equal(immutableReads, 2, "versioned reads must recheck durable revoke authority before consulting a process cache");
+  assert.equal(historical.cacheControl, "private, no-store");
 }
 
 function verifyPresenterUsesOneSnapshot() {

@@ -48,6 +48,8 @@
 | PUT | `/api/actor-profiles/:id` | 本地管理员 | 更新单个人物资料与可选头像。门禁在读取 body 前执行；完成后返回 200；仅当 body 显式设置 `acceptAsyncOperation: true` 时，`prepared/applying/retry_wait` 返回 202，否则返回 retryable 503；`blocked/cancelled` 始终返回 409。 |
 | GET | `/api/actor-profile-operations/:operationId` | 公开 | 查询单人物资料更新的可恢复 operation 状态。 |
 | POST | `/api/actor-profile-operations/:operationId/retry` | 本地管理员 | 显式重试被阻断的人物资料 operation；`retry_wait` 由协调器自动恢复。 |
+| POST | `/api/actor-profiles/:personId/versions/:operationId/revoke` | 本地管理员 | 幂等撤销已完成头像版本；逻辑撤销持久化后始终返回 200，`purgeStatus=pending` 表示 stage BLOB 将由受限 GC 恢复推进，已回收则为 `completed`。 |
+| POST | `/api/actor-profile-image-gc` | 本地管理员 | 手动推进已撤销 stage 的回收；不删除未明确撤销的历史版本，单批最多 50 条和 64 MiB。 |
 | GET | `/api/people/:id` | 公开 | 人物详情（作品、缺失作品、合并候选、封面）。 |
 | POST | `/api/people/:id/merge` | 本地管理员 | 将某人物合并到目标人物。 |
 | PUT | `/api/people/:id/cover` | 公开 | 设置人物封面（头像）。 |

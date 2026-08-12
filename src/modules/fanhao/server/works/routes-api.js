@@ -43,6 +43,14 @@ const ACTOR_PROFILE_PUBLIC_ERROR_MESSAGES = Object.freeze({
   ACTOR_PROFILE_RESERVED: "人物头像或 JavDB 身份正在更新，请稍后重试",
   ACTOR_PROFILE_RESERVATION_LOST: "人物资料任务状态需要人工检查，暂时无法重试",
   ACTOR_PROFILE_RETRY_NOT_BLOCKED: "只有已阻断的人物资料任务可以重试",
+  ACTOR_PROFILE_OPERATION_ACTIVE: "人物资料任务尚未完成，不能撤销头像版本",
+  ACTOR_PROFILE_VERSION_NOT_COMPLETED: "只有已完成的人物头像版本可以撤销",
+  ACTOR_PROFILE_VERSION_HAS_NO_AVATAR: "该已完成任务没有可撤销的头像版本",
+  ACTOR_PROFILE_VERSION_PERSON_MISMATCH: "人物与头像版本不匹配",
+  ACTOR_PROFILE_REVOCATION_CONFLICT: "人物头像撤销状态需要人工检查",
+  ACTOR_PROFILE_GC_RECEIPT_CONFLICT: "人物头像回收状态需要人工检查",
+  ACTOR_PROFILE_LIFECYCLE_NOT_READY: "人物头像撤销服务尚未就绪",
+  ACTOR_PROFILE_LIFECYCLE_BUSY: "人物头像撤销服务暂时繁忙，请稍后重试",
   CROSS_STORE_FAILURE_RECORD_BUSY: "人物资料任务已经持久化，请使用同一请求键重试",
   CROSS_STORE_NOT_READY: "人物资料恢复队列尚未就绪",
   IDEMPOTENCY_CONFLICT: "幂等键已经用于不同的人物资料请求",
@@ -72,7 +80,7 @@ export function sanitizeActorProfileOperation(operation) {
 
 export function actorProfileRouteErrorStatus(error) {
   const status = Number(error?.statusCode || error?.status || 0);
-  return [400, 409, 413, 429, 503].includes(status) ? status : 500;
+  return [400, 404, 409, 413, 429, 503].includes(status) ? status : 500;
 }
 
 export function safeActorProfileRouteError(error, fallback = "人物资料操作失败") {
@@ -89,6 +97,54 @@ export function safeActorProfileRouteError(error, fallback = "人物资料操作
     ...(Object.hasOwn(ACTOR_PROFILE_PUBLIC_ERROR_MESSAGES, code) ? { code } : {}),
     ...(error?.retryable || status === 503 ? { retryable: true } : {}),
     ...(operation ? { operation } : {})
+  };
+}
+
+function publicActorProfileLimitations() {
+  return {
+    browserCacheRecall: false,
+    forensicErasure: false,
+    retainedMetadata: ["intent", "mainReceipt", "imageReceipt", "revocation", "gcReceipt"]
+  };
+}
+
+function publicActorProfileRevocationReason(value) {
+  const text = String(value || "").trim().replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 80);
+  if (!text) return "manual";
+  if (!/^[\p{L}\p{N}_ -]+$/u.test(text)) return "manual-redacted";
+  if (/\b(?:busy|database|error|exception|ioerr|locked|sqlite|errno|stack|traceback)\b/i.test(text)) return "manual-redacted";
+  if (/(?:数据库|文件路径|堆栈|错误|异常|锁定)/u.test(text)) return "manual-redacted";
+  return text;
+}
+
+export function sanitizeActorProfileRevocation(result) {
+  if (!result?.operationId || !result?.personId) return null;
+  return {
+    ok: result.ok === true,
+    operationId: String(result.operationId),
+    personId: String(result.personId),
+    reason: publicActorProfileRevocationReason(result.reason),
+    revokedAt: String(result.revokedAt || ""),
+    alreadyRevoked: result.alreadyRevoked === true,
+    wasCurrent: result.wasCurrent === true,
+    purgeStatus: result.purgeStatus === "completed" ? "completed" : "pending",
+    limitations: publicActorProfileLimitations()
+  };
+}
+
+export function sanitizeActorProfileGcResult(result) {
+  const count = (value) => {
+    const numeric = Math.floor(Number(value));
+    return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : 0;
+  };
+  return {
+    ok: result?.ok === true,
+    selected: count(result?.selected),
+    selectedBytes: count(result?.selectedBytes),
+    deleted: count(result?.deleted),
+    deletedBytes: count(result?.deletedBytes),
+    pending: count(result?.pending),
+    limitations: publicActorProfileLimitations()
   };
 }
 
@@ -179,6 +235,37 @@ export async function routeWorksApi(req, res, url, deps) {
       sendJson(res, 200, { ok: true, operation: sanitizeActorProfileOperation(operation) });
     } catch (error) {
       sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "重试人物资料任务失败"));
+    }
+    return true;
+  }
+
+  const actorProfileVersionRevokeMatch = /^\/api\/actor-profiles\/([^/]+)\/versions\/([^/]+)\/revoke$/.exec(url.pathname);
+  if (actorProfileVersionRevokeMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const result = personDetailService.revokeActorProfileVersion(
+        decodeURIComponent(actorProfileVersionRevokeMatch[1]),
+        decodeURIComponent(actorProfileVersionRevokeMatch[2]),
+        { reason: body?.reason }
+      );
+      if (!result) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, sanitizeActorProfileRevocation(result));
+    } catch (error) {
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "撤销人物头像版本失败"));
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/actor-profile-image-gc" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, sanitizeActorProfileGcResult(personDetailService.collectRevokedActorProfileImages()));
+    } catch (error) {
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "回收已撤销人物头像失败"));
     }
     return true;
   }

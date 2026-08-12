@@ -56,7 +56,33 @@
 
 publication stage 只在自己的 source 优先级内代替同来源 live 行，并不跨级压过手工头像。完成后的直接头像替换 writer 必须先在 `BEGIN IMMEDIATE` 中通过 reservation fence，再删除该人物 publication 指针，最后写 live image。删除手工头像时，仅在 publication 自身也是手工来源时清 pointer；若 publication 是较低优先级的 `actor_profiles`，保留 pointer 作为删除手工 override 后的回退。这样既不会让旧 publication 永久遮蔽后续修改，也不破坏原有来源回退顺序；下一次 PUT 可再次建立新指针。
 
-手工覆盖或删除只改变 current pointer/live 候选选择，不会擦除、撤销或使已 `completed` 的历史 `?v=<operation-id>` 失效。敏感图片删除、版本 URL revoke 和 stage GC 需要单独的管理协议；当前切片未实现这些能力。
+手工覆盖或删除只改变 current pointer/live 候选选择，不会自动撤销已 `completed` 的历史版本。管理员需要明确调用
+`POST /api/actor-profiles/:personId/versions/:operationId/revoke` 才会写入不可变 revoke tombstone。人物与 operation
+同时作为资源标识，并在主库事务内与原始 intent 重新绑定校验，避免错人或错版本撤销。
+
+revoke 的 `synchronous=FULL` 主库事务同时验证 completed state、main receipt、图片 stage/image receipt，写
+`actor_profile_image_revocations`，并以 operation/person/digest 条件仅清除匹配的 current pointer。之后所有 profile、current
+avatar 和 versioned avatar reader 都以 tombstone 为权威 deny；已知撤销版本返回 410，版本响应统一为
+`Cache-Control: private, no-store`。响应的 `purgeStatus=pending` 表示逻辑撤销已完成、stage BLOB 等待回收，仍返回 200；
+回收凭据与删除在图片库 FULL 事务中完成后，幂等重放返回 `purgeStatus=completed`。
+相同 revoke 重放是幂等的，并返回原始 reason/time。
+
+每条新 tombstone 还保存由服务端生成的 UUID `request_id`、固定脱敏主体 `caller=local-admin` 和 audit schema version；
+这些字段参与 v2 tombstone digest，并与整行一起不可更新、不可删除。HTTP body 中同名字段、path、URL 或 raw error 均不会
+进入审计记录，包含路径、URL 或错误文本形态的自由 reason 会折叠为 `manual-redacted`。旧版 tombstone 在一个
+`BEGIN IMMEDIATE` + `synchronous=FULL` 迁移中原子补齐服务端 UUID 与 caller，并保留 v1 digest 标记；迁移可幂等重放，
+断电不会留下半列或半回填状态。`request_id`、caller、digest、intent 等内部审计字段不进入 revoke HTTP 响应。
+
+stage 回收只处理明确撤销的版本，不推断历史保留策略，也不自动淘汰未撤销历史。启动恢复、revoke 后调度或管理员调用
+`POST /api/actor-profile-image-gc` 可推进队列；单个图片库 FULL 事务最多 50 条、最多 64 MiB，不执行 VACUUM。
+图片库先写不可变 `actor_profile_image_gc_receipts`（绑定 operation/person/intent/tombstone digest/content SHA-256/bytes），
+再由同一专用连接的临时授权通过 DELETE trigger 删除 stage；普通连接 raw DELETE/UPDATE、伪造 receipt 和 GC 后重建 stage
+均被拒绝。主库 tombstone 与 main receipt，以及图片库 image receipt/GC receipt 永久保留，支持崩溃恢复和审计。
+
+这是 logical revoke + stage BLOB GC，不是浏览器缓存召回或法证擦除。`no-store` 只约束撤销能力上线后的新响应；撤销前
+已经被旧浏览器长期缓存的字节无法从客户端收回，SQLite/WAL 页、文件系统或备份副本也不保证被本协议抹除。immutable intent
+的 `payload_json` 及各 receipt 仍可能保留原始 URL/path 等元数据。operation ID 永不复用。若需要元数据脱敏，必须设计
+单独的、可审计的 redaction 协议，不能修改既有 immutable intent。
 
 当前直接或同优先级 writer 清单：
 
@@ -101,11 +127,13 @@ publication stage 只在自己的 source 优先级内代替同来源 live 行，
 
 - `GET /api/actor-profile-operations/:operationId`
 - `POST /api/actor-profile-operations/:operationId/retry`（本地管理员）
+- `POST /api/actor-profiles/:personId/versions/:operationId/revoke`（本地管理员；逻辑撤销，stage 回收可能待处理）
+- `POST /api/actor-profile-image-gc`（本地管理员；仅推进已经撤销的 stage 回收）
 
 ## 尚未覆盖的迁移清单
 
 - 将 Filetree/Python/人物合并各自迁入可靠 journal/outbox，消除它们现有的跨库 crash-atomic 风险。
-- 为已完成 stage 设计保留/压缩、敏感图删除和 immutable URL revoke 策略；当前 completed versions 会持续增长并保持可按原 operation URL 读取。
-- 在协议 schema 发生兼容性变化前引入显式 schema version/migration gate；本批只创建首版表，不扩展在线升级协议。
+- 若产品需要对未撤销历史版本做自动 retention，需要另行确定保留策略；首版为安全起见完全关闭自动淘汰。
+- 若未来继续改变 tombstone/receipt 合约，引入独立 schema version gate；本批只为既有 tombstone 增加一次受测的 audit v1→v2 兼容迁移。
 - 单独审查并统一 `PUT /api/people/:id/cover` 等历史写路由的权限策略；本批不扩大到人物封面接口。
 - 增加多进程、真实异常断电和长时间 BUSY soak；当前 fixture 使用临时 SQLite、强制 kill 和确定性错误，不访问真实数据库或服务。

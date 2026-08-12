@@ -11,6 +11,7 @@ import { createImageLibraryService } from "./src/modules/content-index/server/im
 import { createActorAvatarService } from "./src/modules/fanhao/server/people/actor-avatar-service.js";
 import { createActorMovieService } from "./src/modules/fanhao/server/people/actor-movie-service.js";
 import { createActorProfileService } from "./src/modules/fanhao/server/people/actor-profile-service.js";
+import { createActorProfilePublicationLifecycleService } from "./src/modules/fanhao/server/people/actor-profile-publication-lifecycle-service.js";
 import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin/admin-actor-avatar-service.js";
 import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin/admin-core-mutation-service.js";
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
@@ -659,6 +660,15 @@ actorProfileOutboxService = createCrossStoreOutboxService({
   imageDbPath: CORE_IMAGE_DB_PATH,
   mainDbPath: CORE_DB_PATH
 });
+const actorProfilePublicationLifecycleService = createActorProfilePublicationLifecycleService({
+  imageDbPath: CORE_IMAGE_DB_PATH,
+  mainDbPath: CORE_DB_PATH,
+  onChanged: () => {
+    invalidateTableStamp("actor_profiles");
+    actorProfileService.invalidate();
+    workImageService.invalidate();
+  }
+});
 const workLocalMutationService = createWorkLocalMutationService({
   ensureLibraryDirectoryPath: (...args) => ensureLibraryDirectoryPath(...args),
   getCoreDb,
@@ -933,6 +943,7 @@ const moduleRegistry = await discoverFanHaoModules({
         actorMovieStamp,
         actorMovieInfoStamp,
         actorProfileMergeCandidates,
+        actorProfilePublicationLifecycleService,
         actorProfileRow,
         actorMissingSearchWorks,
         actorMissingSearchWorksForPeople,
@@ -2258,6 +2269,7 @@ userStateService.load();
 appConfigService.load();
 imageReaderCacheService.startCleanupTimer();
 actorProfileOutboxService.start();
+actorProfilePublicationLifecycleService.start();
 localLibraryIndexService.initializeLibrary();
 await moduleRegistry.start();
 
@@ -2286,6 +2298,7 @@ const serverHost = createServerHost({
   stop: async () => {
     await accessAnalyticsService.close();
     await workMoveJobService.close();
+    actorProfilePublicationLifecycleService.close();
     actorProfileOutboxService.close();
     await moduleRegistry.stop();
     await mediaBlobStore.close();

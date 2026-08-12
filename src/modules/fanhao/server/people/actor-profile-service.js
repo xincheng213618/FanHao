@@ -24,6 +24,11 @@ const PUBLISHED_PROFILE_ROWS_SQL = `
       ON stage.operation_id = publication.operation_id
      AND stage.person_id = publication.person_id
      AND stage.intent_sha256 = publication.intent_sha256
+    LEFT JOIN actor_profile_image_revocations revocation
+      ON revocation.operation_id = publication.operation_id
+     AND revocation.person_id = publication.person_id
+     AND revocation.intent_sha256 = publication.intent_sha256
+    WHERE revocation.operation_id IS NULL
   ),
   ranked_avatars AS (
     SELECT avatar_candidates.*,
