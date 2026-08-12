@@ -144,7 +144,7 @@ try {
     method: "OPTIONS",
     headers: {
       origin: "http://localhost",
-      "access-control-request-headers": "content-type,x-fanhao-client",
+      "access-control-request-headers": "content-type,range,if-range,x-fanhao-client",
       "access-control-request-method": "PATCH"
     }
   });
@@ -188,6 +188,9 @@ try {
   assert.equal(allowedPreflightResponse.status, 204);
   assert.equal(allowedPreflightResponse.headers.get("access-control-allow-origin"), "http://localhost");
   assert.match(allowedPreflightResponse.headers.get("access-control-allow-methods"), /(?:^|,)PATCH(?:,|$)/, "Android collection rename preflights must allow PATCH");
+  assert.match(allowedPreflightResponse.headers.get("access-control-allow-headers"), /(?:^|,)If-Range(?:,|$)/, "conditional range preflights must allow If-Range");
+  assert.match(allowedPreflightResponse.headers.get("access-control-expose-headers"), /(?:^|,)ETag(?:,|$)/, "cross-origin media clients must be able to read ETag");
+  assert.match(allowedPreflightResponse.headers.get("access-control-expose-headers"), /(?:^|,)Last-Modified(?:,|$)/, "cross-origin media clients must be able to read Last-Modified");
   assert.equal(allowedPreflightResponse.headers.get("vary"), "Origin");
   const rejectedPreflightResponse = fakeResponse();
   await corsHandler(fakeRequest({

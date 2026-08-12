@@ -23,8 +23,8 @@ export function createRequestHandler({
     if (allowedCorsOrigin) {
       res.setHeader("Access-Control-Allow-Origin", allowedCorsOrigin);
       res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range,X-FanHao-Client,X-FanHao-Media-Cache");
-      res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range,If-Range,X-FanHao-Client,X-FanHao-Media-Cache");
+      res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,ETag,Last-Modified,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms");
     }
 
     if (req.method === "OPTIONS") {
