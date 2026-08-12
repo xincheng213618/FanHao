@@ -46,13 +46,15 @@ export function createNovelPage(deps) {
     openBook,
     rerender: renderView,
     onLibraryChanged: async () => {
+      if (state.novel?.mode !== "manage") return;
+      const requestId = libraryRequestId;
       try {
         const summary = await api("/api/novels/summary");
+        if (state.novel?.mode !== "manage" || requestId !== libraryRequestId) return;
         state.novel.summary = summary;
-        state.novel.data = state.novel.mode === "manage"
-          ? { summary, books: [], total: 0, limit: NOVEL_BOOK_PAGE_SIZE, offset: 0 }
-          : null;
+        state.novel.data = { summary, books: [], total: 0, limit: NOVEL_BOOK_PAGE_SIZE, offset: 0 };
       } catch {
+        if (state.novel?.mode !== "manage" || requestId !== libraryRequestId) return;
         state.novel.data = null;
         state.novel.summary = null;
       }
@@ -220,6 +222,9 @@ export function createNovelPage(deps) {
       finishLibraryRequest(request);
       state.novel.loading = false;
       state.novel.loadingMore = false;
+      state.novel.status = error.message || (append ? "继续加载失败" : "小说书库读取失败");
+      renderStats();
+      renderView();
       throw error;
     }
     if (!isCurrentLibraryRequest(request)) return false;
@@ -233,7 +238,7 @@ export function createNovelPage(deps) {
         state.novel.page = clampedPage;
         state.novel.loading = false;
         state.novel.loadingMore = false;
-        return loadNovels({ ...options, pageClamped: true, replaceRoute: true });
+        return loadNovels({ ...options, pageClamped: true, skipRoute: false, replaceRoute: true });
       }
     }
     if (append) {

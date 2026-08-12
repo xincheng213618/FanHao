@@ -16,6 +16,7 @@ let delayedAuthorDetail = null;
 const delayedNovelRequests = [];
 let delayedNovelCollection = null;
 let fixtureNovelCollectionRequests = 0;
+let fixtureNovelSummaryRequests = 0;
 const fixtureCollections = new Map();
 let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
@@ -156,6 +157,13 @@ async function verifyNovelLibraryIntent(browser) {
     await page.goForward();
     await bookTitle().filter({ hasText: "前进后退二" }).waitFor({ state: "visible", timeout: 5000 });
 
+    await submitSearch("当前失败");
+    await page.locator(".novel-empty-card", { hasText: "fixture current novel request failed" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.match(page.url(), /\?q=%E5%BD%93%E5%89%8D%E5%A4%B1%E8%B4%A5/, "a current failed search must retain its intended URL");
+    assert.equal(await page.locator(".novel-home-loading").count(), 0, "a current failed search must clear its loading state");
+    await submitSearch("失败后恢复");
+    await bookTitle().filter({ hasText: "失败后恢复" }).waitFor({ state: "visible", timeout: 5000 });
+
   } finally {
     await page.close();
   }
@@ -168,9 +176,11 @@ async function verifyNovelCardAccessibility(browser) {
     const card = page.locator("article.novel-book-row").first();
     await card.waitFor({ state: "visible", timeout: 5000 });
     assert.equal(await card.getAttribute("tabindex"), null, "novel cards must not add a non-semantic tab stop");
+    assert.notEqual(await card.evaluate((element) => getComputedStyle(element).cursor), "pointer", "a static novel card must not advertise a click target");
     const detail = card.getByRole("button", { name: "书籍详情" });
     await detail.focus();
     assert.equal(await detail.evaluate((element) => document.activeElement === element), true, "the named book-detail control must be keyboard focusable");
+    assert.equal(await detail.evaluate((element) => getComputedStyle(element).cursor), "pointer", "the real detail button must retain its interactive cursor");
     await page.keyboard.press("Enter");
     await page.locator(".novel-detail").waitFor({ state: "visible", timeout: 5000 });
   } finally {
@@ -181,38 +191,22 @@ async function verifyNovelCardAccessibility(browser) {
 async function verifyNovelRankingClampHistory(browser) {
   const page = await browser.newPage();
   try {
-    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
-    const result = await page.evaluate(async () => {
-      const { createNovelPage } = await import("/modules/novels/novel-page.js?ranking-clamp-history=1");
-      const state = { activeView: "novels", novel: { mode: "rankings", page: 99 } };
-      const routeUrl = (route) => `/novels/rankings${route.novelPage > 0 ? `?page=${route.novelPage + 1}` : ""}`;
-      const writeRoute = (route, mode) => history[mode === "replace" ? "replaceState" : "pushState"]({ route }, "", routeUrl(route));
-      const pageController = createNovelPage({
-        api: async () => ({ books: [], total: 1, limit: 48, offset: 4752, summary: { totals: {} } }),
-        cancelScheduledWorkRendering() {},
-        disconnectPeopleIndexAutoload() {},
-        els: { workGrid: document.getElementById("fixture"), statsRow: document.createElement("div") },
-        formatBytes: () => "0 B",
-        formatDateTime: () => "",
-        formatNumber: (value) => String(value || 0),
-        hidePersonProfile() {},
-        openAdminScript() {},
-        pushRoute: (route) => writeRoute(route, "push"),
-        replaceRoute: (route) => writeRoute(route, "replace"),
-        resetProgressiveCoverLoading() {},
-        setMainHeader() {},
-        state,
-        syncRouteAfterNavigation() {}
-      });
-      const historyLengthBefore = history.length;
-      await pageController.loadNovels();
-      return { historyLengthBefore, historyLengthAfter: history.length, path: `${location.pathname}${location.search}` };
+    await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
+    await page.locator(".novel-book-row").waitFor({ state: "visible", timeout: 5000 });
+    const historyLengthBefore = await page.evaluate(() => history.length);
+    await page.evaluate(() => {
+      history.pushState({}, "", "/novels/rankings?page=100");
+      dispatchEvent(new PopStateEvent("popstate"));
     });
-    assert.equal(result.historyLengthAfter, result.historyLengthBefore + 1, "an out-of-range ranking page must replace its provisional route instead of adding another history entry");
-    assert.equal(result.path, "/novels/rankings", "the clamped ranking route must point to the first valid page");
+    await page.locator(".novel-ranking-board").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await page.locator(".novel-ranking-board").textContent(), /第 1 \/ 1 页/, "the restored ranking view must show the clamped page");
+    assert.equal(await page.evaluate(() => history.length), historyLengthBefore + 1, "an out-of-range history route must be replaced instead of adding another entry");
+    assert.match(page.url(), /\/novels\/rankings$/, "the clamped ranking route must omit its invalid page parameter");
     await page.goBack();
-    assert.match(page.url(), /android-picker-fixture$/, "Back must return before the provisional out-of-range ranking request");
+    await page.locator(".novel-book-row").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(page.url(), /\/novels$/, "Back must return before the provisional out-of-range ranking request");
     await page.goForward();
+    await page.locator(".novel-ranking-board").waitFor({ state: "visible", timeout: 5000 });
     assert.match(page.url(), /\/novels\/rankings$/, "Forward must visit only the clamped ranking route");
   } finally {
     await page.close();
@@ -223,6 +217,7 @@ async function verifyNovelManageExitStopsPolling(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   try {
     fixtureNovelCollectionRequests = 0;
+    fixtureNovelSummaryRequests = 0;
     const delayed = deferNovelCollection();
     await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "管理" }).click();
@@ -232,6 +227,8 @@ async function verifyNovelManageExitStopsPolling(browser) {
     delayed.release();
     await page.waitForTimeout(1800);
     assert.equal(fixtureNovelCollectionRequests, 1, "a completed stale manage load must not schedule a collection poll after leaving management");
+    assert.equal(fixtureNovelSummaryRequests, 1, "a stale succeeded collection task must not refresh or clear the current books intent");
+    await page.locator(".novel-book-row").waitFor({ state: "visible", timeout: 5000 });
   } finally {
     delayedNovelCollection = null;
     await page.close();
@@ -1955,9 +1952,13 @@ async function fixtureApi(url, request = {}) {
       await delayed.response;
       if (delayed.reject) throw new Error("fixture stale novel request failed");
     }
+    if (url.searchParams.get("q") === "当前失败") throw new Error("fixture current novel request failed");
     return fixtureNovels(url);
   }
-  if (url.pathname === "/api/novels/summary") return fixtureNovels(url).summary;
+  if (url.pathname === "/api/novels/summary") {
+    fixtureNovelSummaryRequests += 1;
+    return fixtureNovels(url).summary;
+  }
   if (url.pathname === "/api/novels/collection") {
     fixtureNovelCollectionRequests += 1;
     if (delayedNovelCollection) {
@@ -1971,7 +1972,7 @@ async function fixtureApi(url, request = {}) {
       credentials: {},
       runtime: {},
       summary: {},
-      tasks: [{ id: "fixture-active-collection", status: "running" }]
+      tasks: [{ id: "fixture-active-collection", status: "succeeded", bookId: "fixture-novel" }]
     };
   }
   const novelDetail = /^\/api\/novels\/([^/]+)$/.exec(url.pathname);
