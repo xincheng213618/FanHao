@@ -46,7 +46,7 @@
     "verify:cover-cache-status": "node tools/verify_cover_cache_status_performance.mjs",
     "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs && node tools/verify_native_short_video_paging.mjs && node tools/verify_native_short_video_http.mjs",
     "verify:browser-behavior": "node tools/verify_browser_behavior.mjs",
-    "verify:douyin-manager": "node tools/verify_douyin_download_manager_integration.mjs",
+    "verify:douyin-manager": "node tools/verify_douyin_download_manager_integration.mjs && node tools/verify_douyin_manager_latest_requests.mjs",
     "verify:settings": "node tools/verify_module_settings.mjs",
     "verify:market-dashboard": "node tools/verify_market_dashboard.mjs",
     "verify:gomoku": "node tools/verify_gomoku_game.mjs",

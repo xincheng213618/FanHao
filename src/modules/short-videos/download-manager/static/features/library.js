@@ -1,5 +1,6 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
+import { createLatestRequestLifecycle } from "../core/latest-request.js";
 
 const PAGE_SIZE = 48;
 
@@ -11,6 +12,11 @@ export function createLibraryFeature(options) {
   let hasMore = false;
   let loading = false;
   let searchTimer = null;
+  const requests = createLatestRequestLifecycle();
+
+  function currentQuerySnapshot() {
+    return String($("librarySearch")?.value || "").trim();
+  }
 
   function libraryCard(item) {
     const cover = item.cover_url
@@ -52,13 +58,14 @@ export function createLibraryFeature(options) {
   }
 
   async function loadLibrary(options = {}) {
-    if (loading) return;
     const append = Boolean(options.append);
+    if (append && requests.inFlight) return;
+    const querySnapshot = currentQuerySnapshot();
     const params = new URLSearchParams({
       limit: String(PAGE_SIZE),
       offset: String(append ? offset : 0),
     });
-    const search = $("librarySearch").value.trim();
+    const search = querySnapshot;
     if (search) params.set("q", search);
     if (!append) {
       rows = [];
@@ -66,17 +73,24 @@ export function createLibraryFeature(options) {
       offset = 0;
       hasMore = false;
     }
+    const request = requests.begin(querySnapshot);
     loading = true;
     renderLibrary();
     try {
-      const result = await api(`/api/library?${params.toString()}`);
+      const result = await api(`/api/library?${params.toString()}`, { signal: request.signal });
+      if (!requests.canCommit(request, currentQuerySnapshot())) return;
       total = Number(result.total || 0);
       rows = append ? [...rows, ...(result.items || [])] : result.items || [];
       offset = Number(result.next_offset || 0);
       hasMore = Boolean(result.has_more);
+    } catch (error) {
+      if (!requests.canCommit(request, currentQuerySnapshot())) return;
+      throw error;
     } finally {
-      loading = false;
-      renderLibrary();
+      if (requests.finish(request)) {
+        loading = false;
+        renderLibrary();
+      }
     }
   }
 

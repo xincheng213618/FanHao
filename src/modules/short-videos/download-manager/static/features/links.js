@@ -1,6 +1,7 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { formatCompact, formatDateTime, statusLabel } from "../core/format.js";
+import { createLatestRequestLifecycle } from "../core/latest-request.js";
 
 const PAGE_SIZE = 100;
 
@@ -14,6 +15,11 @@ export function createLinksFeature(options) {
   let loading = false;
   let searchTimer = null;
   let summary = null;
+  const requests = createLatestRequestLifecycle();
+
+  function currentQuerySnapshot() {
+    return `${currentFilter}\n${String($("linksSearch")?.value || "").trim()}`;
+  }
 
   function renderSummary() {
     document.querySelectorAll("[data-link-count]").forEach((node) => {
@@ -139,14 +145,16 @@ export function createLinksFeature(options) {
   }
 
   async function load(options = {}) {
-    if (loading) return;
+    const append = Boolean(options.append);
+    if (append && requests.inFlight) return;
     const reset = options.reset !== false && !options.append;
     const preserve = Boolean(options.preserve);
     const offset = options.append ? rows.length : 0;
     const limit = preserve ? Math.max(PAGE_SIZE, rows.length || PAGE_SIZE) : PAGE_SIZE;
+    const querySnapshot = currentQuerySnapshot();
     const params = new URLSearchParams();
     if (currentFilter) params.set("status", currentFilter);
-    const search = $("linksSearch")?.value.trim();
+    const search = String($("linksSearch")?.value || "").trim();
     if (search) params.set("q", search);
     params.set("view", "manager");
     params.set("include_summary", "1");
@@ -156,17 +164,24 @@ export function createLinksFeature(options) {
       rows = [];
       total = 0;
     }
+    const request = requests.begin(querySnapshot);
     loading = true;
     renderPager();
     try {
-      const data = await api(`/api/links?${params.toString()}`);
+      const data = await api(`/api/links?${params.toString()}`, { signal: request.signal });
+      if (!requests.canCommit(request, currentQuerySnapshot())) return;
       total = Number(data.total || 0);
       if (data.summary) summary = data.summary;
       rows = options.append ? [...rows, ...(data.links || [])] : data.links || [];
       renderTable();
+    } catch (error) {
+      if (!requests.canCommit(request, currentQuerySnapshot())) return;
+      throw error;
     } finally {
-      loading = false;
-      renderPager();
+      if (requests.finish(request)) {
+        loading = false;
+        renderPager();
+      }
     }
   }
 

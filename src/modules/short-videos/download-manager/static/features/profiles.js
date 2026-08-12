@@ -1,6 +1,7 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { displayDouyinId, formatCompact, formatDateTime, profileWorkDate } from "../core/format.js";
+import { createLatestRequestLifecycle } from "../core/latest-request.js";
 
 const PROFILE_AUTO_LOAD_DISTANCE = 320;
 const PROFILE_PAGE_SIZE = 40;
@@ -23,6 +24,18 @@ export function createProfilesFeature(options) {
   let wasExtractActive = false;
   let extractActive = false;
   let deepLinkedProfile = "";
+  const requests = createLatestRequestLifecycle();
+
+  function currentQuery() {
+    const differenceFilter = $("profileManagerDeletedWorks")?.value || "all";
+    return new URLSearchParams({
+      scope: $("profileManagerScope")?.value || "collected",
+      q: String($("profileManagerSearch")?.value || "").trim(),
+      sort: $("profileManagerSort")?.value || "latest_desc",
+      deleted_works: differenceFilter === "pending" ? "all" : differenceFilter,
+      limit: differenceFilter === "pending" ? "500" : String(PROFILE_PAGE_SIZE),
+    });
+  }
 
   function formatRefreshInterval(value) {
     const seconds = Math.max(0, Number(value) || 0);
@@ -226,20 +239,17 @@ export function createProfilesFeature(options) {
   }
 
   async function load(options = {}) {
-    if (loading) return;
     const reset = options.reset !== false;
+    if (!reset && requests.inFlight) return;
+    const query = currentQuery();
+    const querySnapshot = query.toString();
+    const params = new URLSearchParams(query);
+    params.set("offset", String(reset ? 0 : rows.length));
+    const request = requests.begin(querySnapshot);
     loading = true;
     try {
-      const differenceFilter = $("profileManagerDeletedWorks")?.value || "all";
-      const params = new URLSearchParams({
-        scope: $("profileManagerScope")?.value || "collected",
-        q: String($("profileManagerSearch")?.value || "").trim(),
-        sort: $("profileManagerSort")?.value || "latest_desc",
-        deleted_works: differenceFilter === "pending" ? "all" : differenceFilter,
-        limit: differenceFilter === "pending" ? "500" : String(PROFILE_PAGE_SIZE),
-        offset: String(reset ? 0 : rows.length),
-      });
-      const data = await api(`/api/profiles?${params.toString()}`);
+      const data = await api(`/api/profiles?${params.toString()}`, { signal: request.signal });
+      if (!requests.canCommit(request, currentQuery().toString())) return;
       const incoming = Array.isArray(data.profiles) ? data.profiles : [];
       if (reset) {
         rows = incoming;
@@ -256,9 +266,14 @@ export function createProfilesFeature(options) {
       bannedCount = Object.prototype.hasOwnProperty.call(data, "banned_count")
         ? Number(data.banned_count || 0)
         : null;
+    } catch (error) {
+      if (!requests.canCommit(request, currentQuery().toString())) return;
+      throw error;
     } finally {
-      loading = false;
-      renderManager(rows, extractActive);
+      if (requests.finish(request)) {
+        loading = false;
+        renderManager(rows, extractActive);
+      }
     }
   }
 

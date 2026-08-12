@@ -408,6 +408,7 @@ assert.match(managerIndexSource, /全库数据库链接/);
 assert.match(managerIndexSource, /主页 \/ 作者/);
 assert.match(managerIndexSource, /id="profileUrl"/);
 assert.match(managerIndexSource, /id="extractStart"/);
+assert.match(managerIndexSource, /id="librarySearch"[^>]*aria-label="搜索已下载作品"/);
 assert.match(managerIndexSource, /<option value="banned">已封禁主页<\/option>/);
 assert.match(managerIndexSource, /class="panel download-execution-panel"/);
 assert.doesNotMatch(
