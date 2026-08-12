@@ -22,8 +22,17 @@
 | 区域 | 当前问题 | 下一条清晰边界 |
 | --- | --- | --- |
 | `server.js` | 仍负责大量 FanHao 领域服务构造 | 继续迁到 `src/modules/fanhao/server/composition.js`，壳层只提供平台上下文 |
-| `src/modules/short-videos/server/store.js` | schema、同步、查询、元数据、封面和写操作集中 | 拆为 schema/repository、source-sync、query 和 cover 服务 |
-| `public/modules/short-videos/short-video-page.js` | Web 端信息流、播放器、手势、评论、分享和渲染仍集中 | 按 data/controller、player lifecycle、interaction 和 view 拆分 |
+| `src/modules/short-videos/server/store.js` | schema、同步、查询、元数据、封面和写操作集中；删除文件早于 SQLite 提交，中途失败无法回滚 | 先建立可恢复的删除作业（预留、隔离、提交、清理），再拆 schema/repository、source-sync、query 和 cover 服务 |
+| `src/modules/music/server/` | 重扫描与 `ffprobe` 仍可在 HTTP 进程中做递归和同步工作 | 迁到后台 worker，分阶段发布新索引，请求线程只读已提交快照 |
+| `public/modules/short-videos/short-video-page.js` | Web 端信息流、播放器、手势、评论、分享和渲染仍集中 | 按状态 owner、request lifecycle、player lifecycle 和 renderer 渐进拆分 |
+| Android 短视频 | 原生点赞/收藏与 Web/API 持久化契约不一致；`targetSdk 30` 和旧存储权限在新系统上已是迁移债务 | 先确定交互状态的单一权威端，再单独做 target/storage 迁移和真机回归 |
+
+## 本轮已收敛的横切问题
+
+- 下载管理器的主页、资料库和链接查询共用 latest-request 生命周期；新的筛选或搜索可抢占旧请求，旧成功/失败都不得回写新界面。
+- 短视频 API 的 JSON 请求体有统一的 400/413 边界，未知 5xx 只记录详细错误并返回稳定公开文案。
+- Android 原生短视频的 JSON 响应先有界收集字节、再一次性 UTF-8 解码；图片同时校验状态、类型、声明长度和实际长度。
+- 共享页面只保留一个 `main` landmark；路由筛选使用 pressed button 语义，动态模块导航在替换 DOM 后重新同步 `aria-current`。
 
 ## 后续约束
 
@@ -36,9 +45,10 @@
 
 ## 推荐迭代顺序
 
-1. 继续缩小 `server.js`，优先完成 FanHao 领域组合迁移。
-2. 拆短视频后端 store；这是服务端变化最频繁的热点。
-3. 参照 Android 已完成的短视频内部模块化，拆分 Web 短视频控制器；保持模块入口与 URL 不变。
-4. 为七个可见业务模块补稳定的 API 合同冒烟用例，逐步替代依赖人工点击的验证。
+1. 先把短视频本地文件删除做成可恢复作业；这是数据一致性风险，优先于文件拆分。
+2. 把音乐重扫描与媒体探测迁移到后台 worker，并用心跳延迟证明 HTTP 主循环不再被阻塞。
+3. 确定 Android 点赞/收藏是本地标记还是服务端状态，然后再统一命名、API 和离线同步策略。
+4. 继续缩小 `server.js`，同时按已有状态/请求/渲染边界拆短视频巨型文件；每次抽取都要保持 API、路由和打包产物等价。
+5. 为七个可见业务模块补稳定的 API 合同冒烟用例，逐步替代依赖人工点击的验证。
 
 新增模块的具体方式见 [模块开发](./module-development.md)。

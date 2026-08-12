@@ -2,7 +2,7 @@
   "name": "fanhao-local-library",
   "version": "1.0.0",
   "private": true,
-  "description": "Local LAN video library browser for a G: drive collection.",
+  "description": "Local-first media library for Web and Android clients.",
   "type": "module",
   "scripts": {
     "build:short-video-web": "node tools/build_short_video_web.mjs",
