@@ -691,7 +691,7 @@ function createMusicFixture(baseDir) {
   fs.writeFileSync(fakeProbePath, `
 const filePath = process.argv.at(-1) || "";
 const fileName = filePath.replace(/\\\\/g, "/").split("/").at(-1) || "";
-if (fileName.includes("timeout")) await new Promise((resolve) => setTimeout(resolve, 500));
+if (fileName.includes("timeout")) await new Promise((resolve) => setTimeout(resolve, 2500));
 if (fileName.includes("slow")) await new Promise((resolve) => setTimeout(resolve, 55));
 const stem = fileName.replace(/\\.[^.]+$/, "");
 const recoverFromFileName = fileName.includes("刘若英");
@@ -717,7 +717,7 @@ process.stdout.write(JSON.stringify({
     probeOptions: {
       ffprobePath: process.execPath,
       ffprobeArgsPrefix: [fakeProbePath],
-      ffprobeTimeoutMs: 120
+      ffprobeTimeoutMs: 1000
     }
   };
 }
