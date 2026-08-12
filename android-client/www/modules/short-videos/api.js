@@ -1,9 +1,30 @@
 import { fetchJson } from "../../js/api.js?v=20260812-collection-busy-01";
-import { readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260711-short-video-cache-08";
+import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260812-action-restart-sync-01";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 export function createShortVideoApi({ getActiveUrl }) {
+  const refreshes = new Map();
+  const refresh = (baseUrl, routePath, fetchOptions) => {
+    const fence = captureCachedJsonFence(baseUrl);
+    const key = `${normalizeBaseUrl(baseUrl)} ${fence.epoch}:${fence.generation} ${routePath}`;
+    const existing = refreshes.get(key);
+    if (existing) return existing;
+    const request = refreshOnce(baseUrl, routePath, fetchOptions, fence).finally(() => {
+      if (refreshes.get(key) === request) refreshes.delete(key);
+    });
+    refreshes.set(key, request);
+    return request;
+  };
+
+  const refreshOnce = async (baseUrl, routePath, fetchOptions, fence) => {
+    const data = await fetchJson(baseUrl, routePath, fetchOptions);
+    if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
+    await writeCachedJson(baseUrl, routePath, data, { fence });
+    if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
+    return data;
+  };
+
   return Object.freeze({
     fetch(baseUrl, routePath, options) {
       return fetchJson(baseUrl || getActiveUrl(), routePath, options);
@@ -22,23 +43,40 @@ export function createShortVideoApi({ getActiveUrl }) {
         && Date.now() - updatedAt <= Math.max(0, Number(cacheMaxAgeMs || 0));
       if (fresh) return cached.payload;
 
-      const refresh = () => fetchJson(requestBaseUrl, routePath, fetchOptions)
-        .then((data) => {
-          writeCachedJson(requestBaseUrl, routePath, data).catch(() => {});
-          return data;
-        });
+      const refreshRequest = () => refresh(requestBaseUrl, routePath, fetchOptions);
 
       if (cached?.payload && staleWhileRevalidate) {
-        refresh().catch(() => {});
+        refreshRequest().catch(() => {});
         return cached.payload;
       }
 
       try {
-        return await refresh();
+        return await refreshRequest();
       } catch (error) {
         if (cached?.payload) return cached.payload;
         throw error;
       }
+    },
+    async fetchCachedRevalidated(baseUrl, routePath, options = {}) {
+      const requestBaseUrl = baseUrl || getActiveUrl();
+      const { cacheMaxAgeMs: _cacheMaxAgeMs, staleWhileRevalidate: _staleWhileRevalidate, ...fetchOptions } = options || {};
+      const cached = await readCachedJson(requestBaseUrl, routePath).catch(() => null);
+      if (cached?.payload) {
+        return {
+          data: cached.payload,
+          fromCache: true,
+          revalidation: refresh(requestBaseUrl, routePath, fetchOptions)
+        };
+      }
+      return {
+        data: await refresh(requestBaseUrl, routePath, fetchOptions),
+        fromCache: false,
+        revalidation: null
+      };
     }
   });
+}
+
+function normalizeBaseUrl(value) {
+  return String(value || "").replace(/\/+$/, "");
 }

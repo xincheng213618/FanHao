@@ -17,17 +17,24 @@ let dbPromise = null;
 let responseTrimPromise = null;
 let imageTrimPromise = null;
 let staleResponsePrunePromise = null;
+const responseInvalidationState = globalThis.__fanhaoResponseCacheInvalidationState ||= {
+  epoch: 0,
+  baseGenerations: new Map()
+};
 
 export async function readCachedJson(baseUrl, path) {
+  const fence = captureCachedJsonFence(baseUrl);
   const db = await openCacheDb();
   const entry = await requestToPromise(db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE).get(cacheKey(baseUrl, path)));
-  if (!entry || !entry.payload || !isCurrentResponseCache(entry)) return null;
-  touchCachedResponse(entry).catch(() => {});
+  if (!isCachedJsonFenceCurrent(fence) || !entry || !entry.payload || !isCurrentResponseCache(entry)) return null;
+  touchCachedResponse(entry, fence).catch(() => {});
   return entry;
 }
 
-export async function writeCachedJson(baseUrl, path, payload) {
+export async function writeCachedJson(baseUrl, path, payload, options = {}) {
+  const fence = options.fence || captureCachedJsonFence(baseUrl);
   const db = await openCacheDb();
+  if (!isCachedJsonFenceCurrent(fence)) return null;
   const entry = {
     key: cacheKey(baseUrl, path),
     baseUrl: normalizeBaseUrl(baseUrl),
@@ -104,8 +111,9 @@ export async function getCacheStats(baseUrl = "") {
 }
 
 export async function clearCachedData(baseUrl = "") {
-  const db = await openCacheDb();
   const normalizedBase = baseUrl ? normalizeBaseUrl(baseUrl) : "";
+  invalidateCachedJsonWrites(normalizedBase);
+  const db = await openCacheDb();
   if (!normalizedBase) {
     await requestToPromise(db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE).clear());
     if (db.objectStoreNames.contains(IMAGE_STORE)) {
@@ -126,6 +134,7 @@ export async function clearCachedJsonByPrefix(baseUrl, pathPrefix) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const normalizedPrefix = String(pathPrefix || "").trim();
   if (!normalizedBase || !normalizedPrefix) return;
+  invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
   const transaction = db.transaction(RESPONSE_STORE, "readwrite");
   const store = transaction.objectStore(RESPONSE_STORE);
@@ -150,6 +159,34 @@ export function cacheAgeText(updatedAt) {
   if (diff >= 0 && diff < hour) return `${Math.max(1, Math.floor(diff / minute))} 分钟前`;
   if (diff >= 0 && diff < day) return `${Math.max(1, Math.floor(diff / hour))} 小时前`;
   return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+}
+
+export function captureCachedJsonFence(baseUrl) {
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  return Object.freeze({
+    baseUrl: normalizedBase,
+    epoch: responseInvalidationState.epoch,
+    generation: responseInvalidationState.baseGenerations.get(normalizedBase) || 0
+  });
+}
+
+export function isCachedJsonFenceCurrent(fence) {
+  if (!fence || typeof fence !== "object") return false;
+  const normalizedBase = normalizeBaseUrl(fence.baseUrl);
+  return Number(fence.epoch) === responseInvalidationState.epoch
+    && Number(fence.generation) === (responseInvalidationState.baseGenerations.get(normalizedBase) || 0);
+}
+
+function invalidateCachedJsonWrites(normalizedBase) {
+  if (!normalizedBase) {
+    responseInvalidationState.epoch += 1;
+    responseInvalidationState.baseGenerations.clear();
+    return;
+  }
+  responseInvalidationState.baseGenerations.set(
+    normalizedBase,
+    (responseInvalidationState.baseGenerations.get(normalizedBase) || 0) + 1
+  );
 }
 
 function openCacheDb() {
@@ -240,17 +277,19 @@ async function deleteByBaseUrl(db, storeName, normalizedBase) {
   await Promise.all(entries.map((key) => requestToPromise(store.delete(key))));
 }
 
-async function touchCachedResponse(entry) {
+async function touchCachedResponse(entry, fence) {
   if (!entry?.key) return;
   const db = await openCacheDb();
-  await requestToPromise(
-    db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE).put({
-      ...entry,
-      accessedAt: new Date().toISOString(),
-      version: RESPONSE_CACHE_VERSION,
-      bytes: responseEntryBytes(entry)
-    })
-  );
+  if (!isCachedJsonFenceCurrent(fence)) return;
+  const store = db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE);
+  const current = await requestToPromise(store.get(entry.key));
+  if (!current || !isCachedJsonFenceCurrent(fence)) return;
+  await requestToPromise(store.put({
+    ...current,
+    accessedAt: new Date().toISOString(),
+    version: RESPONSE_CACHE_VERSION,
+    bytes: responseEntryBytes(current)
+  }));
 }
 
 function scheduleStaleResponsePrune(db) {

@@ -3,9 +3,11 @@ export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
   let listEventsInstalled = false;
+  let listRequestGeneration = 0;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
+  const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
   const setListRefreshing = (...args) => context.setListRefreshing?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
@@ -58,6 +60,7 @@ export function createShortVideoListController(context = {}) {
     const append = Boolean(options.append);
     const preserveShell = Boolean(options.preserveShell && !append);
     if (append && (listState.loading || listState.loadingMore || !listState.data?.hasMore)) return;
+    const requestGeneration = ++listRequestGeneration;
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
     const authorIndex = isAuthorIndexView();
@@ -92,8 +95,13 @@ export function createShortVideoListController(context = {}) {
       if (preserveShell) setListRefreshing(true);
       else renderListShell();
     }
+    const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
+    const requestPath = `${endpoint}?${params}`;
+    const requestScope = listScopeKey(requestUrl);
+    const isCurrentRequest = () => requestGeneration === listRequestGeneration
+      && requestScope === listScopeKey(getActiveUrl())
+      && (!renderGuard || renderGuard());
     try {
-      const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
       const relatedAuthorsRequest = listState.searchPage
         && listState.searchTab === "all"
         && Boolean(listState.query)
@@ -103,56 +111,39 @@ export function createShortVideoListController(context = {}) {
             cacheMaxAgeMs: 5 * 60 * 1000
           }).catch(() => null)
         : Promise.resolve(null);
-      const [data, relatedAuthors] = await Promise.all([api.fetchCached(requestUrl, `${endpoint}?${params}`, {
-        timeoutMs: 16000,
-        cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
-        staleWhileRevalidate: !append
-      }), relatedAuthorsRequest]);
-      if (renderGuard && !renderGuard()) return;
-      if (append && listState.data && authorIndex) {
-        const merged = [...(listState.data.authors || [])];
-        const seen = new Set(merged.map((author) => shortVideoAuthorFilterValue(author)).filter(Boolean));
-        for (const author of data.authors || []) {
-          const key = shortVideoAuthorFilterValue(author);
-          if (!key || seen.has(key)) continue;
-          seen.add(key);
-          merged.push(author);
-        }
-        listState.data = { ...data, authors: merged, offset: 0 };
-      } else if (append && listState.data) {
-        const seen = new Set((listState.data.videos || []).map((video) => video.id));
-        const merged = [...(listState.data.videos || [])];
-        for (const video of data.videos || []) {
-          if (seen.has(video.id)) continue;
-          seen.add(video.id);
-          merged.push(video);
-          appendedVideos.push(video);
-        }
-        listState.data = { ...data, videos: merged, offset: 0, limit: merged.length };
-      } else {
-        listState.data = data;
+      const primaryResult = api.fetchCachedRevalidated && !append
+        ? await api.fetchCachedRevalidated(requestUrl, requestPath, {
+            timeoutMs: 16000
+          })
+        : {
+            data: await api.fetchCached(requestUrl, requestPath, {
+              timeoutMs: 16000,
+              cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
+              staleWhileRevalidate: false
+            }),
+            revalidation: null
+          };
+      const data = primaryResult.data;
+      if (!isCurrentRequest()) return;
+      applyLoadedListData(data, { append, authorIndex, appendedVideos });
+      if (primaryResult.revalidation) {
+        primaryResult.revalidation.then((freshData) => {
+          if (!isCurrentRequest()) return;
+          const renderMode = applyRevalidatedListData(freshData, authorIndex);
+          if (renderMode === "full") renderListShell();
+        }).catch(() => {});
       }
-      if (!append) {
-        listState.searchAuthors = Array.isArray(relatedAuthors?.authors) ? relatedAuthors.authors : [];
-      }
-      if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
-      listState.loading = false;
-      listState.loadingMore = false;
-      listState.status = data.total
-        ? ""
-        : authorIndex
-          ? listState.source === "following" && listState.authorFilter === "unliked"
-            ? "没有未点赞的关注账号。"
-            : listState.source === "following"
-              ? "还没有关注账号。"
-              : listState.authorAccountStatus === "banned"
-                ? "没有已封禁的作者。"
-                : "还没有作者数据。"
-          : "还没有短视频。";
+      relatedAuthorsRequest.then((relatedAuthors) => {
+        if (!relatedAuthors || !isCurrentRequest()) return;
+        const authors = Array.isArray(relatedAuthors.authors) ? relatedAuthors.authors : [];
+        if (JSON.stringify(authors) === JSON.stringify(listState.searchAuthors)) return;
+        listState.searchAuthors = authors;
+        renderListShell();
+      }).catch(() => {});
       if (append && !authorIndex) appendListVideos(appendedVideos);
       else renderListShell();
     } catch (error) {
-      if (renderGuard && !renderGuard()) return;
+      if (!isCurrentRequest()) return;
       listState.loading = false;
       listState.loadingMore = false;
       const message = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
@@ -162,6 +153,105 @@ export function createShortVideoListController(context = {}) {
         setListRefreshing(false);
         shortVideoToast(`${message}，已保留当前内容`);
       } else renderListShell();
+    }
+  }
+
+  function applyRevalidatedListData(data, authorIndex) {
+    const previousVideos = listState.data?.videos;
+    const nextVideos = data?.videos;
+    if (authorIndex || !Array.isArray(previousVideos) || !Array.isArray(nextVideos)
+      || previousVideos.length !== nextVideos.length) {
+      applyLoadedListData(data, { append: false, authorIndex, appendedVideos: [] });
+      return "full";
+    }
+    const nextById = new Map(nextVideos.map((video) => [String(video?.id || ""), video]));
+    if (previousVideos.some((video) => !sameVideoContent(video, nextById.get(String(video?.id || ""))))) {
+      applyLoadedListData(data, { append: false, authorIndex, appendedVideos: [] });
+      return "full";
+    }
+    for (const video of previousVideos) {
+      const fresh = nextById.get(String(video?.id || ""));
+      const actionsChanged = JSON.stringify(video.actions || {}) !== JSON.stringify(fresh.actions || {});
+      const statsChanged = JSON.stringify(video.stats || {}) !== JSON.stringify(fresh.stats || {});
+      if (!actionsChanged && !statsChanged) continue;
+      video.actions = fresh.actions && typeof fresh.actions === "object" ? { ...fresh.actions } : {};
+      video.stats = fresh.stats && typeof fresh.stats === "object" ? { ...fresh.stats } : {};
+      refreshVideoCards(video);
+    }
+    Object.assign(listState.data, data, { videos: previousVideos });
+    listState.loading = false;
+    listState.loadingMore = false;
+    listState.status = data.total ? "" : "还没有短视频。";
+    return "targeted";
+  }
+
+  function sameVideoContent(previous, next) {
+    if (!previous || !next || String(previous.id || "") !== String(next.id || "")) return false;
+    const { actions: _previousActions, stats: _previousStats, ...previousContent } = previous;
+    const { actions: _nextActions, stats: _nextStats, ...nextContent } = next;
+    return JSON.stringify(previousContent) === JSON.stringify(nextContent);
+  }
+
+  function applyLoadedListData(data, { append, authorIndex, appendedVideos }) {
+    if (append && listState.data && authorIndex) {
+      const merged = [...(listState.data.authors || [])];
+      const seen = new Set(merged.map((author) => shortVideoAuthorFilterValue(author)).filter(Boolean));
+      for (const author of data.authors || []) {
+        const key = shortVideoAuthorFilterValue(author);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        merged.push(author);
+      }
+      listState.data = { ...data, authors: merged, offset: 0 };
+    } else if (append && listState.data) {
+      const seen = new Set((listState.data.videos || []).map((video) => video.id));
+      const merged = [...(listState.data.videos || [])];
+      for (const video of data.videos || []) {
+        if (seen.has(video.id)) continue;
+        seen.add(video.id);
+        merged.push(video);
+        appendedVideos.push(video);
+      }
+      listState.data = { ...data, videos: merged, offset: 0, limit: merged.length };
+    } else {
+      listState.data = data;
+    }
+    if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
+    listState.loading = false;
+    listState.loadingMore = false;
+    listState.status = data.total
+      ? ""
+      : authorIndex
+        ? listState.source === "following" && listState.authorFilter === "unliked"
+          ? "没有未点赞的关注账号。"
+          : listState.source === "following"
+            ? "还没有关注账号。"
+            : listState.authorAccountStatus === "banned"
+              ? "没有已封禁的作者。"
+              : "还没有作者数据。"
+        : "还没有短视频。";
+  }
+
+  function listScopeKey(baseUrl) {
+    return JSON.stringify({
+      origin: serverOrigin(baseUrl),
+      query: listState.query,
+      author: listState.author,
+      source: listState.source,
+      sort: listState.sort,
+      authorSort: listState.authorSort,
+      authorFilter: listState.authorFilter,
+      authorAccountStatus: listState.authorAccountStatus,
+      searchPage: listState.searchPage,
+      searchTab: listState.searchTab
+    });
+  }
+
+  function serverOrigin(baseUrl) {
+    try {
+      return new URL(baseUrl).origin;
+    } catch {
+      return String(baseUrl || "").replace(/\/+$/, "");
     }
   }
 

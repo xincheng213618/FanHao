@@ -1,4 +1,4 @@
-import { createShortVideoViews } from "./index.js?v=20260812-native-action-ui-01";
+import { createShortVideoViews } from "./index.js?v=20260812-action-restart-sync-01";
 import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260812-collection-review-02";
 
 export function createAndroidModule({ host }) {

@@ -43,6 +43,7 @@ try {
     await verifyAndroidCollectionManagement(browser);
     await verifyAndroidCollectionStackReturn(browser);
     await verifyAndroidNativeActionCardRefresh(browser);
+    await verifyAndroidRestartActionConvergence(browser);
     await verifyAndroidFavoriteFolders(browser);
     await verifyAndroidFavoriteRoute(browser);
     await verifyAndroidFavoriteServerSwitch(browser);
@@ -809,6 +810,233 @@ async function verifyAndroidNativeActionCardRefresh(browser) {
     assert.equal(metrics.invalidations.length, unchangedInvalidations, "rejected result payloads must not invalidate persistent caches");
     assert.equal(metrics.listStable && metrics.collectionStable, true);
     assert.equal(metrics.scrollTop, metrics.initialScrollTop);
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidRestartActionConvergence(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const [{ createShortVideoViews }, cache, { createShortVideoApi }] = await Promise.all([
+        import("/android-client/modules/short-videos/index.js?restart-action-fixture=1"),
+        import("/android-client/js/cache.js?v=20260812-action-restart-sync-01"),
+        import("/android-client/modules/short-videos/api.js?restart-action-fixture=1")
+      ]);
+      await cache.clearCachedData();
+      const host = document.getElementById("fixture");
+      const active = { value: location.origin };
+      const requests = [];
+      const pending = [];
+      const relatedPending = [];
+      const nativePayloads = [];
+      let relatedQuery = "";
+      let networkMode = "immediate";
+      const payloads = new Map();
+      window.Capacitor = { Plugins: { FanHaoPlayer: {
+        async playShortFeed(payload) {
+          nativePayloads.push(JSON.parse(payload.videos).videos);
+          return { serverBase: new URL(payload.baseUrl).origin, snapshots: [] };
+        }
+      } } };
+      const nativeFetch = window.fetch.bind(window);
+      const responseFor = (url) => {
+        const payload = payloads.get(`${url.origin}${url.pathname}${url.search}`)
+          || payloads.get(`${url.origin}${url.pathname}`);
+        return new Response(JSON.stringify(payload || {}), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      };
+      window.fetch = (input, options) => {
+        const url = new URL(typeof input === "string" ? input : input.url, location.href);
+        if (url.pathname === "/api/short-videos/authors" && url.searchParams.get("q") === relatedQuery) {
+          return new Promise((resolve) => relatedPending.push(() => resolve(new Response(JSON.stringify({
+            authors: [{ secUid: "related-author", name: "延迟相关作者", count: 1 }],
+            hasMore: false,
+            total: 1
+          }), { status: 200, headers: { "content-type": "application/json" } }))));
+        }
+        if (url.pathname !== "/api/short-videos") return nativeFetch(input, options);
+        requests.push(url.href);
+        if (networkMode === "offline") return Promise.reject(new TypeError("fixture offline"));
+        if (networkMode === "delay") {
+          return new Promise((resolve) => pending.push(() => resolve(responseFor(url))));
+        }
+        return Promise.resolve(responseFor(url));
+      };
+      const pathFor = (query) => `/api/short-videos?${new URLSearchParams({
+        q: query,
+        source: "all",
+        sort: "published",
+        limit: "12",
+        facets: "0",
+        stats: "0"
+      })}`;
+      const video = (id, liked, collected = liked) => ({
+        id,
+        title: `缓存收敛 ${id}`,
+        mediaType: "video",
+        streamUrl: `/media/short-video/${id}`,
+        actions: { liked, collected },
+        stats: { likes: liked ? 11 : 10, collects: collected ? 4 : 3 }
+      });
+      const feed = (item) => ({ videos: [item], total: 1, hasMore: false, source: "all" });
+      const deps = () => ({
+        els: {
+          viewContent: host,
+          viewKicker: document.createElement("div"),
+          viewMeta: document.createElement("div"),
+          viewTitle: document.createElement("div")
+        },
+        getActiveUrl: () => active.value,
+        goBack() {},
+        setActiveBottom() {},
+        showView() {}
+      });
+      const renderSearch = (views, query, guard = null) => views.renderSearch({
+        query,
+        source: "all",
+        sort: "published",
+        tab: "all"
+      }, guard);
+      const cardState = () => {
+        const card = host.querySelector(".short-video-mobile-card");
+        const metric = host.querySelector(".short-video-mobile-thumb-metric");
+        return {
+          aria: card?.getAttribute("aria-label") || "",
+          count: metric?.textContent || "",
+          liked: Boolean(metric?.classList.contains("is-liked")),
+          videoId: card?.closest("[data-video-id]")?.dataset.videoId || ""
+        };
+      };
+      const waitFor = async (predicate, message) => {
+        const deadline = Date.now() + 3000;
+        while (!predicate()) {
+          if (Date.now() >= deadline) throw new Error(message);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      };
+
+      const restartQuery = "restart-action";
+      const restartPath = pathFor(restartQuery);
+      const cachedRestart = feed(video("restart-video", false, false));
+      const freshRestart = feed(video("restart-video", true, true));
+      relatedQuery = restartQuery;
+      await cache.writeCachedJson(active.value, restartPath, cachedRestart);
+      payloads.set(`${active.value}${restartPath}`, freshRestart);
+      networkMode = "delay";
+      const restartedViews = createShortVideoViews(deps());
+      await Promise.all([renderSearch(restartedViews, restartQuery), renderSearch(restartedViews, restartQuery)]);
+      const cachedCard = host.querySelector("[data-video-id='restart-video']");
+      const cachedState = cardState();
+      const restartRequests = requests.filter((value) => new URL(value).searchParams.get("q") === restartQuery);
+      if (restartRequests.length !== 1) throw new Error(`restart revalidation was not deduplicated: ${restartRequests.length}`);
+      const exact = new URL(restartRequests[0]);
+      if (exact.pathname !== "/api/short-videos" || exact.searchParams.get("source") !== "all"
+        || exact.searchParams.get("sort") !== "published" || exact.searchParams.get("facets") !== "0"
+        || exact.searchParams.get("stats") !== "0") throw new Error(`unexpected exact search path: ${exact.href}`);
+      pending.splice(0).forEach((release) => release());
+      await waitFor(() => cardState().liked, "fresh restart action state did not reach the mounted card");
+      const freshState = cardState();
+      const targetedStable = cachedCard === host.querySelector("[data-video-id='restart-video']");
+      host.querySelector("[data-video-id='restart-video'] .short-video-mobile-card").click();
+      await waitFor(() => nativePayloads.length === 1, "fresh restart model was not available to the Native bridge");
+      const freshModelActions = nativePayloads[0][0].actions;
+      relatedPending.splice(0).forEach((release) => release());
+      await waitFor(() => Boolean(host.querySelector(".short-video-search-author-item")), "delayed related authors did not render");
+      const afterRelatedAuthorsState = cardState();
+      relatedQuery = "";
+
+      const offlineQuery = "offline-retry";
+      const offlinePath = pathFor(offlineQuery);
+      await cache.writeCachedJson(active.value, offlinePath, feed(video("offline-video", false, false)));
+      payloads.set(`${active.value}${offlinePath}`, feed(video("offline-video", true, true)));
+      networkMode = "offline";
+      const offlineViews = createShortVideoViews(deps());
+      await renderSearch(offlineViews, offlineQuery);
+      const offlineCachedState = cardState();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      networkMode = "immediate";
+      await renderSearch(offlineViews, offlineQuery);
+      await waitFor(() => cardState().liked, "offline cached page did not converge after retry");
+      const offlineRetriedState = cardState();
+
+      const otherOrigin = "http://second.invalid:39999";
+      const originQuery = "origin-race";
+      const originPath = pathFor(originQuery);
+      await cache.writeCachedJson(location.origin, originPath, feed(video("origin-a", false, false)));
+      await cache.writeCachedJson(otherOrigin, originPath, feed(video("origin-b", false, false)));
+      payloads.set(`${location.origin}${originPath}`, feed(video("origin-a", true, true)));
+      payloads.set(`${otherOrigin}${originPath}`, feed(video("origin-b", false, false)));
+      networkMode = "delay";
+      active.value = location.origin;
+      const originViews = createShortVideoViews(deps());
+      await renderSearch(originViews, originQuery);
+      active.value = otherOrigin;
+      networkMode = "immediate";
+      await renderSearch(originViews, originQuery);
+      pending.splice(0).forEach((release) => release());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const originState = cardState();
+
+      active.value = location.origin;
+      const lateQuery = "late-write";
+      const latePath = pathFor(lateQuery);
+      await cache.writeCachedJson(active.value, latePath, feed(video("late-video", false, false)));
+      payloads.set(`${active.value}${latePath}`, feed(video("late-video", false, false)));
+      networkMode = "delay";
+      const directApi = createShortVideoApi({ getActiveUrl: () => active.value });
+      const late = await directApi.fetchCachedRevalidated(active.value, latePath, { timeoutMs: 16000 });
+      await cache.clearCachedJsonByPrefix(active.value, "/api/short-videos");
+      const emptyAfterClear = await cache.readCachedJson(active.value, latePath);
+      pending.splice(0).forEach((release) => release());
+      await late.revalidation.catch(() => null);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const emptyAfterLateWrite = await cache.readCachedJson(active.value, latePath);
+      payloads.set(`${active.value}${latePath}`, feed(video("late-video", true, true)));
+      networkMode = "immediate";
+      const afterFence = await directApi.fetchCachedRevalidated(active.value, latePath, { timeoutMs: 16000 });
+
+      window.androidRestartActionFixture = {
+        cachedState,
+        afterRelatedAuthorsState,
+        emptyAfterClear: emptyAfterClear === null,
+        emptyAfterLateWrite: emptyAfterLateWrite === null,
+        exactSearch: exact.pathname + exact.search,
+        freshState,
+        freshModelActions,
+        freshWriteAfterFence: Boolean(afterFence.data?.videos?.[0]?.actions?.liked),
+        offlineCachedState,
+        offlineRetriedState,
+        originState,
+        requestCount: requests.length,
+        targetedStable
+      };
+    });
+    const metrics = await page.evaluate(() => window.androidRestartActionFixture);
+    assert.equal(metrics.cachedState.liked, false, "process-restart-like list creation must render its persisted cached action state immediately");
+    assert.equal(metrics.cachedState.videoId, "restart-video");
+    assert.equal(metrics.freshState.liked, true, "successful server revalidation must update the current list model and DOM in bounded time");
+    assert.deepEqual(metrics.freshModelActions, { collected: true, liked: true }, "restart convergence must update both authoritative action fields in the model passed to Native");
+    assert.match(metrics.freshState.aria, /已点赞，11 个赞/u);
+    assert.equal(metrics.targetedStable, true, "action-only convergence must retain the mounted card instead of rebuilding the list");
+    assert.equal(metrics.afterRelatedAuthorsState.liked, true, "a delayed related-author response must render from the current fresh video state instead of restoring the stale cached video object");
+    assert.match(metrics.exactSearch, /^\/api\/short-videos\?q=restart-action&source=all&sort=published&limit=12&facets=0&stats=0$/u,
+      "restart convergence must revalidate the exact active search endpoint");
+    assert.equal(metrics.offlineCachedState.liked, false, "offline restart must retain the persisted list");
+    assert.equal(metrics.offlineRetriedState.liked, true, "an offline cached restart must retry and converge when the server returns");
+    assert.deepEqual(metrics.originState, {
+      aria: "缓存收敛 origin-b，未点赞，10 个赞",
+      count: "10",
+      liked: false,
+      videoId: "origin-b"
+    }, "a delayed response from the previous server origin must not update the current model or DOM");
+    assert.equal(metrics.emptyAfterClear, true, "cache invalidation must remove the matching persisted response before returning");
+    assert.equal(metrics.emptyAfterLateWrite, true, "a pre-invalidation refresh/touch must not resurrect its response after clear completes");
+    assert.equal(metrics.freshWriteAfterFence, true, "a post-invalidation request must use a new generation instead of deduplicating onto the rejected old refresh");
   } finally {
     await page.close();
   }

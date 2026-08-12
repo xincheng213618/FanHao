@@ -1,5 +1,5 @@
 import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=20260711-short-video-cache-08";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=20260812-action-restart-sync-01";
 import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
