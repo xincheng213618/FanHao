@@ -12,6 +12,7 @@ import { createMusicListRequestBuilder } from "./music-list-request.js?v=2026073
 import { createMusicLibraryView } from "./music-library-view.js?v=20260730-music-palette-ui-42";
 import { createMusicLibrarySort } from "./music-library-sort.js?v=20260730-music-palette-ui-42";
 import { createMusicCollectionView } from "./music-collection-view.js?v=20260730-music-palette-ui-42";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=20260812-music-write-retry-01";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -180,8 +181,21 @@ export function createMusicViews(deps) {
 
   let audio = null;
   const audioEventTargets = new WeakSet();
-  let progressTimer = 0;
-  let pendingProgressRecord = null;
+  let playReportSession = 0;
+  const progressWriter = createMusicProgressWriter({
+    send(record, played) {
+      return postJson(record.activeUrl, `/api/music/tracks/${encodeURIComponent(record.trackId)}/progress`, {
+        positionMs: record.positionMs,
+        durationMs: record.durationMs,
+        ...(played ? { played: true } : {})
+      });
+    },
+    onPlayed(record) {
+      if (record.session === playReportSession && state.current?.id === record.trackId) {
+        state.playReportedTrackId = record.trackId;
+      }
+    }
+  });
   let lyricRaf = 0;
   let progressBindings = [];
   let currentLyricIndex = -1;
@@ -844,6 +858,7 @@ export function createMusicViews(deps) {
       state.nextId = data.nextId || "";
       state.loading = false;
       state.status = "";
+      playReportSession += 1;
       state.playReportedTrackId = "";
       state.lyricFollowPaused = false;
       currentLyricIndex = -1;
@@ -4043,6 +4058,7 @@ export function createMusicViews(deps) {
     incoming.volume = crossfadeDurationMs > 0 ? 0 : state.volume;
     state.current = { ...candidate, positionMs: 0 };
     state.lyrics = { lines: [], raw: "" };
+    playReportSession += 1;
     state.playReportedTrackId = "";
     state.lyricFollowPaused = false;
     currentLyricIndex = -1;
@@ -4369,7 +4385,8 @@ export function createMusicViews(deps) {
   }
 
   function moveQueueTrack(trackId, direction) {
-    const queue = [...(state.queue || [])];
+    const previousQueue = [...(state.queue || [])];
+    const queue = [...previousQueue];
     const index = queue.findIndex((item) => item.id === trackId);
     const nextIndex = index + direction;
     if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
@@ -4381,6 +4398,9 @@ export function createMusicViews(deps) {
     state.status = `已调整「${item.title || "歌曲"}」顺序`;
     renderShell();
     persistPlaylistQueueOrder(queue).catch((error) => {
+      state.queue = previousQueue;
+      scheduleGaplessPreload();
+      rememberPlaybackQueue();
       state.status = error?.message || "歌单顺序保存失败";
       renderShell();
     });
@@ -4465,7 +4485,13 @@ export function createMusicViews(deps) {
   async function toggleFavorite(trackId) {
     const id = String(trackId || "").trim();
     if (!id) return;
-    const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/favorite`, {});
+    const source = state.current?.id === id
+      ? state.current
+      : (state.queue || []).find((track) => track.id === id)
+        || (state.data?.tracks || []).find((track) => track.id === id);
+    const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/favorite`, {
+      favorite: !Boolean(source?.favorite)
+    });
     const updated = data.track;
     if (!updated) return;
     applyTrackUpdate(updated);
@@ -4486,12 +4512,18 @@ export function createMusicViews(deps) {
     const name = window.prompt("歌单名称", defaultPlaylistName());
     const clean = String(name || "").trim();
     if (!clean) return null;
-    const data = await postJson(getActiveUrl(), "/api/music/playlists", { name: clean });
+    const addTrackId = String(options.addTrackId || (options.addCurrent ? state.current?.id : "") || "").trim();
+    const data = await postJson(getActiveUrl(), "/api/music/playlists", {
+      name: clean,
+      ...(addTrackId ? { trackIds: [addTrackId] } : {})
+    });
     const playlist = data?.playlist || null;
     await loadPlaylists();
-    const addTrackId = String(options.addTrackId || (options.addCurrent ? state.current?.id : "") || "").trim();
     if (playlist?.id && addTrackId) {
-      await addTrackToPlaylist(playlist.id, addTrackId);
+      state.playlistSheetOpen = false;
+      state.playlistActionTrackId = "";
+      state.status = `已加入「${playlist.name || "歌单"}」`;
+      renderShell();
       return playlist;
     }
     if (playlist?.id && options.openAfterCreate) {
@@ -4523,31 +4555,37 @@ export function createMusicViews(deps) {
     if (!clean) return null;
     state.status = "正在保存播放队列";
     renderShell();
-    const data = await postJson(getActiveUrl(), "/api/music/playlists", {
-      name: clean,
-      description: "从播放队列保存",
-      trackIds
-    });
-    const playlist = data?.playlist || null;
-    state.queueOpen = false;
-    state.queueManageOpen = false;
-    await loadPlaylists();
-    if (playlist?.id) {
-      updateListParams({
-        mode: "playlist",
-        playlistId: playlist.id,
-        smartId: "",
-        favorite: false,
-        query: "",
-        artistId: "",
-        albumId: "",
-        genre: ""
-      }, { resetSearch: true });
-    } else {
-      state.status = "播放队列已保存";
+    try {
+      const data = await postJson(getActiveUrl(), "/api/music/playlists", {
+        name: clean,
+        description: "从播放队列保存",
+        trackIds
+      });
+      const playlist = data?.playlist || null;
+      state.queueOpen = false;
+      state.queueManageOpen = false;
+      await loadPlaylists();
+      if (playlist?.id) {
+        updateListParams({
+          mode: "playlist",
+          playlistId: playlist.id,
+          smartId: "",
+          favorite: false,
+          query: "",
+          artistId: "",
+          albumId: "",
+          genre: ""
+        }, { resetSearch: true });
+      } else {
+        state.status = "播放队列已保存";
+        renderShell();
+      }
+      return playlist;
+    } catch (error) {
+      state.status = error?.message || "播放队列保存失败，请稍后重试";
       renderShell();
+      throw error;
     }
-    return playlist;
   }
 
   async function addCurrentToPlaylist(playlistId) {
@@ -4660,29 +4698,20 @@ export function createMusicViews(deps) {
   }
 
   function reportPlayedOnce() {
-    const track = state.current;
-    if (!track || state.playReportedTrackId === track.id) return;
-    state.playReportedTrackId = track.id;
-    postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(track.id)}/progress`, {
-      positionMs: Math.round((audio?.currentTime || 0) * 1000),
-      durationMs: Math.round((audio?.duration || 0) * 1000) || track.durationMs || 0,
-      played: true
-    }).catch(() => {});
+    const record = currentProgressRecord();
+    const reportKey = record ? `${playReportSession}:${record.trackId}` : "";
+    if (!record || state.playReportedTrackId === record.trackId) return;
+    progressWriter.reportPlayed({ ...record, reportKey, session: playReportSession });
   }
 
   function saveProgressSoon(positionOverride = null) {
-    pendingProgressRecord = currentProgressRecord(positionOverride);
-    if (!pendingProgressRecord || progressTimer) return;
-    progressTimer = window.setTimeout(() => {
-      progressTimer = 0;
-      const record = pendingProgressRecord;
-      pendingProgressRecord = null;
-      postProgressRecord(record);
-    }, 800);
+    const record = currentProgressRecord(positionOverride);
+    progressWriter.save(record, { delayMs: 800 });
   }
 
   function saveProgress(positionOverride = null) {
-    postProgressRecord(currentProgressRecord(positionOverride));
+    const record = currentProgressRecord(positionOverride);
+    progressWriter.save(record, { immediate: true });
   }
 
   function currentProgressRecord(positionOverride = null) {
@@ -4694,14 +4723,6 @@ export function createMusicViews(deps) {
       positionMs: positionOverride === null ? Math.round((audio.currentTime || 0) * 1000) : Number(positionOverride || 0),
       durationMs: Math.round((audio.duration || 0) * 1000) || track.durationMs || 0
     };
-  }
-
-  function postProgressRecord(record) {
-    if (!record?.trackId) return;
-    postJson(record.activeUrl, `/api/music/tracks/${encodeURIComponent(record.trackId)}/progress`, {
-      positionMs: record.positionMs,
-      durationMs: record.durationMs
-    }).catch(() => {});
   }
 
   function updatePlaybackUi() {

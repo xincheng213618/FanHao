@@ -56,8 +56,8 @@ export function createMusicApi(api) {
     suggest(query, signal) {
       return get(`/api/music/suggest?q=${encodeURIComponent(query)}`, signal);
     },
-    setFavorite(id, signal) {
-      return send(`/api/music/tracks/${encodeURIComponent(id)}/favorite`, "POST", {}, signal);
+    setFavorite(id, favorite, signal) {
+      return send(`/api/music/tracks/${encodeURIComponent(id)}/favorite`, "POST", { favorite: Boolean(favorite) }, signal);
     },
     setRating(id, rating, signal) {
       return send(`/api/music/tracks/${encodeURIComponent(id)}/rating`, "POST", { rating }, signal);

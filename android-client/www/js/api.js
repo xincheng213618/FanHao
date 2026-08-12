@@ -40,7 +40,10 @@ export async function fetchJson(baseUrl, path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload.error || `请求失败：${response.status}`);
     error.status = response.status;
+    error.code = String(payload.code || "");
     error.retryable = response.status === 503 && payload.retryable === true;
+    error.statusCode = response.status;
+    error.payload = payload;
     throw error;
   }
   return payload;
@@ -61,44 +64,24 @@ function isLocalBaseUrl(baseUrl) {
 }
 
 export async function postJson(baseUrl, path, body = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  return fetchJson(baseUrl, path, {
     method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-FanHao-Client": "android"
-    },
-    body: JSON.stringify(body)
+    body,
+    timeoutMs: 0
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
-  return payload;
 }
 
 export async function putJson(baseUrl, path, body = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  return fetchJson(baseUrl, path, {
     method: "PUT",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-FanHao-Client": "android"
-    },
-    body: JSON.stringify(body)
+    body,
+    timeoutMs: 0
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
-  return payload;
 }
 
 export async function deleteJson(baseUrl, path) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  return fetchJson(baseUrl, path, {
     method: "DELETE",
-    headers: {
-      Accept: "application/json",
-      "X-FanHao-Client": "android"
-    }
+    timeoutMs: 0
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
-  return payload;
 }

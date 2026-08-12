@@ -27,13 +27,20 @@ import {
 } from "./constants.js";
 
 export function createMusicActions({ state, api, player, view, router, showError }) {
+  const MUSIC_WRITE_RETRY_DELAY_MS = 1000;
   let musicLoadGeneration = 0;
   let musicLoadController = null;
   let trackOpenGeneration = 0;
   let trackOpenController = null;
   let restoreAttemptKey = "";
-  let pendingProgressRecord = null;
+  const pendingProgressRecords = new Map();
+  const pendingPlayedRecords = new Map();
+  const attemptedPlayedReportKeys = new Set();
   let progressTimer = null;
+  let progressRequestActive = false;
+  let playedProgressTimer = null;
+  let playedProgressRequestKey = "";
+  let playReportSession = 0;
   let lastProgressSavedAt = 0;
   let playlistDialogReturnFocus = null;
 
@@ -251,6 +258,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().nextId = data.nextId || "";
     music().openingTrackId = "";
     music().status = "";
+    playReportSession += 1;
     music().playReportedTrackId = "";
     music().lyricFollowPaused = false;
     music().libraryDrawerOpen = false;
@@ -338,7 +346,8 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   function moveQueueTrack(trackId, direction) {
-    const queue = [...(music().queue || [])];
+    const previousQueue = [...(music().queue || [])];
+    const queue = [...previousQueue];
     const index = queue.findIndex((track) => track.id === trackId);
     const nextIndex = index + direction;
     if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
@@ -347,7 +356,11 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().queue = queue;
     music().status = `已调整「${item.title || "歌曲"}」顺序`;
     view.refreshQueueSurface();
-    persistPlaylistQueueOrder(queue).catch(showError);
+    persistPlaylistQueueOrder(queue).catch((error) => {
+      music().queue = previousQueue;
+      view.refreshQueueSurface();
+      showError(error);
+    });
   }
 
   function removeTrackFromQueue(trackId) {
@@ -485,7 +498,13 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   async function toggleFavorite(trackId) {
-    const data = await api.setFavorite(trackId);
+    const id = String(trackId || "").trim();
+    if (!id) return;
+    const source = music().current?.id === id
+      ? music().current
+      : (music().queue || []).find((track) => track.id === id)
+        || (music().data?.tracks || []).find((track) => track.id === id);
+    const data = await api.setFavorite(id, !Boolean(source?.favorite));
     const updated = data.track;
     if (!updated) return;
     applyTrackUpdate(updated);
@@ -611,10 +630,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     const trackId = music().playlistDialogTrackId || "";
     closePlaylistDialog();
     music().status = "正在创建歌单";
-    const data = await api.createPlaylist({ name });
-    if (trackId && data.playlist?.id) {
-      await api.addTrackToPlaylist(data.playlist.id, { trackId });
-    }
+    const data = await api.createPlaylist({ name, ...(trackId ? { trackIds: [trackId] } : {}) });
     await loadPlaylists();
     if (data.playlist?.id) {
       music().mode = "playlist";
@@ -773,14 +789,15 @@ export function createMusicActions({ state, api, player, view, router, showError
   // ---------- 进度保存 ----------
   function reportPlayedOnce() {
     const record = captureProgressRecord();
-    if (!record || music().playReportedTrackId === record.trackId) return;
-    music().playReportedTrackId = record.trackId;
-    lastProgressSavedAt = Date.now();
-    api.setProgress(record.trackId, {
-      positionMs: record.positionMs,
-      durationMs: record.durationMs,
-      played: true
-    }).catch(() => {});
+    const reportKey = record ? `${playReportSession}:${record.trackId}` : "";
+    if (!record
+      || music().playReportedTrackId === record.trackId
+      || attemptedPlayedReportKeys.has(reportKey)
+      || playedProgressRequestKey === reportKey
+      || pendingPlayedRecords.has(reportKey)) return;
+    rememberPlayedReportAttempt(reportKey);
+    pendingPlayedRecords.set(reportKey, { ...record, reportKey, session: playReportSession });
+    schedulePlayedProgressFlush(0);
   }
 
   function captureProgressRecord(positionOverride = null) {
@@ -799,25 +816,96 @@ export function createMusicActions({ state, api, player, view, router, showError
   function saveProgressSoon(positionOverride = null, { immediate = false } = {}) {
     const record = captureProgressRecord(positionOverride);
     if (!record) return;
-    pendingProgressRecord = record;
+    pendingProgressRecords.set(record.trackId, record);
     if (immediate) {
-      flushPendingProgress();
+      window.clearTimeout(progressTimer);
+      progressTimer = null;
+      void flushPendingProgress();
       return;
     }
     if (progressTimer) return;
     const elapsed = Date.now() - lastProgressSavedAt;
     const delay = Math.max(700, 10000 - Math.max(0, elapsed));
-    progressTimer = window.setTimeout(flushPendingProgress, delay);
+    scheduleProgressFlush(delay);
   }
 
-  function flushPendingProgress() {
+  function scheduleProgressFlush(delayMs) {
+    if (progressTimer) return;
+    progressTimer = window.setTimeout(() => {
+      progressTimer = null;
+      void flushPendingProgress();
+    }, Math.max(0, Number(delayMs || 0)));
+  }
+
+  async function flushPendingProgress() {
     window.clearTimeout(progressTimer);
     progressTimer = null;
-    const record = pendingProgressRecord;
-    pendingProgressRecord = null;
-    if (!record?.trackId) return;
-    lastProgressSavedAt = Date.now();
-    api.setProgress(record.trackId, { positionMs: record.positionMs, durationMs: record.durationMs }).catch(() => {});
+    if (progressRequestActive) return;
+    const entry = pendingProgressRecords.entries().next().value;
+    if (!entry) return;
+    const [trackId, record] = entry;
+    pendingProgressRecords.delete(trackId);
+    progressRequestActive = true;
+    let shouldRetry = false;
+    try {
+      await api.setProgress(trackId, { positionMs: record.positionMs, durationMs: record.durationMs });
+      lastProgressSavedAt = Date.now();
+    } catch (error) {
+      shouldRetry = isRetryableMusicWriteError(error);
+      if (shouldRetry && !pendingProgressRecords.has(trackId)) pendingProgressRecords.set(trackId, record);
+    } finally {
+      progressRequestActive = false;
+      if (pendingProgressRecords.size) scheduleProgressFlush(shouldRetry ? MUSIC_WRITE_RETRY_DELAY_MS : 700);
+    }
+  }
+
+  function schedulePlayedProgressFlush(delayMs) {
+    if (playedProgressTimer) return;
+    playedProgressTimer = window.setTimeout(() => {
+      playedProgressTimer = null;
+      void flushPendingPlayedProgress();
+    }, Math.max(0, Number(delayMs || 0)));
+  }
+
+  async function flushPendingPlayedProgress() {
+    if (playedProgressRequestKey) return;
+    const entry = pendingPlayedRecords.entries().next().value;
+    if (!entry) return;
+    const [reportKey, record] = entry;
+    pendingPlayedRecords.delete(reportKey);
+    playedProgressRequestKey = reportKey;
+    let shouldRetry = false;
+    try {
+      await api.setProgress(record.trackId, {
+        positionMs: record.positionMs,
+        durationMs: record.durationMs,
+        played: true
+      });
+      if (record.session === playReportSession && music().current?.id === record.trackId) {
+        music().playReportedTrackId = record.trackId;
+      }
+      lastProgressSavedAt = Date.now();
+    } catch (error) {
+      shouldRetry = isRetryableMusicWriteError(error);
+      if (shouldRetry
+        && !pendingPlayedRecords.has(reportKey)) pendingPlayedRecords.set(reportKey, record);
+    } finally {
+      playedProgressRequestKey = "";
+      if (pendingPlayedRecords.size) schedulePlayedProgressFlush(shouldRetry ? MUSIC_WRITE_RETRY_DELAY_MS : 0);
+    }
+  }
+
+  function isRetryableMusicWriteError(error) {
+    return Number(error?.status ?? error?.statusCode) === 503
+      && error?.retryable === true
+      && error?.code === "MUSIC_WRITE_BUSY";
+  }
+
+  function rememberPlayedReportAttempt(reportKey) {
+    attemptedPlayedReportKeys.add(reportKey);
+    while (attemptedPlayedReportKeys.size > 64) {
+      attemptedPlayedReportKeys.delete(attemptedPlayedReportKeys.values().next().value);
+    }
   }
 
   // ---------- 恢复上次播放 ----------

@@ -19,6 +19,7 @@ export function createApiClient(options = {}) {
       }
       const error = new Error(payload.error || `请求失败：${response.status}`);
       error.status = response.status;
+      error.code = String(payload.code || "");
       error.retryable = response.status === 503 && payload.retryable === true;
       error.statusCode = response.status;
       error.payload = payload;
