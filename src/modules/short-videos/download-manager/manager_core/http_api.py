@@ -6,7 +6,7 @@ import json
 import mimetypes
 import os
 import re
-from email.utils import formatdate, parsedate_to_datetime
+from email.utils import formatdate
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
@@ -46,45 +46,44 @@ def media_validators(stat_result: os.stat_result) -> tuple[str, str]:
     return etag, last_modified
 
 
-def if_range_matches(value: str, etag: str, modified_at: float) -> bool:
+def if_range_matches(value: str, etag: str) -> bool:
     candidate = str(value or "").strip()
-    if not candidate or candidate.lower().startswith("w/"):
-        return not candidate
-    if candidate.startswith('"'):
-        return candidate == etag
-    if not re.fullmatch(
-        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} "
-        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
-        r"\d{4} \d{2}:\d{2}:\d{2} GMT",
-        candidate,
-    ):
-        return False
-    try:
-        candidate_date = parsedate_to_datetime(candidate)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    if candidate_date is None or candidate_date.tzinfo is None:
-        return False
-    return int(modified_at) <= int(candidate_date.timestamp())
+    return (
+        candidate.startswith('"')
+        and not candidate.lower().startswith("w/")
+        and not etag.lower().startswith("w/")
+        and candidate == etag
+    )
 
 
-def parse_byte_range(value: str, size: int) -> tuple[int, int] | None:
+def parse_byte_range(value: str, size: int) -> tuple[str, tuple[int, int] | None]:
     match = re.fullmatch(r"bytes=(\d*)-(\d*)", str(value or "").strip(), re.IGNORECASE)
-    if not match or size <= 0:
-        return None
+    if not match:
+        return "ignored", None
     raw_start, raw_end = match.groups()
     if not raw_start and not raw_end:
-        return None
+        return "ignored", None
     if raw_start:
-        start = int(raw_start)
-        end = int(raw_end) if raw_end else size - 1
-        if start >= size or end < start:
-            return None
-        return start, min(end, size - 1)
-    suffix = int(raw_end)
+        try:
+            start = int(raw_start)
+            requested_end = int(raw_end) if raw_end else None
+        except ValueError:
+            return "unsatisfiable", None
+        if requested_end is not None and requested_end < start:
+            return "unsatisfiable", None
+        if size <= 0 or start >= size:
+            return "unsatisfiable", None
+        end = requested_end if requested_end is not None else size - 1
+        return "satisfiable", (start, min(end, size - 1))
+    try:
+        suffix = int(raw_end)
+    except ValueError:
+        return "unsatisfiable", None
     if suffix <= 0:
-        return None
-    return max(0, size - min(size, suffix)), size - 1
+        return "unsatisfiable", None
+    if size <= 0:
+        return "unsatisfiable", None
+    return "satisfiable", (max(0, size - min(size, suffix)), size - 1)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -516,9 +515,10 @@ class Handler(SimpleHTTPRequestHandler):
             status = HTTPStatus.OK
             range_header = self.headers.get("Range", "").strip()
             if_range = self.headers.get("If-Range", "").strip()
-            if range_header and (not if_range or if_range_matches(if_range, etag, stat_result.st_mtime)):
-                parsed_range = parse_byte_range(range_header, size)
-                if parsed_range is None:
+            if self.command == "GET" and range_header:
+                range_state, parsed_range = parse_byte_range(range_header, size)
+                range_allowed = not if_range or if_range_matches(if_range, etag)
+                if range_state == "unsatisfiable" and range_allowed:
                     self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                     self.send_header("Accept-Ranges", "bytes")
                     self.send_header("Content-Range", f"bytes */{size}")
@@ -527,8 +527,9 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_header("Last-Modified", last_modified)
                     self.end_headers()
                     return
-                start, end = parsed_range
-                status = HTTPStatus.PARTIAL_CONTENT
+                if range_state == "satisfiable" and range_allowed and parsed_range is not None:
+                    start, end = parsed_range
+                    status = HTTPStatus.PARTIAL_CONTENT
             content_length = max(0, end - start + 1)
             content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
             self.send_response(status)

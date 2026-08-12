@@ -1226,15 +1226,6 @@ export function createShortVideosRuntime({
     const cachedSmoothLegacy = cachePath === descriptor.legacyCachePath;
     if (!cachedSmoothLegacy) rememberSmoothVideoResolved(id, descriptor, true);
     sharedCache.touch(cachePath);
-    const servedSourceStat = safeStat(servedSourceFile.path);
-    const sourceEntityMtimeMs = Math.max(
-      0,
-      Number(servedSourceFile.entityMtimeMs || servedSourceStat?.mtimeMs || servedSourceFile.cacheVersion || 0)
-    );
-    const renditionEntityMtimeMs = Math.max(
-      Number(cachedStat.mtimeMs || 0),
-      Math.floor(sourceEntityMtimeMs / 1000) * 1000 + 1000
-    );
     return {
       ...servedSourceFile,
       path: cachePath,
@@ -1242,7 +1233,7 @@ export function createShortVideosRuntime({
       size: cachedStat.size,
       type: "video",
       cacheVersion: originalFile.cacheVersion,
-      entityMtimeMs: renditionEntityMtimeMs,
+      entityMtimeMs: Math.max(0, Number(cachedStat.mtimeMs || 0)),
       cachedSmooth: true,
       cachedSmoothLegacy
     };

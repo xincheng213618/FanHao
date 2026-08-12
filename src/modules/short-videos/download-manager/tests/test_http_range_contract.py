@@ -43,12 +43,18 @@ class HttpRangeContractTests(unittest.TestCase):
             self.assertEqual(ranged.headers["Content-Range"], "bytes 3-5/10")
             self.assertEqual(ranged.headers["ETag"], full.headers["ETag"])
 
-            ranged_by_date = serve_media(
-                media_path,
-                headers={"Range": "bytes=8-", "If-Range": full.headers["Last-Modified"]},
-            )
-            self.assertEqual(ranged_by_date.status, 206)
-            self.assertEqual(ranged_by_date.body, b"89")
+            for date_validator in (
+                full.headers["Last-Modified"],
+                "Fri, 31 Dec 9999 23:59:59 GMT",
+            ):
+                with self.subTest(date_validator=date_validator):
+                    ranged_by_date = serve_media(
+                        media_path,
+                        headers={"Range": "bytes=8-", "If-Range": date_validator},
+                    )
+                    self.assertEqual(ranged_by_date.status, 200)
+                    self.assertEqual(ranged_by_date.body, b"0123456789")
+                    self.assertNotIn("Content-Range", ranged_by_date.headers)
 
             for stale_validator in ('"stale"', full.headers["ETag"], "not-a-date"):
                 with self.subTest(stale_validator=stale_validator):
@@ -75,8 +81,20 @@ class HttpRangeContractTests(unittest.TestCase):
             self.assertEqual(unsatisfied.headers["ETag"], full.headers["ETag"])
             self.assertEqual(unsatisfied.headers["Last-Modified"], full.headers["Last-Modified"])
 
-            malformed = serve_media(media_path, headers={"Range": "bytes=0-1,3-4"})
-            self.assertEqual(malformed.status, 416)
+            for ignored_range in ("items=0-1", "bytes=0-1,3-4", "bytes=invalid"):
+                with self.subTest(ignored_range=ignored_range):
+                    ignored = serve_media(media_path, headers={"Range": ignored_range})
+                    self.assertEqual(ignored.status, 200)
+                    self.assertEqual(ignored.body, b"0123456789")
+                    self.assertNotIn("Content-Range", ignored.headers)
+
+            reversed_range = serve_media(media_path, headers={"Range": "bytes=5-3"})
+            self.assertEqual(reversed_range.status, 416)
+            self.assertEqual(reversed_range.headers["Content-Range"], "bytes */10")
+
+            oversized_range = serve_media(media_path, headers={"Range": f"bytes={'9' * 5000}-"})
+            self.assertEqual(oversized_range.status, 416)
+            self.assertEqual(oversized_range.headers["Content-Range"], "bytes */10")
 
     def test_head_has_get_status_and_headers_without_body(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-manager-range-contract-") as temp:
@@ -91,8 +109,10 @@ class HttpRangeContractTests(unittest.TestCase):
 
             get_range = serve_media(media_path, headers={"Range": "bytes=2-4"})
             head_range = serve_media(media_path, command="HEAD", headers={"Range": "bytes=2-4"})
-            self.assertEqual(head_range.status, get_range.status)
-            self.assertEqual(head_range.headers, get_range.headers)
+            self.assertEqual(get_range.status, 206)
+            self.assertEqual(head_range.status, 200)
+            self.assertEqual(head_range.headers, get_full.headers)
+            self.assertNotIn("Content-Range", head_range.headers)
             self.assertEqual(head_range.body, b"")
 
             handler, state = capture_handler("HEAD")
@@ -118,7 +138,7 @@ class HttpRangeContractTests(unittest.TestCase):
             self.assertEqual(ranged.status, 416)
             self.assertEqual(ranged.headers["Content-Range"], "bytes */0")
 
-    def test_same_length_replacement_changes_validator_when_mtime_changes(self) -> None:
+    def test_same_length_replacement_changes_etag_within_the_same_second(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-manager-range-contract-") as temp:
             media_path = Path(temp) / "fixture.mp4"
             media_path.write_bytes(b"v1-data")
@@ -127,12 +147,19 @@ class HttpRangeContractTests(unittest.TestCase):
             first = serve_media(media_path)
 
             media_path.write_bytes(b"v2-data")
-            second_ns = first_ns + 2_000_000_000
+            second_ns = first_ns + 500_000_000
             os.utime(media_path, ns=(second_ns, second_ns))
             second = serve_media(media_path)
 
             self.assertNotEqual(first.headers["ETag"], second.headers["ETag"])
-            self.assertNotEqual(first.headers["Last-Modified"], second.headers["Last-Modified"])
+            self.assertEqual(first.headers["Last-Modified"], second.headers["Last-Modified"])
+            resumed_by_ambiguous_date = serve_media(
+                media_path,
+                headers={"Range": "bytes=2-", "If-Range": first.headers["Last-Modified"]},
+            )
+            self.assertEqual(resumed_by_ambiguous_date.status, 200)
+            self.assertEqual(resumed_by_ambiguous_date.body, b"v2-data")
+            self.assertNotIn("Content-Range", resumed_by_ambiguous_date.headers)
 
 
 class CapturedResponse:

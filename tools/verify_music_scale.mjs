@@ -152,9 +152,9 @@ try {
     },
     { ...rangedFile, maxRangeBytes: 2 * 1024 * 1024 }
   );
-  assert.equal(rangeStatus, 206);
-  assert.equal(Number(rangeHeaders["Content-Length"]), 2 * 1024 * 1024);
-  assert.match(String(rangeHeaders["Content-Range"] || ""), /^bytes 0-2097151\//);
+  assert.equal(rangeStatus, 200, "HEAD must ignore Range and describe the full representation");
+  assert.equal(Number(rangeHeaders["Content-Length"]), fs.statSync(rangedFile.path).size);
+  assert.equal(rangeHeaders["Content-Range"], undefined);
   assert.equal(rangeEnded, true);
 
   const searchStartedAt = performance.now();

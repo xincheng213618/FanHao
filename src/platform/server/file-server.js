@@ -28,7 +28,7 @@ export function parseRange(rangeHeader, size) {
 }
 
 function normalizedEntityMtimeMs(file, stat) {
-  for (const value of [file?.entityMtimeMs, stat?.mtimeMs, file?.cacheVersion]) {
+  for (const value of [stat?.mtimeMs, file?.entityMtimeMs, file?.cacheVersion]) {
     if (value === null || value === undefined || value === "") continue;
     const candidate = Number(value);
     if (Number.isFinite(candidate) && candidate >= 0) return candidate;
@@ -63,15 +63,14 @@ export function ifRangeMatches(ifRangeHeader, validators) {
     const etag = String(validators?.ETag || "");
     return Boolean(etag) && !/^W\//i.test(etag) && candidate === etag;
   }
+  // Last-Modified has only second precision and is not a byte identity. This
+  // server authorizes a resumed range only with a trusted strong entity tag.
+  return false;
+}
 
-  if (!/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(candidate)) {
-    return false;
-  }
-  const candidateTime = Date.parse(candidate);
-  const lastModifiedTime = Date.parse(String(validators?.["Last-Modified"] || ""));
-  return Number.isFinite(candidateTime)
-    && Number.isFinite(lastModifiedTime)
-    && lastModifiedTime <= candidateTime;
+function isSingleByteRange(rangeHeader) {
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || "").trim());
+  return Boolean(match && (match[1] || match[2]));
 }
 
 function diagnosticResponseHeaders(headers) {
@@ -90,8 +89,23 @@ function diagnosticResponseHeaders(headers) {
   );
 }
 
-export function pipeFileRange(req, res, filePath, range) {
-  const stream = fs.createReadStream(filePath, range);
+export function pipeFileRange(req, res, filePathOrDescriptor, range) {
+  const fileDescriptor = Number.isInteger(filePathOrDescriptor)
+    ? filePathOrDescriptor
+    : fs.openSync(filePathOrDescriptor, "r");
+  let stream;
+  try {
+    stream = fs.createReadStream(null, {
+      ...(range || {}),
+      fd: fileDescriptor,
+      autoClose: true
+    });
+  } catch (error) {
+    try {
+      fs.closeSync(fileDescriptor);
+    } catch {}
+    throw error;
+  }
   let closed = false;
   const closeStream = () => {
     if (closed) return;
@@ -99,15 +113,30 @@ export function pipeFileRange(req, res, filePath, range) {
     stream.destroy();
   };
 
-  req.on("aborted", closeStream);
-  res.on("close", closeStream);
-  stream.on("error", () => {
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-    }
-    res.end();
-  });
-  stream.pipe(res);
+  const detach = () => {
+    req.off("aborted", closeStream);
+    res.off("close", closeStream);
+  };
+
+  try {
+    req.once("aborted", closeStream);
+    res.once("close", closeStream);
+    stream.once("close", () => {
+      closed = true;
+      detach();
+    });
+    stream.once("error", () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      }
+      res.end();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    detach();
+    stream.destroy();
+    throw error;
+  }
 }
 
 export function createFileServer({ mimeTypes, normalizeExt, notFound, safeStat }) {
@@ -157,56 +186,97 @@ export function createFileServer({ mimeTypes, normalizeExt, notFound, safeStat }
   }
 
   function serveRangedFile(req, res, file) {
-    const stat = safeStat(file.path);
-    if (!stat) {
+    let fileDescriptor;
+    let stat;
+    try {
+      fileDescriptor = fs.openSync(file.path, "r");
+      stat = fs.fstatSync(fileDescriptor);
+      if (!stat.isFile()) throw new Error("Media path is not a file");
+    } catch {
+      if (fileDescriptor !== undefined) {
+        try {
+          fs.closeSync(fileDescriptor);
+        } catch {}
+      }
       notFound(res);
       return;
     }
 
-    // A short-video startup cache may contain only the first chunk while still
-    // representing the original media entity. Keep the HTTP range total and
-    // validators tied to that original entity, but never read past the cached
-    // physical prefix.
-    const entitySize = Math.max(stat.size, Math.floor(Number(file.totalSize || 0)) || 0);
-    const validators = entityValidators(file, stat, entitySize);
-    const rangeHeader = String(req.headers?.range || "").trim();
-    const ifRangeHeader = String(req.headers?.["if-range"] || "").trim();
-    const rangeConditionMatches = !ifRangeHeader || ifRangeMatches(ifRangeHeader, validators);
-    const requestedRange = rangeHeader && rangeConditionMatches
-      ? parseRange(rangeHeader, entitySize)
-      : null;
-    const maxRangeBytes = Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)));
-    const range = requestedRange && maxRangeBytes
-      ? {
-          start: requestedRange.start,
-          end: Math.min(requestedRange.end, requestedRange.start + maxRangeBytes - 1)
+    let streamOwnsDescriptor = false;
+    try {
+      // A short-video startup cache may contain only the first chunk while still
+      // representing the original media entity. Keep the HTTP range total and
+      // validators tied to that original entity, but never read past the cached
+      // physical prefix.
+      const entitySize = Math.max(stat.size, Math.floor(Number(file.totalSize || 0)) || 0);
+      const validators = entityValidators(file, stat, entitySize);
+      const rangeHeader = req.method === "GET" ? String(req.headers?.range || "").trim() : "";
+      const singleByteRange = isSingleByteRange(rangeHeader);
+      const ifRangeHeader = String(req.headers?.["if-range"] || "").trim();
+      const rangeConditionMatches = !ifRangeHeader || ifRangeMatches(ifRangeHeader, validators);
+      const requestedRange = singleByteRange && rangeConditionMatches
+        ? parseRange(rangeHeader, entitySize)
+        : null;
+      const maxRangeBytes = Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)));
+      const range = requestedRange && maxRangeBytes
+        ? {
+            start: requestedRange.start,
+            end: Math.min(requestedRange.end, requestedRange.start + maxRangeBytes - 1)
+          }
+        : requestedRange;
+      const contentType = mimeTypes[file.ext] || "application/octet-stream";
+      const cacheControl = String(file.cacheControl || "").trim() || "no-store";
+      const responseHeaders = file.responseHeaders && typeof file.responseHeaders === "object"
+        ? diagnosticResponseHeaders(file.responseHeaders)
+        : {};
+
+      if (singleByteRange && rangeConditionMatches && !requestedRange) {
+        res.writeHead(416, {
+          ...responseHeaders,
+          "Content-Type": contentType,
+          "Accept-Ranges": "bytes",
+          "Content-Range": `bytes */${entitySize}`,
+          "Content-Length": 0,
+          "Cache-Control": cacheControl,
+          "Content-Disposition": "inline",
+          ...validators
+        });
+        res.end();
+        return;
+      }
+
+      if (!range) {
+        // A physical startup-prefix file cannot satisfy a full representation.
+        // Callers must fall back to the source entity when If-Range fails.
+        if (stat.size < entitySize) {
+          res.writeHead(503, {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Length": 0,
+            "Cache-Control": "no-store"
+          });
+          res.end();
+          return;
         }
-      : requestedRange;
-    const contentType = mimeTypes[file.ext] || "application/octet-stream";
-    const cacheControl = String(file.cacheControl || "").trim() || "no-store";
-    const responseHeaders = file.responseHeaders && typeof file.responseHeaders === "object"
-      ? diagnosticResponseHeaders(file.responseHeaders)
-      : {};
 
-    if (rangeHeader && rangeConditionMatches && !requestedRange) {
-      res.writeHead(416, {
-        ...responseHeaders,
-        "Content-Type": contentType,
-        "Accept-Ranges": "bytes",
-        "Content-Range": `bytes */${entitySize}`,
-        "Content-Length": 0,
-        "Cache-Control": cacheControl,
-        "Content-Disposition": "inline",
-        ...validators
-      });
-      res.end();
-      return;
-    }
+        res.writeHead(200, {
+          ...responseHeaders,
+          "Content-Type": contentType,
+          "Accept-Ranges": "bytes",
+          "Content-Length": entitySize,
+          "Cache-Control": cacheControl,
+          "Content-Disposition": "inline",
+          ...validators
+        });
+        if (req.method === "HEAD" || stat.size === 0) {
+          res.end();
+          return;
+        }
+        streamOwnsDescriptor = true;
+        pipeFileRange(req, res, fileDescriptor);
+        return;
+      }
 
-    if (!range) {
-      // A physical startup-prefix file cannot satisfy a full representation.
-      // Callers must fall back to the source entity when If-Range fails.
-      if (stat.size < entitySize) {
+      if (range.start >= stat.size) {
         res.writeHead(503, {
           "Content-Type": "text/plain; charset=utf-8",
           "Content-Length": 0,
@@ -216,53 +286,31 @@ export function createFileServer({ mimeTypes, normalizeExt, notFound, safeStat }
         return;
       }
 
-      res.writeHead(200, {
+      const responseRange = {
+        start: range.start,
+        end: Math.min(range.end, stat.size - 1)
+      };
+
+      res.writeHead(206, {
         ...responseHeaders,
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
-        "Content-Length": entitySize,
+        "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`,
+        "Content-Length": responseRange.end - responseRange.start + 1,
         "Cache-Control": cacheControl,
         "Content-Disposition": "inline",
         ...validators
       });
-      if (req.method === "HEAD" || stat.size === 0) {
-        res.end();
-        return;
+      streamOwnsDescriptor = true;
+      pipeFileRange(req, res, fileDescriptor, responseRange);
+      return;
+    } finally {
+      if (!streamOwnsDescriptor) {
+        try {
+          fs.closeSync(fileDescriptor);
+        } catch {}
       }
-      pipeFileRange(req, res, file.path);
-      return;
     }
-
-    if (range.start >= stat.size) {
-      res.writeHead(503, {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Content-Length": 0,
-        "Cache-Control": "no-store"
-      });
-      res.end();
-      return;
-    }
-
-    const responseRange = {
-      start: range.start,
-      end: Math.min(range.end, stat.size - 1)
-    };
-
-    res.writeHead(206, {
-      ...responseHeaders,
-      "Content-Type": contentType,
-      "Accept-Ranges": "bytes",
-      "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`,
-      "Content-Length": responseRange.end - responseRange.start + 1,
-      "Cache-Control": cacheControl,
-      "Content-Disposition": "inline",
-      ...validators
-    });
-    if (req.method === "HEAD") {
-      res.end();
-      return;
-    }
-    pipeFileRange(req, res, file.path, responseRange);
   }
 
   return {
