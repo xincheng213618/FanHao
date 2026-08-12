@@ -350,6 +350,7 @@ function workerMessageError(message, operation) {
     error.code = String(message?.errorCode || "SHORT_VIDEO_STATS_WORKER_FAILED");
     error.retryable = message?.retryable === true;
     error.statusCode = 503;
+    error.expose = true;
     return error;
   }
 
@@ -359,20 +360,28 @@ function workerMessageError(message, operation) {
 }
 
 function publicLikeDistributionError(error) {
-  if (error?.code === "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE") return error;
+  if (error?.code === "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE") {
+    error.expose = true;
+    return error;
+  }
   const result = new Error("短视频统计后台线程暂时不可用");
   result.code = "SHORT_VIDEO_LIKE_DISTRIBUTION_UNAVAILABLE";
   result.retryable = true;
   result.statusCode = 503;
+  result.expose = true;
   return result;
 }
 
 function shortVideoStatsWorkerError(error) {
-  if (error?.statusCode === 503 && String(error?.code || "").startsWith("SHORT_VIDEO_")) return error;
+  if (error?.statusCode === 503 && String(error?.code || "").startsWith("SHORT_VIDEO_")) {
+    error.expose = true;
+    return error;
+  }
   const result = new Error("短视频统计后台线程暂时不可用");
   result.code = "SHORT_VIDEO_STATS_WORKER_UNAVAILABLE";
   result.retryable = true;
   result.statusCode = 503;
+  result.expose = true;
   return result;
 }
 
@@ -405,6 +414,7 @@ function stoppedError() {
   error.code = "SHORT_VIDEO_STATS_WORKER_STOPPED";
   error.retryable = false;
   error.statusCode = 503;
+  error.expose = true;
   return error;
 }
 
@@ -413,6 +423,7 @@ function staleStatsError() {
   error.code = "SHORT_VIDEO_STATS_STALE";
   error.retryable = false;
   error.statusCode = 503;
+  error.expose = true;
   return error;
 }
 
@@ -421,6 +432,7 @@ function staleLikeDistributionError() {
   error.code = "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE";
   error.retryable = true;
   error.statusCode = 503;
+  error.expose = true;
   return error;
 }
 

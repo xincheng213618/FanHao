@@ -752,6 +752,7 @@ function assertEquivalentDistribution(actual, expected, label) {
 function assertGenericDistribution503(error) {
   assert.equal(error?.statusCode, 503);
   assert.equal(error?.retryable, true);
+  assert.equal(error?.expose, true, "sanitized worker failures must be explicitly marked safe for the public route");
   assert.equal(error?.message, "短视频统计后台线程暂时不可用");
   assert(!/Users|\\|\/.*sqlite|\.sqlite/i.test(error.message), "public worker errors must not expose filesystem paths");
   return true;

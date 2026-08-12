@@ -252,6 +252,7 @@ async function verifyRecommendedFailureMapping() {
       (error) => {
         assert.equal(error.statusCode, 503);
         assert.equal(error.retryable, true);
+        assert.equal(error.expose, true, "the sanitized recommendation failure must be marked safe for the public route");
         assert.equal(error.message, "短视频推荐后台线程暂时不可用");
         assert(!error.message.includes("private-user"));
         return true;
