@@ -285,7 +285,7 @@ try {
     /^\/media\/short-video-cover\/legacy-generated-cover\?v=/,
     "SQLite-backed generated covers must keep the public media contract"
   );
-  const storedCoverDelete = store.deleteVideos([legacyGeneratedId], { deleteFiles: false });
+  const storedCoverDelete = await store.deleteVideos([legacyGeneratedId], { deleteFiles: false });
   assert.equal(storedCoverDelete.deletedStoredCovers, 1, "deleting a short video should delete its linked SQLite cover");
   assert.equal(store.coverStorageStatus().count, 0, "cover storage should not retain deleted-video orphans");
   fs.rmSync(legacyGeneratedVideo, { force: true });

@@ -10,6 +10,7 @@ import { createShortVideoCommentsRepository } from "./comments-repository.js";
 import { createShortVideoCollectionsRepository } from "./collections-repository.js";
 import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
 import { createShortVideoCoverStorageService } from "./cover-storage-service.js";
+import { createShortVideoDeleteJobService, SHORT_VIDEO_DELETE_QUARANTINE_DIR } from "./delete-job-service.js";
 import {
   syncDownloadManagerProfiles,
   syncDownloadManagerSourceMemberships
@@ -192,6 +193,7 @@ export function createShortVideoStore(options = {}) {
   const coverCacheDir = options.coverCacheDir || path.join(path.dirname(dbPath || "."), "short-video-covers");
   const coverTempDir = options.coverTempDir || path.join(os.tmpdir(), "fanhao-short-video-cover-inputs");
   const coverDbPath = options.coverDbPath || defaultShortVideoCoverDbPath(dbPath);
+  const pathWriteTestHooks = options.pathWriteTestHooks || {};
   const coverBlobDatabase = createShortVideoCoverDatabase({ dbPath: coverDbPath });
   const coverStorage = createShortVideoCoverStorageService({
     coverDatabase: coverBlobDatabase,
@@ -218,6 +220,21 @@ export function createShortVideoStore(options = {}) {
     resolveVideo: videoCatalogRowByAnyId,
     runBusyRetry: runSqliteBusyRetry,
     testHooks: options.collectionTestHooks
+  });
+  const deleteJobs = readOnly ? null : createShortVideoDeleteJobService({
+    database: databaseOrOpen,
+    roots,
+    coverCacheDir,
+    deleteRows: deleteShortVideoRows,
+    deleteStoredCovers: (videoIds) => coverBlobDatabase.removeMany(videoIds),
+    displayPath: shortVideoRelativePath,
+    fsOps: options.deleteJobFsOps,
+    hooks: options.deleteJobTestHooks,
+    leaseDurationMs: options.deleteJobLeaseDurationMs,
+    ownerId: options.deleteJobOwnerId,
+    removeEmptyParents: removeEmptyShortVideoParents,
+    terminalJobLimit: options.deleteJobTerminalLimit,
+    warn: options.deleteJobWarn || console.warn
   });
 
   function database() {
@@ -303,8 +320,10 @@ export function createShortVideoStore(options = {}) {
         `);
         if (!skipStartupMaintenance) cleanupSupersededFfmpegCovers(opened, coverCacheDir);
         db = opened;
+        if (!readOnly) deleteJobs.initialize(opened);
         if (!skipStartupMaintenance) coverStorage.reconcile(opened);
       } catch (error) {
+        db = null;
         try {
           opened.close();
         } catch {}
@@ -368,6 +387,9 @@ export function createShortVideoStore(options = {}) {
   }
 
   function close() {
+    try {
+      deleteJobs?.close(db);
+    } catch {}
     if (db) {
       try {
         db.close();
@@ -2256,7 +2278,7 @@ function summary() {
     };
   }
 
-  function deleteVideo(id, options = {}) {
+  async function deleteVideo(id, options = {}) {
     const database = databaseOrOpen();
     const row = videoCatalogRowByAnyId(database, id);
     if (!row) {
@@ -2274,7 +2296,7 @@ function summary() {
     return deleteShortVideos(database, [fullRow], { ...options, scope: "single" });
   }
 
-  function deleteVideoGroup(id, options = {}) {
+  async function deleteVideoGroup(id, options = {}) {
     const database = databaseOrOpen();
     const row = videoCatalogRowByAnyId(database, id);
     if (!row) {
@@ -2303,7 +2325,7 @@ function summary() {
     return deleteShortVideos(database, rows, { ...options, scope: "group", groupDir });
   }
 
-  function deleteVideos(ids, options = {}) {
+  async function deleteVideos(ids, options = {}) {
     const database = databaseOrOpen();
     const canonicalIds = [];
     const seen = new Set();
@@ -2331,7 +2353,7 @@ function summary() {
     return deleteShortVideos(database, rows, { ...options, scope: "batch" });
   }
 
-  function deleteShortVideos(database, rows, options = {}) {
+  async function deleteShortVideos(database, rows, options = {}) {
     const fullRows = [];
     const seenIds = new Set();
     for (const row of rows || []) {
@@ -2348,33 +2370,14 @@ function summary() {
     const videoIds = fullRows.map((item) => item.id);
     const firstRow = fullRows[0];
     const deleteFiles = options.deleteFiles !== false;
-    const files = deleteFiles ? shortVideoFilesForDelete(database, fullRows) : [];
-    const deletedFiles = [];
-    const deletedFilePaths = [];
-    const missingFiles = [];
-    const skippedFiles = [];
-    const errors = [];
-
     if (deleteFiles) {
-      for (const filePath of files) {
-        const result = deleteShortVideoFile(database, filePath, videoIds);
-        if (result.deleted) {
-          deletedFiles.push(result.relativePath || result.path);
-          deletedFilePaths.push(result.path);
-        }
-        else if (result.missing) missingFiles.push(result.relativePath || result.path);
-        else if (result.skipped) skippedFiles.push({ path: result.relativePath || result.path, reason: result.reason || "" });
-        else if (result.error) errors.push({ path: result.relativePath || result.path, error: result.error });
-      }
-      if (errors.length) {
-        const error = new Error(`删除本地文件失败：${errors[0].error}`);
-        error.statusCode = 500;
-        error.details = { errors, deletedFiles, skippedFiles };
-        throw error;
-      }
+      const result = await deleteJobs.execute(fullRows, options);
+      catalogCache.key = null;
+      catalogCache.summary = null;
+      catalogCache.authors = null;
+      return result;
     }
 
-    const emptyRemovedPaths = deleteFiles ? removeEmptyShortVideoParents(deletedFilePaths) : [];
     const now = new Date().toISOString();
     database.exec("BEGIN");
     try {
@@ -2406,12 +2409,12 @@ function summary() {
       scope: options.scope || "single",
       groupDir: options.groupDir ? shortVideoRelativePath(options.groupDir) : "",
       title: firstRow.title || firstRow.description || firstRow.file_name || "",
-      deletedFiles,
+      deletedFiles: [],
       deletedStoredCovers,
       coverCleanupError,
-      missingFiles,
-      skippedFiles,
-      emptyRemovedPaths
+      missingFiles: [],
+      skippedFiles: [],
+      emptyRemovedPaths: []
     };
   }
 
@@ -2431,31 +2434,7 @@ function summary() {
     ]) {
       database.prepare(`DELETE FROM ${table} WHERE video_id IN (${placeholders})`).run(...ids);
     }
-    database.prepare(`DELETE FROM short_videos WHERE id IN (${placeholders})`).run(...ids);
-  }
-
-  function shortVideoFilesForDelete(database, rowsOrRow) {
-    const rows = Array.isArray(rowsOrRow) ? rowsOrRow : [rowsOrRow];
-    const ids = uniqueTextArray(rows.map((row) => row?.id || ""), { maxItems: 10000, maxLength: 200 });
-    let assetRows = [];
-    if (ids.length) {
-      const placeholders = ids.map(() => "?").join(", ");
-      assetRows = database.prepare(`
-        SELECT local_path
-        FROM short_video_assets
-        WHERE video_id IN (${placeholders})
-          AND COALESCE(NULLIF(local_path, ''), '') <> ''
-      `).all(...ids);
-    }
-    const rowFiles = [];
-    for (const row of rows) {
-      if (!row) continue;
-      rowFiles.push(row.source_path || "", row.cover_path || "", row.music_path || "", row.data_path || "");
-    }
-    return uniqueTextArray([
-      ...rowFiles,
-      ...assetRows.map((item) => item.local_path || "")
-    ].filter(Boolean), { maxItems: 10000, maxLength: 1000 });
+    return Number(database.prepare(`DELETE FROM short_videos WHERE id IN (${placeholders})`).run(...ids).changes || 0);
   }
 
   function shortVideoManagedParentDir(filePath) {
@@ -2466,47 +2445,6 @@ function summary() {
     const rootsResolved = roots.map((item) => path.resolve(item));
     if (rootsResolved.some((root) => dir === root) || dir === path.resolve(coverCacheDir)) return "";
     return dir;
-  }
-
-  function deleteShortVideoFile(database, filePath, videoIds) {
-    const resolved = path.resolve(String(filePath || ""));
-    const relativePath = shortVideoRelativePath(resolved);
-    if (!isShortVideoManagedPath(resolved)) return { path: resolved, relativePath, skipped: true, reason: "不在短视频目录内" };
-    if (isFileReferencedByOtherVideo(database, resolved, videoIds)) return { path: resolved, relativePath, skipped: true, reason: "仍被其他短视频引用" };
-    const stat = safeStat(resolved);
-    if (!stat) return { path: resolved, relativePath, missing: true };
-    if (!stat.isFile()) return { path: resolved, relativePath, skipped: true, reason: "不是文件" };
-    try {
-      fs.unlinkSync(resolved);
-      return { path: resolved, relativePath, deleted: true };
-    } catch (error) {
-      return { path: resolved, relativePath, error: error.message || String(error) };
-    }
-  }
-
-  function isFileReferencedByOtherVideo(database, filePath, videoIds) {
-    const ignoredIds = uniqueTextArray(Array.isArray(videoIds) ? videoIds : [videoIds], { maxItems: 10000, maxLength: 200 });
-    const exact = path.resolve(filePath);
-    const ignoreClause = ignoredIds.length ? `id NOT IN (${ignoredIds.map(() => "?").join(", ")}) AND` : "";
-    const row = database.prepare(`
-      SELECT 1
-      FROM short_videos
-      WHERE ${ignoreClause}
-        (
-          source_path = ? OR cover_path = ? OR music_path = ? OR data_path = ?
-        )
-      LIMIT 1
-    `).get(...ignoredIds, exact, exact, exact, exact);
-    if (row) return true;
-    const assetIgnoreClause = ignoredIds.length ? `video_id NOT IN (${ignoredIds.map(() => "?").join(", ")}) AND` : "";
-    const asset = database.prepare(`
-      SELECT 1
-      FROM short_video_assets
-      WHERE ${assetIgnoreClause}
-        local_path = ?
-      LIMIT 1
-    `).get(...ignoredIds, exact);
-    return Boolean(asset);
   }
 
   function removeEmptyShortVideoParents(filePaths) {
@@ -2902,10 +2840,12 @@ function summary() {
     const resolveExistingCanonical = canonicalShortVideoBySourcePathStatement(database);
     const writeBatch = (items) => {
       if (!items.length) return;
-      database.exec("BEGIN");
+      pathWriteTestHooks.beforeWriterLock?.({ kind: "scan", count: items.length });
+      database.exec("BEGIN IMMEDIATE");
       try {
         for (const item of items) {
           applyCanonicalShortVideoIdentity(database, resolveExistingCanonical, item);
+          deleteJobs.assertPathWritesAllowed(database, shortVideoItemPaths(item), { videoId: item.id });
           foundIds.add(item.id);
           upsert.run(...videoRowValues(item, now));
           // 文件所在目录只表示物理存储位置。统一存储后，作者作品也可能位于
@@ -2983,6 +2923,7 @@ function summary() {
 
   function importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now, options }) {
     const upsert = shortVideoUpsertStatement(targetDb);
+    const resolveExistingCanonical = canonicalShortVideoBySourcePathStatement(targetDb);
     const normalized = normalizedUpsertStatements(targetDb, coverCacheDir);
     const batchId = `download-manager:${hashText(`${sourceDbPath}:${now}`).slice(0, 24)}`;
     const profileColumns = new Set(sourceDb.prepare("PRAGMA table_info(profiles)").all().map((row) => row.name));
@@ -3236,12 +3177,14 @@ function summary() {
         skippedNoPlayableVideo += 1;
         return;
       }
+      applyCanonicalShortVideoIdentity(targetDb, resolveExistingCanonical, item);
       if (seenIds.has(item.id)) {
         skipped += 1;
         skippedDuplicate += 1;
         return;
       }
       seenIds.add(item.id);
+      deleteJobs.assertPathWritesAllowed(targetDb, shortVideoItemPaths(item), { videoId: item.id });
       const existed = targetDb.prepare("SELECT 1 FROM short_videos WHERE id = ? LIMIT 1").get(item.id);
       upsert.run(...videoRowValues(item, now));
       upsertNormalizedItem(
@@ -3262,7 +3205,8 @@ function summary() {
       else imported += 1;
     };
 
-    targetDb.exec("BEGIN");
+    pathWriteTestHooks.beforeWriterLock?.({ kind: "download-manager-import", count: sourceRows.length });
+    targetDb.exec("BEGIN IMMEDIATE");
     try {
       targetDb.prepare(`
         INSERT INTO short_video_import_batches (
@@ -3342,6 +3286,14 @@ function summary() {
     return database();
   }
 
+  function deleteJobStatus(options = {}) {
+    return deleteJobs ? deleteJobs.status(databaseOrOpen(), options) : { ok: true, active: 0, jobs: [] };
+  }
+
+  async function recoverDeleteJobs(options = {}) {
+    return deleteJobs ? deleteJobs.recoverPending({ db: databaseOrOpen(), jobId: options.jobId || "" }) : deleteJobStatus();
+  }
+
   function downloadManagerSourceStateKey(value) {
     const database = databaseOrOpen();
     if (value === undefined) return metaValue(database, DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META);
@@ -3369,6 +3321,7 @@ function summary() {
     dbPath,
     deleteVideo,
     deleteCollection: collections.deleteCollection,
+    deleteJobStatus,
     deleteVideoGroup,
     deleteVideos,
     downloadManagerSourceStateKey,
@@ -3389,6 +3342,7 @@ function summary() {
     queueQualityUpgrades,
     prepareSchema: () => Boolean(databaseOrOpen()),
     relatedVideos,
+    recoverDeleteJobs,
     removeCollectionVideo: collections.removeCollectionVideo,
     renameCollection: collections.renameCollection,
     recordWatch,
@@ -3729,22 +3683,17 @@ function cleanupSupersededFfmpegCovers(db, coverCacheDir = "") {
       throw error;
     }
 
-    for (const row of rows) removeGeneratedCoverFile(row.local_path, coverCacheDir);
-    db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('cover_cleanup_at', ?)").run(new Date().toISOString());
+    // The path reference can be shared by another catalog owner, and this
+    // startup lane has no crash-safe file-delete journal. Retain the legacy
+    // file after removing the superseded DB owner; the dedicated cover store
+    // migration/maintenance lane may reclaim proven orphans offline.
+    const finishedAt = new Date().toISOString();
+    db.prepare("DELETE FROM short_video_meta WHERE key = 'cover_cleanup_at'").run();
+    db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('cover_reference_cleanup_at', ?)").run(finishedAt);
+    db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('cover_physical_cleanup_mode', 'retained_unjournaled')").run();
   } catch (error) {
     console.warn("[short-video-cover-cleanup]", error.message || error);
   }
-}
-
-function removeGeneratedCoverFile(filePath, coverCacheDir = "") {
-  const rawPath = String(filePath || "").trim();
-  if (!rawPath || !coverCacheDir) return;
-  const resolvedPath = path.resolve(rawPath);
-  const resolvedCacheDir = path.resolve(coverCacheDir);
-  if (!resolvedPath.startsWith(`${resolvedCacheDir}${path.sep}`)) return;
-  try {
-    fs.rmSync(resolvedPath, { force: true });
-  } catch {}
 }
 
 function shortVideoUpsertStatement(db) {
@@ -4245,6 +4194,16 @@ function videoRowValues(item, now) {
   ];
 }
 
+function shortVideoItemPaths(item = {}) {
+  return [
+    item.sourcePath,
+    item.coverPath,
+    item.musicPath,
+    item.dataPath,
+    ...(Array.isArray(item.galleryItems) ? item.galleryItems.map((entry) => entry?.path || "") : [])
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
 function normalizedUpsertStatements(db, coverCacheDir = "") {
   return {
     coverCacheDir,
@@ -4535,9 +4494,10 @@ function upsertNormalizedItem(statements, item, now, options = {}) {
 
 function deleteSupersededFfmpegCover(statements, videoId) {
   if (!videoId || !statements?.ffmpegCoverRows || !statements?.deleteFfmpegCover) return;
-  const rows = statements.ffmpegCoverRows.all(videoId);
+  // This runs inside the scanner/import transaction. Physical deletion here
+  // would survive a later SQL rollback and could also sever another owner's
+  // shared path, so only remove the normalized DB owner in this transaction.
   statements.deleteFfmpegCover.run(videoId);
-  for (const row of rows) removeGeneratedCoverFile(row.local_path, statements.coverCacheDir);
 }
 
 function runAssetUpsert(statement, asset, now) {
@@ -4776,6 +4736,7 @@ function* walkFiles(root) {
     for (const entry of safeReadDirEntries(current)) {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name.toLowerCase() === SHORT_VIDEO_DELETE_QUARANTINE_DIR.toLowerCase()) continue;
         stack.push(fullPath);
       } else if (entry.isFile()) {
         yield fullPath;

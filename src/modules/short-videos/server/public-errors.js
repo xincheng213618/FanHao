@@ -27,11 +27,34 @@ export function sendShortVideoPublicError(res, sendJson, error, fallback, option
     (options.logError || console.error)(options.logLabel || "[short-video-api]", error);
   }
   const exposeDetails = result.status < 500 || error?.expose === true;
+  const recovery = shortVideoDeleteRecoveryBody(error?.publicBody);
   sendJson(res, result.status, {
     error: result.message,
+    ...recovery,
     ...(options.includeRetryable && result.status === 503 && error?.retryable === true ? { retryable: true } : {}),
     ...(options.includeDetails && exposeDetails && error?.details ? { details: error.details } : {})
   });
+}
+
+function shortVideoDeleteRecoveryBody(value) {
+  if (!value || typeof value !== "object" || value.pending !== true || value.recoveryRequired !== true) return {};
+  const status = ["running", "rollback_pending", "cleanup_pending"].includes(String(value.status || ""))
+    ? String(value.status)
+    : "rollback_pending";
+  const rawCode = String(value.code || "");
+  const code = rawCode.startsWith("SHORT_VIDEO_DELETE_")
+    ? rawCode
+    : "SHORT_VIDEO_DELETE_RECOVERY_REQUIRED";
+  return {
+    ok: false,
+    accepted: false,
+    pending: true,
+    recoveryRequired: true,
+    retryable: value.retryable === true,
+    status,
+    jobId: String(value.jobId || "").slice(0, 100),
+    code
+  };
 }
 
 function isSafeDatabaseBusyError(error) {

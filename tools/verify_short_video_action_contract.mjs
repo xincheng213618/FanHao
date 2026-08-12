@@ -69,7 +69,7 @@ try {
 function createLegacyFixture() {
   const bootstrap = createShortVideoStore({
     dbPath,
-    roots: [],
+    roots: [fixtureRoot],
     skipStartupMaintenance: false
   });
   try {
@@ -197,6 +197,7 @@ function createLegacyFixture() {
     `).run(TARGET_ID, now, now);
     fs.writeFileSync(path.join(fixtureRoot, `${TARGET_ID}.mp4`), Buffer.from("action-contract-video"));
     fs.writeFileSync(path.join(fixtureRoot, `${CANONICAL_ID}.mp4`), Buffer.from("canonical-action-contract-video"));
+    fs.writeFileSync(path.join(fixtureRoot, `${LEGACY_IMPORTED_ID}.mp4`), Buffer.from("legacy-imported-action-contract-video"));
     downgradeCatalogView(db);
   } finally {
     db.close();
@@ -341,7 +342,7 @@ function createFixtureRuntime() {
     downloadManagerSyncMs: 0,
     ffmpegPath: "ffmpeg",
     ffprobePath: "ffprobe",
-    roots: [],
+    roots: [fixtureRoot],
     mediaResponseService: { serveImage() {} },
     mediaStreamService: { serveVideo() {} },
     notFound(res) {

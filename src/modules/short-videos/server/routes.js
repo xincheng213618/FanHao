@@ -92,13 +92,37 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       const body = await readJsonBody(req);
       const ids = Array.isArray(body?.ids) ? body.ids : [];
-      const result = shortVideoStore.deleteVideos(ids, {
+      const result = await shortVideoStore.deleteVideos(ids, {
         deleteFiles: body?.deleteFiles !== false
       });
       onMutation?.();
-      sendJson(res, 200, result);
+      sendJson(res, shortVideoDeleteResponseStatus(result), result);
     } catch (error) {
       sendShortVideoPublicError(res, sendJson, error, "短视频批量删除失败", { includeDetails: true });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos/delete-jobs" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const jobId = String(url.searchParams.get("jobId") || "").trim();
+      sendJson(res, 200, shortVideoStore.deleteJobStatus({ jobId }));
+    } catch (error) {
+      sendShortVideoPublicError(res, sendJson, error, "短视频删除恢复状态读取失败");
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos/delete-jobs" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const result = await shortVideoStore.recoverDeleteJobs({ jobId: String(body?.jobId || "").trim() });
+      onMutation?.();
+      sendJson(res, shortVideoRecoveryResponseStatus(result), result);
+    } catch (error) {
+      sendShortVideoPublicError(res, sendJson, error, "短视频删除恢复失败");
     }
     return true;
   }
@@ -111,6 +135,24 @@ export async function routeShortVideoApi(req, res, url, deps) {
       return true;
     }
     sendJson(res, 200, data);
+    return true;
+  }
+
+  if (explicitVideoDetailMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const options = { deleteFiles: body?.deleteFiles !== false };
+      const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
+      const videoId = decodeShortVideoRouteId(explicitVideoDetailMatch[1]);
+      const result = scope === "group" || scope === "folder"
+        ? await shortVideoStore.deleteVideoGroup(videoId, options)
+        : await shortVideoStore.deleteVideo(videoId, options);
+      onMutation?.();
+      sendJson(res, shortVideoDeleteResponseStatus(result), result);
+    } catch (error) {
+      sendShortVideoPublicError(res, sendJson, error, "短视频删除失败", { includeDetails: true });
+    }
     return true;
   }
 
@@ -360,10 +402,10 @@ export async function routeShortVideoApi(req, res, url, deps) {
       };
       const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
       const result = scope === "group" || scope === "folder"
-        ? shortVideoStore.deleteVideoGroup(detailSegment.value, options)
-        : shortVideoStore.deleteVideo(detailSegment.value, options);
+        ? await shortVideoStore.deleteVideoGroup(detailSegment.value, options)
+        : await shortVideoStore.deleteVideo(detailSegment.value, options);
       onMutation?.();
-      sendJson(res, 200, result);
+      sendJson(res, shortVideoDeleteResponseStatus(result), result);
     } catch (error) {
       sendShortVideoPublicError(res, sendJson, error, "短视频删除失败", { includeDetails: true });
     }
@@ -391,4 +433,16 @@ function decodeShortVideoRouteId(value) {
     error.statusCode = 400;
     throw error;
   }
+}
+
+function shortVideoDeleteResponseStatus(result) {
+  if (result?.status === "rollback_pending" || result?.recoveryRequired === true) return 500;
+  return result?.status === "cleanup_pending" || result?.pending === true ? 202 : 200;
+}
+
+function shortVideoRecoveryResponseStatus(result) {
+  if (result?.pending === true) return 202;
+  if (result?.job?.pending === true) return 202;
+  if (Array.isArray(result?.jobs) && result.jobs.some((job) => job?.pending === true)) return 202;
+  return 200;
 }

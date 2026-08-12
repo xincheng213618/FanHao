@@ -1,6 +1,7 @@
 export const SHORT_VIDEO_RESERVED_DETAIL_SEGMENT_NAMES = Object.freeze([
   "authors",
   "collections",
+  "delete-jobs",
   "facets",
   "like-distribution",
   "quality-upgrades",

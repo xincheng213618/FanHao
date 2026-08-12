@@ -6,6 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
+import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-runtime-"));
 const dbPath = path.join(tempDir, "short-videos.sqlite");
@@ -180,9 +181,148 @@ try {
   `).get();
   verifyDb.close();
   assert.equal(savedWatch?.progress_ms, 1250, "worker writes must remain linked to the existing short-video database");
+  await runtime.stop();
+  const stoppedProbe = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    assert.equal(
+      Number(stoppedProbe.prepare("SELECT COUNT(*) AS count FROM short_video_delete_jobs WHERE owner_id <> ''").get()?.count || 0),
+      0,
+      "runtime stop must close the store and release every persisted delete owner"
+    );
+  } finally {
+    stoppedProbe.close();
+  }
+  assert.equal(runtime.store.deleteJobStatus().ok, true, "the same runtime store must reopen safely after stop");
+  await runtime.start();
+  const reopenedStatus = {};
+  await runtime.routeApi(
+    { method: "GET" },
+    reopenedStatus,
+    new URL("http://127.0.0.1/api/short-videos/delete-jobs")
+  );
+  assert.equal(reopenedStatus.status, 200, "a stopped runtime must start again with a fresh store owner");
+  await runtime.stop();
+  await verifyPendingStartupFailsClosed();
   console.log(`short-video-runtime-queue: ok (530 observed playback issues; locked watch write kept HTTP responsive at ${healthDurationMs.toFixed(1)}ms)`);
 } finally {
   await runtime?.stop();
   runtime?.store?.close();
   fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+async function verifyPendingStartupFailsClosed() {
+  const root = path.join(tempDir, "pending-start");
+  const mediaRoot = path.join(root, "media");
+  const pendingDbPath = path.join(root, "short-videos.sqlite");
+  const pendingCacheRoot = path.join(root, "cache");
+  fs.mkdirSync(mediaRoot, { recursive: true });
+  const bootstrap = createShortVideoStore({
+    dbPath: pendingDbPath,
+    roots: [mediaRoot],
+    skipStartupMaintenance: true
+  });
+  bootstrap.summary();
+  bootstrap.close();
+
+  const now = "2026-08-13T00:00:00.000Z";
+  const presentPath = path.join(mediaRoot, "pending-present.mp4");
+  const missingPath = path.join(mediaRoot, "pending-missing.mp4");
+  fs.writeFileSync(presentPath, "pending-present");
+  const seed = new DatabaseSync(pendingDbPath);
+  try {
+    seed.prepare(`
+      INSERT INTO short_videos (id, source_path, file_name, imported_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run("pending-present", presentPath, path.basename(presentPath), now, now);
+    seed.prepare(`
+      INSERT INTO short_video_delete_jobs (
+        id, status, phase, scope, anchor_id, video_ids_json, quarantine_token,
+        owner_id, lease_until, created_at, updated_at
+      ) VALUES (
+        'runtime-pending-start', 'running', 'planned', 'batch', 'pending-present',
+        '["pending-present","pending-missing"]', 'runtime-pending-token', '', '', ?, ?
+      )
+    `).run(now, now);
+    const reserve = seed.prepare(`
+      INSERT INTO short_video_delete_reservations (
+        job_id, kind, reservation_key, original_value, mutation_mode,
+        released_at, created_at, updated_at
+      ) VALUES ('runtime-pending-start', 'video', ?, ?, '', '', ?, ?)
+    `);
+    reserve.run("pending-present", "pending-present", now, now);
+    reserve.run("pending-missing", "pending-missing", now, now);
+  } finally {
+    seed.close();
+  }
+
+  let writerStarts = 0;
+  const runtimeStates = [];
+  const pendingRuntime = createShortVideosRuntime({
+    dbPath: pendingDbPath,
+    downloadManagerDbPath: "",
+    downloadManagerSyncMs: 0,
+    ffmpegPath: "ffmpeg",
+    ffprobePath: "ffprobe",
+    roots: [mediaRoot],
+    mediaResponseService: { serveImage() {} },
+    mediaStreamService: { serveVideo() {} },
+    notFound() {},
+    readJsonBody: async (req) => req?.body || {},
+    requireLocalAdmin: () => true,
+    sendJson(res, status, data) { res.status = status; res.data = data; },
+    sharedCache: { rootDir: pendingCacheRoot, scheduleCleanup() {}, touch() {} },
+    runtimeTestHooks: {
+      beforeWritersStart() { writerStarts += 1; },
+      onRuntimeStartedChange(value) { runtimeStates.push(Boolean(value)); }
+    }
+  });
+
+  try {
+    await assert.rejects(
+      () => pendingRuntime.start(),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_RECOVERY_PENDING"
+    );
+    assert.equal(writerStarts, 0, "pending delete recovery must reject before any runtime writer starts");
+    assert.equal(runtimeStates.includes(true), false, "pending delete recovery must never mark the runtime started");
+    const failedProbe = new DatabaseSync(pendingDbPath, { readOnly: true });
+    try {
+      const job = failedProbe.prepare("SELECT status, owner_id FROM short_video_delete_jobs WHERE id = 'runtime-pending-start'").get();
+      assert.equal(job?.status, "rollback_pending", "partial recovery must stay pending and fail closed");
+      assert.equal(job?.owner_id, "", "failed runtime startup must release its claimed delete owner");
+    } finally {
+      failedProbe.close();
+    }
+
+    fs.writeFileSync(missingPath, "pending-missing");
+    const repair = new DatabaseSync(pendingDbPath);
+    try {
+      repair.exec("BEGIN IMMEDIATE");
+      repair.prepare(`
+        UPDATE short_video_delete_reservations
+        SET mutation_mode = 'commit', updated_at = ?
+        WHERE job_id = 'runtime-pending-start' AND released_at = ''
+      `).run(now);
+      repair.prepare(`
+        INSERT INTO short_videos (id, source_path, file_name, imported_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run("pending-missing", missingPath, path.basename(missingPath), now, now);
+      repair.prepare(`
+        UPDATE short_video_delete_reservations
+        SET mutation_mode = '', updated_at = ?
+        WHERE job_id = 'runtime-pending-start' AND released_at = ''
+      `).run(now);
+      repair.exec("COMMIT");
+    } catch (error) {
+      try { repair.exec("ROLLBACK"); } catch {}
+      throw error;
+    } finally {
+      repair.close();
+    }
+    await pendingRuntime.start();
+    assert.equal(writerStarts, 1, "a converged retry may start writers exactly once");
+    assert.equal(runtimeStates.includes(true), true, "a converged retry must mark the runtime started");
+  } finally {
+    await pendingRuntime.stop();
+    pendingRuntime.store.close();
+  }
 }

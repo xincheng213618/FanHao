@@ -61,6 +61,7 @@ export function createShortVideosRuntime({
   sendJson,
   sharedCache,
   catalogWorkerOptions = {},
+  runtimeTestHooks = {},
   listQuery = null,
   schemaBusyTimeoutMs = 10000,
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
@@ -1040,22 +1041,47 @@ export function createShortVideosRuntime({
     await Promise.all(workerStops);
   }
 
-  function startDownloadManagerSync() {
+  async function startDownloadManagerSync() {
+    try {
+      const recovery = await store.recoverDeleteJobs();
+      const pending = Math.max(Number(recovery?.pending || 0), Number(recovery?.active || 0));
+      if (pending > 0) {
+        const error = new Error(`短视频删除恢复仍有 ${pending} 个未完成作业`);
+        error.code = "SHORT_VIDEO_DELETE_RECOVERY_PENDING";
+        error.statusCode = 503;
+        error.retryable = true;
+        throw error;
+      }
+    } catch (error) {
+      runtimeStarted = false;
+      runtimeTestHooks.onRuntimeStartedChange?.(false);
+      store.close();
+      throw error;
+    }
     runtimeStarted = true;
+    runtimeTestHooks.onRuntimeStartedChange?.(true);
+    runtimeTestHooks.beforeWritersStart?.();
     catalogWorker.reopen();
+    runtimeTestHooks.beforeWatchWriterStart?.();
     watchWriter.start();
+    runtimeTestHooks.beforeDownloadManagerSyncStart?.();
     downloadManagerSync.start();
     schedule4kSmoothVideoWarmup();
   }
 
   async function stopDownloadManagerSync() {
     runtimeStarted = false;
-    const syncStop = downloadManagerSync.stop();
+    runtimeTestHooks.onRuntimeStartedChange?.(false);
     if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
     smoothVideoWarmupTimer = null;
     stopVideoCacheQueue();
     stopSmoothVideoQueue();
-    await Promise.all([syncStop, stopListServices()]);
+    try {
+      const syncStop = downloadManagerSync.stop();
+      await Promise.all([syncStop, stopListServices()]);
+    } finally {
+      store.close();
+    }
   }
 
   async function downloadManagerRequest(pathname, options = {}) {

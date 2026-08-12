@@ -27,7 +27,7 @@ async function runFixtureVerification() {
     const legacyStore = createShortVideoStore({
       dbPath: fixture.dbPath,
       coverDbPath: fixture.coverDbPath,
-      roots: [],
+      roots: [fixture.root],
       skipStartupMaintenance: true
     });
     let legacy;
@@ -667,7 +667,7 @@ function fixtureRuntime(fixture, extraWorkerData = {}) {
     downloadManagerSyncMs: 0,
     ffmpegPath: "ffmpeg",
     ffprobePath: "ffprobe",
-    roots: [],
+    roots: [fixture.root],
     mediaResponseService: { serveImage() {} },
     mediaStreamService: { serveVideo() {} },
     notFound(res) { res.status = 404; res.data = { error: "not found" }; },

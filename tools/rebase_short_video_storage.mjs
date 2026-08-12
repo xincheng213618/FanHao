@@ -18,6 +18,9 @@ const source = path.resolve(args.from || defaults.from);
 const destination = path.resolve(args.to || defaults.to);
 const storageRoot = path.resolve(args["storage-root"] || defaults.storageRoot);
 const apply = Boolean(args.apply);
+if (apply && !args["offline-confirmed"]) {
+  throw new Error("存储重定位必须先停止 FanHao/下载器写入，再显式传入 --offline-confirmed");
+}
 
 if (!fs.existsSync(destination)) throw new Error(`目标媒体库不存在：${destination}`);
 if (source.toLowerCase() === destination.toLowerCase()) throw new Error("新旧媒体库路径相同");
@@ -42,6 +45,7 @@ if (!apply) console.log("未写入数据库；复制校验通过后使用 --appl
 async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply) {
   const db = new DatabaseSync(target.file, { readOnly: !shouldApply });
   db.exec("PRAGMA busy_timeout = 10000");
+  if (shouldApply && target.kind === "fanhao") assertDeleteProtocolOfflineBoundary(db, from);
   if (shouldApply) {
     const backupDir = path.join(path.dirname(target.file), "backups");
     fs.mkdirSync(backupDir, { recursive: true });
@@ -49,7 +53,9 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
     await backup(db, backupPath);
     console.log(`${target.kind}: 已备份 ${backupPath}`);
   }
-  const candidates = textColumns(db);
+  const candidates = textColumns(db, {
+    excludedTables: target.kind === "fanhao" ? shortVideoDeleteProtocolTables() : new Set()
+  });
   const replacements = [[from, to]];
   const escapedFrom = from.replaceAll("\\", "\\\\");
   const escapedTo = to.replaceAll("\\", "\\\\");
@@ -88,6 +94,7 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
         }
       }
     }
+    if (shouldApply && target.kind === "fanhao") assertShortVideoReferenceProjection(db);
     if (shouldApply) db.exec("COMMIT");
   } catch (error) {
     if (shouldApply) db.exec("ROLLBACK");
@@ -98,10 +105,11 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
   return { matches, changes };
 }
 
-function textColumns(db) {
+function textColumns(db, { excludedTables = new Set() } = {}) {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
   const result = [];
   for (const { name } of tables) {
+    if (excludedTables.has(name)) continue;
     for (const column of db.prepare(`PRAGMA table_info(${quoteIdentifier(name)})`).all()) {
       const type = String(column.type || "").toUpperCase();
       if (type.includes("TEXT") || type.includes("CHAR") || type.includes("CLOB")) {
@@ -110,6 +118,71 @@ function textColumns(db) {
     }
   }
   return result;
+}
+
+function shortVideoDeleteProtocolTables() {
+  return new Set([
+    "short_video_delete_jobs",
+    "short_video_delete_items",
+    "short_video_delete_reservations",
+    "short_video_delete_video_tombstones",
+    "short_video_path_references",
+    "short_video_path_tombstones"
+  ]);
+}
+
+function assertDeleteProtocolOfflineBoundary(db, from) {
+  const tableNames = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+  if (tableNames.has("short_video_delete_jobs")) {
+    const active = Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM short_video_delete_jobs
+      WHERE status IN ('running', 'rollback_pending', 'cleanup_pending') OR owner_id <> ''
+    `).get()?.count || 0);
+    if (active) throw new Error("短视频删除作业仍在运行；拒绝离线存储重定位");
+  }
+  if (tableNames.has("short_video_path_tombstones")) {
+    const tombstones = Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM short_video_path_tombstones
+      WHERE state = 'active' AND instr(original_path, ?) > 0
+    `).get(from)?.count || 0);
+    if (tombstones) {
+      throw new Error("旧存储根仍有短视频删除墓碑；必须先由受控恢复流程处理，不能批量改写内部安全表");
+    }
+  }
+}
+
+function assertShortVideoReferenceProjection(db) {
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+  if (!tables.has("short_video_path_references")) return;
+  const mismatch = Number(db.prepare(`
+    WITH expected AS (
+      SELECT 'short_videos' owner_table, id owner_key, id owner_video_id, 'source_path' path_column,
+             trim(source_path) raw_path, lower(replace(trim(source_path), char(92), '/')) path_key
+      FROM short_videos WHERE trim(source_path) <> ''
+      UNION ALL SELECT 'short_videos', id, id, 'cover_path', trim(cover_path), lower(replace(trim(cover_path), char(92), '/'))
+      FROM short_videos WHERE trim(cover_path) <> ''
+      UNION ALL SELECT 'short_videos', id, id, 'music_path', trim(music_path), lower(replace(trim(music_path), char(92), '/'))
+      FROM short_videos WHERE trim(music_path) <> ''
+      UNION ALL SELECT 'short_videos', id, id, 'data_path', trim(data_path), lower(replace(trim(data_path), char(92), '/'))
+      FROM short_videos WHERE trim(data_path) <> ''
+      UNION ALL SELECT 'short_video_assets', id, video_id, 'local_path', trim(local_path), lower(replace(trim(local_path), char(92), '/'))
+      FROM short_video_assets WHERE trim(local_path) <> ''
+    )
+    SELECT COUNT(*) AS count FROM (
+      SELECT * FROM (
+        SELECT owner_table, owner_key, owner_video_id, path_column, raw_path, path_key FROM expected
+        EXCEPT
+        SELECT owner_table, owner_key, owner_video_id, path_column, raw_path, path_key FROM short_video_path_references
+      )
+      UNION ALL
+      SELECT * FROM (
+        SELECT owner_table, owner_key, owner_video_id, path_column, raw_path, path_key FROM short_video_path_references
+        EXCEPT
+        SELECT owner_table, owner_key, owner_video_id, path_column, raw_path, path_key FROM expected
+      )
+    )
+  `).get()?.count || 0);
+  if (mismatch) throw new Error("存储重定位后短视频路径引用投影对账失败");
 }
 
 function quoteIdentifier(value) {
@@ -122,8 +195,8 @@ function parseArgs(values) {
     const token = values[index];
     if (!token.startsWith("--")) throw new Error(`无法识别参数：${token}`);
     const key = token.slice(2);
-    if (key === "apply") {
-      parsed.apply = true;
+    if (["apply", "offline-confirmed"].includes(key)) {
+      parsed[key] = true;
       continue;
     }
     const value = values[index + 1];
