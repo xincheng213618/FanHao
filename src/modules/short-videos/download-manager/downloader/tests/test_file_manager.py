@@ -1,3 +1,5 @@
+import hashlib
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +29,13 @@ def test_file_exists_returns_true_for_non_empty(tmp_path):
 def test_get_file_size_returns_0_for_missing(tmp_path):
     fm = FileManager(str(tmp_path))
     assert fm.get_file_size(tmp_path / "nope.mp4") == 0
+
+
+@pytest.mark.asyncio
+async def test_download_file_rejects_output_root_as_file_target(tmp_path):
+    fm = FileManager(str(tmp_path))
+    assert await fm.download_file("https://example.com/v.mp4", tmp_path) is False
+    assert not tmp_path.with_suffix(".tmp").exists()
 
 
 def test_get_save_path_creates_directories(tmp_path):
@@ -330,6 +339,11 @@ async def test_download_file_atomic_write(tmp_path):
     mock_response = AsyncMock()
     mock_response.status = 200
     mock_response.content_length = len(content)
+    mock_response.headers = {
+        "Content-Type": "video/mp4",
+        "Content-Length": str(len(content)),
+        "ETag": '"fixture-v1"',
+    }
 
     async def iter_chunked(size):
         yield content
@@ -456,13 +470,14 @@ async def test_download_file_no_httpx_fallback_on_404(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_download_file_size_mismatch_keeps_partial_for_resume(tmp_path):
+async def test_download_file_size_mismatch_without_validator_discards_partial(tmp_path):
     fm = FileManager(str(tmp_path))
     save_path = tmp_path / "video.mp4"
 
     mock_response = AsyncMock()
     mock_response.status = 200
     mock_response.content_length = 999
+    mock_response.headers = {"Content-Type": "video/mp4", "Content-Length": "999"}
 
     async def iter_chunked(size):
         yield b"short"
@@ -480,7 +495,8 @@ async def test_download_file_size_mismatch_keeps_partial_for_resume(tmp_path):
     result = await fm.download_file("https://example.com/v.mp4", save_path, session=mock_session)
     assert result is False
     assert not save_path.exists()
-    assert save_path.with_suffix(".mp4.tmp").read_bytes() == b"short"
+    assert not save_path.with_suffix(".mp4.tmp").exists()
+    assert not save_path.with_suffix(".mp4.tmp.meta.json").exists()
 
 
 class _FakeContent:
@@ -497,7 +513,12 @@ class _FakeResponse:
         self.status = status
         self.content = _FakeContent(chunks)
         self.content_length = sum(len(chunk) for chunk in chunks)
-        self.headers = headers or {"Content-Type": "video/mp4", "Content-Range": "bytes 0-2/3"}
+        self.headers = headers or {
+            "Content-Type": "video/mp4",
+            "Content-Length": "3",
+            "Content-Range": "bytes 0-2/3",
+            "ETag": '"fixture-v1"',
+        }
 
     async def __aenter__(self):
         return self
@@ -564,13 +585,26 @@ async def test_download_file_rejects_incomplete_partial_content_206(tmp_path):
 async def test_download_file_resumes_partial_temp_file_after_connection_drop(tmp_path):
     fm = FileManager(str(tmp_path))
     target = tmp_path / "resume.mp4"
-    first = _FakeResponse(status=200, chunks=(), headers={"Content-Type": "video/mp4"})
+    first = _FakeResponse(
+        status=200,
+        chunks=(),
+        headers={
+            "Content-Type": "video/mp4",
+            "Content-Length": "6",
+            "ETag": '"fixture-v1"',
+        },
+    )
     first.content = _InterruptedContent()
     first.content_length = 6
     second = _FakeResponse(
         status=206,
         chunks=(b"def",),
-        headers={"Content-Type": "video/mp4", "Content-Range": "bytes 3-5/6"},
+        headers={
+            "Content-Type": "video/mp4",
+            "Content-Length": "3",
+            "Content-Range": "bytes 3-5/6",
+            "ETag": '"fixture-v1"',
+        },
     )
     session = _SequenceSession([first, second])
 
@@ -586,10 +620,11 @@ async def test_download_file_resumes_partial_temp_file_after_connection_drop(tmp
     assert target.read_bytes() == b"abcdef"
     assert not target.with_suffix(".mp4.tmp").exists()
     assert session.calls[1][1]["headers"]["Range"] == "bytes=3-"
+    assert session.calls[1][1]["headers"]["If-Range"] == '"fixture-v1"'
 
 
 @pytest.mark.asyncio
-async def test_download_file_restarts_when_server_ignores_range(tmp_path):
+async def test_download_file_discards_legacy_tmp_before_full_request(tmp_path):
     fm = FileManager(str(tmp_path))
     target = tmp_path / "restart.mp4"
     target.with_suffix(".mp4.tmp").write_bytes(b"stale-prefix")
@@ -605,24 +640,44 @@ async def test_download_file_restarts_when_server_ignores_range(tmp_path):
 
     assert result is True
     assert target.read_bytes() == b"complete"
-    assert session.calls[0][1]["headers"]["Range"] == "bytes=12-"
+    assert "Range" not in session.calls[0][1]["headers"]
+    assert "If-Range" not in session.calls[0][1]["headers"]
 
 
 @pytest.mark.asyncio
 async def test_download_file_promotes_complete_temp_file_after_416(tmp_path):
     fm = FileManager(str(tmp_path))
     target = tmp_path / "already-complete.mp4"
-    target.with_suffix(".mp4.tmp").write_bytes(b"abc")
+    url = "https://cdn.example/already-complete.mp4"
+    tmp_path = target.with_suffix(".mp4.tmp")
+    meta_path = target.with_suffix(".mp4.tmp.meta.json")
+    tmp_path.write_bytes(b"abc")
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    meta_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "written_length": 3,
+                "expected_length": 3,
+                "etag": '"fixture-v1"',
+                "original_url_sha256": digest,
+                "final_url_sha256": digest,
+                "content_type": "video/mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
     response = _FakeResponse(
         status=416,
         chunks=(),
-        headers={"Content-Range": "bytes */3"},
+        headers={"Content-Range": "bytes */3", "ETag": '"fixture-v1"'},
     )
     response.content_length = 0
     session = _SequenceSession([response])
 
-    result = await fm.download_file("https://cdn.example/already-complete.mp4", target, session=session)
+    result = await fm.download_file(url, target, session=session)
 
     assert result is True
     assert target.read_bytes() == b"abc"
     assert not target.with_suffix(".mp4.tmp").exists()
+    assert not target.with_suffix(".mp4.tmp.meta.json").exists()

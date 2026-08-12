@@ -1,8 +1,15 @@
+import asyncio
+import hashlib
+import json
 import os
 import re
+import threading
 import time
+import uuid
+from datetime import timezone
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import aiofiles
 import aiohttp
@@ -24,8 +31,30 @@ _SEC_UID_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # （视频动辄几十 MB），256KB 在内存占用与吞吐之间取平衡。
 _DOWNLOAD_CHUNK_BYTES = 256 * 1024
 
+_PARTIAL_METADATA_SCHEMA = 1
+_PARTIAL_METADATA_KEYS = {
+    "schema",
+    "written_length",
+    "expected_length",
+    "original_url_sha256",
+    "final_url_sha256",
+    "content_type",
+}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STRONG_ETAG_RE = re.compile(r'^"[\x21\x23-\x7e\x80-\xff]*"$')
+
+
+class _UnsafePartialResponse(RuntimeError):
+    """The response cannot safely extend the current partial entity."""
+
 
 class FileManager:
+    # The sidecar shares a FileManager across concurrent jobs, but tests and
+    # embedders may construct more than one instance.  Keep in-flight work at
+    # class scope so every caller on the same event loop joins the same write.
+    _inflight_guard = threading.Lock()
+    _inflight_downloads: Dict[tuple[int, str], asyncio.Task] = {}
+
     _IMAGE_CONTENT_TYPE_SUFFIXES = {
         "image/gif": ".gif",
         "image/jpeg": ".jpg",
@@ -200,8 +229,91 @@ class FileManager:
         prefer_response_content_type: bool = False,
         return_saved_path: bool = False,
     ) -> Union[bool, Path]:
-        should_close = False
         started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        save_path = Path(save_path)
+        controlled_path = self._controlled_path(save_path)
+        if controlled_path is None:
+            logger.warning("Rejected download path outside the configured output directory")
+            return False
+        single_flight_path = controlled_path
+        if prefer_response_content_type:
+            parent, name = os.path.split(controlled_path)
+            stem, _suffix = os.path.splitext(name)
+            # Gallery callers can propose different suffixes before the HTTP
+            # Content-Type resolves both names to the same final file.  Group
+            # those candidates by parent + stem so they cannot share a tmp.
+            single_flight_path = os.path.join(parent, f"{stem}.__content_type__")
+        key = (id(loop), single_flight_path)
+
+        with self._inflight_guard:
+            task = self._inflight_downloads.get(key)
+            if task is None:
+                task = loop.create_task(
+                    self._download_file_operation(
+                        url,
+                        save_path,
+                        session=session,
+                        headers=headers,
+                        proxy=proxy,
+                        prefer_response_content_type=prefer_response_content_type,
+                    )
+                )
+                self._inflight_downloads[key] = task
+                task.add_done_callback(
+                    lambda completed, inflight_key=key: self._forget_inflight(
+                        inflight_key, completed
+                    )
+                )
+
+        try:
+            saved_path = await asyncio.shield(task)
+            timing_event(
+                "http_download_done",
+                path=str(saved_path if isinstance(saved_path, Path) else save_path),
+                status="complete" if saved_path else "failed",
+                elapsed_ms=elapsed_ms(started),
+                success=bool(saved_path),
+            )
+            if not saved_path:
+                return False
+            return saved_path if return_saved_path else True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("Download error for %s: %s", save_path.name, e)
+            timing_event(
+                "http_download_done",
+                path=str(save_path),
+                status="exception",
+                elapsed_ms=elapsed_ms(started),
+                success=False,
+                error=str(e)[:1000],
+            )
+            return False
+
+    @classmethod
+    def _forget_inflight(cls, key: tuple[int, str], task: asyncio.Task) -> None:
+        with cls._inflight_guard:
+            if cls._inflight_downloads.get(key) is task:
+                cls._inflight_downloads.pop(key, None)
+        try:
+            task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            pass
+
+    async def _download_file_operation(
+        self,
+        url: str,
+        save_path: Path,
+        *,
+        session: aiohttp.ClientSession = None,
+        headers: Optional[Dict[str, str]] = None,
+        proxy: Optional[str] = None,
+        prefer_response_content_type: bool = False,
+    ) -> Union[bool, Path]:
+        should_close = False
+        can_resume = not prefer_response_content_type
         if session is None:
             default_headers = headers or {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -212,186 +324,483 @@ class FileManager:
             session = aiohttp.ClientSession(headers=default_headers)
             should_close = True
 
-        final_path = save_path
-        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
-        can_resume = not prefer_response_content_type
-        resume_offset = 0
-        if can_resume:
-            try:
-                resume_offset = tmp_path.stat().st_size
-            except OSError:
-                resume_offset = 0
-            if resume_offset <= 0:
-                tmp_path.unlink(missing_ok=True)
-                resume_offset = 0
-        request_headers = dict(headers or {})
-        if resume_offset:
-            request_headers["Range"] = f"bytes={resume_offset}-"
+        if not can_resume:
+            self._discard_partial(save_path)
+
         try:
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=300),
-                headers=request_headers or None,
-                proxy=proxy or None,
-            ) as response:
-                if response.status == 200:
-                    # Some CDNs ignore Range and return the complete body. In
-                    # that case restart the temp file instead of appending a
-                    # duplicate prefix.
-                    result = await self._persist_stream(
-                        response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
-                        save_path,
-                        response.content_length,
-                        response.headers,
-                        prefer_response_content_type=prefer_response_content_type,
-                        return_saved_path=return_saved_path,
-                        keep_partial=can_resume,
-                    )
-                    timing_event(
-                        "http_download_done",
-                        path=str(result if isinstance(result, Path) else save_path),
-                        host=self._response_host(response),
-                        status=200,
-                        content_length=response.content_length,
-                        resume_offset=resume_offset,
-                        range_ignored=bool(resume_offset),
-                        elapsed_ms=elapsed_ms(started),
-                        success=bool(result),
-                    )
-                    return result
-                if response.status == 206:
-                    range_parts = self._content_range_parts(response.headers)
-                    if range_parts is None:
-                        logger.warning(
-                            "Rejected incomplete range response for %s: %s",
-                            final_path.name,
-                            response.headers.get("Content-Range") if response.headers else None,
-                        )
-                        timing_event(
-                            "http_download_done",
-                            path=str(final_path),
-                            host=self._response_host(response),
-                            status=206,
-                            content_length=response.content_length,
-                            elapsed_ms=elapsed_ms(started),
-                            success=False,
-                            error="incomplete_range",
-                        )
-                        tmp_path.unlink(missing_ok=True)
-                        return False
-                    range_start, range_end, expected_size = range_parts
-                    if range_start != resume_offset or range_end + 1 != expected_size:
-                        logger.warning(
-                            "Rejected mismatched range response for %s: requested %d, got %s",
-                            final_path.name,
-                            resume_offset,
-                            response.headers.get("Content-Range") if response.headers else None,
-                        )
-                        tmp_path.unlink(missing_ok=True)
-                        timing_event(
-                            "http_download_done",
-                            path=str(final_path),
-                            host=self._response_host(response),
-                            status=206,
-                            content_length=response.content_length,
-                            resume_offset=resume_offset,
-                            elapsed_ms=elapsed_ms(started),
-                            success=False,
-                            error="mismatched_range",
-                        )
-                        return False
-                    result = await self._persist_stream(
-                        response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
-                        save_path,
-                        expected_size,
-                        response.headers,
-                        prefer_response_content_type=prefer_response_content_type,
-                        return_saved_path=return_saved_path,
-                        initial_size=resume_offset,
-                        keep_partial=can_resume,
-                    )
-                    timing_event(
-                        "http_download_done",
-                        path=str(result if isinstance(result, Path) else save_path),
-                        host=self._response_host(response),
-                        status=206,
-                        content_length=response.content_length,
-                        expected_size=expected_size,
-                        resume_offset=resume_offset,
-                        elapsed_ms=elapsed_ms(started),
-                        success=bool(result),
-                    )
-                    return result
-                if response.status == 416 and resume_offset:
-                    expected_size = self._unsatisfied_content_range_size(response.headers)
-                    if expected_size == resume_offset:
-                        os.replace(str(tmp_path), str(final_path))
-                        timing_event(
-                            "http_download_done",
-                            path=str(final_path),
-                            host=self._response_host(response),
-                            status=416,
-                            expected_size=expected_size,
-                            resume_offset=resume_offset,
-                            elapsed_ms=elapsed_ms(started),
-                            success=True,
-                            completed_from_partial=True,
-                        )
-                        return final_path if return_saved_path else True
-                status = response.status
-                logger.debug("Download failed for %s, status=%s", final_path.name, status)
-            # aiohttp connection released here. Douyin's image CDN 403s aiohttp's
-            # TLS fingerprint for some assets (e.g. ``biz_tag=pcweb_cover`` covers)
-            # while serving httpx/curl/requests fine, so retry those via httpx.
-            if status == 403:
-                result = await self._download_via_httpx(
+            # At most one unsafe resume response is retried here.  The retry is
+            # deliberately a fresh request without Range, so an outer retry or
+            # mirror switch can never append bytes from a rejected entity.
+            for request_index in range(2):
+                checkpoint = self._load_checkpoint(save_path) if can_resume else None
+                resume_offset = int(checkpoint["written_length"]) if checkpoint else 0
+                request_headers = {
+                    key: value
+                    for key, value in dict(headers or {}).items()
+                    if str(key).casefold() not in {"range", "if-range", "accept-encoding"}
+                }
+                if can_resume:
+                    request_headers["Accept-Encoding"] = "identity"
+                if checkpoint:
+                    request_headers["Range"] = f"bytes={resume_offset}-"
+                    request_headers["If-Range"] = self._checkpoint_validator(checkpoint)
+
+                retry_full = False
+                async with session.get(
                     url,
-                    save_path,
-                    headers=headers,
-                    proxy=proxy,
-                    prefer_response_content_type=prefer_response_content_type,
-                    return_saved_path=return_saved_path,
-                )
-                if not result:
-                    tmp_path.unlink(missing_ok=True)
-                timing_event(
-                    "http_download_done",
-                    path=str(result if isinstance(result, Path) else save_path),
-                    host="",
-                    status=403,
-                    fallback="httpx",
-                    elapsed_ms=elapsed_ms(started),
-                    success=bool(result),
-                )
-                return result
-            tmp_path.unlink(missing_ok=True)
-            timing_event(
-                "http_download_done",
-                path=str(final_path),
-                host="",
-                status=status,
-                elapsed_ms=elapsed_ms(started),
-                success=False,
-            )
+                    timeout=aiohttp.ClientTimeout(total=300),
+                    headers=request_headers or None,
+                    proxy=proxy or None,
+                ) as response:
+                    final_url_hash = self._url_sha256(self._response_url(response, url))
+                    original_url_hash = self._url_sha256(url)
+
+                    if response.status == 200:
+                        response_validator = self._response_validator(response.headers)
+                        response_checkpoint = self._build_checkpoint(
+                            response_validator,
+                            expected_length=self._response_content_length(response),
+                            original_url_sha256=original_url_hash,
+                            final_url_sha256=final_url_hash,
+                            content_type=self._content_type(response.headers),
+                        )
+                        if not can_resume:
+                            response_checkpoint = None
+                        try:
+                            return await self._persist_stream(
+                                response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
+                                save_path,
+                                self._response_content_length(response),
+                                response.headers,
+                                prefer_response_content_type=prefer_response_content_type,
+                                initial_size=0,
+                                checkpoint=response_checkpoint,
+                                keep_partial=can_resume and response_checkpoint is not None,
+                            )
+                        except _UnsafePartialResponse:
+                            self._discard_partial(save_path)
+                            return False
+
+                    if response.status == 206:
+                        range_parts = self._content_range_parts(response.headers)
+                        invalid_reason = self._validate_partial_response(
+                            checkpoint,
+                            range_parts,
+                            response.headers,
+                            original_url_hash,
+                            final_url_hash,
+                        )
+                        if invalid_reason:
+                            logger.warning(
+                                "Rejected unsafe range response for %s: %s",
+                                save_path.name,
+                                invalid_reason,
+                            )
+                            retry_full = checkpoint is not None and request_index == 0
+                        else:
+                            range_start, range_end, expected_size = range_parts
+                            validator = (
+                                self._checkpoint_validator_pair(checkpoint)
+                                if checkpoint
+                                else self._response_validator(response.headers)
+                            )
+                            response_checkpoint = self._build_checkpoint(
+                                validator,
+                                expected_length=expected_size,
+                                original_url_sha256=original_url_hash,
+                                final_url_sha256=final_url_hash,
+                                content_type=(
+                                    self._content_type(response.headers)
+                                    or (checkpoint or {}).get("content_type", "")
+                                ),
+                            )
+                            if not can_resume:
+                                response_checkpoint = None
+                            try:
+                                return await self._persist_stream(
+                                    response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
+                                    save_path,
+                                    expected_size,
+                                    response.headers,
+                                    prefer_response_content_type=prefer_response_content_type,
+                                    initial_size=range_start,
+                                    expected_body_length=range_end - range_start + 1,
+                                    checkpoint=response_checkpoint,
+                                    keep_partial=can_resume and response_checkpoint is not None,
+                                )
+                            except _UnsafePartialResponse as exc:
+                                logger.warning(
+                                    "Rejected overflowing range response for %s: %s",
+                                    save_path.name,
+                                    exc,
+                                )
+                                retry_full = checkpoint is not None and request_index == 0
+
+                    elif response.status == 416 and checkpoint:
+                        expected_size = self._unsatisfied_content_range_size(response.headers)
+                        expected_checkpoint_size = checkpoint.get("expected_length")
+                        validator_matches = self._checkpoint_matches_response(
+                            checkpoint,
+                            response.headers,
+                            original_url_hash,
+                            final_url_hash,
+                            check_content_type=False,
+                        )
+                        if (
+                            validator_matches
+                            and expected_size == resume_offset
+                            and (
+                                expected_checkpoint_size is None
+                                or expected_checkpoint_size == expected_size
+                            )
+                        ):
+                            tmp_path, meta_path = self._partial_paths(save_path)
+                            os.replace(str(tmp_path), str(save_path))
+                            try:
+                                meta_path.unlink(missing_ok=True)
+                            except OSError as exc:
+                                logger.warning(
+                                    "Could not remove completed checkpoint %s: %s",
+                                    meta_path.name,
+                                    exc,
+                                )
+                            return save_path
+                        retry_full = request_index == 0
+
+                    elif response.status == 403:
+                        # The httpx fallback is a new full request.  Never let it
+                        # inherit an aiohttp checkpoint implicitly.
+                        self._discard_partial(save_path)
+                        return await self._download_via_httpx(
+                            url,
+                            save_path,
+                            headers=headers,
+                            proxy=proxy,
+                            prefer_response_content_type=prefer_response_content_type,
+                            return_saved_path=True,
+                        )
+                    else:
+                        logger.debug(
+                            "Download failed for %s, status=%s", save_path.name, response.status
+                        )
+                        return False
+
+                if retry_full:
+                    self._discard_partial(save_path)
+                    continue
+
+                self._discard_partial(save_path)
+                return False
             return False
-        except Exception as e:
-            logger.debug("Download error for %s: %s", final_path.name, e)
-            if not can_resume:
-                tmp_path.unlink(missing_ok=True)
-            timing_event(
-                "http_download_done",
-                path=str(final_path),
-                status="exception",
-                elapsed_ms=elapsed_ms(started),
-                success=False,
-                error=str(e)[:1000],
-                resume_offset=resume_offset,
-                partial_size=self.get_file_size(tmp_path),
-            )
-            return False
+        except Exception:
+            if not can_resume or self._load_checkpoint(save_path) is None:
+                self._discard_partial(save_path)
+            raise
         finally:
             if should_close:
                 await session.close()
+
+    @staticmethod
+    def _partial_paths(save_path: Path) -> tuple[Path, Path]:
+        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+        return tmp_path, Path(str(tmp_path) + ".meta.json")
+
+    def _controlled_path(self, save_path: Path) -> Optional[str]:
+        base = os.path.normcase(os.path.abspath(os.fspath(self.base_path)))
+        target = os.path.normcase(os.path.abspath(os.fspath(save_path)))
+        if target == base or os.path.isdir(target):
+            return None
+        try:
+            if os.path.commonpath((base, target)) != base:
+                return None
+        except ValueError:
+            # Different Windows drives or UNC shares cannot share a controlled
+            # output root.
+            return None
+        try:
+            resolved_base = os.path.normcase(os.path.realpath(base))
+            resolved_target = os.path.normcase(os.path.realpath(target))
+            if (
+                resolved_target == resolved_base
+                or os.path.commonpath((resolved_base, resolved_target)) != resolved_base
+            ):
+                return None
+        except ValueError:
+            return None
+        return resolved_target
+
+    @classmethod
+    def _discard_partial(cls, save_path: Path) -> None:
+        tmp_path, meta_path = cls._partial_paths(save_path)
+        errors = []
+        # Remove trust before bytes.  A crash between the two leaves a legacy
+        # tmp that the next call must discard, never a trusted stale checkpoint.
+        for path in (meta_path, tmp_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                errors.append((path, exc))
+        if errors:
+            path, exc = errors[0]
+            raise OSError(f"Could not remove unsafe partial {path.name}: {exc}") from exc
+
+    @classmethod
+    def _load_checkpoint(cls, save_path: Path) -> Optional[dict[str, Any]]:
+        tmp_path, meta_path = cls._partial_paths(save_path)
+        try:
+            tmp_size = tmp_path.stat().st_size
+            raw = meta_path.read_text(encoding="utf-8")
+            metadata = json.loads(raw)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            cls._discard_partial(save_path)
+            return None
+
+        if not cls._valid_checkpoint(metadata, tmp_size):
+            cls._discard_partial(save_path)
+            return None
+        return metadata
+
+    @classmethod
+    def _valid_checkpoint(cls, metadata: Any, tmp_size: int) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        validator_keys = {key for key in ("etag", "last_modified") if key in metadata}
+        if len(validator_keys) != 1:
+            return False
+        if set(metadata) != _PARTIAL_METADATA_KEYS | validator_keys:
+            return False
+        if metadata.get("schema") != _PARTIAL_METADATA_SCHEMA:
+            return False
+        written_length = metadata.get("written_length")
+        expected_length = metadata.get("expected_length")
+        if (
+            not isinstance(written_length, int)
+            or isinstance(written_length, bool)
+            or written_length <= 0
+            or written_length != tmp_size
+        ):
+            return False
+        if expected_length is not None and (
+            not isinstance(expected_length, int)
+            or isinstance(expected_length, bool)
+            or expected_length < written_length
+        ):
+            return False
+        for key in ("original_url_sha256", "final_url_sha256"):
+            if not isinstance(metadata.get(key), str) or not _SHA256_RE.fullmatch(metadata[key]):
+                return False
+        content_type = metadata.get("content_type")
+        if (
+            not isinstance(content_type, str)
+            or len(content_type) > 512
+            or "\r" in content_type
+            or "\n" in content_type
+        ):
+            return False
+        if "etag" in metadata:
+            return cls._strong_etag(metadata["etag"]) is not None
+        return cls._canonical_http_date(metadata.get("last_modified")) is not None
+
+    @staticmethod
+    def _url_sha256(url: str) -> str:
+        return hashlib.sha256(str(url).encode("utf-8", errors="surrogatepass")).hexdigest()
+
+    @staticmethod
+    def _response_url(response: Any, fallback: str) -> str:
+        value = getattr(response, "url", None)
+        if value is None:
+            return fallback
+        rendered = str(value)
+        if not rendered or rendered.startswith("<"):
+            return fallback
+        return rendered
+
+    @staticmethod
+    def _header(response_headers: Any, name: str) -> Optional[str]:
+        if not response_headers:
+            return None
+        value = response_headers.get(name)
+        if value is not None:
+            return str(value).strip()
+        target = name.casefold()
+        try:
+            for key, candidate in response_headers.items():
+                if str(key).casefold() == target:
+                    return str(candidate).strip()
+        except (AttributeError, TypeError):
+            return None
+        return None
+
+    @classmethod
+    def _strong_etag(cls, value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if candidate[:2].casefold() == "w/":
+            return None
+        return candidate if _STRONG_ETAG_RE.fullmatch(candidate) else None
+
+    @staticmethod
+    def _canonical_http_date(value: Any) -> Optional[str]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = parsedate_to_datetime(value.strip())
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed is None or parsed.tzinfo is None:
+            return None
+        try:
+            return format_datetime(parsed.astimezone(timezone.utc), usegmt=True)
+        except (ValueError, OverflowError):
+            return None
+
+    @classmethod
+    def _response_validator(cls, response_headers: Any) -> Optional[tuple[str, str]]:
+        etag = cls._strong_etag(cls._header(response_headers, "ETag"))
+        if etag is not None:
+            return "etag", etag
+        last_modified = cls._canonical_http_date(
+            cls._header(response_headers, "Last-Modified")
+        )
+        if last_modified is not None:
+            return "last_modified", last_modified
+        return None
+
+    @staticmethod
+    def _checkpoint_validator_pair(checkpoint: dict[str, Any]) -> tuple[str, str]:
+        if "etag" in checkpoint:
+            return "etag", checkpoint["etag"]
+        return "last_modified", checkpoint["last_modified"]
+
+    @classmethod
+    def _checkpoint_validator(cls, checkpoint: dict[str, Any]) -> str:
+        return cls._checkpoint_validator_pair(checkpoint)[1]
+
+    @classmethod
+    def _build_checkpoint(
+        cls,
+        validator: Optional[tuple[str, str]],
+        *,
+        expected_length: Optional[int],
+        original_url_sha256: str,
+        final_url_sha256: str,
+        content_type: str,
+    ) -> Optional[dict[str, Any]]:
+        if validator is None:
+            return None
+        key, value = validator
+        return {
+            "schema": _PARTIAL_METADATA_SCHEMA,
+            "written_length": 0,
+            "expected_length": expected_length,
+            key: value,
+            "original_url_sha256": original_url_sha256,
+            "final_url_sha256": final_url_sha256,
+            "content_type": content_type,
+        }
+
+    @classmethod
+    def _content_type(cls, response_headers: Any) -> str:
+        value = cls._header(response_headers, "Content-Type") or ""
+        if len(value) > 512 or "\r" in value or "\n" in value:
+            return ""
+        return value
+
+    @classmethod
+    def _checkpoint_matches_response(
+        cls,
+        checkpoint: dict[str, Any],
+        response_headers: Any,
+        original_url_sha256: str,
+        final_url_sha256: str,
+        *,
+        check_content_type: bool = True,
+    ) -> bool:
+        validator_key, validator_value = cls._checkpoint_validator_pair(checkpoint)
+        if validator_key == "etag":
+            if cls._strong_etag(cls._header(response_headers, "ETag")) != validator_value:
+                return False
+        else:
+            response_date = cls._canonical_http_date(
+                cls._header(response_headers, "Last-Modified")
+            )
+            if response_date != validator_value:
+                return False
+            # Dates are only a fallback validator.  They cannot establish
+            # identity after a redirect target or mirror changes.
+            if (
+                checkpoint["original_url_sha256"] != original_url_sha256
+                or checkpoint["final_url_sha256"] != final_url_sha256
+            ):
+                return False
+        if check_content_type and checkpoint.get("content_type"):
+            if cls._content_type(response_headers) != checkpoint["content_type"]:
+                return False
+        return True
+
+    @classmethod
+    def _validate_partial_response(
+        cls,
+        checkpoint: Optional[dict[str, Any]],
+        range_parts: Optional[tuple[int, int, int]],
+        response_headers: Any,
+        original_url_sha256: str,
+        final_url_sha256: str,
+    ) -> str:
+        if range_parts is None:
+            return "missing or malformed Content-Range"
+        range_start, range_end, expected_size = range_parts
+        response_length = cls._header(response_headers, "Content-Length")
+        if response_length is not None:
+            if not response_length.isdigit():
+                return "invalid Content-Length"
+            if int(response_length) != range_end - range_start + 1:
+                return "Content-Length does not match Content-Range"
+        if checkpoint is None:
+            if range_start != 0:
+                return "unsolicited partial response starts after byte zero"
+            if cls._response_validator(response_headers) is None:
+                return "partial response has no reusable entity validator"
+            return ""
+        if range_start != checkpoint["written_length"]:
+            return "range offset does not match checkpoint"
+        expected_checkpoint_size = checkpoint.get("expected_length")
+        if expected_checkpoint_size is not None and expected_checkpoint_size != expected_size:
+            return "entity total does not match checkpoint"
+        if not cls._checkpoint_matches_response(
+            checkpoint,
+            response_headers,
+            original_url_sha256,
+            final_url_sha256,
+        ):
+            return "entity validator or identity does not match checkpoint"
+        return ""
+
+    @classmethod
+    def _response_content_length(cls, response: Any) -> Optional[int]:
+        header_value = cls._header(getattr(response, "headers", None), "Content-Length")
+        if header_value is not None:
+            return int(header_value) if header_value.isdigit() else None
+        value = getattr(response, "content_length", None)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    @classmethod
+    async def _write_checkpoint(cls, meta_path: Path, metadata: dict[str, Any]) -> None:
+        scratch_path = meta_path.with_name(
+            f"{meta_path.name}.{os.getpid()}.{uuid.uuid4().hex}.write"
+        )
+        payload = json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        try:
+            async with aiofiles.open(scratch_path, "w", encoding="utf-8", newline="\n") as handle:
+                await handle.write(payload)
+                await handle.flush()
+            os.replace(str(scratch_path), str(meta_path))
+        finally:
+            try:
+                scratch_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     def _response_host(response) -> str:
@@ -440,8 +849,9 @@ class FileManager:
         response_headers,
         *,
         prefer_response_content_type: bool = False,
-        return_saved_path: bool = False,
         initial_size: int = 0,
+        expected_body_length: Optional[int] = None,
+        checkpoint: Optional[dict[str, Any]] = None,
         keep_partial: bool = False,
     ) -> Union[bool, Path]:
         """Stream ``chunk_iter`` to a temp file and atomically rename it.
@@ -454,13 +864,67 @@ class FileManager:
             response_headers,
             prefer_response_content_type=prefer_response_content_type,
         )
-        tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path, meta_path = self._partial_paths(final_path)
+        if initial_size:
+            try:
+                actual_size = tmp_path.stat().st_size
+            except OSError as exc:
+                raise _UnsafePartialResponse("checkpoint bytes disappeared before append") from exc
+            if actual_size != initial_size:
+                self._discard_partial(final_path)
+                raise _UnsafePartialResponse("checkpoint length changed before append")
+        else:
+            self._discard_partial(final_path)
+
         written = initial_size
+        body_written = 0
         mode = "ab" if initial_size else "wb"
-        async with aiofiles.open(tmp_path, mode) as f:
-            async for chunk in chunk_iter:
-                await f.write(chunk)
-                written += len(chunk)
+        metadata = dict(checkpoint) if checkpoint is not None else None
+        try:
+            async with aiofiles.open(tmp_path, mode) as f:
+                async for chunk in chunk_iter:
+                    if not chunk:
+                        continue
+                    chunk_size = len(chunk)
+                    if (
+                        expected_body_length is not None
+                        and body_written + chunk_size > expected_body_length
+                    ):
+                        raise _UnsafePartialResponse(
+                            "response body exceeds its declared byte range"
+                        )
+                    if expected_size is not None and written + chunk_size > expected_size:
+                        raise _UnsafePartialResponse("response body exceeds entity total")
+                    await f.write(chunk)
+                    await f.flush()
+                    written += chunk_size
+                    body_written += chunk_size
+                    if metadata is not None:
+                        metadata["written_length"] = written
+                        await self._write_checkpoint(meta_path, metadata)
+        except BaseException:
+            if keep_partial and metadata is not None and written > 0:
+                metadata["written_length"] = written
+                try:
+                    await self._write_checkpoint(meta_path, metadata)
+                except Exception:
+                    self._discard_partial(final_path)
+            else:
+                self._discard_partial(final_path)
+            raise
+
+        if expected_body_length is not None and body_written != expected_body_length:
+            logger.warning(
+                "Range body mismatch for %s: expected %d, got %d",
+                final_path.name,
+                expected_body_length,
+                body_written,
+            )
+            if not keep_partial or metadata is None or written <= 0:
+                self._discard_partial(final_path)
+            return False
+
         if expected_size is not None and written != expected_size:
             logger.warning(
                 "Size mismatch for %s: expected %d, got %d",
@@ -468,11 +932,16 @@ class FileManager:
                 expected_size,
                 written,
             )
-            if not keep_partial or written <= 0 or written > expected_size:
-                tmp_path.unlink(missing_ok=True)
+            if not keep_partial or metadata is None or written <= 0:
+                self._discard_partial(final_path)
             return False
+
         os.replace(str(tmp_path), str(final_path))
-        return final_path if return_saved_path else True
+        try:
+            meta_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove completed checkpoint %s: %s", meta_path.name, exc)
+        return final_path
 
     async def _download_via_httpx(
         self,
@@ -488,13 +957,19 @@ class FileManager:
         CDN accepts when aiohttp's is rejected (403). Mirrors aiohttp's
         redirect-following and streaming-to-disk behaviour."""
         started = time.monotonic()
+        request_headers = {
+            key: value
+            for key, value in dict(headers or {}).items()
+            if str(key).casefold() not in {"range", "if-range", "accept-encoding"}
+        }
+        request_headers["Accept-Encoding"] = "identity"
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(300.0),
                 proxy=proxy or None,
                 follow_redirects=True,
             ) as client:
-                async with client.stream("GET", url, headers=headers) as response:
+                async with client.stream("GET", url, headers=request_headers) as response:
                     if response.status_code != 200:
                         logger.debug(
                             "httpx fallback failed for %s, status=%s",
@@ -517,13 +992,23 @@ class FileManager:
                         content_length = response.headers.get("Content-Length")
                         if content_length is not None and content_length.isdigit():
                             expected_size = int(content_length)
+                    response_checkpoint = self._build_checkpoint(
+                        self._response_validator(response.headers),
+                        expected_length=expected_size,
+                        original_url_sha256=self._url_sha256(url),
+                        final_url_sha256=self._url_sha256(self._response_url(response, url)),
+                        content_type=self._content_type(response.headers),
+                    )
                     result = await self._persist_stream(
                         response.aiter_bytes(),
                         save_path,
                         expected_size,
                         response.headers,
                         prefer_response_content_type=prefer_response_content_type,
-                        return_saved_path=return_saved_path,
+                        checkpoint=response_checkpoint,
+                        keep_partial=(
+                            not prefer_response_content_type and response_checkpoint is not None
+                        ),
                     )
                     timing_event(
                         "httpx_download_done",
@@ -533,7 +1018,9 @@ class FileManager:
                         elapsed_ms=elapsed_ms(started),
                         success=bool(result),
                     )
-                    return result
+                    if not result:
+                        return False
+                    return result if return_saved_path else True
         except Exception as e:
             logger.debug("httpx fallback error for %s: %s", save_path.name, e)
             timing_event(
