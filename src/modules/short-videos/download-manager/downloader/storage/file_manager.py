@@ -214,14 +214,30 @@ class FileManager:
 
         final_path = save_path
         tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+        can_resume = not prefer_response_content_type
+        resume_offset = 0
+        if can_resume:
+            try:
+                resume_offset = tmp_path.stat().st_size
+            except OSError:
+                resume_offset = 0
+            if resume_offset <= 0:
+                tmp_path.unlink(missing_ok=True)
+                resume_offset = 0
+        request_headers = dict(headers or {})
+        if resume_offset:
+            request_headers["Range"] = f"bytes={resume_offset}-"
         try:
             async with session.get(
                 url,
                 timeout=aiohttp.ClientTimeout(total=300),
-                headers=headers,
+                headers=request_headers or None,
                 proxy=proxy or None,
             ) as response:
                 if response.status == 200:
+                    # Some CDNs ignore Range and return the complete body. In
+                    # that case restart the temp file instead of appending a
+                    # duplicate prefix.
                     result = await self._persist_stream(
                         response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
                         save_path,
@@ -229,6 +245,7 @@ class FileManager:
                         response.headers,
                         prefer_response_content_type=prefer_response_content_type,
                         return_saved_path=return_saved_path,
+                        keep_partial=can_resume,
                     )
                     timing_event(
                         "http_download_done",
@@ -236,13 +253,15 @@ class FileManager:
                         host=self._response_host(response),
                         status=200,
                         content_length=response.content_length,
+                        resume_offset=resume_offset,
+                        range_ignored=bool(resume_offset),
                         elapsed_ms=elapsed_ms(started),
                         success=bool(result),
                     )
                     return result
                 if response.status == 206:
-                    expected_size = self._complete_content_range_size(response.headers)
-                    if expected_size is None:
+                    range_parts = self._content_range_parts(response.headers)
+                    if range_parts is None:
                         logger.warning(
                             "Rejected incomplete range response for %s: %s",
                             final_path.name,
@@ -258,6 +277,28 @@ class FileManager:
                             success=False,
                             error="incomplete_range",
                         )
+                        tmp_path.unlink(missing_ok=True)
+                        return False
+                    range_start, range_end, expected_size = range_parts
+                    if range_start != resume_offset or range_end + 1 != expected_size:
+                        logger.warning(
+                            "Rejected mismatched range response for %s: requested %d, got %s",
+                            final_path.name,
+                            resume_offset,
+                            response.headers.get("Content-Range") if response.headers else None,
+                        )
+                        tmp_path.unlink(missing_ok=True)
+                        timing_event(
+                            "http_download_done",
+                            path=str(final_path),
+                            host=self._response_host(response),
+                            status=206,
+                            content_length=response.content_length,
+                            resume_offset=resume_offset,
+                            elapsed_ms=elapsed_ms(started),
+                            success=False,
+                            error="mismatched_range",
+                        )
                         return False
                     result = await self._persist_stream(
                         response.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES),
@@ -266,6 +307,8 @@ class FileManager:
                         response.headers,
                         prefer_response_content_type=prefer_response_content_type,
                         return_saved_path=return_saved_path,
+                        initial_size=resume_offset,
+                        keep_partial=can_resume,
                     )
                     timing_event(
                         "http_download_done",
@@ -274,10 +317,27 @@ class FileManager:
                         status=206,
                         content_length=response.content_length,
                         expected_size=expected_size,
+                        resume_offset=resume_offset,
                         elapsed_ms=elapsed_ms(started),
                         success=bool(result),
                     )
                     return result
+                if response.status == 416 and resume_offset:
+                    expected_size = self._unsatisfied_content_range_size(response.headers)
+                    if expected_size == resume_offset:
+                        os.replace(str(tmp_path), str(final_path))
+                        timing_event(
+                            "http_download_done",
+                            path=str(final_path),
+                            host=self._response_host(response),
+                            status=416,
+                            expected_size=expected_size,
+                            resume_offset=resume_offset,
+                            elapsed_ms=elapsed_ms(started),
+                            success=True,
+                            completed_from_partial=True,
+                        )
+                        return final_path if return_saved_path else True
                 status = response.status
                 logger.debug("Download failed for %s, status=%s", final_path.name, status)
             # aiohttp connection released here. Douyin's image CDN 403s aiohttp's
@@ -292,6 +352,8 @@ class FileManager:
                     prefer_response_content_type=prefer_response_content_type,
                     return_saved_path=return_saved_path,
                 )
+                if not result:
+                    tmp_path.unlink(missing_ok=True)
                 timing_event(
                     "http_download_done",
                     path=str(result if isinstance(result, Path) else save_path),
@@ -302,6 +364,7 @@ class FileManager:
                     success=bool(result),
                 )
                 return result
+            tmp_path.unlink(missing_ok=True)
             timing_event(
                 "http_download_done",
                 path=str(final_path),
@@ -313,7 +376,8 @@ class FileManager:
             return False
         except Exception as e:
             logger.debug("Download error for %s: %s", final_path.name, e)
-            tmp_path.unlink(missing_ok=True)
+            if not can_resume:
+                tmp_path.unlink(missing_ok=True)
             timing_event(
                 "http_download_done",
                 path=str(final_path),
@@ -321,6 +385,8 @@ class FileManager:
                 elapsed_ms=elapsed_ms(started),
                 success=False,
                 error=str(e)[:1000],
+                resume_offset=resume_offset,
+                partial_size=self.get_file_size(tmp_path),
             )
             return False
         finally:
@@ -333,6 +399,16 @@ class FileManager:
 
     @staticmethod
     def _complete_content_range_size(response_headers) -> Optional[int]:
+        parts = FileManager._content_range_parts(response_headers)
+        if parts is None:
+            return None
+        start, end, total = parts
+        if start != 0 or end + 1 != total:
+            return None
+        return total
+
+    @staticmethod
+    def _content_range_parts(response_headers) -> Optional[tuple[int, int, int]]:
         if not response_headers:
             return None
         content_range = response_headers.get("Content-Range")
@@ -342,9 +418,19 @@ class FileManager:
         if not match:
             return None
         start, end, total = (int(part) for part in match.groups())
-        if start != 0 or end + 1 != total:
+        if start > end or end >= total:
             return None
-        return total
+        return start, end, total
+
+    @staticmethod
+    def _unsatisfied_content_range_size(response_headers) -> Optional[int]:
+        if not response_headers:
+            return None
+        content_range = response_headers.get("Content-Range")
+        if not content_range:
+            return None
+        match = re.match(r"^bytes \*/(\d+)$", content_range.strip())
+        return int(match.group(1)) if match else None
 
     async def _persist_stream(
         self,
@@ -355,6 +441,8 @@ class FileManager:
         *,
         prefer_response_content_type: bool = False,
         return_saved_path: bool = False,
+        initial_size: int = 0,
+        keep_partial: bool = False,
     ) -> Union[bool, Path]:
         """Stream ``chunk_iter`` to a temp file and atomically rename it.
 
@@ -367,8 +455,9 @@ class FileManager:
             prefer_response_content_type=prefer_response_content_type,
         )
         tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-        written = 0
-        async with aiofiles.open(tmp_path, "wb") as f:
+        written = initial_size
+        mode = "ab" if initial_size else "wb"
+        async with aiofiles.open(tmp_path, mode) as f:
             async for chunk in chunk_iter:
                 await f.write(chunk)
                 written += len(chunk)
@@ -379,7 +468,8 @@ class FileManager:
                 expected_size,
                 written,
             )
-            tmp_path.unlink(missing_ok=True)
+            if not keep_partial or written <= 0 or written > expected_size:
+                tmp_path.unlink(missing_ok=True)
             return False
         os.replace(str(tmp_path), str(final_path))
         return final_path if return_saved_path else True

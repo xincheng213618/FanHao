@@ -456,7 +456,7 @@ async def test_download_file_no_httpx_fallback_on_404(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_download_file_size_mismatch_cleans_up(tmp_path):
+async def test_download_file_size_mismatch_keeps_partial_for_resume(tmp_path):
     fm = FileManager(str(tmp_path))
     save_path = tmp_path / "video.mp4"
 
@@ -480,7 +480,7 @@ async def test_download_file_size_mismatch_cleans_up(tmp_path):
     result = await fm.download_file("https://example.com/v.mp4", save_path, session=mock_session)
     assert result is False
     assert not save_path.exists()
-    assert not save_path.with_suffix(".mp4.tmp").exists()
+    assert save_path.with_suffix(".mp4.tmp").read_bytes() == b"short"
 
 
 class _FakeContent:
@@ -514,6 +514,22 @@ class _FakeSession:
         return self.response
 
 
+class _SequenceSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.responses.pop(0)
+
+
+class _InterruptedContent:
+    async def iter_chunked(self, _size):
+        yield b"abc"
+        raise RuntimeError("connection closed before the response body completed")
+
+
 @pytest.mark.asyncio
 async def test_download_file_accepts_complete_partial_content_206(tmp_path):
     fm = FileManager(str(tmp_path))
@@ -542,3 +558,71 @@ async def test_download_file_rejects_incomplete_partial_content_206(tmp_path):
 
     assert ok is False
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_file_resumes_partial_temp_file_after_connection_drop(tmp_path):
+    fm = FileManager(str(tmp_path))
+    target = tmp_path / "resume.mp4"
+    first = _FakeResponse(status=200, chunks=(), headers={"Content-Type": "video/mp4"})
+    first.content = _InterruptedContent()
+    first.content_length = 6
+    second = _FakeResponse(
+        status=206,
+        chunks=(b"def",),
+        headers={"Content-Type": "video/mp4", "Content-Range": "bytes 3-5/6"},
+    )
+    session = _SequenceSession([first, second])
+
+    first_result = await fm.download_file("https://cdn.example/resume.mp4", target, session=session)
+    assert first_result is False
+    assert target.with_suffix(".mp4.tmp").read_bytes() == b"abc"
+
+    second_result = await fm.download_file(
+        "https://cdn.example/resume.mp4", target, session=session
+    )
+
+    assert second_result is True
+    assert target.read_bytes() == b"abcdef"
+    assert not target.with_suffix(".mp4.tmp").exists()
+    assert session.calls[1][1]["headers"]["Range"] == "bytes=3-"
+
+
+@pytest.mark.asyncio
+async def test_download_file_restarts_when_server_ignores_range(tmp_path):
+    fm = FileManager(str(tmp_path))
+    target = tmp_path / "restart.mp4"
+    target.with_suffix(".mp4.tmp").write_bytes(b"stale-prefix")
+    response = _FakeResponse(
+        status=200,
+        chunks=(b"complete",),
+        headers={"Content-Type": "video/mp4", "Content-Length": "8"},
+    )
+    response.content_length = 8
+    session = _SequenceSession([response])
+
+    result = await fm.download_file("https://cdn.example/restart.mp4", target, session=session)
+
+    assert result is True
+    assert target.read_bytes() == b"complete"
+    assert session.calls[0][1]["headers"]["Range"] == "bytes=12-"
+
+
+@pytest.mark.asyncio
+async def test_download_file_promotes_complete_temp_file_after_416(tmp_path):
+    fm = FileManager(str(tmp_path))
+    target = tmp_path / "already-complete.mp4"
+    target.with_suffix(".mp4.tmp").write_bytes(b"abc")
+    response = _FakeResponse(
+        status=416,
+        chunks=(),
+        headers={"Content-Range": "bytes */3"},
+    )
+    response.content_length = 0
+    session = _SequenceSession([response])
+
+    result = await fm.download_file("https://cdn.example/already-complete.mp4", target, session=session)
+
+    assert result is True
+    assert target.read_bytes() == b"abc"
+    assert not target.with_suffix(".mp4.tmp").exists()
