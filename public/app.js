@@ -98,6 +98,7 @@ async function initializeModuleNavigation() {
   try {
     const modules = await loadModuleCatalog(() => api("/api/modules"));
     els.productTabs = renderWebModuleNavigation(els.productNav, modules);
+    syncNavigationState(state.activeView);
   } catch (error) {
     console.warn("[modules]", error.message || error);
   }
@@ -618,7 +619,6 @@ function syncNavigationState(view = state.activeView) {
   for (const button of els.productTabs || []) {
     const active = productButtonActive(button, view);
     button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }

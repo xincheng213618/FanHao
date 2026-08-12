@@ -161,9 +161,9 @@ assert(adminHtmlSource.includes('class="app-module-loading"') && adminHtmlSource
 assert(adminHtmlSource.includes('await import("/admin.js?v=20260811-work-move-ops-04")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260727-admin-merge-01'), "FanHao shell changes must refresh the browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260812-module-nav-state-01'), "FanHao shell changes must refresh the browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260727-admin-merge-01'), "FanHao shell changes must refresh the app module");
+assert(fanhaoEntry.includes('app.js?v=20260812-module-nav-state-01'), "FanHao shell changes must refresh the app module");
 assert(webApp.includes('await bootApp().catch') && webApp.includes('classList.remove("app-module-loading")'), "FanHao must reveal the page only after its initial route is rendered");
 assert(webApp.includes('index.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
@@ -239,6 +239,8 @@ assert(webApp.indexOf("collectionPage.prefetch(initialRoute.view);") < webApp.in
 assert(!webApp.includes("await initializeModuleNavigation();"), "FanHao startup must not serialize module discovery ahead of the first library request");
 assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf("await applyRoute(initialRoute);"), "module discovery and route data must start concurrently");
 assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must still observe module-navigation completion");
+assert.match(webApp, /els\.productTabs = renderWebModuleNavigation\(els\.productNav, modules\);\s*syncNavigationState\(state\.activeView\);/, "dynamic module navigation must restore the current route state after replacing its links");
+assert(!webApp.includes('button.setAttribute("aria-pressed", String(active));\n    if (active) button.setAttribute("aria-current", "page");'), "module links must expose current-page state without button-only aria-pressed semantics");
 assert(webApp.includes("const WORK_DESKTOP_PAGE_SIZE = 64") && webApp.includes("const WORK_MOBILE_PAGE_SIZE = 48"), "FanHao work APIs must use viewport-sized desktop and mobile first pages");
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
