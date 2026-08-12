@@ -1124,7 +1124,7 @@ public class NativeShortVideoActivity extends Activity {
       player.setMediaItem(MediaItem.fromUri(cachedMediaUri(media.url)));
       player.prepare();
     }
-    player.setRepeatMode(Player.REPEAT_MODE_OFF);
+    player.setRepeatMode(item.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
     player.setVolume(0f);
     activePlayer = player;
     if (activityResumed && authorOverlay == null) player.play();
@@ -3284,7 +3284,8 @@ public class NativeShortVideoActivity extends Activity {
       player.setVolume(player == activePlayer ? activeVolume() : 0f);
     }
     if (gallerySegmentPlayer != null) {
-      gallerySegmentPlayer.setRepeatMode(Player.REPEAT_MODE_OFF);
+      ShortVideoItem galleryItem = gallerySegmentFeedIndex >= 0 && gallerySegmentFeedIndex < videos.size() ? videos.get(gallerySegmentFeedIndex) : null;
+      gallerySegmentPlayer.setRepeatMode(galleryItem != null && galleryItem.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
       gallerySegmentPlayer.setVolume(0f);
     }
     if (gallerySoundPlayer != null) {
