@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { createAndroidUpdateService } from "../../src/modules/system/server/android-update/service.js";
 
-const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const scriptProjectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const projectDir = process.env.FANHAO_ANDROID_SECURITY_PROJECT_DIR
+  ? path.resolve(process.env.FANHAO_ANDROID_SECURITY_PROJECT_DIR)
+  : scriptProjectDir;
 const repoDir = path.resolve(projectDir, "..");
 const require = createRequire(import.meta.url);
 const javaSourceDir = path.join(
@@ -53,8 +56,71 @@ assert(
   /android:exported="false"/.test(nativeShortVideoActivity),
   "NativeShortVideoActivity must not be callable by other apps"
 );
+assert(!manifest.includes("requestLegacyExternalStorage"), "the app must not opt back into legacy external storage");
+for (const permission of ["MANAGE_EXTERNAL_STORAGE", "READ_EXTERNAL_STORAGE", "READ_MEDIA_"]) {
+  assert(!manifest.includes(permission), `the SAF-only app must not request ${permission}`);
+}
+assert(!/android:scheme="file"/i.test(manifest), "text intents must not expose the file URI scheme");
+
+const filePaths = read("android/app/src/main/res/xml/file_paths.xml");
+assert(filePaths.includes('<cache-path name="updates" path="updates/" />'), "FileProvider must expose only the update cache lane");
+assert(filePaths.includes('<external-files-path name="app_pictures" path="Pictures/" />'), "FileProvider may expose app-specific Pictures");
+assert(!filePaths.includes("<external-path"), "FileProvider must not expose shared external storage");
+assert.equal((filePaths.match(/<(?:cache-path|external-files-path)\b/g) || []).length, 2, "FileProvider must keep exactly two narrow roots");
+const capacitorChromeClient = read("node_modules/@capacitor/android/capacitor/src/main/java/com/getcapacitor/BridgeWebChromeClient.java");
+assert(
+  capacitorChromeClient.includes("getExternalFilesDir(Environment.DIRECTORY_PICTURES)"),
+  "app_pictures must remain because Capacitor's camera chooser creates its temporary JPEG there"
+);
+assert(
+  capacitorChromeClient.includes("FileProvider.getUriForFile"),
+  "Capacitor's camera chooser must continue sharing its temporary JPEG through FileProvider"
+);
+
+const androidVariables = read("android/variables.gradle");
+assert(/targetSdkVersion\s*=\s*30\b/.test(androidVariables), "this SAF phase must keep targetSdk 30");
+
+const novelPlugin = read("android/app/src/main/java/local/fanhao/library/FanHaoNovelPlugin.java");
+assert(novelPlugin.includes("new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)"), "novel directory scan must use ACTION_OPEN_DOCUMENT_TREE");
+assert(novelPlugin.includes("DocumentsContract.buildChildDocumentsUriUsingTree"), "novel directory scan must use DocumentsContract children");
+assert(novelPlugin.includes("openTextDirectoryPicker"), "the native bridge must expose openTextDirectoryPicker");
+assert(novelPlugin.includes("readScannedTextFile"), "the native bridge must retain content-URI text reads");
+assert(novelPlugin.includes('call.getString("uri", "")'), "scanned text reads must accept only the URI contract");
+assert(!novelPlugin.includes('call.getString("path"'), "scanned text reads must not accept raw filesystem paths");
+assert(!novelPlugin.includes('item.put("path"'), "directory scan results must not expose raw filesystem paths");
+assert(novelPlugin.includes("new Intent(Intent.ACTION_OPEN_DOCUMENT);"), "multi-select document import must remain available");
+assert(novelPlugin.includes("Intent.EXTRA_ALLOW_MULTIPLE"), "multi-select document import must remain multi-select");
+assert(!novelPlugin.includes("takePersistableUriPermission"), "new novel picks must not retain URI grants");
+assert(!novelPlugin.includes("FLAG_GRANT_PERSISTABLE_URI_PERMISSION"), "directory and file picks must be one-session grants");
+assert(!novelPlugin.includes("getPersistedUriPermissions"), "novel startup must not enumerate grants owned by other app features");
+assert(!novelPlugin.includes("releasePersistableUriPermission"), "novel startup must not release grants without per-feature ownership metadata");
+assert(novelPlugin.includes("getBridge().executeOnMainThread"), "background document work must settle PluginCall on the main thread");
+assert(novelPlugin.includes("call == null || call.isReleased()"), "background document work must not settle a released PluginCall");
+for (const obsolete of [
+  "android.Manifest",
+  "Environment.isExternalStorageManager",
+  "Environment.getExternalStorageDirectory",
+  "MediaStore.Files",
+  "ProcessBuilder(\"find\"",
+  "ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
+  "hasTextScanAccess",
+  "requestTextScanAccess",
+  "scanTextFiles"
+]) {
+  assert(!novelPlugin.includes(obsolete), `legacy unrestricted scan code must stay removed: ${obsolete}`);
+}
+
+const novelViews = read("www/modules/novels/novel-views.js");
+assert(novelViews.includes('busyButtonLabel("scan", "目录")'), "novel UI must label directory scanning as 目录");
+assert(novelViews.includes('smartImport.title = "选择一个目录扫描 TXT"'), "novel UI must explain the scoped directory choice");
+assert(novelViews.includes("plugin.openTextDirectoryPicker"), "novel UI must call the directory picker bridge");
+assert(novelViews.includes('plugin.readScannedTextFile({ uri: item.uri || "" })'), "novel UI must read scan results by content URI only");
+for (const obsolete of ["hasTextScanAccess", "requestTextScanAccess", "plugin.scanTextFiles", "item.path"]) {
+  assert(!novelViews.includes(obsolete), `novel UI must not retain legacy scan state: ${obsolete}`);
+}
 
 const updater = read("android/app/src/main/java/local/fanhao/library/FanHaoUpdaterPlugin.java");
+assert(updater.includes('new File(getContext().getCacheDir(), "updates")'), "the update cache FileProvider root must match the updater's private cache lane");
 assert(updater.includes("AndroidUpdatePolicy.requireTrustedDownloadUrl(rawUrl, rawServiceBase)"), "updater must enforce trusted update URLs");
 assert(updater.includes('call.getString("serviceBase")'), "updater must require the explicit active service base");
 assert(updater.includes("AndroidUpdatePolicy.requireSha256"), "updater must require a valid SHA-256");
@@ -239,6 +305,16 @@ function verifyJavaPolicy() {
       path.join(projectDir, "scripts", "AndroidUpdatePolicyVerifier.java")
     ]);
     run(java, ["-cp", tempDir, "local.fanhao.library.AndroidUpdatePolicyVerifier"]);
+    run(javac, [
+      "-encoding",
+      "UTF-8",
+      "-d",
+      tempDir,
+      path.join(javaSourceDir, "DocumentTreeScanner.java"),
+      path.join(javaSourceDir, "BoundedTextReader.java"),
+      path.join(projectDir, "scripts", "DocumentTreeScannerVerifier.java")
+    ]);
+    run(java, ["-cp", tempDir, "local.fanhao.library.DocumentTreeScannerVerifier"]);
   } finally {
     removeVerifiedTempDir(tempDir);
   }

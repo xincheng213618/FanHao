@@ -6,7 +6,9 @@ import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=2026073
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";
-const DEVICE_TEXT_SCAN_LIMIT = 50000;
+const DEVICE_TEXT_SCAN_LIMIT = 5000;
+const DEVICE_TEXT_SCAN_DEPTH = 32;
+const DEVICE_TEXT_SCAN_NODE_LIMIT = 20000;
 const NOVEL_CATALOG_PAGE_SIZE = 80;
 const NOVEL_READING_CHARS_PER_MINUTE = 450;
 const NOVEL_REMOTE_PAGE_SIZE = 80;
@@ -764,8 +766,8 @@ export function createNovelViews(context) {
     const smartImport = document.createElement("button");
     smartImport.type = "button";
     smartImport.className = "novel-mobile-tool-button local";
-    smartImport.textContent = busyButtonLabel("scan", "扫描");
-    smartImport.title = "全盘扫描手机里的 TXT";
+    smartImport.textContent = busyButtonLabel("scan", "目录");
+    smartImport.title = "选择一个目录扫描 TXT";
     smartImport.disabled = listState.uploading;
     smartImport.addEventListener("click", scanLocalNovelFiles);
 
@@ -2364,45 +2366,49 @@ export function createNovelViews(context) {
 
   function scanLocalNovelFiles() {
     const plugin = nativeNovelPlugin();
-    if (!plugin?.scanTextFiles || !plugin?.readScannedTextFile) {
-      setStatus?.("当前环境不能直接扫描系统 TXT，请用「导入」选择文件。", "error");
+    if (!plugin?.openTextDirectoryPicker || !plugin?.readScannedTextFile) {
+      setStatus?.("当前环境不能扫描目录，请用「导入」选择文件。", "error");
       return;
     }
     if (listState.uploading) return;
     setNovelBusy("scan");
-    setStatus?.("正在检查本机 TXT 扫描权限");
+    setStatus?.("请选择一个目录扫描 TXT");
     renderCurrentView();
 
     Promise.resolve()
       .then(async () => {
-        const access = await plugin.hasTextScanAccess?.().catch(() => null);
-        if (access && access.hasAccess === false) {
+        const scan = await plugin.openTextDirectoryPicker({
+          maxFiles: DEVICE_TEXT_SCAN_LIMIT,
+          maxDepth: DEVICE_TEXT_SCAN_DEPTH,
+          maxNodes: DEVICE_TEXT_SCAN_NODE_LIMIT
+        });
+        if (scan?.canceled) {
           clearNovelBusy();
-          setStatus?.("需要开启所有文件访问权限，开启后回到这里再点「扫描」。", "error");
+          setStatus?.("已取消目录扫描。");
           renderCurrentView();
-          await plugin.requestTextScanAccess?.();
           return;
         }
-
-        setStatus?.("正在全盘扫描手机里的 TXT");
-        const scan = await plugin.scanTextFiles({ maxFiles: DEVICE_TEXT_SCAN_LIMIT, maxDepth: 64 });
-        if (scan?.hasAccess === false) {
+        const errors = Array.isArray(scan?.errors) ? scan.errors : [];
+        const scanTruncated = Boolean(scan?.truncated);
+        if (scan?.rootFailed) {
           clearNovelBusy();
-          setStatus?.(scan.message || "需要开启所有文件访问权限，才能扫描 TXT。", "error");
+          setStatus?.("所选目录无法读取，请重新选择一个可访问的目录。", "error");
           renderCurrentView();
-          await plugin.requestTextScanAccess?.().catch(() => {});
           return;
         }
 
         const items = Array.isArray(scan?.items) ? scan.items : [];
         if (!items.length) {
           clearNovelBusy();
-          setStatus?.("没有扫描到可导入的 TXT。");
+          const partialText = scanTruncated ? "扫描已达到安全上限，可能仍有目录未检查。" : "";
+          setStatus?.(errors.length
+            ? `目录中没有可导入的 TXT，另有 ${formatNumber(errors.length)} 个子目录无法读取。${partialText}`
+            : `所选目录中没有可导入的 TXT。${partialText}`, errors.length || scanTruncated ? "error" : "");
           renderCurrentView();
           return;
         }
 
-        const selectedItems = await confirmScanImport(items, Boolean(scan?.truncated));
+        const selectedItems = await confirmScanImport(items, scanTruncated);
         if (!selectedItems?.length) {
           clearNovelBusy();
           setStatus?.("已取消扫描导入。");
@@ -2414,15 +2420,15 @@ export function createNovelViews(context) {
         let skipped = 0;
         for (const item of selectedItems) {
           try {
-            const file = await plugin.readScannedTextFile({ path: item.path, uri: item.uri || "" });
+            const file = await plugin.readScannedTextFile({ uri: item.uri || "" });
             await saveLocalTextFile({
               fileName: file.fileName || item.fileName,
               sizeBytes: Number(file.sizeBytes || item.sizeBytes || 0),
               lastModified: Number(item.lastModified || Date.now()),
               encoding: file.encoding,
               text: file.text,
-              sourceUri: file.uri || item.uri || item.path,
-              sourceType: "device-scan"
+              sourceUri: file.uri || item.uri || "",
+              sourceType: "document-tree"
             });
             imported += 1;
             setStatus?.(`扫描导入 ${formatNumber(imported + skipped)}/${formatNumber(selectedItems.length)}：${file.fileName || item.fileName || "TXT"}`);
@@ -2434,9 +2440,11 @@ export function createNovelViews(context) {
 
         clearNovelBusy();
         focusLocalLibraryAfterImport();
-        setStatus?.(skipped
-          ? `已导入 ${formatNumber(imported)} 本，跳过 ${formatNumber(skipped)} 本读取失败的 TXT`
-          : `已扫描导入 ${formatNumber(imported)} 本到手机本地书库`);
+        const directorySkips = errors.length;
+        const partialText = scanTruncated ? "；扫描已达到安全上限，可能仍有目录未检查" : "";
+        setStatus?.(`${skipped || directorySkips
+          ? `已导入 ${formatNumber(imported)} 本，跳过 ${formatNumber(skipped)} 本 TXT，${formatNumber(directorySkips)} 个子目录无法读取`
+          : `已从所选目录导入 ${formatNumber(imported)} 本到手机本地书库`}${partialText}`);
         renderCurrentView();
       })
       .catch((error) => {
@@ -2514,7 +2522,7 @@ export function createNovelViews(context) {
   function confirmScanImport(items = [], truncated = false) {
     const countText = formatNumber(items.length);
     const recommendedCount = items.filter((item) => item?.recommended !== false).length;
-    const truncatedText = truncated ? `，先显示最近的 ${countText} 个` : "";
+    const truncatedText = truncated ? "，扫描已达到安全上限，可能还有文件未显示" : "";
     if (typeof document === "undefined" || !document.body) {
       return Promise.resolve(window.confirm(`扫描到 ${countText} 个 TXT${truncatedText}。导入推荐的 ${formatNumber(recommendedCount)} 个？`)
         ? items.filter((item) => item?.recommended !== false)
@@ -2562,7 +2570,8 @@ export function createNovelViews(context) {
         const name = document.createElement("span");
         name.textContent = item.fileName || "TXT";
         const meta = document.createElement("small");
-        meta.textContent = `${formatBytes(item.sizeBytes)} · ${item.hint || (item.recommended === false ? "可选" : "推荐")}`;
+        const sizeText = item.sizeKnown === false ? "大小未知" : formatBytes(item.sizeBytes);
+        meta.textContent = `${sizeText || "大小未知"} · ${item.hint || (item.recommended === false ? "可选" : "推荐")}`;
         row.append(checkbox, name, meta);
         list.append(row);
         checks.push({ checkbox, item });

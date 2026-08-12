@@ -1,20 +1,14 @@
 package local.fanhao.library;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ContentResolver;
-import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
-import android.os.SystemClock;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
-import android.provider.MediaStore;
-import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -31,12 +25,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-import java.io.ByteArrayOutputStream;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
@@ -44,26 +33,21 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 @CapacitorPlugin(name = "FanHaoNovel")
 public class FanHaoNovelPlugin extends Plugin {
   private static final String TAG = "FanHaoNovel";
-  private static final int MAX_TEXT_BYTES = 80 * 1024 * 1024;
-  private static final int MIN_IMPORT_TEXT_BYTES = 10 * 1024;
-  private static final int MAX_IMPORT_TEXT_BYTES = 50 * 1024 * 1024;
-  private static final int DEFAULT_SCAN_LIMIT = 50000;
-  private static final int MAX_SCAN_LIMIT = 50000;
-  private static final int DEFAULT_SCAN_DEPTH = 64;
+  private static final long MAX_TEXT_BYTES = DocumentTreeScanner.MAX_TEXT_BYTES;
+  private static final String[] DOCUMENT_PROJECTION = new String[] {
+    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+    DocumentsContract.Document.COLUMN_MIME_TYPE,
+    DocumentsContract.Document.COLUMN_SIZE,
+    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+    DocumentsContract.Document.COLUMN_FLAGS
+  };
   private static Intent pendingTextIntent = null;
 
   static void capturePendingTextIntent(Context context, Intent intent) {
@@ -96,119 +80,78 @@ public class FanHaoNovelPlugin extends Plugin {
   }
 
   @PluginMethod
-  public void hasTextScanAccess(PluginCall call) {
-    JSObject result = new JSObject();
-    result.put("available", true);
-    result.put("sdk", Build.VERSION.SDK_INT);
-    result.put("requiresAllFilesAccess", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R);
-    result.put("hasAccess", hasExternalTextScanAccess());
-    call.resolve(result);
-  }
-
-  @PluginMethod
-  public void requestTextScanAccess(PluginCall call) {
+  public void openTextDirectoryPicker(PluginCall call) {
     if (getActivity() == null) {
-      call.reject("无法打开系统文件权限设置");
+      call.reject("无法打开系统目录选择器");
       return;
     }
 
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-      JSObject result = new JSObject();
-      result.put("opened", false);
-      result.put("hasAccess", hasExternalTextScanAccess());
-      call.resolve(result);
-      return;
-    }
-
+    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
     try {
-      Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-      intent.setData(Uri.parse("package:" + getContext().getPackageName()));
-      getActivity().startActivity(intent);
-      JSObject result = new JSObject();
-      result.put("opened", true);
-      result.put("hasAccess", Environment.isExternalStorageManager());
-      call.resolve(result);
+      startActivityForResult(call, intent, "textDirectoryPickerResult");
     } catch (Exception error) {
-      try {
-        getActivity().startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-        JSObject result = new JSObject();
-        result.put("opened", true);
-        result.put("hasAccess", Environment.isExternalStorageManager());
-        call.resolve(result);
-      } catch (Exception fallbackError) {
-        call.reject("无法打开系统文件权限设置", fallbackError);
-      }
+      call.reject("无法打开系统目录选择器", error);
     }
   }
 
-  @PluginMethod
-  public void scanTextFiles(PluginCall call) {
-    if (!hasExternalTextScanAccess()) {
-      JSObject result = new JSObject();
-      result.put("available", true);
-      result.put("hasAccess", false);
-      result.put("message", "需要授予所有文件访问权限，才能扫描手机里的 TXT。");
-      result.put("items", new JSArray());
-      call.resolve(result);
+  @ActivityCallback
+  private void textDirectoryPickerResult(PluginCall call, ActivityResult result) {
+    if (call == null) return;
+    Uri treeUri = result.getData() == null ? null : result.getData().getData();
+    if (DocumentTreeScanner.isPickerCanceled(result.getResultCode() == Activity.RESULT_OK, treeUri != null)) {
+      call.resolve(directoryScanResponse(true, null));
+      return;
+    }
+    if (!isContentUri(treeUri)) {
+      call.resolve(directoryRootFailureResponse("ROOT_INVALID"));
       return;
     }
 
-    int limit = clampInteger(call.getInt("maxFiles"), DEFAULT_SCAN_LIMIT, 1, MAX_SCAN_LIMIT);
-    int maxDepth = clampInteger(call.getInt("maxDepth"), DEFAULT_SCAN_DEPTH, 1, 128);
+    DocumentTreeScanner.Options options = new DocumentTreeScanner.Options(
+      call.getInt("maxFiles"),
+      call.getInt("maxDepth"),
+      call.getInt("maxNodes")
+    );
     new Thread(() -> {
       try {
-        List<ScannedTextCandidate> files = findTextFiles(limit, maxDepth);
-        Log.i(TAG, "scanTextFiles found " + files.size() + " txt files");
-        JSArray items = new JSArray();
-        for (ScannedTextCandidate file : files) {
-          JSObject item = new JSObject();
-          item.put("path", file.path);
-          item.put("uri", file.uri);
-          item.put("fileName", sanitizeFileName(file.fileName));
-          item.put("sizeBytes", file.sizeBytes);
-          item.put("lastModified", file.lastModified);
-          item.put("modifiedAt", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.ROOT).format(new java.util.Date(file.lastModified)));
-          item.put("recommended", isImportableTextCandidate(file.path, file.fileName, file.sizeBytes));
-          item.put("hint", scanCandidateHint(file.path, file.fileName, file.sizeBytes));
-          items.put(item);
-        }
-        JSObject result = new JSObject();
-        result.put("available", true);
-        result.put("hasAccess", true);
-        result.put("items", items);
-        result.put("truncated", files.size() >= limit);
-        resolvePluginCall(call, result);
+        DocumentTreeScanner.Result scan = DocumentTreeScanner.scan(documentTreeSource(treeUri), options);
+        Log.i(
+          TAG,
+          "document tree scan completed: files=" + scan.files.size()
+            + ", nodes=" + scan.nodesVisited
+            + ", errors=" + scan.errors.size()
+            + ", truncated=" + scan.truncated()
+        );
+        resolvePluginCall(call, directoryScanResponse(false, scan));
       } catch (Exception error) {
-        rejectPluginCall(call, error.getMessage() == null ? "扫描 TXT 失败" : error.getMessage(), error);
+        rejectPluginCall(call, "目录扫描失败", error);
       }
-    }, "FanHaoTextScan").start();
+    }, "FanHaoDocumentTreeScan").start();
   }
 
   @PluginMethod
   public void readScannedTextFile(PluginCall call) {
-    if (!hasExternalTextScanAccess()) {
-      call.reject("需要授予所有文件访问权限，才能读取扫描到的 TXT。");
+    String rawUri = call.getString("uri", "");
+    if (!isContentUriString(rawUri)) {
+      call.reject("只能读取系统文件选择器返回的 content URI");
       return;
     }
-
-    String uri = call.getString("uri", "");
-    String path = call.getString("path", "");
     new Thread(() -> {
       try {
-        if (isContentUriString(uri)) {
-          Uri contentUri = Uri.parse(uri);
-          ContentResolver resolver = getContext().getContentResolver();
-          String fileName = displayName(resolver, contentUri);
-          String mime = resolver.getType(contentUri);
-          byte[] bytes = readAllBytes(resolver, contentUri);
-          DecodedText decoded = decodeText(bytes);
-          resolvePluginCall(call, textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, contentUri.toString()));
-          return;
+        Uri contentUri = Uri.parse(rawUri);
+        ContentResolver resolver = getContext().getContentResolver();
+        DocumentMetadata metadata = queryDocumentMetadata(resolver, contentUri);
+        if (metadata.virtual) throw new IllegalArgumentException("虚拟文档不能作为 TXT 导入");
+        String fileName = displayName(resolver, contentUri);
+        String mime = resolver.getType(contentUri);
+        if (!isTextFileName(fileName) && (mime == null || !mime.toLowerCase(Locale.ROOT).startsWith("text/"))) {
+          throw new IllegalArgumentException("这个文档不是 TXT 文件");
         }
-        File file = safeTextFileFromPath(path);
-        byte[] bytes = readAllBytes(file);
+        if (metadata.sizeKnown) BoundedTextReader.requireAllowedKnownSize(metadata.sizeBytes, MAX_TEXT_BYTES);
+        byte[] bytes = readAllBytes(resolver, contentUri);
         DecodedText decoded = decodeText(bytes);
-        resolvePluginCall(call, textResult(file.getName(), "text/plain", decoded.encoding, decoded.text, bytes.length, Uri.fromFile(file).toString()));
+        resolvePluginCall(call, textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, contentUri.toString()));
       } catch (Exception error) {
         rejectPluginCall(call, error.getMessage() == null ? "读取 TXT 失败" : error.getMessage(), error);
       }
@@ -297,7 +240,7 @@ public class FanHaoNovelPlugin extends Plugin {
       "application/x-fictionbook",
       "application/epub+zip"
     });
-    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
     try {
       startActivityForResult(call, Intent.createChooser(intent, "选择 TXT 小说"), "textDocumentPickerResult");
     } catch (Exception error) {
@@ -333,15 +276,9 @@ public class FanHaoNovelPlugin extends Plugin {
         }
 
         ContentResolver resolver = getContext().getContentResolver();
-        int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         for (Uri uri : uris) {
           try {
-            try {
-              if ((flags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
-                resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-              }
-            } catch (Exception ignored) {
-            }
+            if (!isContentUri(uri)) throw new IllegalArgumentException("只支持 content URI 文档");
             String fileName = displayName(resolver, uri);
             if (!isTextFileName(fileName) && !isTextUri(uri)) {
               JSObject skipped = new JSObject();
@@ -469,9 +406,10 @@ public class FanHaoNovelPlugin extends Plugin {
       if (text != null && text.length() > 0) return true;
     }
 
+    Uri uri = textIntentUri(intent);
+    if (!isContentUri(uri)) return false;
     String type = intent.getType();
     if (type != null && type.toLowerCase(Locale.ROOT).startsWith("text/")) return true;
-    Uri uri = textIntentUri(intent);
     if (isTextUri(uri)) return true;
     return context != null && isTextDisplayName(context.getContentResolver(), uri);
   }
@@ -494,7 +432,7 @@ public class FanHaoNovelPlugin extends Plugin {
       Object stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
       if (stream instanceof Uri) uri = (Uri) stream;
     }
-    if (uri == null) throw new IllegalArgumentException("没有可读取的文本文件");
+    if (!isContentUri(uri)) throw new IllegalArgumentException("只能读取 content URI 文本文件");
 
     ContentResolver resolver = getContext().getContentResolver();
     String mime = resolver.getType(uri);
@@ -529,6 +467,8 @@ public class FanHaoNovelPlugin extends Plugin {
     if (intent == null) return "";
     String action = intent.getAction();
     if (!Intent.ACTION_VIEW.equals(action) && !Intent.ACTION_SEND.equals(action)) return "";
+    Uri uri = textIntentUri(intent);
+    if (uri != null && !isContentUri(uri)) return "FanHao 只读取系统提供的 content URI 文本。";
     String type = intent.getType();
     if (type == null || !"application/octet-stream".equalsIgnoreCase(type)) return "";
     return "这个文件不像 TXT 文本，FanHao 只会导入 .txt 文本。";
@@ -540,321 +480,193 @@ public class FanHaoNovelPlugin extends Plugin {
   }
 
   private void resolvePluginCall(PluginCall call, JSObject result) {
-    if (getActivity() == null) {
-      call.resolve(result);
-      return;
-    }
-    getActivity().runOnUiThread(() -> call.resolve(result));
+    if (call == null || call.isReleased()) return;
+    getBridge().executeOnMainThread(() -> {
+      if (!call.isReleased()) call.resolve(result);
+    });
   }
 
   private void rejectPluginCall(PluginCall call, String message, Exception error) {
-    if (getActivity() == null) {
-      call.reject(message, error);
-      return;
-    }
-    getActivity().runOnUiThread(() -> call.reject(message, error));
+    if (call == null || call.isReleased()) return;
+    getBridge().executeOnMainThread(() -> {
+      if (!call.isReleased()) call.reject(message, error);
+    });
   }
 
-  private boolean hasExternalTextScanAccess() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      return Environment.isExternalStorageManager();
-    }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-      return getContext().checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED;
-    }
-    return true;
-  }
-
-  private int clampInteger(Integer value, int fallback, int min, int max) {
-    int number = value == null ? fallback : value;
-    return Math.max(min, Math.min(max, number));
-  }
-
-  private List<ScannedTextCandidate> findTextFiles(int limit, int maxDepth) throws Exception {
-    File root = Environment.getExternalStorageDirectory();
-    if (root == null || !root.exists()) throw new IllegalArgumentException("没有找到手机存储目录");
-
-    LinkedHashMap<String, ScannedTextCandidate> found = new LinkedHashMap<>();
-    addScannedFiles(found, findTextFilesWithMediaStore(root, limit), limit);
-    addScannedFiles(found, findTextFilesWithSystemFind(root, limit), limit);
-
-    ArrayDeque<ScanNode> queue = new ArrayDeque<>();
-    Set<String> visited = new HashSet<>();
-    queue.add(new ScanNode(root, 0));
-
-    while (!queue.isEmpty() && found.size() < limit) {
-      ScanNode node = queue.removeFirst();
-      File dir = node.file;
-      if (dir == null || !dir.isDirectory() || !dir.canRead()) continue;
-      String canonical = dir.getCanonicalPath();
-      if (!visited.add(canonical) || shouldSkipScanDirectory(dir)) continue;
-
-      File[] children = dir.listFiles();
-      if (children == null) continue;
-      for (File child : children) {
-        if (child == null) continue;
-        if (child.isDirectory()) {
-          if (node.depth < maxDepth && !shouldSkipScanDirectory(child)) queue.addLast(new ScanNode(child, node.depth + 1));
-          continue;
-        }
-        if (isScannableTextFile(child)) addScannedFile(found, ScannedTextCandidate.fromFile(child), limit);
-        if (found.size() >= limit) break;
-      }
-    }
-
-    ArrayList<ScannedTextCandidate> files = new ArrayList<>(found.values());
-    sortScannedFiles(files);
-    return files;
-  }
-
-  private List<ScannedTextCandidate> findTextFilesWithMediaStore(File root, int limit) {
-    ArrayList<ScannedTextCandidate> found = new ArrayList<>();
-    Uri uri = MediaStore.Files.getContentUri("external");
-    String idColumn = MediaStore.Files.FileColumns._ID;
-    String dataColumn = MediaStore.Files.FileColumns.DATA;
-    String nameColumn = MediaStore.Files.FileColumns.DISPLAY_NAME;
-    String sizeColumn = MediaStore.Files.FileColumns.SIZE;
-    String modifiedColumn = MediaStore.Files.FileColumns.DATE_MODIFIED;
-    String[] projection = new String[] { idColumn, dataColumn, nameColumn, sizeColumn, modifiedColumn };
-    String selection = dataColumn + " LIKE ? OR " + dataColumn + " LIKE ? OR " + nameColumn + " LIKE ? OR " + nameColumn + " LIKE ?";
-    String[] args = new String[] { "%.txt", "%.TXT", "%.txt", "%.TXT" };
-    try (Cursor cursor = getContext().getContentResolver().query(uri, projection, selection, args, null)) {
-      if (cursor == null) return found;
-      int idIndex = cursor.getColumnIndex(idColumn);
-      int dataIndex = cursor.getColumnIndex(dataColumn);
-      int nameIndex = cursor.getColumnIndex(nameColumn);
-      int sizeIndex = cursor.getColumnIndex(sizeColumn);
-      int modifiedIndex = cursor.getColumnIndex(modifiedColumn);
-      while (cursor.moveToNext() && found.size() < limit) {
-        long id = idIndex >= 0 ? cursor.getLong(idIndex) : 0;
-        String path = dataIndex >= 0 ? cursor.getString(dataIndex) : "";
-        String fileName = nameIndex >= 0 ? cursor.getString(nameIndex) : safeNameFromPath(path);
-        long sizeBytes = sizeIndex >= 0 ? cursor.getLong(sizeIndex) : fileLength(path);
-        long modifiedSeconds = modifiedIndex >= 0 ? cursor.getLong(modifiedIndex) : 0;
-        long lastModified = modifiedSeconds > 0 ? modifiedSeconds * 1000L : fileLastModified(path);
-        String contentUri = id > 0 ? ContentUris.withAppendedId(uri, id).toString() : "";
-        ScannedTextCandidate candidate = ScannedTextCandidate.fromMediaStore(path, contentUri, fileName, sizeBytes, lastModified);
-        if (isScannableTextCandidate(candidate)) found.add(candidate);
-      }
-    } catch (Exception error) {
-      Log.w(TAG, "MediaStore txt scan failed", error);
-      found.clear();
-    }
-    sortScannedFiles(found);
-    Log.i(TAG, "MediaStore txt scan found " + found.size() + " files");
-    return found;
-  }
-
-  private List<ScannedTextCandidate> findTextFilesWithSystemFind(File root, int limit) {
-    ArrayList<ScannedTextCandidate> found = new ArrayList<>();
-    Process process = null;
-    try {
-      process = new ProcessBuilder("find", root.getAbsolutePath(), "-type", "f", "-iname", "*.txt")
-        .redirectErrorStream(true)
-        .start();
-      try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-        String line;
-        while ((line = reader.readLine()) != null && found.size() < limit) {
-          File file = safeScanCandidate(root, line);
-          if (file != null && isScannableTextFile(file)) found.add(ScannedTextCandidate.fromFile(file));
+  private DocumentTreeScanner.Source documentTreeSource(Uri treeUri) {
+    ContentResolver resolver = getContext().getContentResolver();
+    String authority = treeUri.getAuthority() == null ? "" : treeUri.getAuthority();
+    return new DocumentTreeScanner.Source() {
+      @Override
+      public DocumentTreeScanner.Node readRoot() throws Exception {
+        String rootDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+        Uri rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootDocumentId);
+        try (Cursor cursor = resolver.query(rootUri, DOCUMENT_PROJECTION, null, null, null)) {
+          if (cursor == null || !cursor.moveToFirst()) {
+            throw new IllegalArgumentException("所选目录无法读取");
+          }
+          return documentNodeFromCursor(cursor, authority, treeUri);
         }
       }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        process.waitFor(90, TimeUnit.SECONDS);
-      } else {
-        waitForProcess(process, TimeUnit.SECONDS.toMillis(90));
+
+      @Override
+      public DocumentTreeScanner.ChildrenPage readChildren(
+        DocumentTreeScanner.Node directory,
+        int maximumChildren
+      ) throws Exception {
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, directory.documentId);
+        ArrayList<DocumentTreeScanner.Node> children = new ArrayList<>();
+        boolean truncated = false;
+        try (Cursor cursor = resolver.query(childrenUri, DOCUMENT_PROJECTION, null, null, null)) {
+          if (cursor == null) throw new IllegalArgumentException("目录内容无法读取");
+          while (cursor.moveToNext()) {
+            if (children.size() >= maximumChildren) {
+              truncated = true;
+              break;
+            }
+            children.add(documentNodeFromCursor(cursor, authority, treeUri));
+          }
+        }
+        return new DocumentTreeScanner.ChildrenPage(children, truncated);
       }
-    } catch (Exception ignored) {
-      found.clear();
-    } finally {
-      if (process != null) process.destroy();
-    }
-    sortScannedFiles(found);
-    Log.i(TAG, "system find txt scan found " + found.size() + " files");
-    return found;
+    };
   }
 
-  private boolean waitForProcess(Process process, long timeoutMillis) throws InterruptedException {
-    long deadline = SystemClock.elapsedRealtime() + Math.max(0L, timeoutMillis);
-    while (true) {
-      try {
-        process.exitValue();
-        return true;
-      } catch (IllegalThreadStateException ignored) {
-        long remainingMillis = deadline - SystemClock.elapsedRealtime();
-        if (remainingMillis <= 0) return false;
-        Thread.sleep(Math.min(100L, remainingMillis));
+  private DocumentTreeScanner.Node documentNodeFromCursor(
+    Cursor cursor,
+    String authority,
+    Uri treeUri
+  ) {
+    String documentId = cursorString(cursor, DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+    String displayName = cursorString(cursor, DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+    String mimeType = cursorString(cursor, DocumentsContract.Document.COLUMN_MIME_TYPE);
+    boolean sizeKnown = !cursorNull(cursor, DocumentsContract.Document.COLUMN_SIZE);
+    long sizeBytes = sizeKnown ? cursorLong(cursor, DocumentsContract.Document.COLUMN_SIZE) : -1L;
+    long lastModified = cursorNull(cursor, DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+      ? 0L
+      : cursorLong(cursor, DocumentsContract.Document.COLUMN_LAST_MODIFIED);
+    long flags = cursorNull(cursor, DocumentsContract.Document.COLUMN_FLAGS)
+      ? 0L
+      : cursorLong(cursor, DocumentsContract.Document.COLUMN_FLAGS);
+    boolean directory = DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType);
+    boolean virtual = (flags & DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT) != 0L;
+    String uri = documentId.isEmpty()
+      ? ""
+      : DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId).toString();
+    return new DocumentTreeScanner.Node(
+      authority,
+      documentId,
+      uri,
+      displayName,
+      mimeType,
+      sizeBytes,
+      sizeKnown,
+      lastModified,
+      directory,
+      virtual
+    );
+  }
+
+  private JSObject directoryScanResponse(boolean canceled, DocumentTreeScanner.Result scan) {
+    JSObject response = new JSObject();
+    response.put("available", true);
+    response.put("canceled", canceled);
+    response.put("rootFailed", scan != null && scan.rootFailed);
+    response.put("truncated", scan != null && scan.truncated());
+    response.put("nodesVisited", scan == null ? 0 : scan.nodesVisited);
+    response.put("duplicateNodes", scan == null ? 0 : scan.duplicateNodes);
+    response.put("virtualNodesSkipped", scan == null ? 0 : scan.virtualNodes);
+    response.put("invalidNodesSkipped", scan == null ? 0 : scan.invalidNodes);
+    response.put("oversizedFilesSkipped", scan == null ? 0 : scan.oversizedFiles);
+
+    JSArray items = new JSArray();
+    if (scan != null) {
+      for (DocumentTreeScanner.Node file : scan.files) {
+        JSObject item = new JSObject();
+        item.put("uri", file.uri);
+        item.put("fileName", sanitizeFileName(file.displayName));
+        item.put("sizeBytes", file.sizeKnown ? file.sizeBytes : -1L);
+        item.put("sizeKnown", file.sizeKnown);
+        item.put("lastModified", file.lastModified);
+        item.put("modifiedAt", file.lastModified > 0L
+          ? new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.ROOT)
+            .format(new java.util.Date(file.lastModified))
+          : "");
+        item.put("recommended", DocumentTreeScanner.isRecommended(file));
+        item.put("hint", DocumentTreeScanner.hint(file));
+        items.put(item);
       }
     }
-  }
+    response.put("items", items);
 
-  private void addScannedFiles(Map<String, ScannedTextCandidate> target, List<ScannedTextCandidate> files, int limit) {
-    for (ScannedTextCandidate file : files) {
-      addScannedFile(target, file, limit);
-      if (target.size() >= limit) return;
-    }
-  }
-
-  private void addScannedFile(Map<String, ScannedTextCandidate> target, ScannedTextCandidate file, int limit) {
-    if (target.size() >= limit || file == null) return;
-    if (!isScannableTextCandidate(file)) return;
-    target.putIfAbsent(file.dedupeKey(), file);
-  }
-
-  private File safeScanCandidate(File root, String path) {
-    try {
-      if (path == null || path.trim().isEmpty()) return null;
-      File rootFile = root.getCanonicalFile();
-      File file = new File(path.trim()).getCanonicalFile();
-      String rootPath = rootFile.getAbsolutePath();
-      String filePath = file.getAbsolutePath();
-      if (!filePath.equals(rootPath) && !filePath.startsWith(rootPath + File.separator)) return null;
-      return file;
-    } catch (Exception ignored) {
-      return null;
-    }
-  }
-
-  private void sortScannedFiles(List<ScannedTextCandidate> files) {
-    files.sort(Comparator
-      .comparingLong((ScannedTextCandidate item) -> item.lastModified).reversed()
-      .thenComparing(Comparator.comparingLong((ScannedTextCandidate item) -> item.sizeBytes).reversed())
-      .thenComparing(item -> item.fileName, String.CASE_INSENSITIVE_ORDER));
-  }
-
-  private boolean shouldSkipScanDirectory(File dir) {
-    String path = dir.getAbsolutePath().replace('\\', '/').toLowerCase(Locale.ROOT);
-    return path.contains("/.thumbnails/");
-  }
-
-  private boolean isScannableTextFile(File file) {
-    if (file == null || !file.isFile() || !file.canRead()) return false;
-    long length = file.length();
-    if (length <= 0 || length > MAX_TEXT_BYTES) return false;
-    return isTextFileName(file.getName());
-  }
-
-  private boolean isImportableTextCandidate(File file) {
-    if (!isScannableTextFile(file)) return false;
-    return isImportableTextCandidate(file.getAbsolutePath(), file.getName(), file.length());
-  }
-
-  private boolean isScannableTextCandidate(ScannedTextCandidate candidate) {
-    if (candidate == null) return false;
-    long length = candidate.sizeBytes;
-    if (length <= 0 || length > MAX_TEXT_BYTES) return false;
-    return isTextFileName(candidate.fileName) || isTextFileName(candidate.path);
-  }
-
-  private boolean isImportableTextCandidate(String rawPath, String rawName, long length) {
-    if (length < MIN_IMPORT_TEXT_BYTES || length > MAX_IMPORT_TEXT_BYTES) return false;
-    String path = String.valueOf(rawPath).replace('\\', '/').toLowerCase(Locale.ROOT);
-    if (isUserDownloadTextPath(path)) return true;
-    if (path.contains("/miui/debug_log/")
-      || path.contains("/debug_log/")
-      || path.contains("/log/")
-      || path.contains("/logs/")
-      || path.contains("/cache/")
-      || path.contains("/android/obb/")) {
-      return false;
-    }
-    String name = String.valueOf(rawName).toLowerCase(Locale.ROOT);
-    return !name.equals("netstats.txt")
-      && !name.equals("fw_version.txt")
-      && !name.equals("ip_rule.txt")
-      && !name.equals("ip_route.txt")
-      && !name.equals("dumpsys.txt")
-      && !name.equals("modemdump_cache.txt")
-      && !name.equals("985_game.txt")
-      && !name.startsWith("fanhao-")
-      && !name.contains("logcat")
-      && !name.contains("bugreport")
-      && !name.contains("trace")
-      && !name.contains("crash")
-      && !name.contains("dump");
-  }
-
-  private String scanCandidateHint(File file) {
-    if (file == null) return "";
-    return scanCandidateHint(file.getAbsolutePath(), file.getName(), file.length());
-  }
-
-  private String scanCandidateHint(String rawPath, String rawName, long length) {
-    if (isImportableTextCandidate(rawPath, rawName, length)) return "推荐";
-    String path = String.valueOf(rawPath).replace('\\', '/').toLowerCase(Locale.ROOT);
-    String name = String.valueOf(rawName).toLowerCase(Locale.ROOT);
-    if (length < MIN_IMPORT_TEXT_BYTES) return "文件较小";
-    if (length > MAX_IMPORT_TEXT_BYTES) return "文件较大";
-    if (isUserDownloadTextPath(path)) return "应用下载";
-    if (path.contains("/debug_log/")
-      || path.contains("/log/")
-      || path.contains("/logs/")
-      || name.contains("log")
-      || name.contains("trace")
-      || name.contains("crash")
-      || name.contains("dump")) return "可能是日志";
-    if (name.equals("netstats.txt")
-      || name.equals("fw_version.txt")
-      || name.equals("ip_rule.txt")
-      || name.equals("ip_route.txt")
-      || name.equals("dumpsys.txt")
-      || name.equals("modemdump_cache.txt")) return "系统文件";
-    return "可选";
-  }
-
-  private boolean isUserDownloadTextPath(String path) {
-    if (path == null) return false;
-    String normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT);
-    return normalized.contains("/micromsg/download/")
-      || normalized.contains("/download/")
-      || normalized.contains("/downloads/")
-      || normalized.contains("/received from pc/")
-      || normalized.contains("/qqfile_recv/");
-  }
-
-  private File safeTextFileFromPath(String path) throws Exception {
-    if (path == null || path.trim().isEmpty()) throw new IllegalArgumentException("缺少 TXT 路径");
-    File root = Environment.getExternalStorageDirectory().getCanonicalFile();
-    File file = new File(path).getCanonicalFile();
-    String rootPath = root.getAbsolutePath();
-    String filePath = file.getAbsolutePath();
-    if (!filePath.equals(rootPath) && !filePath.startsWith(rootPath + File.separator)) {
-      throw new IllegalArgumentException("只能读取手机存储目录内的 TXT");
-    }
-    if (!isScannableTextFile(file)) throw new IllegalArgumentException("这个文件不是可导入的 TXT");
-    return file;
-  }
-
-  private byte[] readAllBytes(File file) throws Exception {
-    try (InputStream input = new FileInputStream(file)) {
-      ByteArrayOutputStream output = new ByteArrayOutputStream();
-      byte[] buffer = new byte[64 * 1024];
-      int total = 0;
-      int read;
-      while ((read = input.read(buffer)) >= 0) {
-        if (read == 0) continue;
-        total += read;
-        if (total > MAX_TEXT_BYTES) throw new IllegalArgumentException("文本文件太大，暂时只支持 80MB 以内");
-        output.write(buffer, 0, read);
+    JSArray errors = new JSArray();
+    if (scan != null) {
+      for (DocumentTreeScanner.ScanError error : scan.errors) {
+        JSObject item = new JSObject();
+        item.put("code", error.code);
+        item.put("directoryName", error.directoryName);
+        errors.put(item);
       }
-      return output.toByteArray();
     }
+    response.put("errors", errors);
+
+    JSArray truncationReasons = new JSArray();
+    if (scan != null) {
+      for (String reason : scan.truncationReasons) truncationReasons.put(reason);
+    }
+    response.put("truncationReasons", truncationReasons);
+    return response;
+  }
+
+  private JSObject directoryRootFailureResponse(String code) {
+    DocumentTreeScanner.Result result = new DocumentTreeScanner.Result();
+    result.rootFailed = true;
+    result.errors.add(new DocumentTreeScanner.ScanError(code, "所选目录"));
+    return directoryScanResponse(false, result);
+  }
+
+  private DocumentMetadata queryDocumentMetadata(ContentResolver resolver, Uri uri) throws Exception {
+    try (Cursor cursor = resolver.query(
+      uri,
+      new String[] { OpenableColumns.SIZE, DocumentsContract.Document.COLUMN_FLAGS },
+      null,
+      null,
+      null
+    )) {
+      if (cursor == null || !cursor.moveToFirst()) {
+        throw new IllegalArgumentException("无法读取文档信息");
+      }
+      boolean sizeKnown = !cursorNull(cursor, OpenableColumns.SIZE);
+      long sizeBytes = sizeKnown ? cursorLong(cursor, OpenableColumns.SIZE) : -1L;
+      long flags = cursorNull(cursor, DocumentsContract.Document.COLUMN_FLAGS)
+        ? 0L
+        : cursorLong(cursor, DocumentsContract.Document.COLUMN_FLAGS);
+      return new DocumentMetadata(
+        sizeBytes,
+        sizeKnown,
+        (flags & DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT) != 0L
+      );
+    }
+  }
+
+  private String cursorString(Cursor cursor, String column) {
+    int index = cursor.getColumnIndex(column);
+    return index < 0 || cursor.isNull(index) ? "" : String.valueOf(cursor.getString(index)).trim();
+  }
+
+  private long cursorLong(Cursor cursor, String column) {
+    int index = cursor.getColumnIndex(column);
+    return index < 0 || cursor.isNull(index) ? 0L : cursor.getLong(index);
+  }
+
+  private boolean cursorNull(Cursor cursor, String column) {
+    int index = cursor.getColumnIndex(column);
+    return index < 0 || cursor.isNull(index);
   }
 
   private byte[] readAllBytes(ContentResolver resolver, Uri uri) throws Exception {
     try (InputStream input = resolver.openInputStream(uri)) {
-      if (input == null) throw new IllegalArgumentException("无法打开文本文件");
-      ByteArrayOutputStream output = new ByteArrayOutputStream();
-      byte[] buffer = new byte[64 * 1024];
-      int total = 0;
-      int read;
-      while ((read = input.read(buffer)) >= 0) {
-        if (read == 0) continue;
-        total += read;
-        if (total > MAX_TEXT_BYTES) throw new IllegalArgumentException("文本文件太大，暂时只支持 80MB 以内");
-        output.write(buffer, 0, read);
-      }
-      return output.toByteArray();
+      return BoundedTextReader.read(input, MAX_TEXT_BYTES);
     }
   }
 
@@ -912,8 +724,16 @@ public class FanHaoNovelPlugin extends Plugin {
   }
 
   private static boolean isTextUri(Uri uri) {
+    if (!isContentUri(uri)) return false;
     String value = uri == null ? "" : uri.toString().toLowerCase(Locale.ROOT);
     return value.endsWith(".txt") || value.contains(".txt?");
+  }
+
+  private static boolean isContentUri(Uri uri) {
+    return uri != null
+      && "content".equalsIgnoreCase(uri.getScheme())
+      && uri.getAuthority() != null
+      && !uri.getAuthority().trim().isEmpty();
   }
 
   private static boolean isTextDisplayName(ContentResolver resolver, Uri uri) {
@@ -926,32 +746,10 @@ public class FanHaoNovelPlugin extends Plugin {
   }
 
   private static boolean isContentUriString(String value) {
-    return value != null && value.trim().toLowerCase(Locale.ROOT).startsWith("content://");
-  }
-
-  private static String safeNameFromPath(String path) {
-    if (path == null || path.trim().isEmpty()) return "local-text.txt";
-    String value = path.trim();
-    int slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
-    value = slash >= 0 ? value.substring(slash + 1) : value;
-    return value == null || value.trim().isEmpty() ? "local-text.txt" : value.trim();
-  }
-
-  private static long fileLength(String path) {
     try {
-      if (path == null || path.trim().isEmpty()) return 0;
-      return new File(path.trim()).length();
+      return value != null && isContentUri(Uri.parse(value.trim()));
     } catch (Exception ignored) {
-      return 0;
-    }
-  }
-
-  private static long fileLastModified(String path) {
-    try {
-      if (path == null || path.trim().isEmpty()) return 0;
-      return new File(path.trim()).lastModified();
-    } catch (Exception ignored) {
-      return 0;
+      return false;
     }
   }
 
@@ -985,49 +783,15 @@ public class FanHaoNovelPlugin extends Plugin {
     }
   }
 
-  private static final class ScannedTextCandidate {
-    final String path;
-    final String uri;
-    final String fileName;
+  private static final class DocumentMetadata {
     final long sizeBytes;
-    final long lastModified;
+    final boolean sizeKnown;
+    final boolean virtual;
 
-    ScannedTextCandidate(String path, String uri, String fileName, long sizeBytes, long lastModified) {
-      this.path = path == null ? "" : path;
-      this.uri = uri == null ? "" : uri;
-      this.fileName = fileName == null || fileName.trim().isEmpty() ? safeNameFromPath(path) : fileName.trim();
-      this.sizeBytes = Math.max(0, sizeBytes);
-      this.lastModified = Math.max(0, lastModified);
-    }
-
-    static ScannedTextCandidate fromFile(File file) {
-      return new ScannedTextCandidate(
-        file == null ? "" : file.getAbsolutePath(),
-        "",
-        file == null ? "local-text.txt" : file.getName(),
-        file == null ? 0 : file.length(),
-        file == null ? 0 : file.lastModified()
-      );
-    }
-
-    static ScannedTextCandidate fromMediaStore(String path, String uri, String fileName, long sizeBytes, long lastModified) {
-      return new ScannedTextCandidate(path, uri, fileName, sizeBytes, lastModified);
-    }
-
-    String dedupeKey() {
-      if (path != null && !path.trim().isEmpty()) return "path:" + path.trim();
-      if (uri != null && !uri.trim().isEmpty()) return "uri:" + uri.trim();
-      return "name:" + fileName + ":" + sizeBytes + ":" + lastModified;
-    }
-  }
-
-  private static final class ScanNode {
-    final File file;
-    final int depth;
-
-    ScanNode(File file, int depth) {
-      this.file = file;
-      this.depth = depth;
+    DocumentMetadata(long sizeBytes, boolean sizeKnown, boolean virtual) {
+      this.sizeBytes = sizeBytes;
+      this.sizeKnown = sizeKnown;
+      this.virtual = virtual;
     }
   }
 }
