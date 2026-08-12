@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
+import { shortVideoPublicError } from "../src/modules/short-videos/server/public-errors.js";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { readJsonBody, RequestBodyError } from "../src/platform/server/request-io.js";
 
@@ -37,6 +38,43 @@ const empty = await invokeShortVideoDelete("");
 assert.equal(empty.response.status, 200, "an empty DELETE body must remain valid");
 assert.equal(empty.storeCalls, 1, "an empty DELETE body must retain the existing delete call");
 assert.deepEqual(empty.deleteOptions, { deleteFiles: true }, "an empty DELETE body must retain the default file-deletion option");
+
+const secretStoreError = new Error("delete failed at C:\\secret\\videos\\catalog.bin");
+const secretStoreResult = await captureConsoleErrors(() => invokeShortVideoDelete("{}", { storeError: secretStoreError }));
+assert.deepEqual(secretStoreResult.value.response, {
+  status: 500,
+  payload: { error: "短视频删除失败" }
+}, "an unknown store failure must return only the route fallback");
+assert.doesNotMatch(JSON.stringify(secretStoreResult.value.response), /secret|catalog\.bin/i, "a store failure must not disclose its local path");
+assert.equal(secretStoreResult.logs[0]?.[1], secretStoreError, "the local route boundary must log the original store failure");
+
+const sqliteStoreError = new Error("database disk image is malformed at C:\\secret\\catalog.sqlite");
+const sqliteStoreResult = await captureConsoleErrors(() => invokeShortVideoDelete("{}", { storeError: sqliteStoreError }));
+assert.deepEqual(sqliteStoreResult.value.response, {
+  status: 503,
+  payload: { error: "短视频数据库正在恢复，请稍后重试" }
+}, "a database failure must use the fixed recovery response");
+assert.doesNotMatch(JSON.stringify(sqliteStoreResult.value.response), /secret|catalog\.sqlite/i, "the database recovery response must not disclose its local path");
+assert.equal(sqliteStoreResult.logs[0]?.[1], sqliteStoreError, "the local route boundary must log the original database failure");
+
+const private503 = Object.assign(new Error("upstream failed at C:\\secret\\manager.sqlite"), { statusCode: 503 });
+assert.deepEqual(
+  shortVideoPublicError(private503, "采集服务不可用", { defaultStatus: 502 }),
+  { status: 503, message: "短视频数据库正在恢复，请稍后重试", log: true },
+  "a SQLite-flavored 503 must use the fixed database recovery message"
+);
+const privateService503 = Object.assign(new Error("upstream failed at C:\\secret\\manager.bin"), { statusCode: 503 });
+assert.deepEqual(
+  shortVideoPublicError(privateService503, "采集服务不可用", { defaultStatus: 502 }),
+  { status: 503, message: "采集服务不可用", log: true },
+  "a generic 503 must retain its status but use the route fallback"
+);
+const exposed500 = Object.assign(new Error("可安全公开的服务状态"), { statusCode: 500, expose: true });
+assert.deepEqual(
+  shortVideoPublicError(exposed500, "服务失败"),
+  { status: 500, message: "可安全公开的服务状态", log: true },
+  "an explicitly exposed safe server error may retain its message"
+);
 
 const publicError = new RequestBodyError("JSON 格式无效", {
   code: "INVALID_JSON_BODY",
@@ -79,7 +117,7 @@ assert.equal(startedResult.logs.length, 1, "a post-header failure must still be 
 
 console.log("API error boundary verification passed.");
 
-async function invokeShortVideoDelete(bodyText) {
+async function invokeShortVideoDelete(bodyText, { storeError } = {}) {
   let storeCalls = 0;
   let deleteOptions = null;
   let response = null;
@@ -97,6 +135,7 @@ async function invokeShortVideoDelete(bodyText) {
           storeCalls += 1;
           assert.equal(id, "video-1");
           deleteOptions = options;
+          if (storeError) throw storeError;
           return { ok: true, id };
         }
       }
@@ -104,6 +143,17 @@ async function invokeShortVideoDelete(bodyText) {
   );
   assert.equal(handled, true, "the short-video DELETE route must be handled");
   return { deleteOptions, response, storeCalls };
+}
+
+async function captureConsoleErrors(action) {
+  const logs = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => { logs.push(args); };
+  try {
+    return { logs, value: await action() };
+  } finally {
+    console.error = originalConsoleError;
+  }
 }
 
 async function invokeRequestHandler({ routeApi, responseState = {}, sendJson } = {}) {

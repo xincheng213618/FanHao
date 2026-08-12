@@ -5,6 +5,7 @@ import { createShortVideoListStatsService } from "./list-stats-service.js";
 import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
 import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } from "./reserved-routes.js";
+import { sendShortVideoPublicError } from "./public-errors.js";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -166,7 +167,7 @@ export function createShortVideosRuntime({
         }
         sendJson(res, 200, { ok: true, action, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
-        sendJson(res, error?.statusCode || 500, { error: error?.message || "转码控制失败" });
+        sendShortVideoPublicError(res, sendJson, error, "转码控制失败");
       }
       return true;
     }
@@ -184,7 +185,7 @@ export function createShortVideosRuntime({
         const queued = tryQueueSmoothVideoCache(id, { delayMs: 0, kind: "current" });
         sendJson(res, 200, { ok: true, id, reason, queued, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
-        sendJson(res, error?.statusCode || 500, { error: error?.message || "播放问题记录失败" });
+        sendShortVideoPublicError(res, sendJson, error, "播放问题记录失败");
       }
       return true;
     }
@@ -198,7 +199,7 @@ export function createShortVideosRuntime({
         const removed = clearSmoothVideoRenditionCache();
         sendJson(res, 200, { ok: true, removed, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
-        sendJson(res, 500, { error: error?.message || "转码缓存清除失败" });
+        sendShortVideoPublicError(res, sendJson, error, "转码缓存清除失败");
       }
       return true;
     }
@@ -230,7 +231,7 @@ export function createShortVideosRuntime({
         }
         sendJson(res, 200, data);
       } catch (error) {
-        sendJson(res, downloadManagerErrorStatus(error), { error: error.message || "8765 采集服务不可用" });
+        sendShortVideoPublicError(res, sendJson, error, "8765 采集服务不可用", { defaultStatus: 502 });
       }
       return true;
     }
@@ -273,7 +274,7 @@ export function createShortVideosRuntime({
           profile: publicCollectorProfile(profile || { sec_uid: secUid, tab: "post" })
         });
       } catch (error) {
-        sendJson(res, downloadManagerErrorStatus(error), { error: error.message || "作者主页采集启动失败" });
+        sendShortVideoPublicError(res, sendJson, error, "作者主页采集启动失败", { defaultStatus: 502 });
       }
       return true;
     }
@@ -307,7 +308,7 @@ export function createShortVideosRuntime({
         clearShortVideoListCache();
         sendJson(res, 200, imported);
       } catch (error) {
-        sendJson(res, downloadManagerErrorStatus(error), { error: error.message || "抖音评论同步失败" });
+        sendShortVideoPublicError(res, sendJson, error, "抖音评论同步失败", { defaultStatus: 502 });
       }
       return true;
     }
@@ -347,7 +348,7 @@ export function createShortVideosRuntime({
           const data = applyShortVideoWatchOverlays(cached.data);
           sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, offline: true, cacheState: "offline" }));
         } else {
-          sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频列表读取失败") });
+          sendShortVideoPublicError(res, sendJson, error, "短视频列表读取失败");
         }
       }
       return true;
@@ -1080,10 +1081,6 @@ export function createShortVideosRuntime({
       tab: String(profile.tab || "post"),
       lastExtractedAt: String(profile.last_extracted_at || "")
     };
-  }
-
-  function downloadManagerErrorStatus(error) {
-    return Number(error?.statusCode || 0) || 502;
   }
 
   function clearShortVideoListCache() {
@@ -2032,22 +2029,6 @@ export function createShortVideosRuntime({
 
   function safeFilePart(value) {
     return String(value || "").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 96) || "short-video";
-  }
-
-  function shortVideoErrorStatus(error) {
-    if (isShortVideoDatabaseError(error)) return 503;
-    return error.statusCode || 500;
-  }
-
-  function shortVideoErrorMessage(error, fallback) {
-    if (isShortVideoDatabaseError(error)) return "短视频数据库正在恢复，请稍后重试";
-    return error.message || fallback;
-  }
-
-  function isShortVideoDatabaseError(error) {
-    if (["SHORT_VIDEO_DATABASE_BUSY", "SHORT_VIDEO_DATABASE_UNAVAILABLE"].includes(String(error?.code || ""))) return true;
-    const message = String(error?.message || error || "");
-    return /database disk image|malformed|sqlite/i.test(message);
   }
 
   return {
