@@ -102,9 +102,9 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
     `).run(LOCAL_SHORT_VIDEO_USER_ID));
     actionsChanged += changedRows(targetDb.prepare(`
       INSERT INTO short_video_user_actions (
-        local_user_id, video_id, action_type, active, source, acted_at, updated_at
+        local_user_id, video_id, action_type, active, source, baseline_active, acted_at, updated_at
       )
-      SELECT ?, v.id, 'like', 1, 'download_manager',
+      SELECT ?, v.id, 'like', 1, 'download_manager', 1,
              COALESCE(NULLIF(v.liked_at, ''), ?), ?
       FROM short_videos v
       WHERE EXISTS (
@@ -116,10 +116,12 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
       ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
         active = 1,
         source = 'download_manager',
+        baseline_active = 1,
         updated_at = excluded.updated_at
       WHERE short_video_user_actions.source <> 'local_web'
         AND (short_video_user_actions.active IS NOT 1
-          OR short_video_user_actions.source IS NOT 'download_manager')
+          OR short_video_user_actions.source IS NOT 'download_manager'
+          OR short_video_user_actions.baseline_active IS NOT 1)
     `).run(LOCAL_SHORT_VIDEO_USER_ID, now, now));
 
     originsChanged += changedRows(targetDb.prepare(`

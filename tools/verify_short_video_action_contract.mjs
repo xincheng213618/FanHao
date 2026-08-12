@@ -9,11 +9,16 @@ import { createShortVideosRuntime } from "../src/modules/short-videos/server/run
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 
 const LEGACY_SCHEMA_VERSION = "20260812-short-video-collections-11";
+const ACTIONS_12_SCHEMA_VERSION = "20260812-native-user-actions-12";
+const CURRENT_SCHEMA_VERSION = "20260812-native-user-actions-13";
 const TARGET_ID = "action-contract-target";
 const TARGET_AWEME_ID = "7600000000000000001";
 const ANCHOR_ID = "action-contract-anchor";
 const PLAIN_ID = "action-contract-plain";
 const CANONICAL_ID = "7600000000000000003";
+const LEGACY_IMPORTED_ID = "action-contract-legacy-imported";
+const LEGACY_IMPORTED_AWEME_ID = "7600000000000000004";
+const CUSTOM_SOURCE_ID = "action-contract-custom-source";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-actions-"));
 const dbPath = path.join(fixtureRoot, "short-videos.sqlite");
@@ -24,6 +29,7 @@ let runtime = null;
 try {
   createLegacyFixture();
   assert.equal(hasCatalogColumn(dbPath, "library_liked"), false, "the fixture must start with the legacy catalog view");
+  assert.equal(hasActionColumn(dbPath, "baseline_active"), false, "the legacy fixture must predate the baseline column");
 
   runtime = createFixtureRuntime();
   assert.equal(
@@ -36,16 +42,19 @@ try {
     true,
     "runtime construction must complete the versioned writable view migration before worker reads"
   );
-  assert.notEqual(
+  assert.equal(
     readMeta(dbPath, "schema_version"),
-    LEGACY_SCHEMA_VERSION,
+    CURRENT_SCHEMA_VERSION,
     "the writable preflight must advance the schema version"
   );
+  assert.equal(hasActionColumn(dbPath, "baseline_active"), true, "actions-13 must add the baseline column");
 
+  await verifyLegacyFalseOwnershipMigration();
   await verifyPublicReadSurfaces();
   await verifyActionStatistics();
   await verifyMetadataSyncPreservesExplicitFalse();
   await verifyDownloadImportPreservesExplicitFalse();
+  await verifyRecommendedRecoversAfterLockedPreflight();
 
   console.log("short-video-action-contract: ok (legacy migration, read parity, idempotent stats, downloader ownership)");
 } finally {
@@ -146,18 +155,152 @@ function createLegacyFixture() {
       `${CANONICAL_ID}.mp4`,
       now
     );
+    insertVideo.run(
+      LEGACY_IMPORTED_ID,
+      LEGACY_IMPORTED_AWEME_ID,
+      "author-legacy-imported",
+      "sec-legacy-imported",
+      "契约作者戊",
+      "旧版取消点赞所有权",
+      "验证 actions-13 迁移不会被后台同步重新激活",
+      "2026-08-09T12:00:00.000Z",
+      "2026-08-09T12:00:00.000Z",
+      500,
+      50,
+      path.join(fixtureRoot, `${LEGACY_IMPORTED_ID}.mp4`),
+      `${LEGACY_IMPORTED_ID}.mp4`,
+      now
+    );
     db.prepare(`
       INSERT INTO short_video_source_memberships (
         aweme_id, source_type, source_profile_id, first_seen_at, last_seen_at, updated_at
       ) VALUES (?, 'like', 'legacy-fixture', ?, ?, ?)
     `).run(TARGET_AWEME_ID, now, now, now);
-    writeAction(db, TARGET_ID, "like", true, "local_web");
+    db.prepare(`
+      INSERT INTO short_video_source_memberships (
+        aweme_id, source_type, source_profile_id, first_seen_at, last_seen_at, updated_at
+      ) VALUES (?, 'like', 'legacy-imported-fixture', ?, ?, ?)
+    `).run(LEGACY_IMPORTED_AWEME_ID, now, now, now);
+    writeAction(db, TARGET_ID, "like", false, "download_manager");
+    writeAction(db, LEGACY_IMPORTED_ID, "like", false, "imported");
+    writeAction(db, TARGET_ID, "collect", false, "download_manager");
+    writeAction(db, ANCHOR_ID, "like", true, "imported");
+    writeAction(db, PLAIN_ID, "like", false, "imported");
+    writeAction(db, CUSTOM_SOURCE_ID, "like", false, "custom");
+    db.prepare(`
+      INSERT INTO short_video_user_actions (
+        local_user_id, video_id, action_type, active, source, acted_at, updated_at
+      ) VALUES ('local:other', ?, 'like', 0, 'download_manager', ?, ?)
+    `).run(TARGET_ID, now, now);
     fs.writeFileSync(path.join(fixtureRoot, `${TARGET_ID}.mp4`), Buffer.from("action-contract-video"));
     fs.writeFileSync(path.join(fixtureRoot, `${CANONICAL_ID}.mp4`), Buffer.from("canonical-action-contract-video"));
     downgradeCatalogView(db);
   } finally {
     db.close();
   }
+}
+
+async function verifyLegacyFalseOwnershipMigration() {
+  assertStoredAction(
+    TARGET_ID,
+    false,
+    "local_web",
+    "actions-13 migration must claim a legacy download-manager false like for the local user"
+  );
+  assertStoredAction(
+    LEGACY_IMPORTED_ID,
+    false,
+    "local_web",
+    "actions-13 migration must claim a legacy imported false like for the local user"
+  );
+  assertStoredActionType(
+    TARGET_ID,
+    "collect",
+    false,
+    "download_manager",
+    "actions-13 migration must not rewrite collect ownership"
+  );
+  assertStoredActionType(
+    ANCHOR_ID,
+    "like",
+    true,
+    "imported",
+    "actions-13 migration must not rewrite an active background like"
+  );
+  assertStoredAction(
+    PLAIN_ID,
+    false,
+    "local_web",
+    "actions-13 migration must preserve a legacy imported false as a local override"
+  );
+  assertStoredBaseline(
+    PLAIN_ID,
+    true,
+    "actions-13 migration must retain the imported counting baseline independently of ownership"
+  );
+  assertStoredAction(
+    CUSTOM_SOURCE_ID,
+    false,
+    "custom",
+    "actions-13 migration must not rewrite an unrelated action source"
+  );
+  assertStoredActionForUser(
+    "local:other",
+    TARGET_ID,
+    "like",
+    false,
+    "download_manager",
+    "actions-13 migration must not rewrite another user's action"
+  );
+
+  await assertPutAction(PLAIN_ID, "like", true, "liked", "likes", 200);
+  await assertPutAction(PLAIN_ID, "like", false, "liked", "likes", 199);
+  createManagerMembershipFixture();
+  const targetDb = new DatabaseSync(dbPath);
+  const managerDb = new DatabaseSync(managerDbPath, { readOnly: true });
+  try {
+    syncDownloadManagerSourceMemberships(targetDb, managerDb, "2026-08-12T12:45:00.000Z");
+  } finally {
+    managerDb.close();
+    targetDb.close();
+  }
+  assertStoredAction(
+    TARGET_ID,
+    false,
+    "local_web",
+    "real metadata sync must preserve the migrated false like"
+  );
+  assertStoredAction(
+    PLAIN_ID,
+    false,
+    "local_web",
+    "real metadata sync must not reopen a migrated imported false override"
+  );
+  runtime.clearListCache();
+  await assertActionState(
+    TARGET_ID,
+    "liked",
+    false,
+    "likes",
+    99,
+    "migrated downloader false must remain effective in public stats after sync"
+  );
+  await assertActionState(
+    LEGACY_IMPORTED_ID,
+    "liked",
+    false,
+    "likes",
+    499,
+    "migrated imported false must retain its public baseline subtraction"
+  );
+  await assertActionState(
+    PLAIN_ID,
+    "liked",
+    false,
+    "likes",
+    199,
+    "legacy imported PUT false must remain baseline-relative after real sync"
+  );
 }
 
 function downgradeCatalogView(db) {
@@ -172,12 +315,18 @@ function downgradeCatalogView(db) {
 
   const libraryColumn = /\s*CASE WHEN EXISTS \(\s*SELECT 1\s*FROM short_video_source_memberships liked_membership\s*WHERE liked_membership\.aweme_id = v\.aweme_id\s*AND liked_membership\.source_type = 'like'\s*\) THEN 1 ELSE 0 END AS library_liked,\s*/u;
   const legacyBaseSql = baseSql.replace(libraryColumn, "");
-  assert.notEqual(legacyBaseSql, baseSql, "legacy fixture downgrade must remove the library_liked expression");
-  assert.equal(legacyBaseSql.includes("library_liked"), false);
+  const legacyActionSql = legacyBaseSql.replace(
+    /\s*COALESCE\(user_like\.baseline_active, 0\) AS user_like_baseline_active,\s*/u,
+    ""
+  );
+  assert.notEqual(legacyActionSql, baseSql, "legacy fixture downgrade must remove current action baseline expressions");
+  assert.equal(legacyActionSql.includes("library_liked"), false);
+  assert.equal(legacyActionSql.includes("user_like_baseline_active"), false);
 
   db.exec("DROP VIEW short_video_catalog; DROP VIEW short_video_catalog_base;");
-  db.exec(legacyBaseSql);
+  db.exec(legacyActionSql);
   db.exec(catalogSql);
+  db.exec("ALTER TABLE short_video_user_actions DROP COLUMN baseline_active");
   db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('schema_version', ?)")
     .run(LEGACY_SCHEMA_VERSION);
 }
@@ -257,6 +406,11 @@ async function verifyActionStatistics() {
   await setStoredAction(PLAIN_ID, "like", false, "local_web");
   await assertActionState(PLAIN_ID, "liked", false, "likes", 200, "local-web false leaves a non-library baseline unchanged");
 
+  await setStoredAction(PLAIN_ID, "collect", true, "imported");
+  await assertActionState(PLAIN_ID, "collected", true, "collects", 20, "legacy imported collect counting must remain unchanged");
+  await setStoredAction(PLAIN_ID, "collect", false, "imported");
+  await assertActionState(PLAIN_ID, "collected", false, "collects", 19, "legacy imported collect removal must remain unchanged");
+
   await setStoredAction(TARGET_ID, "like", true, "local_web");
   await assertActionState(TARGET_ID, "liked", true, "likes", 100, "library membership is the active like baseline");
   await assertPutAction(TARGET_ID, "like", true, "liked", "likes", 100);
@@ -272,7 +426,6 @@ async function verifyActionStatistics() {
 
 async function verifyMetadataSyncPreservesExplicitFalse() {
   await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
-  createManagerMembershipFixture();
   const targetDb = new DatabaseSync(dbPath);
   const managerDb = new DatabaseSync(managerDbPath, { readOnly: true });
   try {
@@ -281,7 +434,7 @@ async function verifyMetadataSyncPreservesExplicitFalse() {
       managerDb,
       "2026-08-12T13:00:00.000Z"
     );
-    assert.equal(result.membershipsSeen, 2);
+    assert.equal(result.membershipsSeen, 3);
     const action = targetDb.prepare(`
       SELECT active, source
       FROM short_video_user_actions
@@ -365,6 +518,14 @@ function createManagerMembershipFixture() {
       400,
       40
     );
+    insertLink.run(
+      3,
+      LEGACY_IMPORTED_AWEME_ID,
+      fixtureRoot,
+      JSON.stringify([path.join(fixtureRoot, `${LEGACY_IMPORTED_ID}.mp4`)]),
+      500,
+      50
+    );
   } finally {
     db.close();
   }
@@ -439,15 +600,36 @@ function assertImportedLocalAction() {
 }
 
 function assertStoredAction(videoId, active, source, message) {
+  assertStoredActionForUser("local:self", videoId, "like", active, source, message);
+}
+
+function assertStoredActionType(videoId, actionType, active, source, message) {
+  assertStoredActionForUser("local:self", videoId, actionType, active, source, message);
+}
+
+function assertStoredActionForUser(localUserId, videoId, actionType, active, source, message) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const action = db.prepare(`
       SELECT active, source
       FROM short_video_user_actions
-      WHERE local_user_id = 'local:self' AND video_id = ? AND action_type = 'like'
-    `).get(videoId);
+      WHERE local_user_id = ? AND video_id = ? AND action_type = ?
+    `).get(localUserId, videoId, actionType);
     assert.equal(Boolean(action?.active), active, message);
     assert.equal(action?.source, source, message);
+  } finally {
+    db.close();
+  }
+}
+
+function assertStoredBaseline(videoId, expected, message) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const row = db.prepare(`
+      SELECT baseline_active FROM short_video_user_actions
+      WHERE local_user_id = 'local:self' AND video_id = ? AND action_type = 'like'
+    `).get(videoId);
+    assert.equal(Boolean(row?.baseline_active), expected, message);
   } finally {
     db.close();
   }
@@ -495,16 +677,18 @@ async function setStoredAction(videoId, actionType, active, source) {
 
 function writeAction(db, videoId, actionType, active, source) {
   const now = "2026-08-12T12:00:00.000Z";
+  const baselineActive = actionType === "like" && (source === "imported" || source === "download_manager") ? 1 : 0;
   db.prepare(`
     INSERT INTO short_video_user_actions (
-      local_user_id, video_id, action_type, active, source, acted_at, updated_at
-    ) VALUES ('local:self', ?, ?, ?, ?, ?, ?)
+      local_user_id, video_id, action_type, active, source, baseline_active, acted_at, updated_at
+    ) VALUES ('local:self', ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
       active = excluded.active,
       source = excluded.source,
+      baseline_active = excluded.baseline_active,
       acted_at = excluded.acted_at,
       updated_at = excluded.updated_at
-  `).run(videoId, actionType, active ? 1 : 0, source, now, now);
+  `).run(videoId, actionType, active ? 1 : 0, source, baselineActive, now, now);
 }
 
 async function request(method, pathname, body = null) {
@@ -541,6 +725,85 @@ function readMeta(filePath, key) {
   const db = new DatabaseSync(filePath, { readOnly: true });
   try {
     return String(db.prepare("SELECT value FROM short_video_meta WHERE key = ?").get(key)?.value || "");
+  } finally {
+    db.close();
+  }
+}
+
+async function verifyRecommendedRecoversAfterLockedPreflight() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-schema-retry-"));
+  const lockedDbPath = path.join(root, "short-videos.sqlite");
+  const lockedCacheRoot = path.join(root, "cache");
+  let lockedRuntime = null;
+  const bootstrap = createShortVideoStore({ dbPath: lockedDbPath, roots: [] });
+  try {
+    bootstrap.summary();
+  } finally {
+    bootstrap.close();
+  }
+  const db = new DatabaseSync(lockedDbPath);
+  try {
+    const baseSql = String(db.prepare("SELECT sql FROM sqlite_master WHERE type='view' AND name='short_video_catalog_base'").get()?.sql || "");
+    const catalogSql = String(db.prepare("SELECT sql FROM sqlite_master WHERE type='view' AND name='short_video_catalog'").get()?.sql || "");
+    const oldBaseSql = baseSql.replace(/\s*COALESCE\(user_like\.baseline_active, 0\) AS user_like_baseline_active,\s*/u, "");
+    db.exec("DROP VIEW short_video_catalog; DROP VIEW short_video_catalog_base;");
+    db.exec(oldBaseSql);
+    db.exec(catalogSql);
+    db.exec("ALTER TABLE short_video_user_actions DROP COLUMN baseline_active");
+    db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('schema_version', ?)").run(ACTIONS_12_SCHEMA_VERSION);
+    db.exec("BEGIN IMMEDIATE");
+
+    lockedRuntime = createShortVideosRuntime({
+      dbPath: lockedDbPath,
+      downloadManagerDbPath: "",
+      downloadManagerSyncMs: 0,
+      schemaBusyTimeoutMs: 25,
+      ffmpegPath: "ffmpeg",
+      ffprobePath: "ffprobe",
+      roots: [],
+      mediaResponseService: { serveImage() {} },
+      mediaStreamService: { serveVideo() {} },
+      notFound() {},
+      readJsonBody: async () => ({}),
+      requireLocalAdmin: () => true,
+      sendJson(res, status, data) { res.status = status; res.data = data; },
+      sharedCache: { rootDir: lockedCacheRoot, scheduleCleanup() {}, touch() {} }
+    });
+    assert.equal(readMeta(lockedDbPath, "schema_version"), ACTIONS_12_SCHEMA_VERSION, "locked startup preflight must leave actions-12 pending");
+    assert.equal(lockedRuntime.catalogWorkerDiagnostics().workerStarts, 0, "failed startup preflight must not start the reader");
+    db.exec("ROLLBACK");
+
+    const response = {};
+    await lockedRuntime.routeApi(
+      { method: "GET" },
+      response,
+      new URL("http://fixture/api/short-videos?source=recommended&stats=0&facets=0&limit=5")
+    );
+    assert.equal(response.status, 200, "the first recommended request after lock release must repair schema and succeed");
+    assert.equal(readMeta(lockedDbPath, "schema_version"), CURRENT_SCHEMA_VERSION, "recommended recovery must advance schema");
+    assert.equal(hasActionColumn(lockedDbPath, "baseline_active"), true, "recommended recovery must add the action baseline column");
+    assert.equal(lockedRuntime.catalogWorkerDiagnostics().workerStarts, 1, "recommended recovery must start one read-only worker");
+    const repeated = {};
+    await lockedRuntime.routeApi(
+      { method: "GET" },
+      repeated,
+      new URL("http://fixture/api/short-videos?source=recommended&stats=0&facets=0&limit=5&refresh=1")
+    );
+    assert.equal(repeated.status, 200, "later recommended requests must stay healthy after schema repair");
+    assert.equal(lockedRuntime.catalogWorkerDiagnostics().workerStarts, 1, "successful schema repair must remain latched");
+  } finally {
+    try { db.exec("ROLLBACK"); } catch {}
+    db.close();
+    await lockedRuntime?.stop();
+    lockedRuntime?.store?.close();
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+}
+
+function hasActionColumn(filePath, columnName) {
+  const db = new DatabaseSync(filePath, { readOnly: true });
+  try {
+    return db.prepare("PRAGMA table_info(short_video_user_actions)").all().some((column) => column.name === columnName);
   } finally {
     db.close();
   }

@@ -58,7 +58,7 @@ const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260812-native-user-actions-12";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260812-native-user-actions-13";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -113,6 +113,7 @@ const LIST_VIDEO_COLUMNS = [
   "play_count",
   "user_like_active",
   "user_like_source",
+  "user_like_baseline_active",
   "user_collect_active",
   "user_collect_source",
   "user_dislike_active",
@@ -237,6 +238,7 @@ export function createShortVideoStore(options = {}) {
           throw new Error("short video database schema is unavailable");
         } else if (!currentSchema) {
           ensureSchema(opened, coverCacheDir);
+          migrateNativeUserActionOwnershipV13(opened);
           opened.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('schema_version', ?)")
             .run(SHORT_VIDEO_SCHEMA_VERSION);
         } else if (!skipStartupMaintenance) {
@@ -3416,7 +3418,13 @@ function isCurrentShortVideoSchema(db) {
     return false;
   }
 }
-
+function migrateNativeUserActionOwnershipV13(db) {
+  db.prepare(`
+    UPDATE short_video_user_actions SET baseline_active = 1,
+      source = CASE WHEN active = 0 THEN 'local_web' ELSE source END
+    WHERE local_user_id = ? AND action_type = 'like' AND source IN ('imported', 'download_manager')
+  `).run(LOCAL_SHORT_VIDEO_USER_ID);
+}
 function ensureSchema(db, coverCacheDir = "") {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -3556,6 +3564,7 @@ function ensureSchema(db, coverCacheDir = "") {
       action_type TEXT NOT NULL,
       active INTEGER NOT NULL DEFAULT 1,
       source TEXT NOT NULL DEFAULT '',
+      baseline_active INTEGER NOT NULL DEFAULT 0,
       acted_at TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY(local_user_id, video_id, action_type)
@@ -4100,15 +4109,14 @@ function mergeDuplicateShortVideoActions(db, duplicateId, keepId, now) {
       : String(keep.source || row.source || "");
     const actedAt = duplicateTimestamp > keepTimestamp ? String(row.acted_at || "") : String(keep.acted_at || "");
     db.prepare(`
-      UPDATE short_video_user_actions
-      SET active = ?,
-          source = ?,
+      UPDATE short_video_user_actions SET active = ?, source = ?,
+          baseline_active = MAX(COALESCE(baseline_active, 0), ?),
           acted_at = ?,
           updated_at = ?
       WHERE local_user_id = ?
         AND video_id = ?
         AND action_type = ?
-    `).run(active, source, actedAt, now, row.local_user_id, keepId, row.action_type);
+    `).run(active, source, Math.max(Number(keep.baseline_active || 0), Number(row.baseline_active || 0)), actedAt, now, row.local_user_id, keepId, row.action_type);
     db.prepare(`
       DELETE FROM short_video_user_actions
       WHERE local_user_id = ? AND video_id = ? AND action_type = ?
@@ -4401,13 +4409,14 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
         AND asset_type LIKE 'gallery_%:%'
     `),
     action: db.prepare(`
-      INSERT INTO short_video_user_actions (
-        local_user_id, video_id, action_type, active, source, acted_at, updated_at
+      INSERT INTO short_video_user_actions (local_user_id, video_id, action_type, active, source,
+        baseline_active, acted_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
         active = excluded.active,
         source = excluded.source,
+        baseline_active = 1,
         acted_at = excluded.acted_at,
         updated_at = excluded.updated_at
       WHERE short_video_user_actions.source <> 'local_web'

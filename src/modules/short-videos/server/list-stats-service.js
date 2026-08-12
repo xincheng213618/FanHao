@@ -1,6 +1,6 @@
 import { normalizeShortVideoStatsFilter } from "./stats-query.js";
 
-export function createShortVideoListStatsService({ store, catalogWorker, logger = console }) {
+export function createShortVideoListStatsService({ store, catalogWorker, ensureCatalogSchema = null, logger = console }) {
   if (!store || typeof store.listVideos !== "function" || typeof store.catalogStamp !== "function") {
     throw new Error("short-video list stats service requires a catalog-aware store");
   }
@@ -13,6 +13,7 @@ export function createShortVideoListStatsService({ store, catalogWorker, logger 
     const filter = normalizeShortVideoStatsFilter(params);
     if (filter.source === "recommended") {
       try {
+        ensureCatalogSchema?.();
         return await catalogWorker.query(workerListUrl(urlOrOptions), "list");
       } catch (error) {
         logger?.warn?.("[short-video-recommended-worker]", error?.message || error);

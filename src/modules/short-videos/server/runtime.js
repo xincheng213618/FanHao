@@ -37,7 +37,7 @@ const SHORT_VIDEO_SMOOTH_MAX_EDGE = 2560;
 const SHORT_VIDEO_SMOOTH_RENDITION_VERSION = 2;
 const SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE = 2160;
 const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
-const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v4-native-user-actions";
+const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v5-action-baselines";
 const SHORT_VIDEO_CACHE_WATCH_DELAY_MS = 4000;
 const SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS = 750;
 const SHORT_VIDEO_CACHE_MIN_PROGRESS_MS = 500;
@@ -60,6 +60,7 @@ export function createShortVideosRuntime({
   sendJson,
   sharedCache,
   catalogWorkerOptions = {},
+  schemaBusyTimeoutMs = 10000,
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
   setTranscodeConcurrency = null
 }) {
@@ -70,10 +71,13 @@ export function createShortVideosRuntime({
     downloadManagerDbPath,
     ffmpegPath,
     roots,
-    skipStartupMaintenance: true
+    skipStartupMaintenance: true,
+    busyTimeoutMs: schemaBusyTimeoutMs
   });
+  let catalogSchemaPrepared = false;
   try {
     store.prepareSchema();
+    catalogSchemaPrepared = true;
   } catch {
     // Preserve the route's lazy, sanitized 503 boundary for corrupt or
     // unavailable databases. A readable legacy schema still cannot reach the
@@ -100,7 +104,17 @@ export function createShortVideosRuntime({
       return Reflect.get(target, property, receiver);
     }
   });
-  const listStatsService = createShortVideoListStatsService({ store, catalogWorker });
+  const ensureCatalogSchema = () => {
+    if (catalogSchemaPrepared) return;
+    try {
+      store.prepareSchema();
+    } finally {
+      store.close();
+    }
+    catalogSchemaPrepared = true;
+    catalogWorker.reset();
+  };
+  const listStatsService = createShortVideoListStatsService({ store, catalogWorker, ensureCatalogSchema });
   const watchWriter = createShortVideoWatchWriteService({
     dbPath,
     downloadManagerDbPath,

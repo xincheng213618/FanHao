@@ -40,6 +40,7 @@ export function ensureShortVideoColumns(db) {
   addColumnIfMissing(db, "short_video_users", "account_status_detected_at", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_source_memberships", "is_missing_from_profile", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "short_video_source_memberships", "missing_from_profile_at", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_user_actions", "baseline_active", "INTEGER NOT NULL DEFAULT 0");
   db.exec(`
     UPDATE short_videos
     SET media_type = CASE
@@ -583,6 +584,7 @@ export function recreateShortVideoCatalogView(db) {
       COALESCE(s.play_count, v.play_count, 0) AS play_count,
       COALESCE(user_like.active, 0) AS user_like_active,
       COALESCE(user_like.source, '') AS user_like_source,
+      COALESCE(user_like.baseline_active, 0) AS user_like_baseline_active,
       COALESCE(user_collect.active, 0) AS user_collect_active,
       COALESCE(user_collect.source, '') AS user_collect_source,
       COALESCE(user_dislike.active, 0) AS user_dislike_active,
