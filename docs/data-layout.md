@@ -66,7 +66,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 
 ## 音乐库（`music.sqlite`）
 
-音乐模块默认扫描 `D:\Media\Music`，也可通过 `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT`
+音乐模块默认扫描 `E:\Music`，也可通过 `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT`
 覆盖。扫描会重建歌手、专辑、歌曲、歌词与全文搜索索引，保留 `music_track_state` 中的收藏、播放次数与播放进度。
 
 主要表：
