@@ -121,7 +121,7 @@ final class DeleteResult {
   }
 }
 
-final class ShortVideoItem {
+final class ShortVideoItem implements NativeShortVideoActionSnapshots.Target {
   final String id;
   final String awemeId;
   final String mediaType;
@@ -214,6 +214,26 @@ final class ShortVideoItem {
 
   boolean isGallery() {
     return "gallery".equals(mediaType) && !galleryItems.isEmpty();
+  }
+
+  @Override
+  public String actionVideoId() {
+    return id;
+  }
+
+  @Override
+  public NativeShortVideoActionSnapshots.Snapshot currentActionSnapshot() {
+    return new NativeShortVideoActionSnapshots.Snapshot(
+      true, userLiked, true, userCollected, true, likes, true, collects
+    );
+  }
+
+  @Override
+  public void applyActionSnapshot(NativeShortVideoActionSnapshots.Snapshot snapshot) {
+    if (snapshot.hasLiked) userLiked = snapshot.liked;
+    if (snapshot.hasCollected) userCollected = snapshot.collected;
+    if (snapshot.hasLikes) likes = snapshot.likes;
+    if (snapshot.hasCollects) collects = snapshot.collects;
   }
 
   boolean isSingleLivePhoto() {

@@ -1,5 +1,4 @@
 package local.fanhao.library;
-
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
@@ -45,7 +44,6 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.media3.common.MediaItem;
@@ -69,10 +67,8 @@ import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager2.widget.ViewPager2;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
-
 import java.io.File;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -90,11 +86,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
 @UnstableApi
 public class NativeShortVideoActivity extends Activity {
   private static final String TAG = "NativeShortVideo";
-
   public static final String EXTRA_VIDEOS_JSON = "videosJson";
   public static final String EXTRA_START_INDEX = "startIndex";
   public static final String EXTRA_START_ID = "startId";
@@ -108,10 +102,6 @@ public class NativeShortVideoActivity extends Activity {
   private static final String PREF_MUTED = "muted";
   private static final String PREF_VIDEO_FIT_MODE = "videoFitMode";
   private static final String PREF_AUTO_NEXT = "autoNext";
-  private static final String PREF_LIKED_VIDEO_KEYS = "likedVideoKeys";
-  private static final String PREF_COLLECTED_VIDEO_KEYS = "collectedVideoKeys";
-  private static final String PREF_LEGACY_ACTION_SCOPE = "legacyActionScope.v1";
-  private static final String PREF_ACTION_STATE_PREFIX = "actionState.v1.";
   private static final String PREF_FOLLOWED_AUTHOR_KEYS = "followedAuthorKeys";
   private static final long STAGE_DOUBLE_TAP_MS = 280;
   private static final long GALLERY_IMAGE_AUTO_ADVANCE_MS = 4000;
@@ -190,8 +180,8 @@ public class NativeShortVideoActivity extends Activity {
   private int commentsPausedIndex = -1;
   private ScreenState currentScreen;
   private String apiBaseUrl;
-  private String actionServerScope = "";
-  private NativeShortVideoActionState actionState = new NativeShortVideoActionState(Collections.emptyList());
+  private NativeShortVideoActionPreferences actionPreferences;
+  private final NativeShortVideoActionSnapshots actionSnapshots = new NativeShortVideoActionSnapshots();
   private String pendingFeedUrl;
   private int pendingStartIndex;
   private int nextFeedOffset;
@@ -239,7 +229,10 @@ public class NativeShortVideoActivity extends Activity {
     initializeVideoCache();
     apiBaseUrl = getIntent().getStringExtra(EXTRA_BASE_URL);
     pendingFeedUrl = getIntent().getStringExtra(EXTRA_FEED_URL);
-    initializeActionState();
+    actionPreferences = new NativeShortVideoActionPreferences(
+      getSharedPreferences(PREFS_NAME, MODE_PRIVATE),
+      apiBase()
+    );
     pendingStartIndex = Math.max(0, getIntent().getIntExtra(EXTRA_START_INDEX, 0));
     nextFeedOffset = Math.max(0, getIntent().getIntExtra(EXTRA_NEXT_OFFSET, 0));
     nextFeedCursor = String.valueOf(getIntent().getStringExtra(EXTRA_NEXT_CURSOR));
@@ -248,13 +241,14 @@ public class NativeShortVideoActivity extends Activity {
     feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     openAuthorPanelOnStart = getIntent().getBooleanExtra(EXTRA_OPEN_AUTHOR_PANEL, false);
     readVideos();
-    reconcileServerActionSnapshots(videos);
+    acceptServerActionSnapshots(videos, actionSnapshots.revision());
+    actionPreferences.reconcile(videos);
     String requestedStartId = String.valueOf(getIntent().getStringExtra(EXTRA_START_ID));
     int requestedStartIndex = findVideoIndex(videos, requestedStartId);
     if (requestedStartIndex >= 0) pendingStartIndex = requestedStartIndex;
     buildUi();
     currentScreen = captureFeedScreen();
-    syncPendingVideoActions(false);
+    syncPendingVideoActions(true);
     if (!videos.isEmpty()) {
       int initialIndex = Math.max(0, Math.min(pendingStartIndex, videos.size() - 1));
       if (openAuthorPanelOnStart) openInitialAuthorScreen(initialIndex);
@@ -491,7 +485,7 @@ public class NativeShortVideoActivity extends Activity {
       }
 
       @Override public String originalVideoUrl(ShortVideoItem item) {
-        return NativeShortVideoActivity.this.originalVideoUrl(item);
+        return NativeShortVideoLinks.originalUrl(item);
       }
 
       @Override public void openOriginalVideo(ShortVideoItem item) {
@@ -645,6 +639,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void renderScreen(ScreenState screen) {
+    applyCanonicalActionSnapshots(screen);
     if (screen instanceof AuthorScreenState) {
       renderAuthorScreen(((AuthorScreenState) screen).copy());
       return;
@@ -657,6 +652,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void renderFeedScreen(FeedScreenState screen) {
+    applyCanonicalActionSnapshots(screen);
     removeAuthorOverlay();
     releaseAllPlayers();
     attachedHolders.clear();
@@ -671,7 +667,8 @@ public class NativeShortVideoActivity extends Activity {
     feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     videos.clear();
     videos.addAll(screen.items);
-    reconcileServerActionSnapshots(videos);
+    actionSnapshots.applyAll(videos);
+    actionPreferences.reconcile(videos);
     currentScreen = screen.copy();
     adapter.notifyDataSetChanged();
     if (videos.isEmpty()) {
@@ -2384,7 +2381,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private boolean isLiked(ShortVideoItem item) {
-    return item != null && actionState.active(item.id, NativeShortVideoActionState.Type.LIKE, item.userLiked);
+    return item != null && actionPreferences.state().active(item.id, NativeShortVideoActionState.Type.LIKE, item.userLiked);
   }
 
   private void toggleCollected(ShortVideoItem item) {
@@ -2397,32 +2394,37 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private boolean isCollected(ShortVideoItem item) {
-    return item != null && actionState.active(item.id, NativeShortVideoActionState.Type.COLLECT, item.userCollected);
+    return item != null && actionPreferences.state().active(item.id, NativeShortVideoActionState.Type.COLLECT, item.userCollected);
   }
 
   private void requestVideoAction(ShortVideoItem item, NativeShortVideoActionState.Type type, boolean active, boolean showStatus) {
-    NativeShortVideoActionState.Mutation mutation = actionState.request(item.id, type, serverAction(item, type), active);
-    persistActionState();
+    NativeShortVideoActionState.RequestResult request = actionPreferences.state().request(
+      item.id, type, NativeShortVideoActionClient.serverAction(item, type), active
+    );
+    if (!request.accepted) {
+      if (showStatus) showTransientStatus("待同步操作较多，本次未保存，请稍后重试");
+      return;
+    }
+    actionPreferences.persist();
     refreshVisibleRails();
     if (showStatus) {
       String action = type == NativeShortVideoActionState.Type.LIKE ? (active ? "已点赞" : "已取消点赞") : (active ? "已收藏" : "已取消收藏");
-      String pending = actionState.pending(item.id, type) ? "，正在同步" : "";
+      String pending = actionPreferences.state().pending(item.id, type) ? "，正在同步" : "";
       showTransientStatus(action + pending);
     }
-    dispatchVideoAction(mutation);
+    dispatchVideoAction(request.mutation);
   }
-
   private void syncPendingVideoActions(boolean announce) {
-    if (actionServerScope.length() == 0 || destroying) return;
-    for (NativeShortVideoActionState.Stored stored : actionState.snapshot()) {
-      dispatchVideoAction(actionState.resume(stored.videoId, stored.type));
+    if (actionPreferences.serverScope().length() == 0 || destroying) return;
+    for (NativeShortVideoActionState.Stored stored : actionPreferences.state().snapshot()) {
+      dispatchVideoAction(actionPreferences.state().resume(stored.videoId, stored.type));
     }
-    if (announce && actionState.pendingCount() > 0) showTransientStatus("正在同步 " + actionState.pendingCount() + " 项本机互动");
+    if (announce && actionPreferences.state().pendingCount() > 0) showTransientStatus("正在同步 " + actionPreferences.state().pendingCount() + " 项本机互动");
   }
 
   private void dispatchVideoAction(@Nullable NativeShortVideoActionState.Mutation mutation) {
-    if (mutation == null || destroying || actionServerScope.length() == 0) return;
-    String endpoint = actionEndpoint(mutation.videoId, mutation.type);
+    if (mutation == null || destroying || actionPreferences.serverScope().length() == 0) return;
+    String endpoint = NativeShortVideoActionClient.endpoint(actionPreferences.serverScope(), mutation.videoId, mutation.type);
     if (endpoint.length() == 0) return;
     executor.execute(() -> {
       try {
@@ -2448,48 +2450,49 @@ public class NativeShortVideoActivity extends Activity {
     boolean active = updatedActions != null
       ? updatedActions.optBoolean(mutation.type == NativeShortVideoActionState.Type.LIKE ? "liked" : "collected", mutation.active)
       : data != null && data.optBoolean("active", mutation.active);
+    NativeShortVideoActionState.Completion completion = actionPreferences.state().completeSuccess(mutation, active);
+    if (!completion.accepted) return;
     applyServerActionSnapshot(mutation.videoId, updated, mutation.type, active);
-    NativeShortVideoActionState.Completion completion = actionState.completeSuccess(mutation, active);
-    clearAcknowledgedLegacyActions();
-    persistActionState();
+    actionPreferences.clearAcknowledged(videos);
+    actionPreferences.persist();
     refreshVisibleRails();
     dispatchVideoAction(completion.next);
   }
 
   private void applyVideoActionFailure(NativeShortVideoActionState.Mutation mutation) {
-    NativeShortVideoActionState.Completion completion = actionState.completeFailure(mutation);
-    persistActionState();
+    NativeShortVideoActionState.Completion completion = actionPreferences.state().completeFailure(mutation);
+    if (!completion.accepted) return;
+    actionPreferences.persist();
     refreshVisibleRails();
     if (completion.rolledBack) {
       String label = mutation.type == NativeShortVideoActionState.Type.LIKE ? "点赞" : "收藏";
-      showTransientStatus(label + "未同步，已恢复服务器状态");
+      boolean pending = actionPreferences.state().pending(mutation.videoId, mutation.type);
+      showTransientStatus(label + "未同步，已恢复服务器状态" + (pending ? "，将稍后重试" : ""));
     }
     dispatchVideoAction(completion.next);
   }
 
   private void applyServerActionSnapshot(String videoId, @Nullable JSONObject updated, NativeShortVideoActionState.Type type, boolean fallbackActive) {
-    JSONObject actions = updated == null ? null : updated.optJSONObject("actions");
-    JSONObject stats = updated == null ? null : updated.optJSONObject("stats");
-    boolean liked = actions == null ? (type == NativeShortVideoActionState.Type.LIKE ? fallbackActive : false) : actions.optBoolean("liked", false);
-    boolean collected = actions == null ? (type == NativeShortVideoActionState.Type.COLLECT ? fallbackActive : false) : actions.optBoolean("collected", false);
-    for (ShortVideoItem item : videos) {
-      if (!videoId.equals(item.id)) continue;
-      item.userLiked = liked;
-      item.userCollected = collected;
-      if (stats != null) {
-        item.likes = Math.max(0, stats.optLong("likes", item.likes));
-        item.collects = Math.max(0, stats.optLong("collects", item.collects));
-      }
-    }
+    NativeShortVideoActionSnapshots.Snapshot snapshot = actionSnapshots.acceptAction(
+      videoId, NativeShortVideoActionResponse.snapshot(updated, type, fallbackActive)
+    );
+    if (snapshot == null) return;
+    feedReader.clear();
+    applyCanonicalActionSnapshots();
   }
 
-  private boolean serverAction(ShortVideoItem item, NativeShortVideoActionState.Type type) {
-    return item != null && (type == NativeShortVideoActionState.Type.LIKE ? item.userLiked : item.userCollected);
+  private void applyCanonicalActionSnapshots() {
+    NativeShortVideoActionModels.applyAll(actionSnapshots, videos, currentScreen, navigationStack);
   }
 
-  private String actionEndpoint(String videoId, NativeShortVideoActionState.Type type) {
-    if (!NativeShortVideoActionState.isServerVideoId(videoId) || actionServerScope.length() == 0) return "";
-    return actionServerScope + "/api/short-videos/" + Uri.encode(videoId) + "/actions/" + type.wireName;
+  private void acceptServerActionSnapshots(List<ShortVideoItem> items, long requestRevision) {
+    if (items == null) return;
+    actionSnapshots.acceptFeed(items, requestRevision);
+    applyCanonicalActionSnapshots();
+  }
+
+  private void applyCanonicalActionSnapshots(@Nullable ScreenState screen) {
+    NativeShortVideoActionModels.apply(actionSnapshots, screen);
   }
 
   private String videoInteractionKey(ShortVideoItem item) {
@@ -2498,128 +2501,6 @@ public class NativeShortVideoActivity extends Activity {
     if (item.awemeId.length() > 0) return "aweme:" + item.awemeId;
     if (item.streamUrl.length() > 0) return "stream:" + item.streamUrl;
     return "";
-  }
-
-  private void initializeActionState() {
-    actionServerScope = NativeShortVideoActionState.serverScope(apiBase());
-    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-    actionState = new NativeShortVideoActionState(readStoredActionStates(prefs, actionServerScope));
-    if (actionServerScope.length() == 0) return;
-    String legacyScope = prefs.getString(PREF_LEGACY_ACTION_SCOPE, "");
-    if (legacyScope.length() == 0) {
-      // Old releases did not retain an origin. Bind their one-time migration to
-      // the first current server only; later server switches never reuse it.
-      prefs.edit().putString(PREF_LEGACY_ACTION_SCOPE, actionServerScope).apply();
-    }
-  }
-
-  private List<NativeShortVideoActionState.Stored> readStoredActionStates(SharedPreferences prefs, String scope) {
-    List<NativeShortVideoActionState.Stored> stored = new ArrayList<>();
-    if (scope == null || scope.length() == 0) return stored;
-    String encoded = prefs.getString(PREF_ACTION_STATE_PREFIX + scope, "");
-    try {
-      JSONArray rows = new JSONArray(encoded == null ? "[]" : encoded);
-      for (int index = 0; index < rows.length() && stored.size() < NativeShortVideoActionState.MAX_STORED_ACTIONS; index++) {
-        JSONObject row = rows.optJSONObject(index);
-        if (row == null) continue;
-        stored.add(new NativeShortVideoActionState.Stored(
-          row.optString("videoId", ""),
-          NativeShortVideoActionState.Type.fromWireName(row.optString("type", "")),
-          row.optBoolean("confirmed", false),
-          row.optBoolean("desired", false),
-          row.optBoolean("legacy", false)
-        ));
-      }
-    } catch (Exception ignored) {}
-    return stored;
-  }
-
-  private void persistActionState() {
-    if (actionServerScope.length() == 0) return;
-    JSONArray rows = new JSONArray();
-    for (NativeShortVideoActionState.Stored stored : actionState.snapshot()) {
-      JSONObject row = new JSONObject();
-      try {
-        row.put("videoId", stored.videoId);
-        row.put("type", stored.type.wireName);
-        row.put("confirmed", stored.confirmed);
-        row.put("desired", stored.desired);
-        row.put("legacy", stored.legacy);
-        rows.put(row);
-      } catch (Exception ignored) {}
-    }
-    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-      .putString(PREF_ACTION_STATE_PREFIX + actionServerScope, rows.toString())
-      .apply();
-  }
-
-  private void reconcileServerActionSnapshots(List<ShortVideoItem> items) {
-    if (items == null || actionServerScope.length() == 0) return;
-    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-    boolean migrateLegacy = actionServerScope.equals(prefs.getString(PREF_LEGACY_ACTION_SCOPE, ""));
-    for (ShortVideoItem item : items) {
-      if (item == null || item.id.length() == 0) continue;
-      if (migrateLegacy) {
-        if (legacyActionMatches(prefs, item, PREF_LIKED_VIDEO_KEYS)) actionState.importLegacy(item.id, NativeShortVideoActionState.Type.LIKE);
-        if (legacyActionMatches(prefs, item, PREF_COLLECTED_VIDEO_KEYS)) actionState.importLegacy(item.id, NativeShortVideoActionState.Type.COLLECT);
-      }
-      actionState.observeServer(item.id, NativeShortVideoActionState.Type.LIKE, item.userLiked);
-      actionState.observeServer(item.id, NativeShortVideoActionState.Type.COLLECT, item.userCollected);
-    }
-    clearAcknowledgedLegacyActions();
-    persistActionState();
-  }
-
-  private boolean legacyActionMatches(SharedPreferences prefs, ShortVideoItem item, String preferenceKey) {
-    Set<String> legacy = prefs.getStringSet(preferenceKey, Collections.emptySet());
-    if (legacy == null || legacy.isEmpty()) return false;
-    return legacy.contains(item.id)
-      || legacy.contains(item.awemeId)
-      || legacy.contains("aweme:" + item.awemeId);
-  }
-
-  private void clearAcknowledgedLegacyActions() {
-    List<NativeShortVideoActionState.Stored> acknowledged = actionState.drainAcknowledgedLegacy();
-    if (acknowledged.isEmpty()) return;
-    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-    Set<String> likes = new HashSet<>(prefs.getStringSet(PREF_LIKED_VIDEO_KEYS, Collections.emptySet()));
-    Set<String> collects = new HashSet<>(prefs.getStringSet(PREF_COLLECTED_VIDEO_KEYS, Collections.emptySet()));
-    for (NativeShortVideoActionState.Stored stored : acknowledged) {
-      ShortVideoItem item = findVideoById(stored.videoId);
-      removeLegacyActionKeys(stored.type == NativeShortVideoActionState.Type.LIKE ? likes : collects, stored.videoId, item == null ? "" : item.awemeId);
-    }
-    SharedPreferences.Editor editor = prefs.edit()
-      .putStringSet(PREF_LIKED_VIDEO_KEYS, likes)
-      .putStringSet(PREF_COLLECTED_VIDEO_KEYS, collects);
-    if (likes.isEmpty() && collects.isEmpty()) editor.remove(PREF_LEGACY_ACTION_SCOPE);
-    editor.apply();
-  }
-
-  private void removeLegacyActionKeys(Set<String> values, String videoId, String awemeId) {
-    values.remove(videoId);
-    if (awemeId != null && awemeId.length() > 0) {
-      values.remove(awemeId);
-      values.remove("aweme:" + awemeId);
-    }
-  }
-
-  private void clearLegacyActionsForDeletedVideos(List<ShortVideoItem> source, Set<String> ids) {
-    if (source == null || ids == null || ids.isEmpty()) return;
-    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-    Set<String> likes = new HashSet<>(prefs.getStringSet(PREF_LIKED_VIDEO_KEYS, Collections.emptySet()));
-    Set<String> collects = new HashSet<>(prefs.getStringSet(PREF_COLLECTED_VIDEO_KEYS, Collections.emptySet()));
-    for (ShortVideoItem item : source) {
-      if (item == null || !ids.contains(item.id)) continue;
-      removeLegacyActionKeys(likes, item.id, item.awemeId);
-      removeLegacyActionKeys(collects, item.id, item.awemeId);
-    }
-    prefs.edit().putStringSet(PREF_LIKED_VIDEO_KEYS, likes).putStringSet(PREF_COLLECTED_VIDEO_KEYS, collects).apply();
-  }
-
-  @Nullable
-  private ShortVideoItem findVideoById(String videoId) {
-    for (ShortVideoItem item : videos) if (videoId.equals(item.id)) return item;
-    return null;
   }
 
   private String authorInteractionKey(ShortVideoItem item) {
@@ -2992,6 +2873,7 @@ public class NativeShortVideoActivity extends Activity {
     if (request == null) return;
     loadingMoreVideos = true;
     String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, nextFeedCursor, FEED_PAGE_LIMIT);
+    long actionRevision = actionSnapshots.revision();
     Log.i(TAG, "load more offset=" + nextFeedOffset + " cursor=" + (nextFeedCursor.length() > 0));
     executor.execute(() -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(feedUrl);
@@ -3004,6 +2886,7 @@ public class NativeShortVideoActivity extends Activity {
           return;
         }
         FeedPage page = result.value;
+        acceptServerActionSnapshots(page.items, actionRevision);
         nextFeedOffset = page.nextOffset();
         nextFeedCursor = page.nextCursor;
         hasMoreVideos = page.hasMore;
@@ -3016,7 +2899,7 @@ public class NativeShortVideoActivity extends Activity {
           videos.add(item);
           inserted++;
         }
-        reconcileServerActionSnapshots(videos);
+        actionPreferences.reconcile(videos);
         syncPendingVideoActions(false);
         if (inserted > 0) {
           adapter.notifyItemRangeInserted(videos.size() - inserted, inserted);
@@ -3122,9 +3005,8 @@ public class NativeShortVideoActivity extends Activity {
     attachedHolders.clear();
     feedPaging.clearPendingAutoAdvance();
     loadingMoreVideos = false;
-    for (String id : ids) actionState.removeVideo(id);
-    clearLegacyActionsForDeletedVideos(before, ids);
-    persistActionState();
+    actionPreferences.clearDeleted(before, ids);
+    for (String id : ids) actionSnapshots.remove(id);
     videos.clear();
     for (ShortVideoItem item : before) {
       if (!ids.contains(item.id)) videos.add(item);
@@ -3468,6 +3350,7 @@ public class NativeShortVideoActivity extends Activity {
   private void loadFeedAsync(String feedUrl, int startIndex) {
     String normalizedFeedUrl = normalizeFeedUrl(feedUrl);
     long replacementGeneration = feedPaging.beginFeedReplacement(normalizedFeedUrl);
+    long actionRevision = actionSnapshots.revision();
     executor.execute(() -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(normalizedFeedUrl);
       mainHandler.post(() -> {
@@ -3478,9 +3361,11 @@ public class NativeShortVideoActivity extends Activity {
           return;
         }
         FeedPage page = result.value;
+        acceptServerActionSnapshots(page.items, actionRevision);
         videos.clear();
         videos.addAll(page.items);
-        reconcileServerActionSnapshots(videos);
+        actionSnapshots.applyAll(videos);
+        actionPreferences.reconcile(videos);
         syncPendingVideoActions(false);
         nextFeedOffset = page.nextOffset();
         nextFeedCursor = page.nextCursor;
@@ -3541,6 +3426,8 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void renderAuthorScreen(AuthorScreenState screen) {
+    applyCanonicalActionSnapshots(screen);
+    if (screen.page != null) actionPreferences.reconcile(screen.page.items);
     ShortVideoItem seed = screen.seed;
     removeAuthorOverlay();
     cancelGalleryAutoAdvance();
@@ -3885,6 +3772,7 @@ public class NativeShortVideoActivity extends Activity {
 
     String authorUrl = authorFeedUrl(seed, 0, AUTHOR_PAGE_LIMIT, screen.sort);
     if (shouldLoadInitialAuthorPage && authorUrl.length() > 0) {
+      long actionRevision = actionSnapshots.revision();
       executor.execute(() -> {
         NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(authorUrl);
         mainHandler.post(() -> {
@@ -3895,6 +3783,8 @@ public class NativeShortVideoActivity extends Activity {
           }
           FeedPage loaded = result.value;
           if (loaded.items.isEmpty()) return;
+          acceptServerActionSnapshots(loaded.items, actionRevision);
+          actionPreferences.reconcile(loaded.items);
           pageRef[0] = loaded;
           screen.page = loaded.copy();
           render[0].run();
@@ -4060,6 +3950,7 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     showStatus("正在按" + authorSortLabel(screen.sort) + "排序");
+    long actionRevision = actionSnapshots.revision();
     executor.execute(() -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url);
       mainHandler.post(() -> {
@@ -4069,6 +3960,8 @@ public class NativeShortVideoActivity extends Activity {
           return;
         }
         FeedPage loaded = result.value;
+        acceptServerActionSnapshots(loaded.items, actionRevision);
+        actionPreferences.reconcile(loaded.items);
         if (loaded.items.isEmpty()) pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
         else pageRef[0] = loaded;
         screen.page = pageRef[0].copy();
@@ -4084,6 +3977,7 @@ public class NativeShortVideoActivity extends Activity {
     String url = authorFeedUrl(screen.seed, offset, AUTHOR_PAGE_LIMIT, screen.sort);
     if (url.length() == 0) return;
     screen.loadingMore = true;
+    long actionRevision = actionSnapshots.revision();
     Log.i(TAG, "load author more author=" + displayAuthor(screen.seed) + " offset=" + offset + " sort=" + screen.sort);
     if (render[0] != null) render[0].run();
     executor.execute(() -> {
@@ -4096,6 +3990,8 @@ public class NativeShortVideoActivity extends Activity {
           return;
         }
         FeedPage loaded = result.value;
+        acceptServerActionSnapshots(loaded.items, actionRevision);
+        actionPreferences.reconcile(loaded.items);
         if (!loaded.items.isEmpty()) {
           Set<String> seen = new HashSet<>();
           for (ShortVideoItem item : current.items) seen.add(item.id);
@@ -4937,8 +4833,8 @@ public class NativeShortVideoActivity extends Activity {
       dp(72)
     ));
 
-    String originalUrl = originalVideoUrl(item);
-    String shareUrl = shareVideoUrl(item);
+    String originalUrl = NativeShortVideoLinks.originalUrl(item);
+    String shareUrl = NativeShortVideoLinks.shareUrl(item);
     ShortVideoHolder holder = attachedHolders.get(currentIndex);
     GalleryMedia activeGalleryMedia = item.isGallery() && holder != null ? galleryMediaAt(item, holder.galleryIndex) : null;
     if (item.isGallery() && (activeGalleryMedia == null || !activeGalleryMedia.isVideo())) {
@@ -5163,6 +5059,7 @@ public class NativeShortVideoActivity extends Activity {
     }
     showStatus("正在按" + authorSortLabel(normalized) + "排序");
     long replacementGeneration = feedPaging.beginFeedReplacement(sortedUrl);
+    long actionRevision = actionSnapshots.revision();
     loadingMoreVideos = true;
     executor.execute(() -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(sortedUrl);
@@ -5179,6 +5076,7 @@ public class NativeShortVideoActivity extends Activity {
           applyLocalFeedSort(normalized, "已按" + authorSortLabel(normalized) + "本地排序");
           return;
         }
+        acceptServerActionSnapshots(page.items, actionRevision);
         replaceFeedWithPage(page, sortedUrl, 0);
         showTransientStatus("已按" + authorSortLabel(normalized) + "排序");
       });
@@ -5216,7 +5114,8 @@ public class NativeShortVideoActivity extends Activity {
     feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     videos.clear();
     videos.addAll(page.items);
-    reconcileServerActionSnapshots(videos);
+    actionSnapshots.applyAll(videos);
+    actionPreferences.reconcile(videos);
     syncPendingVideoActions(false);
     currentScreen = new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, startIndex);
     adapter.notifyDataSetChanged();
@@ -5259,6 +5158,7 @@ public class NativeShortVideoActivity extends Activity {
     ScreenState returnScreen = captureCurrentScreen();
     showStatus(normalizedQuery.length() > 0 ? "正在搜索“" + normalizedQuery + "”" : "正在恢复全部作品");
     long replacementGeneration = feedPaging.beginFeedReplacement(searchUrl);
+    long actionRevision = actionSnapshots.revision();
     loadingMoreVideos = true;
     executor.execute(() -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(searchUrl);
@@ -5271,6 +5171,7 @@ public class NativeShortVideoActivity extends Activity {
           return;
         }
         FeedPage page = result.value;
+        acceptServerActionSnapshots(page.items, actionRevision);
         if (page.items.isEmpty()) {
           feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
           showTransientStatus(normalizedQuery.length() > 0 ? "没有找到相关短视频" : "没有可播放的短视频");
@@ -5512,21 +5413,8 @@ public class NativeShortVideoActivity extends Activity {
     return view;
   }
 
-  private String originalVideoUrl(ShortVideoItem item) {
-    String awemeId = item.awemeId.length() > 0 ? item.awemeId : item.id;
-    if (awemeId.matches("\\d{8,}")) return "https://www.douyin.com/video/" + awemeId;
-    String url = item.originalUrl.length() > 0 ? item.originalUrl : item.shareUrl;
-    return url.startsWith("http://") || url.startsWith("https://") ? url : "";
-  }
-
-  private String shareVideoUrl(ShortVideoItem item) {
-    String url = originalVideoUrl(item);
-    if (url.length() > 0) return url;
-    return item.streamUrl.startsWith("http://") || item.streamUrl.startsWith("https://") ? item.streamUrl : "";
-  }
-
   private void openOriginalVideo(ShortVideoItem item) {
-    String url = originalVideoUrl(item);
+    String url = NativeShortVideoLinks.originalUrl(item);
     if (url.length() == 0) {
       showTransientStatus("没有原始链接");
       return;
@@ -5539,7 +5427,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void shareVideo(ShortVideoItem item) {
-    String url = shareVideoUrl(item);
+    String url = NativeShortVideoLinks.shareUrl(item);
     if (url.length() == 0) {
       showTransientStatus("没有可分享的链接");
       return;
@@ -5706,61 +5594,6 @@ public class NativeShortVideoActivity extends Activity {
       return videos.size();
     }
 
-  }
-
-  private abstract static class ScreenState {}
-
-  private static final class FeedScreenState extends ScreenState {
-    final List<ShortVideoItem> items = new ArrayList<>();
-    final String feedUrl;
-    final int nextOffset;
-    final String nextCursor;
-    final boolean hasMore;
-    final int currentIndex;
-
-    FeedScreenState(List<ShortVideoItem> items, String feedUrl, int nextOffset, String nextCursor, boolean hasMore, int currentIndex) {
-      if (items != null) this.items.addAll(items);
-      this.feedUrl = feedUrl == null ? "" : feedUrl;
-      this.nextOffset = Math.max(0, nextOffset);
-      this.nextCursor = nextCursor == null ? "" : nextCursor;
-      this.hasMore = hasMore;
-      this.currentIndex = Math.max(0, currentIndex);
-    }
-
-    FeedScreenState copy() {
-      return new FeedScreenState(items, feedUrl, nextOffset, nextCursor, hasMore, currentIndex);
-    }
-  }
-
-  private static final class AuthorScreenState extends ScreenState {
-    final ShortVideoItem seed;
-    ShortVideoItem currentItem;
-    FeedPage page;
-    String activeTab;
-    String sort;
-    boolean loadingMore;
-    boolean hasPlaybackContext = true;
-    int worksGestureId;
-    int worksGestureDirection;
-    int worksScrollY;
-    @Nullable ScrollView worksScrollView;
-
-    AuthorScreenState(ShortVideoItem seed, @Nullable FeedPage page, String activeTab, String sort) {
-      this.seed = seed;
-      this.currentItem = seed;
-      this.page = page == null ? null : page.copy();
-      this.activeTab = activeTab == null || activeTab.length() == 0 ? "works" : activeTab;
-      this.sort = sort == null || sort.length() == 0 ? "published" : sort;
-    }
-
-    AuthorScreenState copy() {
-      AuthorScreenState copy = new AuthorScreenState(seed, page, activeTab, sort);
-      copy.currentItem = currentItem;
-      copy.loadingMore = loadingMore;
-      copy.hasPlaybackContext = hasPlaybackContext;
-      copy.worksScrollY = worksScrollY;
-      return copy;
-    }
   }
 
 }

@@ -36,7 +36,7 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       collected: Boolean(row.user_collect_active),
       disliked: Boolean(row.user_dislike_active)
     };
-    const likeDelta = shortVideoActionMetricDelta(row.user_like_active, row.user_like_source);
+    const likeDelta = shortVideoActionMetricDelta(row.user_like_active, row.user_like_source, row.library_liked);
     const collectDelta = shortVideoActionMetricDelta(row.user_collect_active, row.user_collect_source);
     const statisticsKnown = shortVideoStatisticsKnown(row);
     const watchProgressMs = Math.max(0, Number(row.watch_progress_ms || 0));
@@ -230,8 +230,9 @@ export function shortVideoMediaUrl(id, mtimeMs) {
   return version ? `${base}?v=${encodeURIComponent(version)}` : base;
 }
 
-function shortVideoActionMetricDelta(active, source) {
-  const baselineActive = IMPORTED_SHORT_VIDEO_ACTION_SOURCES.has(String(source || "").trim());
+function shortVideoActionMetricDelta(active, source, libraryActive = false) {
+  const baselineActive = Boolean(libraryActive)
+    || IMPORTED_SHORT_VIDEO_ACTION_SOURCES.has(String(source || "").trim());
   return Number(Boolean(active)) - Number(baselineActive);
 }
 

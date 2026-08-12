@@ -37,7 +37,7 @@ const SHORT_VIDEO_SMOOTH_MAX_EDGE = 2560;
 const SHORT_VIDEO_SMOOTH_RENDITION_VERSION = 2;
 const SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE = 2160;
 const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
-const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v3-author-account-status";
+const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v4-native-user-actions";
 const SHORT_VIDEO_CACHE_WATCH_DELAY_MS = 4000;
 const SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS = 750;
 const SHORT_VIDEO_CACHE_MIN_PROGRESS_MS = 500;
@@ -63,8 +63,8 @@ export function createShortVideosRuntime({
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
   setTranscodeConcurrency = null
 }) {
-  // Keep the HTTP process lightweight. The catalog worker owns startup
-  // prewarming; the main-thread store opens only when an API actually needs it.
+  // Complete versioned schema writes before the read-only catalog worker can
+  // observe the database. The store is closed immediately after this preflight.
   const store = createShortVideoStore({
     dbPath,
     downloadManagerDbPath,
@@ -72,6 +72,16 @@ export function createShortVideosRuntime({
     roots,
     skipStartupMaintenance: true
   });
+  try {
+    store.prepareSchema();
+  } catch {
+    // Preserve the route's lazy, sanitized 503 boundary for corrupt or
+    // unavailable databases. A readable legacy schema still cannot reach the
+    // worker: its read-only store rejects every non-current schema version,
+    // and the version is written only after ensureSchema completes.
+  } finally {
+    store.close();
+  }
   const catalogWorker = createShortVideoCatalogWorkerClient({
     ...catalogWorkerOptions,
     dbPath,

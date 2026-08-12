@@ -115,16 +115,11 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
       )
       ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
         active = 1,
-        source = CASE
-          WHEN short_video_user_actions.source = 'local_web' THEN short_video_user_actions.source
-          ELSE 'download_manager'
-        END,
+        source = 'download_manager',
         updated_at = excluded.updated_at
-      WHERE short_video_user_actions.active IS NOT 1
-         OR short_video_user_actions.source IS NOT CASE
-           WHEN short_video_user_actions.source = 'local_web' THEN short_video_user_actions.source
-           ELSE 'download_manager'
-         END
+      WHERE short_video_user_actions.source <> 'local_web'
+        AND (short_video_user_actions.active IS NOT 1
+          OR short_video_user_actions.source IS NOT 'download_manager')
     `).run(LOCAL_SHORT_VIDEO_USER_ID, now, now));
 
     originsChanged += changedRows(targetDb.prepare(`

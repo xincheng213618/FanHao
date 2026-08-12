@@ -58,7 +58,7 @@ const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260812-short-video-collections-11";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260812-native-user-actions-12";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -68,6 +68,7 @@ const LIST_VIDEO_COLUMNS = [
   "status",
   "visibility",
   "media_type",
+  "library_liked",
   "title",
   "description",
   "tags_json",
@@ -2033,7 +2034,7 @@ function summary() {
       ? Boolean(options.active)
       : !Boolean(existing?.active);
     const now = new Date().toISOString();
-    const source = String(existing?.source || "").trim() || "local_web";
+    const source = "local_web";
     database.prepare(`
       INSERT INTO short_video_user_actions (
         local_user_id, video_id, action_type, active, source, acted_at, updated_at
@@ -2041,10 +2042,7 @@ function summary() {
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
         active = excluded.active,
-        source = CASE
-          WHEN COALESCE(short_video_user_actions.source, '') = '' THEN excluded.source
-          ELSE short_video_user_actions.source
-        END,
+        source = excluded.source,
         acted_at = excluded.acted_at,
         updated_at = excluded.updated_at
     `).run(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, type, active ? 1 : 0, source, now, now);
@@ -3387,6 +3385,7 @@ function summary() {
     deleteLocalComment,
     musicFile,
     queueQualityUpgrades,
+    prepareSchema: () => Boolean(databaseOrOpen()),
     relatedVideos,
     removeCollectionVideo: collections.removeCollectionVideo,
     renameCollection: collections.renameCollection,
@@ -4075,7 +4074,7 @@ function mergeDuplicateShortVideoAssets(db, duplicateId, keepId, now) {
 function mergeDuplicateShortVideoActions(db, duplicateId, keepId, now) {
   const rows = db.prepare("SELECT * FROM short_video_user_actions WHERE video_id = ?").all(duplicateId);
   const keepStatement = db.prepare(`
-    SELECT 1 FROM short_video_user_actions
+    SELECT * FROM short_video_user_actions
     WHERE local_user_id = ? AND video_id = ? AND action_type = ?
   `);
   for (const row of rows) {
@@ -4088,16 +4087,28 @@ function mergeDuplicateShortVideoActions(db, duplicateId, keepId, now) {
       `).run(keepId, now, row.local_user_id, duplicateId, row.action_type);
       continue;
     }
+    const keepIsLocal = String(keep.source || "") === "local_web";
+    const duplicateIsLocal = String(row.source || "") === "local_web";
+    const keepTimestamp = String(keep.updated_at || keep.acted_at || "");
+    const duplicateTimestamp = String(row.updated_at || row.acted_at || "");
+    const duplicateWins = duplicateIsLocal && (!keepIsLocal || duplicateTimestamp > keepTimestamp);
+    const active = keepIsLocal || duplicateIsLocal
+      ? Number(duplicateWins ? row.active : keep.active || 0)
+      : Math.max(Number(keep.active || 0), Number(row.active || 0));
+    const source = keepIsLocal || duplicateIsLocal
+      ? "local_web"
+      : String(keep.source || row.source || "");
+    const actedAt = duplicateTimestamp > keepTimestamp ? String(row.acted_at || "") : String(keep.acted_at || "");
     db.prepare(`
       UPDATE short_video_user_actions
-      SET active = MAX(COALESCE(active, 0), ?),
-          source = COALESCE(NULLIF(source, ''), ?),
-          acted_at = CASE WHEN COALESCE(?, '') > COALESCE(acted_at, '') THEN ? ELSE acted_at END,
+      SET active = ?,
+          source = ?,
+          acted_at = ?,
           updated_at = ?
       WHERE local_user_id = ?
         AND video_id = ?
         AND action_type = ?
-    `).run(Number(row.active || 0), row.source || "", row.acted_at || "", row.acted_at || "", now, row.local_user_id, keepId, row.action_type);
+    `).run(active, source, actedAt, now, row.local_user_id, keepId, row.action_type);
     db.prepare(`
       DELETE FROM short_video_user_actions
       WHERE local_user_id = ? AND video_id = ? AND action_type = ?
@@ -4399,6 +4410,7 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
         source = excluded.source,
         acted_at = excluded.acted_at,
         updated_at = excluded.updated_at
+      WHERE short_video_user_actions.source <> 'local_web'
     `)
   };
 }
