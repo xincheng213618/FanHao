@@ -161,6 +161,7 @@ public class NativeShortVideoActivity extends Activity {
   private ShortVideoHolder galleryScaleHolder;
   private ShortVideoAdapter adapter;
   private TextView statusView;
+  private NativeShortVideoDeleteStatusView deleteStatusView;
   private TextView topInfoView;
   private ImageView topSearchButton;
   private ImageView topBackButton;
@@ -169,6 +170,7 @@ public class NativeShortVideoActivity extends Activity {
   private View authorOverlay;
   private View playbackToolbarOverlay;
   private NativeShortVideoCommentsController commentsController;
+  private NativeShortVideoDeleteController deleteController;
   private ExoPlayer commentsPausedVideo;
   private ExoPlayer commentsPausedGallerySegment;
   private ExoPlayer commentsPausedGallerySound;
@@ -245,6 +247,7 @@ public class NativeShortVideoActivity extends Activity {
     int requestedStartIndex = findVideoIndex(videos, requestedStartId);
     if (requestedStartIndex >= 0) pendingStartIndex = requestedStartIndex;
     buildUi();
+    deleteController = createDeleteController();
     currentScreen = captureFeedScreen();
     syncPendingVideoActions(true);
     if (!videos.isEmpty()) {
@@ -306,6 +309,7 @@ public class NativeShortVideoActivity extends Activity {
   protected void onDestroy() {
     Log.i(TAG, "destroy");
     destroying = true;
+    if (deleteController != null) deleteController.destroy();
     if (feedSearchController != null) feedSearchController.dismiss(false);
     stopSystemInfoUpdates();
     stopProgressUpdates();
@@ -446,6 +450,8 @@ public class NativeShortVideoActivity extends Activity {
     root.addView(statusView, statusParams);
     statusView.setVisibility(View.GONE);
 
+    deleteStatusView = new NativeShortVideoDeleteStatusView(this, root);
+
     commentsController = createCommentsController();
     setContentView(root);
     hideSystemBars();
@@ -487,6 +493,41 @@ public class NativeShortVideoActivity extends Activity {
         NativeShortVideoActivity.this.openOriginalVideo(item);
       }
     });
+  }
+
+  private NativeShortVideoDeleteController createDeleteController() {
+    return new NativeShortVideoDeleteController(new NativeShortVideoDeleteController.Host() {
+      @Override public void post(Runnable action) {
+        mainHandler.post(action);
+      }
+
+      @Override public void confirmDelete(String title, String message, Runnable onConfirm) {
+        AlertDialog dialog = new AlertDialog.Builder(NativeShortVideoActivity.this)
+          .setTitle(title)
+          .setMessage(message)
+          .setNegativeButton("取消", null)
+          .setPositiveButton("删除", (ignored, which) -> onConfirm.run())
+          .create();
+        dialog.setOnDismissListener(ignored -> hideSystemBars());
+        dialog.show();
+      }
+
+      @Override public void showTransientStatus(String message) {
+        NativeShortVideoActivity.this.showTransientStatus(message);
+      }
+
+      @Override public void showPersistentStatus(String message, String actionLabel, Runnable action) {
+        NativeShortVideoActivity.this.showPersistentDeleteStatus(message, actionLabel, action);
+      }
+
+      @Override public void clearPersistentStatus() {
+        NativeShortVideoActivity.this.clearPersistentDeleteStatus();
+      }
+
+      @Override public void applyCommittedDelete(DeleteResult result, boolean group) {
+        NativeShortVideoActivity.this.applyCommittedDelete(result, group);
+      }
+    }, new NativeShortVideoDeleteTransport());
   }
 
   private NativeShortVideoFeedSearchController createFeedSearchController() {
@@ -2933,61 +2974,11 @@ public class NativeShortVideoActivity extends Activity {
       showTransientStatus("没有可删除的视频记录");
       return;
     }
-    String title = group ? "删除同组短视频？" : "删除这条短视频？";
-    String message = (item.title.length() > 0 ? item.title : "当前短视频")
-      + "\n\n"
-      + (group
-        ? "会删除同一个本地文件夹下的短视频记录，以及这些记录引用且未被组外引用的本地文件。"
-        : "会删除资料库记录以及这条记录引用的本地视频文件。");
-    AlertDialog dialog = new AlertDialog.Builder(this)
-      .setTitle(title)
-      .setMessage(message)
-      .setNegativeButton("取消", null)
-      .setPositiveButton("删除", (ignored, which) -> deleteVideo(item, group))
-      .create();
-    dialog.setOnDismissListener(ignored -> hideSystemBars());
-    dialog.show();
+    String url = deleteVideoUrl(item, group);
+    deleteController.confirmDelete(item.id, item.title, group, url, apiBase());
   }
 
-  private void deleteVideo(ShortVideoItem item, boolean group) {
-    String url = deleteVideoUrl(item, group);
-    if (url.length() == 0) {
-      showTransientStatus("没有可用的删除接口");
-      return;
-    }
-    showStatus(group ? "正在删除同组短视频" : "正在删除短视频");
-    executor.execute(() -> {
-      try {
-        DeleteResult result = requestDeleteVideo(url, item);
-        mainHandler.post(() -> applyDeleteResult(item, result, group));
-      } catch (Exception error) {
-        String message = error.getMessage() == null || error.getMessage().length() == 0 ? "短视频删除失败" : error.getMessage();
-        mainHandler.post(() -> showTransientStatus(message));
-      }
-    });
-  }
-  private DeleteResult requestDeleteVideo(String url, ShortVideoItem item) throws Exception {
-    HttpURLConnection connection = null;
-    try {
-      connection = (HttpURLConnection) new URL(url).openConnection();
-      connection.setRequestMethod("DELETE");
-      connection.setConnectTimeout(8000);
-      connection.setReadTimeout(16000);
-      connection.setRequestProperty("Accept", "application/json");
-      connection.connect();
-      int status = connection.getResponseCode();
-      String body = NativeShortVideoHttpResponse.readUtf8(connection, status >= 200 && status < 300);
-      JSONObject data = body.length() > 0 ? new JSONObject(body) : new JSONObject();
-      return ShortVideoDeleteJson.parse(status, data, item == null ? "" : item.id);
-    } finally {
-      if (connection != null) connection.disconnect();
-    }
-  }
-  private void applyDeleteResult(ShortVideoItem seed, DeleteResult result, boolean group) {
-    if (!result.committed()) {
-      showTransientStatus(result.recoveryMessage());
-      return;
-    }
+  private void applyCommittedDelete(DeleteResult result, boolean group) {
     Set<String> ids = result.ids;
     if (ids.isEmpty()) {
       showTransientStatus("删除完成");
@@ -3012,11 +3003,9 @@ public class NativeShortVideoActivity extends Activity {
     adapter.notifyDataSetChanged();
 
     int deletedCount = Math.max(result.count, before.size() - videos.size());
-    String message = result.cleanupPending()
-      ? result.cleanupMessage()
-      : group
-        ? "已删除 " + Math.max(1, deletedCount) + " 条"
-        : "已删除";
+    String message = group
+      ? "已删除 " + Math.max(1, deletedCount) + " 条"
+      : "已删除";
     if (!result.cleanupPending() && result.deletedFiles > 0) message += "，" + result.deletedFiles + " 个文件";
 
     if (videos.isEmpty()) {
@@ -3268,6 +3257,14 @@ public class NativeShortVideoActivity extends Activity {
   private void showTransientStatus(String text) {
     showStatus(text);
     mainHandler.postDelayed(this::hideStatus, 1400);
+  }
+
+  private void showPersistentDeleteStatus(String text, String actionLabel, @Nullable Runnable action) {
+    if (deleteStatusView != null) deleteStatusView.show(text, actionLabel, action);
+  }
+
+  private void clearPersistentDeleteStatus() {
+    if (deleteStatusView != null) deleteStatusView.hide();
   }
 
   private void readControlPreferences() {

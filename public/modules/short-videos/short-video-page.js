@@ -11,8 +11,9 @@ import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-po
 import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
-import { requestShortVideoDelete, shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage, shortVideoDeleteRecoveryMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
-import { shortVideoDeleteApiPath } from "./router.js?v=20260813-delete-recovery-01";
+import { shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
+import { createShortVideoDeleteActions } from "./delete-actions.js?v=20260813-delete-client-state-02";
+import { createShortVideoDeleteRecoveryController } from "./delete-recovery.js?v=20260813-delete-client-state-02";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -78,6 +79,8 @@ export function createShortVideoPage(deps) {
   let shortVideoListCardsPromise = null;
   let shortVideoListCards = null;
   const playbackRenditionPolicy = createShortVideoPlaybackRenditionPolicy({ api });
+  const deleteRecoveryController = createShortVideoDeleteRecoveryController({ api });
+  const deleteActions = createShortVideoDeleteActions({ api, recovery: deleteRecoveryController, showToast: showBrowserToast });
   const transcodeManagementPage = createShortVideoTranscodeManagementPage({ api, els, formatBytes, setMainHeader, state });
   const {
     ensureShortVideoPlayerSource,
@@ -6141,18 +6144,12 @@ export function createShortVideoPage(deps) {
 
   async function deleteShortVideo(video, options = {}) {
     if (!video?.id) return;
-    const title = cardTitle(video);
     const scope = options.scope === "group" ? "group" : "single";
-    const prompt = scope === "group"
-      ? `确定删除同组短视频吗？\n\n${title}\n\n会删除同一个本地文件夹下的短视频记录，以及这些记录引用且未被组外引用的本地文件。`
-      : `确定删除这条短视频吗？\n\n${title}\n\n会删除资料库记录以及这条记录引用的本地视频文件。`;
-    const ok = window.confirm(prompt);
-    if (!ok) return;
     const deletingCurrent = state.shortVideo?.current?.id === video.id;
     const nextId = deletingCurrent ? state.shortVideo.nextId || "" : "";
     const prevId = deletingCurrent ? state.shortVideo.prevId || "" : "";
-    const data = await requestShortVideoDelete(api, `${shortVideoDeleteApiPath(video.id)}${scope === "group" ? "?scope=group" : ""}`, { method: "DELETE" }, { expectedIds: [video.id] });
-    if (!data.committed) return showBrowserToast(shortVideoDeleteRecoveryMessage(data));
+    const data = await deleteActions.deleteVideo(video, { scope });
+    if (!data?.committed) return;
     const deletedIds = new Set(data.ids);
     for (const id of deletedIds) loadedCoverIds.delete(id);
     if (state.shortVideo.data?.videos) {
@@ -6180,14 +6177,8 @@ export function createShortVideoPage(deps) {
   async function deleteSelectedShortVideos() {
     const selection = shortVideoDeleteSelection();
     const ids = [...selection].filter(Boolean);
-    if (!ids.length) return;
-    const ok = window.confirm(`确定删除选中的 ${ids.length} 条短视频吗？\n\n会删除资料库记录以及这些记录引用且未被其他记录引用的本地文件。`);
-    if (!ok) return;
-    const data = await requestShortVideoDelete(api, "/api/short-videos", {
-      method: "DELETE",
-      body: { ids }
-    }, { expectedIds: ids });
-    if (!data.committed) return showBrowserToast(shortVideoDeleteRecoveryMessage(data));
+    const data = await deleteActions.deleteSelected(ids);
+    if (!data?.committed) return;
     const deletedIds = new Set(data.ids);
     for (const id of deletedIds) loadedCoverIds.delete(id);
     if (state.shortVideo.data?.videos) {

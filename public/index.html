@@ -20,7 +20,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-6e4e4af76270";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-86040edabbe8";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -35,7 +35,7 @@
           "/modules/short-videos/styles/list.css?v=20260812-collection-review-02",
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
-          "/modules/short-videos/styles/panels.css?v=20260720-transcode-page-concurrency-05",
+          "/modules/short-videos/styles/panels.css?v=20260813-delete-client-state-02",
           "/modules/short-videos/styles/responsive.css?v=20260812-collection-review-02"
         ];
         const shortVideoViewerStyleUrls = [
@@ -222,7 +222,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-6e4e4af76270");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-86040edabbe8");
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;

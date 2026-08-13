@@ -11,6 +11,11 @@ import {
   shortVideoDeletePendingMessage,
   shortVideoDeleteRecoveryMessage
 } from "../public/modules/short-videos/delete-contract.js";
+import {
+  createShortVideoDeleteRecoveryController,
+  parseShortVideoDeleteJob
+} from "../public/modules/short-videos/delete-recovery.js";
+import { createShortVideoDeleteActions } from "../public/modules/short-videos/delete-actions.js";
 import { shortVideoDeleteApiPath, shortVideoDetailApiPath } from "../public/modules/short-videos/router.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,6 +23,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 verifyRoutes();
 await verifyWebApiStatusRetention();
 await verifyWebDeleteContract();
+await verifyWebDeleteActions();
+await verifyWebDeleteRecoveryController();
 verifyWebMutationBoundary();
 verifyNativeSourceBoundary();
 verifyNativeContract();
@@ -152,30 +159,178 @@ async function verifyWebDeleteContract() {
 
 function verifyWebMutationBoundary() {
   const source = read("public/modules/short-videos/short-video-page.js");
+  const actions = read("public/modules/short-videos/delete-actions.js");
   const singleStart = source.indexOf("async function deleteShortVideo");
   const batchStart = source.indexOf("async function deleteSelectedShortVideos");
   const single = source.slice(singleStart, batchStart);
   const batch = source.slice(batchStart, source.indexOf("function decrementCurrentAuthorCount", batchStart));
   for (const [name, block] of [["single/group", single], ["batch", batch]]) {
-    const requestAt = block.indexOf("requestShortVideoDelete(");
-    const rollbackAt = block.indexOf("if (!data.committed)");
+    const requestAt = block.indexOf("deleteActions.delete");
+    const rollbackAt = block.indexOf("if (!data?.committed)");
     const mutationAt = block.indexOf("loadedCoverIds.delete");
     assert(requestAt >= 0 && rollbackAt > requestAt && mutationAt > rollbackAt, `${name} delete must validate and return on rollback before model mutation`);
   }
-  assert(single.includes("shortVideoDeleteApiPath(video.id)"), "single/group delete must use the explicit video endpoint");
-  assert(batch.includes('requestShortVideoDelete(api, "/api/short-videos"'), "batch delete must share the same response validator");
-  assert(batch.indexOf("if (!data.committed)") < batch.indexOf("clearShortVideoDeleteSelection()"), "rollback must preserve Web selection");
+  assert(actions.includes("shortVideoDeleteApiPath(video.id)"), "single/group delete must use the explicit video endpoint");
+  assert(actions.includes('requestShortVideoDelete(api, "/api/short-videos"'), "batch delete must share the same response validator");
+  assert(batch.indexOf("if (!data?.committed)") < batch.indexOf("clearShortVideoDeleteSelection()"), "rollback must preserve Web selection");
+}
+
+async function verifyWebDeleteActions() {
+  const tracked = [];
+  const requests = [];
+  let pending = false;
+  const actions = createShortVideoDeleteActions({
+    api: async (path, options) => {
+      requests.push({ path, options });
+      const error = new Error("fixture rollback");
+      error.status = 500;
+      error.payload = rollbackPending();
+      throw error;
+    },
+    confirmDelete: () => true,
+    recovery: {
+      hasPending: () => pending,
+      track: (result) => tracked.push(result)
+    },
+    showToast: () => {}
+  });
+  const result = await actions.deleteVideo({ id: "video-1", title: "fixture" });
+  assert.equal(result.committed, false);
+  assert.equal(requests[0].path, "/api/short-videos/videos/video-1");
+  assert.equal(tracked.length, 1, "delete actions must hand rollback responses to persistent recovery tracking");
+  pending = true;
+  const blocked = await actions.deleteSelected(["video-1"]);
+  assert.equal(blocked, null);
+  assert.equal(requests.length, 1, "a pending recovery must block another client delete request");
+}
+
+async function verifyWebDeleteRecoveryController() {
+  const timers = createManualTimers();
+  const rendered = [];
+  const responses = [];
+  const controller = createShortVideoDeleteRecoveryController({
+    api: async (path, options = {}) => {
+      const next = responses.shift();
+      if (next instanceof Error) throw next;
+      assert(next, `missing recovery fixture response for ${options.method || "GET"} ${path}`);
+      return next;
+    },
+    pollDelayMs: 1,
+    renderState: (state) => rendered.push(state ? { ...state } : null),
+    setTimer: timers.set,
+    clearTimer: timers.clear
+  });
+
+  controller.track(parseShortVideoDeleteResponse(200, completed(), { expectedIds: ["video-1"] }));
+  assert.equal(controller.hasPending(), false, "200 completed must not leave a recovery banner");
+
+  controller.track(parseShortVideoDeleteResponse(202, cleanupPending(), { expectedIds: ["video-1"] }));
+  assert.equal(controller.hasPending(), true);
+  assert.match(rendered.at(-1).message, /资料库记录已移除，正在安全清理2 个文件/);
+  responses.push(jobPayload("job-cleanup", "cleanup_pending", "cleanup", true, false));
+  await timers.runNext();
+  assert.equal(rendered.at(-1).actionLabel, "", "non-recoverable cleanup must not expose recovery");
+  responses.push(jobPayload("job-cleanup", "completed", "cleanup", false, false));
+  await timers.runNext();
+  assert.match(rendered.at(-1).message, /已安全清理完成/);
+  assert.equal(rendered.at(-1).actionLabel, "知道了");
+
+  controller.track(await rollbackResult());
+  responses.push(jobPayload("job-rollback", "rollback_pending", "rollback", true, true));
+  await timers.runNext();
+  assert.equal(rendered.at(-1).actionLabel, "重试恢复", "recoverable rollback must expose recovery");
+  responses.push(new Error("fixture recovery failure"));
+  await controller.recover();
+  assert.match(rendered.at(-1).message, /恢复失败：fixture recovery failure/);
+  assert.equal(rendered.at(-1).actionLabel, "重试恢复", "failed recovery must remain retryable");
+  responses.push(jobPayload("job-rollback", "rolled_back", "rollback", false, false));
+  await controller.recover();
+  assert.match(rendered.at(-1).message, /删除未生效，文件已安全恢复/);
+
+  assert.throws(
+    () => parseShortVideoDeleteJob(jobPayload("other-job", "completed", "cleanup", false, false), "expected-job"),
+    /其他任务/
+  );
+  controller.dispose();
+
+  let releasePoll;
+  const cancellationRenders = [];
+  const cancellationTimers = createManualTimers();
+  const cancellationController = createShortVideoDeleteRecoveryController({
+    api: () => new Promise((resolve) => { releasePoll = resolve; }),
+    pollDelayMs: 1,
+    renderState: (state) => cancellationRenders.push(state ? { ...state } : null),
+    setTimer: cancellationTimers.set,
+    clearTimer: cancellationTimers.clear
+  });
+  cancellationController.track(await rollbackResult());
+  const pendingPoll = cancellationTimers.runNext();
+  cancellationController.dispose();
+  releasePoll(jobPayload("job-rollback", "rollback_pending", "rollback", true, true));
+  await pendingPoll;
+  assert.equal(cancellationRenders.at(-1), null, "disposed polling must not render an old response");
+  assert.equal(cancellationTimers.pending(), 0, "disposed polling must not schedule another request");
+}
+
+async function rollbackResult() {
+  const rollbackError = new Error("fixture rollback");
+  rollbackError.status = 500;
+  rollbackError.payload = rollbackPending();
+  return requestShortVideoDelete(async () => { throw rollbackError; }, "/delete", { method: "DELETE" });
+}
+
+function jobPayload(id, status, phase, pending, recoverable, overrides = {}) {
+  return {
+    ok: true,
+    job: {
+      id,
+      status,
+      phase,
+      pending,
+      recoverable,
+      requiresAttention: recoverable,
+      error: "",
+      ...overrides
+    }
+  };
+}
+
+function createManualTimers() {
+  const entries = [];
+  return {
+    set(action) {
+      const entry = { action, canceled: false };
+      entries.push(entry);
+      return entry;
+    },
+    clear(entry) {
+      if (entry) entry.canceled = true;
+    },
+    async runNext() {
+      while (entries.length) {
+        const entry = entries.shift();
+        if (!entry.canceled) return entry.action();
+      }
+      throw new Error("manual timer queue is empty");
+    },
+    pending() {
+      return entries.filter((entry) => !entry.canceled).length;
+    }
+  };
 }
 
 function verifyNativeSourceBoundary() {
   const source = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoActivity.java");
-  const request = source.slice(source.indexOf("private DeleteResult requestDeleteVideo"), source.indexOf("private void applyDeleteResult"));
-  const apply = source.slice(source.indexOf("private void applyDeleteResult"), source.indexOf("private ShortVideoItem nextVideoAfterDelete"));
+  const controller = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteController.java");
+  const transport = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteTransport.java");
+  const apply = source.slice(source.indexOf("private void applyCommittedDelete"), source.indexOf("private ShortVideoItem nextVideoAfterDelete"));
   const urlStart = source.indexOf("private String deleteVideoUrl");
   const url = source.slice(urlStart, source.indexOf("private String apiBase()", urlStart));
-  assert(request.includes("ShortVideoDeleteJson.parse(status"), "Native delete transport must retain HTTP status for strict parsing");
-  assert(!request.includes("status < 200 || status >= 300"), "Native transport must let the contract parse rollback_pending HTTP 500");
-  assert(apply.indexOf("if (!result.committed())") < apply.indexOf("releaseAllPlayers()"), "Native rollback must return before player/model/navigation mutation");
+  assert(transport.includes("ShortVideoDeleteJson.parse(status"), "Native delete transport must retain HTTP status for strict parsing");
+  assert(controller.includes("if (result.committed()) host.applyCommittedDelete") && controller.indexOf("if (result.committed()) host.applyCommittedDelete") < controller.indexOf("if (!result.committed())"), "Native controller must apply only committed responses and track rollback without mutation");
+  assert(!source.includes("private DeleteResult requestDeleteVideo"), "Activity must delegate DELETE transport to NativeShortVideoDeleteController");
+  assert(source.includes("deleteController.confirmDelete(") && source.includes("if (deleteController != null) deleteController.destroy()"), "Activity must delegate confirmation and cancel the controller during destroy");
+  assert(apply.includes("releaseAllPlayers()"), "committed Native deletion must retain the existing model/player cleanup");
   assert(url.indexOf('.appendPath("videos")') < url.indexOf(".appendPath(item.id)"), "Native deletion must use the explicit /videos/:id route");
 }
 
@@ -191,7 +346,10 @@ function verifyNativeContract() {
   try {
     const sources = [
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoDeleteResult.java"),
-      path.join(root, "tools", "fixtures", "NativeShortVideoDeleteContractHarness.java")
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteJobState.java"),
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteController.java"),
+      path.join(root, "tools", "fixtures", "NativeShortVideoDeleteContractHarness.java"),
+      path.join(root, "tools", "fixtures", "NativeShortVideoDeleteControllerHarness.java")
     ];
     const compiled = spawnSync(javaTool("javac"), ["-encoding", "UTF-8", "-d", tempRoot, ...sources], {
       cwd: root,
@@ -204,6 +362,12 @@ function verifyNativeContract() {
     });
     assert.equal(executed.status, 0, `native delete contract harness must pass:\n${executed.stderr || executed.stdout}`);
     process.stdout.write(executed.stdout);
+    const controllerExecuted = spawnSync(javaTool("java"), ["-cp", tempRoot, "local.fanhao.library.NativeShortVideoDeleteControllerHarness"], {
+      cwd: root,
+      encoding: "utf8"
+    });
+    assert.equal(controllerExecuted.status, 0, `native delete controller harness must pass:\n${controllerExecuted.stderr || controllerExecuted.stdout}`);
+    process.stdout.write(controllerExecuted.stdout);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
