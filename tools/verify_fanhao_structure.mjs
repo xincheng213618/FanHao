@@ -3254,7 +3254,7 @@ const backgroundStamp = new Promise((resolve) => {
 const fakeCoreDb = {
   exec() {},
   prepare(sql) {
-    if (sql.startsWith("PRAGMA table_info")) {
+    if (/^PRAGMA (?:main\.)?table_info/.test(sql)) {
       return {
         all: () => [
           { name: "gender" },
@@ -3262,9 +3262,15 @@ const fakeCoreDb = {
           { name: "is_streamable" },
           { name: "has_subtitles" },
           { name: "javdb_tags_json" },
-          { name: "image_blob" }
+          { name: "image_blob" },
+          { name: "request_id" },
+          { name: "caller" },
+          { name: "audit_version" }
         ]
       };
+    }
+    if (sql.includes("FROM main.actor_profile_image_revocations")) {
+      return { all: () => [] };
     }
     return {
       get() {
