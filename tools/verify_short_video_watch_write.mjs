@@ -6,12 +6,15 @@ import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 
 import { sendShortVideoPublicError, shortVideoPublicError } from "../src/modules/short-videos/server/public-errors.js";
+import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
+import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createShortVideoWatchWriteService } from "../src/modules/short-videos/server/watch-write-service.js";
 import { mergeShortVideoWatchPayload } from "../public/modules/short-videos/watch-write-payload.js";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-watch-write-"));
 const fixtureWorkerUrl = new URL("./fixtures/short_video_watch_write_worker_fixture.mjs", import.meta.url);
+const commitWorkerUrl = new URL("./fixtures/short_video_watch_write_commit_worker_fixture.mjs", import.meta.url);
 
 try {
   verifyClientPendingMerge();
@@ -20,11 +23,17 @@ try {
   await verifyLatestSameVideoSemantics();
   await verifyDifferentVideoFairness();
   await verifyStopDrainAndRestart();
+  await verifySameTickStartStopFence();
+  await verifyCommitBeforeAckReceipt();
   await verifyQueueCongestionContract();
   await verifyWorkerTimeoutContract();
   await verifyWorkerCrashRecovery();
   await verifyWorkerCrashFailure();
-  console.log("short-video-watch-write: ok (real SQLite busy recovery/budget, latest-value coalescing, fairness, stop/restart, queue/worker timeout, crash recovery)");
+  await verifyWorkerStartFailure();
+  await verifyRuntimeWorkerStartFailure();
+  await verifyCloseFailuresRemainRetryable();
+  await verifyTerminateFailureRemainsRetryable();
+  console.log("short-video-watch-write: ok (SQLite busy/receipt convergence, lifecycle fencing, close/terminate failure recovery)");
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
@@ -259,6 +268,69 @@ async function verifyStopDrainAndRestart() {
   }
 }
 
+async function verifySameTickStartStopFence() {
+  const service = fixtureService({ mode: "success" });
+  await service.start();
+  await service.stop();
+  const workerStarts = service.diagnostics().workerStarts;
+  const starting = service.start();
+  const stopping = service.stop();
+  const [startResult] = await Promise.all([starting, stopping]);
+  assert.equal(startResult, false, "same-tick stop must invalidate the pending start continuation");
+  assert.equal(service.diagnostics().accepting, false);
+  assert.equal(service.diagnostics().desiredStarted, false);
+  assert.equal(service.diagnostics().workerStarts, workerStarts, "an invalidated same-tick start must not create another worker");
+  await assert.rejects(service.record("video-a", { progressMs: 1 }), (error) => error?.code === "SHORT_VIDEO_WATCH_STOPPED");
+}
+
+async function verifyCommitBeforeAckReceipt() {
+  const fixture = createDatabaseFixture("commit-before-ack", ["video-a"]);
+  const recordLogPath = path.join(tempRoot, "commit-before-ack-records.log");
+  const service = createShortVideoWatchWriteService({
+    dbPath: fixture.dbPath,
+    downloadManagerDbPath: "",
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    busyTimeoutMs: 20,
+    workerResponseTimeoutMs: 1000,
+    workerUrl: commitWorkerUrl,
+    extraWorkerData: { mode: "commit-before-ack", recordLogPath }
+  });
+  let onWatchMutation = 0;
+  let onWatch = 0;
+  const response = {};
+  try {
+    await service.start();
+    await routeShortVideoApi(
+      { method: "PUT", body: { progressMs: 4321, completed: true } },
+      response,
+      new URL("http://127.0.0.1/api/short-videos/video-a/watch"),
+      {
+        readJsonBody: async (req) => req.body,
+        recordWatch: (videoId, options) => service.record(videoId, options),
+        onWatchMutation: () => { onWatchMutation += 1; },
+        onWatch: () => { onWatch += 1; },
+        sendJson(res, status, data) { res.status = status; res.data = data; },
+        shortVideoStore: {}
+      }
+    );
+    assert.equal(response.status, 200, "a committed write with a lost ack must converge through receipt read-back");
+    assert.equal(response.data?.watch?.progressMs, 4321);
+    assert.equal(response.data?.watch?.completed, true);
+    assert.equal(onWatchMutation, 1, "receipt recovery must run the normal route mutation hook exactly once");
+    assert.equal(onWatch, 1, "receipt recovery must run the normal route watch hook exactly once");
+    assert.equal(service.diagnostics().receiptsRecovered, 1);
+    assert.equal(fs.readFileSync(recordLogPath, "utf8").trim().split(/\r?\n/).length, 1, "receipt recovery must not issue a second write");
+    const saved = readWatchDetail(fixture.dbPath, "video-a");
+    assert.equal(saved.progress_ms, 4321);
+    assert.equal(saved.completed_count, 1);
+    assert.equal(saved.last_watched_at, response.data.watch.lastWatchedAt, "receipt identity must be the fixed parent acceptedAt");
+  } finally {
+    await service.stop();
+    fixture.close();
+  }
+}
+
 async function verifyQueueCongestionContract() {
   const dispatches = [];
   const service = fixtureService({
@@ -327,6 +399,106 @@ async function verifyWorkerCrashFailure() {
   } finally {
     await service.stop();
   }
+}
+
+async function verifyWorkerStartFailure() {
+  const service = fixtureService({ mode: "start-error" });
+  try {
+    await assert.rejects(
+      service.start(),
+      (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_UNAVAILABLE" && error?.statusCode === 503
+    );
+    assert.equal(service.diagnostics().accepting, true, "a failed start remains retryable until the owner explicitly stops it");
+  } finally {
+    await service.stop();
+  }
+}
+
+async function verifyRuntimeWorkerStartFailure() {
+  const fixture = createDatabaseFixture("runtime-start-error", ["video-a"]);
+  const runtimeStates = [];
+  const runtime = createShortVideosRuntime({
+    dbPath: fixture.dbPath,
+    downloadManagerDbPath: "",
+    downloadManagerSyncMs: 0,
+    ffmpegPath: "ffmpeg",
+    ffprobePath: "ffprobe",
+    roots: [],
+    mediaResponseService: { serveImage() {} },
+    mediaStreamService: { serveVideo() {} },
+    notFound() {},
+    readJsonBody: async (req) => req?.body || {},
+    requireLocalAdmin: () => true,
+    sendJson(res, status, data) { res.status = status; res.data = data; },
+    sharedCache: { rootDir: path.join(tempRoot, "runtime-start-error-cache"), scheduleCleanup() {}, touch() {} },
+    watchWriterOptions: {
+      workerUrl: fixtureWorkerUrl,
+      extraWorkerData: { mode: "start-error" }
+    },
+    runtimeTestHooks: {
+      onRuntimeStartedChange(value) { runtimeStates.push(Boolean(value)); }
+    }
+  });
+  try {
+    await assert.rejects(
+      runtime.start(),
+      (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_UNAVAILABLE"
+    );
+    assert.equal(runtimeStates.includes(true), false, "runtime must not become started after watch worker startup failure");
+  } finally {
+    await runtime.stop().catch(() => {});
+    runtime.store.close();
+    fixture.close();
+  }
+}
+
+async function verifyCloseFailuresRemainRetryable() {
+  for (const mode of ["close-false-once", "close-throw-once"]) {
+    const service = fixtureService({ mode, workerCloseTimeoutMs: 250 });
+    await service.start();
+    const starts = service.diagnostics().workerStarts;
+    await assert.rejects(
+      service.stop(),
+      (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_CLOSE_FAILED" && error?.statusCode === 503
+    );
+    assert.equal(service.diagnostics().accepting, false);
+    assert.equal(service.diagnostics().workerStarts, starts, `${mode} must preserve the same worker handle for retry`);
+    await assert.rejects(service.record("video-a", { progressMs: 1 }), (error) => error?.code === "SHORT_VIDEO_WATCH_STOPPED");
+    await service.stop();
+    assert.equal(service.diagnostics().stopFailures, 1);
+  }
+}
+
+async function verifyTerminateFailureRemainsRetryable() {
+  let failTerminate = true;
+  const fixture = createDatabaseFixture("terminate-failure", ["video-a"]);
+  const service = createShortVideoWatchWriteService({
+    dbPath: fixture.dbPath,
+    downloadManagerDbPath: "",
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    workerUrl: commitWorkerUrl,
+    extraWorkerData: {
+      mode: "success",
+      recordLogPath: path.join(tempRoot, "terminate-failure-records.log")
+    },
+    terminateWorker(activeWorker) {
+      if (failTerminate) return Promise.reject(new Error("fixture terminate failure"));
+      return activeWorker.terminate();
+    }
+  });
+  await service.start();
+  const starts = service.diagnostics().workerStarts;
+  await assert.rejects(
+    service.stop(),
+    (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_STOP_FAILED" && error?.statusCode === 503
+  );
+  assert.equal(service.diagnostics().accepting, false);
+  assert.equal(service.diagnostics().workerStarts, starts, "terminate failure must retain the original worker handle");
+  failTerminate = false;
+  await service.stop();
+  assert.equal(service.diagnostics().stopFailures, 1);
+  fixture.close();
 }
 
 function realService(dbPath, options = {}) {

@@ -61,6 +61,7 @@ export function createShortVideosRuntime({
   sendJson,
   sharedCache,
   catalogWorkerOptions = {},
+  watchWriterOptions = {},
   runtimeTestHooks = {},
   listQuery = null,
   schemaBusyTimeoutMs = 10000,
@@ -120,6 +121,7 @@ export function createShortVideosRuntime({
   };
   const listStatsService = createShortVideoListStatsService({ store, catalogWorker, ensureCatalogSchema });
   const watchWriter = createShortVideoWatchWriteService({
+    ...watchWriterOptions,
     dbPath,
     downloadManagerDbPath,
     ffmpegPath,
@@ -1082,7 +1084,18 @@ export function createShortVideosRuntime({
       if (!runtimeStartStillCurrent(generation)) return false;
       runtimeTestHooks.beforeWatchWriterStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;
-      await watchWriter.start();
+      try {
+        await watchWriter.start();
+      } catch (error) {
+        if (!runtimeStartStillCurrent(generation)) return false;
+        runtimeDesiredStarted = false;
+        runtimeLifecycleGeneration += 1;
+        runtimeStarted = false;
+        runtimeTestHooks.onRuntimeStartedChange?.(false);
+        await stopListServices();
+        store.close();
+        throw error;
+      }
       if (!runtimeStartStillCurrent(generation)) return false;
       runtimeTestHooks.beforeDownloadManagerSyncStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;

@@ -15,9 +15,30 @@ const store = createShortVideoStore({
 parentPort?.postMessage({ type: "ready", ok: true });
 
 parentPort?.on("message", (message) => {
-  if (message?.type !== "record") return;
+  if (message?.type === "close") {
+    try {
+      const closed = store.close();
+      parentPort?.postMessage({
+        type: "closed",
+        ok: closed !== false,
+        id: message.id,
+        error: closed === false ? "watch store close returned false" : undefined
+      });
+    } catch (error) {
+      parentPort?.postMessage({
+        type: "closed",
+        ok: false,
+        id: message.id,
+        error: String(error?.message || error)
+      });
+    }
+    return;
+  }
+  if (!["record", "receipt"].includes(message?.type)) return;
   try {
-    const data = store.recordWatch(message.videoId, message.options || {});
+    const data = message.type === "receipt"
+      ? store.watchReceipt(message.videoId, message.acceptedAt)
+      : store.recordWatch(message.videoId, message.options || {});
     parentPort?.postMessage({ ok: true, id: message.id, data });
   } catch (error) {
     parentPort?.postMessage({
