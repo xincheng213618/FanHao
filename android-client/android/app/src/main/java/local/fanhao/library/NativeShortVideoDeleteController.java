@@ -36,7 +36,6 @@ final class NativeShortVideoDeleteController {
     ScheduledTask schedule(Runnable action, long delayMs);
     void shutdownNow();
   }
-
   private final Host host;
   private final Transport transport;
   private final PendingJobStore pendingJobStore;
@@ -202,6 +201,13 @@ final class NativeShortVideoDeleteController {
       } catch (Exception error) {
         post(token, () -> {
           if (!currentJob(token, jobId)) return;
+          if (NativeShortVideoDeleteJobException.isJobNotFound(error)) {
+            cancelScheduledPoll();
+            clearStoredJob();
+            clearActiveJob();
+            showRestoreNotice("上次删除恢复记录已失效，已清除。");
+            return;
+          }
           activeSession.statusLoaded = true;
           activeSession.error = "状态读取失败，将继续重试：" + errorMessage(error, "网络错误");
           renderPending(token);
@@ -308,7 +314,6 @@ final class NativeShortVideoDeleteController {
       return false;
     }
   }
-
   private boolean current(long token) {
     return !destroyed && token == generation;
   }
@@ -316,24 +321,19 @@ final class NativeShortVideoDeleteController {
     NativeShortVideoDeleteSession session = activeSession;
     return current(token) && session != null && session.pendingJob.jobId.equals(clean(jobId));
   }
-
   private void cancelScheduledPoll() {
     ScheduledTask pending = scheduledPoll;
     scheduledPoll = null;
     if (pending != null) pending.cancel();
   }
-
   private void clearActiveJob() {
     activeSession = null;
   }
-
   private static String clean(String value) {
     return value == null ? "" : value.trim();
   }
-
   private static String errorMessage(Exception error, String fallback) {
     String message = error == null ? "" : clean(error.getMessage());
     return message.isEmpty() ? fallback : message;
   }
-
 }

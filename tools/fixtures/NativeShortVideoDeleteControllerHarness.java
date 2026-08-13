@@ -18,6 +18,8 @@ public final class NativeShortVideoDeleteControllerHarness {
     verifyDeleteFailureReleasesGate();
     verifyConcurrentDeleteGate();
     verifyRebuildRestoresAndClearsPendingJob();
+    verifyMissingRestoreExpiresSnapshot();
+    verifyGeneric404RestoreKeepsRetrying();
     verifyInvalidRestoreDoesNotRequest();
     verifyManualInterventionStopsPolling();
     verifyInitialManualRollbackPersistsWithoutPolling();
@@ -145,6 +147,37 @@ public final class NativeShortVideoDeleteControllerHarness {
     invalid.controller.restorePending("http://fixture");
     equal(invalid.transport.statusCalls, 0, "bad persisted payload must not request a job");
     check(bad.cleared, "bad persisted payload must be cleared");
+  }
+
+  private static void verifyMissingRestoreExpiresSnapshot() {
+    MemoryStore store = new MemoryStore();
+    store.job = new NativeShortVideoPendingJob("job-missing", "http://fixture", "cleanup", 2);
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"), store);
+    NativeShortVideoDeleteJobException missing = new NativeShortVideoDeleteJobException(
+      404, NativeShortVideoDeleteJobException.JOB_NOT_FOUND, "fixture missing"
+    );
+    fixture.transport.statusError = missing;
+    fixture.controller.restorePending("http://fixture");
+    equal(missing.statusCode, 404, "typed job error must retain HTTP status");
+    equal(missing.code, NativeShortVideoDeleteJobException.JOB_NOT_FOUND, "typed job error must retain the public code");
+    check(store.job == null, "explicit job-not-found must clear the stale native snapshot");
+    equal(fixture.runner.pendingSchedules(), 0, "explicit job-not-found must not schedule another native poll");
+    contains(fixture.host.persistentMessage, "恢复记录已失效", "native stale snapshot must be understandable");
+    equal(fixture.host.actionLabel, "知道了", "native stale snapshot notice must be dismissible");
+    fixture.confirm();
+    equal(fixture.transport.deleteCalls, 1, "expired native snapshot must release the next delete immediately");
+  }
+
+  private static void verifyGeneric404RestoreKeepsRetrying() {
+    MemoryStore store = new MemoryStore();
+    store.job = new NativeShortVideoPendingJob("job-generic-404", "http://fixture", "cleanup", 2);
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"), store);
+    fixture.transport.statusError = new NativeShortVideoDeleteJobException(404, "", "fixture generic 404");
+    fixture.controller.restorePending("http://fixture");
+    check(store.job != null, "generic 404 must retain the native snapshot");
+    equal(fixture.runner.pendingSchedules(), 1, "generic 404 must remain fail-closed and retry");
+    fixture.controller.confirmDelete("video-1", "测试视频", false, "http://fixture/delete", "http://fixture");
+    equal(fixture.transport.deleteCalls, 0, "generic 404 must continue blocking a new native delete");
   }
 
   private static void verifyManualInterventionStopsPolling() {
@@ -363,6 +396,7 @@ public final class NativeShortVideoDeleteControllerHarness {
     NativeShortVideoDeleteJobState recovery;
     Exception recoveryError;
     Exception deleteError;
+    Exception statusError;
     boolean canceled;
     int deleteCalls;
     int statusCalls;
@@ -377,8 +411,9 @@ public final class NativeShortVideoDeleteControllerHarness {
       return result;
     }
 
-    @Override public NativeShortVideoDeleteJobState status(String apiBaseUrl, String jobId) {
+    @Override public NativeShortVideoDeleteJobState status(String apiBaseUrl, String jobId) throws Exception {
       statusCalls += 1;
+      if (statusError != null) throw statusError;
       NativeShortVideoDeleteJobState state = statuses.pollFirst();
       if (state == null) throw new IllegalStateException("fixture status missing");
       return state;

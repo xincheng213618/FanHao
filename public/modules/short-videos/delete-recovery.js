@@ -58,6 +58,14 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
       applyJob(parseShortVideoDeleteJob(payload, jobId), token);
     } catch (error) {
       if (!isCurrent(token, jobId)) return snapshot();
+      if (isDeleteJobNotFound(error)) {
+        generation += 1;
+        cancelPoll();
+        active = null;
+        clearStoredPending();
+        renderRestoreNotice("上次删除恢复记录已失效，已清除。");
+        return null;
+      }
       active.error = `状态读取失败，将继续重试：${errorMessage(error, "网络错误")}`;
       render();
       schedulePoll(token);
@@ -231,6 +239,10 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
     const clear = () => renderState(null);
     renderState({ terminal: true, error: message, message, actionLabel: "知道了", action: clear });
   }
+}
+
+function isDeleteJobNotFound(error) {
+  return String(error?.code || error?.payload?.code || "").trim() === "SHORT_VIDEO_DELETE_JOB_NOT_FOUND";
 }
 
 export function parseShortVideoDeleteJob(payload, expectedJobId = "") {

@@ -414,6 +414,49 @@ async function verifyWebDeleteRecoveryRebuild() {
   assert.match(rendered.at(-1).message, /已安全清理完成/);
   assert.equal(storage.value(), null, "terminal Web job must clear localStorage");
 
+  const missingStorage = createMemoryStorage(storedPending("job-missing"));
+  const missingTimers = createManualTimers();
+  const missingRendered = [];
+  const missing = createShortVideoDeleteRecoveryController({
+    api: async () => { throw deleteJobError(404, "SHORT_VIDEO_DELETE_JOB_NOT_FOUND"); },
+    apiBaseUrl: "http://fixture",
+    storage: missingStorage,
+    setTimer: missingTimers.set,
+    clearTimer: missingTimers.clear,
+    renderState: (state) => missingRendered.push(state ? { ...state } : null)
+  });
+  await missing.ready;
+  assert.equal(missingStorage.value(), null, "explicit job-not-found must clear the stale Web snapshot");
+  assert.equal(missingTimers.pending(), 0, "explicit job-not-found must not schedule another Web poll");
+  assert.equal(missing.hasPending(), false, "explicit job-not-found must release the Web delete gate");
+  assert.match(missingRendered.at(-1).message, /恢复记录已失效/);
+  assert.equal(missingRendered.at(-1).actionLabel, "知道了", "stale Web notice must be dismissible");
+  let postStaleDeletes = 0;
+  const postStaleActions = createShortVideoDeleteActions({
+    api: async () => { postStaleDeletes += 1; return { status: 200, payload: completed() }; },
+    confirmDelete: () => true,
+    recovery: missing,
+    showToast: () => {}
+  });
+  await postStaleActions.deleteVideo({ id: "video-1", title: "after stale restore" });
+  assert.equal(postStaleDeletes, 1, "explicit job-not-found must allow the next Web delete immediately");
+
+  const genericStorage = createMemoryStorage(storedPending("job-generic-404"));
+  const genericTimers = createManualTimers();
+  const generic = createShortVideoDeleteRecoveryController({
+    api: async () => { throw deleteJobError(404, ""); },
+    apiBaseUrl: "http://fixture",
+    storage: genericStorage,
+    setTimer: genericTimers.set,
+    clearTimer: genericTimers.clear,
+    renderState: () => {}
+  });
+  await generic.ready;
+  assert(genericStorage.value(), "generic 404 must retain the Web snapshot");
+  assert.equal(genericTimers.pending(), 1, "generic 404 must remain fail-closed and retry");
+  assert.equal(generic.hasPending(), true, "generic 404 must keep blocking a new delete");
+  generic.dispose();
+
   for (const [name, raw, base] of [
     ["bad payload", "{bad-json", "http://fixture"],
     ["different base", JSON.stringify({ version: 1, jobId: "job-cross-base", apiBaseUrl: "http://other-fixture", kind: "rollback", cleanupPendingFiles: 0 }), "http://fixture"]
@@ -430,6 +473,18 @@ async function verifyWebDeleteRecoveryRebuild() {
     assert.equal(calls, 0, `${name} must fail closed before GET`);
     assert.equal(unsafeStorage.value(), null, `${name} must clear unsafe localStorage`);
   }
+}
+
+function storedPending(jobId) {
+  return JSON.stringify({ version: 1, jobId, apiBaseUrl: "http://fixture", kind: "cleanup", cleanupPendingFiles: 2 });
+}
+
+function deleteJobError(status, code) {
+  const error = new Error(`fixture ${status}`);
+  error.status = status;
+  error.code = code;
+  error.payload = { code };
+  return error;
 }
 
 async function rollbackResult() {
@@ -503,14 +558,17 @@ function verifyNativeSourceBoundary() {
   const source = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoActivity.java");
   const controller = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteController.java");
   const transport = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteTransport.java");
+  const jobError = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteJobException.java");
   const apply = source.slice(source.indexOf("private void applyCommittedDelete"), source.indexOf("private ShortVideoItem nextVideoAfterDelete"));
   const urlStart = source.indexOf("private String deleteVideoUrl");
   const url = source.slice(urlStart, source.indexOf("private String apiBase()", urlStart));
   assert(transport.includes("ShortVideoDeleteJson.parse(status"), "Native delete transport must retain HTTP status for strict parsing");
+  assert(transport.includes("new NativeShortVideoDeleteJobException(") && jobError.includes("statusCode") && jobError.includes("JOB_NOT_FOUND.equals"), "Native job transport must retain typed HTTP status and exact public error code");
   assert(controller.includes("if (result.committed()) host.applyCommittedDelete") && controller.indexOf("if (result.committed()) host.applyCommittedDelete") < controller.indexOf("if (!result.committed())"), "Native controller must apply only committed responses and track rollback without mutation");
   assert(controller.includes("requestInFlight") && controller.includes("if (deleteOperationActive())"), "Native controller must gate confirmations while a DELETE request is in flight");
   assert(!source.includes("private DeleteResult requestDeleteVideo"), "Activity must delegate DELETE transport to NativeShortVideoDeleteController");
   assert(source.includes("deleteController.confirmDelete(") && source.includes("if (deleteController != null) deleteController.destroy()"), "Activity must delegate confirmation and cancel the controller during destroy");
+  assert(source.includes("deleteController.restorePending(apiBase());"), "Activity must restore the persisted delete job after its UI is ready");
   assert(apply.includes("releaseAllPlayers()"), "committed Native deletion must retain the existing model/player cleanup");
   assert(url.indexOf('.appendPath("videos")') < url.indexOf(".appendPath(item.id)"), "Native deletion must use the explicit /videos/:id route");
 }
@@ -531,6 +589,7 @@ function verifyNativeContract() {
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPendingJob.java"),
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteSession.java"),
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteTaskRunner.java"),
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteJobException.java"),
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteController.java"),
       path.join(root, "tools", "fixtures", "NativeShortVideoDeleteContractHarness.java"),
       path.join(root, "tools", "fixtures", "NativeShortVideoDeleteControllerHarness.java")

@@ -69,7 +69,11 @@ final class NativeShortVideoDeleteTransport implements NativeShortVideoDeleteCon
       int status = connection.getResponseCode();
       JSONObject data = responseJson(connection, status);
       if (status < 200 || status >= 300) {
-        throw new IllegalArgumentException(data.optString("error", "删除恢复请求失败"));
+        throw new NativeShortVideoDeleteJobException(
+          status,
+          data.optString("code", ""),
+          data.optString("error", "删除恢复请求失败")
+        );
       }
       JSONObject job = data.optJSONObject("job");
       if (job == null) throw new IllegalArgumentException("删除恢复接口没有返回任务状态");
