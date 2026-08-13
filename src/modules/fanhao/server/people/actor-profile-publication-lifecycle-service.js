@@ -11,6 +11,8 @@ const DEFAULT_GC_BATCH_SIZE = 50;
 const MAX_GC_BATCH_SIZE = 50;
 const DEFAULT_GC_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_GC_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_GC_RETRY_BASE_DELAY_MS = 100;
+const MAX_GC_RETRY_DELAY_MS = 30 * 1000;
 const ACTIVE_OPERATION_STATUSES = new Set(["prepared", "applying", "retry_wait", "blocked"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -113,12 +115,18 @@ export function createActorProfilePublicationLifecycleService({
   imageDbPath,
   mainDbPath,
   maxBatchBytes = DEFAULT_GC_MAX_BYTES,
+  gcRetryBaseDelayMs = DEFAULT_GC_RETRY_BASE_DELAY_MS,
   now = Date.now,
   onChanged = () => {},
   warn = console.warn
 }) {
   const configuredBatchSize = boundedPositiveInteger(batchSize, DEFAULT_GC_BATCH_SIZE, MAX_GC_BATCH_SIZE);
   const configuredMaxBytes = boundedPositiveInteger(maxBatchBytes, DEFAULT_GC_MAX_BYTES, MAX_GC_MAX_BYTES);
+  const configuredGcRetryBaseDelayMs = boundedPositiveInteger(
+    gcRetryBaseDelayMs,
+    DEFAULT_GC_RETRY_BASE_DELAY_MS,
+    MAX_GC_RETRY_DELAY_MS
+  );
   const deleteAuthorizations = new Map();
   const revokeAuthorizations = new Map();
   let imageDb = null;
@@ -126,6 +134,7 @@ export function createActorProfilePublicationLifecycleService({
   let mainAttachedToImage = false;
   let ready = false;
   let scheduled = null;
+  let gcErrorRetryCount = 0;
 
   function requireReady() {
     if (ready) return;
@@ -242,6 +251,7 @@ export function createActorProfilePublicationLifecycleService({
   function close() {
     if (scheduled) clearTimeout(scheduled);
     scheduled = null;
+    gcErrorRetryCount = 0;
     ready = false;
     deleteAuthorizations.clear();
     revokeAuthorizations.clear();
@@ -483,6 +493,10 @@ export function createActorProfilePublicationLifecycleService({
       `).all(limit);
   }
 
+  function hasPendingTombstones() {
+    return pendingTombstones(1).length > 0;
+  }
+
   function stageForGc(tombstone) {
     const row = imageDb.prepare(`
       SELECT operation_id, person_id, intent_sha256, image_blob,
@@ -676,12 +690,27 @@ export function createActorProfilePublicationLifecycleService({
     };
   }
 
-  function scheduleGc() {
+  function scheduleGc(delayMs = 0) {
     if (!ready || scheduled) return;
     scheduled = setTimeout(() => {
       scheduled = null;
-      try { drainRevoked(); } catch (error) { warn("[actor-profile-publication-gc]", error?.message || error); }
-    }, 0);
+      if (!ready) return;
+      try {
+        const result = drainRevoked();
+        gcErrorRetryCount = 0;
+        // Continue only after making progress. A permanently over-limit item stays
+        // pending for an explicit later drain instead of turning the event loop hot.
+        if (result.deleted > 0 && hasPendingTombstones()) scheduleGc();
+      } catch (error) {
+        warn("[actor-profile-publication-gc]", error?.message || error);
+        const retryDelayMs = Math.min(
+          configuredGcRetryBaseDelayMs * (2 ** Math.min(gcErrorRetryCount, 16)),
+          MAX_GC_RETRY_DELAY_MS
+        );
+        gcErrorRetryCount += 1;
+        scheduleGc(retryDelayMs);
+      }
+    }, Math.max(0, Number(delayMs) || 0));
     scheduled.unref?.();
   }
 

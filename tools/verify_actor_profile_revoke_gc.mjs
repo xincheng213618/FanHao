@@ -113,6 +113,31 @@ function createLifecycle(fixture, options = {}) {
   return service;
 }
 
+function gcSnapshot(fixture) {
+  const image = new DatabaseSync(fixture.imageDbPath);
+  try {
+    return {
+      receipts: Number(image.prepare("SELECT COUNT(*) AS count FROM actor_profile_image_gc_receipts").get().count),
+      stages: Number(image.prepare("SELECT COUNT(*) AS count FROM actor_profile_image_staging").get().count)
+    };
+  } finally {
+    image.close();
+  }
+}
+
+function wait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function waitFor(condition, message, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await wait(5);
+  }
+  assert.fail(message);
+}
+
 function installLegacyRevocationSchema(fixture, operationId = "legacy-revocation") {
   const main = new DatabaseSync(fixture.mainDbPath);
   main.exec(`
@@ -503,6 +528,98 @@ function verifyExplicitOnlyAndBounds() {
   }
 }
 
+async function verifyScheduledGcContinuationAndRetry() {
+  const continuationFixture = createFixture();
+  let service = null;
+  try {
+    let committedBatches = 0;
+    service = createLifecycle(continuationFixture, {
+      batchSize: 50,
+      boundaryHook(name) {
+        if (name === "gc_committed") committedBatches += 1;
+      },
+      gcRetryBaseDelayMs: 5
+    });
+    for (let index = 0; index < 51; index += 1) {
+      const operationId = `scheduled-${String(index).padStart(2, "0")}`;
+      insertVersion(continuationFixture, { operationId, value: "x" });
+      service.revokeVersion(1, operationId, { reason: "scheduled-continuation" });
+    }
+    await waitFor(
+      () => gcSnapshot(continuationFixture).stages === 0,
+      "scheduled GC must continue after the first fifty-item batch"
+    );
+    assert.deepEqual(gcSnapshot(continuationFixture), { receipts: 51, stages: 0 });
+    assert.equal(committedBatches, 2, "a 51-item backlog must use two bounded GC commits");
+    await wait(30);
+    assert.equal(committedBatches, 2, "an empty backlog must not schedule another GC commit");
+  } finally {
+    service?.close();
+    continuationFixture.cleanup();
+  }
+
+  const retryFixture = createFixture();
+  service = null;
+  try {
+    let attempts = 0;
+    let firstFailureAt = 0;
+    let recoveredAt = 0;
+    const warnings = [];
+    service = createLifecycle(retryFixture, {
+      boundaryHook(name) {
+        if (name !== "gc_before_receipt") return;
+        attempts += 1;
+        if (attempts === 1) {
+          firstFailureAt = Date.now();
+          throw new Error("temporary GC failure");
+        }
+        recoveredAt = Date.now();
+      },
+      gcRetryBaseDelayMs: 20,
+      warn: (...args) => warnings.push(args)
+    });
+    insertVersion(retryFixture, { operationId: "scheduled-retry", value: "retry" });
+    service.revokeVersion(1, "scheduled-retry", { reason: "scheduled-retry" });
+    await waitFor(
+      () => gcSnapshot(retryFixture).stages === 0,
+      "a failed scheduled GC batch must retry with backoff"
+    );
+    assert.deepEqual(gcSnapshot(retryFixture), { receipts: 1, stages: 0 });
+    assert.equal(attempts, 2);
+    assert.equal(warnings.length, 1);
+    assert.ok(recoveredAt - firstFailureAt >= 15, "scheduled GC retries must yield through the configured backoff delay");
+  } finally {
+    service?.close();
+    retryFixture.cleanup();
+  }
+
+  const closeFixture = createFixture();
+  service = null;
+  try {
+    let attempts = 0;
+    const warnings = [];
+    service = createLifecycle(closeFixture, {
+      boundaryHook(name) {
+        if (name !== "gc_before_receipt") return;
+        attempts += 1;
+        throw new Error("retry must be cancelled by close");
+      },
+      gcRetryBaseDelayMs: 75,
+      warn: (...args) => warnings.push(args)
+    });
+    insertVersion(closeFixture, { operationId: "scheduled-close", value: "close" });
+    service.revokeVersion(1, "scheduled-close", { reason: "scheduled-close" });
+    await waitFor(() => warnings.length === 1, "the first scheduled GC attempt must fail before close");
+    service.close();
+    await wait(120);
+    assert.equal(attempts, 1, "close must cancel a pending GC retry");
+    assert.deepEqual(gcSnapshot(closeFixture), { receipts: 0, stages: 1 });
+  } finally {
+    service?.close();
+    closeFixture.cleanup();
+  }
+}
+
 async function verifyRouteAuthorizationAndBinding() {
   const sent = [];
   let bodyReads = 0;
@@ -815,6 +932,7 @@ if (process.argv[2] === "--crash-child") {
   verifyTerminalAndBusyErrors();
   verifyConcurrentPublishAndRevoke();
   verifyExplicitOnlyAndBounds();
+  await verifyScheduledGcContinuationAndRetry();
   await verifySameProcessCachedVersionRevoke();
   await verifyRouteAuthorizationAndBinding();
   await verifySchemaMigrationCrashBoundaries();
