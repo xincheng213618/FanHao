@@ -484,7 +484,7 @@ fanhaoFixture.exec("CREATE TABLE short_videos(source_path TEXT, cover_path TEXT)
 fanhaoFixture.prepare("INSERT INTO short_videos(source_path, cover_path) VALUES(?, ?)").run(path.join(sourceLibrary, "clip.mp4"), path.join(sourceLibrary, "clip.jpg"));
 fanhaoFixture.close();
 
-const migrationResult = spawnSync(process.execPath, [
+const migrationArgs = [
   path.join(projectRoot, "tools", "rebase_short_video_storage.mjs"),
   "--from", sourceLibrary,
   "--to", destinationLibrary,
@@ -492,7 +492,18 @@ const migrationResult = spawnSync(process.execPath, [
   "--manager-db", managerFixtureDb,
   "--fanhao-db", fanhaoFixtureDb,
   "--apply"
-], { encoding: "utf8" });
+];
+const unconfirmedMigrationResult = spawnSync(process.execPath, migrationArgs, { encoding: "utf8" });
+assert.notEqual(unconfirmedMigrationResult.status, 0, "storage rebase must reject an unconfirmed online apply");
+assert.match(
+  `${unconfirmedMigrationResult.stderr || ""}${unconfirmedMigrationResult.stdout || ""}`,
+  /--offline-confirmed/
+);
+const migrationResult = spawnSync(
+  process.execPath,
+  [...migrationArgs, "--offline-confirmed"],
+  { encoding: "utf8" }
+);
 assert.equal(migrationResult.status, 0, migrationResult.stderr || migrationResult.stdout);
 
 const migratedManager = new DatabaseSync(managerFixtureDb, { readOnly: true });
