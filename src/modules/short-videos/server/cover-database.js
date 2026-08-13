@@ -22,10 +22,8 @@ export function createShortVideoCoverDatabase(options = {}) {
       opened.exec("PRAGMA busy_timeout = 10000");
       assertSupportedSchemaVersion(opened);
       opened.exec(`
-        PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA temp_store = MEMORY;
-        PRAGMA wal_autocheckpoint = 2000;
         BEGIN IMMEDIATE;
       `);
       try {
@@ -35,6 +33,10 @@ export function createShortVideoCoverDatabase(options = {}) {
         try { opened.exec("ROLLBACK"); } catch {}
         throw error;
       }
+      opened.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA wal_autocheckpoint = 2000;
+      `);
     } catch (error) {
       try { opened.close(); } catch {}
       throw error;
@@ -96,25 +98,37 @@ export function createShortVideoCoverDatabase(options = {}) {
       WHERE type = 'table' AND name = 'short_video_cover_delete_receipts'
     `).get();
     if (!table) return;
-    const columns = new Set(opened.prepare("PRAGMA table_info(short_video_cover_delete_receipts)").all()
-      .map((row) => String(row.name || "")));
-    const requiredColumns = [
-      "operation_id",
-      "request_sha256",
-      "video_ids_json",
-      "deleted_count",
-      "created_at"
+    const tableInfo = opened.prepare("PRAGMA table_info(short_video_cover_delete_receipts)").all();
+    const expectedColumns = [
+      { name: "operation_id", type: "TEXT", notNull: 1, pk: 1 },
+      { name: "request_sha256", type: "TEXT", notNull: 1, pk: 0 },
+      { name: "video_ids_json", type: "TEXT", notNull: 1, pk: 0 },
+      { name: "deleted_count", type: "INTEGER", notNull: 1, pk: 0 },
+      { name: "created_at", type: "TEXT", notNull: 1, pk: 0 }
     ];
+    const columns = new Set(tableInfo.map((row) => String(row.name || "")));
+    const requiredColumns = expectedColumns.map((column) => column.name);
     const sql = String(table.sql || "");
-    const canonicalShape = requiredColumns.every((column) => columns.has(column))
+    const primaryKeyIndex = opened.prepare("PRAGMA index_list(short_video_cover_delete_receipts)").all()
+      .find((index) => Number(index.unique || 0) === 1
+        && String(index.origin || "") === "pk"
+        && Number(index.partial || 0) === 0);
+    const canonicalColumns = tableInfo.length === expectedColumns.length
+      && expectedColumns.every((expected, index) => {
+        const actual = tableInfo[index];
+        return Number(actual?.cid) === index
+          && String(actual?.name || "") === expected.name
+          && String(actual?.type || "").trim().toUpperCase() === expected.type
+          && Number(actual?.notnull || 0) === expected.notNull
+          && Number(actual?.pk || 0) === expected.pk
+          && actual?.dflt_value === null;
+      });
+    const canonicalShape = canonicalColumns
+      && Boolean(primaryKeyIndex)
       && /CHECK\s*\(\s*length\s*\(\s*request_sha256\s*\)\s*=\s*64\s*\)/iu.test(sql)
       && /CHECK\s*\(\s*deleted_count\s*>=\s*0\s*\)/iu.test(sql)
       && /WITHOUT\s+ROWID/iu.test(sql);
     if (canonicalShape) return;
-    opened.exec(`
-      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_update_v1;
-      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_delete_v1;
-    `);
     const rowCount = Number(opened.prepare("SELECT COUNT(*) AS count FROM short_video_cover_delete_receipts").get()?.count || 0);
     if (!requiredColumns.every((column) => columns.has(column))) {
       if (rowCount) {
@@ -126,6 +140,37 @@ export function createShortVideoCoverDatabase(options = {}) {
       opened.exec("DROP TABLE short_video_cover_delete_receipts");
       return;
     }
+    if (rowCount) {
+      const invalid = opened.prepare(`
+        SELECT 1
+        FROM short_video_cover_delete_receipts
+        WHERE operation_id IS NULL
+          OR request_sha256 IS NULL
+          OR length(request_sha256) <> 64
+          OR video_ids_json IS NULL
+          OR deleted_count IS NULL
+          OR deleted_count < 0
+          OR created_at IS NULL
+        LIMIT 1
+      `).get();
+      const duplicate = opened.prepare(`
+        SELECT 1
+        FROM short_video_cover_delete_receipts
+        GROUP BY operation_id
+        HAVING COUNT(*) > 1
+        LIMIT 1
+      `).get();
+      if (invalid || duplicate) {
+        throw codedCoverError(
+          "short video cover receipt rows cannot be repaired losslessly",
+          "SHORT_VIDEO_COVER_SCHEMA_INCOMPLETE"
+        );
+      }
+    }
+    opened.exec(`
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_update_v1;
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_delete_v1;
+    `);
     opened.exec(`
       ALTER TABLE short_video_cover_delete_receipts
       RENAME TO short_video_cover_delete_receipts_repair_v2;

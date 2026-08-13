@@ -114,6 +114,61 @@ function verifyCoverSchemaMigrationAndFutureFence() {
     }
   }
 
+  const repairable = createMalformedV2ReceiptFixture({ duplicateOperationId: false });
+  try {
+    const covers = createShortVideoCoverDatabase({ dbPath: repairable.dbPath });
+    try {
+      assert.equal(covers.status().count, 1);
+    } finally {
+      covers.close();
+    }
+    const repaired = new DatabaseSync(repairable.dbPath, { readOnly: true });
+    try {
+      assert.deepEqual(
+        receiptTableShape(repaired),
+        [
+          ["operation_id", "TEXT", 1, 1],
+          ["request_sha256", "TEXT", 1, 0],
+          ["video_ids_json", "TEXT", 1, 0],
+          ["deleted_count", "INTEGER", 1, 0],
+          ["created_at", "TEXT", 1, 0]
+        ],
+        "wrong-PK v2 receipt table must be rebuilt to the exact canonical shape"
+      );
+      assert.equal(
+        Number(repaired.prepare(`
+          SELECT COUNT(*) AS count
+          FROM short_video_cover_delete_receipts
+          WHERE operation_id = ?
+        `).get(operationIdFor(91))?.count || 0),
+        1,
+        "safe wrong-PK repair must preserve its unique receipt"
+      );
+    } finally {
+      repaired.close();
+    }
+  } finally {
+    repairable.temp.cleanup();
+  }
+
+  const duplicate = createMalformedV2ReceiptFixture({ duplicateOperationId: true });
+  try {
+    const before = coverRepairSnapshot(duplicate.dbPath);
+    const covers = createShortVideoCoverDatabase({ dbPath: duplicate.dbPath });
+    assert.throws(
+      () => covers.status(),
+      (error) => error?.code === "SHORT_VIDEO_COVER_SCHEMA_INCOMPLETE"
+    );
+    covers.close();
+    assert.deepEqual(
+      coverRepairSnapshot(duplicate.dbPath),
+      before,
+      "duplicate operation receipts must fail closed with an atomic schema rollback"
+    );
+  } finally {
+    duplicate.temp.cleanup();
+  }
+
   for (const version of [3, 999]) {
     const temp = createVerifiedTempDir(`fanhao-short-video-cover-future-${version}-`);
     const dbPath = path.join(temp.tempDir, "covers.sqlite");
@@ -980,6 +1035,85 @@ function createLegacyCoverDatabase(dbPath, schemaVersion) {
   }
 }
 
+function createMalformedV2ReceiptFixture({ duplicateOperationId }) {
+  const temp = createVerifiedTempDir(`fanhao-short-video-cover-malformed-${duplicateOperationId ? "duplicate" : "repair"}-`);
+  const dbPath = path.join(temp.tempDir, "covers.sqlite");
+  createLegacyCoverDatabase(dbPath, 2);
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE short_video_cover_delete_receipts (
+        operation_id TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+        video_ids_json TEXT NOT NULL,
+        deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),
+        created_at TEXT PRIMARY KEY
+      ) WITHOUT ROWID;
+    `);
+    const insert = db.prepare(`
+      INSERT INTO short_video_cover_delete_receipts (
+        operation_id, request_sha256, video_ids_json, deleted_count, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      operationIdFor(91),
+      "8".repeat(64),
+      JSON.stringify(["schema-cover"]),
+      1,
+      "2026-08-01T00:00:00.000Z"
+    );
+    if (duplicateOperationId) {
+      insert.run(
+        operationIdFor(91),
+        "7".repeat(64),
+        JSON.stringify(["schema-cover-duplicate"]),
+        2,
+        "2026-08-01T00:00:01.000Z"
+      );
+    }
+  } finally {
+    db.close();
+  }
+  return { temp, dbPath };
+}
+
+function receiptTableShape(db) {
+  return db.prepare("PRAGMA table_info(short_video_cover_delete_receipts)").all()
+    .map((row) => [
+      String(row.name || ""),
+      String(row.type || "").trim().toUpperCase(),
+      Number(row.notnull || 0),
+      Number(row.pk || 0)
+    ]);
+}
+
+function coverRepairSnapshot(dbPath) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return {
+      journalMode: String(db.prepare("PRAGMA journal_mode").get()?.journal_mode || ""),
+      schema: db.prepare(`
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_schema
+        ORDER BY type, name
+      `).all(),
+      meta: db.prepare("SELECT key, value FROM short_video_cover_meta ORDER BY key").all(),
+      covers: db.prepare(`
+        SELECT video_id, byte_length, hex(image_blob) AS image_hex
+        FROM short_video_covers
+        ORDER BY video_id
+      `).all(),
+      receipts: db.prepare(`
+        SELECT operation_id, request_sha256, video_ids_json, deleted_count, created_at
+        FROM short_video_cover_delete_receipts
+        ORDER BY created_at
+      `).all()
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function coverMeta(db, key) {
   return String(db.prepare("SELECT value FROM short_video_cover_meta WHERE key = ?").get(key)?.value || "");
 }
@@ -992,6 +1126,7 @@ function coverSchemaSnapshot(dbPath) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     return {
+      journalMode: String(db.prepare("PRAGMA journal_mode").get()?.journal_mode || ""),
       schema: db.prepare(`
         SELECT type, name, tbl_name, sql
         FROM sqlite_schema
