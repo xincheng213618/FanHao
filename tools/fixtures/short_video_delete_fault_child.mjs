@@ -20,8 +20,16 @@ function stopAt(name) {
 
 const faultFsOps = new Proxy(fs, {
   get(target, property) {
+    if (property === "linkSync" && boundary === "unsupported_isolate_pending_restart") {
+      return () => { throw Object.assign(new Error("hardlinks unsupported"), { code: "ENOTSUP" }); };
+    }
     if (property === "linkSync" && boundary.startsWith("fallback_guard_")) {
-      return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
+      return (sourcePath, targetPath) => {
+        if (String(sourcePath).endsWith(".prepared")) {
+          throw Object.assign(new Error("links unsupported"), { code: "EPERM" });
+        }
+        return fs.linkSync(sourcePath, targetPath);
+      };
     }
     if (property === "openSync") {
       return (targetPath, flags, ...args) => {
@@ -66,6 +74,16 @@ const faultFsOps = new Proxy(fs, {
         return result;
       };
     }
+    if (property === "renameSync") {
+      return (sourcePath, targetPath) => {
+        if (["fallback_guard_published", "hardlink_guard_published"].includes(boundary)
+          && String(sourcePath).endsWith(".prepared")
+          && String(targetPath).endsWith("captured")) {
+          stopAt(boundary);
+        }
+        return fs.renameSync(sourcePath, targetPath);
+      };
+    }
     if (property === "unlinkSync") {
       return (targetPath) => {
         if (["fallback_guard_published", "hardlink_guard_published"].includes(boundary)
@@ -100,7 +118,8 @@ const store = createShortVideoStore({
       stopAt("planned");
     },
     afterItemIsolated({ ordinal }) {
-      if (boundary === "restore_renamed_pre_journal" && ordinal === 0) {
+      if ((boundary === "restore_renamed_pre_journal" || boundary.startsWith("fs_restore_media_"))
+        && ordinal === 0) {
         throw Object.assign(new Error("injected rollback after first isolation"), { code: "EACCES" });
       }
       if (ordinal === 0) stopAt("partially_isolated");
@@ -117,6 +136,19 @@ const store = createShortVideoStore({
     },
     afterRestoreRenamed({ ordinal }) {
       if (ordinal === 0) stopAt("restore_renamed_pre_journal");
+    },
+    afterFsActionNeutralized({ kind }) {
+      if (boundary === "post_cleanup_unlinks_pre_journal" && kind === "guard-published-cleanup") {
+        stopAt("post_cleanup_unlinks_pre_journal");
+      }
+    },
+    afterFsActionSystemCall({ kind, boundary: actionBoundary }) {
+      stopAt(`fs_${String(kind).replaceAll("-", "_")}_${actionBoundary}`);
+    },
+    afterDeletePendingRemembered({ errorCode }) {
+      if (errorCode === "SHORT_VIDEO_DELETE_ISOLATE_NO_REPLACE_UNAVAILABLE") {
+        stopAt("unsupported_isolate_pending_restart");
+      }
     },
     afterExclusiveGuardOpen() {
       stopAt("fallback_guard_open_pre_identity");

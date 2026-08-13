@@ -12,6 +12,7 @@ const GUARD_PREFIX = "FANHAO_SHORT_VIDEO_DELETE_GUARD";
 const PATH_REFERENCE_TABLE = "short_video_path_references";
 const PATH_TOMBSTONE_TABLE = "short_video_path_tombstones";
 const VIDEO_TOMBSTONE_TABLE = "short_video_delete_video_tombstones";
+const FS_ACTION_TABLE = "short_video_delete_fs_actions";
 const PATH_COLUMNS = ["source_path", "cover_path", "music_path", "data_path"];
 const DELETE_PROTOCOL_VERSION_META = "short_video_delete_protocol_version";
 const DELETE_PROTOCOL_VERSION = "4";
@@ -24,6 +25,7 @@ const AUTOMATIC_RECOVERY_CODES = new Set([
   "SHORT_VIDEO_DELETE_COVER_CLEANUP_PENDING",
   "SHORT_VIDEO_DELETE_GUARD_TEMP_CLEANUP",
   "SHORT_VIDEO_DELETE_IDENTITY_UNAVAILABLE",
+  "SHORT_VIDEO_DELETE_ISOLATE_NO_REPLACE_UNAVAILABLE",
   "SHORT_VIDEO_DELETE_LEASE_LOST",
   "SHORT_VIDEO_DELETE_PENDING"
 ]);
@@ -31,6 +33,7 @@ const DELETE_PROTOCOL_TABLES = [
   "short_video_delete_jobs",
   "short_video_delete_items",
   "short_video_delete_reservations",
+  FS_ACTION_TABLE,
   PATH_REFERENCE_TABLE,
   PATH_TOMBSTONE_TABLE,
   VIDEO_TOMBSTONE_TABLE
@@ -247,6 +250,27 @@ export function createShortVideoDeleteJobService({
       CREATE UNIQUE INDEX IF NOT EXISTS idx_short_video_delete_reservation_active
         ON short_video_delete_reservations(kind, reservation_key)
         WHERE released_at = '';
+
+      CREATE TABLE IF NOT EXISTS ${FS_ACTION_TABLE} (
+        job_id TEXT NOT NULL,
+        action_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL DEFAULT -1,
+        kind TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        target_path TEXT NOT NULL DEFAULT '',
+        evidence_dir TEXT NOT NULL,
+        evidence_path TEXT NOT NULL,
+        expected_identity_json TEXT NOT NULL,
+        observed_identity_json TEXT NOT NULL DEFAULT '',
+        stage TEXT NOT NULL DEFAULT 'intent',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(job_id, action_key),
+        FOREIGN KEY(job_id) REFERENCES short_video_delete_jobs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_short_video_delete_fs_actions_stage
+        ON ${FS_ACTION_TABLE}(job_id, stage, ordinal);
 
       CREATE TABLE IF NOT EXISTS ${PATH_REFERENCE_TABLE} (
         owner_table TEXT NOT NULL,
@@ -890,6 +914,10 @@ export function createShortVideoDeleteJobService({
           return executionResult(db, current.id);
         }
         rememberPending(db, current.id, "rollback_pending", "rollback", error);
+        await invokeHook(hooks.afterDeletePendingRemembered, {
+          jobId: current.id,
+          errorCode: String(error?.code || "SHORT_VIDEO_DELETE_FAILED")
+        });
         try {
           const recovered = await recoverOne(db, current.id, executionToken);
           if (recovered?.status === "rolled_back") throw pendingOperationError(db, current.id, error, "删除本地文件失败");
@@ -1290,13 +1318,14 @@ export function createShortVideoDeleteJobService({
       }
 
       await invokeHook(hooks.afterItemIsolationIntent, { jobId, ordinal: item.ordinal });
-      fsOps.renameSync(item.original_path, item.quarantine_path);
-      const isolated = await requireManagedFileIdentityAsync(
+      const isolated = publishManagedFileNoReplaceAndCaptureSource(
+        db,
+        requireOwnedJob(db, jobId),
+        item,
+        "isolate-media",
+        item.original_path,
         item.quarantine_path,
-        item.managed_root,
-        expected,
-        "隔离文件身份已变化",
-        { transitionAfterRename: true }
+        current
       );
       const guardIdentity = await createGuard(
         db,
@@ -1510,12 +1539,13 @@ export function createShortVideoDeleteJobService({
         continue;
       }
       if (planned.disposition !== "delete" || planned.state === "cleaned") continue;
-      const candidate = await inspectCleanupCandidate(requireOwnedJob(db, jobId), planned);
+      const actionable = releaseIsolateMediaEvidence(db, requireOwnedJob(db, jobId), planned);
+      const candidate = await inspectCleanupCandidate(requireOwnedJob(db, jobId), actionable);
       beginImmediate(db);
       try {
         heartbeat(db, jobId);
         requireOwnedJob(db, jobId);
-        assertCleanupCandidateCheap(requireOwnedJob(db, jobId), planned, candidate);
+        assertCleanupCandidateCheap(requireOwnedJob(db, jobId), actionable, candidate);
         const intent = db.prepare(`
           UPDATE short_video_delete_items
           SET state = 'cleaning', error = '', updated_at = ?
@@ -1533,7 +1563,7 @@ export function createShortVideoDeleteJobService({
         throw error;
       }
 
-      await cleanupIsolatedItem(requireOwnedJob(db, jobId), { ...planned, state: "cleaning" }, candidate);
+      await cleanupIsolatedItem(db, requireOwnedJob(db, jobId), { ...actionable, state: "cleaning" }, candidate);
 
       beginImmediate(db);
       try {
@@ -1563,7 +1593,7 @@ export function createShortVideoDeleteJobService({
       finalItems.filter((item) => item.disposition === "delete").map((item) => item.original_path)
     );
     result.coverCleanupError = "";
-    finalizeOwnedDirectories(requireOwnedJob(db, jobId), finalItems);
+    finalizeOwnedDirectories(db, requireOwnedJob(db, jobId), finalItems);
     finishJob(db, jobId, "completed", result);
     pruneTerminalJobs(db);
     return readJob(db, jobId);
@@ -1608,7 +1638,8 @@ export function createShortVideoDeleteJobService({
         }
         continue;
       }
-      const candidate = await inspectRestoreCandidate(requireOwnedJob(db, jobId), planned);
+      const actionable = releaseIsolateMediaEvidence(db, requireOwnedJob(db, jobId), planned);
+      const candidate = await inspectRestoreCandidate(requireOwnedJob(db, jobId), actionable);
       beginImmediate(db);
       try {
         heartbeat(db, jobId);
@@ -1640,7 +1671,7 @@ export function createShortVideoDeleteJobService({
       const restoredIdentity = await restoreIsolatedItem(
         db,
         requireOwnedJob(db, jobId),
-        { ...planned, state: "restoring" },
+        { ...actionable, state: "restoring" },
         candidate
       );
 
@@ -1672,7 +1703,7 @@ export function createShortVideoDeleteJobService({
       }
       await invokeHook(hooks.afterItemRestored, { jobId, ordinal: planned.ordinal });
     }
-    finalizeOwnedDirectories(job, readItems(db, jobId));
+    finalizeOwnedDirectories(db, job, readItems(db, jobId));
     finishJob(db, jobId, "rolled_back", buildResult(db, jobId));
     pruneTerminalJobs(db);
     return readJob(db, jobId);
@@ -1721,6 +1752,7 @@ export function createShortVideoDeleteJobService({
       const job = claim(db, jobId, token);
       if (!job) return readJob(db, jobId);
       if (ownsExecution) await invokeHook(hooks.afterRecoveryClaim, { jobId });
+      reconcileFsActions(db, job);
       const disposition = databaseDisposition(db, job);
       if (disposition === "committed") return await cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
       if (disposition === "uncommitted") return await rollbackUncommitted(db, jobId, { claimedJob: job, executionToken: token });
@@ -2005,6 +2037,18 @@ export function createShortVideoDeleteJobService({
   }
 
   function finishJob(db, jobId, terminalStatus, result) {
+    const job = requireOwnedJob(db, jobId);
+    reconcileFsActions(db, job);
+    const remainingAction = db.prepare(`
+      SELECT stage, evidence_path FROM ${FS_ACTION_TABLE}
+      WHERE job_id = ? ORDER BY action_key LIMIT 1
+    `).get(jobId);
+    if (remainingAction) {
+      throw codedError(
+        `文件动作尚未收敛 (${remainingAction.stage}): ${remainingAction.evidence_path}`,
+        "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
+      );
+    }
     beginImmediate(db);
     try {
       finishJobInTransaction(db, jobId, terminalStatus, result);
@@ -2120,16 +2164,32 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  async function cleanupIsolatedItem(job, item, candidate) {
+  async function cleanupIsolatedItem(db, job, item, candidate) {
     if (candidate.mode === "delete") {
       assertCleanupCandidateCheap(job, item, candidate);
       await invokeHook(hooks.beforeQuarantineCleanup, { jobId: job.id, ordinal: item.ordinal });
-      fsOps.unlinkSync(item.quarantine_path);
-      removeOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json);
+      const action = beginFsAction(
+        db,
+        job,
+        item,
+        "quarantine-cleanup",
+        item.quarantine_path,
+        "",
+        candidate.identity
+      );
+      capturePathIntoEvidence(
+        db,
+        job,
+        item,
+        action,
+        (candidatePath) => captureManagedFileIdentity(candidatePath, item.managed_root),
+        { neutralize: true }
+      );
+      removeOwnedGuard(db, job, item);
     } else if (candidate.mode === "guard_only") {
-      removeOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json);
+      removeOwnedGuard(db, job, item);
     }
-    removeOwnedGuardTemp(job, item);
+    removeOwnedGuardTemp(db, job, item);
   }
 
   async function inspectRestoreCandidate(job, item) {
@@ -2213,23 +2273,25 @@ export function createShortVideoDeleteJobService({
   async function restoreIsolatedItem(db, job, item, candidate) {
     if (candidate.mode === "restore") {
       if (candidate.incompleteExclusiveGuard) {
-        removeOwnedIncompleteExclusiveGuard(job, item, candidate.incompleteExclusiveGuard);
+        removeOwnedIncompleteExclusiveGuard(db, job, item, candidate.incompleteExclusiveGuard);
       } else if (candidate.guardOwned) moveOwnedGuardAside(db, item.original_path, job, item);
-      else removeOwnedGuardTemp(job, item);
+      else removeOwnedGuardTemp(db, job, item);
       assertPathMissing(item.original_path, "原文件位置已被其他文件占用");
       await invokeHook(hooks.beforeItemRestored, { jobId: job.id, ordinal: item.ordinal });
-      fsOps.renameSync(item.quarantine_path, item.original_path);
-      await invokeHook(hooks.afterRestoreRenamed, { jobId: job.id, ordinal: item.ordinal });
-      removeOwnedGuardTemp(job, item);
-      return requireManagedFileIdentityAsync(
+      const restored = publishManagedFileNoReplaceAndCaptureSource(
+        db,
+        job,
+        item,
+        "restore-media",
+        item.quarantine_path,
         item.original_path,
-        item.managed_root,
-        candidate.identity,
-        "恢复后的源文件身份不一致",
-        { rollbackAfterRename: true }
+        candidate.identity
       );
+      await invokeHook(hooks.afterRestoreRenamed, { jobId: job.id, ordinal: item.ordinal });
+      removeOwnedGuardTemp(db, job, item);
+      return restored;
     }
-    removeOwnedGuardTemp(job, item);
+    removeOwnedGuardTemp(db, job, item);
     return candidate.identity;
   }
 
@@ -2321,8 +2383,22 @@ export function createShortVideoDeleteJobService({
     }
     checkpointPublishedGuard(db, job.id, ordinal, publishMode, guardIdentity);
     try {
-      fsOps.unlinkSync(tempPath);
+      const item = readItem(db, job.id, ordinal);
+      const preparedProof = captureOwnedGuardCapability(tempPath, job, ordinal, "");
+      if (!item || !preparedProof) {
+        throw codedError("guard 临时文件清理证据缺失", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
+      }
+      removeProvenGuardThroughPrivateCandidate(
+        db,
+        job,
+        item,
+        tempPath,
+        preparedProof,
+        "prepared-publish",
+        publishMode === GUARD_PUBLISH_HARDLINK ? originalPath : ""
+      );
     } catch (error) {
+      if (String(error?.code || "") === "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND") throw error;
       throw codedError("guard 临时文件清理失败", "SHORT_VIDEO_DELETE_GUARD_TEMP_CLEANUP", error?.message);
     }
     return guardIdentity;
@@ -2332,25 +2408,35 @@ export function createShortVideoDeleteJobService({
     return ["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"].includes(String(error?.code || "").toUpperCase());
   }
 
-  function removeOwnedGuardTemp(job, item) {
+  function removeOwnedGuardTemp(db, job, item) {
     if (!item.quarantine_path || !item.managed_root) return;
     const jobDir = path.dirname(item.quarantine_path);
     const tempPath = guardTempPath(jobDir, job, item.ordinal);
     const entry = lstatIfPresent(tempPath);
     if (!entry) return;
     requireOwnedJobDirectory(job, jobDir, item.managed_root);
-    if (!entry.isFile() || entry.isSymbolicLink()) {
-      throw codedError("guard 临时路径不是普通文件", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
-    }
     const expected = parseJson(item.source_identity_json, null);
-    if (!expected || String(entry.dev) !== String(expected.dev)) {
+    const proof = captureOwnedPreparedGuardCapability(tempPath, job, item.ordinal);
+    if (!expected || !proof || String(proof.dev) !== String(expected.dev)) {
       throw codedError("guard 临时文件不在源文件卷", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
     }
-    fsOps.unlinkSync(tempPath);
+    const publishedEntry = lstatIfPresent(item.original_path);
+    const retainedPath = publishedEntry
+      && String(publishedEntry.dev) === String(proof.dev)
+      && String(publishedEntry.ino) === String(proof.ino)
+        ? item.original_path
+        : "";
+    removeProvenGuardThroughPrivateCandidate(db, job, item, tempPath, proof, "prepared", retainedPath);
   }
 
   function moveOwnedGuardAside(db, originalPath, job, item) {
-    if (!isOwnedGuard(originalPath, job, item.ordinal, item.guard_identity_json)) {
+    const initialPublishedProof = captureOwnedGuardCapability(
+      originalPath,
+      job,
+      item.ordinal,
+      item.guard_identity_json
+    );
+    if (!initialPublishedProof) {
       throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
     }
     const jobDir = path.dirname(item.quarantine_path);
@@ -2358,7 +2444,7 @@ export function createShortVideoDeleteJobService({
     const tempPath = guardTempPath(jobDir, job, item.ordinal);
     const prepared = lstatIfPresent(tempPath);
     if (!prepared) {
-      fsOps.renameSync(originalPath, tempPath);
+      removeProvenGuardThroughPrivateCandidate(db, job, item, originalPath, initialPublishedProof, "published");
       return;
     }
     if (!isOwnedGuard(tempPath, job, item.ordinal, "")) {
@@ -2391,7 +2477,15 @@ export function createShortVideoDeleteJobService({
     // whether the source name is the prepared hardlink or an independently
     // created no-clobber guard. Removing only that owned source name leaves the
     // prepared checkpoint available until the media rename has completed.
-    fsOps.unlinkSync(originalPath);
+    removeProvenGuardThroughPrivateCandidate(
+      db,
+      job,
+      item,
+      originalPath,
+      published,
+      "published",
+      publishMode === GUARD_PUBLISH_HARDLINK ? tempPath : ""
+    );
   }
 
   function checkpointGuardPublishMode(db, jobId, ordinal, expectedMode, nextMode) {
@@ -2607,13 +2701,20 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  function removeOwnedGuard(originalPath, job, ordinal, storedIdentityJson) {
+  function removeOwnedGuard(db, job, item) {
+    const originalPath = item.original_path;
     const entry = lstatIfPresent(originalPath);
     if (!entry) return;
-    if (!isOwnedGuard(originalPath, job, ordinal, storedIdentityJson)) {
+    const proof = captureOwnedGuardCapability(
+      originalPath,
+      job,
+      item.ordinal,
+      item.guard_identity_json
+    );
+    if (!proof) {
       throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
     }
-    fsOps.unlinkSync(originalPath);
+    removeProvenGuardThroughPrivateCandidate(db, job, item, originalPath, proof, "published-cleanup");
   }
 
   function isOwnedGuard(originalPath, job, ordinal, storedIdentityJson) {
@@ -2656,7 +2757,8 @@ export function createShortVideoDeleteJobService({
     return jobDir;
   }
 
-  function finalizeOwnedDirectories(job, items) {
+  function finalizeOwnedDirectories(db, job, items) {
+    reconcileFsActions(db, job);
     const directories = [...new Set(items
       .filter((item) => item.managed_root && item.quarantine_path)
       .map((item) => path.dirname(item.quarantine_path)))];
@@ -2668,10 +2770,38 @@ export function createShortVideoDeleteJobService({
       if (!entry) continue;
       ensurePlainDirectory(jobDir, root, false);
       if (lstatIfPresent(marker)) {
-        if (fsOps.readFileSync(marker, "utf8") !== `${job.id}:${job.quarantine_token}`) {
+        const markerContent = `${job.id}:${job.quarantine_token}`;
+        const markerProof = captureExactSmallFileCapability(marker, markerContent);
+        if (!markerProof) {
           throw codedError("隔离目录 ownership marker 不匹配", "SHORT_VIDEO_DELETE_QUARANTINE_OWNER");
         }
-        fsOps.unlinkSync(marker);
+        const item = items.find((candidate) => path.dirname(candidate.quarantine_path || "") === jobDir);
+        if (!item) throw codedError("隔离目录缺少文件动作 owner", "SHORT_VIDEO_DELETE_FS_ACTION_CHANGED");
+        const action = beginFsAction(
+          db,
+          job,
+          item,
+          `owner-marker-finalize-${item.ordinal}`,
+          marker,
+          "",
+          markerProof
+        );
+        capturePathIntoEvidence(
+          db,
+          job,
+          item,
+          action,
+          (candidatePath) => captureExactSmallFileCapability(candidatePath, markerContent),
+          { neutralize: true }
+        );
+        reconcileFsActions(db, job);
+      }
+      const remaining = fsOps.readdirSync(jobDir);
+      if (remaining.length) {
+        throw codedError(
+          `隔离目录仍有未收敛 evidence: ${jobDir}`,
+          "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
+        );
       }
       fsOps.rmdirSync(jobDir);
       const base = path.dirname(jobDir);
@@ -2900,6 +3030,714 @@ export function createShortVideoDeleteJobService({
     return after;
   }
 
+  function captureOwnedPreparedGuardCapability(filePath, job, ordinal) {
+    const lexicalEntry = fsOps.lstatSync(filePath, { bigint: true });
+    const expectedContent = guardContent(job, ordinal);
+    if (!lexicalEntry.isFile()
+      || lexicalEntry.isSymbolicLink()
+      || Number(lexicalEntry.size) > Buffer.byteLength(expectedContent)) return null;
+    const handle = fsOps.openSync(filePath, "r");
+    let before;
+    let after;
+    let content;
+    try {
+      before = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) return null;
+      content = fsOps.readFileSync(handle, "utf8");
+      after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+    } finally {
+      fsOps.closeSync(handle);
+    }
+    if (!matchesExactSnapshot(after, before) || !expectedContent.startsWith(content)) return null;
+    const finalIdentity = captureIdentity(fsOps.lstatSync(filePath, { bigint: true }));
+    return matchesCheapIdentity(finalIdentity, after) ? after : null;
+  }
+
+  function captureExactSmallFileCapability(filePath, expectedContent) {
+    const lexicalEntry = fsOps.lstatSync(filePath, { bigint: true });
+    if (!lexicalEntry.isFile() || lexicalEntry.isSymbolicLink() || Number(lexicalEntry.size) > 4096) return null;
+    const handle = fsOps.openSync(filePath, "r");
+    let before;
+    let after;
+    let content;
+    try {
+      before = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) return null;
+      content = fsOps.readFileSync(handle, "utf8");
+      after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+    } finally {
+      fsOps.closeSync(handle);
+    }
+    if (!matchesExactSnapshot(after, before) || content !== expectedContent) return null;
+    const finalIdentity = captureIdentity(fsOps.lstatSync(filePath, { bigint: true }));
+    return matchesCheapIdentity(finalIdentity, after) ? after : null;
+  }
+
+  function actionObjectMatches(actual, expected) {
+    if (!actual || !expected) return false;
+    return String(actual.dev || "") === String(expected.dev || "")
+      && String(actual.ino || "") === String(expected.ino || "")
+      && String(actual.size || "") === String(expected.size || "")
+      && String(actual.birthtimeNs || "") === String(expected.birthtimeNs || "")
+      && String(actual.mtimeNs || "") === String(expected.mtimeNs || "")
+      && (!expected.contentSha256
+        || String(actual.contentSha256 || "") === String(expected.contentSha256))
+      && (!expected.contentFingerprint
+        || String(actual.contentFingerprint || actual.contentSha256 || "")
+          === String(expected.contentFingerprint));
+  }
+
+  function actionInodeMatches(actual, expected) {
+    return String(actual?.dev || "") === String(expected?.dev || "")
+      && String(actual?.ino || "") === String(expected?.ino || "")
+      && String(actual?.birthtimeNs || "") === String(expected?.birthtimeNs || "");
+  }
+
+  function beginFsAction(db, job, item, kind, sourcePath, targetPath, expectedIdentity) {
+    const ordinal = Number(item?.ordinal ?? -1);
+    const actionKey = `${ordinal}:${kind}`;
+    const existing = db.prepare(`
+      SELECT * FROM ${FS_ACTION_TABLE} WHERE job_id = ? AND action_key = ?
+    `).get(job.id, actionKey) || null;
+    if (existing) {
+      if (existing.kind !== kind
+        || path.resolve(existing.source_path) !== path.resolve(sourcePath)
+        || String(existing.target_path || "") !== String(targetPath || "")
+        || !actionObjectMatches(parseJson(existing.expected_identity_json, null), expectedIdentity)) {
+        throw codedError("文件动作 journal 与当前计划不一致", "SHORT_VIDEO_DELETE_FS_ACTION_CHANGED");
+      }
+      if (existing.stage === "manual") {
+        throw codedError(
+          `文件动作需要人工处理；保留证据: ${existing.evidence_path}`,
+          "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
+        );
+      }
+      return existing;
+    }
+    const jobDir = path.dirname(item.quarantine_path);
+    requireOwnedJobDirectory(job, jobDir, item.managed_root);
+    const actionId = crypto.randomBytes(24).toString("hex");
+    const evidenceDir = path.join(jobDir, `.evidence-${actionId}`);
+    const evidencePath = path.join(evidenceDir, "captured");
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      db.prepare(`
+        INSERT INTO ${FS_ACTION_TABLE} (
+          job_id, action_key, ordinal, kind, source_path, target_path,
+          evidence_dir, evidence_path, expected_identity_json,
+          observed_identity_json, stage, error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'intent', '', ?, ?)
+      `).run(
+        job.id,
+        actionKey,
+        ordinal,
+        kind,
+        path.resolve(sourcePath),
+        targetPath ? path.resolve(targetPath) : "",
+        evidenceDir,
+        evidencePath,
+        JSON.stringify(expectedIdentity),
+        now(),
+        now()
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+    return db.prepare(`SELECT * FROM ${FS_ACTION_TABLE} WHERE job_id = ? AND action_key = ?`)
+      .get(job.id, actionKey);
+  }
+
+  function updateFsAction(db, job, action, stage, observedIdentity = null, errorMessage = "") {
+    const executionToken = requireActiveExecutionToken(job.id);
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      const updated = db.prepare(`
+        UPDATE ${FS_ACTION_TABLE}
+        SET stage = ?, observed_identity_json = ?, error = ?, updated_at = ?
+        WHERE job_id = ? AND action_key = ?
+          AND EXISTS (
+            SELECT 1 FROM short_video_delete_jobs owner
+            WHERE owner.id = ${FS_ACTION_TABLE}.job_id
+              AND owner.owner_id = ? AND owner.execution_token = ?
+          )
+      `).run(
+        stage,
+        observedIdentity ? JSON.stringify(observedIdentity) : String(action.observed_identity_json || ""),
+        String(errorMessage || "").slice(0, 2000),
+        now(),
+        job.id,
+        action.action_key,
+        ownerId,
+        executionToken
+      );
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("文件动作状态 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+    return db.prepare(`SELECT * FROM ${FS_ACTION_TABLE} WHERE job_id = ? AND action_key = ?`)
+      .get(job.id, action.action_key);
+  }
+
+  function failFsAction(db, job, action, reason) {
+    const message = `${reason}; foreign/evidence retained at ${action.evidence_path}`;
+    try {
+      updateFsAction(db, job, action, "manual", null, message);
+    } catch {}
+    throw codedError(message, "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND");
+  }
+
+  function ensureFsActionEvidenceDirectory(action, item) {
+    const jobDir = path.dirname(item.quarantine_path);
+    if (path.dirname(action.evidence_dir) !== jobDir
+      || path.dirname(action.evidence_path) !== action.evidence_dir) {
+      throw codedError("文件动作 evidence 路径逃逸", "SHORT_VIDEO_DELETE_FS_ACTION_CHANGED");
+    }
+    const existing = lstatIfPresent(action.evidence_dir);
+    if (!existing) {
+      try {
+        fsOps.mkdirSync(action.evidence_dir, { mode: 0o700 });
+      } catch (error) {
+        if (String(error?.code || "").toUpperCase() !== "EEXIST") throw error;
+      }
+    }
+    ensurePlainDirectory(action.evidence_dir, item.managed_root, false);
+  }
+
+  function capturePathIntoEvidence(db, job, item, action, captureCandidate, options = {}) {
+    ensureFsActionEvidenceDirectory(action, item);
+    let evidenceEntry = lstatIfPresent(action.evidence_path);
+    const sourceEntry = lstatIfPresent(action.source_path);
+    if (!evidenceEntry) {
+      if (!sourceEntry) return failFsAction(db, job, action, "source and evidence are both missing");
+      fsOps.renameSync(action.source_path, action.evidence_path);
+      hooks.afterFsActionSystemCall?.({
+        jobId: job.id,
+        ordinal: Number(action.ordinal),
+        kind: action.kind,
+        boundary: "captured"
+      });
+      evidenceEntry = lstatIfPresent(action.evidence_path);
+    }
+    if (["captured", "neutralized"].includes(action.stage)) {
+      if (lstatIfPresent(action.source_path)) {
+        return failFsAction(db, job, action, "source name was repopulated after atomic capture");
+      }
+      const persistedObserved = parseJson(action.observed_identity_json, null);
+      const handle = fsOps.openSync(action.evidence_path, options.neutralize ? "r+" : "r");
+      try {
+        const bound = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+        if (!persistedObserved || !actionInodeMatches(bound, persistedObserved)) {
+          return failFsAction(db, job, action, "evidence name no longer resolves to the captured inode");
+        }
+        if (action.stage === "neutralized") {
+          if (String(bound.size || "") !== "0") {
+            return failFsAction(db, job, action, "neutralized evidence was repopulated");
+          }
+          return { action, observed: bound };
+        }
+        if (!options.neutralize) return { action, observed: bound };
+        if (String(bound.nlink || "") !== "1") {
+          return failFsAction(db, job, action, "refusing handle truncation while evidence inode has other links");
+        }
+        fsOps.ftruncateSync(handle, 0);
+        fsOps.fsyncSync(handle);
+        hooks.afterFsActionSystemCall?.({
+          jobId: job.id,
+          ordinal: Number(action.ordinal),
+          kind: action.kind,
+          boundary: "neutralized"
+        });
+        const neutralized = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+        action = updateFsAction(db, job, action, "neutralized", neutralized);
+        hooks.afterFsActionNeutralized?.({
+          jobId: job.id,
+          ordinal: Number(action.ordinal),
+          kind: action.kind
+        });
+        return { action, observed: neutralized };
+      } finally {
+        fsOps.closeSync(handle);
+      }
+    }
+    let observed = null;
+    try {
+      observed = captureCandidate(action.evidence_path);
+    } catch {}
+    const expected = parseJson(action.expected_identity_json, null);
+    if (!observed || !actionObjectMatches(observed, expected)) {
+      return failFsAction(db, job, action, "atomic capture moved an unproven object");
+    }
+    if (lstatIfPresent(action.source_path)) {
+      return failFsAction(db, job, action, "source name was repopulated during atomic capture");
+    }
+    if (action.stage === "intent") action = updateFsAction(db, job, action, "captured", observed);
+    if (!options.neutralize) return { action, observed };
+    if (action.stage === "neutralized") return { action, observed };
+
+    const handle = fsOps.openSync(action.evidence_path, "r+");
+    try {
+      const bound = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      const persistedObserved = parseJson(action.observed_identity_json, observed);
+      if (!actionInodeMatches(bound, persistedObserved)) {
+        return failFsAction(db, job, action, "evidence name no longer resolves to the captured inode");
+      }
+      if (String(bound.nlink || "") !== "1") {
+        return failFsAction(db, job, action, "refusing handle truncation while evidence inode has other links");
+      }
+      fsOps.ftruncateSync(handle, 0);
+      fsOps.fsyncSync(handle);
+      hooks.afterFsActionSystemCall?.({
+        jobId: job.id,
+        ordinal: Number(action.ordinal),
+        kind: action.kind,
+        boundary: "neutralized"
+      });
+      const neutralized = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      action = updateFsAction(db, job, action, "neutralized", neutralized);
+      hooks.afterFsActionNeutralized?.({
+        jobId: job.id,
+        ordinal: Number(action.ordinal),
+        kind: action.kind
+      });
+      return { action, observed: neutralized };
+    } finally {
+      fsOps.closeSync(handle);
+    }
+  }
+
+  function publishManagedFileNoReplaceAndCaptureSource(
+    db,
+    job,
+    item,
+    kind,
+    sourcePath,
+    targetPath,
+    expectedIdentity
+  ) {
+    let action = beginFsAction(db, job, item, kind, sourcePath, targetPath, expectedIdentity);
+    const targetEntry = lstatIfPresent(targetPath);
+    if (!targetEntry) {
+      try {
+        fsOps.linkSync(sourcePath, targetPath);
+        hooks.afterFsActionSystemCall?.({
+          jobId: job.id,
+          ordinal: Number(item.ordinal),
+          kind,
+          boundary: "linked"
+        });
+      } catch (error) {
+        if (kind === "isolate-media") {
+          const sourceAfterFailure = captureManagedIdentityIfPresent(sourcePath, item.managed_root);
+          if (sourceAfterFailure
+            && actionObjectMatches(sourceAfterFailure, expectedIdentity)
+            && !lstatIfPresent(targetPath)
+            && !lstatIfPresent(action.evidence_path)) {
+            action = updateFsAction(
+              db,
+              job,
+              action,
+              "cancelled",
+              sourceAfterFailure,
+              `no-replace link unavailable (${String(error?.code || "unknown")})`
+            );
+            finalizeReconciledFsAction(db, job, item, action);
+            resetCancelledIsolationItem(db, job, item);
+            throw codedError(
+              "文件系统不支持安全 no-replace 隔离，源文件未改变",
+              "SHORT_VIDEO_DELETE_ISOLATE_NO_REPLACE_UNAVAILABLE",
+              error?.message
+            );
+          }
+        }
+        return failFsAction(
+          db,
+          job,
+          action,
+          `atomic no-replace publication failed (${String(error?.code || "unknown")})`
+        );
+      }
+    }
+    let targetIdentity = null;
+    try {
+      targetIdentity = captureManagedFileIdentity(targetPath, item.managed_root);
+    } catch {}
+    if (!targetIdentity || !actionObjectMatches(targetIdentity, expectedIdentity)) {
+      return failFsAction(db, job, action, "no-replace target is not the planned media object");
+    }
+    const captured = capturePathIntoEvidence(
+      db,
+      job,
+      item,
+      action,
+      (candidatePath) => captureManagedFileIdentity(candidatePath, item.managed_root),
+      { neutralize: false }
+    );
+    action = captured.action;
+    action = releasePrivateEvidenceLink(db, job, item, action, targetPath);
+    let finalTarget = null;
+    try {
+      finalTarget = captureManagedFileIdentity(targetPath, item.managed_root);
+    } catch {}
+    if (!finalTarget || !actionObjectMatches(finalTarget, expectedIdentity)) {
+      return failFsAction(db, job, action, "published media target changed after source capture");
+    }
+    if (action.stage === "released") finalizeReconciledFsAction(db, job, item, action);
+    return finalTarget;
+  }
+
+  function resetCancelledIsolationItem(db, job, item) {
+    const executionToken = requireActiveExecutionToken(job.id);
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET state = 'planned', error = '', updated_at = ?
+        WHERE job_id = ? AND ordinal = ? AND state = 'isolating'
+          AND EXISTS (
+            SELECT 1 FROM short_video_delete_jobs owner
+            WHERE owner.id = short_video_delete_items.job_id
+              AND owner.owner_id = ? AND owner.execution_token = ?
+          )
+      `).run(now(), job.id, item.ordinal, ownerId, executionToken);
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("取消隔离 intent CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function releasePrivateEvidenceLink(db, job, item, action, retainedPath) {
+    if (action.stage === "released") return action;
+    if (action.stage !== "captured") {
+      return failFsAction(db, job, action, "media evidence is not in a releasable captured state");
+    }
+    ensureFsActionEvidenceDirectory(action, item);
+    const retainedEntry = lstatIfPresent(retainedPath);
+    if (!retainedEntry) return failFsAction(db, job, action, "retained media name is missing");
+    const handle = fsOps.openSync(action.evidence_path, "r");
+    try {
+      const bound = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      const observed = parseJson(action.observed_identity_json, null);
+      const retained = captureIdentity(retainedEntry);
+      if (!observed
+        || !actionInodeMatches(bound, observed)
+        || String(bound.dev) !== String(retained.dev)
+        || String(bound.ino) !== String(retained.ino)
+        || Number(bound.nlink || 0) < 2) {
+        return failFsAction(db, job, action, "private media evidence is not linked to the retained target");
+      }
+      // This is the only regular-file unlink in the protocol. The name is a
+      // 192-bit capability inside an atomically-created 0700 directory and is
+      // never passed to a hook before this call. Public/managed names never use
+      // unlink. Same-user processes that enumerate and mutate private protocol
+      // directories are outside the supported threat boundary.
+      fs.unlinkSync(action.evidence_path);
+      hooks.afterFsActionSystemCall?.({
+        jobId: job.id,
+        ordinal: Number(action.ordinal),
+        kind: action.kind,
+        boundary: "released"
+      });
+      const after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (Number(after.nlink || 0) !== Number(bound.nlink || 0) - 1) {
+        return failFsAction(db, job, action, "private evidence link count did not decrease exactly once");
+      }
+      return updateFsAction(db, job, action, "released", after);
+    } finally {
+      fsOps.closeSync(handle);
+    }
+  }
+
+  function releaseIsolateMediaEvidence(db, job, item) {
+    reconcileFsActions(db, job);
+    const action = db.prepare(`
+      SELECT * FROM ${FS_ACTION_TABLE}
+      WHERE job_id = ? AND action_key = ?
+    `).get(job.id, `${Number(item.ordinal)}:isolate-media`) || null;
+    if (!action || action.stage === "released") return readItem(db, job.id, item.ordinal) || item;
+    if (action.stage === "manual") {
+      throw codedError(
+        `媒体 evidence 需要人工处理: ${action.evidence_path}`,
+        "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
+      );
+    }
+    const retainedPath = item.quarantine_path;
+    releasePrivateEvidenceLink(db, job, item, action, retainedPath);
+    const current = captureManagedFileIdentity(retainedPath, item.managed_root);
+    const expected = parseJson(item.quarantine_identity_json, null)
+      || parseJson(item.source_identity_json, null);
+    if (!expected || !actionObjectMatches(current, expected)) {
+      throw codedError("释放 isolate evidence 后媒体身份不一致", "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND");
+    }
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET quarantine_identity_json = ?, updated_at = ?
+        WHERE job_id = ? AND ordinal = ?
+          AND EXISTS (
+            SELECT 1 FROM short_video_delete_jobs owner
+            WHERE owner.id = short_video_delete_items.job_id
+              AND owner.owner_id = ? AND owner.execution_token = ?
+          )
+      `).run(JSON.stringify(current), now(), job.id, item.ordinal, ownerId, requireActiveExecutionToken(job.id));
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("媒体 evidence 释放检查点 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+    return readItem(db, job.id, item.ordinal);
+  }
+
+  function reconcileFsActions(db, job) {
+    const actions = db.prepare(`
+      SELECT * FROM ${FS_ACTION_TABLE}
+      WHERE job_id = ?
+      ORDER BY created_at, action_key
+    `).all(job.id);
+    for (let action of actions) {
+      if (action.stage === "manual") {
+        throw codedError(
+          `文件动作需要人工处理；保留证据: ${action.evidence_path}`,
+          "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
+        );
+      }
+      const item = readItem(db, job.id, action.ordinal);
+      if (!item) {
+        failFsAction(db, job, action, "filesystem action has no item owner");
+      }
+      if (["isolate-media", "restore-media"].includes(action.kind)) {
+        action = reconcileMediaFsAction(db, job, item, action);
+      } else {
+        action = reconcileRemovalFsAction(db, job, item, action);
+      }
+      if (["neutralized", "released", "cancelled"].includes(action.stage)) {
+        finalizeReconciledFsAction(db, job, item, action);
+      }
+    }
+  }
+
+  function reconcileMediaFsAction(db, job, item, action) {
+    const expected = parseJson(action.expected_identity_json, null);
+    const source = captureManagedIdentityIfPresent(action.source_path, item.managed_root);
+    const target = captureManagedIdentityIfPresent(action.target_path, item.managed_root);
+    const evidence = captureManagedIdentityIfPresent(action.evidence_path, item.managed_root);
+    if (action.stage === "intent" && source && !target && !evidence) {
+      return updateFsAction(db, job, action, "cancelled", source);
+    }
+    if (action.stage === "intent" && target && actionObjectMatches(target, expected)) {
+      if (source && !evidence) {
+        const captured = capturePathIntoEvidence(
+          db,
+          job,
+          item,
+          action,
+          (candidatePath) => captureManagedFileIdentity(candidatePath, item.managed_root),
+          { neutralize: false }
+        );
+        action = captured.action;
+      } else if (!source && evidence && actionObjectMatches(evidence, expected)) {
+        action = updateFsAction(db, job, action, "captured", evidence);
+      } else if (source || !evidence) {
+        return failFsAction(db, job, action, "media intent paths cannot be safely reconciled");
+      }
+    }
+    if (action.stage === "captured") {
+      const currentTarget = captureManagedIdentityIfPresent(action.target_path, item.managed_root);
+      const currentEvidence = captureManagedIdentityIfPresent(action.evidence_path, item.managed_root);
+      if (!currentTarget || !actionObjectMatches(currentTarget, expected)) {
+        return failFsAction(db, job, action, "retained media target changed before evidence release");
+      }
+      if (!currentEvidence) {
+        return updateFsAction(db, job, action, "released", currentTarget);
+      }
+      action = releasePrivateEvidenceLink(db, job, item, action, action.target_path);
+    }
+    if (action.stage === "released") {
+      const currentTarget = captureManagedIdentityIfPresent(action.target_path, item.managed_root);
+      if (lstatIfPresent(action.evidence_path)
+        || lstatIfPresent(action.source_path)
+        || !currentTarget
+        || !actionObjectMatches(currentTarget, expected)) {
+        return failFsAction(db, job, action, "released media action no longer matches its target");
+      }
+    }
+    return action;
+  }
+
+  function reconcileRemovalFsAction(db, job, item, action) {
+    if (action.kind === "guard-prepared-publish"
+      && !GUARD_PUBLISH_MODES.has(String(item.guard_publish_mode || ""))) {
+      throw codedError("guard 发布模式缺失且无法安全推导", "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
+    }
+    const expected = parseJson(action.expected_identity_json, null);
+    if (action.stage === "intent") {
+      if (lstatIfPresent(action.source_path) && !lstatIfPresent(action.evidence_path)) {
+        action = capturePathIntoEvidence(
+          db,
+          job,
+          item,
+          action,
+          (candidatePath) => captureRemovalCandidate(job, item, action, candidatePath),
+          { neutralize: !action.target_path }
+        ).action;
+        if (action.target_path) {
+          action = releasePrivateEvidenceLink(db, job, item, action, action.target_path);
+        }
+      } else if (!lstatIfPresent(action.source_path) && lstatIfPresent(action.evidence_path)) {
+        const captured = captureRemovalCandidate(job, item, action, action.evidence_path);
+        if (!captured || !actionObjectMatches(captured, expected)) {
+          return failFsAction(db, job, action, "removal intent captured an unproven object");
+        }
+        action = updateFsAction(db, job, action, "captured", captured);
+      } else {
+        return failFsAction(db, job, action, "removal intent paths cannot be safely reconciled");
+      }
+    }
+    if (action.stage === "captured") {
+      const evidence = lstatIfPresent(action.evidence_path);
+      if (!evidence && action.target_path) {
+        const retained = captureRemovalCandidate(job, item, action, action.target_path);
+        if (retained && actionObjectMatches(retained, expected)) {
+          return updateFsAction(db, job, action, "released", retained);
+        }
+      }
+      if (!evidence) return failFsAction(db, job, action, "captured removal evidence is missing");
+      action = capturePathIntoEvidence(
+        db,
+        job,
+        item,
+        action,
+        (candidatePath) => captureRemovalCandidate(job, item, action, candidatePath),
+        { neutralize: !action.target_path }
+      ).action;
+      if (action.target_path) {
+        action = releasePrivateEvidenceLink(db, job, item, action, action.target_path);
+      }
+    }
+    if (action.stage === "neutralized") {
+      const entry = lstatIfPresent(action.evidence_path);
+      if (entry && (!entry.isFile() || entry.isSymbolicLink() || Number(entry.size) !== 0)) {
+        return failFsAction(db, job, action, "neutralized evidence is missing or non-empty");
+      }
+    }
+    if (action.stage === "released" && lstatIfPresent(action.evidence_path)) {
+      return failFsAction(db, job, action, "released removal action retained an evidence name");
+    }
+    return action;
+  }
+
+  function captureRemovalCandidate(job, item, action, candidatePath) {
+    if (action.kind === "quarantine-cleanup") {
+      return captureManagedFileIdentity(candidatePath, item.managed_root);
+    }
+    if (action.kind.startsWith("owner-marker-")) {
+      return captureExactSmallFileCapability(candidatePath, `${job.id}:${job.quarantine_token}`);
+    }
+    if (action.kind === "guard-partial-remove") {
+      return captureExclusiveGuardPrefixCapability(
+        candidatePath,
+        job,
+        item.ordinal,
+        parseJson(item.guard_publish_identity_json, null)
+      )?.identity || null;
+    }
+    if (action.kind.startsWith("guard-")) {
+      if (action.kind.includes("prepared")) {
+        return captureOwnedPreparedGuardCapability(candidatePath, job, item.ordinal);
+      }
+      return captureOwnedGuardCapability(candidatePath, job, item.ordinal, "");
+    }
+    return null;
+  }
+
+  function captureManagedIdentityIfPresent(filePath, root) {
+    if (!filePath || !lstatIfPresent(filePath)) return null;
+    try {
+      return captureManagedFileIdentity(filePath, root);
+    } catch {
+      return null;
+    }
+  }
+
+  function finalizeReconciledFsAction(db, job, item, action) {
+    if (action.stage === "neutralized" && lstatIfPresent(action.evidence_path)) {
+      removePrivateNeutralizedEvidence(db, job, item, action);
+    }
+    if (lstatIfPresent(action.evidence_path)) {
+      return failFsAction(db, job, action, "reconciled action still has evidence content");
+    }
+    try {
+      fs.rmdirSync(action.evidence_dir);
+    } catch (error) {
+      if (!isMissing(error)) return failFsAction(db, job, action, "evidence directory is not empty");
+    }
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      const removed = db.prepare(`
+        DELETE FROM ${FS_ACTION_TABLE}
+        WHERE job_id = ? AND action_key = ? AND stage = ?
+      `).run(job.id, action.action_key, action.stage);
+      if (Number(removed.changes || 0) !== 1) {
+        throw codedError("已收敛文件动作删除 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function removePrivateNeutralizedEvidence(db, job, item, action) {
+    ensureFsActionEvidenceDirectory(action, item);
+    const handle = fsOps.openSync(action.evidence_path, "r");
+    try {
+      const bound = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      const observed = parseJson(action.observed_identity_json, null);
+      if (!observed
+        || !actionInodeMatches(bound, observed)
+        || String(bound.size || "") !== "0"
+        || String(bound.nlink || "") !== "1") {
+        return failFsAction(db, job, action, "neutralized private evidence changed before release");
+      }
+      fs.unlinkSync(action.evidence_path);
+      hooks.afterFsActionSystemCall?.({
+        jobId: job.id,
+        ordinal: Number(action.ordinal),
+        kind: action.kind,
+        boundary: "evidence_unlinked"
+      });
+      const after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (String(after.nlink || "") !== "0") {
+        return failFsAction(db, job, action, "neutralized evidence unlink did not release exactly one name");
+      }
+    } finally {
+      fsOps.closeSync(handle);
+    }
+  }
+
   function captureOwnedIncompleteExclusiveGuard(job, item) {
     if (String(item?.guard_publish_mode || "") !== GUARD_PUBLISH_EXCLUSIVE_CREATE) return null;
     const publicationIdentity = parseJson(item.guard_publish_identity_json, null);
@@ -2976,9 +3814,53 @@ export function createShortVideoDeleteJobService({
     return current;
   }
 
-  function removeOwnedIncompleteExclusiveGuard(job, item, expected) {
-    assertOwnedIncompleteExclusiveGuard(job, item, expected);
-    fsOps.unlinkSync(item.original_path);
+  function removeOwnedIncompleteExclusiveGuard(db, job, item, expected) {
+    const current = assertOwnedIncompleteExclusiveGuard(job, item, expected);
+    const action = beginFsAction(
+      db,
+      job,
+      item,
+      "guard-partial-remove",
+      item.original_path,
+      "",
+      current.published
+    );
+    capturePathIntoEvidence(
+      db,
+      job,
+      item,
+      action,
+      (candidatePath) => captureExclusiveGuardPrefixCapability(
+        candidatePath,
+        job,
+        item.ordinal,
+        parseJson(item.guard_publish_identity_json, null)
+      )?.identity || null,
+      { neutralize: true }
+    );
+  }
+
+  function removeProvenGuardThroughPrivateCandidate(
+    db,
+    job,
+    item,
+    sourcePath,
+    proof,
+    actionKind,
+    retainedPath = ""
+  ) {
+    const action = beginFsAction(db, job, item, `guard-${actionKind}`, sourcePath, retainedPath, proof);
+    const captured = capturePathIntoEvidence(
+      db,
+      job,
+      item,
+      action,
+      (candidatePath) => actionKind.includes("prepared")
+        ? captureOwnedPreparedGuardCapability(candidatePath, job, item.ordinal)
+        : captureOwnedGuardCapability(candidatePath, job, item.ordinal, ""),
+      { neutralize: !retainedPath }
+    );
+    if (retainedPath) releasePrivateEvidenceLink(db, job, item, captured.action, retainedPath);
   }
 
   function captureIdentity(entry) {
@@ -3541,6 +4423,10 @@ export function createShortVideoDeleteJobService({
         AND NOT EXISTS (
           SELECT 1 FROM short_video_delete_reservations reservation
           WHERE reservation.job_id = short_video_delete_jobs.id AND reservation.released_at = ''
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM ${FS_ACTION_TABLE} action
+          WHERE action.job_id = short_video_delete_jobs.id
         )
     `);
     let removed = 0;

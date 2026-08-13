@@ -19,6 +19,15 @@ const WORKER_THREAD_CHILD = path.join(
   "short_video_delete_worker_thread.mjs"
 );
 const REBASE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "rebase_short_video_storage.mjs");
+const DELETE_SERVICE_SOURCE = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "src",
+  "modules",
+  "short-videos",
+  "server",
+  "delete-job-service.js"
+);
 const QUEUED_WRITER_CHILD = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "fixtures",
@@ -41,10 +50,14 @@ const SUCCESS_KEYS = [
 ];
 
 await verifySuccessfulCompatibilityAndReservations();
+verifyDestructiveFsActionInventory();
 await verifyBatchMissingIdsFailAtomically();
 await verifyV3ActiveJournalMigration();
+await verifyV4MissingFsActionTableMigration();
 await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink");
 await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create");
+await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink", { swapAfterProof: true });
+await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create", { swapAfterProof: true });
 await verifyV3ActiveGuardReplacementFailures();
 await verifyProtocolMigrationAndTombstones();
 await verifyCanonicalScannerTombstoneConsumption();
@@ -52,6 +65,9 @@ await verifyAssetTransferSnapshotCas();
 await verifyRollbackAndCleanupRecovery();
 await verifyPathEscapeAndBusyFailure();
 await verifyGuardNoClobberAndExclusiveFallback();
+await verifyUnsupportedIsolateLinkRollsBackCleanly();
+await verifyUnsupportedIsolateRestartRecovery();
+await verifyProofToCaptureSwapMatrix();
 await verifyPublishedGuardTempCleanupRecovery();
 await verifyExclusiveGuardTempCleanupRecovery();
 await verifyActiveExecuteRecoveryFencing();
@@ -85,6 +101,28 @@ await verifyKilledProcessRecovery("fallback_guard_published", "rolled_back");
 await verifyKilledProcessRecovery("db_committed", "completed");
 await verifyKilledProcessRecovery("post_cleanup_unlinks_pre_journal", "completed");
 await verifyKilledProcessRecovery("partially_cleaned", "completed");
+for (const boundary of [
+  "fs_isolate_media_linked",
+  "fs_isolate_media_captured",
+  "fs_isolate_media_released",
+  "fs_guard_prepared_publish_captured",
+  "fs_guard_prepared_publish_released",
+  "fs_restore_media_linked",
+  "fs_restore_media_captured",
+  "fs_restore_media_released"
+]) {
+  await verifyKilledProcessRecovery(boundary, "rolled_back");
+}
+for (const boundary of [
+  "fs_quarantine_cleanup_captured",
+  "fs_quarantine_cleanup_neutralized",
+  "fs_quarantine_cleanup_evidence_unlinked",
+  "fs_owner_marker_finalize_0_captured",
+  "fs_owner_marker_finalize_0_neutralized",
+  "fs_owner_marker_finalize_0_evidence_unlinked"
+]) {
+  await verifyKilledProcessRecovery(boundary, "completed");
+}
 
 console.log("short-video-delete-jobs: ok (durable plan, same-volume quarantine, rollback, cleanup retry, reservation fencing, scanner exclusion, SIGKILL recovery)");
 
@@ -116,6 +154,20 @@ function verifyOfflineRebaseBoundary() {
   assert.match(source, /assertShortVideoReferenceProjection/, "storage rebase must reconcile the 4+1 path projection before commit");
 }
 
+function verifyDestructiveFsActionInventory() {
+  const source = fs.readFileSync(DELETE_SERVICE_SOURCE, "utf8");
+  const actions = [...source.matchAll(/\b(?:fsOps|fs)\.(?:unlinkSync|renameSync)\([^\n]+/gu)]
+    .map((match) => match[0].trim());
+  assert.deepEqual(actions, [
+    "fsOps.renameSync(action.source_path, action.evidence_path);",
+    "fs.unlinkSync(action.evidence_path);",
+    "fs.unlinkSync(action.evidence_path);"
+  ], "every regular-file unlink/rename must stay inside the reviewed evidence protocol");
+  assert.doesNotMatch(source, /evidencePath\s*:/u, "private 192-bit evidence paths must never be exposed to hooks");
+  assert.match(source, /String\(bound\.nlink \|\| ""\) !== "1"/u, "handle truncation must require a single link");
+  assert.match(source, /Number\(after\.nlink \|\| 0\) !== Number\(bound\.nlink \|\| 0\) - 1/u);
+}
+
 async function verifyV3ActiveJournalMigration() {
   const fixture = createFixture({ openStore: false });
   let store = null;
@@ -126,6 +178,7 @@ async function verifyV3ActiveJournalMigration() {
     const db = openDb(fixture.dbPath);
     try {
       const tableNames = [
+        "short_video_delete_fs_actions",
         "short_video_delete_reservations",
         "short_video_delete_items",
         "short_video_delete_jobs",
@@ -146,6 +199,7 @@ async function verifyV3ActiveJournalMigration() {
       db.exec("PRAGMA foreign_keys = OFF");
       for (const table of tableNames) db.exec(`DROP TABLE ${table}`);
       for (const table of tableNames.slice().reverse()) {
+        if (table === "short_video_delete_fs_actions") continue;
         let sql = String(schemas.get(table) || "");
         if (table === "short_video_delete_jobs") {
           sql = sql.replace(/,\s*execution_token TEXT NOT NULL DEFAULT ''/u, "");
@@ -183,6 +237,7 @@ async function verifyV3ActiveJournalMigration() {
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_mode"), 0);
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_provenance"), 0);
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_identity_json"), 0);
+      assert.equal(schemaTableCount(db, "short_video_delete_fs_actions"), 0);
       assert.equal(
         db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
         "3"
@@ -204,6 +259,7 @@ async function verifyV3ActiveJournalMigration() {
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_mode"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_provenance"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_identity_json"), 1);
+      assert.equal(schemaTableCount(migrated, "short_video_delete_fs_actions"), 1);
       assert.equal(migrated.prepare("SELECT status FROM short_video_delete_jobs WHERE id = 'v3-active-job'").get()?.status, "running");
     } finally {
       migrated.close();
@@ -218,7 +274,49 @@ async function verifyV3ActiveJournalMigration() {
   }
 }
 
-async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
+async function verifyV4MissingFsActionTableMigration() {
+  const fixture = createFixture({ openStore: false });
+  let reopened = null;
+  try {
+    const bootstrap = createShortVideoStore(storeOptions(fixture));
+    bootstrap.summary();
+    bootstrap.close();
+    const staleV4 = openDb(fixture.dbPath);
+    try {
+      assert.equal(
+        staleV4.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "4"
+      );
+      staleV4.exec("DROP TABLE short_video_delete_fs_actions");
+      assert.equal(schemaTableCount(staleV4, "short_video_delete_fs_actions"), 0);
+    } finally {
+      staleV4.close();
+    }
+
+    reopened = createShortVideoStore(storeOptions(fixture));
+    reopened.summary();
+    const migrated = openDb(fixture.dbPath);
+    try {
+      assert.equal(
+        migrated.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "4",
+        "a same-version repair must not rewrite the protocol version"
+      );
+      assert.equal(
+        schemaTableCount(migrated, "short_video_delete_fs_actions"),
+        1,
+        "opening an older v4 database must install the newly-required action journal"
+      );
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    reopened?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode, options = {}) {
   const fixture = createFixture({ openStore: false });
   let recovery = null;
   try {
@@ -260,6 +358,7 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
     try {
       v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
         .run(interruptedJob.id);
+      convertCurrentProducerActionsToFaithfulV3(v3, interruptedJob.id, interruptedItem.quarantine_path);
       v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
@@ -278,7 +377,13 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
       v3.close();
     }
 
-    recovery = createShortVideoStore(storeOptions(fixture));
+    const swapper = options.swapAfterProof
+      ? createFsActionSourceSwap(fixture.dbPath, "guard-published", `foreign-v3-${expectedMode}`)
+      : null;
+    recovery = createShortVideoStore({
+      ...storeOptions(fixture),
+      ...(swapper ? { deleteJobFsOps: swapper.fsOps } : {})
+    });
     recovery.summary();
     const migrated = openDb(fixture.dbPath);
     try {
@@ -299,7 +404,23 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
     await recovery.recoverDeleteJobs({ jobId: interruptedJob.id });
     const recoveredJob = jobRows(fixture.dbPath)[0];
     const recoveredItem = deleteItemRows(fixture.dbPath)[0];
-    assert.equal(recoveredJob?.status, "rolled_back");
+    if (swapper) {
+      assert.equal(recoveredItem?.guard_publish_mode, expectedMode, "the v3 proof must persist its mode before capture");
+      assert.equal(recoveredItem?.guard_publish_provenance, "legacy_v3");
+      await assertManualFsActionSwapFence({
+        fixture,
+        store: recovery,
+        swapper,
+        expectedKind: "guard-published",
+        jobId: interruptedJob.id
+      });
+      return;
+    }
+    assert.equal(
+      recoveredJob?.status,
+      "rolled_back",
+      `v3 ${expectedMode} recovery failed: ${recoveredJob?.error_code || ""} ${recoveredJob?.error || ""}`
+    );
     assert.equal(recoveredItem?.guard_publish_mode, expectedMode, "claimed recovery must CAS the proven v3 mode");
     assert.equal(recoveredItem?.guard_publish_provenance, "legacy_v3");
     assert.equal(fs.readFileSync(source, "utf8"), `v3-${expectedMode}-bytes`);
@@ -349,6 +470,7 @@ async function verifyV3ActiveGuardReplacementFailures() {
       try {
         v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
           .run(interruptedJob.id);
+        convertCurrentProducerActionsToFaithfulV3(v3, interruptedJob.id, interruptedItem.quarantine_path);
         v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
@@ -412,6 +534,34 @@ async function verifyV3ActiveGuardReplacementFailures() {
 function schemaColumnCount(db, table, column) {
   return Number(db.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info(?) WHERE name = ?`)
     .get(table, column)?.count || 0);
+}
+
+function convertCurrentProducerActionsToFaithfulV3(db, jobId, quarantinePath) {
+  // Fixture-only downgrade: remove v4 private isolate evidence so this
+  // temporary state is something the real v3 producer could have left.
+  // Production never removes public names through this conversion helper.
+  const actions = db.prepare(`
+    SELECT * FROM short_video_delete_fs_actions WHERE job_id = ? ORDER BY action_key
+  `).all(jobId);
+  for (const action of actions) {
+    if (action.kind === "isolate-media" && action.stage === "captured") {
+      const evidence = fs.lstatSync(action.evidence_path, { bigint: true });
+      const quarantine = fs.lstatSync(quarantinePath, { bigint: true });
+      assert.equal(String(evidence.dev), String(quarantine.dev));
+      assert.equal(String(evidence.ino), String(quarantine.ino));
+      fs.unlinkSync(action.evidence_path);
+    }
+    if (fs.existsSync(action.evidence_dir)) {
+      assert.deepEqual(fs.readdirSync(action.evidence_dir), [], "v3 conversion may remove empty v4 evidence directories only");
+      fs.rmdirSync(action.evidence_dir);
+    }
+  }
+  db.exec("DROP TABLE short_video_delete_fs_actions");
+}
+
+function schemaTableCount(db, table) {
+  return Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = ?")
+    .get(table)?.count || 0);
 }
 
 async function verifyProtocolMigrationAndTombstones() {
@@ -784,6 +934,7 @@ async function verifySuccessfulCompatibilityAndReservations() {
     assert.equal(fs.existsSync(asset), false);
     assert.equal(fs.readFileSync(shared, "utf8"), "shared-video");
     assert.equal(fs.readFileSync(outside, "utf8"), "outside-sentinel");
+    assert.equal(fsActionCount(fixture.dbPath), 0, "a successful terminal delete must not retain action rows");
     const coverCheck = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
     assert.equal(coverCheck.has("video-1"), false);
     coverCheck.close();
@@ -816,6 +967,7 @@ async function verifySuccessfulCompatibilityAndReservations() {
     assert.equal(group.scope, "group");
     assert.equal(group.count, 2);
     assert.equal(group.groupDir, relative(fixture.root, groupDir));
+    assert.equal(fsActionCount(fixture.dbPath), 0, "all normal terminal lanes must reconcile action rows");
     assertNoQuarantine(fixture.root);
   } finally {
     closeFixture(fixture);
@@ -1130,7 +1282,12 @@ async function verifyGuardNoClobberAndExclusiveFallback() {
     const unsupportedLinks = new Proxy(fs, {
       get(target, property, receiver) {
         if (property === "linkSync") {
-          return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
+          return (sourcePath, targetPath) => {
+            if (String(sourcePath).endsWith(".prepared")) {
+              throw Object.assign(new Error("links unsupported"), { code: "EPERM" });
+            }
+            return fs.linkSync(sourcePath, targetPath);
+          };
         }
         return Reflect.get(target, property, receiver);
       }
@@ -1153,31 +1310,14 @@ async function verifyPublishedGuardTempCleanupRecovery() {
   const fixture = createFixture({ openStore: false });
   let source = "";
   let injected = false;
-  const interruptedGuardCleanup = new Proxy(fs, {
-    get(target, property, receiver) {
-      if (property === "unlinkSync") {
-        return (targetPath, ...args) => {
-          const text = String(targetPath || "");
-          if (!injected && source && text.endsWith(".prepared") && fs.existsSync(source)) {
-            const sourceEntry = fs.lstatSync(source, { bigint: true });
-            const preparedEntry = fs.lstatSync(text, { bigint: true });
-            if (String(sourceEntry.dev) === String(preparedEntry.dev)
-              && String(sourceEntry.ino) === String(preparedEntry.ino)) {
-              injected = true;
-              throw Object.assign(new Error("injected guard temp cleanup interruption"), { code: "EACCES" });
-            }
-          }
-          return fs.unlinkSync(targetPath, ...args);
-        };
-      }
-      return Reflect.get(target, property, receiver);
+  fixture.hooks.afterFsActionSystemCall = ({ kind, boundary }) => {
+    if (!injected && kind === "guard-prepared-publish" && boundary === "captured") {
+      injected = true;
+      throw Object.assign(new Error("injected guard temp capture interruption"), { code: "EACCES" });
     }
-  });
+  };
   try {
-    fixture.store = createShortVideoStore({
-      ...storeOptions(fixture),
-      deleteJobFsOps: interruptedGuardCleanup
-    });
+    fixture.store = createShortVideoStore(storeOptions(fixture));
     fixture.store.summary();
     source = writeMedia(fixture.root, "guard-published/video.mp4", "guard-published-original");
     seedVideo(fixture.dbPath, { id: "guard-published", sourcePath: source });
@@ -1201,6 +1341,444 @@ async function verifyPublishedGuardTempCleanupRecovery() {
   }
 }
 
+async function verifyUnsupportedIsolateLinkRollsBackCleanly() {
+  const fixture = createFixture({ openStore: false });
+  const unsupportedLinks = new Proxy(fs, {
+    get(target, property, receiver) {
+      if (property === "linkSync") {
+        return () => { throw Object.assign(new Error("hardlinks unsupported"), { code: "ENOTSUP" }); };
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  try {
+    fixture.store = createShortVideoStore({ ...storeOptions(fixture), deleteJobFsOps: unsupportedLinks });
+    fixture.store.summary();
+    const source = writeMedia(fixture.root, "unsupported-isolate/video.mp4", "unsupported-isolate-original");
+    seedVideo(fixture.dbPath, { id: "unsupported-isolate", sourcePath: source });
+    await assert.rejects(
+      () => fixture.store.deleteVideo("unsupported-isolate"),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_ISOLATE_NO_REPLACE_UNAVAILABLE"
+    );
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
+    assert.equal(fs.readFileSync(source, "utf8"), "unsupported-isolate-original");
+    assert.equal(fsActionCount(fixture.dbPath), 0, "unsupported isolate must cancel and remove its action row");
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyUnsupportedIsolateRestartRecovery() {
+  const fixture = createFixture({ openStore: false });
+  let recovery = null;
+  try {
+    const videoId = "unsupported-isolate-restart";
+    const source = writeMedia(
+      fixture.root,
+      "unsupported-isolate-restart/video.mp4",
+      "unsupported-isolate-restart-original"
+    );
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    const child = spawn(process.execPath, [
+      CHILD,
+      fixture.dbPath,
+      fixture.root,
+      "unsupported_isolate_pending_restart",
+      videoId
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const closePromise = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    await killAtBoundary(child, "unsupported_isolate_pending_restart", closePromise);
+
+    const interruptedJob = jobRows(fixture.dbPath)[0];
+    const interruptedItem = deleteItemRows(fixture.dbPath)[0];
+    assert.equal(interruptedJob?.status, "rollback_pending");
+    assert.equal(interruptedJob?.error_code, "SHORT_VIDEO_DELETE_ISOLATE_NO_REPLACE_UNAVAILABLE");
+    assert.equal(interruptedItem?.state, "planned", "the cancelled isolate intent must be reset before restart");
+    assert.equal(fsActionCount(fixture.dbPath), 0, "the cancelled action must be removed before restart");
+    assert.equal(fs.readFileSync(source, "utf8"), "unsupported-isolate-restart-original");
+    assert.equal(activeReservationCount(fixture.dbPath) > 0, true, "the interrupted pending job must remain fenced");
+
+    recovery = createShortVideoStore(storeOptions(fixture));
+    const automatic = await recovery.recoverDeleteJobs();
+    const recoveredPublic = automatic.jobs.find((job) => job.id === interruptedJob.id);
+    assert.equal(recoveredPublic, undefined, "automatic recovery must remove the job from the pending list");
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
+    assert.equal(fs.readFileSync(source, "utf8"), "unsupported-isolate-restart-original");
+    assert.equal(fsActionCount(fixture.dbPath), 0);
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+  } finally {
+    recovery?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyProofToCaptureSwapMatrix() {
+  const liveCases = [
+    { kind: "isolate-media", phase: "isolate" },
+    { kind: "restore-media", phase: "restore" },
+    { kind: "quarantine-cleanup", phase: "cleanup" },
+    { kind: "guard-prepared-publish", phase: "prepared-publish" },
+    { kind: "guard-published-cleanup", phase: "cleanup" },
+    { kind: "owner-marker-finalize-0", phase: "cleanup" }
+  ];
+  for (const testCase of liveCases) await verifyLiveFsActionSourceSwap(testCase);
+  await verifyCurrentPublishedGuardSourceSwap("hardlink");
+  await verifyCurrentPublishedGuardSourceSwap("exclusive_create");
+  await verifyPreparedGuardRecoverySourceSwap();
+  await verifyPartialExclusiveGuardRecoverySourceSwap();
+  await verifyPublishedMediaTargetSwap("isolate-media");
+  await verifyPublishedMediaTargetSwap("restore-media");
+
+  assert.deepEqual(
+    [
+      ...liveCases.map((testCase) => testCase.kind),
+      "guard-published:hardlink",
+      "guard-published:exclusive_create",
+      "guard-prepared",
+      "guard-partial-remove",
+      "guard-published:legacy_v3_hardlink",
+      "guard-published:legacy_v3_exclusive_create",
+      "isolate-media:target",
+      "restore-media:target"
+    ],
+    [
+      "isolate-media",
+      "restore-media",
+      "quarantine-cleanup",
+      "guard-prepared-publish",
+      "guard-published-cleanup",
+      "owner-marker-finalize-0",
+      "guard-published:hardlink",
+      "guard-published:exclusive_create",
+      "guard-prepared",
+      "guard-partial-remove",
+      "guard-published:legacy_v3_hardlink",
+      "guard-published:legacy_v3_exclusive_create",
+      "isolate-media:target",
+      "restore-media:target"
+    ],
+    "the proof-to-capture gate must enumerate every destructive file-action lane"
+  );
+}
+
+async function verifyPublishedMediaTargetSwap(kind) {
+  const fixture = createFixture({ openStore: false });
+  let store = null;
+  let swap = null;
+  try {
+    const videoId = `swap-target-${kind}`;
+    const source = writeMedia(fixture.root, `swap/target-${kind}.mp4`, `owned-target-${kind}`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    if (kind === "restore-media") {
+      let interrupted = false;
+      fixture.hooks.afterItemIsolated = () => {
+        if (interrupted) return;
+        interrupted = true;
+        throw Object.assign(new Error("force rollback into restore target publication"), { code: "EACCES" });
+      };
+    }
+    fixture.hooks.afterFsActionSystemCall = ({ kind: actionKind, boundary }) => {
+      if (swap || actionKind !== kind || boundary !== "captured") return;
+      const action = fsActionRows(fixture.dbPath).find((row) => row.kind === kind && row.stage === "intent");
+      assert(action, `${kind} captured boundary must still have a durable intent`);
+      const targetPath = action.target_path;
+      const backupPath = `${targetPath}.fixture-owned-target`;
+      const ownedBytes = fs.readFileSync(targetPath);
+      fs.renameSync(targetPath, backupPath);
+      const foreignBytes = Buffer.from(`foreign-target-${kind}`);
+      fs.writeFileSync(targetPath, foreignBytes, { flag: "wx" });
+      swap = { targetPath, backupPath, ownedBytes, foreignBytes };
+    };
+    store = createShortVideoStore(storeOptions(fixture));
+    store.summary();
+    await assert.rejects(() => store.deleteVideo(videoId));
+    assert(swap, `${kind} target must be replaced after no-replace publication`);
+    assert.deepEqual(fs.readFileSync(swap.targetPath), swap.foreignBytes);
+    assert.deepEqual(fs.readFileSync(swap.backupPath), swap.ownedBytes);
+    const jobId = jobRows(fixture.dbPath)[0]?.id;
+    const actionBefore = fsActionRows(fixture.dbPath).find((row) => row.kind === kind);
+    assert.equal(actionBefore?.stage, "manual", `${kind} target replacement must fail closed`);
+    assert.equal(fs.existsSync(actionBefore?.evidence_path || ""), true, `${kind} owned source must remain in evidence`);
+    assert.equal(fs.existsSync(actionBefore?.source_path || ""), false, `${kind} public source name must remain captured`);
+    assert.deepEqual(
+      fs.readFileSync(actionBefore.evidence_path),
+      swap.ownedBytes,
+      `${kind} target swap must not mutate the captured owned source`
+    );
+    const jobBefore = jobRows(fixture.dbPath).find((row) => row.id === jobId);
+    assert(["running", "rollback_pending", "cleanup_pending"].includes(jobBefore?.status));
+    const publicBefore = store.deleteJobStatus({ jobId });
+    assert.equal(publicBefore.job?.pending, true);
+    assert.equal(publicBefore.job?.manualInterventionRequired, true);
+    assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
+    const before = snapshotFileStates([
+      actionBefore?.source_path,
+      actionBefore?.target_path,
+      actionBefore?.evidence_path,
+      swap.backupPath
+    ]);
+    const status = await store.recoverDeleteJobs({ jobId });
+    assert.equal(status.job?.manualInterventionRequired, true);
+    assert.equal(status.job?.recoverable, false);
+    assert.equal(status.job?.retryable, false);
+    assert.deepEqual(snapshotFileStates([...before.keys()]), before, "explicit recovery must not cross a target proof failure");
+    assert.equal(fsActionRows(fixture.dbPath).find((row) => row.kind === kind)?.stage, "manual");
+    assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
+  } finally {
+    store?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyLiveFsActionSourceSwap({ kind, phase }) {
+  const fixture = createFixture({ openStore: false });
+  let store = null;
+  try {
+    const videoId = `swap-${kind}`;
+    const source = writeMedia(fixture.root, `swap/${kind}.mp4`, `owned-${kind}`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    if (phase === "restore") {
+      let interrupted = false;
+      fixture.hooks.afterItemIsolated = () => {
+        if (interrupted) return;
+        interrupted = true;
+        throw Object.assign(new Error("force rollback into restore-media"), { code: "EACCES" });
+      };
+    }
+    const swapper = createFsActionSourceSwap(fixture.dbPath, kind, `foreign-${kind}`);
+    store = createShortVideoStore({ ...storeOptions(fixture), deleteJobFsOps: swapper.fsOps });
+    store.summary();
+    if (["cleanup"].includes(phase)) {
+      const result = await store.deleteVideo(videoId);
+      assert.equal(result.status, "cleanup_pending", `${kind} swap must stop post-commit cleanup`);
+      assert.equal(result.pending, true);
+    } else {
+      await assert.rejects(() => store.deleteVideo(videoId));
+    }
+    const jobId = jobRows(fixture.dbPath)[0]?.id;
+    assert(jobId, `${kind} swap must persist a delete job`);
+    await assertManualFsActionSwapFence({ fixture, store, swapper, expectedKind: kind, jobId });
+  } finally {
+    store?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyCurrentPublishedGuardSourceSwap(expectedMode) {
+  const fixture = createFixture({ openStore: false });
+  let store = null;
+  try {
+    const videoId = `swap-published-${expectedMode}`;
+    const source = writeMedia(fixture.root, `swap/published-${expectedMode}.mp4`, `owned-published-${expectedMode}`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    let interrupted = false;
+    fixture.hooks.afterItemIsolated = () => {
+      if (interrupted) return;
+      interrupted = true;
+      throw Object.assign(new Error("force rollback into published guard removal"), { code: "EACCES" });
+    };
+    const swapper = createFsActionSourceSwap(
+      fixture.dbPath,
+      "guard-published",
+      `foreign-published-${expectedMode}`,
+      { forceExclusiveGuard: expectedMode === "exclusive_create" }
+    );
+    store = createShortVideoStore({ ...storeOptions(fixture), deleteJobFsOps: swapper.fsOps });
+    store.summary();
+    await assert.rejects(() => store.deleteVideo(videoId));
+    const item = deleteItemRows(fixture.dbPath)[0];
+    assert.equal(item?.guard_publish_mode, expectedMode, "the current producer mode must be persisted before rollback proof");
+    const jobId = jobRows(fixture.dbPath)[0]?.id;
+    await assertManualFsActionSwapFence({
+      fixture,
+      store,
+      swapper,
+      expectedKind: "guard-published",
+      jobId
+    });
+  } finally {
+    store?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyPreparedGuardRecoverySourceSwap() {
+  const fixture = createFixture({ openStore: false });
+  let recovery = null;
+  try {
+    const videoId = "swap-guard-prepared";
+    const source = writeMedia(fixture.root, "swap/guard-prepared.mp4", "owned-guard-prepared");
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    const child = spawn(process.execPath, [CHILD, fixture.dbPath, fixture.root, "guard_pre_publish", videoId], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const closePromise = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    await killAtBoundary(child, "guard_pre_publish", closePromise);
+    const jobId = jobRows(fixture.dbPath)[0]?.id;
+    const swapper = createFsActionSourceSwap(fixture.dbPath, "guard-prepared", "foreign-guard-prepared");
+    recovery = createShortVideoStore({ ...storeOptions(fixture), deleteJobFsOps: swapper.fsOps });
+    await recovery.recoverDeleteJobs({ jobId });
+    await assertManualFsActionSwapFence({
+      fixture,
+      store: recovery,
+      swapper,
+      expectedKind: "guard-prepared",
+      jobId
+    });
+  } finally {
+    recovery?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyPartialExclusiveGuardRecoverySourceSwap() {
+  const killed = await prepareKilledExclusiveGuardBoundary("fallback_guard_half_written", "swap-partial");
+  let recovery = null;
+  try {
+    const swapper = createFsActionSourceSwap(
+      killed.fixture.dbPath,
+      "guard-partial-remove",
+      "foreign-guard-partial"
+    );
+    recovery = createShortVideoStore({ ...storeOptions(killed.fixture), deleteJobFsOps: swapper.fsOps });
+    await recovery.recoverDeleteJobs({ jobId: killed.job.id });
+    await assertManualFsActionSwapFence({
+      fixture: killed.fixture,
+      store: recovery,
+      swapper,
+      expectedKind: "guard-partial-remove",
+      jobId: killed.job.id
+    });
+  } finally {
+    recovery?.close();
+    closeFixture(killed.fixture);
+  }
+}
+
+function createFsActionSourceSwap(dbPath, expectedKind, foreignContent, options = {}) {
+  let swap = null;
+  const foreignBytes = Buffer.from(foreignContent);
+  const fsOps = new Proxy(fs, {
+    get(target, property, receiver) {
+      if (property === "linkSync" && options.forceExclusiveGuard) {
+        return (sourcePath, targetPath) => {
+          if (String(sourcePath).endsWith(".prepared")) {
+            throw Object.assign(new Error("fixture forces exclusive-create guard publication"), { code: "ENOTSUP" });
+          }
+          return fs.linkSync(sourcePath, targetPath);
+        };
+      }
+      if (property === "renameSync") {
+        return (sourcePath, targetPath) => {
+          if (!swap) {
+            const db = openDb(dbPath);
+            let action = null;
+            try {
+              action = db.prepare(`
+                SELECT kind, source_path, evidence_path
+                FROM short_video_delete_fs_actions
+                WHERE stage = 'intent' AND evidence_path = ?
+              `).get(path.resolve(targetPath)) || null;
+            } finally {
+              db.close();
+            }
+            if (action?.kind === expectedKind) {
+              assert.equal(path.resolve(sourcePath), path.resolve(action.source_path));
+              const backupPath = path.join(
+                path.dirname(sourcePath),
+                `.fixture-owned-${expectedKind.replaceAll("-", "_")}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+              );
+              const ownedBytes = fs.readFileSync(sourcePath);
+              fs.renameSync(sourcePath, backupPath);
+              fs.writeFileSync(sourcePath, foreignBytes, { flag: "wx" });
+              swap = {
+                sourcePath: path.resolve(sourcePath),
+                evidencePath: path.resolve(targetPath),
+                backupPath,
+                ownedBytes,
+                foreignBytes
+              };
+            }
+          }
+          return fs.renameSync(sourcePath, targetPath);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  return { fsOps, get swap() { return swap; } };
+}
+
+async function assertManualFsActionSwapFence({ fixture, store, swapper, expectedKind, jobId }) {
+  const swap = swapper.swap;
+  assert(swap, `${expectedKind} must execute the proof-to-capture swap`);
+  assert.equal(fs.existsSync(swap.sourcePath), false, "the foreign pathname must have been atomically captured");
+  assert.deepEqual(fs.readFileSync(swap.evidencePath), swap.foreignBytes, "foreign bytes must remain in evidence");
+  assert.deepEqual(fs.readFileSync(swap.backupPath), swap.ownedBytes, "the previously-proved object must remain intact");
+  const actionBefore = fsActionRows(fixture.dbPath).find((row) => row.kind === expectedKind);
+  assert.equal(actionBefore?.stage, "manual", `${expectedKind} must fail closed after the captured object fails proof`);
+  assert.equal(path.resolve(actionBefore?.evidence_path || ""), swap.evidencePath);
+  const jobBefore = jobRows(fixture.dbPath).find((row) => row.id === jobId);
+  assert(
+    ["running", "rollback_pending", "cleanup_pending"].includes(jobBefore?.status),
+    "manual filesystem evidence must keep the job non-terminal"
+  );
+  const publicBefore = store.deleteJobStatus({ jobId });
+  assert.equal(publicBefore.job?.pending, true);
+  assert.equal(publicBefore.job?.manualInterventionRequired, true);
+  const reservationsBefore = activeReservationCount(fixture.dbPath);
+  assert.equal(reservationsBefore > 0, true, "manual filesystem evidence must keep reservations fenced");
+  const fileStateBefore = snapshotFileStates([
+    swap.sourcePath,
+    swap.evidencePath,
+    swap.backupPath,
+    actionBefore?.target_path
+  ]);
+
+  const status = await store.recoverDeleteJobs({ jobId });
+  assert.equal(status.job?.manualInterventionRequired, true, "explicit recovery must surface the manual hard fence");
+  assert.equal(status.job?.recoverable, false);
+  assert.equal(status.job?.retryable, false);
+  assert.equal(activeReservationCount(fixture.dbPath), reservationsBefore, "explicit recovery must not release manual reservations");
+  const actionAfter = fsActionRows(fixture.dbPath).find((row) => row.kind === expectedKind);
+  assert.equal(actionAfter?.stage, "manual");
+  assert.equal(actionAfter?.evidence_path, actionBefore?.evidence_path);
+  assert.deepEqual(
+    snapshotFileStates([...fileStateBefore.keys()]),
+    fileStateBefore,
+    "explicit recovery must not mutate foreign, owned, retained, or evidence paths"
+  );
+}
+
+function snapshotFileStates(paths) {
+  const snapshot = new Map();
+  for (const filePath of new Set(paths.filter(Boolean).map((value) => path.resolve(value)))) {
+    const entry = fs.existsSync(filePath) ? fs.lstatSync(filePath) : null;
+    snapshot.set(filePath, entry
+      ? { exists: true, isFile: entry.isFile(), bytes: entry.isFile() ? fs.readFileSync(filePath) : null }
+      : { exists: false, isFile: false, bytes: null });
+  }
+  return snapshot;
+}
+
 async function verifyExclusiveGuardTempCleanupRecovery() {
   const fixture = createFixture({ openStore: false });
   let source = "";
@@ -1208,26 +1786,22 @@ async function verifyExclusiveGuardTempCleanupRecovery() {
   const interruptedExclusiveGuard = new Proxy(fs, {
     get(target, property, receiver) {
       if (property === "linkSync") {
-        return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
-      }
-      if (property === "unlinkSync") {
-        return (targetPath, ...args) => {
-          const text = String(targetPath || "");
-          if (!injected && source && text.endsWith(".prepared") && fs.existsSync(source)) {
-            const sourceEntry = fs.lstatSync(source, { bigint: true });
-            const preparedEntry = fs.lstatSync(text, { bigint: true });
-            if (String(sourceEntry.dev) === String(preparedEntry.dev)
-              && String(sourceEntry.ino) !== String(preparedEntry.ino)) {
-              injected = true;
-              throw Object.assign(new Error("injected exclusive guard temp cleanup interruption"), { code: "EACCES" });
-            }
+        return (sourcePath, targetPath) => {
+          if (String(sourcePath).endsWith(".prepared")) {
+            throw Object.assign(new Error("links unsupported"), { code: "EPERM" });
           }
-          return fs.unlinkSync(targetPath, ...args);
+          return fs.linkSync(sourcePath, targetPath);
         };
       }
       return Reflect.get(target, property, receiver);
     }
   });
+  fixture.hooks.afterFsActionSystemCall = ({ kind, boundary }) => {
+    if (!injected && kind === "guard-prepared-publish" && boundary === "captured") {
+      injected = true;
+      throw Object.assign(new Error("injected exclusive guard temp capture interruption"), { code: "EACCES" });
+    }
+  };
   try {
     fixture.store = createShortVideoStore({
       ...storeOptions(fixture),
@@ -2429,11 +3003,14 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
       assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
       const restoreMode = openDb(fixture.dbPath);
       try {
-        restoreMode.prepare(`
+        const repairItem = interruptedItems.find((item) => item.guard_publish_mode === "exclusive_create");
+        assert(repairItem, "the interrupted fallback item must be present in the pre-corruption journal snapshot");
+        const repaired = restoreMode.prepare(`
           UPDATE short_video_delete_items
           SET guard_publish_mode = 'exclusive_create'
-          WHERE state = 'restoring' AND guard_publish_mode = ''
-        `).run();
+          WHERE job_id = ? AND ordinal = ? AND guard_publish_mode = ''
+        `).run(before.id, repairItem.ordinal);
+        assert.equal(Number(repaired.changes || 0), 1, "manual mode repair must target exactly the interrupted item");
       } finally {
         restoreMode.close();
       }
@@ -2784,7 +3361,29 @@ function assertLegacyDeleteResultFields(result) {
 }
 
 function assertNoQuarantine(root) {
-  assert.equal(fs.existsSync(path.join(root, SHORT_VIDEO_DELETE_QUARANTINE_DIR)), false, "a converged job must not leave a quarantine tree");
+  assert.equal(
+    fs.existsSync(path.join(root, SHORT_VIDEO_DELETE_QUARANTINE_DIR)),
+    false,
+    "a converged job must not leave quarantine or evidence state"
+  );
+}
+
+function fsActionCount(dbPath) {
+  const db = openDb(dbPath);
+  try {
+    return Number(db.prepare("SELECT COUNT(*) AS count FROM short_video_delete_fs_actions").get()?.count || 0);
+  } finally {
+    db.close();
+  }
+}
+
+function fsActionRows(dbPath) {
+  const db = openDb(dbPath);
+  try {
+    return db.prepare("SELECT * FROM short_video_delete_fs_actions ORDER BY created_at, action_key").all();
+  } finally {
+    db.close();
+  }
 }
 
 function relative(root, value) {
