@@ -45,6 +45,7 @@ await verifyBatchMissingIdsFailAtomically();
 await verifyV3ActiveJournalMigration();
 await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink");
 await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create");
+await verifyV3ActiveGuardReplacementFailures();
 await verifyProtocolMigrationAndTombstones();
 await verifyCanonicalScannerTombstoneConsumption();
 await verifyAssetTransferSnapshotCas();
@@ -251,6 +252,8 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
 
     const v3 = openDb(fixture.dbPath);
     try {
+      v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
+        .run(interruptedJob.id);
       v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
@@ -258,6 +261,11 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
       assert.equal(schemaColumnCount(v3, "short_video_delete_jobs", "execution_token"), 0);
       assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_mode"), 0);
       assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_provenance"), 0);
+      assert.equal(
+        v3.prepare("SELECT guard_identity_json FROM short_video_delete_items WHERE job_id = ?").get(interruptedJob.id)?.guard_identity_json,
+        "",
+        "a faithful v3 guard-publish crash has no published identity checkpoint"
+      );
     } finally {
       v3.close();
     }
@@ -267,13 +275,14 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
     const migrated = openDb(fixture.dbPath);
     try {
       const migratedItem = migrated.prepare(`
-        SELECT state, guard_publish_mode, guard_publish_provenance
+        SELECT state, guard_identity_json, guard_publish_mode, guard_publish_provenance
         FROM short_video_delete_items
         WHERE job_id = ? AND ordinal = ?
       `).get(interruptedJob.id, interruptedItem.ordinal);
       assert.equal(migratedItem?.state, "isolating");
       assert.equal(migratedItem?.guard_publish_mode, "", "v3 migration must not guess from filesystem state");
       assert.equal(migratedItem?.guard_publish_provenance, "legacy_v3");
+      assert.equal(migratedItem?.guard_identity_json, "", "migration must not manufacture a v4 guard identity checkpoint");
       assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
     } finally {
       migrated.close();
@@ -291,6 +300,103 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
   } finally {
     recovery?.close();
     closeFixture(fixture);
+  }
+}
+
+async function verifyV3ActiveGuardReplacementFailures() {
+  for (const replacement of ["source_identity", "prepared", "published", "quarantine", "owner_marker"]) {
+    const fixture = createFixture({ openStore: false });
+    let recovery = null;
+    try {
+      const videoId = `v3-replaced-${replacement}`;
+      const source = writeMedia(fixture.root, `v3-replaced/${replacement}.mp4`, `v3-${replacement}-media`);
+      const initializer = createShortVideoStore(storeOptions(fixture));
+      initializer.summary();
+      initializer.close();
+      seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+
+      const child = spawn(process.execPath, [
+        CHILD,
+        fixture.dbPath,
+        fixture.root,
+        "fallback_guard_published",
+        videoId
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      const closePromise = new Promise((resolve) => {
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      });
+      await killAtBoundary(child, "fallback_guard_published", closePromise);
+
+      const interruptedJob = jobRows(fixture.dbPath)[0];
+      const interruptedItem = deleteItemFullRow(fixture.dbPath);
+      assert(interruptedJob && interruptedItem);
+      const jobDir = path.dirname(interruptedItem.quarantine_path);
+      const preparedPath = fs.readdirSync(jobDir)
+        .map((name) => path.join(jobDir, name))
+        .find((name) => name.endsWith(".prepared"));
+      assert(preparedPath);
+      const markerPath = path.join(jobDir, ".owner");
+
+      const v3 = openDb(fixture.dbPath);
+      try {
+        v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
+          .run(interruptedJob.id);
+        v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
+        v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
+        v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
+        v3.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '3')").run();
+        if (replacement === "source_identity") {
+          const expected = JSON.parse(interruptedItem.source_identity_json);
+          expected.ino = `${expected.ino}-forged`;
+          v3.prepare("UPDATE short_video_delete_items SET source_identity_json = ? WHERE job_id = ?")
+            .run(JSON.stringify(expected), interruptedJob.id);
+        }
+      } finally {
+        v3.close();
+      }
+
+      if (replacement === "prepared") fs.writeFileSync(preparedPath, "forged-prepared");
+      if (replacement === "published") fs.writeFileSync(interruptedItem.original_path, "forged-published");
+      if (replacement === "quarantine") fs.writeFileSync(interruptedItem.quarantine_path, "forged-quarantine");
+      if (replacement === "owner_marker") fs.writeFileSync(markerPath, "forged-owner-marker");
+      const before = new Map([
+        [interruptedItem.original_path, fs.readFileSync(interruptedItem.original_path)],
+        [interruptedItem.quarantine_path, fs.readFileSync(interruptedItem.quarantine_path)],
+        [preparedPath, fs.readFileSync(preparedPath)],
+        [markerPath, fs.readFileSync(markerPath)]
+      ]);
+
+      recovery = createShortVideoStore(storeOptions(fixture));
+      recovery.summary();
+      const migrated = openDb(fixture.dbPath);
+      try {
+        const row = migrated.prepare(`
+          SELECT guard_identity_json, guard_publish_mode, guard_publish_provenance
+          FROM short_video_delete_items WHERE job_id = ?
+        `).get(interruptedJob.id);
+        assert.equal(row?.guard_identity_json, "");
+        assert.equal(row?.guard_publish_mode, "");
+        assert.equal(row?.guard_publish_provenance, "legacy_v3");
+      } finally {
+        migrated.close();
+      }
+
+      const status = await recovery.recoverDeleteJobs({ jobId: interruptedJob.id });
+      assert.equal(status.job?.manualInterventionRequired, true, `${replacement} replacement must require manual review`);
+      assert.equal(status.job?.recoverable, false);
+      assert.equal(status.job?.retryable, false);
+      const failedJob = jobRows(fixture.dbPath)[0];
+      assert.equal(failedJob?.status, "rollback_pending");
+      assert.notEqual(failedJob?.error_code, "");
+      assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
+      for (const [targetPath, bytes] of before) {
+        assert.equal(fs.existsSync(targetPath), true, `${replacement} failure must not remove ${path.basename(targetPath)}`);
+        assert.deepEqual(fs.readFileSync(targetPath), bytes, `${replacement} failure must not mutate ${path.basename(targetPath)}`);
+      }
+    } finally {
+      recovery?.close();
+      closeFixture(fixture);
+    }
   }
 }
 
@@ -2515,6 +2621,15 @@ function deleteItemRows(dbPath) {
       FROM short_video_delete_items
       ORDER BY ordinal
     `).all();
+  } finally {
+    db.close();
+  }
+}
+
+function deleteItemFullRow(dbPath) {
+  const db = openDb(dbPath);
+  try {
+    return db.prepare("SELECT * FROM short_video_delete_items ORDER BY ordinal LIMIT 1").get() || null;
   } finally {
     db.close();
   }
