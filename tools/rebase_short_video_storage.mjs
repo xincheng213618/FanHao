@@ -123,6 +123,7 @@ function textColumns(db, { excludedTables = new Set() } = {}) {
 function shortVideoDeleteProtocolTables() {
   return new Set([
     "short_video_delete_jobs",
+    "short_video_delete_operations",
     "short_video_delete_items",
     "short_video_delete_reservations",
     "short_video_delete_fs_actions",

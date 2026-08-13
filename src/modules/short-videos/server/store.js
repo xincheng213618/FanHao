@@ -232,8 +232,15 @@ export function createShortVideoStore(options = {}) {
     fsOps: options.deleteJobFsOps,
     hooks: options.deleteJobTestHooks,
     leaseDurationMs: options.deleteJobLeaseDurationMs,
+    now: options.deleteJobNow,
     ownerId: options.deleteJobOwnerId,
     removeEmptyParents: removeEmptyShortVideoParents,
+    resolveGroupRows: (database, groupDir) => database.prepare(`
+      SELECT *
+      FROM short_videos
+      WHERE COALESCE(NULLIF(source_path, ''), '') <> ''
+    `).all().filter((item) => shortVideoManagedParentDir(item.source_path || "") === groupDir),
+    keyedTerminalRetentionMs: options.deleteJobKeyedRetentionMs,
     terminalJobLimit: options.deleteJobTerminalLimit,
     warn: options.deleteJobWarn || console.warn
   });
@@ -2308,39 +2315,42 @@ function summary() {
     };
   }
 
+  function deleteRequestOptions(options, requestKind, requestSelector) {
+    return { ...options, requestKind, requestSelector, scope: requestKind };
+  }
+
+  function replayOrThrowDelete(database, options, message, statusCode, code = "") {
+    const replay = deleteJobs.lookupOperation(database, options);
+    if (replay) return replay;
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    if (code) { error.code = code; error.expose = true; }
+    throw error;
+  }
+
   async function deleteVideo(id, options = {}) {
     const database = databaseOrOpen();
+    const requestOptions = deleteRequestOptions(options, "single", id);
+    const replay = deleteJobs.lookupOperation(database, requestOptions);
+    if (replay) return replay;
     const row = videoCatalogRowByAnyId(database, id);
-    if (!row) {
-      const error = new Error("短视频不存在");
-      error.statusCode = 404;
-      throw error;
-    }
+    if (!row) return replayOrThrowDelete(database, requestOptions, "短视频不存在", 404);
     const videoId = row.id || id;
     const fullRow = database.prepare("SELECT * FROM short_videos WHERE id = ?").get(videoId);
-    if (!fullRow) {
-      const error = new Error("短视频记录不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-    return deleteShortVideos(database, [fullRow], { ...options, scope: "single" });
+    if (!fullRow) return replayOrThrowDelete(database, requestOptions, "短视频记录不存在", 404);
+    return deleteShortVideos(database, [fullRow], requestOptions);
   }
 
   async function deleteVideoGroup(id, options = {}) {
     const database = databaseOrOpen();
+    const requestOptions = deleteRequestOptions(options, "group", id);
+    const replay = deleteJobs.lookupOperation(database, requestOptions);
+    if (replay) return replay;
     const row = videoCatalogRowByAnyId(database, id);
-    if (!row) {
-      const error = new Error("短视频不存在");
-      error.statusCode = 404;
-      throw error;
-    }
+    if (!row) return replayOrThrowDelete(database, requestOptions, "短视频不存在", 404);
     const videoId = row.id || id;
     const fullRow = database.prepare("SELECT * FROM short_videos WHERE id = ?").get(videoId);
-    if (!fullRow) {
-      const error = new Error("短视频记录不存在");
-      error.statusCode = 404;
-      throw error;
-    }
+    if (!fullRow) return replayOrThrowDelete(database, requestOptions, "短视频记录不存在", 404);
     const groupDir = shortVideoManagedParentDir(fullRow.source_path || "");
     if (!groupDir) {
       const error = new Error("这条视频没有可安全批量删除的本地同组目录");
@@ -2352,11 +2362,14 @@ function summary() {
       FROM short_videos
       WHERE COALESCE(NULLIF(source_path, ''), '') <> ''
     `).all().filter((item) => shortVideoManagedParentDir(item.source_path || "") === groupDir);
-    return deleteShortVideos(database, rows, { ...options, scope: "group", groupDir });
+    return deleteShortVideos(database, rows, { ...requestOptions, groupDir });
   }
 
   async function deleteVideos(ids, options = {}) {
     const database = databaseOrOpen();
+    const requestOptions = deleteRequestOptions(options, "batch", ids);
+    const replay = deleteJobs.lookupOperation(database, requestOptions);
+    if (replay) return replay;
     const canonicalIds = [];
     const seen = new Set();
     for (const id of ids || []) {
@@ -2368,21 +2381,13 @@ function summary() {
       seen.add(videoId);
       canonicalIds.push(videoId);
     }
-    if (!canonicalIds.length) {
-      const error = new Error("请选择要删除的短视频");
-      error.statusCode = 400;
-      throw error;
-    }
+    if (!canonicalIds.length) return replayOrThrowDelete(database, requestOptions, "请选择要删除的短视频", 400);
     const placeholders = canonicalIds.map(() => "?").join(", ");
     const rows = database.prepare(`SELECT * FROM short_videos WHERE id IN (${placeholders})`).all(...canonicalIds);
-    if (rows.length !== canonicalIds.length) {
-      const error = new Error("部分短视频记录已失效，请刷新后重试");
-      error.statusCode = 409;
-      error.code = "SHORT_VIDEO_DELETE_BATCH_INCOMPLETE";
-      error.expose = true;
-      throw error;
-    }
-    return deleteShortVideos(database, rows, { ...options, scope: "batch" });
+    if (rows.length !== canonicalIds.length) return replayOrThrowDelete(
+      database, requestOptions, "部分短视频记录已失效，请刷新后重试", 409, "SHORT_VIDEO_DELETE_BATCH_INCOMPLETE"
+    );
+    return deleteShortVideos(database, rows, requestOptions);
   }
 
   async function deleteShortVideos(database, rows, options = {}) {
@@ -2404,6 +2409,13 @@ function summary() {
     const deleteFiles = options.deleteFiles !== false;
     if (deleteFiles) {
       const result = await deleteJobs.execute(fullRows, options);
+      catalogCache.key = null;
+      catalogCache.summary = null;
+      catalogCache.authors = null;
+      return result;
+    }
+    if (options.operationId) {
+      const result = await deleteJobs.executeLogical(fullRows, options);
       catalogCache.key = null;
       catalogCache.summary = null;
       catalogCache.authors = null;

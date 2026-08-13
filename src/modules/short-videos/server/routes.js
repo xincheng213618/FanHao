@@ -93,7 +93,8 @@ export async function routeShortVideoApi(req, res, url, deps) {
       const body = await readJsonBody(req);
       const ids = Array.isArray(body?.ids) ? body.ids : [];
       const result = await shortVideoStore.deleteVideos(ids, {
-        deleteFiles: body?.deleteFiles !== false
+        deleteFiles: body?.deleteFiles !== false,
+        ...(Object.hasOwn(body || {}, "operationId") ? { operationId: body.operationId } : {})
       });
       onMutation?.();
       sendJson(res, shortVideoDeleteResponseStatus(result), result);
@@ -142,7 +143,10 @@ export async function routeShortVideoApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      const options = { deleteFiles: body?.deleteFiles !== false };
+      const options = {
+        deleteFiles: body?.deleteFiles !== false,
+        ...(Object.hasOwn(body || {}, "operationId") ? { operationId: body.operationId } : {})
+      };
       const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
       const videoId = decodeShortVideoRouteId(explicitVideoDetailMatch[1]);
       const result = scope === "group" || scope === "folder"
@@ -398,7 +402,8 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       const body = await readJsonBody(req);
       const options = {
-        deleteFiles: body?.deleteFiles !== false
+        deleteFiles: body?.deleteFiles !== false,
+        ...(Object.hasOwn(body || {}, "operationId") ? { operationId: body.operationId } : {})
       };
       const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
       const result = scope === "group" || scope === "folder"
@@ -436,6 +441,9 @@ function decodeShortVideoRouteId(value) {
 }
 
 function shortVideoDeleteResponseStatus(result) {
+  if (result?.keyedOperation === true && [200, 202, 409].includes(Number(result?.httpStatus))) {
+    return Number(result.httpStatus);
+  }
   if (result?.status === "rollback_pending" || result?.recoveryRequired === true) return 500;
   return result?.status === "cleanup_pending" || result?.pending === true ? 202 : 200;
 }

@@ -66,7 +66,14 @@ function shortVideoDeleteRecoveryBody(value) {
 function shortVideoPublic4xxCode(error, status) {
   if (status < 400 || status >= 500 || error?.expose !== true) return "";
   const code = String(error?.code || "");
-  return code === "SHORT_VIDEO_DELETE_JOB_NOT_FOUND" ? code : "";
+  return new Set([
+    "SHORT_VIDEO_DELETE_JOB_NOT_FOUND",
+    "SHORT_VIDEO_DELETE_OPERATION_ID_INVALID",
+    "SHORT_VIDEO_DELETE_OPERATION_CONFLICT",
+    "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE",
+    "SHORT_VIDEO_DELETE_REQUEST_INVALID",
+    "SHORT_VIDEO_DELETE_GROUP_CHANGED"
+  ]).has(code) ? code : "";
 }
 
 function isSafeDatabaseBusyError(error) {
