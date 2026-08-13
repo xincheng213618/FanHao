@@ -24,6 +24,7 @@ await verifyRestartAndResponseLossReplay();
 await verifyHttpStatesAndSanitizedErrors();
 await verifyReceiptRetentionAndIncompleteIntent();
 await verifyLogicalReceiptFinalizationAfterCoverCleanup();
+await verifyLogicalCoverCleanupCrashRecovery();
 await verifyMalformedAndLegacyContracts();
 
 console.log("short-video-delete-idempotency: ok (strict operation IDs, immutable command digests, exact replay, receipt retention, conflict fences)");
@@ -293,7 +294,7 @@ async function verifyHttpStatesAndSanitizedErrors() {
   const states = [
     ["running", false, 202],
     ["cleanup_pending", false, 202],
-    ["rollback_pending", false, 202],
+    ["rollback_pending", false, 500],
     ["rollback_pending", true, 409],
     ["completed", false, 200],
     ["rolled_back", false, 409]
@@ -305,12 +306,58 @@ async function verifyHttpStatesAndSanitizedErrors() {
       httpStatus: expected,
       status,
       state: manual ? "manual" : status,
-      manualInterventionRequired: manual
+      manualInterventionRequired: manual,
+      accepted: status !== "rollback_pending",
+      recoveryRequired: status === "rollback_pending"
     };
     const response = await invokeRoute("/api/short-videos/state-fixture", {
       deleteVideo: async () => result
     }, { body: { operationId: operationIdFor(600 + expected + states.indexOf(states.find((item) => item[0] === status))) } });
     assert.equal(response.status, expected, `${status}/${manual} must map to ${expected}`);
+  }
+
+  let releaseRollback;
+  let reachedRollback;
+  const rollbackPaused = new Promise((resolve) => { reachedRollback = resolve; });
+  const rollbackGate = new Promise((resolve) => { releaseRollback = resolve; });
+  const rollbackFixture = createFixture({
+    hooks: {
+      async afterPlanPersisted() {
+        reachedRollback();
+        await rollbackGate;
+      }
+    }
+  });
+  try {
+    const id = "http-keyed-rollback";
+    const source = writeMedia(rollbackFixture, "http/rollback.mp4", "rollback");
+    const operationId = operationIdFor(650);
+    seedVideo(rollbackFixture, { id, sourcePath: source });
+    const creator = rollbackFixture.store.deleteVideo(id, { operationId });
+    await rollbackPaused;
+    const db = openDb(rollbackFixture);
+    try {
+      db.prepare(`
+        UPDATE short_video_delete_jobs
+        SET status = 'rollback_pending', phase = 'rollback', error_code = 'EBUSY', error = 'fixture retry'
+        WHERE id = ?
+      `).run(operationId);
+    } finally {
+      db.close();
+    }
+    const response = await invokeRoute(`/api/short-videos/${id}`, rollbackFixture.store, {
+      body: { operationId }
+    });
+    assert.equal(response.status, 500);
+    assert.equal(response.payload.status, "rollback_pending");
+    assert.equal(response.payload.accepted, false);
+    assert.equal(response.payload.recoveryRequired, true);
+    assert.equal(response.payload.manualInterventionRequired, false);
+    releaseRollback();
+    await creator;
+  } finally {
+    releaseRollback?.();
+    closeFixture(rollbackFixture);
   }
 
   const secretSelector = "raw-selector-secret";
@@ -507,6 +554,74 @@ async function verifyLogicalReceiptFinalizationCase({
     assert.deepEqual(businessResult(replay), businessResult(first), "receipt-only replay must preserve the full cleanup result");
     assert.equal(replay.deletedStoredCovers, expectedDeletedStoredCovers);
     assert.equal(replay.coverCleanupError, expectedCoverCleanupError);
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyLogicalCoverCleanupCrashRecovery() {
+  let currentMs = Date.parse("2026-08-06T00:00:00.000Z");
+  let observedDeletedStoredCovers = -1;
+  let hookCalls = 0;
+  const fixture = createFixture({
+    terminalLimit: 1,
+    now: () => new Date(currentMs).toISOString(),
+    hooks: {
+      async afterLogicalCoverCleanup({ deletedStoredCovers }) {
+        hookCalls += 1;
+        observedDeletedStoredCovers = deletedStoredCovers;
+        throw new Error("fixture crash after logical cover cleanup");
+      }
+    }
+  });
+  try {
+    const id = "logical-cover-crash";
+    const operationId = operationIdFor(770);
+    const source = writeMedia(fixture, "logical/crash.mp4", "crash");
+    seedVideo(fixture, { id, sourcePath: source });
+    const coverDatabase = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
+    try {
+      coverDatabase.put(id, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    } finally {
+      coverDatabase.close();
+    }
+
+    await assert.rejects(
+      () => fixture.store.deleteVideo(id, { deleteFiles: false, operationId }),
+      /fixture crash after logical cover cleanup/
+    );
+    assert.equal(hookCalls, 1);
+    assert.equal(observedDeletedStoredCovers, 1, "the external cleanup result must be known before the crash window");
+    const pending = durableJob(fixture, operationId);
+    assert.equal(pending.status, "cleanup_pending");
+    assert.equal(pending.phase, "logical_cleanup");
+    const checkpoint = coverDeleteReceipt(fixture, operationId);
+    assert.equal(checkpoint.deleted_count, 1, "cover removal and its result checkpoint must commit atomically");
+    assert.equal(checkpoint.request_sha256, operationRow(fixture, operationId).request_sha256);
+
+    fixture.store.close();
+    fixture.hooks = {};
+    fixture.store = openStore(fixture);
+    await fixture.store.recoverDeleteJobs({ jobId: operationId });
+    const recovered = await fixture.store.deleteVideo(id, { deleteFiles: false, operationId });
+    assert.equal(recovered.status, "completed");
+    assert.equal(recovered.deletedStoredCovers, 1, "restart recovery must replay the durable external result");
+    assert.equal(recovered.coverCleanupError, "");
+    const recoveredBusinessResult = businessResult(recovered);
+
+    currentMs += 1_000;
+    const evictId = "logical-cover-crash-evict";
+    const evictSource = writeMedia(fixture, "logical/crash-evict.mp4", "crash-evict");
+    seedVideo(fixture, { id: evictId, sourcePath: evictSource });
+    await fixture.store.deleteVideo(evictId, {
+      deleteFiles: false,
+      operationId: operationIdFor(771)
+    });
+    assert.equal(jobIds(fixture).includes(operationId), false);
+    const receiptReplay = await fixture.store.deleteVideo(id, { deleteFiles: false, operationId });
+    assert.equal(receiptReplay.receiptOnly, true);
+    assert.deepEqual(businessResult(receiptReplay), recoveredBusinessResult);
+    assert.equal(receiptReplay.deletedStoredCovers, 1, "receipt replay must retain the checkpointed count after job pruning");
   } finally {
     closeFixture(fixture);
   }
@@ -725,6 +840,25 @@ function operationRow(fixture, operationId) {
   const db = openDb(fixture);
   try { return db.prepare("SELECT * FROM short_video_delete_operations WHERE operation_id = ?").get(operationId) || null; }
   finally { db.close(); }
+}
+
+function durableJob(fixture, jobId) {
+  const db = openDb(fixture);
+  try { return db.prepare("SELECT * FROM short_video_delete_jobs WHERE id = ?").get(jobId) || null; }
+  finally { db.close(); }
+}
+
+function coverDeleteReceipt(fixture, operationId) {
+  const db = new DatabaseSync(fixture.coverDbPath, { readOnly: true });
+  try {
+    return db.prepare(`
+      SELECT operation_id, request_sha256, video_ids_json, deleted_count
+      FROM short_video_cover_delete_receipts
+      WHERE operation_id = ?
+    `).get(operationId) || null;
+  } finally {
+    db.close();
+  }
 }
 
 function persistedResultPair(fixture, operationId) {

@@ -441,7 +441,7 @@ function decodeShortVideoRouteId(value) {
 }
 
 function shortVideoDeleteResponseStatus(result) {
-  if (result?.keyedOperation === true && [200, 202, 409].includes(Number(result?.httpStatus))) {
+  if (result?.keyedOperation === true && [200, 202, 409, 500].includes(Number(result?.httpStatus))) {
     return Number(result.httpStatus);
   }
   if (result?.status === "rollback_pending" || result?.recoveryRequired === true) return 500;

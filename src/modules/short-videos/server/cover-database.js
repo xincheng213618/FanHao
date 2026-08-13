@@ -23,6 +23,7 @@ export function createShortVideoCoverDatabase(options = {}) {
       PRAGMA synchronous = NORMAL;
       PRAGMA temp_store = MEMORY;
       PRAGMA wal_autocheckpoint = 2000;
+      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS short_video_cover_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -41,10 +42,28 @@ export function createShortVideoCoverDatabase(options = {}) {
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS idx_short_video_covers_updated
         ON short_video_covers(updated_at);
+      CREATE TABLE IF NOT EXISTS short_video_cover_delete_receipts (
+        operation_id TEXT PRIMARY KEY,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+        video_ids_json TEXT NOT NULL,
+        deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),
+        created_at TEXT NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TRIGGER IF NOT EXISTS trg_short_video_cover_delete_receipt_no_update_v1
+      BEFORE UPDATE ON short_video_cover_delete_receipts
+      BEGIN
+        SELECT RAISE(ABORT, 'short video cover delete receipt is immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_short_video_cover_delete_receipt_no_delete_v1
+      BEFORE DELETE ON short_video_cover_delete_receipts
+      BEGIN
+        SELECT RAISE(ABORT, 'short video cover delete receipt is permanent');
+      END;
       INSERT INTO short_video_cover_meta (key, value)
-      VALUES ('schema_version', '1')
+      VALUES ('schema_version', '2')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
       WHERE short_video_cover_meta.value <> excluded.value;
+      COMMIT;
     `);
     db = opened;
     return db;
@@ -142,17 +161,44 @@ export function createShortVideoCoverDatabase(options = {}) {
     return Number(databaseOrOpen().prepare("DELETE FROM short_video_covers WHERE video_id = ?").run(id)?.changes || 0) > 0;
   }
 
-  function removeMany(videoIds = []) {
-    const ids = [...new Set(videoIds.map(normalizeVideoId).filter(Boolean))];
-    if (!ids.length) return 0;
+  function removeMany(videoIds = [], receipt = {}) {
+    const ids = [...new Set(videoIds.map(normalizeVideoId).filter(Boolean))].sort();
+    const operationId = String(receipt?.operationId || "").trim();
+    const requestSha256 = String(receipt?.requestSha256 || "").trim();
+    if (Boolean(operationId) !== Boolean(requestSha256)) {
+      throw new Error("short video cover delete receipt identity is incomplete");
+    }
+    if (!operationId && !ids.length) return 0;
+    const videoIdsJson = JSON.stringify(ids);
     let removed = 0;
     const database = databaseOrOpen();
     database.exec("BEGIN IMMEDIATE");
     try {
+      if (operationId) {
+        const existing = database.prepare(`
+          SELECT request_sha256, video_ids_json, deleted_count
+          FROM short_video_cover_delete_receipts
+          WHERE operation_id = ?
+        `).get(operationId);
+        if (existing) {
+          if (existing.request_sha256 !== requestSha256 || existing.video_ids_json !== videoIdsJson) {
+            throw new Error("short video cover delete receipt conflict");
+          }
+          database.exec("COMMIT");
+          return Number(existing.deleted_count || 0);
+        }
+      }
       for (let offset = 0; offset < ids.length; offset += 500) {
         const batch = ids.slice(offset, offset + 500);
         const placeholders = batch.map(() => "?").join(", ");
         removed += Number(database.prepare(`DELETE FROM short_video_covers WHERE video_id IN (${placeholders})`).run(...batch)?.changes || 0);
+      }
+      if (operationId) {
+        database.prepare(`
+          INSERT INTO short_video_cover_delete_receipts (
+            operation_id, request_sha256, video_ids_json, deleted_count, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+        `).run(operationId, requestSha256, videoIdsJson, removed, new Date().toISOString());
       }
       database.exec("COMMIT");
     } catch (error) {

@@ -1277,11 +1277,19 @@ export function createShortVideoDeleteJobService({
       throw codedError("逻辑删除封面清理作业不完整", "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE");
     }
     const result = sanitizedJobResult(job);
+    let coverCleanupCompleted = false;
     try {
-      result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job)) || 0);
+      result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job), coverDeleteReceipt(job)) || 0);
+      coverCleanupCompleted = true;
     } catch (error) {
       result.coverCleanupError = String(error?.message || error);
       warn?.("[short-video-cover-delete]", result.coverCleanupError);
+    }
+    if (coverCleanupCompleted) {
+      await invokeHook(hooks.afterLogicalCoverCleanup, {
+        jobId: String(job.id || ""),
+        deletedStoredCovers: Number(result.deletedStoredCovers || 0)
+      });
     }
     const finalResult = sanitizedJobResult({ ...job, result_json: JSON.stringify(result) }, result);
     return finalizeLogicalCleanup(db, job, finalResult);
@@ -1956,7 +1964,7 @@ export function createShortVideoDeleteJobService({
     const currentJob = readJob(db, jobId);
     if (!Number(currentJob.cover_cleanup_done || 0)) {
       try {
-        result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job)) || 0);
+        result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job), coverDeleteReceipt(job)) || 0);
       } catch (error) {
         coverCleanupError = String(error?.message || error);
         result.coverCleanupError = coverCleanupError;
@@ -4775,6 +4783,7 @@ export function createShortVideoDeleteJobService({
     const pending = ACTIVE_STATUSES.includes(String(job.status || ""));
     const publicState = publicJob(job);
     const keyedOperation = isKeyedJob(job);
+    const keyedRollbackPending = keyedOperation && job.status === "rollback_pending";
     if (cleanupPending) {
       result.deletedFiles = items
         .filter((item) => item.disposition === "delete" && item.state === "cleaned")
@@ -4783,7 +4792,7 @@ export function createShortVideoDeleteJobService({
     return {
       ...result,
       ok: completed || cleanupPending,
-      accepted: (completed || pending) && !publicState.manualInterventionRequired,
+      accepted: !keyedRollbackPending && (completed || pending) && !publicState.manualInterventionRequired,
       pending,
       recoveryRequired: job.status === "rollback_pending",
       retryable: publicState.retryable,
@@ -4986,6 +4995,7 @@ export function createShortVideoDeleteJobService({
 
   function deleteJobHttpStatus(job) {
     if (job.manualInterventionRequired) return 409;
+    if (job.keyedOperation && job.status === "rollback_pending") return 500;
     if (job.status === "completed") return 200;
     if (job.status === "rolled_back") return 409;
     return ACTIVE_STATUSES.includes(String(job.status || "")) ? 202 : 200;
@@ -4993,6 +5003,12 @@ export function createShortVideoDeleteJobService({
 
   function isKeyedJob(row) {
     return Boolean(String(row?.request_sha256 || ""));
+  }
+
+  function coverDeleteReceipt(job) {
+    return isKeyedJob(job)
+      ? { operationId: String(job.id || ""), requestSha256: String(job.request_sha256 || "") }
+      : undefined;
   }
 
   function sanitizedJobResult(row, fallback = null) {
