@@ -43,6 +43,8 @@ await verifyRollbackAndCleanupRecovery();
 await verifyPathEscapeAndBusyFailure();
 await verifyGuardNoClobberAndExclusiveFallback();
 await verifyPublishedGuardTempCleanupRecovery();
+await verifyExclusiveGuardTempCleanupRecovery();
+await verifyActiveExecuteRecoveryFencing();
 await verifyInPlaceOverwriteFailsClosed();
 await verifyPostIsolationOpenHandleOverwriteFailsClosed();
 await verifyAfterAllIsolatedBusyRecovery();
@@ -65,6 +67,7 @@ await verifyKilledProcessRecovery("partially_isolated", "rolled_back");
 await verifyKilledProcessRecovery("restore_renamed_pre_journal", "rolled_back");
 await verifyKilledProcessRecovery("guard_half_written", "rolled_back");
 await verifyKilledProcessRecovery("guard_pre_publish", "rolled_back");
+await verifyKilledProcessRecovery("fallback_guard_published", "rolled_back");
 await verifyKilledProcessRecovery("db_committed", "completed");
 await verifyKilledProcessRecovery("post_cleanup_unlinks_pre_journal", "completed");
 await verifyKilledProcessRecovery("partially_cleaned", "completed");
@@ -126,7 +129,16 @@ async function verifyProtocolMigrationAndTombstones() {
     try {
       assert.equal(
         afterMigration.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
-        "3"
+        "4"
+      );
+      assert.equal(
+        Number(afterMigration.prepare(`
+          SELECT COUNT(*) AS count
+          FROM pragma_table_info('short_video_delete_items')
+          WHERE name = 'guard_publish_mode'
+        `).get()?.count || 0),
+        1,
+        "protocol v4 must persist the guard publication mode"
       );
       assert.equal(Number(afterMigration.prepare("SELECT COUNT(*) AS count FROM short_video_path_references").get()?.count || 0), 1);
       assertReferenceProjectionMatches(afterMigration);
@@ -839,6 +851,117 @@ async function verifyPublishedGuardTempCleanupRecovery() {
     assert.equal(fs.readFileSync(source, "utf8"), "guard-published-original");
   } finally {
     closeFixture(fixture);
+  }
+}
+
+async function verifyExclusiveGuardTempCleanupRecovery() {
+  const fixture = createFixture({ openStore: false });
+  let source = "";
+  let injected = false;
+  const interruptedExclusiveGuard = new Proxy(fs, {
+    get(target, property, receiver) {
+      if (property === "linkSync") {
+        return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
+      }
+      if (property === "unlinkSync") {
+        return (targetPath, ...args) => {
+          const text = String(targetPath || "");
+          if (!injected && source && text.endsWith(".prepared") && fs.existsSync(source)) {
+            const sourceEntry = fs.lstatSync(source, { bigint: true });
+            const preparedEntry = fs.lstatSync(text, { bigint: true });
+            if (String(sourceEntry.dev) === String(preparedEntry.dev)
+              && String(sourceEntry.ino) !== String(preparedEntry.ino)) {
+              injected = true;
+              throw Object.assign(new Error("injected exclusive guard temp cleanup interruption"), { code: "EACCES" });
+            }
+          }
+          return fs.unlinkSync(targetPath, ...args);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  try {
+    fixture.store = createShortVideoStore({
+      ...storeOptions(fixture),
+      deleteJobFsOps: interruptedExclusiveGuard
+    });
+    fixture.store.summary();
+    source = writeMedia(fixture.root, "guard-exclusive-published/video.mp4", "guard-exclusive-original");
+    seedVideo(fixture.dbPath, { id: "guard-exclusive-published", sourcePath: source });
+
+    await assert.rejects(
+      () => fixture.store.deleteVideo("guard-exclusive-published"),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_GUARD_TEMP_CLEANUP"
+    );
+    assert.equal(injected, true, "the fixture must interrupt an independently published exclusive-create guard");
+    assert.equal(deleteItemRows(fixture.dbPath)[0]?.guard_publish_mode, "exclusive_create");
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
+    assert.equal(fs.readFileSync(source, "utf8"), "guard-exclusive-original");
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+
+    await fixture.store.recoverDeleteJobs();
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back", "exclusive guard recovery must be idempotent");
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyActiveExecuteRecoveryFencing() {
+  const windows = [
+    { name: "plan", hook: "afterPlanPersisted", expectedStatus: "running", expectedPhase: "planned" },
+    { name: "isolation", hook: "afterItemIsolated", expectedStatus: "running", expectedPhase: "isolating" },
+    { name: "db-commit-cleanup", hook: "afterDatabaseCommit", expectedStatus: "cleanup_pending", expectedPhase: "db_committed" }
+  ];
+  for (const window of windows) {
+    const fixture = createFixture();
+    let releaseHook = null;
+    let releaseEntered = null;
+    let deletion = null;
+    const entered = new Promise((resolve) => { releaseEntered = resolve; });
+    const blocked = new Promise((resolve) => { releaseHook = resolve; });
+    try {
+      fixture.hooks[window.hook] = async () => {
+        releaseEntered();
+        await blocked;
+      };
+      const id = `active-${window.name}`;
+      const source = writeMedia(fixture.root, `${window.name}/video.mp4`, `active-${window.name}`);
+      seedVideo(fixture.dbPath, { id, sourcePath: source });
+      deletion = fixture.store.deleteVideo(id);
+      await entered;
+
+      const before = jobRows(fixture.dbPath)[0];
+      assert.equal(before?.status, window.expectedStatus);
+      assert.equal(before?.phase, window.expectedPhase);
+      const listed = fixture.store.deleteJobStatus().jobs.find((job) => job.id === before.id);
+      assert(listed, `${window.name} must be visible in the pending status list`);
+      assert.equal(listed.blockedByActiveOwner, true, `${window.name} must advertise an active execution fence`);
+      assert.equal(listed.recoverable, false, `${window.name} must not advertise recovery while execute is active`);
+
+      const recovery = await fixture.store.recoverDeleteJobs({ jobId: before.id });
+      assert.equal(recovery.job?.blockedByActiveOwner, true);
+      assert.equal(recovery.job?.recoverable, false);
+      const afterRecovery = jobRows(fixture.dbPath)[0];
+      assert.equal(afterRecovery.status, before.status, `${window.name} recovery must not change status`);
+      assert.equal(afterRecovery.phase, before.phase, `${window.name} recovery must not change phase`);
+      assert.equal(afterRecovery.owner_id, before.owner_id, `${window.name} recovery must not steal the active owner`);
+      assert.equal(afterRecovery.version, before.version, `${window.name} recovery must not mutate the active journal`);
+      assert.equal(afterRecovery.attempts, before.attempts, `${window.name} recovery must not increment attempts`);
+
+      releaseHook();
+      const result = await deletion;
+      deletion = null;
+      assert.equal(result.status, "completed", `${window.name} execute must finish after the recovery probe`);
+      assert.equal(fs.existsSync(source), false);
+      assertNoActiveReservations(fixture.dbPath);
+      assertNoQuarantine(fixture.root);
+    } finally {
+      releaseHook?.();
+      if (deletion) await deletion.catch(() => {});
+      closeFixture(fixture);
+    }
   }
 }
 
@@ -1708,6 +1831,20 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
         );
       }
     }
+    if (boundary === "fallback_guard_published") {
+      const interrupted = interruptedItems.filter((item) => item.state === "isolating"
+        && item.guard_publish_mode === "exclusive_create"
+        && fs.existsSync(item.original_path)
+        && fs.existsSync(item.quarantine_path));
+      assert.equal(interrupted.length, 1, "fallback publish must persist its mode before the child is killed");
+      const prepared = fs.readdirSync(path.dirname(interrupted[0].quarantine_path))
+        .map((name) => path.join(path.dirname(interrupted[0].quarantine_path), name))
+        .find((name) => name.endsWith(".prepared"));
+      assert(prepared, "fallback publish must retain the prepared guard across SIGKILL");
+      const sourceEntry = fs.lstatSync(interrupted[0].original_path, { bigint: true });
+      const preparedEntry = fs.lstatSync(prepared, { bigint: true });
+      assert.notEqual(String(sourceEntry.ino), String(preparedEntry.ino), "exclusive-create guards must use independent inodes");
+    }
     if (boundary === "post_cleanup_unlinks_pre_journal") {
       assert.equal(before.status, "cleanup_pending");
       assert.equal(before.phase, "cleanup");
@@ -1725,6 +1862,35 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
     const expectedCommitted = expectedStatus === "completed";
     assert.equal(videoExists(fixture.dbPath, `${boundary}-1`), !expectedCommitted);
     assert.equal(videoExists(fixture.dbPath, `${boundary}-2`), !expectedCommitted);
+
+    if (boundary === "fallback_guard_published") {
+      const db = openDb(fixture.dbPath);
+      try {
+        db.prepare(`
+          UPDATE short_video_delete_items
+          SET guard_publish_mode = ''
+          WHERE state = 'isolating' AND guard_publish_mode = 'exclusive_create'
+        `).run();
+      } finally {
+        db.close();
+      }
+      const untrustedRecovery = createShortVideoStore(storeOptions(fixture));
+      await untrustedRecovery.recoverDeleteJobs();
+      untrustedRecovery.close();
+      assert.equal(jobRows(fixture.dbPath)[0]?.status, "rollback_pending");
+      assert.equal(jobRows(fixture.dbPath)[0]?.error_code, "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
+      assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
+      const restoreMode = openDb(fixture.dbPath);
+      try {
+        restoreMode.prepare(`
+          UPDATE short_video_delete_items
+          SET guard_publish_mode = 'exclusive_create'
+          WHERE state = 'restoring' AND guard_publish_mode = ''
+        `).run();
+      } finally {
+        restoreMode.close();
+      }
+    }
 
     const recovery = createShortVideoStore(storeOptions(fixture));
     // Production passes skipStartupMaintenance=true. Opening through this call
@@ -1919,7 +2085,7 @@ function deleteItemRows(dbPath) {
   const db = openDb(dbPath);
   try {
     return db.prepare(`
-      SELECT ordinal, state, original_path, quarantine_path, guard_identity_json
+      SELECT ordinal, state, original_path, quarantine_path, guard_identity_json, guard_publish_mode
       FROM short_video_delete_items
       ORDER BY ordinal
     `).all();

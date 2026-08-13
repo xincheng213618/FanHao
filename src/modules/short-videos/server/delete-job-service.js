@@ -10,12 +10,16 @@ const TERMINAL_STATUSES = ["completed", "rolled_back"];
 const OWNER_MARKER = ".owner";
 const GUARD_PREFIX = "FANHAO_SHORT_VIDEO_DELETE_GUARD";
 const ACTIVE_OWNER_IDS = new Set();
+const ACTIVE_JOB_EXECUTIONS = new Map();
 const PATH_REFERENCE_TABLE = "short_video_path_references";
 const PATH_TOMBSTONE_TABLE = "short_video_path_tombstones";
 const VIDEO_TOMBSTONE_TABLE = "short_video_delete_video_tombstones";
 const PATH_COLUMNS = ["source_path", "cover_path", "music_path", "data_path"];
 const DELETE_PROTOCOL_VERSION_META = "short_video_delete_protocol_version";
-const DELETE_PROTOCOL_VERSION = "3";
+const DELETE_PROTOCOL_VERSION = "4";
+const GUARD_PUBLISH_HARDLINK = "hardlink";
+const GUARD_PUBLISH_EXCLUSIVE_CREATE = "exclusive_create";
+const GUARD_PUBLISH_MODES = new Set([GUARD_PUBLISH_HARDLINK, GUARD_PUBLISH_EXCLUSIVE_CREATE]);
 const DELETE_PROTOCOL_TABLES = [
   "short_video_delete_jobs",
   "short_video_delete_items",
@@ -185,6 +189,7 @@ export function createShortVideoDeleteJobService({
         source_identity_json TEXT NOT NULL DEFAULT '',
         quarantine_identity_json TEXT NOT NULL DEFAULT '',
         guard_identity_json TEXT NOT NULL DEFAULT '',
+        guard_publish_mode TEXT NOT NULL DEFAULT '',
         error TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL,
         PRIMARY KEY(job_id, ordinal),
@@ -391,6 +396,7 @@ export function createShortVideoDeleteJobService({
     ensureColumn(db, "short_video_delete_jobs", "deleted_stored_covers", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "short_video_delete_items", "real_path_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "identity_key", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "short_video_delete_items", "guard_publish_mode", "TEXT NOT NULL DEFAULT ''");
     installReferenceTriggers(db);
     installTombstoneTriggers(db);
   }
@@ -821,41 +827,46 @@ export function createShortVideoDeleteJobService({
     const db = database();
     const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "plan" });
     const job = await persistPlan(db, rows, options, referenceSnapshot);
+    const executionToken = beginExecution(job.id);
     referenceSnapshotsByJob.set(job.id, referenceSnapshot);
     try {
-      await invokeHook(hooks.afterPlanPersisted, publicHookJob(job));
-      await isolatePlannedFiles(db, job.id);
-      await invokeHook(hooks.afterAllIsolated, publicHookJob(readJob(db, job.id)));
-      await commitRows(db, job.id);
-      await invokeHook(hooks.afterDatabaseCommit, publicHookJob(readJob(db, job.id)));
-    } catch (error) {
-      referenceSnapshotsByJob.delete(job.id);
-      const current = readJob(db, job.id);
-      if (!current) throw error;
-      if (databaseDisposition(db, current) === "committed") {
-        rememberPending(db, current.id, "cleanup_pending", "cleanup", error);
-        warn?.("[short-video-delete-cleanup-pending]", error);
-        return executionResult(db, current.id);
-      }
-      rememberPending(db, current.id, "rollback_pending", "rollback", error);
       try {
-        const recovered = await recoverOne(db, current.id);
-        if (recovered?.status === "rolled_back") throw pendingOperationError(db, current.id, error, "删除本地文件失败");
-      } catch (recoveryError) {
-        if (recoveryError?.cause === error) throw recoveryError;
-        rememberPending(db, current.id, "rollback_pending", "rollback", recoveryError);
-        throw pendingOperationError(db, current.id, recoveryError, "短视频删除已安全隔离，等待恢复后重试");
+        await invokeHook(hooks.afterPlanPersisted, publicHookJob(job));
+        await isolatePlannedFiles(db, job.id);
+        await invokeHook(hooks.afterAllIsolated, publicHookJob(readJob(db, job.id)));
+        await commitRows(db, job.id);
+        await invokeHook(hooks.afterDatabaseCommit, publicHookJob(readJob(db, job.id)));
+      } catch (error) {
+        referenceSnapshotsByJob.delete(job.id);
+        const current = readJob(db, job.id);
+        if (!current) throw error;
+        if (databaseDisposition(db, current) === "committed") {
+          rememberPending(db, current.id, "cleanup_pending", "cleanup", error);
+          warn?.("[short-video-delete-cleanup-pending]", error);
+          return executionResult(db, current.id);
+        }
+        rememberPending(db, current.id, "rollback_pending", "rollback", error);
+        try {
+          const recovered = await recoverOne(db, current.id, executionToken);
+          if (recovered?.status === "rolled_back") throw pendingOperationError(db, current.id, error, "删除本地文件失败");
+        } catch (recoveryError) {
+          if (recoveryError?.cause === error) throw recoveryError;
+          rememberPending(db, current.id, "rollback_pending", "rollback", recoveryError);
+          throw pendingOperationError(db, current.id, recoveryError, "短视频删除已安全隔离，等待恢复后重试");
+        }
+        throw pendingOperationError(db, current.id, error, "短视频删除已安全隔离，等待恢复后重试");
       }
-      throw pendingOperationError(db, current.id, error, "短视频删除已安全隔离，等待恢复后重试");
-    }
 
-    try {
-      await cleanupCommitted(db, job.id);
-    } catch (error) {
-      rememberPending(db, job.id, "cleanup_pending", "cleanup", error);
-      warn?.("[short-video-delete-cleanup-pending]", error);
+      try {
+        await cleanupCommitted(db, job.id, { executionToken });
+      } catch (error) {
+        rememberPending(db, job.id, "cleanup_pending", "cleanup", error);
+        warn?.("[short-video-delete-cleanup-pending]", error);
+      }
+      return executionResult(db, job.id);
+    } finally {
+      endExecution(job.id, executionToken);
     }
-    return executionResult(db, job.id);
   }
 
   async function persistPlan(db, inputRows, options, referenceSnapshot = null) {
@@ -1224,6 +1235,7 @@ export function createShortVideoDeleteJobService({
         { transitionAfterRename: true }
       );
       const guardIdentity = await createGuard(
+        db,
         item.original_path,
         item.managed_root,
         expected,
@@ -1363,8 +1375,8 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  async function cleanupCommitted(db, jobId) {
-    const job = claim(db, jobId);
+  async function cleanupCommitted(db, jobId, options = {}) {
+    const job = options.claimedJob || claim(db, jobId, options.executionToken);
     if (!job) return readJob(db, jobId);
     if (databaseDisposition(db, job) !== "committed") {
       throw codedError("数据库删除尚未提交，拒绝清理隔离文件", "SHORT_VIDEO_DELETE_DIRECTION_MISMATCH");
@@ -1472,8 +1484,8 @@ export function createShortVideoDeleteJobService({
     return readJob(db, jobId);
   }
 
-  async function rollbackUncommitted(db, jobId) {
-    const job = claim(db, jobId);
+  async function rollbackUncommitted(db, jobId, options = {}) {
+    const job = options.claimedJob || claim(db, jobId, options.executionToken);
     if (!job) return readJob(db, jobId);
     if (databaseDisposition(db, job) !== "uncommitted") {
       throw codedError("数据库删除已经提交，拒绝恢复原文件", "SHORT_VIDEO_DELETE_DIRECTION_MISMATCH");
@@ -1613,13 +1625,24 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  async function recoverOne(db, jobId) {
-    const job = claim(db, jobId);
-    if (!job) return readJob(db, jobId);
-    const disposition = databaseDisposition(db, job);
-    if (disposition === "committed") return cleanupCommitted(db, jobId);
-    if (disposition === "uncommitted") return rollbackUncommitted(db, jobId);
-    throw codedError("短视频记录处于部分删除状态，已停止自动文件操作", "SHORT_VIDEO_DELETE_PARTIAL_COMMIT");
+  async function recoverOne(db, jobId, executionToken = "") {
+    let token = executionToken;
+    let ownsExecution = false;
+    if (!token) {
+      if (activeExecutionTokenFor(jobId, ownerId)) return readJob(db, jobId);
+      token = beginExecution(jobId);
+      ownsExecution = true;
+    }
+    try {
+      const job = claim(db, jobId, token);
+      if (!job) return readJob(db, jobId);
+      const disposition = databaseDisposition(db, job);
+      if (disposition === "committed") return cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
+      if (disposition === "uncommitted") return rollbackUncommitted(db, jobId, { claimedJob: job, executionToken: token });
+      throw codedError("短视频记录处于部分删除状态，已停止自动文件操作", "SHORT_VIDEO_DELETE_PARTIAL_COMMIT");
+    } finally {
+      if (ownsExecution) endExecution(jobId, token);
+    }
   }
 
   function status(db = database(), options = {}) {
@@ -1638,7 +1661,7 @@ export function createShortVideoDeleteJobService({
     `).all().map((row) => [row.status, Number(row.count || 0)]));
     const pending = db.prepare(`
       SELECT id, status, phase, scope, anchor_id, video_ids_json, attempts,
-             error_code, created_at, updated_at
+             owner_id, lease_until, error_code, created_at, updated_at
       FROM short_video_delete_jobs
       WHERE status IN ('running', 'rollback_pending', 'cleanup_pending')
       ORDER BY created_at, id
@@ -1771,7 +1794,7 @@ export function createShortVideoDeleteJobService({
     return true;
   }
 
-  function claim(db, jobId) {
+  function claim(db, jobId, executionToken = "") {
     beginImmediate(db);
     try {
       const job = readJob(db, jobId);
@@ -1781,8 +1804,20 @@ export function createShortVideoDeleteJobService({
       }
       const previousOwner = String(job.owner_id || "");
       const previousLease = String(job.lease_until || "");
+      const activeExecutionToken = activeExecutionTokenFor(jobId, previousOwner)
+        || activeExecutionTokenFor(jobId, ownerId);
+      if (activeExecutionToken && activeExecutionToken !== executionToken) {
+        db.exec("COMMIT");
+        return null;
+      }
+      const continuingExecution = Boolean(
+        executionToken
+        && activeExecutionToken === executionToken
+        && (!previousOwner || previousOwner === ownerId)
+      );
       if (
         previousOwner
+        && !continuingExecution
         && previousOwner !== ownerId
         && ownerStillExclusive(previousOwner, previousLease)
       ) {
@@ -2078,7 +2113,7 @@ export function createShortVideoDeleteJobService({
     return current;
   }
 
-  async function createGuard(originalPath, root, expectedSource, job, ordinal, jobDir) {
+  async function createGuard(db, originalPath, root, expectedSource, job, ordinal, jobDir) {
     const content = guardContent(job, ordinal);
     const tempPath = guardTempPath(jobDir, job, ordinal);
     assertPathMissing(tempPath, "guard 临时路径已被占用");
@@ -2094,13 +2129,24 @@ export function createShortVideoDeleteJobService({
       throw codedError("guard 临时文件内容不完整", "SHORT_VIDEO_DELETE_GUARD_INCOMPLETE");
     }
     assertGuardDestination(originalPath, root, expectedSource);
+    checkpointGuardPublishMode(db, job.id, ordinal, "", GUARD_PUBLISH_HARDLINK);
     await invokeHook(hooks.beforeGuardPublish, { jobId: job.id, ordinal, originalPath });
+    let publishMode = GUARD_PUBLISH_HARDLINK;
     try {
       fsOps.linkSync(tempPath, originalPath);
     } catch (error) {
       if (!guardExclusiveFallbackAllowed(error)) {
         throw codedError("guard 目标已被占用或无法原子发布", "SHORT_VIDEO_DELETE_GUARD_NO_CLOBBER", error?.message);
       }
+      assertPathMissing(originalPath, "guard hardlink 发布结果不明确");
+      checkpointGuardPublishMode(
+        db,
+        job.id,
+        ordinal,
+        GUARD_PUBLISH_HARDLINK,
+        GUARD_PUBLISH_EXCLUSIVE_CREATE
+      );
+      publishMode = GUARD_PUBLISH_EXCLUSIVE_CREATE;
       let destinationHandle = null;
       try {
         destinationHandle = fsOps.openSync(originalPath, "wx", 0o600);
@@ -2116,6 +2162,7 @@ export function createShortVideoDeleteJobService({
     if (fsOps.readFileSync(originalPath, "utf8") !== content) {
       throw codedError("guard 原子发布后身份不一致", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
     }
+    checkpointPublishedGuard(db, job.id, ordinal, publishMode, guardIdentity);
     try {
       fsOps.unlinkSync(tempPath);
     } catch (error) {
@@ -2160,16 +2207,80 @@ export function createShortVideoDeleteJobService({
     if (!isOwnedGuard(tempPath, job, item.ordinal, "")) {
       throw codedError("guard 临时路径已被替换", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
     }
+    requireOwnedJobDirectory(job, jobDir, item.managed_root);
+    const expectedSource = parseJson(item.source_identity_json, null);
+    assertGuardDestination(originalPath, item.managed_root, expectedSource);
     const published = capturePlainFileIdentity(originalPath);
     const preparedIdentity = capturePlainFileIdentity(tempPath);
-    if (String(published.dev) !== String(preparedIdentity.dev)
-      || String(published.ino) !== String(preparedIdentity.ino)) {
+    if (!expectedSource
+      || String(published.dev) !== String(expectedSource.dev)
+      || String(preparedIdentity.dev) !== String(expectedSource.dev)) {
+      throw codedError("guard 发布文件不在源文件卷", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
+    }
+    const sameInode = String(published.dev) === String(preparedIdentity.dev)
+      && String(published.ino) === String(preparedIdentity.ino);
+    const publishMode = persistedOrInferredGuardPublishMode(item, sameInode);
+    if (publishMode === GUARD_PUBLISH_HARDLINK && !sameInode) {
       throw codedError("guard 临时路径不是已发布 guard 的同一硬链接", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
     }
-    // linkSync published the guard but the following temp unlink was interrupted.
-    // Both names are the same owned inode, so removing only the published name is
-    // the idempotent no-clobber equivalent of renaming it back to `.prepared`.
+    if (publishMode === GUARD_PUBLISH_EXCLUSIVE_CREATE && sameInode) {
+      throw codedError("exclusive-create guard 意外共享 inode", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
+    }
+    // The persisted publication intent and both exact owned guard values prove
+    // whether the source name is the prepared hardlink or an independently
+    // created no-clobber guard. Removing only that owned source name leaves the
+    // prepared checkpoint available until the media rename has completed.
     fsOps.unlinkSync(originalPath);
+  }
+
+  function checkpointGuardPublishMode(db, jobId, ordinal, expectedMode, nextMode) {
+    if (!GUARD_PUBLISH_MODES.has(nextMode)) {
+      throw codedError("guard 发布模式无效", "SHORT_VIDEO_DELETE_GUARD_MODE_INVALID");
+    }
+    beginImmediate(db);
+    try {
+      heartbeat(db, jobId);
+      requireOwnedJob(db, jobId);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET guard_publish_mode = ?, updated_at = ?
+        WHERE job_id = ? AND ordinal = ? AND state = 'isolating' AND guard_publish_mode = ?
+      `).run(nextMode, now(), jobId, ordinal, expectedMode);
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("guard 发布模式 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function checkpointPublishedGuard(db, jobId, ordinal, publishMode, guardIdentity) {
+    beginImmediate(db);
+    try {
+      heartbeat(db, jobId);
+      requireOwnedJob(db, jobId);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET guard_identity_json = ?, updated_at = ?
+        WHERE job_id = ? AND ordinal = ? AND state = 'isolating' AND guard_publish_mode = ?
+      `).run(JSON.stringify(guardIdentity), now(), jobId, ordinal, publishMode);
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("guard 发布身份 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function persistedOrInferredGuardPublishMode(item, sameInode) {
+    const persisted = String(item?.guard_publish_mode || "");
+    if (GUARD_PUBLISH_MODES.has(persisted)) return persisted;
+    if (!persisted && sameInode) return GUARD_PUBLISH_HARDLINK;
+    throw codedError("guard 发布模式缺失且无法安全推导", "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
   }
 
   function requireOwnedJobDirectory(job, jobDir, root) {
@@ -2946,7 +3057,10 @@ export function createShortVideoDeleteJobService({
     const ids = parseJson(row.video_ids_json, []);
     const pending = ACTIVE_STATUSES.includes(String(row.status || ""));
     const leaseExpired = pending && !leaseActive(row.lease_until);
-    const blockedByActiveOwner = pending && ownerStillExclusive(row.owner_id, row.lease_until);
+    const blockedByActiveOwner = pending && (
+      Boolean(activeExecutionTokenFor(row.id, row.owner_id) || activeExecutionTokenFor(row.id, ownerId))
+      || (String(row.owner_id || "") !== ownerId && ownerStillExclusive(row.owner_id, row.lease_until))
+    );
     const stalled = leaseExpired && blockedByActiveOwner;
     const requiresAttention = row.status === "rollback_pending" || stalled || Boolean(row.error_code);
     return {
@@ -3108,6 +3222,30 @@ export function createShortVideoDeleteJobService({
   async function invokeHook(hook, payload) {
     if (typeof hook !== "function") return;
     await hook(payload);
+  }
+
+  function beginExecution(jobId) {
+    const key = String(jobId || "");
+    const registryKey = activeExecutionKey(key, ownerId);
+    if (ACTIVE_JOB_EXECUTIONS.has(registryKey)) {
+      throw codedError("删除作业已有活动执行", "SHORT_VIDEO_DELETE_EXECUTION_ACTIVE");
+    }
+    const token = crypto.randomBytes(24).toString("hex");
+    ACTIVE_JOB_EXECUTIONS.set(registryKey, token);
+    return token;
+  }
+
+  function endExecution(jobId, executionToken) {
+    const registryKey = activeExecutionKey(jobId, ownerId);
+    if (ACTIVE_JOB_EXECUTIONS.get(registryKey) === executionToken) ACTIVE_JOB_EXECUTIONS.delete(registryKey);
+  }
+
+  function activeExecutionTokenFor(jobId, executionOwnerId) {
+    return ACTIVE_JOB_EXECUTIONS.get(activeExecutionKey(jobId, executionOwnerId)) || "";
+  }
+
+  function activeExecutionKey(jobId, executionOwnerId) {
+    return `${String(executionOwnerId || "")}\0${String(jobId || "")}`;
   }
 
   return {

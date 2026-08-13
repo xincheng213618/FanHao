@@ -19,6 +19,9 @@ function stopAt(name) {
 
 const faultFsOps = new Proxy(fs, {
   get(target, property) {
+    if (property === "linkSync" && boundary === "fallback_guard_published") {
+      return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
+    }
     if (property === "writeFileSync") {
       return (targetValue, content, ...args) => {
         if (
@@ -44,6 +47,9 @@ const faultFsOps = new Proxy(fs, {
     }
     if (property === "unlinkSync") {
       return (targetPath) => {
+        if (boundary === "fallback_guard_published" && String(targetPath).endsWith(".prepared")) {
+          stopAt("fallback_guard_published");
+        }
         const result = fs.unlinkSync(targetPath);
         if (String(targetPath).endsWith(".quarantine")) {
           quarantineUnlinked = true;
