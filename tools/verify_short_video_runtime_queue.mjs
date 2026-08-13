@@ -203,6 +203,8 @@ try {
   assert.equal(reopenedStatus.status, 200, "a stopped runtime must start again with a fresh store owner");
   await runtime.stop();
   await verifyActiveDeleteStopDrain();
+  await verifySameTickStartStopLifecycle();
+  await verifyActiveRecoveryStartStopLifecycle();
   await verifyPendingStartupFailsClosed();
   console.log(`short-video-runtime-queue: ok (530 observed playback issues; locked watch write kept HTTP responsive at ${healthDurationMs.toFixed(1)}ms)`);
 } finally {
@@ -310,6 +312,174 @@ async function verifyActiveDeleteStopDrain() {
     await stopPromise?.catch(() => {});
     await activeRuntime?.stop().catch(() => {});
     activeRuntime?.store.close();
+  }
+}
+
+async function verifySameTickStartStopLifecycle() {
+  const root = path.join(tempDir, "same-tick-start-stop");
+  const lifecycleDbPath = path.join(root, "short-videos.sqlite");
+  const lifecycleCacheRoot = path.join(root, "cache");
+  fs.mkdirSync(root, { recursive: true });
+  let writerStarts = 0;
+  const runtimeStates = [];
+  const lifecycleRuntime = createShortVideosRuntime({
+    dbPath: lifecycleDbPath,
+    downloadManagerDbPath: "",
+    downloadManagerSyncMs: 0,
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    mediaResponseService: { serveImage() {} },
+    mediaStreamService: { serveVideo() {} },
+    notFound() {},
+    readJsonBody: async (req) => req?.body || {},
+    requireLocalAdmin: () => true,
+    sendJson(res, status, data) { res.status = status; res.data = data; },
+    sharedCache: { rootDir: lifecycleCacheRoot, scheduleCleanup() {}, touch() {} },
+    runtimeTestHooks: {
+      beforeWritersStart() { writerStarts += 1; },
+      onRuntimeStartedChange(value) { runtimeStates.push(Boolean(value)); }
+    }
+  });
+  try {
+    lifecycleRuntime.store.warm();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const starting = lifecycleRuntime.start();
+      const stopping = lifecycleRuntime.stop();
+      assert.equal(lifecycleRuntime.stop(), stopping, "repeated same-tick stop must share one drain");
+      const [startResult] = await Promise.all([starting, stopping]);
+      assert.equal(startResult, false, "a same-tick stop must invalidate the in-flight start");
+      assert.equal(lifecycleRuntime.catalogWorkerDiagnostics().closed, true, "stop must leave catalog diagnostics closed");
+    }
+    assert.equal(writerStarts, 0, "an invalidated empty-store start must not launch writers");
+    assert.equal(runtimeStates.includes(true), false, "an invalidated start must never advertise started");
+
+    const restarted = lifecycleRuntime.start();
+    assert.equal(lifecycleRuntime.start(), restarted, "concurrent repeated start must share one lifecycle operation");
+    assert.equal(await restarted, true);
+    assert.equal(writerStarts, 1, "a later explicit restart may launch writers exactly once");
+    const restop = lifecycleRuntime.stop();
+    assert.equal(lifecycleRuntime.stop(), restop, "repeated stop after restart must remain idempotent");
+    await restop;
+    assert.equal(lifecycleRuntime.catalogWorkerDiagnostics().closed, true);
+  } finally {
+    await lifecycleRuntime.stop().catch(() => {});
+    lifecycleRuntime.store.close();
+  }
+}
+
+async function verifyActiveRecoveryStartStopLifecycle() {
+  const root = path.join(tempDir, "active-recovery-start-stop");
+  const recoveryDbPath = path.join(root, "short-videos.sqlite");
+  const recoveryCacheRoot = path.join(root, "cache");
+  fs.mkdirSync(root, { recursive: true });
+  const bootstrap = createShortVideoStore({
+    dbPath: recoveryDbPath,
+    roots: [],
+    skipStartupMaintenance: true
+  });
+  bootstrap.summary();
+  bootstrap.close();
+  const timestamp = "2026-08-13T00:00:00.000Z";
+  const seed = new DatabaseSync(recoveryDbPath);
+  try {
+    seed.prepare(`
+      INSERT INTO short_videos (id, source_path, imported_at, updated_at)
+      VALUES ('lifecycle-recovery-video', '', ?, ?)
+    `).run(timestamp, timestamp);
+    seed.prepare(`
+      INSERT INTO short_video_delete_jobs (
+        id, status, phase, scope, anchor_id, video_ids_json, quarantine_token,
+        owner_id, lease_until, execution_token, created_at, updated_at
+      ) VALUES (
+        'lifecycle-recovery-job', 'running', 'planned', 'single', 'lifecycle-recovery-video',
+        '["lifecycle-recovery-video"]', 'lifecycle-recovery-token', '', '', '', ?, ?
+      )
+    `).run(timestamp, timestamp);
+    seed.prepare(`
+      INSERT INTO short_video_delete_reservations (
+        job_id, kind, reservation_key, original_value, mutation_mode,
+        released_at, created_at, updated_at
+      ) VALUES (
+        'lifecycle-recovery-job', 'video', 'lifecycle-recovery-video',
+        'lifecycle-recovery-video', '', '', ?, ?
+      )
+    `).run(timestamp, timestamp);
+  } finally {
+    seed.close();
+  }
+
+  let signalClaimed = null;
+  let releaseClaim = null;
+  const claimed = new Promise((resolve) => { signalClaimed = resolve; });
+  const claimBlocked = new Promise((resolve) => { releaseClaim = resolve; });
+  let writerStarts = 0;
+  const runtimeStates = [];
+  const recoveryRuntime = createShortVideosRuntime({
+    dbPath: recoveryDbPath,
+    downloadManagerDbPath: "",
+    downloadManagerSyncMs: 0,
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    mediaResponseService: { serveImage() {} },
+    mediaStreamService: { serveVideo() {} },
+    notFound() {},
+    readJsonBody: async (req) => req?.body || {},
+    requireLocalAdmin: () => true,
+    sendJson(res, status, data) { res.status = status; res.data = data; },
+    sharedCache: { rootDir: recoveryCacheRoot, scheduleCleanup() {}, touch() {} },
+    runtimeTestHooks: {
+      beforeWritersStart() { writerStarts += 1; },
+      onRuntimeStartedChange(value) { runtimeStates.push(Boolean(value)); },
+      deleteJobTestHooks: {
+        async afterRecoveryClaim() {
+          signalClaimed();
+          await claimBlocked;
+        }
+      }
+    }
+  });
+  let starting = null;
+  let stopping = null;
+  try {
+    recoveryRuntime.store.warm();
+    starting = recoveryRuntime.start();
+    await claimed;
+    let stopSettled = false;
+    stopping = recoveryRuntime.stop().finally(() => { stopSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stopSettled, false, "stop must drain an active startup recovery claim");
+    assert.equal(recoveryRuntime.catalogWorkerDiagnostics().closed, true, "stop must close catalog while recovery drains");
+    releaseClaim();
+    releaseClaim = null;
+    const [startResult] = await Promise.all([starting, stopping]);
+    starting = null;
+    stopping = null;
+    assert.equal(startResult, false, "stop must invalidate the start continuation after active recovery");
+    assert.equal(writerStarts, 0, "active recovery completion after stop must not launch writers");
+    assert.equal(runtimeStates.includes(true), false, "active recovery completion after stop must stay stopped");
+    assert.equal(recoveryRuntime.catalogWorkerDiagnostics().closed, true);
+    const probe = new DatabaseSync(recoveryDbPath, { readOnly: true });
+    try {
+      const job = probe.prepare(`
+        SELECT status, owner_id, execution_token
+        FROM short_video_delete_jobs WHERE id = 'lifecycle-recovery-job'
+      `).get();
+      assert.equal(job?.status, "rolled_back");
+      assert.equal(job?.owner_id, "");
+      assert.equal(job?.execution_token, "");
+      assert.equal(Number(probe.prepare(`
+        SELECT COUNT(*) AS count FROM short_video_delete_reservations
+        WHERE job_id = 'lifecycle-recovery-job' AND released_at = ''
+      `).get()?.count || 0), 0);
+    } finally {
+      probe.close();
+    }
+  } finally {
+    releaseClaim?.();
+    await starting?.catch(() => {});
+    await stopping?.catch(() => {});
+    await recoveryRuntime.stop().catch(() => {});
+    recoveryRuntime.store.close();
   }
 }
 

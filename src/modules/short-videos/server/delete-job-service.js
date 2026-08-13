@@ -1717,6 +1717,7 @@ export function createShortVideoDeleteJobService({
     try {
       const job = claim(db, jobId, token);
       if (!job) return readJob(db, jobId);
+      if (ownsExecution) await invokeHook(hooks.afterRecoveryClaim, { jobId });
       const disposition = databaseDisposition(db, job);
       if (disposition === "committed") return await cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
       if (disposition === "uncommitted") return await rollbackUncommitted(db, jobId, { claimedJob: job, executionToken: token });

@@ -159,6 +159,9 @@ export function createShortVideosRuntime({
   const smoothVideoRecentJobs = [];
   let smoothVideoWarmupTimer = null;
   let runtimeStarted = false;
+  let runtimeDesiredStarted = false;
+  let runtimeLifecycleGeneration = 0;
+  let runtimeStartPromise = null;
   let runtimeStopPromise = null;
   let lastSmoothVideoWarmupAt = 0;
   let lastSmoothVideoWarmupCandidates = 0;
@@ -1043,37 +1046,75 @@ export function createShortVideosRuntime({
     await Promise.all(workerStops);
   }
 
-  async function startDownloadManagerSync() {
-    if (runtimeStopPromise) await runtimeStopPromise;
-    try {
-      const recovery = await store.recoverDeleteJobs();
-      const pending = Math.max(Number(recovery?.pending || 0), Number(recovery?.active || 0));
-      if (pending > 0) {
-        const error = new Error(`短视频删除恢复仍有 ${pending} 个未完成作业`);
-        error.code = "SHORT_VIDEO_DELETE_RECOVERY_PENDING";
-        error.statusCode = 503;
-        error.retryable = true;
+  function startDownloadManagerSync() {
+    if (runtimeStarted && runtimeDesiredStarted && !runtimeStopPromise) return Promise.resolve(true);
+    if (runtimeStartPromise && runtimeDesiredStarted) return runtimeStartPromise;
+    runtimeDesiredStarted = true;
+    const generation = ++runtimeLifecycleGeneration;
+    const stopping = runtimeStopPromise;
+    const startWork = (async () => {
+      if (stopping) await stopping;
+      if (!runtimeStartStillCurrent(generation)) return false;
+      try {
+        const recovery = await store.recoverDeleteJobs();
+        if (!runtimeStartStillCurrent(generation)) return false;
+        const pending = Math.max(Number(recovery?.pending || 0), Number(recovery?.active || 0));
+        if (pending > 0) {
+          const error = new Error(`短视频删除恢复仍有 ${pending} 个未完成作业`);
+          error.code = "SHORT_VIDEO_DELETE_RECOVERY_PENDING";
+          error.statusCode = 503;
+          error.retryable = true;
+          throw error;
+        }
+      } catch (error) {
+        if (!runtimeStartStillCurrent(generation)) return false;
+        runtimeDesiredStarted = false;
+        runtimeLifecycleGeneration += 1;
+        runtimeStarted = false;
+        runtimeTestHooks.onRuntimeStartedChange?.(false);
+        store.close();
         throw error;
       }
-    } catch (error) {
-      runtimeStarted = false;
-      runtimeTestHooks.onRuntimeStartedChange?.(false);
-      store.close();
-      throw error;
-    }
-    runtimeStarted = true;
-    runtimeTestHooks.onRuntimeStartedChange?.(true);
-    runtimeTestHooks.beforeWritersStart?.();
-    catalogWorker.reopen();
-    runtimeTestHooks.beforeWatchWriterStart?.();
-    watchWriter.start();
-    runtimeTestHooks.beforeDownloadManagerSyncStart?.();
-    downloadManagerSync.start();
-    schedule4kSmoothVideoWarmup();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      runtimeTestHooks.beforeWritersStart?.();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      catalogWorker.reopen();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      runtimeTestHooks.beforeWatchWriterStart?.();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      watchWriter.start();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      runtimeTestHooks.beforeDownloadManagerSyncStart?.();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      downloadManagerSync.start();
+      if (!runtimeStartStillCurrent(generation)) return false;
+      runtimeStarted = true;
+      runtimeTestHooks.onRuntimeStartedChange?.(true);
+      if (!runtimeStartStillCurrent(generation)) return false;
+      schedule4kSmoothVideoWarmup();
+      return true;
+    })();
+    let trackedStart;
+    trackedStart = startWork.finally(() => {
+      if (runtimeStartPromise === trackedStart) runtimeStartPromise = null;
+    });
+    runtimeStartPromise = trackedStart;
+    return trackedStart;
+  }
+
+  function runtimeStartStillCurrent(generation) {
+    return runtimeDesiredStarted
+      && generation === runtimeLifecycleGeneration
+      && !runtimeStopPromise;
   }
 
   function stopDownloadManagerSync() {
+    if (runtimeDesiredStarted || runtimeStartPromise) {
+      runtimeDesiredStarted = false;
+      runtimeLifecycleGeneration += 1;
+    }
     if (runtimeStopPromise) return runtimeStopPromise;
+    const startToDrain = runtimeStartPromise;
     const deleteDrain = store.beginClose();
     runtimeStarted = false;
     runtimeTestHooks.onRuntimeStartedChange?.(false);
@@ -1094,6 +1135,7 @@ export function createShortVideosRuntime({
       } catch (error) {
         stopError ||= error;
       }
+      if (startToDrain) await startToDrain.catch(() => undefined);
       const closed = store.close();
       if (!closed && !stopError) {
         stopError = Object.assign(new Error("短视频删除作业未完成，运行时存储无法关闭"), {
