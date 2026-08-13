@@ -15,6 +15,7 @@ final class NativeShortVideoDeleteJobException extends Exception {
 
   static boolean isJobNotFound(Exception error) {
     return error instanceof NativeShortVideoDeleteJobException
+      && ((NativeShortVideoDeleteJobException) error).statusCode == 404
       && JOB_NOT_FOUND.equals(((NativeShortVideoDeleteJobException) error).code);
   }
 }

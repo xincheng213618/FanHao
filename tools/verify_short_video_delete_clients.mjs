@@ -441,21 +441,26 @@ async function verifyWebDeleteRecoveryRebuild() {
   await postStaleActions.deleteVideo({ id: "video-1", title: "after stale restore" });
   assert.equal(postStaleDeletes, 1, "explicit job-not-found must allow the next Web delete immediately");
 
-  const genericStorage = createMemoryStorage(storedPending("job-generic-404"));
-  const genericTimers = createManualTimers();
-  const generic = createShortVideoDeleteRecoveryController({
-    api: async () => { throw deleteJobError(404, ""); },
-    apiBaseUrl: "http://fixture",
-    storage: genericStorage,
-    setTimer: genericTimers.set,
-    clearTimer: genericTimers.clear,
-    renderState: () => {}
-  });
-  await generic.ready;
-  assert(genericStorage.value(), "generic 404 must retain the Web snapshot");
-  assert.equal(genericTimers.pending(), 1, "generic 404 must remain fail-closed and retry");
-  assert.equal(generic.hasPending(), true, "generic 404 must keep blocking a new delete");
-  generic.dispose();
+  for (const [name, status, code] of [
+    ["generic 404", 404, ""],
+    ["500 with exact job-not-found code", 500, "SHORT_VIDEO_DELETE_JOB_NOT_FOUND"]
+  ]) {
+    const retainedStorage = createMemoryStorage(storedPending(`job-retained-${status}`));
+    const retainedTimers = createManualTimers();
+    const retained = createShortVideoDeleteRecoveryController({
+      api: async () => { throw deleteJobError(status, code); },
+      apiBaseUrl: "http://fixture",
+      storage: retainedStorage,
+      setTimer: retainedTimers.set,
+      clearTimer: retainedTimers.clear,
+      renderState: () => {}
+    });
+    await retained.ready;
+    assert(retainedStorage.value(), `${name} must retain the Web snapshot`);
+    assert.equal(retainedTimers.pending(), 1, `${name} must remain fail-closed and retry`);
+    assert.equal(retained.hasPending(), true, `${name} must keep blocking a new delete`);
+    retained.dispose();
+  }
 
   for (const [name, raw, base] of [
     ["bad payload", "{bad-json", "http://fixture"],
@@ -482,6 +487,7 @@ function storedPending(jobId) {
 function deleteJobError(status, code) {
   const error = new Error(`fixture ${status}`);
   error.status = status;
+  error.statusCode = status;
   error.code = code;
   error.payload = { code };
   return error;
@@ -559,12 +565,24 @@ function verifyNativeSourceBoundary() {
   const controller = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteController.java");
   const transport = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteTransport.java");
   const jobError = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteJobException.java");
+  const handleDelete = controller.slice(controller.indexOf("private void handleDeleteResult"), controller.indexOf("private boolean deleteOperationActive"));
+  const cleanupStart = handleDelete.indexOf("if (result.cleanupPending())");
+  const rollbackStart = handleDelete.indexOf("if (!result.committed())", cleanupStart);
+  const applyIndexes = [...handleDelete.matchAll(/host\.applyCommittedDelete\(result, group\)/g)].map((match) => match.index);
+  const cleanupBranch = handleDelete.slice(cleanupStart, rollbackStart);
+  const rollbackBranch = handleDelete.slice(rollbackStart, applyIndexes[1]);
+  const completedBranch = handleDelete.slice(applyIndexes[1]);
+  const startTracking = controller.slice(controller.indexOf("private boolean startTracking"), controller.indexOf("private void finishTracking"));
   const apply = source.slice(source.indexOf("private void applyCommittedDelete"), source.indexOf("private ShortVideoItem nextVideoAfterDelete"));
   const urlStart = source.indexOf("private String deleteVideoUrl");
   const url = source.slice(urlStart, source.indexOf("private String apiBase()", urlStart));
   assert(transport.includes("ShortVideoDeleteJson.parse(status"), "Native delete transport must retain HTTP status for strict parsing");
   assert(transport.includes("new NativeShortVideoDeleteJobException(") && jobError.includes("statusCode") && jobError.includes("JOB_NOT_FOUND.equals"), "Native job transport must retain typed HTTP status and exact public error code");
-  assert(controller.includes("if (result.committed()) host.applyCommittedDelete") && controller.indexOf("if (result.committed()) host.applyCommittedDelete") < controller.indexOf("if (!result.committed())"), "Native controller must apply only committed responses and track rollback without mutation");
+  assert(cleanupStart >= 0 && rollbackStart > cleanupStart && applyIndexes.length === 2, "Native delete result handling must retain distinct cleanup, rollback, and completed branches");
+  assert(cleanupBranch.includes("if (!startTracking(") && cleanupBranch.indexOf("startTracking(") < cleanupBranch.indexOf("host.applyCommittedDelete(result, group)"), "cleanup 202 must finish synchronous tracking setup before Activity model mutation");
+  assert(startTracking.includes("if (persistActiveJob()) return true") && startTracking.indexOf("persistActiveJob()") < startTracking.indexOf("return true"), "tracking setup must synchronously save the pending identity before reporting success");
+  assert(rollbackBranch.includes("KIND_ROLLBACK") && !rollbackBranch.includes("host.applyCommittedDelete"), "rollback 500 must persist tracking without mutating the Activity model");
+  assert(completedBranch.includes("host.applyCommittedDelete(result, group)"), "completed 200 must still apply the committed Activity model update");
   assert(controller.includes("requestInFlight") && controller.includes("if (deleteOperationActive())"), "Native controller must gate confirmations while a DELETE request is in flight");
   assert(!source.includes("private DeleteResult requestDeleteVideo"), "Activity must delegate DELETE transport to NativeShortVideoDeleteController");
   assert(source.includes("deleteController.confirmDelete(") && source.includes("if (deleteController != null) deleteController.destroy()"), "Activity must delegate confirmation and cancel the controller during destroy");

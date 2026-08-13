@@ -242,7 +242,8 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
 }
 
 function isDeleteJobNotFound(error) {
-  return String(error?.code || error?.payload?.code || "").trim() === "SHORT_VIDEO_DELETE_JOB_NOT_FOUND";
+  const status = Number(error?.status ?? error?.statusCode ?? 0);
+  return status === 404 && String(error?.code || error?.payload?.code || "").trim() === "SHORT_VIDEO_DELETE_JOB_NOT_FOUND";
 }
 
 export function parseShortVideoDeleteJob(payload, expectedJobId = "") {

@@ -18,8 +18,11 @@ public final class NativeShortVideoDeleteControllerHarness {
     verifyDeleteFailureReleasesGate();
     verifyConcurrentDeleteGate();
     verifyRebuildRestoresAndClearsPendingJob();
+    verifyCleanupPersistsBeforeApplyFailureAndRebuild();
+    verifySaveFailureStaysFailClosed();
     verifyMissingRestoreExpiresSnapshot();
     verifyGeneric404RestoreKeepsRetrying();
+    verifyExactCodeOn500KeepsRetrying();
     verifyInvalidRestoreDoesNotRequest();
     verifyManualInterventionStopsPolling();
     verifyInitialManualRollbackPersistsWithoutPolling();
@@ -133,6 +136,39 @@ public final class NativeShortVideoDeleteControllerHarness {
     check(store.job == null, "terminal job must clear persisted identity");
   }
 
+  private static void verifyCleanupPersistsBeforeApplyFailureAndRebuild() {
+    MemoryStore store = new MemoryStore();
+    Fixture first = new Fixture(DeleteResult.fromHttp(202, cleanupPending(), "video-1"), store);
+    first.host.applyError = new IllegalStateException("fixture apply failed");
+    first.confirm();
+    equal(store.events, List.of("save", "apply"), "cleanup identity must be saved before Activity model mutation");
+    check(store.job != null, "apply failure must retain the persisted cleanup job");
+    contains(first.host.persistentMessage, "界面更新失败", "apply failure must remain visible without tearing down tracking");
+    equal(first.runner.pendingSchedules(), 1, "apply failure must continue durable cleanup polling");
+    first.controller.destroy();
+
+    FakeHost host = new FakeHost();
+    FakeTransport transport = new FakeTransport(DeleteResult.fromHttp(200, completed(), "video-1"));
+    transport.statuses.add(job("job-cleanup", "completed", "cleanup", false, false));
+    NativeShortVideoDeleteController second = new NativeShortVideoDeleteController(host, transport, store, new ManualRunner(), 1L);
+    second.restorePending("http://fixture");
+    equal(transport.statusCalls, 1, "rebuilt Activity must GET the same job after apply failure");
+    check(store.job == null, "terminal rebuild after apply failure must clear the persisted job");
+  }
+
+  private static void verifySaveFailureStaysFailClosed() {
+    MemoryStore store = new MemoryStore();
+    store.saveError = new IllegalStateException("fixture save failed");
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(202, cleanupPending(), "video-1"), store);
+    fixture.confirm();
+    equal(fixture.host.applied, 0, "cleanup model must not mutate when pending identity cannot be saved");
+    contains(fixture.host.persistentMessage, "恢复状态无法保存", "save failure must show a durable fail-closed explanation");
+    contains(fixture.host.persistentMessage, "#job-cleanup", "save failure must retain the recovery job identity in memory");
+    equal(fixture.runner.pendingSchedules(), 1, "save failure must keep tracking while this Activity is alive");
+    fixture.controller.confirmDelete("video-2", "下一条", false, "http://fixture/delete/2", "http://fixture");
+    equal(fixture.transport.deleteCalls, 1, "save failure must keep the active gate and block another DELETE");
+  }
+
   private static void verifyInvalidRestoreDoesNotRequest() {
     MemoryStore crossBase = new MemoryStore();
     crossBase.job = new NativeShortVideoPendingJob("job-cross-base", "http://other-fixture", "rollback", 0);
@@ -178,6 +214,18 @@ public final class NativeShortVideoDeleteControllerHarness {
     equal(fixture.runner.pendingSchedules(), 1, "generic 404 must remain fail-closed and retry");
     fixture.controller.confirmDelete("video-1", "测试视频", false, "http://fixture/delete", "http://fixture");
     equal(fixture.transport.deleteCalls, 0, "generic 404 must continue blocking a new native delete");
+  }
+
+  private static void verifyExactCodeOn500KeepsRetrying() {
+    MemoryStore store = new MemoryStore();
+    store.job = new NativeShortVideoPendingJob("job-exact-code-500", "http://fixture", "cleanup", 2);
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"), store);
+    fixture.transport.statusError = new NativeShortVideoDeleteJobException(
+      500, NativeShortVideoDeleteJobException.JOB_NOT_FOUND, "fixture misleading message"
+    );
+    fixture.controller.restorePending("http://fixture");
+    check(store.job != null, "500 with exact job-not-found code must retain the native snapshot");
+    equal(fixture.runner.pendingSchedules(), 1, "500 with exact job-not-found code must continue polling");
   }
 
   private static void verifyManualInterventionStopsPolling() {
@@ -295,7 +343,7 @@ public final class NativeShortVideoDeleteControllerHarness {
   }
 
   private static final class Fixture {
-    final FakeHost host = new FakeHost();
+    final FakeHost host;
     final FakeTransport transport;
     final ManualRunner runner = new ManualRunner();
     final NativeShortVideoDeleteController controller;
@@ -305,6 +353,7 @@ public final class NativeShortVideoDeleteControllerHarness {
     }
 
     Fixture(DeleteResult result, MemoryStore store) {
+      host = new FakeHost(store.events);
       transport = new FakeTransport(result);
       controller = new NativeShortVideoDeleteController(host, transport, store, runner, 1L);
     }
@@ -318,6 +367,8 @@ public final class NativeShortVideoDeleteControllerHarness {
   private static final class MemoryStore implements NativeShortVideoDeleteController.PendingJobStore {
     NativeShortVideoPendingJob job;
     Exception loadError;
+    Exception saveError;
+    final List<String> events = new ArrayList<>();
     boolean cleared;
 
     @Override public NativeShortVideoPendingJob load() throws Exception {
@@ -325,7 +376,9 @@ public final class NativeShortVideoDeleteControllerHarness {
       return job;
     }
 
-    @Override public void save(NativeShortVideoPendingJob value) {
+    @Override public void save(NativeShortVideoPendingJob value) throws Exception {
+      events.add("save");
+      if (saveError != null) throw saveError;
       job = value;
       cleared = false;
     }
@@ -343,7 +396,12 @@ public final class NativeShortVideoDeleteControllerHarness {
     Runnable action;
     String actionLabel = "";
     String persistentMessage = "";
+    RuntimeException applyError;
+    final List<String> events;
     int applied;
+
+    FakeHost() { this(new ArrayList<>()); }
+    FakeHost(List<String> events) { this.events = events; }
 
     @Override public void post(Runnable value) {
       if (queuePosts) posts.add(value);
@@ -369,6 +427,8 @@ public final class NativeShortVideoDeleteControllerHarness {
     }
 
     @Override public void applyCommittedDelete(DeleteResult result, boolean group) {
+      events.add("apply");
+      if (applyError != null) throw applyError;
       applied += 1;
     }
 
