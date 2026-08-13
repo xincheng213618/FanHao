@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export const SQLITE_SHORT_VIDEO_COVER_SOURCE = "ffmpeg_sqlite";
 export const SHORT_VIDEO_COVER_GENERATION_VERSION = 1;
+const SHORT_VIDEO_COVER_SCHEMA_VERSION = 2;
 
 export function defaultShortVideoCoverDbPath(shortVideoDbPath) {
   return path.join(path.dirname(path.resolve(shortVideoDbPath || ".")), "short-video-covers.sqlite");
@@ -17,13 +18,34 @@ export function createShortVideoCoverDatabase(options = {}) {
     if (db) return db;
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     const opened = new DatabaseSync(dbPath);
+    try {
+      opened.exec("PRAGMA busy_timeout = 10000");
+      assertSupportedSchemaVersion(opened);
+      opened.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA wal_autocheckpoint = 2000;
+        BEGIN IMMEDIATE;
+      `);
+      try {
+        installSchema(opened);
+        opened.exec("COMMIT");
+      } catch (error) {
+        try { opened.exec("ROLLBACK"); } catch {}
+        throw error;
+      }
+    } catch (error) {
+      try { opened.close(); } catch {}
+      throw error;
+    }
+    db = opened;
+    return db;
+  }
+
+  function installSchema(opened) {
+    repairReceiptTableIfNeeded(opened);
     opened.exec(`
-      PRAGMA busy_timeout = 10000;
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA temp_store = MEMORY;
-      PRAGMA wal_autocheckpoint = 2000;
-      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS short_video_cover_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -49,24 +71,78 @@ export function createShortVideoCoverDatabase(options = {}) {
         deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),
         created_at TEXT NOT NULL
       ) WITHOUT ROWID;
-      CREATE TRIGGER IF NOT EXISTS trg_short_video_cover_delete_receipt_no_update_v1
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_update_v1;
+      CREATE TRIGGER trg_short_video_cover_delete_receipt_no_update_v1
       BEFORE UPDATE ON short_video_cover_delete_receipts
       BEGIN
         SELECT RAISE(ABORT, 'short video cover delete receipt is immutable');
       END;
-      CREATE TRIGGER IF NOT EXISTS trg_short_video_cover_delete_receipt_no_delete_v1
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_delete_v1;
+      CREATE TRIGGER trg_short_video_cover_delete_receipt_no_delete_v1
       BEFORE DELETE ON short_video_cover_delete_receipts
       BEGIN
         SELECT RAISE(ABORT, 'short video cover delete receipt is permanent');
       END;
       INSERT INTO short_video_cover_meta (key, value)
-      VALUES ('schema_version', '2')
+      VALUES ('schema_version', '${SHORT_VIDEO_COVER_SCHEMA_VERSION}')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
       WHERE short_video_cover_meta.value <> excluded.value;
-      COMMIT;
     `);
-    db = opened;
-    return db;
+  }
+
+  function repairReceiptTableIfNeeded(opened) {
+    const table = opened.prepare(`
+      SELECT sql FROM sqlite_schema
+      WHERE type = 'table' AND name = 'short_video_cover_delete_receipts'
+    `).get();
+    if (!table) return;
+    const columns = new Set(opened.prepare("PRAGMA table_info(short_video_cover_delete_receipts)").all()
+      .map((row) => String(row.name || "")));
+    const requiredColumns = [
+      "operation_id",
+      "request_sha256",
+      "video_ids_json",
+      "deleted_count",
+      "created_at"
+    ];
+    const sql = String(table.sql || "");
+    const canonicalShape = requiredColumns.every((column) => columns.has(column))
+      && /CHECK\s*\(\s*length\s*\(\s*request_sha256\s*\)\s*=\s*64\s*\)/iu.test(sql)
+      && /CHECK\s*\(\s*deleted_count\s*>=\s*0\s*\)/iu.test(sql)
+      && /WITHOUT\s+ROWID/iu.test(sql);
+    if (canonicalShape) return;
+    opened.exec(`
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_update_v1;
+      DROP TRIGGER IF EXISTS trg_short_video_cover_delete_receipt_no_delete_v1;
+    `);
+    const rowCount = Number(opened.prepare("SELECT COUNT(*) AS count FROM short_video_cover_delete_receipts").get()?.count || 0);
+    if (!requiredColumns.every((column) => columns.has(column))) {
+      if (rowCount) {
+        throw codedCoverError(
+          "short video cover receipt schema is incomplete",
+          "SHORT_VIDEO_COVER_SCHEMA_INCOMPLETE"
+        );
+      }
+      opened.exec("DROP TABLE short_video_cover_delete_receipts");
+      return;
+    }
+    opened.exec(`
+      ALTER TABLE short_video_cover_delete_receipts
+      RENAME TO short_video_cover_delete_receipts_repair_v2;
+      CREATE TABLE short_video_cover_delete_receipts (
+        operation_id TEXT PRIMARY KEY,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+        video_ids_json TEXT NOT NULL,
+        deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),
+        created_at TEXT NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO short_video_cover_delete_receipts (
+        operation_id, request_sha256, video_ids_json, deleted_count, created_at
+      )
+      SELECT operation_id, request_sha256, video_ids_json, deleted_count, created_at
+      FROM short_video_cover_delete_receipts_repair_v2;
+      DROP TABLE short_video_cover_delete_receipts_repair_v2;
+    `);
   }
 
   function put(videoId, imageBuffer, metadata = {}) {
@@ -182,7 +258,10 @@ export function createShortVideoCoverDatabase(options = {}) {
         `).get(operationId);
         if (existing) {
           if (existing.request_sha256 !== requestSha256 || existing.video_ids_json !== videoIdsJson) {
-            throw new Error("short video cover delete receipt conflict");
+            throw codedCoverError(
+              "short video cover delete receipt conflict",
+              "SHORT_VIDEO_DELETE_COVER_RECEIPT_CONFLICT"
+            );
           }
           database.exec("COMMIT");
           return Number(existing.deleted_count || 0);
@@ -369,4 +448,29 @@ function safeFileSize(filePath) {
   } catch {
     return 0;
   }
+}
+
+function assertSupportedSchemaVersion(db) {
+  const hasMeta = db.prepare(`
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'short_video_cover_meta'
+    LIMIT 1
+  `).get();
+  if (!hasMeta) return;
+  const rawVersion = db.prepare(`
+    SELECT value FROM short_video_cover_meta WHERE key = 'schema_version'
+  `).get()?.value;
+  const version = Number(String(rawVersion ?? ""));
+  if (Number.isFinite(version) && version > SHORT_VIDEO_COVER_SCHEMA_VERSION) {
+    throw codedCoverError(
+      `short video cover schema ${version} is newer than supported ${SHORT_VIDEO_COVER_SCHEMA_VERSION}`,
+      "SHORT_VIDEO_COVER_SCHEMA_FUTURE"
+    );
+  }
+}
+
+function codedCoverError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
 }

@@ -449,6 +449,9 @@ function shortVideoDeleteResponseStatus(result) {
 }
 
 function shortVideoRecoveryResponseStatus(result) {
+  if (result?.job?.keyedOperation === true && result.job.manualInterventionRequired === true) return 409;
+  if (Array.isArray(result?.jobs)
+    && result.jobs.some((job) => job?.keyedOperation === true && job?.manualInterventionRequired === true)) return 409;
   if (result?.pending === true) return 202;
   if (result?.job?.pending === true) return 202;
   if (Array.isArray(result?.jobs) && result.jobs.some((job) => job?.pending === true)) return 202;

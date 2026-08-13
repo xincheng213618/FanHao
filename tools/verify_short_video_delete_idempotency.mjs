@@ -15,6 +15,7 @@ const RESULT_KEYS = [
   "deletedStoredCovers", "coverCleanupError", "missingFiles", "skippedFiles", "emptyRemovedPaths"
 ];
 
+verifyCoverSchemaMigrationAndFutureFence();
 await verifyExactReplayBoundaries();
 await verifyWorkerReplay();
 await verifyConcurrentCreatorsUseConsistentReplaySnapshot();
@@ -25,9 +26,116 @@ await verifyHttpStatesAndSanitizedErrors();
 await verifyReceiptRetentionAndIncompleteIntent();
 await verifyLogicalReceiptFinalizationAfterCoverCleanup();
 await verifyLogicalCoverCleanupCrashRecovery();
+await verifyCoverReceiptConflictsFailClosed();
 await verifyMalformedAndLegacyContracts();
 
 console.log("short-video-delete-idempotency: ok (strict operation IDs, immutable command digests, exact replay, receipt retention, conflict fences)");
+
+function verifyCoverSchemaMigrationAndFutureFence() {
+  for (const version of [1, 2]) {
+    const temp = createVerifiedTempDir(`fanhao-short-video-cover-v${version}-`);
+    const dbPath = path.join(temp.tempDir, "covers.sqlite");
+    try {
+      createLegacyCoverDatabase(dbPath, version);
+      if (version === 2) {
+        const partial = new DatabaseSync(dbPath);
+        try {
+          partial.exec(`
+            CREATE TABLE short_video_cover_delete_receipts (
+              operation_id TEXT PRIMARY KEY,
+              request_sha256 TEXT NOT NULL,
+              video_ids_json TEXT NOT NULL,
+              deleted_count INTEGER NOT NULL,
+              created_at TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TRIGGER trg_short_video_cover_delete_receipt_no_update_v1
+            BEFORE UPDATE ON short_video_cover_delete_receipts
+            BEGIN
+              SELECT RAISE(ABORT, 'broken partial trigger');
+            END;
+          `);
+          partial.prepare(`
+            INSERT INTO short_video_cover_delete_receipts (
+              operation_id, request_sha256, video_ids_json, deleted_count, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+          `).run(
+            operationIdFor(90),
+            "9".repeat(64),
+            JSON.stringify(["schema-cover"]),
+            1,
+            "2026-08-01T00:00:00.000Z"
+          );
+        } finally {
+          partial.close();
+        }
+      }
+      const covers = createShortVideoCoverDatabase({ dbPath });
+      try {
+        assert.equal(covers.status().count, 1);
+        assert.equal(covers.has("schema-cover"), true, `v${version} migration must preserve covers`);
+      } finally {
+        covers.close();
+      }
+      const repaired = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal(coverMeta(repaired, "schema_version"), "2");
+        assert.equal(schemaObjectCount(repaired, "table", "short_video_cover_delete_receipts"), 1);
+        for (const trigger of [
+          "trg_short_video_cover_delete_receipt_no_update_v1",
+          "trg_short_video_cover_delete_receipt_no_delete_v1"
+        ]) {
+          assert.equal(schemaObjectCount(repaired, "trigger", trigger), 1);
+        }
+        assert.match(
+          repaired.prepare("SELECT sql FROM sqlite_schema WHERE name = 'trg_short_video_cover_delete_receipt_no_update_v1'").get()?.sql || "",
+          /receipt is immutable/
+        );
+        if (version === 2) {
+          assert.deepEqual(
+            { ...repaired.prepare(`
+              SELECT request_sha256, video_ids_json, deleted_count, created_at
+              FROM short_video_cover_delete_receipts
+              WHERE operation_id = ?
+            `).get(operationIdFor(90)) },
+            {
+              request_sha256: "9".repeat(64),
+              video_ids_json: JSON.stringify(["schema-cover"]),
+              deleted_count: 1,
+              created_at: "2026-08-01T00:00:00.000Z"
+            },
+            "v2 partial repair must preserve compatible receipt rows"
+          );
+        }
+      } finally {
+        repaired.close();
+      }
+    } finally {
+      temp.cleanup();
+    }
+  }
+
+  for (const version of [3, 999]) {
+    const temp = createVerifiedTempDir(`fanhao-short-video-cover-future-${version}-`);
+    const dbPath = path.join(temp.tempDir, "covers.sqlite");
+    try {
+      createLegacyCoverDatabase(dbPath, version);
+      const before = coverSchemaSnapshot(dbPath);
+      const covers = createShortVideoCoverDatabase({ dbPath });
+      assert.throws(
+        () => covers.status(),
+        (error) => error?.code === "SHORT_VIDEO_COVER_SCHEMA_FUTURE"
+      );
+      covers.close();
+      assert.deepEqual(
+        coverSchemaSnapshot(dbPath),
+        before,
+        `future cover schema v${version} must remain byte-for-byte logical-schema unchanged`
+      );
+    } finally {
+      temp.cleanup();
+    }
+  }
+}
 
 async function verifyExactReplayBoundaries() {
   for (const [hookName, suffix] of [
@@ -627,6 +735,100 @@ async function verifyLogicalCoverCleanupCrashRecovery() {
   }
 }
 
+async function verifyCoverReceiptConflictsFailClosed() {
+  for (const testCase of [
+    {
+      suffix: "logical-wrong-digest-and-ids",
+      deleteFiles: false,
+      hookName: "beforeLogicalCoverCleanup",
+      receiptIdentity(operation) {
+        return { requestSha256: "f".repeat(64), videoIds: ["wrong-logical-id"] };
+      }
+    },
+    {
+      suffix: "physical-wrong-ids",
+      deleteFiles: true,
+      hookName: "afterDatabaseCommit",
+      receiptIdentity(operation) {
+        return { requestSha256: operation.request_sha256, videoIds: ["wrong-physical-id"] };
+      }
+    }
+  ]) {
+    let release;
+    let reached;
+    const paused = new Promise((resolve) => { reached = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    const fixture = createFixture({
+      hooks: {
+        async [testCase.hookName]() {
+          reached();
+          await gate;
+        }
+      }
+    });
+    try {
+      const id = `cover-conflict-${testCase.suffix}`;
+      const operationId = operationIdFor(testCase.deleteFiles ? 781 : 780);
+      const source = writeMedia(fixture, `cover-conflict/${testCase.suffix}.mp4`, testCase.suffix);
+      seedVideo(fixture, { id, sourcePath: source });
+      const coverDatabase = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
+      try {
+        coverDatabase.put(id, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+      } finally {
+        coverDatabase.close();
+      }
+
+      const deleteResponsePromise = invokeRoute(`/api/short-videos/${id}`, fixture.store, {
+        body: { deleteFiles: testCase.deleteFiles, operationId }
+      });
+      await paused;
+      const operationBefore = operationRow(fixture, operationId);
+      const wrongIdentity = testCase.receiptIdentity(operationBefore);
+      insertCoverDeleteReceipt(fixture, {
+        operationId,
+        requestSha256: wrongIdentity.requestSha256,
+        videoIds: wrongIdentity.videoIds,
+        deletedCount: 7
+      });
+      const coverBefore = coverDatabaseSnapshot(fixture);
+      release();
+
+      const deleteResponse = await deleteResponsePromise;
+      assert.equal(deleteResponse.status, 409);
+      assert.equal(deleteResponse.payload.status, "cleanup_pending");
+      assert.equal(deleteResponse.payload.state, "manual");
+      assert.equal(deleteResponse.payload.accepted, false);
+      assert.equal(deleteResponse.payload.manualInterventionRequired, true);
+      assert.equal(deleteResponse.payload.recoverable, false);
+      assert.equal(deleteResponse.payload.retryable, false);
+      assert.equal(deleteResponse.payload.code, "SHORT_VIDEO_DELETE_COVER_RECEIPT_CONFLICT");
+      assert.equal(operationRow(fixture, operationId).terminal_status, "");
+      assert.deepEqual(coverDatabaseSnapshot(fixture), coverBefore);
+
+      const recoveryResponse = await invokeRoute("/api/short-videos/delete-jobs", fixture.store, {
+        method: "POST",
+        body: { jobId: operationId }
+      });
+      assert.equal(recoveryResponse.status, 409);
+      assert.equal(recoveryResponse.payload.job.status, "cleanup_pending");
+      assert.equal(recoveryResponse.payload.job.state, "manual");
+      assert.equal(recoveryResponse.payload.job.manualInterventionRequired, true);
+      assert.equal(recoveryResponse.payload.job.recoverable, false);
+      assert.equal(recoveryResponse.payload.job.retryable, false);
+      assert.equal(recoveryResponse.payload.job.errorCode, "SHORT_VIDEO_DELETE_COVER_RECEIPT_CONFLICT");
+      assert.deepEqual(operationRow(fixture, operationId), operationBefore);
+      assert.deepEqual(
+        coverDatabaseSnapshot(fixture),
+        coverBefore,
+        "conflicting route and recovery attempts must not mutate the cover receipt or cover row"
+      );
+    } finally {
+      release?.();
+      closeFixture(fixture);
+    }
+  }
+}
+
 async function verifyMalformedAndLegacyContracts() {
   const fixture = createFixture();
   try {
@@ -741,6 +943,110 @@ function openDb(fixture) {
   const db = new DatabaseSync(fixture.dbPath);
   db.exec("PRAGMA busy_timeout = 1000; PRAGMA foreign_keys = ON");
   return db;
+}
+
+function createLegacyCoverDatabase(dbPath, schemaVersion) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE short_video_cover_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TABLE short_video_covers (
+        video_id TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL DEFAULT '',
+        source_mtime_ms INTEGER NOT NULL DEFAULT 0,
+        mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+        byte_length INTEGER NOT NULL CHECK(byte_length > 0),
+        image_blob BLOB NOT NULL,
+        generation_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(byte_length = length(image_blob))
+      ) WITHOUT ROWID;
+      INSERT INTO short_video_cover_meta (key, value)
+      VALUES ('schema_version', '${schemaVersion}');
+    `);
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    db.prepare(`
+      INSERT INTO short_video_covers (
+        video_id, source_fingerprint, source_mtime_ms, mime_type, byte_length,
+        image_blob, generation_version, created_at, updated_at
+      ) VALUES (?, '', 0, 'image/jpeg', ?, ?, 1, ?, ?)
+    `).run("schema-cover", image.length, image, "2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z");
+  } finally {
+    db.close();
+  }
+}
+
+function coverMeta(db, key) {
+  return String(db.prepare("SELECT value FROM short_video_cover_meta WHERE key = ?").get(key)?.value || "");
+}
+
+function schemaObjectCount(db, type, name) {
+  return Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = ? AND name = ?").get(type, name)?.count || 0);
+}
+
+function coverSchemaSnapshot(dbPath) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return {
+      schema: db.prepare(`
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_schema
+        ORDER BY type, name
+      `).all(),
+      meta: db.prepare("SELECT key, value FROM short_video_cover_meta ORDER BY key").all()
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function insertCoverDeleteReceipt(fixture, {
+  operationId,
+  requestSha256,
+  videoIds,
+  deletedCount
+}) {
+  const db = new DatabaseSync(fixture.coverDbPath);
+  try {
+    db.prepare(`
+      INSERT INTO short_video_cover_delete_receipts (
+        operation_id, request_sha256, video_ids_json, deleted_count, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      operationId,
+      requestSha256,
+      JSON.stringify([...new Set(videoIds.map((value) => String(value).trim()).filter(Boolean))].sort()),
+      deletedCount,
+      "2026-08-01T00:00:00.000Z"
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function coverDatabaseSnapshot(fixture) {
+  const db = new DatabaseSync(fixture.coverDbPath, { readOnly: true });
+  try {
+    return {
+      covers: db.prepare(`
+        SELECT video_id, source_fingerprint, source_mtime_ms, mime_type, byte_length,
+               hex(image_blob) AS image_hex, generation_version, created_at, updated_at
+        FROM short_video_covers
+        ORDER BY video_id
+      `).all(),
+      receipts: db.prepare(`
+        SELECT operation_id, request_sha256, video_ids_json, deleted_count, created_at
+        FROM short_video_cover_delete_receipts
+        ORDER BY operation_id
+      `).all()
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function seedVideo(fixture, { id, sourcePath }) {

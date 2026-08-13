@@ -1261,7 +1261,15 @@ export function createShortVideoDeleteJobService({
       }
 
       if (created) {
-        await cleanupLogicalCommitted(db, readJob(db, identity.operationId));
+        try {
+          await cleanupLogicalCommitted(db, readJob(db, identity.operationId));
+        } catch (error) {
+          rememberPending(db, identity.operationId, "cleanup_pending", "logical_cleanup", error);
+          if (isCoverReceiptConflict(error)) {
+            return { ...executionResult(db, identity.operationId), replayed: false };
+          }
+          throw error;
+        }
         pruneTerminalJobs(db);
       }
       const result = operationReplay(db, identity);
@@ -1279,9 +1287,11 @@ export function createShortVideoDeleteJobService({
     const result = sanitizedJobResult(job);
     let coverCleanupCompleted = false;
     try {
+      await invokeHook(hooks.beforeLogicalCoverCleanup, { jobId: String(job.id || "") });
       result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job), coverDeleteReceipt(job)) || 0);
       coverCleanupCompleted = true;
     } catch (error) {
+      if (isCoverReceiptConflict(error)) throw error;
       result.coverCleanupError = String(error?.message || error);
       warn?.("[short-video-cover-delete]", result.coverCleanupError);
     }
@@ -1966,6 +1976,7 @@ export function createShortVideoDeleteJobService({
       try {
         result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job), coverDeleteReceipt(job)) || 0);
       } catch (error) {
+        if (isCoverReceiptConflict(error)) throw error;
         coverCleanupError = String(error?.message || error);
         result.coverCleanupError = coverCleanupError;
       }
@@ -2239,12 +2250,13 @@ export function createShortVideoDeleteJobService({
       if (current
         && current.owner_id === ownerId
         && String(current.execution_token || "") === token) {
-        const disposition = databaseDisposition(db, current);
+        const logicalCleanup = current.phase === "logical_cleanup" && isKeyedJob(current);
+        const disposition = logicalCleanup ? "committed" : databaseDisposition(db, current);
         rememberPending(
           db,
           current.id,
           disposition === "committed" ? "cleanup_pending" : "rollback_pending",
-          disposition === "committed" ? "cleanup" : "rollback",
+          logicalCleanup ? "logical_cleanup" : disposition === "committed" ? "cleanup" : "rollback",
           error
         );
       }
@@ -4795,7 +4807,9 @@ export function createShortVideoDeleteJobService({
       accepted: !keyedRollbackPending && (completed || pending) && !publicState.manualInterventionRequired,
       pending,
       recoveryRequired: job.status === "rollback_pending",
+      recoverable: publicState.recoverable,
       retryable: publicState.retryable,
+      code: publicState.errorCode,
       manualInterventionRequired: publicState.manualInterventionRequired,
       processRestartRequired: publicState.processRestartRequired,
       state: publicState.state,
@@ -5495,6 +5509,10 @@ function isSqliteBusy(error) {
 function isReservationConflict(error) {
   return String(error?.code || "") === "SHORT_VIDEO_DELETE_CONFLICT"
     || /short video delete reservation conflict|idx_short_video_delete_reservation_active/i.test(String(error?.message || error));
+}
+
+function isCoverReceiptConflict(error) {
+  return String(error?.code || "") === "SHORT_VIDEO_DELETE_COVER_RECEIPT_CONFLICT";
 }
 
 function isMissing(error) {
