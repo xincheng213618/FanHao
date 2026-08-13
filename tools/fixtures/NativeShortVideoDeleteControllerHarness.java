@@ -5,14 +5,21 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class NativeShortVideoDeleteControllerHarness {
-  public static void main(String[] args) {
+  public static void main(String[] args) throws Exception {
     verifyCompletedAndCleanupPolling();
     verifyRollbackRecoveryFailureAndSuccess();
+    verifyDeleteFailureReleasesGate();
+    verifyConcurrentDeleteGate();
     verifyPollingCancellation();
     verifyDestroyedCallbackCannotReachHostUi();
-    System.out.println("native-short-video-delete-controller: cleanup, rollback, recovery failure, polling cancel, and destroy checks passed");
+    System.out.println("native-short-video-delete-controller: cleanup, rollback, in-flight gate, recovery failure, polling cancel, and destroy checks passed");
   }
 
   private static void verifyCompletedAndCleanupPolling() {
@@ -61,6 +68,44 @@ public final class NativeShortVideoDeleteControllerHarness {
     equal(fixture.transport.statusCalls, 0, "destroy must cancel scheduled polling");
     check(fixture.transport.canceled, "destroy must cancel active HTTP transport");
     check(fixture.runner.shutdown, "destroy must stop the controller runner");
+  }
+
+  private static void verifyDeleteFailureReleasesGate() {
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"));
+    fixture.transport.deleteError = new IllegalStateException("fixture delete failed");
+    fixture.confirm();
+    equal(fixture.transport.deleteCalls, 1, "failed delete must reach transport once");
+    fixture.transport.deleteError = null;
+    fixture.confirm();
+    equal(fixture.transport.deleteCalls, 2, "failed delete must release the operation gate");
+    equal(fixture.host.applied, 1, "request after a failure must still apply normally");
+  }
+
+  private static void verifyConcurrentDeleteGate() throws Exception {
+    ConcurrentHost host = new ConcurrentHost();
+    BlockingTransport transport = new BlockingTransport(DeleteResult.fromHttp(202, cleanupPending(), "video-1"));
+    AsyncRunner runner = new AsyncRunner();
+    NativeShortVideoDeleteController controller = new NativeShortVideoDeleteController(host, transport, runner, 1L);
+    try {
+      controller.confirmDelete("video-1", "第一条", false, "http://fixture/delete/1", "http://fixture");
+      controller.confirmDelete("video-2", "第二条", false, "http://fixture/delete/2", "http://fixture");
+      equal(host.confirmationCount(), 2, "two dialogs opened before confirmation must retain separate callbacks");
+
+      host.confirmNext();
+      check(transport.deleteEntered.await(2, TimeUnit.SECONDS), "first DELETE did not enter the blocking transport");
+      host.confirmNext();
+      equal(transport.deleteCalls.get(), 1, "second confirmation during DELETE must not send another request");
+      contains(host.transientMessage, "等待上一项删除恢复完成", "blocked confirmation must explain the active operation");
+
+      transport.releaseDelete.countDown();
+      check(host.applied.await(2, TimeUnit.SECONDS), "released DELETE did not apply its committed result");
+      waitUntil(() -> runner.pendingSchedules() == 1, "released cleanup response did not start job tracking");
+      equal(host.applyCalls.get(), 1, "released first DELETE must apply exactly once");
+      contains(host.persistentMessage, "资料库记录已移除", "released cleanup response must retain persistent tracking");
+    } finally {
+      transport.releaseDelete.countDown();
+      controller.destroy();
+    }
   }
 
   private static void verifyDestroyedCallbackCannotReachHostUi() {
@@ -205,14 +250,18 @@ public final class NativeShortVideoDeleteControllerHarness {
     final ArrayDeque<NativeShortVideoDeleteJobState> statuses = new ArrayDeque<>();
     NativeShortVideoDeleteJobState recovery;
     Exception recoveryError;
+    Exception deleteError;
     boolean canceled;
+    int deleteCalls;
     int statusCalls;
 
     FakeTransport(DeleteResult result) {
       this.result = result;
     }
 
-    @Override public DeleteResult delete(String url, String expectedVideoId) {
+    @Override public DeleteResult delete(String url, String expectedVideoId) throws Exception {
+      deleteCalls += 1;
+      if (deleteError != null) throw deleteError;
       return result;
     }
 
@@ -231,6 +280,108 @@ public final class NativeShortVideoDeleteControllerHarness {
 
     @Override public void cancel() {
       canceled = true;
+    }
+  }
+
+  private static final class ConcurrentHost implements NativeShortVideoDeleteController.Host {
+    final ArrayDeque<Runnable> confirmations = new ArrayDeque<>();
+    final AtomicInteger applyCalls = new AtomicInteger();
+    final CountDownLatch applied = new CountDownLatch(1);
+    volatile String persistentMessage = "";
+    volatile String transientMessage = "";
+
+    @Override public void post(Runnable action) {
+      action.run();
+    }
+
+    @Override public synchronized void confirmDelete(String title, String message, Runnable onConfirm) {
+      confirmations.add(onConfirm);
+    }
+
+    @Override public void showTransientStatus(String message) {
+      transientMessage = message;
+    }
+
+    @Override public void showPersistentStatus(String message, String label, Runnable action) {
+      persistentMessage = message;
+    }
+
+    @Override public void clearPersistentStatus() {
+      persistentMessage = "";
+    }
+
+    @Override public void applyCommittedDelete(DeleteResult result, boolean group) {
+      applyCalls.incrementAndGet();
+      applied.countDown();
+    }
+
+    synchronized int confirmationCount() {
+      return confirmations.size();
+    }
+
+    void confirmNext() {
+      Runnable action;
+      synchronized (this) {
+        action = confirmations.pollFirst();
+      }
+      if (action == null) throw new AssertionError("confirmation callback missing");
+      action.run();
+    }
+  }
+
+  private static final class BlockingTransport implements NativeShortVideoDeleteController.Transport {
+    final DeleteResult result;
+    final AtomicInteger deleteCalls = new AtomicInteger();
+    final CountDownLatch deleteEntered = new CountDownLatch(1);
+    final CountDownLatch releaseDelete = new CountDownLatch(1);
+
+    BlockingTransport(DeleteResult result) {
+      this.result = result;
+    }
+
+    @Override public DeleteResult delete(String url, String expectedVideoId) throws Exception {
+      deleteCalls.incrementAndGet();
+      deleteEntered.countDown();
+      if (!releaseDelete.await(2, TimeUnit.SECONDS)) throw new IllegalStateException("fixture DELETE release timed out");
+      return result;
+    }
+
+    @Override public NativeShortVideoDeleteJobState status(String apiBaseUrl, String jobId) {
+      throw new AssertionError("fixture polling must stay scheduled, not execute");
+    }
+
+    @Override public NativeShortVideoDeleteJobState recover(String apiBaseUrl, String jobId) {
+      throw new AssertionError("fixture recovery must not execute");
+    }
+
+    @Override public void cancel() {
+      releaseDelete.countDown();
+    }
+  }
+
+  private static final class AsyncRunner implements NativeShortVideoDeleteController.TaskRunner {
+    final ExecutorService executor = Executors.newSingleThreadExecutor();
+    final List<Entry> scheduled = new ArrayList<>();
+
+    @Override public void execute(Runnable action) {
+      executor.execute(action);
+    }
+
+    @Override public synchronized NativeShortVideoDeleteController.ScheduledTask schedule(Runnable action, long delayMs) {
+      Entry entry = new Entry(action);
+      scheduled.add(entry);
+      return () -> entry.canceled = true;
+    }
+
+    @Override public synchronized void shutdownNow() {
+      for (Entry entry : scheduled) entry.canceled = true;
+      executor.shutdownNow();
+    }
+
+    synchronized int pendingSchedules() {
+      int count = 0;
+      for (Entry entry : scheduled) if (!entry.canceled) count += 1;
+      return count;
     }
   }
 
@@ -289,6 +440,16 @@ public final class NativeShortVideoDeleteControllerHarness {
 
   private static void equal(Object actual, Object expected, String message) {
     if (!expected.equals(actual)) throw new AssertionError(message + ": expected=" + expected + " actual=" + actual);
+  }
+
+  private static void waitUntil(Check condition, String message) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+    while (!condition.passed() && System.nanoTime() < deadline) Thread.yield();
+    if (!condition.passed()) throw new AssertionError(message);
+  }
+
+  private interface Check {
+    boolean passed();
   }
 
   private NativeShortVideoDeleteControllerHarness() {}

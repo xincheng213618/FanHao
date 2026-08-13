@@ -47,6 +47,7 @@ final class NativeShortVideoDeleteController {
   private final TaskRunner runner;
   private final long pollDelayMs;
   private volatile boolean destroyed;
+  private volatile boolean requestInFlight;
   private volatile long generation;
   private volatile ScheduledTask scheduledPoll;
   private volatile String activeJobId = "";
@@ -71,9 +72,8 @@ final class NativeShortVideoDeleteController {
 
   void confirmDelete(String videoId, String title, boolean group, String deleteUrl, String apiBaseUrl) {
     if (destroyed) return;
-    if (!activeJobId.isEmpty()) {
-      renderPending(generation);
-      host.showTransientStatus("请先等待上一项删除恢复完成");
+    if (deleteOperationActive()) {
+      showOperationActive();
       return;
     }
     String id = clean(videoId);
@@ -93,6 +93,7 @@ final class NativeShortVideoDeleteController {
   void destroy() {
     if (destroyed) return;
     destroyed = true;
+    requestInFlight = false;
     generation += 1L;
     cancelScheduledPoll();
     transport.cancel();
@@ -101,35 +102,59 @@ final class NativeShortVideoDeleteController {
 
   private void startDelete(String videoId, boolean group, String deleteUrl, String apiBaseUrl) {
     if (destroyed) return;
+    if (deleteOperationActive()) {
+      showOperationActive();
+      return;
+    }
+    requestInFlight = true;
     long token = ++generation;
     cancelScheduledPoll();
     clearActiveJob();
     host.showPersistentStatus(group ? "正在删除同组短视频" : "正在删除短视频", "", null);
-    execute(() -> {
+    if (!execute(() -> {
       try {
         DeleteResult result = transport.delete(deleteUrl, videoId);
         post(token, () -> handleDeleteResult(token, result, group, apiBaseUrl));
       } catch (Exception error) {
         post(token, () -> {
+          requestInFlight = false;
           host.clearPersistentStatus();
           host.showTransientStatus(errorMessage(error, "短视频删除失败"));
         });
       }
-    });
+    })) {
+      requestInFlight = false;
+      if (current(token)) {
+        host.clearPersistentStatus();
+        host.showTransientStatus("短视频删除任务无法启动");
+      }
+    }
   }
 
   private void handleDeleteResult(long token, DeleteResult result, boolean group, String apiBaseUrl) {
-    if (!current(token) || result == null) return;
-    if (result.committed()) host.applyCommittedDelete(result, group);
-    if (result.cleanupPending()) {
-      startTracking(token, result.jobId, apiBaseUrl, PendingKind.CLEANUP, result.cleanupPendingFiles);
-      return;
+    if (!current(token)) return;
+    try {
+      if (result.committed()) host.applyCommittedDelete(result, group);
+      if (result.cleanupPending()) {
+        startTracking(token, result.jobId, apiBaseUrl, PendingKind.CLEANUP, result.cleanupPendingFiles);
+        return;
+      }
+      if (!result.committed()) {
+        startTracking(token, result.jobId, apiBaseUrl, PendingKind.ROLLBACK, 0);
+        return;
+      }
+      host.clearPersistentStatus();
+    } finally {
+      requestInFlight = false;
     }
-    if (!result.committed()) {
-      startTracking(token, result.jobId, apiBaseUrl, PendingKind.ROLLBACK, 0);
-      return;
-    }
-    host.clearPersistentStatus();
+  }
+
+  private boolean deleteOperationActive() {
+    return requestInFlight || !activeJobId.isEmpty();
+  }
+  private void showOperationActive() {
+    if (!activeJobId.isEmpty()) renderPending(generation);
+    host.showTransientStatus("请先等待上一项删除恢复完成");
   }
 
   private void startTracking(long token, String jobId, String apiBaseUrl, PendingKind kind, int pendingFiles) {
@@ -247,19 +272,20 @@ final class NativeShortVideoDeleteController {
     });
   }
 
-  private void execute(Runnable action) {
-    if (destroyed) return;
+  private boolean execute(Runnable action) {
+    if (destroyed) return false;
     try {
       runner.execute(action);
+      return true;
     } catch (RejectedExecutionException ignored) {
       // Activity teardown can race a queued confirmation callback.
+      return false;
     }
   }
 
   private boolean current(long token) {
     return !destroyed && token == generation;
   }
-
   private boolean currentJob(long token, String jobId) {
     return current(token) && !activeJobId.isEmpty() && activeJobId.equals(clean(jobId));
   }

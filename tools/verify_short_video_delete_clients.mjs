@@ -24,6 +24,7 @@ verifyRoutes();
 await verifyWebApiStatusRetention();
 await verifyWebDeleteContract();
 await verifyWebDeleteActions();
+await verifyWebDeleteInFlightGate();
 await verifyWebDeleteRecoveryController();
 verifyWebMutationBoundary();
 verifyNativeSourceBoundary();
@@ -204,6 +205,65 @@ async function verifyWebDeleteActions() {
   assert.equal(requests.length, 1, "a pending recovery must block another client delete request");
 }
 
+async function verifyWebDeleteInFlightGate() {
+  const deferred = createDeferred();
+  const tracked = [];
+  const toasts = [];
+  let calls = 0;
+  let confirmations = 0;
+  let response = deferred.promise;
+  const actions = createShortVideoDeleteActions({
+    api: () => {
+      calls += 1;
+      return response;
+    },
+    confirmDelete: () => {
+      confirmations += 1;
+      return true;
+    },
+    recovery: {
+      hasPending: () => false,
+      track: (result) => tracked.push(result)
+    },
+    showToast: (message) => toasts.push(message)
+  });
+
+  const first = actions.deleteVideo({ id: "video-1", title: "first" });
+  const blocked = await actions.deleteSelected(["video-2"]);
+  assert.equal(blocked, null);
+  assert.equal(calls, 1, "single and batch deletes must share one in-flight request gate");
+  assert.equal(confirmations, 1, "blocked delete must only explain the active operation, not open another confirmation");
+  assert.match(toasts.at(-1), /等待上一项删除恢复完成/);
+
+  deferred.resolve({ status: 202, payload: cleanupPending() });
+  const firstResult = await first;
+  assert.equal(firstResult.committed, true);
+  assert.equal(tracked.length, 1, "the released first response must still enter recovery tracking");
+
+  response = Promise.resolve({ status: 200, payload: completed() });
+  const afterSuccess = await actions.deleteVideo({ id: "video-1", title: "after success" });
+  assert.equal(afterSuccess.committed, true);
+  assert.equal(calls, 2, "request gate must release after response tracking completes");
+
+  let fail = true;
+  let failureCalls = 0;
+  const failureActions = createShortVideoDeleteActions({
+    api: async () => {
+      failureCalls += 1;
+      if (fail) throw new Error("fixture network failure");
+      return { status: 200, payload: completed() };
+    },
+    confirmDelete: () => true,
+    recovery: { hasPending: () => false, track: () => {} },
+    showToast: () => {}
+  });
+  await assert.rejects(failureActions.deleteVideo({ id: "video-1" }), /fixture network failure/);
+  fail = false;
+  const afterFailure = await failureActions.deleteVideo({ id: "video-1" });
+  assert.equal(afterFailure.committed, true);
+  assert.equal(failureCalls, 2, "request gate must release in finally after a failed fetch");
+}
+
 async function verifyWebDeleteRecoveryController() {
   const timers = createManualTimers();
   const rendered = [];
@@ -319,6 +379,16 @@ function createManualTimers() {
   };
 }
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function verifyNativeSourceBoundary() {
   const source = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoActivity.java");
   const controller = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteController.java");
@@ -328,6 +398,7 @@ function verifyNativeSourceBoundary() {
   const url = source.slice(urlStart, source.indexOf("private String apiBase()", urlStart));
   assert(transport.includes("ShortVideoDeleteJson.parse(status"), "Native delete transport must retain HTTP status for strict parsing");
   assert(controller.includes("if (result.committed()) host.applyCommittedDelete") && controller.indexOf("if (result.committed()) host.applyCommittedDelete") < controller.indexOf("if (!result.committed())"), "Native controller must apply only committed responses and track rollback without mutation");
+  assert(controller.includes("requestInFlight") && controller.includes("if (deleteOperationActive())"), "Native controller must gate confirmations while a DELETE request is in flight");
   assert(!source.includes("private DeleteResult requestDeleteVideo"), "Activity must delegate DELETE transport to NativeShortVideoDeleteController");
   assert(source.includes("deleteController.confirmDelete(") && source.includes("if (deleteController != null) deleteController.destroy()"), "Activity must delegate confirmation and cancel the controller during destroy");
   assert(apply.includes("releaseAllPlayers()"), "committed Native deletion must retain the existing model/player cleanup");
