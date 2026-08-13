@@ -202,12 +202,115 @@ try {
   );
   assert.equal(reopenedStatus.status, 200, "a stopped runtime must start again with a fresh store owner");
   await runtime.stop();
+  await verifyActiveDeleteStopDrain();
   await verifyPendingStartupFailsClosed();
   console.log(`short-video-runtime-queue: ok (530 observed playback issues; locked watch write kept HTTP responsive at ${healthDurationMs.toFixed(1)}ms)`);
 } finally {
   await runtime?.stop();
   runtime?.store?.close();
   fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+async function verifyActiveDeleteStopDrain() {
+  const root = path.join(tempDir, "active-delete-stop");
+  const mediaRoot = path.join(root, "media");
+  const activeDbPath = path.join(root, "short-videos.sqlite");
+  const activeCacheRoot = path.join(root, "cache");
+  fs.mkdirSync(mediaRoot, { recursive: true });
+  let releaseDelete = null;
+  let signalDeleteEntered = null;
+  const deleteEntered = new Promise((resolve) => { signalDeleteEntered = resolve; });
+  const deleteBlocked = new Promise((resolve) => { releaseDelete = resolve; });
+  let activeRuntime = null;
+  let deletion = null;
+  let stopPromise = null;
+  try {
+    activeRuntime = createShortVideosRuntime({
+      dbPath: activeDbPath,
+      downloadManagerDbPath: "",
+      downloadManagerSyncMs: 0,
+      ffmpegPath: "ffmpeg",
+      roots: [mediaRoot],
+      mediaResponseService: { serveImage() {} },
+      mediaStreamService: { serveVideo() {} },
+      notFound() {},
+      readJsonBody: async (req) => req?.body || {},
+      requireLocalAdmin: () => true,
+      sendJson(res, status, data) { res.status = status; res.data = data; },
+      sharedCache: { rootDir: activeCacheRoot, scheduleCleanup() {}, touch() {} },
+      runtimeTestHooks: {
+        deleteJobTestHooks: {
+          async afterItemIsolationIntent() {
+            signalDeleteEntered();
+            await deleteBlocked;
+          }
+        }
+      }
+    });
+    activeRuntime.store.warm();
+    const activeSource = path.join(mediaRoot, "active.mp4");
+    const rejectedSource = path.join(mediaRoot, "rejected.mp4");
+    fs.writeFileSync(activeSource, "active-delete-stop");
+    fs.writeFileSync(rejectedSource, "rejected-delete-stop");
+    const seed = new DatabaseSync(activeDbPath);
+    try {
+      const timestamp = "2026-08-13T00:00:00.000Z";
+      const insert = seed.prepare(`
+        INSERT INTO short_videos (id, source_path, file_name, imported_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      insert.run("active-delete-stop", activeSource, path.basename(activeSource), timestamp, timestamp);
+      insert.run("rejected-delete-stop", rejectedSource, path.basename(rejectedSource), timestamp, timestamp);
+    } finally {
+      seed.close();
+    }
+    await activeRuntime.start();
+    deletion = activeRuntime.store.deleteVideo("active-delete-stop");
+    await deleteEntered;
+
+    let stopSettled = false;
+    stopPromise = activeRuntime.stop().finally(() => { stopSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stopSettled, false, "runtime.stop must remain pending while a delete execution is active");
+    await assert.rejects(
+      () => activeRuntime.store.recoverDeleteJobs(),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_SERVICE_CLOSING"
+    );
+    await assert.rejects(
+      () => activeRuntime.store.deleteVideo("rejected-delete-stop"),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_SERVICE_CLOSING"
+    );
+
+    releaseDelete();
+    releaseDelete = null;
+    const [deleted] = await Promise.all([deletion, stopPromise]);
+    deletion = null;
+    stopPromise = null;
+    assert.equal(deleted.status, "completed");
+    assert.equal(fs.existsSync(activeSource), false);
+    assert.equal(fs.readFileSync(rejectedSource, "utf8"), "rejected-delete-stop");
+    const stopped = new DatabaseSync(activeDbPath, { readOnly: true });
+    try {
+      assert.equal(stopped.prepare("SELECT status FROM short_video_delete_jobs WHERE id = ?").get(deleted.jobId)?.status, "completed");
+      assert.equal(Number(stopped.prepare("SELECT COUNT(*) AS count FROM short_video_delete_reservations WHERE released_at = ''").get()?.count || 0), 0);
+      assert.equal(Number(stopped.prepare("SELECT COUNT(*) AS count FROM short_video_delete_jobs WHERE owner_id <> '' OR execution_token <> ''").get()?.count || 0), 0);
+    } finally {
+      stopped.close();
+    }
+    const renameProbe = `${root}-rename-probe`;
+    fs.renameSync(root, renameProbe);
+    fs.renameSync(renameProbe, root);
+    assert.equal(activeRuntime.store.deleteJobStatus().ok, true, "a drained runtime store must reopen without a closing-state leak");
+    assert.equal(activeRuntime.store.close(), true);
+    assert.equal(activeRuntime.store.close(), true, "repeated close must remain idempotent after drain");
+    await activeRuntime.stop();
+  } finally {
+    releaseDelete?.();
+    await deletion?.catch(() => {});
+    await stopPromise?.catch(() => {});
+    await activeRuntime?.stop().catch(() => {});
+    activeRuntime?.store.close();
+  }
 }
 
 async function verifyPendingStartupFailsClosed() {

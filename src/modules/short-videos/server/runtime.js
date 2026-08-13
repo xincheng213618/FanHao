@@ -75,7 +75,8 @@ export function createShortVideosRuntime({
     ffmpegPath,
     roots,
     skipStartupMaintenance: true,
-    busyTimeoutMs: schemaBusyTimeoutMs
+    busyTimeoutMs: schemaBusyTimeoutMs,
+    deleteJobTestHooks: runtimeTestHooks.deleteJobTestHooks
   });
   let catalogSchemaPrepared = false;
   try {
@@ -158,6 +159,7 @@ export function createShortVideosRuntime({
   const smoothVideoRecentJobs = [];
   let smoothVideoWarmupTimer = null;
   let runtimeStarted = false;
+  let runtimeStopPromise = null;
   let lastSmoothVideoWarmupAt = 0;
   let lastSmoothVideoWarmupCandidates = 0;
   let lastSmoothVideoWarmupDurationMs = 0;
@@ -1042,6 +1044,7 @@ export function createShortVideosRuntime({
   }
 
   async function startDownloadManagerSync() {
+    if (runtimeStopPromise) await runtimeStopPromise;
     try {
       const recovery = await store.recoverDeleteJobs();
       const pending = Math.max(Number(recovery?.pending || 0), Number(recovery?.active || 0));
@@ -1069,19 +1072,42 @@ export function createShortVideosRuntime({
     schedule4kSmoothVideoWarmup();
   }
 
-  async function stopDownloadManagerSync() {
+  function stopDownloadManagerSync() {
+    if (runtimeStopPromise) return runtimeStopPromise;
+    const deleteDrain = store.beginClose();
     runtimeStarted = false;
     runtimeTestHooks.onRuntimeStartedChange?.(false);
     if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
     smoothVideoWarmupTimer = null;
     stopVideoCacheQueue();
     stopSmoothVideoQueue();
-    try {
-      const syncStop = downloadManagerSync.stop();
-      await Promise.all([syncStop, stopListServices()]);
-    } finally {
-      store.close();
-    }
+    const stopWork = (async () => {
+      let stopError = null;
+      try {
+        const syncStop = downloadManagerSync.stop();
+        await Promise.all([syncStop, stopListServices()]);
+      } catch (error) {
+        stopError = error;
+      }
+      try {
+        await deleteDrain;
+      } catch (error) {
+        stopError ||= error;
+      }
+      const closed = store.close();
+      if (!closed && !stopError) {
+        stopError = Object.assign(new Error("短视频删除作业未完成，运行时存储无法关闭"), {
+          code: "SHORT_VIDEO_DELETE_DRAIN_INCOMPLETE"
+        });
+      }
+      if (stopError) throw stopError;
+    })();
+    let trackedStop;
+    trackedStop = stopWork.finally(() => {
+      if (runtimeStopPromise === trackedStop) runtimeStopPromise = null;
+    });
+    runtimeStopPromise = trackedStop;
+    return trackedStop;
   }
 
   async function downloadManagerRequest(pathname, options = {}) {

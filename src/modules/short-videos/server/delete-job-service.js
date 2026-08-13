@@ -64,6 +64,8 @@ export function createShortVideoDeleteJobService({
   let recovering = false;
   let closing = false;
   let closed = false;
+  let closeDrainPromise = null;
+  let resolveCloseDrain = null;
 
   function newOwnerId() {
     return `short-video-delete-owner-${process.pid}-${crypto.randomUUID()}`;
@@ -850,13 +852,18 @@ export function createShortVideoDeleteJobService({
 
   async function execute(rows, options = {}) {
     assertAcceptingWork();
-    const db = database();
-    const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "plan" });
     const executionToken = newExecutionToken();
-    const job = await persistPlan(db, rows, options, referenceSnapshot, executionToken);
-    beginExecution(job.id, executionToken);
-    referenceSnapshotsByJob.set(job.id, referenceSnapshot);
+    const preflightKey = `preflight:${executionToken}`;
+    beginExecution(preflightKey, executionToken);
+    let db = null;
+    let executionKey = preflightKey;
     try {
+      db = database();
+      const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "plan" });
+      const job = await persistPlan(db, rows, options, referenceSnapshot, executionToken);
+      transferExecution(preflightKey, job.id, executionToken);
+      executionKey = job.id;
+      referenceSnapshotsByJob.set(job.id, referenceSnapshot);
       try {
         await invokeHook(hooks.afterPlanPersisted, publicHookJob(job));
         await isolatePlannedFiles(db, job.id);
@@ -892,7 +899,7 @@ export function createShortVideoDeleteJobService({
       }
       return executionResult(db, job.id);
     } finally {
-      endExecution(db, job.id, executionToken);
+      endExecution(db, executionKey, executionToken);
     }
   }
 
@@ -1915,11 +1922,21 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  function close(db = null) {
-    if (activeExecutions.size) {
-      closing = true;
-      return false;
+  function beginClose() {
+    if (closed) return Promise.resolve();
+    closing = true;
+    if (!activeExecutions.size) return Promise.resolve();
+    if (!closeDrainPromise) {
+      closeDrainPromise = new Promise((resolve) => {
+        resolveCloseDrain = resolve;
+      });
     }
+    return closeDrainPromise;
+  }
+
+  function close(db = null) {
+    beginClose();
+    if (activeExecutions.size) return false;
     closed = true;
     closing = false;
     referenceSnapshotsByJob.clear();
@@ -3373,10 +3390,21 @@ export function createShortVideoDeleteJobService({
     return executionToken;
   }
 
+  function transferExecution(previousJobId, jobId, executionToken) {
+    const previousKey = String(previousJobId || "");
+    const key = String(jobId || "");
+    if (activeExecutions.get(previousKey) !== executionToken || activeExecutions.has(key)) {
+      throw codedError("删除作业执行 token 转换失败", "SHORT_VIDEO_DELETE_EXECUTION_ACTIVE");
+    }
+    activeExecutions.delete(previousKey);
+    activeExecutions.set(key, executionToken);
+  }
+
   function endExecution(db, jobId, executionToken) {
     const key = String(jobId || "");
     if (activeExecutions.get(key) !== executionToken) return;
     try {
+      if (!db || key.startsWith("preflight:")) return;
       const released = db.prepare(`
         UPDATE short_video_delete_jobs
         SET owner_id = '', lease_until = '', execution_token = '', updated_at = ?, version = version + 1
@@ -3399,7 +3427,16 @@ export function createShortVideoDeleteJobService({
       warn?.("[short-video-delete-execution-release]", error);
     } finally {
       activeExecutions.delete(key);
+      resolveExecutionDrainIfReady();
     }
+  }
+
+  function resolveExecutionDrainIfReady() {
+    if (activeExecutions.size || !resolveCloseDrain) return;
+    const resolve = resolveCloseDrain;
+    resolveCloseDrain = null;
+    closeDrainPromise = null;
+    resolve();
   }
 
   function activeExecutionTokenFor(jobId) {
@@ -3414,6 +3451,7 @@ export function createShortVideoDeleteJobService({
 
   return {
     assertPathWritesAllowed,
+    beginClose,
     close,
     execute,
     initialize,

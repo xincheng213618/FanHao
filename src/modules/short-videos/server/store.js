@@ -415,6 +415,10 @@ export function createShortVideoStore(options = {}) {
     return databaseClosed;
   }
 
+  function beginClose() {
+    return deleteJobs?.beginClose() || Promise.resolve();
+  }
+
   // 列表的 summary() 与 authorFacet() 每次分页都会重算（聚合 + GROUP BY），
   // 但二者只在入库（scan / importDownloadManagerDb）改变行集合时才会变化。
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
@@ -3320,6 +3324,7 @@ function summary() {
     addCollectionVideo: collections.addCollectionVideo,
     backfillMissingCovers,
     backfillMissingCoversAsync,
+    beginClose,
     catalogStamp,
     close,
     collectionVideoDetail: collections.collectionVideoDetail,
