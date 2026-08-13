@@ -39,6 +39,14 @@ parentPort?.on("message", (message) => {
     return;
   }
   if (message?.type !== "record") return;
+  if (workerData.mode === "delayed-commit-exit") {
+    setTimeout(() => {
+      store.recordWatch(message.videoId, message.options || {});
+      fs.appendFileSync(workerData.recordLogPath, `${message.videoId}\n`);
+      process.exit(28);
+    }, Math.max(1, Number(workerData.delayMs || 100)));
+    return;
+  }
   const data = store.recordWatch(message.videoId, message.options || {});
   fs.appendFileSync(workerData.recordLogPath, `${message.videoId}\n`);
   if (workerData.mode === "commit-before-ack") process.exit(27);

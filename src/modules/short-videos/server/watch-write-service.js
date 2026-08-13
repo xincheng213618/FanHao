@@ -33,6 +33,7 @@ export function createShortVideoWatchWriteService({
   const readyQueue = [];
   const workerRequests = new Map();
   const closeRequests = new Map();
+  const workerRetirementErrors = new Map();
   let worker = null;
   let readyPromise = null;
   let readyResolve = null;
@@ -48,6 +49,7 @@ export function createShortVideoWatchWriteService({
   let stopResolve = null;
   let stopReject = null;
   let stopCompleting = false;
+  let incompleteStopWorker = null;
   let workerStarts = 0;
   let workerRestarts = 0;
   let attempts = 0;
@@ -56,19 +58,29 @@ export function createShortVideoWatchWriteService({
   let queueTimeouts = 0;
   let workerTimeouts = 0;
   let receiptsRecovered = 0;
+  let retirementTerminationFailures = 0;
   let stopFailures = 0;
 
   async function start() {
+    if (incompleteStopWorker) throw workerStopIncompleteError();
     const generation = ++lifecycleGeneration;
     desiredStarted = true;
     await Promise.resolve();
     const stopping = stoppingPromise;
+    let stoppingError = null;
     if (stopping) {
       try {
         await stopping;
-      } catch {}
+      } catch (error) {
+        stoppingError = error;
+      }
     }
     if (!desiredStarted || generation !== lifecycleGeneration) return false;
+    if (stoppingError || incompleteStopWorker) {
+      desiredStarted = false;
+      accepting = false;
+      throw workerStopIncompleteError(stoppingError);
+    }
     accepting = true;
     ensureWorker();
     const ready = await readyPromise;
@@ -140,6 +152,8 @@ export function createShortVideoWatchWriteService({
       queueTimeouts,
       workerTimeouts,
       receiptsRecovered,
+      retirementTerminationFailures,
+      stopIncomplete: Boolean(incompleteStopWorker),
       stopFailures
     };
   }
@@ -309,16 +323,18 @@ export function createShortVideoWatchWriteService({
       request.timer = setTimeout(() => {
         if (!workerRequests.has(id)) return;
         workerTimeouts += 1;
-        void retireWorker(activeWorker, workerTimeoutError()).then(() => {
-          rejectWorkerRequest(id, workerTimeoutError());
+        const timeoutError = workerTimeoutError();
+        void retireWorker(activeWorker, timeoutError).then((retired) => {
+          if (retired) rejectWorkerRequest(id, timeoutError);
         });
       }, Math.max(1, timeoutMs));
       request.timer.unref?.();
       try {
         activeWorker.postMessage({ type, id, ...payload });
       } catch (error) {
-        void retireWorker(activeWorker, workerUnavailableError(error)).then(() => {
-          rejectWorkerRequest(id, workerUnavailableError(error));
+        const unavailableError = workerUnavailableError(error);
+        void retireWorker(activeWorker, unavailableError).then((retired) => {
+          if (retired) rejectWorkerRequest(id, unavailableError);
         });
       }
     });
@@ -360,6 +376,7 @@ export function createShortVideoWatchWriteService({
       const id = Number(message?.id || 0);
       const request = workerRequests.get(id);
       if (!request || request.worker !== nextWorker) return;
+      workerRetirementErrors.delete(nextWorker);
       workerRequests.delete(id);
       clearTimeout(request.timer);
       if (message?.ok) request.resolve(message.data);
@@ -370,19 +387,28 @@ export function createShortVideoWatchWriteService({
     });
     nextWorker.on("exit", (code) => {
       if (worker !== nextWorker) return;
+      const exitError = workerRetirementErrors.get(nextWorker) || workerExitError(code);
+      workerRetirementErrors.delete(nextWorker);
       detachWorker(nextWorker);
-      rejectWorkerRequests(nextWorker, workerExitError(code));
-      rejectCloseRequests(nextWorker, workerExitError(code));
+      rejectWorkerRequests(nextWorker, exitError);
+      rejectCloseRequests(nextWorker, exitError);
     });
     return nextWorker;
   }
 
   async function retireWorker(failedWorker, error) {
-    if (worker === failedWorker) detachWorker(failedWorker);
+    if (!workerRetirementErrors.has(failedWorker)) workerRetirementErrors.set(failedWorker, error);
     try {
       await terminateWorker(failedWorker);
-    } catch {}
+    } catch (terminationError) {
+      retirementTerminationFailures += 1;
+      testHooks.onRetireTerminateFailure?.({ error: terminationError, worker: failedWorker });
+      return false;
+    }
+    workerRetirementErrors.delete(failedWorker);
+    if (worker === failedWorker) detachWorker(failedWorker);
     rejectWorkerRequests(failedWorker, error);
+    return true;
   }
 
   function detachWorker(failedWorker) {
@@ -455,9 +481,11 @@ export function createShortVideoWatchWriteService({
         await terminateWorker(activeWorker);
         if (worker === activeWorker) detachWorker(activeWorker);
       }
+      incompleteStopWorker = null;
       settleStop();
     } catch (cause) {
       stopFailures += 1;
+      incompleteStopWorker = activeWorker || worker || incompleteStopWorker;
       settleStop(workerStopError(cause));
     }
   }
@@ -577,6 +605,15 @@ function workerStopError(cause) {
   if (String(cause?.code || "").startsWith("SHORT_VIDEO_WATCH_WORKER_CLOSE_")) return cause;
   const error = new Error("观看进度后台线程停止失败", { cause });
   error.code = "SHORT_VIDEO_WATCH_WORKER_STOP_FAILED";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
+function workerStopIncompleteError(cause) {
+  const error = new Error("观看进度后台线程上次停止尚未完成", { cause });
+  error.code = "SHORT_VIDEO_WATCH_WORKER_STOP_INCOMPLETE";
   error.statusCode = 503;
   error.retryable = true;
   error.expose = true;

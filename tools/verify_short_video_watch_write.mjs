@@ -27,13 +27,14 @@ try {
   await verifyCommitBeforeAckReceipt();
   await verifyQueueCongestionContract();
   await verifyWorkerTimeoutContract();
+  await verifyTimeoutTerminateFailureReceiptConvergence();
   await verifyWorkerCrashRecovery();
   await verifyWorkerCrashFailure();
   await verifyWorkerStartFailure();
   await verifyRuntimeWorkerStartFailure();
   await verifyCloseFailuresRemainRetryable();
   await verifyTerminateFailureRemainsRetryable();
-  console.log("short-video-watch-write: ok (SQLite busy/receipt convergence, lifecycle fencing, close/terminate failure recovery)");
+  console.log("short-video-watch-write: ok (SQLite busy/receipt convergence, timeout retirement fencing, lifecycle/stop recovery)");
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
@@ -373,6 +374,63 @@ async function verifyWorkerTimeoutContract() {
   }
 }
 
+async function verifyTimeoutTerminateFailureReceiptConvergence() {
+  const fixture = createDatabaseFixture("timeout-terminate-failure", ["video-a"]);
+  const recordLogPath = path.join(tempRoot, "timeout-terminate-failure-records.log");
+  let terminateFailures = 0;
+  const service = createShortVideoWatchWriteService({
+    dbPath: fixture.dbPath,
+    downloadManagerDbPath: "",
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    busyRetryBudgetMs: 500,
+    workerResponseTimeoutMs: 100,
+    transportRetryLimit: 0,
+    workerUrl: commitWorkerUrl,
+    extraWorkerData: { mode: "delayed-commit-exit", delayMs: 300, recordLogPath },
+    terminateWorker(activeWorker) {
+      if (terminateFailures === 0) {
+        terminateFailures += 1;
+        return Promise.reject(new Error("fixture active worker cannot be terminated"));
+      }
+      return activeWorker.terminate();
+    }
+  });
+  const response = {};
+  let onWatchMutation = 0;
+  let onWatch = 0;
+  try {
+    await service.start();
+    await routeShortVideoApi(
+      { method: "PUT", body: { progressMs: 2468, completed: true } },
+      response,
+      new URL("http://127.0.0.1/api/short-videos/video-a/watch"),
+      {
+        readJsonBody: async (req) => req.body,
+        recordWatch: (videoId, options) => service.record(videoId, options),
+        onWatchMutation: () => { onWatchMutation += 1; },
+        onWatch: () => { onWatch += 1; },
+        sendJson(res, status, data) { res.status = status; res.data = data; },
+        shortVideoStore: {}
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const saved = readWatchDetail(fixture.dbPath, "video-a");
+    assert.equal(saved.progress_ms, 2468, "the fixture must prove that the unkillable worker committed after its timeout");
+    assert.equal(response.status, 200, "a timeout must not fail while an unkillable worker can still commit later");
+    assert.equal(response.data?.watch?.progressMs, 2468);
+    assert.equal(onWatchMutation, 1);
+    assert.equal(onWatch, 1);
+    assert.equal(terminateFailures, 1, "the timeout path must exercise a rejected termination");
+    assert.equal(service.diagnostics().retirementTerminationFailures, 1);
+    assert.equal(service.diagnostics().receiptsRecovered, 1, "confirmed worker exit must allow receipt convergence");
+    assert.equal(fs.readFileSync(recordLogPath, "utf8").trim().split(/\r?\n/).length, 1);
+  } finally {
+    await service.stop().catch(() => {});
+    fixture.close();
+  }
+}
+
 async function verifyWorkerCrashRecovery() {
   const markerPath = path.join(tempRoot, "worker-crash-once.marker");
   const service = fixtureService({ mode: "crash-once", markerPath, workerResponseTimeoutMs: 500 });
@@ -462,10 +520,12 @@ async function verifyCloseFailuresRemainRetryable() {
       (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_CLOSE_FAILED" && error?.statusCode === 503
     );
     assert.equal(service.diagnostics().accepting, false);
+    assert.equal(service.diagnostics().stopIncomplete, true);
     assert.equal(service.diagnostics().workerStarts, starts, `${mode} must preserve the same worker handle for retry`);
     await assert.rejects(service.record("video-a", { progressMs: 1 }), (error) => error?.code === "SHORT_VIDEO_WATCH_STOPPED");
     await service.stop();
     assert.equal(service.diagnostics().stopFailures, 1);
+    assert.equal(service.diagnostics().stopIncomplete, false);
   }
 }
 
@@ -487,18 +547,35 @@ async function verifyTerminateFailureRemainsRetryable() {
       return activeWorker.terminate();
     }
   });
-  await service.start();
-  const starts = service.diagnostics().workerStarts;
-  await assert.rejects(
-    service.stop(),
-    (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_STOP_FAILED" && error?.statusCode === 503
-  );
-  assert.equal(service.diagnostics().accepting, false);
-  assert.equal(service.diagnostics().workerStarts, starts, "terminate failure must retain the original worker handle");
-  failTerminate = false;
-  await service.stop();
-  assert.equal(service.diagnostics().stopFailures, 1);
-  fixture.close();
+  try {
+    await service.start();
+    const starts = service.diagnostics().workerStarts;
+    await assert.rejects(
+      service.stop(),
+      (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_STOP_FAILED" && error?.statusCode === 503
+    );
+    assert.equal(service.diagnostics().accepting, false);
+    assert.equal(service.diagnostics().stopIncomplete, true);
+    assert.equal(service.diagnostics().workerStarts, starts, "terminate failure must retain the original worker handle");
+    await assert.rejects(
+      service.start(),
+      (error) => error?.code === "SHORT_VIDEO_WATCH_WORKER_STOP_INCOMPLETE" && error?.statusCode === 503
+    );
+    assert.equal(service.diagnostics().accepting, false, "start must not reopen a worker whose store already acknowledged close");
+    assert.equal(service.diagnostics().workerStarts, starts);
+    failTerminate = false;
+    await service.stop();
+    assert.equal(service.diagnostics().stopFailures, 1);
+    assert.equal(service.diagnostics().stopIncomplete, false);
+    await service.start();
+    assert.equal(service.diagnostics().workerStarts, starts + 1, "start after a successful stop retry must create a fresh worker");
+    const saved = await service.record("video-a", { progressMs: 1357 });
+    assert.equal(saved.watch.progressMs, 1357);
+  } finally {
+    failTerminate = false;
+    await service.stop().catch(() => {});
+    fixture.close();
+  }
 }
 
 function realService(dbPath, options = {}) {
