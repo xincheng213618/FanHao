@@ -20,6 +20,7 @@ let cacheStatusCalls = 0;
 let mangaCount = 0;
 let photoRootStatus = "ready";
 let imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets, mediaItems: [] };
+let tvMetadata = new Map();
 
 const service = createImageLibraryService({
   clampInteger(value, fallback, min, max) {
@@ -44,8 +45,8 @@ const service = createImageLibraryService({
     publicTvSeries: (value) => value,
     movieRow: () => null,
     tvSeriesKey: (category, seriesName) => `${category}|${seriesName}`,
-    tvSeriesRow: () => null,
-    tvSeriesRowsMap: () => new Map()
+    tvSeriesRow: (key) => tvMetadata.get(key) || null,
+    tvSeriesRowsMap: () => tvMetadata
   },
   photoCollectionRootValue: "__fanhao_photo_collection_root__",
   photoSetRootStatuses: () => [{ root: "T:\\photos", status: photoRootStatus }],
@@ -201,6 +202,36 @@ const westernPeople = service.itemsPayload(url({ mode: "western", limit: "20" })
 assert.equal(westernPeople.total, 1, "western list should page grouped people instead of every video");
 assert.equal(westernPeople.items[0].videoCount, 2);
 
+tvMetadata = new Map([
+  ["华语剧|示例剧 S01E01", tvMetadataRecord("100001", "示例剧 第一季")],
+  ["华语剧|示例剧 S01E02", tvMetadataRecord("100001", "示例剧 第一季")],
+  ["华语剧|示例剧 S02E01", tvMetadataRecord("100001", "示例剧 第一季")],
+  ["华语剧|同名剧 E01", tvMetadataRecord("200001", "同名剧 A")],
+  ["华语剧|同名剧 E02", tvMetadataRecord("200002", "同名剧 B")]
+]);
+imageIndex = {
+  ...imageIndex,
+  mediaItems: [
+    media("cross-a", "tv", "华语剧", "示例剧 S01E01", "示例剧 S01E01 1080p"),
+    media("cross-b", "tv", "华语剧", "示例剧 S01E02", "示例剧 S01E02 1080p"),
+    media("different-season", "tv", "华语剧", "示例剧 S02E01", "示例剧 S02E01 1080p"),
+    media("same-name-a", "tv", "华语剧", "同名剧 E01", "同名剧 E01"),
+    media("same-name-b", "tv", "华语剧", "同名剧 E02", "同名剧 E02"),
+    media("unconfirmed-a", "tv", "华语剧", "未确认剧 E01", "未确认剧 E01"),
+    media("unconfirmed-b", "tv", "华语剧", "未确认剧 E02", "未确认剧 E02")
+  ]
+};
+
+const conservativeTvWorks = service.itemsPayload(url({ mode: "tv", limit: "20" }));
+const mergedCrossDirectoryWork = conservativeTvWorks.items.find((item) => item.title === "示例剧 第一季" && item.episodeCount === 2);
+assert(mergedCrossDirectoryWork, "same trusted metadata plus the same normalized local season must merge cross-directory episodes");
+assert.equal(conservativeTvWorks.items.filter((item) => item.title === "示例剧 第一季").length, 2, "a different local season must remain separate even when an old metadata record reuses its identity");
+assert.equal(conservativeTvWorks.items.filter((item) => item.title === "同名剧 A" || item.title === "同名剧 B").length, 2, "same local names with different trusted metadata identities must remain separate");
+assert.equal(conservativeTvWorks.items.filter((item) => item.seriesName.startsWith("未确认剧")).length, 2, "unconfirmed metadata must not enable a cross-directory merge");
+
+const mergedEpisodeDetail = service.itemsPayload(url({ mode: "tv", seriesKey: mergedCrossDirectoryWork.seriesKey, limit: "20" }));
+assert.deepEqual(mergedEpisodeDetail.items.map((item) => item.id).sort(), ["cross-a", "cross-b"], "a merged TV work must still open every original episode file");
+
 console.log("image-library-service: ok");
 
 function photo(id, category, subCategory, personName, relativePath, size, updatedAt) {
@@ -231,6 +262,10 @@ function media(id, mediaKind, category, personOrSeries, title = personOrSeries) 
     updatedAt: "2026-07-12T00:00:00.000Z",
     playable: true
   };
+}
+
+function tvMetadataRecord(doubanId, title) {
+  return { doubanId, title, category: "华语剧", episodeCount: 0 };
 }
 
 function url(params) {

@@ -144,6 +144,7 @@ export function normalizeRoute(route = {}) {
     galleryCategory: view === "gallery" ? normalizeGalleryCategory(route) : "all",
     gallerySubCategory: view === "gallery" ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
     galleryPerson: view === "gallery" ? String(route.galleryPerson || "all").trim() || "all" : "all",
+    gallerySeriesKey: view === "gallery" && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
     galleryPhotoDate: view === "gallery" ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
     gallerySort: view === "gallery" ? normalizeGallerySort(route.gallerySort) : "updated",
     novelBookId: view === "novels" ? String(route.novelBookId || "").trim() : "",
@@ -211,6 +212,7 @@ export function routeUrl(route, options = {}) {
     if (next.galleryPerson && next.galleryPerson !== "all") {
       params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
+    if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
     if (next.galleryMode === "photo" && next.galleryPhotoDate && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
     const defaultGallerySort = next.galleryMode === "photo"
       && next.galleryPhotoView === "collections"
@@ -438,6 +440,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryCategory: params.has("category") && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__"].includes(params.get("category")) ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
+    gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
     gallerySort: normalizeGallerySort(params.get("sort") || (galleryMode === "photo" && galleryPhotoView === "collections" && !photoSearch ? "count" : "updated")),
     personId: "",

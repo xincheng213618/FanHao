@@ -148,6 +148,7 @@ function galleryImageModuleButton(mode, label) {
     state.gallery.category = mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
     state.gallery.subCategory = "all";
     state.gallery.person = "all";
+    state.gallery.seriesKey = "";
     state.gallery.photoDate = "all";
     state.gallery.sort = "updated";
     state.gallery.visibleLimit = 80;
@@ -179,6 +180,7 @@ function galleryPhotoViewButton(view, label) {
     if (view === "albums" && state.gallery.sort === "count") state.gallery.sort = "updated";
     if (view === "collections" && state.gallery.sort === "updated") state.gallery.sort = "count";
     state.gallery.person = "all";
+    state.gallery.seriesKey = "";
     state.gallery.subCategory = "all";
     state.gallery.photoDate = "all";
     state.gallery.visibleLimit = 80;
@@ -246,6 +248,7 @@ function createPhotoCategoryStrip() {
       state.gallery.category = value;
       state.gallery.subCategory = "all";
       state.gallery.person = "all";
+      state.gallery.seriesKey = "";
       state.gallery.photoDate = "all";
       state.gallery.visibleLimit = 80;
       resetGalleryReader();
@@ -333,6 +336,7 @@ function createMovieCategoryStrip() {
     button.addEventListener("click", () => {
       state.gallery.mediaKind = value;
       state.gallery.person = "all";
+      state.gallery.seriesKey = "";
       state.gallery.visibleLimit = 80;
       resetGalleryReader();
       renderGalleryView();
@@ -416,6 +420,7 @@ function renderGalleryControls(options = {}) {
     state.gallery.subCategory = "all";
     state.gallery.photoCollection = null;
     state.gallery.person = "all";
+    state.gallery.seriesKey = "";
     state.gallery.photoDate = "all";
     state.gallery.visibleLimit = 80;
     resetGalleryReader();
@@ -441,6 +446,7 @@ function renderGalleryControls(options = {}) {
     const nextPerson = people.value || "all";
     state.gallery.photoCollection = null;
     state.gallery.person = nextPerson;
+    state.gallery.seriesKey = "";
     state.gallery.visibleLimit = 80;
     resetGalleryReader();
     renderGalleryView();
@@ -543,7 +549,7 @@ function renderGalleryControls(options = {}) {
   if (["western", "tv"].includes(state.gallery.mode)) filterRow.append(createGalleryControlGroup(state.gallery.mode === "tv" ? "剧集" : "人物", people));
   if (["movie", "media"].includes(state.gallery.mode)) filterRow.append(createGalleryControlGroup("排序", sort));
 
-  if (state.gallery.query || state.gallery.category !== "all" || (state.gallery.mode === "media" && state.gallery.mediaKind !== "all")) {
+  if (state.gallery.query || state.gallery.category !== "all" || state.gallery.seriesKey || (state.gallery.mode === "media" && state.gallery.mediaKind !== "all")) {
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "text-button gallery-filter-clear";
@@ -553,6 +559,7 @@ function renderGalleryControls(options = {}) {
       state.gallery.category = "all";
       state.gallery.mediaKind = "all";
       state.gallery.person = "all";
+      state.gallery.seriesKey = "";
       state.gallery.visibleLimit = 80;
       renderGalleryView();
       syncGalleryRoute("replace");
@@ -1026,8 +1033,12 @@ function tvSeriesGroups() {
   });
 }
 
+function hasSelectedTvSeries() {
+  return Boolean(state.gallery.seriesKey || state.gallery.person !== "all");
+}
+
 function selectedTvSeriesMetadata() {
-  if (!["tv", "media"].includes(state.gallery.mode) || state.gallery.person === "all") return null;
+  if (!["tv", "media"].includes(state.gallery.mode) || !hasSelectedTvSeries()) return null;
   return filteredMediaItems().find((item) => item.tvSeries)?.tvSeries || null;
 }
 
@@ -1198,7 +1209,7 @@ async function openMovieDoubanCalibration(media, metadata = null) {
 }
 
 function renderTvSeriesBar(container, total) {
-  if (!["tv", "media"].includes(state.gallery.mode) || state.gallery.person === "all") return;
+  if (!["tv", "media"].includes(state.gallery.mode) || !hasSelectedTvSeries()) return;
   const metadata = selectedTvSeriesMetadata();
   const bar = document.createElement("div");
   bar.className = "gallery-person-bar gallery-series-hero";
@@ -1282,6 +1293,7 @@ function renderTvSeriesBar(container, total) {
   allButton.textContent = state.gallery.mode === "media" ? "返回影视库" : "返回电视剧";
   allButton.addEventListener("click", () => {
     state.gallery.person = "all";
+    state.gallery.seriesKey = "";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
     syncGalleryRoute("replace");
@@ -1315,7 +1327,8 @@ function renderTvSeriesShelf(container) {
         placeholder: "待补海报",
         onOpen: () => {
           state.gallery.category = group.category || state.gallery.category;
-          state.gallery.person = group.title;
+          state.gallery.person = group.title || "all";
+          state.gallery.seriesKey = group.value || "";
           state.gallery.visibleLimit = 80;
           renderGalleryView();
           window.scrollTo({ top: 0, behavior: "smooth" });
@@ -2227,7 +2240,8 @@ function createMovieExploreItem(item, index) {
   button.addEventListener("click", () => {
     if (isTvSeriesWork) {
       state.gallery.category = item.category || state.gallery.category;
-      state.gallery.person = item.seriesName || item.title;
+      state.gallery.person = item.seriesName || item.title || "all";
+      state.gallery.seriesKey = item.seriesKey || "";
       state.gallery.visibleLimit = 80;
       renderGalleryView();
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -2453,7 +2467,7 @@ function renderMediaShelf(container) {
     }
     return;
   }
-  if (state.gallery.mode === "movie" || (state.gallery.mode === "media" && state.gallery.person === "all")) {
+  if (state.gallery.mode === "movie" || (state.gallery.mode === "media" && !hasSelectedTvSeries())) {
     renderMovieShelf(container);
     return;
   }
@@ -2461,14 +2475,14 @@ function renderMediaShelf(container) {
     renderWesternPersonShelf(container);
     return;
   }
-  if (state.gallery.mode === "tv" && state.gallery.person === "all") {
+  if (state.gallery.mode === "tv" && !hasSelectedTvSeries()) {
     renderTvSeriesShelf(container);
     return;
   }
   const items = filteredMediaItems();
   const visible = items.slice(0, state.gallery.visibleLimit);
   const total = Number(list.total ?? items.length);
-  const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all";
+  const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && hasSelectedTvSeries();
   renderWesternPersonBar(container, items.length);
   renderTvSeriesBar(container, items.length);
   if (selectedSeries) {

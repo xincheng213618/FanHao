@@ -35,9 +35,58 @@ export function createImageLibraryService({
     return items.filter((item) => selected.has(item.mediaKind));
   }
 
-  function galleryMediaSeriesKey(item) {
+  function galleryMediaSourceSeriesKey(item) {
     if (!item || item.mediaKind !== "tv") return "";
     return metadataService.tvSeriesKey(item.category || "", item.seriesName || item.personName || item.subCategory || item.title || "");
+  }
+
+  function trustedTvMetadataIdentity(tvSeries) {
+    const doubanId = String(tvSeries?.doubanId || "").trim();
+    const title = String(tvSeries?.title || "").trim();
+    if (!/^\d{5,12}$/u.test(doubanId) || !title) return "";
+    return `${doubanId}|${title.normalize("NFKC").toLocaleLowerCase()}`;
+  }
+
+  function normalizedTvEpisodeSeriesName(value) {
+    const source = String(value || "")
+      .trim()
+      .replace(/\.(?:mp4|mkv|avi|mov|wmv|m4v|webm)$/iu, "")
+      .replace(/[._]+/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (!source) return "";
+
+    const seasonEpisode = /^(?<title>.+?)\s*(?<season>s(?:eason)?\s*0?\d{1,2})\s*(?:e|ep(?:isode)?)\s*0?\d{1,3}(?:\s|$)/iu.exec(source);
+    if (seasonEpisode?.groups?.title && seasonEpisode.groups.season) {
+      const title = normalizedTvSeriesNamePart(seasonEpisode.groups.title);
+      const season = Number.parseInt(seasonEpisode.groups.season.match(/\d+/u)?.[0] || "", 10);
+      return title && Number.isFinite(season) ? `${title}|s${season}` : "";
+    }
+
+    const namedEpisode = /^(?<title>.+?)\s*(?:e|ep(?:isode)?)\s*0?\d{1,3}(?:\s|$)/iu.exec(source);
+    if (namedEpisode?.groups?.title) return normalizedTvSeriesNamePart(namedEpisode.groups.title);
+
+    const cjkEpisode = /^(?<title>.*[\u3400-\u9FFF])\s*0?\d{1,3}$/u.exec(source);
+    return cjkEpisode?.groups?.title ? normalizedTvSeriesNamePart(cjkEpisode.groups.title) : "";
+  }
+
+  function normalizedTvSeriesNamePart(value) {
+    const normalized = String(value || "")
+      .normalize("NFKC")
+      .replace(/[._]+/gu, " ")
+      .replace(/\s+/gu, " ")
+      .replace(/[\s\-–—:：]+$/gu, "")
+      .trim()
+      .toLocaleLowerCase();
+    return Array.from(normalized.replace(/\s+/gu, "")).length >= 2 ? normalized : "";
+  }
+
+  function galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries) {
+    if (!item || item.mediaKind !== "tv") return "";
+    const trustedIdentity = trustedTvMetadataIdentity(tvSeries);
+    const localSeriesName = normalizedTvEpisodeSeriesName(item.seriesName || item.personName || item.subCategory || "");
+    if (!trustedIdentity || !localSeriesName) return sourceSeriesKey;
+    return metadataService.tvSeriesKey("trusted-tv", `${trustedIdentity}|${localSeriesName}`);
   }
 
   function galleryMediaCoverUrl(mediaId, updatedAt = "") {
@@ -47,14 +96,16 @@ export function createImageLibraryService({
   }
 
   function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null) {
-    const seriesKey = galleryMediaSeriesKey(item);
-    const tvSeries = seriesKey ? metadataService.publicTvSeries(tvMetadataByKey?.get(seriesKey) || metadataService.tvSeriesRow(seriesKey)) : null;
+    const sourceSeriesKey = galleryMediaSourceSeriesKey(item);
+    const tvSeries = sourceSeriesKey ? metadataService.publicTvSeries(tvMetadataByKey?.get(sourceSeriesKey) || metadataService.tvSeriesRow(sourceSeriesKey)) : null;
+    const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries);
     const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById?.get(item.id) || metadataService.movieRow(item.id)) : null;
     const movieCoverUrl = movieMetadata?.coverUrl || "";
     const fallbackCoverUrl = item.mediaKind === "tv" || item.mediaKind === "movie" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
     return {
       ...item,
       seriesKey,
+      sourceSeriesKey,
       tvSeries,
       movieMetadata,
       coverUrl: movieCoverUrl || fallbackCoverUrl || item.coverUrl || ""

@@ -1,7 +1,7 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
 import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260727-novel-nav-search-01";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260813-tv-series-identity-01";
 
 const MODULE_VIEWS = new Set(["gallery", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -36,8 +36,8 @@ export async function bootStandaloneApp() {
 async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
-      import("../modules/content-index/gallery-page.js?v=20260717-photo-library-workspace-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20260718-photo-gesture-parser-03")
+      import("../modules/content-index/gallery-page.js?v=20260813-tv-series-identity-01"),
+      import("../modules/content-index/gallery-renderer.js?v=20260813-tv-series-identity-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -127,6 +127,7 @@ function createHost({ api, els, initialParams, pages, state }) {
         galleryCategory: state.gallery.category || "all",
         gallerySubCategory: state.gallery.subCategory || "all",
         galleryPerson: state.gallery.person || "all",
+        gallerySeriesKey: state.gallery.seriesKey || "",
         galleryPhotoDate: state.gallery.photoDate || "all",
         gallerySort: state.gallery.sort || "updated"
       });
@@ -293,6 +294,7 @@ function createStandaloneState(view) {
       category: "all",
       subCategory: "all",
       person: "all",
+      seriesKey: "",
       photoDate: "all",
       sort: view === "gallery" ? "count" : "updated",
       visibleLimit: 80,

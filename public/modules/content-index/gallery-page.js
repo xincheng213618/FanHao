@@ -56,6 +56,7 @@ export function createGalleryPage(deps) {
     state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
+    state.gallery.seriesKey = ["media", "tv"].includes(state.gallery.mode) ? route.gallerySeriesKey || "" : "";
     state.gallery.photoDate = route.galleryPhotoDate || "all";
     state.gallery.sort = route.gallerySort || "updated";
     state.gallery.visibleLimit = 80;
@@ -143,6 +144,7 @@ export function createGalleryPage(deps) {
       category: state.gallery.mode === "manga" ? "" : state.gallery.category || "all",
       subCategory: state.gallery.mode === "photo" ? state.gallery.subCategory || "all" : "",
       person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? state.gallery.person || "all" : "",
+      seriesKey: ["media", "tv"].includes(state.gallery.mode) ? state.gallery.seriesKey || "" : "",
       date: state.gallery.mode === "photo" ? state.gallery.photoDate || "all" : "",
       query: state.gallery.query || "",
       sort: ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : ""
@@ -151,7 +153,7 @@ export function createGalleryPage(deps) {
 
   function imageLibraryListPath(options = {}) {
     const collectionIndex = state.gallery.mode === "photo" && !state.gallery.photoCollection && state.gallery.photoView === "collections";
-    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all";
+    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && (state.gallery.seriesKey || state.gallery.person && state.gallery.person !== "all");
     const query = String(state.gallery.query || "").trim();
     const params = new URLSearchParams({
       mode: state.gallery.mode,
@@ -170,7 +172,9 @@ export function createGalleryPage(deps) {
     } else if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
       if (state.gallery.mode === "media" && state.gallery.mediaKind && state.gallery.mediaKind !== "all") params.set("kind", state.gallery.mediaKind);
       if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
-      if (["western", "media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all") {
+      if (["media", "tv"].includes(state.gallery.mode) && state.gallery.seriesKey) {
+        params.set("seriesKey", state.gallery.seriesKey);
+      } else if (["western", "media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all") {
         params.set("person", state.gallery.person);
       }
     }
