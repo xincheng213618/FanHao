@@ -28,9 +28,11 @@ export function sendShortVideoPublicError(res, sendJson, error, fallback, option
   }
   const exposeDetails = result.status < 500 || error?.expose === true;
   const recovery = shortVideoDeleteRecoveryBody(error?.publicBody);
+  const publicCode = shortVideoPublic4xxCode(error, result.status);
   sendJson(res, result.status, {
     error: result.message,
     ...recovery,
+    ...(publicCode ? { code: publicCode } : {}),
     ...(options.includeRetryable && result.status === 503 && error?.retryable === true ? { retryable: true } : {}),
     ...(options.includeDetails && exposeDetails && error?.details ? { details: error.details } : {})
   });
@@ -45,16 +47,26 @@ function shortVideoDeleteRecoveryBody(value) {
   const code = rawCode.startsWith("SHORT_VIDEO_DELETE_")
     ? rawCode
     : "SHORT_VIDEO_DELETE_RECOVERY_REQUIRED";
+  const processRestartRequired = value.processRestartRequired === true;
+  const manualInterventionRequired = value.manualInterventionRequired === true || processRestartRequired;
   return {
     ok: false,
     accepted: false,
     pending: true,
     recoveryRequired: true,
-    retryable: value.retryable === true,
+    retryable: value.retryable === true && !manualInterventionRequired,
+    manualInterventionRequired,
+    processRestartRequired,
     status,
     jobId: String(value.jobId || "").slice(0, 100),
     code
   };
+}
+
+function shortVideoPublic4xxCode(error, status) {
+  if (status < 400 || status >= 500 || error?.expose !== true) return "";
+  const code = String(error?.code || "");
+  return code === "SHORT_VIDEO_DELETE_JOB_NOT_FOUND" ? code : "";
 }
 
 function isSafeDatabaseBusyError(error) {

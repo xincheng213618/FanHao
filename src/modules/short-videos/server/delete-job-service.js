@@ -3122,6 +3122,7 @@ export function createShortVideoDeleteJobService({
       recoveryRequired: true,
       retryable: !manualInterventionRequired,
       manualInterventionRequired,
+      processRestartRequired: false,
       status: String(job.status || "rollback_pending"),
       jobId: String(job.id || ""),
       code: publicDeleteErrorCode(job.error_code || error.code)

@@ -39,6 +39,83 @@ assert.equal(empty.response.status, 200, "an empty DELETE body must remain valid
 assert.equal(empty.storeCalls, 1, "an empty DELETE body must retain the existing delete call");
 assert.deepEqual(empty.deleteOptions, { deleteFiles: true }, "an empty DELETE body must retain the default file-deletion option");
 
+const missingJob = Object.assign(new Error("短视频删除作业不存在"), {
+  statusCode: 404,
+  code: "SHORT_VIDEO_DELETE_JOB_NOT_FOUND",
+  expose: true
+});
+const missingJobResult = await invokeShortVideoDeleteJobStatus(missingJob);
+assert.deepEqual(missingJobResult, {
+  status: 404,
+  payload: { error: "短视频删除作业不存在", code: "SHORT_VIDEO_DELETE_JOB_NOT_FOUND" }
+}, "the exact missing delete job must expose its controlled 404 code");
+
+const ordinary404 = Object.assign(new Error("普通资源不存在"), {
+  statusCode: 404,
+  code: "SHORT_VIDEO_INTERNAL_NOT_FOUND",
+  expose: true
+});
+assert.deepEqual(await invokeShortVideoDeleteJobStatus(ordinary404), {
+  status: 404,
+  payload: { error: "普通资源不存在" }
+}, "an ordinary 404 must not expose an unapproved internal code");
+
+const privateJob500 = Object.assign(new Error("private delete failure at C:\\secret\\delete.bin"), {
+  statusCode: 500,
+  code: "SHORT_VIDEO_DELETE_JOB_NOT_FOUND"
+});
+const privateJob500Result = await captureConsoleErrors(() => invokeShortVideoDeleteJobStatus(privateJob500));
+assert.deepEqual(privateJob500Result.value, {
+  status: 500,
+  payload: { error: "短视频删除恢复状态读取失败" }
+}, "a 5xx must not expose an internal message or even a whitelisted 4xx code");
+
+const manualRecoveryError = Object.assign(new Error("private guard failure"), {
+  statusCode: 500,
+  publicBody: {
+    pending: true,
+    recoveryRequired: true,
+    retryable: false,
+    manualInterventionRequired: true,
+    processRestartRequired: false,
+    status: "rollback_pending",
+    jobId: "manual-job",
+    code: "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING"
+  }
+});
+const manualRecoveryResult = await captureConsoleErrors(() => invokeShortVideoDelete("{}", { storeError: manualRecoveryError }));
+assert.deepEqual(manualRecoveryResult.value.response.payload, {
+  error: "短视频删除失败",
+  ok: false,
+  accepted: false,
+  pending: true,
+  recoveryRequired: true,
+  retryable: false,
+  manualInterventionRequired: true,
+  processRestartRequired: false,
+  status: "rollback_pending",
+  jobId: "manual-job",
+  code: "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING"
+}, "manual delete recovery state must survive the route public-error boundary");
+
+const restartRecoveryError = Object.assign(new Error("private same-process fence"), {
+  statusCode: 500,
+  publicBody: {
+    pending: true,
+    recoveryRequired: true,
+    retryable: true,
+    manualInterventionRequired: false,
+    processRestartRequired: true,
+    status: "rollback_pending",
+    jobId: "restart-job",
+    code: "SHORT_VIDEO_DELETE_RECOVERY_REQUIRED"
+  }
+});
+const restartRecoveryResult = await captureConsoleErrors(() => invokeShortVideoDelete("{}", { storeError: restartRecoveryError }));
+assert.equal(restartRecoveryResult.value.response.payload.processRestartRequired, true);
+assert.equal(restartRecoveryResult.value.response.payload.manualInterventionRequired, true, "restart-required recovery must imply manual intervention");
+assert.equal(restartRecoveryResult.value.response.payload.retryable, false, "manual recovery must never remain retryable");
+
 const secretStoreError = new Error("delete failed at C:\\secret\\videos\\catalog.bin");
 const secretStoreResult = await captureConsoleErrors(() => invokeShortVideoDelete("{}", { storeError: secretStoreError }));
 assert.deepEqual(secretStoreResult.value.response, {
@@ -143,6 +220,26 @@ async function invokeShortVideoDelete(bodyText, { storeError } = {}) {
   );
   assert.equal(handled, true, "the short-video DELETE route must be handled");
   return { deleteOptions, response, storeCalls };
+}
+
+async function invokeShortVideoDeleteJobStatus(storeError) {
+  let response = null;
+  const handled = await routeShortVideoApi(
+    { method: "GET" },
+    {},
+    new URL("http://127.0.0.1/api/short-videos/delete-jobs?jobId=missing-job"),
+    {
+      notFound() { assert.fail("the delete-job status fixture must not fall through"); },
+      readJsonBody,
+      requireLocalAdmin: () => true,
+      sendJson(_res, status, payload) { response = { status, payload }; },
+      shortVideoStore: {
+        deleteJobStatus() { throw storeError; }
+      }
+    }
+  );
+  assert.equal(handled, true);
+  return response;
 }
 
 async function captureConsoleErrors(action) {

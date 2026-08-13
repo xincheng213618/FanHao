@@ -1674,6 +1674,19 @@ async function verifyJunctionRetargetAfterOwnerSnapshot() {
 }
 
 async function verifyDeleteRouteStatusContract() {
+  const statusFixture = createFixture();
+  try {
+    const missing = await invokeDeleteRoute(
+      "/api/short-videos/delete-jobs?jobId=missing-job",
+      statusFixture.store,
+      { method: "GET" }
+    );
+    assert.equal(missing.status, 404);
+    assert.equal(missing.payload?.code, "SHORT_VIDEO_DELETE_JOB_NOT_FOUND");
+  } finally {
+    closeFixture(statusFixture);
+  }
+
   const completed = { ok: true, accepted: true, pending: false, status: "completed" };
   const cleanupPending = {
     ok: true,
