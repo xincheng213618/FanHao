@@ -737,6 +737,9 @@ async function verifyRollbackAndCleanupRecovery() {
     assert.equal(videoExists(cleanup.dbPath, "cleanup"), false);
     const pending = cleanup.store.deleteJobStatus();
     assert.equal(pending.cleanupPending, 1);
+    assert.equal(pending.jobs[0]?.manualInterventionRequired, false);
+    assert.equal(pending.jobs[0]?.recoverable, true);
+    assert.equal(pending.jobs[0]?.retryable, true);
     assert.doesNotMatch(JSON.stringify(pending), new RegExp(escapeRegExp(cleanup.temp.tempDir), "i"), "delete status must not disclose absolute paths");
     assert.equal(activeReservationCount(cleanup.dbPath) > 0, true, "cleanup_pending must keep its durable reservations");
     failCleanup = false;
@@ -748,6 +751,32 @@ async function verifyRollbackAndCleanupRecovery() {
     assertNoQuarantine(cleanup.root);
   } finally {
     closeFixture(cleanup);
+  }
+
+  const unknownCleanup = createFixture();
+  try {
+    const source = writeMedia(unknownCleanup.root, "unknown-cleanup/video.mp4", "unknown-cleanup-video");
+    seedVideo(unknownCleanup.dbPath, { id: "unknown-cleanup", sourcePath: source });
+    unknownCleanup.hooks.beforeQuarantineCleanup = () => {
+      throw new Error("injected unknown cleanup failure");
+    };
+    const result = await unknownCleanup.store.deleteVideo("unknown-cleanup");
+    assert.equal(result.status, "cleanup_pending");
+    const pending = unknownCleanup.store.deleteJobStatus();
+    const job = pending.jobs.find((entry) => entry.id === result.jobId);
+    assert.equal(job?.errorCode, "SHORT_VIDEO_DELETE_FAILED");
+    assert.equal(job?.manualInterventionRequired, true);
+    assert.equal(job?.recoverable, false);
+    assert.equal(job?.retryable, false);
+    unknownCleanup.hooks.beforeQuarantineCleanup = null;
+    await unknownCleanup.store.recoverDeleteJobs();
+    assert.equal(jobRows(unknownCleanup.dbPath)[0]?.status, "cleanup_pending", "automatic recovery must skip an unknown program error");
+    await unknownCleanup.store.recoverDeleteJobs({ jobId: result.jobId });
+    assert.equal(jobRows(unknownCleanup.dbPath)[0]?.status, "completed");
+    assertNoActiveReservations(unknownCleanup.dbPath);
+    assertNoQuarantine(unknownCleanup.root);
+  } finally {
+    closeFixture(unknownCleanup);
   }
 }
 

@@ -22,7 +22,6 @@ const AUTOMATIC_RECOVERY_CODES = new Set([
   "EBUSY",
   "SHORT_VIDEO_DELETE_BUSY",
   "SHORT_VIDEO_DELETE_COVER_CLEANUP_PENDING",
-  "SHORT_VIDEO_DELETE_FAILED",
   "SHORT_VIDEO_DELETE_GUARD_TEMP_CLEANUP",
   "SHORT_VIDEO_DELETE_IDENTITY_UNAVAILABLE",
   "SHORT_VIDEO_DELETE_LEASE_LOST",
@@ -2012,7 +2011,7 @@ export function createShortVideoDeleteJobService({
   }
 
   function rememberPending(db, jobId, statusValue, phase, error) {
-    const code = String(error?.code || "SHORT_VIDEO_DELETE_PENDING").slice(0, 100);
+    const code = String(error?.code || "SHORT_VIDEO_DELETE_FAILED").slice(0, 100);
     const message = String(error?.message || error || "删除作业等待恢复").slice(0, 2000);
     try {
       const update = db.prepare(`
