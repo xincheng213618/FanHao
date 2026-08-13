@@ -68,6 +68,9 @@ await verifyGuardNoClobberAndExclusiveFallback();
 await verifyUnsupportedIsolateLinkRollsBackCleanly();
 await verifyUnsupportedIsolateRestartRecovery();
 await verifyProofToCaptureSwapMatrix();
+await verifyMediaIntentSwapCrashFailsClosed("isolate-media", "isolate_media_swap_captured_pre_proof");
+await verifyMediaIntentSwapCrashFailsClosed("restore-media", "restore_media_swap_captured_pre_proof");
+await verifyAmbiguousMediaIntentCombinationsFailClosed();
 await verifyPublishedGuardTempCleanupRecovery();
 await verifyExclusiveGuardTempCleanupRecovery();
 await verifyActiveExecuteRecoveryFencing();
@@ -144,6 +147,7 @@ function verifyOfflineRebaseBoundary() {
     "short_video_delete_jobs",
     "short_video_delete_items",
     "short_video_delete_reservations",
+    "short_video_delete_fs_actions",
     "short_video_delete_video_tombstones",
     "short_video_path_references",
     "short_video_path_tombstones"
@@ -152,6 +156,48 @@ function verifyOfflineRebaseBoundary() {
   }
   assert.match(source, /assertDeleteProtocolOfflineBoundary/, "storage rebase must reject active protocol ownership");
   assert.match(source, /assertShortVideoReferenceProjection/, "storage rebase must reconcile the 4+1 path projection before commit");
+
+  const fixture = createVerifiedTempDir("fanhao-short-video-rebase-boundary-");
+  try {
+    const oldRoot = path.join(fixture.tempDir, "old-media-root");
+    const newRoot = path.join(fixture.tempDir, "new-media-root");
+    const managerDbPath = path.join(fixture.tempDir, "manager.sqlite");
+    const fanhaoDbPath = path.join(fixture.tempDir, "fanhao.sqlite");
+    fs.mkdirSync(oldRoot);
+    fs.mkdirSync(newRoot);
+    const manager = new DatabaseSync(managerDbPath);
+    manager.exec("CREATE TABLE manager_notes(value TEXT)");
+    manager.close();
+    const fanhao = new DatabaseSync(fanhaoDbPath);
+    fanhao.exec(`
+      CREATE TABLE ordinary_media(source_path TEXT);
+      CREATE TABLE short_video_delete_fs_actions(source_path TEXT, evidence_path TEXT);
+    `);
+    fanhao.prepare("INSERT INTO ordinary_media(source_path) VALUES (?)")
+      .run(path.join(oldRoot, "ordinary.mp4"));
+    fanhao.prepare("INSERT INTO short_video_delete_fs_actions(source_path, evidence_path) VALUES (?, ?)")
+      .run(path.join(oldRoot, "owned.mp4"), path.join(oldRoot, "evidence"));
+    fanhao.close();
+
+    const dryRun = spawnSync(process.execPath, [
+      REBASE_SCRIPT,
+      "--from", oldRoot,
+      "--to", newRoot,
+      "--storage-root", fixture.tempDir,
+      "--manager-db", managerDbPath,
+      "--fanhao-db", fanhaoDbPath
+    ], { encoding: "utf8", windowsHide: true });
+    assert.equal(dryRun.status, 0, dryRun.stderr || dryRun.stdout);
+    assert.match(dryRun.stdout, /fanhao: ordinary_media\.source_path = 1/);
+    assert.match(dryRun.stdout, /预检查：匹配 1 处，修改 0 行/);
+    assert.doesNotMatch(
+      dryRun.stdout,
+      /short_video_delete_fs_actions/,
+      "dry-run must not scan or report durable action paths"
+    );
+  } finally {
+    fixture.cleanup();
+  }
 }
 
 function verifyDestructiveFsActionInventory() {
@@ -1415,6 +1461,135 @@ async function verifyUnsupportedIsolateRestartRecovery() {
   } finally {
     recovery?.close();
     closeFixture(fixture);
+  }
+}
+
+async function verifyMediaIntentSwapCrashFailsClosed(kind, boundary) {
+  const fixture = createFixture({ openStore: false });
+  let recovery = null;
+  try {
+    const first = writeMedia(fixture.root, `${boundary}/first.mp4`, `${boundary}-first`);
+    const second = writeMedia(fixture.root, `${boundary}/second.mp4`, `${boundary}-second`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: `${boundary}-1`, sourcePath: first });
+    seedVideo(fixture.dbPath, { id: `${boundary}-2`, sourcePath: second });
+
+    const child = spawn(process.execPath, [
+      CHILD,
+      fixture.dbPath,
+      fixture.root,
+      boundary,
+      `${boundary}-1`,
+      `${boundary}-2`
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const closePromise = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    await killAtBoundary(child, boundary, closePromise);
+
+    const job = jobRows(fixture.dbPath)[0];
+    const action = fsActionRows(fixture.dbPath).find((row) => row.kind === kind);
+    assert(job && action, `${kind} crash must retain its durable job and action`);
+    assert.equal(action.stage, "intent", `${kind} crash must precede the captured checkpoint`);
+    const backupPath = `${action.source_path}.fixture-owned-pre-proof`;
+    assert.equal(fs.existsSync(action.source_path), false);
+    assert.equal(fs.existsSync(action.target_path), true);
+    assert.equal(fs.existsSync(action.evidence_path), true);
+    assert.equal(fs.existsSync(backupPath), true);
+    assert.equal(fs.readFileSync(action.evidence_path, "utf8"), `${boundary}-foreign`);
+    assert.equal(fs.readFileSync(action.target_path, "utf8"), `${boundary}-first`);
+    assert.equal(fs.readFileSync(backupPath, "utf8"), `${boundary}-first`);
+    assert.equal(fs.readFileSync(second, "utf8"), `${boundary}-second`, "later planned items must remain untouched");
+
+    const fileState = snapshotFileStates([
+      action.source_path,
+      action.target_path,
+      action.evidence_path,
+      backupPath,
+      first,
+      second
+    ]);
+    const itemState = deleteItemAllRows(fixture.dbPath);
+    const reservations = activeReservationCount(fixture.dbPath);
+    assert.equal(reservations > 0, true);
+
+    recovery = createShortVideoStore(storeOptions(fixture));
+    const firstRecovery = await recovery.recoverDeleteJobs({ jobId: job.id });
+    assert.equal(firstRecovery.job?.pending, true);
+    assert.equal(firstRecovery.job?.manualInterventionRequired, true);
+    assert.equal(firstRecovery.job?.recoverable, false);
+    assert.equal(firstRecovery.job?.retryable, false);
+    const failedAction = fsActionRows(fixture.dbPath).find((row) => row.kind === kind);
+    assert.equal(failedAction?.stage, "manual");
+    assert.match(failedAction?.error || "", /media intent paths cannot be safely reconciled/);
+    assert.deepEqual(deleteItemAllRows(fixture.dbPath), itemState, "initial reconciliation must not advance any item");
+    assert.equal(activeReservationCount(fixture.dbPath), reservations);
+    assert.deepEqual(snapshotFileStates([...fileState.keys()]), fileState);
+
+    await recovery.recoverDeleteJobs({ jobId: job.id });
+    assert.deepEqual(deleteItemAllRows(fixture.dbPath), itemState, "manual recovery must remain a hard fence");
+    assert.equal(activeReservationCount(fixture.dbPath), reservations);
+    assert.deepEqual(snapshotFileStates([...fileState.keys()]), fileState);
+  } finally {
+    recovery?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyAmbiguousMediaIntentCombinationsFailClosed() {
+  for (const mutation of ["target_missing", "target_swapped", "source_repopulated", "evidence_missing"]) {
+    const boundary = "fs_isolate_media_captured";
+    const fixture = createFixture({ openStore: false });
+    let recovery = null;
+    try {
+      const videoId = `ambiguous-intent-${mutation}`;
+      const source = writeMedia(fixture.root, `ambiguous/${mutation}.mp4`, `owned-${mutation}`);
+      const initializer = createShortVideoStore(storeOptions(fixture));
+      initializer.summary();
+      initializer.close();
+      seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+      const child = spawn(process.execPath, [CHILD, fixture.dbPath, fixture.root, boundary, videoId], {
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const closePromise = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+      await killAtBoundary(child, boundary, closePromise);
+      const job = jobRows(fixture.dbPath)[0];
+      const action = fsActionRows(fixture.dbPath).find((row) => row.kind === "isolate-media");
+      assert(job && action);
+      assert.equal(action.stage, "intent");
+      if (mutation === "target_missing") {
+        fs.renameSync(action.target_path, `${action.target_path}.fixture-retained`);
+      } else if (mutation === "target_swapped") {
+        fs.renameSync(action.target_path, `${action.target_path}.fixture-retained`);
+        fs.writeFileSync(action.target_path, "foreign-target", { flag: "wx" });
+      } else if (mutation === "source_repopulated") {
+        fs.writeFileSync(action.source_path, "foreign-source", { flag: "wx" });
+      } else if (mutation === "evidence_missing") {
+        fs.renameSync(action.evidence_path, `${action.evidence_path}.fixture-retained`);
+      }
+      const paths = [
+        action.source_path,
+        action.target_path,
+        action.evidence_path,
+        `${action.target_path}.fixture-retained`,
+        `${action.evidence_path}.fixture-retained`
+      ];
+      const fileState = snapshotFileStates(paths);
+      const itemState = deleteItemAllRows(fixture.dbPath);
+      const reservations = activeReservationCount(fixture.dbPath);
+      recovery = createShortVideoStore(storeOptions(fixture));
+      const status = await recovery.recoverDeleteJobs({ jobId: job.id });
+      assert.equal(status.job?.manualInterventionRequired, true, `${mutation} must fail closed`);
+      const failedAction = fsActionRows(fixture.dbPath).find((row) => row.kind === "isolate-media");
+      assert.equal(failedAction?.stage, "manual");
+      assert.match(failedAction?.error || "", /media intent paths cannot be safely reconciled/);
+      assert.deepEqual(deleteItemAllRows(fixture.dbPath), itemState);
+      assert.equal(activeReservationCount(fixture.dbPath), reservations);
+      assert.deepEqual(snapshotFileStates(paths), fileState);
+    } finally {
+      recovery?.close();
+      closeFixture(fixture);
+    }
   }
 }
 
@@ -3336,6 +3511,15 @@ function deleteItemFullRow(dbPath) {
   const db = openDb(dbPath);
   try {
     return db.prepare("SELECT * FROM short_video_delete_items ORDER BY ordinal LIMIT 1").get() || null;
+  } finally {
+    db.close();
+  }
+}
+
+function deleteItemAllRows(dbPath) {
+  const db = openDb(dbPath);
+  try {
+    return db.prepare("SELECT * FROM short_video_delete_items ORDER BY job_id, ordinal").all();
   } finally {
     db.close();
   }

@@ -3539,14 +3539,20 @@ export function createShortVideoDeleteJobService({
 
   function reconcileMediaFsAction(db, job, item, action) {
     const expected = parseJson(action.expected_identity_json, null);
+    const sourcePresent = Boolean(lstatIfPresent(action.source_path));
+    const targetPresent = Boolean(lstatIfPresent(action.target_path));
+    const evidencePresent = Boolean(lstatIfPresent(action.evidence_path));
     const source = captureManagedIdentityIfPresent(action.source_path, item.managed_root);
     const target = captureManagedIdentityIfPresent(action.target_path, item.managed_root);
     const evidence = captureManagedIdentityIfPresent(action.evidence_path, item.managed_root);
-    if (action.stage === "intent" && source && !target && !evidence) {
-      return updateFsAction(db, job, action, "cancelled", source);
-    }
-    if (action.stage === "intent" && target && actionObjectMatches(target, expected)) {
-      if (source && !evidence) {
+    if (action.stage === "intent") {
+      const sourceExpected = sourcePresent && actionObjectMatches(source, expected);
+      const targetExpected = targetPresent && actionObjectMatches(target, expected);
+      const evidenceExpected = evidencePresent && actionObjectMatches(evidence, expected);
+      if (sourceExpected && !targetPresent && !evidencePresent) {
+        return updateFsAction(db, job, action, "cancelled", source);
+      }
+      if (sourceExpected && targetExpected && !evidencePresent) {
         const captured = capturePathIntoEvidence(
           db,
           job,
@@ -3556,9 +3562,9 @@ export function createShortVideoDeleteJobService({
           { neutralize: false }
         );
         action = captured.action;
-      } else if (!source && evidence && actionObjectMatches(evidence, expected)) {
+      } else if (!sourcePresent && targetExpected && evidenceExpected) {
         action = updateFsAction(db, job, action, "captured", evidence);
-      } else if (source || !evidence) {
+      } else {
         return failFsAction(db, job, action, "media intent paths cannot be safely reconciled");
       }
     }

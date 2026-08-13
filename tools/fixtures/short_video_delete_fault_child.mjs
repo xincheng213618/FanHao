@@ -76,6 +76,21 @@ const faultFsOps = new Proxy(fs, {
     }
     if (property === "renameSync") {
       return (sourcePath, targetPath) => {
+        const isolateSwapBoundary = boundary === "isolate_media_swap_captured_pre_proof";
+        const restoreSwapBoundary = boundary === "restore_media_swap_captured_pre_proof";
+        const mediaSourceMatches = isolateSwapBoundary
+          ? !String(sourcePath).endsWith(".quarantine")
+          : restoreSwapBoundary
+            ? String(sourcePath).endsWith(".quarantine")
+            : false;
+        if (mediaSourceMatches && String(targetPath).endsWith("captured")) {
+          const backupPath = `${sourcePath}.fixture-owned-pre-proof`;
+          fs.renameSync(sourcePath, backupPath);
+          fs.writeFileSync(sourcePath, `${boundary}-foreign`, { flag: "wx" });
+          fs.renameSync(sourcePath, targetPath);
+          stopAt(boundary);
+          return;
+        }
         if (["fallback_guard_published", "hardlink_guard_published"].includes(boundary)
           && String(sourcePath).endsWith(".prepared")
           && String(targetPath).endsWith("captured")) {
@@ -118,7 +133,9 @@ const store = createShortVideoStore({
       stopAt("planned");
     },
     afterItemIsolated({ ordinal }) {
-      if ((boundary === "restore_renamed_pre_journal" || boundary.startsWith("fs_restore_media_"))
+      if ((boundary === "restore_renamed_pre_journal"
+        || boundary.startsWith("fs_restore_media_")
+        || boundary === "restore_media_swap_captured_pre_proof")
         && ordinal === 0) {
         throw Object.assign(new Error("injected rollback after first isolation"), { code: "EACCES" });
       }

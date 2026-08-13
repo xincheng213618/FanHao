@@ -125,6 +125,7 @@ function shortVideoDeleteProtocolTables() {
     "short_video_delete_jobs",
     "short_video_delete_items",
     "short_video_delete_reservations",
+    "short_video_delete_fs_actions",
     "short_video_delete_video_tombstones",
     "short_video_path_references",
     "short_video_path_tombstones"
