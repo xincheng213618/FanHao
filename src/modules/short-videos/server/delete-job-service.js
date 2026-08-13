@@ -9,8 +9,6 @@ const ACTIVE_STATUSES = ["running", "rollback_pending", "cleanup_pending"];
 const TERMINAL_STATUSES = ["completed", "rolled_back"];
 const OWNER_MARKER = ".owner";
 const GUARD_PREFIX = "FANHAO_SHORT_VIDEO_DELETE_GUARD";
-const ACTIVE_OWNER_IDS = new Set();
-const ACTIVE_JOB_EXECUTIONS = new Map();
 const PATH_REFERENCE_TABLE = "short_video_path_references";
 const PATH_TOMBSTONE_TABLE = "short_video_path_tombstones";
 const VIDEO_TOMBSTONE_TABLE = "short_video_delete_video_tombstones";
@@ -20,6 +18,16 @@ const DELETE_PROTOCOL_VERSION = "4";
 const GUARD_PUBLISH_HARDLINK = "hardlink";
 const GUARD_PUBLISH_EXCLUSIVE_CREATE = "exclusive_create";
 const GUARD_PUBLISH_MODES = new Set([GUARD_PUBLISH_HARDLINK, GUARD_PUBLISH_EXCLUSIVE_CREATE]);
+const AUTOMATIC_RECOVERY_CODES = new Set([
+  "EBUSY",
+  "SHORT_VIDEO_DELETE_BUSY",
+  "SHORT_VIDEO_DELETE_COVER_CLEANUP_PENDING",
+  "SHORT_VIDEO_DELETE_FAILED",
+  "SHORT_VIDEO_DELETE_GUARD_TEMP_CLEANUP",
+  "SHORT_VIDEO_DELETE_IDENTITY_UNAVAILABLE",
+  "SHORT_VIDEO_DELETE_LEASE_LOST",
+  "SHORT_VIDEO_DELETE_PENDING"
+]);
 const DELETE_PROTOCOL_TABLES = [
   "short_video_delete_jobs",
   "short_video_delete_items",
@@ -52,9 +60,11 @@ export function createShortVideoDeleteJobService({
   let ownerId = configuredOwner || newOwnerId();
   const rootGroupCache = new Map();
   const referenceSnapshotsByJob = new Map();
+  const activeExecutions = new Map();
+  const relinquishableExecutions = new Map();
   let recovering = false;
+  let closing = false;
   let closed = false;
-  ACTIVE_OWNER_IDS.add(ownerId);
 
   function newOwnerId() {
     return `short-video-delete-owner-${process.pid}-${crypto.randomUUID()}`;
@@ -62,9 +72,11 @@ export function createShortVideoDeleteJobService({
 
   function reopen() {
     if (!closed) return;
+    if (closing || activeExecutions.size) {
+      throw codedError("短视频删除服务正在关闭活动作业", "SHORT_VIDEO_DELETE_SERVICE_CLOSING");
+    }
     ownerId = configuredOwner || newOwnerId();
     closed = false;
-    ACTIVE_OWNER_IDS.add(ownerId);
   }
 
   function assertOpen() {
@@ -73,7 +85,15 @@ export function createShortVideoDeleteJobService({
     }
   }
 
+  function assertAcceptingWork() {
+    assertOpen();
+    if (closing) {
+      throw codedError("短视频删除服务正在关闭活动作业", "SHORT_VIDEO_DELETE_SERVICE_CLOSING");
+    }
+  }
+
   function initialize(db = database()) {
+    if (closing) assertAcceptingWork();
     reopen();
     ensureSchema(db);
     pruneTerminalJobs(db);
@@ -124,7 +144,12 @@ export function createShortVideoDeleteJobService({
       FROM sqlite_schema
       WHERE name IN (${placeholders})
     `).all(...names).map((row) => `${row.type}\0${row.name}`));
-    return required.every(([type, name]) => existing.has(`${type}\0${name}`));
+    if (!required.every(([type, name]) => existing.has(`${type}\0${name}`))) return false;
+    const requiredColumns = [
+      ["short_video_delete_jobs", "execution_token"],
+      ["short_video_delete_items", "guard_publish_mode"]
+    ];
+    return requiredColumns.every(([table, column]) => schemaHasColumn(db, table, column));
   }
 
   function ensureSchema(db = database()) {
@@ -163,6 +188,7 @@ export function createShortVideoDeleteJobService({
         quarantine_token TEXT NOT NULL,
         owner_id TEXT NOT NULL DEFAULT '',
         lease_until TEXT NOT NULL DEFAULT '',
+        execution_token TEXT NOT NULL DEFAULT '',
         version INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT NOT NULL DEFAULT '',
@@ -394,6 +420,7 @@ export function createShortVideoDeleteJobService({
     `);
     ensureColumn(db, "short_video_delete_jobs", "cover_cleanup_done", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "short_video_delete_jobs", "deleted_stored_covers", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "short_video_delete_jobs", "execution_token", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "real_path_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "identity_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "guard_publish_mode", "TEXT NOT NULL DEFAULT ''");
@@ -823,11 +850,12 @@ export function createShortVideoDeleteJobService({
   }
 
   async function execute(rows, options = {}) {
-    assertOpen();
+    assertAcceptingWork();
     const db = database();
     const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "plan" });
-    const job = await persistPlan(db, rows, options, referenceSnapshot);
-    const executionToken = beginExecution(job.id);
+    const executionToken = newExecutionToken();
+    const job = await persistPlan(db, rows, options, referenceSnapshot, executionToken);
+    beginExecution(job.id, executionToken);
     referenceSnapshotsByJob.set(job.id, referenceSnapshot);
     try {
       try {
@@ -865,11 +893,11 @@ export function createShortVideoDeleteJobService({
       }
       return executionResult(db, job.id);
     } finally {
-      endExecution(job.id, executionToken);
+      endExecution(db, job.id, executionToken);
     }
   }
 
-  async function persistPlan(db, inputRows, options, referenceSnapshot = null) {
+  async function persistPlan(db, inputRows, options, referenceSnapshot = null, executionToken = "") {
     const requestedIds = uniqueStrings((inputRows || []).map((row) => row?.id), 10_000);
     if (!requestedIds.length) throw statusError("没有可删除的短视频记录", 404, "SHORT_VIDEO_DELETE_EMPTY");
     const jobId = `sv-delete-${crypto.randomUUID()}`;
@@ -896,9 +924,9 @@ export function createShortVideoDeleteJobService({
       db.prepare(`
         INSERT INTO short_video_delete_jobs (
           id, status, phase, scope, anchor_id, title, group_dir, video_ids_json,
-          result_json, quarantine_token, owner_id, lease_until, version, attempts,
+          result_json, quarantine_token, owner_id, lease_until, execution_token, version, attempts,
           error, error_code, created_at, updated_at, finished_at
-        ) VALUES (?, 'running', 'planned', ?, ?, ?, ?, ?, '', ?, ?, ?, 1, 1, '', '', ?, ?, '')
+        ) VALUES (?, 'running', 'planned', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 1, 1, '', '', ?, ?, '')
       `).run(
         jobId,
         String(options.scope || "single"),
@@ -909,6 +937,7 @@ export function createShortVideoDeleteJobService({
         token,
         ownerId,
         leaseUntil(),
+        executionToken,
         timestamp,
         timestamp
       );
@@ -1178,6 +1207,7 @@ export function createShortVideoDeleteJobService({
 
   async function isolatePlannedFiles(db, jobId) {
     updateJob(db, jobId, { status: "running", phase: "isolating", error: "", errorCode: "" });
+    const executionToken = requireActiveExecutionToken(jobId);
     for (const planned of readItems(db, jobId)) {
       if (planned.disposition !== "delete" || planned.state === "isolated") continue;
       const item = readItem(db, jobId, planned.ordinal);
@@ -1214,9 +1244,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state IN ('planned', 'isolating')
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(now(), jobId, item.ordinal, ownerId);
+        `).run(now(), jobId, item.ordinal, ownerId, executionToken);
         if (Number(intent.changes || 0) !== 1) {
           throw codedError("隔离文件 intent CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         }
@@ -1226,6 +1257,7 @@ export function createShortVideoDeleteJobService({
         throw error;
       }
 
+      await invokeHook(hooks.afterItemIsolationIntent, { jobId, ordinal: item.ordinal });
       fsOps.renameSync(item.original_path, item.quarantine_path);
       const isolated = await requireManagedFileIdentityAsync(
         item.quarantine_path,
@@ -1263,9 +1295,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state = 'isolating'
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(JSON.stringify(isolated), JSON.stringify(guardIdentity), now(), jobId, item.ordinal, ownerId);
+        `).run(JSON.stringify(isolated), JSON.stringify(guardIdentity), now(), jobId, item.ordinal, ownerId, executionToken);
         if (Number(checkpoint.changes || 0) !== 1) {
           throw codedError("隔离文件检查点 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         }
@@ -1281,6 +1314,7 @@ export function createShortVideoDeleteJobService({
 
   async function commitRows(db, jobId) {
     const job = requireOwnedJob(db, jobId);
+    const executionToken = requireActiveExecutionToken(jobId);
     const ids = videoIds(job);
     await invokeHook(hooks.beforeDatabaseCommit, publicHookJob(job));
     const preparedItems = new Map();
@@ -1296,7 +1330,11 @@ export function createShortVideoDeleteJobService({
     beginImmediate(db);
     try {
       const current = readJob(db, jobId);
-      if (!current || current.owner_id !== ownerId) throw codedError("删除作业 lease 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      if (!current
+        || current.owner_id !== ownerId
+        || String(current.execution_token || "") !== executionToken) {
+        throw codedError("删除作业 lease 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
       const rows = rowsForIds(db, ids);
       if (rows.size !== ids.length) throw codedError("短视频记录在提交前已发生变化", "SHORT_VIDEO_DELETE_CHANGED");
       const references = commitReferenceSnapshotInTransaction(db, referenceSnapshot);
@@ -1357,12 +1395,15 @@ export function createShortVideoDeleteJobService({
       }
       db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('deleted_at', ?)").run(now());
       const result = buildResultFromRows(current, readItems(db, jobId));
-      db.prepare(`
+      const committed = db.prepare(`
         UPDATE short_video_delete_jobs
         SET status = 'cleanup_pending', phase = 'db_committed', result_json = ?,
             error = '', error_code = '', updated_at = ?, version = version + 1
-        WHERE id = ? AND owner_id = ?
-      `).run(JSON.stringify(result), now(), jobId, ownerId);
+        WHERE id = ? AND owner_id = ? AND execution_token = ?
+      `).run(JSON.stringify(result), now(), jobId, ownerId, executionToken);
+      if (Number(committed.changes || 0) !== 1) {
+        throw codedError("删除作业提交 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
       db.prepare(`
         UPDATE short_video_delete_reservations
         SET mutation_mode = 'cleanup', updated_at = ?
@@ -1378,6 +1419,7 @@ export function createShortVideoDeleteJobService({
   async function cleanupCommitted(db, jobId, options = {}) {
     const job = options.claimedJob || claim(db, jobId, options.executionToken);
     if (!job) return readJob(db, jobId);
+    const executionToken = requireActiveExecutionToken(jobId);
     if (databaseDisposition(db, job) !== "committed") {
       throw codedError("数据库删除尚未提交，拒绝清理隔离文件", "SHORT_VIDEO_DELETE_DIRECTION_MISMATCH");
     }
@@ -1393,15 +1435,24 @@ export function createShortVideoDeleteJobService({
         result.coverCleanupError = coverCleanupError;
       }
       if (coverCleanupError) {
-        db.prepare("UPDATE short_video_delete_jobs SET result_json = ?, updated_at = ? WHERE id = ?")
-          .run(JSON.stringify(result), now(), jobId);
+        const pendingResult = db.prepare(`
+          UPDATE short_video_delete_jobs
+          SET result_json = ?, updated_at = ?
+          WHERE id = ? AND owner_id = ? AND execution_token = ?
+        `).run(JSON.stringify(result), now(), jobId, ownerId, executionToken);
+        if (Number(pendingResult.changes || 0) !== 1) {
+          throw codedError("删除作业封面清理 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+        }
         throw codedError("短视频封面清理等待重试", "SHORT_VIDEO_DELETE_COVER_CLEANUP_PENDING", coverCleanupError);
       }
-      db.prepare(`
+      const coverCleaned = db.prepare(`
         UPDATE short_video_delete_jobs
         SET cover_cleanup_done = 1, deleted_stored_covers = ?, result_json = ?, updated_at = ?
-        WHERE id = ? AND owner_id = ?
-      `).run(result.deletedStoredCovers, JSON.stringify(result), now(), jobId, ownerId);
+        WHERE id = ? AND owner_id = ? AND execution_token = ?
+      `).run(result.deletedStoredCovers, JSON.stringify(result), now(), jobId, ownerId, executionToken);
+      if (Number(coverCleaned.changes || 0) !== 1) {
+        throw codedError("删除作业封面清理 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
+      }
     } else {
       result.deletedStoredCovers = Number(currentJob.deleted_stored_covers || 0);
     }
@@ -1439,9 +1490,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state IN ('isolated', 'cleaning')
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(now(), jobId, planned.ordinal, ownerId);
+        `).run(now(), jobId, planned.ordinal, ownerId, executionToken);
         if (Number(intent.changes || 0) !== 1) throw codedError("隔离文件清理 intent CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         db.exec("COMMIT");
       } catch (error) {
@@ -1461,9 +1513,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state = 'cleaning'
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(now(), jobId, planned.ordinal, ownerId);
+        `).run(now(), jobId, planned.ordinal, ownerId, executionToken);
         if (Number(checkpoint.changes || 0) !== 1) throw codedError("隔离文件清理检查点 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         db.exec("COMMIT");
       } catch (error) {
@@ -1487,6 +1540,7 @@ export function createShortVideoDeleteJobService({
   async function rollbackUncommitted(db, jobId, options = {}) {
     const job = options.claimedJob || claim(db, jobId, options.executionToken);
     if (!job) return readJob(db, jobId);
+    const executionToken = requireActiveExecutionToken(jobId);
     if (databaseDisposition(db, job) !== "uncommitted") {
       throw codedError("数据库删除已经提交，拒绝恢复原文件", "SHORT_VIDEO_DELETE_DIRECTION_MISMATCH");
     }
@@ -1508,9 +1562,10 @@ export function createShortVideoDeleteJobService({
             WHERE job_id = ? AND ordinal = ? AND state = 'planned'
               AND EXISTS (
                 SELECT 1 FROM short_video_delete_jobs job
-                WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+                WHERE job.id = short_video_delete_items.job_id
+                  AND job.owner_id = ? AND job.execution_token = ?
               )
-          `).run(now(), jobId, planned.ordinal, ownerId);
+          `).run(now(), jobId, planned.ordinal, ownerId, executionToken);
           if (Number(untouched.changes || 0) !== 1) {
             throw codedError("未隔离文件回滚检查点 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
           }
@@ -1539,9 +1594,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state IN ('planned', 'isolating', 'isolated', 'restoring')
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(now(), jobId, current.ordinal, ownerId);
+        `).run(now(), jobId, current.ordinal, ownerId, executionToken);
         if (Number(intent.changes || 0) !== 1) throw codedError("源文件恢复 intent CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         db.exec("COMMIT");
       } catch (error) {
@@ -1567,9 +1623,10 @@ export function createShortVideoDeleteJobService({
           WHERE job_id = ? AND ordinal = ? AND state = 'restoring'
             AND EXISTS (
               SELECT 1 FROM short_video_delete_jobs job
-              WHERE job.id = short_video_delete_items.job_id AND job.owner_id = ?
+              WHERE job.id = short_video_delete_items.job_id
+                AND job.owner_id = ? AND job.execution_token = ?
             )
-        `).run(JSON.stringify(restoredIdentity), now(), jobId, planned.ordinal, ownerId);
+        `).run(JSON.stringify(restoredIdentity), now(), jobId, planned.ordinal, ownerId, executionToken);
         if (Number(checkpoint.changes || 0) !== 1) throw codedError("源文件恢复检查点 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
         db.exec("COMMIT");
       } catch (error) {
@@ -1585,7 +1642,7 @@ export function createShortVideoDeleteJobService({
   }
 
   async function recoverPending({ db = database(), jobId = "" } = {}) {
-    assertOpen();
+    assertAcceptingWork();
     ensureSchema(db);
     if (recovering) return status(db, { jobId });
     recovering = true;
@@ -1602,20 +1659,10 @@ export function createShortVideoDeleteJobService({
             ORDER BY created_at, id
           `).all();
       for (const row of rows) {
+        if (!jobId && requiresManualIntervention(row.error_code)) continue;
         try {
           await recoverOne(db, row.id);
         } catch (error) {
-          const current = readJob(db, row.id);
-          if (current) {
-            const disposition = databaseDisposition(db, current);
-            rememberPending(
-              db,
-              current.id,
-              disposition === "committed" ? "cleanup_pending" : "rollback_pending",
-              disposition === "committed" ? "cleanup" : "rollback",
-              error
-            );
-          }
           warn?.("[short-video-delete-recovery]", error);
         }
       }
@@ -1629,7 +1676,7 @@ export function createShortVideoDeleteJobService({
     let token = executionToken;
     let ownsExecution = false;
     if (!token) {
-      if (activeExecutionTokenFor(jobId, ownerId)) return readJob(db, jobId);
+      if (activeExecutionTokenFor(jobId)) return readJob(db, jobId);
       token = beginExecution(jobId);
       ownsExecution = true;
     }
@@ -1637,16 +1684,31 @@ export function createShortVideoDeleteJobService({
       const job = claim(db, jobId, token);
       if (!job) return readJob(db, jobId);
       const disposition = databaseDisposition(db, job);
-      if (disposition === "committed") return cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
-      if (disposition === "uncommitted") return rollbackUncommitted(db, jobId, { claimedJob: job, executionToken: token });
+      if (disposition === "committed") return await cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
+      if (disposition === "uncommitted") return await rollbackUncommitted(db, jobId, { claimedJob: job, executionToken: token });
       throw codedError("短视频记录处于部分删除状态，已停止自动文件操作", "SHORT_VIDEO_DELETE_PARTIAL_COMMIT");
+    } catch (error) {
+      const current = readJob(db, jobId);
+      if (current
+        && current.owner_id === ownerId
+        && String(current.execution_token || "") === token) {
+        const disposition = databaseDisposition(db, current);
+        rememberPending(
+          db,
+          current.id,
+          disposition === "committed" ? "cleanup_pending" : "rollback_pending",
+          disposition === "committed" ? "cleanup" : "rollback",
+          error
+        );
+      }
+      throw error;
     } finally {
-      if (ownsExecution) endExecution(jobId, token);
+      if (ownsExecution) endExecution(db, jobId, token);
     }
   }
 
   function status(db = database(), options = {}) {
-    assertOpen();
+    assertAcceptingWork();
     ensureSchema(db);
     const jobId = String(options.jobId || "").trim();
     if (jobId) {
@@ -1661,7 +1723,7 @@ export function createShortVideoDeleteJobService({
     `).all().map((row) => [row.status, Number(row.count || 0)]));
     const pending = db.prepare(`
       SELECT id, status, phase, scope, anchor_id, video_ids_json, attempts,
-             owner_id, lease_until, error_code, created_at, updated_at
+             owner_id, lease_until, execution_token, error_code, created_at, updated_at
       FROM short_video_delete_jobs
       WHERE status IN ('running', 'rollback_pending', 'cleanup_pending')
       ORDER BY created_at, id
@@ -1804,45 +1866,48 @@ export function createShortVideoDeleteJobService({
       }
       const previousOwner = String(job.owner_id || "");
       const previousLease = String(job.lease_until || "");
-      const activeExecutionToken = activeExecutionTokenFor(jobId, previousOwner)
-        || activeExecutionTokenFor(jobId, ownerId);
-      if (activeExecutionToken && activeExecutionToken !== executionToken) {
-        db.exec("COMMIT");
-        return null;
-      }
+      const previousExecutionToken = String(job.execution_token || "");
       const continuingExecution = Boolean(
         executionToken
-        && activeExecutionToken === executionToken
-        && (!previousOwner || previousOwner === ownerId)
+        && previousExecutionToken === executionToken
+        && previousOwner === ownerId
+      );
+      const reclaimingReleasedExecution = Boolean(
+        executionToken
+        && previousOwner === ownerId
+        && previousExecutionToken
+        && relinquishableExecutions.get(String(jobId || "")) === previousExecutionToken
       );
       if (
-        previousOwner
-        && !continuingExecution
-        && previousOwner !== ownerId
-        && ownerStillExclusive(previousOwner, previousLease)
+        !continuingExecution
+        && !reclaimingReleasedExecution
+        && durableExecutionStillExclusive(previousOwner, previousLease, previousExecutionToken)
       ) {
         db.exec("COMMIT");
         return null;
       }
       const result = db.prepare(`
         UPDATE short_video_delete_jobs
-        SET owner_id = ?, lease_until = ?, attempts = attempts + 1,
+        SET owner_id = ?, lease_until = ?, execution_token = ?, attempts = attempts + 1,
             updated_at = ?, version = version + 1
-        WHERE id = ? AND version = ? AND owner_id = ? AND lease_until = ?
+        WHERE id = ? AND version = ? AND owner_id = ? AND lease_until = ? AND execution_token = ?
           AND status IN ('running', 'rollback_pending', 'cleanup_pending')
       `).run(
         ownerId,
         leaseUntil(),
+        executionToken,
         now(),
         jobId,
         Number(job.version || 0),
         previousOwner,
-        previousLease
+        previousLease,
+        previousExecutionToken
       );
       if (Number(result.changes || 0) !== 1) {
         db.exec("COMMIT");
         return null;
       }
+      relinquishableExecutions.delete(String(jobId || ""));
       db.exec("COMMIT");
       return readJob(db, jobId);
     } catch (error) {
@@ -1852,29 +1917,40 @@ export function createShortVideoDeleteJobService({
   }
 
   function close(db = null) {
-    if (closed) return;
+    if (activeExecutions.size) {
+      closing = true;
+      return false;
+    }
     closed = true;
+    closing = false;
     referenceSnapshotsByJob.clear();
-    ACTIVE_OWNER_IDS.delete(ownerId);
-    if (!db) return;
+    if (!db) return activeExecutions.size === 0;
     try {
-      db.prepare(`
+      const release = db.prepare(`
         UPDATE short_video_delete_jobs
-        SET owner_id = '', lease_until = '', updated_at = ?, version = version + 1
-        WHERE owner_id = ? AND status IN ('running', 'rollback_pending', 'cleanup_pending')
-      `).run(now(), ownerId);
+        SET owner_id = '', lease_until = '', execution_token = '', updated_at = ?, version = version + 1
+        WHERE id = ? AND owner_id = ? AND execution_token = ?
+          AND status IN ('running', 'rollback_pending', 'cleanup_pending')
+      `);
+      for (const [jobId, executionToken] of relinquishableExecutions) {
+        release.run(now(), jobId, ownerId, executionToken);
+      }
+      relinquishableExecutions.clear();
+      return true;
     } catch (error) {
       warn?.("[short-video-delete-owner-close]", error);
+      return false;
     }
   }
 
   function heartbeat(db, jobId) {
+    const executionToken = requireActiveExecutionToken(jobId);
     const result = db.prepare(`
       UPDATE short_video_delete_jobs
       SET lease_until = ?, updated_at = ?, version = version + 1
-      WHERE id = ? AND owner_id = ?
+      WHERE id = ? AND owner_id = ? AND execution_token = ?
         AND status IN ('running', 'rollback_pending', 'cleanup_pending')
-    `).run(leaseUntil(), now(), jobId, ownerId);
+    `).run(leaseUntil(), now(), jobId, ownerId, executionToken);
     if (Number(result.changes || 0) !== 1) {
       throw codedError("删除作业 lease 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
     }
@@ -1893,7 +1969,8 @@ export function createShortVideoDeleteJobService({
 
   function finishJobInTransaction(db, jobId, terminalStatus, result) {
     const timestamp = now();
-    const job = readJob(db, jobId);
+    const job = requireOwnedJob(db, jobId);
+    const executionToken = requireActiveExecutionToken(jobId);
     const expectedFileReservationKeys = new Set(readItems(db, jobId)
       .filter((item) => ["delete", "missing", "alias", "retained"].includes(item.disposition))
       .flatMap((item) => [
@@ -1917,8 +1994,8 @@ export function createShortVideoDeleteJobService({
     const update = db.prepare(`
       UPDATE short_video_delete_jobs
       SET status = ?, phase = ?, result_json = ?, error = '', error_code = '',
-          owner_id = '', lease_until = '', updated_at = ?, finished_at = ?, version = version + 1
-      WHERE id = ? AND owner_id = ?
+          owner_id = '', lease_until = '', execution_token = '', updated_at = ?, finished_at = ?, version = version + 1
+      WHERE id = ? AND owner_id = ? AND execution_token = ?
     `).run(
       terminalStatus,
       terminalStatus === "completed" ? "completed" : "rolled_back",
@@ -1926,7 +2003,8 @@ export function createShortVideoDeleteJobService({
       timestamp,
       timestamp,
       jobId,
-      ownerId
+      ownerId,
+      executionToken
     );
     if (Number(update.changes || 0) !== 1) {
       throw codedError("删除作业终态 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
@@ -1939,10 +2017,10 @@ export function createShortVideoDeleteJobService({
     try {
       const update = db.prepare(`
         UPDATE short_video_delete_jobs
-        SET status = ?, phase = ?, error = ?, error_code = ?, owner_id = '', lease_until = '',
-            updated_at = ?, version = version + 1
-        WHERE id = ? AND owner_id = ? AND status NOT IN ('completed', 'rolled_back')
-      `).run(statusValue, phase, message, code, now(), jobId, ownerId);
+        SET status = ?, phase = ?, error = ?, error_code = ?, updated_at = ?, version = version + 1
+        WHERE id = ? AND owner_id = ? AND execution_token = ?
+          AND status NOT IN ('completed', 'rolled_back')
+      `).run(statusValue, phase, message, code, now(), jobId, ownerId, requireActiveExecutionToken(jobId));
       if (Number(update.changes || 0) !== 1) {
         warn?.("[short-video-delete-journal-owner-lost]", jobId);
       }
@@ -1952,12 +2030,13 @@ export function createShortVideoDeleteJobService({
   }
 
   function updateJob(db, jobId, values) {
+    const executionToken = requireActiveExecutionToken(jobId);
     const result = db.prepare(`
       UPDATE short_video_delete_jobs
       SET status = ?, phase = ?, error = ?, error_code = ?, updated_at = ?, version = version + 1
-      WHERE id = ? AND owner_id = ?
+      WHERE id = ? AND owner_id = ? AND execution_token = ?
         AND status IN ('running', 'rollback_pending', 'cleanup_pending')
-    `).run(values.status, values.phase, values.error || "", values.errorCode || "", now(), jobId, ownerId);
+    `).run(values.status, values.phase, values.error || "", values.errorCode || "", now(), jobId, ownerId, executionToken);
     if (Number(result.changes || 0) !== 1) {
       throw codedError("删除作业 lease 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
     }
@@ -2249,6 +2328,7 @@ export function createShortVideoDeleteJobService({
       if (Number(updated.changes || 0) !== 1) {
         throw codedError("guard 发布模式 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
       }
+      relinquishableExecutions.delete(String(jobId || ""));
       db.exec("COMMIT");
     } catch (error) {
       rollback(db);
@@ -3017,13 +3097,15 @@ export function createShortVideoDeleteJobService({
     const job = readJob(db, jobId);
     if (!job || !ACTIVE_STATUSES.includes(job.status)) return error;
     error.statusCode = job.status === "rollback_pending" ? 500 : Number(error.statusCode || 500);
-    error.retryable = true;
+    const manualInterventionRequired = requiresManualIntervention(job.error_code || error.code);
+    error.retryable = !manualInterventionRequired;
     error.publicBody = {
       ok: false,
       accepted: false,
       pending: true,
       recoveryRequired: true,
-      retryable: true,
+      retryable: !manualInterventionRequired,
+      manualInterventionRequired,
       status: String(job.status || "rollback_pending"),
       jobId: String(job.id || ""),
       code: publicDeleteErrorCode(job.error_code || error.code)
@@ -3057,12 +3139,29 @@ export function createShortVideoDeleteJobService({
     const ids = parseJson(row.video_ids_json, []);
     const pending = ACTIVE_STATUSES.includes(String(row.status || ""));
     const leaseExpired = pending && !leaseActive(row.lease_until);
+    const localExecutionToken = activeExecutionTokenFor(row.id);
+    const sameProcessExecutionFence = pending
+      && ownerProcessId(row.owner_id) === process.pid
+      && (!localExecutionToken || String(row.execution_token || "") !== localExecutionToken);
     const blockedByActiveOwner = pending && (
-      Boolean(activeExecutionTokenFor(row.id, row.owner_id) || activeExecutionTokenFor(row.id, ownerId))
-      || (String(row.owner_id || "") !== ownerId && ownerStillExclusive(row.owner_id, row.lease_until))
+      Boolean(String(row.execution_token || ""))
+      && String(row.execution_token || "") !== localExecutionToken
+        ? durableExecutionStillExclusive(row.owner_id, row.lease_until, row.execution_token)
+        : Boolean(localExecutionToken)
+          || ownerStillExclusive(row.owner_id, row.lease_until)
     );
     const stalled = leaseExpired && blockedByActiveOwner;
-    const requiresAttention = row.status === "rollback_pending" || stalled || Boolean(row.error_code);
+    // A worker_thread crash cannot be distinguished from an active sibling
+    // isolate by PID liveness. Keep the durable token fenced until a process
+    // restart proves the old PID dead, and expose the availability tradeoff
+    // instead of advertising unsafe automatic recovery.
+    const processRestartRequired = sameProcessExecutionFence;
+    const manualInterventionRequired = requiresManualIntervention(row.error_code)
+      || processRestartRequired;
+    const requiresAttention = row.status === "rollback_pending"
+      || stalled
+      || processRestartRequired
+      || Boolean(row.error_code);
     return {
       id: row.id,
       status: row.status,
@@ -3070,12 +3169,17 @@ export function createShortVideoDeleteJobService({
       scope: row.scope,
       videoCount: Array.isArray(ids) ? ids.length : 0,
       attempts: Number(row.attempts || 0),
+      owner_id: String(row.owner_id || ""),
+      lease_until: String(row.lease_until || ""),
       pending,
       requiresAttention,
       stalled,
       leaseExpired,
       blockedByActiveOwner,
-      recoverable: pending && !blockedByActiveOwner,
+      recoverable: pending && !blockedByActiveOwner && !manualInterventionRequired,
+      retryable: pending && !blockedByActiveOwner && !manualInterventionRequired,
+      manualInterventionRequired,
+      processRestartRequired,
       errorCode: publicDeleteErrorCode(row.error_code),
       error: publicPendingMessage(row.error_code),
       createdAt: row.created_at,
@@ -3130,7 +3234,12 @@ export function createShortVideoDeleteJobService({
 
   function requireOwnedJob(db, jobId) {
     const job = readJob(db, jobId);
-    if (!job || job.owner_id !== ownerId || !ACTIVE_STATUSES.includes(job.status)) {
+    const executionToken = activeExecutionTokenFor(jobId);
+    if (!job
+      || job.owner_id !== ownerId
+      || !executionToken
+      || String(job.execution_token || "") !== executionToken
+      || !ACTIVE_STATUSES.includes(job.status)) {
       throw codedError("删除作业 lease 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
     }
     return job;
@@ -3169,18 +3278,39 @@ export function createShortVideoDeleteJobService({
   function ownerStillExclusive(value, leaseValue) {
     const previousOwner = String(value || "");
     if (!previousOwner) return false;
-    if (ACTIVE_OWNER_IDS.has(previousOwner)) return true;
-    const match = /^short-video-delete-owner-(\d+)-/.exec(previousOwner);
-    if (!match) return leaseActive(leaseValue);
-    const pid = Number(match[1]);
-    if (pid === process.pid) return false;
+    const pid = ownerProcessId(previousOwner);
+    if (!pid) return leaseActive(leaseValue);
+    // A different worker_thread has the same PID. A matching durable execution
+    // token is the only proof that the caller owns that work; process liveness
+    // must otherwise keep the fence closed even when the timestamp is stale.
+    if (pid === process.pid) return true;
     return ownerProcessAlive(previousOwner);
   }
 
+  function requiresManualIntervention(code) {
+    const value = String(code || "");
+    // Recovery classifications are fail-closed: new or unknown filesystem
+    // integrity failures are manual until they are explicitly audited as a
+    // safe automatic retry.
+    return Boolean(value) && !AUTOMATIC_RECOVERY_CODES.has(value);
+  }
+
+  function durableExecutionStillExclusive(previousOwner, previousLease, previousExecutionToken) {
+    if (previousExecutionToken) {
+      // A durable execution token is a fence, not a lease hint. It may only be
+      // displaced when its standard PID owner is provably dead; unknown owner
+      // formats and missing owners remain fail-closed.
+      const pid = ownerProcessId(previousOwner);
+      if (!pid) return true;
+      return ownerProcessAlive(previousOwner);
+    }
+    if (!previousOwner) return false;
+    return ownerStillExclusive(previousOwner, previousLease);
+  }
+
   function ownerProcessAlive(value) {
-    const match = /^short-video-delete-owner-(\d+)-/.exec(String(value || ""));
-    if (!match) return String(value || "") !== "";
-    const pid = Number(match[1]);
+    const pid = ownerProcessId(value);
+    if (!pid) return String(value || "") !== "";
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
       process.kill(pid, 0);
@@ -3224,28 +3354,63 @@ export function createShortVideoDeleteJobService({
     await hook(payload);
   }
 
-  function beginExecution(jobId) {
+  function ownerProcessId(value) {
+    const match = /^short-video-delete-owner-(\d+)-/.exec(String(value || ""));
+    if (!match) return 0;
+    const pid = Number(match[1]);
+    return Number.isInteger(pid) && pid > 0 ? pid : 0;
+  }
+
+  function newExecutionToken() {
+    return crypto.randomBytes(24).toString("hex");
+  }
+
+  function beginExecution(jobId, executionToken = newExecutionToken()) {
     const key = String(jobId || "");
-    const registryKey = activeExecutionKey(key, ownerId);
-    if (ACTIVE_JOB_EXECUTIONS.has(registryKey)) {
+    if (activeExecutions.has(key)) {
       throw codedError("删除作业已有活动执行", "SHORT_VIDEO_DELETE_EXECUTION_ACTIVE");
     }
-    const token = crypto.randomBytes(24).toString("hex");
-    ACTIVE_JOB_EXECUTIONS.set(registryKey, token);
+    activeExecutions.set(key, executionToken);
+    return executionToken;
+  }
+
+  function endExecution(db, jobId, executionToken) {
+    const key = String(jobId || "");
+    if (activeExecutions.get(key) !== executionToken) return;
+    try {
+      const released = db.prepare(`
+        UPDATE short_video_delete_jobs
+        SET owner_id = '', lease_until = '', execution_token = '', updated_at = ?, version = version + 1
+        WHERE id = ? AND owner_id = ? AND execution_token = ?
+          AND status IN ('running', 'rollback_pending', 'cleanup_pending')
+      `).run(now(), key, ownerId, executionToken);
+      if (Number(released.changes || 0) === 1) {
+        relinquishableExecutions.delete(key);
+      } else {
+        const current = readJob(db, key);
+        if (current
+          && ACTIVE_STATUSES.includes(String(current.status || ""))
+          && current.owner_id === ownerId
+          && String(current.execution_token || "") === executionToken) {
+          relinquishableExecutions.set(key, executionToken);
+        }
+      }
+    } catch (error) {
+      relinquishableExecutions.set(key, executionToken);
+      warn?.("[short-video-delete-execution-release]", error);
+    } finally {
+      activeExecutions.delete(key);
+    }
+  }
+
+  function activeExecutionTokenFor(jobId) {
+    return activeExecutions.get(String(jobId || "")) || "";
+  }
+
+  function requireActiveExecutionToken(jobId) {
+    const token = activeExecutionTokenFor(jobId);
+    if (!token) throw codedError("删除作业执行 token 已丢失", "SHORT_VIDEO_DELETE_LEASE_LOST");
     return token;
-  }
-
-  function endExecution(jobId, executionToken) {
-    const registryKey = activeExecutionKey(jobId, ownerId);
-    if (ACTIVE_JOB_EXECUTIONS.get(registryKey) === executionToken) ACTIVE_JOB_EXECUTIONS.delete(registryKey);
-  }
-
-  function activeExecutionTokenFor(jobId, executionOwnerId) {
-    return ACTIVE_JOB_EXECUTIONS.get(activeExecutionKey(jobId, executionOwnerId)) || "";
-  }
-
-  function activeExecutionKey(jobId, executionOwnerId) {
-    return `${String(executionOwnerId || "")}\0${String(jobId || "")}`;
   }
 
   return {
@@ -3350,13 +3515,17 @@ function parseJson(value, fallback) {
 }
 
 function ensureColumn(db, table, column, definition) {
-  const hasColumn = () => db.prepare(`PRAGMA table_info(${table})`).all().some((item) => item.name === column);
+  const hasColumn = () => schemaHasColumn(db, table, column);
   if (hasColumn()) return;
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch (error) {
     if (!hasColumn()) throw error;
   }
+}
+
+function schemaHasColumn(db, table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((item) => item.name === column);
 }
 
 function beginImmediate(db) {

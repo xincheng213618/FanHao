@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 import { createShortVideoCoverDatabase } from "../src/modules/short-videos/server/cover-database.js";
 import { SHORT_VIDEO_DELETE_QUARANTINE_DIR } from "../src/modules/short-videos/server/delete-job-service.js";
@@ -12,6 +13,11 @@ import { createShortVideoStore } from "../src/modules/short-videos/server/store.
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const CHILD = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "short_video_delete_fault_child.mjs");
+const WORKER_THREAD_CHILD = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "short_video_delete_worker_thread.mjs"
+);
 const REBASE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "rebase_short_video_storage.mjs");
 const QUEUED_WRITER_CHILD = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -36,6 +42,7 @@ const SUCCESS_KEYS = [
 
 await verifySuccessfulCompatibilityAndReservations();
 await verifyBatchMissingIdsFailAtomically();
+await verifyV3ActiveJournalMigration();
 await verifyProtocolMigrationAndTombstones();
 await verifyCanonicalScannerTombstoneConsumption();
 await verifyAssetTransferSnapshotCas();
@@ -45,6 +52,7 @@ await verifyGuardNoClobberAndExclusiveFallback();
 await verifyPublishedGuardTempCleanupRecovery();
 await verifyExclusiveGuardTempCleanupRecovery();
 await verifyActiveExecuteRecoveryFencing();
+await verifyWorkerThreadDurableExecutionFence();
 await verifyInPlaceOverwriteFailsClosed();
 await verifyPostIsolationOpenHandleOverwriteFailsClosed();
 await verifyAfterAllIsolatedBusyRecovery();
@@ -102,6 +110,107 @@ function verifyOfflineRebaseBoundary() {
   assert.match(source, /assertShortVideoReferenceProjection/, "storage rebase must reconcile the 4+1 path projection before commit");
 }
 
+async function verifyV3ActiveJournalMigration() {
+  const fixture = createFixture({ openStore: false });
+  let store = null;
+  try {
+    const bootstrap = createShortVideoStore(storeOptions(fixture));
+    bootstrap.summary();
+    bootstrap.close();
+    const db = openDb(fixture.dbPath);
+    try {
+      const tableNames = [
+        "short_video_delete_reservations",
+        "short_video_delete_items",
+        "short_video_delete_jobs",
+        "short_video_path_references",
+        "short_video_path_tombstones",
+        "short_video_delete_video_tombstones"
+      ];
+      const schemas = new Map(db.prepare(`
+        SELECT name, sql FROM sqlite_schema
+        WHERE type = 'table' AND name IN (${tableNames.map(() => "?").join(", ")})
+      `).all(...tableNames).map((row) => [row.name, row.sql]));
+      for (const trigger of db.prepare(`
+        SELECT name FROM sqlite_schema
+        WHERE type = 'trigger' AND name LIKE 'trg_short_video_%'
+      `).all()) {
+        db.exec(`DROP TRIGGER ${trigger.name}`);
+      }
+      db.exec("PRAGMA foreign_keys = OFF");
+      for (const table of tableNames) db.exec(`DROP TABLE ${table}`);
+      for (const table of tableNames.slice().reverse()) {
+        let sql = String(schemas.get(table) || "");
+        if (table === "short_video_delete_jobs") {
+          sql = sql.replace(/,\s*execution_token TEXT NOT NULL DEFAULT ''/u, "");
+        }
+        if (table === "short_video_delete_items") {
+          sql = sql.replace(/,\s*guard_publish_mode TEXT NOT NULL DEFAULT ''/u, "");
+        }
+        assert(sql, `v3 migration fixture requires captured schema for ${table}`);
+        db.exec(sql);
+      }
+      db.exec("PRAGMA foreign_keys = ON");
+      db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '3')").run();
+      db.prepare(`
+        INSERT INTO short_videos (id, source_path, imported_at, updated_at)
+        VALUES ('v3-active-video', '', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `).run();
+      db.prepare(`
+        INSERT INTO short_video_delete_jobs (
+          id, status, phase, scope, anchor_id, video_ids_json, quarantine_token,
+          owner_id, lease_until, version, attempts, created_at, updated_at
+        ) VALUES ('v3-active-job', 'running', 'planned', 'single', 'v3-active-video',
+                  '["v3-active-video"]', 'v3-active-token', '', '', 3, 1,
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `).run();
+      db.prepare(`
+        INSERT INTO short_video_delete_reservations (
+          job_id, kind, reservation_key, original_value, mutation_mode,
+          released_at, created_at, updated_at
+        ) VALUES ('v3-active-job', 'video', 'v3-active-video', 'v3-active-video', '', '',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `).run();
+      assert.equal(schemaColumnCount(db, "short_video_delete_jobs", "execution_token"), 0);
+      assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_mode"), 0);
+      assert.equal(
+        db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "3"
+      );
+    } finally {
+      db.close();
+    }
+
+    store = createShortVideoStore(storeOptions(fixture));
+    const migratedStatus = store.summary();
+    assert(migratedStatus, "opening the v3 fixture must initialize the ordinary store");
+    const migrated = openDb(fixture.dbPath);
+    try {
+      assert.equal(
+        migrated.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "4"
+      );
+      assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
+      assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_mode"), 1);
+      assert.equal(migrated.prepare("SELECT status FROM short_video_delete_jobs WHERE id = 'v3-active-job'").get()?.status, "running");
+    } finally {
+      migrated.close();
+    }
+    await store.recoverDeleteJobs({ jobId: "v3-active-job" });
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
+    assert.equal(videoExists(fixture.dbPath, "v3-active-video"), true);
+    assertNoActiveReservations(fixture.dbPath);
+  } finally {
+    store?.close();
+    closeFixture(fixture);
+  }
+}
+
+function schemaColumnCount(db, table, column) {
+  return Number(db.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info(?) WHERE name = ?`)
+    .get(table, column)?.count || 0);
+}
+
 async function verifyProtocolMigrationAndTombstones() {
   const fixture = createFixture({ openStore: false });
   let store = null;
@@ -140,6 +249,7 @@ async function verifyProtocolMigrationAndTombstones() {
         1,
         "protocol v4 must persist the guard publication mode"
       );
+      assert.equal(schemaColumnCount(afterMigration, "short_video_delete_jobs", "execution_token"), 1);
       assert.equal(Number(afterMigration.prepare("SELECT COUNT(*) AS count FROM short_video_path_references").get()?.count || 0), 1);
       assertReferenceProjectionMatches(afterMigration);
       const propertyPaths = ["source", "cover", "music", "data", "asset"]
@@ -591,10 +701,14 @@ async function verifyRollbackAndCleanupRecovery() {
     await assert.rejects(() => occupied.store.deleteVideo("occupied"));
     assert.equal(videoExists(occupied.dbPath, "occupied"), true);
     assert.equal(fs.readFileSync(source, "utf8"), "foreign-replacement", "rollback must preserve a replacement at the original path");
-    assert.equal(jobRows(occupied.dbPath)[0]?.status, "rollback_pending");
+    const occupiedJob = jobRows(occupied.dbPath)[0];
+    assert.equal(occupiedJob?.status, "rollback_pending");
+    const automatic = await occupied.store.recoverDeleteJobs();
+    assert.equal(automatic.jobs.find((job) => job.id === occupiedJob.id)?.manualInterventionRequired, true);
+    assert.equal(fs.readFileSync(source, "utf8"), "foreign-replacement", "automatic recovery must not touch a manual-intervention replacement");
     fs.unlinkSync(source);
     occupied.hooks.afterItemIsolated = null;
-    await occupied.store.recoverDeleteJobs();
+    await occupied.store.recoverDeleteJobs({ jobId: occupiedJob.id });
     assert.equal(fs.readFileSync(source, "utf8"), "original-video");
     assert.equal(jobRows(occupied.dbPath)[0]?.status, "rolled_back");
     assertNoActiveReservations(occupied.dbPath);
@@ -767,10 +881,11 @@ async function verifyGuardNoClobberAndExclusiveFallback() {
     );
     assert.equal(fs.readFileSync(source, "utf8"), "guard-race-replacement", "guard publication must never replace a newly-created destination");
     assert.equal(videoExists(race.dbPath, "guard-race"), true);
-    assert.equal(jobRows(race.dbPath)[0]?.status, "rollback_pending");
+    const raceJob = jobRows(race.dbPath)[0];
+    assert.equal(raceJob?.status, "rollback_pending");
     fs.unlinkSync(source);
     race.hooks.beforeGuardPublish = null;
-    await race.store.recoverDeleteJobs();
+    await race.store.recoverDeleteJobs({ jobId: raceJob.id });
     assert.equal(fs.readFileSync(source, "utf8"), "guard-original");
     assert.equal(jobRows(race.dbPath)[0]?.status, "rolled_back");
   } finally {
@@ -965,6 +1080,157 @@ async function verifyActiveExecuteRecoveryFencing() {
   }
 }
 
+async function verifyWorkerThreadDurableExecutionFence() {
+  const fixture = createFixture({ openStore: false });
+  let executeWorker = null;
+  try {
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    const source = writeMedia(fixture.root, "worker-fence/video.mp4", "worker-fence-original");
+    seedVideo(fixture.dbPath, { id: "worker-fence", sourcePath: source });
+
+    executeWorker = new Worker(WORKER_THREAD_CHILD, {
+      workerData: {
+        role: "execute",
+        dbPath: fixture.dbPath,
+        coverDbPath: fixture.coverDbPath,
+        root: fixture.root,
+        videoId: "worker-fence"
+      }
+    });
+    const paused = await waitForWorkerMessage(executeWorker, "paused");
+    assert.equal(paused.pid, process.pid, "worker_threads must share the process PID for this fence test");
+    const before = jobRows(fixture.dbPath)[0];
+    assert.equal(before?.id, paused.jobId);
+    assert.equal(before?.phase, "isolating");
+    assert.equal(deleteItemRows(fixture.dbPath)[0]?.state, "isolating");
+    assert.equal(fs.readFileSync(source, "utf8"), "worker-fence-original", "A must pause before physical rename");
+    assert.match(before?.execution_token || "", /^[0-9a-f]{48}$/);
+    const expired = openDb(fixture.dbPath);
+    try {
+      expired.prepare("UPDATE short_video_delete_jobs SET lease_until = ? WHERE id = ?")
+        .run(new Date(Date.now() - 60_000).toISOString(), before.id);
+    } finally {
+      expired.close();
+    }
+
+    const firstRecovery = await runRecoveryWorker(fixture, before.id);
+    assert.equal(firstRecovery.pid, process.pid);
+    assert.equal(firstRecovery.result.job?.blockedByActiveOwner, true);
+    assert.equal(firstRecovery.result.job?.recoverable, false);
+    assert.equal(firstRecovery.result.job?.owner_id, before.owner_id);
+    assert.match(firstRecovery.result.job?.lease_until || "", /^\d{4}-\d{2}-\d{2}T/u);
+    assert.equal(firstRecovery.result.job?.processRestartRequired, true);
+    assertWorkerFenceUnchanged(fixture, before, source, "cross-isolate recovery");
+
+    executeWorker.postMessage({ type: "close" });
+    const closeResult = await waitForWorkerMessage(executeWorker, "close-result");
+    assert.equal(closeResult.closed, false, "close must defer database shutdown while execute owns a durable token");
+    const secondRecovery = await runRecoveryWorker(fixture, before.id);
+    assert.equal(secondRecovery.result.job?.blockedByActiveOwner, true);
+    assert.equal(secondRecovery.result.job?.recoverable, false);
+    assert.equal(secondRecovery.result.job?.retryable, false);
+    assert.equal(secondRecovery.result.job?.manualInterventionRequired, true);
+    assert.equal(secondRecovery.result.job?.processRestartRequired, true);
+    assertWorkerFenceUnchanged(fixture, before, source, "close-while-execute recovery");
+
+    executeWorker.postMessage({ type: "resume" });
+    const finished = await waitForWorkerMessage(executeWorker, "finished");
+    assert.equal(finished.result.status, "completed");
+    await waitForWorkerExit(executeWorker);
+    executeWorker = null;
+    assert.equal(fs.existsSync(source), false);
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "completed");
+    assert.equal(jobRows(fixture.dbPath)[0]?.execution_token, "");
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+  } finally {
+    if (executeWorker) await terminateWorker(executeWorker);
+    closeFixture(fixture);
+  }
+}
+
+async function runRecoveryWorker(fixture, jobId) {
+  const worker = new Worker(WORKER_THREAD_CHILD, {
+    workerData: {
+      role: "recover",
+      dbPath: fixture.dbPath,
+      coverDbPath: fixture.coverDbPath,
+      root: fixture.root,
+      jobId
+    }
+  });
+  try {
+    const result = await waitForWorkerMessage(worker, "recovered");
+    await waitForWorkerExit(worker);
+    return result;
+  } catch (error) {
+    await terminateWorker(worker);
+    throw error;
+  }
+}
+
+function assertWorkerFenceUnchanged(fixture, before, source, label) {
+  const after = jobRows(fixture.dbPath)[0];
+  assert.equal(after.status, before.status, `${label} must not change status`);
+  assert.equal(after.phase, before.phase, `${label} must not change phase`);
+  assert.equal(after.owner_id, before.owner_id, `${label} must not replace owner`);
+  assert.equal(after.execution_token, before.execution_token, `${label} must not replace execution token`);
+  assert.equal(after.attempts, before.attempts, `${label} must not increment attempts`);
+  assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
+  assert.equal(fs.readFileSync(source, "utf8"), "worker-fence-original");
+}
+
+function waitForWorkerMessage(worker, expectedType, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error(`timed out waiting for worker message: ${expectedType}`)), timeoutMs);
+    const onMessage = (message) => {
+      if (message?.type === "error") {
+        finish(new Error(`worker failed: ${message.code} ${message.message}\n${message.stack}`));
+        return;
+      }
+      if (message?.type !== expectedType) return;
+      finish(null, message);
+    };
+    const onError = (error) => finish(error);
+    const onExit = (code) => {
+      if (code !== 0) finish(new Error(`worker exited with code ${code} before ${expectedType}`));
+    };
+    const finish = (error, value) => {
+      clearTimeout(timer);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+  });
+}
+
+function waitForWorkerExit(worker, timeoutMs = 10_000) {
+  if (worker.threadId === -1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out waiting for worker exit")), timeoutMs);
+    worker.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`worker exited with code ${code}`));
+    });
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function terminateWorker(worker) {
+  try { await worker.terminate(); } catch {}
+}
+
 async function verifyPostIsolationOpenHandleOverwriteFailsClosed() {
   const fixture = createFixture();
   const fileSize = 256 * 1024;
@@ -1011,7 +1277,8 @@ async function verifyPostIsolationOpenHandleOverwriteFailsClosed() {
     );
     assert.equal(overwriteObserved, true);
     assert.equal(videoExists(fixture.dbPath, "open-handle-overwrite"), true);
-    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rollback_pending");
+    const repairedJob = jobRows(fixture.dbPath)[0];
+    assert.equal(repairedJob?.status, "rollback_pending");
     assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
     const pendingItem = deleteItemRows(fixture.dbPath)[0];
     assert.equal(pendingItem.state, "isolated");
@@ -1024,7 +1291,7 @@ async function verifyPostIsolationOpenHandleOverwriteFailsClosed() {
     sourceHandle = null;
     fixture.hooks.afterItemIsolated = null;
 
-    await fixture.store.recoverDeleteJobs();
+    await fixture.store.recoverDeleteJobs({ jobId: repairedJob.id });
     assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
     assert.equal(videoExists(fixture.dbPath, "open-handle-overwrite"), true);
     assert.deepEqual(fs.readFileSync(source), original, "repairing the owned quarantine bytes must allow a byte-exact rollback");
@@ -1700,8 +1967,21 @@ async function verifyLeaseClaimFencing() {
 
     first.close();
     first = null;
+    const afterClose = jobRows(fixture.dbPath)[0];
+    assert.equal(afterClose?.status, "running", "close must not release an execution without its exact durable token");
+    assert.equal(afterClose?.owner_id, firstOwner);
+    const restarted = openDb(fixture.dbPath);
+    try {
+      restarted.prepare(`
+        UPDATE short_video_delete_jobs
+        SET owner_id = 'short-video-delete-owner-2147483647-dead'
+        WHERE id = 'lease-probe-job' AND owner_id = ? AND execution_token = ''
+      `).run(firstOwner);
+    } finally {
+      restarted.close();
+    }
     await recovery.recoverDeleteJobs({ jobId: "lease-probe-job" });
-    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back", "closing the old service must relinquish its exact owner id for recovery");
+    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back", "a provably dead previous process must remain recoverable");
     assert.equal(videoExists(fixture.dbPath, "lease-probe"), true);
     assertNoActiveReservations(fixture.dbPath);
   } finally {
@@ -1787,6 +2067,7 @@ async function verifyQueuedCleanupWriterFence() {
 
 async function verifyKilledProcessRecovery(boundary, expectedStatus) {
   const fixture = createFixture({ openStore: false });
+  let primaryError = null;
   try {
     const first = writeMedia(fixture.root, `${boundary}/first.mp4`, `${boundary}-first`);
     const second = writeMedia(fixture.root, `${boundary}/second.mp4`, `${boundary}-second`);
@@ -1863,6 +2144,7 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
     assert.equal(videoExists(fixture.dbPath, `${boundary}-1`), !expectedCommitted);
     assert.equal(videoExists(fixture.dbPath, `${boundary}-2`), !expectedCommitted);
 
+    const recovery = createShortVideoStore(storeOptions(fixture));
     if (boundary === "fallback_guard_published") {
       const db = openDb(fixture.dbPath);
       try {
@@ -1874,9 +2156,11 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
       } finally {
         db.close();
       }
-      const untrustedRecovery = createShortVideoStore(storeOptions(fixture));
-      await untrustedRecovery.recoverDeleteJobs();
-      untrustedRecovery.close();
+      const manualStatus = await recovery.recoverDeleteJobs();
+      const manualJob = manualStatus.jobs.find((job) => job.id === before.id);
+      assert.equal(manualJob?.manualInterventionRequired, true);
+      assert.equal(manualJob?.recoverable, false);
+      assert.equal(manualJob?.retryable, false);
       assert.equal(jobRows(fixture.dbPath)[0]?.status, "rollback_pending");
       assert.equal(jobRows(fixture.dbPath)[0]?.error_code, "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
       assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
@@ -1890,13 +2174,17 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
       } finally {
         restoreMode.close();
       }
+      await recovery.recoverDeleteJobs();
+      assert.equal(
+        jobRows(fixture.dbPath)[0]?.status,
+        "rollback_pending",
+        "automatic recovery must skip a manual-intervention job even after the fixture repairs its guard mode"
+      );
     }
 
-    const recovery = createShortVideoStore(storeOptions(fixture));
     // Production passes skipStartupMaintenance=true. Opening through this call
     // must still run delete recovery before serving ordinary store work.
-    await recovery.recoverDeleteJobs();
-    recovery.close();
+    await recovery.recoverDeleteJobs(boundary === "fallback_guard_published" ? { jobId: before.id } : undefined);
 
     const recovered = jobRows(fixture.dbPath)[0];
     assert.equal(recovered?.status, expectedStatus, `${boundary} recovery must converge to ${expectedStatus}`);
@@ -1910,12 +2198,19 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
     assertNoActiveReservations(fixture.dbPath);
     assertNoQuarantine(fixture.root);
 
-    const secondRecovery = createShortVideoStore(storeOptions(fixture));
-    await secondRecovery.recoverDeleteJobs();
-    secondRecovery.close();
+    await recovery.recoverDeleteJobs();
+    assert.equal(recovery.close(), true, `${boundary} recovery must release its database handles`);
     assert.equal(jobRows(fixture.dbPath)[0]?.status, expectedStatus, "recovery must be idempotent");
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    closeFixture(fixture);
+    try {
+      closeFixture(fixture);
+    } catch (cleanupError) {
+      if (!primaryError) throw cleanupError;
+      console.error(`fixture cleanup also failed after ${boundary}: ${cleanupError?.message || cleanupError}`);
+    }
   }
 }
 

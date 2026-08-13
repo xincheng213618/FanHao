@@ -311,6 +311,12 @@ async function verifyPendingStartupFailsClosed() {
         SET mutation_mode = '', updated_at = ?
         WHERE job_id = 'runtime-pending-start' AND released_at = ''
       `).run(now);
+      repair.prepare(`
+        UPDATE short_video_delete_jobs
+        SET error = '', error_code = '', updated_at = ?
+        WHERE id = 'runtime-pending-start'
+          AND owner_id = '' AND execution_token = ''
+      `).run(now);
       repair.exec("COMMIT");
     } catch (error) {
       try { repair.exec("ROLLBACK"); } catch {}

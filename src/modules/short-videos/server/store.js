@@ -387,13 +387,20 @@ export function createShortVideoStore(options = {}) {
   }
 
   function close() {
+    let deleteJobsClosed = true;
+    let databaseClosed = true;
     try {
-      deleteJobs?.close(db);
-    } catch {}
+      deleteJobsClosed = deleteJobs?.close(db) !== false;
+    } catch {
+      deleteJobsClosed = false;
+    }
+    if (!deleteJobsClosed) return false;
     if (db) {
       try {
         db.close();
-      } catch {}
+      } catch {
+        databaseClosed = false;
+      }
     }
     db = null;
     coverBlobDatabase.close();
@@ -405,6 +412,7 @@ export function createShortVideoStore(options = {}) {
     catalogCache.sourceTotals.clear();
     recommendationCache = { key: "", ids: [] };
     explicitCatalogStamp = "";
+    return databaseClosed;
   }
 
   // 列表的 summary() 与 authorFacet() 每次分页都会重算（聚合 + GROUP BY），
