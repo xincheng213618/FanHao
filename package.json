@@ -38,7 +38,7 @@
     "verify:short-video-store": "node tools/verify_short_video_store.mjs",
     "verify:short-video-actions": "node tools/verify_short_video_action_contract.mjs",
     "verify:short-video-collections": "node tools/verify_short_video_collections.mjs && node tools/verify_short_video_collection_busy.mjs",
-    "verify:short-video-delete-jobs": "node tools/verify_short_video_delete_jobs.mjs",
+    "verify:short-video-delete-jobs": "node tools/verify_short_video_delete_jobs.mjs && node tools/verify_short_video_delete_idempotency.mjs",
     "verify:short-video-watch-write": "node tools/verify_short_video_watch_write.mjs",
     "verify:short-video-runtime": "node tools/verify_short_video_runtime_queue.mjs",
     "verify:short-video-stats-performance": "node tools/verify_short_video_stats_performance.mjs",

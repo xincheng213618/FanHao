@@ -53,7 +53,9 @@ await verifySuccessfulCompatibilityAndReservations();
 verifyDestructiveFsActionInventory();
 await verifyBatchMissingIdsFailAtomically();
 await verifyV3ActiveJournalMigration();
-await verifyV4MissingFsActionTableMigration();
+await verifyV4ToV5MigrationAndImmutability();
+await verifyV5PartialSchemaRepair();
+verifyFutureProtocolFailsClosed();
 await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink");
 await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create");
 await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink", { swapAfterProof: true });
@@ -145,6 +147,7 @@ function verifyOfflineRebaseBoundary() {
   const source = fs.readFileSync(REBASE_SCRIPT, "utf8");
   for (const table of [
     "short_video_delete_jobs",
+    "short_video_delete_operations",
     "short_video_delete_items",
     "short_video_delete_reservations",
     "short_video_delete_fs_actions",
@@ -249,6 +252,7 @@ async function verifyV3ActiveJournalMigration() {
         let sql = String(schemas.get(table) || "");
         if (table === "short_video_delete_jobs") {
           sql = sql.replace(/,\s*execution_token TEXT NOT NULL DEFAULT ''/u, "");
+          sql = sql.replace(/,\s*request_sha256 TEXT NOT NULL DEFAULT ''/u, "");
         }
         if (table === "short_video_delete_items") {
           sql = sql.replace(/,\s*guard_publish_mode TEXT NOT NULL DEFAULT ''/u, "");
@@ -299,7 +303,7 @@ async function verifyV3ActiveJournalMigration() {
     try {
       assert.equal(
         migrated.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
-        "4"
+        "5"
       );
       assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_mode"), 1);
@@ -320,21 +324,24 @@ async function verifyV3ActiveJournalMigration() {
   }
 }
 
-async function verifyV4MissingFsActionTableMigration() {
+async function verifyV4ToV5MigrationAndImmutability() {
   const fixture = createFixture({ openStore: false });
   let reopened = null;
   try {
     const bootstrap = createShortVideoStore(storeOptions(fixture));
     bootstrap.summary();
     bootstrap.close();
+    const source = writeMedia(fixture.root, "v4-to-v5/video.mp4", "v4-to-v5");
+    seedVideo(fixture.dbPath, { id: "v4-to-v5-video", sourcePath: source });
     const staleV4 = openDb(fixture.dbPath);
     try {
-      assert.equal(
-        staleV4.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
-        "4"
-      );
-      staleV4.exec("DROP TABLE short_video_delete_fs_actions");
-      assert.equal(schemaTableCount(staleV4, "short_video_delete_fs_actions"), 0);
+      staleV4.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
+      staleV4.exec("DROP TRIGGER trg_short_video_delete_operation_request_immutable_v1");
+      staleV4.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v1");
+      staleV4.exec("DROP TABLE short_video_delete_operations");
+      staleV4.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
+      staleV4.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '4')").run();
+      assert.equal(schemaColumnCount(staleV4, "short_video_delete_jobs", "request_sha256"), 0);
     } finally {
       staleV4.close();
     }
@@ -345,19 +352,141 @@ async function verifyV4MissingFsActionTableMigration() {
     try {
       assert.equal(
         migrated.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
-        "4",
-        "a same-version repair must not rewrite the protocol version"
+        "5",
+        "opening a v4 database must atomically advance the delete protocol"
       );
       assert.equal(
-        schemaTableCount(migrated, "short_video_delete_fs_actions"),
+        schemaColumnCount(migrated, "short_video_delete_jobs", "request_sha256"),
         1,
-        "opening an older v4 database must install the newly-required action journal"
+        "v5 must add the immutable request digest"
       );
+      assert.equal(schemaTableCount(migrated, "short_video_delete_operations"), 1);
     } finally {
       migrated.close();
     }
+    const operationId = "sv-delete-op-00000000-0000-4000-8000-000000000004";
+    await reopened.deleteVideo("v4-to-v5-video", { operationId });
+    const immutable = openDb(fixture.dbPath);
+    try {
+      const row = immutable.prepare("SELECT request_sha256 FROM short_video_delete_jobs WHERE id = ?").get(operationId);
+      assert.match(String(row?.request_sha256 || ""), /^[0-9a-f]{64}$/u);
+      assert.throws(
+        () => immutable.prepare("UPDATE short_video_delete_jobs SET request_sha256 = ? WHERE id = ?")
+          .run("0".repeat(64), operationId),
+        /request digest is immutable/
+      );
+      assert.throws(
+        () => immutable.prepare("UPDATE short_video_delete_jobs SET video_ids_json = '[]' WHERE id = ?").run(operationId),
+        /execution target is immutable/
+      );
+      assert.throws(
+        () => immutable.prepare("UPDATE short_video_delete_operations SET request_sha256 = ? WHERE operation_id = ?")
+          .run("0".repeat(64), operationId),
+        /operation request is immutable/
+      );
+      assert.equal(
+        immutable.prepare("SELECT request_sha256 FROM short_video_delete_jobs WHERE id = ?").get(operationId)?.request_sha256,
+        row.request_sha256
+      );
+    } finally {
+      immutable.close();
+    }
   } finally {
     reopened?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyV5PartialSchemaRepair() {
+  const fixture = createFixture({ openStore: false });
+  let repaired = null;
+  try {
+    const bootstrap = createShortVideoStore(storeOptions(fixture));
+    bootstrap.summary();
+    bootstrap.close();
+    const partial = openDb(fixture.dbPath);
+    try {
+      partial.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
+      partial.exec("DROP TRIGGER trg_short_video_delete_operation_request_immutable_v1");
+      partial.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v1");
+      partial.exec("DROP TABLE short_video_delete_operations");
+      partial.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
+      assert.equal(
+        partial.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "5"
+      );
+    } finally {
+      partial.close();
+    }
+
+    repaired = createShortVideoStore(storeOptions(fixture));
+    repaired.summary();
+    const db = openDb(fixture.dbPath);
+    try {
+      assert.equal(schemaColumnCount(db, "short_video_delete_jobs", "request_sha256"), 1);
+      assert.equal(schemaTableCount(db, "short_video_delete_operations"), 1);
+      for (const trigger of [
+        "trg_short_video_delete_request_sha256_immutable_v1",
+        "trg_short_video_delete_operation_request_immutable_v1",
+        "trg_short_video_delete_operation_receipt_immutable_v1"
+      ]) {
+        assert.equal(
+          Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(trigger)?.count || 0),
+          1,
+          `v5 same-version repair must restore ${trigger}`
+        );
+      }
+      assert.equal(
+        db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "5"
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    repaired?.close();
+    closeFixture(fixture);
+  }
+}
+
+function verifyFutureProtocolFailsClosed() {
+  const fixture = createFixture({ openStore: false });
+  let futureStore = null;
+  try {
+    const bootstrap = createShortVideoStore(storeOptions(fixture));
+    bootstrap.summary();
+    bootstrap.close();
+    const future = openDb(fixture.dbPath);
+    let before;
+    try {
+      future.exec("DROP TRIGGER trg_short_video_delete_operation_request_immutable_v1");
+      future.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '6')").run();
+      before = future.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name").all();
+    } finally {
+      future.close();
+    }
+
+    futureStore = createShortVideoStore(storeOptions(fixture));
+    assert.throws(
+      () => futureStore.summary(),
+      (error) => error?.code === "SHORT_VIDEO_DELETE_PROTOCOL_NEWER"
+    );
+    const after = openDb(fixture.dbPath);
+    try {
+      assert.equal(
+        after.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "6"
+      );
+      assert.deepEqual(
+        after.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name").all(),
+        before,
+        "a future delete protocol must fail before any schema repair or downgrade"
+      );
+    } finally {
+      after.close();
+    }
+  } finally {
+    futureStore?.close();
     closeFixture(fixture);
   }
 }
@@ -405,7 +534,9 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode, o
       v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
         .run(interruptedJob.id);
       convertCurrentProducerActionsToFaithfulV3(v3, interruptedJob.id, interruptedItem.quarantine_path);
+      v3.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
       v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
+      v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_identity_json");
@@ -517,7 +648,9 @@ async function verifyV3ActiveGuardReplacementFailures() {
         v3.prepare("UPDATE short_video_delete_items SET guard_identity_json = '' WHERE job_id = ?")
           .run(interruptedJob.id);
         convertCurrentProducerActionsToFaithfulV3(v3, interruptedJob.id, interruptedItem.quarantine_path);
+        v3.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
         v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
+        v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_identity_json");
@@ -637,7 +770,7 @@ async function verifyProtocolMigrationAndTombstones() {
     try {
       assert.equal(
         afterMigration.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
-        "4"
+        "5"
       );
       assert.equal(
         Number(afterMigration.prepare(`
@@ -646,7 +779,7 @@ async function verifyProtocolMigrationAndTombstones() {
           WHERE name = 'guard_publish_mode'
         `).get()?.count || 0),
         1,
-        "protocol v4 must persist the guard publication mode"
+        "protocol v5 must preserve the guard publication mode"
       );
       assert.equal(schemaColumnCount(afterMigration, "short_video_delete_jobs", "execution_token"), 1);
       assert.equal(Number(afterMigration.prepare("SELECT COUNT(*) AS count FROM short_video_path_references").get()?.count || 0), 1);
@@ -2662,7 +2795,10 @@ async function verifyDeleteRouteStatusContract() {
   ]) {
     for (const [result, expectedStatus] of [[completed, 200], [cleanupPending, 202], [rollbackPending, 500]]) {
       const response = await invokeDeleteRoute(pathname, {
-        [methodName]: async () => result
+        [methodName]: async (...args) => {
+          assert.equal(args.at(-1)?.operationId, undefined, `${pathname} must preserve the unkeyed request contract`);
+          return result;
+        }
       });
       assert.equal(response.status, expectedStatus, `${pathname} must map ${result.status} to ${expectedStatus}`);
       assert.equal(response.payload, result);
