@@ -43,6 +43,8 @@ const SUCCESS_KEYS = [
 await verifySuccessfulCompatibilityAndReservations();
 await verifyBatchMissingIdsFailAtomically();
 await verifyV3ActiveJournalMigration();
+await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink");
+await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create");
 await verifyProtocolMigrationAndTombstones();
 await verifyCanonicalScannerTombstoneConsumption();
 await verifyAssetTransferSnapshotCas();
@@ -146,6 +148,7 @@ async function verifyV3ActiveJournalMigration() {
         }
         if (table === "short_video_delete_items") {
           sql = sql.replace(/,\s*guard_publish_mode TEXT NOT NULL DEFAULT ''/u, "");
+          sql = sql.replace(/,\s*guard_publish_provenance TEXT NOT NULL DEFAULT ''/u, "");
         }
         assert(sql, `v3 migration fixture requires captured schema for ${table}`);
         db.exec(sql);
@@ -173,6 +176,7 @@ async function verifyV3ActiveJournalMigration() {
       `).run();
       assert.equal(schemaColumnCount(db, "short_video_delete_jobs", "execution_token"), 0);
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_mode"), 0);
+      assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_provenance"), 0);
       assert.equal(
         db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
         "3"
@@ -192,6 +196,7 @@ async function verifyV3ActiveJournalMigration() {
       );
       assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_mode"), 1);
+      assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_provenance"), 1);
       assert.equal(migrated.prepare("SELECT status FROM short_video_delete_jobs WHERE id = 'v3-active-job'").get()?.status, "running");
     } finally {
       migrated.close();
@@ -202,6 +207,89 @@ async function verifyV3ActiveJournalMigration() {
     assertNoActiveReservations(fixture.dbPath);
   } finally {
     store?.close();
+    closeFixture(fixture);
+  }
+}
+
+async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
+  const fixture = createFixture({ openStore: false });
+  let recovery = null;
+  try {
+    const videoId = `v3-${expectedMode}-active`;
+    const source = writeMedia(fixture.root, `v3-${expectedMode}/active.mp4`, `v3-${expectedMode}-bytes`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+
+    const child = spawn(process.execPath, [CHILD, fixture.dbPath, fixture.root, boundary, videoId], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const closePromise = new Promise((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    await killAtBoundary(child, boundary, closePromise);
+
+    const interruptedJob = jobRows(fixture.dbPath)[0];
+    const interruptedItem = deleteItemRows(fixture.dbPath)[0];
+    assert(interruptedJob && interruptedItem, "the v3 guard migration fixture must start from a real active journal");
+    assert.equal(interruptedItem.state, "isolating");
+    assert.equal(interruptedItem.guard_publish_mode, expectedMode);
+    assert.equal(fs.existsSync(interruptedItem.original_path), true);
+    assert.equal(fs.existsSync(interruptedItem.quarantine_path), true);
+    const preparedPath = fs.readdirSync(path.dirname(interruptedItem.quarantine_path))
+      .map((name) => path.join(path.dirname(interruptedItem.quarantine_path), name))
+      .find((name) => name.endsWith(".prepared"));
+    assert(preparedPath, "the killed v3 publication fixture must retain its prepared guard");
+    const publishedEntry = fs.lstatSync(interruptedItem.original_path, { bigint: true });
+    const preparedEntry = fs.lstatSync(preparedPath, { bigint: true });
+    assert.equal(
+      String(publishedEntry.ino) === String(preparedEntry.ino),
+      expectedMode === "hardlink",
+      "the real filesystem relationship must match the publication mode before schema downgrade"
+    );
+
+    const v3 = openDb(fixture.dbPath);
+    try {
+      v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
+      v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
+      v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
+      v3.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '3')").run();
+      assert.equal(schemaColumnCount(v3, "short_video_delete_jobs", "execution_token"), 0);
+      assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_mode"), 0);
+      assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_provenance"), 0);
+    } finally {
+      v3.close();
+    }
+
+    recovery = createShortVideoStore(storeOptions(fixture));
+    recovery.summary();
+    const migrated = openDb(fixture.dbPath);
+    try {
+      const migratedItem = migrated.prepare(`
+        SELECT state, guard_publish_mode, guard_publish_provenance
+        FROM short_video_delete_items
+        WHERE job_id = ? AND ordinal = ?
+      `).get(interruptedJob.id, interruptedItem.ordinal);
+      assert.equal(migratedItem?.state, "isolating");
+      assert.equal(migratedItem?.guard_publish_mode, "", "v3 migration must not guess from filesystem state");
+      assert.equal(migratedItem?.guard_publish_provenance, "legacy_v3");
+      assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
+    } finally {
+      migrated.close();
+    }
+
+    await recovery.recoverDeleteJobs({ jobId: interruptedJob.id });
+    const recoveredJob = jobRows(fixture.dbPath)[0];
+    const recoveredItem = deleteItemRows(fixture.dbPath)[0];
+    assert.equal(recoveredJob?.status, "rolled_back");
+    assert.equal(recoveredItem?.guard_publish_mode, expectedMode, "claimed recovery must CAS the proven v3 mode");
+    assert.equal(recoveredItem?.guard_publish_provenance, "legacy_v3");
+    assert.equal(fs.readFileSync(source, "utf8"), `v3-${expectedMode}-bytes`);
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+  } finally {
+    recovery?.close();
     closeFixture(fixture);
   }
 }
@@ -2422,7 +2510,8 @@ function deleteItemRows(dbPath) {
   const db = openDb(dbPath);
   try {
     return db.prepare(`
-      SELECT ordinal, state, original_path, quarantine_path, guard_identity_json, guard_publish_mode
+      SELECT ordinal, state, original_path, quarantine_path, guard_identity_json,
+             guard_publish_mode, guard_publish_provenance
       FROM short_video_delete_items
       ORDER BY ordinal
     `).all();

@@ -47,8 +47,9 @@ const faultFsOps = new Proxy(fs, {
     }
     if (property === "unlinkSync") {
       return (targetPath) => {
-        if (boundary === "fallback_guard_published" && String(targetPath).endsWith(".prepared")) {
-          stopAt("fallback_guard_published");
+        if (["fallback_guard_published", "hardlink_guard_published"].includes(boundary)
+          && String(targetPath).endsWith(".prepared")) {
+          stopAt(boundary);
         }
         const result = fs.unlinkSync(targetPath);
         if (String(targetPath).endsWith(".quarantine")) {

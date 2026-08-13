@@ -148,7 +148,8 @@ export function createShortVideoDeleteJobService({
     if (!required.every(([type, name]) => existing.has(`${type}\0${name}`))) return false;
     const requiredColumns = [
       ["short_video_delete_jobs", "execution_token"],
-      ["short_video_delete_items", "guard_publish_mode"]
+      ["short_video_delete_items", "guard_publish_mode"],
+      ["short_video_delete_items", "guard_publish_provenance"]
     ];
     return requiredColumns.every(([table, column]) => schemaHasColumn(db, table, column));
   }
@@ -161,7 +162,11 @@ export function createShortVideoDeleteJobService({
         db.exec("COMMIT");
         return false;
       }
+      const previousProtocolVersion = String(
+        db.prepare("SELECT value FROM short_video_meta WHERE key = ?").get(DELETE_PROTOCOL_VERSION_META)?.value || ""
+      );
       installProtocolSchemaInTransaction(db);
+      migrateV3GuardPublishModesInTransaction(db, previousProtocolVersion);
       backfillLexicalReferenceIndexInTransaction(db);
       assertReferenceProjectionComplete(db);
       db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)")
@@ -217,6 +222,7 @@ export function createShortVideoDeleteJobService({
         quarantine_identity_json TEXT NOT NULL DEFAULT '',
         guard_identity_json TEXT NOT NULL DEFAULT '',
         guard_publish_mode TEXT NOT NULL DEFAULT '',
+        guard_publish_provenance TEXT NOT NULL DEFAULT '',
         error TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL,
         PRIMARY KEY(job_id, ordinal),
@@ -425,6 +431,7 @@ export function createShortVideoDeleteJobService({
     ensureColumn(db, "short_video_delete_items", "real_path_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "identity_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "guard_publish_mode", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "short_video_delete_items", "guard_publish_provenance", "TEXT NOT NULL DEFAULT ''");
     installReferenceTriggers(db);
     installTombstoneTriggers(db);
   }
@@ -901,6 +908,22 @@ export function createShortVideoDeleteJobService({
     } finally {
       endExecution(db, executionKey, executionToken);
     }
+  }
+
+  function migrateV3GuardPublishModesInTransaction(db, previousProtocolVersion) {
+    if (previousProtocolVersion !== "3") return;
+    db.prepare(`
+      UPDATE short_video_delete_items
+      SET guard_publish_provenance = 'legacy_v3', updated_at = ?
+      WHERE guard_publish_mode = ''
+        AND guard_publish_provenance = ''
+        AND EXISTS (
+          SELECT 1
+          FROM short_video_delete_jobs job
+          WHERE job.id = short_video_delete_items.job_id
+            AND job.status IN ('running', 'rollback_pending', 'cleanup_pending')
+        )
+    `).run(now());
   }
 
   async function persistPlan(db, inputRows, options, referenceSnapshot = null, executionToken = "") {
@@ -1611,7 +1634,12 @@ export function createShortVideoDeleteJobService({
         throw error;
       }
 
-      const restoredIdentity = await restoreIsolatedItem(requireOwnedJob(db, jobId), { ...planned, state: "restoring" }, candidate);
+      const restoredIdentity = await restoreIsolatedItem(
+        db,
+        requireOwnedJob(db, jobId),
+        { ...planned, state: "restoring" },
+        candidate
+      );
 
       beginImmediate(db);
       try {
@@ -2158,9 +2186,9 @@ export function createShortVideoDeleteJobService({
     assertCheapManagedFileIdentity(item.original_path, item.managed_root, candidate.identity, "恢复后的源文件身份不一致");
   }
 
-  async function restoreIsolatedItem(job, item, candidate) {
+  async function restoreIsolatedItem(db, job, item, candidate) {
     if (candidate.mode === "restore") {
-      if (candidate.guardOwned) moveOwnedGuardAside(item.original_path, job, item);
+      if (candidate.guardOwned) moveOwnedGuardAside(db, item.original_path, job, item);
       else removeOwnedGuardTemp(job, item);
       assertPathMissing(item.original_path, "原文件位置已被其他文件占用");
       await invokeHook(hooks.beforeItemRestored, { jobId: job.id, ordinal: item.ordinal });
@@ -2287,7 +2315,7 @@ export function createShortVideoDeleteJobService({
     fsOps.unlinkSync(tempPath);
   }
 
-  function moveOwnedGuardAside(originalPath, job, item) {
+  function moveOwnedGuardAside(db, originalPath, job, item) {
     if (!isOwnedGuard(originalPath, job, item.ordinal, item.guard_identity_json)) {
       throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
     }
@@ -2314,7 +2342,11 @@ export function createShortVideoDeleteJobService({
     }
     const sameInode = String(published.dev) === String(preparedIdentity.dev)
       && String(published.ino) === String(preparedIdentity.ino);
-    const publishMode = persistedOrInferredGuardPublishMode(item, sameInode);
+    const publishMode = persistedOrRecoveredGuardPublishMode(db, job, item, {
+      published,
+      prepared: preparedIdentity,
+      sameInode
+    });
     if (publishMode === GUARD_PUBLISH_HARDLINK && !sameInode) {
       throw codedError("guard 临时路径不是已发布 guard 的同一硬链接", "SHORT_VIDEO_DELETE_GUARD_TEMP_REPLACED");
     }
@@ -2372,11 +2404,111 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  function persistedOrInferredGuardPublishMode(item, sameInode) {
+  function persistedOrRecoveredGuardPublishMode(db, job, item, observed) {
     const persisted = String(item?.guard_publish_mode || "");
     if (GUARD_PUBLISH_MODES.has(persisted)) return persisted;
-    if (!persisted && sameInode) return GUARD_PUBLISH_HARDLINK;
-    throw codedError("guard 发布模式缺失且无法安全推导", "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
+    if (persisted || String(item?.guard_publish_provenance || "") !== "legacy_v3") {
+      throw codedError("guard 发布模式缺失且无法安全推导", "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING");
+    }
+
+    const firstProof = proveLegacyV3GuardPublication(job, item, observed);
+    const executionToken = requireActiveExecutionToken(job.id);
+    beginImmediate(db);
+    try {
+      heartbeat(db, job.id);
+      requireOwnedJob(db, job.id);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET guard_publish_mode = ?, updated_at = ?
+        WHERE job_id = ? AND ordinal = ?
+          AND state = 'restoring'
+          AND guard_publish_mode = ''
+          AND guard_publish_provenance = 'legacy_v3'
+          AND EXISTS (
+            SELECT 1 FROM short_video_delete_jobs owner
+            WHERE owner.id = short_video_delete_items.job_id
+              AND owner.owner_id = ? AND owner.execution_token = ?
+              AND owner.status IN ('running', 'rollback_pending', 'cleanup_pending')
+          )
+      `).run(firstProof.mode, now(), job.id, item.ordinal, ownerId, executionToken);
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("v3 guard 发布模式 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+
+    const current = readItem(db, job.id, item.ordinal);
+    if (!current || String(current.guard_publish_mode || "") !== firstProof.mode) {
+      throw codedError("v3 guard 发布模式持久化后发生变化", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
+    }
+    const secondProof = proveLegacyV3GuardPublication(requireOwnedJob(db, job.id), current);
+    if (secondProof.mode !== firstProof.mode
+      || !matchesExactSnapshot(secondProof.published, firstProof.published)
+      || !matchesExactSnapshot(secondProof.prepared, firstProof.prepared)
+      || !matchesExactSnapshot(secondProof.quarantine, firstProof.quarantine)) {
+      throw codedError("v3 guard 发布证据在持久化期间发生变化", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
+    }
+    return firstProof.mode;
+  }
+
+  function proveLegacyV3GuardPublication(job, item, observed = null) {
+    try {
+      if (String(item?.guard_publish_provenance || "") !== "legacy_v3") throw new Error("not legacy v3");
+      const expectedSource = parseJson(item.source_identity_json, null);
+      if (!expectedSource) throw new Error("source identity missing");
+      const jobDir = path.dirname(item.quarantine_path);
+      requireOwnedJobDirectory(job, jobDir, item.managed_root);
+      assertGuardDestination(item.original_path, item.managed_root, expectedSource);
+      const quarantine = requireManagedFileIdentity(
+        item.quarantine_path,
+        item.managed_root,
+        expectedSource,
+        "v3 隔离文件身份与源计划不一致",
+        { transitionAfterRename: true }
+      );
+      const prepared = captureOwnedGuardCapability(
+        guardTempPath(jobDir, job, item.ordinal),
+        job,
+        item.ordinal,
+        ""
+      );
+      const published = captureOwnedGuardCapability(
+        item.original_path,
+        job,
+        item.ordinal,
+        item.guard_identity_json
+      );
+      if (!prepared || !published
+        || String(quarantine.dev) !== String(expectedSource.dev)
+        || String(prepared.dev) !== String(expectedSource.dev)
+        || String(published.dev) !== String(expectedSource.dev)) {
+        throw new Error("guard or quarantine device mismatch");
+      }
+      if (observed && (!matchesExactSnapshot(published, observed.published)
+        || !matchesExactSnapshot(prepared, observed.prepared))) {
+        throw new Error("guard changed before legacy proof");
+      }
+      const sameInode = String(prepared.dev) === String(published.dev)
+        && String(prepared.ino) === String(published.ino);
+      let mode = "";
+      if (sameInode) mode = GUARD_PUBLISH_HARDLINK;
+      else if (String(prepared.nlink) === "1" && String(published.nlink) === "1") {
+        mode = GUARD_PUBLISH_EXCLUSIVE_CREATE;
+      }
+      if (!mode || (observed && Boolean(observed.sameInode) !== sameInode)) {
+        throw new Error("guard link relationship is not a v3 publication proof");
+      }
+      return { mode, published, prepared, quarantine };
+    } catch (error) {
+      throw codedError(
+        "v3 guard 发布来源无法满足安全恢复证明",
+        "SHORT_VIDEO_DELETE_GUARD_MODE_MISSING",
+        error?.message
+      );
+    }
   }
 
   function requireOwnedJobDirectory(job, jobDir, root) {
@@ -2676,6 +2808,29 @@ export function createShortVideoDeleteJobService({
       throw codedError("guard 不是普通文件", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
     }
     return captureIdentity(entry);
+  }
+
+  function captureOwnedGuardCapability(filePath, job, ordinal, storedIdentityJson) {
+    const lexicalEntry = fsOps.lstatSync(filePath, { bigint: true });
+    if (!lexicalEntry.isFile() || lexicalEntry.isSymbolicLink() || Number(lexicalEntry.size) > 1024) return null;
+    const handle = fsOps.openSync(filePath, "r");
+    let before;
+    let after;
+    let content;
+    try {
+      before = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) return null;
+      content = fsOps.readFileSync(handle, "utf8");
+      after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+    } finally {
+      fsOps.closeSync(handle);
+    }
+    if (!matchesExactSnapshot(after, before) || content !== guardContent(job, ordinal)) return null;
+    const finalIdentity = captureIdentity(fsOps.lstatSync(filePath, { bigint: true }));
+    if (!matchesCheapIdentity(finalIdentity, after)) return null;
+    const expected = parseJson(storedIdentityJson, null);
+    if (expected && !identityMatches(after, expected)) return null;
+    return after;
   }
 
   function captureIdentity(entry) {
