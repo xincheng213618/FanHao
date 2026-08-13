@@ -16,6 +16,7 @@ final class ShortVideoDeleteJson {
     for (String key : new String[] {
       "ok", "accepted", "pending", "status", "jobId", "logicalDeleteCommitted",
       "physicalCleanupComplete", "cleanupPendingFiles", "recoveryRequired", "retryable",
+      "manualInterventionRequired", "processRestartRequired",
       "ids", "count", "deletedFiles", "error"
     }) {
       if (!data.has(key) || data.isNull(key)) continue;

@@ -77,7 +77,12 @@ function rollbackPendingResult(row, httpStatus) {
   requireExact(row, "pending", true, httpStatus);
   requireExact(row, "status", "rollback_pending", httpStatus);
   requireExact(row, "recoveryRequired", true, httpStatus);
-  requireExact(row, "retryable", true, httpStatus);
+  const retryable = requireBoolean(row, "retryable", httpStatus);
+  const manualInterventionRequired = optionalBoolean(row, "manualInterventionRequired", false, httpStatus);
+  const processRestartRequired = optionalBoolean(row, "processRestartRequired", false, httpStatus);
+  if (retryable === manualInterventionRequired || (processRestartRequired && !manualInterventionRequired)) {
+    throw contractError("删除恢复响应的重试与人工介入状态不一致", httpStatus, row);
+  }
   return {
     kind: "rollback_pending",
     committed: false,
@@ -85,7 +90,9 @@ function rollbackPendingResult(row, httpStatus) {
     status: "rollback_pending",
     jobId: requireNonEmptyString(row, "jobId", httpStatus),
     recoveryRequired: true,
-    retryable: true,
+    retryable,
+    manualInterventionRequired,
+    processRestartRequired,
     payload: row
   };
 }
@@ -161,6 +168,15 @@ function requireNonNegativeInteger(row, key, status) {
     throw contractError(`删除响应字段 ${key} 无效`, status, row);
   }
   return row[key];
+}
+
+function requireBoolean(row, key, status) {
+  if (typeof row[key] !== "boolean") throw contractError(`删除响应字段 ${key} 无效`, status, row);
+  return row[key];
+}
+
+function optionalBoolean(row, key, fallback, status) {
+  return Object.hasOwn(row, key) ? requireBoolean(row, key, status) : fallback;
 }
 
 function contractError(message, status, payload) {

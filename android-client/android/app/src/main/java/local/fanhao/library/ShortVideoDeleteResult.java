@@ -21,6 +21,9 @@ final class DeleteResult {
   final int deletedFiles;
   final int cleanupPendingFiles;
   final String jobId;
+  final boolean retryable;
+  final boolean manualInterventionRequired;
+  final boolean processRestartRequired;
 
   private DeleteResult(
     int httpStatus,
@@ -29,7 +32,10 @@ final class DeleteResult {
     int count,
     int deletedFiles,
     int cleanupPendingFiles,
-    String jobId
+    String jobId,
+    boolean retryable,
+    boolean manualInterventionRequired,
+    boolean processRestartRequired
   ) {
     this.httpStatus = httpStatus;
     this.outcome = outcome;
@@ -38,6 +44,9 @@ final class DeleteResult {
     this.deletedFiles = deletedFiles;
     this.cleanupPendingFiles = cleanupPendingFiles;
     this.jobId = jobId;
+    this.retryable = retryable;
+    this.manualInterventionRequired = manualInterventionRequired;
+    this.processRestartRequired = processRestartRequired;
   }
 
   static DeleteResult fromHttp(int httpStatus, Map<String, Object> row, String expectedId) {
@@ -97,7 +106,10 @@ final class DeleteResult {
       count,
       ((List<?>) deletedFilesValue).size(),
       cleanupPendingFiles,
-      jobId
+      jobId,
+      false,
+      false,
+      false
     );
   }
 
@@ -107,7 +119,10 @@ final class DeleteResult {
     requireExact(row, "pending", Boolean.TRUE);
     requireExact(row, "status", "rollback_pending");
     requireExact(row, "recoveryRequired", Boolean.TRUE);
-    requireExact(row, "retryable", Boolean.TRUE);
+    boolean retryable = requireBoolean(row, "retryable");
+    boolean manual = optionalBoolean(row, "manualInterventionRequired", false);
+    boolean restart = optionalBoolean(row, "processRestartRequired", false);
+    if (retryable == manual || (restart && !manual)) throw invalid("删除恢复响应的重试与人工介入状态不一致");
     return new DeleteResult(
       500,
       Outcome.ROLLBACK_PENDING,
@@ -115,7 +130,10 @@ final class DeleteResult {
       0,
       0,
       0,
-      requireString(row, "jobId")
+      requireString(row, "jobId"),
+      retryable,
+      manual,
+      restart
     );
   }
 
@@ -154,6 +172,16 @@ final class DeleteResult {
       throw invalid("删除响应字段 " + key + " 无效");
     }
     return (int) number;
+  }
+
+  private static boolean requireBoolean(Map<String, Object> row, String key) {
+    Object value = row.get(key);
+    if (!(value instanceof Boolean)) throw invalid("删除响应字段 " + key + " 无效");
+    return (Boolean) value;
+  }
+
+  private static boolean optionalBoolean(Map<String, Object> row, String key, boolean fallback) {
+    return row.containsKey(key) ? requireBoolean(row, key) : fallback;
   }
 
   private static String stringValue(Object value) {

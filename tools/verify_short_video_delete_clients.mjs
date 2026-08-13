@@ -26,10 +26,11 @@ await verifyWebDeleteContract();
 await verifyWebDeleteActions();
 await verifyWebDeleteInFlightGate();
 await verifyWebDeleteRecoveryController();
+await verifyWebDeleteRecoveryRebuild();
 verifyWebMutationBoundary();
 verifyNativeSourceBoundary();
 verifyNativeContract();
-console.log("short-video-delete-clients: strict Web and Native response contracts verified");
+console.log("short-video-delete-clients: strict contracts, persistent rebuild, manual recovery, and lifecycle cancellation verified");
 
 function completed(overrides = {}) {
   return {
@@ -138,12 +139,24 @@ async function verifyWebDeleteContract() {
   assert.equal(rollback.committed, false);
   assert.equal(rollback.status, "rollback_pending");
   assert.equal(shortVideoDeleteRecoveryMessage(rollback), "删除尚未提交，正在安全恢复（任务 #job-rollback）");
+  const manual = parseShortVideoDeleteResponse(500, rollbackPending({
+    retryable: false,
+    manualInterventionRequired: true,
+    processRestartRequired: true
+  }));
+  assert.equal(manual.committed, false, "manual rollback must never delete the client model");
+  assert.equal(manual.retryable, false);
+  assert.equal(manual.manualInterventionRequired, true);
+  assert.equal(manual.processRestartRequired, true);
   for (const invalid of [
     rollbackPending({ ok: true }),
     rollbackPending({ accepted: true }),
     rollbackPending({ pending: false }),
     rollbackPending({ recoveryRequired: false }),
+    rollbackPending({ retryable: "false" }),
     rollbackPending({ retryable: false }),
+    rollbackPending({ manualInterventionRequired: true }),
+    rollbackPending({ processRestartRequired: true }),
     rollbackPending({ jobId: "" })
   ]) {
     assert.throws(() => parseShortVideoDeleteResponse(500, invalid));
@@ -330,6 +343,93 @@ async function verifyWebDeleteRecoveryController() {
   await pendingPoll;
   assert.equal(cancellationRenders.at(-1), null, "disposed polling must not render an old response");
   assert.equal(cancellationTimers.pending(), 0, "disposed polling must not schedule another request");
+
+  const manualTimers = createManualTimers();
+  const manualRenders = [];
+  const manualController = createShortVideoDeleteRecoveryController({
+    api: async () => jobPayload("job-rollback", "rollback_pending", "rollback", true, false, {
+      manualInterventionRequired: true,
+      stalled: true,
+      retryable: false
+    }),
+    pollDelayMs: 1,
+    renderState: (state) => manualRenders.push(state ? { ...state } : null),
+    setTimer: manualTimers.set,
+    clearTimer: manualTimers.clear
+  });
+  manualController.track(await rollbackResult());
+  await manualTimers.runNext();
+  assert.match(manualRenders.at(-1).message, /需要人工处理，请人工检查后再恢复/);
+  assert.equal(manualRenders.at(-1).actionLabel, "", "manual intervention must not expose a false retry action");
+  assert.equal(manualTimers.pending(), 0, "manual intervention must stop tight automatic polling");
+  manualController.dispose();
+
+  const initialManualStorage = createMemoryStorage();
+  const initialManualRenders = [];
+  const initialManual = createShortVideoDeleteRecoveryController({
+    api: async () => { throw new Error("initial manual rollback must not poll"); },
+    apiBaseUrl: "http://fixture",
+    storage: initialManualStorage,
+    renderState: (state) => initialManualRenders.push(state ? { ...state } : null)
+  });
+  initialManual.track(parseShortVideoDeleteResponse(500, rollbackPending({
+    retryable: false,
+    manualInterventionRequired: true,
+    processRestartRequired: true
+  })));
+  assert(initialManualStorage.value(), "initial manual rollback must persist its job snapshot");
+  assert.match(initialManualRenders.at(-1).message, /请重启服务后再恢复/);
+  assert.equal(initialManualRenders.at(-1).actionLabel, "", "initial manual rollback must not expose POST recovery");
+  await initialManual.recover();
+  initialManual.dispose();
+}
+
+async function verifyWebDeleteRecoveryRebuild() {
+  const storage = createMemoryStorage();
+  const first = createShortVideoDeleteRecoveryController({
+    api: async () => { throw new Error("first instance must not poll after dispose"); },
+    apiBaseUrl: "http://fixture",
+    storage,
+    pollDelayMs: 1000,
+    renderState: () => {}
+  });
+  first.track(parseShortVideoDeleteResponse(202, cleanupPending(), { expectedIds: ["video-1"] }));
+  assert(storage.value(), "pending Web job must persist before reload");
+  first.dispose();
+  assert(storage.value(), "dispose must preserve a non-terminal Web job");
+
+  const requests = [];
+  const rendered = [];
+  const second = createShortVideoDeleteRecoveryController({
+    api: async (path) => {
+      requests.push(path);
+      return jobPayload("job-cleanup", "completed", "cleanup", false, false);
+    },
+    apiBaseUrl: "http://fixture/",
+    storage,
+    renderState: (state) => rendered.push(state ? { ...state } : null)
+  });
+  await second.ready;
+  assert.deepEqual(requests, ["/api/short-videos/delete-jobs?jobId=job-cleanup"], "reload must first GET the same persisted job");
+  assert.match(rendered.at(-1).message, /已安全清理完成/);
+  assert.equal(storage.value(), null, "terminal Web job must clear localStorage");
+
+  for (const [name, raw, base] of [
+    ["bad payload", "{bad-json", "http://fixture"],
+    ["different base", JSON.stringify({ version: 1, jobId: "job-cross-base", apiBaseUrl: "http://other-fixture", kind: "rollback", cleanupPendingFiles: 0 }), "http://fixture"]
+  ]) {
+    const unsafeStorage = createMemoryStorage(raw);
+    let calls = 0;
+    const controller = createShortVideoDeleteRecoveryController({
+      api: async () => { calls += 1; },
+      apiBaseUrl: base,
+      storage: unsafeStorage,
+      renderState: () => {}
+    });
+    await controller.ready;
+    assert.equal(calls, 0, `${name} must fail closed before GET`);
+    assert.equal(unsafeStorage.value(), null, `${name} must clear unsafe localStorage`);
+  }
 }
 
 async function rollbackResult() {
@@ -389,6 +489,16 @@ function createDeferred() {
   return { promise, reject, resolve };
 }
 
+function createMemoryStorage(initialValue = null) {
+  let value = initialValue;
+  return {
+    getItem: () => value,
+    setItem: (key, next) => { value = String(next); },
+    removeItem: () => { value = null; },
+    value: () => value
+  };
+}
+
 function verifyNativeSourceBoundary() {
   const source = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoActivity.java");
   const controller = read("android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoDeleteController.java");
@@ -418,6 +528,9 @@ function verifyNativeContract() {
     const sources = [
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoDeleteResult.java"),
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteJobState.java"),
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPendingJob.java"),
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteSession.java"),
+      path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteTaskRunner.java"),
       path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoDeleteController.java"),
       path.join(root, "tools", "fixtures", "NativeShortVideoDeleteContractHarness.java"),
       path.join(root, "tools", "fixtures", "NativeShortVideoDeleteControllerHarness.java")

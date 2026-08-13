@@ -10,6 +10,10 @@ final class NativeShortVideoDeleteJobState {
   final boolean pending;
   final boolean recoverable;
   final boolean requiresAttention;
+  final boolean manualInterventionRequired;
+  final boolean processRestartRequired;
+  final boolean stalled;
+  final boolean retryable;
   final String error;
 
   private NativeShortVideoDeleteJobState(
@@ -19,6 +23,10 @@ final class NativeShortVideoDeleteJobState {
     boolean pending,
     boolean recoverable,
     boolean requiresAttention,
+    boolean manualInterventionRequired,
+    boolean processRestartRequired,
+    boolean stalled,
+    boolean retryable,
     String error
   ) {
     this.id = id;
@@ -27,6 +35,10 @@ final class NativeShortVideoDeleteJobState {
     this.pending = pending;
     this.recoverable = recoverable;
     this.requiresAttention = requiresAttention;
+    this.manualInterventionRequired = manualInterventionRequired;
+    this.processRestartRequired = processRestartRequired;
+    this.stalled = stalled;
+    this.retryable = retryable;
     this.error = error;
   }
 
@@ -49,30 +61,28 @@ final class NativeShortVideoDeleteJobState {
       pending,
       recoverable,
       optionalBoolean(row, "requiresAttention", false),
+      optionalBoolean(row, "manualInterventionRequired", false),
+      optionalBoolean(row, "processRestartRequired", false),
+      optionalBoolean(row, "stalled", false),
+      optionalBoolean(row, "retryable", false),
       clean(row.get("error"))
     );
   }
-
   boolean completed() {
     return "completed".equals(status);
   }
-
   boolean rolledBack() {
     return "rolled_back".equals(status);
   }
-
   boolean cleanupPending() {
     return "cleanup_pending".equals(status) || "cleanup".equals(phase);
   }
-
   private static boolean isPendingStatus(String value) {
     return "running".equals(value) || "cleanup_pending".equals(value) || "rollback_pending".equals(value);
   }
-
   private static boolean isSupportedStatus(String value) {
     return isPendingStatus(value) || "completed".equals(value) || "rolled_back".equals(value);
   }
-
   private static String requireString(Map<String, Object> row, String key) {
     String value = clean(row.get(key));
     if (value.isEmpty()) throw invalid("删除恢复任务字段 " + key + " 无效");

@@ -23,10 +23,14 @@ public final class NativeShortVideoDeleteContractHarness {
     DeleteResult rollback = DeleteResult.fromHttp(500, rollbackPending(), "video-1");
     check(!rollback.committed(), "500 rollback_pending must not apply deletion");
     equal(rollback.recoveryMessage(), "删除尚未提交，正在安全恢复（任务 #job-rollback）", "rollback message");
+    DeleteResult manual = DeleteResult.fromHttp(500, manualRollbackPending(), "video-1");
+    check(!manual.retryable && manual.manualInterventionRequired && manual.processRestartRequired, "manual rollback flags must survive strict parsing");
 
     Map<String, Object> malformedRollback = rollbackPending();
     malformedRollback.put("recoveryRequired", false);
     rejects(() -> DeleteResult.fromHttp(500, malformedRollback, "video-1"), "malformed rollback must fail closed");
+    rejects(() -> DeleteResult.fromHttp(500, changed(rollbackPending(), "retryable", false), "video-1"), "non-retryable rollback without manual intervention must fail closed");
+    rejects(() -> DeleteResult.fromHttp(500, changed(rollbackPending(), "manualInterventionRequired", true), "video-1"), "manual rollback marked retryable must fail closed");
     rejects(() -> DeleteResult.fromHttp(200, cleanupPending(), "video-1"), "HTTP/status mismatch must fail closed");
     rejects(() -> DeleteResult.fromHttp(202, completed(), "video-1"), "HTTP/status mismatch must fail closed");
     System.out.println("native-short-video-delete-contract: 200, 202, malformed, and rollback checks passed");
@@ -67,6 +71,14 @@ public final class NativeShortVideoDeleteContractHarness {
     row.put("jobId", "job-rollback");
     row.put("recoveryRequired", true);
     row.put("retryable", true);
+    return row;
+  }
+
+  private static Map<String, Object> manualRollbackPending() {
+    Map<String, Object> row = rollbackPending();
+    row.put("retryable", false);
+    row.put("manualInterventionRequired", true);
+    row.put("processRestartRequired", true);
     return row;
   }
 

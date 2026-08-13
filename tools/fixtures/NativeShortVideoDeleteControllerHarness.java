@@ -17,9 +17,13 @@ public final class NativeShortVideoDeleteControllerHarness {
     verifyRollbackRecoveryFailureAndSuccess();
     verifyDeleteFailureReleasesGate();
     verifyConcurrentDeleteGate();
+    verifyRebuildRestoresAndClearsPendingJob();
+    verifyInvalidRestoreDoesNotRequest();
+    verifyManualInterventionStopsPolling();
+    verifyInitialManualRollbackPersistsWithoutPolling();
     verifyPollingCancellation();
     verifyDestroyedCallbackCannotReachHostUi();
-    System.out.println("native-short-video-delete-controller: cleanup, rollback, in-flight gate, recovery failure, polling cancel, and destroy checks passed");
+    System.out.println("native-short-video-delete-controller: in-flight gate, rebuild persistence, manual recovery, polling cancel, and destroy checks passed");
   }
 
   private static void verifyCompletedAndCleanupPolling() {
@@ -85,7 +89,7 @@ public final class NativeShortVideoDeleteControllerHarness {
     ConcurrentHost host = new ConcurrentHost();
     BlockingTransport transport = new BlockingTransport(DeleteResult.fromHttp(202, cleanupPending(), "video-1"));
     AsyncRunner runner = new AsyncRunner();
-    NativeShortVideoDeleteController controller = new NativeShortVideoDeleteController(host, transport, runner, 1L);
+    NativeShortVideoDeleteController controller = new NativeShortVideoDeleteController(host, transport, new MemoryStore(), runner, 1L);
     try {
       controller.confirmDelete("video-1", "第一条", false, "http://fixture/delete/1", "http://fixture");
       controller.confirmDelete("video-2", "第二条", false, "http://fixture/delete/2", "http://fixture");
@@ -106,6 +110,62 @@ public final class NativeShortVideoDeleteControllerHarness {
       transport.releaseDelete.countDown();
       controller.destroy();
     }
+  }
+
+  private static void verifyRebuildRestoresAndClearsPendingJob() {
+    MemoryStore store = new MemoryStore();
+    Fixture first = new Fixture(DeleteResult.fromHttp(202, cleanupPending(), "video-1"), store);
+    first.confirm();
+    check(store.job != null, "pending response must atomically persist its job identity");
+    first.controller.destroy();
+    check(store.job != null, "destroy must preserve a non-terminal pending job");
+
+    FakeHost host = new FakeHost();
+    FakeTransport transport = new FakeTransport(DeleteResult.fromHttp(200, completed(), "video-1"));
+    transport.statuses.add(job("job-cleanup", "completed", "cleanup", false, false));
+    ManualRunner runner = new ManualRunner();
+    NativeShortVideoDeleteController second = new NativeShortVideoDeleteController(host, transport, store, runner, 1L);
+    second.restorePending("http://fixture");
+    equal(transport.statusCalls, 1, "rebuilt controller must GET the persisted job before rendering or polling");
+    contains(host.persistentMessage, "已安全清理完成", "rebuilt controller must continue to terminal state");
+    check(store.job == null, "terminal job must clear persisted identity");
+  }
+
+  private static void verifyInvalidRestoreDoesNotRequest() {
+    MemoryStore crossBase = new MemoryStore();
+    crossBase.job = new NativeShortVideoPendingJob("job-cross-base", "http://other-fixture", "rollback", 0);
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"), crossBase);
+    fixture.controller.restorePending("http://fixture");
+    equal(fixture.transport.statusCalls, 0, "different API base must fail closed before GET");
+    check(crossBase.job == null, "different API base must clear the unsafe snapshot");
+
+    MemoryStore bad = new MemoryStore();
+    bad.loadError = new IllegalArgumentException("fixture bad schema");
+    Fixture invalid = new Fixture(DeleteResult.fromHttp(200, completed(), "video-1"), bad);
+    invalid.controller.restorePending("http://fixture");
+    equal(invalid.transport.statusCalls, 0, "bad persisted payload must not request a job");
+    check(bad.cleared, "bad persisted payload must be cleared");
+  }
+
+  private static void verifyManualInterventionStopsPolling() {
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(500, rollbackPending(), "video-1"));
+    fixture.transport.statuses.add(jobWithFlags("job-rollback", true, false, false, false));
+    fixture.confirm();
+    fixture.runner.runNextSchedule();
+    contains(fixture.host.persistentMessage, "需要人工处理", "manual intervention must remain understandable");
+    equal(fixture.host.actionLabel, "", "manual intervention must not expose a false recovery action");
+    equal(fixture.runner.pendingSchedules(), 0, "manual intervention must stop tight automatic polling");
+  }
+
+  private static void verifyInitialManualRollbackPersistsWithoutPolling() {
+    MemoryStore store = new MemoryStore();
+    Fixture fixture = new Fixture(DeleteResult.fromHttp(500, manualRollbackPending(), "video-1"), store);
+    fixture.confirm();
+    equal(fixture.host.applied, 0, "initial manual rollback must not mutate the model");
+    check(store.job != null, "initial manual rollback must persist its job snapshot");
+    equal(fixture.runner.pendingSchedules(), 0, "initial manual rollback must not poll tightly");
+    equal(fixture.host.actionLabel, "", "initial manual rollback must not expose POST recovery");
+    contains(fixture.host.persistentMessage, "请重启服务后再恢复", "restart-required rollback must explain the next action");
   }
 
   private static void verifyDestroyedCallbackCannotReachHostUi() {
@@ -156,6 +216,14 @@ public final class NativeShortVideoDeleteControllerHarness {
     return row;
   }
 
+  private static Map<String, Object> manualRollbackPending() {
+    Map<String, Object> row = rollbackPending();
+    row.put("retryable", false);
+    row.put("manualInterventionRequired", true);
+    row.put("processRestartRequired", true);
+    return row;
+  }
+
   private static NativeShortVideoDeleteJobState job(
     String id,
     String status,
@@ -174,6 +242,25 @@ public final class NativeShortVideoDeleteControllerHarness {
     return NativeShortVideoDeleteJobState.fromMap(row, id);
   }
 
+  private static NativeShortVideoDeleteJobState jobWithFlags(
+    String id,
+    boolean stalled,
+    boolean recoverable,
+    boolean manualInterventionRequired,
+    boolean retryable
+  ) {
+    Map<String, Object> row = new HashMap<>();
+    row.put("id", id);
+    row.put("status", "rollback_pending");
+    row.put("phase", "rollback");
+    row.put("pending", true);
+    row.put("recoverable", recoverable);
+    row.put("manualInterventionRequired", manualInterventionRequired);
+    row.put("stalled", stalled);
+    row.put("retryable", retryable);
+    return NativeShortVideoDeleteJobState.fromMap(row, id);
+  }
+
   private static final class Fixture {
     final FakeHost host = new FakeHost();
     final FakeTransport transport;
@@ -181,13 +268,38 @@ public final class NativeShortVideoDeleteControllerHarness {
     final NativeShortVideoDeleteController controller;
 
     Fixture(DeleteResult result) {
+      this(result, new MemoryStore());
+    }
+
+    Fixture(DeleteResult result, MemoryStore store) {
       transport = new FakeTransport(result);
-      controller = new NativeShortVideoDeleteController(host, transport, runner, 1L);
+      controller = new NativeShortVideoDeleteController(host, transport, store, runner, 1L);
     }
 
     void confirm() {
       controller.confirmDelete("video-1", "测试视频", false, "http://fixture/delete", "http://fixture");
       host.confirm();
+    }
+  }
+
+  private static final class MemoryStore implements NativeShortVideoDeleteController.PendingJobStore {
+    NativeShortVideoPendingJob job;
+    Exception loadError;
+    boolean cleared;
+
+    @Override public NativeShortVideoPendingJob load() throws Exception {
+      if (loadError != null) throw loadError;
+      return job;
+    }
+
+    @Override public void save(NativeShortVideoPendingJob value) {
+      job = value;
+      cleared = false;
+    }
+
+    @Override public void clear() {
+      job = null;
+      cleared = true;
     }
   }
 

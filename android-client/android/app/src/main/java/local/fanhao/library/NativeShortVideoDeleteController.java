@@ -1,11 +1,6 @@
 package local.fanhao.library;
 
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
 
 /** Owns native delete confirmation, durable job tracking, recovery, and lifecycle cancellation. */
 final class NativeShortVideoDeleteController {
@@ -27,49 +22,43 @@ final class NativeShortVideoDeleteController {
     void cancel();
   }
 
+  interface PendingJobStore {
+    NativeShortVideoPendingJob load() throws Exception;
+    void save(NativeShortVideoPendingJob job) throws Exception;
+    void clear() throws Exception;
+  }
+
   interface ScheduledTask {
     void cancel();
   }
-
   interface TaskRunner {
     void execute(Runnable action);
     ScheduledTask schedule(Runnable action, long delayMs);
     void shutdownNow();
   }
 
-  private enum PendingKind {
-    CLEANUP,
-    ROLLBACK
-  }
-
   private final Host host;
   private final Transport transport;
+  private final PendingJobStore pendingJobStore;
   private final TaskRunner runner;
   private final long pollDelayMs;
   private volatile boolean destroyed;
   private volatile boolean requestInFlight;
   private volatile long generation;
   private volatile ScheduledTask scheduledPoll;
-  private volatile String activeJobId = "";
-  private volatile String activeApiBaseUrl = "";
-  private volatile PendingKind activeKind = PendingKind.ROLLBACK;
-  private volatile int cleanupPendingFiles;
-  private volatile boolean recoverable;
-  private volatile boolean recovering;
-  private volatile String pendingError = "";
-
-  NativeShortVideoDeleteController(Host host, Transport transport) {
-    this(host, transport, new ExecutorTaskRunner(), DEFAULT_POLL_DELAY_MS);
+  private volatile NativeShortVideoDeleteSession activeSession;
+  NativeShortVideoDeleteController(Host host, Transport transport, PendingJobStore pendingJobStore) {
+    this(host, transport, pendingJobStore, new NativeShortVideoDeleteTaskRunner(), DEFAULT_POLL_DELAY_MS);
   }
 
-  NativeShortVideoDeleteController(Host host, Transport transport, TaskRunner runner, long pollDelayMs) {
-    if (host == null || transport == null || runner == null) throw new IllegalArgumentException("delete controller dependencies are required");
+  NativeShortVideoDeleteController(Host host, Transport transport, PendingJobStore pendingJobStore, TaskRunner runner, long pollDelayMs) {
+    if (host == null || transport == null || pendingJobStore == null || runner == null) throw new IllegalArgumentException("delete controller dependencies are required");
     this.host = host;
     this.transport = transport;
+    this.pendingJobStore = pendingJobStore;
     this.runner = runner;
     this.pollDelayMs = Math.max(0L, pollDelayMs);
   }
-
   void confirmDelete(String videoId, String title, boolean group, String deleteUrl, String apiBaseUrl) {
     if (destroyed) return;
     if (deleteOperationActive()) {
@@ -89,7 +78,6 @@ final class NativeShortVideoDeleteController {
       : "会删除资料库记录以及这条记录引用的本地视频文件。");
     host.confirmDelete(promptTitle, message, () -> startDelete(id, group, url, clean(apiBaseUrl)));
   }
-
   void destroy() {
     if (destroyed) return;
     destroyed = true;
@@ -99,7 +87,23 @@ final class NativeShortVideoDeleteController {
     transport.cancel();
     runner.shutdownNow();
   }
-
+  void restorePending(String currentApiBaseUrl) {
+    if (destroyed || deleteOperationActive()) return;
+    NativeShortVideoPendingJob pending;
+    try {
+      pending = pendingJobStore.load();
+      if (pending == null) return;
+      String currentBase = NativeShortVideoPendingJob.normalizeApiBase(currentApiBaseUrl);
+      if (!currentBase.equals(pending.apiBaseUrl)) throw new IllegalArgumentException("上次删除任务属于其他服务");
+    } catch (Exception error) {
+      clearStoredJob();
+      showRestoreNotice("上次删除恢复状态无效，已安全忽略：" + errorMessage(error, "数据损坏"));
+      return;
+    }
+    long token = ++generation;
+    activeSession = new NativeShortVideoDeleteSession(pending);
+    poll(token, pending.jobId);
+  }
   private void startDelete(String videoId, boolean group, String deleteUrl, String apiBaseUrl) {
     if (destroyed) return;
     if (deleteOperationActive()) {
@@ -130,17 +134,22 @@ final class NativeShortVideoDeleteController {
       }
     }
   }
-
   private void handleDeleteResult(long token, DeleteResult result, boolean group, String apiBaseUrl) {
     if (!current(token)) return;
+    if (result == null) {
+      requestInFlight = false;
+      host.clearPersistentStatus();
+      host.showTransientStatus("删除接口没有返回结果");
+      return;
+    }
     try {
       if (result.committed()) host.applyCommittedDelete(result, group);
       if (result.cleanupPending()) {
-        startTracking(token, result.jobId, apiBaseUrl, PendingKind.CLEANUP, result.cleanupPendingFiles);
+        startTracking(token, result, apiBaseUrl, NativeShortVideoPendingJob.KIND_CLEANUP, result.cleanupPendingFiles);
         return;
       }
       if (!result.committed()) {
-        startTracking(token, result.jobId, apiBaseUrl, PendingKind.ROLLBACK, 0);
+        startTracking(token, result, apiBaseUrl, NativeShortVideoPendingJob.KIND_ROLLBACK, 0);
         return;
       }
       host.clearPersistentStatus();
@@ -148,130 +157,147 @@ final class NativeShortVideoDeleteController {
       requestInFlight = false;
     }
   }
-
   private boolean deleteOperationActive() {
-    return requestInFlight || !activeJobId.isEmpty();
+    return requestInFlight || activeSession != null;
   }
   private void showOperationActive() {
-    if (!activeJobId.isEmpty()) renderPending(generation);
+    if (activeSession != null && activeSession.statusLoaded) renderPending(generation);
     host.showTransientStatus("请先等待上一项删除恢复完成");
   }
-
-  private void startTracking(long token, String jobId, String apiBaseUrl, PendingKind kind, int pendingFiles) {
-    activeJobId = clean(jobId);
-    activeApiBaseUrl = clean(apiBaseUrl);
-    activeKind = kind;
-    cleanupPendingFiles = Math.max(0, pendingFiles);
-    recoverable = false;
-    recovering = false;
-    pendingError = "";
+  private void startTracking(long token, DeleteResult result, String apiBaseUrl, String kind, int pendingFiles) {
+    try {
+      activeSession = new NativeShortVideoDeleteSession(new NativeShortVideoPendingJob(result.jobId, apiBaseUrl, kind, pendingFiles));
+      activeSession.statusLoaded = true;
+      activeSession.manualIntervention = result.manualInterventionRequired;
+      activeSession.processRestartRequired = result.processRestartRequired;
+    } catch (Exception error) {
+      clearStoredJob();
+      host.showPersistentStatus("删除任务已提交，但恢复地址无效，需要人工检查。", "", null);
+      return;
+    }
+    persistActiveJob();
     renderPending(token);
     schedulePoll(token);
   }
-
   private void schedulePoll(long token) {
-    if (!current(token) || activeJobId.isEmpty()) return;
+    NativeShortVideoDeleteSession session = activeSession;
+    if (!current(token) || session == null || session.manualIntervention) return;
     cancelScheduledPoll();
     try {
-      ScheduledTask next = runner.schedule(() -> poll(token, activeJobId), pollDelayMs);
+      ScheduledTask next = runner.schedule(() -> poll(token, session.pendingJob.jobId), pollDelayMs);
       if (current(token)) scheduledPoll = next;
       else next.cancel();
     } catch (RejectedExecutionException ignored) {
       // Activity teardown can race a poll scheduled by an already-posted callback.
     }
   }
-
   private void poll(long token, String jobId) {
     if (!currentJob(token, jobId)) return;
     execute(() -> {
       try {
-        NativeShortVideoDeleteJobState state = transport.status(activeApiBaseUrl, jobId);
+        NativeShortVideoDeleteSession session = activeSession;
+        if (session == null) return;
+        NativeShortVideoDeleteJobState state = transport.status(session.pendingJob.apiBaseUrl, jobId);
         post(token, () -> handleJobState(token, state));
       } catch (Exception error) {
         post(token, () -> {
           if (!currentJob(token, jobId)) return;
-          pendingError = "状态读取失败，将继续重试：" + errorMessage(error, "网络错误");
+          activeSession.statusLoaded = true;
+          activeSession.error = "状态读取失败，将继续重试：" + errorMessage(error, "网络错误");
           renderPending(token);
           schedulePoll(token);
         });
       }
     });
   }
-
   private void recover(long token, String jobId) {
-    if (!currentJob(token, jobId) || !recoverable || recovering) return;
+    NativeShortVideoDeleteSession session = activeSession;
+    if (!currentJob(token, jobId) || session == null || !session.recoverable || session.recovering || session.manualIntervention) return;
     cancelScheduledPoll();
-    recovering = true;
-    pendingError = "";
+    session.recovering = true;
+    session.error = "";
     renderPending(token);
     execute(() -> {
       try {
-        NativeShortVideoDeleteJobState state = transport.recover(activeApiBaseUrl, jobId);
+        NativeShortVideoDeleteJobState state = transport.recover(session.pendingJob.apiBaseUrl, jobId);
         post(token, () -> handleJobState(token, state));
       } catch (Exception error) {
         post(token, () -> {
           if (!currentJob(token, jobId)) return;
-          recovering = false;
-          pendingError = "恢复失败：" + errorMessage(error, "请稍后重试");
+          activeSession.recovering = false;
+          activeSession.error = "恢复失败：" + errorMessage(error, "请稍后重试");
           renderPending(token);
           schedulePoll(token);
         });
       }
     });
   }
-
   private void handleJobState(long token, NativeShortVideoDeleteJobState state) {
     if (!currentJob(token, state == null ? "" : state.id)) return;
-    recovering = false;
-    pendingError = state.error;
-    recoverable = state.recoverable;
     if (state.completed()) {
       cancelScheduledPoll();
-      String jobId = activeJobId;
+      String jobId = activeSession.pendingJob.jobId;
+      clearStoredJob();
       clearActiveJob();
       host.showPersistentStatus("短视频文件已安全清理完成（任务 #" + jobId + "）", "知道了", () -> dismiss(token));
       return;
     }
     if (state.rolledBack()) {
       cancelScheduledPoll();
-      String jobId = activeJobId;
+      String jobId = activeSession.pendingJob.jobId;
+      clearStoredJob();
       clearActiveJob();
       host.showPersistentStatus("删除未生效，文件已安全恢复（任务 #" + jobId + "）", "知道了", () -> dismiss(token));
       return;
     }
-    if (state.cleanupPending()) activeKind = PendingKind.CLEANUP;
-    else if ("rollback_pending".equals(state.status) || "rollback".equals(state.phase)) activeKind = PendingKind.ROLLBACK;
+    activeSession.update(state);
+    if (state.cleanupPending()) activeSession = activeSession.withKind(NativeShortVideoPendingJob.KIND_CLEANUP);
+    else if ("rollback_pending".equals(state.status) || "rollback".equals(state.phase)) {
+      activeSession = activeSession.withKind(NativeShortVideoPendingJob.KIND_ROLLBACK);
+    }
+    persistActiveJob();
     renderPending(token);
     schedulePoll(token);
   }
-
   private void renderPending(long token) {
-    if (!current(token)) return;
-    String message;
-    if (activeKind == PendingKind.CLEANUP) {
-      String files = cleanupPendingFiles > 0 ? cleanupPendingFiles + " 个文件" : "文件";
-      message = "资料库记录已移除，正在安全清理" + files + "（任务 #" + activeJobId + "）";
-    } else {
-      message = "删除尚未生效，正在安全恢复（任务 #" + activeJobId + "）";
-    }
-    if (!pendingError.isEmpty()) message += "\n" + pendingError;
-    String actionLabel = recoverable ? (recovering ? "恢复中" : "重试恢复") : "";
-    Runnable action = recoverable && !recovering ? () -> recover(token, activeJobId) : null;
-    host.showPersistentStatus(message, actionLabel, action);
+    NativeShortVideoDeleteSession session = activeSession;
+    if (!current(token) || session == null) return;
+    boolean canRecover = session.recoverable && !session.manualIntervention;
+    String actionLabel = canRecover ? (session.recovering ? "恢复中" : "重试恢复") : "";
+    Runnable action = canRecover && !session.recovering ? () -> recover(token, session.pendingJob.jobId) : null;
+    host.showPersistentStatus(session.message(), actionLabel, action);
   }
-
   private void dismiss(long token) {
     if (!current(token)) return;
+    clearStoredJob();
     host.clearPersistentStatus();
   }
-
+  private void showRestoreNotice(String message) {
+    long token = ++generation;
+    host.showPersistentStatus(message, "知道了", () -> dismiss(token));
+  }
+  private void persistActiveJob() {
+    NativeShortVideoDeleteSession session = activeSession;
+    if (session == null) return;
+    try {
+      pendingJobStore.save(session.pendingJob);
+    } catch (Exception error) {
+      session.error = "恢复状态无法保存，请保持当前页面：" + errorMessage(error, "存储错误");
+    }
+  }
+  private void clearStoredJob() {
+    try {
+      pendingJobStore.clear();
+    } catch (Exception error) {
+      host.showTransientStatus("删除恢复记录清理失败，请稍后重试");
+    }
+  }
   private void post(long token, Runnable action) {
     if (!current(token)) return;
     host.post(() -> {
       if (current(token)) action.run();
     });
   }
-
   private boolean execute(Runnable action) {
     if (destroyed) return false;
     try {
@@ -287,7 +313,8 @@ final class NativeShortVideoDeleteController {
     return !destroyed && token == generation;
   }
   private boolean currentJob(long token, String jobId) {
-    return current(token) && !activeJobId.isEmpty() && activeJobId.equals(clean(jobId));
+    NativeShortVideoDeleteSession session = activeSession;
+    return current(token) && session != null && session.pendingJob.jobId.equals(clean(jobId));
   }
 
   private void cancelScheduledPoll() {
@@ -297,12 +324,7 @@ final class NativeShortVideoDeleteController {
   }
 
   private void clearActiveJob() {
-    activeJobId = "";
-    activeApiBaseUrl = "";
-    recoverable = false;
-    recovering = false;
-    pendingError = "";
-    cleanupPendingFiles = 0;
+    activeSession = null;
   }
 
   private static String clean(String value) {
@@ -314,26 +336,4 @@ final class NativeShortVideoDeleteController {
     return message.isEmpty() ? fallback : message;
   }
 
-  private static final class ExecutorTaskRunner implements TaskRunner {
-    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-      @Override public Thread newThread(Runnable action) {
-        Thread thread = new Thread(action, "FanHaoShortVideoDelete");
-        thread.setDaemon(true);
-        return thread;
-      }
-    });
-
-    @Override public void execute(Runnable action) {
-      executor.execute(action);
-    }
-
-    @Override public ScheduledTask schedule(Runnable action, long delayMs) {
-      ScheduledFuture<?> future = executor.schedule(action, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
-      return () -> future.cancel(true);
-    }
-
-    @Override public void shutdownNow() {
-      executor.shutdownNow();
-    }
-  }
 }

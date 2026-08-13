@@ -248,6 +248,7 @@ public class NativeShortVideoActivity extends Activity {
     if (requestedStartIndex >= 0) pendingStartIndex = requestedStartIndex;
     buildUi();
     deleteController = createDeleteController();
+    deleteController.restorePending(apiBase());
     currentScreen = captureFeedScreen();
     syncPendingVideoActions(true);
     if (!videos.isEmpty()) {
@@ -527,7 +528,7 @@ public class NativeShortVideoActivity extends Activity {
       @Override public void applyCommittedDelete(DeleteResult result, boolean group) {
         NativeShortVideoActivity.this.applyCommittedDelete(result, group);
       }
-    }, new NativeShortVideoDeleteTransport());
+    }, new NativeShortVideoDeleteTransport(), new NativeShortVideoPendingJobPreferences(this));
   }
 
   private NativeShortVideoFeedSearchController createFeedSearchController() {

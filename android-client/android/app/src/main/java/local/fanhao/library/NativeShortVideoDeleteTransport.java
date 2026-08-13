@@ -110,7 +110,8 @@ final class NativeShortVideoDeleteTransport implements NativeShortVideoDeleteCon
   private Map<String, Object> jobMap(JSONObject job) {
     Map<String, Object> row = new HashMap<>();
     for (String key : new String[] {
-      "id", "status", "phase", "pending", "recoverable", "requiresAttention", "error"
+      "id", "status", "phase", "pending", "recoverable", "requiresAttention",
+      "manualInterventionRequired", "processRestartRequired", "stalled", "retryable", "error"
     }) {
       if (job.has(key) && !job.isNull(key)) row.put(key, job.opt(key));
     }

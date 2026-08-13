@@ -1,4 +1,6 @@
 const DEFAULT_POLL_DELAY_MS = 1400;
+const PENDING_STORAGE_KEY = "fanhao.short-video.delete.pending.v1";
+const PENDING_STORAGE_VERSION = 1;
 const PENDING_STATUSES = new Set(["running", "cleanup_pending", "rollback_pending"]);
 const TERMINAL_STATUSES = new Set(["completed", "rolled_back"]);
 
@@ -8,11 +10,14 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
   const setTimer = options.setTimer || ((action, delay) => globalThis.setTimeout(action, delay));
   const clearTimer = options.clearTimer || ((timer) => globalThis.clearTimeout(timer));
   const renderState = options.renderState || createDeleteRecoveryRenderer(options.documentRef || globalThis.document);
+  const storage = options.storage === undefined ? safeLocalStorage() : options.storage;
+  const apiBaseUrl = normalizeApiBase(options.apiBaseUrl || globalThis.location?.origin || "");
   const pollDelayMs = Math.max(0, Number(options.pollDelayMs ?? DEFAULT_POLL_DELAY_MS) || 0);
   let disposed = false;
   let generation = 0;
   let pollTimer = null;
   let active = null;
+  let ready;
 
   function track(result) {
     if (disposed || !result) return snapshot();
@@ -20,6 +25,7 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
     cancelPoll();
     if (!result.pending) {
       active = null;
+      clearStoredPending();
       renderState(null);
       return null;
     }
@@ -30,11 +36,14 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
       cleanupPendingFiles: nonNegativeInteger(result.cleanupPendingFiles, 0),
       recoverable: false,
       recovering: false,
+      manualIntervention: result.manualInterventionRequired === true,
+      processRestartRequired: result.processRestartRequired === true,
       error: "",
       terminal: false
     };
+    persistActive();
     render();
-    schedulePoll(token);
+    if (!active.manualIntervention) schedulePoll(token);
     return snapshot();
   }
 
@@ -58,7 +67,7 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
 
   async function recover() {
     const current = active;
-    if (!current || current.terminal || !current.recoverable || current.recovering || disposed) return snapshot();
+    if (!current || current.terminal || current.manualIntervention || !current.recoverable || current.recovering || disposed) return snapshot();
     const { token, jobId } = current;
     cancelPoll();
     active.recovering = true;
@@ -86,6 +95,7 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
     generation += 1;
     cancelPoll();
     active = null;
+    clearStoredPending();
     renderState(null);
   }
 
@@ -113,6 +123,7 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
         terminal: true,
         terminalMessage: `短视频文件已安全清理完成（任务 #${job.id}）`
       };
+      clearStoredPending();
       cancelPoll();
       render();
       return;
@@ -126,6 +137,7 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
         terminal: true,
         terminalMessage: `删除未生效，文件已安全恢复（任务 #${job.id}）`
       };
+      clearStoredPending();
       cancelPoll();
       render();
       return;
@@ -135,13 +147,16 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
         : active.kind;
     active.recoverable = job.recoverable;
     active.recovering = false;
+    active.manualIntervention = job.manualInterventionRequired || (job.stalled && !job.recoverable);
+    active.processRestartRequired = job.processRestartRequired;
     active.error = job.error;
+    persistActive();
     render();
-    schedulePoll(token);
+    if (!active.manualIntervention) schedulePoll(token);
   }
 
   function schedulePoll(token) {
-    if (!active || active.terminal || !isCurrent(token, active.jobId)) return;
+    if (!active || active.terminal || active.manualIntervention || !isCurrent(token, active.jobId)) return;
     cancelPoll();
     pollTimer = setTimer(() => pollNow(), pollDelayMs);
   }
@@ -158,8 +173,8 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
     renderState({
       ...snapshot(),
       message,
-      actionLabel: active.terminal ? "知道了" : active.recoverable ? (active.recovering ? "恢复中" : "重试恢复") : "",
-      action: active.terminal ? dismiss : active.recoverable && !active.recovering ? recover : null
+      actionLabel: active.terminal ? "知道了" : active.recoverable && !active.manualIntervention ? (active.recovering ? "恢复中" : "重试恢复") : "",
+      action: active.terminal ? dismiss : active.recoverable && !active.recovering && !active.manualIntervention ? recover : null
     });
   }
 
@@ -171,7 +186,51 @@ export function createShortVideoDeleteRecoveryController(options = {}) {
     return !disposed && active?.token === token && active.jobId === String(jobId || "").trim();
   }
 
-  return { dismiss, dispose, hasPending, pollNow, recover, snapshot, track };
+  ready = restoreStoredPending();
+  return { dismiss, dispose, hasPending, pollNow, ready, recover, snapshot, track };
+
+  async function restoreStoredPending() {
+    if (!storage) return null;
+    try {
+      const raw = storage.getItem(PENDING_STORAGE_KEY);
+      if (!raw) return null;
+      const pending = parseStoredPendingJob(raw);
+      if (!apiBaseUrl || pending.apiBaseUrl !== apiBaseUrl) throw new Error("上次删除任务属于其他服务");
+      const token = ++generation;
+      active = { token, ...pending, recoverable: false, recovering: false, manualIntervention: false, processRestartRequired: false, error: "", terminal: false };
+      return pollNow();
+    } catch (error) {
+      clearStoredPending();
+      renderRestoreNotice(`上次删除恢复状态无效，已安全忽略：${errorMessage(error, "数据损坏")}`);
+      return null;
+    }
+  }
+
+  function persistActive() {
+    if (!storage || !active || active.terminal || !apiBaseUrl) return;
+    const pending = validateStoredPendingJob({
+      version: PENDING_STORAGE_VERSION,
+      jobId: active.jobId,
+      apiBaseUrl,
+      kind: active.kind,
+      cleanupPendingFiles: active.cleanupPendingFiles
+    });
+    try {
+      storage.setItem(PENDING_STORAGE_KEY, JSON.stringify(pending));
+    } catch (error) {
+      active.error = `恢复状态无法保存，请保持当前页面：${errorMessage(error, "存储错误")}`;
+    }
+  }
+
+  function clearStoredPending() {
+    if (!storage) return;
+    try { storage.removeItem(PENDING_STORAGE_KEY); } catch {}
+  }
+
+  function renderRestoreNotice(message) {
+    const clear = () => renderState(null);
+    renderState({ terminal: true, error: message, message, actionLabel: "知道了", action: clear });
+  }
 }
 
 export function parseShortVideoDeleteJob(payload, expectedJobId = "") {
@@ -187,6 +246,9 @@ export function parseShortVideoDeleteJob(payload, expectedJobId = "") {
   }
   if (row.recoverable != null && typeof row.recoverable !== "boolean") throw new Error("删除恢复任务 recoverable 无效");
   if (row.requiresAttention != null && typeof row.requiresAttention !== "boolean") throw new Error("删除恢复任务 requiresAttention 无效");
+  for (const key of ["manualInterventionRequired", "processRestartRequired", "stalled", "retryable"]) {
+    if (row[key] != null && typeof row[key] !== "boolean") throw new Error(`删除恢复任务 ${key} 无效`);
+  }
   const recoverable = row.recoverable === true;
   if (!row.pending && recoverable) throw new Error("已结束的删除恢复任务不能声明可恢复");
   return {
@@ -196,6 +258,10 @@ export function parseShortVideoDeleteJob(payload, expectedJobId = "") {
     pending: row.pending,
     recoverable,
     requiresAttention: row.requiresAttention === true,
+    manualInterventionRequired: row.manualInterventionRequired === true,
+    processRestartRequired: row.processRestartRequired === true,
+    stalled: row.stalled === true,
+    retryable: row.retryable === true,
     error: String(row.error || "").trim()
   };
 }
@@ -204,7 +270,47 @@ function pendingMessage(state) {
   const base = state.kind === "cleanup"
     ? `资料库记录已移除，正在安全清理${state.cleanupPendingFiles > 0 ? `${state.cleanupPendingFiles} 个文件` : "文件"}（任务 #${state.jobId}）`
     : `删除尚未生效，正在安全恢复（任务 #${state.jobId}）`;
-  return state.error ? `${base}\n${state.error}` : base;
+  const manual = state.manualIntervention
+    ? state.processRestartRequired ? "\n需要人工处理，请重启服务后再恢复。" : "\n需要人工处理，请人工检查后再恢复。"
+    : "";
+  return state.error ? `${base}${manual}\n${state.error}` : `${base}${manual}`;
+}
+
+function parseStoredPendingJob(raw) {
+  let row;
+  try { row = JSON.parse(raw); } catch { throw new Error("删除恢复记录不是有效 JSON"); }
+  return validateStoredPendingJob(row);
+}
+
+function validateStoredPendingJob(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("删除恢复记录无效");
+  const keys = Object.keys(row).sort();
+  const expected = ["apiBaseUrl", "cleanupPendingFiles", "jobId", "kind", "version"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error("删除恢复记录结构无效");
+  if (row.version !== PENDING_STORAGE_VERSION) throw new Error("删除恢复记录版本无效");
+  const jobId = requireJobId(row.jobId);
+  if (!/^[A-Za-z0-9._:-]{8,160}$/.test(jobId)) throw new Error("删除恢复任务 ID 无效");
+  const apiBaseUrl = normalizeApiBase(row.apiBaseUrl);
+  if (!apiBaseUrl) throw new Error("删除恢复服务地址无效");
+  if (row.kind !== "cleanup" && row.kind !== "rollback") throw new Error("删除恢复任务类型无效");
+  if (!Number.isSafeInteger(row.cleanupPendingFiles) || row.cleanupPendingFiles < 0 || row.cleanupPendingFiles > 1_000_000) {
+    throw new Error("删除恢复任务待清理数量无效");
+  }
+  return { version: PENDING_STORAGE_VERSION, jobId, apiBaseUrl, kind: row.kind, cleanupPendingFiles: row.cleanupPendingFiles };
+}
+
+function normalizeApiBase(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (!(["http:", "https:"].includes(url.protocol)) || url.username || url.password || (url.pathname && url.pathname !== "/") || url.search || url.hash) return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+
+function safeLocalStorage() {
+  try { return globalThis.window?.localStorage || null; } catch { return null; }
 }
 
 function createDeleteRecoveryRenderer(documentRef) {
