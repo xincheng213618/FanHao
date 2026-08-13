@@ -6,8 +6,10 @@ const store = createShortVideoStore({
   downloadManagerDbPath: workerData.downloadManagerDbPath,
   ffmpegPath: workerData.ffmpegPath,
   roots: workerData.roots,
+  busyTimeoutMs: workerData.busyTimeoutMs,
   skipStartupMaintenance: true,
-  trustExplicitInvalidation: true
+  trustExplicitInvalidation: true,
+  trustWatchAcceptedAt: true
 });
 
 parentPort?.postMessage({ type: "ready", ok: true });
@@ -21,11 +23,19 @@ parentPort?.on("message", (message) => {
     parentPort?.postMessage({
       ok: false,
       id: message.id,
+      busy: isSqliteBusy(error),
+      code: String(error?.code || ""),
       statusCode: Number(error?.statusCode || 0),
-      error: String(error?.message || error),
-      stack: String(error?.stack || "")
+      error: String(error?.message || error)
     });
   }
 });
 
 process.once("beforeExit", () => store.close());
+
+function isSqliteBusy(error) {
+  return Number(error?.errcode) === 5
+    || Number(error?.errno) === 5
+    || String(error?.code || "").toUpperCase() === "SQLITE_BUSY"
+    || /database is locked|database table is locked|SQLITE_BUSY/i.test(String(error?.message || error));
+}

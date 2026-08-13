@@ -314,7 +314,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onWatch?.(videoId, body || {}, data);
       sendJson(res, 200, data);
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "观看进度保存失败");
+      sendShortVideoPublicError(res, sendJson, error, "观看进度保存失败", { includeRetryable: true });
     }
     return true;
   }

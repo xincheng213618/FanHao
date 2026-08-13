@@ -1,54 +1,279 @@
 import { Worker } from "node:worker_threads";
 
-const WATCH_WRITE_TIMEOUT_MS = 20000;
+const DEFAULT_BUSY_RETRY_BUDGET_MS = 12000;
+const DEFAULT_BUSY_TIMEOUT_MS = 100;
+const DEFAULT_WORKER_RESPONSE_TIMEOUT_MS = 2000;
+const DEFAULT_TRANSPORT_RETRY_LIMIT = 1;
+const DEFAULT_BUSY_RETRY_DELAYS_MS = [40, 80, 160, 320, 640, 1000, 1500, 2000];
 
 export function createShortVideoWatchWriteService({
   dbPath,
   downloadManagerDbPath,
   ffmpegPath,
-  roots
+  roots,
+  busyRetryBudgetMs = DEFAULT_BUSY_RETRY_BUDGET_MS,
+  busyRetryDelaysMs = DEFAULT_BUSY_RETRY_DELAYS_MS,
+  busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS,
+  workerResponseTimeoutMs = DEFAULT_WORKER_RESPONSE_TIMEOUT_MS,
+  transportRetryLimit = DEFAULT_TRANSPORT_RETRY_LIMIT,
+  workerFactory = (url, options) => new Worker(url, options),
+  workerUrl = new URL("./watch-write-worker.js", import.meta.url),
+  extraWorkerData = {},
+  testHooks = {}
 }) {
-  const requests = new Map();
+  const retryBudgetMs = clampInteger(busyRetryBudgetMs, DEFAULT_BUSY_RETRY_BUDGET_MS, 50, 60000);
+  const workerBusyTimeoutMs = clampInteger(busyTimeoutMs, DEFAULT_BUSY_TIMEOUT_MS, 1, 1000);
+  const responseTimeoutMs = clampInteger(workerResponseTimeoutMs, DEFAULT_WORKER_RESPONSE_TIMEOUT_MS, 25, 30000);
+  const retryLimit = clampInteger(transportRetryLimit, DEFAULT_TRANSPORT_RETRY_LIMIT, 0, 3);
+  const retryDelays = normalizeRetryDelays(busyRetryDelaysMs);
+  const entries = new Map();
+  const readyQueue = [];
+  const workerRequests = new Map();
   let worker = null;
   let readyPromise = null;
   let readyResolve = null;
   let requestId = 0;
+  let acceptedAtMs = 0;
+  let accepting = true;
+  let activeAttempt = null;
+  let pumpTimer = null;
+  let pumpScheduled = false;
+  let stoppingPromise = null;
+  let stopResolve = null;
+  let workerStarts = 0;
+  let workerRestarts = 0;
+  let attempts = 0;
+  let busyRetries = 0;
+  let coalesced = 0;
+  let queueTimeouts = 0;
+  let workerTimeouts = 0;
 
-  function start() {
+  async function start() {
+    if (stoppingPromise) await stoppingPromise;
+    accepting = true;
+    stoppingPromise = null;
     ensureWorker();
     return readyPromise;
   }
 
   function record(videoId, options = {}) {
+    if (!accepting) return Promise.reject(stoppedError());
+    const key = String(videoId || "");
+    const acceptedAt = nextAcceptedAt();
     return new Promise((resolve, reject) => {
-      const activeWorker = ensureWorker();
-      const id = ++requestId;
-      const timer = setTimeout(() => {
-        requests.delete(id);
-        const error = new Error("观看进度后台写入超时");
-        error.statusCode = 503;
-        reject(error);
-      }, WATCH_WRITE_TIMEOUT_MS);
-      timer.unref?.();
-      requests.set(id, { reject, resolve, timer });
-      try {
-        activeWorker.postMessage({ type: "record", id, videoId, options });
-      } catch (error) {
-        clearTimeout(timer);
-        requests.delete(id);
-        reject(error);
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = {
+          videoId: key,
+          updates: [],
+          enqueued: false,
+          nextAttemptAt: 0,
+          busyAttempts: 0
+        };
+        entries.set(key, entry);
+      } else if (entry.updates.length > 0 || activeAttempt?.entry === entry) {
+        coalesced += 1;
+        testHooks.onCoalesce?.(key);
       }
+      entry.updates.push({
+        options: { ...options, acceptedAt },
+        deadlineAt: Date.now() + retryBudgetMs,
+        busyAttempts: 0,
+        transportRetries: 0,
+        resolve,
+        reject
+      });
+      if (activeAttempt?.entry !== entry) enqueue(entry);
+      schedulePump();
     });
   }
 
   function stop() {
-    const activeWorker = worker;
-    worker = null;
-    readyResolve?.(false);
-    readyResolve = null;
-    readyPromise = null;
-    rejectRequests(new Error("观看进度后台写入线程已停止"));
-    return activeWorker ? activeWorker.terminate().catch(() => undefined) : Promise.resolve();
+    if (stoppingPromise) return stoppingPromise;
+    accepting = false;
+    stoppingPromise = new Promise((resolve) => {
+      stopResolve = resolve;
+    });
+    schedulePump();
+    finishStopIfDrained();
+    return stoppingPromise;
+  }
+
+  function diagnostics() {
+    return {
+      accepting,
+      active: Boolean(activeAttempt),
+      pendingVideos: entries.size,
+      pendingUpdates: [...entries.values()].reduce((total, entry) => total + entry.updates.length, 0)
+        + Number(activeAttempt?.batch?.length || 0),
+      workerStarts,
+      workerRestarts,
+      attempts,
+      busyRetries,
+      coalesced,
+      queueTimeouts,
+      workerTimeouts
+    };
+  }
+
+  function enqueue(entry) {
+    if (entry.enqueued) return;
+    entry.enqueued = true;
+    readyQueue.push(entry);
+  }
+
+  function schedulePump(delayMs = 0) {
+    if (activeAttempt) return;
+    if (delayMs > 0) {
+      if (pumpTimer) clearTimeout(pumpTimer);
+      pumpTimer = setTimeout(() => {
+        pumpTimer = null;
+        schedulePump();
+      }, delayMs);
+      pumpTimer.unref?.();
+      return;
+    }
+    if (pumpScheduled) return;
+    pumpScheduled = true;
+    queueMicrotask(() => {
+      pumpScheduled = false;
+      void pump();
+    });
+  }
+
+  async function pump() {
+    if (activeAttempt) return;
+    if (pumpTimer) {
+      clearTimeout(pumpTimer);
+      pumpTimer = null;
+    }
+    const now = Date.now();
+    let earliestRetryAt = Infinity;
+    let selected = null;
+    for (let count = readyQueue.length; count > 0; count -= 1) {
+      const entry = readyQueue.shift();
+      entry.enqueued = false;
+      rejectExpiredUpdates(entry, now, workerBusyTimeoutMs);
+      if (!entry.updates.length) {
+        cleanupEntry(entry);
+        continue;
+      }
+      if (entry.nextAttemptAt > now) {
+        earliestRetryAt = Math.min(earliestRetryAt, entry.nextAttemptAt);
+        enqueue(entry);
+        continue;
+      }
+      selected = entry;
+      break;
+    }
+    if (!selected) {
+      if (Number.isFinite(earliestRetryAt)) schedulePump(Math.max(1, earliestRetryAt - now));
+      finishStopIfDrained();
+      return;
+    }
+
+    const batch = selected.updates.splice(0);
+    const options = coalescedOptions(batch);
+    activeAttempt = { entry: selected, batch, options };
+    attempts += 1;
+    testHooks.onDispatch?.({ videoId: selected.videoId, options: { ...options }, batchSize: batch.length });
+    try {
+      const remainingBudgetMs = Math.max(1, Math.min(...batch.map((update) => update.deadlineAt)) - Date.now());
+      const data = await requestWorkerAttempt(selected.videoId, options, Math.min(responseTimeoutMs, remainingBudgetMs));
+      selected.busyAttempts = 0;
+      for (const update of batch) update.resolve(data);
+    } catch (error) {
+      handleAttemptFailure(selected, batch, error);
+    } finally {
+      activeAttempt = null;
+      if (selected.updates.length) enqueue(selected);
+      else cleanupEntry(selected);
+      schedulePump();
+      finishStopIfDrained();
+    }
+  }
+
+  function handleAttemptFailure(entry, batch, error) {
+    const now = Date.now();
+    if (error?.code === "SHORT_VIDEO_WATCH_BUSY") {
+      busyRetries += 1;
+      entry.busyAttempts += 1;
+      for (const update of batch) update.busyAttempts += 1;
+      entry.updates.unshift(...batch);
+      entry.nextAttemptAt = now + retryDelay(entry.busyAttempts, retryDelays);
+      testHooks.onBusyRetry?.({ videoId: entry.videoId, attempt: entry.busyAttempts });
+      return;
+    }
+    if (isWorkerTransportError(error)) {
+      const retrying = [];
+      for (const update of batch) {
+        if (update.transportRetries < retryLimit && update.deadlineAt > now) {
+          update.transportRetries += 1;
+          retrying.push(update);
+        } else {
+          update.reject(error);
+        }
+      }
+      if (retrying.length) {
+        workerRestarts += 1;
+        entry.updates.unshift(...retrying);
+        entry.nextAttemptAt = now;
+      }
+      return;
+    }
+    for (const update of batch) update.reject(error);
+    for (const update of entry.updates.splice(0)) update.reject(error);
+  }
+
+  function rejectExpiredUpdates(entry, now, minimumAttemptMs) {
+    const pending = [];
+    for (const update of entry.updates) {
+      if (update.deadlineAt - now > minimumAttemptMs) {
+        pending.push(update);
+        continue;
+      }
+      if (update.busyAttempts > 0) update.reject(databaseBusyBudgetError());
+      else {
+        queueTimeouts += 1;
+        update.reject(queueBudgetError());
+      }
+    }
+    entry.updates = pending;
+  }
+
+  function cleanupEntry(entry) {
+    if (activeAttempt?.entry === entry || entry.updates.length || entry.enqueued) return;
+    if (entries.get(entry.videoId) === entry) entries.delete(entry.videoId);
+  }
+
+  function requestWorkerAttempt(videoId, options, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let activeWorker;
+      try {
+        activeWorker = ensureWorker();
+      } catch (error) {
+        reject(workerUnavailableError(error));
+        return;
+      }
+      const id = ++requestId;
+      const request = { worker: activeWorker, resolve, reject, timer: null };
+      workerRequests.set(id, request);
+      request.timer = setTimeout(() => {
+        if (!workerRequests.has(id)) return;
+        workerTimeouts += 1;
+        void retireWorker(activeWorker, workerTimeoutError()).then(() => {
+          rejectWorkerRequest(id, workerTimeoutError());
+        });
+      }, Math.max(1, timeoutMs));
+      request.timer.unref?.();
+      try {
+        activeWorker.postMessage({ type: "record", id, videoId, options });
+      } catch (error) {
+        void retireWorker(activeWorker, workerUnavailableError(error)).then(() => {
+          rejectWorkerRequest(id, workerUnavailableError(error));
+        });
+      }
+    });
   }
 
   function ensureWorker() {
@@ -56,10 +281,18 @@ export function createShortVideoWatchWriteService({
     readyPromise = new Promise((resolve) => {
       readyResolve = resolve;
     });
-    const nextWorker = new Worker(new URL("./watch-write-worker.js", import.meta.url), {
-      workerData: { dbPath, downloadManagerDbPath, ffmpegPath, roots }
+    const nextWorker = workerFactory(workerUrl, {
+      workerData: {
+        dbPath,
+        downloadManagerDbPath,
+        ffmpegPath,
+        roots,
+        busyTimeoutMs: workerBusyTimeoutMs,
+        ...extraWorkerData
+      }
     });
     worker = nextWorker;
+    workerStarts += 1;
     nextWorker.on("message", (message) => {
       if (message?.type === "ready") {
         readyResolve?.(Boolean(message.ok));
@@ -67,44 +300,172 @@ export function createShortVideoWatchWriteService({
         return;
       }
       const id = Number(message?.id || 0);
-      const request = requests.get(id);
-      if (!request) return;
-      requests.delete(id);
+      const request = workerRequests.get(id);
+      if (!request || request.worker !== nextWorker) return;
+      workerRequests.delete(id);
       clearTimeout(request.timer);
       if (message?.ok) request.resolve(message.data);
-      else request.reject(workerMessageError(message, "观看进度后台写入失败"));
+      else request.reject(workerMessageError(message));
     });
-    nextWorker.on("error", (error) => failWorker(nextWorker, error));
+    nextWorker.on("error", (error) => {
+      void retireWorker(nextWorker, workerUnavailableError(error));
+    });
     nextWorker.on("exit", (code) => {
       if (worker !== nextWorker) return;
-      failWorker(nextWorker, new Error(`观看进度后台写入线程退出 (${code})`));
+      detachWorker(nextWorker);
+      rejectWorkerRequests(nextWorker, workerExitError(code));
     });
     return nextWorker;
   }
 
-  function failWorker(failedWorker, error) {
+  async function retireWorker(failedWorker, error) {
+    if (worker === failedWorker) detachWorker(failedWorker);
+    try {
+      await failedWorker.terminate();
+    } catch {}
+    rejectWorkerRequests(failedWorker, error);
+  }
+
+  function detachWorker(failedWorker) {
     if (worker !== failedWorker) return;
     worker = null;
     readyResolve?.(false);
     readyResolve = null;
     readyPromise = null;
-    rejectRequests(error);
   }
 
-  function rejectRequests(error) {
-    for (const request of requests.values()) {
-      clearTimeout(request.timer);
-      request.reject(error);
+  function rejectWorkerRequest(id, error) {
+    const request = workerRequests.get(id);
+    if (!request) return;
+    workerRequests.delete(id);
+    clearTimeout(request.timer);
+    request.reject(error);
+  }
+
+  function rejectWorkerRequests(failedWorker, error) {
+    for (const [id, request] of workerRequests) {
+      if (request.worker === failedWorker) rejectWorkerRequest(id, error);
     }
-    requests.clear();
   }
 
-  return { record, start, stop };
+  function finishStopIfDrained() {
+    if (!stoppingPromise || activeAttempt || entries.size || workerRequests.size) return;
+    if (pumpTimer) {
+      clearTimeout(pumpTimer);
+      pumpTimer = null;
+    }
+    const activeWorker = worker;
+    if (activeWorker) detachWorker(activeWorker);
+    const resolve = stopResolve;
+    stopResolve = null;
+    void (activeWorker ? activeWorker.terminate().catch(() => undefined) : Promise.resolve())
+      .then(() => resolve?.());
+  }
+
+  function nextAcceptedAt() {
+    acceptedAtMs = Math.max(Date.now(), acceptedAtMs + 1);
+    return new Date(acceptedAtMs).toISOString();
+  }
+
+  return { diagnostics, record, start, stop };
 }
 
-function workerMessageError(message, fallback) {
-  const error = new Error(message?.error || fallback);
-  if (message?.stack) error.stack = message.stack;
+function coalescedOptions(batch) {
+  const latest = batch[batch.length - 1]?.options || {};
+  return {
+    ...latest,
+    completed: batch.some((update) => update.options?.completed === true)
+  };
+}
+
+function retryDelay(attempt, retryDelays) {
+  return retryDelays[Math.min(Math.max(0, attempt - 1), retryDelays.length - 1)];
+}
+
+function normalizeRetryDelays(values) {
+  const normalized = (Array.isArray(values) ? values : [])
+    .map((value) => clampInteger(value, 0, 0, 10000))
+    .filter((value) => value >= 0);
+  return normalized.length ? normalized : DEFAULT_BUSY_RETRY_DELAYS_MS;
+}
+
+function workerMessageError(message) {
+  if (message?.busy === true) {
+    const error = new Error("短视频数据库正忙，请稍后重试");
+    error.code = "SHORT_VIDEO_WATCH_BUSY";
+    error.statusCode = 503;
+    error.retryable = true;
+    return error;
+  }
+  const error = new Error(message?.error || "观看进度后台写入失败");
   if (message?.statusCode) error.statusCode = Number(message.statusCode);
+  if (message?.code) error.code = String(message.code);
   return error;
+}
+
+function databaseBusyBudgetError() {
+  const error = new Error("短视频数据库正忙，请稍后重试");
+  error.code = "SHORT_VIDEO_DATABASE_BUSY";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
+function queueBudgetError() {
+  const error = new Error("观看进度写入队列繁忙，请稍后重试");
+  error.code = "SHORT_VIDEO_WATCH_QUEUE_TIMEOUT";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
+function workerTimeoutError() {
+  const error = new Error("观看进度后台线程响应超时");
+  error.code = "SHORT_VIDEO_WATCH_WORKER_TIMEOUT";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
+function workerExitError(code) {
+  const error = new Error(`观看进度后台线程退出 (${Number(code || 0)})`);
+  error.code = "SHORT_VIDEO_WATCH_WORKER_EXIT";
+  error.statusCode = 503;
+  error.retryable = true;
+  return error;
+}
+
+function workerUnavailableError(cause) {
+  const error = new Error("观看进度后台线程暂时不可用", { cause });
+  error.code = "SHORT_VIDEO_WATCH_WORKER_UNAVAILABLE";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
+function stoppedError() {
+  const error = new Error("观看进度后台写入服务已停止");
+  error.code = "SHORT_VIDEO_WATCH_STOPPED";
+  error.statusCode = 503;
+  error.retryable = false;
+  error.expose = true;
+  return error;
+}
+
+function isWorkerTransportError(error) {
+  return [
+    "SHORT_VIDEO_WATCH_WORKER_TIMEOUT",
+    "SHORT_VIDEO_WATCH_WORKER_EXIT",
+    "SHORT_VIDEO_WATCH_WORKER_UNAVAILABLE"
+  ].includes(String(error?.code || ""));
+}
+
+function clampInteger(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(number)));
 }

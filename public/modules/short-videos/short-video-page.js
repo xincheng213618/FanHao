@@ -11,6 +11,7 @@ import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-po
 import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
+import { mergeShortVideoWatchPayload } from "./watch-write-payload.js?v=20260813-watch-write-pending-01";
 import { shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
 import { createShortVideoDeleteActions } from "./delete-actions.js?v=20260813-delete-client-state-02";
 import { createShortVideoDeleteRecoveryController } from "./delete-recovery.js?v=20260813-delete-client-state-02";
@@ -2836,7 +2837,7 @@ export function createShortVideoPage(deps) {
     write.lastSavedAt = now;
     write.lastPayload = payload;
     if (write.inFlight) {
-      write.pending = payload;
+      write.pending = mergeShortVideoWatchPayload(write.pending, payload);
       return;
     }
     dispatchShortVideoWatchWrite(video, write, payload);

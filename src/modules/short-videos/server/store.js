@@ -185,6 +185,7 @@ export function createShortVideoStore(options = {}) {
   const dbPath = options.dbPath;
   const skipStartupMaintenance = Boolean(options.skipStartupMaintenance);
   const trustExplicitInvalidation = Boolean(options.trustExplicitInvalidation);
+  const trustWatchAcceptedAt = Boolean(options.trustWatchAcceptedAt);
   const readOnly = Boolean(options.readOnly);
   const busyTimeoutMs = clampInt(options.busyTimeoutMs, 10000, 1, 60000);
   const downloadManagerDbPath = String(options.downloadManagerDbPath || "").trim();
@@ -2258,19 +2259,21 @@ function summary() {
     const progressMs = Math.round(durationMs > 0 ? Math.min(durationMs, requestedProgress) : requestedProgress);
     const completed = options.completed === true
       || (durationMs > 0 && progressMs >= Math.max(1000, durationMs - 1000));
-    const now = new Date().toISOString();
+    const now = trustWatchAcceptedAt
+      ? normalizedWatchTimestamp(options.acceptedAt)
+      : new Date().toISOString();
     database.prepare(`
       INSERT INTO short_video_watch_history (
         local_user_id, video_id, progress_ms, completed_count, last_watched_at
       )
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(local_user_id, video_id) DO UPDATE SET
-        progress_ms = excluded.progress_ms,
-        completed_count = CASE
-          WHEN excluded.completed_count > 0 THEN MAX(short_video_watch_history.completed_count, 1)
-          ELSE short_video_watch_history.completed_count
+        progress_ms = CASE
+          WHEN excluded.last_watched_at >= short_video_watch_history.last_watched_at THEN excluded.progress_ms
+          ELSE short_video_watch_history.progress_ms
         END,
-        last_watched_at = excluded.last_watched_at
+        completed_count = MAX(short_video_watch_history.completed_count, excluded.completed_count),
+        last_watched_at = MAX(short_video_watch_history.last_watched_at, excluded.last_watched_at)
     `).run(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, progressMs, completed ? 1 : 0, now);
     const savedWatch = database.prepare(`
       SELECT progress_ms, completed_count, last_watched_at
@@ -4839,6 +4842,11 @@ function runSqliteBusyRetry(fn, attempts = 8) {
     }
   }
   return fn();
+}
+
+function normalizedWatchTimestamp(value) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString();
 }
 
 function isSqliteBusy(error) {

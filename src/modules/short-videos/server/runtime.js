@@ -1082,7 +1082,7 @@ export function createShortVideosRuntime({
       if (!runtimeStartStillCurrent(generation)) return false;
       runtimeTestHooks.beforeWatchWriterStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;
-      watchWriter.start();
+      await watchWriter.start();
       if (!runtimeStartStillCurrent(generation)) return false;
       runtimeTestHooks.beforeDownloadManagerSyncStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;
