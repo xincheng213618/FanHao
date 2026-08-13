@@ -79,6 +79,21 @@ export function channelConfig(mode) {
   return CHANNELS[normalizeChannelMode(mode)] || CHANNELS.photo;
 }
 
+export function tvSeriesCardNavigation(mode, item = {}) {
+  const normalizedMode = normalizeChannelMode(mode);
+  if (!["tv", "media"].includes(normalizedMode)) return null;
+  if (!["tvSeries", "tvSeriesWork"].includes(String(item?.type || ""))) return null;
+  const params = {
+    tvView: "episodes",
+    seriesKey: item.seriesKey || item.id,
+    category: item.category || "",
+    query: "",
+    sort: "title"
+  };
+  if (normalizedMode === "media") params.mode = "media";
+  return params;
+}
+
 export function createChannelViews(context) {
   const {
     els,
@@ -319,16 +334,10 @@ export function createChannelViews(context) {
         updateChannelParams({ photoView: "albums", collection: item.collectionId || item.id, category: "", person: "", query: "" });
         return;
       }
-      if (mode === "tv" && item.type === "tvSeries") {
+      const tvSeriesNavigation = tvSeriesCardNavigation(mode, item);
+      if (tvSeriesNavigation) {
         updateChannelParams(
-          { tvView: "episodes", seriesKey: item.seriesKey || item.id, category: item.category || "", query: "", sort: "title" },
-          { skipHistory: false, replaceHistory: false, push: true }
-        );
-        return;
-      }
-      if (mode === "media" && item.type === "tvSeries") {
-        updateChannelParams(
-          { mode: "media", tvView: "episodes", seriesKey: item.seriesKey || item.id, category: item.category || "", query: "", sort: "title" },
+          tvSeriesNavigation,
           { skipHistory: false, replaceHistory: false, push: true }
         );
         return;

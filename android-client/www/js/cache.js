@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
+import { CLIENT_VERSION } from "./config.js?v=20260813-tv-series-work-01-5c293a6f8867";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

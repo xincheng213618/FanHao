@@ -1,5 +1,5 @@
 import { fetchJson } from "../../js/api.js?v=20260812-collection-busy-01";
-import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
+import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260813-tv-series-work-01-5c293a6f8867";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 const AUTHORITATIVE_REFRESH_ATTEMPTS = 3;

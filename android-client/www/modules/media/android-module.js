@@ -1,4 +1,4 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260712-module-chrome-03";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260813-tv-series-work-01-5c293a6f8867";
 
 export function createAndroidModule({ host }) {
   const search = createSearchController(host);
