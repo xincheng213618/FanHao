@@ -55,6 +55,7 @@ await verifyBatchMissingIdsFailAtomically();
 await verifyV3ActiveJournalMigration();
 await verifyV4ToV5MigrationAndImmutability();
 await verifyV5PartialSchemaRepair();
+verifyV5ReceiptTriggerUpgrade();
 verifyFutureProtocolFailsClosed();
 await verifyV3ActiveGuardPublicationMigration("hardlink_guard_published", "hardlink");
 await verifyV3ActiveGuardPublicationMigration("fallback_guard_published", "exclusive_create");
@@ -337,7 +338,7 @@ async function verifyV4ToV5MigrationAndImmutability() {
     try {
       staleV4.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
       staleV4.exec("DROP TRIGGER trg_short_video_delete_operation_request_immutable_v1");
-      staleV4.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v1");
+      staleV4.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v2");
       staleV4.exec("DROP TABLE short_video_delete_operations");
       staleV4.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
       staleV4.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '4')").run();
@@ -408,7 +409,7 @@ async function verifyV5PartialSchemaRepair() {
     try {
       partial.exec("DROP TRIGGER trg_short_video_delete_request_sha256_immutable_v1");
       partial.exec("DROP TRIGGER trg_short_video_delete_operation_request_immutable_v1");
-      partial.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v1");
+      partial.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v2");
       partial.exec("DROP TABLE short_video_delete_operations");
       partial.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN request_sha256");
       assert.equal(
@@ -428,7 +429,8 @@ async function verifyV5PartialSchemaRepair() {
       for (const trigger of [
         "trg_short_video_delete_request_sha256_immutable_v1",
         "trg_short_video_delete_operation_request_immutable_v1",
-        "trg_short_video_delete_operation_receipt_immutable_v1"
+        "trg_short_video_delete_operation_receipt_immutable_v2",
+        "trg_short_video_delete_operation_no_delete_v1"
       ]) {
         assert.equal(
           Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(trigger)?.count || 0),
@@ -445,6 +447,47 @@ async function verifyV5PartialSchemaRepair() {
     }
   } finally {
     repaired?.close();
+    closeFixture(fixture);
+  }
+}
+
+function verifyV5ReceiptTriggerUpgrade() {
+  const fixture = createFixture({ openStore: false });
+  let upgraded = null;
+  try {
+    const bootstrap = createShortVideoStore(storeOptions(fixture));
+    bootstrap.summary();
+    bootstrap.close();
+    const legacyV5 = openDb(fixture.dbPath);
+    try {
+      legacyV5.exec(`
+        DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v2;
+        CREATE TRIGGER trg_short_video_delete_operation_receipt_immutable_v1
+        BEFORE UPDATE OF terminal_status, result_json, finished_at ON short_video_delete_operations
+        WHEN OLD.terminal_status <> ''
+        BEGIN
+          SELECT RAISE(ABORT, 'short video delete operation receipt is immutable');
+        END;
+      `);
+    } finally {
+      legacyV5.close();
+    }
+
+    upgraded = createShortVideoStore(storeOptions(fixture));
+    upgraded.summary();
+    const db = openDb(fixture.dbPath);
+    try {
+      assert.equal(
+        db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
+        "5"
+      );
+      assert.equal(Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'trg_short_video_delete_operation_receipt_immutable_v1'").get()?.count || 0), 0);
+      assert.equal(Number(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'trg_short_video_delete_operation_receipt_immutable_v2'").get()?.count || 0), 1);
+    } finally {
+      db.close();
+    }
+  } finally {
+    upgraded?.close();
     closeFixture(fixture);
   }
 }

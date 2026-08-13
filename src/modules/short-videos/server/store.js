@@ -227,7 +227,8 @@ export function createShortVideoStore(options = {}) {
     roots,
     coverCacheDir,
     deleteRows: deleteShortVideoRows,
-    deleteStoredCovers: (videoIds) => coverBlobDatabase.removeMany(videoIds),
+    deleteStoredCovers: options.deleteJobDeleteStoredCovers
+      || ((videoIds) => coverBlobDatabase.removeMany(videoIds)),
     displayPath: shortVideoRelativePath,
     fsOps: options.deleteJobFsOps,
     hooks: options.deleteJobTestHooks,

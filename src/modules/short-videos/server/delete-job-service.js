@@ -123,7 +123,8 @@ export function createShortVideoDeleteJobService({
       "trg_short_video_delete_job_target_immutable_v1",
       "trg_short_video_delete_item_target_immutable_v1",
       "trg_short_video_delete_operation_request_immutable_v1",
-      "trg_short_video_delete_operation_receipt_immutable_v1",
+      "trg_short_video_delete_operation_receipt_immutable_v2",
+      "trg_short_video_delete_operation_no_delete_v1",
       "trg_short_video_path_tombstone_no_update_v1",
       "trg_short_video_video_tombstone_no_update_v1",
       "trg_short_video_video_tombstone_insert_v1",
@@ -541,11 +542,23 @@ export function createShortVideoDeleteJobService({
         SELECT RAISE(ABORT, 'short video delete operation request is immutable');
       END;
       DROP TRIGGER IF EXISTS trg_short_video_delete_operation_receipt_immutable_v1;
-      CREATE TRIGGER trg_short_video_delete_operation_receipt_immutable_v1
+      DROP TRIGGER IF EXISTS trg_short_video_delete_operation_receipt_immutable_v2;
+      CREATE TRIGGER trg_short_video_delete_operation_receipt_immutable_v2
       BEFORE UPDATE OF terminal_status, result_json, finished_at ON ${OPERATION_TABLE}
-      WHEN OLD.terminal_status <> ''
+      WHEN OLD.terminal_status <> '' AND NOT (
+        NEW.terminal_status = OLD.terminal_status
+        AND NEW.finished_at = OLD.finished_at
+        AND OLD.result_json <> ''
+        AND NEW.result_json = ''
+      )
       BEGIN
         SELECT RAISE(ABORT, 'short video delete operation receipt is immutable');
+      END;
+      DROP TRIGGER IF EXISTS trg_short_video_delete_operation_no_delete_v1;
+      CREATE TRIGGER trg_short_video_delete_operation_no_delete_v1
+      BEFORE DELETE ON ${OPERATION_TABLE}
+      BEGIN
+        SELECT RAISE(ABORT, 'short video delete operation tombstones are permanent');
       END;
     `);
     installReferenceTriggers(db);
@@ -1024,8 +1037,7 @@ export function createShortVideoDeleteJobService({
   }
 
   function operationReplay(db, identity) {
-    const operation = readOperation(db, identity.operationId);
-    const job = readJob(db, identity.operationId);
+    const { operation, job } = readOperationReplayState(db, identity.operationId);
     if (!operation) {
       if (job) {
         throw statusError(
@@ -1041,7 +1053,7 @@ export function createShortVideoDeleteJobService({
       assertRequestReplay(job, identity.requestSha256);
       return executionResult(db, job.id, { replayed: true });
     }
-    if (TERMINAL_STATUSES.includes(String(operation.terminal_status || "")) && operation.result_json) {
+    if (TERMINAL_STATUSES.includes(String(operation.terminal_status || ""))) {
       return receiptExecutionResult(operation);
     }
     throw statusError(
@@ -1151,119 +1163,190 @@ export function createShortVideoDeleteJobService({
     }
     const earlyReplay = operationReplay(db, identity);
     if (earlyReplay) return earlyReplay;
+    const executionToken = newExecutionToken();
+    const preflightKey = `preflight:${executionToken}`;
+    beginExecution(preflightKey, executionToken);
+    let executionKey = preflightKey;
 
-    const requestedIds = uniqueStrings((rows || []).map((row) => row?.id), 10_000);
-    if (!requestedIds.length) throw statusError("没有可删除的短视频记录", 404, "SHORT_VIDEO_DELETE_EMPTY");
-    const beforeById = rowsForIds(db, requestedIds);
-    if (beforeById.size !== requestedIds.length) {
-      throw statusError("短视频记录在删除计划创建前已发生变化", 409, "SHORT_VIDEO_DELETE_CHANGED");
-    }
-    const beforeRows = requestedIds.map((id) => beforeById.get(id));
-    const timestamp = now();
-    const token = crypto.randomBytes(24).toString("hex");
-    let created = false;
-
-    beginImmediate(db);
     try {
-      const existingReplay = operationReplay(db, identity);
-      if (existingReplay) {
-        db.exec("COMMIT");
-        return existingReplay;
-      }
-      const currentById = rowsForIds(db, requestedIds);
-      const currentRows = requestedIds.map((id) => currentById.get(id));
-      if (currentById.size !== requestedIds.length || !rowsSnapshotMatches(beforeRows, currentRows)) {
+      const requestedIds = uniqueStrings((rows || []).map((row) => row?.id), 10_000);
+      if (!requestedIds.length) throw statusError("没有可删除的短视频记录", 404, "SHORT_VIDEO_DELETE_EMPTY");
+      const beforeById = rowsForIds(db, requestedIds);
+      if (beforeById.size !== requestedIds.length) {
         throw statusError("短视频记录在删除计划创建前已发生变化", 409, "SHORT_VIDEO_DELETE_CHANGED");
       }
-      if (String(options.scope || "") === "group") {
-        if (typeof resolveGroupRows !== "function") {
-          throw codedError("短视频同组删除缺少事务内成员解析器", "SHORT_VIDEO_DELETE_GROUP_RESOLVER_MISSING");
+      const beforeRows = requestedIds.map((id) => beforeById.get(id));
+      const timestamp = now();
+      const token = crypto.randomBytes(24).toString("hex");
+      let created = false;
+
+      beginImmediate(db);
+      try {
+        const existingReplay = operationReplay(db, identity);
+        if (existingReplay) {
+          db.exec("COMMIT");
+          return existingReplay;
         }
-        const transactionGroupIds = uniqueStrings(
-          (resolveGroupRows(db, String(options.groupDir || "")) || []).map((row) => row?.id),
-          10_000
-        ).sort();
-        const plannedGroupIds = requestedIds.slice().sort();
-        if (
-          transactionGroupIds.length !== plannedGroupIds.length
-          || transactionGroupIds.some((id, index) => id !== plannedGroupIds[index])
-        ) {
-          throw statusError(
-            "短视频同组成员在删除计划创建前已发生变化",
-            409,
-            "SHORT_VIDEO_DELETE_GROUP_CHANGED"
-          );
+        const currentById = rowsForIds(db, requestedIds);
+        const currentRows = requestedIds.map((id) => currentById.get(id));
+        if (currentById.size !== requestedIds.length || !rowsSnapshotMatches(beforeRows, currentRows)) {
+          throw statusError("短视频记录在删除计划创建前已发生变化", 409, "SHORT_VIDEO_DELETE_CHANGED");
         }
+        if (String(options.scope || "") === "group") {
+          if (typeof resolveGroupRows !== "function") {
+            throw codedError("短视频同组删除缺少事务内成员解析器", "SHORT_VIDEO_DELETE_GROUP_RESOLVER_MISSING");
+          }
+          const transactionGroupIds = uniqueStrings(
+            (resolveGroupRows(db, String(options.groupDir || "")) || []).map((row) => row?.id),
+            10_000
+          ).sort();
+          const plannedGroupIds = requestedIds.slice().sort();
+          if (
+            transactionGroupIds.length !== plannedGroupIds.length
+            || transactionGroupIds.some((id, index) => id !== plannedGroupIds[index])
+          ) {
+            throw statusError(
+              "短视频同组成员在删除计划创建前已发生变化",
+              409,
+              "SHORT_VIDEO_DELETE_GROUP_CHANGED"
+            );
+          }
+        }
+        const firstRow = currentRows[0];
+        db.prepare(`
+          INSERT INTO ${OPERATION_TABLE} (
+            operation_id, request_sha256, terminal_status, result_json, created_at, finished_at
+          ) VALUES (?, ?, '', '', ?, '')
+        `).run(identity.operationId, identity.requestSha256, timestamp);
+        const result = logicalDeleteResult(currentRows, options);
+        db.prepare(`
+          INSERT INTO short_video_delete_jobs (
+            id, status, phase, scope, anchor_id, title, group_dir, video_ids_json,
+            result_json, request_sha256, quarantine_token, owner_id, lease_until, execution_token,
+            version, attempts, cover_cleanup_done, deleted_stored_covers,
+            error, error_code, created_at, updated_at, finished_at
+          ) VALUES (?, 'cleanup_pending', 'logical_cleanup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    1, 1, 0, 0, '', '', ?, ?, '')
+        `).run(
+          identity.operationId,
+          String(options.scope || "single"),
+          String(firstRow.id || ""),
+          String(firstRow.title || firstRow.description || firstRow.file_name || ""),
+          String(options.groupDir || ""),
+          JSON.stringify(requestedIds),
+          JSON.stringify(result),
+          identity.requestSha256,
+          token,
+          ownerId,
+          leaseUntil(),
+          executionToken,
+          timestamp,
+          timestamp
+        );
+        const deletedCount = Number(deleteRows(db, requestedIds) || 0);
+        if (deletedCount !== requestedIds.length) {
+          throw codedError("短视频记录删除数量与持久计划不一致", "SHORT_VIDEO_DELETE_COMMIT_MISMATCH");
+        }
+        db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('deleted_at', ?)").run(timestamp);
+        db.exec("COMMIT");
+        transferExecution(preflightKey, identity.operationId, executionToken);
+        executionKey = identity.operationId;
+        created = true;
+      } catch (error) {
+        rollback(db);
+        if (isReservationConflict(error)) {
+          throw statusError("另一个短视频删除作业正在处理这些记录或文件", 409, "SHORT_VIDEO_DELETE_CONFLICT");
+        }
+        throw error;
       }
-      const firstRow = currentRows[0];
-      const result = logicalDeleteResult(currentRows, options);
-      db.prepare(`
-        INSERT INTO ${OPERATION_TABLE} (
-          operation_id, request_sha256, terminal_status, result_json, created_at, finished_at
-        ) VALUES (?, ?, 'completed', ?, ?, ?)
-      `).run(identity.operationId, identity.requestSha256, JSON.stringify(result), timestamp, timestamp);
-      db.prepare(`
-        INSERT INTO short_video_delete_jobs (
-          id, status, phase, scope, anchor_id, title, group_dir, video_ids_json,
-          result_json, request_sha256, quarantine_token, owner_id, lease_until, execution_token,
-          version, attempts, cover_cleanup_done, deleted_stored_covers,
-          error, error_code, created_at, updated_at, finished_at
-        ) VALUES (?, 'completed', 'completed', ?, ?, ?, ?, ?, ?, ?, ?, '', '', '',
-                  1, 1, 0, 0, '', '', ?, ?, ?)
+
+      if (created) {
+        await cleanupLogicalCommitted(db, readJob(db, identity.operationId));
+        pruneTerminalJobs(db);
+      }
+      const result = operationReplay(db, identity);
+      if (!result) throw codedError("短视频删除幂等结果缺失", "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE");
+      return { ...result, replayed: false };
+    } finally {
+      endExecution(db, executionKey, executionToken);
+    }
+  }
+
+  async function cleanupLogicalCommitted(db, job) {
+    if (!job || job.phase !== "logical_cleanup" || !isKeyedJob(job)) {
+      throw codedError("逻辑删除封面清理作业不完整", "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE");
+    }
+    const result = sanitizedJobResult(job);
+    try {
+      result.deletedStoredCovers = Number(deleteStoredCovers?.(videoIds(job)) || 0);
+    } catch (error) {
+      result.coverCleanupError = String(error?.message || error);
+      warn?.("[short-video-cover-delete]", result.coverCleanupError);
+    }
+    const finalResult = sanitizedJobResult({ ...job, result_json: JSON.stringify(result) }, result);
+    return finalizeLogicalCleanup(db, job, finalResult);
+  }
+
+  function finalizeLogicalCleanup(db, expectedJob, result) {
+    const jobId = String(expectedJob?.id || "");
+    const requestSha256 = String(expectedJob?.request_sha256 || "");
+    const expectedOwner = String(expectedJob?.owner_id || "");
+    const expectedExecutionToken = String(expectedJob?.execution_token || "");
+    const timestamp = now();
+    beginImmediate(db);
+    try {
+      const operation = readOperation(db, jobId);
+      const current = readJob(db, jobId);
+      assertRequestReplay(operation, requestSha256);
+      assertRequestReplay(current, requestSha256);
+      if (operation && TERMINAL_STATUSES.includes(String(operation.terminal_status || ""))) {
+        db.exec("COMMIT");
+        return operationReplay(db, { operationId: jobId, requestSha256 });
+      }
+      if (!operation || !current || current.status !== "cleanup_pending" || current.phase !== "logical_cleanup") {
+        throw statusError(
+          "逻辑删除幂等记录不完整，已拒绝终结",
+          409,
+          "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE"
+        );
+      }
+      const resultJson = JSON.stringify(result);
+      const completed = db.prepare(`
+        UPDATE short_video_delete_jobs
+        SET status = 'completed', phase = 'completed', result_json = ?,
+            owner_id = '', lease_until = '', execution_token = '',
+            cover_cleanup_done = 1, deleted_stored_covers = ?,
+            error = '', error_code = '', updated_at = ?, finished_at = ?, version = version + 1
+        WHERE id = ? AND request_sha256 = ?
+          AND status = 'cleanup_pending' AND phase = 'logical_cleanup'
+          AND owner_id = ? AND execution_token = ?
       `).run(
-        identity.operationId,
-        String(options.scope || "single"),
-        String(firstRow.id || ""),
-        String(firstRow.title || firstRow.description || firstRow.file_name || ""),
-        String(options.groupDir || ""),
-        JSON.stringify(requestedIds),
-        JSON.stringify(result),
-        identity.requestSha256,
-        token,
+        resultJson,
+        Number(result.deletedStoredCovers || 0),
         timestamp,
         timestamp,
-        timestamp
+        jobId,
+        requestSha256,
+        expectedOwner,
+        expectedExecutionToken
       );
-      const deletedCount = Number(deleteRows(db, requestedIds) || 0);
-      if (deletedCount !== requestedIds.length) {
-        throw codedError("短视频记录删除数量与持久计划不一致", "SHORT_VIDEO_DELETE_COMMIT_MISMATCH");
+      if (Number(completed.changes || 0) !== 1) {
+        throw codedError("逻辑删除作业终态 CAS 失败", "SHORT_VIDEO_DELETE_LEASE_LOST");
       }
-      db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('deleted_at', ?)").run(timestamp);
+      const receipt = db.prepare(`
+        UPDATE ${OPERATION_TABLE}
+        SET terminal_status = 'completed', result_json = ?, finished_at = ?
+        WHERE operation_id = ? AND request_sha256 = ? AND terminal_status = ''
+      `).run(resultJson, timestamp, jobId, requestSha256);
+      if (Number(receipt.changes || 0) !== 1) {
+        throw codedError("逻辑删除终态 receipt 不完整", "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE");
+      }
       db.exec("COMMIT");
-      created = true;
+      return executionResult(db, jobId);
     } catch (error) {
       rollback(db);
-      if (isReservationConflict(error)) {
-        throw statusError("另一个短视频删除作业正在处理这些记录或文件", 409, "SHORT_VIDEO_DELETE_CONFLICT");
-      }
       throw error;
     }
-
-    if (created) {
-      const job = readJob(db, identity.operationId);
-      const result = sanitizedJobResult(job);
-      try {
-        result.deletedStoredCovers = Number(deleteStoredCovers?.(requestedIds) || 0);
-      } catch (error) {
-        result.coverCleanupError = String(error?.message || error);
-        warn?.("[short-video-cover-delete]", result.coverCleanupError);
-      }
-      db.prepare(`
-        UPDATE short_video_delete_jobs
-        SET result_json = ?, cover_cleanup_done = 1, deleted_stored_covers = ?, updated_at = ?
-        WHERE id = ? AND request_sha256 = ?
-      `).run(
-        JSON.stringify(result),
-        Number(result.deletedStoredCovers || 0),
-        now(),
-        identity.operationId,
-        identity.requestSha256
-      );
-      pruneTerminalJobs(db);
-    }
-    const result = operationReplay(db, identity);
-    if (!result) throw codedError("短视频删除幂等结果缺失", "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE");
-    return { ...result, replayed: false };
   }
 
   function logicalDeleteResult(rows, options) {
@@ -2135,6 +2218,9 @@ export function createShortVideoDeleteJobService({
       const job = claim(db, jobId, token);
       if (!job) return readJob(db, jobId);
       if (ownsExecution) await invokeHook(hooks.afterRecoveryClaim, { jobId });
+      if (job.phase === "logical_cleanup" && isKeyedJob(job)) {
+        return await cleanupLogicalCommitted(db, job);
+      }
       reconcileFsActions(db, job);
       const disposition = databaseDisposition(db, job);
       if (disposition === "committed") return await cleanupCommitted(db, jobId, { claimedJob: job, executionToken: token });
@@ -2168,7 +2254,7 @@ export function createShortVideoDeleteJobService({
       const row = readJob(db, jobId);
       if (!row) {
         const operation = readOperation(db, jobId);
-        if (operation && TERMINAL_STATUSES.includes(String(operation.terminal_status || "")) && operation.result_json) {
+        if (operation && TERMINAL_STATUSES.includes(String(operation.terminal_status || ""))) {
           return { ok: true, job: publicReceipt(operation) };
         }
         if (operation) {
@@ -4720,6 +4806,7 @@ export function createShortVideoDeleteJobService({
 
   function receiptExecutionResult(operation) {
     const statusValue = String(operation.terminal_status || "");
+    const expired = !String(operation.result_json || "");
     const result = sanitizedJobResult({
       id: operation.operation_id,
       status: statusValue,
@@ -4733,21 +4820,25 @@ export function createShortVideoDeleteJobService({
     const completed = statusValue === "completed";
     return {
       ...result,
-      ok: completed,
-      accepted: completed,
+      ok: completed && !expired,
+      accepted: completed && !expired,
       pending: false,
       recoveryRequired: false,
       retryable: false,
       manualInterventionRequired: false,
       processRestartRequired: false,
-      state: statusValue,
+      state: expired ? "expired" : statusValue,
       status: statusValue,
+      terminalStatus: statusValue,
       jobId: String(operation.operation_id || ""),
       operationId: String(operation.operation_id || ""),
       keyedOperation: true,
       replayed: true,
       receiptOnly: true,
-      httpStatus: completed ? 200 : 409,
+      expired,
+      resultExpired: expired,
+      code: expired ? "SHORT_VIDEO_DELETE_OPERATION_EXPIRED" : "",
+      httpStatus: completed && !expired ? 200 : 409,
       logicalDeleteCommitted: completed,
       physicalCleanupComplete: completed,
       cleanupPendingFiles: 0
@@ -4870,7 +4961,7 @@ export function createShortVideoDeleteJobService({
       owner_id: "",
       lease_until: "",
       pending: false,
-      requiresAttention: replay.status === "rolled_back",
+      requiresAttention: replay.status === "rolled_back" || replay.expired,
       stalled: false,
       leaseExpired: false,
       blockedByActiveOwner: false,
@@ -4885,6 +4976,9 @@ export function createShortVideoDeleteJobService({
       finishedAt: String(operation.finished_at || ""),
       keyedOperation: true,
       receiptOnly: true,
+      expired: replay.expired,
+      resultExpired: replay.resultExpired,
+      code: replay.code,
       result: sanitizedJobResult({ result_json: operation.result_json }),
       httpStatus: replay.httpStatus
     };
@@ -4987,17 +5081,19 @@ export function createShortVideoDeleteJobService({
     );
     const currentTime = Date.parse(String(now() || ""));
     const cutoff = new Date((Number.isFinite(currentTime) ? currentTime : Date.now()) - retentionMs).toISOString();
-    const expiredReceipts = db.prepare(`
-      DELETE FROM ${OPERATION_TABLE}
+    const compactedReceipts = db.prepare(`
+      UPDATE ${OPERATION_TABLE}
+      SET result_json = ''
       WHERE terminal_status IN ('completed', 'rolled_back')
         AND finished_at <> ''
         AND finished_at < ?
+        AND result_json <> ''
         AND NOT EXISTS (
           SELECT 1 FROM short_video_delete_jobs job
           WHERE job.id = ${OPERATION_TABLE}.operation_id
         )
     `).run(cutoff);
-    return removed + Number(expiredReceipts.changes || 0);
+    return removed + Number(compactedReceipts.changes || 0);
   }
 
   function readJob(db, jobId) {
@@ -5007,6 +5103,36 @@ export function createShortVideoDeleteJobService({
   function readOperation(db, operationId) {
     return db.prepare(`SELECT * FROM ${OPERATION_TABLE} WHERE operation_id = ?`)
       .get(String(operationId || "")) || null;
+  }
+
+  function readOperationReplayState(db, operationId) {
+    const row = db.prepare(`
+      SELECT
+        operation.operation_id AS replay_operation_id,
+        operation.request_sha256 AS replay_request_sha256,
+        operation.terminal_status AS replay_terminal_status,
+        operation.result_json AS replay_result_json,
+        operation.created_at AS replay_created_at,
+        operation.finished_at AS replay_finished_at,
+        job.*
+      FROM (SELECT ? AS lookup_id) lookup
+      LEFT JOIN ${OPERATION_TABLE} operation
+        ON operation.operation_id = lookup.lookup_id
+      LEFT JOIN short_video_delete_jobs job
+        ON job.id = lookup.lookup_id
+    `).get(String(operationId || ""));
+    const operation = row?.replay_operation_id
+      ? {
+          operation_id: row.replay_operation_id,
+          request_sha256: row.replay_request_sha256,
+          terminal_status: row.replay_terminal_status,
+          result_json: row.replay_result_json,
+          created_at: row.replay_created_at,
+          finished_at: row.replay_finished_at
+        }
+      : null;
+    const job = row?.id ? row : null;
+    return { operation, job };
   }
 
   function requireOwnedJob(db, jobId) {

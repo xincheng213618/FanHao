@@ -8,6 +8,7 @@ if (!parentPort || !workerData?.dbPath || !workerData?.root || !workerData?.vide
 }
 
 let resume = null;
+let fsExecutorCalls = 0;
 const store = createShortVideoStore({
   dbPath: workerData.dbPath,
   coverDbPath: workerData.coverDbPath,
@@ -15,12 +16,19 @@ const store = createShortVideoStore({
   roots: [workerData.root],
   skipStartupMaintenance: true,
   deleteJobWarn() {},
-  deleteJobTestHooks: workerData.pauseAfterPlan ? {
+  deleteJobTestHooks: {
+    async beforePlanTransaction() {
+      if (!workerData.pauseBeforePlan) return;
+      parentPort.postMessage({ type: "before-plan" });
+      await new Promise((resolve) => { resume = resolve; });
+    },
     async afterPlanPersisted({ id }) {
+      fsExecutorCalls += 1;
+      if (!workerData.pauseAfterPlan) return;
       parentPort.postMessage({ type: "paused", jobId: id });
       await new Promise((resolve) => { resume = resolve; });
     }
-  } : {}
+  }
 });
 
 parentPort.on("message", (message) => {
@@ -37,7 +45,7 @@ try {
     deleteFiles: workerData.deleteFiles !== false,
     operationId: workerData.operationId
   });
-  parentPort.postMessage({ type: "finished", result });
+  parentPort.postMessage({ type: "finished", result, fsExecutorCalls });
 } catch (error) {
   parentPort.postMessage({
     type: "error",

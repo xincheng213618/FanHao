@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
+import { createShortVideoCoverDatabase } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
@@ -16,11 +17,13 @@ const RESULT_KEYS = [
 
 await verifyExactReplayBoundaries();
 await verifyWorkerReplay();
+await verifyConcurrentCreatorsUseConsistentReplaySnapshot();
 await verifyConflictMatrixAndCanonicalBatch();
 await verifyGroupMembershipTransactionFence();
 await verifyRestartAndResponseLossReplay();
 await verifyHttpStatesAndSanitizedErrors();
 await verifyReceiptRetentionAndIncompleteIntent();
+await verifyLogicalReceiptFinalizationAfterCoverCleanup();
 await verifyMalformedAndLegacyContracts();
 
 console.log("short-video-delete-idempotency: ok (strict operation IDs, immutable command digests, exact replay, receipt retention, conflict fences)");
@@ -110,6 +113,47 @@ async function verifyWorkerReplay() {
     const afterRestart = await fixture.store.deleteVideo(id, { operationId });
     assert.equal(afterRestart.replayed, true);
     assert.equal(afterRestart.status, "completed");
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyConcurrentCreatorsUseConsistentReplaySnapshot() {
+  const fixture = createFixture();
+  try {
+    const id = "worker-snapshot-race";
+    const source = writeMedia(fixture, "worker/snapshot-race.mp4", "worker-snapshot-race");
+    seedVideo(fixture, { id, sourcePath: source });
+    fixture.store.close();
+    fixture.store = null;
+    const operationId = operationIdFor(202);
+    const first = createWorker(fixture, id, operationId, { pauseBeforePlan: true });
+    const second = createWorker(fixture, id, operationId, { pauseBeforePlan: true });
+    await Promise.all([
+      waitForWorkerMessage(first, "before-plan"),
+      waitForWorkerMessage(second, "before-plan")
+    ]);
+    const firstFinishedPromise = waitForWorkerMessage(first, "finished");
+    const secondFinishedPromise = waitForWorkerMessage(second, "finished");
+    first.postMessage({ type: "resume" });
+    second.postMessage({ type: "resume" });
+    const [firstFinished, secondFinished] = await Promise.all([
+      firstFinishedPromise,
+      secondFinishedPromise
+    ]);
+    await Promise.all([waitForWorkerExit(first), waitForWorkerExit(second)]);
+    const results = [firstFinished, secondFinished];
+    assert.equal(results.filter((entry) => entry.result.replayed === false).length, 1);
+    assert.equal(results.filter((entry) => entry.result.replayed === true).length, 1);
+    assert.equal(results.reduce((total, entry) => total + Number(entry.fsExecutorCalls || 0), 0), 1);
+    for (const entry of results) {
+      assert.equal(entry.result.jobId, operationId);
+      assert.notEqual(entry.result.code, "SHORT_VIDEO_DELETE_OPERATION_CONFLICT");
+      assert(["running", "cleanup_pending", "completed"].includes(entry.result.status));
+    }
+    assert.equal(jobCount(fixture), 1);
+    assert.equal(operationCount(fixture), 1);
+    assert.equal(fs.existsSync(source), false);
   } finally {
     closeFixture(fixture);
   }
@@ -330,10 +374,59 @@ async function verifyReceiptRetentionAndIncompleteIntent() {
     fixture.store = openStore(fixture);
     const retained = await fixture.store.deleteVideo(evictedSelector, { deleteFiles: false, operationId: evictedOperation });
     assert.equal(retained.receiptOnly, true, "a keyed terminal receipt must survive for at least seven days");
+    assert.equal(retained.resultExpired, false);
+
+    const reboundPath = writeMedia(fixture, `receipt/reimported-${evictedSelector}.mp4`, "reimported");
+    seedVideo(fixture, { id: evictedSelector, sourcePath: reboundPath });
+    const beforeExpiry = operationRow(fixture, evictedOperation);
+    currentMs += 2 * 24 * 60 * 60 * 1_000 + 1_000;
+    fixture.store.close();
+    fixture.store = openStore(fixture);
+    const compacted = operationRow(fixture, evictedOperation);
+    assert(compacted, "the operation tombstone must be permanent after receipt expiry");
+    assert.equal(compacted.request_sha256, beforeExpiry.request_sha256);
+    assert.equal(compacted.terminal_status, "completed");
+    assert.equal(compacted.result_json, "", "only the full terminal result may be compacted after seven days");
+    const permanent = openDb(fixture);
+    try {
+      assert.throws(
+        () => permanent.prepare("DELETE FROM short_video_delete_operations WHERE operation_id = ?").run(evictedOperation),
+        /operation tombstones are permanent/
+      );
+    } finally {
+      permanent.close();
+    }
+
+    const jobCountBeforeReplay = jobCount(fixture);
+    const expired = await fixture.store.deleteVideo(evictedSelector, { deleteFiles: false, operationId: evictedOperation });
+    assert.equal(expired.replayed, true);
+    assert.equal(expired.receiptOnly, true);
+    assert.equal(expired.state, "expired");
+    assert.equal(expired.terminalStatus, "completed");
+    assert.equal(expired.resultExpired, true);
+    assert.equal(expired.httpStatus, 409);
+    assert.equal(expired.code, "SHORT_VIDEO_DELETE_OPERATION_EXPIRED");
+    assert.equal(jobCount(fixture), jobCountBeforeReplay, "expired exact replay must never create another job");
+    assert.equal(videoExists(fixture, evictedSelector), true, "expired exact replay must not delete a reimported row");
+    assert.equal(fs.readFileSync(reboundPath, "utf8"), "reimported");
+    const expiredHttp = await invokeRoute(`/api/short-videos/${evictedSelector}`, fixture.store, {
+      body: { deleteFiles: false, operationId: evictedOperation }
+    });
+    assert.equal(expiredHttp.status, 409);
+    assert.equal(expiredHttp.payload.state, "expired");
+    const knownExpired = fixture.store.deleteJobStatus({ jobId: evictedOperation });
+    assert.equal(knownExpired.job.state, "expired");
+    assert.equal(knownExpired.job.resultExpired, true);
+    await assert.rejects(
+      () => fixture.store.deleteVideoGroup(evictedSelector, { deleteFiles: false, operationId: evictedOperation }),
+      (error) => error?.statusCode === 409 && error?.code === "SHORT_VIDEO_DELETE_OPERATION_CONFLICT"
+    );
+    assert.equal(videoExists(fixture, evictedSelector), true);
+    assert.equal(fs.readFileSync(reboundPath, "utf8"), "reimported");
 
     const corrupt = openDb(fixture);
     try {
-      corrupt.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v1");
+      corrupt.exec("DROP TRIGGER trg_short_video_delete_operation_receipt_immutable_v2");
       corrupt.prepare("UPDATE short_video_delete_operations SET terminal_status = '', result_json = '', finished_at = '' WHERE operation_id = ?")
         .run(evictedOperation);
     } finally {
@@ -343,6 +436,77 @@ async function verifyReceiptRetentionAndIncompleteIntent() {
       () => fixture.store.deleteVideo(evictedSelector, { deleteFiles: false, operationId: evictedOperation }),
       (error) => error?.statusCode === 409 && error?.code === "SHORT_VIDEO_DELETE_OPERATION_INCOMPLETE"
     );
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyLogicalReceiptFinalizationAfterCoverCleanup() {
+  await verifyLogicalReceiptFinalizationCase({
+    suffix: "success",
+    operationBase: 750,
+    seedCover: true,
+    expectedDeletedStoredCovers: 1,
+    expectedCoverCleanupError: ""
+  });
+  await verifyLogicalReceiptFinalizationCase({
+    suffix: "error",
+    operationBase: 760,
+    deleteStoredCovers() { throw new Error("fixture cover cleanup failed"); },
+    expectedDeletedStoredCovers: 0,
+    expectedCoverCleanupError: "fixture cover cleanup failed"
+  });
+}
+
+async function verifyLogicalReceiptFinalizationCase({
+  suffix,
+  operationBase,
+  seedCover = false,
+  deleteStoredCovers,
+  expectedDeletedStoredCovers,
+  expectedCoverCleanupError
+}) {
+  let currentMs = Date.parse("2026-08-05T00:00:00.000Z");
+  const fixture = createFixture({
+    terminalLimit: 1,
+    now: () => new Date(currentMs).toISOString(),
+    deleteStoredCovers
+  });
+  try {
+    const id = `logical-cover-${suffix}`;
+    const operationId = operationIdFor(operationBase);
+    const source = writeMedia(fixture, `logical/${suffix}.mp4`, suffix);
+    seedVideo(fixture, { id, sourcePath: source });
+    if (seedCover) {
+      const coverDatabase = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
+      try {
+        coverDatabase.put(id, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+      } finally {
+        coverDatabase.close();
+      }
+    }
+    const first = await fixture.store.deleteVideo(id, { deleteFiles: false, operationId });
+    assert.equal(first.status, "completed");
+    assert.equal(first.deletedStoredCovers, expectedDeletedStoredCovers);
+    assert.equal(first.coverCleanupError, expectedCoverCleanupError);
+    const beforePrune = persistedResultPair(fixture, operationId);
+    assert.deepEqual(beforePrune.job, beforePrune.operation, "job and receipt must freeze the same cleanup result");
+    assert.deepEqual(beforePrune.job, businessResult(first));
+
+    currentMs += 1_000;
+    const evictId = `logical-cover-${suffix}-evict`;
+    const evictSource = writeMedia(fixture, `logical/${suffix}-evict.mp4`, `${suffix}-evict`);
+    seedVideo(fixture, { id: evictId, sourcePath: evictSource });
+    await fixture.store.deleteVideo(evictId, {
+      deleteFiles: false,
+      operationId: operationIdFor(operationBase + 1)
+    });
+    assert.equal(jobIds(fixture).includes(operationId), false, "the first logical job must be pruned");
+    const replay = await fixture.store.deleteVideo(id, { deleteFiles: false, operationId });
+    assert.equal(replay.receiptOnly, true);
+    assert.deepEqual(businessResult(replay), businessResult(first), "receipt-only replay must preserve the full cleanup result");
+    assert.equal(replay.deletedStoredCovers, expectedDeletedStoredCovers);
+    assert.equal(replay.coverCleanupError, expectedCoverCleanupError);
   } finally {
     closeFixture(fixture);
   }
@@ -419,7 +583,7 @@ async function verifyMalformedAndLegacyContracts() {
   }
 }
 
-function createFixture({ hooks = {}, terminalLimit, now } = {}) {
+function createFixture({ hooks = {}, terminalLimit, now, deleteStoredCovers } = {}) {
   const temp = createVerifiedTempDir("fanhao-short-video-idempotency-");
   const fixture = {
     temp,
@@ -429,6 +593,7 @@ function createFixture({ hooks = {}, terminalLimit, now } = {}) {
     hooks,
     terminalLimit,
     now,
+    deleteStoredCovers,
     store: null
   };
   fs.mkdirSync(fixture.root);
@@ -446,6 +611,7 @@ function openStore(fixture) {
     deleteJobTestHooks: fixture.hooks,
     deleteJobTerminalLimit: fixture.terminalLimit,
     deleteJobNow: fixture.now,
+    deleteJobDeleteStoredCovers: fixture.deleteStoredCovers,
     deleteJobWarn() {}
   });
   store.summary();
@@ -555,7 +721,34 @@ function operationIds(fixture) {
   finally { db.close(); }
 }
 
-function createWorker(fixture, videoId, operationId, pauseAfterPlan) {
+function operationRow(fixture, operationId) {
+  const db = openDb(fixture);
+  try { return db.prepare("SELECT * FROM short_video_delete_operations WHERE operation_id = ?").get(operationId) || null; }
+  finally { db.close(); }
+}
+
+function persistedResultPair(fixture, operationId) {
+  const db = openDb(fixture);
+  try {
+    const job = db.prepare("SELECT result_json FROM short_video_delete_jobs WHERE id = ?").get(operationId);
+    const operation = db.prepare("SELECT result_json FROM short_video_delete_operations WHERE operation_id = ?").get(operationId);
+    assert(job?.result_json, "terminal job result must be present");
+    assert(operation?.result_json, "terminal operation result must be present");
+    return {
+      job: businessResult(JSON.parse(job.result_json)),
+      operation: businessResult(JSON.parse(operation.result_json))
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function businessResult(result) {
+  return Object.fromEntries(RESULT_KEYS.map((key) => [key, result?.[key]]));
+}
+
+function createWorker(fixture, videoId, operationId, options = {}) {
+  const workerOptions = typeof options === "boolean" ? { pauseAfterPlan: options } : options;
   return new Worker(WORKER, {
     workerData: {
       dbPath: fixture.dbPath,
@@ -563,7 +756,9 @@ function createWorker(fixture, videoId, operationId, pauseAfterPlan) {
       root: fixture.root,
       videoId,
       operationId,
-      pauseAfterPlan
+      pauseAfterPlan: workerOptions.pauseAfterPlan === true,
+      pauseBeforePlan: workerOptions.pauseBeforePlan === true,
+      deleteFiles: workerOptions.deleteFiles !== false
     }
   });
 }
