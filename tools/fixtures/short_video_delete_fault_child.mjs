@@ -10,6 +10,7 @@ if (!dbPath || !root || !boundary || !videoIds.length) {
 const waitState = new Int32Array(new SharedArrayBuffer(4));
 let cleanedItems = 0;
 let quarantineUnlinked = false;
+let exclusiveDestinationHandle = null;
 
 function stopAt(name) {
   if (name !== boundary) return;
@@ -19,8 +20,19 @@ function stopAt(name) {
 
 const faultFsOps = new Proxy(fs, {
   get(target, property) {
-    if (property === "linkSync" && boundary === "fallback_guard_published") {
+    if (property === "linkSync" && boundary.startsWith("fallback_guard_")) {
       return () => { throw Object.assign(new Error("links unsupported"), { code: "EPERM" }); };
+    }
+    if (property === "openSync") {
+      return (targetPath, flags, ...args) => {
+        const handle = fs.openSync(targetPath, flags, ...args);
+        if (boundary === "fallback_guard_half_written"
+          && flags === "wx"
+          && !String(targetPath).endsWith(".prepared")) {
+          exclusiveDestinationHandle = handle;
+        }
+        return handle;
+      };
     }
     if (property === "writeFileSync") {
       return (targetValue, content, ...args) => {
@@ -33,6 +45,15 @@ const faultFsOps = new Proxy(fs, {
           const result = fs.writeFileSync(targetValue, prefix, ...args);
           fs.fsyncSync(targetValue);
           stopAt("guard_half_written");
+          return result;
+        }
+        if (boundary === "fallback_guard_half_written"
+          && targetValue === exclusiveDestinationHandle
+          && String(content).startsWith("FANHAO_SHORT_VIDEO_DELETE_GUARD:")) {
+          const prefix = String(content).slice(0, 20);
+          const result = fs.writeFileSync(targetValue, prefix, ...args);
+          fs.fsyncSync(targetValue);
+          stopAt("fallback_guard_half_written");
           return result;
         }
         return fs.writeFileSync(targetValue, content, ...args);
@@ -96,6 +117,9 @@ const store = createShortVideoStore({
     },
     afterRestoreRenamed({ ordinal }) {
       if (ordinal === 0) stopAt("restore_renamed_pre_journal");
+    },
+    afterExclusiveGuardOpen() {
+      stopAt("fallback_guard_open_pre_identity");
     }
   }
 });

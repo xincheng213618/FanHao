@@ -78,6 +78,9 @@ await verifyKilledProcessRecovery("partially_isolated", "rolled_back");
 await verifyKilledProcessRecovery("restore_renamed_pre_journal", "rolled_back");
 await verifyKilledProcessRecovery("guard_half_written", "rolled_back");
 await verifyKilledProcessRecovery("guard_pre_publish", "rolled_back");
+await verifyExclusiveGuardOpenWithoutIdentityFailsClosed();
+await verifyKilledProcessRecovery("fallback_guard_half_written", "rolled_back");
+await verifyExclusiveGuardPartialReplacementFailsClosed();
 await verifyKilledProcessRecovery("fallback_guard_published", "rolled_back");
 await verifyKilledProcessRecovery("db_committed", "completed");
 await verifyKilledProcessRecovery("post_cleanup_unlinks_pre_journal", "completed");
@@ -150,6 +153,7 @@ async function verifyV3ActiveJournalMigration() {
         if (table === "short_video_delete_items") {
           sql = sql.replace(/,\s*guard_publish_mode TEXT NOT NULL DEFAULT ''/u, "");
           sql = sql.replace(/,\s*guard_publish_provenance TEXT NOT NULL DEFAULT ''/u, "");
+          sql = sql.replace(/,\s*guard_publish_identity_json TEXT NOT NULL DEFAULT ''/u, "");
         }
         assert(sql, `v3 migration fixture requires captured schema for ${table}`);
         db.exec(sql);
@@ -178,6 +182,7 @@ async function verifyV3ActiveJournalMigration() {
       assert.equal(schemaColumnCount(db, "short_video_delete_jobs", "execution_token"), 0);
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_mode"), 0);
       assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_provenance"), 0);
+      assert.equal(schemaColumnCount(db, "short_video_delete_items", "guard_publish_identity_json"), 0);
       assert.equal(
         db.prepare("SELECT value FROM short_video_meta WHERE key = 'short_video_delete_protocol_version'").get()?.value,
         "3"
@@ -198,6 +203,7 @@ async function verifyV3ActiveJournalMigration() {
       assert.equal(schemaColumnCount(migrated, "short_video_delete_jobs", "execution_token"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_mode"), 1);
       assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_provenance"), 1);
+      assert.equal(schemaColumnCount(migrated, "short_video_delete_items", "guard_publish_identity_json"), 1);
       assert.equal(migrated.prepare("SELECT status FROM short_video_delete_jobs WHERE id = 'v3-active-job'").get()?.status, "running");
     } finally {
       migrated.close();
@@ -257,10 +263,12 @@ async function verifyV3ActiveGuardPublicationMigration(boundary, expectedMode) {
       v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
       v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
+      v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_identity_json");
       v3.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '3')").run();
       assert.equal(schemaColumnCount(v3, "short_video_delete_jobs", "execution_token"), 0);
       assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_mode"), 0);
       assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_provenance"), 0);
+      assert.equal(schemaColumnCount(v3, "short_video_delete_items", "guard_publish_identity_json"), 0);
       assert.equal(
         v3.prepare("SELECT guard_identity_json FROM short_video_delete_items WHERE job_id = ?").get(interruptedJob.id)?.guard_identity_json,
         "",
@@ -344,6 +352,7 @@ async function verifyV3ActiveGuardReplacementFailures() {
         v3.exec("ALTER TABLE short_video_delete_jobs DROP COLUMN execution_token");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_mode");
         v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_provenance");
+        v3.exec("ALTER TABLE short_video_delete_items DROP COLUMN guard_publish_identity_json");
         v3.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('short_video_delete_protocol_version', '3')").run();
         if (replacement === "source_identity") {
           const expected = JSON.parse(interruptedItem.source_identity_json);
@@ -2348,6 +2357,24 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
         );
       }
     }
+    if (boundary === "fallback_guard_half_written") {
+      const interrupted = interruptedItems.filter((item) => item.state === "isolating"
+        && item.guard_publish_mode === "exclusive_create"
+        && item.guard_publish_identity_json
+        && fs.existsSync(item.original_path)
+        && fs.existsSync(item.quarantine_path));
+      assert.equal(interrupted.length, 1, "exclusive fallback half-write must retain one journaled destination identity");
+      assert.equal(
+        fs.readFileSync(interrupted[0].original_path, "utf8"),
+        "FANHAO_SHORT_VIDEO_D",
+        "the second destination write must stop with durable guard-prefix bytes"
+      );
+      const publicationIdentity = JSON.parse(interrupted[0].guard_publish_identity_json);
+      const partialIdentity = fs.lstatSync(interrupted[0].original_path, { bigint: true });
+      assert.equal(String(partialIdentity.dev), String(publicationIdentity.dev));
+      assert.equal(String(partialIdentity.ino), String(publicationIdentity.ino));
+      assert.equal(String(publicationIdentity.size), "0", "the intent must record identity before the first destination byte");
+    }
     if (boundary === "fallback_guard_published") {
       const interrupted = interruptedItems.filter((item) => item.state === "isolating"
         && item.guard_publish_mode === "exclusive_create"
@@ -2447,6 +2474,108 @@ async function verifyKilledProcessRecovery(boundary, expectedStatus) {
       if (!primaryError) throw cleanupError;
       console.error(`fixture cleanup also failed after ${boundary}: ${cleanupError?.message || cleanupError}`);
     }
+  }
+}
+
+async function verifyExclusiveGuardOpenWithoutIdentityFailsClosed() {
+  const killed = await prepareKilledExclusiveGuardBoundary(
+    "fallback_guard_open_pre_identity",
+    "open-pre-identity"
+  );
+  let recovery = null;
+  try {
+    assert.equal(killed.item.guard_publish_mode, "exclusive_create");
+    assert.equal(killed.item.guard_publish_identity_json, "");
+    assert.equal(fs.statSync(killed.item.original_path).size, 0, "open(wx) must precede every destination byte");
+    const before = new Map([
+      [killed.item.original_path, fs.readFileSync(killed.item.original_path)],
+      [killed.item.quarantine_path, fs.readFileSync(killed.item.quarantine_path)],
+      [killed.preparedPath, fs.readFileSync(killed.preparedPath)]
+    ]);
+
+    recovery = createShortVideoStore(storeOptions(killed.fixture));
+    const status = await recovery.recoverDeleteJobs({ jobId: killed.job.id });
+    assert.equal(status.job?.manualInterventionRequired, true);
+    assert.equal(status.job?.recoverable, false);
+    assert.equal(status.job?.retryable, false);
+    const failed = jobRows(killed.fixture.dbPath)[0];
+    assert.equal(failed?.status, "rollback_pending");
+    assert.equal(failed?.error_code, "SHORT_VIDEO_DELETE_GUARD_PUBLISH_IDENTITY_MISSING");
+    assert.equal(activeReservationCount(killed.fixture.dbPath) > 0, true);
+    for (const [targetPath, bytes] of before) {
+      assert.equal(fs.existsSync(targetPath), true);
+      assert.deepEqual(fs.readFileSync(targetPath), bytes, "unproven open-to-checkpoint state must remain untouched");
+    }
+  } finally {
+    recovery?.close();
+    closeFixture(killed.fixture);
+  }
+}
+
+async function verifyExclusiveGuardPartialReplacementFailsClosed() {
+  const killed = await prepareKilledExclusiveGuardBoundary(
+    "fallback_guard_half_written",
+    "partial-replaced"
+  );
+  let recovery = null;
+  try {
+    assert(killed.item.guard_publish_identity_json);
+    const intendedIdentity = JSON.parse(killed.item.guard_publish_identity_json);
+    const partialBytes = fs.readFileSync(killed.item.original_path);
+    const replacementPath = `${killed.item.original_path}.replacement`;
+    fs.writeFileSync(replacementPath, partialBytes, { flag: "wx" });
+    const replacementIdentity = fs.lstatSync(replacementPath, { bigint: true });
+    fs.unlinkSync(killed.item.original_path);
+    fs.renameSync(replacementPath, killed.item.original_path);
+    assert.notEqual(String(replacementIdentity.ino), String(intendedIdentity.ino));
+    const quarantineBytes = fs.readFileSync(killed.item.quarantine_path);
+    const preparedBytes = fs.readFileSync(killed.preparedPath);
+
+    recovery = createShortVideoStore(storeOptions(killed.fixture));
+    const status = await recovery.recoverDeleteJobs({ jobId: killed.job.id });
+    assert.equal(status.job?.manualInterventionRequired, true);
+    assert.equal(status.job?.recoverable, false);
+    assert.equal(status.job?.retryable, false);
+    const failed = jobRows(killed.fixture.dbPath)[0];
+    assert.equal(failed?.status, "rollback_pending");
+    assert.equal(failed?.error_code, "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+    assert.equal(activeReservationCount(killed.fixture.dbPath) > 0, true);
+    assert.deepEqual(fs.readFileSync(killed.item.original_path), partialBytes, "replacement destination must not be removed");
+    assert.deepEqual(fs.readFileSync(killed.item.quarantine_path), quarantineBytes);
+    assert.deepEqual(fs.readFileSync(killed.preparedPath), preparedBytes);
+  } finally {
+    recovery?.close();
+    closeFixture(killed.fixture);
+  }
+}
+
+async function prepareKilledExclusiveGuardBoundary(boundary, suffix) {
+  const fixture = createFixture({ openStore: false });
+  try {
+    const videoId = `exclusive-${suffix}`;
+    const source = writeMedia(fixture.root, `exclusive/${suffix}.mp4`, `exclusive-${suffix}-media`);
+    const initializer = createShortVideoStore(storeOptions(fixture));
+    initializer.summary();
+    initializer.close();
+    seedVideo(fixture.dbPath, { id: videoId, sourcePath: source });
+    const child = spawn(process.execPath, [CHILD, fixture.dbPath, fixture.root, boundary, videoId], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const closePromise = new Promise((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    await killAtBoundary(child, boundary, closePromise);
+    const job = jobRows(fixture.dbPath)[0];
+    const item = deleteItemFullRow(fixture.dbPath);
+    assert(job && item);
+    const preparedPath = fs.readdirSync(path.dirname(item.quarantine_path))
+      .map((name) => path.join(path.dirname(item.quarantine_path), name))
+      .find((name) => name.endsWith(".prepared"));
+    assert(preparedPath);
+    return { fixture, job, item, preparedPath };
+  } catch (error) {
+    closeFixture(fixture);
+    throw error;
   }
 }
 
@@ -2617,7 +2746,7 @@ function deleteItemRows(dbPath) {
   try {
     return db.prepare(`
       SELECT ordinal, state, original_path, quarantine_path, guard_identity_json,
-             guard_publish_mode, guard_publish_provenance
+             guard_publish_mode, guard_publish_provenance, guard_publish_identity_json
       FROM short_video_delete_items
       ORDER BY ordinal
     `).all();

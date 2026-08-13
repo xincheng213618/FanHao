@@ -149,7 +149,8 @@ export function createShortVideoDeleteJobService({
     const requiredColumns = [
       ["short_video_delete_jobs", "execution_token"],
       ["short_video_delete_items", "guard_publish_mode"],
-      ["short_video_delete_items", "guard_publish_provenance"]
+      ["short_video_delete_items", "guard_publish_provenance"],
+      ["short_video_delete_items", "guard_publish_identity_json"]
     ];
     return requiredColumns.every(([table, column]) => schemaHasColumn(db, table, column));
   }
@@ -223,6 +224,7 @@ export function createShortVideoDeleteJobService({
         guard_identity_json TEXT NOT NULL DEFAULT '',
         guard_publish_mode TEXT NOT NULL DEFAULT '',
         guard_publish_provenance TEXT NOT NULL DEFAULT '',
+        guard_publish_identity_json TEXT NOT NULL DEFAULT '',
         error TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL,
         PRIMARY KEY(job_id, ordinal),
@@ -432,6 +434,7 @@ export function createShortVideoDeleteJobService({
     ensureColumn(db, "short_video_delete_items", "identity_key", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "guard_publish_mode", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "short_video_delete_items", "guard_publish_provenance", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "short_video_delete_items", "guard_publish_identity_json", "TEXT NOT NULL DEFAULT ''");
     installReferenceTriggers(db);
     installTombstoneTriggers(db);
   }
@@ -2150,10 +2153,26 @@ export function createShortVideoDeleteJobService({
             "隔离文件身份无法从源计划转换",
             { transitionAfterRename: true }
           );
+      let incompleteExclusiveGuard = null;
       if (source && !isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json)) {
-        throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+        if (String(item.guard_publish_mode || "") === GUARD_PUBLISH_EXCLUSIVE_CREATE
+          && !String(item.guard_publish_identity_json || "")) {
+          throw codedError(
+            "exclusive guard 已创建但缺少目的文件身份检查点",
+            "SHORT_VIDEO_DELETE_GUARD_PUBLISH_IDENTITY_MISSING"
+          );
+        }
+        incompleteExclusiveGuard = captureOwnedIncompleteExclusiveGuard(job, item);
+        if (!incompleteExclusiveGuard) {
+          throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+        }
       }
-      return { mode: "restore", identity: currentQuarantine, guardOwned: Boolean(source) };
+      return {
+        mode: "restore",
+        identity: currentQuarantine,
+        guardOwned: Boolean(source),
+        incompleteExclusiveGuard
+      };
     }
     if (source && isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json)) {
       throw codedError("隔离文件缺失，无法恢复源文件", "SHORT_VIDEO_DELETE_QUARANTINE_MISSING");
@@ -2179,8 +2198,12 @@ export function createShortVideoDeleteJobService({
     if (candidate.mode === "restore") {
       assertCheapManagedFileIdentity(item.quarantine_path, item.managed_root, candidate.identity, "隔离文件已被替换");
       const source = lstatIfPresent(item.original_path);
-      if (source && !isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json)) {
-        throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+      if (source) {
+        if (candidate.incompleteExclusiveGuard) {
+          assertOwnedIncompleteExclusiveGuard(job, item, candidate.incompleteExclusiveGuard);
+        } else if (!isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json)) {
+          throw codedError("原文件位置已被其他文件占用", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+        }
       }
       return;
     }
@@ -2189,7 +2212,9 @@ export function createShortVideoDeleteJobService({
 
   async function restoreIsolatedItem(db, job, item, candidate) {
     if (candidate.mode === "restore") {
-      if (candidate.guardOwned) moveOwnedGuardAside(db, item.original_path, job, item);
+      if (candidate.incompleteExclusiveGuard) {
+        removeOwnedIncompleteExclusiveGuard(job, item, candidate.incompleteExclusiveGuard);
+      } else if (candidate.guardOwned) moveOwnedGuardAside(db, item.original_path, job, item);
       else removeOwnedGuardTemp(job, item);
       assertPathMissing(item.original_path, "原文件位置已被其他文件占用");
       await invokeHook(hooks.beforeItemRestored, { jobId: job.id, ordinal: item.ordinal });
@@ -2274,6 +2299,14 @@ export function createShortVideoDeleteJobService({
       let destinationHandle = null;
       try {
         destinationHandle = fsOps.openSync(originalPath, "wx", 0o600);
+        const publicationIdentity = captureIdentity(fsOps.fstatSync(destinationHandle, { bigint: true }));
+        if (String(publicationIdentity.size) !== "0"
+          || String(publicationIdentity.nlink) !== "1"
+          || String(publicationIdentity.dev) !== String(expectedSource.dev)) {
+          throw codedError("exclusive guard 初始身份无效", "SHORT_VIDEO_DELETE_GUARD_PUBLISH_IDENTITY_INVALID");
+        }
+        await invokeHook(hooks.afterExclusiveGuardOpen, { jobId: job.id, ordinal, originalPath });
+        checkpointExclusiveGuardPublishIdentity(db, job.id, ordinal, publicationIdentity);
         fsOps.writeFileSync(destinationHandle, content, "utf8");
         fsOps.fsyncSync(destinationHandle);
       } catch (fallbackError) {
@@ -2398,6 +2431,39 @@ export function createShortVideoDeleteJobService({
       if (Number(updated.changes || 0) !== 1) {
         throw codedError("guard 发布身份 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_MODE_CHANGED");
       }
+      db.exec("COMMIT");
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function checkpointExclusiveGuardPublishIdentity(db, jobId, ordinal, publicationIdentity) {
+    if (String(publicationIdentity?.size || "") !== "0"
+      || String(publicationIdentity?.nlink || "") !== "1") {
+      throw codedError("exclusive guard 初始身份无效", "SHORT_VIDEO_DELETE_GUARD_PUBLISH_IDENTITY_INVALID");
+    }
+    const executionToken = requireActiveExecutionToken(jobId);
+    beginImmediate(db);
+    try {
+      heartbeat(db, jobId);
+      requireOwnedJob(db, jobId);
+      const updated = db.prepare(`
+        UPDATE short_video_delete_items
+        SET guard_publish_identity_json = ?, updated_at = ?
+        WHERE job_id = ? AND ordinal = ? AND state = 'isolating'
+          AND guard_publish_mode = 'exclusive_create'
+          AND guard_publish_identity_json = ''
+          AND EXISTS (
+            SELECT 1 FROM short_video_delete_jobs owner
+            WHERE owner.id = short_video_delete_items.job_id
+              AND owner.owner_id = ? AND owner.execution_token = ?
+          )
+      `).run(JSON.stringify(publicationIdentity), now(), jobId, ordinal, ownerId, executionToken);
+      if (Number(updated.changes || 0) !== 1) {
+        throw codedError("exclusive guard 身份 CAS 失败", "SHORT_VIDEO_DELETE_GUARD_PUBLISH_IDENTITY_CHANGED");
+      }
+      relinquishableExecutions.delete(String(jobId || ""));
       db.exec("COMMIT");
     } catch (error) {
       rollback(db);
@@ -2832,6 +2898,87 @@ export function createShortVideoDeleteJobService({
     const expected = parseJson(storedIdentityJson, null);
     if (expected && !identityMatches(after, expected)) return null;
     return after;
+  }
+
+  function captureOwnedIncompleteExclusiveGuard(job, item) {
+    if (String(item?.guard_publish_mode || "") !== GUARD_PUBLISH_EXCLUSIVE_CREATE) return null;
+    const publicationIdentity = parseJson(item.guard_publish_identity_json, null);
+    const expectedSource = parseJson(item.source_identity_json, null);
+    if (!publicationIdentity || !expectedSource
+      || String(publicationIdentity.size || "") !== "0"
+      || String(publicationIdentity.nlink || "") !== "1"
+      || String(publicationIdentity.dev || "") !== String(expectedSource.dev || "")) return null;
+    const jobDir = path.dirname(item.quarantine_path);
+    requireOwnedJobDirectory(job, jobDir, item.managed_root);
+    assertGuardDestination(item.original_path, item.managed_root, expectedSource);
+    const prepared = captureOwnedGuardCapability(
+      guardTempPath(jobDir, job, item.ordinal),
+      job,
+      item.ordinal,
+      ""
+    );
+    const published = captureExclusiveGuardPrefixCapability(
+      item.original_path,
+      job,
+      item.ordinal,
+      publicationIdentity
+    );
+    if (!prepared || !published
+      || String(prepared.dev) !== String(expectedSource.dev)
+      || String(published.identity.dev) !== String(expectedSource.dev)
+      || (String(prepared.dev) === String(published.identity.dev)
+        && String(prepared.ino) === String(published.identity.ino))) return null;
+    return { published: published.identity, prepared, content: published.content };
+  }
+
+  function captureExclusiveGuardPrefixCapability(filePath, job, ordinal, publicationIdentity) {
+    const lexicalEntry = fsOps.lstatSync(filePath, { bigint: true });
+    if (!lexicalEntry.isFile() || lexicalEntry.isSymbolicLink() || Number(lexicalEntry.size) > 1024) return null;
+    const handle = fsOps.openSync(filePath, "r");
+    let before;
+    let after;
+    let content;
+    try {
+      before = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) return null;
+      content = fsOps.readFileSync(handle, "utf8");
+      after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
+    } finally {
+      fsOps.closeSync(handle);
+    }
+    const expectedContent = guardContent(job, ordinal);
+    if (!matchesExactSnapshot(after, before)
+      || content === expectedContent
+      || !expectedContent.startsWith(content)
+      || !matchesExclusiveGuardPublishIdentity(after, publicationIdentity)) return null;
+    const finalIdentity = captureIdentity(fsOps.lstatSync(filePath, { bigint: true }));
+    if (!matchesCheapIdentity(finalIdentity, after)) return null;
+    return { identity: after, content };
+  }
+
+  function matchesExclusiveGuardPublishIdentity(actual, expected) {
+    return String(expected?.size || "") === "0"
+      && String(expected?.nlink || "") === "1"
+      && String(actual?.dev || "") === String(expected?.dev || "")
+      && String(actual?.ino || "") === String(expected?.ino || "")
+      && String(actual?.birthtimeNs || "") === String(expected?.birthtimeNs || "")
+      && String(actual?.nlink || "") === "1";
+  }
+
+  function assertOwnedIncompleteExclusiveGuard(job, item, expected) {
+    const current = captureOwnedIncompleteExclusiveGuard(job, item);
+    if (!current
+      || current.content !== expected.content
+      || !matchesExactSnapshot(current.published, expected.published)
+      || !matchesExactSnapshot(current.prepared, expected.prepared)) {
+      throw codedError("exclusive guard 半写文件已被替换", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
+    }
+    return current;
+  }
+
+  function removeOwnedIncompleteExclusiveGuard(job, item, expected) {
+    assertOwnedIncompleteExclusiveGuard(job, item, expected);
+    fsOps.unlinkSync(item.original_path);
   }
 
   function captureIdentity(entry) {
