@@ -1,0 +1,19 @@
+{
+  "bytes": 42993361698366,
+  "completedAt": "2026-08-16T01:09:47.311Z",
+  "databaseFile": "v-1786842518486-5hac4d0.sqlite",
+  "directories": 3263,
+  "driveId": "V",
+  "errors": 0,
+  "files": 14165,
+  "linkedRoots": [
+    "V:\\[A]",
+    "V:\\[A1]"
+  ],
+  "nodes": 17429,
+  "root": "V:\\",
+  "scanId": "1786842518486-5hac4d0",
+  "schemaVersion": 1,
+  "skipped": 7,
+  "startedAt": "2026-08-16T01:08:38.515Z"
+}

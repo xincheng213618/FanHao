@@ -91,10 +91,10 @@ npm run verify:imports    # 检查重构后 JS/CSS 相对引用没有悬空
 作业中心底层就是调用 `tools/` 下的脚本，也可以手动跑（注意 Node 用 >= 24，Python 用项目虚拟环境）：
 
 ```powershell
-# Node 作业
-node tools/generate_missing_covers.mjs --write --limit 20
+# Node 作业：欧美视频每个文件一张卡，缺封面时用 FFmpeg 写入核心图片缓存
+node tools/generate_missing_covers.mjs --scope western --write --limit 20
 
-# Python 作业（举例）
+# Python 作业：欧美 R 盘始终按“一个视频一条作品”刷新
 python tools/full_scan_core_library.py --scope western --write --changed-only
 ```
 

@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { open as openFile } from "node:fs/promises";
 import path from "node:path";
 
 export const SHORT_VIDEO_DELETE_QUARANTINE_DIR = ".fanhao-short-video-delete-quarantine";
@@ -173,7 +172,6 @@ export function createShortVideoDeleteJobService({
   }
 
   function ensureSchema(db = database()) {
-    if (protocolSchemaCurrent(db)) return false;
     const observedProtocolVersion = String(
       db.prepare("SELECT value FROM short_video_meta WHERE key = ?").get(DELETE_PROTOCOL_VERSION_META)?.value || ""
     );
@@ -183,6 +181,8 @@ export function createShortVideoDeleteJobService({
         "SHORT_VIDEO_DELETE_PROTOCOL_NEWER"
       );
     }
+    ensureReferenceLookupIndexes(db);
+    if (protocolSchemaCurrent(db)) return false;
     beginImmediate(db);
     try {
       if (protocolSchemaCurrent(db)) {
@@ -210,6 +210,17 @@ export function createShortVideoDeleteJobService({
       rollback(db);
       throw error;
     }
+  }
+
+  function ensureReferenceLookupIndexes(db) {
+    const pathReferenceTableExists = Boolean(db.prepare(`
+      SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?
+    `).get(PATH_REFERENCE_TABLE));
+    if (!pathReferenceTableExists) return;
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_short_video_path_refs_owner_video
+        ON ${PATH_REFERENCE_TABLE}(owner_video_id, owner_table, owner_key, path_column);
+    `);
   }
 
   function installProtocolSchemaInTransaction(db) {
@@ -334,6 +345,8 @@ export function createShortVideoDeleteJobService({
         ON ${PATH_REFERENCE_TABLE}(identity_key, owner_video_id);
       CREATE INDEX IF NOT EXISTS idx_short_video_path_refs_probe
         ON ${PATH_REFERENCE_TABLE}(probe_state, owner_video_id);
+      CREATE INDEX IF NOT EXISTS idx_short_video_path_refs_owner_video
+        ON ${PATH_REFERENCE_TABLE}(owner_video_id, owner_table, owner_key, path_column);
 
       CREATE TABLE IF NOT EXISTS ${PATH_TOMBSTONE_TABLE} (
         path_key TEXT PRIMARY KEY,
@@ -800,6 +813,13 @@ export function createShortVideoDeleteJobService({
   }
 
   async function buildReferenceSnapshot(db, hookContext = null) {
+    if (hookContext?.jobId || uniqueStrings(hookContext?.targetVideoIds || [], 10_000).length) {
+      return buildTargetedReferenceSnapshot(db, hookContext);
+    }
+    return buildCompleteReferenceSnapshot(db, hookContext);
+  }
+
+  async function buildCompleteReferenceSnapshot(db, hookContext = null) {
     assertOpen();
     const jobKey = String(hookContext?.jobId || "");
     // The plan snapshot may be reused for the logical DB commit because all
@@ -855,6 +875,121 @@ export function createShortVideoDeleteJobService({
       }
     }
     return snapshots;
+  }
+
+  async function buildTargetedReferenceSnapshot(db, hookContext = {}) {
+    assertOpen();
+    const selectedIds = uniqueStrings(hookContext.targetVideoIds || [], 10_000);
+    const rows = new Map();
+    const remember = (row) => {
+      if (!row) return;
+      rows.set(referenceOwnerKey(row), row);
+    };
+    for (const row of referenceRowsForVideoIds(db, selectedIds)) remember(row);
+    if (hookContext.jobId) {
+      for (const row of referenceRowsForItems(db, readItems(db, hookContext.jobId))) remember(row);
+    }
+    for (const row of unresolvedReferenceRows(db)) remember(row);
+
+    await invokeHook(hooks.afterReferenceSnapshot, hookContext);
+
+    const probeCache = createReferenceProbeCache();
+    const refreshed = [];
+    for (const row of rows.values()) {
+      const item = referenceRow(row);
+      refreshed.push({ ...item, ...probeReferencePath(item.rawPath, probeCache) });
+    }
+    if (refreshed.length) commitTargetedReferenceSnapshot(db, refreshed);
+
+    const candidates = new Map(refreshed.map((row) => [referenceOwnerKey(row), row]));
+    for (const row of referenceRowsForKeys(db, referenceKeysFromRows(refreshed))) {
+      if (!candidates.has(referenceOwnerKey(row))) candidates.set(referenceOwnerKey(row), referenceRow(row));
+    }
+    for (const row of unresolvedReferenceRows(db)) {
+      if (!candidates.has(referenceOwnerKey(row))) candidates.set(referenceOwnerKey(row), referenceRow(row));
+    }
+    return [...candidates.values()];
+  }
+
+  function referenceRow(row) {
+    return {
+      ownerTable: String(row?.ownerTable ?? row?.owner_table ?? ""),
+      ownerKey: String(row?.ownerKey ?? row?.owner_key ?? ""),
+      ownerVideoId: String(row?.ownerVideoId ?? row?.owner_video_id ?? ""),
+      pathColumn: String(row?.pathColumn ?? row?.path_column ?? ""),
+      rawPath: String(row?.rawPath ?? row?.raw_path ?? ""),
+      pathKey: String(row?.pathKey ?? row?.path_key ?? ""),
+      realPathKey: String(row?.realPathKey ?? row?.real_path_key ?? ""),
+      identityKey: String(row?.identityKey ?? row?.identity_key ?? ""),
+      rootGroupKey: String(row?.rootGroupKey ?? row?.root_group_key ?? ""),
+      probeState: String(row?.probeState ?? row?.probe_state ?? "unverified")
+    };
+  }
+
+  function referenceRowsForVideoIds(db, videoIdsValue) {
+    const ids = uniqueStrings(videoIdsValue || [], 10_000);
+    if (!ids.length) return [];
+    const rows = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const page = ids.slice(offset, offset + 500);
+      const placeholders = page.map(() => "?").join(", ");
+      rows.push(...db.prepare(`
+        SELECT * FROM ${PATH_REFERENCE_TABLE}
+        WHERE owner_video_id IN (${placeholders})
+      `).all(...page));
+    }
+    return rows;
+  }
+
+  function unresolvedReferenceRows(db) {
+    return db.prepare(`
+      SELECT * FROM ${PATH_REFERENCE_TABLE}
+      WHERE probe_state IN ('unverified', 'failed', 'outside')
+    `).all();
+  }
+
+  function referenceKeysFromRows(rows) {
+    const keys = new Map();
+    const remember = (kind, value) => {
+      const key = String(value || "");
+      if (key) keys.set(referenceLookupKey(kind, key), [kind, key]);
+    };
+    for (const row of rows || []) {
+      remember("path", row.pathKey ?? row.path_key);
+      remember("real", row.realPathKey ?? row.real_path_key);
+      remember("identity", row.identityKey ?? row.identity_key);
+    }
+    return [...keys.values()];
+  }
+
+  function referenceRowsForItems(db, items) {
+    return referenceRowsForKeys(db, (items || []).flatMap((item) => [
+      ["path", String(item.path_key ?? item.pathKey ?? "")],
+      ["real", String(item.real_path_key ?? item.realPathKey ?? "")],
+      ["identity", String(item.identity_key ?? item.identityKey ?? "")]
+    ]));
+  }
+
+  function referenceRowsForKeys(db, keys) {
+    const rows = new Map();
+    const queries = {
+      path: db.prepare(`SELECT * FROM ${PATH_REFERENCE_TABLE} WHERE path_key = ?`),
+      real: db.prepare(`SELECT * FROM ${PATH_REFERENCE_TABLE} WHERE real_path_key = ?`),
+      identity: db.prepare(`SELECT * FROM ${PATH_REFERENCE_TABLE} WHERE identity_key = ?`)
+    };
+    for (const [kind, value] of keys || []) {
+      const key = String(value || "");
+      if (!key || !queries[kind]) continue;
+      for (const row of queries[kind].all(key)) rows.set(referenceOwnerKey(row), row);
+    }
+    return [...rows.values()];
+  }
+
+  function currentReferencesForItems(db, items) {
+    const rows = new Map();
+    for (const row of referenceRowsForItems(db, items)) rows.set(referenceOwnerKey(row), row);
+    for (const row of unresolvedReferenceRows(db)) rows.set(referenceOwnerKey(row), row);
+    return referencesFromRows([...rows.values()]);
   }
 
   function referenceOwnerKey(row) {
@@ -913,6 +1048,64 @@ export function createShortVideoDeleteJobService({
       rollback(db);
       throw error;
     }
+  }
+
+  function commitTargetedReferenceSnapshot(db, snapshots) {
+    beginImmediate(db);
+    try {
+      const references = commitTargetedReferenceSnapshotInTransaction(db, snapshots);
+      db.exec("COMMIT");
+      return references;
+    } catch (error) {
+      rollback(db);
+      throw error;
+    }
+  }
+
+  function commitTargetedReferenceSnapshotInTransaction(db, snapshots) {
+    if (!db?.isTransaction) {
+      throw codedError("目标路径引用刷新必须持有数据库写事务", "SHORT_VIDEO_DELETE_REFERENCE_NOT_FENCED");
+    }
+    const select = db.prepare(`
+      SELECT owner_video_id, raw_path, path_key
+      FROM ${PATH_REFERENCE_TABLE}
+      WHERE owner_table = ? AND owner_key = ? AND path_column = ?
+    `);
+    const update = db.prepare(`
+      UPDATE ${PATH_REFERENCE_TABLE}
+      SET real_path_key = ?, identity_key = ?, root_group_key = ?, probe_state = ?, updated_at = ?
+      WHERE owner_table = ? AND owner_key = ? AND path_column = ?
+    `);
+    for (const row of snapshots || []) {
+      const snapshot = referenceRow(row);
+      const current = select.get(snapshot.ownerTable, snapshot.ownerKey, snapshot.pathColumn);
+      if (!current
+        || String(current.owner_video_id || "") !== snapshot.ownerVideoId
+        || String(current.raw_path || "") !== snapshot.rawPath
+        || String(current.path_key || "") !== snapshot.pathKey) {
+        throw codedError(
+          `短视频路径引用在目标探测期间发生变化 (${snapshot.ownerTable}:${snapshot.ownerKey}:${snapshot.pathColumn})`,
+          "SHORT_VIDEO_DELETE_REFERENCE_CHANGED"
+        );
+      }
+      const result = update.run(
+        snapshot.realPathKey,
+        snapshot.identityKey,
+        snapshot.rootGroupKey,
+        snapshot.probeState || "missing",
+        now(),
+        snapshot.ownerTable,
+        snapshot.ownerKey,
+        snapshot.pathColumn
+      );
+      if (Number(result.changes || 0) !== 1) {
+        throw codedError(
+          `短视频路径引用在目标探测期间发生变化 (${snapshot.ownerTable}:${snapshot.ownerKey}:${snapshot.pathColumn})`,
+          "SHORT_VIDEO_DELETE_REFERENCE_CHANGED"
+        );
+      }
+    }
+    return referencesFromRows(snapshots || []);
   }
 
   function commitReferenceSnapshotInTransaction(db, snapshots) {
@@ -1086,7 +1279,10 @@ export function createShortVideoDeleteJobService({
         const replay = operationReplay(db, identity);
         if (replay) return replay;
       }
-      const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "plan" });
+      const referenceSnapshot = await buildReferenceSnapshot(db, {
+        phase: "plan",
+        targetVideoIds: (rows || []).map((row) => row?.id)
+      });
       const persisted = await persistPlan(db, rows, options, referenceSnapshot, executionToken, identity);
       if (persisted.replayed) return persisted.replayed;
       const job = persisted.job;
@@ -1453,7 +1649,7 @@ export function createShortVideoDeleteJobService({
         }
       }
       const rows = requestedIds.map((id) => rowsById.get(id));
-      const references = commitReferenceSnapshotInTransaction(db, referenceSnapshot || []);
+      const references = currentReferencesForItems(db, items);
       assertPlannedReferences(items, rows, references);
       assertNoReservationConflicts(db, requestedIds, items);
       const firstRow = rows[0];
@@ -1643,7 +1839,7 @@ export function createShortVideoDeleteJobService({
         items.push(plannedItem(items.length, originalPath, key, relativePath, "skipped", "不是文件"));
         continue;
       }
-      const sourceIdentity = await captureManagedFileIdentityAsync(originalPath, managedRoot, entry);
+      const sourceIdentity = captureManagedFileIdentity(originalPath, managedRoot, entry);
       const realPathKey = String(sourceIdentity.realPathKey || "");
       const identityKey = physicalIdentityKey(sourceIdentity);
       const referenceKeys = [["path", key], ["real", realPathKey], ["identity", identityKey]].filter(([, value]) => value);
@@ -1759,7 +1955,7 @@ export function createShortVideoDeleteJobService({
         throw codedError("隔离文件计划状态已变化", "SHORT_VIDEO_DELETE_ITEM_CHANGED");
       }
       const expected = parseJson(item.source_identity_json, null);
-      const current = await requireManagedFileIdentityAsync(
+      const current = requireManagedFileIdentity(
         item.original_path,
         item.managed_root,
         expected,
@@ -1802,7 +1998,7 @@ export function createShortVideoDeleteJobService({
       }
 
       await invokeHook(hooks.afterItemIsolationIntent, { jobId, ordinal: item.ordinal });
-      const isolated = publishManagedFileNoReplaceAndCaptureSource(
+      const isolated = await publishManagedFileNoReplaceAndCaptureSource(
         db,
         requireOwnedJob(db, jobId),
         item,
@@ -1866,9 +2062,8 @@ export function createShortVideoDeleteJobService({
     for (const item of readItems(db, jobId)) {
       preparedItems.set(item.ordinal, await assertItemReadyForCommit(item, job));
     }
-    let referenceSnapshot;
     try {
-      referenceSnapshot = await buildReferenceSnapshot(db, { phase: "commit", jobId });
+      await buildReferenceSnapshot(db, { phase: "commit", jobId });
     } finally {
       referenceSnapshotsByJob.delete(jobId);
     }
@@ -1882,9 +2077,9 @@ export function createShortVideoDeleteJobService({
       }
       const rows = rowsForIds(db, ids);
       if (rows.size !== ids.length) throw codedError("短视频记录在提交前已发生变化", "SHORT_VIDEO_DELETE_CHANGED");
-      const references = commitReferenceSnapshotInTransaction(db, referenceSnapshot);
-      assertNoLateReferences(db, current, references);
       const currentItems = readItems(db, jobId);
+      const references = currentReferencesForItems(db, currentItems);
+      assertNoLateReferences(db, current, references);
       for (const item of currentItems) {
         if (["skipped", "alias", "retained"].includes(item.disposition)) continue;
         if (item.disposition === "missing") {
@@ -2003,14 +2198,14 @@ export function createShortVideoDeleteJobService({
       result.deletedStoredCovers = Number(currentJob.deleted_stored_covers || 0);
     }
 
-    const referenceSnapshot = await buildReferenceSnapshot(db, { phase: "cleanup", jobId });
+    await buildReferenceSnapshot(db, { phase: "cleanup", jobId });
     beginImmediate(db);
     try {
       const current = requireOwnedJob(db, jobId);
       if (databaseDisposition(db, current) !== "committed") {
         throw codedError("数据库删除尚未提交，拒绝清理隔离文件", "SHORT_VIDEO_DELETE_DIRECTION_MISMATCH");
       }
-      const references = commitReferenceSnapshotInTransaction(db, referenceSnapshot);
+      const references = currentReferencesForItems(db, readItems(db, jobId));
       assertNoLateReferences(db, current, references);
       db.exec("COMMIT");
     } catch (error) {
@@ -2653,7 +2848,7 @@ export function createShortVideoDeleteJobService({
     const source = lstatIfPresent(item.original_path);
     const guardOwned = isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json);
     if (quarantine) {
-      const identity = await requireManagedFileIdentityAsync(item.quarantine_path, item.managed_root, expected, "隔离文件已被替换");
+      const identity = requireManagedFileIdentity(item.quarantine_path, item.managed_root, expected, "隔离文件已被替换");
       if (!guardOwned) throw codedError("源文件 guard 已被替换", "SHORT_VIDEO_DELETE_GUARD_REPLACED");
       return { mode: "delete", identity, guardOwned: true };
     }
@@ -2712,14 +2907,14 @@ export function createShortVideoDeleteJobService({
     const quarantine = lstatIfPresent(item.quarantine_path);
     if (quarantine) {
       const currentQuarantine = persistedQuarantine
-        ? await requireManagedFileIdentityAsync(
+        ? requireManagedFileIdentity(
             item.quarantine_path,
             item.managed_root,
             persistedQuarantine,
             "隔离文件已被替换",
             { rollbackOwnedQuarantine: true }
           )
-        : await requireManagedFileIdentityAsync(
+        : requireManagedFileIdentity(
             item.quarantine_path,
             item.managed_root,
             sourceExpected,
@@ -2751,10 +2946,10 @@ export function createShortVideoDeleteJobService({
       throw codedError("隔离文件缺失，无法恢复源文件", "SHORT_VIDEO_DELETE_QUARANTINE_MISSING");
     }
     if (item.state === "planned" && source && !isOwnedGuard(item.original_path, job, item.ordinal, item.guard_identity_json)) {
-      return { mode: "already_source", identity: await captureManagedFileIdentityAsync(item.original_path, item.managed_root, source) };
+      return { mode: "already_source", identity: captureManagedFileIdentity(item.original_path, item.managed_root, source) };
     }
     if (item.state === "restoring" && source && persistedQuarantine) {
-      const restored = await requireManagedFileIdentityAsync(
+      const restored = requireManagedFileIdentity(
         item.original_path,
         item.managed_root,
         persistedQuarantine,
@@ -2763,7 +2958,7 @@ export function createShortVideoDeleteJobService({
       );
       return { mode: "already_source", identity: restored };
     }
-    const restored = await requireManagedFileIdentityAsync(item.original_path, item.managed_root, sourceExpected, "源文件和隔离文件均不符合持久计划");
+    const restored = requireManagedFileIdentity(item.original_path, item.managed_root, sourceExpected, "源文件和隔离文件均不符合持久计划");
     return { mode: "already_source", identity: restored };
   }
 
@@ -2791,7 +2986,7 @@ export function createShortVideoDeleteJobService({
       else removeOwnedGuardTemp(db, job, item);
       assertPathMissing(item.original_path, "原文件位置已被其他文件占用");
       await invokeHook(hooks.beforeItemRestored, { jobId: job.id, ordinal: item.ordinal });
-      const restored = publishManagedFileNoReplaceAndCaptureSource(
+      const restored = await publishManagedFileNoReplaceAndCaptureSource(
         db,
         job,
         item,
@@ -2824,7 +3019,7 @@ export function createShortVideoDeleteJobService({
     }
     if (item.state !== "isolated") throw codedError("仍有文件未完成隔离", "SHORT_VIDEO_DELETE_NOT_ISOLATED");
     const expected = quarantineIdentity(item);
-    const current = await requireManagedFileIdentityAsync(
+    const current = requireManagedFileIdentity(
       item.quarantine_path,
       item.managed_root,
       expected,
@@ -3364,101 +3559,23 @@ export function createShortVideoDeleteJobService({
     if (!lexicalEntry.isFile() || lexicalEntry.isSymbolicLink()) {
       throw codedError("删除目标不是普通文件", "SHORT_VIDEO_DELETE_NOT_FILE");
     }
-    const handle = fsOps.openSync(filePath, "r");
-    let before;
-    let after;
-    let contentSha256;
-    try {
-      before = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
-      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) {
-        throw codedError("文件路径在打开期间发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-      }
-      contentSha256 = fullFileSha256(handle, before);
-      after = captureIdentity(fsOps.fstatSync(handle, { bigint: true }));
-    } finally {
-      fsOps.closeSync(handle);
-    }
-    if (!matchesExactSnapshot(after, before)) {
-      throw codedError("文件在身份采集期间发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-    }
-    const finalEntry = fsOps.lstatSync(filePath, { bigint: true });
-    if (!matchesCheapIdentity(captureIdentity(finalEntry), after)) {
-      throw codedError("文件路径在身份采集后发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-    }
+    const before = captureIdentity(lexicalEntry);
     const rootReal = realpath(root);
     const fileReal = realpath(filePath);
     if (!isInside(fileReal, rootReal) || samePath(fileReal, rootReal)) {
       throw codedError("文件通过链接逃逸受管根", "SHORT_VIDEO_DELETE_PATH_ESCAPE");
     }
+    const after = captureIdentity(fsOps.lstatSync(filePath, { bigint: true }));
+    if (!matchesCheapIdentity(after, before)) {
+      throw codedError("文件路径在身份采集期间发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
+    }
     return {
       ...after,
-      contentSha256,
-      contentFingerprint: contentSha256,
       realPathKey: pathKey(fileReal),
       parentRealPathKey: pathKey(realpath(path.dirname(filePath))),
       rootRealPathKey: pathKey(rootReal),
       aliasRisk: pathHasAliasRisk(filePath, root, fileReal, rootReal)
     };
-  }
-
-  async function captureManagedFileIdentityAsync(filePath, root, entry = null) {
-    assertManagedRoot(root);
-    const lexical = path.resolve(filePath);
-    if (!isInside(lexical, root) || samePath(lexical, root)) {
-      throw codedError("文件路径不在受管根内", "SHORT_VIDEO_DELETE_PATH_ESCAPE");
-    }
-    const lexicalEntry = entry || fsOps.lstatSync(filePath, { bigint: true });
-    if (!lexicalEntry.isFile() || lexicalEntry.isSymbolicLink()) {
-      throw codedError("删除目标不是普通文件", "SHORT_VIDEO_DELETE_NOT_FILE");
-    }
-    const handle = await openFile(filePath, "r");
-    let before;
-    let after;
-    let contentSha256;
-    try {
-      before = captureIdentity(await handle.stat({ bigint: true }));
-      if (!matchesCheapIdentity(before, captureIdentity(lexicalEntry))) {
-        throw codedError("文件路径在打开期间发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-      }
-      contentSha256 = await fullFileSha256Async(handle, before);
-      after = captureIdentity(await handle.stat({ bigint: true }));
-    } finally {
-      await handle.close();
-    }
-    if (!matchesExactSnapshot(after, before)) {
-      throw codedError("文件在身份采集期间发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-    }
-    const finalEntry = fsOps.lstatSync(filePath, { bigint: true });
-    if (!matchesCheapIdentity(captureIdentity(finalEntry), after)) {
-      throw codedError("文件路径在身份采集后发生变化", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-    }
-    const rootReal = realpath(root);
-    const fileReal = realpath(filePath);
-    if (!isInside(fileReal, rootReal) || samePath(fileReal, rootReal)) {
-      throw codedError("文件通过链接逃逸受管根", "SHORT_VIDEO_DELETE_PATH_ESCAPE");
-    }
-    return {
-      ...after,
-      contentSha256,
-      contentFingerprint: contentSha256,
-      realPathKey: pathKey(fileReal),
-      parentRealPathKey: pathKey(realpath(path.dirname(filePath))),
-      rootRealPathKey: pathKey(rootReal),
-      aliasRisk: pathHasAliasRisk(filePath, root, fileReal, rootReal)
-    };
-  }
-
-  async function requireManagedFileIdentityAsync(filePath, root, expected, message, options = {}) {
-    const current = await captureManagedFileIdentityAsync(filePath, root);
-    const matches = options.rollbackAfterRename
-      ? matchesRollbackRenameTransition(current, expected)
-      : options.transitionAfterRename
-        ? matchesRenameTransition(current, expected)
-      : options.rollbackOwnedQuarantine
-        ? matchesRollbackQuarantine(current, expected)
-        : matchesExactSnapshot(current, expected);
-    if (!expected || !matches) throw codedError(message, "SHORT_VIDEO_DELETE_FILE_REPLACED");
-    return current;
   }
 
   function assertCheapManagedFileIdentity(filePath, root, expected, message) {
@@ -3498,11 +3615,13 @@ export function createShortVideoDeleteJobService({
 
   function requireManagedFileIdentity(filePath, root, expected, message, options = {}) {
     const current = captureManagedFileIdentity(filePath, root);
-    const matches = options.transitionAfterRename
-      ? matchesRenameTransition(current, expected)
+    const matches = options.rollbackAfterRename
+      ? matchesRollbackRenameTransition(current, expected)
+      : options.transitionAfterRename
+        ? matchesRenameTransition(current, expected)
       : options.rollbackOwnedQuarantine
         ? matchesRollbackQuarantine(current, expected)
-      : matchesExactSnapshot(current, expected);
+        : matchesExactSnapshot(current, expected);
     if (
       !expected
       || !matches
@@ -3592,12 +3711,7 @@ export function createShortVideoDeleteJobService({
       && String(actual.ino || "") === String(expected.ino || "")
       && String(actual.size || "") === String(expected.size || "")
       && String(actual.birthtimeNs || "") === String(expected.birthtimeNs || "")
-      && String(actual.mtimeNs || "") === String(expected.mtimeNs || "")
-      && (!expected.contentSha256
-        || String(actual.contentSha256 || "") === String(expected.contentSha256))
-      && (!expected.contentFingerprint
-        || String(actual.contentFingerprint || actual.contentSha256 || "")
-          === String(expected.contentFingerprint));
+      && String(actual.mtimeNs || "") === String(expected.mtimeNs || "");
   }
 
   function actionInodeMatches(actual, expected) {
@@ -3828,7 +3942,7 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  function publishManagedFileNoReplaceAndCaptureSource(
+  async function publishManagedFileNoReplaceAndCaptureSource(
     db,
     job,
     item,
@@ -3991,9 +4105,9 @@ export function createShortVideoDeleteJobService({
     }
     const retainedPath = item.quarantine_path;
     releasePrivateEvidenceLink(db, job, item, action, retainedPath);
-    const current = captureManagedFileIdentity(retainedPath, item.managed_root);
     const expected = parseJson(item.quarantine_identity_json, null)
       || parseJson(item.source_identity_json, null);
+    const current = captureManagedFileIdentity(retainedPath, item.managed_root);
     if (!expected || !actionObjectMatches(current, expected)) {
       throw codedError("释放 isolate evidence 后媒体身份不一致", "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND");
     }
@@ -4029,15 +4143,18 @@ export function createShortVideoDeleteJobService({
       ORDER BY created_at, action_key
     `).all(job.id);
     for (let action of actions) {
+      const item = readItem(db, job.id, action.ordinal);
+      if (!item) {
+        failFsAction(db, job, action, "filesystem action has no item owner");
+      }
+      if (action.stage === "manual") {
+        action = reconcileReleasedManualMediaAction(db, job, item, action);
+      }
       if (action.stage === "manual") {
         throw codedError(
           `文件动作需要人工处理；保留证据: ${action.evidence_path}`,
           "SHORT_VIDEO_DELETE_FS_ACTION_UNBOUND"
         );
-      }
-      const item = readItem(db, job.id, action.ordinal);
-      if (!item) {
-        failFsAction(db, job, action, "filesystem action has no item owner");
       }
       if (["isolate-media", "restore-media"].includes(action.kind)) {
         action = reconcileMediaFsAction(db, job, item, action);
@@ -4048,6 +4165,26 @@ export function createShortVideoDeleteJobService({
         finalizeReconciledFsAction(db, job, item, action);
       }
     }
+  }
+
+  function reconcileReleasedManualMediaAction(db, job, item, action) {
+    if (!["isolate-media", "restore-media"].includes(String(action.kind || ""))
+      || !String(action.error || "").startsWith("published media target changed after source capture")
+      || lstatIfPresent(action.source_path)
+      || lstatIfPresent(action.evidence_path)) {
+      return action;
+    }
+    const expected = parseJson(action.expected_identity_json, null);
+    const target = captureManagedIdentityIfPresent(action.target_path, item.managed_root);
+    if (!expected || !target || !actionObjectMatches(target, expected)) return action;
+    return updateFsAction(
+      db,
+      job,
+      action,
+      "released",
+      target,
+      "自动确认已发布目标仍是原计划文件"
+    );
   }
 
   function reconcileMediaFsAction(db, job, item, action) {
@@ -4410,11 +4547,7 @@ export function createShortVideoDeleteJobService({
       && String(actual?.ino || "") === String(expected?.ino || "")
       && String(actual?.size || "") === String(expected?.size || "")
       && String(actual?.birthtimeNs || "") === String(expected?.birthtimeNs || "")
-      && String(actual?.mtimeNs || "") === String(expected?.mtimeNs || "")
-      && (!expected?.contentSha256
-        || String(actual?.contentSha256 || "") === String(expected.contentSha256))
-      && (!expected?.contentFingerprint
-        || String(actual?.contentFingerprint || actual?.contentSha256 || "") === String(expected.contentFingerprint));
+      && String(actual?.mtimeNs || "") === String(expected?.mtimeNs || "");
   }
 
   function matchesCheapIdentity(actual, expected) {
@@ -4444,11 +4577,7 @@ export function createShortVideoDeleteJobService({
       || (expected?.nlink && String(actual?.nlink || "") !== String(expected.nlink))
       || String(actual?.size || "") !== String(expected?.size || "")
       || String(actual?.birthtimeNs || "") !== String(expected?.birthtimeNs || "")
-      || String(actual?.mtimeNs || "") !== String(expected?.mtimeNs || "")
-      || (expected?.contentSha256
-        && String(actual?.contentSha256 || "") !== String(expected.contentSha256))
-      || (expected?.contentFingerprint
-        && String(actual?.contentFingerprint || actual?.contentSha256 || "") !== String(expected.contentFingerprint))) return false;
+      || String(actual?.mtimeNs || "") !== String(expected?.mtimeNs || "")) return false;
     return !expected?.rootRealPathKey
       || String(actual?.rootRealPathKey || "") === String(expected.rootRealPathKey);
   }
@@ -4459,10 +4588,6 @@ export function createShortVideoDeleteJobService({
       && (!expected?.nlink || String(actual?.nlink || "") === String(expected.nlink))
       && String(actual?.size || "") === String(expected?.size || "")
       && String(actual?.mtimeNs || "") === String(expected?.mtimeNs || "")
-      && (!expected?.contentSha256
-        || String(actual?.contentSha256 || "") === String(expected.contentSha256))
-      && (!expected?.contentFingerprint
-        || String(actual?.contentFingerprint || actual?.contentSha256 || "") === String(expected.contentFingerprint))
       && (!expected?.rootRealPathKey
         || String(actual?.rootRealPathKey || "") === String(expected.rootRealPathKey));
   }
@@ -4476,44 +4601,6 @@ export function createShortVideoDeleteJobService({
     if (Object.prototype.hasOwnProperty.call(expected || {}, "aliasRisk")
       && Boolean(actual?.aliasRisk) !== Boolean(expected.aliasRisk)) return false;
     return true;
-  }
-
-  function fullFileSha256(handle, entry) {
-    const size = Number(entry?.size ?? 0);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw codedError("文件过大，无法建立安全内容指纹", "SHORT_VIDEO_DELETE_IDENTITY_UNAVAILABLE");
-    }
-    const hash = crypto.createHash("sha256");
-    const chunkSize = 1024 * 1024;
-    const buffer = Buffer.allocUnsafe(Math.min(chunkSize, Math.max(1, size)));
-    let position = 0;
-    while (position < size) {
-      const length = Math.min(buffer.length, size - position);
-      const read = fsOps.readSync(handle, buffer, 0, length, position);
-      if (!read) throw codedError("文件内容在哈希采集期间被截断", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-      hash.update(buffer.subarray(0, read));
-      position += read;
-    }
-    return hash.digest("hex");
-  }
-
-  async function fullFileSha256Async(handle, entry) {
-    const size = Number(entry?.size ?? 0);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw codedError("文件过大，无法建立安全内容哈希", "SHORT_VIDEO_DELETE_IDENTITY_UNAVAILABLE");
-    }
-    const hash = crypto.createHash("sha256");
-    const chunkSize = 1024 * 1024;
-    const buffer = Buffer.allocUnsafe(Math.min(chunkSize, Math.max(1, size)));
-    let position = 0;
-    while (position < size) {
-      const length = Math.min(buffer.length, size - position);
-      const { bytesRead } = await handle.read(buffer, 0, length, position);
-      if (!bytesRead) throw codedError("文件内容在哈希采集期间被截断", "SHORT_VIDEO_DELETE_FILE_REPLACED");
-      hash.update(buffer.subarray(0, bytesRead));
-      position += bytesRead;
-    }
-    return hash.digest("hex");
   }
 
   function assertManagedRoot(root) {

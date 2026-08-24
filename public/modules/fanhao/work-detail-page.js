@@ -238,7 +238,7 @@ export function createWorkDetailPage(deps) {
     return actions;
   }
 
-  async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false) {
+  async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false, playInfoOverride = null) {
     playInfoRequests.cancel();
     stopProgressReporting();
     stopTimelineSync();
@@ -263,28 +263,31 @@ export function createWorkDetailPage(deps) {
     state.currentPlayInfo = null;
     state.currentStreamOffset = 0;
 
-    const loading = document.createElement("div");
-    loading.className = "unsupported";
-    loading.textContent = "正在探测播放方式";
-    els.playerArea.append(loading);
+    let loading = null;
+    let playInfo = playInfoOverride;
+    if (!playInfo) {
+      loading = document.createElement("div");
+      loading.className = "unsupported";
+      loading.textContent = "正在探测播放方式";
+      els.playerArea.append(loading);
 
-    const request = playInfoRequests.begin();
-    let playInfo;
-    try {
-      playInfo = await api(`/api/playinfo/${encodeURIComponent(selected.id)}`, { signal: request.signal });
-      if (!request.isCurrent()) return;
-    } catch (error) {
-      if (!request.isCurrent()) return;
-      loading.textContent = error.message;
-      return;
-    } finally {
-      request.finish();
+      const request = playInfoRequests.begin();
+      try {
+        playInfo = await api(`/api/playinfo/${encodeURIComponent(selected.id)}`, { signal: request.signal });
+        if (!request.isCurrent()) return;
+      } catch (error) {
+        if (!request.isCurrent()) return;
+        loading.textContent = error.message;
+        return;
+      } finally {
+        request.finish();
+      }
     }
 
     if (state.currentVideo?.id !== selected.id || state.currentWork?.id !== work.id) return;
 
     state.currentPlayInfo = playInfo;
-    loading.remove();
+    loading?.remove();
 
     const video = document.createElement("video");
     video.className = "video-player";
@@ -321,6 +324,19 @@ export function createWorkDetailPage(deps) {
 
     video.addEventListener("pause", reportCurrentProgress);
     video.addEventListener("ended", reportCurrentProgress);
+    video.addEventListener("error", () => {
+      const fallbackStreamUrl = String(playInfo.fallbackStreamUrl || "").trim();
+      if (playInfo.mode !== "direct" || !fallbackStreamUrl) return;
+      const fallbackPosition = currentPlaybackPosition(video) || resumePosition;
+      const fallbackInfo = {
+        ...playInfo,
+        mode: "transcode",
+        label: playInfo.hasNvenc ? "GPU 兼容转码" : "兼容转码",
+        streamUrl: fallbackStreamUrl,
+        fallbackStreamUrl: ""
+      };
+      renderPlayer(work, selected.id, fallbackPosition, true, fallbackInfo);
+    }, { once: true });
     const playerShell = document.createElement("div");
     playerShell.className = "web-player-shell";
     playerShell.append(video, createPlayerChrome(video, playInfo, work, selected, { isSegmentedStream, shell: playerShell }));

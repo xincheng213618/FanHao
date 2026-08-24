@@ -505,7 +505,6 @@ export function createWorkLocalMutationService({
       throw error;
     }
 
-    const personWorkIds = [...new Set([...(person.works || [])].map((workId) => String(workId)))];
     const hasRequestedWorkIds = Object.prototype.hasOwnProperty.call(options, "workIds");
     if (hasRequestedWorkIds && !Array.isArray(options.workIds)) {
       const error = new Error("workIds 必须是数组");
@@ -520,14 +519,9 @@ export function createWorkLocalMutationService({
       error.statusCode = 400;
       throw error;
     }
-    const unknownWorkIds = requestedWorkIds.filter((workId) => !personWorkIds.includes(workId));
-    if (unknownWorkIds.length) {
-      const error = new Error("所选作品不属于当前人物");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const candidateWorkIds = requestedWorkIds.length ? requestedWorkIds : personWorkIds;
+    const candidateWorkIds = requestedWorkIds.length
+      ? requestedWorkIds
+      : [...new Set([...(person.works || [])].map((workId) => String(workId)))];
     const workIds = candidateWorkIds.filter((workId) => {
       const work = getWorkById(workId);
       return work && !work.missingLocal;

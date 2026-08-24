@@ -23,15 +23,66 @@ export function createProfilesFeature(options) {
   let avatarObserver = null;
   let wasExtractActive = false;
   let extractActive = false;
+  let extractCurrent = null;
+  let extractQueue = [];
+  let extractUiSignature = "";
   let deepLinkedProfile = "";
   const requests = createLatestRequestLifecycle();
+
+  function cleanDisplayName(value) {
+    const name = String(value || "").trim();
+    return /^(?:读屏标签已关闭|读屏标签已开启)$/u.test(name) ? "" : name;
+  }
+
+  function profileHistoryValues(profile, key) {
+    const source = profile?.[key];
+    let entries = source;
+    if (typeof source === "string") {
+      try { entries = JSON.parse(source); } catch { entries = []; }
+    }
+    return (Array.isArray(entries) ? entries : [])
+      .map((item) => item && typeof item === "object" ? item.value : item)
+      .filter((value) => value !== "" && value !== null && value !== undefined);
+  }
+
+  function collectionRequestState(profileId, fullScan) {
+    const matches = (request) => request
+      && request.type === "refresh"
+      && Boolean(request.full_scan) === Boolean(fullScan)
+      && Array.isArray(request.profile_ids)
+      && request.profile_ids.some((value) => Number(value) === Number(profileId));
+    if (matches(extractCurrent)) return "active";
+    if (extractQueue.some(matches)) return "queued";
+    return "";
+  }
+
+  function collectionButtonLabel(baseLabel, requestState) {
+    if (requestState === "active") return "采集中";
+    if (requestState === "queued") return "已排队";
+    if (!extractActive) return baseLabel;
+    if (baseLabel === "快速采集") return "排队快速";
+    if (baseLabel === "采集喜欢") return "排队采集";
+    if (baseLabel === "手动确认") return "排队确认";
+    return "排队全量";
+  }
+
+  function taskNotice(result, label) {
+    if (result.duplicate) {
+      return result.queued
+        ? `${label}已在队列中（待执行第 ${result.queue_position} 个）#${result.job_id}`
+        : `${label}正在执行 #${result.job_id}`;
+    }
+    return result.queued
+      ? `${label}已排队（待执行第 ${result.queue_position} 个）#${result.job_id}`
+      : `${label}已启动 #${result.job_id}`;
+  }
 
   function currentQuery() {
     const differenceFilter = $("profileManagerDeletedWorks")?.value || "all";
     return new URLSearchParams({
       scope: $("profileManagerScope")?.value || "collected",
       q: String($("profileManagerSearch")?.value || "").trim(),
-      sort: $("profileManagerSort")?.value || "latest_desc",
+      sort: $("profileManagerSort")?.value || "last_extracted_desc",
       deleted_works: differenceFilter === "pending" ? "all" : differenceFilter,
       limit: differenceFilter === "pending" ? "500" : String(PROFILE_PAGE_SIZE),
     });
@@ -53,6 +104,7 @@ export function createProfilesFeature(options) {
     if (String(profile.account_status || "active") === "banned") return false;
     if (Number(profile.full_scan_required || 0) === 1) return true;
     if (Number(profile.has_deleted_works || 0) === 1) return false;
+    if (String(profile.last_full_scan_at || "").trim()) return false;
     const localCount = Math.max(0, Number(profile.total || 0));
     const observedCount = Number(profile.aweme_count);
     if (!localCount || !Number.isFinite(observedCount) || observedCount < 0) return false;
@@ -90,7 +142,7 @@ export function createProfilesFeature(options) {
     const node = $("profileManagerList");
     if (!node) return;
     const query = String($("profileManagerSearch")?.value || "").trim().toLowerCase();
-    const sortMode = $("profileManagerSort")?.value || "latest_desc";
+    const sortMode = $("profileManagerSort")?.value || "last_extracted_desc";
     const scope = $("profileManagerScope")?.value || "collected";
     const deletedWorks = $("profileManagerDeletedWorks")?.value || "all";
     const allRows = Array.isArray(profiles) ? profiles : [];
@@ -103,7 +155,7 @@ export function createProfilesFeature(options) {
       if (deletedWorks === "flagged" && Number(profile.has_deleted_works || 0) !== 1) return false;
       if (deletedWorks === "pending" && !needsFullScan(profile)) return false;
       if (!query) return true;
-      return [profile.nickname, profile.title, profile.unique_id, profile.short_id, profile.sec_uid]
+      return [profile.nickname, profile.title, profile.unique_id, profile.short_id, profile.sec_uid, ...profileHistoryValues(profile, "nickname_history_json")]
         .some((value) => String(value || "").toLowerCase().includes(query));
     });
     const numericSort = {
@@ -114,8 +166,10 @@ export function createProfilesFeature(options) {
     };
     if (sortMode === "last_refresh_asc") {
       filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || String(a.last_extracted_at || "").localeCompare(String(b.last_extracted_at || "")) || Number(a.id) - Number(b.id));
+    } else if (sortMode === "last_extracted_desc" || !numericSort[sortMode]) {
+      filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || String(b.last_extracted_at || "").localeCompare(String(a.last_extracted_at || "")) || Number(b.id) - Number(a.id));
     } else {
-      const valueOf = numericSort[sortMode] || numericSort.latest_desc;
+      const valueOf = numericSort[sortMode];
       filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || valueOf(b) - valueOf(a) || Number(b.id) - Number(a.id));
     }
 
@@ -130,7 +184,9 @@ export function createProfilesFeature(options) {
     const currentDeferredCount = deferredCount === null
       ? Math.max(0, localCandidates.length - localEligibleCount)
       : deferredCount;
-    const currentFullScanCount = fullScanRequiredCount === null ? localFullScanCount : fullScanRequiredCount;
+    const currentFullScanCount = fullScanRequiredCount === null
+      ? localFullScanCount
+      : Math.max(fullScanRequiredCount, localFullScanCount);
     const localBannedCount = localCandidates.filter(
       (profile) => String(profile.account_status || "active") === "banned"
     ).length;
@@ -141,17 +197,26 @@ export function createProfilesFeature(options) {
       confirmPendingButton.textContent = currentFullScanCount > 0
         ? `一键确认待全量（${currentFullScanCount}）`
         : "暂无待确认";
-      confirmPendingButton.disabled = isExtractActive || currentFullScanCount <= 0;
+      confirmPendingButton.disabled = currentFullScanCount <= 0;
       confirmPendingButton.title = currentFullScanCount > 0
         ? `只依次全量扫描 ${currentFullScanCount} 个待确认主页，不采集其他主页`
         : "当前没有待全量确认的主页";
     }
     const visibleRows = filteredRows;
     const totalRows = deletedWorks === "pending" ? filteredRows.length : Math.max(total, filteredRows.length);
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个`;
+    const queueSummary = extractQueue.length ? ` · 采集队列待执行 ${extractQueue.length} 个` : "";
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个${queueSummary}`;
     node.innerHTML = visibleRows.map((profile) => {
-      const name = String(profile.nickname || profile.title || `主页 #${profile.id}`).trim();
       const douyinId = displayDouyinId(profile) || "-";
+      const name = cleanDisplayName(profile.nickname) || cleanDisplayName(profile.title) || (douyinId !== "-" ? douyinId : `主页 #${profile.id}`);
+      const historicalNames = profileHistoryValues(profile, "nickname_history_json")
+        .map(cleanDisplayName)
+        .filter((value, index, values) => value && value !== name && values.indexOf(value) === index);
+      const historicalLikes = profileHistoryValues(profile, "total_favorited_history_json")
+        .map(Number)
+        .filter((value, index, values) => Number.isFinite(value) && value >= 0 && values.indexOf(value) === index)
+        .slice(-3)
+        .reverse();
       const latestWork = profileWorkDate(profile);
       const lastExtracted = formatDateTime(profile.last_extracted_at);
       const accountBanned = String(profile.account_status || "active") === "banned";
@@ -162,6 +227,11 @@ export function createProfilesFeature(options) {
       const cadence = formatRefreshInterval(profile.refresh_cadence_seconds);
       const tabLabel = profile.tab === "like" ? "我的喜欢" : "作者作品";
       const sourceLabel = Number(profile.is_self || 0) === 1 ? "本人" : Number(profile.is_following || 0) === 1 ? "已关注" : "";
+      const plannedFullScan = fullScanPending;
+      const quickBaseLabel = Number(profile.is_self || 0) === 1 ? "采集喜欢" : plannedFullScan ? "按计划全量" : "快速采集";
+      const quickRequestState = collectionRequestState(profile.id, plannedFullScan);
+      const fullBaseLabel = accountBanned ? "手动确认" : "立即全量";
+      const fullRequestState = collectionRequestState(profile.id, true);
       const bannedReason = String(profile.account_status_reason || "抖音主页明确显示账号已封禁").trim();
       const bannedBadge = accountBanned
         ? ` <span class="profile-manager-badge is-account-banned" title="${escapeHtml(bannedReason)}">已封禁</span>`
@@ -214,11 +284,12 @@ export function createProfilesFeature(options) {
             <div>
               <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${bannedBadge}${fullScanBadge}${deletedWorksBadge}${refreshBadge}</div>
               <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
+              ${historicalNames.length ? `<div class="profile-manager-history" title="${escapeHtml(historicalNames.join("、"))}">曾用名 ${escapeHtml(historicalNames.slice(-3).reverse().join("、"))}</div>` : ""}
             </div>
           </div>
           <div class="profile-manager-metric"><span>作品</span><strong>${formatCompact(observedCount)}</strong><small>${escapeHtml(countMeta)}</small></div>
           <div class="profile-manager-metric"><span>粉丝</span><strong>${formatCompact(profile.follower_count || 0)}</strong></div>
-          <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong></div>
+          <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong>${historicalLikes.length > 1 ? `<small title="${escapeHtml(historicalLikes.map(formatCompact).join("、"))}">历史 ${escapeHtml(historicalLikes.map(formatCompact).join(" → "))}</small>` : ""}</div>
           <div class="profile-manager-date"><span>最新作品</span><strong>${escapeHtml(latestWork ? latestWork.slice(0, 10) : "暂无日期")}</strong></div>
           <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(accountBanned ? "暂停自动更新" : fullScanPending ? "下次全量确认" : refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
           <div class="profile-manager-row-actions">
@@ -226,8 +297,8 @@ export function createProfilesFeature(options) {
               ${localAuthorUrl ? `<a class="queue-link is-local" href="${safeUrl(localAuthorUrl)}" target="_blank" rel="noreferrer" title="打开 FanHao 本地短视频作者主页">本地</a>` : ""}
               <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer" title="打开抖音主页">抖音</a>
             </span>
-            ${accountBanned ? "" : `<button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : fullScanPending ? "按计划全量" : "快速采集"}</button>`}
-            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${isExtractActive ? "disabled" : ""}>${accountBanned ? "手动确认" : "立即全量"}</button>` : ""}
+            ${accountBanned ? "" : `<button data-profile-refresh="${escapeHtml(profile.id || "")}" ${quickRequestState ? "disabled" : ""}>${collectionButtonLabel(quickBaseLabel, quickRequestState)}</button>`}
+            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${fullRequestState ? "disabled" : ""}>${collectionButtonLabel(fullBaseLabel, fullRequestState)}</button>` : ""}
             <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
           </div>
         </div>
@@ -304,9 +375,8 @@ export function createProfilesFeature(options) {
       idle_rounds: payload.idle_rounds,
       incremental_stop_existing: payload.incremental_stop_existing || 12,
     });
-    $("extractStart").hidden = true;
-    $("extractStop").hidden = false;
-    toast(`采集任务已启动 #${result.job_id}`);
+    toast(taskNotice(result, "主页采集"));
+    await refreshState();
   }
 
   async function refreshProfiles(profileIds = [], options = {}) {
@@ -323,19 +393,16 @@ export function createProfilesFeature(options) {
       incremental_stop_existing: payload.incremental_stop_existing || 12,
       full_scan: fullScan,
     });
-    $("extractStart").hidden = true;
-    $("refreshProfiles").hidden = true;
-    $("confirmPendingProfiles").hidden = true;
-    $("extractStop").hidden = false;
-    $("profileRefreshStop").hidden = false;
-    toast(profileIds.length
-      ? `${manualConfirmation ? "主页手动确认" : fullScan ? "主页全量采集" : "主页快速采集"}已启动 #${result.job_id}`
-      : `一键智能采集已启动 #${result.job_id}`);
+    const label = profileIds.length
+      ? (manualConfirmation ? "主页手动确认" : fullScan ? "主页全量采集" : "主页快速采集")
+      : "一键智能采集";
+    toast(taskNotice(result, label));
+    await refreshState();
   }
 
   async function confirmPendingProfiles() {
     const button = $("confirmPendingProfiles");
-    if (extractActive || button?.disabled) return;
+    if (button?.disabled) return;
     button.disabled = true;
     const params = new URLSearchParams({
       scope: "all",
@@ -371,10 +438,8 @@ export function createProfilesFeature(options) {
       scrolls: 1200,
       idle_rounds: 16,
     });
-    $("importFollowing").hidden = true;
-    $("refreshProfiles").hidden = true;
-    $("profileRefreshStop").hidden = false;
-    toast(`我的关注提取已启动 #${result.job_id}`);
+    toast(taskNotice(result, "我的关注提取"));
+    await refreshState();
   }
 
   async function deleteProfile(profileId, button) {
@@ -400,13 +465,16 @@ export function createProfilesFeature(options) {
   }
 
   async function stopExtractJob() {
-    await post("/api/extract/stop");
+    const result = await post("/api/extract/stop");
     $("extractStart").hidden = false;
     $("refreshProfiles").hidden = false;
     $("confirmPendingProfiles").hidden = false;
     $("extractStop").hidden = true;
     $("profileRefreshStop").hidden = true;
-    toast("正在停止采集");
+    toast(result.cancelled_queued
+      ? `正在停止采集，并已取消 ${result.cancelled_queued} 个排队任务`
+      : "正在停止采集");
+    await refreshState();
   }
 
   function bind() {
@@ -419,7 +487,7 @@ export function createProfilesFeature(options) {
     }
     $("extractStart").addEventListener("click", () => startExtract().catch((err) => toast(err.message)));
     $("profileUrl").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || extractActive) return;
+      if (event.key !== "Enter") return;
       event.preventDefault();
       startExtract().catch((err) => toast(err.message));
     });
@@ -478,22 +546,38 @@ export function createProfilesFeature(options) {
 
   function renderStatus(state) {
     extractActive = Boolean(state.extract?.active);
+    extractCurrent = state.extract?.current || null;
+    extractQueue = Array.isArray(state.extract?.queue) ? state.extract.queue : [];
+    const nextSignature = JSON.stringify({
+      active: extractActive,
+      current: extractCurrent?.job_id || 0,
+      queue: extractQueue.map((request) => request?.job_id || 0),
+    });
     const extractState = $("extractState");
-    extractState.textContent = extractActive ? "正在采集" : "采集空闲";
+    extractState.textContent = extractActive
+      ? `正在采集${extractQueue.length ? ` · 待执行 ${extractQueue.length}` : ""}`
+      : "采集空闲";
     extractState.classList.toggle("is-active", extractActive);
     extractState.title = extractActive && state.extract?.job_id
-      ? `采集任务 #${state.extract.job_id}`
+      ? `${extractCurrent?.label || "采集任务"} #${state.extract.job_id}${extractQueue.length ? `；另有 ${extractQueue.length} 个待执行` : ""}`
       : "当前没有采集任务";
     if (wasExtractActive && !extractActive && location.hash === "#profiles") {
       load({ reset: true }).catch((err) => toast(err.message));
     }
     wasExtractActive = extractActive;
-    $("extractStart").hidden = extractActive;
-    $("refreshProfiles").hidden = extractActive;
-    $("confirmPendingProfiles").hidden = extractActive;
-    $("importFollowing").hidden = extractActive;
+    $("extractStart").hidden = false;
+    $("extractStart").textContent = extractActive ? "加入采集队列" : "采集链接";
+    $("refreshProfiles").hidden = false;
+    $("refreshProfiles").textContent = extractActive ? "排队智能采集" : "一键智能采集";
+    $("confirmPendingProfiles").hidden = false;
+    $("importFollowing").hidden = false;
+    $("importFollowing").textContent = extractActive ? "排队提取关注" : "提取我的关注";
     $("extractStop").hidden = !extractActive;
     $("profileRefreshStop").hidden = !extractActive;
+    if (nextSignature !== extractUiSignature) {
+      extractUiSignature = nextSignature;
+      renderManager(rows, extractActive);
+    }
   }
 
   function render(state) {

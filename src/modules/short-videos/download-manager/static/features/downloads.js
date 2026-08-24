@@ -3,13 +3,11 @@ import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { displayDouyinId, formatCompact, formatCountdown, formatDateTime } from "../core/format.js";
 
 export function createDownloadsFeature(options) {
-  const settings = options.settings;
   const refreshState = options.refreshState;
   let localQueueOrder = [];
   let latestState = null;
   let latestStatus = null;
   let lastDownloadProfileId = null;
-  let downloadActionPending = false;
 
   function renderDownloadGuard(state) {
     const guard = state.download?.failure_guard || {};
@@ -28,7 +26,7 @@ export function createDownloadsFeature(options) {
     $("downloadGuardTime").textContent = `预计 ${resumeAt || "稍后"} 自动重试（剩余 ${countdown}）`;
     $("downloadGuardHelp").textContent = plannedPause
       ? "本轮达到安全下载量，系统会自动继续处理剩余队列。"
-      : "切换代理 IP 或更新 Cookie 后，可立即重新尝试。";
+      : "系统会在保护冷却结束后自动重试；期间可更新代理或 Cookie。";
     $("downloadGuard").title = proxy;
   }
 
@@ -140,7 +138,7 @@ export function createDownloadsFeature(options) {
         .join("") || `
           <div class="queue-empty">
             <strong>当前没有排队主页</strong>
-            <span>${state.download?.active && state.download?.watch_new ? "动态监听仍在运行，新链接入库后会自动下载。" : "采集新链接或启动下载后，待处理主页会显示在这里。"}</span>
+            <span>自动下载持续监听，新链接入库后会直接执行。</span>
           </div>
         `;
   }
@@ -202,38 +200,6 @@ export function createDownloadsFeature(options) {
     return null;
   }
 
-  async function startDownload(retryFailed = false) {
-    await settings.save();
-    const result = await post("/api/download/start", {
-      concurrency: $("concurrency").value,
-      retry_failed: retryFailed,
-      limit: 0,
-      watch_new: true,
-    });
-    const mode = result.watch_new ? "动态监听" : `本次 ${result.run_total} 条`;
-    toast(`下载任务已启动：${mode}，待处理 ${result.pending} 条`);
-    refreshState().catch(() => {});
-  }
-
-  async function toggleDownload() {
-    if (downloadActionPending) return;
-    downloadActionPending = true;
-    const button = $("downloadStart");
-    button.disabled = true;
-    try {
-      if (latestStatus?.download?.active) {
-        await post("/api/download/stop");
-        toast("正在停止下载");
-      } else {
-        await startDownload(false);
-      }
-    } finally {
-      downloadActionPending = false;
-      button.disabled = false;
-      refreshState().catch(() => {});
-    }
-  }
-
   async function sortQueueByPending() {
     const result = await post("/api/download-queue/sort", { mode: "pending_asc" });
     toast(`队列已按待下载数量排序：${result.changed || 0} 个作者`);
@@ -258,7 +224,6 @@ export function createDownloadsFeature(options) {
 
   function bind() {
     $("quitApp").addEventListener("click", () => quitApplication().catch((err) => toast(err.message)));
-    $("downloadStart").addEventListener("click", () => toggleDownload().catch((err) => toast(err.message)));
     $("sortQueueByPending").addEventListener("click", () => sortQueueByPending().catch((err) => toast(err.message)));
     $("downloadQueue").addEventListener("click", (event) => {
       const button = event.target.closest("button");
@@ -302,8 +267,8 @@ export function createDownloadsFeature(options) {
       state.download?.sidecar_port ? `sidecar ${state.download.sidecar_port}` : "",
       state.download?.proxy ? `代理 ${state.download.proxy}` : "未配置代理",
     ].filter(Boolean).join(" · ");
-    let primaryStatus = "下载空闲";
-    let nextAction = "启动后会按队列顺序处理待下载作品";
+    let primaryStatus = "自动下载准备中";
+    let nextAction = "程序会自动启动监听，采集到新作品后直接下载";
     let statusClass = "is-idle";
     if (active && inflight > 0) {
       primaryStatus = `正在下载 · ${inflight} 个任务`;
@@ -338,13 +303,6 @@ export function createDownloadsFeature(options) {
     $("downloadNextAction").textContent = nextAction;
     $("downloadRuntimeDetails").textContent = diagnostics;
 
-    const downloadButton = $("downloadStart");
-    downloadButton.textContent = guard.active
-      ? guard.kind === "cycle_limit" ? "提前继续" : "检查后立即重试"
-      : active ? "停止下载" : "开始下载";
-    downloadButton.classList.toggle("danger", active && !guard.active);
-    downloadButton.classList.toggle("primary", !active || guard.active);
-    downloadButton.disabled = downloadActionPending;
   }
 
   function render(state) {

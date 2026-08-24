@@ -51,6 +51,7 @@ export function createShortVideoAuthorPanel(deps) {
     replaceRoute,
     resolvedShortVideoDetail,
     resumeActiveSound,
+    runShortVideoLocalAction,
     setAuthorPanelReturnFeed,
     setAuthorPanelTileMap,
     setReelPanelInteractionState,
@@ -208,7 +209,13 @@ export function createShortVideoAuthorPanel(deps) {
       closeAuthorPanel(panel, { restoreFeed: false });
       openShortVideoAuthorPage(author, video);
     });
-    actions.append(follow, douyin, authorPage);
+    const authorFolder = document.createElement("button");
+    authorFolder.type = "button";
+    authorFolder.textContent = "作者文件夹";
+    authorFolder.disabled = !video?.id;
+    authorFolder.title = video?.id ? "打开作者本地文件夹" : "当前作者没有可定位的本地作品";
+    authorFolder.addEventListener("click", () => runShortVideoLocalAction(video, "open-author-folder", authorFolder));
+    actions.append(follow, douyin, authorPage, authorFolder);
     head.append(title, actions);
 
     const content = document.createElement("div");
@@ -539,7 +546,8 @@ export function createShortVideoAuthorPanel(deps) {
       ["likes", "点赞最多"],
       ["likesAsc", "点赞最少"],
       ["comments", "评论最多"],
-      ["duration", "时长最长"]
+      ["duration", "时长最长"],
+      ["size", "文件大小"]
     ]) {
       const option = document.createElement("option");
       option.value = item[0];

@@ -1,7 +1,3 @@
-import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
-import { createAccessAnalyticsController } from "./modules/system/access-analytics-controller.js?v=20260718-access-analytics-01";
-import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-05";
-
 const state = {
   library: null,
   health: null,
@@ -25,6 +21,13 @@ const state = {
   pollTimer: null,
   workMovePollTimer: null
 };
+
+const loadedResources = new Set();
+const resourceLoads = new Map();
+const stylesheetLoads = new Map();
+let settingsControllerPromise = null;
+let accessAnalyticsControllerPromise = null;
+let workMoveOpsControllerPromise = null;
 
 const els = {
   serviceMode: document.querySelector("#adminServiceMode"),
@@ -204,24 +207,71 @@ async function api(path, options = {}) {
   return payload;
 }
 
-const settingsController = createSettingsController({
-  api,
-  root: els.settingsRoot,
-  summary: els.settingsSummary,
-  status: els.settingsStatus,
-  onSaved: () => loadImageReaderCache({ quiet: true })
-});
-const accessAnalyticsController = createAccessAnalyticsController({
-  api,
-  root: document.querySelector("#adminViewVisitors")
-});
-const workMoveOpsController = createWorkMoveOpsController({
-  api,
-  formatBytes,
-  formatDateTime,
-  root: document.querySelector("#adminWorkMoveOps")
-});
 const workMoveOpsRoot = document.querySelector("#adminWorkMoveOps");
+
+function invalidateResource(name) {
+  loadedResources.delete(name);
+}
+
+function loadStylesheet(href) {
+  if (stylesheetLoads.has(href)) return stylesheetLoads.get(href);
+  const pending = new Promise((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.addEventListener("load", () => resolve(link), { once: true });
+    link.addEventListener("error", () => {
+      stylesheetLoads.delete(href);
+      link.remove();
+      reject(new Error(`样式加载失败：${href}`));
+    }, { once: true });
+    document.head.append(link);
+  });
+  stylesheetLoads.set(href, pending);
+  return pending;
+}
+
+function settingsController() {
+  if (!settingsControllerPromise) {
+    settingsControllerPromise = import("./modules/system/settings-controller.js?v=20260815-admin-lazy-load-01")
+      .then(({ createSettingsController }) => createSettingsController({
+        api,
+        root: els.settingsRoot,
+        summary: els.settingsSummary,
+        status: els.settingsStatus,
+        onSaved: () => invalidateResource("readerCache")
+      }));
+  }
+  return settingsControllerPromise;
+}
+
+function accessAnalyticsController() {
+  if (!accessAnalyticsControllerPromise) {
+    accessAnalyticsControllerPromise = Promise.all([
+      loadStylesheet("/modules/system/access-analytics.css?v=20260815-admin-lazy-load-01"),
+      import("./modules/system/access-analytics-controller.js?v=20260815-admin-lazy-load-01")
+    ]).then(([, { createAccessAnalyticsController }]) => createAccessAnalyticsController({
+        api,
+        root: document.querySelector("#adminViewVisitors")
+      }));
+  }
+  return accessAnalyticsControllerPromise;
+}
+
+function workMoveOpsController() {
+  if (!workMoveOpsControllerPromise) {
+    workMoveOpsControllerPromise = Promise.all([
+      loadStylesheet("/modules/system/work-move-ops-panel.css?v=20260815-admin-lazy-load-01"),
+      import("./modules/system/work-move-ops-panel.js?v=20260815-admin-lazy-load-01")
+    ]).then(([, { createWorkMoveOpsController }]) => createWorkMoveOpsController({
+        api,
+        formatBytes,
+        formatDateTime,
+        root: workMoveOpsRoot
+      }));
+  }
+  return workMoveOpsControllerPromise;
+}
 
 function setBusy(button, busy, text = "处理中") {
   if (!button) return;
@@ -245,11 +295,13 @@ async function loadLibrary() {
   renderPeopleSelect();
   renderSystemSummary();
   renderScriptPanel();
+  loadedResources.add("library");
 }
 
 async function loadHealth() {
   state.health = await api("/api/health");
   renderHealth();
+  loadedResources.add("health");
 }
 
 async function loadScripts() {
@@ -263,6 +315,7 @@ async function loadScripts() {
   renderScripts();
   renderScriptPanel();
   renderOverviewCounts();
+  loadedResources.add("scripts");
 }
 
 async function refreshTasks() {
@@ -278,23 +331,56 @@ async function refreshTasks() {
   renderOverviewCounts();
   renderLastRefresh();
   await handleCompletedTasks(previous);
+  loadedResources.add("tasks");
 }
 
-async function refreshAll() {
+const VIEW_RESOURCES = {
+  overview: ["health", "library", "scripts", "tasks"],
+  visitors: ["access"],
+  scripts: ["library", "scripts", "tasks"],
+  tasks: ["tasks", "workMoves"],
+  maintenance: ["library", "readerCache", "coverCache"],
+  settings: ["settings"]
+};
+
+const RESOURCE_LOADERS = {
+  health: () => loadHealth(),
+  library: () => loadLibrary(),
+  scripts: () => loadScripts(),
+  tasks: () => refreshTasks(),
+  access: async () => (await accessAnalyticsController()).load({ quiet: true }),
+  settings: async () => (await settingsController()).load({ quiet: true }),
+  workMoves: async () => (await workMoveOpsController()).load({ quiet: true }),
+  readerCache: () => loadImageReaderCache({ quiet: true }),
+  coverCache: () => refreshCoverCacheStatus({ quiet: true })
+};
+
+async function loadResource(name, options = {}) {
+  if (!options.force && loadedResources.has(name)) return true;
+  if (resourceLoads.has(name)) return resourceLoads.get(name);
+  const loader = RESOURCE_LOADERS[name];
+  if (!loader) return false;
+  const pending = Promise.resolve()
+    .then(loader)
+    .then((result) => {
+      if (result !== false) loadedResources.add(name);
+      return result;
+    })
+    .finally(() => resourceLoads.delete(name));
+  resourceLoads.set(name, pending);
+  return pending;
+}
+
+async function loadView(view, options = {}) {
+  const resources = VIEW_RESOURCES[view] || VIEW_RESOURCES.overview;
+  await Promise.all(resources.map((name) => loadResource(name, options)));
+  renderLastRefresh();
+}
+
+async function refreshActiveView() {
   setBusy(els.refreshAll, true, "刷新中");
   try {
-    await Promise.all([
-      loadHealth(),
-      loadLibrary(),
-      loadScripts(),
-      refreshTasks(),
-      workMoveOpsController.load({ quiet: true }),
-      loadImageReaderCache({ quiet: true }),
-      settingsController.load({ quiet: true }),
-      accessAnalyticsController.load({ quiet: true })
-    ]);
-    await refreshCoverCacheStatus({ quiet: true });
-    renderLastRefresh();
+    await loadView(state.activeView, { force: true });
   } finally {
     setBusy(els.refreshAll, false);
   }
@@ -814,7 +900,14 @@ async function handleCompletedTasks(previous) {
   if (!completed.length) return;
   completed.forEach((task) => state.handledTasks.add(task.id));
   if (completed.some((task) => task.status === "done" && (task.refreshHints || []).length)) {
-    await Promise.allSettled([loadHealth(), loadLibrary(), refreshCoverCacheStatus({ quiet: true }), loadImageReaderCache({ quiet: true })]);
+    const affectedResources = ["health", "library", "coverCache", "readerCache"];
+    affectedResources.forEach(invalidateResource);
+    const visibleResources = new Set(VIEW_RESOURCES[state.activeView] || []);
+    await Promise.allSettled(
+      affectedResources
+        .filter((name) => visibleResources.has(name))
+        .map((name) => loadResource(name, { force: true }))
+    );
   }
 }
 
@@ -880,6 +973,7 @@ async function loadImageReaderCache(options = {}) {
     const data = await api("/api/image-reader/cache");
     state.readerCache = data.cache || null;
     renderImageReaderCache();
+    loadedResources.add("readerCache");
     if (!options.quiet) setText(els.imageReaderCacheStatus, "缓存状态已更新");
   } catch (error) {
     if (!options.quiet) setText(els.imageReaderCacheStatus, error.message || "缓存状态读取失败");
@@ -916,6 +1010,7 @@ async function refreshCoverCacheStatus(options = {}) {
         ? `缺封面候选 ${formatNumber(candidates)}，可生成 ${formatNumber(ready)}，视频不可读 ${formatNumber(missingVideo)}`
         : "当前没有需要补齐的封面"
     );
+    loadedResources.add("coverCache");
   } catch (error) {
     if (!options.quiet) setText(els.coverStatus, error.message || "封面状态读取失败");
   }
@@ -1042,11 +1137,22 @@ function setView(view, options = {}) {
   for (const panel of els.views) {
     panel.classList.toggle("active", panel.dataset.adminView === state.activeView);
   }
-  if (state.activeView === "tasks") scheduleWorkMoveOpsPoll(0);
+  syncTaskPoll();
+  if (state.activeView === "tasks") scheduleWorkMoveOpsPoll(2500);
   else clearWorkMoveOpsPoll();
   if (options.pushHash) {
     history.replaceState(null, "", `#${state.activeView}`);
   }
+  if (options.load !== false) {
+    loadView(state.activeView).catch(reportViewLoadError);
+  }
+}
+
+function reportViewLoadError(error) {
+  const message = error?.message || "后台加载失败";
+  setText(els.sideHealth, message);
+  if (state.activeView === "overview") setText(els.healthStatus, message);
+  if (state.activeView === "settings") setText(els.settingsStatus, message);
 }
 
 function viewFromHash() {
@@ -1088,7 +1194,7 @@ function applyPendingScriptDefaults() {
 }
 
 function bindEvents() {
-  els.refreshAll?.addEventListener("click", refreshAll);
+  els.refreshAll?.addEventListener("click", refreshActiveView);
   els.refreshScripts?.addEventListener("click", loadScripts);
   els.refreshTasks?.addEventListener("click", refreshTasks);
   els.scriptForm?.addEventListener("submit", runSelectedScript);
@@ -1141,8 +1247,9 @@ function bindEvents() {
   }
   window.addEventListener("hashchange", () => setView(viewFromHash()));
   document.addEventListener("visibilitychange", () => {
+    syncTaskPoll();
     if (document.visibilityState === "hidden") clearWorkMoveOpsPoll();
-    else scheduleWorkMoveOpsPoll(0);
+    else if (state.activeView === "tasks") scheduleWorkMoveOpsPoll(0);
   });
 }
 
@@ -1161,14 +1268,27 @@ function selectQuickScript(scriptId) {
 async function init() {
   readInitialAdminTarget();
   bindEvents();
-  setView(viewFromHash());
-  await refreshAll();
+  setView(viewFromHash(), { load: false });
+  await loadView(state.activeView);
   applyPendingScriptDefaults();
   els.scriptList?.querySelector(".admin-script-card.active")?.scrollIntoView({ block: "nearest" });
+  syncTaskPoll();
+}
+
+function taskPollingIsNeeded() {
+  return document.visibilityState !== "hidden" && ["overview", "scripts", "tasks"].includes(state.activeView);
+}
+
+function syncTaskPoll() {
+  if (!taskPollingIsNeeded()) {
+    if (state.pollTimer) window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+    return;
+  }
+  if (state.pollTimer) return;
   state.pollTimer = window.setInterval(() => {
-    refreshTasks();
+    loadResource("tasks", { force: true }).catch(reportViewLoadError);
   }, 2500);
-  scheduleWorkMoveOpsPoll(2500);
 }
 
 function clearWorkMoveOpsPoll() {
@@ -1179,12 +1299,13 @@ function clearWorkMoveOpsPoll() {
 
 function scheduleWorkMoveOpsPoll(delayMs = 2500) {
   clearWorkMoveOpsPoll();
-  if (!workMoveOpsPanelIsVisible(workMoveOpsRoot)) return;
+  if (document.visibilityState === "hidden" || state.activeView !== "tasks" || !workMoveOpsRoot) return;
   state.workMovePollTimer = window.setTimeout(async () => {
     state.workMovePollTimer = null;
     try {
-      if (!workMoveOpsController.state.loading) {
-        await workMoveOpsController.load({ quiet: true });
+      const controller = await workMoveOpsController();
+      if (!controller.state.loading) {
+        await controller.load({ quiet: true });
       }
     } finally {
       scheduleWorkMoveOpsPoll(2500);

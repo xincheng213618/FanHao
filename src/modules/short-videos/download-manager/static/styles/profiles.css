@@ -105,6 +105,17 @@
   white-space: nowrap;
 }
 
+.profile-manager-history {
+  max-width: 100%;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .profile-manager-badge {
   display: inline-block;
   margin-left: 5px;

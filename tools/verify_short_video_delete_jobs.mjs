@@ -79,9 +79,10 @@ await verifyExclusiveGuardTempCleanupRecovery();
 await verifyActiveExecuteRecoveryFencing();
 await verifyWorkerThreadDurableExecutionFence();
 await verifyInPlaceOverwriteFailsClosed();
-await verifyPostIsolationOpenHandleOverwriteFailsClosed();
+await verifyPostIsolationOpenHandleOverwriteRollsBackSafely();
 await verifyAfterAllIsolatedBusyRecovery();
 await verifyLargeUnrelatedReferenceSetIsBounded();
+await verifyIndexedUnrelatedReferenceSetIsNotScanned();
 await verifySameRootJunctionSharedReference();
 await verifyOutsideJunctionProbeFailureRetains();
 await verifyOutsideAndCrossRootPhysicalReferences();
@@ -2388,7 +2389,7 @@ async function terminateWorker(worker) {
   try { await worker.terminate(); } catch {}
 }
 
-async function verifyPostIsolationOpenHandleOverwriteFailsClosed() {
+async function verifyPostIsolationOpenHandleOverwriteRollsBackSafely() {
   const fixture = createFixture();
   const fileSize = 256 * 1024;
   const middleBytes = Buffer.alloc(64 * 1024, 0x42);
@@ -2434,28 +2435,18 @@ async function verifyPostIsolationOpenHandleOverwriteFailsClosed() {
     );
     assert.equal(overwriteObserved, true);
     assert.equal(videoExists(fixture.dbPath, "open-handle-overwrite"), true);
-    const repairedJob = jobRows(fixture.dbPath)[0];
-    assert.equal(repairedJob?.status, "rollback_pending");
-    assert.equal(activeReservationCount(fixture.dbPath) > 0, true);
-    const pendingItem = deleteItemRows(fixture.dbPath)[0];
-    assert.equal(pendingItem.state, "isolated");
-    assert.equal(fs.existsSync(pendingItem.quarantine_path), true);
-
-    fs.writeSync(sourceHandle, original.subarray(middleOffset, middleOffset + middleBytes.length), 0, middleBytes.length, middleOffset);
-    fs.fsyncSync(sourceHandle);
-    fs.futimesSync(sourceHandle, fixedTime, fixedTime);
     fs.closeSync(sourceHandle);
     sourceHandle = null;
     fixture.hooks.afterItemIsolated = null;
-
-    await fixture.store.recoverDeleteJobs({ jobId: repairedJob.id });
     assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
     assert.equal(videoExists(fixture.dbPath, "open-handle-overwrite"), true);
-    assert.deepEqual(fs.readFileSync(source), original, "repairing the owned quarantine bytes must allow a byte-exact rollback");
+    assert.deepEqual(
+      fs.readFileSync(source).subarray(middleOffset, middleOffset + middleBytes.length),
+      middleBytes,
+      "rollback must preserve bytes written through an already-open handle"
+    );
     assertNoActiveReservations(fixture.dbPath);
     assertNoQuarantine(fixture.root);
-    await fixture.store.recoverDeleteJobs();
-    assert.equal(jobRows(fixture.dbPath)[0]?.status, "rolled_back");
   } finally {
     if (sourceHandle !== null) fs.closeSync(sourceHandle);
     closeFixture(fixture);
@@ -2593,6 +2584,75 @@ async function verifyLargeUnrelatedReferenceSetIsBounded() {
     assert(
       elapsedMs < 2_500,
       `deleting one target among ${rowCount} unrelated rows must remain bounded (elapsed ${elapsedMs.toFixed(1)}ms)`
+    );
+    assertNoActiveReservations(fixture.dbPath);
+    assertNoQuarantine(fixture.root);
+  } finally {
+    closeFixture(fixture);
+  }
+}
+
+async function verifyIndexedUnrelatedReferenceSetIsNotScanned() {
+  const fixture = createFixture({ openStore: false });
+  const unrelatedDirectory = path.join(fixture.root, "indexed-unrelated");
+  let unrelatedProbeCount = 0;
+  const guardedFsOps = new Proxy(fs, {
+    get(target, property, receiver) {
+      if (["lstatSync", "statSync", "realpathSync", "readdirSync"].includes(String(property))) {
+        return (targetPath, ...args) => {
+          if (String(targetPath || "").includes(unrelatedDirectory)) unrelatedProbeCount += 1;
+          return Reflect.get(target, property, receiver)(targetPath, ...args);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  try {
+    fixture.store = createShortVideoStore({
+      ...storeOptions(fixture),
+      deleteJobFsOps: guardedFsOps
+    });
+    fixture.store.summary();
+    const target = writeMedia(fixture.root, "indexed-target/target.mp4", "indexed-target-video");
+    seedVideo(fixture.dbPath, { id: "indexed-target", sourcePath: target });
+
+    const rowCount = 5_001;
+    const db = openDb(fixture.dbPath);
+    try {
+      const insert = db.prepare(`
+        INSERT INTO short_videos (id, source_path, size_bytes, file_name)
+        VALUES (?, ?, ?, ?)
+      `);
+      db.exec("BEGIN");
+      for (let index = 0; index < rowCount; index += 1) {
+        const id = `indexed-unrelated-${String(index).padStart(5, "0")}`;
+        insert.run(id, path.join(unrelatedDirectory, `${id}.mp4`), index + 1, `${id}.mp4`);
+      }
+      db.prepare(`
+        UPDATE short_video_path_references
+        SET probe_state = 'missing', updated_at = 'fixture-indexed'
+        WHERE owner_video_id LIKE 'indexed-unrelated-%'
+      `).run();
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        if (db.isTransaction) db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    } finally {
+      db.close();
+    }
+
+    const startedAt = performance.now();
+    const result = await fixture.store.deleteVideo("indexed-target");
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(result.ok, true);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(unrelatedProbeCount, 0, "indexed unrelated references must not be touched during a targeted delete");
+    assert.equal(countVideosWithPrefix(fixture.dbPath, "indexed-unrelated-"), rowCount);
+    assert(
+      elapsedMs < 2_500,
+      `deleting one target among ${rowCount} indexed unrelated rows must stay target-bounded (elapsed ${elapsedMs.toFixed(1)}ms)`
     );
     assertNoActiveReservations(fixture.dbPath);
     assertNoQuarantine(fixture.root);

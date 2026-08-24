@@ -4,7 +4,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
-import { authorFacet, followingAuthorFacet } from "./author-facets.js";
+import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory } from "./author-facets.js";
+import { createShortVideoAuthorCleanupService } from "./author-cleanup-service.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
 import { createShortVideoCommentsRepository } from "./comments-repository.js";
 import { createShortVideoCollectionsRepository } from "./collections-repository.js";
@@ -50,7 +51,6 @@ import {
 } from "./query-contract.js";
 import { queryShortVideoStats } from "./stats-query.js";
 import { normalizedWatchTimestamp, watchReceiptFromDatabase } from "./watch-history.js";
-
 const VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const DEFAULT_LIMIT = 72;
 const MAX_LIMIT = 300;
@@ -60,7 +60,7 @@ const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260812-native-user-actions-13";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260825-profile-history-14";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -145,6 +145,8 @@ const LIST_VIDEO_COLUMNS = [
 ].join(", ");
 const DETAIL_VIDEO_COLUMNS = `${LIST_VIDEO_COLUMNS}, is_liked, liked_sort_at, liked_sort_time, create_time, imported_at, updated_at`;
 const {
+  authorDeletedVideoTotal,
+  authorVideoCount,
   decodeShortVideoListCursor,
   fastFilteredVideoPage,
   fastHistoryVideoPage,
@@ -181,7 +183,6 @@ const {
   parseJsonObject,
   safeStat
 });
-
 export function createShortVideoStore(options = {}) {
   const dbPath = options.dbPath;
   const skipStartupMaintenance = Boolean(options.skipStartupMaintenance);
@@ -246,7 +247,7 @@ export function createShortVideoStore(options = {}) {
     terminalJobLimit: options.deleteJobTerminalLimit,
     warn: options.deleteJobWarn || console.warn
   });
-
+  const authorCleanup = createShortVideoAuthorCleanupService({ database: databaseOrOpen, deleteVideos: (...args) => deleteVideos(...args) });
   function database() {
     if (!db) {
       if (!readOnly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -286,7 +287,7 @@ export function createShortVideoStore(options = {}) {
               id
             );
           CREATE INDEX IF NOT EXISTS idx_short_videos_summary
-            ON short_videos(visibility, author_sec_uid, author_name, size_bytes, duration_ms);
+            ON short_videos(visibility, author_sec_uid, author_name, size_bytes, duration_ms); CREATE INDEX IF NOT EXISTS idx_short_videos_size ON short_videos(visibility, size_bytes DESC, liked_at DESC, id DESC);
           CREATE INDEX IF NOT EXISTS idx_short_videos_distribution
             ON short_videos(visibility, media_type, actual_pixels, digg_count, id);
           CREATE INDEX IF NOT EXISTS idx_short_videos_media_digg
@@ -505,7 +506,7 @@ export function createShortVideoStore(options = {}) {
       Object.defineProperty(author, "_searchText", {
         configurable: true,
         enumerable: false,
-        value: `${author.name || ""} ${author.secUid || ""} ${author.uniqueId || ""} ${author.id || ""}`.toLocaleLowerCase("zh-CN")
+        value: `${author.name || ""} ${(author.nameHistory || []).map((item) => item.name).join(" ")} ${author.secUid || ""} ${author.uniqueId || ""} ${author.id || ""}`.toLocaleLowerCase("zh-CN")
       });
     }
     return authors;
@@ -677,7 +678,52 @@ export function createShortVideoStore(options = {}) {
     const mention = String(value || "").trim().replace(/^@+\s*/u, "").trim().slice(0, 120);
     if (!mention) return null;
     const normalizedMention = mention.replace(/[-‐‑‒–—―_·•.。]+$/gu, "").trim();
+    const exactSecUid = /^MS4wLjAB[A-Za-z0-9_-]+$/u.test(mention);
     const database = databaseOrOpen();
+    const countSql = exactSecUid
+      ? "0"
+      : `(
+          SELECT COUNT(*)
+          FROM short_videos videos
+          WHERE videos.visibility = 'local_only'
+            AND (
+              videos.owner_user_id = users.id
+              OR (COALESCE(videos.owner_user_id, '') = '' AND videos.author_sec_uid = users.sec_uid)
+            )
+        )`;
+    const matchSql = exactSecUid
+      ? "users.sec_uid = ? AND users.sec_uid <> ''"
+      : `(
+          users.nickname = ? COLLATE NOCASE
+          OR users.unique_id = ? COLLATE NOCASE
+          OR users.short_id = ?
+          OR users.sec_uid = ?
+          OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(users.nickname_history_json) THEN users.nickname_history_json ELSE '[]' END) name_history
+            WHERE TRIM(CAST(json_extract(name_history.value, '$.value') AS TEXT)) = ? COLLATE NOCASE)
+          OR RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE
+        )`;
+    const orderSql = exactSecUid
+      ? ""
+      : `ORDER BY
+          CASE
+            WHEN users.nickname = ? COLLATE NOCASE THEN 0
+            WHEN users.unique_id = ? COLLATE NOCASE THEN 1
+            WHEN users.short_id = ? THEN 2
+            WHEN users.sec_uid = ? THEN 3
+            WHEN EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(users.nickname_history_json) THEN users.nickname_history_json ELSE '[]' END) name_history
+              WHERE TRIM(CAST(json_extract(name_history.value, '$.value') AS TEXT)) = ? COLLATE NOCASE) THEN 4
+            WHEN RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE THEN 5
+            ELSE 5
+          END,
+          count DESC,
+          users.profile_collected_at DESC`;
+    const queryArgs = exactSecUid
+      ? [LOCAL_SHORT_VIDEO_USER_ID, mention]
+      : [
+          LOCAL_SHORT_VIDEO_USER_ID,
+          mention, mention, mention, mention, mention, normalizedMention,
+          mention, mention, mention, mention, mention, normalizedMention
+        ];
     const row = database.prepare(`
       SELECT
         users.id,
@@ -693,6 +739,8 @@ export function createShortVideoStore(options = {}) {
         users.follower_count AS followerCount,
         users.following_count AS followingCount,
         users.total_favorited AS totalFavorited,
+        users.nickname_history_json AS nameHistoryJson,
+        users.total_favorited_history_json AS totalFavoritedHistoryJson,
         users.aweme_count AS awemeCount,
         users.favoriting_count AS favoritingCount,
         users.gender,
@@ -709,50 +757,15 @@ export function createShortVideoStore(options = {}) {
             AND follows.target_user_id = users.id
             AND follows.active = 1
         ) AS following,
-        (
-          SELECT COUNT(*)
-          FROM short_videos videos
-          WHERE videos.visibility = 'local_only'
-            AND (
-              videos.owner_user_id = users.id
-              OR (COALESCE(videos.owner_user_id, '') = '' AND videos.author_sec_uid = users.sec_uid)
-            )
-        ) AS count
+        ${countSql} AS count
       FROM short_video_users users
       WHERE users.platform = 'douyin'
-        AND (
-          users.nickname = ? COLLATE NOCASE
-          OR users.unique_id = ? COLLATE NOCASE
-          OR users.short_id = ?
-          OR users.sec_uid = ?
-          OR RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE
-        )
-      ORDER BY
-        CASE
-          WHEN users.nickname = ? COLLATE NOCASE THEN 0
-          WHEN users.unique_id = ? COLLATE NOCASE THEN 1
-          WHEN users.short_id = ? THEN 2
-          WHEN users.sec_uid = ? THEN 3
-          WHEN RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE THEN 4
-          ELSE 5
-        END,
-        count DESC,
-        users.profile_collected_at DESC
+        AND ${matchSql}
+      ${orderSql}
       LIMIT 1
-    `).get(
-      LOCAL_SHORT_VIDEO_USER_ID,
-      mention,
-      mention,
-      mention,
-      mention,
-      normalizedMention,
-      mention,
-      mention,
-      mention,
-      mention,
-      normalizedMention
-    );
+    `).get(...queryArgs);
     if (!row?.secUid) return null;
+    if (exactSecUid) row.count = authorVideoCount(database, row.secUid);
     return {
       id: row.id || "",
       secUid: row.secUid || "",
@@ -767,6 +780,8 @@ export function createShortVideoStore(options = {}) {
       followerCount: optionalInteger(row.followerCount),
       followingCount: optionalInteger(row.followingCount),
       totalFavorited: optionalInteger(row.totalFavorited),
+      nameHistory: parseAuthorProfileHistory(row.nameHistoryJson, { field: "name" }),
+      totalFavoritedHistory: parseAuthorProfileHistory(row.totalFavoritedHistoryJson, { numeric: true, field: "value" }),
       awemeCount: optionalInteger(row.awemeCount),
       favoritingCount: optionalInteger(row.favoritingCount),
       gender: optionalInteger(row.gender),
@@ -1026,7 +1041,8 @@ function summary() {
         liked_at ASC
       `,
       comments: "comment_count DESC, liked_at DESC",
-      duration: "duration_ms DESC, liked_at DESC"
+      duration: "duration_ms DESC, liked_at DESC",
+      size: "size_bytes DESC, liked_at DESC"
     }[sort] || "published_at DESC, liked_at DESC";
     const database = databaseOrOpen();
     const deletedTotal = authorDeletedVideoTotal(database, filter);
@@ -1124,27 +1140,6 @@ function summary() {
     };
   }
 
-  function authorDeletedVideoTotal(database, filter = {}) {
-    const author = String(filter.author || "").trim();
-    if (!author || author === "all") return 0;
-    if (author.startsWith("name:")) {
-      return Number(database.prepare(`
-        SELECT COUNT(*) AS count
-        FROM short_video_catalog
-        WHERE visibility = 'local_only'
-          AND author_deleted = 1
-          AND author_name = ?
-      `).get(author.slice(5))?.count || 0);
-    }
-    return Number(database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM short_video_catalog
-      WHERE visibility = 'local_only'
-        AND author_deleted = 1
-        AND author_sec_uid = ?
-    `).get(author)?.count || 0);
-  }
-
   function videoDetail(id, urlOrOptions = {}) {
     const database = databaseOrOpen();
     const params = urlOrOptions?.searchParams || new URLSearchParams();
@@ -1197,7 +1192,7 @@ function summary() {
     return Number(database.prepare(`
       SELECT COUNT(*) AS count
       FROM short_video_playback_issues issue
-      JOIN short_videos video ON video.id = issue.video_id
+      CROSS JOIN short_videos video ON video.id = issue.video_id
       WHERE issue.active = 1
         AND video.visibility = 'local_only'
         AND video.media_type = 'video'
@@ -1228,7 +1223,7 @@ function summary() {
         actual_probe_error,
         digg_count
       FROM short_video_playback_issues issue
-      JOIN short_videos video ON video.id = issue.video_id
+      CROSS JOIN short_videos video ON video.id = issue.video_id
       WHERE issue.active = 1
         AND video.visibility = 'local_only'
         AND video.media_type = 'video'
@@ -2977,7 +2972,8 @@ function summary() {
       profilesChanged: 0,
       profileUsersChanged: 0,
       accountStatesChanged: 0,
-      videoAuthorsChanged: 0
+      videoAuthorsChanged: 0,
+      profileHistoriesChanged: 0
     };
     const incremental = Boolean(options.incremental);
     const backfillStatsLimit = incremental
@@ -3347,6 +3343,7 @@ function summary() {
     backfillMissingCovers,
     backfillMissingCoversAsync,
     beginClose,
+    authorCleanupPreview: authorCleanup.preview, cleanupAuthorUnliked: authorCleanup.execute,
     catalogStamp,
     close,
     collectionVideoDetail: collections.collectionVideoDetail,
@@ -3482,7 +3479,7 @@ function ensureSchema(db, coverCacheDir = "") {
     CREATE INDEX IF NOT EXISTS idx_short_videos_author_published
       ON short_videos(author_sec_uid, visibility, published_at, liked_at, id);
     CREATE INDEX IF NOT EXISTS idx_short_videos_liked ON short_videos(liked_at);
-    CREATE INDEX IF NOT EXISTS idx_short_videos_published ON short_videos(published_at);
+    CREATE INDEX IF NOT EXISTS idx_short_videos_published ON short_videos(published_at); CREATE INDEX IF NOT EXISTS idx_short_videos_size ON short_videos(visibility, size_bytes DESC, liked_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_short_videos_digg ON short_videos(digg_count);
     CREATE INDEX IF NOT EXISTS idx_short_videos_aweme ON short_videos(aweme_id);
     CREATE INDEX IF NOT EXISTS idx_short_videos_source_path ON short_videos(source_path);
@@ -3505,6 +3502,8 @@ function ensureSchema(db, coverCacheDir = "") {
       follower_count INTEGER,
       following_count INTEGER,
       total_favorited INTEGER,
+      nickname_history_json TEXT NOT NULL DEFAULT '[]',
+      total_favorited_history_json TEXT NOT NULL DEFAULT '[]',
       aweme_count INTEGER,
       favoriting_count INTEGER,
       gender INTEGER,
@@ -4847,9 +4846,8 @@ function metaValue(db, key) {
 
 function normalizeSort(value) {
   const sort = String(value || "published").trim();
-  return ["recommended", "liked", "likedAsc", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "liked", "likedAsc", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration", "size"].includes(sort) ? sort : "published";
 }
-
 function runSqliteBusyRetry(fn, attempts = 8) {
   let delayMs = 100;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {

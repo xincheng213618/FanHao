@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,7 +24,12 @@ from .profiles_links import (
     upsert_profile_metadata,
 )
 from .profile_collection_history import record_profile_collection
-from .profile_refresh_policy import PROFILE_LINK_STATS_SQL, profile_refresh_decision
+from .profile_refresh_policy import (
+    PROFILE_LINK_STATS_SQL,
+    profile_prefers_full_scan,
+    profile_refresh_decision,
+    profile_requires_full_scan,
+)
 
 
 extract_lock = threading.Lock()
@@ -44,6 +50,150 @@ extract_stop_event = threading.Event()
 extract_cancel_event = threading.Event()
 
 
+extract_queue: deque[dict[str, Any]] = deque()
+
+
+extract_current_request: dict[str, Any] | None = None
+
+
+def _public_request(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not request:
+        return None
+    return {
+        "job_id": request["job_id"],
+        "type": request["type"],
+        "profile_ids": list(request.get("profile_ids") or []),
+        "full_scan": bool(request.get("full_scan")),
+        "label": str(request.get("label") or "采集任务"),
+    }
+
+
+def extract_status() -> dict[str, Any]:
+    with extract_lock:
+        active = extract_thread is not None and extract_thread.is_alive()
+        return {
+            "active": active,
+            "job_id": extract_job_id if active else None,
+            "current": _public_request(extract_current_request) if active else None,
+            "queued": len(extract_queue),
+            "queue": [_public_request(request) for request in extract_queue],
+        }
+
+
+def _run_collection_request(request: dict[str, Any]) -> None:
+    try:
+        request["runner"](*request["args"], **request["kwargs"])
+    except Exception as exc:
+        update_job(
+            int(request["job_id"]),
+            status="failed",
+            finished_at=now_iso(),
+            message=str(exc)[:2000],
+        )
+        add_event("error", f"采集队列任务异常：{exc}")
+    finally:
+        _finish_collection_request()
+
+
+def _launch_collection_request_locked(request: dict[str, Any]) -> None:
+    global extract_thread, extract_job_id, extract_current_request
+    extract_stop_event.clear()
+    extract_cancel_event.clear()
+    extract_job_id = int(request["job_id"])
+    extract_current_request = request
+    update_job(
+        extract_job_id,
+        status="running",
+        started_at=now_iso(),
+        finished_at=None,
+        message=str(request["running_message"]),
+    )
+    extract_thread = threading.Thread(
+        target=_run_collection_request,
+        args=(request,),
+        daemon=True,
+        name=f"douyin-collection-{extract_job_id}",
+    )
+    extract_thread.start()
+
+
+def _finish_collection_request() -> None:
+    global extract_thread, extract_job_id, extract_process, extract_current_request
+    with extract_lock:
+        extract_process = None
+        extract_stop_event.clear()
+        extract_cancel_event.clear()
+        if extract_queue:
+            request = extract_queue.popleft()
+            _launch_collection_request_locked(request)
+            add_event("info", f"采集队列开始执行 #{request['job_id']}：{request['label']}")
+            return
+        extract_thread = None
+        extract_job_id = None
+        extract_current_request = None
+
+
+def _submit_collection_request(
+    *,
+    request_type: str,
+    request_key: tuple[Any, ...],
+    label: str,
+    running_message: str,
+    runner: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any] | None = None,
+    profile_ids: list[int] | None = None,
+    full_scan: bool = False,
+    profile_id: int | None = None,
+) -> dict[str, Any]:
+    with extract_lock:
+        active = extract_thread is not None and extract_thread.is_alive()
+        if active and extract_current_request and extract_current_request["key"] == request_key:
+            return {
+                "ok": True,
+                "job_id": int(extract_current_request["job_id"]),
+                "queued": False,
+                "duplicate": True,
+                "queue_position": 0,
+            }
+        for position, queued_request in enumerate(extract_queue, start=1):
+            if queued_request["key"] == request_key:
+                return {
+                    "ok": True,
+                    "job_id": int(queued_request["job_id"]),
+                    "queued": True,
+                    "duplicate": True,
+                    "queue_position": position,
+                }
+
+        job_id = create_job(
+            request_type,
+            f"排队等待：{label}" if active else running_message,
+            profile_id,
+            status="queued" if active else "running",
+        )
+        request = {
+            "job_id": job_id,
+            "type": request_type,
+            "key": request_key,
+            "label": label,
+            "running_message": running_message,
+            "runner": runner,
+            "args": (job_id, *args),
+            "kwargs": kwargs or {},
+            "profile_ids": list(profile_ids or []),
+            "full_scan": full_scan,
+        }
+        if active:
+            extract_queue.append(request)
+            position = len(extract_queue)
+            add_event("info", f"采集任务已排队 #{job_id}（待执行第 {position} 个）：{label}")
+            return {"ok": True, "job_id": job_id, "queued": True, "queue_position": position}
+
+        _launch_collection_request_locked(request)
+        return {"ok": True, "job_id": job_id, "queued": False, "queue_position": 0}
+
+
 def run_extract_job(
     job_id: int,
     url: str,
@@ -55,7 +205,7 @@ def run_extract_job(
     clear_global: bool = True,
     full_scan: bool = False,
 ) -> None:
-    global extract_thread, extract_job_id, extract_process
+    global extract_process
     profile_id = upsert_profile(url)
     with db() as conn:
         profile_row = conn.execute(
@@ -65,6 +215,16 @@ def run_extract_job(
         profile_tab_for_job = str(profile_row["tab"] or "post") if profile_row else "post"
         profile_aweme_count = int_or_none(profile_row["aweme_count"]) or 0 if profile_row else 0
         stored_account_status = str(profile_row["account_status"] or "active").strip().lower() if profile_row else "active"
+    if not full_scan and profile_prefers_full_scan(
+        {
+            "tab": profile_tab_for_job,
+            "aweme_count": profile_aweme_count,
+            "account_status": stored_account_status,
+        }
+    ):
+        full_scan = True
+        max_items = 0
+        incremental_stop_existing = 0
     out_path = DATA_DIR / f"extract-{uuid.uuid4().hex}.json"
     stream_path = DATA_DIR / f"extract-stream-{job_id}.jsonl"
     log_path = LOG_DIR / f"extract-job-{job_id}.log"
@@ -450,15 +610,9 @@ def run_extract_job(
     finally:
         with extract_lock:
             extract_process = None
-            if clear_global:
-                extract_thread = None
-                extract_job_id = None
-                extract_stop_event.clear()
-                extract_cancel_event.clear()
 
 
 def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
-    global extract_thread, extract_job_id
     url = str(payload.get("url") or setting("profile_url", TEST_PROFILE_URL)).strip()
     if not url:
         return {"ok": False, "message": "需要主页链接"}
@@ -482,21 +636,16 @@ def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
         incremental_stop_existing = 0
     headed = bool(payload.get("headed", False))
 
-    with extract_lock:
-        if extract_thread is not None and extract_thread.is_alive():
-            return {"ok": False, "message": "采集任务已经在运行"}
-        extract_stop_event.clear()
-        extract_cancel_event.clear()
-        job_id = create_job("extract", "准备采集")
-        extract_job_id = job_id
-        extract_thread = threading.Thread(
-            target=run_extract_job,
-            args=(job_id, url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing),
-            kwargs={"full_scan": full_scan},
-            daemon=True,
-        )
-        extract_thread.start()
-    return {"ok": True, "job_id": job_id}
+    return _submit_collection_request(
+        request_type="extract",
+        request_key=("extract", url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing, full_scan),
+        label="采集主页链接",
+        running_message="准备采集",
+        runner=run_extract_job,
+        args=(url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing),
+        kwargs={"full_scan": full_scan},
+        full_scan=full_scan,
+    )
 
 
 def run_refresh_profiles_job(
@@ -510,7 +659,7 @@ def run_refresh_profiles_job(
     incremental_stop_existing: int,
     full_scan: bool,
 ) -> None:
-    global extract_thread, extract_job_id, extract_process
+    global extract_process
     success_profiles = 0
     failed_profiles = 0
     stopped = False
@@ -531,9 +680,12 @@ def run_refresh_profiles_job(
                       profiles.updated_at,
                       profiles.last_extracted_at,
                       profiles.account_status,
+                      profiles.aweme_count,
+                      profiles.has_deleted_works,
                       profiles.full_scan_required,
                       profiles.full_scan_reason,
                       profiles.full_scan_required_at,
+                      profiles.last_full_scan_at,
                       profiles.sec_uid,
                       q.sort_order,
                       COALESCE(stats.total, 0) link_total,
@@ -600,8 +752,14 @@ def run_refresh_profiles_job(
                 break
             extract_stop_event.clear()
             label = clean_profile_nickname(profile.get("nickname") or profile.get("title")) or f"主页 #{profile['id']}"
-            profile_full_scan = bool(full_scan or int(profile.get("full_scan_required") or 0))
-            mode_label = "全量确认" if profile_full_scan else "快速刷新"
+            requires_full_scan = profile_requires_full_scan(profile)
+            profile_full_scan = bool(full_scan or requires_full_scan or profile_prefers_full_scan(profile))
+            if requires_full_scan:
+                mode_label = "全量确认"
+            elif profile_full_scan:
+                mode_label = "全量采集"
+            else:
+                mode_label = "快速刷新"
             update_job(
                 job_id,
                 processed=index - 1,
@@ -662,14 +820,9 @@ def run_refresh_profiles_job(
     finally:
         with extract_lock:
             extract_process = None
-            extract_thread = None
-            extract_job_id = None
-        extract_stop_event.clear()
-        extract_cancel_event.clear()
 
 
 def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
-    global extract_thread, extract_job_id
     max_profiles = normalize_int(payload.get("max_profiles", 0), 0, 0, 100000)
     raw_profile_ids = payload.get("profile_ids")
     profile_ids: list[int] = []
@@ -692,30 +845,42 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
         max_items = 0
         incremental_stop_existing = 0
     headed = bool(payload.get("headed", False))
-    with extract_lock:
-        if extract_thread is not None and extract_thread.is_alive():
-            return {"ok": False, "message": "采集任务已经在运行"}
-        extract_stop_event.clear()
-        extract_cancel_event.clear()
-        job_id = create_job("refresh", "准备批量刷新现有主页")
-        extract_job_id = job_id
-        extract_thread = threading.Thread(
-            target=run_refresh_profiles_job,
-            args=(
-                job_id,
-                max_profiles,
-                profile_ids,
-                max_items,
-                scrolls,
-                idle_rounds,
-                headed,
-                incremental_stop_existing,
-                full_scan,
-            ),
-            daemon=True,
-        )
-        extract_thread.start()
-    return {"ok": True, "job_id": job_id}
+    automatic = bool(payload.get("automatic"))
+    if profile_ids:
+        mode_label = "全量采集" if full_scan else "智能采集"
+        label = f"{len(profile_ids)} 个主页{mode_label}"
+    else:
+        label = "定时智能采集" if automatic else "一键智能采集"
+    return _submit_collection_request(
+        request_type="refresh",
+        request_key=(
+            "refresh",
+            tuple(profile_ids),
+            max_profiles,
+            max_items,
+            scrolls,
+            idle_rounds,
+            headed,
+            incremental_stop_existing,
+            full_scan,
+        ),
+        label=label,
+        running_message="准备批量刷新现有主页",
+        runner=run_refresh_profiles_job,
+        args=(
+            max_profiles,
+            profile_ids,
+            max_items,
+            scrolls,
+            idle_rounds,
+            headed,
+            incremental_stop_existing,
+            full_scan,
+        ),
+        profile_ids=profile_ids,
+        full_scan=full_scan,
+        profile_id=profile_ids[0] if len(profile_ids) == 1 else None,
+    )
 
 
 def run_following_import_job(
@@ -726,7 +891,7 @@ def run_following_import_job(
     idle_rounds: int,
     headed: bool,
 ) -> None:
-    global extract_thread, extract_job_id, extract_process
+    global extract_process
     out_path = DATA_DIR / f"following-{uuid.uuid4().hex}.json"
     log_path = LOG_DIR / f"following-job-{job_id}.log"
     cmd = [
@@ -837,33 +1002,22 @@ def run_following_import_job(
             pass
         with extract_lock:
             extract_process = None
-            extract_thread = None
-            extract_job_id = None
-        extract_stop_event.clear()
-        extract_cancel_event.clear()
 
 
 def start_following_import(payload: dict[str, Any]) -> dict[str, Any]:
-    global extract_thread, extract_job_id
     max_users = normalize_int(payload.get("max", 0), 0, 0, 100000)
     scrolls = normalize_int(payload.get("scrolls", 1200), 1200, 1, 30000)
     idle_rounds = normalize_int(payload.get("idle_rounds", 16), 16, 1, 1000)
     headed = bool(payload.get("headed", False))
     url = f"https://www.douyin.com/user/{LIBRARY_SEC_UID}"
-    with extract_lock:
-        if extract_thread is not None and extract_thread.is_alive():
-            return {"ok": False, "message": "采集任务已经在运行"}
-        extract_stop_event.clear()
-        extract_cancel_event.clear()
-        job_id = create_job("following", "准备提取本人关注列表")
-        extract_job_id = job_id
-        extract_thread = threading.Thread(
-            target=run_following_import_job,
-            args=(job_id, url, max_users, scrolls, idle_rounds, headed),
-            daemon=True,
-        )
-        extract_thread.start()
-    return {"ok": True, "job_id": job_id}
+    return _submit_collection_request(
+        request_type="following",
+        request_key=("following", max_users, scrolls, idle_rounds, headed),
+        label="提取我的关注",
+        running_message="准备提取本人关注列表",
+        runner=run_following_import_job,
+        args=(url, max_users, scrolls, idle_rounds, headed),
+    )
 
 
 def stop_extract() -> dict[str, Any]:
@@ -872,6 +1026,15 @@ def stop_extract() -> dict[str, Any]:
         proc = extract_process
         if not running:
             return {"ok": False, "message": "当前没有采集任务"}
+        queued_requests = list(extract_queue)
+        extract_queue.clear()
+        for request in queued_requests:
+            update_job(
+                int(request["job_id"]),
+                status="stopped",
+                finished_at=now_iso(),
+                message="采集队列已取消",
+            )
         extract_cancel_event.set()
         extract_stop_event.set()
         if proc is not None and proc.poll() is None:
@@ -879,5 +1042,7 @@ def stop_extract() -> dict[str, Any]:
                 proc.terminate()
             except OSError:
                 pass
-    add_event("warn", "正在停止采集任务")
-    return {"ok": True}
+    cancelled = len(queued_requests)
+    suffix = f"，并取消 {cancelled} 个排队任务" if cancelled else ""
+    add_event("warn", f"正在停止采集任务{suffix}")
+    return {"ok": True, "cancelled_queued": cancelled}

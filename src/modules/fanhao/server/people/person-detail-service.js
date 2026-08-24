@@ -165,7 +165,11 @@ export function createPersonDetailService({
   }
 
   function mergeIntoTarget(targetPersonId, body) {
-    const result = adminCoreMutationService.mergePeopleIntoTarget(targetPersonId, body.sourcePersonIds || body.sources || []);
+    const result = adminCoreMutationService.mergePeopleIntoTarget(
+      targetPersonId,
+      body.sourcePersonIds || body.sources || [],
+      { preserveSourceNames: body.preserveSourceNames !== false }
+    );
     return { ok: true, ...result };
   }
 
@@ -195,7 +199,7 @@ export function createPersonDetailService({
       worksPayload = workQueryService.listFromWorksPayload(yearWorks, url, {
         filter,
         facets
-      }, { lightweightInfo: true });
+      }, { lightweightInfo: true, includeCoreCovers: scope === "western" });
       cachePage(source, pageCacheKey, worksPayload);
       mark("payload");
     }

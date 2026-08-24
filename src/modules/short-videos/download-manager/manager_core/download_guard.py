@@ -9,7 +9,6 @@ import time
 from .common import first_text, iso_from_timestamp, normalize_int
 from .config import DOWNLOAD_GUARD_STATE_SETTING, FAILURE_GUARD_COOLDOWN_SECONDS, MAX_CONCURRENCY
 from .database import add_event, download_cycle_cooldown_seconds, download_cycle_limit, failure_guard_threshold, set_setting, setting, update_job
-from .profiles_links import current_profile_id
 from .runtime import download_timing
 
 
@@ -200,7 +199,7 @@ class DownloadGuardMixin:
             concurrency,
             retry_failed=False,
             limit=limit,
-            profile_id=profile_id or current_profile_id(create=False),
+            profile_id=profile_id,
             watch_new=watch_new,
             manual=False,
         )

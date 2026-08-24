@@ -486,7 +486,7 @@ function createProductionQuery(db, spans, spanCounts) {
     maxWorkLimit: 1_000,
     peopleScopeService: {
       normalize: () => "main",
-      workMatches: () => false,
+      workMatches: (_work, scope) => scope === "main",
       workMatchesDirect: () => false
     },
     playbackProgressService: { getWorkProgress: () => null },
@@ -700,7 +700,7 @@ async function verifyRealReadOnlyDatabase(coreDbPath, { skipPrewarm = false, rea
       isVrWork: () => false,
       library,
       maxWorkLimit: 1_000,
-      peopleScopeService: { normalize: () => "main", workMatches: () => false, workMatchesDirect: () => false },
+      peopleScopeService: { normalize: () => "main", workMatches: (_work, scope) => scope === "main", workMatchesDirect: () => false },
       playbackProgressService: { getWorkProgress: () => null },
       prewarmRemoteImagesForWorks: () => {},
       publicWork: (work) => ({ id: work.id, title: work.title, modifiedAt: work.modifiedAt, playableCount: work.playableCount, infoSummary: work.infoSummary }),

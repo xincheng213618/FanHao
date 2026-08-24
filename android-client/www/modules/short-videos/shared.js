@@ -25,7 +25,8 @@ export const SHORT_VIDEO_SORT_OPTIONS = [
   ["likes", "点赞最多"],
   ["likesAsc", "点赞最少"],
   ["comments", "评论最多"],
-  ["duration", "时长最长"]
+  ["duration", "时长最长"],
+  ["size", "文件大小"]
 ];
 export const FOLLOWING_AUTHOR_SORT_OPTIONS = [
   ["followed", "最近关注"],

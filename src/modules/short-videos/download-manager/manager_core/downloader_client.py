@@ -94,7 +94,7 @@ def write_sidecar_config(output_dir: str, concurrency: int) -> Path:
             # Windows 路径中重复一遍长标题。
             'filename_template: "{id}"',
             'folder_template: "{date}_{title}_{id}"',
-            'author_dir: "nickname_uid"',
+            'author_dir: "sec_uid"',
             "mode:",
             "  - post",
             "number:",
@@ -229,7 +229,7 @@ def write_config(link: sqlite3.Row, output_dir: str, worker_id: int) -> Path:
             "folderstyle: true",
             'filename_template: "{id}"',
             'folder_template: "{date}_{title}_{id}"',
-            'author_dir: "nickname_uid"',
+            'author_dir: "sec_uid"',
             "mode:",
             "  - post",
             "number:",

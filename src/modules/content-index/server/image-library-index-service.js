@@ -246,6 +246,7 @@ export function createImageLibraryIndexService({
     if (kind === "western") return "gw";
     if (kind === "movie") return "gf";
     if (kind === "tv") return "gt";
+    if (kind === "anime") return "ga";
     return "gm";
   }
 
@@ -265,8 +266,9 @@ export function createImageLibraryIndexService({
     const id = createId(mediaKindPrefix(source.kind), `${source.kind}|${path.resolve(filePath)}`);
     const parentName = dirParts[dirParts.length - 1] || "";
     const category = dirParts[0] || source.label;
-    const seriesName = source.kind === "tv" ? parentName || category : source.kind === "movie" ? parentName : "";
-    const personName = source.kind === "western" ? category : source.kind === "tv" ? seriesName : "";
+    const episodic = source.kind === "tv" || source.kind === "anime";
+    const seriesName = episodic ? parentName || category : source.kind === "movie" ? parentName : "";
+    const personName = source.kind === "western" ? category : episodic ? seriesName : "";
     return {
       id,
       type: "media",

@@ -24,6 +24,14 @@
         <item name="android:windowAnimationStyle">@style/AppTheme.NoAnimation</item>
     </style>
 
+    <style name="AppTheme.VisionExploration" parent="AppTheme.NoActionBar">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+
     <style name="AppTheme.NoAnimation" parent="@android:style/Animation.Activity">
         <item name="android:activityOpenEnterAnimation">@anim/no_anim</item>
         <item name="android:activityOpenExitAnimation">@anim/no_anim</item>

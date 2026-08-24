@@ -62,7 +62,10 @@ function showPeopleIndex(options = {}) {
   state.personWorksFacets = null;
   syncNavigationState("people");
   hidePersonProfile();
-  setMainHeader("人物索引", "按人物浏览全部资料库");
+  setMainHeader(
+    state.peopleScope === "western" ? "欧美人物" : "人物索引",
+    state.peopleScope === "western" ? "R:\\ 欧美分支" : "按人物浏览全部资料库"
+  );
   renderPeopleIndexStats();
   renderPeopleIndex();
   if (options.restoreScroll !== false) {

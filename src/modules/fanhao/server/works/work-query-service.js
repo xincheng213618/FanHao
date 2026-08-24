@@ -294,7 +294,7 @@ export function createWorkQueryService({
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
       case "hasMagnet": return Boolean(work.missingLocal && work.infoSummary?.hasMagnet);
-      case "missingCover": return !work.coverId && !work.remoteCoverUrl && !work.searchHasCover && !work.infoSummary?.imageUrl;
+      case "missingCover": return !work.missingLocal && !work.coverId && !workHasCoreCover(work.id);
       case "all":
       default: return true;
     }
@@ -382,7 +382,7 @@ export function createWorkQueryService({
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
       if (missingLocal && work.infoSummary?.hasMagnet) facets.hasMagnet += 1;
-      if (!work.coverId && !work.remoteCoverUrl && !work.searchHasCover && !work.infoSummary?.imageUrl) facets.missingCover += 1;
+      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
     }
 
     return facets;
@@ -399,7 +399,7 @@ export function createWorkQueryService({
     if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
     const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
-      const coverBatch = options.lightweightInfo
+      const coverBatch = options.lightweightInfo && !options.includeCoreCovers
         ? missing.filter((work) => work.missingLocal && !work.cachedCover?.coverUrl)
         : missing;
       if (coverBatch.length) prewarmCoreWorkCovers(coverBatch);
@@ -461,7 +461,10 @@ export function createWorkQueryService({
 
   function preparedWorkCacheKey(work, options = {}) {
     const workId = String(work?.id || "");
-    return workId ? `${options.lightweightInfo ? "light" : "full"}:${workId}` : "";
+    const mode = options.lightweightInfo
+      ? options.includeCoreCovers ? "light-cover" : "light"
+      : "full";
+    return workId ? `${mode}:${workId}` : "";
   }
 
   function listFromWorksPayload(sourceWorks, url, extra = {}, options = {}) {
@@ -591,6 +594,7 @@ export function createWorkQueryService({
     const sources = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, []]));
     measure("category", () => {
       for (const work of enrichedWorks()) {
+        if (!peopleScopeService.workMatches(work, "main")) continue;
         const category = workCategory(work);
         sources.get(category)?.push(work);
       }
@@ -831,7 +835,7 @@ export function createWorkQueryService({
       ...(fastMissingMatches || []),
       ...rankingMissingMatches,
       ...actorMissingMatches
-    ]);
+    ]).filter((work) => peopleScopeService.workMatches(work, "main"));
     mark("dedupe");
     const source = {
       categoryWorks: new Map(),

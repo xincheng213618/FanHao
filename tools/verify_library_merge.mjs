@@ -31,18 +31,49 @@ const regularPerson = {
   sourcePaths: ["G:/Aoi"],
   works: [regularWork.id]
 };
+const animeWork = {
+  id: "anime-work",
+  personId: "anime-person",
+  personName: "",
+  relativePath: "O:/[legacy-garbled]/Series/episode.mp4",
+  videos: [],
+  images: [],
+  infos: []
+};
+const sharedPerson = {
+  id: "shared-person",
+  relativePath: "G:/Shared",
+  sourcePaths: ["G:/Shared", "R:/Shared"],
+  works: [regularWork.id, westernWork.id]
+};
+const profileOnlyPerson = {
+  id: "profile-only-person",
+  relativePath: "",
+  sourcePaths: [],
+  works: []
+};
+const animePerson = {
+  id: "anime-person",
+  name: "[动漫]",
+  relativePath: "O:/[动漫]",
+  sourcePaths: ["O:/[动漫]"],
+  works: [animeWork.id]
+};
 const library = {
   scannedAt: "test",
-  people: [westernPerson, regularPerson],
+  people: [westernPerson, regularPerson, sharedPerson, profileOnlyPerson, animePerson],
   worksById: new Map([
     [westernWork.id, westernWork],
-    [regularWork.id, regularWork]
+    [regularWork.id, regularWork],
+    [animeWork.id, animeWork]
   ]),
   totals: { videos: 2, images: 0, infoFiles: 0 }
 };
 const normalizePath = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
 const scopeService = createPeopleScopeService({
   getLibrary: () => library,
+  isMainExcludedWork: (work) => work?.personName === "[动漫]",
+  mainExcludedRoots: ["O:/[动漫]"],
   mergedPersonRecord: (person) => person,
   pathWithinRoot: (target, root) => normalizePath(target).startsWith(normalizePath(root)),
   sourcePathToAbsolute: (value) => value,
@@ -51,22 +82,29 @@ const scopeService = createPeopleScopeService({
 
 assert.equal(scopeService.workMatches(westernWork, "main"), true);
 assert.equal(scopeService.workMatches(regularWork, "main"), true);
-assert.equal(scopeService.personMatches(westernPerson, "main"), true);
+assert.equal(scopeService.workMatches(animeWork, "main"), false);
+assert.equal(scopeService.personMatches(westernPerson, "main"), false);
 assert.equal(scopeService.personMatches(regularPerson, "main"), true);
+assert.equal(scopeService.personMatches(sharedPerson, "main"), true);
+assert.equal(scopeService.personMatches(profileOnlyPerson, "main"), true);
+assert.equal(scopeService.personMatches(animePerson, "main"), false);
 assert.equal(scopeService.workMatches(westernWork, "western"), true);
 assert.equal(scopeService.workMatches(regularWork, "western"), false);
 assert.equal(scopeService.personMatches(westernPerson, "western"), true);
 assert.equal(scopeService.personMatches(regularPerson, "western"), false);
+assert.equal(scopeService.personMatches(sharedPerson, "western"), true);
+assert.equal(scopeService.personMatches(profileOnlyPerson, "western"), false);
+assert.equal(scopeService.personMatches(animePerson, "western"), false);
 
 assert.deepEqual(
   galleryMediaSources({ FANHAO_MOVIE_ROOTS: "Z:/", FANHAO_TV_ROOTS: "Y:/" }).map((item) => item.kind),
-  ["movie", "tv"]
+  ["movie", "tv", "anime"]
 );
 
-const legacyRoute = routeFromUrl("http://localhost/western");
-assert.equal(legacyRoute.view, "people");
-assert.equal(legacyRoute.peopleScope, "main");
-assert.equal(routeUrl(legacyRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao");
+const westernRoute = routeFromUrl("http://localhost/western");
+assert.equal(westernRoute.view, "people");
+assert.equal(westernRoute.peopleScope, "western");
+assert.equal(routeUrl(westernRoute, { initialParams: new URLSearchParams(), hash: "" }), "/western");
 const fanhaoRoute = routeFromUrl("http://localhost/fanhao");
 assert.equal(fanhaoRoute.view, "people");
 assert.equal(routeUrl(fanhaoRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao");
@@ -92,5 +130,9 @@ assert.equal(
   routeUrl(filteredMediaRoute, { initialParams: new URLSearchParams(), hash: "" }),
   "/media?kind=movie&category=%E4%B8%AD%E5%9B%BD"
 );
+const animeMediaRoute = routeFromUrl("http://localhost/media?kind=anime");
+assert.equal(animeMediaRoute.galleryMode, "media");
+assert.equal(animeMediaRoute.galleryMediaKind, "anime");
+assert.equal(routeUrl(animeMediaRoute, { initialParams: new URLSearchParams(), hash: "" }), "/media?kind=anime");
 
 console.log("library merge verification passed");

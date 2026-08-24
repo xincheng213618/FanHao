@@ -51,7 +51,8 @@ export function createShortVideoFilterControls(deps) {
       ["recommended", "推荐排序"], ["watched", "最近观看"],
       ["published", `${timeLabel}倒序`], ["publishedAsc", `${timeLabel}正序`],
       ["likes", "点赞最多"], ["likesAsc", "点赞最少"],
-      ["comments", "评论最多"], ["duration", "时长最长"]
+      ["comments", "评论最多"], ["duration", "时长最长"],
+      ["size", "文件大小"]
     ]) {
       const option = document.createElement("option");
       option.value = item[0];

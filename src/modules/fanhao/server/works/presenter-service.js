@@ -224,7 +224,7 @@ export function createWorkPresenterService({
       ? getLibrary().peopleById.get(String(work.personId || "")) || null
       : displayPersonForWork(work.personId);
     const profileRow = person && !options.lightweightInfo ? actorProfileRow(person.id) : null;
-    const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
+    const coreCover = options.lightweightInfo && !options.includeCoreCovers ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
     const cachedCover = manualCover ? null : coreCover;
     const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id);

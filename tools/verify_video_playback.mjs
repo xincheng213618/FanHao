@@ -3,10 +3,11 @@ import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Writable } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { createFileServer, entityValidators, ifRangeMatches, parseRange } from "../src/platform/server/file-server.js";
 import { createMediaFileRelocationService } from "../src/modules/fanhao/server/works/media-file-relocation-service.js";
+import { createMediaStreamService } from "../src/platform/server/media-stream-service.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,7 +42,8 @@ assert.equal(relocationDirectoryReads, 1, "cached media relocation must avoid re
 assert.equal(relocationService.resolve({ id: "wrong-size", path: staleVideoPath, size: 4096 }), null, "media relocation must not guess when file size differs");
 
 assertPlaybackMode({ ext: ".mp4", videoCodec: "h264", audioCodec: "aac", expected: "direct" });
-assertPlaybackMode({ ext: ".mp4", videoCodec: "hevc", audioCodec: "aac", expected: "transcode" });
+assertPlaybackMode({ ext: ".mp4", videoCodec: "hevc", audioCodec: "aac", expected: "direct" });
+assertPlaybackMode({ ext: ".m4v", videoCodec: "hvc1", audioCodec: "aac", expected: "direct" });
 assertPlaybackMode({ ext: ".mp4", videoCodec: "h264", audioCodec: "ac3", expected: "remux" });
 assertPlaybackMode({ ext: ".mkv", videoCodec: "h264", audioCodec: "aac", expected: "remux" });
 assertPlaybackMode({ ext: ".mkv", videoCodec: "hevc", audioCodec: "aac", expected: "transcode" });
@@ -53,6 +55,8 @@ const streamSource = fs.readFileSync(path.join(root, "src", "platform", "server"
 const fileServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "file-server.js"), "utf8");
 const playerHtmlSource = fs.readFileSync(path.join(root, "public", "player.html"), "utf8");
 const playerSource = fs.readFileSync(path.join(root, "public", "js", "player-page.js"), "utf8");
+const workDetailPlayerSource = fs.readFileSync(path.join(root, "public", "modules", "fanhao", "work-detail-page.js"), "utf8");
+const androidWebPlayerSource = fs.readFileSync(path.join(root, "android-client", "www", "js", "android-player.js"), "utf8");
 const nativePlayerSource = fs.readFileSync(
   path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativePlayerActivity.java"),
   "utf8"
@@ -60,7 +64,7 @@ const nativePlayerSource = fs.readFileSync(
 const shortVideoRuntimeSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"), "utf8");
 
 assert(serverConfigSource.includes("DEFAULT_VIDEO_CHUNK_BYTES: 4 * 1024 * 1024"), "video initial ranges should avoid 1 MB request churn");
-assert(routeSource.includes('cacheControl: "private, max-age=0, must-revalidate"'), "native video ranges should be reusable with validators");
+assert(routeSource.includes('cacheControl: "no-store"'), "native video ranges must not create weak If-Range cache revalidation loops");
 assert(fileServerSource.includes("const entitySize = Math.max(stat.size") && fileServerSource.includes('"Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`'), "partial startup files must preserve the original media entity size in HTTP ranges");
 assert(fileServerSource.includes("...responseHeaders"), "media range responses must expose module diagnostics without changing the shared file server contract");
 assert(shortVideoRuntimeSource.includes("!hasIfRange(req)") && shortVideoRuntimeSource.includes('req?.headers?.["if-range"]'), "conditional ranges must bypass physical startup-prefix files so stale validators can receive a complete 200 entity");
@@ -80,6 +84,9 @@ assert(playerSource.includes("const deferGeneratedStream = customControls && !au
 assert(playerSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "blocked sound autoplay should fall back to immediate muted playback");
 assert(playerSource.includes('dataset.autoplayMuted !== "1"') && playerSource.includes("restoreAutoplayAudioFromInteraction") && playerSource.includes("els.video.muted = false;") && playerSource.includes("requestVideoPlayback();"), "the first trusted interaction should restore sound and keep playing after muted autoplay");
 assert(playerSource.includes('document.addEventListener("click", restoreAutoplayAudioFromInteraction, { capture: true });'), "sound restoration must run during the browser-authorized click phase");
+assert(playerSource.includes("handleVideoPlaybackError") && playerSource.includes("currentPlayInfo?.fallbackStreamUrl") && playerSource.includes("直连失败，正在切换兼容播放"), "standalone playback must retry a failed direct HEVC source through the server-provided compatibility stream");
+assert(workDetailPlayerSource.includes("playInfoOverride = null") && workDetailPlayerSource.includes("playInfo.fallbackStreamUrl") && workDetailPlayerSource.includes("renderPlayer(work, selected.id, fallbackPosition, true, fallbackInfo)"), "work-detail playback must preserve position while falling back from direct decoding to compatibility transcoding");
+assert(androidWebPlayerSource.includes("nativeFallbackInfo") && androidWebPlayerSource.includes("playInfo.fallbackStreamUrl") && androidWebPlayerSource.includes('fallbackStreamUrl: ""'), "Android FanHao playback must give the native player a real compatibility fallback instead of retrying the versioned direct URL");
 assert(playerSource.includes('els.markerA.textContent = playbackSnapshot?.videoId ? "释放播放"') && playerSource.includes("stopCurrentPlayback();") && playerSource.includes("await delay(LOCAL_MARKER_RELEASE_DELAY_MS);"), "local markers must release the active media handle before renaming its folder");
 assert(playerSource.includes("await restorePlaybackSnapshot(playbackSnapshot);") && playerSource.includes("resumePosition: snapshot.position") && playerSource.includes("autoPlay: snapshot.autoPlay"), "local markers must restore the same playback position and playing state after the rename");
 assert(playerSource.includes('createMoveField("搜索人物", existingInput)') && playerSource.includes('existingInput.placeholder = "输入人物姓名，例如：皆瀬あかり"'), "existing-person migration must ask for a searchable name instead of an internal person id");
@@ -93,9 +100,12 @@ assert(nativePlayerSource.includes("R.id.exo_controls_background"), "native FanH
 assert(nativePlayerSource.includes("R.id.exo_bottom_bar"), "native FanHao playback must clear the progress bar shadow background");
 assert(nativePlayerSource.includes("HttpDataSource.InvalidResponseCodeException") && nativePlayerSource.includes("视频文件已移动或离线"), "native FanHao playback must translate missing media responses into an actionable message");
 assert(nativePlayerSource.includes('Log.e(TAG, "Playback failed:'), "native FanHao playback must retain the complete Media3 failure in ADB logs");
+assert(nativePlayerSource.includes("streamOffsetMs + player.getCurrentPosition()") && nativePlayerSource.includes("playUrl(fallbackPlaybackUrl, 0)") && nativePlayerSource.includes("streamOffsetFromUrl"), "native FanHao compatibility playback must seek the generated stream once and keep reporting the original media timeline");
 for (const option of ['"-fflags", "+genpts"', '"-avoid_negative_ts", "make_zero"', '"-pix_fmt", "yuv420p"']) {
   assert(streamSource.includes(option), `missing compatibility option: ${option}`);
 }
+assert(streamSource.includes("TRANSCODE_MAX_EDGE = 4096") && streamSource.includes("force_original_aspect_ratio=decrease:force_divisible_by=2"), "shared compatibility transcoding must scale oversized sources within NVENC's supported edge");
+assert(streamSource.indexOf('child.stdout.once("data"') < streamSource.indexOf('res.writeHead(200'), "transcoded responses must not commit HTTP 200 until FFmpeg produces media bytes");
 
 async function verifyFileServerRangeContract() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-file-range-contract-"));
@@ -159,6 +169,38 @@ async function verifyFileServerRangeContract() {
     assert.equal(partial.headers.ETag, validators.ETag);
     assert.equal(partial.headers.etag, undefined);
     assert.equal(partial.headers["X-Fixture"], "kept");
+
+    const defaultLimitedRange = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-", "if-range": validators.ETag },
+      file
+    );
+    assert.equal(defaultLimitedRange.status, 206);
+    assert.equal(defaultLimitedRange.body.toString(), "3456");
+    assert.equal(defaultLimitedRange.headers["Content-Range"], "bytes 3-6/10");
+    assert.equal(defaultLimitedRange.headers["Content-Length"], 4);
+
+    const explicitlyLimitedRange = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-", "if-range": validators.ETag },
+      { ...file, maxRangeBytes: 2 }
+    );
+    assert.equal(explicitlyLimitedRange.body.toString(), "34");
+    assert.equal(explicitlyLimitedRange.headers["Content-Range"], "bytes 3-4/10");
+
+    const explicitlyUnlimitedRange = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-", "if-range": validators.ETag },
+      { ...file, maxRangeBytes: 0, fullResponse: true }
+    );
+    assert.equal(explicitlyUnlimitedRange.body.toString(), "3456789");
+    assert.equal(explicitlyUnlimitedRange.headers["Content-Range"], "bytes 3-9/10");
 
     const stale = await captureFileResponse(
       fileServer,
@@ -423,7 +465,89 @@ function assertPlaybackMode({ ext, videoCodec, audioCodec, expected }) {
   assert.equal(info.mode, expected, `${ext} ${videoCodec}/${audioCodec}`);
   assert.equal(info.width, 1920);
   assert.equal(info.height, 1080);
+  if (expected === "direct") {
+    const streamUrl = new URL(info.streamUrl, "http://fanhao.local");
+    assert.match(streamUrl.searchParams.get("v") || "", /^\d{8}-range-chunks-\d+$/);
+    const fallbackUrl = new URL(info.fallbackStreamUrl, "http://fanhao.local");
+    assert.equal(fallbackUrl.searchParams.get("mode"), "transcode");
+    assert.equal(fallbackUrl.searchParams.get("audio"), "aac");
+  }
 }
 
 await verifyFileServerRangeContract();
-console.log("video-playback: ok (range contract, native MP4, MKV remux, WMV/MKV transcode)");
+await verifyTranscodeResponseContract();
+console.log("video-playback: ok (range contract, direct fallback, bounded transcode, truthful failures)");
+
+async function verifyTranscodeResponseContract() {
+  let spawnedArgs = [];
+  const successChild = fakeTranscodeChild();
+  const service = createTranscodeFixtureService((command, args) => {
+    assert.equal(command, "ffmpeg-fixture");
+    spawnedArgs = args;
+    setImmediate(() => {
+      successChild.stdout.write(Buffer.from("ftyp"));
+      setImmediate(() => {
+        successChild.stdout.end(Buffer.from("mdat"));
+        successChild.exitCode = 0;
+        successChild.emit("close", 0);
+      });
+    });
+    return successChild;
+  });
+  const successResponse = new CaptureResponse();
+  service.serveTranscodedVideo(new EventEmitter(), successResponse, { path: "fixture-8k.mp4" }, new URL("http://fanhao.local/transcode?mode=transcode"));
+  if (!successResponse.writableFinished) await once(successResponse, "finish");
+  assert.equal(successResponse.status, 200);
+  assert.equal(Buffer.concat(successResponse.chunks).toString(), "ftypmdat");
+  const filterIndex = spawnedArgs.indexOf("-vf");
+  assert(filterIndex >= 0);
+  assert.match(spawnedArgs[filterIndex + 1], /min\(iw,4096\).*min\(ih,4096\)/);
+
+  const failedChild = fakeTranscodeChild();
+  const failedService = createTranscodeFixtureService(() => {
+    setImmediate(() => {
+      failedChild.stderr.end("Width 8192 exceeds 4096");
+      failedChild.stdout.end();
+      failedChild.exitCode = 1;
+      failedChild.emit("close", 1);
+    });
+    return failedChild;
+  });
+  const failedResponse = new CaptureResponse();
+  failedService.serveTranscodedVideo(new EventEmitter(), failedResponse, { path: "fixture-8k.mp4" }, new URL("http://fanhao.local/transcode?mode=transcode"));
+  if (!failedResponse.writableFinished) await once(failedResponse, "finish");
+  assert.equal(failedResponse.status, 500, "FFmpeg failures before output must not masquerade as empty HTTP 200 videos");
+  assert.match(Buffer.concat(failedResponse.chunks).toString(), /视频转码失败/);
+}
+
+function createTranscodeFixtureService(spawnProcess) {
+  return createMediaStreamService({
+    decodeInfoBuffer: () => "",
+    ffmpegPath: "ffmpeg-fixture",
+    hasNvenc: true,
+    isSubtitleLikeInfoText: () => false,
+    maxInfoBytes: 1024,
+    notFound: () => assert.fail("transcode fixture must exist"),
+    parseInfoMetadata: () => null,
+    safeStat: () => ({ size: 8 }),
+    sendJson(res, status, payload) {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+    },
+    serveRangedFile: () => {},
+    spawnProcess,
+    warn: () => {}
+  });
+}
+
+function fakeTranscodeChild() {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+  };
+  return child;
+}

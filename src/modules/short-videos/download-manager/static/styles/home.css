@@ -202,10 +202,6 @@
   justify-content: flex-end;
 }
 
-.download-actions #downloadStart {
-  min-width: 112px;
-}
-
 .download-execution-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.65fr);

@@ -110,7 +110,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
         v.id DESC
       `,
       comments: "COALESCE(v.comment_count, 0) DESC, v.liked_at DESC, v.id DESC",
-      duration: "COALESCE(v.duration_ms, 0) DESC, v.liked_at DESC, v.id DESC"
+      duration: "COALESCE(v.duration_ms, 0) DESC, v.liked_at DESC, v.id DESC",
+      size: "v.size_bytes DESC, v.liked_at DESC, v.id DESC"
     }[sort];
     if (!orderBy) return null;
 
@@ -215,18 +216,10 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     if (!["liked", "all", "posts", "local"].includes(filter.source)) return null;
     if (filter.author?.startsWith("name:")) return null;
 
+    const authorScope = indexedAuthorVideoScope(filter.author);
     const whereParts = [];
     const args = [];
     if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
-    if (filter.author && filter.author !== "all") {
-      whereParts.push(`(
-        v.author_sec_uid = ?
-        OR v.owner_user_id IN (
-          SELECT id FROM short_video_users WHERE sec_uid = ?
-        )
-      )`);
-      args.push(filter.author, filter.author);
-    }
     if (filter.source === "liked") {
       whereParts.push("v.is_liked = 1");
     } else if (filter.source === "posts") {
@@ -245,25 +238,94 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     const orderBy = sort === "publishedAsc"
       ? "v.published_at ASC, v.liked_at ASC, v.id DESC"
       : "v.published_at DESC, v.liked_at DESC, v.id DESC";
+    const queryPrefix = authorScope?.queryPrefix || "";
+    const from = authorScope
+      ? "FROM author_video_ids author_match CROSS JOIN short_videos v ON v.id = author_match.id"
+      : "FROM short_videos v";
+    const queryArgs = [...(authorScope?.args || []), ...args];
     const total = Number.isFinite(totalOverride)
       ? Number(totalOverride)
       : Number(database.prepare(`
+        ${queryPrefix}
         SELECT COUNT(*) AS count
-        FROM short_videos v
+        ${from}
         ${where}
-      `).get(...args)?.count || 0);
+      `).get(...queryArgs)?.count || 0);
     const ids = database.prepare(`
+      ${queryPrefix}
       SELECT v.id
-      FROM short_videos v
+      ${from}
       ${where}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
-    `).all(...args, limit, offset).map((row) => String(row.id || "")).filter(Boolean);
+    `).all(...queryArgs, limit, offset).map((row) => String(row.id || "")).filter(Boolean);
     if (!ids.length) return { total, rows: [] };
 
     return {
       total,
       rows: orderedCatalogRows(database, ids)
+    };
+  }
+
+  function authorDeletedVideoTotal(database, filter = {}) {
+    const author = String(filter.author || "").trim();
+    if (!author || author === "all") return 0;
+    const authorScope = indexedAuthorVideoScope(author);
+    if (!authorScope) {
+      return Number(database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM short_video_catalog
+        WHERE visibility = 'local_only'
+          AND author_deleted = 1
+          AND author_name = ?
+      `).get(author.slice(5))?.count || 0);
+    }
+    return Number(database.prepare(`
+      ${authorScope.queryPrefix}
+      SELECT COUNT(*) AS count
+      FROM author_video_ids author_match
+      CROSS JOIN short_videos video ON video.id = author_match.id
+      WHERE video.visibility = 'local_only'
+        AND EXISTS (
+          SELECT 1
+          FROM short_video_source_memberships membership INDEXED BY idx_short_video_source_memberships_type
+          WHERE membership.source_type = 'post'
+            AND membership.aweme_id = video.aweme_id
+            AND membership.is_missing_from_profile = 1
+        )
+    `).get(...authorScope.args)?.count || 0);
+  }
+
+  function authorVideoCount(database, authorValue) {
+    const authorScope = indexedAuthorVideoScope(authorValue);
+    if (!authorScope) return 0;
+    return Number(database.prepare(`
+      ${authorScope.queryPrefix}
+      SELECT COUNT(*) AS count
+      FROM author_video_ids author_match
+      CROSS JOIN short_videos video ON video.id = author_match.id
+      WHERE video.visibility = 'local_only'
+    `).get(...authorScope.args)?.count || 0);
+  }
+
+  function indexedAuthorVideoScope(authorValue) {
+    const author = String(authorValue || "").trim();
+    if (!author || author === "all" || author.startsWith("name:")) return null;
+    return {
+      queryPrefix: `WITH author_video_ids AS (
+        SELECT id
+        FROM short_videos INDEXED BY idx_short_videos_author_published
+        WHERE author_sec_uid = ?
+        UNION
+        SELECT video.id
+        FROM short_video_users author
+        CROSS JOIN short_videos video INDEXED BY idx_short_videos_owner
+          ON video.owner_user_id = author.id
+        WHERE author.platform = 'douyin'
+          AND author.sec_uid = ?
+          AND author.sec_uid <> ''
+      )`,
+      args: [author, author]
     };
   }
 
@@ -304,6 +366,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
   }
 
   return {
+    authorDeletedVideoTotal,
+    authorVideoCount,
     decodeShortVideoListCursor,
     fastFilteredVideoPage,
     fastHistoryVideoPage,

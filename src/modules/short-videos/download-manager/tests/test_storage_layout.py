@@ -53,6 +53,7 @@ class StorageLayoutTests(unittest.TestCase):
             config_text = config_path.read_text(encoding="utf-8")
             self.assertIn('filename_template: "{id}"', config_text)
             self.assertIn('folder_template: "{date}_{title}_{id}"', config_text)
+            self.assertIn('author_dir: "sec_uid"', config_text)
 
 
 if __name__ == "__main__":

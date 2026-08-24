@@ -1,9 +1,13 @@
 import { createShortVideoStore } from "./store.js";
+import { routeShortVideoAuthorCleanup } from "./author-cleanup-route.js";
 import { routeShortVideoApi } from "./routes.js";
 import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js";
 import { createShortVideoListStatsService } from "./list-stats-service.js";
+import { createShortVideoSmoothWarmupWorkerClient } from "./smooth-warmup-worker-client.js";
 import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
+import { routeShortVideoLocalActionApi } from "./local-action-routes.js";
+import { createShortVideoLocalActions } from "./local-actions.js";
 import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } from "./reserved-routes.js";
 import { sendShortVideoPublicError } from "./public-errors.js";
 import crypto from "node:crypto";
@@ -27,6 +31,7 @@ const SHORT_VIDEO_SMOOTH_MAX_CONCURRENCY = 4;
 const SHORT_VIDEO_SMOOTH_CACHE_BACKLOG_LIMIT = 512;
 const SHORT_VIDEO_SMOOTH_CACHE_PAGE_SIZE = 256;
 const SHORT_VIDEO_SMOOTH_CACHE_REFILL_LOW_WATERMARK = 256;
+const SHORT_VIDEO_SMOOTH_CANDIDATES_PER_TURN = 32;
 const SHORT_VIDEO_SMOOTH_WARMUP_DELAY_MS = 1500;
 const SHORT_VIDEO_SMOOTH_CACHE_DELAY_MS = 8000;
 const SHORT_VIDEO_SMOOTH_CURRENT_DELAY_MS = 1200;
@@ -59,8 +64,10 @@ export function createShortVideosRuntime({
   readJsonBody,
   requireLocalAdmin,
   sendJson,
+  serveDownloadFile = null,
   sharedCache,
   catalogWorkerOptions = {},
+  smoothWarmupWorkerOptions = {},
   watchWriterOptions = {},
   runtimeTestHooks = {},
   listQuery = null,
@@ -78,6 +85,11 @@ export function createShortVideosRuntime({
     skipStartupMaintenance: true,
     busyTimeoutMs: schemaBusyTimeoutMs,
     deleteJobTestHooks: runtimeTestHooks.deleteJobTestHooks
+  });
+  const localActions = createShortVideoLocalActions({
+    roots,
+    getVideoFile: (...args) => store.videoFile(...args),
+    openTarget: runtimeTestHooks.openLocalTarget
   });
   let catalogSchemaPrepared = false;
   try {
@@ -120,6 +132,13 @@ export function createShortVideosRuntime({
     catalogWorker.reset();
   };
   const listStatsService = createShortVideoListStatsService({ store, catalogWorker, ensureCatalogSchema });
+  const smoothWarmupWorker = createShortVideoSmoothWarmupWorkerClient({
+    ...smoothWarmupWorkerOptions,
+    dbPath,
+    downloadManagerDbPath,
+    ffmpegPath,
+    roots
+  });
   const watchWriter = createShortVideoWatchWriteService({
     ...watchWriterOptions,
     dbPath,
@@ -154,6 +173,9 @@ export function createShortVideosRuntime({
   const smoothVideoRenditionVersions = new Map();
   let smoothVideoCandidateScanOffset = 0;
   let smoothVideoCandidateScanComplete = true;
+  let smoothVideoCandidateRefill = null;
+  let smoothVideoCandidateFillImmediate = null;
+  let smoothVideoWarmupGeneration = 0;
   let smoothVideoTimer = null;
   const smoothVideoActiveJobs = new Map();
   const smoothVideoChildren = new Map();
@@ -178,6 +200,17 @@ export function createShortVideosRuntime({
   let shortVideoWatchCachePersistTimer = null;
 
   async function routeApi(req, res, url) {
+    if (await routeShortVideoLocalActionApi(req, res, url, {
+      localActions,
+      readJsonBody,
+      requireLocalAdmin,
+      sendJson
+    })) return true;
+    if (await routeShortVideoAuthorCleanup({
+      req, res, url, store, readJsonBody, requireLocalAdmin, sendJson,
+      downloadManagerRequest,
+      onMutation: clearShortVideoListCache
+    })) return true;
     if (url.pathname === "/api/short-videos/playback-cache-status" && req.method === "GET") {
       sendJson(res, 200, shortVideoPlaybackCacheStatus());
       return true;
@@ -215,8 +248,8 @@ export function createShortVideosRuntime({
           sendJson(res, 404, { error: "没有找到可记录的本地视频" });
           return true;
         }
-        lastSmoothVideoWarmupCandidates = store.smoothPlaybackCandidateCount();
         const queued = tryQueueSmoothVideoCache(id, { delayMs: 0, kind: "current" });
+        schedule4kSmoothVideoWarmup(0);
         sendJson(res, 200, { ok: true, id, reason, queued, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
         sendShortVideoPublicError(res, sendJson, error, "播放问题记录失败");
@@ -417,7 +450,8 @@ export function createShortVideosRuntime({
         onWatchMutation: (...args) => {
           recordShortVideoWatchCacheMutation(...args);
           catalogWorker.invalidateStats();
-        }
+        },
+        refreshLikeDistribution
       });
     } finally {
       req?.off?.("aborted", onRouteAbort);
@@ -555,6 +589,21 @@ export function createShortVideosRuntime({
     const videoMatch = /^\/media\/short-video\/([^/]+)$/.exec(url.pathname);
     if (videoMatch && (req.method === "GET" || req.method === "HEAD")) {
       const id = decodeURIComponent(videoMatch[1]);
+      if (String(url.searchParams.get("download") || "").trim() === "1") {
+        try {
+          if (typeof serveDownloadFile !== "function") {
+            const error = new Error("原文件下载服务暂不可用");
+            error.statusCode = 503;
+            throw error;
+          }
+          const originalFile = localActions.sourceFile(id);
+          serveDownloadFile(req, res, originalFile, originalFile.fileName || path.basename(originalFile.path));
+        } catch (error) {
+          if (Number(error?.statusCode || 0) === 404) notFound(res);
+          else sendShortVideoPublicError(res, sendJson, error, "短视频原文件下载失败");
+        }
+        return true;
+      }
       const sourceFile = videoFileWithCache(id);
       if (!sourceFile || sourceFile.type !== "video") {
         notFound(res);
@@ -780,6 +829,7 @@ export function createShortVideosRuntime({
         warmupAt: lastSmoothVideoWarmupAt,
         warmupCandidates: lastSmoothVideoWarmupCandidates,
         warmupDurationMs: lastSmoothVideoWarmupDurationMs,
+        warmupWorker: smoothWarmupWorker.diagnostics(),
         cacheIndexEntries: lastSmoothVideoCacheIndexEntries,
         pipeline: {
           candidatePolicy: "observed-playback-issues",
@@ -1037,7 +1087,7 @@ export function createShortVideosRuntime({
   }
 
   async function stopListServices() {
-    const workerStops = [catalogWorker.stop(), watchWriter.stop()];
+    const workerStops = [catalogWorker.stop(), smoothWarmupWorker.stop(), watchWriter.stop()];
     for (const timer of listCacheRefreshJobs.values()) clearTimeout(timer);
     listCacheRefreshJobs.clear();
     if (shortVideoWatchCachePersistTimer) {
@@ -1081,6 +1131,7 @@ export function createShortVideosRuntime({
       runtimeTestHooks.beforeWritersStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;
       catalogWorker.reopen();
+      smoothWarmupWorker.reopen();
       if (!runtimeStartStillCurrent(generation)) return false;
       runtimeTestHooks.beforeWatchWriterStart?.();
       if (!runtimeStartStillCurrent(generation)) return false;
@@ -1131,8 +1182,12 @@ export function createShortVideosRuntime({
     const deleteDrain = store.beginClose();
     runtimeStarted = false;
     runtimeTestHooks.onRuntimeStartedChange?.(false);
+    smoothVideoWarmupGeneration += 1;
     if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
     smoothVideoWarmupTimer = null;
+    if (smoothVideoCandidateFillImmediate) clearImmediate(smoothVideoCandidateFillImmediate);
+    smoothVideoCandidateFillImmediate = null;
+    smoothVideoCandidateRefill = null;
     stopVideoCacheQueue();
     stopSmoothVideoQueue();
     const stopWork = (async () => {
@@ -1258,12 +1313,36 @@ export function createShortVideosRuntime({
   }
 
   async function likeDistributionRuntimeStamp() {
-    let managerStamp = "";
+    const managerStamp = await sqliteRuntimeStamp(downloadManagerDbPath);
+    return `${shortVideoListCacheGeneration}:manager=${managerStamp}`;
+  }
+
+  async function sqliteRuntimeStamp(databasePath) {
+    const target = String(databasePath || "").trim();
+    if (!target) return "none";
+    const [databaseStamp, walStamp] = await Promise.all([
+      fileRuntimeStamp(target),
+      fileRuntimeStamp(`${target}-wal`, { ignoreEmpty: true })
+    ]);
+    return `${databaseStamp}|wal=${walStamp}`;
+  }
+
+  async function fileRuntimeStamp(filePath, options = {}) {
     try {
-      const managerStat = downloadManagerDbPath ? await fs.promises.stat(downloadManagerDbPath) : null;
-      if (managerStat) managerStamp = `${managerStat.size}:${managerStat.mtimeMs}`;
-    } catch {}
-    return `${shortVideoListCacheGeneration}:${managerStamp}`;
+      const stat = await fs.promises.stat(filePath, { bigint: true });
+      if (options.ignoreEmpty && stat.size === 0n) return "missing";
+      return `${stat.size}:${stat.mtimeNs}`;
+    } catch {
+      return "missing";
+    }
+  }
+
+  async function refreshLikeDistribution(options = {}) {
+    catalogWorker.invalidateLikeDistribution();
+    return catalogWorker.queryLikeDistribution({
+      catalogStamp: await likeDistributionRuntimeStamp(),
+      signal: options.signal
+    });
   }
 
   function videoFileWithCache(id) {
@@ -1410,13 +1489,13 @@ export function createShortVideosRuntime({
     });
   }
 
-  function refreshSmoothVideoCacheEntryIndex() {
+  async function refreshSmoothVideoCacheEntryIndex() {
     const cacheDir = sharedCache?.rootDir
       ? path.join(sharedCache.rootDir, "short-videos", "renditions")
       : "";
     try {
       smoothVideoCacheEntryNames = new Set(
-        fs.readdirSync(cacheDir, { withFileTypes: true })
+        (await fs.promises.readdir(cacheDir, { withFileTypes: true }))
           .filter((entry) => entry.isFile())
           .map((entry) => entry.name)
       );
@@ -1482,73 +1561,123 @@ export function createShortVideosRuntime({
 
   function schedule4kSmoothVideoWarmup(delayMs = SHORT_VIDEO_SMOOTH_WARMUP_DELAY_MS) {
     if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
+    const generation = ++smoothVideoWarmupGeneration;
     smoothVideoWarmupTimer = setTimeout(async () => {
       smoothVideoWarmupTimer = null;
       try {
         const warmupStartedAt = Date.now();
         lastSmoothVideoWarmupAt = Date.now();
-        lastSmoothVideoWarmupCandidates = store.smoothPlaybackCandidateCount();
-        refreshSmoothVideoCacheEntryIndex();
+        const candidateCount = await smoothWarmupWorker.queryCount();
+        if (!smoothVideoWarmupStillCurrent(generation)) return;
+        lastSmoothVideoWarmupCandidates = Math.max(0, Number(candidateCount || 0));
+        await refreshSmoothVideoCacheEntryIndex();
+        if (!smoothVideoWarmupStillCurrent(generation)) return;
         smoothVideoCandidateBacklog.length = 0;
         smoothVideoCandidateIds.clear();
         smoothVideoResolvedVersions.clear();
         smoothVideoRenditionVersions.clear();
         smoothVideoCandidateScanOffset = 0;
         smoothVideoCandidateScanComplete = lastSmoothVideoWarmupCandidates <= 0;
+        if (!smoothVideoCandidateScanComplete) {
+          await refillSmoothVideoCandidateBacklog(generation);
+        }
+        if (!smoothVideoWarmupStillCurrent(generation)) return;
         fillSmoothVideoCandidateQueue();
         lastSmoothVideoWarmupDurationMs = Date.now() - warmupStartedAt;
       } catch (error) {
-        console.warn("[short-video-smooth-warmup]", error.message || error);
+        if (smoothVideoWarmupStillCurrent(generation)) {
+          console.warn("[short-video-smooth-warmup]", error.message || error);
+        }
       }
     }, Math.max(0, Number(delayMs || 0)));
     smoothVideoWarmupTimer.unref?.();
   }
 
-  function refillSmoothVideoCandidateBacklog() {
+  function smoothVideoWarmupStillCurrent(generation) {
+    return runtimeDesiredStarted
+      && generation === smoothVideoWarmupGeneration;
+  }
+
+  function refillSmoothVideoCandidateBacklog(generation = smoothVideoWarmupGeneration) {
     if (
-      smoothVideoCandidateScanComplete
+      !smoothVideoWarmupStillCurrent(generation)
+      || smoothVideoCandidateScanComplete
       || smoothVideoCandidateBacklog.length > SHORT_VIDEO_SMOOTH_CACHE_REFILL_LOW_WATERMARK
-    ) return 0;
-    let scanned = 0;
-    while (
-      !smoothVideoCandidateScanComplete
-      && smoothVideoCandidateBacklog.length < SHORT_VIDEO_SMOOTH_CACHE_BACKLOG_LIMIT
-    ) {
-      const pageLimit = Math.min(
-        SHORT_VIDEO_SMOOTH_CACHE_PAGE_SIZE,
-        SHORT_VIDEO_SMOOTH_CACHE_BACKLOG_LIMIT - smoothVideoCandidateBacklog.length
-      );
-      const page = store.smoothPlaybackCandidates(pageLimit, smoothVideoCandidateScanOffset);
-      smoothVideoCandidateScanOffset += page.length;
-      scanned += page.length;
-      enqueueSmoothVideoCandidates(page);
-      if (
-        page.length < pageLimit
-        || smoothVideoCandidateScanOffset >= lastSmoothVideoWarmupCandidates
-      ) smoothVideoCandidateScanComplete = true;
-      if (!page.length) break;
+    ) return Promise.resolve(0);
+    if (smoothVideoCandidateRefill?.generation === generation) {
+      return smoothVideoCandidateRefill.promise;
     }
-    return scanned;
+    const refill = { generation, promise: null };
+    const refillWork = (async () => {
+      let scanned = 0;
+      while (
+        smoothVideoWarmupStillCurrent(generation)
+        && !smoothVideoCandidateScanComplete
+        && smoothVideoCandidateBacklog.length < SHORT_VIDEO_SMOOTH_CACHE_BACKLOG_LIMIT
+      ) {
+        const pageLimit = Math.min(
+          SHORT_VIDEO_SMOOTH_CACHE_PAGE_SIZE,
+          SHORT_VIDEO_SMOOTH_CACHE_BACKLOG_LIMIT - smoothVideoCandidateBacklog.length
+        );
+        const page = await smoothWarmupWorker.queryCandidates(pageLimit, smoothVideoCandidateScanOffset);
+        if (!smoothVideoWarmupStillCurrent(generation)) return scanned;
+        smoothVideoCandidateScanOffset += page.length;
+        scanned += page.length;
+        enqueueSmoothVideoCandidates(page);
+        scheduleSmoothVideoCandidateFill();
+        if (
+          page.length < pageLimit
+          || smoothVideoCandidateScanOffset >= lastSmoothVideoWarmupCandidates
+        ) smoothVideoCandidateScanComplete = true;
+        if (!page.length) break;
+      }
+      return scanned;
+    })();
+    refill.promise = refillWork.catch((error) => {
+      if (smoothVideoWarmupStillCurrent(generation)) {
+        console.warn("[short-video-smooth-warmup]", error.message || error);
+      }
+      return 0;
+    }).finally(() => {
+      if (smoothVideoCandidateRefill === refill) smoothVideoCandidateRefill = null;
+    });
+    smoothVideoCandidateRefill = refill;
+    return refill.promise;
   }
 
   function fillSmoothVideoCandidateQueue() {
     if (smoothVideoPausedByUser) return;
-    refillSmoothVideoCandidateBacklog();
+    let processed = 0;
     while (
       smoothVideoJobs.size < smoothVideoMaterializedJobLimit()
+      && smoothVideoCandidateBacklog.length
+      && processed < SHORT_VIDEO_SMOOTH_CANDIDATES_PER_TURN
     ) {
-      if (!smoothVideoCandidateBacklog.length) {
-        const scanned = refillSmoothVideoCandidateBacklog();
-        if (!scanned || !smoothVideoCandidateBacklog.length) break;
-      }
       const id = smoothVideoCandidateBacklog.shift();
       smoothVideoCandidateIds.delete(id);
+      processed += 1;
       tryQueueSmoothVideoCache(id, {
         delayMs: SHORT_VIDEO_SMOOTH_CACHE_DELAY_MS,
         kind: "background"
       });
-      refillSmoothVideoCandidateBacklog();
     }
+    if (
+      smoothVideoJobs.size < smoothVideoMaterializedJobLimit()
+      && smoothVideoCandidateBacklog.length
+    ) scheduleSmoothVideoCandidateFill();
+    if (
+      !smoothVideoCandidateScanComplete
+      && smoothVideoCandidateBacklog.length <= SHORT_VIDEO_SMOOTH_CACHE_REFILL_LOW_WATERMARK
+    ) void refillSmoothVideoCandidateBacklog();
+  }
+
+  function scheduleSmoothVideoCandidateFill() {
+    if (smoothVideoPausedByUser || smoothVideoCandidateFillImmediate) return;
+    smoothVideoCandidateFillImmediate = setImmediate(() => {
+      smoothVideoCandidateFillImmediate = null;
+      fillSmoothVideoCandidateQueue();
+    });
+    smoothVideoCandidateFillImmediate.unref?.();
   }
 
   function tryQueueSmoothVideoCache(id, options = {}) {
@@ -2205,6 +2334,7 @@ export function createShortVideosRuntime({
     clearListCache: clearShortVideoListCache,
     routeApi,
     routeMedia,
+    smoothWarmupWorkerDiagnostics: smoothWarmupWorker.diagnostics,
     start: startDownloadManagerSync,
     stop: stopDownloadManagerSync,
     store,

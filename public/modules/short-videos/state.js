@@ -203,7 +203,7 @@ export function normalizeShortVideoDeleted(value) {
 
 export function normalizeShortVideoSortValue(value) {
   const sort = String(value || "published").trim();
-  return ["recommended", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration", "size"].includes(sort) ? sort : "published";
 }
 
 export function normalizeShortVideoAuthorSort(value) {

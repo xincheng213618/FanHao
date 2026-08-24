@@ -3,7 +3,7 @@ export const DEFAULT_SHORT_VIDEO_SOURCE = "liked";
 
 export function normalizeShortVideoSort(value) {
   const sort = String(value || DEFAULT_SHORT_VIDEO_SORT).trim();
-  return ["recommended", "watched", "liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort)
+  return ["recommended", "watched", "liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration", "size"].includes(sort)
     ? sort
     : DEFAULT_SHORT_VIDEO_SORT;
 }

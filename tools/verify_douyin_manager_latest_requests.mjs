@@ -15,6 +15,8 @@ try {
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
     await verifyProfilesLatestSuccess(browser);
+    await verifyProfilesDerivedPendingCount(browser);
+    await verifyProfilesQueueStatus(browser);
     await verifyLibraryLatestFailure(browser);
     await verifyLinksResetSupersedesAppend(browser);
   } finally {
@@ -23,6 +25,95 @@ try {
   console.log("Douyin manager latest-request browser checks passed.");
 } finally {
   await new Promise((resolve) => server.close(resolve));
+}
+
+async function verifyProfilesDerivedPendingCount(browser) {
+  const page = await openFixture(browser);
+  try {
+    await page.evaluate(async () => {
+      const { createProfilesFeature } = await import("/manager/features/profiles.js?derived-pending-fixture=1");
+      const feature = createProfilesFeature({
+        settings: {},
+        refreshLinks: async () => {},
+        refreshState: async () => {},
+      });
+      window.derivedPendingRequest = feature.activate();
+    });
+    await waitForRequests(page, 1);
+    await settleRequest(page, 0, {
+      profiles: [{
+        id: 15327,
+        nickname: "待确认主页",
+        tab: "post",
+        total: 42,
+        aweme_count: 30,
+        has_deleted_works: 0,
+        full_scan_required: 0,
+        last_full_scan_at: null,
+        url: "https://example.invalid/pending",
+      }],
+      total: 1,
+      eligible_count: 0,
+      deferred_count: 1,
+      full_scan_required_count: 0,
+      banned_count: 0,
+    });
+    await page.evaluate(() => window.derivedPendingRequest);
+    const result = await page.evaluate(() => ({
+      buttonText: document.getElementById("confirmPendingProfiles").textContent,
+      buttonDisabled: document.getElementById("confirmPendingProfiles").disabled,
+      list: document.getElementById("profileManagerList").textContent,
+    }));
+    assert.equal(result.buttonText, "一键确认待全量（1）");
+    assert.equal(result.buttonDisabled, false);
+    assert.match(result.list, /待全量确认/);
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyProfilesQueueStatus(browser) {
+  const page = await openFixture(browser);
+  try {
+    const result = await page.evaluate(async () => {
+      const { createProfilesFeature } = await import("/manager/features/profiles.js?collection-queue-fixture=1");
+      const feature = createProfilesFeature({
+        settings: {},
+        refreshLinks: async () => {},
+        refreshState: async () => {},
+      });
+      feature.renderStatus({
+        extract: {
+          active: true,
+          job_id: 41,
+          current: { job_id: 41, type: "refresh", profile_ids: [101], full_scan: false, label: "1 个主页快速采集" },
+          queued: 2,
+          queue: [
+            { job_id: 42, type: "refresh", profile_ids: [202], full_scan: true, label: "1 个主页全量采集" },
+            { job_id: 43, type: "following", profile_ids: [], full_scan: false, label: "提取我的关注" },
+          ],
+        },
+      });
+      return {
+        status: document.getElementById("extractState").textContent,
+        statusTitle: document.getElementById("extractState").title,
+        extractStart: document.getElementById("extractStart").textContent,
+        refreshProfiles: document.getElementById("refreshProfiles").textContent,
+        importFollowing: document.getElementById("importFollowing").textContent,
+        extractStopHidden: document.getElementById("extractStop").hidden,
+        profileStopHidden: document.getElementById("profileRefreshStop").hidden,
+      };
+    });
+    assert.equal(result.status, "正在采集 · 待执行 2");
+    assert.match(result.statusTitle, /另有 2 个待执行/);
+    assert.equal(result.extractStart, "加入采集队列");
+    assert.equal(result.refreshProfiles, "排队智能采集");
+    assert.equal(result.importFollowing, "排队提取关注");
+    assert.equal(result.extractStopHidden, false);
+    assert.equal(result.profileStopHidden, false);
+  } finally {
+    await page.close();
+  }
 }
 
 async function verifyProfilesLatestSuccess(browser) {

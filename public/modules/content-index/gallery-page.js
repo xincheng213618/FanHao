@@ -348,7 +348,7 @@ export function createGalleryPage(deps) {
     setStatus(`正在读取${galleryModeLabel(state.gallery.mode)}`);
     try {
       const data = await api(`/api/gallery-media/${encodeURIComponent(mediaId)}`);
-      if (["movie", "tv"].includes(data.item?.mediaKind)) {
+      if (["movie", "tv", "anime"].includes(data.item?.mediaKind)) {
         const params = new URLSearchParams({ mediaId: String(data.item.id || mediaId) });
         params.set("returnTo", galleryListReturnPath());
         window.location.href = `/player.html?${params.toString()}`;

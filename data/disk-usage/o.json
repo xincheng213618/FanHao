@@ -1,0 +1,21 @@
+{
+  "bytes": 45645303334838,
+  "completedAt": "2026-08-16T01:46:21.122Z",
+  "databaseFile": "o-1786844645519-xjl30ic.sqlite",
+  "directories": 9841,
+  "driveId": "O",
+  "errors": 0,
+  "files": 50034,
+  "linkedRoots": [
+    "O:\\[珍藏]",
+    "O:\\[珍藏1]",
+    "O:\\[稀有]",
+    "O:\\[动漫]"
+  ],
+  "nodes": 59876,
+  "root": "O:\\",
+  "scanId": "1786844645519-xjl30ic",
+  "schemaVersion": 1,
+  "skipped": 12,
+  "startedAt": "2026-08-16T01:44:05.544Z"
+}

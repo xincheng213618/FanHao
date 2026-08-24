@@ -73,7 +73,7 @@ export async function routeWorksMedia(req, res, url, deps) {
 
     mediaStreamService.serveVideo(req, res, {
       ...file,
-      cacheControl: "private, max-age=0, must-revalidate"
+      cacheControl: "no-store"
     });
     return true;
   }

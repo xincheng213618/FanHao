@@ -1,12 +1,43 @@
+import { createShortVideoAuthorCleanup } from "./author-cleanup.js?v=20260825-author-cleanup-01";
+import { invalidateLikeDistributionCache } from "./like-distribution-cache.js?v=20260825-author-efficiency-01";
+
 export function createLikeDistributionView(deps) {
   const {
+    api,
+    deleteRecovery,
     formatNumber,
     loadLikeDistribution,
     openInsightAuthor,
     openInsightTopic,
     showError,
+    showToast,
     state
   } = deps;
+  const authorCleanup = createShortVideoAuthorCleanup({
+    api,
+    recovery: deleteRecovery,
+    showToast,
+    onCompleted: ({ preview, trigger }) => applyCompletedAuthorCleanup(preview, trigger)
+  });
+
+  function applyCompletedAuthorCleanup(preview = {}, trigger = null) {
+    const efficiency = state.shortVideo.likeDistribution?.insights?.personal?.authorEfficiency;
+    const secUid = String(preview.secUid || "").trim();
+    if (efficiency && secUid) {
+      for (const key of ["authors", "highHit", "lowYield", "lowYieldAuthors"]) {
+        if (!Array.isArray(efficiency[key])) continue;
+        efficiency[key] = efficiency[key].filter((item) => String(item.secUid || "").trim() !== secUid);
+      }
+      efficiency.totalVideos = Math.max(0, Number(efficiency.totalVideos || 0) - Number(preview.deleteCount || 0));
+      efficiency.sizeBytes = Math.max(0, Number(efficiency.sizeBytes || 0) - Number(preview.deleteBytes || 0));
+      efficiency.eligibleAuthorTotal = Math.max(0, Number(efficiency.eligibleAuthorTotal || 0) - 1);
+      efficiency.baselineHitRate = efficiency.totalVideos
+        ? Math.max(0, Number(efficiency.likedVideos || 0)) / efficiency.totalVideos
+        : 0;
+    }
+    invalidateLikeDistributionCache();
+    trigger?.closest?.(".short-video-personal-list-row, tr")?.remove();
+  }
 
   function likeDistributionDensityPerThousand(item = {}) {
     if (item.maxLikes == null) return null;
@@ -32,6 +63,30 @@ export function createLikeDistributionView(deps) {
     copy.textContent = copyText;
     heading.append(title, copy);
     return heading;
+  }
+
+  function renderLikeDistributionLoadingStatus(hasPreviousData) {
+    const status = document.createElement("div");
+    status.className = "short-video-distribution-progress";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.setAttribute("aria-busy", "true");
+    const spinner = document.createElement("span");
+    spinner.className = "short-video-distribution-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = hasPreviousData ? "正在同步最新统计" : "正在读取统计缓存";
+    const description = document.createElement("span");
+    description.textContent = hasPreviousData
+      ? "完成前继续显示上一次结果；只有手动刷新才会强制重新计算。"
+      : "首次打开会读取一次服务端结果，之后优先复用本机缓存。";
+    copy.append(title, description);
+    const track = document.createElement("span");
+    track.className = "short-video-distribution-progress-track";
+    track.setAttribute("aria-hidden", "true");
+    status.append(spinner, copy, track);
+    return status;
   }
 
   function shortVideoDistributionSvgElement(tagName, attributes = {}) {
@@ -377,10 +432,12 @@ export function createLikeDistributionView(deps) {
       return column;
     }
     for (const item of items) {
-      const button = document.createElement(kind === "topic" ? "button" : "div");
-      if (kind === "topic") button.type = "button";
+      const cleanable = kind === "low" && Boolean(String(item.secUid || "").trim());
+      const button = document.createElement(cleanable || kind !== "topic" ? "div" : "button");
+      if (button.tagName === "BUTTON") button.type = "button";
       button.className = "short-video-personal-list-row";
-      button.classList.toggle("is-static", kind !== "topic");
+      button.classList.toggle("is-static", kind !== "topic" && !cleanable);
+      button.classList.toggle("is-cleanable", cleanable);
       const copy = document.createElement("span");
       const name = document.createElement("strong");
       name.textContent = item.name || "未知作者";
@@ -390,8 +447,23 @@ export function createLikeDistributionView(deps) {
       const score = document.createElement("em");
       score.textContent = insightPercent(item.hitRate, 1);
       score.title = kind === "high" ? "明确点赞作品占该作者本地作品的比例" : "低命中作者的本地存储占用";
-      button.append(copy, score);
-      button.addEventListener("click", () => openInsightAuthor(item));
+      if (cleanable) {
+        const primary = document.createElement("button");
+        primary.type = "button";
+        primary.className = "short-video-personal-list-main";
+        primary.append(copy, score);
+        primary.addEventListener("click", () => openInsightAuthor(item));
+        const cleanup = document.createElement("button");
+        cleanup.type = "button";
+        cleanup.className = "short-video-personal-cleanup";
+        cleanup.textContent = "清理";
+        cleanup.title = "保留点赞视频，删除未点赞视频，并取消关注、移除监听";
+        cleanup.addEventListener("click", () => authorCleanup.run(item, cleanup));
+        button.append(primary, cleanup);
+      } else {
+        button.append(copy, score);
+        button.addEventListener("click", () => openInsightAuthor(item));
+      }
       column.append(button);
     }
     return column;
@@ -401,10 +473,20 @@ export function createLikeDistributionView(deps) {
     const efficiency = personal.authorEfficiency || {};
     const section = document.createElement("section");
     section.className = "short-video-insight-section short-video-personal-authors";
-    section.append(renderLikeDistributionSectionHeading(
+    const heading = document.createElement("div");
+    heading.className = "short-video-personal-authors-heading";
+    heading.append(renderLikeDistributionSectionHeading(
       "作者投入—命中率",
       `明确点赞作品 / 同作者本地作品，至少 ${formatNumber(efficiency.minSamples || 20)} 条且同时有点赞与其他作品才参与排名；同时看文件占用，便于决定继续采集谁、减少采集谁。`
     ));
+    const openTable = document.createElement("a");
+    openTable.className = "short-video-author-efficiency-open";
+    openTable.href = "/short-videos/stats/likes#authors";
+    openTable.target = "_blank";
+    openTable.rel = "noopener noreferrer";
+    openTable.textContent = "查看占用 × 命中关系表";
+    heading.append(openTable);
+    section.append(heading);
     const summary = document.createElement("div");
     summary.className = "short-video-personal-summary";
     for (const [label, value, note] of [
@@ -424,6 +506,239 @@ export function createLikeDistributionView(deps) {
     );
     section.append(summary, columns);
     return section;
+  }
+
+  function renderAuthorEfficiencyTable() {
+    const panel = document.createElement("section");
+    panel.className = "short-video-distribution-panel short-video-author-efficiency-panel";
+    panel.setAttribute("aria-labelledby", "short-video-author-efficiency-title");
+    const head = document.createElement("div");
+    head.className = "short-video-distribution-head";
+    const heading = document.createElement("div");
+    const title = document.createElement("h2");
+    title.id = "short-video-author-efficiency-title";
+    title.textContent = "作者占用与命中关系表";
+    const description = document.createElement("span");
+    description.textContent = "把本地视频占用和明确点赞命中率放在同一张表里；可筛选、排序、勾选对比，也可清理单个作者。";
+    heading.append(title, description);
+    const actions = document.createElement("div");
+    actions.className = "short-video-distribution-head-actions";
+    const cacheStatus = document.createElement("span");
+    cacheStatus.className = "short-video-distribution-cache-status";
+    cacheStatus.textContent = state.shortVideo.likeDistribution?.generatedAt
+      ? `缓存生成 ${formatInsightDate(state.shortVideo.likeDistribution.generatedAt)}`
+      : "默认读取缓存";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.textContent = state.shortVideo.likeDistributionLoading ? "重新统计中…" : "手动刷新";
+    refresh.title = "清除当前统计缓存并重新计算";
+    refresh.disabled = state.shortVideo.likeDistributionLoading;
+    refresh.addEventListener("click", () => loadLikeDistribution({ force: true }).catch(showError));
+    actions.append(cacheStatus, refresh);
+    head.append(heading, actions);
+    panel.append(head);
+
+    const data = state.shortVideo.likeDistribution;
+    if (state.shortVideo.likeDistributionLoading) panel.append(renderLikeDistributionLoadingStatus(Boolean(data)));
+    if (state.shortVideo.likeDistributionError) {
+      const error = document.createElement("div");
+      error.className = "short-video-distribution-empty is-error";
+      error.textContent = state.shortVideo.likeDistributionError;
+      panel.append(error);
+      return panel;
+    }
+    if (!data) {
+      if (!state.shortVideo.likeDistributionLoading) {
+        const empty = document.createElement("div");
+        empty.className = "short-video-distribution-empty";
+        empty.textContent = "暂无可显示的作者统计数据。";
+        panel.append(empty);
+      }
+      return panel;
+    }
+
+    const efficiency = data.insights?.personal?.authorEfficiency || {};
+    const allAuthors = Array.isArray(efficiency.authors) ? efficiency.authors : [];
+    const lowYieldAuthors = Array.isArray(efficiency.lowYieldAuthors) ? efficiency.lowYieldAuthors : [];
+    if (!allAuthors.length) {
+      const empty = document.createElement("div");
+      empty.className = "short-video-distribution-empty";
+      empty.textContent = "当前缓存还没有完整作者关系表，请点“手动刷新”生成。";
+      panel.append(empty);
+      return panel;
+    }
+
+    const controls = document.createElement("div");
+    controls.className = "short-video-author-efficiency-controls";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "搜索作者";
+    search.setAttribute("aria-label", "搜索作者关系表");
+    const scope = document.createElement("select");
+    scope.setAttribute("aria-label", "作者范围");
+    const scopeOptions = [
+      ["low", `低命中且占用较大（${formatNumber(lowYieldAuthors.length)}）`],
+      ["all", `全部达到样本门槛（${formatNumber(allAuthors.length)}）`]
+    ];
+    for (const [value, label] of scopeOptions) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      scope.append(option);
+    }
+    const sort = document.createElement("select");
+    sort.setAttribute("aria-label", "作者关系表排序");
+    for (const [value, label] of [
+      ["sizeDesc", "占用从大到小"],
+      ["hitAsc", "命中从低到高"],
+      ["hitDesc", "命中从高到低"],
+      ["videosDesc", "入库从多到少"]
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      sort.append(option);
+    }
+    controls.append(search, scope, sort);
+
+    const summary = document.createElement("div");
+    summary.className = "short-video-personal-summary is-four short-video-author-efficiency-summary";
+    const summaryCards = [
+      ["当前作者", "0", "筛选后的作者数量"],
+      ["合计占用", "0 B", "当前结果的本地视频"],
+      ["加权命中率", "0.0%", "明确点赞 / 入库视频"],
+      ["已选中", "0", "勾选行进行对比"]
+    ].map(([label, value, note]) => {
+      const card = document.createElement("div");
+      const labelNode = document.createElement("span");
+      labelNode.textContent = label;
+      const valueNode = document.createElement("strong");
+      valueNode.textContent = value;
+      const noteNode = document.createElement("small");
+      noteNode.textContent = note;
+      card.append(labelNode, valueNode, noteNode);
+      summary.append(card);
+      return { value: valueNode, note: noteNode };
+    });
+    const selection = document.createElement("div");
+    selection.className = "short-video-author-efficiency-selection";
+    selection.setAttribute("role", "status");
+    selection.setAttribute("aria-live", "polite");
+
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "short-video-author-efficiency-table-wrap";
+    const table = document.createElement("table");
+    table.className = "short-video-author-efficiency-table";
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    for (const label of ["选择", "作者", "入库", "明确点赞", "命中率", "本地占用", "平均每条", "操作"]) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = label;
+      headerRow.append(cell);
+    }
+    thead.append(headerRow);
+    const tbody = document.createElement("tbody");
+    table.append(thead, tbody);
+    tableWrap.append(table);
+    const selectedKeys = new Set();
+    const authorKey = (item) => String(item.key || item.secUid || item.name || "");
+
+    const updateSelectionSummary = () => {
+      const selected = allAuthors.filter((item) => selectedKeys.has(authorKey(item)));
+      const bytes = selected.reduce((total, item) => total + Math.max(0, Number(item.sizeBytes || 0)), 0);
+      const videos = selected.reduce((total, item) => total + Math.max(0, Number(item.videoCount || 0)), 0);
+      const likes = selected.reduce((total, item) => total + Math.max(0, Number(item.likedCount || 0)), 0);
+      summaryCards[3].value.textContent = formatNumber(selected.length);
+      summaryCards[3].note.textContent = selected.length
+        ? `${formatInsightBytes(bytes)} · 命中 ${insightPercent(videos ? likes / videos : 0, 1)}`
+        : "勾选行进行对比";
+      selection.textContent = selected.length
+        ? `已选 ${formatNumber(selected.length)} 位作者 · ${formatNumber(videos)} 条视频 · ${formatInsightBytes(bytes)}`
+        : "可勾选多位作者汇总比较；作者名可进入对应作品页。";
+    };
+
+    const renderRows = () => {
+      const query = search.value.trim().toLocaleLowerCase("zh-CN");
+      const source = scope.value === "all" ? allAuthors : lowYieldAuthors;
+      const rows = source.filter((item) => !query || String(item.name || "").toLocaleLowerCase("zh-CN").includes(query));
+      rows.sort((left, right) => {
+        if (sort.value === "hitAsc") return Number(left.hitRate || 0) - Number(right.hitRate || 0) || Number(right.sizeBytes || 0) - Number(left.sizeBytes || 0);
+        if (sort.value === "hitDesc") return Number(right.hitRate || 0) - Number(left.hitRate || 0) || Number(right.sizeBytes || 0) - Number(left.sizeBytes || 0);
+        if (sort.value === "videosDesc") return Number(right.videoCount || 0) - Number(left.videoCount || 0) || Number(right.sizeBytes || 0) - Number(left.sizeBytes || 0);
+        return Number(right.sizeBytes || 0) - Number(left.sizeBytes || 0) || Number(left.hitRate || 0) - Number(right.hitRate || 0);
+      });
+      tbody.replaceChildren();
+      let totalBytes = 0;
+      let totalVideos = 0;
+      let totalLikes = 0;
+      for (const item of rows) {
+        const videoCount = Math.max(0, Number(item.videoCount || 0));
+        const likedCount = Math.max(0, Number(item.likedCount || 0));
+        const sizeBytes = Math.max(0, Number(item.sizeBytes || 0));
+        totalBytes += sizeBytes;
+        totalVideos += videoCount;
+        totalLikes += likedCount;
+        const row = document.createElement("tr");
+        const selectCell = document.createElement("td");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selectedKeys.has(authorKey(item));
+        checkbox.setAttribute("aria-label", `选择 ${item.name || "未知作者"}`);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) selectedKeys.add(authorKey(item));
+          else selectedKeys.delete(authorKey(item));
+          row.classList.toggle("is-selected", checkbox.checked);
+          updateSelectionSummary();
+        });
+        selectCell.append(checkbox);
+        const authorCell = document.createElement("td");
+        const author = document.createElement("button");
+        author.type = "button";
+        author.textContent = item.name || "未知作者";
+        author.disabled = !String(item.secUid || "").trim();
+        author.addEventListener("click", () => openInsightAuthor(item));
+        authorCell.append(author);
+        const videoCell = document.createElement("td");
+        videoCell.textContent = formatNumber(videoCount);
+        const likedCell = document.createElement("td");
+        likedCell.textContent = formatNumber(likedCount);
+        const hitCell = document.createElement("td");
+        const hit = document.createElement("span");
+        hit.className = "short-video-author-efficiency-meter";
+        hit.style.setProperty("--value", `${Math.max(0, Math.min(100, Number(item.hitRate || 0) * 100))}%`);
+        hit.textContent = insightPercent(item.hitRate, 1);
+        hitCell.append(hit);
+        const sizeCell = document.createElement("td");
+        sizeCell.textContent = formatInsightBytes(sizeBytes);
+        const averageCell = document.createElement("td");
+        averageCell.textContent = formatInsightBytes(videoCount ? sizeBytes / videoCount : 0);
+        const actionCell = document.createElement("td");
+        const cleanup = document.createElement("button");
+        cleanup.type = "button";
+        cleanup.className = "short-video-personal-cleanup is-table";
+        cleanup.textContent = "清理";
+        cleanup.disabled = !String(item.secUid || "").trim();
+        cleanup.title = "保留点赞视频，删除未点赞视频，并取消关注、移除监听";
+        cleanup.addEventListener("click", () => authorCleanup.run(item, cleanup));
+        actionCell.append(cleanup);
+        row.classList.toggle("is-selected", checkbox.checked);
+        row.append(selectCell, authorCell, videoCell, likedCell, hitCell, sizeCell, averageCell, actionCell);
+        tbody.append(row);
+      }
+      summaryCards[0].value.textContent = formatNumber(rows.length);
+      summaryCards[0].note.textContent = scope.value === "all" ? "达到样本门槛" : "低命中筛选结果";
+      summaryCards[1].value.textContent = formatInsightBytes(totalBytes);
+      summaryCards[2].value.textContent = insightPercent(totalVideos ? totalLikes / totalVideos : 0, 1);
+      summaryCards[2].note.textContent = `${formatNumber(totalLikes)} / ${formatNumber(totalVideos)} 条`;
+      updateSelectionSummary();
+    };
+    search.addEventListener("input", renderRows);
+    scope.addEventListener("change", renderRows);
+    sort.addEventListener("change", renderRows);
+    renderRows();
+    panel.append(controls, summary, selection, tableWrap);
+    return panel;
   }
 
   function renderPreferenceComparison(comparison = {}) {
@@ -684,16 +999,25 @@ export function createLikeDistributionView(deps) {
     heading.append(title, description);
     const actions = document.createElement("div");
     actions.className = "short-video-distribution-head-actions";
+    const cacheStatus = document.createElement("span");
+    cacheStatus.className = "short-video-distribution-cache-status";
+    cacheStatus.textContent = state.shortVideo.likeDistribution?.generatedAt
+      ? `缓存生成 ${formatInsightDate(state.shortVideo.likeDistribution.generatedAt)}`
+      : "默认读取缓存";
     const refresh = document.createElement("button");
     refresh.type = "button";
-    refresh.textContent = state.shortVideo.likeDistributionLoading ? "统计中…" : "刷新";
+    refresh.textContent = state.shortVideo.likeDistributionLoading ? "重新统计中…" : "手动刷新";
+    refresh.title = "清除当前统计缓存并重新计算";
     refresh.disabled = state.shortVideo.likeDistributionLoading;
-    refresh.addEventListener("click", () => loadLikeDistribution().catch(showError));
-    actions.append(refresh);
+    refresh.addEventListener("click", () => loadLikeDistribution({ force: true }).catch(showError));
+    actions.append(cacheStatus, refresh);
     head.append(heading, actions);
     panel.append(head);
 
     const data = state.shortVideo.likeDistribution;
+    if (state.shortVideo.likeDistributionLoading) {
+      panel.append(renderLikeDistributionLoadingStatus(Boolean(data)));
+    }
     if (state.shortVideo.likeDistributionError) {
       const error = document.createElement("div");
       error.className = "short-video-distribution-empty is-error";
@@ -702,10 +1026,12 @@ export function createLikeDistributionView(deps) {
       return panel;
     }
     if (!data) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-distribution-empty";
-      loading.textContent = "正在统计本地视频…";
-      panel.append(loading);
+      if (!state.shortVideo.likeDistributionLoading) {
+        const empty = document.createElement("div");
+        empty.className = "short-video-distribution-empty";
+        empty.textContent = "暂无可显示的统计数据。";
+        panel.append(empty);
+      }
       return panel;
     }
 
@@ -817,5 +1143,5 @@ export function createLikeDistributionView(deps) {
   }
 
 
-  return { renderLikeDistributionPanel };
+  return { renderAuthorEfficiencyTable, renderLikeDistributionPanel };
 }

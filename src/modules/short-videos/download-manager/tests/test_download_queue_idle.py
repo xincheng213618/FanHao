@@ -19,7 +19,7 @@ from manager_core.queue import (
     queue_pending_count,
     wait_for_download_queue_changed,
 )
-from manager_core import profiles_links
+from manager_core import download_supervisor, profiles_links, server
 
 
 class DownloadQueueIdleTests(unittest.TestCase):
@@ -104,6 +104,84 @@ class DownloadQueueIdleTests(unittest.TestCase):
 
         self.assertEqual((inserted, updated), (1, 0))
         notify.assert_called_once_with()
+
+    def test_start_uses_global_queue_when_current_profile_does_not_resolve(self) -> None:
+        manager = download_supervisor.SidecarDownloadManager()
+        connection = MagicMock()
+
+        def execute(sql: str, _params: object = None) -> MagicMock:
+            result = MagicMock()
+            if "SELECT COUNT(*) c FROM links WHERE status='pending' AND profile_id=?" in sql:
+                result.fetchone.return_value = {"c": 0}
+            return result
+
+        connection.execute.side_effect = execute
+        database_context = MagicMock()
+        database_context.__enter__.return_value = connection
+        database_context.__exit__.return_value = False
+        supervisor_thread = MagicMock()
+
+        with (
+            patch.object(manager, "_clear_failure_guard_locked"),
+            patch.object(download_supervisor, "db", return_value=database_context),
+            patch.object(download_supervisor, "sync_download_queue"),
+            patch.object(download_supervisor, "next_download_queue_profile", return_value=42),
+            patch.object(download_supervisor, "queue_pending_count", return_value=3),
+            patch.object(download_supervisor, "create_job", return_value=1001),
+            patch.object(download_supervisor, "download_timing"),
+            patch.object(download_supervisor, "add_event"),
+            patch.object(download_supervisor.threading, "Thread", return_value=supervisor_thread),
+        ):
+            result = manager.start(8, profile_id=None, watch_new=True)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["pending"], 3)
+        self.assertEqual(manager.profile_id, 42)
+        supervisor_thread.start.assert_called_once_with()
+
+    def test_global_watcher_starts_even_when_queue_is_empty(self) -> None:
+        manager = download_supervisor.SidecarDownloadManager()
+        connection = MagicMock()
+        database_context = MagicMock()
+        database_context.__enter__.return_value = connection
+        database_context.__exit__.return_value = False
+        supervisor_thread = MagicMock()
+
+        with (
+            patch.object(manager, "_clear_failure_guard_locked"),
+            patch.object(download_supervisor, "db", return_value=database_context),
+            patch.object(download_supervisor, "sync_download_queue"),
+            patch.object(download_supervisor, "next_download_queue_profile", return_value=None),
+            patch.object(download_supervisor, "queue_pending_count", return_value=0),
+            patch.object(download_supervisor, "create_job", return_value=1002),
+            patch.object(download_supervisor, "download_timing"),
+            patch.object(download_supervisor, "add_event"),
+            patch.object(download_supervisor.threading, "Thread", return_value=supervisor_thread),
+        ):
+            result = manager.start(8, profile_id=None, watch_new=True, manual=False)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["pending"], 0)
+        self.assertIsNone(manager.profile_id)
+        self.assertTrue(manager.active)
+        supervisor_thread.start.assert_called_once_with()
+
+    def test_server_starts_automatic_global_watcher(self) -> None:
+        with (
+            patch.object(server, "setting", return_value="11"),
+            patch.object(server.download_manager, "start", return_value={"ok": True}) as start,
+        ):
+            result = server.start_automatic_downloads()
+
+        self.assertTrue(result["ok"])
+        start.assert_called_once_with(
+            11,
+            retry_failed=False,
+            limit=0,
+            profile_id=None,
+            watch_new=True,
+            manual=False,
+        )
 
 
 if __name__ == "__main__":

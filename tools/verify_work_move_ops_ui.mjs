@@ -17,9 +17,47 @@ import {
   workMoveOpsPanelIsVisible
 } from "../public/modules/system/work-move-ops-panel.js";
 import { createCompletedWorkMoveReloader } from "../public/modules/fanhao/work-move-completion.js";
+import {
+  existingVrPersonPath,
+  isVrWorkForMove,
+  planWorkMoveTarget,
+  workMoveSourceRoot
+} from "../public/modules/fanhao/work-move-target.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+
+const vrWork = {
+  id: "7447",
+  title: "URVRSP-342 【VR】fixture",
+  relativePath: "V:/AV/弥生みづき/URVRSP-342 【VR】fixture"
+};
+const regularPerson = {
+  id: "198",
+  name: "宮西ひかる",
+  relativePath: "O:/[珍藏]/宮西ひかる",
+  sourcePaths: ["O:/[珍藏]/宮西ひかる", "V:/[A1]/宮西ひかる"],
+  actorProfile: { displayName: "宮西ひかる", aliases: [] }
+};
+const moveRoots = ["G:\\", "V:\\[A1]\\", "V:\\AV\\"];
+assert.equal(isVrWorkForMove(vrWork), true);
+assert.equal(isVrWorkForMove({ title: "ordinary", relativePath: "G:/Person/Work" }), false);
+assert.equal(workMoveSourceRoot(vrWork, moveRoots), "V:\\AV\\", "the longest matching source root must be preserved");
+assert.equal(existingVrPersonPath(regularPerson), "V:/[A1]/宮西ひかる");
+const reusedVrTarget = planWorkMoveTarget({ work: vrWork, selectedPerson: regularPerson, people: [regularPerson], roots: moveRoots, defaultRoot: "G:\\" });
+assert.equal(reusedVrTarget.mode, "existing");
+assert.equal(reusedVrTarget.personId, "198", "VR migration must retain the existing person identity");
+assert.equal(reusedVrTarget.targetDirectory, "V:/[A1]/宮西ひかる", "an existing VR directory must be reused across roots");
+assert.equal(reusedVrTarget.person.name, "宮西ひかる");
+const noVrDirectoryTarget = planWorkMoveTarget({
+  work: vrWork,
+  selectedPerson: { ...regularPerson, sourcePaths: [regularPerson.relativePath] },
+  roots: moveRoots
+});
+assert.match(noVrDirectoryTarget.unavailableReason, /没有已存在的 VR 目录/, "the picker must not invent a VR directory");
+const ordinaryTarget = planWorkMoveTarget({ work: { title: "ordinary", relativePath: "G:/Old/Work" }, selectedPerson: regularPerson, people: [regularPerson], roots: moveRoots });
+assert.equal(ordinaryTarget.mode, "existing");
+assert.equal(ordinaryTarget.personId, "198", "non-VR work must keep the selected person unchanged");
 
 assert.equal(isTransientWorkMovePollError({ statusCode: 408 }), true);
 assert.equal(isTransientWorkMovePollError({ status: 429 }), true);
@@ -396,10 +434,11 @@ assert.match(adminHtml, /data-work-move-work-id/);
 assert.match(adminHtml, /data-work-move-detail/);
 assert.match(adminHtml, /role="status" aria-live="polite" data-work-move-notice/);
 assert.match(adminSource, /createWorkMoveOpsController/);
-assert.match(adminSource, /workMoveOpsController\.load/);
-assert.match(adminSource, /workMoveOpsPanelIsVisible/);
+assert.match(adminSource, /function workMoveOpsController\(\)/);
+assert.match(adminSource, /await workMoveOpsController\(\)/);
+assert.doesNotMatch(adminSource, /^import .*work-move-ops-panel/m);
 assert.match(adminSource, /scheduleWorkMoveOpsPoll/);
-assert.match(adminSource, /await workMoveOpsController\.load/);
+assert.match(adminSource, /await controller\.load/);
 assert.match(panelSource, /queuedLoad/);
 assert.match(panelSource, /preventScroll: true/);
 assert.match(panelSource, /WORK_MOVE|\/api\/work-move-jobs/);

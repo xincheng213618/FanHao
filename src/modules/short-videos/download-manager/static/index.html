@@ -7,10 +7,11 @@
     <link rel="stylesheet" href="/styles/shell.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/auth.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/controls.css?v=20260809-home-simplify-01" />
-    <link rel="stylesheet" href="/styles/profiles.css?v=20260810-banned-profiles-01" />
+    <link rel="stylesheet" href="/styles/profiles.css?v=20260825-profile-history-01" />
     <link rel="stylesheet" href="/styles/home.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/links.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/library.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/activity.css?v=20260824-task-list-01" />
     <link rel="stylesheet" href="/styles/responsive.css?v=20260809-home-simplify-01" />
   </head>
   <body>
@@ -23,7 +24,7 @@
         <div class="topbar-actions">
           <div class="status-line">
             <span id="extractState" role="status" aria-live="polite">采集空闲</span>
-            <span id="downloadState" role="status" aria-live="polite">下载空闲</span>
+            <span id="downloadState" role="status" aria-live="polite">自动下载准备中</span>
           </div>
           <a class="ghost-link topbar-button" href="http://127.0.0.1:29998/short-videos" target="_blank" rel="noreferrer">短视频主页</a>
           <button id="openLibraryQuick" class="topbar-button">查看已下载</button>
@@ -36,7 +37,7 @@
         <button data-page-target="library">已下载</button>
         <button data-page-target="profiles">主页管理</button>
         <button data-page-target="settings">配置</button>
-        <button data-page-target="activity">任务日志</button>
+        <button data-page-target="activity">任务列表</button>
       </nav>
 
       <section class="page-panel active" data-page-panel="home">
@@ -55,11 +56,10 @@
           <section class="panel download-execution-panel">
             <div class="panel-head download-execution-head">
               <div>
-                <div class="panel-title">下载执行</div>
-                <div class="muted">采集到的新作品会自动进入下载队列。</div>
+                <div class="panel-title">自动下载</div>
+                <div class="muted">程序启动后持续监听；采集到新作品就直接下载，无需手动开关。</div>
               </div>
               <div class="actions download-actions">
-                <button id="downloadStart" class="primary">开始下载</button>
                 <button id="openLibraryHome">查看已下载</button>
                 <button id="resetFailedCurrent">当前失败转待下载</button>
               </div>
@@ -68,13 +68,13 @@
               <div id="downloadGuardTitle" class="download-guard-title">下载保护已暂停</div>
               <div id="downloadGuardReason"></div>
               <div id="downloadGuardTime" class="download-guard-time"></div>
-              <div id="downloadGuardHelp" class="download-guard-help">切换代理 IP 或更新 Cookie 后，可立即重新尝试。</div>
+              <div id="downloadGuardHelp" class="download-guard-help">系统会在保护冷却结束后自动重试。</div>
             </div>
             <div class="download-execution-body">
               <div class="download-execution-summary" aria-live="polite" aria-atomic="true">
                 <span>当前状态</span>
-                <strong id="downloadPrimaryStatus">下载空闲</strong>
-                <div id="downloadNextAction" class="muted">启动后会按队列顺序处理待下载作品</div>
+                <strong id="downloadPrimaryStatus">自动下载准备中</strong>
+                <div id="downloadNextAction" class="muted">持续监听队列，发现新作品后自动下载</div>
                 <details class="runtime-details">
                   <summary>诊断详情</summary>
                   <div id="downloadRuntimeDetails" class="muted">未配置代理</div>
@@ -212,6 +212,7 @@
             <label class="field">
               <span>排序</span>
               <select id="profileManagerSort">
+                <option value="last_extracted_desc">最近检测时间</option>
                 <option value="latest_desc">最新作品时间</option>
                 <option value="works_desc">作品数量</option>
                 <option value="likes_desc">获赞数量</option>
@@ -313,6 +314,15 @@
                 <input id="failureGuardThreshold" type="number" min="0" max="1000" value="10" />
               </label>
             </div>
+            <label class="checkbox-field">
+              <input id="automaticCollectionEnabled" type="checkbox" />
+              <span>定时执行一键智能采集</span>
+            </label>
+            <label class="field">
+              <span>自动采集间隔（小时）</span>
+              <input id="automaticCollectionIntervalHours" type="number" min="1" max="720" value="24" />
+            </label>
+            <div id="automaticCollectionStatus" class="muted" role="status" aria-live="polite">定时采集已关闭</div>
           </section>
 
           <section class="panel settings-actions">
@@ -327,21 +337,57 @@
       </section>
 
       <section class="page-panel" data-page-panel="activity">
-        <section class="workspace">
-          <div class="panel side-panel">
-            <div class="panel-title">任务</div>
-            <div id="jobs" class="list"></div>
+        <section class="activity-layout">
+          <div class="activity-task-column">
+            <section class="panel activity-panel">
+              <div class="activity-section-head">
+                <div>
+                  <div class="panel-title">正在执行</div>
+                  <div class="muted">当前采集、下载及其他运行中的任务</div>
+                </div>
+                <span id="activityRunningCount" class="activity-count">0</span>
+              </div>
+              <div id="activityRunning" class="activity-job-list"></div>
+            </section>
+
+            <section class="panel activity-panel">
+              <div class="activity-section-head">
+                <div>
+                  <div class="panel-title">接下来</div>
+                  <div class="muted">按采集队列的实际执行顺序排列</div>
+                </div>
+                <span id="activityQueueCount" class="activity-count">0</span>
+              </div>
+              <div id="activityQueue" class="activity-job-list"></div>
+            </section>
+
+            <section class="panel activity-panel">
+              <div class="activity-section-head">
+                <div>
+                  <div class="panel-title">历史任务</div>
+                  <div class="muted">最近完成、失败或停止的任务</div>
+                </div>
+                <span id="activityHistoryCount" class="activity-count">0</span>
+              </div>
+              <div id="activityHistory" class="activity-job-list activity-history-list"></div>
+            </section>
           </div>
 
-          <aside class="panel side-panel">
-            <div class="panel-title">事件</div>
-            <div id="events" class="list events"></div>
+          <aside class="panel activity-event-panel">
+            <div class="activity-section-head">
+              <div>
+                <div class="panel-title">事件日志</div>
+                <div class="muted">最近的后台提示与异常</div>
+              </div>
+              <span id="activityEventCount" class="activity-count">0</span>
+            </div>
+            <div id="events" class="activity-event-list"></div>
           </aside>
         </section>
       </section>
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260812-latest-request-01"></script>
+    <script type="module" src="/app.js?v=20260825-profile-history-01"></script>
   </body>
 </html>

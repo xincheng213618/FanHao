@@ -139,7 +139,9 @@ export function pipeFileRange(req, res, filePathOrDescriptor, range) {
   }
 }
 
-export function createFileServer({ mimeTypes, normalizeExt, notFound, safeStat }) {
+export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeExt, notFound, safeStat }) {
+  const normalizedDefaultChunkBytes = Math.max(0, Math.floor(Number(defaultChunkBytes || 0)));
+
   function attachmentDisposition(fileName = "download") {
     const fallback = String(fileName || "download").replace(/[^\w.-]+/g, "_").slice(0, 180) || "download";
     return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(String(fileName || fallback))}`;
@@ -217,7 +219,12 @@ export function createFileServer({ mimeTypes, normalizeExt, notFound, safeStat }
       const requestedRange = singleByteRange && rangeConditionMatches
         ? parseRange(rangeHeader, entitySize)
         : null;
-      const maxRangeBytes = Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)));
+      const hasExplicitRangeLimit = file.maxRangeBytes !== undefined && file.maxRangeBytes !== null;
+      const maxRangeBytes = file.fullResponse
+        ? 0
+        : hasExplicitRangeLimit
+          ? Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)))
+          : normalizedDefaultChunkBytes;
       const range = requestedRange && maxRangeBytes
         ? {
             start: requestedRange.start,

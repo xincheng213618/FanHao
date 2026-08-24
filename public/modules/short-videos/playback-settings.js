@@ -18,6 +18,7 @@ export function createShortVideoPlaybackSettings(deps) {
     openDouyinLink,
     originalDouyinUrl,
     playbackRates,
+    runShortVideoLocalAction,
     setPlaybackRate,
     shareShortVideo,
     showBrowserToast,
@@ -195,6 +196,35 @@ export function createShortVideoPlaybackSettings(deps) {
     actions.append(pip, fullscreen, autoNext, clearScreen, copyLink, original);
     primarySection.append(primaryTitle, actions);
 
+    const localSection = document.createElement("section");
+    localSection.className = "short-video-more-section";
+    const localTitle = document.createElement("strong");
+    localTitle.textContent = "本地文件";
+    const localActions = document.createElement("div");
+    localActions.className = "short-video-more-actions is-primary-actions";
+    const downloadOriginal = playbackSettingsAction(
+      "下载原文件",
+      galleryMode ? "图集请在作品目录中查看" : "保存当前视频文件",
+      "download",
+      () => {
+        closePlaybackSettings(overlay, { restoreFocus: false });
+        runShortVideoLocalAction(video, "download");
+      }
+    );
+    downloadOriginal.disabled = galleryMode || !video?.id;
+    const revealOriginal = playbackSettingsAction("定位原文件", "在资源管理器中选中", "search", () => {
+      closePlaybackSettings(overlay, { restoreFocus: false });
+      runShortVideoLocalAction(video, "reveal");
+    });
+    revealOriginal.disabled = !video?.id;
+    const openAuthorFolder = playbackSettingsAction("作者文件夹", "打开作者本地目录", "folder", () => {
+      closePlaybackSettings(overlay, { restoreFocus: false });
+      runShortVideoLocalAction(video, "open-author-folder");
+    });
+    openAuthorFolder.disabled = !video?.id;
+    localActions.append(downloadOriginal, revealOriginal, openAuthorFolder);
+    localSection.append(localTitle, localActions);
+
     const manageSection = document.createElement("section");
     manageSection.className = "short-video-more-section";
     const manageTitle = document.createElement("strong");
@@ -235,7 +265,7 @@ export function createShortVideoPlaybackSettings(deps) {
 
     sheet.append(header);
     if (!galleryMode) sheet.append(speedSection);
-    sheet.append(primarySection, manageSection, shortcuts);
+    sheet.append(primarySection, localSection, manageSection, shortcuts);
     overlay.append(sheet);
     browser.append(overlay);
     isolateShortVideoTransientModal(overlay);

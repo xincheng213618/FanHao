@@ -27,6 +27,7 @@ export async function routePhotosApi(req, res, url, deps) {
     sendJson(res, 200, {
       root: status.root,
       exists: status.exists,
+      database: mangaService.databaseStatus(),
       cache: imageReaderCacheStatus(),
       comics: mangaService.cacheDirs().map(mangaService.publicSummary)
     });

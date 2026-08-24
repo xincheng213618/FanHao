@@ -8,7 +8,7 @@ from typing import Any
 
 from .common import clean_profile_nickname, first_int, first_text, int_or_none, json_text, now_iso, parse_profile_url
 from .config import TEST_PROFILE_URL
-from .database import db, setting
+from .database import db, merge_profile_history_value, parse_profile_history, setting
 from .domain_manifest import author_sec_uid_from_manifest, douyin_user_url, kind_from_manifest, manifest_cover_path, manifest_music_metadata, manifest_preview_path, sync_manifest_files
 from .profile_domain import normalize_profile_metadata
 from .queue import ensure_profile_in_download_queue, notify_download_queue_changed
@@ -309,13 +309,24 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
     detected_banned = False
     detected_reason = ""
     with db() as conn:
-        row = conn.execute("SELECT sec_uid FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        row = conn.execute(
+            "SELECT sec_uid, nickname, total_favorited, profile_collected_at, updated_at, "
+            "nickname_history_json, total_favorited_history_json FROM profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
         fallback_sec_uid = first_text(row["sec_uid"]) if row else ""
         meta = normalize_profile_metadata(profile, fallback_sec_uid)
         if not any(meta.get(key) not in ("", None, "{}") for key in meta):
             return
         now = now_iso()
         meta["profile_collected_at"] = now
+        name_history = parse_profile_history(row["nickname_history_json"] if row else "[]")
+        likes_history = parse_profile_history(row["total_favorited_history_json"] if row else "[]", numeric=True)
+        previous_at = first_text(row["profile_collected_at"], row["updated_at"], now) if row else now
+        name_history = merge_profile_history_value(name_history, row["nickname"] if row else "", previous_at)
+        name_history = merge_profile_history_value(name_history, meta["nickname"], now)
+        likes_history = merge_profile_history_value(likes_history, row["total_favorited"] if row else None, previous_at, numeric=True)
+        likes_history = merge_profile_history_value(likes_history, meta["total_favorited"], now, numeric=True)
         detected_banned = meta["account_status"] == "banned"
         detected_reason = meta["account_status_reason"]
         conn.execute(
@@ -338,6 +349,8 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
               gender=COALESCE(?, gender),
               age=COALESCE(?, age),
               verification=COALESCE(NULLIF(?, ''), verification),
+              nickname_history_json=?,
+              total_favorited_history_json=?,
               profile_raw_json=CASE WHEN ? <> '{}' THEN ? ELSE profile_raw_json END,
               profile_collected_at=?,
               updated_at=?
@@ -361,6 +374,8 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
                 meta["gender"],
                 meta["age"],
                 meta["verification"],
+                json_text(name_history),
+                json_text(likes_history),
                 meta["profile_raw_json"],
                 meta["profile_raw_json"],
                 now,
@@ -532,18 +547,27 @@ def upsert_following_profiles(users: list[dict[str, Any]]) -> tuple[int, int]:
             if not sec_uid:
                 continue
             existing = conn.execute(
-                "SELECT id FROM profiles WHERE sec_uid=? AND tab='post'",
+                "SELECT id, nickname, total_favorited, profile_collected_at, updated_at, "
+                "nickname_history_json, total_favorited_history_json FROM profiles WHERE sec_uid=? AND tab='post'",
                 (sec_uid,),
             ).fetchone()
             profile_url = first_text(meta.get("profile_url"), douyin_user_url(sec_uid))
+            name_history = parse_profile_history(existing["nickname_history_json"] if existing else "[]")
+            likes_history = parse_profile_history(existing["total_favorited_history_json"] if existing else "[]", numeric=True)
+            previous_at = first_text(existing["profile_collected_at"], existing["updated_at"], ts) if existing else ts
+            name_history = merge_profile_history_value(name_history, existing["nickname"] if existing else "", previous_at)
+            name_history = merge_profile_history_value(name_history, meta["nickname"], ts)
+            likes_history = merge_profile_history_value(likes_history, existing["total_favorited"] if existing else None, previous_at, numeric=True)
+            likes_history = merge_profile_history_value(likes_history, meta["total_favorited"], ts, numeric=True)
             conn.execute(
                 """
                 INSERT INTO profiles (
                   url, sec_uid, tab, title, uid, nickname, avatar_url, unique_id, short_id,
                   signature, ip_location, following_count, follower_count, total_favorited,
                   aweme_count, favoriting_count, gender, age, verification, profile_raw_json,
-                  profile_collected_at, is_following, following_discovered_at, created_at, updated_at
-                ) VALUES (?, ?, 'post', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                  profile_collected_at, nickname_history_json, total_favorited_history_json,
+                  is_following, following_discovered_at, created_at, updated_at
+                ) VALUES (?, ?, 'post', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(sec_uid, tab) DO UPDATE SET
                   url=excluded.url,
                   title=COALESCE(NULLIF(excluded.title, ''), profiles.title),
@@ -562,6 +586,8 @@ def upsert_following_profiles(users: list[dict[str, Any]]) -> tuple[int, int]:
                   gender=COALESCE(excluded.gender, profiles.gender),
                   age=COALESCE(excluded.age, profiles.age),
                   verification=COALESCE(NULLIF(excluded.verification, ''), profiles.verification),
+                  nickname_history_json=excluded.nickname_history_json,
+                  total_favorited_history_json=excluded.total_favorited_history_json,
                   profile_raw_json=CASE WHEN excluded.profile_raw_json <> '{}' THEN excluded.profile_raw_json ELSE profiles.profile_raw_json END,
                   profile_collected_at=COALESCE(excluded.profile_collected_at, profiles.profile_collected_at),
                   is_following=1,
@@ -589,6 +615,8 @@ def upsert_following_profiles(users: list[dict[str, Any]]) -> tuple[int, int]:
                     meta["verification"],
                     meta["profile_raw_json"],
                     ts,
+                    json_text(name_history),
+                    json_text(likes_history),
                     ts,
                     ts,
                     ts,

@@ -8,6 +8,7 @@ export function createLocalLibraryScanService({
   createId,
   emptyLibrary,
   excludedDirs,
+  excludedRoots = [],
   fileBase,
   isExcludedDirName,
   isImage,
@@ -18,8 +19,19 @@ export function createLocalLibraryScanService({
   linkScannedWork = (personId, work) => work,
   normalizeExt,
   relativeFromRoot,
-  safeStat
+  safeStat,
+  singleVideoRoots = []
 }) {
+  function pathWithinAnyRoot(targetPath, roots) {
+    const target = path.resolve(targetPath);
+    return roots.some((rootPath) => {
+      const root = path.resolve(rootPath);
+      if (path.parse(root).root.toLowerCase() !== path.parse(target).root.toLowerCase()) return false;
+      const relative = path.relative(root, target);
+      return relative === "" || (!path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`) && relative !== "..");
+    });
+  }
+
   function walkFiles(rootDir) {
     const results = [];
     const stack = [rootDir];
@@ -35,8 +47,9 @@ export function createLocalLibraryScanService({
 
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          if (!isExcludedDirName(entry.name)) {
-            stack.push(path.join(current, entry.name));
+          const childPath = path.join(current, entry.name);
+          if (!isExcludedDirName(entry.name) && !pathWithinAnyRoot(childPath, excludedRoots)) {
+            stack.push(childPath);
           }
           continue;
         }
@@ -54,7 +67,10 @@ export function createLocalLibraryScanService({
     try {
       return fs
         .readdirSync(rootDir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && !isExcludedDirName(entry.name))
+        .filter((entry) => {
+          if (!entry.isDirectory() || isExcludedDirName(entry.name)) return false;
+          return !pathWithinAnyRoot(path.join(rootDir, entry.name), excludedRoots);
+        })
         .map((entry) => path.join(rootDir, entry.name));
     } catch {
       return [];
@@ -143,7 +159,7 @@ export function createLocalLibraryScanService({
     }
   }
 
-  function createWork(personId, title, workDir, files, fallbackVideo = null) {
+  function createWork(personId, title, workDir, files, fallbackVideo = null, options = {}) {
     const { videos, images, infos } = collectMediaFiles(files);
     if (!videos.length && fallbackVideo) {
       videos.push(fallbackVideo);
@@ -153,6 +169,7 @@ export function createLocalLibraryScanService({
       return null;
     }
 
+    const identityPath = options.identityPath || workDir;
     const preferredBaseName = fallbackVideo ? fileBase(fallbackVideo.name) : path.basename(workDir);
     const cover = chooseCover(images, preferredBaseName, workDir);
     const playableCount = videos.filter((video) => video.playable).length;
@@ -163,11 +180,11 @@ export function createLocalLibraryScanService({
       .at(-1) || null;
 
     return {
-      id: createId("w", `${personId}|${workDir}|${title}`),
+      id: createId("w", `${personId}|${identityPath}|${title}`),
       personId,
       title,
-      directoryName: path.basename(workDir),
-      relativePath: relativeFromRoot(workDir),
+      directoryName: path.basename(identityPath),
+      relativePath: relativeFromRoot(identityPath),
       coverId: cover?.id || null,
       videoCount: videos.length,
       playableCount,
@@ -180,7 +197,43 @@ export function createLocalLibraryScanService({
     };
   }
 
+  function scanSingleVideoWorks(personId, personDir) {
+    const files = walkFiles(personDir);
+    const media = collectMediaFiles(files);
+    const videoCountByDir = new Map();
+    const filesByDir = new Map();
+    for (const fullPath of files) {
+      const dirKey = path.dirname(fullPath).toLowerCase();
+      if (!filesByDir.has(dirKey)) filesByDir.set(dirKey, []);
+      filesByDir.get(dirKey).push(fullPath);
+    }
+    for (const video of media.videos) {
+      const dirKey = path.dirname(video.path).toLowerCase();
+      videoCountByDir.set(dirKey, Number(videoCountByDir.get(dirKey) || 0) + 1);
+    }
+
+    return media.videos
+      .map((video) => {
+        const videoDir = path.dirname(video.path);
+        const videoDirKey = videoDir.toLowerCase();
+        const videoBase = fileBase(video.name).toLowerCase();
+        const isOnlyVideoInDir = videoCountByDir.get(videoDirKey) === 1;
+        const matchingFiles = (filesByDir.get(videoDirKey) || []).filter((fullPath) => {
+          if (fullPath === video.path) return true;
+          if (!isImage(fullPath) && !isInfo(fullPath)) return false;
+          return isOnlyVideoInDir || fileBase(path.basename(fullPath)).toLowerCase() === videoBase;
+        });
+        return createWork(personId, video.name, videoDir, matchingFiles, video, { identityPath: video.path });
+      })
+      .filter(Boolean)
+      .map((work) => linkScannedWork(personId, work));
+  }
+
   function scanPersonDirectory(personId, personDir) {
+    if (pathWithinAnyRoot(personDir, singleVideoRoots)) {
+      return scanSingleVideoWorks(personId, personDir);
+    }
+
     const works = [];
 
     const childDirs = directChildDirectories(personDir);
@@ -306,6 +359,7 @@ export function createLocalLibraryScanService({
     collectMediaFiles,
     registerFiles,
     scanLibrary,
-    scanPersonDirectory
+    scanPersonDirectory,
+    scanSingleVideoWorks
   };
 }

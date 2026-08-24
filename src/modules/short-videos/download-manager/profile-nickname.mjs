@@ -1,7 +1,7 @@
 function cleanNicknameCandidate(value) {
   const name = String(value || "").trim();
   if (!name || name.length > 32) return "";
-  if (/captcha|\.zip$|\.rar$|\.7z$|搜索|推荐|关注|粉丝|获赞|作品/i.test(name)) return "";
+  if (/captcha|\.zip$|\.rar$|\.7z$|搜索|推荐|关注|粉丝|获赞|作品|读屏标签已关闭|读屏标签已开启/i.test(name)) return "";
   return name;
 }
 

@@ -4,6 +4,176 @@
   padding-bottom: 8px;
 }
 
+.tools-dashboard + .tools-dashboard {
+  margin-top: 22px;
+}
+
+.vision-exploration-notice {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--button-soft) 72%, transparent);
+  color: var(--muted);
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 780;
+  line-height: 1.55;
+}
+
+.vision-exploration-dashboard .tool-launch-badge {
+  width: 48px;
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+}
+
+.vision-exploration-dashboard .tool-launch-card {
+  min-height: 122px;
+  align-items: start;
+}
+
+.vision-exploration-dashboard .tool-launch-body strong {
+  display: -webkit-box;
+  min-height: 2.4em;
+  text-overflow: clip;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.vision-exploration-dashboard .tool-launch-body small {
+  min-height: 2.6em;
+}
+
+.vision-exploration-status {
+  min-height: 38px;
+  border-radius: 11px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 9px 11px;
+  font-size: 10.5px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.vision-exploration-status[data-state="busy"] {
+  color: var(--blue);
+}
+
+.vision-exploration-status[data-state="success"] {
+  background: rgba(24, 116, 92, 0.10);
+  color: #18745c;
+}
+
+.vision-exploration-status[data-state="error"] {
+  background: rgba(180, 35, 24, 0.09);
+  color: #b42318;
+}
+
+.vision-exploration-archive-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.vision-exploration-archive-head strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.vision-exploration-archive-head span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.vision-exploration-sessions {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.vision-exploration-session {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  padding: 8px 9px;
+}
+
+.vision-exploration-session-badge {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--button-soft);
+  color: var(--blue);
+  font-size: 8.5px;
+  font-weight: 950;
+}
+
+.vision-exploration-session-body {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.vision-exploration-session-body strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 930;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vision-exploration-session-body small {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 780;
+}
+
+.vision-exploration-session-actions {
+  display: grid;
+  gap: 5px;
+}
+
+.vision-exploration-review,
+.vision-exploration-delete {
+  min-width: 48px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 900;
+}
+
+.vision-exploration-review {
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
+.vision-exploration-delete {
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.vision-exploration-review:disabled,
+.vision-exploration-delete:disabled {
+  opacity: 0.5;
+}
+
 .tools-section-head {
   display: flex;
   min-width: 0;

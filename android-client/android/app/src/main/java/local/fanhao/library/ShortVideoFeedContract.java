@@ -112,6 +112,7 @@ final class ShortVideoFeedContract {
       author != null && author.optBoolean("following", false),
       row.optString("publishedAt", ""),
       row.optLong("durationMs", 0),
+      row.optLong("size", 0),
       width,
       height,
       stats == null ? 0 : stats.optLong("likes", 0),

@@ -435,6 +435,78 @@
   opacity: .62;
 }
 
+.short-video-delete-confirm {
+  width: min(440px, calc(100vw - 32px));
+  max-width: none;
+  border: 1px solid rgba(230, 43, 70, .18);
+  border-radius: 18px;
+  background: var(--panel, #fff);
+  box-shadow: 0 24px 80px rgba(12, 18, 28, .28);
+  color: var(--text, #1e2530);
+  padding: 0;
+}
+
+.short-video-delete-confirm::backdrop {
+  background: rgba(12, 18, 28, .46);
+  backdrop-filter: blur(3px);
+}
+
+.short-video-delete-confirm-content {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+}
+
+.short-video-delete-confirm h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.short-video-delete-confirm-description {
+  display: grid;
+  gap: 9px;
+  color: var(--muted, #697386);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.short-video-delete-confirm-description p {
+  margin: 0;
+}
+
+.short-video-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.short-video-delete-confirm-actions button {
+  min-width: 88px;
+  height: 40px;
+  border-radius: 10px;
+  padding: 0 16px;
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.short-video-delete-confirm-cancel {
+  border: 1px solid var(--line);
+  background: var(--panel, #fff);
+  color: var(--text, #1e2530);
+}
+
+.short-video-delete-confirm-commit {
+  border: 1px solid #d82445;
+  background: #e62b46;
+  color: #fff;
+}
+
+.short-video-delete-confirm-actions button:focus-visible {
+  outline: 3px solid rgba(22, 119, 91, .28);
+  outline-offset: 2px;
+}
+
 .short-video-search-overlay {
   position: absolute;
   inset: 0;

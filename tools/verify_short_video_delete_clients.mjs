@@ -186,6 +186,7 @@ function verifyWebMutationBoundary() {
   }
   assert(actions.includes("shortVideoDeleteApiPath(video.id)"), "single/group delete must use the explicit video endpoint");
   assert(actions.includes('requestShortVideoDelete(api, "/api/short-videos"'), "batch delete must share the same response validator");
+  assert(actions.includes("showShortVideoDeleteConfirm") && actions.includes("confirmed = Boolean(await confirmDelete(prompt))") && actions.includes("confirmationInFlight"), "Web deletes must use a visible in-page asynchronous confirmation with a single-flight gate");
   assert(batch.indexOf("if (!data?.committed)") < batch.indexOf("clearShortVideoDeleteSelection()"), "rollback must preserve Web selection");
 }
 

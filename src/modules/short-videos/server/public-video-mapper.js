@@ -174,27 +174,31 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
         : []
     };
   }
-
   function livePhotoGalleryItems(metadata = {}, media = {}) {
     const images = Array.isArray(metadata.images) ? metadata.images : [];
     if (media.type !== "gallery" || !images.length) return null;
+    const sourceIndices = { image: [], video: [] };
+    media.galleryItems.forEach((type, index) => sourceIndices[type]?.push(index));
     const items = [];
-    let sourceIndex = 0;
+    let imageCursor = 0;
+    let videoCursor = 0;
     let liveCount = 0;
     for (const image of images) {
-      if (!image || typeof image !== "object" || media.galleryItems[sourceIndex] !== "image") return null;
-      const imageIndex = sourceIndex++;
+      if (!image || typeof image !== "object") return null;
+      const imageIndex = sourceIndices.image[imageCursor++];
+      if (!Number.isInteger(imageIndex)) return null;
       const nestedVideo = image.video && typeof image.video === "object";
       const livePhoto = Number(image.live_photo_type || 0) > 0 && nestedVideo;
       if (!livePhoto) {
         items.push({ sourceIndex: imageIndex, type: "image" });
         continue;
       }
-      if (media.galleryItems[sourceIndex] !== "video") return null;
-      items.push({ sourceIndex: sourceIndex++, posterIndex: imageIndex, type: "video" });
+      const videoIndex = sourceIndices.video[videoCursor++];
+      if (!Number.isInteger(videoIndex)) return null;
+      items.push({ sourceIndex: videoIndex, posterIndex: imageIndex, type: "video" });
       liveCount += 1;
     }
-    return liveCount > 0 && sourceIndex === media.galleryItems.length ? items : null;
+    return liveCount > 0 && imageCursor === sourceIndices.image.length && videoCursor === sourceIndices.video.length ? items : null;
   }
 
   function publicShortVideoSound(row = {}, id = "") {

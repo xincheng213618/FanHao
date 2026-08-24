@@ -9,7 +9,7 @@ export const moduleDefinition = {
     web: { href: "/fanhao", view: "people" },
     android: { view: "categories", bottomKey: "fanhao", entry: "./modules/fanhao/android-module.js" }
   },
-  capabilities: ["people", "code-prefixes", "works", "rankings", "studios", "vr", "favorites", "history"]
+  capabilities: ["people", "code-prefixes", "works", "rankings", "studios", "vr", "favorites", "history", "disk-usage"]
 };
 
 export function createModule({ moduleDeps }) {

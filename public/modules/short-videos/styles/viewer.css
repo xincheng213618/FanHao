@@ -1430,14 +1430,31 @@
   place-items: center;
 }
 
+.short-video-control-volume::before {
+  position: absolute;
+  right: -10px;
+  bottom: 28px;
+  width: 52px;
+  height: 16px;
+  content: "";
+  pointer-events: none;
+}
+
+.short-video-control-volume:hover::before,
+.short-video-control-volume:focus-within::before,
+.short-video-control-volume.is-open::before {
+  pointer-events: auto;
+}
+
 .short-video-control-volume > button {
   width: 32px;
 }
 
 .short-video-volume-popover {
   position: absolute;
+  z-index: 6;
   right: -10px;
-  bottom: 34px;
+  bottom: 30px;
   display: grid;
   grid-template-columns: 100%;
   grid-template-rows: 24px minmax(0, 1fr);
@@ -1459,9 +1476,9 @@
 .short-video-volume-popover::after {
   position: absolute;
   right: 0;
-  bottom: -8px;
+  bottom: -12px;
   left: 0;
-  height: 8px;
+  height: 12px;
   content: "";
 }
 

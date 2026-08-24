@@ -7,9 +7,11 @@
     <title>资料库设置与运维</title>
     <style>html.app-module-loading body { visibility: hidden; }</style>
     <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260718-access-analytics-01" />
-    <link rel="stylesheet" href="/modules/system/access-analytics.css?v=20260718-access-analytics-01" />
-    <link rel="stylesheet" href="/modules/system/work-move-ops-panel.css?v=20260811-work-move-ops-01" />
+    <link rel="stylesheet" href="/css/foundation.css?v=20260710-web-css-modules-01" />
+    <link rel="stylesheet" href="/css/shell.css?v=20260713-search-index-02" />
+    <link rel="stylesheet" href="/modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01" />
+    <link rel="stylesheet" href="/modules/system/admin.css?v=20260727-hidden-overlays-01" />
+    <link rel="stylesheet" href="/css/responsive.css?v=20260712-module-settings-02" />
   </head>
   <body class="admin-page">
     <div class="admin-shell">
@@ -50,8 +52,8 @@
         </nav>
 
         <div class="admin-side-status">
-          <span id="adminSideHealth">正在检查服务</span>
-          <strong id="adminSideTotals">-</strong>
+          <span id="adminSideHealth">按页面加载数据</span>
+          <strong id="adminSideTotals">进入总览后读取</strong>
           <small id="adminLastRefresh">-</small>
         </div>
       </aside>
@@ -493,7 +495,7 @@
 
     <script type="module">
       try {
-        await import("/admin.js?v=20260811-work-move-ops-04");
+        await import("/admin.js?v=20260815-admin-lazy-load-01");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

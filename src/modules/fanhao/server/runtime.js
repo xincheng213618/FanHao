@@ -1,4 +1,5 @@
 import { createCatalogRuntime } from "./catalog/runtime.js";
+import { createDiskUsageRuntime } from "./disk-usage/runtime.js";
 import { createLibraryRuntime } from "./library/runtime.js";
 import { createFanhaoSettingsProvider } from "./settings/index.js";
 import { createUserStateRuntime } from "./user-state/runtime.js";
@@ -6,12 +7,14 @@ import { createWorksRuntime } from "./works/runtime.js";
 
 export function createFanhaoRuntime(deps) {
   const catalog = createCatalogRuntime(deps.catalog);
+  const diskUsage = createDiskUsageRuntime(deps.diskUsage);
   const library = createLibraryRuntime(deps.library);
   const settings = createFanhaoSettingsProvider(deps.settings);
   const userState = createUserStateRuntime(deps.userState);
   const works = createWorksRuntime(deps.works);
 
   async function routeApi(req, res, url) {
+    if (await diskUsage.routeApi(req, res, url)) return true;
     if (await library.routeReadApi(req, res, url)) return true;
     if (await catalog.routeApi(req, res, url)) return true;
     if (await library.routeMutationApi(req, res, url)) return true;
@@ -20,6 +23,7 @@ export function createFanhaoRuntime(deps) {
   }
 
   function start() {
+    diskUsage.start();
     // This deliberately moves the one-time exact local code derivation into
     // readiness (before listen) so it cannot monopolize the shared HTTP event
     // loop later. It is startup latency, not free work. A transient read error
@@ -34,10 +38,25 @@ export function createFanhaoRuntime(deps) {
     userState.start();
   }
 
+  function beginStop() {
+    diskUsage.beginStop();
+  }
+
+  async function stop() {
+    await diskUsage.stop();
+  }
+
+  async function routeMedia(req, res, url) {
+    if (await diskUsage.routeMedia(req, res, url)) return true;
+    return works.routeMedia(req, res, url);
+  }
+
   return {
+    beginStop,
     routeApi,
-    routeMedia: works.routeMedia,
+    routeMedia,
     start,
+    stop,
     settings
   };
 }

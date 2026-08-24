@@ -284,6 +284,30 @@ export function createShortVideoListCards(dependencies) {
     return card;
   }
 
+  function syncRenderedSelection(root) {
+    for (const card of root?.querySelectorAll?.(".short-video-card[data-video-id]") || []) {
+      const video = card.shortVideoCardRecord || {};
+      const videoId = String(video.id || card.dataset.videoId || "");
+      const selecting = Boolean(state.shortVideo.deleteMode);
+      const selected = shortVideoDeleteSelection().has(videoId);
+      card.classList.toggle("is-selecting", selecting);
+      card.classList.toggle("is-selected", selected);
+
+      const open = card.querySelector(".short-video-thumb-open");
+      if (open) {
+        const title = video.title || "短视频";
+        open.setAttribute("aria-label", selecting
+          ? `选择 ${title}`
+          : (video.actions?.liked ? `${video.title || "打开短视频"}，已点赞` : video.title || "打开短视频"));
+        if (selecting) open.setAttribute("aria-pressed", String(selected));
+        else open.removeAttribute("aria-pressed");
+      }
+
+      const author = card.querySelector("button.short-video-card-author");
+      if (author) author.disabled = selecting;
+    }
+  }
+
   function appendShortVideoWatchBadge(target, video = {}) {
     const watchedAt = String(video?.watch?.lastWatchedAt || "").trim();
     if (!watchedAt) return;
@@ -307,7 +331,7 @@ export function createShortVideoListCards(dependencies) {
   }
 
 
-  return { renderAuthorIndexCard, renderSearchUserCard, renderVideoCard };
+  return { renderAuthorIndexCard, renderSearchUserCard, renderVideoCard, syncRenderedSelection };
 }
 
 export function shortVideoAuthorCardAccessibility(author = {}, kind = "index") {

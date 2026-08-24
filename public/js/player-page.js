@@ -5,11 +5,20 @@ import {
   workMoveCleanupRetryRequired
 } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-02";
 import { createCompletedWorkMoveReloader } from "../modules/fanhao/work-move-completion.js?v=20260811-work-move-ops-01";
+import {
+  isVrWorkForMove,
+  personMoveDisplayName,
+  personMoveSearchValues,
+  planWorkMoveTarget,
+  workMoveSourceRoot
+} from "../modules/fanhao/work-move-target.js?v=20260816-vr-target-01";
 
 const api = createApiClient();
 const params = new URLSearchParams(window.location.search);
 const workId = params.get("workId") || "";
 const mediaId = params.get("mediaId") || "";
+const diskDrive = params.get("diskDrive") || "";
+const diskPath = params.get("diskPath") || "";
 const requestedVideoId = params.get("videoId") || "";
 const returnTo = params.get("returnTo") || "";
 
@@ -84,7 +93,7 @@ els.back?.addEventListener("click", () => {
     window.close();
     return;
   }
-  window.location.href = returnTo || (mediaId ? "/media" : "/");
+  window.location.href = returnTo || (mediaId ? "/media" : diskDrive ? "/disk-usage" : "/");
 });
 
 els.openFile?.addEventListener("click", () => {
@@ -167,7 +176,7 @@ els.video?.addEventListener("pause", revealPlayerUi);
 els.video?.addEventListener("ended", revealPlayerUi);
 
 els.video?.addEventListener("error", () => {
-  setPlaybackStatus(videoErrorMessage());
+  handleVideoPlaybackError();
 });
 
 window.addEventListener("beforeunload", () => {
@@ -299,11 +308,15 @@ function shouldIgnorePlayerShortcut(event) {
 }
 
 async function load() {
-  if (!workId && !mediaId) {
-    showNotice("缺少 workId 或 mediaId");
+  if (!workId && !mediaId && !(diskDrive && diskPath)) {
+    showNotice("缺少 workId、mediaId 或磁盘视频路径");
     return;
   }
   try {
+    if (diskDrive && diskPath) {
+      await loadDiskUsageMedia();
+      return;
+    }
     if (mediaId) {
       await loadGalleryMedia();
       return;
@@ -320,6 +333,18 @@ async function load() {
   } catch (error) {
     showNotice(error.message || "读取作品失败");
   }
+}
+
+async function loadDiskUsageMedia() {
+  const query = new URLSearchParams({ drive: diskDrive, path: diskPath });
+  const data = await api(`/api/disk-usage/item?${query}`);
+  applyCurrentWorkDetails(data.work);
+  const video = selectInitialVideo(currentWork);
+  if (!video) {
+    showNotice("这个磁盘文件不可播放");
+    return;
+  }
+  await playVideo(video);
 }
 
 function startDeferredStream() {
@@ -357,6 +382,7 @@ async function loadGalleryMedia() {
 }
 
 function galleryMediaAsWork(media = {}) {
+  const isEpisodic = media.mediaKind === "tv" || media.mediaKind === "anime";
   const metadata = media.mediaKind === "movie" ? media.movieMetadata || {} : media.tvSeries || {};
   const title = media.mediaKind === "movie"
     ? [metadata.title || metadata.movieTitle || media.title, metadata.year ? `(${metadata.year})` : ""].filter(Boolean).join(" ")
@@ -379,8 +405,8 @@ function galleryMediaAsWork(media = {}) {
     title,
     directoryName: media.title || title,
     relativePath: media.relativePath || "",
-    personName: media.mediaKind === "tv" ? media.seriesName || "" : media.personName || "",
-    personDisplayName: media.mediaKind === "tv" ? media.seriesName || "" : media.personName || "",
+    personName: isEpisodic ? media.seriesName || "" : media.personName || "",
+    personDisplayName: isEpisodic ? media.seriesName || "" : media.personName || "",
     sourcePaths: [media.relativePath || ""].filter(Boolean),
     videoCount: videos.length,
     playableCount: videos.filter((video) => video.playable).length,
@@ -394,7 +420,7 @@ function galleryMediaAsWork(media = {}) {
       ratingCount: metadata.ratingCount || null,
       actors: metadata.actors || [],
       maker: media.kindLabel || "",
-      series: media.mediaKind === "tv" ? media.seriesName || "" : "",
+      series: isEpisodic ? media.seriesName || "" : "",
       tags: metadata.genres || []
     },
     galleryMetadata: metadata,
@@ -463,8 +489,9 @@ async function playVideo(video, options = {}) {
   hidePlaybackControls();
 
   try {
-    const sourceQuery = mediaId ? "?source=gallery" : "";
-    const playInfo = await api(`/api/playinfo/${encodeURIComponent(video.id)}${sourceQuery}`);
+    const playInfo = currentWork?.diskUsage
+      ? await api(`/api/disk-usage/playinfo?${new URLSearchParams({ drive: video.diskDrive || diskDrive, path: video.diskPath || diskPath })}`)
+      : await api(`/api/playinfo/${encodeURIComponent(video.id)}${mediaId ? "?source=gallery" : ""}`);
     currentPlayInfo = playInfo;
     const savedProgress = video.progress || (currentWork.progress?.videoId === video.id ? currentWork.progress : null);
     const requestedResumePosition = Number(options.resumePosition);
@@ -889,6 +916,24 @@ function videoErrorMessage() {
   return `${message} · ${playbackModeText()}`;
 }
 
+function handleVideoPlaybackError() {
+  const fallbackStreamUrl = String(currentPlayInfo?.fallbackStreamUrl || "").trim();
+  if ((currentPlayInfo?.mode || "direct") === "direct" && fallbackStreamUrl) {
+    const resumePosition = mediaPosition();
+    currentPlayInfo = {
+      ...currentPlayInfo,
+      mode: "transcode",
+      label: currentPlayInfo.hasNvenc ? "GPU 兼容转码" : "兼容转码",
+      streamUrl: fallbackStreamUrl,
+      fallbackStreamUrl: ""
+    };
+    setPlaybackStatus("直连失败，正在切换兼容播放");
+    setVideoSourceAt(resumePosition, { autoPlay: true, holdFrame: true });
+    return;
+  }
+  setPlaybackStatus(videoErrorMessage());
+}
+
 function formatPlaybackTime(seconds) {
   const totalSeconds = Math.max(0, Math.floor(Number(seconds || 0) || 0));
   const hours = Math.floor(totalSeconds / 3600);
@@ -909,6 +954,14 @@ function renderMeta(work) {
   }
   if (work.galleryMedia) {
     renderGalleryMediaMeta(work);
+    return;
+  }
+  if (work.diskUsage) {
+    appendMeta("来源", `空间 · ${work.diskDrive || "磁盘"}`);
+    appendMeta("标题", work.title || "");
+    appendMeta("格式", videoExtensionLabel((work.videos || [])[0]));
+    appendMeta("大小", formatFileSize(work.videoSize));
+    appendMeta("路径", work.relativePath || "");
     return;
   }
   appendMeta("番号", info.code || "");
@@ -937,12 +990,13 @@ function renderMeta(work) {
 
 function renderGalleryMediaMeta(work) {
   const metadata = work.galleryMetadata || {};
-  appendMeta("类型", work.mediaKind === "tv" ? "电视剧" : "电影");
+  const isEpisodic = work.mediaKind === "tv" || work.mediaKind === "anime";
+  appendMeta("类型", work.mediaKind === "anime" ? "动漫" : work.mediaKind === "tv" ? "电视剧" : "电影");
   appendMeta("标题", work.title || "");
-  appendMeta(work.mediaKind === "tv" ? "首播" : "上映", metadata.pubdate || (metadata.releaseDates || []).join(" / "));
+  appendMeta(isEpisodic ? "首播" : "上映", metadata.pubdate || (metadata.releaseDates || []).join(" / "));
   appendMeta("评分", metadata.rating ? `${metadata.rating} 分${metadata.ratingCount ? `，${metadata.ratingCount} 人评价` : ""}` : "");
   appendMeta("分类", [work.category, work.subCategory].filter(Boolean).join(" / "));
-  appendMeta("系列", work.mediaKind === "tv" ? work.personDisplayName || "" : "");
+  appendMeta("系列", isEpisodic ? work.personDisplayName || "" : "");
   const people = uniqueTextList([...(metadata.directors || []), ...(metadata.actors || [])]);
   if (people.length) appendEntityRow("演职员", people.slice(0, 16).map((name) => ({ name })));
   const genres = uniqueTextList(metadata.genres || []);
@@ -1162,7 +1216,7 @@ async function restorePlaybackSnapshot(snapshot) {
 function updateMarkerButton() {
   if (!els.markerA) return;
   const active = (currentWork?.localMarkers || []).includes("A");
-  els.markerA.hidden = !currentWork || Boolean(currentWork.missingLocal) || Boolean(currentWork.galleryMedia);
+  els.markerA.hidden = !currentWork || Boolean(currentWork.missingLocal) || Boolean(currentWork.galleryMedia) || Boolean(currentWork.diskUsage);
   els.markerA.classList.toggle("active", active);
   els.markerA.textContent = active ? "A 已标记" : "标记 A";
   els.markerA.title = active ? "移除 A 标记" : "添加 A 标记";
@@ -1174,7 +1228,14 @@ async function openCurrentLocalFolder() {
   els.openFile.disabled = true;
   els.openFile.textContent = "打开中";
   try {
-    await api("/api/open-folder", { method: "POST", body: { videoId: currentVideo.id } });
+    if (currentWork?.diskUsage) {
+      await api("/api/disk-usage/open", {
+        method: "POST",
+        body: { action: "reveal", driveId: currentVideo.diskDrive || diskDrive, path: currentVideo.diskPath || diskPath }
+      });
+    } else {
+      await api("/api/open-folder", { method: "POST", body: { videoId: currentVideo.id } });
+    }
     els.openFile.textContent = "已打开";
     window.setTimeout(() => {
       els.openFile.textContent = originalText;
@@ -1202,7 +1263,7 @@ function updateOpenFileButton() {
 
 function updateDeleteLocalButton() {
   if (!els.deleteLocal) return;
-  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia;
+  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia && !currentWork.diskUsage;
   els.deleteLocal.hidden = !available;
   els.deleteLocal.disabled = !available;
   els.deleteLocal.textContent = "删除本地文件";
@@ -1211,7 +1272,7 @@ function updateDeleteLocalButton() {
 
 function updateCorrectActorButton() {
   if (!els.correctActor) return;
-  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia;
+  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia && !currentWork.diskUsage;
   els.correctActor.hidden = !available;
   els.correctActor.disabled = !available;
   els.correctActor.textContent = "订正演员";
@@ -1220,7 +1281,7 @@ function updateCorrectActorButton() {
 
 function updateMoveToPersonButton() {
   if (!els.moveToPerson) return;
-  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia;
+  const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia && !currentWork.diskUsage;
   els.moveToPerson.hidden = !available;
   els.moveToPerson.disabled = !available;
   els.moveToPerson.textContent = pendingMoveJob?.status === "blocked" ? "迁移需处理" : pendingMoveJob?.id ? "恢复迁移" : "迁移演员";
@@ -1249,14 +1310,7 @@ function normalizePersonSearchText(value) {
 }
 
 function movePersonSearchValues(person) {
-  const profile = person?.actorProfile || {};
-  return [
-    person?.id,
-    person?.name,
-    profile.personName,
-    profile.displayName,
-    ...(Array.isArray(profile.aliases) ? profile.aliases : [])
-  ].map(normalizePersonSearchText).filter(Boolean);
+  return personMoveSearchValues(person);
 }
 
 function movePersonMatchScore(person, query) {
@@ -1318,6 +1372,9 @@ async function openMovePersonDialog() {
     libraryRootsForMove(),
     movePeopleForSearch()
   ]);
+  const vrMove = isVrWorkForMove(currentWork);
+  const sourceRoot = workMoveSourceRoot(currentWork, roots);
+  const selectedRoot = sourceRoot || defaultRoot;
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "player-move-backdrop";
@@ -1383,7 +1440,7 @@ async function openMovePersonDialog() {
       option.textContent = formatLibraryPath(root);
       rootSelect.append(option);
     }
-    rootSelect.value = defaultRoot;
+    rootSelect.value = selectedRoot;
     const folderInput = document.createElement("input");
     folderInput.type = "text";
     folderInput.placeholder = "若葉結希";
@@ -1418,25 +1475,78 @@ async function openMovePersonDialog() {
     let mode = "existing";
     let selectedExistingPerson = null;
     let visibleExistingPeople = [];
+    const movePersonDetails = new Map();
+    const movePersonDetailRequests = new Map();
     const exactExistingMatches = () => {
       const query = normalizePersonSearchText(existingInput.value);
       if (!query) return [];
       return movePeople.filter((person) => movePersonSearchValues(person).includes(query));
     };
-    const selectExistingPerson = (person) => {
+    const resolvedMovePerson = (person) => movePersonDetails.get(String(person?.id || "")) || person;
+    const loadMovePersonDetail = async (person) => {
+      const id = String(person?.id || "");
+      if (!id) return person;
+      if (movePersonDetails.has(id)) return movePersonDetails.get(id);
+      if (movePersonDetailRequests.has(id)) return movePersonDetailRequests.get(id);
+      const request = api(`/api/people/${encodeURIComponent(id)}?limit=1`)
+        .then((data) => {
+          const detail = data.person || person;
+          movePersonDetails.set(id, detail);
+          return detail;
+        })
+        .finally(() => movePersonDetailRequests.delete(id));
+      movePersonDetailRequests.set(id, request);
+      return request;
+    };
+    const plannedExistingTarget = (person) => planWorkMoveTarget({
+      work: currentWork,
+      selectedPerson: resolvedMovePerson(person),
+      people: movePeople,
+      roots,
+      defaultRoot: selectedRoot
+    });
+    const selectExistingPerson = async (person) => {
       selectedExistingPerson = person || null;
       if (selectedExistingPerson) existingInput.value = selectedExistingPerson.name || selectedExistingPerson.actorProfile?.displayName || selectedExistingPerson.id;
       renderExistingPeople();
+      if (!selectedExistingPerson || !vrMove) return;
+      try {
+        const detail = await loadMovePersonDetail(selectedExistingPerson);
+        if (String(selectedExistingPerson?.id || "") !== String(detail?.id || "")) return;
+        selectedExistingPerson = detail;
+        renderExistingPeople();
+      } catch (error) {
+        status.textContent = error.message || "读取人物目录失败";
+      }
     };
     const renderExistingPeople = () => {
       const query = existingInput.value.trim();
       visibleExistingPeople = searchMovePeople(movePeople, query);
       const exactMatches = exactExistingMatches();
-      if (exactMatches.length === 1) selectedExistingPerson = exactMatches[0];
+      if (exactMatches.length === 1) {
+        selectedExistingPerson = resolvedMovePerson(exactMatches[0]);
+        if (vrMove && !movePersonDetails.has(String(selectedExistingPerson.id)) && !movePersonDetailRequests.has(String(selectedExistingPerson.id))) {
+          void loadMovePersonDetail(selectedExistingPerson).then((detail) => {
+            if (String(selectedExistingPerson?.id || "") !== String(detail?.id || "")) return;
+            selectedExistingPerson = detail;
+            renderExistingPeople();
+          }).catch((error) => {
+            status.textContent = error.message || "读取人物目录失败";
+          });
+        }
+      }
       else if (selectedExistingPerson && !visibleExistingPeople.some((person) => person.id === selectedExistingPerson.id)) selectedExistingPerson = null;
 
       existingResults.innerHTML = "";
+      const renderedTargetKeys = new Set();
       for (const person of visibleExistingPeople) {
+        const plannedTarget = plannedExistingTarget(person);
+        if (!plannedTarget) continue;
+        const targetKey = plannedTarget.mode === "existing"
+          ? `person:${plannedTarget.personId}`
+          : `create:${normalizePersonSearchText(plannedTarget.createPerson?.name)}`;
+        if (renderedTargetKeys.has(targetKey)) continue;
+        renderedTargetKeys.add(targetKey);
         const option = document.createElement("button");
         option.type = "button";
         option.className = "player-move-person-option";
@@ -1444,12 +1554,17 @@ async function openMovePersonDialog() {
         option.setAttribute("aria-selected", person.id === selectedExistingPerson?.id ? "true" : "false");
         option.classList.toggle("selected", person.id === selectedExistingPerson?.id);
         const name = document.createElement("strong");
-        name.textContent = person.actorProfile?.displayName || person.name || `人物 ${person.id}`;
+        name.textContent = personMoveDisplayName(plannedTarget.person) || `人物 ${plannedTarget.personId}`;
         const meta = document.createElement("span");
         const workCount = Number(person.workCount || 0);
-        meta.textContent = [formatLibraryPath(person.relativePath || ""), `${workCount} 部作品`].filter(Boolean).join(" · ");
+        const targetPath = formatLibraryPath(plannedTarget.person?.relativePath || plannedTarget.person?.sourcePaths?.[0] || "");
+        meta.textContent = plannedTarget.unavailableReason
+          ? plannedTarget.unavailableReason
+          : plannedTarget.adjustedForVr
+          ? ["复用已有 VR 目录", targetPath].filter(Boolean).join(" · ")
+          : [targetPath, `${workCount} 部作品`].filter(Boolean).join(" · ");
         option.append(name, meta);
-        option.addEventListener("click", () => selectExistingPerson(person));
+        option.addEventListener("click", () => void selectExistingPerson(person));
         existingResults.append(option);
       }
 
@@ -1459,9 +1574,13 @@ async function openMovePersonDialog() {
       existingInput.setAttribute("aria-expanded", visibleExistingPeople.length > 0 ? "true" : "false");
       if (mode === "existing") {
         submit.disabled = !selectedExistingPerson;
-        status.textContent = selectedExistingPerson
-          ? `已选择：${selectedExistingPerson.actorProfile?.displayName || selectedExistingPerson.name}`
-          : "";
+        const plannedTarget = selectedExistingPerson ? plannedExistingTarget(selectedExistingPerson) : null;
+        status.textContent = plannedTarget?.unavailableReason
+          ? plannedTarget.unavailableReason
+          : plannedTarget
+          ? `已选择：${personMoveDisplayName(plannedTarget.person)}${plannedTarget.adjustedForVr ? ` · ${formatLibraryPath(plannedTarget.targetDirectory)}` : ""}`
+          : selectedExistingPerson ? "无法确定目标保存位置" : "";
+        if (selectedExistingPerson && (!plannedTarget || plannedTarget.unavailableReason)) submit.disabled = true;
       }
     };
     const renderMode = () => {
@@ -1518,7 +1637,14 @@ async function openMovePersonDialog() {
             const data = await api(`/api/people/${encodeURIComponent(personId)}?limit=1`);
             targetPerson = data.person || null;
           }
-          closeMoveDialog(overlay, { mode, personId, person: targetPerson }, resolve);
+          if (targetPerson && vrMove) targetPerson = await loadMovePersonDetail(targetPerson);
+          const plannedTarget = plannedExistingTarget(targetPerson);
+          if (!plannedTarget || plannedTarget.unavailableReason) {
+            status.textContent = plannedTarget?.unavailableReason || "无法确定目标保存位置";
+            submit.disabled = false;
+            return;
+          }
+          closeMoveDialog(overlay, plannedTarget, resolve);
         } catch (error) {
           status.textContent = error.message || "读取目标人物失败";
           submit.disabled = false;
@@ -1526,9 +1652,11 @@ async function openMovePersonDialog() {
         return;
       }
 
-      const name = nameInput.value.trim();
-      const folderName = safeFolderName(folderInput.value || name);
-      if (!name) {
+      const inputName = nameInput.value.trim();
+      const name = inputName;
+      const inputFolderName = folderInput.value || inputName;
+      const folderName = safeFolderName(inputFolderName);
+      if (!inputName) {
         status.textContent = "请填写演员名";
         return;
       }
@@ -1619,7 +1747,7 @@ async function moveCurrentWorkToPerson() {
         method: "POST",
         body: target.mode === "create"
           ? { createPerson: target.createPerson, idempotencyKey }
-          : { personId: target.personId, idempotencyKey }
+          : { personId: target.personId, targetDirectory: target.targetDirectory || "", idempotencyKey }
       });
     } catch (error) {
       if (error.job?.id) data = { job: error.job };
@@ -1877,7 +2005,7 @@ async function correctCurrentActorFromFolder() {
 }
 
 async function deleteCurrentLocalFiles() {
-  if (!els.deleteLocal || !currentWork?.id || currentWork.missingLocal || currentWork.galleryMedia || !isTrustedNetworkFeatureAvailable()) return;
+  if (!els.deleteLocal || !currentWork?.id || currentWork.missingLocal || currentWork.galleryMedia || currentWork.diskUsage || !isTrustedNetworkFeatureAvailable()) return;
   const title = currentWork.title || currentWork.directoryName || currentWork.id;
   const pathText = formatLibraryPath(currentWork.relativePath || "");
   const message = [
@@ -1994,7 +2122,7 @@ function stopProgressTimer() {
 
 function reportProgress(positionOverride = null, options = {}) {
   const duration = mediaDuration();
-  if (!currentVideo || !els.video || !duration) return;
+  if (!currentVideo || !els.video || !duration || currentWork?.diskUsage) return;
   const now = Date.now();
   if (!options.force && now - lastProgressReport < 1000) return;
   lastProgressReport = now;
@@ -2010,6 +2138,17 @@ function reportProgress(positionOverride = null, options = {}) {
 
 function formatLibraryPath(value) {
   return String(value || "").replaceAll("\\", "/");
+}
+
+function formatFileSize(bytes) {
+  let value = Math.max(0, Number(bytes) || 0);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
 await load();

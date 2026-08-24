@@ -11,6 +11,9 @@ export function followingAuthorFacet(db) {
         users.avatar_url AS avatarUrl,
         users.profile_url AS profileUrl,
         users.unique_id AS uniqueId,
+        users.total_favorited AS totalFavorited,
+        users.nickname_history_json AS nameHistoryJson,
+        users.total_favorited_history_json AS totalFavoritedHistoryJson,
         users.account_status AS accountStatus,
         users.account_status_reason AS accountStatusReason,
         users.account_status_detected_at AS accountStatusDetectedAt,
@@ -40,6 +43,9 @@ export function followingAuthorFacet(db) {
       followed.avatarUrl,
       followed.profileUrl,
       followed.uniqueId,
+      followed.totalFavorited,
+      followed.nameHistoryJson,
+      followed.totalFavoritedHistoryJson,
       followed.accountStatus,
       followed.accountStatusReason,
       followed.accountStatusDetectedAt,
@@ -80,6 +86,9 @@ export function authorFacet(db) {
       COALESCE(NULLIF(author_user.avatar_url, ''), grouped.avatarUrl) AS avatarUrl,
       NULLIF(author_user.profile_url, '') AS profileUrl,
       NULLIF(author_user.unique_id, '') AS uniqueId,
+      author_user.total_favorited AS totalFavorited,
+      author_user.nickname_history_json AS nameHistoryJson,
+      author_user.total_favorited_history_json AS totalFavoritedHistoryJson,
       COALESCE(NULLIF(author_user.account_status, ''), 'active') AS accountStatus,
       COALESCE(NULLIF(author_user.account_status_reason, ''), '') AS accountStatusReason,
       COALESCE(NULLIF(author_user.account_status_detected_at, ''), '') AS accountStatusDetectedAt,
@@ -101,6 +110,9 @@ function publicAuthorFacet(row) {
     avatarUrl: row.avatarUrl || "",
     profileUrl: row.profileUrl || "",
     uniqueId: row.uniqueId || "",
+    totalFavorited: optionalHistoryNumber(row.totalFavorited),
+    nameHistory: parseAuthorProfileHistory(row.nameHistoryJson, { field: "name" }),
+    totalFavoritedHistory: parseAuthorProfileHistory(row.totalFavoritedHistoryJson, { numeric: true, field: "value" }),
     accountStatus: row.accountStatus === "banned" ? "banned" : "active",
     accountStatusReason: row.accountStatusReason || "",
     accountStatusDetectedAt: row.accountStatusDetectedAt || "",
@@ -112,4 +124,35 @@ function publicAuthorFacet(row) {
     fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
     count: Number(row.count || 0)
   };
+}
+
+export function parseAuthorProfileHistory(value, options = {}) {
+  let source = value;
+  if (typeof value === "string") {
+    try { source = JSON.parse(value); } catch { source = []; }
+  }
+  const numeric = options.numeric === true;
+  const field = String(options.field || "value");
+  const result = [];
+  const seen = new Set();
+  for (const item of Array.isArray(source) ? source : []) {
+    const raw = item && typeof item === "object" ? item.value : item;
+    const normalized = numeric ? optionalHistoryNumber(raw) : String(raw || "").trim();
+    if (normalized === null || normalized === "") continue;
+    const key = `${typeof normalized}:${normalized}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({
+      [field]: normalized,
+      firstSeenAt: item && typeof item === "object" ? String(item.first_seen_at || "") : "",
+      lastSeenAt: item && typeof item === "object" ? String(item.last_seen_at || item.first_seen_at || "") : ""
+    });
+  }
+  return result.sort((left, right) => String(right.lastSeenAt).localeCompare(String(left.lastSeenAt)));
+}
+
+function optionalHistoryNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : null;
 }

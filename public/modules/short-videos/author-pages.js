@@ -7,7 +7,7 @@ import {
   SHORT_VIDEO_LOAD_STALE
 } from "./author-navigation.js?v=20260811-author-load-contract-01";
 import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
-
+import { renderShortVideoAuthorProfileHistory } from "./author-profile-history.js?v=20260825-profile-history-01";
 export function createShortVideoAuthorPages(deps) {
   const {
     AUTHOR_APPEND_LOOKAHEAD,
@@ -29,6 +29,7 @@ export function createShortVideoAuthorPages(deps) {
     pushRoute,
     renderDeleteSelectionActions,
     replaceRoute,
+    runShortVideoLocalAction,
     setAuthorPanelReturnFeed,
     shortVideoAuthorMentionCache,
     shortVideoCardCoverUrl,
@@ -156,7 +157,7 @@ export function createShortVideoAuthorPages(deps) {
       collected.textContent = `资料更新 ${collectedAt}`;
       libraryMeta.append(collected);
     }
-    copy.append(eyebrow, nameRow, stats, identity, signature, libraryMeta);
+    copy.append(eyebrow, nameRow, stats, identity, signature, ...renderShortVideoAuthorProfileHistory(author, { formatCompact, formatDate }), libraryMeta);
     const actions = document.createElement("div");
     actions.className = "short-video-author-page-actions";
     const follow = createAuthorFollowButton(authorVideo, author, "page");
@@ -165,6 +166,12 @@ export function createShortVideoAuthorPages(deps) {
     douyin.className = "short-video-author-page-secondary";
     douyin.textContent = "抖音主页";
     douyin.addEventListener("click", () => openAuthorDouyinLink(author));
+    const authorFolder = document.createElement("button");
+    authorFolder.type = "button";
+    authorFolder.className = "short-video-author-page-secondary";
+    authorFolder.textContent = "作者文件夹";
+    authorFolder.disabled = !authorVideo?.id; authorFolder.title = authorVideo?.id ? "打开作者本地文件夹" : "当前作者没有可定位的本地作品";
+    authorFolder.addEventListener("click", () => runShortVideoLocalAction(authorVideo, "open-author-folder", authorFolder));
     const quickRefresh = document.createElement("button");
     quickRefresh.type = "button";
     quickRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
@@ -184,7 +191,7 @@ export function createShortVideoAuthorPages(deps) {
     }
     fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
       .catch((error) => showBrowserToast(error?.message || "数量确认启动失败")));
-    actions.append(follow, douyin, quickRefresh, fullRefresh);
+    actions.append(follow, douyin, authorFolder, quickRefresh, fullRefresh);
     head.append(avatar, copy, actions);
     return head;
   }

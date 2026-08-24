@@ -181,6 +181,8 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
     FROM profiles
     WHERE TRIM(COALESCE(sec_uid, '')) <> ''
   `).all();
+  const hasNicknameHistory = profileColumns.has("nickname_history_json");
+  const hasFavoritedHistory = profileColumns.has("total_favorited_history_json");
   const bestBySecUid = new Map();
   const accountStateBySecUid = new Map();
   for (const row of profileRows) {
@@ -212,6 +214,23 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
       AND ?1 <> ''
       AND COALESCE(author_name, '') IS NOT ?1
   `);
+  const targetProfileHistory = targetDb.prepare(`
+    SELECT nickname, total_favorited, nickname_history_json, total_favorited_history_json,
+           profile_collected_at, updated_at
+    FROM short_video_users
+    WHERE id = ?
+  `);
+  const profileHistoryUpdate = targetDb.prepare(`
+    UPDATE short_video_users
+    SET nickname_history_json = ?1,
+        total_favorited_history_json = ?2,
+        updated_at = ?3
+    WHERE id = ?4
+      AND (
+        nickname_history_json IS NOT ?1
+        OR total_favorited_history_json IS NOT ?2
+      )
+  `);
   const accountStateUpdate = profileColumns.has("account_status")
     ? targetDb.prepare(`
         UPDATE short_video_users
@@ -230,13 +249,16 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
   let profileUsersChanged = 0;
   let accountStatesChanged = 0;
   let videoAuthorsChanged = 0;
+  let profileHistoriesChanged = 0;
   targetDb.exec("BEGIN");
   try {
     for (const [secUid, candidate] of bestBySecUid) {
       const row = candidate.row;
       const nickname = String(row.nickname || "").trim();
+      const userId = `douyin:${secUid}`;
+      const previous = targetProfileHistory.get(userId) || {};
       profileUsersChanged += changedRows(userUpsert.run(
-        `douyin:${secUid}`,
+        userId,
         "douyin",
         secUid,
         String(row.uid || ""),
@@ -260,6 +282,23 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
         String(row.created_at || now),
         now
       ));
+      const observedAt = String(row.profile_collected_at || row.updated_at || now);
+      const previousAt = String(previous.profile_collected_at || previous.updated_at || observedAt);
+      const nicknameHistory = mergeProfileObservationHistory(
+        [previous.nickname_history_json, hasNicknameHistory ? row.nickname_history_json : "[]"],
+        [{ value: previous.nickname, observedAt: previousAt }, { value: nickname, observedAt }]
+      );
+      const favoritedHistory = mergeProfileObservationHistory(
+        [previous.total_favorited_history_json, hasFavoritedHistory ? row.total_favorited_history_json : "[]"],
+        [{ value: previous.total_favorited, observedAt: previousAt }, { value: row.total_favorited, observedAt }],
+        { numeric: true }
+      );
+      profileHistoriesChanged += changedRows(profileHistoryUpdate.run(
+        nicknameHistory,
+        favoritedHistory,
+        now,
+        userId
+      ));
       const accountState = accountStateBySecUid.get(secUid);
       if (accountStateUpdate && accountState) {
         accountStatesChanged += changedRows(accountStateUpdate.run(
@@ -267,7 +306,7 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
           accountState.reason,
           accountState.detectedAt,
           now,
-          `douyin:${secUid}`
+          userId
         ));
       }
       videoAuthorsChanged += changedRows(videoAuthorNameUpdate.run(nickname, now, secUid));
@@ -281,10 +320,11 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
   }
   return {
     profilesSeen: bestBySecUid.size,
-    profilesChanged: profileUsersChanged + accountStatesChanged + videoAuthorsChanged,
+    profilesChanged: profileUsersChanged + accountStatesChanged + videoAuthorsChanged + profileHistoriesChanged,
     profileUsersChanged,
     accountStatesChanged,
-    videoAuthorsChanged
+    videoAuthorsChanged,
+    profileHistoriesChanged
   };
 }
 
@@ -294,7 +334,8 @@ function emptyProfileSyncResult() {
     profilesChanged: 0,
     profileUsersChanged: 0,
     accountStatesChanged: 0,
-    videoAuthorsChanged: 0
+    videoAuthorsChanged: 0,
+    profileHistoriesChanged: 0
   };
 }
 
@@ -310,4 +351,39 @@ function optionalInteger(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? Math.floor(number) : null;
+}
+
+function mergeProfileObservationHistory(rawHistories, observations, options = {}) {
+  const numeric = options.numeric === true;
+  const byValue = new Map();
+  const append = (value, firstSeenAt = "", lastSeenAt = firstSeenAt) => {
+    const normalized = numeric ? optionalInteger(value) : String(value || "").trim();
+    if (normalized === null || normalized === "") return;
+    const key = `${typeof normalized}:${normalized}`;
+    const first = String(firstSeenAt || lastSeenAt || "");
+    const last = String(lastSeenAt || firstSeenAt || "");
+    const current = byValue.get(key);
+    if (current) {
+      current.first_seen_at = [current.first_seen_at, first].filter(Boolean).sort()[0] || "";
+      current.last_seen_at = [current.last_seen_at, last].filter(Boolean).sort().at(-1) || "";
+      return;
+    }
+    byValue.set(key, { value: normalized, first_seen_at: first, last_seen_at: last });
+  };
+  for (const raw of rawHistories || []) {
+    let entries = raw;
+    if (typeof raw === "string") {
+      try { entries = JSON.parse(raw); } catch { entries = []; }
+    }
+    for (const item of Array.isArray(entries) ? entries : []) {
+      if (item && typeof item === "object") append(item.value, item.first_seen_at, item.last_seen_at);
+      else append(item);
+    }
+  }
+  for (const observation of observations || []) {
+    append(observation?.value, observation?.observedAt, observation?.observedAt);
+  }
+  return JSON.stringify([...byValue.values()]
+    .sort((left, right) => String(left.last_seen_at).localeCompare(String(right.last_seen_at)) || String(left.value).localeCompare(String(right.value), "zh-CN"))
+    .slice(-64));
 }

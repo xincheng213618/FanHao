@@ -75,6 +75,7 @@ final class FeedStats {
       stats.collects += item.collects;
       stats.shares += item.shares;
       stats.plays += item.plays;
+      stats.bytes += Math.max(0, item.sizeBytes);
       stats.durationMs += Math.max(0, item.durationMs);
     }
     return stats;
@@ -129,6 +130,7 @@ final class ShortVideoItem implements NativeShortVideoActionSnapshots.Target {
   boolean authorFollowing;
   final String publishedAt;
   final long durationMs;
+  final long sizeBytes;
   final int width;
   final int height;
   long likes;
@@ -142,7 +144,7 @@ final class ShortVideoItem implements NativeShortVideoActionSnapshots.Target {
   final String shareUrl;
   final String originalUrl;
 
-  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, String galleryPresentation, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, boolean userLiked, boolean userCollected, String shareUrl, String originalUrl) {
+  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, String galleryPresentation, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, long sizeBytes, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, boolean userLiked, boolean userCollected, String shareUrl, String originalUrl) {
     this.id = id == null ? "" : id;
     this.awemeId = awemeId == null ? "" : awemeId;
     this.mediaType = mediaType == null ? "video" : mediaType;
@@ -174,6 +176,7 @@ final class ShortVideoItem implements NativeShortVideoActionSnapshots.Target {
     this.authorFollowing = authorFollowing;
     this.publishedAt = publishedAt == null ? "" : publishedAt;
     this.durationMs = durationMs;
+    this.sizeBytes = Math.max(0, sizeBytes);
     this.width = Math.max(0, width);
     this.height = Math.max(0, height);
     this.likes = likes;

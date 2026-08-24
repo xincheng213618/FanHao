@@ -38,7 +38,7 @@ const els = {
   productNav: document.querySelector(".product-nav"),
   productTabs: [...document.querySelectorAll("[data-product-view]")],
   topAdminLink: document.querySelector("#topAdminLink"),
-  viewTabs: [...document.querySelectorAll(".view-tab")],
+  viewTabs: [...document.querySelectorAll(".view-tab[data-view]")],
   workSearch: document.querySelector("#workSearch"),
   sortSelect: null,
   filterList: null,
@@ -596,6 +596,15 @@ function productViewForActiveView(view = state.activeView) {
 function syncProductShell(view = state.activeView) {
   document.body.classList.add("fanhao-view");
   document.body.classList.remove("standalone-module-view");
+  const isWesternBranch = (state.peopleScope || "main") === "western";
+  document.body.classList.toggle("western-branch-view", isWesternBranch);
+  const sidebar = document.querySelector(".fanhao-sidebar");
+  const sidebarEyebrow = sidebar?.querySelector(".fanhao-sidebar-heading .eyebrow");
+  const sidebarTitle = sidebar?.querySelector(".fanhao-sidebar-heading h2");
+  if (sidebar) sidebar.setAttribute("aria-label", isWesternBranch ? "欧美分支菜单" : "番号二级菜单");
+  if (sidebarEyebrow) sidebarEyebrow.textContent = isWesternBranch ? "欧美" : "番号";
+  if (sidebarTitle) sidebarTitle.textContent = isWesternBranch ? "R 盘分支" : "资料库";
+  document.title = isWesternBranch ? "欧美 · FanHao" : "个人视频资料库";
 }
 
 function searchWorksByText(value) {
@@ -609,7 +618,8 @@ function productButtonActive(button, view = state.activeView) {
   const productView = button.dataset.productView || "people";
   if (productView === "people") {
     const buttonScope = button.dataset.peopleScope || "main";
-    return productViewForActiveView(view) === "people" && (state.peopleScope || "main") === buttonScope;
+    return productViewForActiveView(view) === "people"
+      && (buttonScope === "main" || (state.peopleScope || "main") === buttonScope);
   }
   return false;
 }
@@ -624,7 +634,10 @@ function syncNavigationState(view = state.activeView) {
   }
   for (const button of els.viewTabs || []) {
     const activeView = view === "search" ? state.searchReturnView || "people" : view;
-    const active = codePrefixPage.navigationButtonActive(button, activeView) ?? button.dataset.view === activeView;
+    const peopleScope = button.dataset.peopleScope;
+    const active = peopleScope
+      ? activeView === "people" && (state.peopleScope || "main") === peopleScope
+      : codePrefixPage.navigationButtonActive(button, activeView) ?? button.dataset.view === activeView;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
@@ -2418,9 +2431,14 @@ for (const button of els.viewTabs) {
   button.addEventListener("pointerenter", prefetchCollection, { passive: true });
   button.addEventListener("pointerdown", prefetchCollection, { passive: true });
   button.addEventListener("focus", prefetchCollection);
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     clearWorkSearch();
     if (codePrefixPage.handleNavigationButton(button)) return;
+    if (button.dataset.view === "people" && button.dataset.peopleScope) {
+      await setPeopleScope(button.dataset.peopleScope);
+      setActiveView("people");
+      return;
+    }
     setActiveView(button.dataset.view);
   });
 }

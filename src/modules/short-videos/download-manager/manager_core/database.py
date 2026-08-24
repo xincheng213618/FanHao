@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
-from .common import normalize_int, now_iso, parse_profile_url
+from .common import clean_profile_nickname, normalize_int, now_iso, parse_profile_url
 from .config import (
     CONFIG_DIR,
     DATA_DIR,
@@ -177,10 +178,30 @@ def init_db() -> None:
         migrate_link_author_columns(conn)
         migrate_link_preview_columns(conn)
         migrate_link_profile_presence_columns(conn)
+        migrate_profile_observation_history(conn)
         migrate_link_files(conn)
         migrate_download_records(conn)
         migrate_video_quality_audits(conn)
         migrate_self_profile_aliases(conn)
+        conn.execute(
+            """
+            UPDATE profiles
+            SET nickname=(
+              SELECT NULLIF(TRIM(links.author_nickname), '')
+              FROM links
+              WHERE links.profile_id=profiles.id
+                AND TRIM(COALESCE(links.author_nickname, '')) <> ''
+                AND TRIM(links.author_nickname) NOT IN ('读屏标签已关闭', '读屏标签已开启')
+              ORDER BY links.last_seen_at DESC, links.id DESC
+              LIMIT 1
+            )
+            WHERE TRIM(COALESCE(nickname, '')) IN ('读屏标签已关闭', '读屏标签已开启')
+            """
+        )
+        conn.execute(
+            "UPDATE profiles SET title=NULLIF(TRIM(COALESCE(nickname, '')), '') "
+            "WHERE TRIM(COALESCE(title, '')) IN ('读屏标签已关闭', '读屏标签已开启')"
+        )
         defaults = {
             "profile_url": TEST_PROFILE_URL,
             "profile_tab": "auto",
@@ -194,6 +215,10 @@ def init_db() -> None:
             "download_cycle_limit": "350",
             "download_cycle_cooldown_minutes": "30",
             "failure_guard_threshold": str(DEFAULT_FAILURE_GUARD_THRESHOLD),
+            "automatic_collection_enabled": "0",
+            "automatic_collection_interval_hours": "24",
+            "automatic_collection_last_started_at": "",
+            "automatic_collection_next_run_at": "",
             "cookie_file": str(DEFAULT_COOKIE_FILE),
             "download_proxy": "",
             "downloader_root": str(DOWNLOADER_ROOT),
@@ -212,7 +237,7 @@ def init_db() -> None:
         )
         conn.execute(
             "UPDATE jobs SET status='stopped', finished_at=?, message='服务重启，任务已停止' "
-            "WHERE status='running'",
+            "WHERE status IN ('running', 'queued')",
             (now_iso(),),
         )
         from .queue import seed_download_queue
@@ -343,6 +368,103 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_uid ON profiles(uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_unique_id ON profiles(unique_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_account_status ON profiles(account_status, id)")
+
+
+def parse_profile_history(value: Any, *, numeric: bool = False) -> list[dict[str, Any]]:
+    try:
+        source = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source = []
+    result: list[dict[str, Any]] = []
+    for item in source if isinstance(source, list) else []:
+        raw_value = item.get("value") if isinstance(item, dict) else item
+        if numeric:
+            try:
+                normalized: Any = int(float(raw_value))
+            except (TypeError, ValueError):
+                continue
+        else:
+            normalized = clean_profile_nickname(raw_value)
+            if not normalized:
+                continue
+        first_seen = str(item.get("first_seen_at") or "") if isinstance(item, dict) else ""
+        last_seen = str(item.get("last_seen_at") or first_seen) if isinstance(item, dict) else first_seen
+        result.append({"value": normalized, "first_seen_at": first_seen, "last_seen_at": last_seen})
+    return result
+
+
+def merge_profile_history_value(
+    history: list[dict[str, Any]],
+    value: Any,
+    observed_at: str,
+    *,
+    numeric: bool = False,
+    limit: int = 64,
+) -> list[dict[str, Any]]:
+    if numeric:
+        try:
+            normalized: Any = int(float(value))
+        except (TypeError, ValueError):
+            return history
+    else:
+        normalized = clean_profile_nickname(value)
+        if not normalized:
+            return history
+    seen_at = str(observed_at or now_iso())
+    match = next((item for item in history if item.get("value") == normalized), None)
+    if match:
+        match["first_seen_at"] = min(filter(None, [str(match.get("first_seen_at") or ""), seen_at]), default=seen_at)
+        match["last_seen_at"] = max(str(match.get("last_seen_at") or ""), seen_at)
+    else:
+        history.append({"value": normalized, "first_seen_at": seen_at, "last_seen_at": seen_at})
+    history.sort(key=lambda item: (str(item.get("last_seen_at") or ""), str(item.get("value") or "")))
+    return history[-max(1, int(limit)) :]
+
+
+def migrate_profile_observation_history(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
+    for name in ["nickname_history_json", "total_favorited_history_json"]:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'")
+    migration_key = "profile_observation_history_backfill_version"
+    migration_row = conn.execute("SELECT value FROM settings WHERE key=?", (migration_key,)).fetchone()
+    rebuild_names = not migration_row or migration_row["value"] != "2"
+    for profile in conn.execute(
+        "SELECT id, sec_uid, nickname, total_favorited, profile_collected_at, updated_at, "
+        "nickname_history_json, total_favorited_history_json FROM profiles"
+    ).fetchall():
+        observed_at = str(profile["profile_collected_at"] or profile["updated_at"] or now_iso())
+        names = [] if rebuild_names else parse_profile_history(profile["nickname_history_json"])
+        likes = parse_profile_history(profile["total_favorited_history_json"], numeric=True)
+        names = merge_profile_history_value(names, profile["nickname"], observed_at)
+        likes = merge_profile_history_value(likes, profile["total_favorited"], observed_at, numeric=True)
+        link_names = conn.execute(
+            """
+            SELECT TRIM(author_nickname) nickname,
+                   MIN(COALESCE(NULLIF(discovered_at, ''), NULLIF(last_seen_at, ''), ?)) first_seen_at,
+                   MAX(COALESCE(NULLIF(last_seen_at, ''), NULLIF(discovered_at, ''), ?)) last_seen_at
+            FROM links
+            WHERE author_sec_uid=? AND TRIM(COALESCE(author_nickname, '')) <> ''
+            GROUP BY TRIM(author_nickname)
+            """,
+            (observed_at, observed_at, str(profile["sec_uid"] or "")),
+        ).fetchall() if rebuild_names and str(profile["sec_uid"] or "").strip() else []
+        for link_name in link_names:
+            names = merge_profile_history_value(names, link_name["nickname"], link_name["first_seen_at"] or observed_at)
+            names = merge_profile_history_value(names, link_name["nickname"], link_name["last_seen_at"] or observed_at)
+        conn.execute(
+            "UPDATE profiles SET nickname_history_json=?, total_favorited_history_json=? WHERE id=?",
+            (
+                json.dumps(names, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(likes, ensure_ascii=False, separators=(",", ":")),
+                profile["id"],
+            ),
+        )
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?, '2') "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (migration_key,),
+    )
 
 
 def migrate_profile_collection_history(conn: sqlite3.Connection) -> None:
@@ -700,6 +822,22 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
     source = conn.execute("SELECT * FROM profiles WHERE id=?", (source_id,)).fetchone()
     if target is None or source is None:
         return {"links": 0, "duplicates": 0, "files": 0}
+    nickname_history = parse_profile_history(target["nickname_history_json"])
+    for observation in parse_profile_history(source["nickname_history_json"]):
+        nickname_history = merge_profile_history_value(
+            nickname_history, observation["value"], observation["first_seen_at"] or observation["last_seen_at"]
+        )
+        nickname_history = merge_profile_history_value(
+            nickname_history, observation["value"], observation["last_seen_at"] or observation["first_seen_at"]
+        )
+    favorited_history = parse_profile_history(target["total_favorited_history_json"], numeric=True)
+    for observation in parse_profile_history(source["total_favorited_history_json"], numeric=True):
+        favorited_history = merge_profile_history_value(
+            favorited_history, observation["value"], observation["first_seen_at"] or observation["last_seen_at"], numeric=True
+        )
+        favorited_history = merge_profile_history_value(
+            favorited_history, observation["value"], observation["last_seen_at"] or observation["first_seen_at"], numeric=True
+        )
 
     conn.execute(
         """
@@ -721,6 +859,8 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
           gender=COALESCE(gender, ?),
           age=COALESCE(age, ?),
           verification=COALESCE(NULLIF(verification, ''), NULLIF(?, '')),
+          nickname_history_json=?,
+          total_favorited_history_json=?,
           profile_raw_json=CASE
             WHEN COALESCE(profile_raw_json, '{}')='{}' THEN COALESCE(NULLIF(?, ''), '{}')
             ELSE profile_raw_json
@@ -755,6 +895,8 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
             source["gender"],
             source["age"],
             source["verification"],
+            json.dumps(nickname_history, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(favorited_history, ensure_ascii=False, separators=(",", ":")),
             source["profile_raw_json"],
             source["profile_collected_at"],
             source["profile_collected_at"],
@@ -1101,11 +1243,17 @@ def add_event(level: str, message: str) -> None:
         )
 
 
-def create_job(kind: str, message: str = "", profile_id: int | None = None) -> int:
+def create_job(
+    kind: str,
+    message: str = "",
+    profile_id: int | None = None,
+    *,
+    status: str = "running",
+) -> int:
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO jobs(type, status, profile_id, message, started_at) VALUES(?, 'running', ?, ?, ?)",
-            (kind, profile_id, message, now_iso()),
+            "INSERT INTO jobs(type, status, profile_id, message, started_at) VALUES(?, ?, ?, ?, ?)",
+            (kind, status, profile_id, message, now_iso()),
         )
         return int(cur.lastrowid)
 

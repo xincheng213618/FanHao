@@ -2,7 +2,7 @@ import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } f
 import { sendShortVideoPublicError } from "./public-errors.js";
 
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requestSignal, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, refreshLikeDistribution, requestSignal, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
@@ -27,6 +27,16 @@ export async function routeShortVideoApi(req, res, url, deps) {
       sendJson(res, 200, await shortVideoStore.likeDistribution({ signal: requestSignal }));
     } catch (error) {
       sendShortVideoPublicError(res, sendJson, error, "短视频点赞分布读取失败");
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos/like-distribution/refresh" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, await refreshLikeDistribution({ signal: requestSignal }));
+    } catch (error) {
+      sendShortVideoPublicError(res, sendJson, error, "短视频点赞分布刷新失败");
     }
     return true;
   }

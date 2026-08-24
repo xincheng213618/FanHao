@@ -124,7 +124,7 @@ def special_patterns() -> list[dict]:
         {
             "type": "prefix-code",
             "pattern": re.compile(
-                r"\b(3DSVR|CW3D2D?BD|MCB3D(?:BD)?|S2M(?:BD)?|T28|TH101|KIN8(?:TENGOKU)?|GACHI|C0930|H0930|H4610|RED|GEDO|CZ|N|K|SE)[-_\s.]?0*([A-Z]?\d{2,8}(?:[-_]\d{2,6})?[A-Z]?)\b",
+                r"\b(3DSVR|CW3D2D?BD|MCB3D(?:BD)?|S2M(?:BD)?|T28|T38|TH101|KIN8(?:TENGOKU)?|GACHI|C0930|H0930|H4610|RED|GEDO|CZ|N|K|SE)[-_\s.]?0*([A-Z]?\d{2,8}(?:[-_]\d{2,6})?[A-Z]?)\b",
                 re.I,
             ),
             "format": lambda match: f"{normalize_prefix(match.group(1))}-{normalize_code_number(match.group(2))}",

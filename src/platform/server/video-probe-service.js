@@ -2,6 +2,7 @@ import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 
 export const DEFAULT_VIDEO_PROBE_WAIT_MS = 80;
+const DIRECT_STREAM_VERSION = "20260815-range-chunks-01";
 
 export function createVideoProbeService({
   cacheLimit = 512,
@@ -277,7 +278,7 @@ export function createVideoProbeService({
     const ext = String(file.ext || "").toLowerCase();
     const probeUnavailable = !videoCodec && !audioCodec;
     const mp4Compatible = [".mp4", ".m4v"].includes(ext)
-      && ["h264", "avc1"].includes(videoCodec)
+      && ["h264", "avc1", "hevc", "h265", "hev1", "hvc1"].includes(videoCodec)
       && (!audioCodec || ["aac", "mp3"].includes(audioCodec));
     const webmCompatible = ext === ".webm"
       && ["vp8", "vp9", "av1"].includes(videoCodec)
@@ -286,10 +287,12 @@ export function createVideoProbeService({
     const streamBase = options.streamBase || "/media/video";
 
     if (canDirect) {
+      const fallbackParams = new URLSearchParams({ mode: "transcode", audio: "aac" });
       return {
         mode: "direct",
         label: "原生直连",
-        streamUrl: `${streamBase}/${encodeURIComponent(publicVideoId)}`,
+        streamUrl: `${streamBase}/${encodeURIComponent(publicVideoId)}?v=${DIRECT_STREAM_VERSION}`,
+        fallbackStreamUrl: `${streamBase}/${encodeURIComponent(publicVideoId)}/transcode?${fallbackParams}`,
         duration: mediaProbe.duration || null,
         videoCodec,
         audioCodec,

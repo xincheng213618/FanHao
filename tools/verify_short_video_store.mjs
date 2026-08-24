@@ -120,6 +120,29 @@ assert.equal(multiLiveFixture.galleryCount, 3, "three live-photo pairs should ex
 assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.type), ["video", "video", "video"]);
 assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.sourceIndex), [1, 3, 5]);
 assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.posterIndex), [0, 2, 4]);
+const mixedLiveFixture = mapPublicVideoFixture({
+  id: "7675202366409522161",
+  aweme_id: "7675202366409522161",
+  media_type: "gallery",
+  source_path: "C:\\media\\7675202366409522161_1.jpg",
+  metadata_json: JSON.stringify({
+    images: [
+      { live_photo_type: 1, video: { duration: 3000 } },
+      {},
+      { live_photo_type: 1, video: { duration: 3000 } },
+      {}
+    ],
+    fanhaoMedia: {
+      type: "gallery",
+      galleryCount: 6,
+      galleryItems: ["image", "video", "image", "video", "image", "image"]
+    }
+  })
+});
+assert.equal(mixedLiveFixture.galleryPresentation, "live-photo");
+assert.deepEqual(mixedLiveFixture.galleryItems.map((item) => item.type), ["video", "image", "video", "image"]);
+assert.deepEqual(mixedLiveFixture.galleryItems.map((item) => item.sourceIndex), [1, 2, 3, 5]);
+assert.deepEqual(mixedLiveFixture.galleryItems.map((item) => item.posterIndex), [0, undefined, 4, undefined]);
 assert.ok(shortVideoStoreSource.split(/\r?\n/).length <= 4950, "short-video store exceeded its refactored 4950-line budget");
 assert.ok(shortVideoImportItemMapperSource.split(/\r?\n/).length <= 650, "short-video import item mapper exceeded its 650-line budget");
 assert.ok(shortVideoPublicVideoMapperSource.split(/\r?\n/).length <= 280, "short-video public video mapper exceeded its 280-line budget");
@@ -136,6 +159,7 @@ assert.match(
 assert.match(shortVideoStoreSource, /createShortVideoNavigationQueries/, "store should delegate adjacent-video navigation to the query component");
 assert.match(shortVideoStoreSource, /shortVideoLibraryInsights/, "store should delegate personal-value and data-health analytics to a dedicated component");
 assert.match(shortVideoLibraryInsightsSource, /function authorEfficiency\(/, "library insights should quantify author input against explicit-like hits");
+assert.match(shortVideoLibraryInsightsSource, /lowYieldAuthors[\s\S]*authors,/, "author efficiency should retain the complete eligible relationship table instead of only eight dashboard rows");
 assert.match(shortVideoLibraryInsightsSource, /function managerQualityAudit\(/, "library insights should read the real quality-audit state instead of hard-coding a likes band");
 assert.doesNotMatch(
   shortVideoStoreSource,
@@ -481,6 +505,8 @@ try {
       following_count INTEGER,
       follower_count INTEGER,
       total_favorited INTEGER,
+      nickname_history_json TEXT NOT NULL DEFAULT '[]',
+      total_favorited_history_json TEXT NOT NULL DEFAULT '[]',
       aweme_count INTEGER,
       profile_collected_at TEXT,
       updated_at TEXT,
@@ -602,6 +628,8 @@ try {
         following_count = 295,
         follower_count = 892000,
         total_favorited = 8439000,
+        nickname_history_json = '[{"value":"测试作者","first_seen_at":"2026-07-11T00:00:00+08:00","last_seen_at":"2026-07-11T00:00:00+08:00"},{"value":"更新后的测试作者","first_seen_at":"2026-07-20T04:32:03+08:00","last_seen_at":"2026-07-20T04:32:03+08:00"}]',
+        total_favorited_history_json = '[{"value":31,"first_seen_at":"2026-07-11T00:00:00+08:00","last_seen_at":"2026-07-11T00:00:00+08:00"},{"value":8439000,"first_seen_at":"2026-07-20T04:32:03+08:00","last_seen_at":"2026-07-20T04:32:03+08:00"}]',
         aweme_count = 509,
         profile_collected_at = '2026-07-20T04:32:03+08:00',
         updated_at = '2026-07-20T04:32:03+08:00',
@@ -636,9 +664,14 @@ try {
   assert.equal(refreshedLive?.stats?.shares, 88, "existing works must receive refreshed shares");
   const refreshedAuthor = store.resolveAuthorMention("MS4wTestAuthor");
   assert.equal(refreshedAuthor?.name, "更新后的测试作者", "profile nickname changes must reach the local author page");
+  assert.deepEqual(new Set(refreshedAuthor?.nameHistory.map((item) => item.name)), new Set(["更新后的测试作者", "测试作者"]), "author detail must retain current and previous profile names");
+  assert.deepEqual(new Set(refreshedAuthor?.totalFavoritedHistory.map((item) => item.value)), new Set([8439000, 31]), "author detail must retain observed total-like values");
+  assert.equal(store.resolveAuthorMention("测试作者")?.name, "更新后的测试作者", "a previous nickname must resolve to the current author identity");
+  assert.equal(store.listAuthors({ searchParams: new URLSearchParams("q=测试作者&limit=10") }).total, 1, "author search must match previous nicknames");
   assert.equal(refreshedAuthor?.awemeCount, 509, "official profile work totals must refresh without a new download");
   assert.equal(refreshedAuthor?.followingCount, 295);
   assert.equal(refreshedAuthor?.profileCollectedAt, "2026-07-20T04:32:03+08:00");
+  assert.equal(refreshedAuthor?.count, 2, "exact sec_uid resolution must count canonical-owner works through the indexed author scope");
   assert.equal(refreshedAuthor?.accountStatus, "active", "manual recovery in the manager must clear the local banned marker");
   assert.equal(
     store.listAuthors({ searchParams: new URLSearchParams("filter=banned&limit=10") }).total,
@@ -666,6 +699,7 @@ try {
   const authorAllWorks = store.listVideos({
     searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&limit=10&stats=0&facets=0")
   });
+  assert.equal(authorAllWorks.total, 2, "indexed author pages must merge direct sec_uid and canonical owner matches without duplicates");
   assert.equal(authorAllWorks.deletedTotal, 1);
   const authorDeletedWorks = store.listVideos({
     searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&deleted=1&limit=10&stats=0&facets=0")
@@ -793,6 +827,16 @@ try {
     searchParams: new URLSearchParams("source=all&sort=likesAsc&neighbors=2&metadata=0")
   });
   assert.equal(likesAscendingDetail?.nextId, galleryId, "ascending likes navigation must keep unknown statistics after known values");
+  const sizeDescending = store.listVideos({
+    searchParams: new URLSearchParams("source=all&sort=size&limit=10&stats=0&facets=0")
+  });
+  const expectedSizeOrder = [gallery, live].sort((left, right) => right.size - left.size).map((item) => item.id);
+  assert.equal(sizeDescending.sort, "size", "file-size sorting must survive request normalization");
+  assert.deepEqual(sizeDescending.videos.map((item) => item.id), expectedSizeOrder, "file-size sorting must order aggregate gallery or video bytes from largest to smallest");
+  const largestSizeDetail = store.videoDetail(expectedSizeOrder[0], {
+    searchParams: new URLSearchParams("source=all&sort=size&neighbors=2&metadata=0")
+  });
+  assert.equal(largestSizeDetail?.nextId, expectedSizeOrder[1], "file-size detail navigation must match the list order");
   const publishedAscendingDetail = store.videoDetail(galleryId, {
     searchParams: new URLSearchParams("source=all&sort=publishedAsc&neighbors=2&metadata=0")
   });

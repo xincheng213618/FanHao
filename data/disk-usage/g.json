@@ -1,0 +1,16 @@
+{
+  "bytes": 17438278196826,
+  "completedAt": "2026-08-16T01:06:46.329Z",
+  "databaseFile": "g-1786842405858-bpfy7dw.sqlite",
+  "directories": 2306,
+  "driveId": "G",
+  "errors": 0,
+  "files": 8379,
+  "linkedRoots": [],
+  "nodes": 10686,
+  "root": "G:\\",
+  "scanId": "1786842405858-bpfy7dw",
+  "schemaVersion": 1,
+  "skipped": 2,
+  "startedAt": "2026-08-16T01:06:45.896Z"
+}

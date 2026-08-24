@@ -16,7 +16,7 @@ const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
 const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]);
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
-const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "movie", "tv"]);
+const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "movie", "tv", "anime"]);
 
 function normalizeExt(fileName) {
   return path.extname(fileName).toLowerCase();
@@ -58,10 +58,13 @@ function parseArgs(argv) {
       options.scope = "movie";
     } else if (arg === "--tv-only") {
       options.scope = "tv";
+    } else if (arg === "--anime-only") {
+      options.scope = "anime";
     }
   }
   if (options.scope === "movies") options.scope = "movie";
   if (options.scope === "television") options.scope = "tv";
+  if (options.scope === "animation") options.scope = "anime";
   if (options.scope === "western") options.scope = "media";
   if (!VALID_SCAN_SCOPES.has(options.scope)) options.scope = "all";
   return options;
@@ -247,6 +250,7 @@ function mediaKindPrefix(kind) {
   if (kind === "western") return "gw";
   if (kind === "movie") return "gf";
   if (kind === "tv") return "gt";
+  if (kind === "anime") return "ga";
   return "gm";
 }
 
@@ -266,8 +270,9 @@ function publicGalleryMediaFile(filePath, rootPath, source) {
   const id = createId(mediaKindPrefix(source.kind), `${source.kind}|${path.resolve(filePath)}`);
   const parentName = dirParts[dirParts.length - 1] || "";
   const category = dirParts[0] || source.label;
-  const seriesName = source.kind === "tv" ? parentName || category : source.kind === "movie" ? parentName : "";
-  const personName = source.kind === "western" ? category : source.kind === "tv" ? seriesName : "";
+  const episodic = source.kind === "tv" || source.kind === "anime";
+  const seriesName = episodic ? parentName || category : source.kind === "movie" ? parentName : "";
+  const personName = source.kind === "western" ? category : episodic ? seriesName : "";
   return {
     id,
     type: "media",
@@ -400,8 +405,8 @@ function buildIndex(options) {
   const existing = imageLibraryIndexMatches(cached, cacheIdentity) ? cached : {};
 
   const scanPhoto = options.scope === "all" || options.scope === "photo";
-  const scanMedia = options.scope === "all" || options.scope === "media" || ["movie", "tv"].includes(options.scope);
-  const selectedMediaSources = ["movie", "tv"].includes(options.scope)
+  const scanMedia = options.scope === "all" || options.scope === "media" || ["movie", "tv", "anime"].includes(options.scope);
+  const selectedMediaSources = ["movie", "tv", "anime"].includes(options.scope)
     ? mediaSources.filter((source) => source.kind === options.scope)
     : mediaSources;
   const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots) : {
@@ -411,7 +416,7 @@ function buildIndex(options) {
   let media;
   if (scanMedia) {
     const scannedMedia = scanGalleryMediaLibrary(selectedMediaSources);
-    if (["movie", "tv"].includes(options.scope)) {
+    if (["movie", "tv", "anime"].includes(options.scope)) {
       media = {
         mediaRoots: mediaRootStatuses(mediaSources),
         mediaItems: sortGalleryMediaItems([

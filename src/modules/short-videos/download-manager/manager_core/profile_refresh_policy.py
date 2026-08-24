@@ -6,11 +6,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .common import int_or_none
+from .profile_collection_history import significant_count_drop
 
 
 MIN_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 MAX_REFRESH_INTERVAL_SECONDS = 30 * 24 * 60 * 60
+SMALL_PROFILE_FULL_SCAN_MAX_WORKS = 100
 
 
 PROFILE_LINK_STATS_SQL = """
@@ -62,6 +64,47 @@ def _iso_from_timestamp(value: int) -> str:
     return datetime.fromtimestamp(value, timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def profile_requires_full_scan(profile: dict[str, Any]) -> bool:
+    """Return the effective one-shot full-scan state for a profile.
+
+    Older rows can have a clear persisted flag even though their first observed
+    public count is materially below the local library count. Keep that legacy
+    gap visible and actionable until one complete scan establishes a baseline.
+    """
+
+    if str(profile.get("tab") or "post").strip().lower() != "post":
+        return False
+    if str(profile.get("account_status") or "active").strip().lower() == "banned":
+        return False
+    if int(profile.get("full_scan_required") or 0):
+        return True
+    if int(profile.get("has_deleted_works") or 0):
+        return False
+    if str(profile.get("last_full_scan_at") or "").strip():
+        return False
+    local_count = int_or_none(profile.get("link_total"))
+    if local_count is None:
+        local_count = int_or_none(profile.get("total"))
+    observed_count = int_or_none(profile.get("aweme_count"))
+    return significant_count_drop(local_count, observed_count)[0]
+
+
+def profile_prefers_full_scan(profile: dict[str, Any]) -> bool:
+    """Use routine full scans for small, active post profiles.
+
+    This preference is intentionally separate from ``profile_requires_full_scan``:
+    small profiles should use the full collection mode when they are due, but
+    should not appear in the one-shot "pending full confirmation" count.
+    """
+
+    if str(profile.get("tab") or "post").strip().lower() != "post":
+        return False
+    if str(profile.get("account_status") or "active").strip().lower() == "banned":
+        return False
+    observed_count = int_or_none(profile.get("aweme_count"))
+    return observed_count is not None and 0 < observed_count <= SMALL_PROFILE_FULL_SCAN_MAX_WORKS
+
+
 def profile_refresh_decision(
     profile: dict[str, Any],
     *,
@@ -91,7 +134,7 @@ def profile_refresh_decision(
             "refresh_mode": "manual",
         }
 
-    if tab == "post" and int(profile.get("full_scan_required") or 0):
+    if tab == "post" and profile_requires_full_scan(profile):
         return {
             "refresh_due": 1,
             "refresh_due_at": profile.get("full_scan_required_at") or None,
@@ -121,7 +164,7 @@ def profile_refresh_decision(
             "refresh_cadence_seconds": None,
             "refresh_silence_seconds": None,
             "refresh_basis": "never_collected",
-            "refresh_mode": "quick",
+            "refresh_mode": "full" if profile_prefers_full_scan(profile) else "quick",
         }
 
     cadence_seconds: int | None = None
@@ -150,7 +193,7 @@ def profile_refresh_decision(
         "refresh_cadence_seconds": cadence_seconds,
         "refresh_silence_seconds": silence_seconds,
         "refresh_basis": basis,
-        "refresh_mode": "quick",
+        "refresh_mode": "full" if profile_prefers_full_scan(profile) else "quick",
     }
 
 

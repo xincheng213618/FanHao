@@ -1,19 +1,23 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
-import { createShortVideoAuthorPages } from "./author-pages.js?v=20260810-author-header-align-01";
+import { createShortVideoAuthorPages } from "./author-pages.js?v=20260825-profile-history-01";
 import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260812-collection-busy-01";
 import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20260811-custom-collections-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
-import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
+import { createIcon, railButton, setIconButton } from "./icons.js?v=20260824-local-file-actions-01";
+import { createShortVideoLocalActions } from "./local-actions.js?v=20260824-local-file-actions-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
+import { readLikeDistributionCache } from "./like-distribution-cache.js?v=20260825-author-efficiency-01";
+import { createLikeDistributionLoader } from "./like-distribution-loader.js?v=20260825-author-cleanup-02";
+import { renderLikeDistributionPageShell } from "./like-distribution-page-shell.js?v=20260825-author-efficiency-01";
 import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20260720-observed-playback-issues-01";
 import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
 import { mergeShortVideoWatchPayload } from "./watch-write-payload.js?v=20260813-watch-write-pending-01";
 import { shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
-import { createShortVideoDeleteActions } from "./delete-actions.js?v=20260813-delete-client-state-02";
+import { createShortVideoDeleteActions } from "./delete-actions.js?v=20260823-delete-confirm-01";
 import { createShortVideoDeleteRecoveryController } from "./delete-recovery.js?v=20260813-delete-client-state-02";
 import {
   applyShortVideoLikeBadgeState,
@@ -52,6 +56,7 @@ import {
   writeVolumePreference
 } from "./state.js?v=20260716-short-video-state-01";
 import { discardAuthorIndexWindowAfterRouteChange, isCurrentShortVideoLoadRequest, restoreSavedAuthorIndexWindow, settleShortVideoLoad, SHORT_VIDEO_LOAD_STALE } from "./author-navigation.js?v=20260811-author-load-contract-01";
+
 export function createShortVideoPage(deps) {
   const {
     api,
@@ -82,6 +87,8 @@ export function createShortVideoPage(deps) {
   const playbackRenditionPolicy = createShortVideoPlaybackRenditionPolicy({ api });
   const deleteRecoveryController = createShortVideoDeleteRecoveryController({ api });
   const deleteActions = createShortVideoDeleteActions({ api, recovery: deleteRecoveryController, showToast: showBrowserToast });
+  const runShortVideoLocalAction = createShortVideoLocalActions({ api, showToast: showBrowserToast });
+  const { loadLikeDistribution } = createLikeDistributionLoader({ api, render: renderView, shortVideoState: state.shortVideo });
   const transcodeManagementPage = createShortVideoTranscodeManagementPage({ api, els, formatBytes, setMainHeader, state });
   const {
     ensureShortVideoPlayerSource,
@@ -91,7 +98,6 @@ export function createShortVideoPage(deps) {
     playbackUrl: shortVideoPlaybackUrl,
     waitForFirstFrame: waitForVideoFirstFrame
   });
-
   let wheelLocked = false;
   let touchStartX = 0;
   let touchStartY = 0;
@@ -291,7 +297,7 @@ export function createShortVideoPage(deps) {
     formatNumber,
     getShortVideoListCards: () => shortVideoListCards,
     loadVideos,
-    openAuthorDouyinLink,
+    openAuthorDouyinLink, runShortVideoLocalAction,
     profileNumber,
     pushRoute,
     renderDeleteSelectionActions,
@@ -529,9 +535,17 @@ export function createShortVideoPage(deps) {
       state.shortVideo.nextVideo = null;
       state.shortVideo.prevId = "";
       state.shortVideo.nextId = "";
-      setMainHeader("内容洞察", "短视频 / 数据统计");
+      const authorEfficiencyTable = isLikeDistributionAuthorTableRoute();
+      setMainHeader(authorEfficiencyTable ? "作者占用与命中" : "内容洞察", "短视频 / 数据统计");
+      const cached = readLikeDistributionCache(state.shortVideo.likeDistribution);
+      if (cached.data) state.shortVideo.likeDistribution = cached.data;
       renderView();
+      // The statistics request can take a while on a cold cache. Reveal the
+      // rendered loading shell before awaiting it so direct visits never sit
+      // on the entry document's blank module-loading state.
+      document.documentElement.classList.remove("app-module-loading");
       if (!state.shortVideo.likeDistribution) await loadLikeDistribution();
+      else if (!cached.fresh) loadLikeDistribution({ silent: true }).catch(() => {});
       return;
     }
     if (!route.shortVideoId && collectionsController.restoreFeedAfterRoute(route)) return;
@@ -1218,6 +1232,7 @@ export function createShortVideoPage(deps) {
     distribution.type = "button";
     distribution.className = "short-video-distribution-toggle";
     distribution.append(createIcon("chart"), document.createTextNode("数据统计"));
+    distribution.title = "在新标签页打开独立的短视频数据统计页面";
     distribution.addEventListener("click", openLikeDistributionPage);
     const transcodeStatus = createShortVideoTranscodeStatusButton({ api, createIcon, formatBytes });
 
@@ -1293,25 +1308,12 @@ export function createShortVideoPage(deps) {
   }
 
   function openLikeDistributionPage() {
-    state.shortVideo.mode = "likes";
-    state.shortVideo.current = null;
-    state.shortVideo.prevVideo = null;
-    state.shortVideo.nextVideo = null;
-    state.shortVideo.prevId = "";
-    state.shortVideo.nextId = "";
-    pushRoute({
-      shortVideoId: "",
-      shortVideoAuthorPage: "",
-      shortVideoMode: "likes"
-    });
-    setMainHeader("内容洞察", "短视频 / 数据统计");
-    renderView();
-    if (!state.shortVideo.likeDistribution) {
-      loadLikeDistribution().catch((error) => {
-        state.shortVideo.likeDistributionError = error?.message || "点赞分布读取失败";
-        renderView();
-      });
-    }
+    window.open("/short-videos/stats/likes", "_blank", "noopener,noreferrer");
+  }
+
+  function isLikeDistributionAuthorTableRoute() {
+    return window.location.hash === "#authors"
+      || String(window.location.pathname || "").replace(/\/+$/g, "").endsWith("/short-videos/stats/likes/authors");
   }
 
   function leaveLikeDistributionPage() {
@@ -1324,22 +1326,6 @@ export function createShortVideoPage(deps) {
     setMainHeader("短视频", "抖音点赞本地库");
     renderView();
     if (!state.shortVideo.data) loadVideos({ skipRoute: true }).catch(showError);
-  }
-
-  async function loadLikeDistribution(options = {}) {
-    if (state.shortVideo.likeDistributionLoading) return;
-    state.shortVideo.likeDistributionLoading = true;
-    state.shortVideo.likeDistributionError = "";
-    if (state.shortVideo.mode === "likes") renderView();
-    try {
-      state.shortVideo.likeDistribution = await api("/api/short-videos/like-distribution");
-    } catch (error) {
-      state.shortVideo.likeDistributionError = error?.message || "点赞分布读取失败";
-      return null;
-    } finally {
-      state.shortVideo.likeDistributionLoading = false;
-      if (state.shortVideo.mode === "likes" && options.render !== false) renderView();
-    }
   }
 
   function openLikeDistributionAuthor(item = {}) {
@@ -1362,19 +1348,17 @@ export function createShortVideoPage(deps) {
 
   function ensureLikeDistributionView() {
     if (likeDistributionViewPromise) return likeDistributionViewPromise;
-    // Keep the research/statistics renderer out of the video-detail startup bundle.
-    // A variable URL intentionally leaves this import for the browser at route time.
-    const moduleUrl = "/modules/short-videos/like-distribution-view.js?v=20260716-personal-value-health-01";
+    const moduleUrl = "/modules/short-videos/like-distribution-view.js?v=20260825-author-efficiency-03";
     likeDistributionViewPromise = import(moduleUrl).then((module) => {
       if (typeof module.createLikeDistributionView !== "function") {
         throw new Error("内容洞察模块加载失败");
       }
       return module.createLikeDistributionView({
-        formatNumber,
+        api, deleteRecovery: deleteRecoveryController, formatNumber,
         loadLikeDistribution,
         openInsightAuthor: openLikeDistributionAuthor,
         openInsightTopic: openLikeDistributionTopic,
-        showError,
+        showError, showToast: showBrowserToast,
         state
       });
     }).catch((error) => {
@@ -1385,37 +1369,15 @@ export function createShortVideoPage(deps) {
   }
 
   function renderLikeDistributionPage() {
-    const shell = document.createElement("section");
-    shell.className = "short-video-home short-video-distribution-page";
-    const navigation = document.createElement("div");
-    navigation.className = "short-video-distribution-page-nav";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.append(createIcon("chevronLeft"), document.createTextNode("返回短视频"));
-    back.addEventListener("click", leaveLikeDistributionPage);
-    const context = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = "短视频数据统计";
-    const title = document.createElement("h1");
-    title.textContent = "内容洞察";
-    context.append(eyebrow, title);
-    navigation.append(back, context);
-    const placeholder = document.createElement("section");
-    placeholder.className = "short-video-distribution-panel";
-    placeholder.setAttribute("aria-busy", "true");
-    placeholder.textContent = "正在载入内容洞察…";
-    shell.append(navigation, placeholder);
-    els.workGrid.append(shell);
-
-    const renderToken = ++likeDistributionRenderToken;
-    ensureLikeDistributionView().then((view) => {
-      if (renderToken !== likeDistributionRenderToken || state.shortVideo.mode !== "likes" || !placeholder.isConnected) return;
-      placeholder.replaceWith(view.renderLikeDistributionPanel());
-    }).catch((error) => {
-      if (renderToken !== likeDistributionRenderToken || !placeholder.isConnected) return;
-      placeholder.removeAttribute("aria-busy");
-      placeholder.classList.add("is-error");
-      placeholder.textContent = error?.message || "内容洞察模块加载失败";
+    const authorEfficiencyTable = isLikeDistributionAuthorTableRoute(), renderToken = ++likeDistributionRenderToken;
+    renderLikeDistributionPageShell({
+      authorEfficiencyTable,
+      createIcon,
+      els,
+      ensureView: ensureLikeDistributionView,
+      isCurrent: () => renderToken === likeDistributionRenderToken,
+      onLeave: authorEfficiencyTable ? () => window.location.assign("/short-videos/stats/likes") : leaveLikeDistributionPage,
+      state
     });
   }
   function commitShortVideoSearch(value, options = {}) {
@@ -1717,7 +1679,7 @@ export function createShortVideoPage(deps) {
       start.append(createIcon("trash"), document.createTextNode("选择删除"));
       start.addEventListener("click", () => {
         state.shortVideo.deleteMode = true;
-        renderView();
+        refreshShortVideoDeleteSelectionUi();
       });
       wrap.append(collect, start);
       return wrap;
@@ -1744,7 +1706,7 @@ export function createShortVideoPage(deps) {
     cancel.textContent = "取消";
     cancel.addEventListener("click", () => {
       clearShortVideoDeleteSelection();
-      renderView();
+      refreshShortVideoDeleteSelectionUi();
     });
     wrap.append(selectLoaded, commit, cancel);
     return wrap;
@@ -1809,14 +1771,14 @@ export function createShortVideoPage(deps) {
     selection.clear();
     if (!options.keepMode) state.shortVideo.deleteMode = false;
   }
-
+  function refreshShortVideoDeleteSelectionUi() { const actions = els.workGrid?.querySelector?.(".short-video-delete-actions"); if (actions) actions.replaceWith(renderDeleteSelectionActions(state.shortVideo.data || {})); shortVideoListCards?.syncRenderedSelection?.(els.workGrid); }
   function toggleShortVideoSelected(id) {
     const videoId = String(id || "").trim();
     if (!videoId) return;
     const selection = shortVideoDeleteSelection();
     if (selection.has(videoId)) selection.delete(videoId);
     else selection.add(videoId);
-    renderView();
+    refreshShortVideoDeleteSelectionUi();
   }
 
   function toggleLoadedShortVideoSelection(loadedIds, clear) {
@@ -1827,7 +1789,7 @@ export function createShortVideoPage(deps) {
       if (clear) selection.delete(videoId);
       else selection.add(videoId);
     }
-    renderView();
+    refreshShortVideoDeleteSelectionUi();
   }
 
   function shortVideoCardCoverUrl(video = {}) {
@@ -2492,6 +2454,14 @@ export function createShortVideoPage(deps) {
     };
     const handleError = () => {
       if ([3, 4].includes(Number(player.error?.code || 0)) && switchToSmoothFallback("decode-error")) return;
+      if (playbackRenditionPolicy.retrySmoothFallback(player, video, {
+        ensureSource: ensureShortVideoPlayerSource,
+        lastGoodTime,
+        wantsToPlay,
+        onScheduled: (attempt, limit) => {
+          retrying = true; showStatus("retrying", "兼容版本正在生成", `自动重试 ${attempt}/${limit}`);
+        }
+      })) return;
       retrying = false;
       showStatus("error", "视频加载失败", "保留当前进度后重试");
     };
@@ -2899,6 +2869,7 @@ export function createShortVideoPage(deps) {
       return mediaNotReady
         || playbackPaused
         || hasInteractiveFocus
+        || browser.classList.contains("is-volume-open")
         || browser.classList.contains("is-author-panel-open")
         || Boolean(browser.querySelector(".short-video-search-overlay, .short-video-more-overlay, .short-video-share-panel"));
     };
@@ -3022,7 +2993,7 @@ export function createShortVideoPage(deps) {
   }
 
   function handleAutoNextEnded(player) {
-    if (!state.shortVideo?.autoNext) return;
+    if (!state.shortVideo?.autoNext || els.workGrid?.querySelector?.(".short-video-more-overlay")) return;
     if (player !== activePlayer()) return;
     if (!state.shortVideo.nextId) {
       player.loop = true;
@@ -3556,19 +3527,22 @@ export function createShortVideoPage(deps) {
     let progressRaf = 0;
     let progressPlayer = null;
     let lastProgressFrameAt = 0;
-    let volumeScrubbing = false;
+    let volumeScrubbing = false, volumeCloseTimer = 0;
     let scrubPlayer = null;
     let scrubWasPlaying = false;
     let scrubTargetTime = 0;
     let scrubSeekRaf = 0;
-
     const setVolumePopoverOpen = (open) => {
-      const expanded = Boolean(open);
+      const expanded = Boolean(open); if (expanded) window.clearTimeout(volumeCloseTimer);
       volumeControl.classList.toggle("is-open", expanded);
       mute.setAttribute("aria-expanded", String(expanded));
       volumePopover.setAttribute("aria-hidden", String(!expanded));
       volumePopover.inert = !expanded;
       bar.closest(".short-video-browser")?.classList.toggle("is-volume-open", expanded);
+    };
+    const scheduleVolumePopoverClose = (delay = 220) => {
+      window.clearTimeout(volumeCloseTimer);
+      volumeCloseTimer = window.setTimeout(() => { if (!volumeScrubbing && !volumeControl.matches(":hover") && !volumeControl.contains(document.activeElement)) setVolumePopoverOpen(false); }, Math.max(0, Number(delay || 0)));
     };
     volumeControl.shortVideoSetOpen = setVolumePopoverOpen;
     setVolumePopoverOpen(false);
@@ -3827,14 +3801,10 @@ export function createShortVideoPage(deps) {
     });
     volumeControl.addEventListener("pointerleave", (event) => {
       if (event.pointerType === "touch") return;
-      if (!volumeScrubbing && !volumeControl.contains(document.activeElement)) setVolumePopoverOpen(false);
+      scheduleVolumePopoverClose();
     });
     volumeControl.addEventListener("focusin", () => setVolumePopoverOpen(true));
-    volumeControl.addEventListener("focusout", () => {
-      window.setTimeout(() => {
-        if (!volumeScrubbing && !volumeControl.contains(document.activeElement)) setVolumePopoverOpen(false);
-      });
-    });
+    volumeControl.addEventListener("focusout", () => scheduleVolumePopoverClose(80));
     const closeVolumeFromOutside = (event) => {
       if (!volumeControl.contains(event.target)) setVolumePopoverOpen(false);
     };
@@ -6036,7 +6006,7 @@ export function createShortVideoPage(deps) {
 
   function ensureShortVideoPlaybackSettings() {
     if (shortVideoPlaybackSettingsPromise) return shortVideoPlaybackSettingsPromise;
-    const moduleUrl = "/modules/short-videos/playback-settings.js?v=20260715-settings-lazy-02";
+    const moduleUrl = "/modules/short-videos/playback-settings.js?v=20260824-local-file-actions-01";
     shortVideoPlaybackSettingsPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoPlaybackSettings !== "function") {
         throw new Error("播放设置模块加载失败");
@@ -6058,7 +6028,7 @@ export function createShortVideoPage(deps) {
         normalizePlaybackRate,
         openAdjacent,
         openDouyinLink,
-        originalDouyinUrl,
+        originalDouyinUrl, runShortVideoLocalAction,
         playbackRates: PLAYBACK_RATES,
         setPlaybackRate,
         shareShortVideo,
@@ -6316,7 +6286,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoAuthorPanel() {
     if (shortVideoAuthorPanelPromise) return shortVideoAuthorPanelPromise;
     markShortVideoPerformance("author-panel-module-start");
-    const moduleUrl = "/modules/short-videos/author-panel.js?v=20260715-author-panel-lazy-04";
+    const moduleUrl = "/modules/short-videos/author-panel.js?v=20260824-local-file-actions-01";
     shortVideoAuthorPanelPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoAuthorPanel !== "function") {
         throw new Error("作者信息模块加载失败");
@@ -6362,7 +6332,7 @@ export function createShortVideoPage(deps) {
         normalizeShortVideoSortValue,
         normalizeShortVideoSound,
         normalizeShortVideoTopic,
-        openAuthorDouyinLink,
+        openAuthorDouyinLink, runShortVideoLocalAction,
         openDouyinLink,
         openShortVideoAuthorPage,
         prefetchRelatedVideo,

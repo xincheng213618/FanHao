@@ -32,6 +32,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(FanHaoSystemPlugin.class);
     registerPlugin(FanHaoUpdaterPlugin.class);
     registerPlugin(FanHaoNovelPlugin.class);
+    registerPlugin(FanHaoVisionExplorationPlugin.class);
     FanHaoNovelPlugin.capturePendingTextIntent(this, getIntent());
     super.onCreate(savedInstanceState);
 

@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+const TRANSCODE_MAX_EDGE = 4096;
+
 export function createMediaStreamService({
   decodeInfoBuffer,
   ffmpegPath,
@@ -13,6 +15,7 @@ export function createMediaStreamService({
   safeStat,
   sendJson,
   serveRangedFile,
+  spawnProcess = spawn,
   warn = console.warn
 }) {
   function serveVideo(req, res, file) {
@@ -36,6 +39,10 @@ export function createMediaStreamService({
     if (mode === "remux") {
       args.push("-c:v", "copy", "-c:a", audio === "copy" ? "copy" : "aac", "-b:a", "160k");
     } else {
+      args.push(
+        "-vf",
+        `scale=w='min(iw,${TRANSCODE_MAX_EDGE})':h='min(ih,${TRANSCODE_MAX_EDGE})':force_original_aspect_ratio=decrease:force_divisible_by=2`
+      );
       if (hasNvenc) {
         args.push("-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24", "-pix_fmt", "yuv420p");
       } else {
@@ -53,26 +60,50 @@ export function createMediaStreamService({
       "pipe:1"
     );
 
-    res.writeHead(200, {
-      "Content-Type": "video/mp4",
-      "Cache-Control": "no-store",
-      "Content-Disposition": "inline"
-    });
+    const child = spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let outputStarted = false;
+    let failureHandled = false;
+    let stderrText = "";
 
-    const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    child.stdout.pipe(res);
+    child.stdout.once("data", (chunk) => {
+      if (res.destroyed || res.writableEnded) return;
+      outputStarted = true;
+      res.writeHead(200, {
+        "Content-Type": "video/mp4",
+        "Cache-Control": "no-store",
+        "Content-Disposition": "inline"
+      });
+      res.write(chunk);
+      child.stdout.pipe(res);
+    });
     child.stderr.on("data", (chunk) => {
       const text = String(chunk || "").trim();
-      if (text) warn("[ffmpeg]", text);
+      if (!text) return;
+      stderrText = `${stderrText}\n${text}`.trim().slice(-2000);
+      warn("[ffmpeg]", text);
     });
     child.on("error", (error) => {
       warn("[ffmpeg]", error.message);
-      if (!res.headersSent) sendJson(res, 500, { error: "FFmpeg 启动失败" });
-      else res.destroy(error);
+      failTranscode("FFmpeg 启动失败", error);
+    });
+    child.on("close", (code) => {
+      if (outputStarted || failureHandled || res.destroyed || res.writableEnded) return;
+      const detail = stderrText ? `: ${stderrText.split(/\r?\n/).at(-1)}` : "";
+      failTranscode("视频转码失败", new Error(`FFmpeg exited before output (code ${code})${detail}`));
     });
     res.on("close", () => {
-      if (!child.killed) child.kill("SIGKILL");
+      if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
     });
+
+    function failTranscode(message, error) {
+      if (failureHandled) return;
+      failureHandled = true;
+      if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+        sendJson(res, 500, { error: message });
+        return;
+      }
+      if (!res.destroyed && !res.writableEnded) res.destroy(error);
+    }
   }
 
   function serveInfo(res, file) {

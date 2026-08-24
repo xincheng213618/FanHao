@@ -158,7 +158,11 @@ assert(adminUrl("overview") === "/admin#overview", "admin navigation must suppor
 assert(adminUrl("scripts", { scriptId: "novel-library-rescan" }) === "/admin?script=novel-library-rescan#scripts", "admin navigation must deep-link to a selected script");
 assert(adminPageSource.includes('params.get("script")') && adminPageSource.includes("applyPendingScriptDefaults()"), "the admin page must restore script deep links and their pending defaults");
 assert(adminHtmlSource.includes('class="app-module-loading"') && adminHtmlSource.includes('html.app-module-loading body'), "the admin page must hide its incomplete shell during startup");
-assert(adminHtmlSource.includes('await import("/admin.js?v=20260811-work-move-ops-04")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
+assert(adminHtmlSource.includes('await import("/admin.js?v=20260815-admin-lazy-load-01")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
+assert(!adminHtmlSource.includes('href="/styles.css') && adminHtmlSource.includes('/css/foundation.css') && adminHtmlSource.includes('/modules/system/admin.css'), "the admin page must not load the full application stylesheet graph");
+assert(adminPageSource.includes("const VIEW_RESOURCES") && adminPageSource.includes("await loadView(state.activeView)") && !adminPageSource.includes("await refreshAll()"), "the admin page must load only the active section on startup");
+assert(!adminPageSource.startsWith("import ") && adminPageSource.includes('import("./modules/system/settings-controller.js?v=20260815-admin-lazy-load-01")'), "admin feature controllers must load only when their section is opened");
+assert(!adminHtmlSource.includes('/modules/system/access-analytics.css') && adminPageSource.includes('loadStylesheet("/modules/system/access-analytics.css?v=20260815-admin-lazy-load-01")'), "section-specific admin styles must load with their owning section");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
 assert(indexHtml.includes('/fanhao-app.js?v=20260812-module-nav-state-01'), "FanHao shell changes must refresh the browser entry");
@@ -205,7 +209,7 @@ assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVid
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes('class="app-module-loading"') && playerHtmlSource.includes('html.app-module-loading body'), "the standalone player must hide its incomplete shell during startup");
-assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260811-work-move-ops-04")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
+assert(playerHtmlSource.includes('await import("/js/player-page.js?v=') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
 assert(playerPageSource.lastIndexOf("await load();") > playerPageSource.indexOf("async function load()"), "the standalone player must await its initial payload after all module declarations are initialized");
 assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
 assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");
@@ -1404,7 +1408,7 @@ assert(workQueryServiceSource.includes("categorySummaryForWorks") && workQuerySe
 assert(workQueryServiceSource.includes('const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`') && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages and source partitions must use versioned bounded caches");
 assert(workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, \"western\") })"), "western-root membership must feed the shared work category classifier");
 assert(workQueryServiceSource.includes("peopleScopeService.workMatchesDirect?.(work, \"western\")") && peopleScopeServiceSource.includes("function workMatchesDirect(work, scope)"), "small result category summaries must avoid building the full scope index");
-assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path");
+assert(personDetailServiceSource.includes("lightweightInfo: true") && personDetailServiceSource.includes('includeCoreCovers: scope === "western"') && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path while Western pages retain cached covers");
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
 assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
@@ -2075,7 +2079,7 @@ const cachedPersonDetailService = createPersonDetailService({
 const personDetailUrl = new URL("http://127.0.0.1/api/people/person-1?filter=all&limit=48&offset=0");
 const firstPersonDetail = cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailServiceSource.includes("skipFallbackAvatar: true"), true, "person detail APIs must not rescan works for fallback avatars");
-assert.deepEqual(personDetailPayloadOptions, { lightweightInfo: true }, "person detail first pages must not synchronously hydrate work-detail-only metadata");
+assert.deepEqual(personDetailPayloadOptions, { lightweightInfo: true, includeCoreCovers: false }, "main person detail first pages must not synchronously hydrate work-detail-only metadata or cover metadata");
 const cachedFirstPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL(personDetailUrl));
 assert.equal(personDetailFacetReadCount, 1, "identical person pages must reuse prepared facets while user state is unchanged");
 assert.equal(personDetailPayloadReadCount, 1, "identical person pages must reuse their complete prepared response");
@@ -3547,8 +3551,9 @@ try {
     );
     CREATE TABLE main.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, updated_at TEXT);
     CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, updated_at TEXT);
-    INSERT INTO people VALUES (1, 'Target', 'Target', ''), (2, 'Source', 'Source', '');
+    INSERT INTO people VALUES (1, 'Target', 'Target', ''), (2, 'Source', 'Source', ''), (3, 'Wrong VR Name', 'Wrong VR Name', '');
     INSERT INTO person_aliases VALUES (1, 2, 'Source Alias', 'sourcealias', 'fixture');
+    INSERT INTO person_aliases VALUES (2, 3, 'Wrong Alias', 'wrongalias', 'fixture');
     INSERT INTO work_people VALUES (10, 2, 'actor', 0, 'fixture', '', '');
     INSERT INTO main.images VALUES (99, 'person', 2, 'main-sentinel');
     INSERT INTO fanhao_images.images VALUES (7, 'person', 2, 'attached-avatar');
@@ -3574,6 +3579,9 @@ try {
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE work_id = 10 AND person_id = 1").get().count, 1, "person merges must retain source work membership on the target");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE person_id = 2").get().count, 0, "person merges must clear source work membership");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM person_aliases WHERE person_id = 1 AND alias_search = 'sourcealias'").get().count, 1, "person merges must retain source aliases on the target");
+  adminMutationService.mergePeopleIntoTarget(1, [3], { preserveSourceNames: false });
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM people WHERE id = 3").get().count, 0, "person merges that drop bad source names must still delete the source person");
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM person_aliases WHERE person_id = 1 AND alias_search IN ('wrongvrname', 'wrongalias')").get().count, 0, "person merges may explicitly discard incorrect source names and aliases");
 } finally {
   personMergeDb.close();
 }
@@ -3657,11 +3665,15 @@ const localMutationDb = new DatabaseSync(":memory:");
 try {
   const sharedPersonDir = path.join(localMutationRoot, "shared-person");
   const missingPersonDir = path.join(localMutationRoot, "missing-person");
+  const relatedPersonDir = path.join(localMutationRoot, "related-person");
   const firstVideoPath = path.join(sharedPersonDir, "one.mp4");
   const secondVideoPath = path.join(sharedPersonDir, "two.mp4");
+  const relatedVideoPath = path.join(relatedPersonDir, "five.mp4");
   fs.mkdirSync(sharedPersonDir, { recursive: true });
+  fs.mkdirSync(relatedPersonDir, { recursive: true });
   fs.writeFileSync(firstVideoPath, "one");
   fs.writeFileSync(secondVideoPath, "two");
+  fs.writeFileSync(relatedVideoPath, "five");
   localMutationDb.exec(`
     CREATE TABLE works (id INTEGER PRIMARY KEY, updated_at TEXT);
     CREATE TABLE local_works (
@@ -3676,7 +3688,7 @@ try {
       local_work_id INTEGER,
       file_path TEXT
     );
-    INSERT INTO works (id, updated_at) VALUES (1, ''), (2, ''), (3, ''), (4, '');
+    INSERT INTO works (id, updated_at) VALUES (1, ''), (2, ''), (3, ''), (4, ''), (5, '');
   `);
   const insertLocalWork = localMutationDb.prepare("INSERT INTO local_works (id, work_id, local_path) VALUES (?, ?, ?)");
   const insertLocalFile = localMutationDb.prepare("INSERT INTO local_files (id, work_id, local_work_id, file_path) VALUES (?, ?, ?, ?)");
@@ -3684,15 +3696,17 @@ try {
   insertLocalWork.run(2, 2, sharedPersonDir);
   insertLocalWork.run(3, 3, missingPersonDir);
   insertLocalWork.run(4, 4, missingPersonDir);
+  insertLocalWork.run(5, 5, relatedPersonDir);
   insertLocalFile.run(1, 1, 1, firstVideoPath);
   insertLocalFile.run(2, 2, 2, secondVideoPath);
   insertLocalFile.run(3, 3, 3, path.join(missingPersonDir, "three.mp4"));
   insertLocalFile.run(4, 4, 4, path.join(missingPersonDir, "four.mp4"));
+  insertLocalFile.run(5, 5, 5, relatedVideoPath);
 
-  const mutationWorks = new Map([1, 2, 3, 4].map((id) => [String(id), {
+  const mutationWorks = new Map([1, 2, 3, 4, 5].map((id) => [String(id), {
     id: String(id),
-    personId: "10",
-    personName: "Shared Person",
+    personId: id === 5 ? "20" : "10",
+    personName: id === 5 ? "Related Person" : "Shared Person",
     title: `Work ${id}`,
     directoryName: "shared-person",
     missingLocal: false
@@ -3746,10 +3760,11 @@ try {
   assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id IN (3, 4)").get().count, 0, "stale shared-path rows must not survive deletion");
   assert.deepEqual(mutationReconcileBatches, [["3", "4"]], "one-work deletion must reconcile only the cleared in-memory work ids");
 
-  const personDelete = localMutationService.deletePersonLocalFiles("10", { workIds: ["2"] });
+  const personDelete = localMutationService.deletePersonLocalFiles("10", { workIds: ["2", "5"] });
   assert.equal(personDelete.failedCount, 0, "selected person deletion must complete without per-work failures");
-  assert.deepEqual(mutationReconcileBatches, [["3", "4"], ["2"]], "selected person deletion must reconcile one cleared-id batch without refreshing the full library");
+  assert.deepEqual(mutationReconcileBatches, [["3", "4"], ["2", "5"]], "selected person deletion must reconcile one cleared-id batch without refreshing the full library");
   assert.equal(fs.existsSync(sharedPersonDir), false, "the last work may remove its now-exclusive folder");
+  assert.equal(fs.existsSync(relatedPersonDir), false, "a selected related work may be deleted even when its primary owner differs from the current person");
   assert.throws(
     () => localMutationService.deletePersonLocalFiles("10", { workIds: [] }),
     /请选择要删除的作品/,

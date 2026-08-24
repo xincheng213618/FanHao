@@ -18,6 +18,7 @@ export function createShortVideoPlaybackRenditionPolicy({ api }) {
   function preparePlayer(player, video = {}) {
     if (!player || String(player.dataset.videoId || "") === String(video?.id || "")) return;
     delete player.dataset.shortVideoSmoothFallback;
+    delete player.dataset.shortVideoSmoothRetryCount;
   }
 
   function switchToSmoothFallback(player, video = {}, reason = "playback-stalled", options = {}) {
@@ -67,5 +68,33 @@ export function createShortVideoPlaybackRenditionPolicy({ api }) {
     });
   }
 
-  return Object.freeze({ playbackUrl, preparePlayer, smoothPlaybackUrl, switchToSmoothFallback });
+  function retrySmoothFallback(player, video = {}, options = {}) {
+    const currentSource = String(player?.currentSrc || player?.getAttribute?.("src") || "").trim();
+    if (!player || !currentSource.includes("/media/short-video-smooth/")) return false;
+    const retryLimit = 4;
+    const attempt = Math.max(0, Number(player.dataset.shortVideoSmoothRetryCount || 0)) + 1;
+    if (attempt > retryLimit) return false;
+    player.dataset.shortVideoSmoothRetryCount = String(attempt);
+    options.onScheduled?.(attempt, retryLimit);
+    const preservedTime = Math.max(0, Number(options.lastGoodTime || 0));
+    window.setTimeout(() => {
+      if (!player.isConnected) return;
+      const smoothSource = smoothPlaybackUrl(video);
+      const retrySource = `${smoothSource}${smoothSource.includes("?") ? "&" : "?"}retry=${attempt}`;
+      player.addEventListener("loadedmetadata", () => {
+        if (preservedTime > 0 && Number(player.duration || 0) > preservedTime) {
+          try { player.currentTime = preservedTime; } catch {}
+        }
+        if (options.wantsToPlay) player.play?.().catch(() => {});
+      }, { once: true });
+      options.ensureSource?.(player, video, {
+        source: retrySource,
+        forceReload: true,
+        reason: `smooth-rendition-retry-${attempt}`
+      });
+    }, 1200);
+    return true;
+  }
+
+  return Object.freeze({ playbackUrl, preparePlayer, retrySmoothFallback, smoothPlaybackUrl, switchToSmoothFallback });
 }

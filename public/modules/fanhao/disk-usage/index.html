@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN" class="app-module-loading">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1f7a62" />
+    <title>磁盘空间 · FanHao</title>
+    <style>html.app-module-loading body { visibility: hidden; }</style>
+    <link rel="stylesheet" href="/css/foundation.css?v=20260710-web-css-modules-01" />
+    <link rel="stylesheet" href="/css/shell.css?v=20260713-search-index-02" />
+    <link rel="stylesheet" href="/modules/fanhao/disk-usage/styles.css?v=20260816-disk-treemap-10" />
+  </head>
+  <body class="disk-usage-page">
+    <header class="product-topbar" aria-label="资料库模块">
+      <a class="product-brand" href="/fanhao" aria-label="返回 FanHao 番号库">
+        <span class="product-logo">FH</span>
+        <span class="product-brand-text">
+          <strong>FanHao</strong>
+          <small>个人资料库</small>
+        </span>
+      </a>
+      <nav class="product-nav" id="productNav" aria-label="主模块切换">
+        <a class="product-tab" href="/fanhao" target="_blank" rel="noopener">番号</a>
+        <a class="product-tab" href="/photo" target="_blank" rel="noopener">图库</a>
+        <a class="product-tab" href="/media" target="_blank" rel="noopener">影视</a>
+        <a class="product-tab" href="/novels" target="_blank" rel="noopener">小说</a>
+        <a class="product-tab" href="/short-videos" target="_blank" rel="noopener">短视频</a>
+        <a class="product-tab" href="/music" target="_blank" rel="noopener">音乐</a>
+        <a class="product-tab" href="/tools" target="_blank" rel="noopener">小工具</a>
+        <a class="product-tab" href="/modules/market-dashboard/index.html" target="_blank" rel="noopener">行情</a>
+      </nav>
+      <div class="product-actions">
+        <a class="product-action" href="/android-update">手机端</a>
+        <a class="product-action" href="/admin#overview">设置与运维</a>
+      </div>
+    </header>
+
+    <div class="app-shell disk-app-shell">
+      <aside class="sidebar fanhao-sidebar disk-sidebar" aria-label="番号二级菜单">
+        <div class="fanhao-sidebar-heading">
+          <span class="eyebrow">番号</span>
+          <h2>资料库</h2>
+        </div>
+        <nav class="view-tabs fanhao-subnav" aria-label="番号资料库视图">
+          <a class="view-tab" href="/fanhao">人物</a>
+          <a class="view-tab" href="/fanhao/codes">番号</a>
+          <a class="view-tab" href="/fanhao/codes?prefix=FC2&amp;family=1">FC2</a>
+          <a class="view-tab" href="/fanhao/studios">厂商</a>
+          <a class="view-tab" href="/fanhao/rankings">排行</a>
+          <a class="view-tab" href="/fanhao/vr">VR</a>
+          <a class="view-tab" href="/fanhao/favorites">收藏</a>
+          <a class="view-tab" href="/fanhao/history">历史</a>
+          <a class="view-tab" href="/fanhao?scope=western">欧美</a>
+          <a class="view-tab active" href="/disk-usage" aria-current="page">空间</a>
+        </nav>
+      </aside>
+
+      <main class="disk-page">
+      <header class="disk-hero">
+        <div>
+          <p class="disk-kicker">STORAGE MAP</p>
+          <h1>磁盘空间</h1>
+          <p class="disk-intro">默认只读已保存的扫描缓存。选择磁盘后可逐层进入文件夹，只有手动刷新时才重新遍历磁盘。</p>
+        </div>
+        <span class="cache-policy"><i></i> 缓存优先 · 不自动扫盘</span>
+      </header>
+
+      <section class="drive-grid" id="driveGrid" aria-label="监控磁盘"></section>
+
+      <section class="browser-panel">
+        <div class="browser-toolbar">
+          <div class="path-tools">
+            <button class="up-button" id="upButton" type="button" disabled>← 上一级</button>
+            <nav class="path-breadcrumb" id="breadcrumb" aria-label="当前磁盘路径"></nav>
+          </div>
+          <label class="disk-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="pathSearch" type="search" placeholder="在当前磁盘缓存中查找文件或文件夹" autocomplete="off" />
+          </label>
+          <div class="browser-actions">
+            <button class="secondary-button" id="openCurrentButton" type="button">打开当前文件夹</button>
+            <button class="primary-button" id="refreshButton" type="button">手动刷新缓存</button>
+          </div>
+        </div>
+
+        <div class="scan-status" id="scanStatus" aria-live="polite"></div>
+
+        <div class="folder-summary" id="folderSummary">
+          <div><span>当前占用</span><strong id="folderSize">--</strong></div>
+          <div><span>文件</span><strong id="folderFiles">--</strong></div>
+          <div><span>文件夹</span><strong id="folderDirectories">--</strong></div>
+          <div><span>缓存时间</span><strong id="cacheTime">尚未扫描</strong></div>
+        </div>
+
+        <div class="disk-content-tabs" role="tablist" aria-label="空间内容视图">
+          <button class="content-tab active" id="mapViewTab" type="button" role="tab" aria-selected="true" aria-controls="treemapPanel">空间图</button>
+          <button class="content-tab" id="listViewTab" type="button" role="tab" aria-selected="false" aria-controls="entryPanel">目录列表</button>
+        </div>
+
+        <div class="disk-content" id="diskContent">
+          <section class="treemap-panel" id="treemapPanel" role="tabpanel" aria-labelledby="mapViewTab treemapTitle">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">TREEMAP</p>
+                <h2 id="treemapTitle">空间分布</h2>
+              </div>
+              <span id="treemapHint">按可见空间逐层展开 · 小项归入右下角“其他” · 左键进入或播放</span>
+            </div>
+            <div class="treemap" id="treemap" role="group" aria-label="磁盘空间矩形图"></div>
+          </section>
+
+          <aside class="entry-panel" id="entryPanel" role="tabpanel" aria-labelledby="listViewTab entryTitle" hidden>
+            <div class="section-heading entry-heading">
+              <div>
+                <p class="section-kicker">ENTRIES</p>
+                <h2 id="entryTitle">当前目录</h2>
+              </div>
+              <span id="entryCount">0 项</span>
+            </div>
+            <div class="entry-list" id="entryList"></div>
+          </aside>
+        </div>
+      </section>
+      </main>
+    </div>
+
+    <div class="disk-context-menu" id="contextMenu" role="menu" hidden></div>
+
+    <dialog class="preview-dialog" id="previewDialog">
+      <div class="preview-shell">
+        <header>
+          <div>
+            <p>本地播放</p>
+            <h2 id="previewTitle">文件预览</h2>
+            <span id="previewPath"></span>
+          </div>
+          <button class="dialog-close" id="previewClose" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="preview-stage" id="previewStage"></div>
+        <footer>
+          <button class="secondary-button" id="previewReveal" type="button">在资源管理器中定位</button>
+          <button class="primary-button" id="previewOpen" type="button">使用系统打开</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <script type="module">
+      try {
+        await import("/modules/fanhao/disk-usage/app.js?v=20260816-disk-treemap-12");
+      } finally {
+        document.documentElement.classList.remove("app-module-loading");
+      }
+    </script>
+  </body>
+</html>

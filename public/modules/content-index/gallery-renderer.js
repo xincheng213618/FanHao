@@ -12,11 +12,13 @@ const PHOTO_CATEGORY_LABELS = new Map([
 ]);
 const MEDIA_KIND_CATEGORY_VALUES = {
   movie: "__fanhao_media_kind_movie__",
-  tv: "__fanhao_media_kind_tv__"
+  tv: "__fanhao_media_kind_tv__",
+  anime: "__fanhao_media_kind_anime__"
 };
 const MEDIA_KIND_CATEGORY_LABELS = {
   [MEDIA_KIND_CATEGORY_VALUES.movie]: "电影",
-  [MEDIA_KIND_CATEGORY_VALUES.tv]: "电视剧"
+  [MEDIA_KIND_CATEGORY_VALUES.tv]: "电视剧",
+  [MEDIA_KIND_CATEGORY_VALUES.anime]: "动漫"
 };
 const MEDIA_SORT_OPTIONS = [
   ["updated", "最近更新"],
@@ -80,7 +82,7 @@ function renderGalleryStats() {
     ["套图", data.totals?.photoSets || 0],
     ["韩漫", data.totals?.manga || 0],
     ["欧美", data.totals?.western || 0],
-    ["影视", (data.totals?.movies || 0) + (data.totals?.tv || 0)]
+    ["影视", (data.totals?.movies || 0) + (data.totals?.tv || 0) + (data.totals?.anime || 0)]
   ];
 
   els.statsRow.innerHTML = "";
@@ -116,6 +118,7 @@ function galleryModeLabel(mode) {
     media: "影视作品",
     movie: "电影",
     tv: "电视剧",
+    anime: "动漫",
     cache: "缓存"
   };
   return labels[mode] || mode;
@@ -125,6 +128,7 @@ function galleryMediaKindForMode(mode) {
   if (mode === "western") return "western";
   if (mode === "movie") return "movie";
   if (mode === "tv") return "tv";
+  if (mode === "anime") return "anime";
   if (mode === "media") return "media";
   return "";
 }
@@ -273,10 +277,10 @@ function appendFacetOption(select, label, value, count) {
 function mediaItemsForMode(mode = state.gallery.mode) {
   const kind = galleryMediaKindForMode(mode);
   const list = currentImageLibraryList();
-  const source = list && ["western", "media", "movie", "tv"].includes(state.gallery.mode)
+  const source = list && ["western", "media", "movie", "tv", "anime"].includes(state.gallery.mode)
     ? list.items || []
     : state.gallery.data?.mediaItems || [];
-  if (kind === "media") return source.filter((item) => item.mediaKind === "movie" || item.mediaKind === "tv");
+  if (kind === "media") return source.filter((item) => ["movie", "tv", "anime"].includes(item.mediaKind));
   return kind ? source.filter((item) => item.mediaKind === kind) : [];
 }
 
@@ -348,6 +352,7 @@ function createMovieCategoryStrip() {
   addChip("all", "全部", total);
   addChip("movie", "电影", kindCounts.get("movie") || 0);
   addChip("tv", "电视剧", kindCounts.get("tv") || 0);
+  addChip("anime", "动漫", kindCounts.get("anime") || 0);
 
   return strip;
 }
@@ -355,7 +360,7 @@ function createMovieCategoryStrip() {
 function galleryRescanScopeForMode() {
   if (state.gallery.mode === "photo") return "photo";
   if (state.gallery.mode === "media") return "media";
-  if (["western", "movie", "tv"].includes(state.gallery.mode)) return state.gallery.mode;
+  if (["western", "movie", "tv", "anime"].includes(state.gallery.mode)) return state.gallery.mode;
   return "all";
 }
 
@@ -740,7 +745,7 @@ function currentTvSeriesFacets() {
 
 function galleryText(item) {
   const movieMetadata = item.mediaKind === "movie" ? item.movieMetadata || {} : {};
-  const tvMetadata = item.mediaKind === "tv" || item.type === "tvSeriesWork" ? item.tvSeries || {} : {};
+  const tvMetadata = ["tv", "anime"].includes(item.mediaKind) || item.type === "tvSeriesWork" ? item.tvSeries || {} : {};
   return [
     item.title,
     item.category,
@@ -885,7 +890,7 @@ function movieListMetaLine(item) {
   const metadata = screenMetadata(item);
   return [
     metadata.year || "",
-    item.mediaKind === "tv" && metadata.pubdate ? `首播 ${metadata.pubdate}` : "",
+    ["tv", "anime"].includes(item.mediaKind) && metadata.pubdate ? `首播 ${metadata.pubdate}` : "",
     (metadata.countries || []).slice(0, 2).join(" / ") || item.category,
     (metadata.genres || []).slice(0, 3).join(" / ")
   ].filter(Boolean).join(" / ");
@@ -1075,7 +1080,7 @@ function hasCjkText(value) {
 }
 
 function screenMetadata(media = {}) {
-  return media?.mediaKind === "tv" || media?.type === "tvSeriesWork" ? media.tvSeries || {} : media.movieMetadata || {};
+  return ["tv", "anime"].includes(media?.mediaKind) || media?.type === "tvSeriesWork" ? media.tvSeries || {} : media.movieMetadata || {};
 }
 
 function movieChineseTitle(value) {
@@ -1228,7 +1233,7 @@ function renderTvSeriesBar(container, total) {
   text.className = "gallery-person-bar-text gallery-series-copy";
   const eyebrow = document.createElement("span");
   eyebrow.className = "gallery-series-eyebrow";
-  eyebrow.textContent = ["电视剧", state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : ""].filter(Boolean).join(" · ");
+  eyebrow.textContent = [state.gallery.mediaKind === "anime" ? "动漫" : "电视剧", state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : ""].filter(Boolean).join(" · ");
   const title = document.createElement("h1");
   title.textContent = tvSeriesDisplayTitle(state.gallery.person, metadata);
   const stats = document.createElement("div");
@@ -2239,6 +2244,7 @@ function createMovieExploreItem(item, index) {
   button.className = "gallery-movie-list-item";
   button.addEventListener("click", () => {
     if (isTvSeriesWork) {
+      state.gallery.mediaKind = item.mediaKind || state.gallery.mediaKind;
       state.gallery.category = item.category || state.gallery.category;
       state.gallery.person = item.seriesName || item.title || "all";
       state.gallery.seriesKey = item.seriesKey || "";
@@ -2248,7 +2254,7 @@ function createMovieExploreItem(item, index) {
       syncGalleryRoute();
       return;
     }
-    if (["movie", "tv"].includes(item.mediaKind)) {
+    if (["movie", "tv", "anime"].includes(item.mediaKind)) {
       openScreenMediaPlayer(item);
     } else {
       openGalleryMedia(item.id);
@@ -2268,7 +2274,7 @@ function createMovieExploreItem(item, index) {
     poster.append(img);
   } else {
     poster.classList.add("empty");
-    poster.dataset.placeholder = isTvSeriesWork ? "电视剧" : "电影";
+    poster.dataset.placeholder = isTvSeriesWork ? (item.mediaKind === "anime" ? "动漫" : "电视剧") : "电影";
   }
 
   const copy = document.createElement("div");
@@ -2305,7 +2311,7 @@ function createMovieExploreItem(item, index) {
 
   const local = document.createElement("small");
   local.textContent = [
-    isTvSeriesWork ? "电视剧" : "电影",
+    isTvSeriesWork ? (item.mediaKind === "anime" ? "动漫" : "电视剧") : "电影",
     item.category,
     isTvSeriesWork ? `${formatNumber(item.episodeCount || 0)} 集` : formatBytes(item.size),
     item.updatedAt ? `最近 ${formatDateTime(item.updatedAt)}` : ""
@@ -2508,7 +2514,7 @@ function renderMediaShelf(container) {
       : item;
     const meta = item.mediaKind === "movie"
       ? [item.category, item.movieMetadata?.year, ...(item.movieMetadata?.genres || []).slice(0, 2)].filter(Boolean).join(" · ")
-      : [item.category, item.subCategory, item.mediaKind === "tv" ? item.seriesName : item.personName].filter(Boolean).join(" · ");
+      : [item.category, item.subCategory, ["tv", "anime"].includes(item.mediaKind) ? item.seriesName : item.personName].filter(Boolean).join(" · ");
     const extra = [
       tvSeriesRatingText(doubanMetadata),
       formatBytes(item.size),
@@ -2520,7 +2526,7 @@ function renderMediaShelf(container) {
         extra,
         badges: doubanMetadata?.rating ? [`豆瓣 ${Number(doubanMetadata.rating).toFixed(1)}`] : [],
         placeholder: item.kindLabel || galleryModeLabel(state.gallery.mode),
-        onOpen: () => ["movie", "tv"].includes(item.mediaKind) ? openScreenMediaPlayer(item) : openGalleryMedia(item.id)
+        onOpen: () => ["movie", "tv", "anime"].includes(item.mediaKind) ? openScreenMediaPlayer(item) : openGalleryMedia(item.id)
       })
     );
   }
@@ -3274,7 +3280,7 @@ function createGalleryMediaPlayer(media, metadata = null) {
   const strong = document.createElement("strong");
   strong.textContent = media.mediaKind === "movie" ? movieDisplayTitle(media) : media.title || "播放";
   const sub = document.createElement("span");
-  sub.textContent = [media.kindLabel, media.category, media.mediaKind === "tv" ? media.seriesName : media.personName, metadata?.rating ? `豆瓣 ${Number(metadata.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+  sub.textContent = [media.kindLabel, media.category, ["tv", "anime"].includes(media.mediaKind) ? media.seriesName : media.personName, metadata?.rating ? `豆瓣 ${Number(metadata.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
   title.append(strong, sub);
   top.append(back, title);
 
@@ -3490,6 +3496,8 @@ function createMovieInfoPanel(media, metadata = null, onBack = null) {
   const panel = document.createElement("section");
   panel.className = "gallery-movie-detail";
   const isTv = media?.mediaKind === "tv";
+  const isAnime = media?.mediaKind === "anime";
+  const isEpisodic = isTv || isAnime;
 
   const header = document.createElement("div");
   header.className = "gallery-movie-detail-header";
@@ -3562,7 +3570,7 @@ function createMovieInfoPanel(media, metadata = null, onBack = null) {
     cover.append(img);
   } else {
     cover.classList.add("empty");
-    cover.textContent = isTv ? "电视剧" : "电影";
+    cover.textContent = isAnime ? "动漫" : isTv ? "电视剧" : "电影";
   }
 
   const facts = document.createElement("div");
@@ -3573,9 +3581,9 @@ function createMovieInfoPanel(media, metadata = null, onBack = null) {
   appendMovieFact(facts, "类型", metadata?.genres);
   appendMovieFact(facts, "制片国家/地区", metadata?.countries);
   appendMovieFact(facts, "语言", metadata?.languages);
-  appendMovieFact(facts, isTv ? "首播日期" : "上映日期", metadata?.releaseDates?.length ? metadata.releaseDates : metadata?.pubdate);
-  appendMovieFact(facts, "季数", isTv && metadata?.seasonCount ? `${formatNumber(metadata.seasonCount)} 季` : "");
-  appendMovieFact(facts, "集数", isTv && metadata?.episodeCount ? `${formatNumber(metadata.episodeCount)} 集` : "");
+  appendMovieFact(facts, isEpisodic ? "首播日期" : "上映日期", metadata?.releaseDates?.length ? metadata.releaseDates : metadata?.pubdate);
+  appendMovieFact(facts, "季数", isEpisodic && metadata?.seasonCount ? `${formatNumber(metadata.seasonCount)} 季` : "");
+  appendMovieFact(facts, "集数", isEpisodic && metadata?.episodeCount ? `${formatNumber(metadata.episodeCount)} 集` : "");
   appendMovieFact(facts, "片长", metadata?.durations?.length ? metadata.durations : metadata?.episodeDuration);
   appendMovieFact(facts, "又名", metadata?.aliases);
   appendMovieFact(facts, "IMDb", metadata?.imdbId, { mono: true });
@@ -3603,7 +3611,7 @@ function createMovieInfoPanel(media, metadata = null, onBack = null) {
   const localGrid = document.createElement("div");
   localGrid.className = "gallery-movie-local-grid";
   appendMovieFact(localGrid, "分类", [media.category, media.seriesName].filter(Boolean).join(" / "));
-  appendMovieFact(localGrid, "类型", isTv ? "电视剧" : "电影");
+  appendMovieFact(localGrid, "类型", isAnime ? "动漫" : isTv ? "电视剧" : "电影");
   appendMovieFact(localGrid, "格式", media.ext);
   appendMovieFact(localGrid, "大小", formatBytes(media.size));
   appendMovieFact(localGrid, "文件名", media.title);
@@ -3634,12 +3642,12 @@ function appendMediaMetaItem(container, label, value, options = {}) {
 function renderMediaReader(container) {
   const media = state.gallery.media;
   const isMovie = media.mediaKind === "movie";
-  const isScreenMedia = ["movie", "tv"].includes(media.mediaKind);
+  const isScreenMedia = ["movie", "tv", "anime"].includes(media.mediaKind);
   const metadata = isMovie ? media.movieMetadata : media.tvSeries;
   if (!isScreenMedia) {
     const toolbar = readerToolbar(
       media.title,
-      [media.kindLabel, media.category, media.mediaKind === "tv" ? media.seriesName : media.personName, formatBytes(media.size)]
+      [media.kindLabel, media.category, ["tv", "anime"].includes(media.mediaKind) ? media.seriesName : media.personName, formatBytes(media.size)]
         .filter(Boolean)
         .join(" · "),
       () => {

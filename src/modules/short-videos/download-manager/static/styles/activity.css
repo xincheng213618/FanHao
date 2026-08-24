@@ -1,0 +1,248 @@
+.activity-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 14px;
+  align-items: start;
+}
+
+.activity-task-column {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.activity-panel,
+.activity-event-panel {
+  min-width: 0;
+}
+
+.activity-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.activity-section-head .panel-title {
+  margin-bottom: 3px;
+}
+
+.activity-count {
+  display: inline-grid;
+  min-width: 30px;
+  min-height: 30px;
+  place-items: center;
+  border-radius: 999px;
+  background: #eef3f6;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-job-list,
+.activity-event-list {
+  display: grid;
+  gap: 9px;
+}
+
+.activity-history-list {
+  max-height: 720px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.activity-job-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.activity-job-card.is-running {
+  border-left-color: var(--accent);
+  background: rgba(15, 143, 140, 0.035);
+}
+
+.activity-job-card.is-queued {
+  border-left-color: var(--pending);
+}
+
+.activity-job-card.is-complete {
+  border-left-color: var(--ok);
+}
+
+.activity-job-card.is-failed {
+  border-left-color: var(--danger);
+}
+
+.activity-job-card.is-stopped {
+  border-left-color: var(--warn);
+}
+
+.activity-job-head,
+.activity-job-title-row,
+.activity-progress-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-job-head {
+  justify-content: space-between;
+}
+
+.activity-job-title-row {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.activity-job-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 800;
+}
+
+.activity-job-id {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eef3f6;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.activity-status.is-running,
+.activity-status.is-complete {
+  color: var(--ok);
+  background: rgba(24, 134, 75, 0.1);
+}
+
+.activity-status.is-queued {
+  color: var(--pending);
+}
+
+.activity-status.is-failed {
+  color: var(--danger);
+  background: rgba(199, 58, 58, 0.1);
+}
+
+.activity-status.is-stopped {
+  color: #9b5d00;
+  background: #fff8e8;
+}
+
+.activity-job-message,
+.activity-job-meta,
+.activity-job-time {
+  overflow-wrap: anywhere;
+}
+
+.activity-job-message {
+  line-height: 1.55;
+}
+
+.activity-job-meta,
+.activity-job-time,
+.activity-progress-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.activity-progress-summary {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.activity-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8edf1;
+}
+
+.activity-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.activity-empty {
+  padding: 24px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.activity-event-panel {
+  position: sticky;
+  top: 14px;
+}
+
+.activity-event-list {
+  max-height: min(760px, calc(100vh - 180px));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.activity-event-item {
+  display: grid;
+  gap: 5px;
+  padding: 10px 0 10px 11px;
+  border-left: 3px solid var(--line);
+}
+
+.activity-event-item.is-warn {
+  border-left-color: var(--warn);
+}
+
+.activity-event-item.is-error {
+  border-left-color: var(--danger);
+}
+
+.activity-event-title {
+  font-weight: 800;
+}
+
+.activity-event-time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 980px) {
+  .activity-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-event-panel {
+    position: static;
+  }
+
+  .activity-event-list {
+    max-height: 520px;
+  }
+}
+
+@media (max-width: 720px) {
+  .activity-job-head {
+    align-items: flex-start;
+  }
+
+  .activity-section-head,
+  .activity-job-head {
+    flex-direction: column;
+  }
+}

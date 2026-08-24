@@ -55,13 +55,16 @@ async function runFixtureVerification() {
       assert.deepEqual(hot, cold, "hot distribution cache must preserve generatedAt and the full payload");
       assert.equal(client.diagnostics().likeDistributionDispatches, dispatchAfterCold, "hot distribution cache must not dispatch worker work");
 
-      client.invalidateStats();
+      await delay(2);
+      client.invalidateLikeDistribution();
+      assert.equal(client.diagnostics().likeDistributionCacheEntries, 0, "explicit distribution invalidation must clear the client cache");
       const beforeConcurrent = client.diagnostics().likeDistributionDispatches;
       const concurrent = await Promise.all(Array.from({ length: 100 }, () => (
-        client.queryLikeDistribution({ catalogStamp: "fixture-single-flight" })
+        client.queryLikeDistribution({ catalogStamp: fixture.stamp })
       )));
       assert(concurrent.every((item) => JSON.stringify(item) === JSON.stringify(concurrent[0])), "100 concurrent distribution callers must share one result");
       assert.equal(client.diagnostics().likeDistributionDispatches, beforeConcurrent + 1, "100 concurrent distribution callers must dispatch exactly once");
+      assert.notEqual(concurrent[0].generatedAt, cold.generatedAt, "explicit distribution invalidation must also clear the worker store cache");
 
       const beforeCatalogMutation = concurrent[0].bins.at(-1).videoCount;
       mutateCatalogFixture(fixture.dbPath);
@@ -72,6 +75,7 @@ async function runFixtureVerification() {
     }
 
     await verifyRuntimeRouteAndInvalidation(fixture);
+    await verifyRefreshRequiresLocalAdmin(fixture);
     const health = await verifyArmedRouteHealth(fixture);
     await verifyRouteAbort(fixture);
     await verifyAbortIsolation(fixture);
@@ -106,17 +110,30 @@ async function verifyRuntimeRouteAndInvalidation(fixture) {
     assert.deepEqual(hot.data, first.data, "the real route must preserve the hot JSON contract including generatedAt");
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 1, "the real route hot cache must stay worker-free");
 
-    touchManagerFixture(fixture.managerDbPath);
-    const afterManagerChange = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
-    assert.equal(afterManagerChange.status, 200);
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 2, "download-manager mtime changes must invalidate the route cache without opening the main-thread store for a stamp");
+    const managerWriter = openManagerWalMutation(fixture.managerDbPath);
+    try {
+      const afterManagerChange = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
+      assert.equal(afterManagerChange.status, 200);
+      assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 2, "download-manager WAL changes must invalidate the route cache without opening the main-thread store for a stamp");
+
+      await delay(2);
+      const refreshed = await runtimeRequest(runtime, "POST", "/api/short-videos/like-distribution/refresh");
+      assert.equal(refreshed.status, 200);
+      assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 3, "the administrator refresh route must force a new worker aggregate for an unchanged stamp");
+      assert.notEqual(refreshed.data.generatedAt, afterManagerChange.data.generatedAt, "the administrator refresh route must clear the worker store cache before recomputing");
+      const hotAfterRefresh = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
+      assert.deepEqual(hotAfterRefresh.data, refreshed.data, "ordinary GET must continue using the freshly rebuilt cache");
+      assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 3, "ordinary GET after a forced refresh must remain worker-free");
+    } finally {
+      managerWriter.close();
+    }
 
     const action = await runtimeRequest(runtime, "PUT", "/api/short-videos/fixture-000001/actions/like", { active: false });
     assert.equal(action.status, 200);
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "a user-action mutation must clear the distribution cache");
     const afterAction = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
     assert.equal(afterAction.status, 200);
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 3, "a user-action mutation must force a new worker aggregate");
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 4, "a user-action mutation must force a new worker aggregate");
     assert.equal(afterAction.data.insights.personal.authorEfficiency.likedVideos, first.data.insights.personal.authorEfficiency.likedVideos - 1);
 
     const watch = await runtimeRequest(runtime, "PUT", "/api/short-videos/fixture-000001/watch", {
@@ -127,7 +144,7 @@ async function verifyRuntimeRouteAndInvalidation(fixture) {
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "a watch mutation must clear the client distribution cache");
     const afterWatch = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
     assert.equal(afterWatch.status, 200);
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 4, "a watch mutation must force a new worker aggregate");
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 5, "a watch mutation must force a new worker aggregate");
     assert.equal(afterWatch.data.insights.personal.watch.watchedTotal, afterAction.data.insights.personal.watch.watchedTotal + 1);
 
     mutateCatalogFixture(fixture.dbPath, "fixture-000002");
@@ -135,23 +152,44 @@ async function verifyRuntimeRouteAndInvalidation(fixture) {
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "catalog generation invalidation must clear the distribution cache");
     const afterCatalog = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
     assert.equal(afterCatalog.status, 200);
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 5, "catalog generation invalidation must dispatch a new worker aggregate");
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 6, "catalog generation invalidation must dispatch a new worker aggregate");
 
     const deleted = await runtimeRequest(runtime, "DELETE", "/api/short-videos/fixture-000004", { deleteFiles: false });
     assert.equal(deleted.status, 200);
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "the real delete mutation route must reset the distribution cache");
     const afterDelete = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
     assert.equal(afterDelete.data.total, afterCatalog.data.total - 1, "delete mutation invalidation must expose the new catalog total");
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 6);
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 7);
 
     const imported = await runtime.syncCatalog({ force: true });
     assert(imported && imported.catalogChanged === true && imported.imported >= 1, "the real download-manager import must report a catalog change");
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "the download-manager import callback must reset the distribution cache");
     const afterImport = await runtimeRequest(runtime, "GET", "/api/short-videos/like-distribution");
     assert.equal(afterImport.data.total, afterDelete.data.total + 1, "import invalidation must expose the imported video");
-    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 7);
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 8);
 
     await verifyReservedSingletonRouting(runtime);
+  } finally {
+    await runtime.stop();
+    runtime.store.close();
+  }
+}
+
+async function verifyRefreshRequiresLocalAdmin(fixture) {
+  let adminChecks = 0;
+  const runtime = fixtureRuntime(fixture, {}, {
+    requireLocalAdmin(_req, res) {
+      adminChecks += 1;
+      res.status = 403;
+      res.data = { error: "forbidden" };
+      return false;
+    }
+  });
+  try {
+    const response = await runtimeRequest(runtime, "POST", "/api/short-videos/like-distribution/refresh");
+    assert.equal(response.status, 403, "distribution refresh must reject callers that are not local administrators");
+    assert.equal(adminChecks, 1);
+    assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 0, "rejected refresh requests must not start worker work");
   } finally {
     await runtime.stop();
     runtime.store.close();
@@ -330,7 +368,7 @@ async function verifyInFlightInvalidation() {
   try {
     const stale = client.queryLikeDistribution({ catalogStamp: "before-watch" });
     while (client.diagnostics().likeDistributionDispatches < 1) await delay(1);
-    client.invalidateStats();
+    client.invalidateLikeDistribution();
     Atomics.store(new Int32Array(valueBuffer), 0, 2);
     await assert.rejects(stale, (error) => error?.code === "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE" && error?.statusCode === 503);
     assert.equal(client.diagnostics().likeDistributionCacheEntries, 0, "an invalidated in-flight result must never refill the cache");
@@ -550,6 +588,8 @@ function createProductionShapeFixture(videoCount) {
   fs.writeFileSync(importedMediaPath, "fixture manager video");
   const managerDb = new DatabaseSync(managerDbPath);
   managerDb.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA wal_autocheckpoint = 0;
     CREATE TABLE fixture_marker (value INTEGER NOT NULL);
     INSERT INTO fixture_marker VALUES (1);
     CREATE TABLE profiles (
@@ -636,12 +676,30 @@ function createProductionShapeFixture(videoCount) {
   }
 }
 
-function touchManagerFixture(managerDbPath) {
-  const db = new DatabaseSync(managerDbPath);
-  db.prepare("UPDATE fixture_marker SET value = value + 1").run();
-  db.close();
-  const next = new Date(Date.now() + 2000);
-  fs.utimesSync(managerDbPath, next, next);
+function openManagerWalMutation(managerDbPath) {
+  return openWalMutation(managerDbPath, (database) => {
+    database.prepare("UPDATE fixture_marker SET value = value + 1").run();
+  });
+}
+
+function openWalMutation(dbPath, mutate) {
+  const before = fs.statSync(dbPath, { bigint: true });
+  const database = new DatabaseSync(dbPath);
+  try {
+    database.exec("PRAGMA wal_autocheckpoint = 0; BEGIN IMMEDIATE;");
+    mutate(database);
+    database.exec("COMMIT");
+    const wal = fs.statSync(`${dbPath}-wal`, { bigint: true });
+    const after = fs.statSync(dbPath, { bigint: true });
+    assert(wal.size > 0n, "the WAL fixture mutation must remain in a live sqlite -wal file");
+    assert.equal(after.size, before.size, "the WAL fixture mutation must not change the main sqlite file size");
+    assert.equal(after.mtimeNs, before.mtimeNs, "the WAL fixture mutation must not change the main sqlite file mtime");
+    return database;
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    database.close();
+    throw error;
+  }
 }
 
 function mutateCatalogFixture(dbPath, id = "fixture-000003") {
@@ -660,7 +718,7 @@ function mutateCatalogFixture(dbPath, id = "fixture-000003") {
   }
 }
 
-function fixtureRuntime(fixture, extraWorkerData = {}) {
+function fixtureRuntime(fixture, extraWorkerData = {}, runtimeOverrides = {}) {
   return createShortVideosRuntime({
     dbPath: fixture.dbPath,
     downloadManagerDbPath: fixture.managerDbPath || "",
@@ -675,7 +733,8 @@ function fixtureRuntime(fixture, extraWorkerData = {}) {
     requireLocalAdmin: () => true,
     sendJson(res, status, data) { res.status = status; res.data = data; },
     sharedCache: { rootDir: fixture.cacheRoot, scheduleCleanup() {}, touch() {} },
-    catalogWorkerOptions: { extraWorkerData }
+    catalogWorkerOptions: { extraWorkerData },
+    ...runtimeOverrides
   });
 }
 

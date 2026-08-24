@@ -20,6 +20,7 @@ export function createServerConfig({
   spawn = spawnSync
 } = {}) {
   const DATA_DIR = path.join(projectRoot, "data");
+  const MANGA_LIBRARY_ROOT = env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
   const FFMPEG_PATH = env.FFMPEG_PATH || "ffmpeg";
   const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 
@@ -32,7 +33,8 @@ export function createServerConfig({
     LIBRARY_ROOTS: parseLibraryRoots(env),
     PUBLIC_DIR: path.join(projectRoot, "public"),
     DATA_DIR,
-    MANGA_LIBRARY_ROOT: env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue",
+    MANGA_LIBRARY_ROOT,
+    MANGA_DATABASE_PATH: env.FANHAO_MANGA_DATABASE || path.join(MANGA_LIBRARY_ROOT, "manga.sqlite"),
     PHOTO_SET_ROOTS: parsePhotoSetRoots(env),
     GALLERY_MEDIA_SOURCES: galleryMediaSources(env),
     WESTERN_LIBRARY_ROOTS: parseRootList(env.FANHAO_WESTERN_ROOTS, "R:\\"),

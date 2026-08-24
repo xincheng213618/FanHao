@@ -122,6 +122,7 @@ public class NativeShortVideoActivity extends Activity {
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private final ExecutorService executor = Executors.newFixedThreadPool(4);
   private final ExecutorService videoPrefetchExecutor = Executors.newSingleThreadExecutor();
+  private final NativeShortVideoPlaybackFallback playbackFallback = new NativeShortVideoPlaybackFallback(mainHandler, executor);
   private final Set<String> pendingFrameIds = Collections.synchronizedSet(new HashSet<>());
   private final Set<String> pendingAuthorFollowKeys = Collections.synchronizedSet(new HashSet<>());
   private final Set<String> pendingVideoPrefetchIds = Collections.synchronizedSet(new HashSet<>());
@@ -876,7 +877,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private Uri cachedMediaUri(ShortVideoItem item) {
-    return cachedMediaUri(item.streamUrl);
+    return cachedMediaUri(playbackFallback.playbackUrl(item));
   }
 
   private Uri cachedMediaUri(String url) {
@@ -1074,7 +1075,7 @@ public class NativeShortVideoActivity extends Activity {
     player.clearMediaItems();
     player.setRepeatMode(activeRepeatMode());
     player.setVolume(0f);
-    Uri mediaUri = cachedMediaUri(item);
+    Uri mediaUri = playbackFallback.mediaUri(player, item);
     player.setMediaItem(MediaItem.fromUri(mediaUri));
     player.prepare();
   }
@@ -1295,6 +1296,7 @@ public class NativeShortVideoActivity extends Activity {
 
   private void handlePlaybackError(int index, ExoPlayer player, PlaybackException error) {
     if (playerCache.get(index) != player && activePlayer != player) return;
+    if (playbackFallback.handle(player, videos.get(index), error, player.getPlayWhenReady() || currentIndex == index)) { failedPlayerIndexes.remove(index); if (currentIndex == index) showStatus(playbackFallback.status()); return; }
     if (playerCache.get(index) == player) {
       playerCache.remove(index);
       if (activePlayer == player) activePlayer = null;
@@ -3914,8 +3916,8 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void showAuthorSortDialog(AuthorScreenState screen, FeedPage[] pageRef, String[] activeTab, Runnable[] render) {
-    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长" };
-    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration" };
+    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长", "文件大小" };
+    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration", "size" };
     int checked = 0;
     for (int i = 0; i < values.length; i++) {
       if (values[i].equals(screen.sort)) {
@@ -4026,7 +4028,7 @@ public class NativeShortVideoActivity extends Activity {
       case "likes": return "点赞最多";
       case "likesAsc": return "点赞最少";
       case "comments": return "评论最多";
-      case "duration": return "时长最长";
+      case "duration": return "时长最长"; case "size": return "文件大小";
       default: return "时间倒序";
     }
   }
@@ -4070,8 +4072,8 @@ public class NativeShortVideoActivity extends Activity {
           return Long.compare(right.likes, left.likes);
         case "comments":
           return Long.compare(right.comments, left.comments);
-        case "duration":
-          return Long.compare(right.durationMs, left.durationMs);
+        case "duration": return Long.compare(right.durationMs, left.durationMs);
+        case "size": return Long.compare(right.sizeBytes, left.sizeBytes);
         default:
           return right.publishedAt.compareTo(left.publishedAt);
       }
@@ -4530,7 +4532,7 @@ public class NativeShortVideoActivity extends Activity {
       case "likes":
       case "likesAsc":
       case "comments":
-      case "duration":
+      case "duration": case "size":
         return sort;
       default:
         return "published";
@@ -5025,8 +5027,8 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void showFeedSortDialog() {
-    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长" };
-    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration" };
+    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长", "文件大小" };
+    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration", "size" };
     String current = currentFeedSort();
     int checked = 0;
     for (int i = 0; i < values.length; i++) {

@@ -73,6 +73,10 @@ const APP_PAGE_PREFIXES = [
   "/tv/"
 ];
 
+const STANDALONE_PAGE_FILES = new Map([
+  ["/disk-usage", "/modules/fanhao/disk-usage/index.html"]
+]);
+
 export function isAppPagePath(routePath) {
   return APP_PAGE_PATHS.has(routePath) || APP_PAGE_PREFIXES.some((prefix) => routePath.startsWith(prefix));
 }
@@ -98,11 +102,12 @@ export function createStaticFileServer({ publicDir, mimeTypes, normalizeExt, not
   function publicFilePath(urlPath) {
     const routePath = String(urlPath || "/").replace(/\/+$/g, "") || "/";
     const requested =
-      routePath === "/" || isAppPagePath(routePath)
+      STANDALONE_PAGE_FILES.get(routePath) ||
+      (routePath === "/" || isAppPagePath(routePath)
         ? "/index.html"
         : routePath === "/admin"
           ? "/admin.html"
-          : urlPath;
+          : urlPath);
     const decoded = decodeURIComponent(requested);
     const normalized = path.normalize(decoded).replace(/^(\.\.[/\\])+/, "");
     const target = path.join(publicDir, normalized);

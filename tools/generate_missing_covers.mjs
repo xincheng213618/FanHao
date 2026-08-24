@@ -2,63 +2,92 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "../lib/cover-frame.js";
+import { DEFAULT_MAX_COVER_BYTES, extractCoverFrameAsync } from "../lib/cover-frame.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_INDEX_PATH = path.join(PROJECT_ROOT, "data", "library-index.json");
-const DEFAULT_DB_PATH = path.join(PROJECT_ROOT, "data", "actor-profiles.sqlite");
+const DEFAULT_DB_PATH = path.join(PROJECT_ROOT, "data", "fanhao-core-v2.sqlite");
+const DEFAULT_IMAGE_DB_PATH = path.join(PROJECT_ROOT, "data", "fanhao-core-images.sqlite");
+const DEFAULT_WESTERN_ROOTS = ["R:\\"];
 
 const options = parseArgs(process.argv.slice(2));
-const indexPath = path.resolve(options.index || DEFAULT_INDEX_PATH);
 const dbPath = path.resolve(options.db || DEFAULT_DB_PATH);
+const imageDbPath = path.resolve(options["image-db"] || process.env.FANHAO_CORE_IMAGE_DB || DEFAULT_IMAGE_DB_PATH);
 const writeChanges = Boolean(options.write);
 const overwrite = Boolean(options.overwrite);
-const limit = options.limit === "0" ? 0 : positiveInteger(options.limit) || (writeChanges ? 20 : 20);
+const retryErrors = Boolean(options["retry-errors"]);
+const scope = options.scope === "western" ? "western" : "all";
+const limit = options.limit === "0" ? 0 : positiveInteger(options.limit) ?? 20;
+const concurrency = Math.max(1, Math.min(8, positiveInteger(options.concurrency) ?? 3));
 const ffmpegPath = options.ffmpeg || process.env.FFMPEG_PATH || "ffmpeg";
 const ffprobePath = options.ffprobe || process.env.FFPROBE_PATH || "ffprobe";
 const maxBytes = positiveInteger(options["max-bytes"]) || DEFAULT_MAX_COVER_BYTES;
+const westernRoots = rootList(options.root || process.env.FANHAO_WESTERN_ROOTS, DEFAULT_WESTERN_ROOTS);
 
-const index = readJson(indexPath);
+if (!fs.existsSync(dbPath)) throw new Error(`核心数据库不存在：${dbPath}`);
+if (!fs.existsSync(imageDbPath)) throw new Error(`图片数据库不存在：${imageDbPath}`);
+
 const db = new DatabaseSync(dbPath);
-ensureWorkCoversTable(db);
+db.exec("PRAGMA busy_timeout = 30000");
+db.prepare("ATTACH DATABASE ? AS fanhao_images").run(imageDbPath);
+verifyImageStore(db);
 
-const peopleById = new Map((index.people || []).map((person) => [person.id, person]));
-const existingCoverIds = overwrite ? new Set() : cachedCoverWorkIds(db);
-const candidates = coverCandidates(index.works || [], existingCoverIds, options);
+const candidates = loadCandidates(db, {
+  overwrite,
+  retryErrors,
+  scope,
+  westernRoots,
+  workId: options["work-id"],
+  personId: options["person-id"]
+});
 const selected = limit > 0 ? candidates.slice(0, limit) : candidates;
-
-const report = {
-  candidates: candidates.length,
-  selected: selected.length,
-  generated: 0,
-  skippedMissingVideo: 0,
-  errors: []
-};
+const report = { candidates: candidates.length, selected: selected.length, generated: 0, skippedMissingVideo: 0, errors: [] };
 
 if (!writeChanges) {
-  printDryRun(report, selected, { indexPath, dbPath, limit, overwrite });
+  printDryRun(report, selected);
+  db.close();
   process.exit(0);
 }
 
-for (const work of selected) {
-  const video = chooseVideo(work);
-  if (!video) {
+const coverWriter = createCoverWriter(db);
+await mapWithConcurrency(selected, concurrency, async (candidate, index) => {
+  if (!candidate.video_path || !fs.existsSync(candidate.video_path)) {
     report.skippedMissingVideo += 1;
-    continue;
+    coverWriter.saveError(candidate, "视频文件不存在");
+    return;
   }
-
   try {
-    const coverBlob = extractCoverFrame(video.path, { ffmpegPath, ffprobePath, maxBytes });
-    saveCover(db, work, video, peopleById.get(work.personId), coverBlob);
+    const durationSeconds = Number(candidate.duration_minutes || 0) > 0 ? Number(candidate.duration_minutes) * 60 : 0;
+    let coverBlob;
+    try {
+      coverBlob = await extractCoverFrameAsync(candidate.video_path, {
+        ffmpegPath,
+        ffprobePath,
+        duration: durationSeconds,
+        maxBytes
+      });
+    } catch (error) {
+      if (durationSeconds > 0 || !shouldRetryAtStart(error)) throw error;
+      coverBlob = await extractCoverFrameAsync(candidate.video_path, {
+        ffmpegPath,
+        ffprobePath,
+        duration: 1,
+        maxBytes
+      });
+    }
+    coverWriter.saveCover(candidate, coverBlob);
     report.generated += 1;
-    console.log(`OK ${report.generated}/${selected.length} ${work.title || work.directoryName || work.id}`);
+    if (report.generated === 1 || report.generated % 25 === 0 || index === selected.length - 1) {
+      console.log(`[cover] ${report.generated}/${selected.length} ${candidate.title || path.basename(candidate.video_path)}`);
+    }
   } catch (error) {
-    report.errors.push({ workId: work.id, title: work.title || work.directoryName || "", error: error.message });
-    console.warn(`ERR ${work.title || work.id}: ${error.message}`);
+    report.errors.push({ workId: String(candidate.work_id), title: candidate.title || "", error: error.message });
+    coverWriter.saveError(candidate, error.message);
+    console.warn(`[cover:error] ${candidate.title || candidate.work_id}: ${singleLine(error.message, 240)}`);
   }
-}
+});
 
-printWriteReport(report, { indexPath, dbPath, limit, overwrite });
+printWriteReport(report);
+db.close();
 
 function parseArgs(args) {
   const result = {};
@@ -66,7 +95,7 @@ function parseArgs(args) {
     const arg = args[index];
     if (!arg.startsWith("--")) continue;
     const key = arg.slice(2);
-    if (key === "write" || key === "overwrite") {
+    if (["write", "overwrite", "retry-errors"].includes(key)) {
       result[key] = true;
       continue;
     }
@@ -81,115 +110,203 @@ function parseArgs(args) {
   return result;
 }
 
-function readJson(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
-    throw new Error(`读取 JSON 失败: ${filePath}\n${error.message}`);
-  }
-}
-
 function positiveInteger(value) {
   if (value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
 }
 
-function ensureWorkCoversTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS work_covers (
-      work_id TEXT PRIMARY KEY,
-      person_id TEXT NOT NULL,
-      person_name TEXT NOT NULL,
-      video_id TEXT,
-      title TEXT,
-      cover_url TEXT,
-      cover_mime TEXT,
-      cover_blob BLOB,
-      source TEXT,
-      fetched_at TEXT,
-      updated_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_work_covers_person_id ON work_covers(person_id);
-    CREATE INDEX IF NOT EXISTS idx_work_covers_video_id ON work_covers(video_id);
-  `);
+function rootList(rawValue, fallback) {
+  const values = String(rawValue || "").replaceAll("|", ";").split(";").map((value) => value.trim()).filter(Boolean);
+  return values.length ? values : fallback;
 }
 
-function cachedCoverWorkIds(db) {
-  return new Set(db.prepare("SELECT work_id FROM work_covers WHERE cover_blob IS NOT NULL AND length(cover_blob) > 0").all().map((row) => row.work_id));
+function pathWithinAnyRoot(targetPath, roots) {
+  if (!targetPath) return false;
+  const target = path.resolve(targetPath);
+  return roots.some((rootPath) => {
+    const root = path.resolve(rootPath);
+    if (path.parse(root).root.toLowerCase() !== path.parse(target).root.toLowerCase()) return false;
+    const relative = path.relative(root, target);
+    return relative === "" || (!path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`) && relative !== "..");
+  });
 }
 
-function coverCandidates(works, existingCoverIds, options) {
-  return works
-    .filter((work) => !options["work-id"] || work.id === options["work-id"])
-    .filter((work) => !options["person-id"] || work.personId === options["person-id"])
-    .filter((work) => !work.coverId)
-    .filter((work) => overwrite || !existingCoverIds.has(work.id))
-    .filter((work) => (work.videos || []).length > 0)
-    .sort((a, b) => String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")));
+function shouldRetryAtStart(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return ![
+    "moov atom not found",
+    "matches no streams",
+    "invalid data found",
+    "only rectangular vol supported",
+    "header damaged",
+    "invalid bitstream",
+    "unable to determine channel mode"
+  ].some((marker) => message.includes(marker));
 }
 
-function chooseVideo(work) {
-  return (work.videos || []).find((video) => video?.path && fs.existsSync(video.path)) || null;
+function singleLine(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
-function saveCover(db, work, video, person, coverBlob) {
-  const now = new Date().toISOString();
-  db.prepare(
+function verifyImageStore(database) {
+  const row = database.prepare("SELECT name FROM fanhao_images.sqlite_schema WHERE type = 'table' AND name = 'images'").get();
+  if (!row) throw new Error("图片数据库缺少 images 表");
+}
+
+function loadCandidates(database, filters) {
+  const rows = database.prepare(
     `
-    INSERT INTO work_covers (
-      work_id, person_id, person_name, video_id, title,
-      cover_url, cover_mime, cover_blob, source, fetched_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(work_id) DO UPDATE SET
-      person_id = excluded.person_id,
-      person_name = excluded.person_name,
-      video_id = excluded.video_id,
-      title = excluded.title,
-      cover_url = excluded.cover_url,
-      cover_mime = excluded.cover_mime,
-      cover_blob = excluded.cover_blob,
+    WITH ranked_videos AS (
+      SELECT
+        w.id AS work_id,
+        w.title,
+        w.duration_minutes,
+        lw.id AS local_work_id,
+        lw.local_path,
+        lf.file_id AS video_id,
+        lf.file_path AS video_path,
+        lf.relative_path AS video_relative_path,
+        lf.modified_at,
+        (
+          SELECT wp.person_id FROM work_people wp
+          WHERE wp.work_id = w.id AND wp.role = 'actor'
+          ORDER BY wp.sort_order, wp.person_id LIMIT 1
+        ) AS person_id,
+        ROW_NUMBER() OVER (PARTITION BY w.id ORDER BY lf.modified_at DESC, lw.id, lf.sort_order, lf.id) AS row_number
+      FROM local_works lw
+      JOIN works w ON w.id = lw.work_id
+      JOIN local_files lf ON lf.local_work_id = lw.id AND lf.file_type = 'video'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM local_files image_file
+        WHERE image_file.local_work_id = lw.id AND image_file.file_type = 'image'
+      )
+    )
+    SELECT * FROM ranked_videos video
+    WHERE video.row_number = 1
+      AND (
+        ? = 1 OR NOT EXISTS (
+          SELECT 1 FROM fanhao_images.images image
+          WHERE image.owner_type = 'work' AND image.owner_id = video.work_id
+            AND image.kind = 'cover' AND image.status = 'ok'
+            AND image.image_blob IS NOT NULL AND length(image.image_blob) > 0
+        )
+      )
+      AND (
+        ? = 1 OR NOT EXISTS (
+          SELECT 1 FROM fanhao_images.images failed_image
+          WHERE failed_image.owner_type = 'work' AND failed_image.owner_id = video.work_id
+            AND failed_image.kind = 'cover_error' AND failed_image.status = 'error'
+            AND failed_image.source = 'ffmpeg-frame-batch'
+        )
+      )
+    ORDER BY video.modified_at DESC, video.work_id DESC
+    `
+  ).all(filters.overwrite ? 1 : 0, filters.retryErrors ? 1 : 0);
+
+  return rows
+    .filter((row) => filters.scope !== "western" || pathWithinAnyRoot(row.local_path, filters.westernRoots))
+    .filter((row) => !filters.workId || String(row.work_id) === String(filters.workId))
+    .filter((row) => !filters.personId || String(row.person_id) === String(filters.personId));
+}
+
+function createCoverWriter(database) {
+  const coverStatement = database.prepare(
+    `
+    INSERT INTO fanhao_images.images (
+      owner_type, owner_id, kind, source_type, local_path, mime, image_blob,
+      byte_size, sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+    ) VALUES ('work', ?, 'cover', 'generated', ?, 'image/jpeg', ?, ?, 0, 'ok', 'ffmpeg-frame-batch', 'generated', ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+      source_type = excluded.source_type,
+      local_path = excluded.local_path,
+      mime = excluded.mime,
+      image_blob = excluded.image_blob,
+      byte_size = excluded.byte_size,
+      status = excluded.status,
+      error = NULL,
       source = excluded.source,
-      fetched_at = excluded.fetched_at,
+      legacy_table = excluded.legacy_table,
+      legacy_key = excluded.legacy_key,
       updated_at = excluded.updated_at
     `
-  ).run(
-    work.id,
-    work.personId || "",
-    person?.name || "",
-    video.id || "",
-    work.title || work.directoryName || video.title || "",
-    video.relativePath || video.path || "",
-    "image/jpeg",
-    coverBlob,
-    "ffmpeg-frame-batch",
-    now,
-    now
   );
+  const errorStatement = database.prepare(
+    `
+    INSERT INTO fanhao_images.images (
+      owner_type, owner_id, kind, source_type, local_path, mime, image_blob,
+      byte_size, sort_order, status, error, source, legacy_table, legacy_key, created_at, updated_at
+    ) VALUES ('work', ?, 'cover_error', 'generated', ?, 'image/jpeg', NULL, 0, 0, 'error', ?, 'ffmpeg-frame-batch', 'generated', ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+      status = excluded.status,
+      error = excluded.error,
+      source = excluded.source,
+      legacy_table = excluded.legacy_table,
+      legacy_key = excluded.legacy_key,
+      updated_at = excluded.updated_at
+    `
+  );
+  function saveCover(candidate, coverBlob) {
+    const now = new Date().toISOString();
+    coverStatement.run(
+      Number(candidate.work_id),
+      candidate.video_relative_path || candidate.video_path || "",
+      coverBlob,
+      coverBlob.length,
+      String(candidate.work_id),
+      now,
+      now
+    );
+  }
+  function saveError(candidate, errorMessage) {
+    const now = new Date().toISOString();
+    errorStatement.run(
+      Number(candidate.work_id),
+      candidate.video_relative_path || candidate.video_path || "",
+      singleLine(errorMessage, 1000),
+      String(candidate.work_id),
+      now,
+      now
+    );
+  }
+  return { saveCover, saveError };
 }
 
-function printDryRun(report, selected, settings) {
-  console.log(`library-index: ${settings.indexPath}`);
-  console.log(`metadata-db: ${settings.dbPath}`);
+async function mapWithConcurrency(items, workerCount, mapper) {
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(workerCount, items.length) }, worker));
+}
+
+function printDryRun(report, sample) {
+  console.log(`core-db: ${dbPath}`);
+  console.log(`image-db: ${imageDbPath}`);
   console.log("mode: dry-run");
-  console.log(`overwrite: ${settings.overwrite ? "true" : "false"}`);
+  console.log(`scope: ${scope}`);
+  console.log(`overwrite: ${overwrite ? "true" : "false"}`);
+  console.log(`retry errors: ${retryErrors ? "true" : "false"}`);
   console.log(`missing cover candidates: ${report.candidates}`);
-  console.log(`selected sample: ${report.selected}${settings.limit ? ` (limit ${settings.limit})` : ""}`);
-  for (const work of selected.slice(0, 10)) {
-    const video = chooseVideo(work);
-    const status = video ? "video" : "missing-file";
-    console.log(`  - ${status} ${work.title || work.directoryName || work.id}`);
+  console.log(`selected: ${report.selected}${limit ? ` (limit ${limit})` : ""}`);
+  for (const candidate of sample.slice(0, 10)) {
+    console.log(`  - ${fs.existsSync(candidate.video_path) ? "video" : "missing-file"} ${candidate.title || candidate.video_path}`);
   }
   console.log("\nAdd --write to generate cached covers. Use --limit 0 to process all candidates.");
 }
 
-function printWriteReport(report, settings) {
+function printWriteReport(report) {
   console.log("");
-  console.log(`library-index: ${settings.indexPath}`);
-  console.log(`metadata-db: ${settings.dbPath}`);
+  console.log(`core-db: ${dbPath}`);
+  console.log(`image-db: ${imageDbPath}`);
   console.log("mode: write");
-  console.log(`overwrite: ${settings.overwrite ? "true" : "false"}`);
-  console.log(`selected: ${report.selected}${settings.limit ? ` (limit ${settings.limit})` : ""}`);
+  console.log(`scope: ${scope}`);
+  console.log(`selected: ${report.selected}${limit ? ` (limit ${limit})` : ""}`);
   console.log(`generated: ${report.generated}`);
   console.log(`skipped missing video: ${report.skippedMissingVideo}`);
   console.log(`errors: ${report.errors.length}`);

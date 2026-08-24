@@ -9,6 +9,7 @@ from typing import Any
 from . import download_supervisor, extraction
 from .auth import cookie_auth_status
 from .common import first_text, normalize_int
+from .collection_scheduler import automatic_collection_scheduler
 from .config import BASE_DIR, DB_PATH, DEFAULT_OUTPUT_DIR, FROZEN_BUILD, LIBRARY_SEC_UID, LOG_DIR
 from .database import db
 from .domain_manifest import profile_output_dir
@@ -16,9 +17,14 @@ from .profiles_links import current_profile_id
 from .profile_refresh_policy import (
     PROFILE_LINK_STATS_SQL,
     attach_profile_refresh_decision,
+    profile_requires_full_scan,
     profile_refresh_decision,
 )
 from .queue import link_stats, list_download_queue
+
+
+ACTIVITY_JOB_LIMIT = 200
+ACTIVITY_EVENT_LIMIT = 100
 
 
 def get_runtime_status() -> dict[str, Any]:
@@ -29,30 +35,38 @@ def get_runtime_status() -> dict[str, Any]:
             "browser": FROZEN_BUILD,
             "frozen": FROZEN_BUILD,
         },
-        "extract": {
-            "active": extraction.extract_thread is not None and extraction.extract_thread.is_alive(),
-            "job_id": extraction.extract_job_id,
-        },
+        "extract": extraction.extract_status(),
         "download": download_supervisor.download_manager.snapshot(),
     }
 
 
 def get_activity_state() -> dict[str, Any]:
-    """Return recent jobs and events without loading every profile and link count."""
+    """Return the bounded task history plus the authoritative extraction queue."""
+    extract = extraction.extract_status()
     with db() as conn:
         jobs = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM jobs ORDER BY id DESC LIMIT 8"
+                """
+                SELECT *
+                FROM jobs
+                WHERE status IN ('running', 'queued')
+                   OR id IN (
+                     SELECT id FROM jobs ORDER BY id DESC LIMIT ?
+                   )
+                ORDER BY id DESC
+                """,
+                (ACTIVITY_JOB_LIMIT,),
             ).fetchall()
         ]
         events = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM events ORDER BY id DESC LIMIT 20"
+                "SELECT * FROM events ORDER BY id DESC LIMIT ?",
+                (ACTIVITY_EVENT_LIMIT,),
             ).fetchall()
         ]
-    return {"jobs": jobs, "events": events}
+    return {"jobs": jobs, "events": events, "extract": extract}
 
 
 def get_state() -> dict[str, Any]:
@@ -83,6 +97,8 @@ def get_state() -> dict[str, Any]:
                   profiles.following_count,
                   profiles.follower_count,
                   profiles.total_favorited,
+                  profiles.nickname_history_json,
+                  profiles.total_favorited_history_json,
                    profiles.aweme_count,
                    profiles.has_deleted_works,
                    profiles.account_status,
@@ -147,14 +163,12 @@ def get_state() -> dict[str, Any]:
             "frozen": FROZEN_BUILD,
         },
         "settings": settings,
+        "automatic_collection": automatic_collection_scheduler.snapshot(),
         "current_profile": current_profile,
         "profiles": profiles,
         "download_queue": download_queue,
         "stats": stats,
-        "extract": {
-            "active": extraction.extract_thread is not None and extraction.extract_thread.is_alive(),
-            "job_id": extraction.extract_job_id,
-        },
+        "extract": extraction.extract_status(),
         "download": download_supervisor.download_manager.snapshot(),
         "auth": cookie_auth_status(),
         "jobs": jobs,
@@ -174,10 +188,24 @@ def get_state() -> dict[str, Any]:
 def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     scope = (query.get("scope") or ["collected"])[0].strip().lower()
     search = (query.get("q") or [""])[0].strip()
-    sort_mode = (query.get("sort") or ["latest_desc"])[0].strip().lower()
+    sort_mode = (query.get("sort") or ["last_extracted_desc"])[0].strip().lower()
     limit = normalize_int((query.get("limit") or ["200"])[0], 200, 1, 500)
     offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
     deleted_works = (query.get("deleted_works") or ["all"])[0].strip().lower()
+    pending_full_scan_sql = """
+    (
+      COALESCE(profiles.full_scan_required, 0)=1
+      OR (
+        profiles.tab='post'
+        AND COALESCE(profiles.account_status, 'active')<>'banned'
+        AND COALESCE(profiles.has_deleted_works, 0)=0
+        AND NULLIF(TRIM(COALESCE(profiles.last_full_scan_at, '')), '') IS NULL
+        AND profiles.aweme_count IS NOT NULL
+        AND COALESCE(stats.total, 0)-profiles.aweme_count>=10
+        AND profiles.aweme_count<=COALESCE(stats.total, 0)*0.9
+      )
+    )
+    """
     where: list[str] = []
     params: list[Any] = []
     if scope == "following":
@@ -193,25 +221,26 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     if deleted_works == "flagged":
         where.append("profiles.has_deleted_works=1")
     elif deleted_works == "pending":
-        where.append("profiles.full_scan_required=1")
+        where.append(pending_full_scan_sql)
     elif deleted_works != "all":
         raise ValueError("作品差异只能是 all/flagged/pending")
     if search:
         where.append(
             "(profiles.nickname LIKE ? OR profiles.title LIKE ? OR profiles.unique_id LIKE ? "
-            "OR profiles.short_id LIKE ? OR profiles.sec_uid LIKE ?)"
+            "OR profiles.short_id LIKE ? OR profiles.sec_uid LIKE ? OR profiles.nickname_history_json LIKE ?)"
         )
         like = f"%{search}%"
-        params.extend([like, like, like, like, like])
+        params.extend([like, like, like, like, like, like])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     order_map = {
+        "last_extracted_desc": "COALESCE(profiles.last_extracted_at, '') DESC, profiles.id DESC",
         "latest_desc": "COALESCE(stats.latest_work_create_time, 0) DESC, profiles.id DESC",
         "works_desc": "COALESCE(profiles.aweme_count, stats.total, 0) DESC, profiles.id DESC",
         "likes_desc": "COALESCE(profiles.total_favorited, 0) DESC, profiles.id DESC",
         "followers_desc": "COALESCE(profiles.follower_count, 0) DESC, profiles.id DESC",
         "last_refresh_asc": "COALESCE(profiles.last_extracted_at, '') ASC, profiles.id ASC",
     }
-    order_sql = order_map.get(sort_mode, order_map["latest_desc"])
+    order_sql = order_map.get(sort_mode, order_map["last_extracted_desc"])
     stats_sql = PROFILE_LINK_STATS_SQL
     with db() as conn:
         total = int(
@@ -240,6 +269,8 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                   profiles.following_count,
                   profiles.follower_count,
                   profiles.total_favorited,
+                  profiles.nickname_history_json,
+                  profiles.total_favorited_history_json,
                    profiles.aweme_count,
                    profiles.has_deleted_works,
                    profiles.account_status,
@@ -298,10 +329,14 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                    profiles.tab,
                    profiles.last_extracted_at,
                    profiles.account_status,
+                   profiles.aweme_count,
+                   profiles.has_deleted_works,
                    profiles.full_scan_required,
                    profiles.full_scan_required_at,
+                   profiles.last_full_scan_at,
+                   COALESCE(stats.total, 0) link_total,
                    stats.latest_work_create_time,
-                  stats.previous_work_create_time
+                   stats.previous_work_create_time
                 FROM profiles
                 LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id
                 WHERE {eligible_where}
@@ -322,10 +357,8 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     )
     deferred_count = len(refresh_candidates) - eligible_count
     full_scan_required_count = sum(
-        int(profile.get("full_scan_required") or 0)
+        int(profile_requires_full_scan(profile))
         for profile in refresh_candidates
-        if str(profile.get("tab") or "post") == "post"
-        and str(profile.get("account_status") or "active").strip().lower() != "banned"
     )
     banned_count = sum(
         str(profile.get("account_status") or "active").strip().lower() == "banned"

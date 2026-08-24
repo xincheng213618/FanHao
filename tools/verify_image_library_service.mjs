@@ -184,19 +184,27 @@ imageIndex = { ...imageIndex, mediaItems: [
   media("movie-1", "movie", "电影", "电影一"),
   media("tv-1", "tv", "华语剧", "剧集一", "第 1 集"),
   media("tv-2", "tv", "华语剧", "剧集一", "第 2 集"),
+  media("anime-1", "anime", "动漫", "动画一", "第 1 话"),
+  media("anime-2", "anime", "动漫", "动画一", "第 2 话"),
   media("western-1", "western", "欧美", "人物甲", "视频一"),
   media("western-2", "western", "欧美", "人物甲", "视频二")
 ] };
 
 const mediaWorks = service.itemsPayload(url({ mode: "media", limit: "20" }));
-assert.equal(mediaWorks.total, 2, "media list should return one movie plus one grouped TV work");
+assert.equal(mediaWorks.total, 3, "media list should return one movie, one grouped TV work, and one grouped anime work");
 assert.equal(mediaWorks.items.find((item) => item.mediaKind === "tv")?.type, "tvSeriesWork");
 assert.equal(mediaWorks.items.find((item) => item.mediaKind === "tv")?.episodeCount, 2);
+assert.equal(mediaWorks.items.find((item) => item.mediaKind === "anime")?.episodeCount, 2);
 const movieWorks = service.itemsPayload(url({ mode: "media", kind: "movie", limit: "20" }));
 assert.deepEqual(movieWorks.items.map((item) => item.id), ["movie-1"], "media kind should be independent from the library category filter");
 
 const tvEpisodes = service.itemsPayload(url({ mode: "tv", person: "剧集一", limit: "20" }));
 assert.deepEqual(tvEpisodes.items.map((item) => item.id).sort(), ["tv-1", "tv-2"], "selecting a TV work should page its episodes");
+const animeWorks = service.itemsPayload(url({ mode: "media", kind: "anime", limit: "20" }));
+assert.equal(animeWorks.total, 1, "anime media kind should group episodes into one work");
+assert.equal(animeWorks.items[0].mediaKind, "anime");
+const animeEpisodes = service.itemsPayload(url({ mode: "media", kind: "anime", seriesKey: animeWorks.items[0].seriesKey, limit: "20" }));
+assert.deepEqual(animeEpisodes.items.map((item) => item.id).sort(), ["anime-1", "anime-2"], "selecting anime should page its video episodes");
 
 const westernPeople = service.itemsPayload(url({ mode: "western", limit: "20" }));
 assert.equal(westernPeople.total, 1, "western list should page grouped people instead of every video");
@@ -256,8 +264,8 @@ function media(id, mediaKind, category, personOrSeries, title = personOrSeries) 
     mediaKind,
     category,
     title,
-    personName: mediaKind === "tv" ? "" : personOrSeries,
-    seriesName: mediaKind === "tv" ? personOrSeries : "",
+    personName: ["tv", "anime"].includes(mediaKind) ? "" : personOrSeries,
+    seriesName: ["tv", "anime"].includes(mediaKind) ? personOrSeries : "",
     size: 100,
     updatedAt: "2026-07-12T00:00:00.000Z",
     playable: true

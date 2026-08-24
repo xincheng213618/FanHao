@@ -39,6 +39,7 @@ export function createShortVideoCatalogWorkerClient({
   let statsRetries = 0;
   let likeDistributionDispatches = 0;
   let likeDistributionRetries = 0;
+  let likeDistributionGeneration = 0;
 
   function start() {
     reopen();
@@ -83,11 +84,11 @@ export function createShortVideoCatalogWorkerClient({
     const existing = likeDistributionFlights.get(cacheKey);
     if (existing) return attachLikeDistributionWaiter(existing, options.signal);
 
-    const flightGeneration = generation;
+    const flightGeneration = likeDistributionGeneration;
     const flight = { promise: null, settled: false, waiters: 0 };
     flight.promise = executeLikeDistribution(cacheKey).then((result) => {
       if (closed) throw stoppedError();
-      if (generation !== flightGeneration) throw staleLikeDistributionError();
+      if (likeDistributionGeneration !== flightGeneration) throw staleLikeDistributionError();
       cacheSetIn(likeDistributionCache, cacheKey, result);
       return result;
     }).finally(() => {
@@ -177,10 +178,17 @@ export function createShortVideoCatalogWorkerClient({
     generation += 1;
     statsCache.clear();
     statsFlights.clear();
+    invalidateLikeDistribution();
+    try {
+      worker?.postMessage({ type: "resetStats" });
+    } catch {}
+  }
+
+  function invalidateLikeDistribution() {
+    likeDistributionGeneration += 1;
     likeDistributionCache.clear();
     likeDistributionFlights.clear();
     try {
-      worker?.postMessage({ type: "resetStats" });
       worker?.postMessage({ type: "resetLikeDistribution" });
     } catch {}
   }
@@ -188,6 +196,7 @@ export function createShortVideoCatalogWorkerClient({
   function stop() {
     closed = true;
     generation += 1;
+    likeDistributionGeneration += 1;
     statsCache.clear();
     statsFlights.clear();
     likeDistributionCache.clear();
@@ -333,6 +342,7 @@ export function createShortVideoCatalogWorkerClient({
 
   return {
     diagnostics,
+    invalidateLikeDistribution,
     invalidateStats,
     query,
     queryLikeDistribution,

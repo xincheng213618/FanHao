@@ -80,14 +80,17 @@ function authorEfficiency(libraryRows) {
   const totalVideos = libraryRows.length;
   const baselineHitRate = rate(likedVideos, totalVideos);
   const minSamples = 20;
+  const lowYieldMinSamples = 50;
+  const lowYieldHitRate = Math.max(0.01, baselineHitRate * 0.55);
+  const authors = rows
+    .filter((row) => row.videoCount >= minSamples)
+    .sort((left, right) => right.sizeBytes - left.sizeBytes || left.hitRate - right.hitRate || right.videoCount - left.videoCount);
   const highHit = rows
     .filter((row) => row.videoCount >= minSamples && row.likedCount >= 2 && row.likedCount < row.videoCount)
     .sort((left, right) => right.hitRate - left.hitRate || right.likedCount - left.likedCount || right.videoCount - left.videoCount)
     .slice(0, 8);
-  const lowYield = rows
-    .filter((row) => row.videoCount >= 50 && row.hitRate < Math.max(0.01, baselineHitRate * 0.55))
-    .sort((left, right) => right.sizeBytes - left.sizeBytes || left.hitRate - right.hitRate)
-    .slice(0, 8);
+  const lowYieldAuthors = authors
+    .filter((row) => row.videoCount >= lowYieldMinSamples && row.hitRate < lowYieldHitRate);
   return {
     authorTotal: rows.length,
     eligibleAuthorTotal: rows.filter((row) => row.videoCount >= minSamples && row.likedCount > 0 && row.likedCount < row.videoCount).length,
@@ -96,8 +99,12 @@ function authorEfficiency(libraryRows) {
     sizeBytes,
     baselineHitRate,
     minSamples,
+    lowYieldMinSamples,
+    lowYieldHitRate,
+    authors,
     highHit,
-    lowYield
+    lowYield: lowYieldAuthors.slice(0, 8),
+    lowYieldAuthors
   };
 }
 

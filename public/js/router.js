@@ -1,6 +1,6 @@
 export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
-export const PEOPLE_SCOPE_NAMES = new Set(["main"]);
+export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 
 const GALLERY_MODE_PATHS = {
@@ -298,6 +298,7 @@ function normalizeGalleryMediaKind(value) {
   const kind = String(value || "").trim().toLowerCase();
   if (["movie", "__fanhao_media_kind_movie__"].includes(kind)) return "movie";
   if (["tv", "__fanhao_media_kind_tv__"].includes(kind)) return "tv";
+  if (["anime", "__fanhao_media_kind_anime__"].includes(kind)) return "anime";
   return "all";
 }
 
@@ -306,7 +307,7 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
   return {
     view: "people",
     galleryMode: "",
-    peopleScope: "main",
+    peopleScope: "western",
     galleryPhotoView: "collections",
     galleryPhotoCollection: "",
     galleryAlbumId: "",
@@ -437,7 +438,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryMediaId: "",
     galleryQuery,
     galleryMediaKind: galleryMode === "media" ? normalizeGalleryMediaKind(params.get("kind") || params.get("mediaKind") || params.get("category")) : "all",
-    galleryCategory: params.has("category") && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__"].includes(params.get("category")) ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
+    galleryCategory: params.has("category") && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__", "__fanhao_media_kind_anime__"].includes(params.get("category")) ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
@@ -668,6 +669,7 @@ function routePath(route) {
     if (route.musicMode === "library") return "/music/library";
     return "/music";
   }
+  if (route.view === "people" && route.peopleScope === "western") return "/western";
   if (VIEW_PATHS[route.view]) return VIEW_PATHS[route.view];
   return "/fanhao";
 }

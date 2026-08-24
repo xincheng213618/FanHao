@@ -1,5 +1,9 @@
 export function createFanhaoDependencies(deps) {
+  if (!deps.diskUsage || typeof deps.diskUsage !== "object") {
+    throw new TypeError("Missing FanHao dependency: diskUsage");
+  }
   return {
+    diskUsage: deps.diskUsage,
     catalog: pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]),
     library: pick(deps, [
       "appConfigService",

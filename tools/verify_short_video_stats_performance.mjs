@@ -24,6 +24,8 @@ if (realDbPath) {
 
 async function runFixtureVerification() {
   const fixture = createProductionShapeFixture(PRODUCTION_VIDEO_COUNT);
+  let authorPageColdMs = 0;
+  let authorResolveColdMs = 0;
   try {
     await verifyStatsZeroDoesNotStartWorker();
     await verifyRouteErrorMapping();
@@ -72,6 +74,7 @@ async function runFixtureVerification() {
       });
       const listService = createShortVideoListStatsService({ store: listStore, catalogWorker: client });
       try {
+        ({ authorPageColdMs, authorResolveColdMs } = verifyAuthorPageColdPerformance(listStore));
         for (const [name, params] of cases.filter(([caseName]) => ["default-liked", "history", "fts-query", "author-name"].includes(caseName))) {
           const legacyParams = new URLSearchParams(params);
           legacyParams.set("limit", "12");
@@ -155,6 +158,8 @@ async function runFixtureVerification() {
         eventLoopMaxMs: round(health.eventLoopMaxMs),
         recommendedHealthP95Ms: round(recommendedHealth.p95Ms),
         recommendedEventLoopMaxMs: round(recommendedHealth.eventLoopMaxMs),
+        authorPageColdMs: round(authorPageColdMs),
+        authorResolveColdMs: round(authorResolveColdMs),
         singleFlightCallers: 100,
         statsDispatches: diagnostics.statsDispatches
       }));
@@ -166,6 +171,24 @@ async function runFixtureVerification() {
   } finally {
     removeFixture(fixture.root);
   }
+}
+
+function verifyAuthorPageColdPerformance(store) {
+  const resolveStartedAt = performance.now();
+  const author = store.resolveAuthorMention("MS4wLjABFixtureAuthor7");
+  const authorResolveColdMs = performance.now() - resolveStartedAt;
+  const startedAt = performance.now();
+  const result = store.listVideos({
+    searchParams: new URLSearchParams("author=MS4wLjABFixtureAuthor7&source=all&sort=published&limit=48&facets=0&stats=0")
+  });
+  const elapsedMs = performance.now() - startedAt;
+  assert(result.total > 1_000, "the author-page performance fixture must retain production-scale author membership");
+  assert.equal(author?.count, result.total, "exact sec_uid resolution must reuse the indexed author scope count");
+  assert.equal(result.videos.length, 48, "the cold author page must return the requested first window");
+  assert.equal(new Set(result.videos.map((video) => video.id)).size, 48, "indexed author candidates must not duplicate canonical-owner matches");
+  assert(elapsedMs < 250, `cold author-page reads must stay index-bounded (${elapsedMs.toFixed(1)}ms)`);
+  assert(authorResolveColdMs < 100, `exact sec_uid resolution must stay index-bounded (${authorResolveColdMs.toFixed(1)}ms)`);
+  return { authorPageColdMs: elapsedMs, authorResolveColdMs };
 }
 
 function verifyStatsZeroDoesNotStartWorker() {
@@ -322,11 +345,16 @@ function createProductionShapeFixture(videoCount) {
   const insertVideo = db.prepare(`
     INSERT INTO short_videos (
       id, aweme_id, visibility, media_type, is_liked, author_following,
-      author_sec_uid, author_name, title, description, tags_json, tags_text,
+      owner_user_id, author_sec_uid, author_name, title, description, tags_json, tags_text,
       published_at, liked_at, duration_ms, actual_pixels,
       digg_count, comment_count, collect_count, share_count, play_count,
       source_path, size_bytes, mtime_ms, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertAuthor = db.prepare(`
+    INSERT INTO short_video_users (
+      id, platform, sec_uid, nickname, profile_collected_at, updated_at
+    ) VALUES (?, 'douyin', ?, ?, '2026-08-12T00:00:00.000Z', '2026-08-12T00:00:00.000Z')
   `);
   const insertWatch = db.prepare(`
     INSERT INTO short_video_watch_history (
@@ -339,6 +367,9 @@ function createProductionShapeFixture(videoCount) {
     ) VALUES (?, 'post', 'fixture-profile', '2026-01-01', '2026-01-01', '2026-01-01')
   `);
   try {
+    for (let index = 0; index < 64; index += 1) {
+      insertAuthor.run(`douyin:MS4wLjABFixtureAuthor${index}`, `MS4wLjABFixtureAuthor${index}`, `测试作者 ${index}`);
+    }
     for (let index = 0; index < videoCount; index += 1) {
       const id = `fixture-${String(index).padStart(6, "0")}`;
       const awemeId = String(900000000000000000n + BigInt(index));
@@ -352,7 +383,8 @@ function createProductionShapeFixture(videoCount) {
         index % 5 === 0 ? "gallery" : "video",
         index % 2,
         index % 3 === 0 ? 1 : 0,
-        `fixture-author-${index % 64}`,
+        `douyin:MS4wLjABFixtureAuthor${index % 64}`,
+        `MS4wLjABFixtureAuthor${index % 64}`,
         `测试作者 ${index % 64}`,
         `${needle} ${index}`,
         `生产形状统计夹具 ${index}`,

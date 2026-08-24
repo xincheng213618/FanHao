@@ -186,6 +186,6 @@ def clean_profile_nickname(*values: Any) -> str:
     lowered = text.lower()
     if "captcha" in lowered or lowered.endswith((".zip", ".rar", ".7z")):
         return ""
-    if text in {"搜索", "推荐", "关注", "粉丝", "获赞", "作品"}:
+    if text in {"搜索", "推荐", "关注", "粉丝", "获赞", "作品", "读屏标签已关闭", "读屏标签已开启"}:
         return ""
     return text

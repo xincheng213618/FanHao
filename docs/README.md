@@ -23,6 +23,7 @@
 | [代码结构评估](./code-structure-assessment.md) | 当前热点、边界规则与后续重构顺序 |
 | [服务端架构](./server-architecture.md) | 反射式模块装配、职责分层与依赖方向 |
 | [模块开发](./module-development.md) | 新增业务形态时的目录、描述符、运行时协议和校验流程 |
+| [模块文档](./modules/README.md) | 按注册模块拆分的职责、代码入口、接口、数据和验证说明 |
 | [核心数据库](./fanhao-core-database.md) | `fanhao-core-v2.sqlite` 的表设计与原则（已有） |
 | [开源小游戏审计](./open-source-games-audit.md) | 集成到 WebView 的离线小游戏的选型与合规记录（已有） |
 
@@ -51,6 +52,16 @@ FanHao/
 ├── data/                  # 本地状态：SQLite、JSON、日志、缓存
 └── docs/                  # 本目录
 ```
+
+## 模块文档
+
+模块文档与代码目录一一对应，适合在修改某个业务形态前先阅读：
+
+- 可见业务模块：`fanhao`、`photos`、`media`、`novels`、`short-videos`、`music`、`tools`、`market-dashboard`。
+- 隐藏基础模块：`system`、`content-index`。
+- `disk-usage` 是 `fanhao` 内部的磁盘用量子能力，不是独立注册模块。
+
+入口见 [模块文档索引](./modules/README.md)。每篇文档只描述该模块的职责和边界；完整接口字段仍以 [API 参考](./api-reference.md) 为准。
 
 ## 快速上手
 

@@ -23,7 +23,7 @@ export function parseLibraryRoots(env = process.env) {
   const baseRaw =
     env.LIBRARY_ROOTS ||
     env.LIBRARY_ROOT ||
-    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;O:\\[动漫]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
+    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
   const raw = [baseRaw, env.FANHAO_WESTERN_ROOTS || "R:\\"].filter(Boolean).join(";");
   const roots = raw
     .split(/[;,|]/)
@@ -56,6 +56,7 @@ export function parsePhotoSetRoots(env = process.env) {
 export function galleryMediaSources(env = process.env) {
   return [
     { kind: "movie", label: "电影", roots: parseRootList(env.FANHAO_MOVIE_ROOTS, "Z:\\") },
-    { kind: "tv", label: "电视剧", roots: parseRootList(env.FANHAO_TV_ROOTS, "Y:\\") }
+    { kind: "tv", label: "电视剧", roots: parseRootList(env.FANHAO_TV_ROOTS, "Y:\\") },
+    { kind: "anime", label: "动漫", roots: parseRootList(env.FANHAO_ANIME_ROOTS, "O:\\[动漫]") }
   ];
 }

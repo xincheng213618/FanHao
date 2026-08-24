@@ -345,6 +345,12 @@ textarea:focus-visible,
   text-align: left;
 }
 
+.fanhao-subnav a.view-tab {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .person-button {
   display: grid;
   width: 100%;

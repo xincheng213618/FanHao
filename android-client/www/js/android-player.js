@@ -98,8 +98,10 @@ export function createAndroidVideoSection(context) {
     if (!plugin?.play) return false;
 
     const directUrl = absoluteUrl(activeUrl, `/media/video/${encodeURIComponent(videoFile.id)}`);
-    const fallbackOffset = playInfo?.mode === "direct" ? 0 : resume;
-    const fallbackUrl = playInfo ? streamUrlFor(activeUrl, playInfo, fallbackOffset) : "";
+    const nativeFallbackInfo = playInfo?.mode === "direct" && playInfo.fallbackStreamUrl
+      ? { ...playInfo, mode: "transcode", streamUrl: playInfo.fallbackStreamUrl }
+      : playInfo;
+    const fallbackUrl = nativeFallbackInfo ? streamUrlFor(activeUrl, nativeFallbackInfo, 0) : "";
     const progressUrl = absoluteUrl(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`);
     const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "直连播放"].filter(Boolean).join(" · ");
 
@@ -289,6 +291,15 @@ export function createAndroidVideoSection(context) {
   }
 
   function fallbackPlayInfo(playInfo, videoFile) {
+    if (playInfo.fallbackStreamUrl) {
+      return {
+        ...playInfo,
+        mode: "transcode",
+        label: playInfo.hasNvenc ? "GPU 兼容转码" : "兼容转码",
+        streamUrl: playInfo.fallbackStreamUrl,
+        fallbackStreamUrl: ""
+      };
+    }
     const canCopyVideo = playInfo.videoCodec === "h264";
     const mode = canCopyVideo ? "remux" : "transcode";
     const params = new URLSearchParams({

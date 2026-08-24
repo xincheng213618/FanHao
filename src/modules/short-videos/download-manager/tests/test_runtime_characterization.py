@@ -400,7 +400,38 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertNotIn("profiles", runtime_status)
                 self.assertFalse(runtime_status["download"]["active"])
                 activity = runtime.json_request("/api/activity")
-                self.assertEqual(set(activity), {"jobs", "events"})
+                self.assertEqual(set(activity), {"jobs", "events", "extract"})
+                self.assertFalse(activity["extract"]["active"])
+                self.assertIsNone(activity["extract"]["current"])
+                self.assertEqual(activity["extract"]["queue"], [])
+
+                now = "2026-07-26T08:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    for index in range(12):
+                        connection.execute(
+                            """
+                            INSERT INTO jobs(type, status, message, started_at, finished_at)
+                            VALUES('extract', 'complete', ?, ?, ?)
+                            """,
+                            (f"activity-{index}", now, now),
+                        )
+                    connection.commit()
+                activity = runtime.json_request("/api/activity")
+                activity_jobs = [
+                    job
+                    for job in activity["jobs"]
+                    if str(job.get("message") or "").startswith("activity-")
+                ]
+                self.assertEqual(len(activity_jobs), 12)
+                self.assertEqual(activity_jobs[0]["message"], "activity-11")
+
+                index_html = runtime.request("/")[2].decode("utf-8")
+                activity_js = runtime.request("/features/activity.js")[2].decode("utf-8")
+                for heading in ("正在执行", "接下来", "历史任务", "事件日志"):
+                    self.assertIn(heading, index_html)
+                self.assertIn("state.extract", activity_js)
+                self.assertIn("执行中", activity_js)
+                self.assertIn("formatDateTime", activity_js)
 
                 profiles = runtime.json_request("/api/profiles")
                 self.assertEqual(profiles.get("profiles"), [])
@@ -409,7 +440,6 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertEqual(links.get("links"), [])
                 self.assertEqual(links.get("total"), 0)
 
-                now = "2026-07-26T08:00:00+08:00"
                 with closing(sqlite3.connect(runtime.db_path)) as connection:
                     first_profile_id = int(
                         connection.execute(
@@ -1107,6 +1137,89 @@ print(json.dumps({"calls": calls, "job": row}))
                     "full_scan": True,
                 }])
                 self.assertEqual(result["job"], {"status": "complete", "success": 1})
+            finally:
+                runtime.close()
+
+    def test_batch_refresh_uses_full_scan_for_profiles_with_at_most_100_works(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-small-full-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile_ids = []
+                    for sec_uid, aweme_count in (("small-full-author", 100), ("large-quick-author", 101)):
+                        profile_ids.append(
+                            int(
+                                connection.execute(
+                                    """
+                                    INSERT INTO profiles(
+                                      url, sec_uid, tab, title, aweme_count,
+                                      created_at, updated_at, last_extracted_at
+                                    ) VALUES(?, ?, 'post', ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        f"https://www.douyin.com/user/{sec_uid}",
+                                        sec_uid,
+                                        sec_uid,
+                                        aweme_count,
+                                        now,
+                                        now,
+                                        now,
+                                    ),
+                                ).lastrowid
+                            )
+                        )
+                    connection.commit()
+
+                probe_script = f"""
+import json
+from manager_core import extraction
+from manager_core.database import create_job, update_job
+
+calls = []
+def fake(job_id, url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing, **kwargs):
+    calls.append({{
+        "url": url,
+        "max_items": max_items,
+        "incremental_stop_existing": incremental_stop_existing,
+        "full_scan": bool(kwargs.get("full_scan")),
+    }})
+    update_job(job_id, status="complete", total=1, processed=1, success=1, failed=0, message="done")
+
+extraction.run_extract_job = fake
+job_id = create_job("refresh", "small profile mode test")
+extraction.run_refresh_profiles_job(job_id, 0, {profile_ids!r}, 123, 10, 2, False, 12, False)
+print(json.dumps(calls))
+"""
+                probe = subprocess.run(
+                    [sys.executable, "-c", probe_script],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                result = json.loads(probe.stdout.strip())
+                self.assertEqual(
+                    result,
+                    [
+                        {
+                            "url": "https://www.douyin.com/user/small-full-author",
+                            "max_items": 0,
+                            "incremental_stop_existing": 0,
+                            "full_scan": True,
+                        },
+                        {
+                            "url": "https://www.douyin.com/user/large-quick-author",
+                            "max_items": 123,
+                            "incremental_stop_existing": 12,
+                            "full_scan": False,
+                        },
+                    ],
+                )
             finally:
                 runtime.close()
 

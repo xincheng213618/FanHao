@@ -6,6 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
+import { createShortVideoSmoothWarmupWorkerClient } from "../src/modules/short-videos/server/smooth-warmup-worker-client.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-runtime-"));
@@ -82,6 +83,7 @@ try {
   db.exec("COMMIT");
   db.close();
 
+  await verifyDedicatedWarmupWorkerResponsiveness();
   await runtime.start();
   await new Promise((resolve) => setTimeout(resolve, 1900));
   const response = {};
@@ -93,6 +95,9 @@ try {
   const smooth = response.data?.smooth || {};
   assert.equal(response.status, 200);
   assert.equal(smooth.warmupCandidates, 530, "observed playback issue total must include rows beyond the in-memory backlog limit");
+  assert.equal(smooth.warmupWorker?.workerStarts, 1, "smooth warmup must use its dedicated read-only worker");
+  assert.equal(smooth.warmupWorker?.countDispatches, 1, "candidate count must leave the HTTP event loop");
+  assert.ok(smooth.warmupWorker?.candidateDispatches >= 3, "candidate pages must leave the HTTP event loop");
   assert.equal(smooth.scanOffset, 530, "candidate scan must page past the first 512 rows");
   assert.equal(smooth.scanComplete, true, "candidate scan must terminate after the final page");
   assert.equal(smooth.resolved, 512, "already resolved rows must make room for later pages without creating jobs");
@@ -211,6 +216,29 @@ try {
   await runtime?.stop();
   runtime?.store?.close();
   fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+async function verifyDedicatedWarmupWorkerResponsiveness() {
+  const delayedWorker = createShortVideoSmoothWarmupWorkerClient({
+    dbPath,
+    downloadManagerDbPath: "",
+    ffmpegPath: "ffmpeg",
+    roots: [],
+    extraWorkerData: { queryDelayMs: 250 }
+  });
+  try {
+    let querySettled = false;
+    const countQuery = delayedWorker.queryCount().finally(() => { querySettled = true; });
+    const timerStartedAt = performance.now();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const timerDurationMs = performance.now() - timerStartedAt;
+    assert.ok(timerDurationMs < 100, `worker warmup must not block the main event loop, got ${timerDurationMs.toFixed(1)}ms`);
+    assert.equal(querySettled, false, "the responsiveness check must run while the worker query is still active");
+    assert.equal(await countQuery, 530);
+    assert.equal(delayedWorker.diagnostics().countDispatches, 1);
+  } finally {
+    await delayedWorker.stop();
+  }
 }
 
 async function verifyActiveDeleteStopDrain() {

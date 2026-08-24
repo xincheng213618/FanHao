@@ -15,6 +15,14 @@ from urllib.parse import parse_qs, urlparse
 
 from .auth import clear_cookie_auth, cookie_auth_status, import_cookie_text, open_cookie_folder, start_cookie_login
 from .common import first_int, first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url
+from .collection_scheduler import (
+    AUTOMATIC_COLLECTION_ENABLED_SETTING,
+    AUTOMATIC_COLLECTION_INTERVAL_SETTING,
+    DEFAULT_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+    MAX_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+    MIN_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+    automatic_collection_scheduler,
+)
 from .config import BASE_DIR, DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_OUTPUT_DIR, FANHAO_PUBLIC_DIR, MAX_CONCURRENCY, STATIC_DIR, TEST_PROFILE_URL
 from .database import add_event, db, set_setting, setting
 from .domain_manifest import profile_output_dir
@@ -341,6 +349,13 @@ class Handler(SimpleHTTPRequestHandler):
         return False
 
     def handle_settings(self, payload: dict[str, Any]) -> None:
+        previous_automatic_collection = (
+            setting(AUTOMATIC_COLLECTION_ENABLED_SETTING, "0"),
+            setting(
+                AUTOMATIC_COLLECTION_INTERVAL_SETTING,
+                str(DEFAULT_AUTOMATIC_COLLECTION_INTERVAL_HOURS),
+            ),
+        )
         allowed = {
             "profile_url",
             "profile_tab",
@@ -353,6 +368,8 @@ class Handler(SimpleHTTPRequestHandler):
             "download_cycle_limit",
             "download_cycle_cooldown_minutes",
             "failure_guard_threshold",
+            AUTOMATIC_COLLECTION_ENABLED_SETTING,
+            AUTOMATIC_COLLECTION_INTERVAL_SETTING,
             "library_output_dir",
             "cookie_file",
             "download_proxy",
@@ -384,9 +401,30 @@ class Handler(SimpleHTTPRequestHandler):
                 value = str(normalize_int(value, 30, 1, 1440))
             if key == "failure_guard_threshold":
                 value = str(normalize_int(value, DEFAULT_FAILURE_GUARD_THRESHOLD, 0, 1000))
+            if key == AUTOMATIC_COLLECTION_ENABLED_SETTING:
+                value = "1" if str(value or "").strip().lower() in {"1", "true", "yes", "on"} else "0"
+            if key == AUTOMATIC_COLLECTION_INTERVAL_SETTING:
+                value = str(
+                    normalize_int(
+                        value,
+                        DEFAULT_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+                        MIN_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+                        MAX_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
+                    )
+                )
             if key == "download_proxy":
                 value = normalize_proxy(value)
             set_setting(key, str(value))
+        current_automatic_collection = (
+            setting(AUTOMATIC_COLLECTION_ENABLED_SETTING, "0"),
+            setting(
+                AUTOMATIC_COLLECTION_INTERVAL_SETTING,
+                str(DEFAULT_AUTOMATIC_COLLECTION_INTERVAL_HOURS),
+            ),
+        )
+        automatic_collection_scheduler.reschedule(
+            reset=current_automatic_collection != previous_automatic_collection
+        )
         add_event("info", "设置已保存")
         return self.send_json({"ok": True, "state": get_state()})
 

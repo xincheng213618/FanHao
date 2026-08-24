@@ -8,7 +8,8 @@ const SHORT_VIDEO_SORT_NAMES = new Set([
   "likes",
   "likesAsc",
   "comments",
-  "duration"
+  "duration",
+  "size"
 ]);
 const SHORT_VIDEO_SOURCE_NAMES = new Set([
   "recommended",

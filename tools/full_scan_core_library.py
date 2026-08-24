@@ -24,7 +24,6 @@ BASE_ROOTS = [
     Path("O:/[珍藏]"),
     Path("O:/[珍藏1]"),
     Path("O:/[稀有]"),
-    Path("O:/[动漫]"),
     Path("V:/[A]"),
     Path("V:/[A1]"),
     Path("V:/AV"),
@@ -32,7 +31,7 @@ BASE_ROOTS = [
 WESTERN_ROOTS = [Path(item) for item in os.environ.get("FANHAO_WESTERN_ROOTS", "R:/").replace("|", ";").split(";") if item.strip()]
 ROOTS = [*BASE_ROOTS, *WESTERN_ROOTS]
 
-EXCLUDED_DIRS = {"$RECYCLE.BIN", "System Volume Information", "Recovery"}
+EXCLUDED_DIRS = {"$RECYCLE.BIN", "System Volume Information", "Recovery", "[动漫]"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"}
 PLAYABLE_VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -240,7 +239,45 @@ def scan_work(person_dir: Path, work_dir: Path, title: str, files: list[Path], r
     )
 
 
+def is_single_video_person(person_dir: Path) -> bool:
+    return any(is_child_or_same(person_dir, root) for root in WESTERN_ROOTS)
+
+
+def scan_single_video_person(person_dir: Path, roots: list[Path]) -> list[ScannedWork]:
+    files = walk_files(person_dir)
+    video_paths = sorted((file for file in files if file.suffix.lower() in VIDEO_EXTS), key=lambda item: clean_path(item).casefold())
+    video_count_by_dir: dict[str, int] = {}
+    files_by_dir: dict[str, list[Path]] = {}
+    for file in files:
+        files_by_dir.setdefault(path_key(file.parent), []).append(file)
+    for video_path in video_paths:
+        key = path_key(video_path.parent)
+        video_count_by_dir[key] = video_count_by_dir.get(key, 0) + 1
+
+    works: list[ScannedWork] = []
+    for video_path in video_paths:
+        video_base = file_base(video_path.name).casefold()
+        video_dir_key = path_key(video_path.parent)
+        only_video_in_dir = video_count_by_dir.get(video_dir_key) == 1
+        matching = []
+        for file in files_by_dir.get(video_dir_key, []):
+            if file == video_path:
+                matching.append(file)
+                continue
+            if file.suffix.lower() not in IMAGE_EXTS | INFO_EXTS:
+                continue
+            if only_video_in_dir or file_base(file.name).casefold() == video_base:
+                matching.append(file)
+        work = scan_work(person_dir, video_path, video_path.name, matching, roots)
+        if work:
+            works.append(work)
+    return works
+
+
 def scan_person(person_dir: Path, roots: list[Path]) -> list[ScannedWork]:
+    if is_single_video_person(person_dir):
+        return scan_single_video_person(person_dir, roots)
+
     works: list[ScannedWork] = []
     for child in direct_child_dirs(person_dir, set()):
         work = scan_work(person_dir, child, child.name, walk_files(child), roots)
@@ -328,6 +365,14 @@ def load_local_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def build_indexes(conn: sqlite3.Connection) -> dict:
     local_rows = load_local_rows(conn)
     by_path = {path_key(row["local_path"]): row for row in local_rows}
+    local_rows_by_id = {int(row["id"]): row for row in local_rows}
+    by_video_path: dict[str, sqlite3.Row] = {}
+    for file_row in conn.execute(
+        "SELECT local_work_id, file_path FROM local_files WHERE file_type = 'video' AND local_work_id IS NOT NULL"
+    ):
+        local_row = local_rows_by_id.get(int(file_row["local_work_id"]))
+        if local_row and file_row["file_path"]:
+            by_video_path.setdefault(path_key(file_row["file_path"]), local_row)
     by_person_code: dict[tuple[int, str], list[sqlite3.Row]] = {}
     by_person_title: dict[tuple[int, str], list[sqlite3.Row]] = {}
     for row in conn.execute(
@@ -364,9 +409,12 @@ def build_indexes(conn: sqlite3.Connection) -> dict:
     return {
         "local_rows": local_rows,
         "by_path": by_path,
+        "by_video_path": by_video_path,
         "by_person_code": by_person_code,
         "by_person_title": by_person_title,
         "work_by_person_code": work_by_person_code,
+        "claimed_local_work_ids": set(),
+        "claimed_work_ids": set(),
     }
 
 
@@ -533,26 +581,64 @@ def ensure_work_person(conn: sqlite3.Connection, work_id: int, person_id: int, w
     )
 
 
-def choose_existing_work(indexes: dict, person_id: int, work: ScannedWork) -> tuple[int | None, int | None, str]:
+def choose_existing_work(indexes: dict, person_id: int, work: ScannedWork, distinct_work: bool = False) -> tuple[int | None, int | None, str]:
+    claimed_ids: set[int] = indexes["claimed_local_work_ids"]
+    claimed_work_ids: set[int] = indexes["claimed_work_ids"]
+    source_video = work.videos[0] if work.videos else None
+    same_video = indexes["by_video_path"].get(path_key(source_video.file_path)) if source_video else None
+    if same_video and int(same_video["id"]) not in claimed_ids and (not distinct_work or int(same_video["work_id"]) not in claimed_work_ids):
+        claimed_ids.add(int(same_video["id"]))
+        if distinct_work:
+            claimed_work_ids.add(int(same_video["work_id"]))
+        return int(same_video["work_id"]), int(same_video["id"]), str(same_video["local_path"] or "")
+
     same_path = indexes["by_path"].get(path_key(work.work_dir))
-    if same_path:
+    if same_path and int(same_path["id"]) not in claimed_ids and (not distinct_work or int(same_path["work_id"]) not in claimed_work_ids):
+        claimed_ids.add(int(same_path["id"]))
+        if distinct_work:
+            claimed_work_ids.add(int(same_path["work_id"]))
         return int(same_path["work_id"]), int(same_path["id"]), str(same_path["local_path"] or "")
 
     candidate = None
     if work.code_search:
-        candidate = choose_local_candidate(indexes["by_person_code"].get((person_id, work.code_search), []), work)
+        candidates = [
+            row for row in indexes["by_person_code"].get((person_id, work.code_search), [])
+            if int(row["id"]) not in claimed_ids and (not distinct_work or int(row["work_id"]) not in claimed_work_ids)
+        ]
+        candidate = choose_local_candidate(candidates, work)
     if not candidate:
-        candidate = choose_local_candidate(indexes["by_person_title"].get((person_id, work.work_dir.name.casefold()), []), work)
+        candidates = [
+            row for row in indexes["by_person_title"].get((person_id, work.work_dir.name.casefold()), [])
+            if int(row["id"]) not in claimed_ids and (not distinct_work or int(row["work_id"]) not in claimed_work_ids)
+        ]
+        candidate = choose_local_candidate(candidates, work)
     if candidate:
+        claimed_ids.add(int(candidate["id"]))
+        if distinct_work:
+            claimed_work_ids.add(int(candidate["work_id"]))
         return int(candidate["work_id"]), int(candidate["id"]), str(candidate["local_path"] or "")
 
     if work.code_search:
         rows = indexes["work_by_person_code"].get((person_id, work.code_search), [])
-        no_local = [row for row in rows if int(row["local_count"] or 0) == 0]
+        no_local = [
+            row for row in rows
+            if int(row["local_count"] or 0) == 0 and (not distinct_work or int(row["work_id"]) not in claimed_work_ids)
+        ]
         if len(no_local) == 1:
+            if distinct_work:
+                claimed_work_ids.add(int(no_local[0]["work_id"]))
             return int(no_local[0]["work_id"]), None, ""
 
     return None, None, ""
+
+
+def sync_single_video_work_title(conn: sqlite3.Connection, work_id: int, work: ScannedWork, write: bool) -> None:
+    if not write:
+        return
+    conn.execute(
+        "UPDATE works SET title = ?, updated_at = ? WHERE id = ?",
+        (work.title, now_iso(), work_id),
+    )
 
 
 def stale_local_work_ids(conn: sqlite3.Connection, scanned_paths: set[str], roots: list[Path]) -> list[int]:
@@ -570,8 +656,19 @@ def stale_local_work_ids(conn: sqlite3.Connection, scanned_paths: set[str], root
     return stale
 
 
+def stale_local_work_ids_for_person(conn: sqlite3.Connection, person_dir: Path, scanned_paths: set[str]) -> list[int]:
+    stale = []
+    for row in conn.execute("SELECT id, local_path FROM local_works WHERE local_path IS NOT NULL AND local_path <> ''"):
+        local_path = str(row["local_path"] or "")
+        if path_key(local_path) in scanned_paths:
+            continue
+        if is_child_or_same(Path(local_path), person_dir):
+            stale.append(int(row["id"]))
+    return stale
+
+
 def delete_stale_local_works(conn: sqlite3.Connection, ids: list[int], write: bool, stats: dict) -> None:
-    stats["stale_local_works_deleted"] = len(ids)
+    stats["stale_local_works_deleted"] += len(ids)
     if not write:
         return
     for local_work_id in ids:
@@ -613,20 +710,34 @@ def scan_all(conn: sqlite3.Connection, roots: list[Path], write: bool, delete_st
                 person_source = clean_path(person_dir)
                 person_id = upsert_person(conn, people, person_dir.name, person_source, write, stats)
                 works = scan_person(person_dir, available_roots)
+                person_scanned_paths: set[str] = set()
                 for work in works:
                     stats["works_seen"] += 1
-                    scanned_paths.add(path_key(work.work_dir))
-                    work_id, local_work_id, old_path = choose_existing_work(indexes, person_id, work)
+                    work_path_key = path_key(work.work_dir)
+                    scanned_paths.add(work_path_key)
+                    person_scanned_paths.add(work_path_key)
+                    work_id, local_work_id, old_path = choose_existing_work(
+                        indexes, person_id, work, distinct_work=is_single_video_person(person_dir)
+                    )
                     if not work_id:
                         work_id = create_work(conn, work, write, stats)
+                        if is_single_video_person(person_dir) and work_id > 0:
+                            indexes["claimed_work_ids"].add(int(work_id))
                     if write and work_id < 0:
                         raise RuntimeError("unexpected dry-run work id while writing")
+                    if is_single_video_person(person_dir):
+                        sync_single_video_work_title(conn, work_id, work, write)
                     next_local_work_id = create_or_update_local_work(conn, work_id, local_work_id, old_path, work, available_roots, write, stats)
                     if write and next_local_work_id:
                         replace_local_files(conn, work_id, next_local_work_id, work, write, stats)
                     else:
                         replace_local_files(conn, work_id, next_local_work_id or -1, work, write, stats)
+                    if next_local_work_id:
+                        indexes["claimed_local_work_ids"].add(int(next_local_work_id))
                     ensure_work_person(conn, work_id, person_id, write, stats)
+                if is_single_video_person(person_dir):
+                    stale_ids = stale_local_work_ids_for_person(conn, person_dir, person_scanned_paths)
+                    delete_stale_local_works(conn, stale_ids, write, stats)
                 if stats["person_dirs_seen"] % 50 == 0:
                     print(
                         f"[scan] people={stats['person_dirs_seen']} works={stats['works_seen']} "
@@ -733,6 +844,10 @@ def candidate_person_dirs(
             if recent_cutoff and dir_mtime(person_dir) >= recent_cutoff:
                 add(person_dir)
                 continue
+            if is_single_video_person(person_dir):
+                if any(path_key(file) not in known_paths for file in walk_files(person_dir) if file.suffix.lower() in VIDEO_EXTS):
+                    add(person_dir)
+                continue
             child_dirs = direct_child_dirs(person_dir, set())
             if any(path_key(child) not in known_paths for child in child_dirs):
                 add(person_dir)
@@ -785,17 +900,31 @@ def scan_candidates(
             person_source = clean_path(person_dir)
             person_id = upsert_person(conn, people, person_dir.name, person_source, write, stats)
             works = scan_person(person_dir, available_roots)
+            person_scanned_paths: set[str] = set()
             for work in works:
                 stats["works_seen"] += 1
-                scanned_paths.add(path_key(work.work_dir))
-                work_id, local_work_id, old_path = choose_existing_work(indexes, person_id, work)
+                work_path_key = path_key(work.work_dir)
+                scanned_paths.add(work_path_key)
+                person_scanned_paths.add(work_path_key)
+                work_id, local_work_id, old_path = choose_existing_work(
+                    indexes, person_id, work, distinct_work=is_single_video_person(person_dir)
+                )
                 if not work_id:
                     work_id = create_work(conn, work, write, stats)
+                    if is_single_video_person(person_dir) and work_id > 0:
+                        indexes["claimed_work_ids"].add(int(work_id))
                 if write and work_id < 0:
                     raise RuntimeError("unexpected dry-run work id while writing")
+                if is_single_video_person(person_dir):
+                    sync_single_video_work_title(conn, work_id, work, write)
                 next_local_work_id = create_or_update_local_work(conn, work_id, local_work_id, old_path, work, available_roots, write, stats)
                 replace_local_files(conn, work_id, next_local_work_id or -1, work, write, stats)
+                if next_local_work_id:
+                    indexes["claimed_local_work_ids"].add(int(next_local_work_id))
                 ensure_work_person(conn, work_id, person_id, write, stats)
+            if is_single_video_person(person_dir):
+                stale_ids = stale_local_work_ids_for_person(conn, person_dir, person_scanned_paths)
+                delete_stale_local_works(conn, stale_ids, write, stats)
             print(
                 f"[scan] {stats['person_dirs_seen']}/{stats['candidate_person_dirs']} "
                 f"works={stats['works_seen']} newPeople={stats['people_created']} "

@@ -10,7 +10,7 @@ import { createShortVideoStore } from "../src/modules/short-videos/server/store.
 
 const LEGACY_SCHEMA_VERSION = "20260812-short-video-collections-11";
 const ACTIONS_12_SCHEMA_VERSION = "20260812-native-user-actions-12";
-const CURRENT_SCHEMA_VERSION = "20260812-native-user-actions-13";
+const CURRENT_SCHEMA_VERSION = "20260825-profile-history-14";
 const TARGET_ID = "action-contract-target";
 const TARGET_AWEME_ID = "7600000000000000001";
 const ANCHOR_ID = "action-contract-anchor";

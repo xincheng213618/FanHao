@@ -35,9 +35,14 @@ export function createImageLibraryService({
     return items.filter((item) => selected.has(item.mediaKind));
   }
 
+  function isEpisodicMediaKind(kind) {
+    return kind === "tv" || kind === "anime";
+  }
+
   function galleryMediaSourceSeriesKey(item) {
-    if (!item || item.mediaKind !== "tv") return "";
-    return metadataService.tvSeriesKey(item.category || "", item.seriesName || item.personName || item.subCategory || item.title || "");
+    if (!item || !isEpisodicMediaKind(item.mediaKind)) return "";
+    const category = item.mediaKind === "anime" ? `动漫:${item.category || ""}` : item.category || "";
+    return metadataService.tvSeriesKey(category, item.seriesName || item.personName || item.subCategory || item.title || "");
   }
 
   function trustedTvMetadataIdentity(tvSeries) {
@@ -82,7 +87,7 @@ export function createImageLibraryService({
   }
 
   function galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries) {
-    if (!item || item.mediaKind !== "tv") return "";
+    if (!item || !isEpisodicMediaKind(item.mediaKind)) return "";
     const trustedIdentity = trustedTvMetadataIdentity(tvSeries);
     const localSeriesName = normalizedTvEpisodeSeriesName(item.seriesName || item.personName || item.subCategory || "");
     if (!trustedIdentity || !localSeriesName) return sourceSeriesKey;
@@ -101,7 +106,7 @@ export function createImageLibraryService({
     const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries);
     const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById?.get(item.id) || metadataService.movieRow(item.id)) : null;
     const movieCoverUrl = movieMetadata?.coverUrl || "";
-    const fallbackCoverUrl = item.mediaKind === "tv" || item.mediaKind === "movie" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
+    const fallbackCoverUrl = item.mediaKind === "movie" || isEpisodicMediaKind(item.mediaKind) ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
     return {
       ...item,
       seriesKey,
@@ -134,7 +139,8 @@ export function createImageLibraryService({
     const westernItems = mediaItemsByKind(mediaItems, "western");
     const movieItems = mediaItemsByKind(mediaItems, "movie");
     const tvItems = mediaItemsByKind(mediaItems, "tv");
-    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
+    const animeItems = mediaItemsByKind(mediaItems, "anime");
+    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv", "anime"]);
     const manga = mangaService.cacheDirs().map(mangaService.publicSummary);
     return {
       schemaVersion: 2,
@@ -149,6 +155,7 @@ export function createImageLibraryService({
         western: westernItems.length,
         movies: movieItems.length,
         tv: tvItems.length,
+        anime: animeItems.length,
         media: mediaItems.length,
         photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
         mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
@@ -161,6 +168,7 @@ export function createImageLibraryService({
         western: mediaFacets(westernItems),
         movie: mediaFacets(movieItems),
         tv: mediaFacets(tvItems),
+        anime: mediaFacets(animeItems),
         media: mediaFacets(screenItems)
       },
       manga,
@@ -204,7 +212,8 @@ export function createImageLibraryService({
     const westernItems = mediaItemsByKind(mediaItems, "western");
     const movieItems = mediaItemsByKind(mediaItems, "movie");
     const tvItems = mediaItemsByKind(mediaItems, "tv");
-    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
+    const animeItems = mediaItemsByKind(mediaItems, "anime");
+    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv", "anime"]);
     const value = {
       scannedAt: index.scannedAt || "",
       totals: {
@@ -212,7 +221,8 @@ export function createImageLibraryService({
         western: westernItems.length,
         movies: movieItems.length,
         tv: tvItems.length,
-        media: mediaItems.length,
+        anime: animeItems.length,
+        media: screenItems.length,
         photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
         mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
       },
@@ -222,6 +232,7 @@ export function createImageLibraryService({
         western: mediaFacets(westernItems),
         movie: mediaFacets(movieItems),
         tv: mediaFacets(tvItems),
+        anime: mediaFacets(animeItems),
         media: mediaFacets(screenItems)
       }
     };
@@ -285,16 +296,18 @@ export function createImageLibraryService({
     } else if (mode === "media") {
       const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
       const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-      const tvSeriesSource = tvSeriesGroups(tvSource).map(publicTvSeriesListItem).filter(Boolean);
-      const screenWorksSource = [...movieSource, ...tvSeriesSource];
+      const animeSource = mediaItemsByKind(mediaItems, "anime").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+      const episodicSource = [...tvSource, ...animeSource];
+      const episodicSeriesSource = tvSeriesGroups(episodicSource).map(publicTvSeriesListItem).filter(Boolean);
+      const screenWorksSource = [...movieSource, ...episodicSeriesSource];
       facetsSource = screenWorksSource;
       if (seriesKey) {
-        const categorySource = filterMediaItemsForList(tvSource, { category, person, mediaKind: "tv" });
+        const categorySource = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
         source = categorySource.filter((item) => item.seriesKey === seriesKey);
-        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesKey === seriesKey) || null);
+        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(episodicSource).find((group) => group.seriesKey === seriesKey) || null);
       } else if (person !== "all") {
-        source = filterMediaItemsForList(tvSource, { category, person, mediaKind: "tv" });
-        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesName === person) || null);
+        source = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
+        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(episodicSource).find((group) => group.seriesName === person && (mediaKind === "all" || group.mediaKind === mediaKind)) || null);
       } else {
         source = filterMediaItemsForList(screenWorksSource, { category, person, mediaKind });
       }
@@ -381,13 +394,13 @@ export function createImageLibraryService({
     if (mode === "photos" || mode === "photo-set" || mode === "photo-sets") return "photo";
     if (mode === "movies") return "movie";
     if (["media", "video", "screen", "film", "films"].includes(mode)) return "media";
-    if (["photo", "manga", "western", "movie", "tv"].includes(mode)) return mode;
+    if (["photo", "manga", "western", "movie", "tv", "anime"].includes(mode)) return mode;
     return "photo";
   }
 
   function normalizeMediaKindFilter(value) {
     const kind = String(value || "").trim().toLowerCase();
-    return ["movie", "tv"].includes(kind) ? kind : "all";
+    return ["movie", "tv", "anime"].includes(kind) ? kind : "all";
   }
 
   function hasCjkText(value) {
@@ -581,7 +594,7 @@ export function createImageLibraryService({
     return {
       id: String(item?.id || ""),
       type: normalizedMode,
-      mediaKind: String(item?.mediaKind || (["western", "movie", "tv"].includes(normalizedMode) ? normalizedMode : "")).trim(),
+      mediaKind: String(item?.mediaKind || (["western", "movie", "tv", "anime"].includes(normalizedMode) ? normalizedMode : "")).trim(),
       title: displayTitle,
       category: String(item?.category || item?.site || item?.kindLabel || "").trim(),
       subCategory: String(item?.subCategory || "").trim(),
@@ -673,12 +686,13 @@ export function createImageLibraryService({
         group = {
           seriesKey,
           type: "tvSeries",
-          title: item?.tvSeries?.title || item?.seriesName || item?.personName || item?.subCategory || item?.title || "电视剧",
+          mediaKind: item?.mediaKind || "tv",
+          title: item?.tvSeries?.title || item?.seriesName || item?.personName || item?.subCategory || item?.title || (item?.mediaKind === "anime" ? "动漫" : "电视剧"),
           seriesName: item?.seriesName || item?.personName || item?.subCategory || "",
           category: item?.category || "",
           rootLabel: item?.rootLabel || "",
           tvSeries: item?.tvSeries || null,
-          coverUrl: item?.tvSeries?.coverUrl || "",
+          coverUrl: item?.tvSeries?.coverUrl || item?.coverUrl || "",
           size: 0,
           episodeCount: 0,
           playableCount: 0,
@@ -691,6 +705,7 @@ export function createImageLibraryService({
       if (item?.playable) group.playableCount += 1;
       group.size += Number(item?.size || 0);
       if (!group.coverUrl && item?.tvSeries?.coverUrl) group.coverUrl = item.tvSeries.coverUrl;
+      if (!group.coverUrl && item?.coverUrl) group.coverUrl = item.coverUrl;
       if (!group.tvSeries && item?.tvSeries) group.tvSeries = item.tvSeries;
       if (!group.firstEpisodeId && item?.id) group.firstEpisodeId = item.id;
       if (String(item?.updatedAt || "") > String(group.updatedAt || "")) group.updatedAt = String(item.updatedAt || "");
@@ -704,8 +719,8 @@ export function createImageLibraryService({
     return {
       id: group.seriesKey,
       type: "tvSeriesWork",
-      mediaKind: "tv",
-      title: String(meta.title || group.title || group.seriesName || "电视剧").trim(),
+      mediaKind: String(group.mediaKind || "tv"),
+      title: String(meta.title || group.title || group.seriesName || (group.mediaKind === "anime" ? "动漫" : "电视剧")).trim(),
       category: String(group.category || meta.category || "").trim(),
       subCategory: String(group.seriesName || "").trim(),
       personName: String(group.seriesName || group.title || "").trim(),
@@ -732,7 +747,9 @@ export function createImageLibraryService({
       ratingCount: meta.ratingCount === null || meta.ratingCount === undefined ? null : Number(meta.ratingCount || 0),
       year: String(meta.year || "").trim(),
       genres: Array.isArray(meta.genres) ? meta.genres : [],
-      routePath: `/tv?seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
+      routePath: group.mediaKind === "anime"
+        ? `/media?kind=anime&seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
+        : `/tv?seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
     };
   }
 
@@ -800,6 +817,7 @@ export function createImageLibraryService({
     if (mode === "western") return `/western/${encoded}`;
     if (mode === "movie") return `/movies/${encoded}`;
     if (mode === "tv") return `/tv/${encoded}`;
+    if (mode === "anime") return `/media?kind=anime&mediaId=${encoded}`;
     return "/";
   }
 
@@ -1001,7 +1019,8 @@ export function createImageLibraryService({
     return (items || []).filter((item) => {
       const categoryKind = {
         __fanhao_media_kind_movie__: "movie",
-        __fanhao_media_kind_tv__: "tv"
+        __fanhao_media_kind_tv__: "tv",
+        __fanhao_media_kind_anime__: "anime"
       }[filters.category];
       if (categoryKind ? item.mediaKind !== categoryKind : filters.category && filters.category !== "all" && item.category !== filters.category) return false;
       if (filters.mediaKind && filters.mediaKind !== "all" && item.mediaKind !== filters.mediaKind) return false;

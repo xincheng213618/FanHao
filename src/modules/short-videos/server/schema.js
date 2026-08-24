@@ -29,6 +29,8 @@ export function ensureShortVideoColumns(db) {
   addColumnIfMissing(db, "short_video_users", "short_id", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_users", "ip_location", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_users", "total_favorited", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "nickname_history_json", "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "short_video_users", "total_favorited_history_json", "TEXT NOT NULL DEFAULT '[]'");
   addColumnIfMissing(db, "short_video_users", "aweme_count", "INTEGER");
   addColumnIfMissing(db, "short_video_users", "favoriting_count", "INTEGER");
   addColumnIfMissing(db, "short_video_users", "gender", "INTEGER");

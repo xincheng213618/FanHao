@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="updates" path="updates/" />
     <external-files-path name="app_pictures" path="Pictures/" />
+    <files-path name="vision_exploration_exports" path="vision-exploration/" />
 </paths>

@@ -15,6 +15,7 @@ from .domain_manifest import profile_output_dir
 from .download_state import DownloadManager
 from .queue import (
     clear_download_queue_changed,
+    next_download_queue_profile,
     notify_download_queue_changed,
     queue_pending_count,
     sync_download_queue,
@@ -43,8 +44,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
     ) -> dict[str, Any]:
         concurrency = normalize_int(concurrency, 8, 1, MAX_CONCURRENCY)
         limit = normalize_int(limit, 0, 0, 1000000)
-        if profile_id is None:
-            return {"ok": False, "message": "当前主页还没有入库，请先采集链接"}
+        global_queue = profile_id is None
         with self.lock:
             if self.active:
                 return {"ok": False, "message": "下载任务已经在运行"}
@@ -55,27 +55,35 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                 }
             if manual or not self.failure_guard_until or time.time() >= self.failure_guard_until:
                 self._clear_failure_guard_locked()
-            if retry_failed:
-                with db() as conn:
+            with db() as conn:
+                sync_download_queue(conn)
+                if global_queue:
+                    if retry_failed:
+                        conn.execute("UPDATE links SET status='pending', last_error=NULL WHERE status='failed'")
+                    # A process restart can leave rows marked as downloading.
+                    # Automatic mode owns the whole queue, so recover all of
+                    # them before choosing the first profile to display.
+                    conn.execute("UPDATE links SET status='pending' WHERE status='downloading'")
+                    sync_download_queue(conn)
+                    profile_id = next_download_queue_profile(conn)
+                    pending = queue_pending_count(conn)
+                else:
+                    if retry_failed:
+                        conn.execute(
+                            "UPDATE links SET status='pending', last_error=NULL WHERE status='failed' AND profile_id=?",
+                            (profile_id,),
+                        )
                     conn.execute(
-                        "UPDATE links SET status='pending', last_error=NULL WHERE status='failed' AND profile_id=?",
+                        "UPDATE links SET status='pending' WHERE status='downloading' AND profile_id=?",
                         (profile_id,),
                     )
-            with db() as conn:
-                conn.execute(
-                    "UPDATE links SET status='pending' WHERE status='downloading' AND profile_id=?",
-                    (profile_id,),
-                )
-                pending = conn.execute(
-                    "SELECT COUNT(*) c FROM links WHERE status='pending' AND profile_id=?",
-                    (profile_id,),
-                ).fetchone()["c"]
-                # Repair legacy/missing queue rows once when a watcher starts.
-                # Runtime writers maintain the queue incrementally after this.
-                sync_download_queue(conn)
-                queue_pending = queue_pending_count(conn)
-            if pending <= 0 and queue_pending > 0:
-                pending = queue_pending
+                    pending = conn.execute(
+                        "SELECT COUNT(*) c FROM links WHERE status='pending' AND profile_id=?",
+                        (profile_id,),
+                    ).fetchone()["c"]
+                    queue_pending = queue_pending_count(conn)
+                    if pending <= 0 and queue_pending > 0:
+                        pending = queue_pending
             if pending <= 0 and not watch_new:
                 return {"ok": False, "message": "没有待下载链接"}
             run_total = min(pending, limit) if limit > 0 else pending
@@ -145,10 +153,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
 
     def _run_supervisor(self, job_id: int, concurrency: int) -> None:
         profile_id = self.profile_id
-        if profile_id is None:
-            update_job(job_id, status="failed", finished_at=now_iso(), message="当前主页不存在")
-            return
-        output_dir = profile_output_dir(setting("output_dir", str(DEFAULT_OUTPUT_DIR)), profile_id)
+        output_dir = profile_output_dir(setting("output_dir", str(DEFAULT_OUTPUT_DIR)), profile_id or 0)
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         download_timing(
             "supervisor_start",

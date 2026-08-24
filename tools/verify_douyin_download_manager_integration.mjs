@@ -26,6 +26,14 @@ assert.equal(
   }),
   "白昼小熊"
 );
+assert.equal(
+  profileNicknameFromSnapshot({
+    heading: "读屏标签已关闭",
+    title: "白昼小熊的抖音 - 抖音",
+    text: "读屏标签已关闭\n白昼小熊\n关注 176"
+  }),
+  "白昼小熊"
+);
 
 const likeTargetSecUid = "MS4wLjABAAAA-target";
 const confirmedLike = {
@@ -349,6 +357,9 @@ assert.doesNotMatch(
   "batch download automation must use manager APIs instead of writing the FanHao catalog"
 );
 assert.match(appSource, /following_discovered_at/);
+assert.match(appSource, /nickname_history_json/);
+assert.match(appSource, /total_favorited_history_json/);
+assert.match(appSource, /def merge_profile_history_value\(/);
 assert.match(appSource, /has_deleted_works/);
 assert.match(appSource, /def profile_refresh_decision\(/);
 assert.match(appSource, /previous_work_create_time/);
@@ -413,10 +424,11 @@ assert.match(managerIndexSource, /<option value="banned">已封禁主页<\/optio
 assert.match(managerIndexSource, /class="panel download-execution-panel"/);
 assert.doesNotMatch(
   managerIndexSource,
-  /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStop)"/
+  /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStart|downloadStop)"/
 );
 assert.match(managerIndexSource, /20260809-home-simplify-01/);
-assert.match(managerIndexSource, /app\.js\?v=20260812-latest-request-01/);
+assert.match(managerIndexSource, /app\.js\?v=20260825-profile-history-01/);
+assert.match(managerIndexSource, /采集到新作品就直接下载，无需手动开关/);
 
 const linksFeatureSource = fs.readFileSync(
   path.join(moduleDir, "static", "features", "links.js"),
@@ -426,10 +438,11 @@ assert.match(linksFeatureSource, /profile_nickname/);
 assert.match(linksFeatureSource, /profile_tab === "like"/);
 
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
-assert.match(managerAppSource, /features\/downloads\.js\?v=20260809-home-simplify-01/);
+assert.match(managerAppSource, /features\/downloads\.js\?v=20260822-auto-download-01/);
 assert.match(managerAppSource, /features\/library\.js\?v=20260812-latest-request-01/);
 assert.match(managerAppSource, /features\/links\.js\?v=20260812-latest-request-01/);
-assert.match(managerAppSource, /features\/profiles\.js\?v=20260812-latest-request-01/);
+assert.match(managerAppSource, /features\/profiles\.js\?v=20260825-profile-history-01/);
+assert.match(managerAppSource, /features\/settings\.js\?v=20260823-auto-collection-01/);
 
 const downloadStateSource = fs.readFileSync(
   path.join(moduleDir, "manager_core", "download_state.py"),
@@ -547,6 +560,8 @@ assert.match(managerHtml, /提取我的关注/);
 assert.match(managerHtml, /待全量确认/);
 assert.match(managerHtml, /已确认主页少作品/);
 assert.match(managerHtml, /一键智能采集/);
+assert.match(managerHtml, /定时执行一键智能采集/);
+assert.match(managerHtml, /id="automaticCollectionIntervalHours"/);
 assert.match(managerHtml, /id="confirmPendingProfiles"/);
 assert.match(managerHtml, /暂无待确认/);
 assert.match(managerHtml, /每次采集都会更新本次遇到作品的点赞、评论、收藏和分享/);
@@ -559,9 +574,9 @@ assert.match(managerClient, /export function createLibraryFeature/);
 assert.match(managerClient, /\/api\/library\?/);
 assert.match(managerClient, /export function createDownloadsFeature/);
 assert.match(managerClient, /\/api\/app\/quit/);
-assert.match(managerClient, /watch_new:\s*true/);
-assert.match(managerClient, /\/api\/download\/stop/);
-assert.match(managerClient, /active \? "停止下载" : "开始下载"/);
+assert.doesNotMatch(managerClient, /\/api\/download\/(?:start|stop)/);
+assert.doesNotMatch(managerClient, /开始下载|停止下载/);
+assert.match(managerClient, /自动下载持续监听/);
 assert.match(managerClient, /idle_remaining_seconds/);
 assert.doesNotMatch(
   managerClient,
@@ -581,6 +596,7 @@ assert.match(managerClient, /account_status/);
 assert.match(managerClient, /scope === "banned"/);
 assert.match(managerClient, /手动确认/);
 assert.match(managerClient, /一键确认待全量/);
+assert.match(managerClient, /automatic_collection_enabled/);
 assert.match(managerClient, /pending\.map\(\(profile\) => Number\(profile\.id\)\)/);
 assert.match(managerClient, /new URLSearchParams\(location\.search\)\.get\("profile"\)/);
 assert.match(managerClient, /profileManagerSearch"\)\.value = friendlyName/);
@@ -615,6 +631,7 @@ assert.match(sharedWebPlayer, /\/api\/short-videos\/like-distribution/);
 assert.match(sharedAuthorPages, /快速刷新/);
 assert.match(sharedAuthorPages, /确认数量/);
 assert.match(sharedAuthorPages, /待确认差/);
+assert.match(sharedAuthorPages, /renderShortVideoAuthorProfileHistory/);
 assert.match(sharedWebPlayer, /profile=\$\{encodeURIComponent\(secUid\)\}#profiles/);
 assert.match(sharedWebPlayer, /comments-view\.js\?v=/);
 assert.match(sharedCommentsView, /commentsEndpoint}\/sync/);

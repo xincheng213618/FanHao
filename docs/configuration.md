@@ -27,13 +27,15 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `LIBRARY_ROOTS` | `G:\;F:\;O:\;O:\[珍藏]\;O:\[珍藏1]\;O:\[稀有]\;O:\[动漫]\;V:\[A]\;V:\[A1]\;V:\AV\` | 主资料库根目录列表。 |
+| `LIBRARY_ROOTS` | `G:\;F:\;O:\;O:\[珍藏]\;O:\[珍藏1]\;O:\[稀有]\;V:\[A]\;V:\[A1]\;V:\AV\` | 主资料库根目录列表；`O:\[动漫]` 会从番号扫描中排除。 |
 | `LIBRARY_ROOT` | （未设置时使用 `LIBRARY_ROOTS`） | 单根别名。 |
 | `FANHAO_WESTERN_ROOTS` | `R:\` | 欧美影视根目录（按人物文件夹进入统一播放逻辑）。 |
 | `FANHAO_MANGA_ROOT` | `E:\https-smtt6-com-man-hua-yue` | 漫画（manga）缓存根目录。 |
+| `FANHAO_MANGA_DATABASE` | `<FANHAO_MANGA_ROOT>\manga.sqlite` | 漫画 SQLite 读模型路径。 |
 | `FANHAO_PHOTO_SET_ROOTS` | `T:\;T:\[套图1]` | 套图（photo set）根目录。 |
 | `FANHAO_MOVIE_ROOTS` | `Z:\` | 图库中的「电影」媒体源。 |
 | `FANHAO_TV_ROOTS` | `Y:\` | 图库中的「电视剧」媒体源。 |
+| `FANHAO_ANIME_ROOTS` | `O:\[动漫]` | 影视库中的「动漫」媒体源，按系列与单集解析。 |
 | `FANHAO_SHORT_VIDEO_STORAGE_ROOT` | `D:\Media` | 本机短视频下载存储根目录；默认媒体库为其下的 `ShortVideos`。 |
 | `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `D:\Media\ShortVideos` | 短视频扫描根目录。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `src/modules/short-videos/download-manager/data/douyin_downloads.sqlite` | 内置抖音下载管理器数据库路径；仅在需要改用外部库时覆盖。 |

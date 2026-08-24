@@ -49,6 +49,7 @@ import { createWorkLocalMutationService } from "./src/modules/fanhao/server/work
 import { createWorkMoveJobService } from "./src/modules/fanhao/server/works/work-move-job-service.js";
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
 import { comparePopularityMetadata, compareRatingCountMetadata } from "./src/modules/fanhao/server/works/work-sort-metadata.js";
+import { isAnimeWork } from "./src/modules/fanhao/server/works/work-category.js";
 import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
 import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
 import { createMangaService } from "./src/modules/photos/server/manga-service.js";
@@ -123,6 +124,7 @@ const {
   JAVDB_115_COOKIE_PROFILE_DIR,
   LIBRARY_ROOTS,
   LOCAL_ACTOR_AVATAR_SOURCE,
+  MANGA_DATABASE_PATH,
   MANGA_LIBRARY_ROOT,
   MAX_ACTOR_AVATAR_BYTES,
   MAX_FAVORITE_FOLDERS,
@@ -178,6 +180,7 @@ const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer
   safeStat
 });
 const mangaService = createMangaService({
+  databasePath: MANGA_DATABASE_PATH,
   root: MANGA_LIBRARY_ROOT,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -415,6 +418,7 @@ const localLibraryScanService = createLocalLibraryScanService({
   createId,
   emptyLibrary,
   excludedDirs: EXCLUDED_DIRS,
+  excludedRoots: GALLERY_MEDIA_SOURCES.filter((source) => source.kind === "anime").flatMap((source) => source.roots || []),
   fileBase,
   isExcludedDirName,
   isImage,
@@ -425,7 +429,8 @@ const localLibraryScanService = createLocalLibraryScanService({
   linkScannedWork: (personId, work) => localLibraryIndexService?.linkedScannedWork(personId, work) || work,
   normalizeExt,
   relativeFromRoot: (...args) => relativeFromRoot(...args),
-  safeStat
+  safeStat,
+  singleVideoRoots: WESTERN_LIBRARY_ROOTS
 });
 const coreLibraryService = createCoreLibraryService({
   chooseCover: localLibraryScanService.chooseCover,
@@ -554,6 +559,8 @@ const personMergeService = createPersonMergeService({
 const peopleScopeService = createPeopleScopeService({
   getLibrary: () => library,
   getRevision: () => personMergeStamp(),
+  isMainExcludedWork: isAnimeWork,
+  mainExcludedRoots: GALLERY_MEDIA_SOURCES.filter((source) => source.kind === "anime").flatMap((source) => source.roots || []),
   mergedPersonRecord,
   pathWithinRoot: (...args) => pathWithinRoot(...args),
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
@@ -939,6 +946,33 @@ const moduleRegistry = await discoverFanHaoModules({
         }
       },
       fanhao: createFanhaoDependencies({
+        diskUsage: {
+          cacheDir: path.join(DATA_DIR, "disk-usage"),
+          excludedNames: [...EXCLUDED_DIRS],
+          getLibrary: () => library,
+          mediaStreamService,
+          normalizeExt,
+          notFound,
+          readJsonBody,
+          requireLocalAdmin,
+          requireTrustedNetworkPage,
+          safeStat,
+          sendJson,
+          serveRangedFile,
+          sources: [
+            ...LIBRARY_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "番号" })),
+            ...WESTERN_LIBRARY_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "欧美" })),
+            ...PHOTO_SET_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "图库" })),
+            { path: MANGA_LIBRARY_ROOT, label: "韩漫" },
+            ...GALLERY_MEDIA_SOURCES.flatMap((source) =>
+              (source.roots || []).map((sourcePath) => ({ path: sourcePath, label: `影视·${source.label}` }))
+            ),
+            ...MUSIC_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "音乐" })),
+            ...SHORT_VIDEO_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "短视频" }))
+          ],
+          videoExtensions: VIDEO_EXTS,
+          videoProbeService
+        },
         adminCoreMutationService,
         actorMovieStamp,
         actorMovieInfoStamp,
@@ -1076,6 +1110,7 @@ const moduleRegistry = await discoverFanHaoModules({
         requireLocalAdmin,
         roots: SHORT_VIDEO_ROOTS,
         sendJson,
+        serveDownloadFile,
         sharedCache: imageReaderCacheService,
         getTranscodeConcurrency: () => appConfigService.shortVideoTranscodeConcurrency(),
         setTranscodeConcurrency: (value) => appConfigService.patch({

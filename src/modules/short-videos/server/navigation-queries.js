@@ -78,7 +78,8 @@ export function createShortVideoNavigationQueries({
         value: (item) => statisticsKnown(item) ? Number(item.digg_count || 0) : 1000000000000
       },
       comments: { column: "comment_count", fallback: "liked_at", numeric: true },
-      duration: { column: "duration_ms", fallback: "liked_at", numeric: true }
+      duration: { column: "duration_ms", fallback: "liked_at", numeric: true },
+      size: { column: "size_bytes", fallback: "liked_at", numeric: true }
     }[sort] || { column: "published_at", fallback: "liked_at", numeric: false };
   }
 
@@ -314,7 +315,7 @@ export function createShortVideoNavigationQueries({
   }
 
   function fastMetricAdjacentRows(database, row, direction, filter, order, limit) {
-    const eligibleColumns = new Set(["digg_count", "comment_count", "collect_count", "share_count", "duration_ms"]);
+    const eligibleColumns = new Set(["digg_count", "comment_count", "collect_count", "share_count", "duration_ms", "size_bytes"]);
     const likesAscending = order.column === "digg_count"
       && String(order.direction || "").toUpperCase() === "ASC"
       && Boolean(order.expression);

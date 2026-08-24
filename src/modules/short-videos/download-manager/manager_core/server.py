@@ -9,7 +9,9 @@ import webbrowser
 from http.server import ThreadingHTTPServer
 
 from . import auth, runtime
-from .config import DB_PATH, DEFAULT_OUTPUT_DIR, FROZEN_BUILD
+from .common import normalize_int
+from .collection_scheduler import automatic_collection_scheduler
+from .config import DB_PATH, DEFAULT_OUTPUT_DIR, FROZEN_BUILD, MAX_CONCURRENCY
 from .database import add_event, init_db, setting
 from .domain_manifest import (
     backfill_download_records_from_links,
@@ -34,6 +36,10 @@ class ManagerHTTPServer(ThreadingHTTPServer):
 
 
 def stop_runtime() -> None:
+    try:
+        automatic_collection_scheduler.stop()
+    except Exception:
+        pass
     try:
         stop_extract()
     except Exception:
@@ -66,6 +72,19 @@ def manager_server(host: str, requested_port: int) -> tuple[ThreadingHTTPServer,
     return ManagerHTTPServer((host, fallback_port), Handler), fallback_port
 
 
+def start_automatic_downloads() -> dict[str, object]:
+    """Start the permanent global watcher used by the button-free UI."""
+    concurrency = normalize_int(setting("concurrency", "8"), 8, 1, MAX_CONCURRENCY)
+    return download_manager.start(
+        concurrency,
+        retry_failed=False,
+        limit=0,
+        profile_id=None,
+        watch_new=True,
+        manual=False,
+    )
+
+
 def main() -> None:
     runtime.APP_QUIT_REQUESTED = False
     if not acquire_single_instance():
@@ -84,10 +103,12 @@ def main() -> None:
                 f"数据库补全 {int(link_backfill.get('inserted') or 0)}",
             )
         add_event("info", "服务启动")
-        download_manager.restore_failure_guard()
+        if not download_manager.restore_failure_guard():
+            start_automatic_downloads()
         host = os.environ.get("DOUYIN_MANAGER_HOST", "127.0.0.1")
         requested_port = int(os.environ.get("DOUYIN_MANAGER_PORT", "8765"))
         server, port = manager_server(host, requested_port)
+        automatic_collection_scheduler.start()
         runtime.ACTIVE_SERVER = server
         url = f"http://localhost:{port}/#home"
         write_runtime_info(port, url)

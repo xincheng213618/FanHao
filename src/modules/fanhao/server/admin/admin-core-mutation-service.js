@@ -1124,7 +1124,7 @@ export function createAdminCoreMutationService({
     return getActorProfileOutboxService()?.retryOperation(operationId) || null;
   }
 
-  function mergePeopleIntoTarget(targetPersonId, sourcePersonIds = []) {
+  function mergePeopleIntoTarget(targetPersonId, sourcePersonIds = [], options = {}) {
     if (!hasCoreDb()) {
       const error = new Error("core DB 不可用");
       error.statusCode = 500;
@@ -1174,9 +1174,11 @@ export function createAdminCoreMutationService({
       assertActorProfileMutationAllowed(db, [targetId, ...sources.map((source) => source.id)]);
       clearActorProfilePublication(db, [targetId, ...sources.map((source) => source.id)]);
       for (const source of sources) {
-        for (const alias of uniquePersonNames([source.name, source.display_name, ...sourceAliases.all(source.id).map((row) => row.alias)])) {
-          const key = normalizePersonSearchValue(alias);
-          if (key && !targetPrimaryKeys.has(key)) insertAlias.run(targetId, alias, key);
+        if (options.preserveSourceNames !== false) {
+          for (const alias of uniquePersonNames([source.name, source.display_name, ...sourceAliases.all(source.id).map((row) => row.alias)])) {
+            const key = normalizePersonSearchValue(alias);
+            if (key && !targetPrimaryKeys.has(key)) insertAlias.run(targetId, alias, key);
+          }
         }
 
         for (const row of sourceWorkPeople.all(source.id)) {

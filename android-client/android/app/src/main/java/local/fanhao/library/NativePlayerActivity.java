@@ -69,6 +69,7 @@ public class NativePlayerActivity extends Activity {
   private double probedDurationSeconds;
   private boolean fallbackTried;
   private long lastProgressAt;
+  private long streamOffsetMs;
 
   private final Runnable statusHideRunnable = new Runnable() {
     @Override
@@ -133,7 +134,10 @@ public class NativePlayerActivity extends Activity {
         if (!fallbackTried && hasText(fallbackUrl) && !sameUrl(url, fallbackUrl)) {
           fallbackTried = true;
           showStatus("直连失败，切换智能播放", true);
-          playUrl(withFallbackSeek(fallbackUrl), Math.max(0, player.getCurrentPosition()));
+          long fallbackPositionMs = Math.max(0, streamOffsetMs + player.getCurrentPosition());
+          String fallbackPlaybackUrl = withFallbackSeek(fallbackUrl, fallbackPositionMs);
+          streamOffsetMs = streamOffsetFromUrl(fallbackPlaybackUrl);
+          playUrl(fallbackPlaybackUrl, 0);
           return;
         }
         showStatus(playbackErrorMessage(error), true);
@@ -369,8 +373,9 @@ public class NativePlayerActivity extends Activity {
     if (!hasText(progressUrl) || player == null) return;
     long now = System.currentTimeMillis();
     if (!force && now - lastProgressAt < 4500) return;
-    long positionMs = Math.max(0, player.getCurrentPosition());
+    long positionMs = Math.max(0, streamOffsetMs + player.getCurrentPosition());
     long durationMs = player.getDuration();
+    if (durationMs > 0 && streamOffsetMs > 0) durationMs += streamOffsetMs;
     if (durationMs <= 0 && probedDurationSeconds > 0) durationMs = secondsToMs(probedDurationSeconds);
     if (durationMs <= 0) return;
     lastProgressAt = now;
@@ -407,13 +412,24 @@ public class NativePlayerActivity extends Activity {
     }
   }
 
-  private String withFallbackSeek(String url) {
-    if (!hasText(url) || player == null) return url;
-    long seconds = Math.max(0, player.getCurrentPosition() / 1000);
+  private String withFallbackSeek(String url, long positionMs) {
+    if (!hasText(url)) return url;
+    long seconds = Math.max(0, positionMs / 1000);
     if (seconds <= 0) return url;
     Uri uri = Uri.parse(url);
     if (uri.getQueryParameter("t") != null) return url;
     return uri.buildUpon().appendQueryParameter("t", String.valueOf(seconds)).build().toString();
+  }
+
+  private long streamOffsetFromUrl(String url) {
+    if (!hasText(url)) return 0;
+    try {
+      String raw = Uri.parse(url).getQueryParameter("t");
+      if (!hasText(raw)) return 0;
+      return secondsToMs(Math.max(0, Double.parseDouble(raw)));
+    } catch (Exception ignored) {
+      return 0;
+    }
   }
 
   private void hideSystemBars() {
