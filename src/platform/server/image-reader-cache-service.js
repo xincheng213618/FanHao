@@ -11,6 +11,8 @@ export function createImageReaderCacheService({
   warn = console.warn
 }) {
   const touchTimes = new Map();
+  let inventory = null;
+  let inventoryBytes = 0;
   let cleanupPending = false;
   let cleanupActive = false;
 
@@ -47,8 +49,20 @@ export function createImageReaderCacheService({
         }
       }
     }
-    entries.sort((a, b) => a.touchedAt - b.touchedAt || a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
     return entries;
+  }
+
+  function inventoryEntries({ refresh = false } = {}) {
+    if (!inventory || refresh) {
+      const entries = collectEntries();
+      inventory = new Map(entries.map((entry) => [entry.path, entry]));
+      inventoryBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+    }
+    return [...inventory.values()];
+  }
+
+  function oldestFirst(entries) {
+    return entries.sort((a, b) => a.touchedAt - b.touchedAt || a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
   }
 
   function removeEmptyParents(filePath) {
@@ -66,15 +80,14 @@ export function createImageReaderCacheService({
   }
 
   function status() {
-    const entries = collectEntries();
-    const currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+    const entries = oldestFirst(inventoryEntries());
     const maxBytes = getMaxBytes();
     return {
       root: rootDir,
       exists: Boolean(safeStat(rootDir)?.isDirectory()),
       maxBytes,
-      currentBytes,
-      overBytes: Math.max(0, currentBytes - maxBytes),
+      currentBytes: inventoryBytes,
+      overBytes: Math.max(0, inventoryBytes - maxBytes),
       fileCount: entries.length,
       cleanupIntervalMs,
       entries: entries.slice(-12).reverse().map((entry) => ({
@@ -92,8 +105,8 @@ export function createImageReaderCacheService({
     cleanupActive = true;
     try {
       const maxBytes = getMaxBytes();
-      const entries = collectEntries();
-      let currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+      const entries = oldestFirst(inventoryEntries({ refresh: Boolean(options.refresh) }));
+      let currentBytes = inventoryBytes;
       const targetBytes = options.force ? 0 : Math.floor(maxBytes * cleanupTargetRatio);
       const removed = [];
       let removedBytes = 0;
@@ -105,6 +118,9 @@ export function createImageReaderCacheService({
             fs.rmSync(entry.path, { force: true });
             removeEmptyParents(entry.path);
             currentBytes -= entry.bytes;
+            inventory.delete(entry.path);
+            inventoryBytes = currentBytes;
+            touchTimes.delete(entry.path);
             removedBytes += entry.bytes;
             removed.push({ relativePath: entry.relativePath, bytes: entry.bytes });
           } catch (error) {
@@ -143,7 +159,7 @@ export function createImageReaderCacheService({
   function startCleanupTimer() {
     setInterval(() => {
       try {
-        cleanup();
+        cleanup({ refresh: true });
       } catch (error) {
         warn("[image-reader-cache-cleanup]", error.message || error);
       }
@@ -159,6 +175,17 @@ export function createImageReaderCacheService({
     try {
       const date = new Date(now);
       fs.utimesSync(filePath, date, date);
+      if (inventory) {
+        const root = path.resolve(rootDir);
+        const relativePath = path.relative(root, key);
+        const stat = safeStat(key);
+        if (stat?.isFile() && relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+          const previous = inventory.get(key);
+          const entry = { path: key, relativePath, bytes: stat.size || 0, touchedAt: now };
+          inventory.set(key, entry);
+          inventoryBytes += entry.bytes - (previous?.bytes || 0);
+        }
+      }
     } catch {}
   }
 

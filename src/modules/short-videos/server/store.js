@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -194,7 +193,6 @@ export function createShortVideoStore(options = {}) {
   const roots = normalizeRoots(options.roots || []);
   const ffmpegPath = options.ffmpegPath || "ffmpeg";
   const coverCacheDir = options.coverCacheDir || path.join(path.dirname(dbPath || "."), "short-video-covers");
-  const coverTempDir = options.coverTempDir || path.join(os.tmpdir(), "fanhao-short-video-cover-inputs");
   const coverDbPath = options.coverDbPath || defaultShortVideoCoverDbPath(dbPath);
   const pathWriteTestHooks = options.pathWriteTestHooks || {};
   const coverBlobDatabase = createShortVideoCoverDatabase({ dbPath: coverDbPath });
@@ -228,6 +226,7 @@ export function createShortVideoStore(options = {}) {
     database: databaseOrOpen,
     roots,
     coverCacheDir,
+    deferCleanup: Boolean(options.deferDeleteCleanup),
     deleteRows: deleteShortVideoRows,
     deleteStoredCovers: options.deleteJobDeleteStoredCovers
       || ((videoIds, receipt) => coverBlobDatabase.removeMany(videoIds, receipt)),
@@ -1722,40 +1721,6 @@ function summary() {
     };
   }
 
-  function qualityUpgradeStatuses(awemeIds) {
-    const ids = [...new Set((awemeIds || []).map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!ids.length || !downloadManagerDbPath || !fs.existsSync(downloadManagerDbPath)) return new Map();
-    let managerDb = null;
-    try {
-      managerDb = new DatabaseSync(downloadManagerDbPath, { readOnly: true });
-      const columns = new Set(managerDb.prepare("PRAGMA table_info(links)").all().map((column) => column.name));
-      if (!columns.has("aweme_id") || !columns.has("status") || !columns.has("download_intent")) return new Map();
-      const placeholders = ids.map(() => "?").join(",");
-      const rows = managerDb.prepare(`
-        SELECT aweme_id, status, download_intent, id
-        FROM links
-        WHERE aweme_id IN (${placeholders})
-        ORDER BY id DESC
-      `).all(...ids);
-      const statuses = new Map();
-      for (const row of rows) {
-        const key = String(row.aweme_id || "");
-        if (!key || statuses.has(key)) continue;
-        statuses.set(key, {
-          status: String(row.status || ""),
-          downloadIntent: String(row.download_intent || "")
-        });
-      }
-      return statuses;
-    } catch {
-      return new Map();
-    } finally {
-      try {
-        managerDb?.close();
-      } catch {}
-    }
-  }
-
   function queueQualityUpgrades(videoIds) {
     const ids = [...new Set((videoIds || []).map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 100);
     if (!ids.length) {
@@ -2800,12 +2765,10 @@ function summary() {
 
   function generateCoverForRow(row) {
     if (!row?.source_path || !fs.existsSync(row.source_path)) return "";
-    let tempInput = null;
     try {
       const fingerprint = coverStorage.sourceFingerprint(row);
       if (coverBlobDatabase.has(row.id, fingerprint)) return coverBlobDatabase.get(row.id);
-      tempInput = asciiInputPath(row.source_path, coverTempDir, row.id || row.aweme_id || "");
-      const buffer = extractCoverFrame(tempInput.path, {
+      const buffer = extractCoverFrame(row.source_path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
         maxBytes: coverMaxBytes,
@@ -2819,19 +2782,15 @@ function summary() {
     } catch (error) {
       console.warn("[short-video-cover]", row.id || row.source_path, error.message || error);
       return "";
-    } finally {
-      if (tempInput?.cleanup) tempInput.cleanup();
     }
   }
 
   async function generateCoverForRowAsync(row) {
     if (!row?.source_path || !fs.existsSync(row.source_path)) return "";
-    let tempInput = null;
     try {
       const fingerprint = coverStorage.sourceFingerprint(row);
       if (coverBlobDatabase.has(row.id, fingerprint)) return coverBlobDatabase.get(row.id);
-      tempInput = asciiInputPath(row.source_path, coverTempDir, row.id || row.aweme_id || "");
-      const buffer = await extractCoverFrameAsync(tempInput.path, {
+      const buffer = await extractCoverFrameAsync(row.source_path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
         maxBytes: coverMaxBytes,
@@ -2845,8 +2804,6 @@ function summary() {
     } catch (error) {
       console.warn("[short-video-cover]", row.id || row.source_path, error.message || error);
       return "";
-    } finally {
-      if (tempInput?.cleanup) tempInput.cleanup();
     }
   }
 
@@ -4807,29 +4764,6 @@ function safeStoredFile(filePath, type, id = "") {
   const normalized = path.resolve(filePath);
   if (!fs.existsSync(normalized)) return null;
   return { id: id || hashText(normalized).slice(0, 16), path: normalized, type, ext: path.extname(normalized).toLowerCase() };
-}
-
-function asciiInputPath(sourcePath, tempDir, token = "") {
-  if (/^[\x00-\x7F]+$/.test(sourcePath) && sourcePath.length < 240) return { path: sourcePath, cleanup: null };
-  fs.mkdirSync(tempDir, { recursive: true });
-  const ext = path.extname(sourcePath) || ".mp4";
-  const tempPath = path.join(tempDir, `_short-video-source-${hashText(`${sourcePath}:${token}`).slice(0, 16)}${ext}`);
-  try {
-    fs.rmSync(tempPath, { force: true });
-  } catch {}
-  try {
-    fs.linkSync(sourcePath, tempPath);
-  } catch {
-    fs.copyFileSync(sourcePath, tempPath);
-  }
-  return {
-    path: tempPath,
-    cleanup: () => {
-      try {
-        fs.rmSync(tempPath, { force: true });
-      } catch {}
-    }
-  };
 }
 
 function normalizeRoots(values) {

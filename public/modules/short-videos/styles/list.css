@@ -4,6 +4,7 @@ body.short-video-browser-active {
 }
 
 body.short-video-view .main {
+  overflow: visible;
   padding: 0 24px 42px;
 }
 
@@ -2201,11 +2202,22 @@ body.short-video-view .work-grid {
 }
 
 .short-video-home-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 7;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 0 0 14px;
+  margin: -8px 0 6px;
+  padding: 8px 0;
+  background: rgba(246, 247, 244, .96);
+  box-shadow: 0 1px 0 rgba(216, 223, 217, .9), 0 10px 22px rgba(24, 35, 30, .08);
+  backdrop-filter: blur(12px);
+}
+
+body.short-video-view:not(.standalone-module-view) .short-video-home-toolbar {
+  top: 64px;
 }
 
 .short-video-source-tabs {

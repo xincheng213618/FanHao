@@ -21,7 +21,7 @@ import { createCrossStoreOutboxService } from "./src/modules/fanhao/server/libra
 import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
-import { ensureRealPathWithinRoots } from "./src/modules/fanhao/server/library/library-path-safety.js";
+import { ensureRealPathWithinRoots } from "./src/platform/server/library-path-safety.js";
 import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
 import { createFavoriteStateService } from "./src/modules/fanhao/server/collections/favorite-state-service.js";
 import { createLibraryPathServices } from "./src/modules/fanhao/server/library/library-paths.js";

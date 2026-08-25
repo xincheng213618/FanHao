@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { createApiClient } from "../public/js/api.js";
 import { createAdminCoreMutationService } from "../src/modules/fanhao/server/admin/admin-core-mutation-service.js";
-import { ensureRealPathWithinRoots } from "../src/modules/fanhao/server/library/library-path-safety.js";
+import { ensureRealPathWithinRoots } from "../src/platform/server/library-path-safety.js";
 import { createPersonLibraryService } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { createWorkLocalMutationService } from "../src/modules/fanhao/server/works/work-local-mutation-service.js";

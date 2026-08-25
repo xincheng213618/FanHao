@@ -47,6 +47,7 @@ export function createShortVideoDeleteJobService({
   database,
   roots = [],
   coverCacheDir = "",
+  deferCleanup = false,
   deleteRows,
   deleteStoredCovers,
   displayPath = (value) => value,
@@ -67,7 +68,6 @@ export function createShortVideoDeleteJobService({
   const configuredOwner = String(configuredOwnerId || "");
   let ownerId = configuredOwner || newOwnerId();
   const rootGroupCache = new Map();
-  const referenceSnapshotsByJob = new Map();
   const activeExecutions = new Map();
   const relinquishableExecutions = new Map();
   let recovering = false;
@@ -812,71 +812,6 @@ export function createShortVideoDeleteJobService({
     }
   }
 
-  async function buildReferenceSnapshot(db, hookContext = null) {
-    if (hookContext?.jobId || uniqueStrings(hookContext?.targetVideoIds || [], 10_000).length) {
-      return buildTargetedReferenceSnapshot(db, hookContext);
-    }
-    return buildCompleteReferenceSnapshot(db, hookContext);
-  }
-
-  async function buildCompleteReferenceSnapshot(db, hookContext = null) {
-    assertOpen();
-    const jobKey = String(hookContext?.jobId || "");
-    // The plan snapshot may be reused for the logical DB commit because all
-    // selected files are already isolated and the full owner tuple CAS below
-    // fences DB writers. Cleanup deliberately rebuilds the physical graph: it
-    // is the last check before unlink and must see filesystem-only retargets.
-    const hasPreviousSnapshot = hookContext?.phase === "commit"
-      && Boolean(jobKey)
-      && referenceSnapshotsByJob.has(jobKey);
-    const previousRows = hasPreviousSnapshot ? referenceSnapshotsByJob.get(jobKey) : [];
-    const expected = new Map();
-    const remember = (ownerTable, ownerKey, ownerVideoId, pathColumn, rawPath) => {
-      const text = String(rawPath || "").trim();
-      if (!text) return;
-      expected.set(`${ownerTable}\0${ownerKey}\0${pathColumn}`, {
-        ownerTable,
-        ownerKey: String(ownerKey),
-        ownerVideoId: String(ownerVideoId),
-        pathColumn,
-        rawPath: text,
-        pathKey: pathKey(text)
-      });
-    };
-    if (hasPreviousSnapshot) {
-      for (const row of previousRows) {
-        remember(row.ownerTable, row.ownerKey, row.ownerVideoId, row.pathColumn, row.rawPath);
-      }
-    } else {
-      for (const row of db.prepare(`
-        SELECT owner_table, owner_key, owner_video_id, path_column, raw_path
-        FROM ${PATH_REFERENCE_TABLE}
-      `).all()) {
-        remember(row.owner_table, row.owner_key, row.owner_video_id, row.path_column, row.raw_path);
-      }
-    }
-
-    // The hook deliberately runs after the lexical owner snapshot but before the
-    // one physical probe pass. The following write transaction compares the full
-    // owner tuple set, so DB writers cannot invalidate this candidate unnoticed;
-    // topology changes made by the test hook are included in the physical graph.
-    if (hookContext) await invokeHook(hooks.afterReferenceSnapshot, hookContext);
-
-    const previous = new Map(previousRows.map((row) => [referenceOwnerKey(row), row]));
-    const targetKeys = hookContext?.jobId ? referenceTargetKeys(db, hookContext.jobId) : null;
-    const probeCache = createReferenceProbeCache();
-    const snapshots = [];
-    for (const item of expected.values()) {
-      const prior = previous.get(referenceOwnerKey(item));
-      if (canReuseReferenceProbe(item, prior, targetKeys)) {
-        snapshots.push({ ...item, ...referenceProbeEvidence(prior) });
-      } else {
-        snapshots.push({ ...item, ...probeReferencePath(item.rawPath, probeCache) });
-      }
-    }
-    return snapshots;
-  }
-
   async function buildTargetedReferenceSnapshot(db, hookContext = {}) {
     assertOpen();
     const selectedIds = uniqueStrings(hookContext.targetVideoIds || [], 10_000);
@@ -996,60 +931,6 @@ export function createShortVideoDeleteJobService({
     return `${row.ownerTable ?? row.owner_table}\0${row.ownerKey ?? row.owner_key}\0${row.pathColumn ?? row.path_column}`;
   }
 
-  function referenceProbeEvidence(row) {
-    return {
-      realPathKey: String(row?.realPathKey ?? row?.real_path_key ?? ""),
-      identityKey: String(row?.identityKey ?? row?.identity_key ?? ""),
-      rootGroupKey: String(row?.rootGroupKey ?? row?.root_group_key ?? ""),
-      probeState: String(row?.probeState ?? row?.probe_state ?? "unverified"),
-      aliasRisk: Boolean(row?.aliasRisk),
-      nlink: String(row?.nlink || "")
-    };
-  }
-
-  function referenceTargetKeys(db, jobId) {
-    const keys = new Set();
-    for (const item of readItems(db, jobId)) {
-      for (const [kind, value] of [
-        ["path", item.path_key],
-        ["real", item.real_path_key],
-        ["identity", item.identity_key]
-      ]) {
-        if (value) keys.add(referenceLookupKey(kind, value));
-      }
-    }
-    return keys;
-  }
-
-  function canReuseReferenceProbe(item, prior, targetKeys) {
-    if (!prior || !targetKeys) return false;
-    if (String(prior.ownerVideoId ?? prior.owner_video_id ?? "") !== item.ownerVideoId
-      || String(prior.rawPath ?? prior.raw_path ?? "") !== item.rawPath
-      || String(prior.pathKey ?? prior.path_key ?? "") !== item.pathKey) {
-      return false;
-    }
-    const evidence = referenceProbeEvidence(prior);
-    if (evidence.probeState === "missing") return true;
-    if (evidence.probeState !== "ready" || evidence.aliasRisk || Number(evidence.nlink || 0) > 1) return false;
-    return ![
-      referenceLookupKey("path", item.pathKey),
-      referenceLookupKey("real", evidence.realPathKey),
-      referenceLookupKey("identity", evidence.identityKey)
-    ].some((key) => targetKeys.has(key));
-  }
-
-  function commitReferenceSnapshot(db, snapshots) {
-    beginImmediate(db);
-    try {
-      const references = commitReferenceSnapshotInTransaction(db, snapshots);
-      db.exec("COMMIT");
-      return references;
-    } catch (error) {
-      rollback(db);
-      throw error;
-    }
-  }
-
   function commitTargetedReferenceSnapshot(db, snapshots) {
     beginImmediate(db);
     try {
@@ -1106,77 +987,6 @@ export function createShortVideoDeleteJobService({
       }
     }
     return referencesFromRows(snapshots || []);
-  }
-
-  function commitReferenceSnapshotInTransaction(db, snapshots) {
-    if (!db?.isTransaction) {
-      throw codedError("物理引用刷新必须持有数据库写事务", "SHORT_VIDEO_DELETE_REFERENCE_NOT_FENCED");
-    }
-    const currentKeys = new Set();
-    for (const row of db.prepare(`SELECT id, ${PATH_COLUMNS.join(", ")} FROM short_videos`).all()) {
-      for (const column of PATH_COLUMNS) {
-        const rawPath = String(row[column] || "").trim();
-        if (rawPath) currentKeys.add(`short_videos\0${row.id}\0${row.id}\0${column}\0${rawPath}`);
-      }
-    }
-    for (const row of db.prepare("SELECT id, video_id, local_path FROM short_video_assets").all()) {
-      const rawPath = String(row.local_path || "").trim();
-      if (rawPath) currentKeys.add(`short_video_assets\0${row.id}\0${row.video_id}\0local_path\0${rawPath}`);
-    }
-    const snapshotKeys = new Set();
-    for (const snapshot of snapshots || []) {
-      const key = `${snapshot.ownerTable}\0${snapshot.ownerKey}\0${snapshot.ownerVideoId}\0${snapshot.pathColumn}\0${snapshot.rawPath}`;
-      if (snapshotKeys.has(key)) {
-        throw codedError("物理引用快照包含重复 owner", "SHORT_VIDEO_DELETE_REFERENCE_CHANGED");
-      }
-      snapshotKeys.add(key);
-    }
-    if (
-      currentKeys.size !== snapshotKeys.size
-      || [...currentKeys].some((key) => !snapshotKeys.has(key))
-      || [...snapshotKeys].some((key) => !currentKeys.has(key))
-    ) {
-      throw codedError("短视频路径引用在物理探测期间发生变化", "SHORT_VIDEO_DELETE_REFERENCE_CHANGED");
-    }
-    const upsert = db.prepare(`
-        INSERT INTO ${PATH_REFERENCE_TABLE} (
-          owner_table, owner_key, owner_video_id, path_column, raw_path, path_key,
-          real_path_key, identity_key, root_group_key, probe_state, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(owner_table, owner_key, path_column) DO UPDATE SET
-          owner_video_id = excluded.owner_video_id,
-          raw_path = excluded.raw_path,
-          path_key = excluded.path_key,
-          real_path_key = excluded.real_path_key,
-          identity_key = excluded.identity_key,
-          root_group_key = excluded.root_group_key,
-          probe_state = excluded.probe_state,
-          updated_at = excluded.updated_at
-    `);
-    for (const snapshot of snapshots || []) {
-      upsert.run(
-        snapshot.ownerTable,
-        snapshot.ownerKey,
-        snapshot.ownerVideoId,
-        snapshot.pathColumn,
-        snapshot.rawPath,
-        snapshot.pathKey,
-        snapshot.realPathKey || "",
-        snapshot.identityKey || "",
-        snapshot.rootGroupKey || "",
-        snapshot.probeState || "missing",
-        now()
-      );
-    }
-    // The durable table intentionally stores only the canonical lookup keys.
-    // Keep the just-probed topology evidence (aliasRisk/nlink) for this stage's
-    // decision; the complete owner-tuple CAS above proves it describes the
-    // same base rows as the trigger-maintained projection.
-    return referencesFromRows(snapshots || []);
-  }
-
-  async function synchronizeReferenceIndex(db) {
-    return commitReferenceSnapshot(db, await buildReferenceSnapshot(db));
   }
 
   function deleteRequestIdentity(options = {}) {
@@ -1272,6 +1082,7 @@ export function createShortVideoDeleteJobService({
     beginExecution(preflightKey, executionToken);
     let db = null;
     let executionKey = preflightKey;
+    let cleanupDetached = false;
     try {
       db = database();
       ensureSchema(db);
@@ -1279,7 +1090,7 @@ export function createShortVideoDeleteJobService({
         const replay = operationReplay(db, identity);
         if (replay) return replay;
       }
-      const referenceSnapshot = await buildReferenceSnapshot(db, {
+      const referenceSnapshot = await buildTargetedReferenceSnapshot(db, {
         phase: "plan",
         targetVideoIds: (rows || []).map((row) => row?.id)
       });
@@ -1288,7 +1099,6 @@ export function createShortVideoDeleteJobService({
       const job = persisted.job;
       transferExecution(preflightKey, job.id, executionToken);
       executionKey = job.id;
-      referenceSnapshotsByJob.set(job.id, referenceSnapshot);
       try {
         await invokeHook(hooks.afterPlanPersisted, publicHookJob(job));
         await isolatePlannedFiles(db, job.id);
@@ -1296,7 +1106,6 @@ export function createShortVideoDeleteJobService({
         await commitRows(db, job.id);
         await invokeHook(hooks.afterDatabaseCommit, publicHookJob(readJob(db, job.id)));
       } catch (error) {
-        referenceSnapshotsByJob.delete(job.id);
         const current = readJob(db, job.id);
         if (!current) throw error;
         if (databaseDisposition(db, current) === "committed") {
@@ -1333,11 +1142,25 @@ export function createShortVideoDeleteJobService({
         throw pendingOperationError(db, current.id, error, "短视频删除已安全隔离，等待恢复后重试");
       }
 
-      try {
-        await cleanupCommitted(db, job.id, { executionToken });
-      } catch (error) {
-        rememberPending(db, job.id, "cleanup_pending", "cleanup", error);
-        warn?.("[short-video-delete-cleanup-pending]", error);
+      if (deferCleanup) {
+        cleanupDetached = true;
+        void cleanupCommitted(db, job.id, { executionToken })
+          .catch((error) => {
+            try {
+              rememberPending(db, job.id, "cleanup_pending", "cleanup", error);
+            } catch (rememberError) {
+              warn?.("[short-video-delete-cleanup-pending]", rememberError);
+            }
+            warn?.("[short-video-delete-cleanup-pending]", error);
+          })
+          .finally(() => endExecution(db, executionKey, executionToken));
+      } else {
+        try {
+          await cleanupCommitted(db, job.id, { executionToken });
+        } catch (error) {
+          rememberPending(db, job.id, "cleanup_pending", "cleanup", error);
+          warn?.("[short-video-delete-cleanup-pending]", error);
+        }
       }
       if (identity.operationId) {
         const keyedResult = operationReplay(db, identity);
@@ -1345,7 +1168,7 @@ export function createShortVideoDeleteJobService({
       }
       return executionResult(db, job.id);
     } finally {
-      endExecution(db, executionKey, executionToken);
+      if (!cleanupDetached) endExecution(db, executionKey, executionToken);
     }
   }
 
@@ -2062,11 +1885,7 @@ export function createShortVideoDeleteJobService({
     for (const item of readItems(db, jobId)) {
       preparedItems.set(item.ordinal, await assertItemReadyForCommit(item, job));
     }
-    try {
-      await buildReferenceSnapshot(db, { phase: "commit", jobId });
-    } finally {
-      referenceSnapshotsByJob.delete(jobId);
-    }
+    await buildTargetedReferenceSnapshot(db, { phase: "commit", jobId });
     beginImmediate(db);
     try {
       const current = readJob(db, jobId);
@@ -2198,7 +2017,7 @@ export function createShortVideoDeleteJobService({
       result.deletedStoredCovers = Number(currentJob.deleted_stored_covers || 0);
     }
 
-    await buildReferenceSnapshot(db, { phase: "cleanup", jobId });
+    await buildTargetedReferenceSnapshot(db, { phase: "cleanup", jobId });
     beginImmediate(db);
     try {
       const current = requireOwnedJob(db, jobId);
@@ -2700,7 +2519,6 @@ export function createShortVideoDeleteJobService({
     if (activeExecutions.size) return false;
     closed = true;
     closing = false;
-    referenceSnapshotsByJob.clear();
     if (!db) return activeExecutions.size === 0;
     try {
       const release = db.prepare(`
@@ -4687,9 +4505,8 @@ export function createShortVideoDeleteJobService({
       .some((videoId) => !selectedIds.has(videoId)));
   }
 
-  function assertNoLateReferences(db, job, references = null) {
+  function assertNoLateReferences(db, job, references) {
     const ids = new Set(videoIds(job));
-    const currentReferences = references || pathReferences(db, { includePhysical: false });
     for (const item of readItems(db, job.id)) {
       if (!["delete", "missing", "alias"].includes(item.disposition)) continue;
       const keys = [
@@ -4697,17 +4514,10 @@ export function createShortVideoDeleteJobService({
         ["real", item.real_path_key],
         ["identity", item.identity_key]
       ].filter(([, value]) => value);
-      if (hasOutsideReferences(currentReferences, keys, ids, managedRootGroupKey(item.managed_root))) {
+      if (hasOutsideReferences(references, keys, ids, managedRootGroupKey(item.managed_root))) {
         throw codedError("隔离路径新增了其他短视频引用", "SHORT_VIDEO_DELETE_LATE_REFERENCE");
       }
     }
-  }
-
-  function pathReferences(db, { includePhysical = false } = {}) {
-    if (!includePhysical) {
-      return referencesFromRows(db.prepare(`SELECT * FROM ${PATH_REFERENCE_TABLE}`).all());
-    }
-    return referencesFromRows(buildReferenceSnapshot(db));
   }
 
   function referencesFromRows(rows) {

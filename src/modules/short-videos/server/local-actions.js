@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
-import { ensureRealPathWithinRoots } from "../../fanhao/server/library/library-path-safety.js";
+import { ensureRealPathWithinRoots } from "../../../platform/server/library-path-safety.js";
 
 const LOCAL_ACTIONS = new Set(["reveal", "open-author-folder"]);
 

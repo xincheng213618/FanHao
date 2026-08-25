@@ -35,6 +35,7 @@ try {
       res.status = status;
       res.data = data;
     },
+    autoSmoothWarmup: true,
     getTranscodeConcurrency: () => transcodeConcurrency,
     setTranscodeConcurrency: (value) => {
       transcodeConcurrency = value;
@@ -316,7 +317,7 @@ async function verifyActiveDeleteStopDrain() {
     const [deleted] = await Promise.all([deletion, stopPromise]);
     deletion = null;
     stopPromise = null;
-    assert.equal(deleted.status, "completed");
+    assert.equal(deleted.status, "cleanup_pending", "runtime deletes must return after commit while cleanup drains in the background");
     assert.equal(fs.existsSync(activeSource), false);
     assert.equal(fs.readFileSync(rejectedSource, "utf8"), "rejected-delete-stop");
     const stopped = new DatabaseSync(activeDbPath, { readOnly: true });

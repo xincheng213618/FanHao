@@ -44,10 +44,8 @@ const SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE = 2160;
 const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
 const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v5-action-baselines";
 const SHORT_VIDEO_LIST_STABLE_QUERY_ATTEMPTS = 3;
-const SHORT_VIDEO_CACHE_WATCH_DELAY_MS = 4000;
-const SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS = 750;
-const SHORT_VIDEO_CACHE_MIN_PROGRESS_MS = 500;
 const SHORT_VIDEO_SMOOTH_RECENT_JOB_LIMIT = 12;
+const STORE_MEDIA_DELETE_METHODS = new Set(["cleanupAuthorUnliked", "deleteVideo", "deleteVideoGroup", "deleteVideos"]);
 
 export function createShortVideosRuntime({
   dbPath,
@@ -72,6 +70,7 @@ export function createShortVideosRuntime({
   runtimeTestHooks = {},
   listQuery = null,
   schemaBusyTimeoutMs = 10000,
+  autoSmoothWarmup = false,
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
   setTranscodeConcurrency = null
 }) {
@@ -82,6 +81,7 @@ export function createShortVideosRuntime({
     downloadManagerDbPath,
     ffmpegPath,
     roots,
+    deferDeleteCleanup: true,
     skipStartupMaintenance: true,
     busyTimeoutMs: schemaBusyTimeoutMs,
     deleteJobTestHooks: runtimeTestHooks.deleteJobTestHooks
@@ -117,6 +117,13 @@ export function createShortVideosRuntime({
           catalogStamp: await likeDistributionRuntimeStamp(),
           signal: options.signal
         });
+      }
+      if (STORE_MEDIA_DELETE_METHODS.has(property)) {
+        const method = Reflect.get(target, property, receiver);
+        return (...args) => {
+          stopSmoothVideoQueue({ pause: false });
+          return Reflect.apply(method, target, args);
+        };
       }
       return Reflect.get(target, property, receiver);
     }
@@ -157,7 +164,7 @@ export function createShortVideosRuntime({
     onCatalogChanged: () => clearShortVideoListCache(),
     onItemsImported: (result) => {
       console.log(`[short-video-sync] imported=${result.imported} updated=${result.updated} backfill=${result.backfillRows || 0} total=${result.summary?.totals?.videos ?? ""}`);
-      schedule4kSmoothVideoWarmup(250);
+      if (autoSmoothWarmup) schedule4kSmoothVideoWarmup(250);
     }
   });
   const syncedCollectorJobs = new Set();
@@ -207,7 +214,7 @@ export function createShortVideosRuntime({
       sendJson
     })) return true;
     if (await routeShortVideoAuthorCleanup({
-      req, res, url, store, readJsonBody, requireLocalAdmin, sendJson,
+      req, res, url, store: routeStore, readJsonBody, requireLocalAdmin, sendJson,
       downloadManagerRequest,
       onMutation: clearShortVideoListCache
     })) return true;
@@ -446,7 +453,6 @@ export function createShortVideosRuntime({
         listVideos: (requestUrl) => queryShortVideoListForRequest(req, requestUrl),
         recordWatch: (videoId, options) => watchWriter.record(videoId, options),
         onMutation: clearShortVideoListCache,
-        onWatch: queueWatchedVideoCache,
         onWatchMutation: (...args) => {
           recordShortVideoWatchCacheMutation(...args);
           catalogWorker.invalidateStats();
@@ -462,7 +468,7 @@ export function createShortVideosRuntime({
     const smoothVideoMatch = /^\/media\/short-video-smooth\/([^/]+)$/.exec(url.pathname);
     if (smoothVideoMatch && (req.method === "GET" || req.method === "HEAD")) {
       const id = decodeURIComponent(smoothVideoMatch[1]);
-      const sourceFile = videoFileWithCache(id);
+      const sourceFile = store.videoFile(id, { allowMissing: true });
       if (!sourceFile || sourceFile.type !== "video") {
         notFound(res);
         return true;
@@ -485,7 +491,7 @@ export function createShortVideosRuntime({
       } else if (!smoothFile && !sourceCompatible && initialPlaybackRange) {
         playbackPrepare = "source-no-wait";
       }
-      const fallbackFile = !androidPlayback && !sourceFile.cached && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
+      const fallbackFile = !androidPlayback && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
       const file = smoothFile || fallbackFile;
@@ -512,11 +518,9 @@ export function createShortVideosRuntime({
       file.responseHeaders = {
         "X-FanHao-Media-Cache": smoothFile
           ? "rendition"
-          : file.cached
-            ? "full"
-            : file.cachedStartup
-              ? "startup"
-              : "source",
+          : file.cachedStartup
+            ? "startup"
+            : "source",
         "X-FanHao-Playback-Rendition": smoothFile
           ? smoothFile.cachedSmoothLegacy
             ? "smooth-4k30-legacy"
@@ -604,14 +608,14 @@ export function createShortVideosRuntime({
         }
         return true;
       }
-      const sourceFile = videoFileWithCache(id);
+      const sourceFile = store.videoFile(id, { allowMissing: true });
       if (!sourceFile || sourceFile.type !== "video") {
         notFound(res);
         return true;
       }
       const mediaCacheRequest = String(req.headers["x-fanhao-media-cache"] || "").trim() === "1"
         || String(url.searchParams.get("fhcache") || "").trim() === "1";
-      const file = !sourceFile.cached && !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
+      const file = !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
       const requestedVersion = String(url.searchParams.get("v") || "").trim();
@@ -619,9 +623,6 @@ export function createShortVideosRuntime({
       file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
         ? "private, max-age=31536000, immutable"
         : "private, max-age=0, must-revalidate";
-      if (req.method === "GET" && mediaCacheRequest && !sourceFile.cached) {
-        tryQueueVideoCache(id, { delayMs: SHORT_VIDEO_CACHE_WATCH_DELAY_MS });
-      }
       file.maxRangeBytes = mediaCacheRequest
         ? 0
         : isInitialVideoRange(req.headers?.range)
@@ -629,7 +630,7 @@ export function createShortVideosRuntime({
           : SHORT_VIDEO_STREAM_CHUNK_BYTES;
       file.fullResponse = mediaCacheRequest;
       file.responseHeaders = {
-        "X-FanHao-Media-Cache": file.cached ? "full" : (file.cachedStartup ? "startup" : "source")
+        "X-FanHao-Media-Cache": file.cachedStartup ? "startup" : "source"
       };
       mediaStreamService.serveVideo(req, res, file);
       return true;
@@ -966,6 +967,7 @@ export function createShortVideosRuntime({
       }
       return;
     }
+    schedule4kSmoothVideoWarmup(0);
     fillSmoothVideoCandidateQueue();
     sortAndScheduleSmoothVideoQueue();
   }
@@ -1155,7 +1157,7 @@ export function createShortVideosRuntime({
       runtimeStarted = true;
       runtimeTestHooks.onRuntimeStartedChange?.(true);
       if (!runtimeStartStillCurrent(generation)) return false;
-      schedule4kSmoothVideoWarmup();
+      if (autoSmoothWarmup) schedule4kSmoothVideoWarmup();
       return true;
     })();
     let trackedStart;
@@ -1182,12 +1184,6 @@ export function createShortVideosRuntime({
     const deleteDrain = store.beginClose();
     runtimeStarted = false;
     runtimeTestHooks.onRuntimeStartedChange?.(false);
-    smoothVideoWarmupGeneration += 1;
-    if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
-    smoothVideoWarmupTimer = null;
-    if (smoothVideoCandidateFillImmediate) clearImmediate(smoothVideoCandidateFillImmediate);
-    smoothVideoCandidateFillImmediate = null;
-    smoothVideoCandidateRefill = null;
     stopVideoCacheQueue();
     stopSmoothVideoQueue();
     const stopWork = (async () => {
@@ -1345,22 +1341,6 @@ export function createShortVideosRuntime({
     });
   }
 
-  function videoFileWithCache(id) {
-    const file = store.videoFile(id, { allowMissing: true });
-    const cached = cachedVideoFile(id, file);
-    if (cached) return cached;
-    return file;
-  }
-
-  function cachedVideoFile(id, file) {
-    const descriptor = videoCacheDescriptor(id, file);
-    if (!descriptor?.cachePath) return null;
-    const cachedStat = safeStat(descriptor.cachePath);
-    if (!cachedStat?.isFile() || (descriptor.expectedSize > 0 && cachedStat.size !== descriptor.expectedSize)) return null;
-    sharedCache.touch(descriptor.cachePath);
-    return { ...file, path: descriptor.cachePath, ext: descriptor.ext, type: "video", cached: true };
-  }
-
   function cachedStartupVideoFile(id, file) {
     const descriptor = startupVideoCacheDescriptor(id, file);
     if (!descriptor?.cachePath || descriptor.prefixSize <= 0) return null;
@@ -1376,19 +1356,6 @@ export function createShortVideosRuntime({
       entityMtimeMs: descriptor.expectedMtimeMs,
       cachedStartup: true
     };
-  }
-
-  function videoCacheDescriptor(id, file) {
-    if (!sharedCache?.rootDir || !file?.path) return null;
-    const safeId = safeFilePart(file.id || id || "short-video");
-    const ext = file.ext || path.extname(file.path).toLowerCase() || ".mp4";
-    const expectedSize = Math.max(0, Number(file.size || 0));
-    const expectedMtimeMs = Math.max(0, Math.floor(Number(file.cacheVersion || 0)));
-    const cacheDir = path.join(sharedCache.rootDir, "short-videos", "videos");
-    const cachePath = expectedSize > 0 && expectedMtimeMs > 0
-      ? path.join(cacheDir, `${safeId}-${hashText(`${file.path}:${expectedSize}:${expectedMtimeMs}`).slice(0, 18)}${ext}`)
-      : latestCachedVideo(cacheDir, safeId);
-    return { cacheDir, cachePath, expectedMtimeMs, expectedSize, ext, safeId };
   }
 
   function startupVideoCacheDescriptor(id, file) {
@@ -1555,6 +1522,7 @@ export function createShortVideosRuntime({
   }
 
   function queueSmoothVideoCandidates(videos = []) {
+    if (!autoSmoothWarmup) return;
     enqueueSmoothVideoCandidates(videos);
     fillSmoothVideoCandidateQueue();
   }
@@ -1745,10 +1713,6 @@ export function createShortVideosRuntime({
   function queueStartupVideoCache(id, options = {}) {
     if (!sharedCache?.rootDir) return { state: "disabled" };
     const file = store.videoFile(id, { allowMissing: true });
-    const fullDescriptor = videoCacheDescriptor(id, file);
-    if (fullDescriptor?.expectedSize > 0 && safeStat(fullDescriptor.cachePath)?.size === fullDescriptor.expectedSize) {
-      return { state: "full-cached", path: fullDescriptor.cachePath };
-    }
     const descriptor = startupVideoCacheDescriptor(id, file);
     if (!file?.path || !descriptor?.cachePath) return { state: "missing" };
     if (safeStat(descriptor.cachePath)?.size === descriptor.prefixSize) {
@@ -1764,48 +1728,6 @@ export function createShortVideosRuntime({
       return { state: existing.active ? "copying" : "queued", path: descriptor.cachePath };
     }
     const job = { active: false, descriptor, file, id, key, kind: "startup", readyAt };
-    videoCacheJobs.set(key, job);
-    videoCacheQueue.push(job);
-    sortAndScheduleVideoCacheQueue();
-    return { state: "queued", path: descriptor.cachePath };
-  }
-
-  function queueWatchedVideoCache(id, body = {}, data = {}) {
-    const progressMs = Math.max(0, Number(data?.watch?.progressMs ?? body?.progressMs ?? 0));
-    const completed = Boolean(body?.completed || data?.watch?.completed);
-    if (!completed && progressMs < SHORT_VIDEO_CACHE_MIN_PROGRESS_MS) return;
-    tryQueueVideoCache(id, {
-      delayMs: completed ? SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS : SHORT_VIDEO_CACHE_WATCH_DELAY_MS
-    });
-  }
-
-  function tryQueueVideoCache(id, options = {}) {
-    try {
-      return queueVideoCache(id, options);
-    } catch (error) {
-      console.warn("[short-video-cache]", id, error.message || error);
-      return { state: "error" };
-    }
-  }
-
-  function queueVideoCache(id, options = {}) {
-    if (!sharedCache?.rootDir) return { state: "disabled" };
-    const file = store.videoFile(id, { allowMissing: true });
-    const descriptor = videoCacheDescriptor(id, file);
-    if (!file?.path || !descriptor?.cachePath) return { state: "missing" };
-    if (descriptor.expectedSize > 0 && safeStat(descriptor.cachePath)?.size === descriptor.expectedSize) {
-      sharedCache.touch(descriptor.cachePath);
-      return { state: "cached", path: descriptor.cachePath };
-    }
-    const key = descriptor.cachePath;
-    const readyAt = Date.now() + Math.max(0, Number(options.delayMs || 0));
-    const existing = videoCacheJobs.get(key);
-    if (existing) {
-      existing.readyAt = Math.min(existing.readyAt, readyAt);
-      sortAndScheduleVideoCacheQueue();
-      return { state: existing.active ? "copying" : "queued", path: descriptor.cachePath };
-    }
-    const job = { active: false, descriptor, file, id, key, kind: "full", readyAt };
     videoCacheJobs.set(key, job);
     videoCacheQueue.push(job);
     sortAndScheduleVideoCacheQueue();
@@ -1837,8 +1759,7 @@ export function createShortVideosRuntime({
     next.active = true;
     videoCacheActive = true;
     try {
-      if (next.kind === "startup") await copyVideoStartupToSharedCache(next);
-      else await copyVideoToSharedCache(next);
+      await copyVideoStartupToSharedCache(next);
     } catch (error) {
       console.warn("[short-video-cache]", next.file?.id || next.id, error.message || error);
     } finally {
@@ -1848,36 +1769,8 @@ export function createShortVideosRuntime({
     }
   }
 
-  async function copyVideoToSharedCache(job) {
-    const { cacheDir, cachePath, expectedSize } = job.descriptor;
-    const currentSourceStat = await fs.promises.stat(job.file.path).catch(() => null);
-    if (!currentSourceStat?.isFile() || (expectedSize > 0 && currentSourceStat.size !== expectedSize)) return;
-    const cachedStat = safeStat(cachePath);
-    if (cachedStat?.isFile() && cachedStat.size === currentSourceStat.size) {
-      sharedCache.touch(cachePath);
-      return;
-    }
-    const tempPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-    await fs.promises.mkdir(cacheDir, { recursive: true });
-    try {
-      await fs.promises.copyFile(job.file.path, tempPath);
-      const tempStat = await fs.promises.stat(tempPath);
-      if (!tempStat.isFile() || tempStat.size !== currentSourceStat.size) throw new Error("后台缓存文件大小校验失败");
-      await fs.promises.rm(cachePath, { force: true });
-      await fs.promises.rename(tempPath, cachePath);
-      sharedCache.touch(cachePath);
-      sharedCache.scheduleCleanup();
-      const startupDescriptor = startupVideoCacheDescriptor(job.id, job.file);
-      if (startupDescriptor?.cachePath) await fs.promises.rm(startupDescriptor.cachePath, { force: true }).catch(() => {});
-    } finally {
-      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-    }
-  }
-
   async function copyVideoStartupToSharedCache(job) {
     const { cacheDir, cachePath, expectedSize, prefixSize } = job.descriptor;
-    const fullDescriptor = videoCacheDescriptor(job.id, job.file);
-    if (fullDescriptor?.expectedSize > 0 && safeStat(fullDescriptor.cachePath)?.size === fullDescriptor.expectedSize) return;
     const currentSourceStat = await fs.promises.stat(job.file.path).catch(() => null);
     if (!currentSourceStat?.isFile() || currentSourceStat.size !== expectedSize || prefixSize <= 0) return;
     const cachedStat = safeStat(cachePath);
@@ -2236,7 +2129,13 @@ export function createShortVideosRuntime({
     videoCacheJobs.clear();
   }
 
-  function stopSmoothVideoQueue() {
+  function stopSmoothVideoQueue({ pause = true } = {}) {
+    smoothVideoWarmupGeneration += 1;
+    if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
+    smoothVideoWarmupTimer = null;
+    if (smoothVideoCandidateFillImmediate) clearImmediate(smoothVideoCandidateFillImmediate);
+    smoothVideoCandidateFillImmediate = null;
+    smoothVideoCandidateRefill = null;
     if (smoothVideoTimer) clearTimeout(smoothVideoTimer);
     smoothVideoTimer = null;
     smoothVideoQueue.length = 0;
@@ -2247,7 +2146,7 @@ export function createShortVideosRuntime({
     smoothVideoRenditionVersions.clear();
     smoothVideoCandidateScanOffset = 0;
     smoothVideoCandidateScanComplete = true;
-    smoothVideoPausedByUser = true;
+    if (pause) smoothVideoPausedByUser = true;
     for (const job of smoothVideoActiveJobs.values()) job.stoppedByUser = true;
     for (const child of smoothVideoChildren.values()) {
       if (child && !child.killed) child.kill("SIGKILL");
@@ -2286,23 +2185,6 @@ export function createShortVideosRuntime({
     if (!codec || frameRate <= 0 || longEdge <= 0) return null;
     return longEdge >= SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE
       && (["hevc", "h265", "hev1", "hvc1"].includes(codec) || frameRate > 45);
-  }
-
-  function latestCachedVideo(cacheDir, safeId) {
-    try {
-      const prefix = `${safeId}-`;
-      return fs.readdirSync(cacheDir)
-        .filter((name) => name.startsWith(prefix))
-        .map((name) => {
-          const filePath = path.join(cacheDir, name);
-          const stat = safeStat(filePath);
-          return stat?.isFile() ? { path: filePath, mtimeMs: stat.mtimeMs || 0 } : null;
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path || "";
-    } catch {
-      return "";
-    }
   }
 
   function isInitialVideoRange(rangeHeader) {

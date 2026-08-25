@@ -1,10 +1,10 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
 import path from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
-import { ensureRealPathWithinRoots } from "../library/library-path-safety.js";
+import { ensureRealPathWithinRoots } from "../../../../platform/server/library-path-safety.js";
 
 const RETRYABLE_CODES = new Set(["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"]);
+const VERIFY_SAMPLE_BYTES = 64 * 1024;
 
 function validateWorkerPaths(...paths) {
   const roots = Array.isArray(workerData.allowedRoots) ? workerData.allowedRoots : [];
@@ -77,31 +77,40 @@ async function collectTree(rootPath) {
   };
 }
 
-async function sameFile(targetPath, sourceFile) {
+async function sameFile(targetPath, sourcePath, sourceFile) {
   try {
     validateWorkerPaths(targetPath);
     const stat = await fs.promises.stat(targetPath);
-    return stat.isFile() && Number(stat.size || 0) === sourceFile.size;
+    if (!stat.isFile() || Number(stat.size || 0) !== sourceFile.size) return false;
+    const [sourceSample, targetSample] = await Promise.all([
+      sampleFile(sourcePath, sourceFile.size),
+      sampleFile(targetPath, sourceFile.size)
+    ]);
+    return sourceSample.equals(targetSample);
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
 }
 
-function hashFile(filePath) {
-  return new Promise((resolve, reject) => {
-    try {
-      validateWorkerPaths(filePath);
-    } catch (error) {
-      reject(error);
-      return;
+async function sampleFile(filePath, size) {
+  validateWorkerPaths(filePath);
+  if (size <= 0) return Buffer.alloc(0);
+  const sampleLength = Math.min(size, VERIFY_SAMPLE_BYTES);
+  const offsets = [...new Set([0, Math.max(0, Math.floor((size - sampleLength) / 2)), Math.max(0, size - sampleLength)])];
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const samples = [];
+    for (const offset of offsets) {
+      const buffer = Buffer.allocUnsafe(sampleLength);
+      const { bytesRead } = await handle.read(buffer, 0, sampleLength, offset);
+      if (bytesRead !== sampleLength) throw new Error(`文件读取不完整：${filePath}`);
+      samples.push(buffer);
     }
-    const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
+    return Buffer.concat(samples);
+  } finally {
+    await handle.close();
+  }
 }
 
 async function matchingContent(sourcePath, targetPath, files, targetFiles) {
@@ -114,11 +123,11 @@ async function matchingContent(sourcePath, targetPath, files, targetFiles) {
     const file = files[index];
     const target = targetFiles.get(file.relativePath.toLowerCase());
     if (!target || target.size !== file.size) return false;
-    const [sourceHash, targetHash] = await Promise.all([
-      hashFile(path.join(sourcePath, file.relativePath)),
-      hashFile(path.join(targetPath, target.relativePath))
+    const [sourceSample, targetSample] = await Promise.all([
+      sampleFile(path.join(sourcePath, file.relativePath), file.size),
+      sampleFile(path.join(targetPath, target.relativePath), target.size)
     ]);
-    if (sourceHash !== targetHash) return false;
+    if (!sourceSample.equals(targetSample)) return false;
     completedBytes += file.size;
     parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: index + 1, totalFiles: files.length, completedBytes, totalBytes });
   }
@@ -140,7 +149,7 @@ async function copyTree(sourcePath, stagingPath) {
   for (const file of tree.files) {
     const sourceFile = path.join(sourcePath, file.relativePath);
     const targetFile = path.join(stagingPath, file.relativePath);
-    if (!(await sameFile(targetFile, file))) {
+    if (!(await sameFile(targetFile, sourceFile, file))) {
       const temporaryFile = `${targetFile}.fanhao-part`;
       validateWorkerPaths(sourceFile, targetFile, temporaryFile);
       await fs.promises.rm(temporaryFile, { force: true });

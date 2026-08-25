@@ -25,6 +25,31 @@ export function createWorkLocalMutationService({
   uniqueTextArray,
   workHasLocalMarker
 }) {
+  let deleteQuarantineCounter = 0;
+
+  function quarantineDirectory(dirPath) {
+    let quarantinePath = "";
+    do {
+      deleteQuarantineCounter += 1;
+      quarantinePath = path.join(
+        path.dirname(dirPath),
+        `.${path.basename(dirPath)}.fanhao-delete-${process.pid}-${Date.now()}-${deleteQuarantineCounter}`
+      );
+      ensureLibraryDirectoryPath(quarantinePath, "作品删除隔离路径");
+    } while (fs.existsSync(quarantinePath));
+    fs.renameSync(dirPath, quarantinePath);
+    return quarantinePath;
+  }
+
+  function removeQuarantinedDirectory(quarantinePath) {
+    setImmediate(() => {
+      fs.promises
+        .rm(quarantinePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+        .then(() => removeEmptyLibraryParents(quarantinePath))
+        .catch((error) => console.warn(`[FanHao] 清理已隔离作品目录失败：${error.message}`));
+    });
+  }
+
   function updateMemoryWorkPath(work, oldDir, newDir) {
     work.directoryName = path.basename(newDir);
     work.relativePath = relativeFromRoot(newDir);
@@ -397,6 +422,7 @@ export function createWorkLocalMutationService({
     const emptyRemovedPaths = [];
     const localWorkRowsToClear = [...rows];
     const localWorkPathIndex = options.localWorkPathIndex || null;
+    const quarantinedDirectories = [];
     db.exec("BEGIN IMMEDIATE");
     try {
       assertLocalPathsNotReserved(db, rows);
@@ -422,14 +448,9 @@ export function createWorkLocalMutationService({
             emptyRemovedPaths.push(...result.emptyRemovedPaths);
           } else {
             try {
-              fs.rmSync(dirPath, {
-                recursive: true,
-                force: false,
-                maxRetries: 5,
-                retryDelay: 100
-              });
+              const quarantinePath = quarantineDirectory(dirPath);
+              quarantinedDirectories.push({ dirPath, quarantinePath });
               deletedPaths.push(relativeFromRoot(dirPath));
-              emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
             } catch (error) {
               const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
               wrapped.statusCode = 500;
@@ -460,8 +481,16 @@ export function createWorkLocalMutationService({
       try {
         db.exec("ROLLBACK");
       } catch {}
+      for (const { dirPath, quarantinePath } of quarantinedDirectories.reverse()) {
+        try {
+          if (!fs.existsSync(dirPath) && fs.existsSync(quarantinePath)) fs.renameSync(quarantinePath, dirPath);
+        } catch (restoreError) {
+          console.warn(`[FanHao] 恢复已隔离作品目录失败：${restoreError.message}`);
+        }
+      }
       throw error;
     }
+    for (const { quarantinePath } of quarantinedDirectories) removeQuarantinedDirectory(quarantinePath);
     removeLocalWorkRowsFromPathIndex(localWorkPathIndex, localWorkRowsToClear);
     invalidateWorkCodeIndex();
     resetWorkSearch();
