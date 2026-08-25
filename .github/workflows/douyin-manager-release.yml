@@ -4,6 +4,21 @@ on:
   push:
     tags:
       - "douyin-manager-v*"
+  workflow_call:
+    inputs:
+      version:
+        description: "不带 douyin-manager-v 前缀的版本号"
+        required: true
+        type: string
+      tag:
+        description: "Release Please 已创建的标签"
+        required: true
+        type: string
+      publish:
+        description: "校验成功后发布 GitHub Pre-release"
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
     inputs:
       version:
@@ -39,13 +54,23 @@ jobs:
       - name: Resolve release metadata
         id: metadata
         env:
+          CALL_VERSION: ${{ inputs.version }}
+          CALL_TAG: ${{ inputs.tag }}
+          CALL_PUBLISH: ${{ inputs.publish }}
           DISPATCH_VERSION: ${{ inputs.version }}
           DISPATCH_PUBLISH: ${{ inputs.publish }}
         run: |
           $ErrorActionPreference = "Stop"
           $versionPattern = '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
 
-          if ($env:GITHUB_EVENT_NAME -eq "push") {
+          if (-not [string]::IsNullOrWhiteSpace($env:CALL_TAG)) {
+            $version = [string]$env:CALL_VERSION
+            $tag = [string]$env:CALL_TAG
+            $publish = if ($env:CALL_PUBLISH -eq "true") { "true" } else { "false" }
+            if ($tag -cne "douyin-manager-v$version") {
+              throw "Reusable workflow tag '$tag' does not match version '$version'."
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "push") {
             if ($env:GITHUB_REF_NAME -notmatch '^douyin-manager-v(?<version>.+)$') {
               throw "Unexpected release tag: $env:GITHUB_REF_NAME"
             }
@@ -71,7 +96,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify pushed tag target
+      - name: Verify release tag target
         if: github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
@@ -247,7 +272,13 @@ jobs:
             if (-not $existing.isDraft) {
               throw "Release $env:RELEASE_TAG is already public; refusing to overwrite it."
             }
-            if ($env:GITHUB_EVENT_NAME -ne "push" -and $existing.targetCommitish -ne $env:GITHUB_SHA) {
+
+            $remoteTagCommit = gh api "repos/$repository/commits/$env:RELEASE_TAG" --jq .sha 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              if ($remoteTagCommit -ne $env:GITHUB_SHA) {
+                throw "Existing tag resolves to $remoteTagCommit, not $env:GITHUB_SHA."
+              }
+            } elseif ($existing.targetCommitish -ne $env:GITHUB_SHA) {
               throw "Existing draft targets $($existing.targetCommitish), not $env:GITHUB_SHA."
             }
 
