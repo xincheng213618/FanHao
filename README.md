@@ -41,4 +41,7 @@ npm run verify
 
 该命令覆盖代码结构、服务端契约、数据库、Android 客户端以及关键页面回归。
 
+抖音下载管理器支持标签自动发布和 Actions 页面安全试跑，详见
+[发布流程](docs/douyin-manager-release.md)。
+
 开发者文档入口：[文档中心](docs/README.md)，按模块拆分的代码说明见[模块文档](docs/modules/README.md)。
