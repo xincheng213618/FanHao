@@ -1,5 +1,7 @@
 # FanHao 文档中心
 
+> **新文档站**：[项目知识首页](site/index.md) · [AI 上下文](site/ai/context.md) · [文档规范](site/contributing/documentation.md) · [GitHub Pages 部署](site/contributing/github-pages.md)。下文保留既有专题导航；它们尚未全部按新规范核对，不会自动加入公开站点或 AI 索引。
+
 本目录是「个人视频资料库」（FanHao）项目的文档模块，面向维护者与新接入的协作者。
 项目本质是一个**运行在本机 / 局域网的服务端**：扫描本地磁盘上的影视、图库、小说、短视频等资料，提供网页浏览与播放，并通过 Capacitor 打包成安卓 App。
 

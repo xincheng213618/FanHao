@@ -1,0 +1,69 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DOCS_BASE_OVERRIDE: ${{ vars.DOCS_BASE }}
+      DOCS_ORIGIN_OVERRIDE: ${{ vars.DOCS_ORIGIN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Resolve deployment path
+        shell: pwsh
+        run: |
+          $repositoryName = ($env:GITHUB_REPOSITORY -split '/')[1]
+          $owner = $env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant()
+          $base = if ($repositoryName.ToLowerInvariant() -eq "$owner.github.io") { '/' } else { "/$repositoryName/" }
+          if ($env:DOCS_BASE_OVERRIDE) { $base = $env:DOCS_BASE_OVERRIDE }
+          $origin = if ($env:DOCS_ORIGIN_OVERRIDE) { $env:DOCS_ORIGIN_OVERRIDE } else { "https://$owner.github.io" }
+          "DOCS_BASE=$base" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DOCS_ORIGIN=$origin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install documentation dependencies only
+        run: npm --prefix docs ci
+      - name: Test documentation contracts
+        run: npm --prefix docs test
+      - name: Build and validate documentation
+        run: npm --prefix docs run build
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy documentation
+        id: deployment
+        uses: actions/deploy-pages@v4

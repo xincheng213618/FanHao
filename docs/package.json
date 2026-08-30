@@ -1,0 +1,31 @@
+{
+  "name": "fanhao-docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Source-backed documentation for people and coding agents.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node .vitepress/scripts/generate.mjs && vitepress dev . --host 127.0.0.1",
+    "check": "node .vitepress/scripts/check.mjs",
+    "build": "npm run check && node .vitepress/scripts/generate.mjs && vitepress build . && npm run check:dist",
+    "check:dist": "node .vitepress/scripts/check-dist.mjs",
+    "preview": "node .vitepress/scripts/preview.mjs",
+    "test": "node --test .vitepress/scripts/*.test.mjs"
+  },
+  "devDependencies": {
+    "markdown-it": "15.0.1",
+    "parse5": "8.0.1",
+    "vite": "6.4.3",
+    "vitepress": "1.6.4",
+    "vue": "3.5.42",
+    "yaml": "2.9.0"
+  },
+  "overrides": {
+    "vitepress": {
+      "vite": "6.4.3"
+    }
+  }
+}

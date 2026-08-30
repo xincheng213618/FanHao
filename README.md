@@ -1,5 +1,7 @@
 # FanHao 个人资料库
 
+> **项目文档与 AI 协作入口**：从 [新文档首页](docs/site/index.md) 开始；编码代理先读 [AGENTS.md](AGENTS.md) 和 [AI 上下文](docs/site/ai/context.md)。文档站可独立构建并部署到 GitHub Pages，见 [部署说明](docs/site/contributing/github-pages.md)。
+
 FanHao 是一个本地优先的媒体资料库：扫描本机磁盘上的番号、图库、影视、短视频和音乐，并在网页和 Android 客户端中统一浏览。
 
 运行环境需要 Node.js 24 或更新版本，因为服务端使用内置的 `node:sqlite`。
