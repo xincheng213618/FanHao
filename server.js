@@ -39,6 +39,7 @@ import { createCodePrefixService } from "./src/modules/fanhao/server/catalog/cod
 import { createRankingService } from "./src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "./src/modules/fanhao/server/catalog/studio-service.js";
 import { createUserStateService } from "./src/modules/fanhao/server/collections/user-state-service.js";
+import { createAccountUserStateService } from "./src/modules/fanhao/server/collections/account-user-state-service.js";
 import { createWorkImageService } from "./src/modules/fanhao/server/works/image-service.js";
 import { createWorkPresenterService } from "./src/modules/fanhao/server/works/presenter-service.js";
 import { createWorkCodeIndexService } from "./src/modules/fanhao/server/works/work-code-index-service.js";
@@ -181,6 +182,8 @@ const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer
 });
 const mangaService = createMangaService({
   databasePath: MANGA_DATABASE_PATH,
+  projectRoot: PROJECT_ROOT,
+  pythonPath: PYTHON_PATH,
   root: MANGA_LIBRARY_ROOT,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -248,6 +251,10 @@ const userStateService = createUserStateService({
   ensureDataDir,
   statePath: USER_STATE_PATH
 });
+const accountUserStateService = createAccountUserStateService({
+  dbPath: path.join(DATA_DIR, "account-user-state.sqlite"),
+  legacyStateService: userStateService
+});
 const coreDbService = createCoreDbService({
   dbPath: CORE_DB_PATH,
   ensureDataDir,
@@ -266,15 +273,15 @@ const favoriteStateService = createFavoriteStateService({
   defaultFavoriteFolderName: DEFAULT_FAVORITE_FOLDER_NAME,
   getLibrary: () => library,
   maxFavoriteFolders: MAX_FAVORITE_FOLDERS,
-  userState,
-  userStateService
+  getUserState: accountUserStateService.state,
+  userStateService: accountUserStateService
 });
 const playbackProgressService = createPlaybackProgressService({
   getLibrary: () => library,
   publicFavoriteFolders: () => favoriteStateService.publicFavoriteFolders(),
   recentWatchedDays: RECENT_WATCHED_DAYS,
-  userState,
-  userStateService
+  getUserState: accountUserStateService.state,
+  userStateService: accountUserStateService
 });
 const imageReaderCacheService = createImageReaderCacheService({
   cleanupIntervalMs: IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
@@ -502,7 +509,7 @@ const rankingService = createRankingService({
   proxiedRemoteImageUrl,
   publicWork,
   storedWorkCodeKey,
-  userStateStamp: () => userStateService.revision()
+  userStateStamp: () => accountUserStateService.revision()
 });
 const actorMovieService = createActorMovieService({
   createId,
@@ -540,7 +547,7 @@ const studioService = createStudioService({
   pagedWorksPayload, prewarmCoreWorkCovers, prewarmWorkInfoDetails,
   publicRemoteUrl,
   sortWorkList,
-  userStateStamp: () => userStateService.revision(),
+  userStateStamp: () => accountUserStateService.revision(),
   workFacets,
   workQueryStamp
 });
@@ -608,7 +615,7 @@ const codePrefixService = createCodePrefixService({
   maxWorkLimit: MAX_WORK_LIMIT,
   pagedWorksPayload,
   sortWorkList,
-  userStateStamp: () => userStateService.revision(),
+  userStateStamp: () => accountUserStateService.revision(),
   workClassificationService,
   workFacets
 });
@@ -885,6 +892,8 @@ const personLibraryService = createPersonLibraryService({
 const workMoveJobService = createWorkMoveJobService({
   adminCoreMutationService,
   getCoreDb,
+  schedule: (callback) => accountUserStateService.runAsGuest(() => setImmediate(callback)),
+  runInBackground: accountUserStateService.runAsGuest,
   log: (message) => console.info(message)
 });
 const adminPersonService = createAdminPersonService({
@@ -1047,7 +1056,8 @@ const moduleRegistry = await discoverFanHaoModules({
         storedWorkCodeKey,
         studioService,
         userStateSummary: () => playbackProgressService.userStateSummary(),
-        userStateStamp: () => userStateService.revision(),
+        userStateStamp: () => accountUserStateService.revision(),
+        scheduleBackground: (callback, delay) => accountUserStateService.runAsGuest(() => setTimeout(callback, delay)),
         videoProbeService,
         workCodeKeySetForWorks,
         workHasCoreCover,
@@ -1074,6 +1084,7 @@ const moduleRegistry = await discoverFanHaoModules({
         notFound,
         photoSetService,
         publicAppConfig: appConfigService.publicConfig,
+        readJsonBody,
         requireLocalAdmin,
         sendJson
       },
@@ -1178,9 +1189,11 @@ const {
   requestAccess,
   requestAuthState,
   routeAuth,
-  sendLoginRequired
+  sendLoginRequired,
+  closeAccounts
 } = createAuthServices({
   authSecretPath: AUTH_SECRET_PATH,
+  accountsDbPath: path.join(DATA_DIR, "accounts.sqlite"),
   remoteWebPassword: REMOTE_WEB_PASSWORD,
   ensureDataDir,
   readBodyText,
@@ -1607,7 +1620,7 @@ function searchSourceStamp() {
 }
 
 function workQueryStamp() {
-  return `${searchSourceStamp()}:${workCoverStamp()}`;
+  return `${searchSourceStamp()}:${workCoverStamp()}:${userStateService.manualCoverRevision()}`;
 }
 function clearSearchSourceCaches() {
   rankingService.invalidateSearch();
@@ -2276,6 +2289,11 @@ function pagedWorksPayload(works, url, extra = {}) {
 }
 
 function requireTrustedNetworkPage(req, res, errorMessage) {
+  const auth = requestAuthState(req, new URL(req.url || "/", "http://localhost"));
+  if (auth.reason === "expired-account" || (auth.accountLoginRequired && !auth.user) || (auth.user && auth.user.role !== "admin")) {
+    sendJson(res, 403, { error: "需要管理员权限" });
+    return false;
+  }
   const access = requestAccess(req);
   if (!isTrustedNetworkAccess(access) || !isSameTrustedNetworkOrigin(req, access)) {
     sendJson(res, 403, { error: errorMessage });
@@ -2313,6 +2331,7 @@ const requestHandler = createRequestHandler({
   attachAccessLogger,
   requestCorsOrigin,
   requestAuthState,
+  runForUser: accountUserStateService.runForUser,
   routeAuth,
   sendLoginRequired,
   routeApi,
@@ -2337,6 +2356,8 @@ const serverHost = createServerHost({
     actorProfileOutboxService.close();
     await moduleRegistry.stop();
     await mediaBlobStore.close();
+    accountUserStateService.close();
+    closeAccounts();
   }
 });
 

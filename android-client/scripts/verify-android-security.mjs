@@ -169,12 +169,26 @@ assert(packageVerifier.includes("PackageManager.GET_SIGNATURES"), "API 24-27 mus
 assert(packageVerifier.includes("Build.VERSION_CODES.TIRAMISU"), "API 33+ package-info flags must be guarded");
 
 const mainActivity = read("android/app/src/main/java/local/fanhao/library/MainActivity.java");
-assert(mainActivity.includes("if (!isSupportedWebDownloadUri(uri))"), "WebView downloads must be validated before enqueueing");
-assert(mainActivity.includes('"http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)'), "WebView downloads must reject non-HTTP schemes");
-assert(mainActivity.includes("uri.getUserInfo() == null"), "WebView downloads must reject credential-bearing hosts");
+const webDownloadRequest = read("android/app/src/main/java/local/fanhao/library/NativeWebDownloadRequest.java");
+const webDownloads = read("android/app/src/main/java/local/fanhao/library/NativeWebDownloads.java");
+assert(mainActivity.includes("webDownloads.request(url, userAgentValue, contentDisposition, mimeType, webDownloadHost)")
+  && webDownloads.includes("NativeWebDownloadRequest.create(url, userAgent, contentDisposition, mimeType)"), "WebView downloads must use the validated permission-aware request path");
+assert(mainActivity.includes("downloadExtras.set(SavedStateHandleSupport.DEFAULT_ARGS_KEY, new Bundle())")
+  && mainActivity.includes("new ViewModelProvider(getViewModelStore(), getDefaultViewModelProviderFactory(), downloadExtras)"), "exported Activity intent extras must never seed saved download requests");
+assert(webDownloadRequest.includes("if (!isSupportedWebDownloadUri(uri))"), "new and restored WebView downloads must be validated before enqueueing");
+assert(webDownloadRequest.includes('"http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)'), "WebView downloads must reject non-HTTP schemes");
+assert(webDownloadRequest.includes("uri.getUserInfo() == null"), "WebView downloads must reject credential-bearing hosts");
+assert(mainActivity.includes("Build.VERSION.SDK_INT <= Build.VERSION_CODES.P")
+  && mainActivity.includes("checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)"), "only legacy Android public Downloads may request storage permission");
+assert(/<uses-permission\b(?=[^>]*android:name="android\.permission\.WRITE_EXTERNAL_STORAGE")(?=[^>]*android:maxSdkVersion="28")[^>]*\/>/.test(manifest), "legacy download storage permission must be limited to Android 9 and below");
+assert.equal([...manifest.matchAll(/<uses-permission(?:-sdk-\d+)?\b[^>]*android:name="android\.permission\.WRITE_EXTERNAL_STORAGE"/g)].length, 1,
+  "legacy write access must not have another unrestricted declaration");
 
 const webApp = read("www/app.js");
-assert(webApp.includes("serviceBase: activeUrl"), "the WebView updater call must bind downloads to the active service origin");
+assert(webApp.includes("serviceBase: androidUpdateInfo.serviceBase,"), "the WebView updater call must bind downloads to the update manifest origin, never the content service");
+assert(webApp.includes("await fetchAndroidUpdate(path)"), "the WebView updater must check the configured update-source fallback chain");
+assert(webApp.includes("new Set(DEFAULT_UPDATE_URLS.map(normalizeUrl).filter(Boolean))"), "saved content-service addresses must not override the default update sources");
+assert(webApp.includes("DEFAULT_UPDATE_URLS.entries()"), "the visible update addresses must come from the actual update-source configuration");
 assert(webApp.includes("versionCode: Number(androidUpdateInfo.versionCode || 0)"), "the WebView updater call must bind the expected versionCode");
 assert(webApp.includes("versionName: String(androidUpdateInfo.versionName || \"\")"), "the WebView updater call must bind the expected versionName");
 assert(webApp.includes("size: Number(androidUpdateInfo.size || 0)"), "the WebView updater call must bind the expected APK size");
@@ -242,29 +256,45 @@ assert(publishPolicy.includes("ignored-build-output"), "scratch build output mus
 assert(publishPolicy.includes("-Install requires the tracked Android version contract identity"), "the shared install policy must reject identities above the reviewed contract");
 
 const androidIndex = read("www/index.html");
-assert(
-  !androidIndex.toLowerCase().includes("xc213618.ddns.me"),
-  "the Android server picker must not advertise an unsupported public DDNS endpoint"
+assert(androidIndex.includes('id="appUpdateSources"'), "settings must visibly list the default update addresses");
+assert(androidIndex.includes('id="appUpdateSourceStatus"'), "settings must show the actual update manifest source");
+const contentServerPicker = /<div class="server-list"[^>]*>([\s\S]*?)<\/div>/.exec(androidIndex)?.[1] || "";
+assert.deepEqual(
+  [...contentServerPicker.matchAll(/data-url="([^"]+)"/g)].map((match) => match[1]),
+  ["http://192.168.31.86:29998", "http://xc213618.ddns.me:29998"],
+  "the content-service picker must contain exactly the user's LAN and DDNS presets; choosing a preset must not relax server authentication"
 );
+const androidWebConfig = read("www/js/config.js");
+assert(androidWebConfig.includes('export const DEFAULT_UPDATE_URLS = Object.freeze(['), "Android must declare an immutable default update-source list");
+assert(androidWebConfig.includes('"http://192.168.31.86:29998"'), "the LAN update source must remain configured");
+assert(androidWebConfig.includes('"http://xc213618.ddns.me:29998"'), "the DDNS update fallback must remain configured");
 
 const androidGuide = readRepo("docs/android-client.md");
 assert(
-  androidGuide.includes("当前 Android 客户端仅支持本机、局域网或可信私网服务"),
-  "the Android guide must state the trusted-network support boundary"
+  androidGuide.includes("Android 远程内容使用显式密码登录"),
+  "the Android guide must require explicit remote authentication"
 );
 assert(
   androidGuide.includes("不要通过手工复制浏览器 / App Cookie"),
   "the Android guide must not present copied cookies as a supported remote login flow"
 );
 assert(
-  androidGuide.includes("HTTPS 与正式的配对 / bearer token 流程"),
-  "the Android guide must reserve remote access for an authenticated HTTPS pairing flow"
+  androidGuide.includes("公网部署应使用 HTTPS"),
+  "the Android guide must disclose the HTTP transport limitation"
+);
+assert(
+  androidGuide.includes("公网地址只开放只读更新清单和清单精确引用的 APK 下载"),
+  "the Android guide must scope DDNS exposure to the read-only update lane"
 );
 
 const androidReadme = read("README.md");
 assert(
-  androidReadme.includes("Android 客户端目前没有可用的远程登录或配对通道"),
-  "the Android README must not imply that remote access currently works"
+  androidReadme.includes("Android 客户端支持显式密码登录"),
+  "the Android README must describe authenticated remote access"
+);
+assert(
+  androidReadme.includes("公网 DDNS 只提供更新清单和 APK 下载"),
+  "the Android README must distinguish the DDNS update fallback from a full service endpoint"
 );
 
 const configurationGuide = readRepo("docs/configuration.md");

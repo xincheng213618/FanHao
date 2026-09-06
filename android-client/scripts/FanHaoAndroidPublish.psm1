@@ -7,6 +7,21 @@ $script:FanHaoPublishVersionCodeMaximum = 99999999L
 $script:FanHaoMaximumApkBytes = 536870912L
 $script:FanHaoDefaultVersionContractPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\version.json"))
 
+function Get-FanHaoFileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $resolvedPath = [IO.Path]::GetFullPath($Path)
+  $stream = [IO.File]::Open($resolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $digest = $sha256.ComputeHash($stream)
+    return ([BitConverter]::ToString($digest)).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Get-FanHaoAndroidVersionLimits {
   [pscustomobject]@{
     AndroidMaximum = $script:FanHaoAndroidVersionCodeMaximum
@@ -445,7 +460,7 @@ function Publish-FanHaoDebugArtifact {
   $manifestBackup = Join-Path $UpdateDir ".latest.$token.bak"
   $hadPreviousManifest = Test-Path -LiteralPath $latestPath
   $previousManifestSha256 = if ($hadPreviousManifest) {
-    (Get-FileHash -LiteralPath $latestPath -Algorithm SHA256).Hash
+    Get-FanHaoFileSha256 -Path $latestPath
   } else {
     ""
   }
@@ -460,7 +475,7 @@ function Publish-FanHaoDebugArtifact {
     if ($stagedItem.Length -le 0 -or $stagedItem.Length -gt $script:FanHaoMaximumApkBytes) {
       throw "Staged APK size is outside the supported range: $($stagedItem.Length)"
     }
-    $stagedHash = (Get-FileHash -LiteralPath $stagedApk -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stagedHash = Get-FanHaoFileSha256 -Path $stagedApk
     $noteList = @($Notes | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
     $manifest = [ordered]@{
       channel = "debug"
@@ -488,7 +503,7 @@ function Publish-FanHaoDebugArtifact {
       if (-not (Test-Path -LiteralPath $latestPath)) {
         throw "Existing latest.json disappeared during publish; refusing to claim another writer's state."
       }
-      $currentManifestSha256 = (Get-FileHash -LiteralPath $latestPath -Algorithm SHA256).Hash
+      $currentManifestSha256 = Get-FanHaoFileSha256 -Path $latestPath
       if ($currentManifestSha256 -cne $previousManifestSha256) {
         throw "Existing latest.json changed during publish; refusing to overwrite another writer's state."
       }
@@ -571,7 +586,7 @@ function Write-FanHaoLocalOnlyMarker {
   Assert-FanHaoRegularFile -Path $ApkPath -Label "local-only APK"
   $validated = Assert-FanHaoDebugApkIdentity -Identity $Identity
   $item = Get-Item -LiteralPath $ApkPath
-  $hash = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $hash = Get-FanHaoFileSha256 -Path $ApkPath
   $marker = [ordered]@{
     kind = "fanhao-debug-local-only"
     packageName = $validated.PackageName
@@ -623,7 +638,7 @@ function Assert-FanHaoLocalOnlyMarker {
   $markerSize = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $marker -Name "size" -Label "local-only marker") -Label "local-only marker size" -Maximum $script:FanHaoMaximumApkBytes
   $markerSha = ConvertTo-FanHaoSha256 -Value (Get-FanHaoRequiredProperty -Object $marker -Name "sha256" -Label "local-only marker") -Label "local-only marker sha256"
   $item = Get-Item -LiteralPath $ApkPath
-  $actualSha = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualSha = Get-FanHaoFileSha256 -Path $ApkPath
   if (
     $markerPackage -ne $identity.PackageName -or
     $markerCode -ne $identity.VersionCode -or
@@ -697,7 +712,7 @@ function Assert-FanHaoUpdateManifest {
   if ($item.Length -ne $size) {
     throw "Update manifest size does not match its APK: $SourcePath"
   }
-  $actualSha = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualSha = Get-FanHaoFileSha256 -Path $ApkPath
   if ($actualSha -ne $sha256) {
     throw "Update manifest SHA-256 does not match its APK: $SourcePath"
   }

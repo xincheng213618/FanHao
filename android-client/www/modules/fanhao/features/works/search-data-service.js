@@ -17,16 +17,16 @@ export function createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageD
     return `/api/fanhao/search?${params}`;
   }
 
-  function warm(query) {
+  function warm(query, category = "censored") {
     const text = String(query || "").trim();
     if (!text || globalThis.navigator?.connection?.saveData) return Promise.resolve([]);
-    return pageDataService.warm(getActiveUrl(), [path(text)]);
+    return pageDataService.warm(getActiveUrl(), [path(text, getWorksLimit(), workListState.getServerFilterMode(), workListState.getServerSortMode(), category)]);
   }
 
   function suggestions(query, options = {}) {
     const text = String(query || "").trim();
     if (!text) return Promise.resolve({ people: [], works: [] });
-    return pageDataService.fetch(getActiveUrl(), path(text, 6, "all", "updated"), {
+    return pageDataService.fetch(getActiveUrl(), path(text, 6, "all", "updated", options.category || "censored"), {
       signal: options.signal
     });
   }

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.function.BooleanSupplier;
 
 final class NativeShortVideoPlaybackFallback {
   private static final String TAG = "NativeShortVideoFallback";
@@ -28,7 +29,7 @@ final class NativeShortVideoPlaybackFallback {
   private final ExecutorService executor;
   private final Set<String> fallbackIds = new HashSet<>();
   private final Map<String, Integer> retryCounts = new HashMap<>();
-  private final Set<String> pendingRetries = new HashSet<>();
+  private final Map<ExoPlayer, Runnable> pendingRetries = new HashMap<>();
   private final Map<ExoPlayer, String> playerBindings = new WeakHashMap<>();
   private String status = "";
 
@@ -38,8 +39,30 @@ final class NativeShortVideoPlaybackFallback {
   }
 
   Uri mediaUri(ExoPlayer player, ShortVideoItem item) {
+    release(player);
     playerBindings.put(player, item == null ? "" : item.id);
     return cachedMediaUri(playbackUrl(item));
+  }
+
+  void release(ExoPlayer player) {
+    Runnable retry = pendingRetries.remove(player);
+    if (retry != null) handler.removeCallbacks(retry);
+    playerBindings.remove(player);
+  }
+
+  void releasePlayerResources(ExoPlayer player) {
+    if (player == null) return;
+    release(player);
+    try {
+      player.clearVideoSurface();
+      player.stop();
+      player.clearMediaItems();
+    } catch (Exception ignored) {}
+    player.release();
+  }
+
+  static boolean shouldResume(boolean foreground, boolean unobscured, boolean current, ExoPlayer player) {
+    return foreground && unobscured && current && player.getPlayWhenReady();
   }
 
   String playbackUrl(ShortVideoItem item) {
@@ -53,9 +76,9 @@ final class NativeShortVideoPlaybackFallback {
     return status;
   }
 
-  boolean handle(ExoPlayer player, ShortVideoItem item, PlaybackException error, boolean shouldPlay) {
+  boolean handle(ExoPlayer player, ShortVideoItem item, PlaybackException error, BooleanSupplier shouldPlay) {
     if (player == null || item == null || item.id.length() == 0) return false;
-    playerBindings.put(player, item.id);
+    if (!item.id.equals(playerBindings.get(player))) return false;
     if (fallbackIds.contains(item.id)) return scheduleRetry(player, item, shouldPlay);
     String smoothUrl = smoothPlaybackUrl(item, 0);
     if (smoothUrl.length() == 0 || smoothUrl.equals(item.streamUrl)) return false;
@@ -67,36 +90,43 @@ final class NativeShortVideoPlaybackFallback {
     return true;
   }
 
-  private boolean scheduleRetry(ExoPlayer player, ShortVideoItem item, boolean shouldPlay) {
-    if (pendingRetries.contains(item.id)) return true;
+  private boolean scheduleRetry(ExoPlayer player, ShortVideoItem item, BooleanSupplier shouldPlay) {
+    if (pendingRetries.containsKey(player)) return true;
     int attempt = retryCounts.getOrDefault(item.id, 0) + 1;
     if (attempt > AUTO_RETRIES) return false;
     retryCounts.put(item.id, attempt);
-    pendingRetries.add(item.id);
     long resumePosition = Math.max(0L, player.getCurrentPosition());
     player.stop();
     status = "兼容版本正在生成，自动重试 " + attempt + "/" + AUTO_RETRIES;
-    handler.postDelayed(() -> {
-      pendingRetries.remove(item.id);
-      if (!item.id.equals(playerBindings.get(player))) return;
-      String smoothUrl = smoothPlaybackUrl(item, attempt);
-      if (smoothUrl.length() == 0) return;
-      try {
-        switchPlayer(player, smoothUrl, resumePosition, shouldPlay);
-      } catch (RuntimeException releasedPlayer) {
-        Log.w(TAG, "smooth retry skipped " + item.id, releasedPlayer);
+    Runnable retry = new Runnable() {
+      @Override public void run() {
+        if (pendingRetries.get(player) != this) return;
+        pendingRetries.remove(player);
+        if (!item.id.equals(playerBindings.get(player))) return;
+        String smoothUrl = smoothPlaybackUrl(item, attempt);
+        if (smoothUrl.length() == 0) return;
+        try {
+          switchPlayer(player, smoothUrl, resumePosition, shouldPlay);
+        } catch (RuntimeException releasedPlayer) {
+          Log.w(TAG, "smooth retry skipped " + item.id, releasedPlayer);
+        }
       }
-    }, RETRY_DELAY_MS);
+    };
+    pendingRetries.put(player, retry);
+    handler.postDelayed(retry, RETRY_DELAY_MS);
     return true;
   }
 
-  private void switchPlayer(ExoPlayer player, String url, long position, boolean shouldPlay) {
+  private void switchPlayer(ExoPlayer player, String url, long position, BooleanSupplier shouldPlay) {
+    // Re-evaluate before mutating the player: lifecycle, overlays and user intent can
+    // change while the compatible rendition is being generated.
+    boolean playWhenReady = shouldPlay.getAsBoolean();
     player.stop();
     player.clearMediaItems();
     player.setMediaItem(MediaItem.fromUri(cachedMediaUri(url)));
     if (position > 0L) player.seekTo(position);
     player.prepare();
-    player.setPlayWhenReady(shouldPlay);
+    player.setPlayWhenReady(playWhenReady);
   }
 
   private String smoothPlaybackUrl(ShortVideoItem item, int retryAttempt) {

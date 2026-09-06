@@ -12,6 +12,8 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import org.json.JSONObject;
+
 @CapacitorPlugin(name = "FanHaoVisionExploration")
 public class FanHaoVisionExplorationPlugin extends Plugin {
   @PluginMethod
@@ -26,9 +28,13 @@ public class FanHaoVisionExplorationPlugin extends Plugin {
 
   @PluginMethod
   public void listSessions(PluginCall call) {
-    JSObject result = new JSObject();
-    result.put("sessions", VisionExplorationStore.listSessions(getContext()));
-    call.resolve(result);
+    try {
+      JSObject result = new JSObject();
+      result.put("sessions", VisionExplorationStore.listSessions(getContext()));
+      call.resolve(result);
+    } catch (Exception error) {
+      call.reject("无法读取本地探索记录", error);
+    }
   }
 
   @PluginMethod
@@ -58,10 +64,26 @@ public class FanHaoVisionExplorationPlugin extends Plugin {
     }
   }
 
-  private void open(PluginCall call, String mode) {
-    Intent intent = new Intent(getActivity(), NativeVisionExplorationActivity.class);
-    intent.putExtra(NativeVisionExplorationActivity.EXTRA_MODE, mode);
+  @PluginMethod
+  public void resumeSession(PluginCall call) {
+    String sessionId = call.getString("sessionId");
     try {
+      JSONObject manifest = VisionExplorationStore.getRecoverableSession(getContext(), sessionId);
+      String mode = "face-verification".equals(manifest.optString("kind", ""))
+        ? NativeVisionExplorationActivity.MODE_FACE : NativeVisionExplorationActivity.MODE_DOCUMENT;
+      Intent intent = new Intent(getActivity(), NativeVisionExplorationActivity.class);
+      intent.putExtra(NativeVisionExplorationActivity.EXTRA_MODE, mode);
+      intent.putExtra(NativeVisionExplorationActivity.EXTRA_SESSION_ID, sessionId);
+      startActivityForResult(call, intent, "visionExplorationResult");
+    } catch (Exception error) {
+      call.reject("无法继续本地探索记录", error);
+    }
+  }
+
+  private void open(PluginCall call, String mode) {
+    try {
+      Intent intent = new Intent(getActivity(), NativeVisionExplorationActivity.class);
+      intent.putExtra(NativeVisionExplorationActivity.EXTRA_MODE, mode);
       startActivityForResult(call, intent, "visionExplorationResult");
     } catch (Exception error) {
       call.reject("无法打开视觉探索工具", error);
@@ -78,8 +100,11 @@ public class FanHaoVisionExplorationPlugin extends Plugin {
     JSObject result = new JSObject();
     result.put("opened", true);
     result.put("canceled", !completed);
+    result.put("preserved", data != null && data.getBooleanExtra(NativeVisionExplorationActivity.RESULT_PRESERVED, false));
+    result.put("discarded", data != null && data.getBooleanExtra(NativeVisionExplorationActivity.RESULT_DISCARDED, false));
+    String sessionId = data == null ? null : data.getStringExtra(NativeVisionExplorationActivity.RESULT_SESSION_ID);
+    if (sessionId != null && !sessionId.isEmpty()) result.put("sessionId", sessionId);
     if (completed) {
-      result.put("sessionId", data.getStringExtra(NativeVisionExplorationActivity.RESULT_SESSION_ID));
       result.put("kind", data.getStringExtra(NativeVisionExplorationActivity.RESULT_KIND));
       result.put("challenge", data.getStringExtra(NativeVisionExplorationActivity.RESULT_CHALLENGE));
       result.put("fileCount", data.getIntExtra(NativeVisionExplorationActivity.RESULT_FILE_COUNT, 0));

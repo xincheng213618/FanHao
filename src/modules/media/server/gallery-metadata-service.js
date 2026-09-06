@@ -16,6 +16,57 @@ function safeJsonObject(value) {
   }
 }
 
+function positiveEpisodeCount(value) {
+  if (typeof value !== "string" && typeof value !== "number") return false;
+  const match = /^(?:共\s*)?(\d+)(?:\.0+)?\s*(?:集|季|episodes?|seasons?)?$/iu.exec(String(value).trim());
+  const count = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(count) && count > 0;
+}
+
+function positiveEpisodeDuration(value) {
+  if (typeof value !== "string" && typeof value !== "number") return false;
+  const text = String(value).trim();
+  const positiveFinite = value => Number.isFinite(value) && value > 0;
+  if (/^\d+(?:\.\d+)?$/u.test(text)) return positiveFinite(Number(text));
+  const iso = /^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/iu.exec(text);
+  if (iso) return positiveFinite(Number(iso[1] || 0) * 3600 + Number(iso[2] || 0) * 60 + Number(iso[3] || 0));
+  const clock = /^(\d+):([0-5]\d):([0-5]\d)$/u.exec(text);
+  if (clock) return positiveFinite(Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]));
+  const unit = /^(?:约\s*)?(\d+(?:\.\d+)?)\s*(分钟|小时|秒钟|分|秒|hours?|hrs?|minutes?|mins?|seconds?|secs?)$/iu.exec(text);
+  if (!unit) return false;
+  const scale = /^(?:小时|hours?|hrs?)$/iu.test(unit[2]) ? 3600 : /^(?:分钟|分|minutes?|mins?)$/iu.test(unit[2]) ? 60 : 1;
+  return positiveFinite(Number(unit[1]) * scale);
+}
+
+function jsonLdHasTvType(value) {
+  let parsed;
+  try { parsed = typeof value === "string" ? JSON.parse(value) : value; } catch { return false; }
+  const pending = [parsed];
+  const seen = new Set();
+  while (pending.length) {
+    const node = pending.pop();
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    if (Array.isArray(node)) { pending.push(...node); continue; }
+    const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+    if (types.some(type => typeof type === "string" && /^(?:https?:\/\/schema\.org\/)?TV(?:Series|Season|Episode)$/iu.test(type.trim()))) return true;
+    if (node["@graph"]) pending.push(node["@graph"]);
+  }
+  return false;
+}
+
+// Publication guard only: retain the source record and its local classification.
+// A title/year mismatch alone is not proof that a movie is actually television.
+function movieMetadataHasTvEvidence(row) {
+  if (!row) return false;
+  const info = safeJsonObject(row.info_json);
+  return positiveEpisodeCount(row.episode_count) || positiveEpisodeCount(row.season_count)
+    || positiveEpisodeDuration(row.episode_duration)
+    || positiveEpisodeCount(info["集数"]) || positiveEpisodeCount(info["季数"])
+    || positiveEpisodeDuration(info["单集片长"])
+    || jsonLdHasTvType(row.json_ld_json);
+}
+
 export function createGalleryMetadataService({
   createId,
   getImageGalleryDb,
@@ -78,7 +129,7 @@ export function createGalleryMetadataService({
   }
 
   function publicMovie(row) {
-    if (!row || row.status !== "ok") return null;
+    if (!row || row.status !== "ok" || movieMetadataHasTvEvidence(row)) return null;
     return {
       mediaId: row.media_id || "",
       category: row.category || "",
@@ -175,7 +226,12 @@ export function createGalleryMetadataService({
   }
 
   function serveMovieCover(res, mediaId) {
-    sendCover(res, movieRow(mediaId));
+    const row = movieRow(mediaId);
+    if (movieMetadataHasTvEvidence(row)) {
+      notFound(res);
+      return;
+    }
+    sendCover(res, row);
   }
 
   return {

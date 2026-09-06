@@ -13,6 +13,7 @@ export function createFanhaoSearchPage({
   goBack,
   showView,
   preserveQuery = () => false,
+  getSearchParams = () => ({}),
   warmSearch,
   fetchSuggestions = async () => ({ people: [], works: [] }),
   getActiveUrl = () => "",
@@ -164,7 +165,7 @@ export function createFanhaoSearchPage({
           hideSuggestions();
           input.blur();
           if (item.kind === "person") {
-            showView("personDetail", { personId: item.id }, { push: true });
+            showView("personDetail", personDetailParams(item.id), { push: true });
           } else if (item.missingLocal && item.javdbUrl) {
             window.open(item.javdbUrl, "_blank", "noreferrer");
           } else {
@@ -233,7 +234,7 @@ export function createFanhaoSearchPage({
     count.textContent = `${formatNumber(person.workCount || 0)} 部本地作品`;
     copy.append(title, count);
     button.append(visual, copy, createChevron());
-    button.addEventListener("click", () => showView("personDetail", { personId: person.id }, { push: true }));
+    button.addEventListener("click", () => showView("personDetail", personDetailParams(person.id), { push: true }));
     return button;
   }
 
@@ -282,13 +283,13 @@ export function createFanhaoSearchPage({
       meta: "本地标记",
       remember: false
     })), { note: "直接筛选" }));
-    const authors = localAuthorSearchSuggestions(getLibrary()?.people);
+    const authors = getSearchParams().category === "western" ? [] : localAuthorSearchSuggestions(getLibrary()?.people);
     if (authors.length) {
       landing.append(createSearchGroup("演员推荐", authors.map((author) => ({
         query: author.name,
         label: author.name,
         meta: `${author.workCount.toLocaleString("zh-CN")} 部`,
-        onSelect: () => showView("personDetail", { personId: author.id }, { push: true })
+        onSelect: () => showView("personDetail", personDetailParams(author.id), { push: true })
       })), { note: "点选直达" }));
     }
     const prompt = document.createElement("div");
@@ -350,7 +351,14 @@ export function createFanhaoSearchPage({
     const query = cleanQuery(value);
     if (query && options.remember !== false) rememberSearch(query);
     if (query) Promise.resolve(warmSearch(query)).catch(() => {});
-    showView("search", { query }, { skipHistory: true, replaceHistory: true });
+    showView("search", { ...getSearchParams(), query }, { skipHistory: true, replaceHistory: true });
+  }
+
+  function personDetailParams(personId) {
+    return {
+      personId,
+      scope: getSearchParams().category === "western" ? "western" : "main"
+    };
   }
 
   return { render, renderResultOverview, submitQuery };

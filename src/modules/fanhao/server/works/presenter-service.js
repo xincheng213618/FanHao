@@ -150,7 +150,7 @@ export function createWorkPresenterService({
     };
   }
 
-  function publicMediaFile(file, work = null) {
+  function publicMediaFile(file, work = null, options = {}) {
     return {
       id: file.id,
       type: file.type,
@@ -162,7 +162,7 @@ export function createWorkPresenterService({
       size: file.size,
       modifiedAt: file.modifiedAt,
       playable: file.playable,
-      progress: file.type === "video" ? playbackProgressService.getVideoProgress(file.id, work) : null
+      progress: file.type === "video" && options.includeUserState !== false ? playbackProgressService.getVideoProgress(file.id, work) : null
     };
   }
 
@@ -230,7 +230,7 @@ export function createWorkPresenterService({
     const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id);
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];
-    const favorite = favoriteStateService.publicFavoriteForWork(work.id);
+    const favorite = options.includeUserState === false ? null : favoriteStateService.publicFavoriteForWork(work.id);
     const personName = person?.name || work.personName || "";
     const base = {
       id: work.id,
@@ -259,12 +259,12 @@ export function createWorkPresenterService({
       favorite: Boolean(favorite),
       favoriteFolderId: favorite?.folderId || "",
       favoriteFolderName: favorite?.folderName || "",
-      progress: playbackProgressService.getWorkProgress(work)
+      progress: options.includeUserState === false ? null : playbackProgressService.getWorkProgress(work)
     };
     if (work.ranking) base.ranking = work.ranking;
 
     if (includeFiles) {
-      base.videos = videos.map((video) => publicMediaFile(video, work));
+      base.videos = videos.map((video) => publicMediaFile(video, work, options));
       base.images = (work.images || []).map((image) => publicMediaFile(image, work));
       base.infos = (work.infos || []).map((infoFile) => publicMediaFile(infoFile, work));
       base.infoMetadata = publicWorkInfoMetadata(infoRow);

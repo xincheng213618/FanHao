@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { canonicalDoubanSubjectUrl, cleanMovieSearchTitle, chooseMovieMetadata } from "../lib/douban-movie-match.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +15,8 @@ const DEFAULT_COOKIE_FILE = path.join(DATA_DIR, "douban-cookie.txt");
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
 const MAX_COVER_BYTES = 2 * 1024 * 1024;
+const MAX_MOVIE_SUBJECTS = 5;
+const REQUEST_TIMEOUT_MS = 45000;
 const SHARED_METADATA_COLUMNS = [
   ["douban_id", "TEXT"],
   ["douban_url", "TEXT"],
@@ -54,7 +57,7 @@ const SHARED_METADATA_COLUMNS = [
   ["updated_at", "TEXT NOT NULL DEFAULT ''"]
 ];
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     write: false,
     limit: 0,
@@ -90,6 +93,21 @@ function normalizeKind(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createRequest(options, injected = {}) {
+  const delayMs = Number(options.sleep ?? 5) * 1000;
+  if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 2147483647) throw new Error("采集间隔无效");
+  const fetchImpl = injected.fetch || globalThis.fetch;
+  const pause = injected.pause || sleep;
+  let requested = false;
+  return async (url, init) => {
+    // The collector awaits each response body before the next request. Keep the
+    // same pacing context for search, every detail, covers and following targets.
+    if (requested && delayMs > 0) await pause(delayMs);
+    requested = true;
+    return fetchImpl(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  };
 }
 
 function readJson(filePath, fallback = null) {
@@ -160,25 +178,6 @@ function tvSeriesKey(category, seriesName) {
   return createId("tvs", `${String(category || "").trim()}|${String(seriesName || "").trim()}`);
 }
 
-function cleanMovieQueryTitle(value) {
-  const source = String(value || "");
-  const year = /\b(19\d{2}|20\d{2})\b/.exec(source)?.[1] || "";
-  const text = source
-    .replace(/\[[^\]]+\]/g, " ")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\b(?:2160p|1080p|720p|480p|4k|8k|uhd|remux|bluray|blu[-_. ]?ray|web[-_. ]?dl|hdtv|hdr|dv|p7|hevc|x265|x264|h\\.264|h\\.265|aac|dts|truehd|atmos|multi|proper|repack)\b/gi, " ")
-    .replace(/\b(?:cd\d+|part\d+|disc\d+)\b/gi, " ")
-    .replace(/\b\d{1,3}(?:\\.\\d+)?\s*(?:gb|mb)\b/gi, " ")
-    .replace(/\.(?:mkv|mp4|m2ts|ts|avi|mov|wmv)$/i, " ")
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const yearIndex = year ? text.indexOf(year) : -1;
-  const beforeYear = yearIndex >= 0 ? text.slice(0, yearIndex).trim() : text;
-  const chinese = /[\p{Script=Han}][\p{Script=Han}\s·：:]+/u.exec(beforeYear || text)?.[0]?.trim();
-  return [chinese || beforeYear || text, year].filter(Boolean).join(" ").trim();
-}
-
 function cleanQueryTitle(value) {
   const cleaned = String(value || "")
     .replace(/\[[^\]]+\]/g, " ")
@@ -218,7 +217,7 @@ function movieTargets(index) {
     .map((item) => {
       const title = String(item.title || item.seriesName || item.subCategory || item.category || "").trim();
       const folderTitle = String(item.subCategory || "").trim();
-      const searchTitle = cleanMovieQueryTitle(title) || cleanMovieQueryTitle(folderTitle) || title;
+      const searchTitle = cleanMovieSearchTitle(title) || cleanMovieSearchTitle(folderTitle) || title;
       return {
         key: String(item.id || "").trim(),
         category: String(item.category || "").trim(),
@@ -271,7 +270,7 @@ function metadataConfig(kind) {
   };
 }
 
-function ensureDb(db) {
+export function ensureSchema(db) {
   db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS tv_series_metadata (
@@ -395,17 +394,28 @@ function existingRows(db, kind) {
 function isDoubanSecurityPage(response, html) {
   const finalUrl = response.url || "";
   if (/^https:\/\/sec\.douban\.com\//i.test(finalUrl)) return true;
-  return /<form[^>]+name=["']sec["']/i.test(html) && /sec\.douban\.com|action=["']\/c["']/i.test(html);
+  return (/<form[^>]+name=["']sec["']/i.test(html) && /sec\.douban\.com|action=["']\/c["']/i.test(html))
+    || /检测到有异常请求|请输入验证码|有异常请求从你的\s*IP\s*发出|Please verify you are a human/i.test(html)
+    || /搜索访问太频繁|搜索太频繁|访问过于频繁|Too Many Requests/i.test(html)
+    || /<(?:title|h1)\b[^>]*>\s*(?:Forbidden|安全验证|验证码)\s*<\//i.test(html)
+    || /<(?:input|img)\b[^>]*(?:name|id)=["'][^"']*captcha[^"']*["']/i.test(html);
 }
 
-class DoubanSecurityPageError extends Error {
-  constructor(url) {
-    super(`豆瓣详情页需要浏览器 Cookie：${url}`);
+export class DoubanSecurityPageError extends Error {
+  constructor(url, status = 0) {
+    super(`豆瓣访问受限，已停止本轮采集${status ? `（HTTP ${status}）` : ""}：${url}`);
     this.name = "DoubanSecurityPageError";
+    this.code = "DOUBAN_BLOCKED";
   }
 }
 
-async function fetchText(url, options = {}) {
+function assertResponseAllowed(response, url) {
+  if ([403, 418, 429].includes(response.status) || /^https:\/\/sec\.douban\.com\//i.test(response.url || "")) {
+    throw new DoubanSecurityPageError(url, response.status);
+  }
+}
+
+async function fetchText(url, options = {}, request = fetch) {
   const headers = {
     "User-Agent": USER_AGENT,
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -414,28 +424,40 @@ async function fetchText(url, options = {}) {
   };
   if (options.cookie) headers.Cookie = options.cookie;
 
-  const response = await fetch(url, {
+  const response = await request(url, {
     headers
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status} ${url}`);
+  assertResponseAllowed(response, url);
   const html = await response.text();
   if (isDoubanSecurityPage(response, html)) throw new DoubanSecurityPageError(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status} ${url}`);
+  if (options.expectedSubjectUrl && response.url) {
+    const finalUrl = new URL(response.url);
+    if (finalUrl.hostname !== "movie.douban.com"
+      || canonicalDoubanSubjectUrl(finalUrl.href) !== options.expectedSubjectUrl) {
+      throw movieReviewError(`电影详情重定向后身份不一致：${url}`);
+    }
+  }
   return html;
 }
 
-async function fetchCover(url) {
+async function fetchCover(url, request = fetch) {
   if (!url) return { bytes: null, mime: "" };
-  const response = await fetch(url, {
+  const response = await request(url, {
     headers: {
       "User-Agent": USER_AGENT,
       Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
       Referer: "https://movie.douban.com/"
     }
   });
-  if (!response.ok) throw new Error(`封面下载失败 HTTP ${response.status}`);
+  assertResponseAllowed(response, url);
   const buffer = Buffer.from(await response.arrayBuffer());
+  if (isDoubanSecurityPage(response, buffer.toString("utf8"))) throw new DoubanSecurityPageError(url);
+  if (!response.ok) throw new Error(`封面下载失败 HTTP ${response.status}`);
+  const mime = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (mime && !/^image\/[\w.+-]+$/.test(mime)) throw new Error(`封面响应不是图片：${mime}`);
   if (!buffer.length || buffer.length > MAX_COVER_BYTES) throw new Error(`封面大小异常 ${buffer.length}`);
-  return { bytes: buffer, mime: response.headers.get("content-type")?.split(";")[0] || "image/jpeg" };
+  return { bytes: buffer, mime: mime || "image/jpeg" };
 }
 
 function htmlDecode(value) {
@@ -623,7 +645,7 @@ function parseSearchPage(html) {
   };
 }
 
-function parseSubjectPage(html, url) {
+export function parseSubjectPage(html, url) {
   const jsonLd = extractJsonLd(html) || {};
   const info = parseInfoFields(html);
   const title = String(firstMatch(html, /<span[^>]+property=["']v:itemreviewed["'][^>]*>([^<]+)/i) || jsonLd.name || "").trim();
@@ -684,7 +706,8 @@ function parseSubjectPage(html, url) {
     info,
     jsonLd,
     summary,
-    coverUrl
+    coverUrl,
+    detailSource: "subject"
   };
 }
 
@@ -693,6 +716,53 @@ function extractSubjectUrlFromSearch(html) {
   if (linked) return linked;
   const href = firstMatch(html, /<a[^>]+href=["'](https:\/\/movie\.douban\.com\/subject\/\d+\/)["'][^>]*>/i);
   return href || "";
+}
+
+function movieReviewError(message) {
+  const error = new Error(message);
+  error.code = "METADATA_REVIEW_REQUIRED";
+  return error;
+}
+
+function extractMovieSubjectUrls(html) {
+  const subjects = new Set();
+  for (const match of String(html || "").matchAll(/<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1/gi)) {
+    let subject = "";
+    try {
+      const href = htmlDecode(match[2]);
+      subject = canonicalDoubanSubjectUrl(href)
+        || canonicalDoubanSubjectUrl(new URL(href, "https://www.douban.com/").href);
+    } catch {}
+    if (subject) subjects.add(subject);
+    if (subjects.size === MAX_MOVIE_SUBJECTS) break;
+  }
+  return [...subjects];
+}
+
+async function fetchMovieMeta(group, options, request) {
+  const rawQuery = group.searchTitle || group.movieTitle || "";
+  const query = cleanMovieSearchTitle(rawQuery) || rawQuery;
+  const searchUrl = `https://www.douban.com/search?cat=1002&q=${encodeURIComponent(query)}`;
+  const searchHtml = await fetchText(searchUrl, { cookie: options.cookie }, request);
+  const subjects = extractMovieSubjectUrls(searchHtml);
+  if (!subjects.length) throw movieReviewError(`豆瓣没有电影候选：${query}`);
+  const candidates = [];
+  let detailFailed = false;
+  for (const subjectUrl of subjects) {
+    try {
+      const html = await fetchText(subjectUrl, {
+        cookie: options.cookie, referer: searchUrl, expectedSubjectUrl: subjectUrl
+      }, request);
+      candidates.push(parseSubjectPage(html, subjectUrl));
+    } catch (error) {
+      if (error instanceof DoubanSecurityPageError) throw error;
+      detailFailed = true;
+    }
+  }
+  // An unread candidate might be another match. Dropping it must not turn the
+  // remaining candidate into a falsely unique match; search fields never qualify.
+  if (detailFailed) throw movieReviewError(`电影候选详情读取不完整，需人工确认：${query}`);
+  return chooseMovieMetadata(group, candidates);
 }
 
 function mergeMeta(primary, fallback) {
@@ -729,22 +799,23 @@ function mergeMeta(primary, fallback) {
   };
 }
 
-async function fetchDoubanMeta(group, options) {
+export async function fetchDoubanMeta(group, options = {}, injected = {}) {
+  const request = injected.request || createRequest(options, injected);
+  if (normalizeKind(options.kind) === "movie") return fetchMovieMeta(group, options, request);
   const rawQuery = group.searchTitle || group.seriesName || group.movieTitle || "";
-  const query = options.kind === "movie" ? cleanMovieQueryTitle(rawQuery) || rawQuery : cleanQueryTitle(rawQuery) || rawQuery;
+  const query = cleanQueryTitle(rawQuery) || rawQuery;
   const searchUrl = `https://www.douban.com/search?cat=1002&q=${encodeURIComponent(query)}`;
-  const searchHtml = await fetchText(searchUrl, { cookie: options.cookie });
+  const searchHtml = await fetchText(searchUrl, { cookie: options.cookie }, request);
   const subjectUrl = extractSubjectUrlFromSearch(searchHtml);
   if (!subjectUrl) throw new Error(`豆瓣没有搜索结果：${query}`);
   const searchMeta = parseSearchPage(searchHtml);
   let subjectMeta = {};
   try {
-    const subjectHtml = await fetchText(subjectUrl, { cookie: options.cookie, referer: searchUrl });
+    const subjectHtml = await fetchText(subjectUrl, { cookie: options.cookie, referer: searchUrl }, request);
     subjectMeta = parseSubjectPage(subjectHtml, subjectUrl);
   } catch (error) {
-    if (!(error instanceof DoubanSecurityPageError)) {
-      subjectMeta = {};
-    }
+    if (error instanceof DoubanSecurityPageError) throw error;
+    subjectMeta = {};
   }
   return mergeMeta(subjectMeta, { ...searchMeta, doubanUrl: subjectUrl });
 }
@@ -753,7 +824,7 @@ function targetTitle(group) {
   return group.movieTitle || group.seriesName || "";
 }
 
-function upsertOk(db, kind, group, meta, cover) {
+export function upsertOk(db, kind, group, meta, cover) {
   const config = metadataConfig(kind);
   const now = new Date().toISOString();
   const record = {
@@ -814,7 +885,7 @@ function upsertOk(db, kind, group, meta, cover) {
   ).run(...columns.map((column) => record[column]));
 }
 
-function upsertError(db, kind, group, error) {
+export function upsertError(db, kind, group, error) {
   const config = metadataConfig(kind);
   const now = new Date().toISOString();
   db.prepare(
@@ -830,60 +901,86 @@ function upsertError(db, kind, group, error) {
       error = excluded.error,
       fetched_at = excluded.fetched_at,
       updated_at = excluded.updated_at
+    WHERE ${config.table}.status IS NOT 'ok'
     `
   ).run(group.key, group.category, targetTitle(group), "douban", "error", String(error?.message || error).slice(0, 1000), now, now);
 }
 
-const options = parseArgs(process.argv.slice(2));
-const cookieState = readDoubanCookie(options);
-options.cookie = cookieState.cookie;
-const index = readJson(INDEX_PATH, {});
-const db = new DatabaseSync(DB_PATH);
-ensureDb(db);
-
-const config = metadataConfig(options.kind);
-const existing = existingRows(db, options.kind);
-let groups = options.kind === "movie" ? movieTargets(index) : seriesGroups(index);
-const keyword = options.kind === "movie" ? options.title || options.series : options.series;
-if (options.category) groups = groups.filter((group) => group.category === options.category);
-if (keyword) {
-  groups = groups.filter((group) =>
-    [group.seriesName, group.movieTitle, group.searchTitle, ...(group.samples || [])].filter(Boolean).some((value) => String(value).includes(keyword))
-  );
-}
-if (!options.refresh) {
-  groups = groups.filter((group) => {
-    const row = existing.get(group.key);
-    return !row || row.status !== "ok" || !row.cover_bytes;
-  });
-}
-if (options.limit > 0) groups = groups.slice(0, options.limit);
-
-const scope = [
-  options.category ? `${config.categoryLabel}=${options.category}` : `全部${config.categoryLabel}`,
-  keyword ? `关键词=${keyword}` : "",
-  options.refresh ? "刷新已有资料" : "只补缺失/无封面",
-  options.limit > 0 ? `上限=${options.limit}` : "全量"
-].filter(Boolean);
-console.log(`豆瓣${config.label}资料目标：${groups.length} ${config.unit} (${scope.join("，")}) write=${options.write ? "yes" : "no"} cookie=${cookieState.cookie ? "yes" : "no"}`);
-if (!options.category && groups.length) console.log(`${config.categoryLabel}分布：${categorySummary(groups)}`);
-if (cookieState.source) console.log(`Cookie 来源：${cookieState.source}`);
-let ok = 0;
-let failed = 0;
-for (const [indexInRun, group] of groups.entries()) {
-  try {
-    console.log(`[${indexInRun + 1}/${groups.length}] ${group.category} / ${targetTitle(group)}`);
-    const meta = await fetchDoubanMeta(group, options);
-    const cover = await fetchCover(meta.coverUrl);
-    if (options.write) upsertOk(db, options.kind, group, meta, cover);
-    ok += 1;
-    console.log(`  ok ${meta.title || "-"} ${meta.year || ""} rating=${meta.rating || "-"} detail=${meta.detailSource || "search"} cover=${cover.bytes?.length || 0}`);
-  } catch (error) {
-    failed += 1;
-    if (options.write) upsertError(db, options.kind, group, error);
-    console.log(`  error ${error.message || error}`);
+export async function run(options = {}, injected = {}) {
+  const boundaryKeys = ["db", "index", "cookieState"];
+  if (boundaryKeys.some((key) => key in injected)
+    && (!boundaryKeys.every((key) => key in injected && injected[key] !== null && typeof injected[key] === "object")
+      || typeof injected.fetch !== "function" || typeof injected.pause !== "function")) {
+    throw new TypeError("注入采集边界时必须同时提供 db、index、cookieState、fetch 和 pause");
   }
-  if (indexInRun < groups.length - 1 && options.sleep > 0) await sleep(options.sleep * 1000);
+  options = { ...parseArgs([]), ...options, kind: normalizeKind(options.kind) };
+  const request = createRequest(options, injected);
+  const log = injected.log || console.log;
+  const cookieState = injected.cookieState ?? readDoubanCookie(options);
+  options.cookie = cookieState.cookie;
+  const index = injected.index ?? readJson(INDEX_PATH, {});
+  const db = injected.db ?? new DatabaseSync(DB_PATH);
+  try {
+    ensureSchema(db);
+    const config = metadataConfig(options.kind);
+    const existing = existingRows(db, options.kind);
+    let groups = options.kind === "movie" ? movieTargets(index) : seriesGroups(index);
+    // Repeated index records for one media ID must not reset its detail budget.
+    if (options.kind === "movie") groups = [...new Map(groups.map((group) => [group.key, group])).values()];
+    const keyword = options.kind === "movie" ? options.title || options.series : options.series;
+    if (options.category) groups = groups.filter((group) => group.category === options.category);
+    if (keyword) {
+      groups = groups.filter((group) =>
+        [group.seriesName, group.movieTitle, group.searchTitle, ...(group.samples || [])].filter(Boolean).some((value) => String(value).includes(keyword))
+      );
+    }
+    if (!options.refresh) {
+      groups = groups.filter((group) => {
+        const row = existing.get(group.key);
+        return !row || row.status !== "ok" || !row.cover_bytes;
+      });
+    }
+    if (options.limit > 0) groups = groups.slice(0, options.limit);
+
+    const scope = [
+      options.category ? `${config.categoryLabel}=${options.category}` : `全部${config.categoryLabel}`,
+      keyword ? `关键词=${keyword}` : "",
+      options.refresh ? "刷新已有资料" : "只补缺失/无封面",
+      options.limit > 0 ? `上限=${options.limit}` : "全量"
+    ].filter(Boolean);
+    log(`豆瓣${config.label}资料目标：${groups.length} ${config.unit} (${scope.join("，")}) write=${options.write ? "yes" : "no"} cookie=${cookieState.cookie ? "yes" : "no"}`);
+    if (!options.category && groups.length) log(`${config.categoryLabel}分布：${categorySummary(groups)}`);
+    if (cookieState.source) log(`Cookie 来源：${cookieState.source}`);
+    let ok = 0;
+    let failed = 0;
+    let blocked = false;
+    for (const [indexInRun, group] of groups.entries()) {
+      try {
+        log(`[${indexInRun + 1}/${groups.length}] ${group.category} / ${targetTitle(group)}`);
+        const meta = await fetchDoubanMeta(group, options, { request });
+        const cover = await fetchCover(meta.coverUrl, request);
+        if (options.write) upsertOk(db, options.kind, group, meta, cover);
+        ok += 1;
+        log(`  ok ${meta.title || "-"} ${meta.year || ""} rating=${meta.rating || "-"} detail=${meta.detailSource || "search"} cover=${cover.bytes?.length || 0}`);
+      } catch (error) {
+        failed += 1;
+        log(`  error ${error.message || error}`);
+        if (error instanceof DoubanSecurityPageError) {
+          blocked = true;
+          break;
+        }
+        if (options.write) upsertError(db, options.kind, group, error);
+      }
+    }
+    log(`完成 ok=${ok} failed=${failed} blocked=${blocked ? "yes" : "no"}`);
+    return { ok, failed, blocked, total: groups.length };
+  } finally {
+    // Fixture-owned connections remain available for assertions and cleanup.
+    if (!injected.db) db.close();
+  }
 }
-db.close();
-console.log(`完成 ok=${ok} failed=${failed}`);
+
+if (import.meta.main) {
+  const result = await run(parseArgs(process.argv.slice(2)));
+  if (result.blocked) process.exitCode = 2;
+}

@@ -28,6 +28,21 @@ import java.util.concurrent.Executors;
 public class FanHaoUpdaterPlugin extends Plugin {
   private static final String APK_MIME = "application/vnd.android.package-archive";
   private final ExecutorService executor = Executors.newSingleThreadExecutor();
+  private volatile boolean awaitingUpdateReturn;
+  private volatile boolean updateActivityPaused;
+
+  @Override
+  protected void handleOnPause() {
+    if (awaitingUpdateReturn) updateActivityPaused = true;
+  }
+
+  @Override
+  protected void handleOnResume() {
+    if (!awaitingUpdateReturn || !updateActivityPaused) return;
+    awaitingUpdateReturn = false;
+    updateActivityPaused = false;
+    notifyListeners("updateFlowReturned", new JSObject());
+  }
 
   @PluginMethod
   public void getInstalledVersion(PluginCall call) {
@@ -80,7 +95,9 @@ public class FanHaoUpdaterPlugin extends Plugin {
     if (!canRequestPackageInstalls()) {
       try {
         openUnknownAppSourcesSettings();
-      } catch (Exception ignored) {
+      } catch (Exception error) {
+        call.reject("无法打开安装权限设置", error);
+        return;
       }
       JSObject result = new JSObject();
       result.put("started", false);
@@ -134,7 +151,7 @@ public class FanHaoUpdaterPlugin extends Plugin {
       Uri.parse("package:" + getContext().getPackageName())
     );
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-    getActivity().startActivity(intent);
+    launchUpdateActivity(intent);
   }
 
   private File downloadApk(
@@ -218,7 +235,19 @@ public class FanHaoUpdaterPlugin extends Plugin {
     intent.setDataAndType(uri, APK_MIME);
     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-    getContext().startActivity(intent);
+    launchUpdateActivity(intent);
+  }
+
+  private void launchUpdateActivity(Intent intent) {
+    awaitingUpdateReturn = true;
+    updateActivityPaused = false;
+    try {
+      getActivity().startActivity(intent);
+    } catch (RuntimeException error) {
+      awaitingUpdateReturn = false;
+      updateActivityPaused = false;
+      throw error;
+    }
   }
 
   private String sanitizeApkFileName(String value) {

@@ -2,21 +2,21 @@ import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260721-fanhao-actor-counts-17";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=20260726-work-sort-01";
-import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-person-work-grid-20";
+import { createWorkListState } from "../../js/work-filtering.js?v=20260830-fanhao-compact-filter-02";
+import { createWorkCards } from "./features/works/cards.js?v=20260830-western-person-link-34";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
-import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=20260811-favorite-folders-02";
+import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=20260830-fanhao-compact-filter-02";
 import { workDataSignature } from "./features/works/work-data-signature.js?v=20260811-favorite-folders-02";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260730-fanhao-ranking-year-ui-45";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260811-favorite-folders-02";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-toolbar-23";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260830-fanhao-single-feed-18";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
-import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=20260721-fanhao-search-toolbar-23";
-import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-suggestions-19";
+import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=20260830-fanhao-single-feed-18";
+import { createFanhaoSearchPage } from "./search-page.js?v=20260830-fanhao-person-home-31";
 import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=20260721-fanhao-studio-density-12";
 import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=20260730-fanhao-nav-ui-44";
-import { CATEGORY_OPTIONS, createCategoryViews } from "./features/categories/category-views.js?v=20260730-fanhao-nav-ui-44";
+import { createCategoryViews } from "./features/categories/category-views.js?v=20260830-fanhao-pure-feed-24";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
@@ -49,13 +49,15 @@ export function createWorkViews(context) {
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
+  let activeSearchCategory = "censored";
   const searchPage = createFanhaoSearchPage({
     els,
     goBack,
     showView,
-    preserveQuery: (query) => replaceViewParams("search", { query }),
-    warmSearch: searchDataService.warm,
-    fetchSuggestions: searchDataService.suggestions,
+    preserveQuery: (query) => replaceViewParams("search", { query, category: activeSearchCategory }),
+    getSearchParams: () => ({ category: activeSearchCategory }),
+    warmSearch: (query) => searchDataService.warm(query, activeSearchCategory),
+    fetchSuggestions: (query, options = {}) => searchDataService.suggestions(query, { ...options, category: activeSearchCategory }),
     getActiveUrl,
     getLibrary
   });
@@ -76,7 +78,6 @@ export function createWorkViews(context) {
     showView, workListState
   });
   let studioQuery = "";
-  let searchCategory = "all";
   async function renderContinuePreview(options = {}) {
     if (!els.continuePreview || !els.continueSection) return;
     els.continuePreview.dataset.hasItems = "0";
@@ -542,17 +543,18 @@ export function createWorkViews(context) {
     return (studio.series || []).find((item) => String(item.id) === id) || null;
   }
 
-  async function renderSearchResults(query, isActive = () => true) {
-    const text = query.trim();
+  async function renderSearchResults(params = {}, isActive = () => true) {
+    const text = String(params.query || "").trim();
+    activeSearchCategory = normalizeSearchCategory(params.category);
+    const libraryLabel = activeSearchCategory === "western" ? "欧美" : "番号";
     setActiveBottom("search");
     els.viewKicker.textContent = "搜索";
-    els.viewTitle.textContent = text ? `搜索：${text}` : "搜索番号库";
-    els.viewMeta.textContent = text ? "正在搜索番号与演员" : "输入番号、作品标题或演员后搜索";
+    els.viewTitle.textContent = text ? `搜索：${text}` : `搜索${libraryLabel}库`;
+    els.viewMeta.textContent = text ? `正在搜索${libraryLabel}与演员` : "输入番号、作品标题或演员后搜索";
     els.contentPanel.hidden = false;
     const { results } = searchPage.render(text);
 
     if (!text) {
-      searchCategory = "all";
       searchListState.setFilterMode("all", { replace: true, rerender: false });
       searchListState.setSortMode("updated", { rerender: false });
       return;
@@ -562,7 +564,7 @@ export function createWorkViews(context) {
     const limit = getWorksLimit();
     const serverFilter = searchListState.getServerFilterMode();
     const serverSort = searchListState.getServerSortMode();
-    const path = searchDataService.path(text, limit, serverFilter, serverSort, searchCategory);
+    const path = searchDataService.path(text, limit, serverFilter, serverSort, activeSearchCategory);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
@@ -588,8 +590,7 @@ export function createWorkViews(context) {
         renderMessageInto(results, "没有匹配的番号作品，已显示演员结果。", "quiet", false);
       }
       mountSearchResultToolbar({
-        container: results, data, works, total, listState: searchListState,
-        category: searchCategory, onCategoryChange: setSearchCategory
+        container: results, data, works, total, listState: searchListState
       });
     };
 
@@ -613,15 +614,6 @@ export function createWorkViews(context) {
         renderMessageInto(results, error.message, "error");
       }
     }
-  }
-
-  function setSearchCategory(value) {
-    const requested = String(value || "");
-    const category = requested === "all" || CATEGORY_OPTIONS.some((option) => option.value === requested) ? requested : "all";
-    if (category === searchCategory) return false;
-    searchCategory = category;
-    renderCurrentView();
-    return true;
   }
 
   async function renderRankings(isActive = () => true) {
@@ -722,7 +714,7 @@ export function createWorkViews(context) {
     renderRankings,
     renderHistory,
     renderSearchResults,
-    warmSearch: searchDataService.warm,
+    warmSearch: (query, category = "censored") => searchDataService.warm(query, normalizeSearchCategory(category)),
     pageDataService,
     favoriteFolders: favoriteViews.folders,
     workDetailDataService,
@@ -743,5 +735,9 @@ export function createWorkViews(context) {
     createLoadMoreButton,
     renderMessage
   };
+}
+
+function normalizeSearchCategory(value) {
+  return String(value || "").trim().toLowerCase() === "western" ? "western" : "censored";
 }
 

@@ -340,6 +340,7 @@ def delete_profile(payload: dict[str, Any]) -> dict[str, Any]:
 
     name = str(profile["nickname"] or profile["title"] or f"主页 #{profile_id}")
     add_event("warn", f"主页记录已删除：{name}（#{profile_id}），数据库链接 {link_count} 条")
+    notify_download_queue_changed()
     return {
         "ok": True,
         "profile_id": profile_id,

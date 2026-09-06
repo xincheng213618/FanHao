@@ -5,18 +5,22 @@ export function createFavoriteStateService({
   getLibrary,
   maxFavoriteFolders,
   userState,
+  getUserState = () => userState,
   userStateService
 }) {
   function isFavoriteWork(workId) {
+    const userState = getUserState();
     return Boolean(userState.favorites[workId]);
   }
 
   function favoriteRecord(workId) {
+    const userState = getUserState();
     const favorite = userState.favorites[workId];
     return favorite ? userStateService.normalizeFavoriteRecord(favorite, userState.favoriteFolders) : null;
   }
 
   function favoriteFolderName(folderId) {
+    const userState = getUserState();
     return userState.favoriteFolders?.[folderId]?.name || defaultFavoriteFolderName;
   }
 
@@ -25,6 +29,7 @@ export function createFavoriteStateService({
   }
 
   function favoriteFolderCounts() {
+    const userState = getUserState();
     const library = getLibrary();
     const counts = new Map(Object.keys(userState.favoriteFolders || userStateService.defaultFavoriteFolders()).map((folderId) => [folderId, 0]));
     for (const [workId, favorite] of Object.entries(userState.favorites || {})) {
@@ -36,6 +41,7 @@ export function createFavoriteStateService({
   }
 
   function publicFavoriteFolders() {
+    const userState = getUserState();
     const counts = favoriteFolderCounts();
     return Object.entries(userState.favoriteFolders || userStateService.defaultFavoriteFolders())
       .map(([id, folder]) => ({
@@ -63,6 +69,7 @@ export function createFavoriteStateService({
   }
 
   function createFavoriteFolder(name) {
+    const userState = getUserState();
     const cleanName = userStateService.cleanFavoriteFolderName(name);
     if (!cleanName) {
       const error = new Error("请输入收藏夹名称");
@@ -97,7 +104,65 @@ export function createFavoriteStateService({
     return { id, ...folders[id] };
   }
 
+  function customFavoriteFolder(folderId, state) {
+    const id = String(folderId || "");
+    if (id === defaultFavoriteFolderId) throw folderError(400, "默认收藏夹不能改名或删除");
+    if (!Object.hasOwn(state.favoriteFolders || {}, id)) throw folderError(404, "收藏夹不存在");
+    return id;
+  }
+
+  function publicFavoriteFolder(folderId) {
+    return publicFavoriteFolders().find((folder) => folder.id === folderId);
+  }
+
+  function saveFolderChanges(state, folders, favorites = state.favorites) {
+    const previousFolders = state.favoriteFolders;
+    const previousFavorites = state.favorites;
+    state.favoriteFolders = folders;
+    state.favorites = favorites;
+    try {
+      // Account persistence is transactional; the legacy store opts into an
+      // atomic file replacement only for these new folder-management actions.
+      userStateService.save({ strict: true });
+    } catch (error) {
+      state.favoriteFolders = previousFolders;
+      state.favorites = previousFavorites;
+      throw error;
+    }
+  }
+
+  function renameFavoriteFolder(folderId, name) {
+    const state = getUserState();
+    const id = customFavoriteFolder(folderId, state);
+    const cleanName = userStateService.cleanFavoriteFolderName(name);
+    if (!cleanName) throw folderError(400, "请输入收藏夹名称");
+    const previous = state.favoriteFolders[id];
+    if (userStateService.cleanFavoriteFolderName(previous?.name) === cleanName) return publicFavoriteFolder(id);
+    if (Object.entries(state.favoriteFolders).some(([otherId, folder]) => otherId !== id && userStateService.cleanFavoriteFolderName(folder?.name) === cleanName)) {
+      throw folderError(409, "已存在同名收藏夹");
+    }
+    const folders = Object.fromEntries(Object.entries(state.favoriteFolders).map(([key, folder]) => [key, key === id ? { ...folder, name: cleanName } : folder]));
+    saveFolderChanges(state, folders);
+    return publicFavoriteFolder(id);
+  }
+
+  function deleteFavoriteFolder(folderId) {
+    const state = getUserState();
+    const id = customFavoriteFolder(folderId, state);
+    const folders = Object.fromEntries(Object.entries(state.favoriteFolders).filter(([key]) => key !== id));
+    if (!Object.hasOwn(folders, defaultFavoriteFolderId)) folders[defaultFavoriteFolderId] = userStateService.defaultFavoriteFolders()[defaultFavoriteFolderId];
+    let movedCount = 0;
+    const favorites = Object.fromEntries(Object.entries(state.favorites || {}).map(([workId, record]) => {
+      if (record?.folderId !== id) return [workId, record];
+      movedCount += 1;
+      return [workId, { ...record, folderId: defaultFavoriteFolderId }];
+    }));
+    saveFolderChanges(state, folders, favorites);
+    return { deletedFolderId: id, movedCount, defaultFolder: publicFavoriteFolder(defaultFavoriteFolderId) };
+  }
+
   function moveFavoriteToFolder(workId, folderId) {
+    const userState = getUserState();
     const favorite = userState.favorites[workId];
     if (!favorite) {
       const error = new Error("作品尚未收藏");
@@ -110,6 +175,7 @@ export function createFavoriteStateService({
   }
 
   function toggleFavorite(workId, body = {}) {
+    const userState = getUserState();
     if (userState.favorites[workId]) {
       delete userState.favorites[workId];
     } else {
@@ -129,6 +195,7 @@ export function createFavoriteStateService({
   }
 
   function favoriteWorks(folderId = "") {
+    const userState = getUserState();
     const library = getLibrary();
     const selectedFolderId = folderId ? userStateService.normalizeFavoriteFolderId(folderId) : "";
     return Object.entries(userState.favorites)
@@ -141,6 +208,7 @@ export function createFavoriteStateService({
 
   return {
     createFavoriteFolder,
+    deleteFavoriteFolder,
     favoriteFolderCounts,
     favoriteRecord,
     favoriteWorks,
@@ -149,6 +217,11 @@ export function createFavoriteStateService({
     normalizeFavoriteFolderId,
     publicFavoriteFolders,
     publicFavoriteForWork,
+    renameFavoriteFolder,
     toggleFavorite
   };
+}
+
+function folderError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
 }

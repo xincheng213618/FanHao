@@ -1,5 +1,5 @@
 import { fetchJson } from "../../../../js/api.js?v=20260702-novel-local-manage-74";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatDate, formatNumber } from "../../../../js/format.js";
 import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 
@@ -19,12 +19,13 @@ export function createRankingViews(deps) {
   let renderSequence = 0;
   let activeSignal;
   const rankingDataByKey = new Map();
+  const responseCacheFences = new WeakMap();
 
   const renderData = (summary, data, summaryCache = null, dataCache = null, options = {}) => {
     lists = summary?.lists || [];
     const dataKey = chooseKey(lists, rankingDataKey(data, selectedKey));
     const activeKey = options.displayKey === undefined ? dataKey : normalizeKey(options.displayKey);
-    if (dataKey) rankingDataByKey.set(dataKey, data);
+    if (dataKey) rememberRankingData(dataKey, data);
     if (options.persistSelection !== false) {
       selectedKey = dataKey;
       localStorage.setItem(STORAGE_KEY, selectedKey);
@@ -143,7 +144,7 @@ export function createRankingViews(deps) {
     els.viewContent.setAttribute("aria-busy", "true");
     els.viewMeta.textContent = `正在切换至 ${rankingLabelForKey(lists, key)} 榜单`;
 
-    const remembered = rankingDataByKey.get(key);
+    const remembered = rememberedRankingData(key);
     if (remembered) {
       renderData(summary, remembered);
       rendered = true;
@@ -181,11 +182,11 @@ export function createRankingViews(deps) {
     for (const item of items || []) {
       if (warmed >= RANKING_WARM_LIMIT) break;
       const key = itemKey(item);
-      if (!key || key === activeKey || rankingDataByKey.has(key) || signal?.aborted) continue;
+      if (!key || key === activeKey || rememberedRankingData(key) || signal?.aborted) continue;
       try {
         const data = await fetchTop(activeUrl, key, signal, PAGE_SIZE);
         if (signal?.aborted) return;
-        rankingDataByKey.set(key, data);
+        rememberRankingData(key, data);
         warmed += 1;
       } catch {}
     }
@@ -193,9 +194,10 @@ export function createRankingViews(deps) {
 
   async function fetchBundle(activeUrl, preferredKey = selectedKey, signal = undefined) {
     const anticipatedKey = normalizeKey(preferredKey || DEFAULT_KEY);
+    const summaryFence = captureCachedJsonFence(activeUrl);
     const summaryRequest = fetchJson(activeUrl, "/api/rankings", { timeoutMs: 12000, signal })
       .then((summary) => {
-        writeCachedJson(activeUrl, "/api/rankings", summary).catch(() => {});
+        writeCachedJson(activeUrl, "/api/rankings", summary, { fence: summaryFence }).catch(() => {});
         return summary;
       });
     const [summary, anticipatedData] = await Promise.all([
@@ -209,9 +211,25 @@ export function createRankingViews(deps) {
 
   async function fetchTop(activeUrl, key, signal = undefined, limit = requestedLimit) {
     const path = topPath(key, limit);
+    const fence = captureCachedJsonFence(activeUrl);
     const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal });
-    await writeCachedJson(activeUrl, path, data).catch(() => {});
+    responseCacheFences.set(data, fence);
+    await writeCachedJson(activeUrl, path, data, { fence }).catch(() => {});
     return data;
+  }
+
+  function rememberRankingData(key, data) {
+    rankingDataByKey.set(key, { data, fence: responseCacheFences.get(data) || captureCachedJsonFence(getActiveUrl()) });
+  }
+
+  function rememberedRankingData(key) {
+    const entry = rankingDataByKey.get(key);
+    if (!entry) return null;
+    if (entry.fence.baseUrl !== String(getActiveUrl() || "").replace(/\/+$/u, "") || !isCachedJsonFenceCurrent(entry.fence)) {
+      rankingDataByKey.delete(key);
+      return null;
+    }
+    return entry.data;
   }
 
   async function cacheLists(activeUrl, items, alreadyCachedKey) {

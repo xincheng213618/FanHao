@@ -3,6 +3,7 @@ export function createPlaybackProgressService({
   publicFavoriteFolders,
   recentWatchedDays,
   userState,
+  getUserState = () => userState,
   userStateService
 }) {
   let historyCache = null;
@@ -12,6 +13,7 @@ export function createPlaybackProgressService({
   let workProgressCacheRevision = -1;
 
   function getVideoProgress(videoId, work = null) {
+    const userState = getUserState();
     const progress = userState.progress[videoId];
     if (!progress || !Number.isFinite(progress.position) || !Number.isFinite(progress.duration) || progress.duration <= 0) {
       return null;
@@ -48,10 +50,16 @@ export function createPlaybackProgressService({
   }
 
   function ensureWorkProgressCache() {
-    if (workProgressCacheProgress === userState.progress && workProgressCacheRevision === progressRevision) return;
+    const userState = getUserState();
+    const revision = currentProgressRevision();
+    if (workProgressCacheProgress === userState.progress && workProgressCacheRevision === revision) return;
     workProgressCache = new WeakMap();
     workProgressCacheProgress = userState.progress;
-    workProgressCacheRevision = progressRevision;
+    workProgressCacheRevision = revision;
+  }
+
+  function currentProgressRevision() {
+    return `${userStateService.revision?.() || ""}:${progressRevision}`;
   }
 
   function progressUpdatedTime(progress) {
@@ -84,11 +92,13 @@ export function createPlaybackProgressService({
 
   function cachedHistoryEntries() {
     const library = getLibrary();
+    const userState = getUserState();
     const progress = userState.progress || {};
+    const revision = currentProgressRevision();
     if (
       historyCache?.library === library
       && historyCache.progress === progress
-      && historyCache.revision === progressRevision
+      && historyCache.revision === revision
     ) {
       return historyCache.entries;
     }
@@ -111,7 +121,7 @@ export function createPlaybackProgressService({
     }
 
     const entries = [...byWorkId.values()].sort((a, b) => b.updatedTime - a.updatedTime || String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-    historyCache = { entries, library, progress, revision: progressRevision };
+    historyCache = { entries, library, progress, revision };
     return entries;
   }
 
@@ -120,6 +130,7 @@ export function createPlaybackProgressService({
   }
 
   function saveVideoProgress(videoId, body = {}) {
+    const userState = getUserState();
     const library = getLibrary();
     const position = Number(body.position || 0);
     const duration = Number(body.duration || body.total || 0);
@@ -158,6 +169,7 @@ export function createPlaybackProgressService({
   }
 
   function userStateSummary() {
+    const userState = getUserState();
     const library = getLibrary();
     const favoriteCount = Object.keys(userState.favorites).filter((workId) => library.worksById.has(workId)).length;
     const allHistory = historyEntries();

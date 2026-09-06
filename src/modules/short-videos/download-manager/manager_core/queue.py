@@ -4,18 +4,37 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from .common import now_iso
 from .database import db
 
 
 _download_queue_changed = threading.Event()
+_download_queue_change_handler: Callable[[], None] | None = None
+_download_queue_change_handler_lock = threading.Lock()
+
+
+def set_download_queue_change_handler(handler: Callable[[], None] | None) -> None:
+    """Register the runtime hook that keeps the permanent watcher available."""
+    global _download_queue_change_handler
+    with _download_queue_change_handler_lock:
+        _download_queue_change_handler = handler
 
 
 def notify_download_queue_changed() -> None:
     """Wake the active watcher after a committed queue-producing change."""
     _download_queue_changed.set()
+    with _download_queue_change_handler_lock:
+        handler = _download_queue_change_handler
+    if handler is None:
+        return
+    try:
+        handler()
+    except Exception:
+        # Queue writers must still succeed if the best-effort runtime repair
+        # cannot start the watcher immediately.
+        return
 
 
 def clear_download_queue_changed() -> None:

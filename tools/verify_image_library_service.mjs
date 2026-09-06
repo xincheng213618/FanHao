@@ -18,6 +18,7 @@ photoSets[5].title = "[YITUYU艺图语]2023.04.19 只有作品_[22P／100MB]";
 let coverUrlCalls = 0;
 let cacheStatusCalls = 0;
 let mangaCount = 0;
+let mangaItems = [];
 let photoRootStatus = "ready";
 let imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets, mediaItems: [] };
 let tvMetadata = new Map();
@@ -34,7 +35,7 @@ const service = createImageLibraryService({
     return { root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 };
   },
   mangaService: {
-    cacheDirs: () => Array.from({ length: mangaCount }, (_, index) => `manga-${index}`),
+    cacheDirs: () => mangaItems.length ? mangaItems : Array.from({ length: mangaCount }, (_, index) => `manga-${index}`),
     publicSummary: (value) => value,
     rootStatus: () => ({ root: "", exists: false })
   },
@@ -77,6 +78,12 @@ const refreshedSummary = service.summaryPayload({ includeCache: false });
 assert.equal(refreshedSummary.totals.photoSets, 7, "a new index identity should rebuild static summary totals");
 assert.equal(refreshedSummary.scannedAt, "2026-07-12T00:00:00.000Z");
 assert.equal(cacheStatusCalls, 2, "cache-free refreshed summaries should still skip cache status work");
+mangaItems = [
+  { id: "manga-old", title: "旧漫画", updatedAt: "2026-08-28T10:00:00.000Z" },
+  { id: "manga-new", title: "新漫画", updatedAt: "2026-08-30T04:13:31+08:00" }
+];
+const mangaList = service.itemsPayload(url({ mode: "manga", limit: "20" }));
+assert.equal(mangaList.scannedAt, "2026-08-30T04:13:31+08:00", "manga lists must report the latest comic update instead of the unrelated image-library scan time");
 photoSets.pop();
 imageIndex = { ...imageIndex, photoSets };
 

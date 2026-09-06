@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { verifyAndroidNavigationRestoration } from "./fixtures/android-navigation-browser.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.FANHAO_BROWSER_TEST_PORT || 0);
@@ -22,18 +23,30 @@ let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
 const fixtureCollectionPageRequests = [];
 const fixtureFanhaoCollectionRequests = [];
+const fixturePersonDetailRequests = [];
 const authorCardSelector = ".short-video-author-index-card-main";
 
 try {
   await waitForHealth(baseUrl);
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
+    await verifyAndroidNavigationRestoration(browser, baseUrl, fixtureApi);
+    await verifyAndroidMangaAddLifecycle(browser);
+    await verifyAndroidMangaTaskNotices(browser);
+    await verifyAndroidMangaReadingProgress(browser);
     await verifyStandaloneStyles(browser);
     await verifyNovelLibraryIntent(browser);
     await verifyNovelCardAccessibility(browser);
     await verifyNovelRankingClampHistory(browser);
     await verifyNovelManageExitStopsPolling(browser);
     await verifyMobileGallery(browser);
+    await verifyAndroidStartupSurface(browser);
+    await verifyAndroidOfflineStartup(browser);
+    await verifyAndroidReconnectFlow(browser);
+    await verifyAndroidUpdateLifecycle(browser);
+    await verifyAndroidAppConfirmation(browser);
+    await verifyAndroidPersonFirstLibraries(browser);
+    await verifyAndroidPhotoCatalog(browser);
     await verifyAuthorIndexReturn(browser);
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
     await verifyAuthorReturnDiscardsDelayedError(browser);
@@ -169,6 +182,1332 @@ async function verifyNovelLibraryIntent(browser) {
 
   } finally {
     await page.close();
+  }
+}
+
+async function verifyAndroidAppConfirmation(browser) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  try {
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await page.locator("#appConfirmOverlay").waitFor({ state: "attached", timeout: 5000 });
+    await page.evaluate(() => {
+      const settings = document.querySelector("#settingsOverlay");
+      if (settings) settings.hidden = false;
+    });
+    await page.locator("#clearResponseCacheButton").click();
+    await page.locator("#appConfirmOverlay").waitFor({ state: "visible", timeout: 5000 });
+
+    const opened = await page.evaluate(() => {
+      const overlay = document.querySelector("#appConfirmOverlay");
+      const sheet = document.querySelector("#appConfirmSheet");
+      const mark = document.querySelector("#appConfirmMark");
+      const accept = document.querySelector("#appConfirmAcceptButton");
+      const siblings = [...(overlay?.parentElement?.children || [])].filter((element) => element !== overlay);
+      return {
+        tone: overlay?.dataset.tone,
+        role: sheet?.getAttribute("role"),
+        mark: mark?.textContent,
+        acceptPrimary: accept?.classList.contains("primary"),
+        acceptDanger: accept?.classList.contains("danger"),
+        bodyLocked: document.body.classList.contains("app-confirm-open"),
+        backgroundInert: siblings.length > 0 && siblings.every((element) => element.inert)
+      };
+    });
+    assert.deepEqual(opened, {
+      tone: "standard",
+      role: "dialog",
+      mark: "i",
+      acceptPrimary: true,
+      acceptDanger: false,
+      bodyLocked: true,
+      backgroundInert: true
+    });
+
+    await page.locator("#appConfirmCancelButton").focus();
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "appConfirmAcceptButton", "Shift+Tab must wrap to the last confirmation action");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "appConfirmCancelButton", "Tab must wrap to the first confirmation action");
+
+    await page.locator("#appConfirmCancelButton").click();
+    await page.locator("#appConfirmOverlay").waitFor({ state: "hidden", timeout: 5000 });
+    await page.waitForTimeout(80);
+    const closed = await page.evaluate(() => {
+      const overlay = document.querySelector("#appConfirmOverlay");
+      const siblings = [...(overlay?.parentElement?.children || [])].filter((element) => element !== overlay);
+      return {
+        bodyLocked: document.body.classList.contains("app-confirm-open"),
+        backgroundRestored: siblings.every((element) => !element.inert),
+        focusedId: document.activeElement?.dataset?.bottomKey || document.activeElement?.id || document.activeElement?.tagName || ""
+      };
+    });
+    assert.deepEqual(closed, { bodyLocked: false, backgroundRestored: true, focusedId: "clearResponseCacheButton" });
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidUpdateLifecycle(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const initialCode = 26083000;
+  let latestCode = initialCode;
+  let manifestFailure = false;
+  let lanManifestFailure = false;
+  let holdNextManifest = false;
+  let releaseManifest = null;
+  let markManifestPending = null;
+  const requests = [];
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const button = page.locator("#appUpdateButton");
+  const status = page.locator("#appUpdateStatus");
+  const waitButton = (label) => button.filter({ hasText: label }).waitFor({ state: "visible", timeout: 10000 });
+  const waitMessage = (message) => status.filter({ hasText: message }).waitFor({ state: "visible", timeout: 10000 });
+  const fixtureCounts = () => page.evaluate(() => ({ reads: window.updateFixture.reads, installs: window.updateFixture.calls.length }));
+  try {
+    await page.addInitScript((versionCode) => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+      localStorage.setItem("fanhao.android.lastView", JSON.stringify({ view: "tools", params: {} }));
+      const fixture = window.updateFixture = {
+        versionCode, permission: true, reads: 0, calls: [], result: { started: true },
+        failVersion: false, failInstall: false, earlyReturn: false, onReturn: () => {}
+      };
+      window.Capacitor = { Plugins: { FanHaoUpdater: {
+        async getInstalledVersion() {
+          fixture.reads += 1;
+          if (fixture.failVersion) throw new Error("fixture version read failure");
+          return { versionCode: fixture.versionCode, versionName: `0.1.${fixture.versionCode}-debug`, packageName: "local.fanhao.library", canRequestPackageInstalls: fixture.permission };
+        },
+        async addListener(name, listener) {
+          if (name === "updateFlowReturned") fixture.onReturn = listener;
+          return { remove() {} };
+        },
+        async downloadAndInstall(args) {
+          fixture.calls.push(args);
+          if (fixture.failInstall) throw new Error("fixture download failure");
+          if (fixture.earlyReturn) fixture.onReturn();
+          return fixture.result;
+        }
+      } } };
+    }, initialCode);
+    // Switching the content server must first pass its independent access probe.
+    // This reserved test host has no server; only this scenario's auth response is synthetic.
+    await page.route((url) => url.hostname === "updates-new.test" && url.pathname === "/api/auth/status", (route) => {
+      const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET, OPTIONS" };
+      return route.fulfill(route.request().method() === "OPTIONS"
+        ? { status: 204, headers }
+        : { status: 200, headers, contentType: "application/json", body: JSON.stringify({ required: false, authenticated: true, accountLoginRequired: false, reason: "trusted-network" }) });
+    });
+    await page.route((url) => url.pathname === "/api/android/update", async (route) => {
+      const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET, OPTIONS" };
+      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+      const url = new URL(route.request().url());
+      requests.push(url.href);
+      const payload = {
+        available: latestCode > Number(url.searchParams.get("currentVersionCode") || 0),
+        versionCode: latestCode, versionName: `0.1.${latestCode}-debug`, channel: "debug",
+        fileName: `fanhao-debug-${latestCode}.apk`, downloadUrl: `${url.origin}/api/android/update/apk/debug/fanhao-debug-${latestCode}.apk`,
+        size: 4096, sha256: "a".repeat(64)
+      };
+      const statusCode = manifestFailure || (lanManifestFailure && url.hostname === "192.168.31.86") ? 503 : 200;
+      if (holdNextManifest) {
+        holdNextManifest = false;
+        const pending = new Promise((resolve) => { releaseManifest = resolve; });
+        markManifestPending?.();
+        await pending;
+      }
+      await route.fulfill({ status: statusCode, headers, contentType: "application/json", body: JSON.stringify(statusCode === 200 ? payload : { error: "fixture manifest failure" }) });
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await page.locator(".tools-settings-section button").first().click();
+    await waitButton("检查更新");
+    assert.match(await status.textContent(), /已是最新/);
+    assert.deepEqual(await page.locator("#appUpdateSources strong").allTextContents(), ["192.168.31.86:29998", "xc213618.ddns.me:29998"], "settings must show the two configured update addresses, not the saved content-service address");
+    assert.deepEqual(requests.map((url) => new URL(url).origin), ["http://192.168.31.86:29998", "http://xc213618.ddns.me:29998"], "startup must check only the two default update sources in order");
+    assert.equal(await page.locator("#appUpdateSourceStatus").textContent(), "本次更新源：192.168.31.86:29998");
+    const initialCounts = await fixtureCounts();
+    latestCode += 1;
+    lanManifestFailure = true;
+    holdNextManifest = true;
+    const recheckPending = new Promise((resolve) => { markManifestPending = resolve; });
+    await button.click();
+    await recheckPending;
+    assert.equal(await button.isDisabled(), true, "an update check must disable duplicate taps");
+    await button.evaluate((node) => { node.click(); node.click(); });
+    assert.equal((await fixtureCounts()).reads, initialCounts.reads + 1, "one manual recheck must read the actual installed version only once");
+    releaseManifest();
+    await waitButton("立即更新");
+    assert.match(await page.locator("#appLatestVersion").textContent(), new RegExp(String(latestCode)), "manual recheck must discover a manifest published since startup without reloading the app");
+    assert.equal(await page.locator("#appUpdateSourceStatus").textContent(), "本次更新源：xc213618.ddns.me:29998", "a failed LAN source must fall back to DDNS and show the source actually used");
+    fs.mkdirSync(path.join(root, ".codex-artifacts"), { recursive: true });
+    await page.locator('[aria-labelledby="appUpdateTitle"]').screenshot({ path: path.join(root, ".codex-artifacts", "android-default-update-sources.png") });
+    lanManifestFailure = false;
+
+    await page.evaluate(() => { window.updateFixture.failInstall = true; });
+    await button.click();
+    await waitMessage("更新安装失败");
+    await waitButton("重试更新");
+    const download = await page.evaluate(() => window.updateFixture.calls.at(-1));
+    assert.equal(download.serviceBase, "http://xc213618.ddns.me:29998", "native downloads must bind to the successful fallback update source");
+    assert.equal(new URL(download.url).origin, download.serviceBase, "the APK and manifest must share their origin even when the content server is different");
+    assert.doesNotMatch(await status.textContent(), /检查失败/, "an installer/download failure must not be mislabeled as a check failure");
+    await page.evaluate(() => { window.updateFixture.failInstall = false; });
+    await button.click();
+    await waitButton("检查安装结果");
+    assert.equal(await button.isDisabled(), false, "returning without a lifecycle signal must still leave manual recovery available");
+    const beforeReturn = await fixtureCounts();
+    const requestsBeforeReturn = requests.length;
+    await page.evaluate(() => { window.updateFixture.onReturn(); window.updateFixture.onReturn(); });
+    await waitMessage("本次安装尚未完成");
+    await waitButton("立即更新");
+    assert.deepEqual(await fixtureCounts(), { reads: beforeReturn.reads + 1, installs: beforeReturn.installs }, "duplicate native return signals must reconcile once and never auto-reinstall");
+    assert.equal(requests.length, requestsBeforeReturn, "installer return must check the local package rather than wait on another manifest request");
+    await button.click();
+    await waitButton("检查安装结果");
+    await button.click();
+    await waitMessage("本次安装尚未完成");
+
+    await page.evaluate(() => { window.updateFixture.permission = false; window.updateFixture.result = { started: false, needsPermission: true }; });
+    await button.click();
+    await waitButton("继续更新");
+    await page.evaluate(() => window.updateFixture.onReturn());
+    await waitMessage("尚未允许安装更新");
+    const permissionCounts = await fixtureCounts();
+    await page.evaluate(() => { window.updateFixture.permission = true; window.updateFixture.onReturn(); });
+    await waitMessage("安装权限已就绪");
+    assert.equal((await fixtureCounts()).installs, permissionCounts.installs, "granting permission must not automatically start installation");
+
+    await page.evaluate(() => { window.updateFixture.result = { started: false }; });
+    await button.click();
+    await waitMessage("系统安装器未打开");
+    await page.evaluate(() => { window.updateFixture.result = { started: true }; window.updateFixture.earlyReturn = true; });
+    await button.click();
+    await waitMessage("本次安装尚未完成");
+    assert.equal(await button.textContent(), "立即更新", "a native return that precedes the bridge result must not be lost");
+
+    await page.evaluate(() => { window.updateFixture.earlyReturn = false; });
+    await button.click();
+    await waitButton("检查安装结果");
+    await page.evaluate(() => { window.updateFixture.failVersion = true; window.updateFixture.onReturn(); });
+    await waitMessage("安装状态读取失败");
+    const beforeVersionRetry = await fixtureCounts();
+    await page.evaluate((versionCode) => { window.updateFixture.failVersion = false; window.updateFixture.versionCode = versionCode; }, latestCode);
+    await button.click();
+    await waitMessage("更新已安装完成");
+    await waitButton("检查更新");
+    assert.equal((await fixtureCounts()).installs, beforeVersionRetry.installs, "retrying a package-state read must not download an already installed update");
+
+    manifestFailure = true;
+    await button.click();
+    await waitMessage("更新检查失败");
+    await waitButton("重新检查");
+    manifestFailure = false;
+    await button.click();
+    await waitButton("检查更新");
+
+    latestCode = initialCode + 20;
+    holdNextManifest = true;
+    const stalePending = new Promise((resolve) => { markManifestPending = resolve; });
+    await button.click();
+    await stalePending;
+    latestCode = initialCode + 3;
+    await page.locator("#serverUrl").fill("http://updates-new.test");
+    await page.locator("#connectForm button[type='submit']").click();
+    await waitButton("立即更新");
+    releaseManifest();
+    await page.waitForTimeout(100);
+    assert.match(await page.locator("#appLatestVersion").textContent(), new RegExp(String(latestCode)), "a late result from a previous update check must not overwrite the refreshed result");
+    assert(requests.every((url) => ["http://192.168.31.86:29998", "http://xc213618.ddns.me:29998"].includes(new URL(url).origin)), "changing the saved content server must not override either default update address");
+    assert.equal(await page.locator("#appUpdateSources li").count(), 2, "repeated checks must not duplicate the visible update-source list");
+    assert.deepEqual(errors, [], "the updater lifecycle must not raise unhandled page errors");
+  } finally {
+    releaseManifest?.();
+    await page.close();
+  }
+}
+
+async function verifyAndroidStartupSurface(browser) {
+  const cases = [
+    { saved: { view: "tools", params: {} }, view: "tools", bottom: "tools", label: "我的", message: "正在准备我的页面", theme: "light" },
+    { saved: { view: "channel", params: { mode: "manga" } }, view: "channel", bottom: "photo", label: "韩漫", message: "正在打开漫画书库", theme: "dark" },
+    { saved: { view: "channel", params: { mode: "photo", photoView: "collections" } }, view: "channel", bottom: "photo", label: "套图", message: "正在打开套图", theme: "light" },
+    { saved: { view: "channel", params: { mode: "manga" } }, hash: "#people?scope=western", view: "people", bottom: "fanhao", label: "欧美", message: "正在打开欧美人物", theme: "dark" },
+    { saved: null, view: "people", bottom: "fanhao", label: "番号", message: "正在打开番号人物", theme: "light" }
+  ];
+  for (const scenario of cases) {
+    const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let releaseScript;
+    let releaseCatalog;
+    let releaseLibrary;
+    const scriptGate = new Promise((resolve) => { releaseScript = resolve; });
+    const catalogGate = new Promise((resolve) => { releaseCatalog = resolve; });
+    const libraryGate = new Promise((resolve) => { releaseLibrary = resolve; });
+    let markCatalog;
+    let markLibrary;
+    const catalogRequested = new Promise((resolve) => { markCatalog = resolve; });
+    const libraryRequested = new Promise((resolve) => { markLibrary = resolve; });
+    try {
+      await page.addInitScript(({ saved, theme }) => {
+        localStorage.clear();
+        localStorage.setItem("fanhao.serverUrl", location.origin);
+        localStorage.setItem("fanhao.theme", theme);
+        localStorage.setItem("fanhao.android.readingMode.v1", "music");
+        if (saved) localStorage.setItem("fanhao.android.lastView", JSON.stringify(saved));
+      }, scenario);
+      await page.route((url) => url.pathname === "/android-client/app.js", async (route) => {
+        await scriptGate;
+        await route.continue();
+      });
+      await page.route((url) => url.pathname === "/api/modules", async (route) => {
+        markCatalog();
+        await catalogGate;
+        await route.continue();
+      });
+      await page.route((url) => url.pathname === "/api/library", async (route) => {
+        markLibrary();
+        await libraryGate;
+        await route.continue();
+      });
+      await page.goto(`${baseUrl}/android-client/index.html${scenario.hash || ""}`, { waitUntil: "commit" });
+      await page.locator("#appStartup").waitFor({ state: "visible", timeout: 5000 });
+      assert.equal(await page.locator(".app-shell").isVisible(), false, "static HTML must not expose the old homepage before the application script loads");
+      assert.equal(await page.locator(".bottom-nav").isVisible(), false, "the uninitialized default navigation must not be exposed to sighted or keyboard users");
+      releaseScript();
+      await Promise.race([catalogRequested, page.waitForTimeout(10000).then(() => { throw new Error("Android startup did not request its catalog"); })]);
+      assert.equal(await page.locator("#appStartupMessage").textContent(), scenario.message, "startup feedback must describe the restored route, with deep links taking precedence");
+      assert.equal(await page.locator("html").getAttribute("data-theme"), scenario.theme, "the startup surface must use the selected application theme");
+      await Promise.race([libraryRequested, page.waitForTimeout(10000).then(() => { throw new Error("Android startup did not request its library"); })]);
+      await page.locator("#appStartup").waitFor({ state: "hidden", timeout: 5000 });
+      assert.equal(await page.locator(".bottom-nav").isVisible(), true, "bundled navigation must be ready before either remote startup dependency resolves");
+      const currentNav = page.locator(".bottom-nav > button[aria-current='page']");
+      assert.equal(await currentNav.count(), 1, "exactly one navigation destination must be selected on the first revealed route");
+      assert.equal(await currentNav.getAttribute("data-bottom-key"), scenario.bottom);
+      assert.equal(await currentNav.locator(".bottom-nav-label").textContent(), scenario.label);
+      assert.equal(await page.locator(".bottom-nav [data-reading-switcher] .bottom-nav-label").textContent(), "音乐", "inactive navigation labels must also restore their saved selection before appearing");
+      assert.equal(await page.locator("#contentPanel").getAttribute("data-view"), scenario.view);
+      for (const selector of [".library-channel-strip", ".quick-strip", "#statusCard", "#omniSection"]) {
+        assert.equal(await page.locator(selector).isVisible(), false, `${selector} must stay hidden after the initial route is revealed`);
+      }
+      if (scenario.view === "people" && !scenario.hash) {
+        assert.equal(await page.locator(".route-loading").isVisible(), true, "uncached main people must show loading, not a false empty library");
+      }
+      if (scenario.view === "tools") {
+        await page.evaluate(() => { window.startupToolsNode = document.querySelector(".tools-profile-header"); });
+      }
+      releaseCatalog();
+      releaseLibrary();
+      await page.waitForFunction(() => document.querySelector("#statusText")?.textContent === "已连接");
+      if (scenario.view === "tools") {
+        assert.equal(await page.evaluate(() => window.startupToolsNode === document.querySelector(".tools-profile-header")), true, "successful background bootstrap must not replace the active local tools DOM");
+      }
+      assert.deepEqual(errors, [], `startup ${scenario.label} must not raise page errors`);
+    } finally {
+      releaseScript();
+      releaseCatalog();
+      releaseLibrary();
+      await page.close();
+    }
+  }
+
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  let failNavigationOnce = true;
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+    });
+    await page.route((url) => url.pathname === "/android-client/js/module-navigation.js", async (route) => {
+      if (!failNavigationOnce) return route.continue();
+      failNavigationOnce = false;
+      const response = await route.fetch();
+      const original = await response.text();
+      const patched = original.replace("export function renderAndroidModuleNavigation(container, modules) {", 'export function renderAndroidModuleNavigation(container, modules) { throw new Error("fixture startup failure");');
+      assert.notEqual(patched, original, "the failure fixture must exercise the real bootstrap error boundary");
+      await route.fulfill({ response, body: patched });
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await page.locator("#appStartupRetry").waitFor({ state: "visible", timeout: 10000 });
+    assert.match(await page.locator("#appStartupMessage").textContent(), /启动失败.*fixture startup failure/);
+    assert.equal(await page.locator(".app-startup-spinner").isVisible(), false, "a failed bootstrap must not keep showing an indefinite spinner");
+    assert.equal(await page.locator(".app-shell").isVisible(), false, "a failed bootstrap must not expose unusable navigation");
+    await page.locator("#appStartupRetry").click();
+    await page.locator(".fanhao-primary-nav").waitFor({ state: "visible", timeout: 10000 });
+    assert.equal(await page.locator("#appStartup").isVisible(), false, "retrying startup must recover without a permanent overlay");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidOfflineStartup(browser) {
+  for (const saved of [
+    { view: "tools", params: {} },
+    { view: "channel", params: { mode: "manga" } },
+    { view: "channel", params: { mode: "photo", photoView: "collections" } }
+  ]) {
+    const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.addInitScript((saved) => {
+        localStorage.clear();
+        localStorage.setItem("fanhao.serverUrl", location.origin);
+        localStorage.setItem("fanhao.android.lastView", JSON.stringify(saved));
+      }, saved);
+      await page.route((url) => url.pathname.startsWith("/api/"), (route) => route.fulfill({
+        status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture server unavailable" })
+      }));
+      await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+      await page.locator("#appStartup").waitFor({ state: "hidden", timeout: 5000 });
+      await page.waitForFunction(() => document.querySelector("#statusText")?.textContent.includes("连接失败"));
+      assert.equal(await page.locator("#contentPanel").getAttribute("data-view"), saved.view, "an unavailable uncached library must not redirect the restored route to the legacy home");
+      assert.equal(await page.locator("#settingsOverlay").isVisible(), false, "connection failure must not force a settings sheet over the user's route");
+      assert.equal(await page.locator(".bottom-nav").isVisible(), true);
+      await page.locator(".bottom-nav [data-module-id='tools']").click();
+      await page.locator(".tools-profile-header").waitFor({ state: "visible", timeout: 5000 });
+      await page.locator(".tools-settings-section button").first().click();
+      await page.locator("#settingsOverlay").waitFor({ state: "visible" });
+      await page.locator("[data-theme-choice='dark']").click();
+      assert.equal(await page.locator("html").getAttribute("data-theme"), "dark", "local settings must be usable while every API is unavailable");
+      await page.locator("#settingsCloseButton").click();
+      await page.locator("#settingsOverlay").waitFor({ state: "hidden" });
+      assert.deepEqual(errors, [], `offline ${saved.params.mode || saved.view} must not raise unhandled errors`);
+    } finally {
+      await page.close();
+    }
+  }
+
+  const retryPage = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  let libraryRequests = 0;
+  let offlineCacheMode = false;
+  let releaseRetry;
+  const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
+  try {
+    await retryPage.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+    });
+    await retryPage.route((url) => url.pathname === "/api/library" && !url.search, async (route) => {
+      libraryRequests += 1;
+      if (libraryRequests === 1 || offlineCacheMode) return route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"fixture library offline"}' });
+      await retryGate;
+      await route.continue();
+    });
+    await retryPage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const retry = retryPage.getByRole("button", { name: "重新连接", exact: true });
+    await retry.waitFor({ state: "visible", timeout: 5000 });
+    fs.mkdirSync(path.join(root, ".codex-artifacts"), { recursive: true });
+    await retryPage.screenshot({ path: path.join(root, ".codex-artifacts", "228-offline-startup-fixture.png") });
+    assert.equal(await retryPage.locator("#contentPanel").getAttribute("data-view"), "people");
+    await retry.evaluate((button) => { button.click(); button.click(); });
+    await retryPage.locator(".route-loading").waitFor({ state: "visible" });
+    await retryPage.waitForTimeout(80);
+    assert.equal(libraryRequests, 2, "repeated retry taps must share one library request");
+    releaseRetry();
+    await retryPage.locator(".people-grid .index-person-card").first().waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await retryPage.locator("#settingsOverlay").isVisible(), false);
+    await retryPage.waitForFunction(async () => {
+      const { readCachedJson } = await import("/android-client/js/cache.js");
+      return Boolean((await readCachedJson(location.origin, "/api/library"))?.payload?.people?.length);
+    });
+    offlineCacheMode = true;
+    await retryPage.reload({ waitUntil: "domcontentloaded" });
+    await retryPage.locator(".people-grid .index-person-card").first().waitFor({ state: "visible", timeout: 5000 });
+    await retryPage.waitForFunction(() => document.querySelector("#statusText")?.textContent.includes("继续显示本地缓存"));
+    assert.equal(await retryPage.locator("#settingsOverlay").isVisible(), false, "a cached offline cold start must keep the library and navigation usable");
+    assert.equal(await retryPage.locator(".library-connection-state").count(), 0, "available cached people must not be replaced with an uncached failure state");
+  } finally {
+    releaseRetry();
+    await retryPage.close();
+  }
+
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let releaseOld;
+  let markOld;
+  const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+  const oldRequested = new Promise((resolve) => { markOld = resolve; });
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+      localStorage.setItem("fanhao.android.lastView", JSON.stringify({ view: "tools", params: {} }));
+    });
+    await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/library" && !url.search && url.origin === baseUrl) {
+        markOld();
+        await oldGate;
+      }
+      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*" } });
+      const payload = await fixtureApi(url);
+      if (url.pathname === "/api/library" && url.origin !== baseUrl) {
+        payload.people[0].name = "新服务人物";
+        payload.people[0].actorProfile.displayName = "新服务人物";
+      }
+      await route.fulfill({ contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(payload) });
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await oldRequested;
+    await page.locator(".tools-profile-header").waitFor({ state: "visible", timeout: 5000 });
+    await page.evaluate(() => { window.startupToolsNode = document.querySelector(".tools-profile-header"); });
+    await page.locator(".tools-settings-section button").first().click();
+    const nextBase = baseUrl.replace("127.0.0.1", "localhost");
+    await page.locator("#serverUrl").fill(nextBase);
+    await page.locator("#connectForm").evaluate((form) => form.requestSubmit());
+    await page.waitForFunction(() => document.querySelector("#statusText")?.textContent === "已连接");
+    await page.locator("#settingsCloseButton").click();
+    await page.locator("#settingsOverlay").waitFor({ state: "hidden" });
+    await page.evaluate(() => { window.startupToolsNode = document.querySelector(".tools-profile-header"); });
+    releaseOld();
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => window.startupToolsNode === document.querySelector(".tools-profile-header")), true, "late background library completion must not rebuild an active local tool");
+    await page.locator(".bottom-nav [data-home-switcher]").click();
+    await page.locator(".people-grid").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await page.locator(".people-grid").textContent(), /新服务人物/, "late old-source library results must not overwrite the current service");
+    assert.doesNotMatch(await page.locator(".people-grid").textContent(), /测试女优/);
+    assert.deepEqual(errors, [], "source changes during background bootstrap must not raise unhandled errors");
+  } finally {
+    releaseOld();
+    await page.close();
+  }
+}
+
+async function verifyAndroidReconnectFlow(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let mode = "offline";
+  let libraryRequests = 0;
+  const libraryRequestOrigins = [];
+  let mangaRequests = 0;
+  let releaseLibrary;
+  let heldLibrary = null;
+  const comic = { id: "reconnect-comic", title: "重连后的漫画", site: "fixture", chapterCount: 1, doneChapterCount: 1, imageCount: 2, chapters: [] };
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+      localStorage.setItem("fanhao.android.lastView", JSON.stringify({ view: "channel", params: { mode: "manga" } }));
+    });
+    await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+      const url = new URL(route.request().url());
+      const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
+      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+      const libraryRequest = url.pathname === "/api/library";
+      const mangaRequest = url.pathname === "/api/image-library/items";
+      if (libraryRequest) {
+        libraryRequests += 1;
+        libraryRequestOrigins.push(url.origin);
+      }
+      if (mangaRequest) mangaRequests += 1;
+      if (mode === "offline" && (libraryRequest || mangaRequest)) {
+        return route.fulfill({ status: 503, headers, contentType: "application/json", body: '{"error":"fixture backend stopped"}' });
+      }
+      const payload = libraryRequest && mode === "malformed" ? { ok: true }
+        : mangaRequest ? { mode: "manga", items: [comic], total: 1 }
+        : url.pathname === "/api/manga/jobs" ? { jobs: [] }
+        : await fixtureApi(url);
+      if (libraryRequest && heldLibrary) await heldLibrary;
+      await route.fulfill({ headers, contentType: "application/json", body: JSON.stringify(payload) });
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await page.locator(".manga-connection-failure").waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector("#statusText")?.textContent.includes("连接失败"));
+    await page.evaluate(() => document.querySelector("#profileSettingsButton").click());
+    const connect = page.locator("#connectServerButton");
+    await connect.waitFor({ state: "visible" });
+    assert.deepEqual(await page.locator(".server-list [data-url]").evaluateAll((buttons) => buttons.map((button) => ({ url: button.dataset.url, label: button.textContent }))), [
+      { url: "http://192.168.31.86:29998", label: "192.168.31.86" },
+      { url: "http://xc213618.ddns.me:29998", label: "xc213618.ddns.me" }
+    ], "the content-service section must show exactly the requested LAN and DDNS presets, not the obsolete private addresses");
+    fs.mkdirSync(path.join(root, ".codex-artifacts"), { recursive: true });
+    await page.locator(".settings-connection-group").screenshot({ path: path.join(root, ".codex-artifacts", "android-content-server-defaults.png") });
+    const initialLibraryRequests = libraryRequests;
+    const initialMangaRequests = mangaRequests;
+    mode = "online";
+    heldLibrary = new Promise((resolve) => { releaseLibrary = resolve; });
+    await page.locator("#serverUrl").fill(new URL(baseUrl).host);
+    await page.locator("#connectForm").evaluate((form) => { form.requestSubmit(); form.requestSubmit(); });
+    await page.waitForFunction(() => document.querySelector("#connectServerButton")?.textContent === "连接中");
+    assert.equal(await connect.isDisabled(), true, "same-source connection must disable its duplicate action while in flight");
+    assert.equal(await page.locator("#connectForm").getAttribute("aria-busy"), "true");
+    await page.locator(".channel-card.manga").waitFor({ state: "attached", timeout: 5000 });
+    await page.waitForTimeout(80);
+    assert.equal(libraryRequests, initialLibraryRequests + 1, "submitting the unchanged address must actually reconnect exactly once");
+    assert.equal(mangaRequests, initialMangaRequests + 1, "same-address reconnect must refresh the failed independent manga route exactly once");
+    assert.equal(await page.locator("#serverUrl").inputValue(), baseUrl, "a scheme-less host:port must normalize and connect instead of being blocked by native URL validation");
+    await page.evaluate(() => { window.reconnectedMangaCard = document.querySelector(".channel-card.manga"); });
+    releaseLibrary();
+    heldLibrary = null;
+    await page.waitForFunction(() => !document.querySelector("#connectServerButton")?.disabled && document.querySelector("#statusText")?.textContent === "已连接");
+    assert.equal(await page.evaluate(() => window.reconnectedMangaCard === document.querySelector(".channel-card.manga")), true, "library completion must not replace the refreshed independent route again");
+    assert.equal(mangaRequests, initialMangaRequests + 1);
+
+    mode = "offline";
+    const quick = page.locator(".server-list [data-url]").first();
+    await quick.evaluate((button) => { button.dataset.url = location.origin; });
+    await quick.click();
+    await page.waitForFunction(() => !document.querySelector("#connectServerButton")?.disabled && document.querySelector("#statusText")?.textContent.includes("继续显示本地缓存"));
+    assert.equal(libraryRequests, initialLibraryRequests + 2, "selecting the current quick address must reconnect as well");
+    assert.equal(await page.locator(".channel-card.manga").count(), 1, "failed reconnect must preserve usable cached content");
+
+    await page.evaluate(async () => {
+      const { clearCachedResponses } = await import("/android-client/js/cache.js");
+      await clearCachedResponses(location.origin);
+    });
+    await quick.click();
+    await page.waitForFunction(() => !document.querySelector("#connectServerButton")?.disabled && document.querySelector("#statusText")?.textContent.includes("继续显示已加载内容"));
+    await page.locator("#settingsCloseButton").click();
+    await page.locator("#settingsOverlay").waitFor({ state: "hidden" });
+    await page.locator(".bottom-nav [data-home-switcher]").click();
+    await page.locator(".people-grid .index-person-card").first().waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await page.locator(".library-connection-state").count(), 0, "failed reconnect must not discard in-memory people when disk cache was cleared");
+    await page.evaluate(() => document.querySelector("#profileSettingsButton").click());
+    await connect.waitFor({ state: "visible" });
+
+    mode = "malformed";
+    await page.locator("#serverUrl").fill("http://wrong-service.local:29998");
+    await connect.click();
+    await page.waitForFunction(() => !document.querySelector("#connectServerButton")?.disabled && document.querySelector("#statusText")?.textContent.includes("未返回有效资料库"));
+    assert.equal(await page.locator("#statusText").getAttribute("class"), "status-text error");
+    const invalidCached = await page.evaluate(async () => {
+      const { readCachedJson } = await import("/android-client/js/cache.js");
+      return await readCachedJson("http://wrong-service.local:29998", "/api/library");
+    });
+    assert.equal(invalidCached, null, "an arbitrary 200 OK payload must not be cached or reported as a valid library");
+    const requestsBeforeInvalidInput = libraryRequests;
+    await page.locator("#serverUrl").fill("ftp://wrong-service.local:29998");
+    await connect.click();
+    assert.match(await page.locator("#statusText").textContent(), /地址格式不对/);
+    assert.equal(await page.evaluate(() => localStorage.getItem("fanhao.serverUrl")), "http://wrong-service.local:29998", "invalid input must leave the configured address untouched");
+    assert.equal(libraryRequests, requestsBeforeInvalidInput);
+    mode = "online";
+    const domainPreset = page.locator('.server-list [data-url="http://xc213618.ddns.me:29998"]');
+    await domainPreset.click();
+    await page.waitForFunction(() => !document.querySelector("#connectServerButton")?.disabled && document.querySelector("#statusText")?.textContent === "已连接");
+    assert.equal(await page.locator("#serverUrl").inputValue(), "http://xc213618.ddns.me:29998", "the domain preset must fill the content-service input");
+    assert.equal(await page.evaluate(() => localStorage.getItem("fanhao.serverUrl")), "http://xc213618.ddns.me:29998", "the domain preset must persist as the selected content service");
+    assert.equal(libraryRequestOrigins.at(-1), "http://xc213618.ddns.me:29998", "selecting the domain preset must send content requests to that domain");
+    assert.equal(await domainPreset.getAttribute("aria-pressed"), "true");
+    assert.deepEqual(errors, [], "reconnection flow must not produce unhandled errors");
+  } finally {
+    releaseLibrary?.();
+    await page.close();
+  }
+}
+
+async function verifyAndroidPersonFirstLibraries(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error?.message || String(error)));
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+    });
+    fixturePersonDetailRequests.length = 0;
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const primaryNav = page.locator(".fanhao-primary-nav");
+    await primaryNav.waitFor({ state: "visible", timeout: 10000 }).catch(() => {
+      assert.fail(`Android person-first fixture did not boot: ${pageErrors.join(" | ")}`);
+    });
+    assert.deepEqual(await primaryNav.locator("button").allTextContents(), ["人物", "番号", "排行"], "FanHao must expose only person, number, and ranking browsing modes");
+    assert.equal(await primaryNav.locator("button.active").textContent(), "人物", "FanHao must open on people instead of an undifferentiated work feed");
+    await page.locator(".index-person-card", { hasText: "测试女优" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await page.locator(".people-category-strip button", { hasText: "欧美" }).count(), 0, "the FanHao people page must not duplicate the independent western library");
+
+    await page.locator(".index-person-card", { hasText: "测试女优" }).click();
+    await page.locator(".person-detail-hero").waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await page.locator(".person-category-strip").count(), 0, "person details must not restore FanHao/western/FC2/anime partition chips");
+    assert.equal(new URL(fixturePersonDetailRequests.at(-1), baseUrl).searchParams.get("scope"), "main", "FanHao person details must retain the main scope");
+    await page.locator(".fanhao-detail-chrome-back").click();
+    await page.locator(".index-person-card", { hasText: "测试女优" }).waitFor({ state: "visible", timeout: 5000 });
+
+    await page.locator("button[data-home-switcher]").click();
+    await page.locator("button[data-home-switcher] .bottom-nav-label", { hasText: "欧美" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.deepEqual(await primaryNav.locator("button").allTextContents(), ["人物", "作品"], "western must expose person-first browsing with an optional work view");
+    assert.equal(await primaryNav.locator("button.active").textContent(), "人物", "western must open on people");
+    await page.locator(".index-person-card", { hasText: "Western Star" }).waitFor({ state: "visible", timeout: 5000 });
+    await page.locator(".index-person-card", { hasText: "Western Star" }).click();
+    await page.locator(".person-detail-hero").waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(new URL(fixturePersonDetailRequests.at(-1), baseUrl).searchParams.get("scope"), "western", "western person details must retain the western scope");
+    await page.locator(".fanhao-detail-chrome-back").click();
+    await page.locator(".index-person-card", { hasText: "Western Star" }).waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForFunction(() => !document.body.classList.contains("fanhao-person-detail-view"), null, { timeout: 5000 });
+
+    const readingSwitcher = page.locator("button[data-reading-switcher]");
+    await readingSwitcher.waitFor({ state: "visible", timeout: 5000 });
+    await readingSwitcher.click();
+    await readingSwitcher.locator(".bottom-nav-label", { hasText: "小说" }).waitFor({ state: "visible", timeout: 5000 });
+    await readingSwitcher.click();
+    await readingSwitcher.locator(".bottom-nav-label", { hasText: "音乐" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await readingSwitcher.getAttribute("aria-current"), "page", "music must keep the shared reading destination selected");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidPhotoCatalog(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const errors = [];
+  const requests = [];
+  let adminRequests = 0;
+  page.on("pageerror", (error) => errors.push(error.message));
+  const collections = [
+    { id: "many", title: "A 最多", albumCount: 214, size: 300, updatedAt: "2026-01-01" },
+    { id: "large", title: "B 最大", albumCount: 153, size: 400, updatedAt: "2026-02-01" },
+    { id: "new", title: "C 最近", albumCount: 92, size: 200, updatedAt: "2026-03-01" }
+  ].map((item, index) => ({ ...item, type: "photoCollection", collectionId: item.id, category: "我喜欢的", coverUrl: index < 2 ? `/photo-catalog-cover-${index}.svg` : "" }));
+  const lazyCollections = Array.from({ length: 12 }, (_, index) => ({
+    id: `lazy-${index}`, collectionId: `lazy-${index}`, type: "photoCollection", category: "新增分类",
+    title: `懒加载${index}`, albumCount: 20 - index, coverUrl: `/photo-catalog-cover-lazy-${index}.svg`
+  }));
+  let releaseCovers;
+  const coversReady = new Promise((resolve) => { releaseCovers = resolve; });
+  try {
+    await page.route("**/photo-catalog-cover-*.svg", async (route) => {
+      await coversReady;
+      const wide = route.request().url().includes("cover-0");
+      await route.fulfill({ contentType: "image/svg+xml", body: `<svg xmlns="http://www.w3.org/2000/svg" width="${wide ? 1200 : 300}" height="${wide ? 400 : 1600}"><rect width="100%" height="100%" fill="#527ba3"/></svg>` });
+    });
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+      localStorage.setItem("fanhao.android.lastView", JSON.stringify({ view: "channel", params: { mode: "photo", photoView: "collections", category: "我喜欢的" } }));
+    });
+    await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.startsWith("/api/admin/")) adminRequests += 1;
+      if (url.pathname === "/api/photo-sets/photo-issue") return route.fulfill({ json: { album: {
+        id: "photo-issue", title: "本合集第一期", category: "我喜欢的", imageCount: 0, images: []
+      } } });
+      if (url.pathname !== "/api/image-library/items") return route.fulfill({ json: await fixtureApi(url) });
+      requests.push(url);
+      const collection = url.searchParams.get("collection") || "";
+      const category = url.searchParams.get("category") || "all";
+      const selected = collections.find((item) => item.id === collection);
+      const items = collection
+        ? [{ id: "photo-issue", type: "photo", title: "本合集第一期", category, size: 10, coverUrl: "/photo-catalog-cover-0.svg" }]
+        : [{ id: "outer-directory", type: "photoCollectionCategory", title: "T:/ 我喜欢的", category, collections: category === "新增分类" ? lazyCollections : collections }];
+      await route.fulfill({ json: {
+        mode: "photo", photoView: collection ? "albums" : "collections", collection, category,
+        sort: url.searchParams.get("sort"), items, total: items.length,
+        collectionSummary: selected ? { ...selected, count: 1 } : null,
+        scannedAt: "2026-08-30T00:00:00Z", facets: { people: [], categories: [{ value: "新增分类", count: 12 }] }
+      } });
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const cards = page.locator(".photo-catalog-grid .channel-summary > strong");
+    await cards.first().waitFor({ state: "visible", timeout: 10000 });
+    assert.deepEqual(await cards.allTextContents(), ["A 最多", "B 最大", "C 最近"], "the category must show real collections ordered by issue count, not its outer directory");
+    assert.equal(requests[0].searchParams.get("sort"), "count", "restored legacy photo roots must adopt the Web default sort");
+    assert.equal(await page.locator(".photo-mode-row, .photo-index-manager, .photo-filter-wrap").count(), 0, "catalog browsing must not duplicate navigation, maintenance or an empty people filter");
+    assert.doesNotMatch(await page.locator("#viewMeta").textContent(), /索引|缓存|更新/);
+    assert.match(await page.locator("#viewMeta").textContent(), /3 \/ 3 合集/, "catalog totals must count child collections");
+    assert.equal(await page.locator(".photo-chrome-tabs [aria-current='page']").textContent(), "我喜欢的");
+    const chromeStyle = await page.locator(".photo-chrome-tabs .active").evaluate((button) => ({
+      size: getComputedStyle(button).fontSize,
+      underline: getComputedStyle(button, "::after").height,
+      fill: getComputedStyle(button).backgroundColor
+    }));
+    assert.deepEqual(chromeStyle, { size: "16px", underline: "3px", fill: "rgba(0, 0, 0, 0)" }, "photo tabs must share the FanHao text-and-underline style");
+    const geometry = await page.locator(".photo-feed-appbar").evaluate((bar) => {
+      const nav = bar.querySelector("nav").getBoundingClientRect();
+      const actions = bar.querySelector(".fanhao-feed-appbar-actions").getBoundingClientRect();
+      return { overlaps: nav.right > actions.left, overflows: bar.getBoundingClientRect().right > innerWidth };
+    });
+    assert.deepEqual(geometry, { overlaps: false, overflows: false }, "categories must not overlap fixed sort and search actions");
+    const coverGeometry = () => page.locator(".photo-collection-card").evaluateAll((cards) => cards.map((card) => {
+      const cover = card.firstElementChild.getBoundingClientRect();
+      const title = card.querySelector(".channel-summary").getBoundingClientRect();
+      return { width: cover.width, height: cover.height, titleTop: title.top };
+    }));
+    const beforeCovers = await coverGeometry();
+    releaseCovers();
+    await page.waitForFunction(() => document.querySelectorAll(".photo-collection-card img").length === 2);
+    const afterCovers = await coverGeometry();
+    assert.deepEqual(afterCovers, beforeCovers, "landscape and tall covers must not resize collection cards or move their titles after loading");
+    assert.ok(afterCovers.every(({ width, height }) => Math.abs(height - width * 4 / 3) < 1), "loaded and missing covers must share the same 3:4 frame");
+    assert.equal(afterCovers[0].titleTop, afterCovers[1].titleTop, "titles in the same collection row must align");
+    for (const [label, order] of [["最近更新", ["C 最近", "B 最大", "A 最多"]], ["容量最大", ["B 最大", "A 最多", "C 最近"]], ["名称排序", ["A 最多", "B 最大", "C 最近"]]]) {
+      await page.locator(".photo-sort-action").click();
+      await page.getByRole("dialog", { name: "套图排序" }).getByRole("button", { name: label, exact: true }).click();
+      await page.waitForFunction((expected) => JSON.stringify([...document.querySelectorAll(".photo-catalog-grid .channel-summary > strong")].map((node) => node.textContent)) === JSON.stringify(expected), order);
+      await page.waitForFunction(() => document.querySelectorAll(".photo-collection-card img").length === 2);
+      assert.ok((await coverGeometry()).every(({ width, height }) => Math.abs(height - width * 4 / 3) < 1), "cached covers must retain their frame after sorting");
+    }
+    await page.locator(".photo-collection-card").first().click();
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    await page.locator(".photo-masonry-list img").waitFor({ state: "visible" });
+    const albumCover = await page.locator(".photo-masonry-list img").boundingBox();
+    assert.ok(Math.abs(albumCover.height - albumCover.width / 3) < 1, "album masonry must retain its source aspect ratio instead of being cropped like collection covers");
+    assert.equal(requests.at(-1).searchParams.get("collection"), "many", "collection clicks must request the actual child id");
+    assert.equal(requests.at(-1).searchParams.get("category"), "我喜欢的", "opening a collection must preserve its category");
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true, "system Back must handle the first collection visit instead of sending Android to the desktop");
+    await cards.first().waitFor({ state: "visible" });
+    assert.match(await page.locator(".photo-sort-action").getAttribute("aria-label"), /名称排序/, "system Back must restore the parent catalog sort");
+    await page.locator(".photo-collection-card").first().click();
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "返回分类", exact: true }).click();
+    await cards.first().waitFor({ state: "visible" });
+    assert.equal(await page.locator(".photo-chrome-tabs [aria-current='page']").textContent(), "我喜欢的");
+    assert.match(await page.locator(".photo-sort-action").getAttribute("aria-label"), /名称排序/, "the explicit return button must restore the same parent as system Back");
+    await page.locator(".photo-collection-card").first().click();
+    await page.locator(".photo-masonry-list .channel-card").first().click();
+    await page.locator(".photo-detail-summary").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true, "returning from a detail must not trap Back in duplicate collection history entries");
+    await cards.first().waitFor({ state: "visible" });
+    assert.match(await page.locator(".photo-sort-action").getAttribute("aria-label"), /名称排序/);
+    await page.locator(".photo-chrome-tabs").getByRole("button", { name: "新增分类", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector(".photo-chrome-tabs [aria-current='page']")?.textContent === "新增分类");
+    await cards.filter({ hasText: "懒加载0" }).waitFor({ state: "visible" });
+    assert.equal(requests.at(-1).searchParams.get("category"), "新增分类", "server categories must remain reachable through the top navigation");
+    assert.equal(requests.at(-1).searchParams.get("collection"), null);
+    assert.equal(requests.at(-1).searchParams.get("sort"), "count");
+    const lazyCard = page.locator(".photo-collection-card").last();
+    assert.equal(await lazyCard.locator("img").count(), 0, "offscreen collection covers must remain lazy");
+    const placeholderFrame = await lazyCard.locator(".photo-collection-cover").boundingBox();
+    await lazyCard.scrollIntoViewIfNeeded();
+    await lazyCard.locator("img").waitFor({ state: "visible" });
+    const loadedFrame = await lazyCard.locator(".photo-collection-cover").boundingBox();
+    assert.deepEqual({ width: loadedFrame.width, height: loadedFrame.height }, { width: placeholderFrame.width, height: placeholderFrame.height }, "lazy-loaded covers must not change their frame dimensions");
+    const parentScrollY = await page.evaluate(() => window.scrollY);
+    await lazyCard.click({ position: { x: 20, y: 20 } });
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+    await cards.filter({ hasText: "懒加载11" }).waitFor({ state: "visible" });
+    await page.waitForFunction((y) => Math.abs(window.scrollY - y) < 3, parentScrollY, { timeout: 3000 });
+    await page.addInitScript(() => {
+      localStorage.setItem("fanhao.android.lastView", JSON.stringify({ view: "channel", params: { mode: "photo", photoView: "albums", collection: "many", category: "我喜欢的" } }));
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true, "restored collection routes without a memory stack must return to their category");
+    await cards.first().waitFor({ state: "visible" });
+    assert.equal(await page.locator(".photo-chrome-tabs [aria-current='page']").textContent(), "我喜欢的");
+    await page.locator(".photo-collection-card").first().click();
+    await page.locator(".photo-masonry-list").waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true, "a second collection visit must behave exactly like the first");
+    await cards.first().waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), false, "only the actual photo catalog root may hand Back to Android");
+    assert.equal(adminRequests, 0, "photo browsing must not poll index maintenance");
+    assert.deepEqual(errors, [], "photo catalog flow must not produce browser errors");
+  } finally {
+    releaseCovers();
+    await page.close();
+  }
+}
+
+async function verifyAndroidMangaReadingProgress(browser) {
+  const mangaId = "reading-progress-fixture";
+  const progressKey = "fanhao.android.mangaReadingProgress.v1";
+  const resumeKey = "fanhao.android.mangaResumeRequest.v1";
+  const chapterPath = `/api/manga/${mangaId}/chapters/1`;
+  const comic = { id: mangaId, title: "阅读进度测试", chapters: [{ index: 1, title: "第一话", imageCount: 36, downloadedCount: 36 }] };
+  const chapter = {
+    index: 1, title: "第一话", imageCount: 36, navigation: { position: 1, total: 1 },
+    images: Array.from({ length: 36 }, (_, index) => ({ index: index + 1, url: `/manga-reading-fixture/${index + 1}.svg` }))
+  };
+  for (const scenario of ["first-page", "quick-return", "pagehide", "visibility-hidden", "deactivate", "abort", "append-more", "real-scroll", "resume-after-error", "resume-late-images", "resume-refreshed-cache", "resume-move-before-refresh", "inline-resume"]) {
+    const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+    const errors = [];
+    let chapterRequests = 0;
+    page.on("pageerror", (error) => errors.push(error.message));
+    let releaseImages;
+    let releaseFresh;
+    const imageGate = new Promise((resolve) => { releaseImages = resolve; });
+    const freshGate = new Promise((resolve) => { releaseFresh = resolve; });
+    const lateImages = scenario === "resume-late-images";
+    const refreshedCache = ["resume-refreshed-cache", "resume-move-before-refresh"].includes(scenario);
+    try {
+      await page.route("**/manga-reading-fixture/*.svg", async (route) => {
+        if (lateImages) await imageGate;
+        await route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="1000"><rect width="400" height="1000" fill="#526782"/></svg>' });
+      });
+      await page.route((url) => url.pathname.startsWith("/api/manga/"), async (route) => {
+        if (new URL(route.request().url()).pathname === chapterPath) {
+          chapterRequests += 1;
+          if (scenario === "resume-after-error" && chapterRequests === 1) return route.fulfill({ status: 503, json: { error: "电脑端暂时未连接" } });
+          if (refreshedCache) await freshGate;
+          await route.fulfill({ json: { comic, chapter: { ...chapter, title: refreshedCache ? "第一话（已更新）" : chapter.title } } });
+        } else await route.fulfill({ json: { comic } });
+      });
+      await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+      await page.addStyleTag({ url: `${baseUrl}/android-client/styles.css` });
+      await page.evaluate(async ({ mangaId, chapterPath, comic, chapter, progressKey, resumeKey, scenario }) => {
+        const { createChannelViews } = await import("/android-client/platform/content-index/channel-views.js?manga-reading-fixture=1");
+        const { writeCachedJson } = await import("/android-client/js/cache.js");
+        const observers = [];
+        if (scenario !== "real-scroll") window.IntersectionObserver = class {
+          constructor(callback) { this.callback = callback; this.targets = new Set(); observers.push(this); }
+          observe(target) { this.targets.add(target); }
+          unobserve(target) { this.targets.delete(target); }
+          disconnect() { this.targets.clear(); }
+        };
+        window.emitReadingPage = (position) => {
+          for (const observer of observers) {
+            const targets = [...observer.targets].filter((target) => target.matches(".manga-reader-page"));
+            if (targets.length) observer.callback(targets.map((target) => ({ target, isIntersecting: Number(target.dataset.mangaPagePosition) === position, intersectionRatio: Number(target.dataset.mangaPagePosition) === position ? 1 : 0 })));
+          }
+        };
+        const viewContent = document.getElementById("fixture");
+        const viewMeta = document.createElement("div");
+        viewMeta.id = "reading-fixture-meta";
+        document.body.prepend(viewMeta);
+        let limit = 12;
+        let views;
+        const controller = new AbortController();
+        window.readingFixtureController = controller;
+        const isActive = () => !controller.signal.aborted;
+        isActive.signal = controller.signal;
+        window.renderReadingChapter = () => views.renderMangaChapter(mangaId, 1, isActive);
+        views = createChannelViews({
+          els: { viewContent, viewMeta, viewKicker: document.createElement("div"), viewTitle: document.createElement("div") },
+          getActiveUrl: () => location.origin, getChannelLimit: () => 48, increaseChannelLimit() {},
+          getMangaImageLimit: () => limit, increaseMangaImageLimit: (amount) => { limit += amount; },
+          openInLibrary() {}, setActiveBottom() {},
+          showMangaCatalog: () => views.renderMangaDetail(mangaId),
+          renderCurrentView: () => window.renderReadingChapter(),
+          renderCurrentViewPreservingScroll: () => window.renderReadingChapter()
+        });
+        window.readingFixtureViews = views;
+        if (scenario.startsWith("resume-") || scenario === "inline-resume") {
+          localStorage.setItem(progressKey, JSON.stringify({ [mangaId]: { chapterIndex: 1, pageIndex: 25, pageTotal: 36 } }));
+          if (scenario !== "inline-resume") sessionStorage.setItem(resumeKey, JSON.stringify({ mangaId, chapterIndex: 1, pageIndex: 25 }));
+        }
+        if (["resume-refreshed-cache", "resume-move-before-refresh"].includes(scenario)) await writeCachedJson(location.origin, chapterPath, { comic, chapter });
+        void window.renderReadingChapter();
+      }, { mangaId, chapterPath, comic, chapter, progressKey, resumeKey, scenario });
+      if (scenario === "resume-after-error") await page.getByRole("button", { name: "重新读取", exact: true }).click();
+      await page.locator(".manga-reader-list").waitFor({ state: "visible" });
+      const saved = () => page.evaluate(({ progressKey, mangaId }) => JSON.parse(localStorage.getItem(progressKey) || "{}")[mangaId], { progressKey, mangaId });
+      if (scenario === "first-page") {
+        await page.evaluate(() => window.emitReadingPage(1));
+        await page.waitForFunction(({ progressKey, mangaId }) => JSON.parse(localStorage.getItem(progressKey) || "{}")[mangaId]?.pageIndex === 1, { progressKey, mangaId }, { timeout: 1500 });
+      } else if (["quick-return", "pagehide", "visibility-hidden", "deactivate", "abort"].includes(scenario)) {
+        await page.evaluate((scenario) => {
+          window.emitReadingPage(3);
+          if (scenario === "quick-return") document.querySelector(".manga-chapter-position").click();
+          if (scenario === "pagehide") window.dispatchEvent(new Event("pagehide"));
+          if (scenario === "deactivate") window.readingFixtureViews.deactivate();
+          if (scenario === "abort") window.readingFixtureController.abort();
+          if (scenario === "visibility-hidden") {
+            Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+            document.dispatchEvent(new Event("visibilitychange"));
+          }
+        }, scenario);
+        assert.equal((await saved())?.pageIndex, 3, `${scenario} must flush the pending reading position before the debounce fires`);
+        if (scenario === "quick-return") {
+          await page.locator(".manga-continue").waitFor({ state: "visible" });
+          assert.match(await page.locator(".manga-continue").textContent(), /第 3 张/);
+        }
+      } else if (scenario === "real-scroll") {
+        await page.locator('[data-manga-page-position="3"]').evaluate((target) => target.scrollIntoView({ block: "start", behavior: "instant" }));
+        await page.waitForFunction(() => [...document.querySelectorAll(".manga-reader-page img")].slice(0, 3).every((img) => img.complete && img.naturalHeight === 1000));
+        await page.locator('[data-manga-page-position="3"]').evaluate((target) => target.scrollIntoView({ block: "start", behavior: "instant" }));
+        await page.waitForFunction(() => document.querySelector('[aria-label="本话阅读进度"]')?.getAttribute("aria-valuenow") === "3");
+        await page.evaluate((mangaId) => window.readingFixtureViews.renderMangaDetail(mangaId), mangaId);
+        assert.equal((await saved())?.pageIndex, 3, "real viewport observation must save the visible page on catalog return");
+      } else if (scenario === "append-more") {
+        const beforeRequests = chapterRequests;
+        const originalCount = await page.locator(".manga-reader-page").count();
+        await page.evaluate(() => {
+          window.originalReadingPage = document.querySelector(".manga-reader-page");
+          window.emitReadingPage(3);
+          document.querySelector(".auto-load-trigger button, button.auto-load-trigger").click();
+        });
+        await page.waitForFunction((count) => document.querySelectorAll(".manga-reader-page").length > count, originalCount);
+        assert.equal(await page.evaluate(() => document.querySelector(".manga-reader-page") === window.originalReadingPage), true, "showing more manga pages must append without rebuilding the chapter");
+        assert.equal(chapterRequests, beforeRequests, "showing more manga pages must not refetch the chapter");
+        await page.evaluate(() => {
+          window.emitReadingPage(18);
+          window.dispatchEvent(new Event("pagehide"));
+        });
+        assert.equal((await saved())?.pageIndex, 18, "appended manga pages must participate in reading progress tracking");
+      } else {
+        if (scenario === "inline-resume") await page.getByRole("button", { name: "回到第 25 张", exact: true }).click();
+        const target = page.locator('[data-manga-page-position="25"]');
+        await target.waitFor({ state: "attached", timeout: 2000 });
+        await page.waitForFunction(() => Math.abs(document.querySelector('[data-manga-page-position="25"]').getBoundingClientRect().top - 60) < 3, null, { timeout: 3000 });
+        releaseImages();
+        if (lateImages) await page.waitForFunction(() => [...document.querySelectorAll(".manga-reader-page img")].slice(0, 2).every((img) => img.complete && img.naturalHeight === 1000));
+        const expectedPage = scenario === "resume-move-before-refresh" ? 24 : 25;
+        if (expectedPage === 24) await page.evaluate(() => {
+          window.dispatchEvent(new WheelEvent("wheel", { deltaY: -500 }));
+          const previous = document.querySelector('[data-manga-page-position="24"]');
+          window.scrollBy(0, previous.getBoundingClientRect().top - 60);
+          window.emitReadingPage(24);
+        });
+        releaseFresh();
+        if (refreshedCache) await page.waitForFunction(() => document.querySelector(".manga-reader-page img")?.alt.includes("已更新"));
+        await page.waitForFunction((position) => Math.abs(document.querySelector(`[data-manga-page-position="${position}"]`).getBoundingClientRect().top - 60) < 3, expectedPage, { timeout: 3000 });
+        if (lateImages) {
+          await page.evaluate(() => {
+            window.dispatchEvent(new WheelEvent("wheel", { deltaY: 500 }));
+            window.scrollBy(0, 500);
+            document.querySelector(".manga-reader-page").style.minHeight = "1600px";
+          });
+          await page.waitForTimeout(100);
+          assert.ok(Math.abs((await target.boundingBox()).y - 60) > 200, "late image changes must not pull the reader back after user scrolling");
+        }
+        await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+        assert.equal((await saved())?.pageIndex, expectedPage, `${scenario} must retain the latest reading position`);
+      }
+      assert.deepEqual(errors, [], `${scenario} must not produce browser errors`);
+    } finally {
+      releaseImages();
+      releaseFresh();
+      await page.close();
+    }
+  }
+}
+
+async function verifyAndroidMangaAddLifecycle(browser) {
+  const comic = { id: "manga-add-fixture", title: "新增流程测试", chapters: [], chapterCount: 1, imageCount: 3 };
+  const chapter = { index: 1, title: "测试章节", navigation: { position: 1, total: 1 }, images: [1, 2, 3].map((index) => ({ index, url: "/fixture-cover.svg" })) };
+  for (const scenario of ["complete", "immediate", "reader-start", "reader-poll", "reader-error", "collapse", "failed", "superseded", "catalog-ready"]) {
+    const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let job = null;
+    let postRequests = 0;
+    let chapterRequests = 0;
+    let libraryRequests = 0;
+    let pollFails = false;
+    let releaseStart;
+    const startGate = new Promise((resolve) => { releaseStart = resolve; });
+    let releaseOldPoll;
+    let oldPollHeld = false;
+    let markOldPoll;
+    const oldPollGate = new Promise((resolve) => { releaseOldPoll = resolve; });
+    const oldPollPending = new Promise((resolve) => { markOldPoll = resolve; });
+    try {
+      await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/api/manga/add") {
+          postRequests += 1;
+          job = { id: postRequests === 1 ? "add-fixture-job" : "add-fixture-job-2", comicId: comic.id, comicAvailable: scenario !== "catalog-ready", title: postRequests === 1 ? comic.title : "下一任务测试", kind: "add", status: scenario === "immediate" ? "complete" : "running", startedAt: postRequests === 1 ? "2026-08-30T06:00:00Z" : "2026-08-30T06:02:00Z", totalChapters: 1, completedChapters: 0, progressPercent: 5 };
+          const body = JSON.stringify({ job });
+          if (scenario === "reader-start") await startGate;
+          return route.fulfill({ contentType: "application/json", body });
+        }
+        if (url.pathname === "/api/manga/jobs") return route.fulfill({ json: { jobs: job ? [job] : [] } });
+        if (url.pathname.startsWith("/api/manga/jobs/")) {
+          if (scenario === "superseded" && url.pathname === "/api/manga/jobs/add-fixture-job" && !oldPollHeld) {
+            oldPollHeld = true;
+            const body = JSON.stringify({ job: { ...job, status: "failed", message: "旧任务迟到错误" } });
+            markOldPoll();
+            await oldPollGate;
+            return route.fulfill({ contentType: "application/json", body });
+          }
+          return route.fulfill(pollFails ? { status: 503, json: { error: "测试轮询断线" } } : { json: { job } });
+        }
+        if (url.pathname.endsWith("/chapters/1")) {
+          chapterRequests += 1;
+          return route.fulfill({ json: { comic, chapter } });
+        }
+        if (url.pathname === "/api/image-library/items") {
+          libraryRequests += 1;
+          const items = scenario === "catalog-ready" && !job?.comicAvailable ? [] : [comic];
+          return route.fulfill({ json: { mode: "manga", items, total: items.length } });
+        }
+        return route.fulfill({ json: { comic, update: job } });
+      });
+      await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+      await page.evaluate(async (comicId) => {
+        const { createChannelViews } = await import("/android-client/platform/content-index/channel-views.js?manga-add-fixture=1");
+        const viewContent = document.getElementById("fixture");
+        let mode = "library";
+        let views;
+        window.renderMangaAddFixture = (nextMode = mode) => {
+          mode = nextMode;
+          return mode === "reader" ? views.renderMangaChapter(comicId, 1) : views.renderChannel({ mode: "manga" });
+        };
+        views = createChannelViews({
+          els: { viewContent, viewKicker: document.createElement("div"), viewTitle: document.createElement("div"), viewMeta: document.createElement("div") },
+          getActiveUrl: () => location.origin, getChannelLimit: () => 48, increaseChannelLimit() {},
+          openInLibrary() {}, setActiveBottom() {},
+          renderCurrentView: () => window.renderMangaAddFixture(), renderCurrentViewPreservingScroll: () => window.renderMangaAddFixture()
+        });
+        await window.renderMangaAddFixture();
+      }, comic.id);
+      await page.getByRole("button", { name: "添加漫画", exact: true }).click();
+      await page.locator(".manga-add-form input").fill("https://example.com/book/add-fixture");
+      const started = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/manga/add");
+      await page.getByRole("button", { name: "开始采集", exact: true }).click();
+      await started;
+      if (scenario.startsWith("reader-")) {
+        if (scenario !== "reader-start") await page.locator(".manga-task-card.is-running").waitFor({ state: "visible" });
+        await page.evaluate(async () => {
+          await window.renderMangaAddFixture("reader");
+          window.addFixtureReader = document.querySelector(".manga-reader-list");
+        });
+        const originalRequests = chapterRequests;
+        if (scenario === "reader-start") {
+          const startResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/manga/add");
+          releaseStart();
+          await startResponse;
+        } else {
+          const polled = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/manga/jobs/add-fixture-job");
+          if (scenario === "reader-error") pollFails = true;
+          else job = { ...job, status: "complete", finishedAt: "2026-08-30T06:01:00Z", completedChapters: 1, progressPercent: 100 };
+          await polled;
+        }
+        await page.waitForTimeout(200);
+        assert.equal(await page.evaluate(() => window.addFixtureReader === document.querySelector(".manga-reader-list")), true, `${scenario}: background collection work must not rebuild the current reader`);
+        assert.equal(chapterRequests, originalRequests, `${scenario}: task responses must not refetch the chapter being read`);
+      } else {
+        if (scenario !== "immediate") {
+          await page.locator(".manga-task-card.is-running").waitFor({ state: "visible" });
+          if (scenario === "catalog-ready") {
+            assert.equal(await page.locator(".channel-card.manga").count(), 0);
+            job = { ...job, comicAvailable: true };
+            await page.locator(".channel-card.manga").waitFor({ state: "visible" });
+            assert.equal(await page.locator(".manga-task-card.is-running").getByRole("button", { name: "书页", exact: true }).isVisible(), true, "the book and catalog entry must become available before collection finishes");
+            const requestsBeforeProgress = libraryRequests;
+            const progressPoll = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/manga/jobs/add-fixture-job");
+            job = { ...job, progressPercent: 40, completedImages: 2 };
+            await progressPoll;
+            await page.waitForTimeout(100);
+            assert.equal(libraryRequests, requestsBeforeProgress, "ordinary image progress must not refetch the whole library");
+          }
+          if (scenario === "collapse") {
+            await page.getByRole("button", { name: "收起", exact: true }).click();
+            assert.equal(await page.locator(".manga-add-form").count(), 0, "an active add form can be collapsed without cancelling its task");
+            assert.equal(await page.locator(".manga-task-card.is-running").isVisible(), true);
+          }
+          if (scenario === "failed") {
+            job = { ...job, status: "failed", message: "测试采集失败", finishedAt: "2026-08-30T06:01:00Z" };
+            await page.locator(".manga-library-actions .manga-operation-error").waitFor({ state: "visible" });
+            assert.equal(await page.locator(".manga-add-form input").inputValue(), "https://example.com/book/add-fixture", "failure must retain the URL for correction or retry");
+            await page.getByRole("button", { name: "重新采集", exact: true }).click();
+            await page.locator('[data-manga-task-id="add-fixture-job-2"].is-running').waitFor({ state: "visible" });
+          }
+          if (scenario === "superseded") {
+            await Promise.race([oldPollPending, new Promise((_, reject) => setTimeout(() => reject(new Error("old add poll did not start")), 5000))]);
+            job = { ...job, status: "complete", finishedAt: "2026-08-30T06:01:00Z", completedChapters: 1, progressPercent: 100 };
+            await page.locator(".manga-task-history-toggle").click();
+            await page.locator(".manga-task-card.is-complete").waitFor({ state: "visible" });
+            await page.getByRole("button", { name: "添加漫画", exact: true }).click();
+            await page.locator(".manga-add-form input").fill("https://example.com/book/next-task");
+            await page.getByRole("button", { name: "开始采集", exact: true }).click();
+            await page.locator('[data-manga-task-id="add-fixture-job-2"].is-running').waitFor({ state: "visible" });
+            const oldResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/manga/jobs/add-fixture-job");
+            releaseOldPoll();
+            await oldResponse;
+            await page.waitForTimeout(100);
+            assert.equal(await page.locator('[data-manga-task-id="add-fixture-job-2"].is-running').isVisible(), true, "a late response from the preceding task must not replace the new running task");
+            assert.doesNotMatch(await page.locator(".manga-library-actions").textContent(), /旧任务迟到错误/);
+          }
+          job = { ...job, status: "complete", finishedAt: postRequests > 1 ? "2026-08-30T06:03:00Z" : "2026-08-30T06:01:00Z", completedChapters: 1, progressPercent: 100 };
+        }
+        await page.locator("[data-manga-completion-notice]").waitFor({ state: "visible", timeout: 5000 });
+        if (["superseded", "failed"].includes(scenario)) {
+          await page.locator("[data-manga-completion-notice]", { hasText: "下一任务测试" }).waitFor({ state: "visible", timeout: 5000 });
+        }
+        assert.equal(await page.locator(".manga-add-form").count(), 0, "successful collection must close the add form rather than leaving its completed URL and button on screen");
+        if (await page.locator(".manga-task-history-toggle").getAttribute("aria-expanded") === "true") await page.locator(".manga-task-history-toggle").click();
+        await page.getByRole("button", { name: "添加漫画", exact: true }).click();
+        assert.equal(await page.locator(".manga-add-form input").inputValue(), "", "the next add starts with a clean input");
+        await page.locator(".manga-add-form input").fill("https://example.com/book/next-draft");
+        await page.evaluate(() => { window.nextAddDraftInput = document.querySelector(".manga-add-form input"); });
+        await page.locator(".manga-task-history-toggle").click();
+        await page.locator(".manga-task-card.is-complete").waitFor({ state: "visible" });
+        assert.equal(await page.locator(".manga-add-form input").inputValue(), "https://example.com/book/next-draft", "refreshing completed history must not close or clear a new draft");
+        assert.equal(await page.evaluate(() => window.nextAddDraftInput === document.querySelector(".manga-add-form input")), true, "unchanged task history must not replace the draft input node");
+      }
+      assert.equal(postRequests, ["failed", "superseded"].includes(scenario) ? 2 : 1);
+      assert.deepEqual(errors, [], `${scenario} add lifecycle must not produce browser errors`);
+    } finally {
+      releaseStart();
+      releaseOldPoll();
+      await page.close();
+    }
+  }
+}
+
+async function verifyAndroidMangaTaskNotices(browser) {
+  const comic = {
+    id: "manga-notice-fixture", title: "任务提示测试", site: "fixture", sourceUrl: "https://example.com/book/1",
+    chapters: [], chapterCount: 1, doneChapterCount: 1, imageCount: 1, downloadedCount: 1, failedCount: 0
+  };
+  const oldJob = { id: "notice-old", comicId: comic.id, title: comic.title, kind: "add", status: "complete", startedAt: "2026-08-29T00:00:00Z", finishedAt: "2026-08-29T00:01:00Z" };
+  for (const initialView of ["library", "switch", "detail", "restored", "idle", "empty", "offline", "failed", "manual-refresh"]) {
+    comic.imageCount = 1;
+    const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    let job = {
+      id: `notice-${initialView}`, comicId: comic.id, title: comic.title, kind: "update", status: "running",
+      startedAt: "2026-08-30T00:00:00Z", totalChapters: null, cachedChapters: null, completedChapters: 0, progressPercent: 3
+    };
+    if (["restored", "idle", "empty", "offline", "manual-refresh"].includes(initialView)) job = { ...job, status: "complete", finishedAt: "2026-08-30T00:01:00Z", completedChapters: 1 };
+    if (initialView === "failed") job = { ...job, status: "failed", finishedAt: "2026-08-30T00:01:00Z", message: "测试任务下载失败" };
+    let jobsUnavailable = false;
+    let retryRequests = 0;
+    let holdNextList = false;
+    let markListPending;
+    let releaseList;
+    const listPending = new Promise((resolve) => { markListPending = resolve; });
+    try {
+      await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/api/manga/jobs" && jobsUnavailable) return route.fulfill({ status: 503, json: { error: "测试连接中断" } });
+        if (url.pathname.endsWith("/retry")) {
+          retryRequests += 1;
+          job = { ...job, id: `${job.id}-retry`, status: "running", finishedAt: "", startedAt: "2026-08-30T00:02:00Z", message: "正在重试" };
+          return route.fulfill({ json: { job } });
+        }
+        const payload = url.pathname === "/api/image-library/items"
+          ? { mode: "manga", items: [comic], total: 1 }
+          : url.pathname === "/api/manga/jobs"
+            ? { jobs: initialView === "empty" ? [] : [job, oldJob] }
+            : url.pathname.endsWith("/update") ? { job } : { comic, update: job };
+        const body = JSON.stringify(payload);
+        if (holdNextList && url.pathname === "/api/manga/jobs") {
+          holdNextList = false;
+          const gate = new Promise((resolve) => { releaseList = resolve; });
+          markListPending();
+          await gate;
+        }
+        await route.fulfill({ status: 200, contentType: "application/json", body });
+      });
+      await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+      await page.addStyleTag({ url: `${baseUrl}/android-client/styles.css` });
+      await page.evaluate(async ({ initialView, comicId }) => {
+        const { createChannelViews } = await import("/android-client/platform/content-index/channel-views.js?manga-notice-fixture=1");
+        const viewContent = document.getElementById("fixture");
+        let currentView = initialView;
+        let views;
+        window.renderMangaNoticeFixture = async (view = currentView) => {
+          currentView = view;
+          if (view === "detail") await views.renderMangaDetail(comicId);
+          else await views.renderChannel({ mode: "manga" });
+        };
+        views = createChannelViews({
+          els: { viewContent, viewKicker: document.createElement("div"), viewTitle: document.createElement("div"), viewMeta: document.createElement("div") },
+          getActiveUrl: () => location.origin,
+          getChannelLimit: () => 48,
+          increaseChannelLimit() {},
+          openInLibrary() {},
+          setActiveBottom() {},
+          showMangaDetail: () => window.renderMangaNoticeFixture("detail"),
+          renderCurrentView: () => window.renderMangaNoticeFixture(),
+          renderCurrentViewPreservingScroll: () => window.renderMangaNoticeFixture()
+        });
+        await window.renderMangaNoticeFixture();
+      }, { initialView: initialView === "restored" ? "detail" : initialView === "switch" ? "library" : initialView, comicId: comic.id });
+      if (["idle", "empty", "offline", "manual-refresh"].includes(initialView)) {
+        const manager = page.locator("[data-manga-task-manager]");
+        const history = page.locator(".manga-task-history-toggle");
+        await history.click();
+        if (initialView === "empty") await page.getByText("暂无下载与更新记录", { exact: true }).waitFor({ state: "visible" });
+        else await page.locator(".manga-task-card.is-complete").waitFor({ state: "visible" });
+        await history.click();
+        assert.equal(await manager.isVisible(), false, "opening an idle library must not leave an empty task panel even when history exists");
+        assert.equal(await page.locator("[data-manga-completion-notice]").count(), 0, "history must not replay old completion notices");
+        if (initialView === "offline") {
+          jobsUnavailable = true;
+          await history.click();
+          await page.locator(".manga-task-connection").waitFor({ state: "visible" });
+          await history.click();
+          assert.equal(await page.locator(".manga-task-connection").isVisible(), true, "connection retry must remain accessible when the only tasks are old completed records and history is closed");
+          jobsUnavailable = false;
+          await page.locator(".manga-task-connection").getByRole("button", { name: "重试", exact: true }).click();
+          await manager.waitFor({ state: "hidden" });
+        }
+        if (initialView === "manual-refresh") {
+          job = { ...job, id: "notice-manual-refresh-new", status: "running", finishedAt: "", startedAt: "2026-08-30T00:03:00Z" };
+          await history.click();
+          await page.locator(".manga-task-card.is-running").waitFor({ state: "visible" });
+          await history.click();
+          comic.imageCount = 2;
+          job = { ...job, status: "complete", finishedAt: "2026-08-30T00:04:00Z", totalChapters: 1, cachedChapters: 1, pendingChapters: 0, progressPercent: 100 };
+          await history.click();
+          await page.locator("[data-manga-completion-notice]").waitFor({ state: "visible" });
+          await page.waitForFunction(() => document.querySelector(".channel-card.manga .channel-facts")?.textContent.includes("2 张"), null, { timeout: 5000 });
+        }
+        for (const width of [320, 412]) {
+          await page.setViewportSize({ width, height: 820 });
+          const layout = await page.locator(".manga-library-actions-head").evaluate((head) => {
+            const copy = head.firstElementChild.getBoundingClientRect();
+            const actions = head.lastElementChild.getBoundingClientRect();
+            return { overlap: copy.right > actions.left, overflow: actions.right > innerWidth };
+          });
+          assert.deepEqual(layout, { overlap: false, overflow: false }, `manga history and add controls must fit at ${width}px`);
+          if (initialView === "idle") {
+            await page.screenshot({ path: path.join(root, ".codex-artifacts", `352-manga-tasks-idle-${width}.png`) });
+          }
+        }
+        assert.deepEqual(pageErrors, [], `${initialView} task manager must not produce browser errors`);
+        continue;
+      }
+      if (initialView === "failed") {
+        const failed = page.locator(".manga-task-card.is-failed");
+        await failed.waitFor({ state: "visible" });
+        await failed.getByRole("button", { name: "重试", exact: true }).click();
+        await page.locator(".manga-task-card.is-running").waitFor({ state: "visible" });
+        assert.equal(await failed.count(), 0, "retry must replace the failed card instead of leaving an obsolete error");
+        assert.equal(retryRequests, 1);
+        assert.deepEqual(pageErrors, [], "failed task retry must not produce browser errors");
+        continue;
+      }
+      if (initialView === "restored") {
+        assert.equal(await page.locator("[data-manga-completion-notice]").count(), 0, "a cold-started app must not replay old completion notices");
+        assert.equal(await page.locator(".manga-job-progress").count(), 0, "a cold-started book must not restore old completion cards");
+        continue;
+      }
+      await page.locator(".manga-job-progress.is-running").waitFor({ state: "visible", timeout: 5000 });
+      assert.doesNotMatch(await page.locator(".manga-job-progress.is-running").textContent(), /目录 0 章/, "a catalog that is still loading must not claim to contain zero chapters");
+      assert.equal(await page.locator("[data-manga-completion-notice]").count(), 0, "loading old history must not replay a completion notice");
+      if (["library", "switch"].includes(initialView)) {
+        assert.equal(await page.locator(".manga-task-card.is-complete").count(), 0, "old completed tasks must stay out of the library feed");
+      }
+      if (initialView === "switch") {
+        holdNextList = true;
+        await page.evaluate(() => window.renderMangaNoticeFixture("detail"));
+        await page.evaluate(() => window.renderMangaNoticeFixture("library"));
+        await Promise.race([listPending, new Promise((_, reject) => setTimeout(() => reject(new Error("manga list race fixture did not start")), 5000))]);
+      }
+      comic.imageCount = 2;
+      job = { ...job, status: "complete", finishedAt: "2026-08-30T00:01:00Z", totalChapters: 1, cachedChapters: 1, pendingChapters: 0, completedChapters: 0, progressPercent: 100 };
+      const notice = page.locator("[data-manga-completion-notice]");
+      await notice.waitFor({ state: "visible", timeout: 5000 });
+      releaseList?.();
+      await page.waitForTimeout(100);
+      assert.match(await notice.textContent(), /任务提示测试.*更新完成/, `${initialView} polling must display a completion notice`);
+      assert.match(await notice.textContent(), /已是最新/, "an incremental check with no pending chapters must clearly report that the comic is up to date");
+      assert.equal(await page.locator(".manga-job-progress.is-running").count(), 0, "a delayed running list snapshot must not undo the completion observed by the book poll");
+      assert.equal(await page.locator(".manga-job-progress.is-complete").count(), 0, "completed progress must be replaced by the short notice, not a permanent 100% card");
+      if (["library", "switch"].includes(initialView)) {
+        await page.waitForFunction(() => document.querySelector(".channel-card.manga .channel-facts")?.textContent.includes("2 张"), null, { timeout: 5000 });
+      }
+      await page.evaluate(() => window.renderMangaNoticeFixture());
+      await notice.waitFor({ state: "visible", timeout: 5000 });
+      await notice.waitFor({ state: "detached", timeout: 7500 });
+      if (["library", "switch"].includes(initialView)) {
+        assert.equal(await page.locator("[data-manga-task-manager]").isVisible(), false, "an idle task manager must disappear after its completion notice expires");
+        const history = page.getByRole("button", { name: "下载记录", exact: true });
+        await history.click();
+        await page.locator(".manga-task-card.is-complete").waitFor({ state: "visible" });
+        assert.equal(await page.locator(".manga-task-history-toggle").getAttribute("aria-expanded"), "true");
+        await page.locator(".manga-task-history-toggle").click();
+        assert.equal(await page.locator("[data-manga-task-manager]").isVisible(), false, "closing history must reclaim the entire empty task region");
+      }
+      await page.evaluate(() => window.renderMangaNoticeFixture("detail"));
+      assert.equal(await notice.count(), 0, "reopening a finished book must not replay the expired notice");
+      assert.equal(await page.locator(".manga-job-progress").count(), 0, "reopening a finished book must not restore its old progress card");
+      assert.deepEqual(pageErrors, [], `manga ${initialView} fixture must not produce browser errors`);
+    } finally {
+      releaseList?.();
+      await page.close();
+    }
   }
 }
 
@@ -2400,7 +3739,7 @@ async function verifyAndroidFavoriteFolders(browser) {
         scopeBSentinel
       };
     });
-    assert.deepEqual(cacheScopeRace.enteredInvalidation, { baseUrl: "http://cache-scope-a.local/", prefix: "/api/favorites" }, "the cache race fixture must switch servers only after the successful A response reaches cache invalidation");
+    assert.deepEqual(cacheScopeRace.enteredInvalidation, { baseUrl: "http://cache-scope-a.local", prefix: "/api/favorites" }, "the cache race fixture must switch servers only after the successful A response reaches cache invalidation");
     assert.equal(cacheScopeRace.scopeACache.work.favorite, true, "a successful A favorite action may update its captured A detail cache after switching to B");
     assert.equal(cacheScopeRace.scopeACache.work.favoriteFolderId, "a-default", "the captured A detail cache must receive the successful A favorite folder");
     assert.deepEqual(cacheScopeRace.scopeBCache, cacheScopeRace.scopeBSentinel, "a completed A favorite action must leave the same-ID B detail cache completely unchanged");
@@ -2421,9 +3760,10 @@ async function verifyAndroidFavoriteRoute(browser) {
       localStorage.setItem("fanhao.serverUrl", location.origin);
       localStorage.setItem("fanhao.android.workFilter", "favorite");
     });
-    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
-    const entry = page.locator(".fanhao-chrome-tag", { hasText: "收藏" });
-    await entry.waitFor({ state: "visible", timeout: 10000 }).catch(async () => {
+    fixtureFanhaoCollectionRequests.length = 0;
+    await page.goto(`${baseUrl}/android-client/index.html#works?favorite=1`, { waitUntil: "domcontentloaded" });
+    const title = page.locator(".fanhao-feed-appbar-title", { hasText: "收藏" });
+    await title.waitFor({ state: "visible", timeout: 10000 }).catch(async () => {
       assert.fail(`Android favorite route fixture did not boot: ${pageErrors.join(" | ")} / ${await page.locator("#statusText").textContent()}`);
     });
     const settings = page.locator("#settingsOverlay");
@@ -2431,11 +3771,9 @@ async function verifyAndroidFavoriteRoute(browser) {
       await page.locator("#settingsCloseButton").click();
       await settings.waitFor({ state: "hidden", timeout: 5000 });
     }
-    assert.equal(await entry.textContent(), "收藏", "Android FanHao chrome must make favorite folders discoverable without an external deep link");
+    assert.equal(await page.locator(".fanhao-chrome-tabs").count(), 0, "Android FanHao must not restore the removed root partition row on favorite deep routes");
+    assert.equal(await title.textContent(), "收藏", "Android favorite deep routes must keep a clear native app-bar title");
     assert.equal(await page.locator("#favoriteCount").textContent(), "0", "Android home shortcut must render the empty favorite count from user state");
-    fixtureFanhaoCollectionRequests.length = 0;
-    await entry.click();
-    await page.waitForFunction(() => location.hash === "#works?favorite=1", null, { timeout: 10000 });
     await page.locator(".favorite-folder-strip").waitFor({ state: "visible", timeout: 10000 });
     await page.locator(".message-box", { hasText: "还没有收藏作品" }).waitFor({ state: "visible", timeout: 5000 });
     const firstRequest = fixtureFanhaoCollectionRequests.find((requestPath) => requestPath.startsWith("/api/favorites?"));
@@ -2495,12 +3833,10 @@ async function verifyAndroidFavoriteServerSwitch(browser) {
       localStorage.clear();
       localStorage.setItem("fanhao.serverUrl", location.origin);
     });
-    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
-    const entry = page.locator(".fanhao-chrome-tag", { hasText: "收藏" });
-    await entry.waitFor({ state: "visible", timeout: 10000 });
+    await page.goto(`${baseUrl}/android-client/index.html#works?favorite=1`, { waitUntil: "domcontentloaded" });
+    await page.locator(".fanhao-feed-appbar-title", { hasText: "收藏" }).waitFor({ state: "visible", timeout: 10000 });
     const settings = page.locator("#settingsOverlay");
     if (await settings.isVisible()) await page.locator("#settingsCloseButton").click();
-    await entry.click();
     await oldFavoriteRequest;
     await page.evaluate(() => document.querySelector("#profileSettingsButton")?.click());
     await settings.waitFor({ state: "visible", timeout: 5000 });
@@ -2796,13 +4132,39 @@ function fixtureNovels(url, options = {}) {
 
 async function fixtureApi(url, request = {}) {
   if (url.pathname === "/api/library") {
+    const western = url.searchParams.get("scope") === "western";
+    const people = western
+      ? [{ id: "western-person", name: "Western Star", isWestern: true, workCount: 2, sourceCount: 1 }]
+      : [{ id: "main-person", name: "测试女优", isWestern: false, workCount: 3, sourceCount: 1, actorProfile: { displayName: "测试女优", gender: "female", avatarUrl: "/media/person/main-person/avatar" } }];
     return {
       access: { mode: "loopback" },
       availableRoots: [],
-      people: [],
-      totals: { infoFiles: 0, people: 0, videos: 0, works: 0 },
+      people,
+      totals: { infoFiles: 0, people: people.length, videos: western ? 2 : 3, works: western ? 2 : 3 },
       user: { favoriteCount: 0, historyCount: 0 },
       works: []
+    };
+  }
+  const personDetail = /^\/api\/people\/([^/]+)$/.exec(url.pathname);
+  if (personDetail) {
+    fixturePersonDetailRequests.push(`${url.pathname}${url.search}`);
+    const western = url.searchParams.get("scope") === "western";
+    const name = western ? "Western Star" : "测试女优";
+    return {
+      categories: [
+        { value: "censored", label: "番号", count: western ? 0 : 3 },
+        { value: "western", label: "欧美", count: western ? 2 : 0 },
+        { value: "fc2", label: "FC2", count: 0 },
+        { value: "anime", label: "动漫", count: 0 }
+      ],
+      count: 0,
+      facets: { all: 0 },
+      filmographyCount: western ? 2 : 3,
+      person: { id: decodeURIComponent(personDetail[1]), name, isWestern: western, workCount: western ? 2 : 3 },
+      total: 0,
+      works: [],
+      year: "all",
+      years: [{ value: "all", label: "全部年份", count: 0 }]
     };
   }
   if (url.pathname === "/api/favorites") {

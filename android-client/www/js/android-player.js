@@ -1,7 +1,8 @@
-import { fetchJson, postJson } from "./api.js?v=20260702-novel-local-manage-74";
+import { fetchJson } from "./api.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
+import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
 
 export function createAndroidVideoSection(context) {
   const { getActiveUrl } = context;
@@ -68,13 +69,16 @@ export function createAndroidVideoSection(context) {
 
   async function playVideo(mount, work, videoFile, options = {}) {
     const activeUrl = getActiveUrl();
+    const accountScope = options.accountScope || captureAccountOwner(activeUrl);
+    if (!isAccountOwnerCurrent(accountScope)) return;
+    options = { ...options, accountScope };
     const resume = Number(options.startAt ?? videoFile.progress?.position ?? 0);
     mount.innerHTML = `<div class="loading-row">正在准备播放</div>`;
     revealDetailBlock(mount);
 
     let playInfo = null;
     try {
-      playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`);
+      playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, { accountScope });
     } catch (error) {
       mount.innerHTML = "";
       mount.append(createPlayerErrorBox(error.message || "播放地址准备失败，请重试", {
@@ -130,6 +134,9 @@ export function createAndroidVideoSection(context) {
 
   async function renderAndroidPlayer(mount, work, videoFile, options = {}) {
     const activeUrl = getActiveUrl();
+    const accountScope = options.accountScope || captureAccountOwner(activeUrl);
+    if (!isAccountOwnerCurrent(accountScope)) return;
+    options = { ...options, accountScope };
     if (!options.playInfo) {
       mount.innerHTML = `<div class="loading-row">正在探测播放方式</div>`;
       revealDetailBlock(mount);
@@ -170,16 +177,17 @@ export function createAndroidVideoSection(context) {
 
       let lastReportedAt = 0;
       const report = (force = false) => {
+        if (!isAccountOwnerCurrent(accountScope)) return;
         const duration = timelineDuration(video, playInfo, streamOffset);
         if (!duration || Number.isNaN(duration)) return;
         const now = Date.now();
         if (!force && now - lastReportedAt < 5000 && !video.paused) return;
         lastReportedAt = now;
-        postJson(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`, {
+        fetchJson(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`, { method: "POST", accountScope, body: {
           workId: work.id,
           position: currentPlaybackPosition(video, streamOffset),
           duration
-        }).catch(() => {});
+        } }).catch(() => {});
       };
       video.addEventListener("timeupdate", report);
       video.addEventListener("pause", () => report(true));

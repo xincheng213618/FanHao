@@ -3,7 +3,7 @@ import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260813-tv-series-identity-01";
 
-const MODULE_VIEWS = new Set(["gallery", "novels", "music", "tools"]);
+const MODULE_VIEWS = new Set(["gallery", "manga", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const formatter = new Intl.NumberFormat("zh-CN");
 
@@ -44,6 +44,10 @@ async function loadCurrentModule(view) {
       createRenderer: rendererModule.createGalleryRenderer,
       view
     };
+  }
+  if (view === "manga") {
+    const module = await import("../modules/photos/manga-page.js?v=20260829-manga-library-08");
+    return { createPage: module.createMangaPage, view };
   }
   if (view === "novels") {
     const module = await import("../modules/novels/novel-page.js?v=20260727-novel-task-log-04");
@@ -131,6 +135,13 @@ function createHost({ api, els, initialParams, pages, state }) {
         galleryPhotoDate: state.gallery.photoDate || "all",
         gallerySort: state.gallery.sort || "updated"
       });
+    } else if (state.activeView === "manga") {
+      Object.assign(route, {
+        mangaComicId: state.manga.chapter?.comicId || state.manga.comic?.id || "",
+        mangaChapterIndex: String(state.manga.chapter?.index || ""),
+        mangaQuery: state.manga.query || "",
+        mangaSort: state.manga.sort || "updated"
+      });
     } else if (state.activeView === "novels") {
       Object.assign(route, {
         novelBookId: state.novel.chapter?.bookId || state.novel.book?.id || "",
@@ -213,6 +224,10 @@ function createHost({ api, els, initialParams, pages, state }) {
         syncBodyClasses();
         page.enter({ skipRoute: true });
         await page.openRouteTarget(next);
+      } else if (state.activeView === "manga") {
+        page.applyRouteState(next);
+        page.enter({ skipRoute: true, deferInitialLoad: true });
+        await page.openRouteTarget(next);
       } else if (state.activeView === "novels") {
         page.applyRouteState(next);
         page.enter({ skipRoute: true, deferInitialLoad: true });
@@ -250,6 +265,8 @@ function createHost({ api, els, initialParams, pages, state }) {
     document.body.classList.toggle("gallery-view", view === "gallery");
     document.body.classList.toggle("gallery-photo-view", view === "gallery" && ["photo", "manga"].includes(state.gallery.mode));
     document.body.classList.toggle("gallery-media-view", view === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode));
+    document.body.classList.toggle("manga-view", view === "manga");
+    document.body.classList.toggle("manga-reader-active", view === "manga" && Boolean(state.manga?.chapter));
     document.body.classList.toggle("novel-view", view === "novels");
     document.body.classList.toggle("novel-reader-active", view === "novels" && Boolean(state.novel?.chapter));
     document.body.classList.toggle("music-view", view === "music");
@@ -311,6 +328,16 @@ function createStandaloneState(view) {
       media: null,
       fitWidth: readStoredFlag("fanhao.gallery.fitWidth", true),
       status: ""
+    },
+    manga: {
+      data: null,
+      comic: null,
+      chapter: null,
+      query: "",
+      sort: "updated",
+      loading: false,
+      status: "",
+      fitWidth: readStoredFlag("fanhao.manga.fitWidth", true)
     },
     novel: {},
     music: {},

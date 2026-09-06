@@ -1,7 +1,7 @@
-import { formatNumber } from "./format.js";
 import { imageUrlForWork } from "./image.js";
 import { compareWorkPopularity, compareWorkRatingCount } from "./work-sort.js?v=20260726-work-sort-01";
 import { isVrWork } from "./work-source.js?v=20260710-western-merge-01";
+import { createWorkFilterControls } from "./work-filter-controls.js?v=20260830-fanhao-compact-filter-02";
 
 const FILTER_STORAGE_KEY = "fanhao.android.workFilter";
 const SORT_STORAGE_KEY = "fanhao.android.workSort";
@@ -80,46 +80,22 @@ export function createWorkListState(context) {
     return true;
   }
 
-  function createWorkControls(sourceWorks, visibleList, options = {}) {
-    const controls = document.createElement("div");
-    controls.className = "work-controls";
+  function createWorkControls(sourceWorks, _visibleList, options = {}) {
     const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
     const activeFilters = new Set(normalizeFilterList(activeFilter));
-    const filterToReveal = activeFilters.size ? [...activeFilters].at(-1) : "all";
-
-    const filterStrip = document.createElement("div");
-    filterStrip.className = "work-filter-strip";
-    filterStrip.setAttribute("aria-label", "作品筛选");
-    let filterButtonToReveal = null;
-    for (const option of getFilterOptions(sourceWorks, options.facets)) {
-      const count = option.count;
-      const button = document.createElement("button");
-      button.type = "button";
-      const active = option.value === "all" ? activeFilters.size === 0 : activeFilters.has(option.value);
-      button.className = active ? "active" : "";
-      button.setAttribute("aria-pressed", active ? "true" : "false");
-      button.textContent = option.label;
-      button.title = `${option.label} · ${formatNumber(count)}`;
-      button.setAttribute("aria-label", `${option.label}，${formatNumber(count)} 个作品`);
-      button.addEventListener("click", () => {
+    return createWorkFilterControls({
+      activeFilters,
+      filterOptions: getFilterOptions(sourceWorks, options.facets),
+      loadedCount: sourceWorks.length,
+      options,
+      onSelect(value) {
         if (typeof options.onFilterChange === "function") {
-          options.onFilterChange(option.value);
+          options.onFilterChange(value);
           return;
         }
-        setFilterMode(option.value);
-      });
-      if (option.value === filterToReveal) filterButtonToReveal = button;
-      filterStrip.append(button);
-    }
-    revealActiveFilter(filterStrip, filterButtonToReveal);
-    const compactSummary = createCompactSummary(options, sourceWorks.length);
-    if (compactSummary) {
-      controls.classList.add("has-compact-summary");
-      controls.append(compactSummary, filterStrip);
-    } else {
-      controls.append(filterStrip);
-    }
-    return controls;
+        setFilterMode(value);
+      }
+    });
   }
 
   function getSortOptions(options = {}) {
@@ -255,34 +231,6 @@ export function createWorkListState(context) {
     setSortMode,
     visibleWorks
   };
-}
-
-function createCompactSummary(options, loadedCount) {
-  if (!options.compactSummary) return null;
-  const loaded = Math.max(0, Number(loadedCount || 0));
-  const total = Math.max(loaded, Number(options.total || loaded));
-  const summary = document.createElement("span");
-  summary.className = "work-control-summary";
-  summary.setAttribute("aria-label", `已载入 ${formatNumber(loaded)} 个，共 ${formatNumber(total)} 个作品`);
-  summary.title = `${formatNumber(loaded)} / ${formatNumber(total)} 个作品`;
-
-  const current = document.createElement("strong");
-  current.textContent = formatNumber(loaded);
-  const overall = document.createElement("small");
-  overall.textContent = `/ ${formatNumber(total)}`;
-  summary.append(current, overall);
-  return summary;
-}
-
-function revealActiveFilter(filterStrip, button) {
-  if (!button || typeof globalThis.requestAnimationFrame !== "function") return;
-  globalThis.requestAnimationFrame(() => {
-    if (!filterStrip.isConnected || !button.isConnected) return;
-    const stripRect = filterStrip.getBoundingClientRect();
-    const buttonRect = button.getBoundingClientRect();
-    const centerOffset = (stripRect.width - buttonRect.width) / 2;
-    filterStrip.scrollLeft = Math.max(0, filterStrip.scrollLeft + buttonRect.left - stripRect.left - centerOffset);
-  });
 }
 
 function validValue(value, options, fallback) {

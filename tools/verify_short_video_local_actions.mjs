@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { createShortVideoLocalActions } from "../src/modules/short-videos/server/local-actions.js";
+import {
+  createShortVideoLocalActions,
+  openShortVideoLocalTarget
+} from "../src/modules/short-videos/server/local-actions.js";
 import { routeShortVideoLocalActionApi } from "../src/modules/short-videos/server/local-action-routes.js";
 import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
 
@@ -59,6 +62,34 @@ try {
     { action: "reveal", path: sourcePath, type: "file" },
     { action: "open-author-folder", path: authorRoot, type: "folder" }
   ], "local actions must open only server-resolved targets");
+
+  const launches = [];
+  openShortVideoLocalTarget({
+    action: "open-author-folder",
+    path: authorRoot,
+    type: "folder"
+  }, {
+    platform: "win32",
+    spawnProcess(command, args, options) {
+      const launch = { command, args, options, unref: false };
+      launches.push(launch);
+      return {
+        unref() {
+          launch.unref = true;
+        }
+      };
+    }
+  });
+  assert.deepEqual(launches, [{
+    command: "explorer.exe",
+    args: [path.resolve(authorRoot)],
+    options: {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    },
+    unref: true
+  }], "Windows author-folder launches must stay visible and detach from the server");
 
   const routeDeps = {
     localActions: actions,

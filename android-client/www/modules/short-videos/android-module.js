@@ -1,11 +1,10 @@
-import { createShortVideoViews } from "./index.js?v=20260813-tv-series-work-01-5c293a6f8867";
+import { createShortVideoViews } from "./index.js?v=20260831-remote-auth-01-1046d3cbbfb6";
 import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260812-collection-review-02";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
-    discardPushedView: host.navigation.discardPushedView,
     goBack: host.navigation.goBack,
     openSettings: host.ui.openSettings,
     setActiveBottom: host.ui.setActiveBottom,
@@ -21,9 +20,7 @@ export function createAndroidModule({ host }) {
     rootViews: ["shortVideos"],
     routes: [
       { view: "shortVideos", render: (params, guard) => shortVideoViews.renderList(params, guard) },
-      { view: "shortVideoSearch", render: (params, guard) => shortVideoViews.renderSearch(params, guard) },
-      { view: "shortVideoCollections", render: (params, guard) => shortVideoViews.renderCollections(params, guard) },
-      { view: "shortVideoCollection", render: (params, guard) => shortVideoViews.renderCollection(params, guard) }
+      { view: "shortVideoSearch", render: (params, guard) => shortVideoViews.renderSearch(params, guard) }
     ],
     renderChrome: (context) => renderShortVideoChrome(context, host, shortVideoViews),
     deactivate: () => shortVideoViews.deactivate?.(),
@@ -83,13 +80,7 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
   search.setAttribute("aria-label", "搜索短视频");
   search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   search.addEventListener("click", () => openShortVideoSearch(host, shortVideoViews));
-  const collections = document.createElement("button");
-  collections.type = "button";
-  collections.className = "short-video-chrome-icon short-video-chrome-collections";
-  collections.setAttribute("aria-label", "我的清单");
-  collections.textContent = "清单";
-  collections.addEventListener("click", () => host.navigation.showView("shortVideoCollections", {}, { push: true }));
-  row.append(tabs, collections, search);
+  row.append(tabs, search);
 
   container.append(row);
   return true;

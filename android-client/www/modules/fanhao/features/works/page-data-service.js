@@ -1,3 +1,5 @@
+import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
+
 const WARMED_RESULT_TTL_MS = 60 * 1000;
 const WARMED_RESULT_LIMIT = 32;
 
@@ -8,6 +10,8 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
   const generations = new Map();
 
   function fetch(activeUrl, path, options = {}) {
+    const scope = options.accountScope || captureAccountOwner(activeUrl);
+    if (!isAccountOwnerCurrent(scope)) throw accountChangedError();
     const key = requestKey(activeUrl, path);
     const generation = generations.get(key) || 0;
     if (options.reuseWarmed) {
@@ -26,8 +30,9 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
         return data;
       });
     }
-    const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal })
+    const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal, accountScope: scope })
       .then((data) => {
+        if (!isAccountOwnerCurrent(scope)) throw accountChangedError();
         if ((generations.get(key) || 0) === generation) writeCachedJson(activeUrl, path, data).catch(() => {});
         return data;
       })
@@ -60,12 +65,13 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
   }
 
   async function load(activeUrl, path, options = {}) {
+    const scope = captureAccountOwner(activeUrl);
     const isActive = options.isActive || (() => true);
     const signature = options.signature || JSON.stringify;
     const key = requestKey(activeUrl, path);
     const generation = generations.get(key) || 0;
-    const isCurrent = () => (generations.get(key) || 0) === generation;
-    const freshRequest = fetch(activeUrl, path, options).then(
+    const isCurrent = () => isAccountOwnerCurrent(scope) && (generations.get(key) || 0) === generation;
+    const freshRequest = fetch(activeUrl, path, { ...options, accountScope: scope }).then(
       (data) => ({ source: "fresh", data }),
       (error) => ({ source: "fresh", error })
     );
@@ -91,13 +97,12 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
   }
 
   function requestKey(activeUrl, path) {
-    return `${activeUrl}:${path}`;
+    return `${activeUrl} ${captureAccountOwner(activeUrl).owner} ${path}`;
   }
 
   function invalidate(activeUrl, pathPrefix) {
-    const prefix = requestKey(activeUrl, pathPrefix);
     for (const key of new Set([...inflight.keys(), ...warmed, ...warmedResults.keys(), ...generations.keys()])) {
-      if (!key.startsWith(prefix)) continue;
+      if (!key.startsWith(`${activeUrl} `) || !key.slice(`${activeUrl} `.length).split(" ").slice(1).join(" ").startsWith(pathPrefix)) continue;
       generations.set(key, (generations.get(key) || 0) + 1);
       inflight.delete(key);
       warmed.delete(key);

@@ -23,6 +23,8 @@
   --mobile-accent-soft: #e7f0ff;
   --mobile-accent-border: rgba(47, 128, 237, 0.36);
   --mobile-focus-ring: rgba(47, 128, 237, 0.1);
+  --accent: var(--mobile-accent);
+  --accent-soft: var(--mobile-accent-soft);
   --shadow: 0 12px 28px rgba(20, 29, 40, 0.11);
   font-family:
     "Microsoft YaHei UI",
@@ -57,6 +59,8 @@
   --mobile-accent-soft: #173154;
   --mobile-accent-border: rgba(106, 168, 255, 0.48);
   --mobile-focus-ring: rgba(106, 168, 255, 0.14);
+  --accent: var(--mobile-accent);
+  --accent-soft: var(--mobile-accent-soft);
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
 }
 
@@ -86,6 +90,8 @@
     --mobile-accent-soft: #173154;
     --mobile-accent-border: rgba(106, 168, 255, 0.48);
     --mobile-focus-ring: rgba(106, 168, 255, 0.14);
+    --accent: var(--mobile-accent);
+    --accent-soft: var(--mobile-accent-soft);
     --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   }
 }
@@ -121,6 +127,60 @@ button {
   min-height: 100dvh;
   margin: 0 auto;
   padding: 12px 16px calc(86px + env(safe-area-inset-bottom));
+}
+
+body.app-starting .app-shell {
+  display: none;
+}
+
+.app-startup {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 32px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.app-startup p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.app-startup-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--mobile-accent);
+  border-radius: 50%;
+  animation: app-startup-spin 800ms linear infinite;
+}
+
+.app-startup button {
+  min-height: 44px;
+  padding: 10px 22px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
+  font-weight: 700;
+}
+
+.app-startup.has-error .app-startup-spinner {
+  display: none;
+}
+
+@keyframes app-startup-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-startup-spinner { animation: none; }
 }
 
 body.search-view .app-shell {
@@ -405,8 +465,7 @@ body.search-expanded .search-history {
 }
 
 .photo-chrome-tabs {
-  justify-content: flex-start;
-  gap: 10px;
+  position: relative;
 }
 
 .novel-chrome-tabs,
@@ -448,16 +507,6 @@ body.search-expanded .search-history {
   white-space: nowrap;
 }
 
-.photo-chrome-tabs button {
-  min-height: 44px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-soft);
-  padding: 0 12px;
-  font-size: 12px;
-  line-height: 1;
-}
-
 .novel-chrome-tabs button,
 .media-chrome-tabs button {
   flex: 1 1 0;
@@ -466,12 +515,6 @@ body.search-expanded .search-history {
   padding: 0 7px;
   font-size: 13.5px;
   line-height: 1;
-}
-
-.photo-chrome-tabs button.active {
-  border-color: var(--mobile-accent-border);
-  background: var(--mobile-accent-soft);
-  color: var(--mobile-accent);
 }
 
 .novel-chrome-tabs button.active,
@@ -485,10 +528,6 @@ body.search-expanded .search-history {
   color: var(--ink);
 }
 
-.photo-chrome-tabs button.active {
-  color: var(--mobile-accent);
-}
-
 .module-chrome-tabs button.active::after {
   content: "";
   position: absolute;
@@ -499,10 +538,6 @@ body.search-expanded .search-history {
   transform: translateX(-50%);
   border-radius: 99px;
   background: currentColor;
-}
-
-.photo-chrome-tabs button.active::after {
-  display: none;
 }
 
 .novel-chrome-tabs button.active::after,

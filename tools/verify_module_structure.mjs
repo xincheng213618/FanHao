@@ -109,11 +109,34 @@ const androidRegistrySource = fs.readFileSync(path.join(root, "android-client", 
 assert(androidRegistrySource.includes("await import(entryUrl)"), "Android module registry must dynamically import discovered entries");
 assert(androidRegistrySource.includes("renderChrome(view"), "Android module registry must delegate module chrome rendering");
 const androidIndexSource = fs.readFileSync(path.join(root, "android-client", "www", "index.html"), "utf8");
+const androidBottomNavigationSource = fs.readFileSync(path.join(root, "android-client", "www", "js", "module-navigation.js"), "utf8");
+const androidSettingsNavStyles = fs.readFileSync(path.join(root, "android-client", "www", "css", "settings-nav.css"), "utf8");
+const androidChannelViewsSource = fs.readFileSync(path.join(androidPlatformDir, "content-index", "channel-views.js"), "utf8");
 assert(!androidIndexSource.includes('id="topSearchButton"'), "Android shell must not own a global search button");
 assert(!androidIndexSource.includes('id="topModuleActions"'), "Android shell must not own a shared module action layout");
 assert(!androidIndexSource.includes('id="fanhaoSectionNav"'), "Android shell must not own business secondary navigation");
 assert(/<header id="moduleChrome"[^>]*><\/header>/.test(androidIndexSource), "Android shell must expose only an empty module chrome mount");
 assert(!fs.existsSync(path.join(root, "android-client", "www", "platform", "search", "global-search.js")), "Android must not keep the retired cross-module search aggregator");
+assert(androidBottomNavigationSource.includes('["fanhao", "photos", "short-videos", "novels", "tools"]'), "Android primary navigation must use five stable top-level destinations");
+assert(androidBottomNavigationSource.includes("bottom-nav-icon-outline") && androidBottomNavigationSource.includes("bottom-nav-icon-filled") && androidBottomNavigationSource.includes("bottom-nav-primary"), "Android primary navigation must provide icon, selected, and central-action states");
+assert.equal((androidIndexSource.match(/class="bottom-nav-item/g) || []).length, 5, "Android fallback navigation must render exactly five native-style destinations");
+assert(androidSettingsNavStyles.includes("grid-template-columns: repeat(5") && androidSettingsNavStyles.includes("button.active::before") && androidSettingsNavStyles.includes("bottom-nav-icon-filled"), "Android bottom navigation must expose five touch targets and a visible selected state");
+assert(androidBottomNavigationSource.includes("gallerySwitcher") && androidIndexSource.includes("data-gallery-switcher"), "Android gallery destination must advertise its long-press submenu in generated and fallback navigation");
+assert(androidAppSource.includes("openGalleryModePicker") && androidAppSource.includes("dataset.galleryModeChoice") && androidAppSource.includes("GALLERY_MODE_STORAGE_KEY") && androidAppSource.includes("GALLERY_MODE_OPTIONS"), "Android gallery navigation must open and remember the four-destination long-press picker");
+for (const [mode, label] of [["photo", "套图"], ["manga", "韩漫"], ["movie", "电影"], ["tv", "电视剧"]]) {
+  assert(androidAppSource.includes(`mode: "${mode}", label: "${label}"`), `Android gallery options must retain ${mode}/${label}`);
+}
+assert(androidSettingsNavStyles.includes(".bottom-nav-gallery-picker") && androidAppSource.includes("galleryModeLabel(mode)") && androidAppSource.includes("label.textContent = modeLabel") && !androidSettingsNavStyles.includes('data-gallery-mode-current="manga"'), "Android gallery picker must expose a styled submenu and a clean option-derived mode label without a floating badge");
+assert(androidBottomNavigationSource.includes("homeSwitcher") && androidIndexSource.includes("data-home-switcher"), "Android home destination must advertise its long-press submenu in generated and fallback navigation");
+assert(androidAppSource.includes("openHomeModePicker") && androidAppSource.includes("dataset.homeModeChoice") && androidAppSource.includes("HOME_MODE_STORAGE_KEY"), "Android home navigation must open and remember the FanHao/western long-press picker");
+assert(androidSettingsNavStyles.includes(".bottom-nav-home-picker") && androidAppSource.includes('label.textContent = mode === "western" ? "欧美" : "番号"') && !androidSettingsNavStyles.includes('data-home-mode-current="western"'), "Android home picker must expose a styled submenu and a clean dynamic mode label without a floating badge");
+assert(androidAppSource.includes('showView("people", { scope: normalized === "western" ? "western" : "main" }') && androidAppSource.includes('params = { scope: "western" }'), "Android home navigation and legacy western routes must open the populated person-scoped western library");
+assert(androidBottomNavigationSource.includes("readingSwitcher") && androidIndexSource.includes("data-reading-switcher"), "Android reading destination must advertise its novel/music long-press submenu in generated and fallback navigation");
+assert(androidAppSource.includes("openReadingModePicker") && androidAppSource.includes("dataset.readingModeChoice") && androidAppSource.includes("READING_MODE_STORAGE_KEY"), "Android reading navigation must open and remember the novel/music long-press picker");
+assert(androidSettingsNavStyles.includes(".bottom-nav-reading-picker") && androidAppSource.includes('label.textContent = mode === "music" ? "音乐" : "小说"'), "Android reading picker must expose a styled submenu and a clean dynamic mode label");
+assert(!androidChannelViewsSource.includes("createImageModuleRow"), "Android photo and manga switching must not remain duplicated at the top of the content page");
+assert(androidAppSource.includes('manga: "photo"') && androidAppSource.includes('music: "novels"'), "Android secondary module views must map to a visible primary navigation selection");
+assert.equal(byId.get("music")?.client.android.bottomKey, "novels", "Android music must share the visible reading destination with novels");
 for (const text of ["搜番号、作品或人物", "搜套图、人物或分类", "搜电影或电视剧", "搜短视频标题、作者或标签"]) {
   assert(!androidAppSource.includes(text), `Android shell must not own module search copy: ${text}`);
 }
@@ -159,6 +182,7 @@ const androidMusicCollectionView = fs.readFileSync(path.join(androidModulesDir, 
 const androidMusicSearchController = fs.readFileSync(path.join(androidModulesDir, "music", "music-search-controller.js"), "utf8");
 const androidMusicSheets = fs.readFileSync(path.join(androidModulesDir, "music", "music-sheets.js"), "utf8");
 assert(androidMusicHomeView.includes("music-mobile-search-pill"), "music must keep search inside its own module surface");
+assert(androidMusicEntry.includes('bottomKey: "novels"'), "music views must keep the shared reading destination selected");
 assert(androidMusicEntry.includes("deactivate: () => musicViews.deactivate()"), "music must deactivate before another module renders");
 assert(androidMusicViews.includes("if (!moduleActive || !els.viewContent) return;"), "inactive music work must not repaint another module");
 assert(androidMusicViews.includes("createMusicSheets") && androidMusicViews.includes("music-sheets.js?v="), "music must delegate settings and action sheets to a dedicated controller");
@@ -193,7 +217,10 @@ assert(!androidNovelListRender.includes("createNovelControls") && !androidNovelL
 assert(androidNovelCardRender.includes("card.append(cover, body)") && androidNovelCardRender.includes('meta.textContent = book.author') && !androidNovelCardRender.includes("summary") && !androidNovelCardRender.includes("progress") && !androidNovelCardRender.includes("actions") && !androidNovelCardRender.includes("bookCategoryLabel"), "novel shelf cards must stay limited to a title-led book cover and optional author");
 assert(androidNovelCardRender.includes("openReader(book)") && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "tapping a novel must open its last reading position directly");
 assert(androidNovelCardRender.includes("installNovelLongPress") && androidNovelCardRender.includes("consumeClick()") && androidNovelViews.includes('title: "小说操作"'), "long-pressing a novel must open management without changing the tap-to-read behavior");
-assert(androidNovelViews.includes('label: "查看详情"') && androidNovelViews.includes('label: localBook ? "从手机书架移除" : "删除小说"') && androidNovelViews.includes("deleteJson(getActiveUrl(), novelDetailPath(book.id))"), "novel long-press management must restore detail, offline, export, and deletion actions");
+assert(androidNovelViews.includes('label: "查看详情"') && androidNovelViews.includes('label: localBook ? "从手机书架移除" : "删除小说"')
+  && androidNovelViews.includes("deleteJson(operation.sourceUrl, novelDetailPath(book.id) + suffix)")
+  && androidNovelViews.includes("requireRemoteOperation(operation)")
+  && androidNovelViews.includes("encodeURIComponent(operation.sourceRealm)"), "novel long-press management must retain actions and delete through the captured source with its realm precondition");
 assert(androidNovelViews.includes('localStorage.setItem(NOVEL_SORT_STORAGE_KEY, next)') && androidNovelViews.includes('{ value: "progress", label: "最近阅读" }') && androidNovelEntry.includes("openMobileActionSheet"), "novel sorting must persist and use the same shared sheet interaction as other modules");
 
 const webStylePaths = [

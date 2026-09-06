@@ -206,6 +206,18 @@ export function createDownloadsFeature(options) {
     refreshState().catch(() => {});
   }
 
+  async function resumeDownloads() {
+    const button = $("resumeDownloads");
+    button.disabled = true;
+    try {
+      await post("/api/download/resume");
+      toast("自动下载已恢复");
+      await refreshState();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async function quitApplication() {
     const busy = Boolean(latestStatus?.extract?.active || latestStatus?.download?.active);
     if (busy && !window.confirm("采集或下载仍在进行。退出后未完成任务会在下次启动时继续，确定退出吗？")) return;
@@ -224,6 +236,7 @@ export function createDownloadsFeature(options) {
 
   function bind() {
     $("quitApp").addEventListener("click", () => quitApplication().catch((err) => toast(err.message)));
+    $("resumeDownloads").addEventListener("click", () => resumeDownloads().catch((err) => toast(err.message)));
     $("sortQueueByPending").addEventListener("click", () => sortQueueByPending().catch((err) => toast(err.message)));
     $("downloadQueue").addEventListener("click", (event) => {
       const button = event.target.closest("button");
@@ -270,6 +283,7 @@ export function createDownloadsFeature(options) {
     let primaryStatus = "自动下载准备中";
     let nextAction = "程序会自动启动监听，采集到新作品后直接下载";
     let statusClass = "is-idle";
+    $("resumeDownloads").hidden = active || Boolean(guard.active);
     if (active && inflight > 0) {
       primaryStatus = `正在下载 · ${inflight} 个任务`;
       nextAction = watching ? "完成当前任务后继续监听新链接" : "正在处理当前下载队列";

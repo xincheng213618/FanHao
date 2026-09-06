@@ -3,7 +3,6 @@ import { formatCompact } from "../../../js/format.js";
 import { DEFAULT_SORT, initials } from "../shared.js?v=20260730-mobile-sync-01";
 import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=20260811-android-author-status-01";
 import { renderFollowingAuthorTools } from "./following-view.js?v=20260730-mobile-sync-01";
-import { appendCollectionCardAction } from "../collections/card-action.js?v=20260812-collection-review-02";
 import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=20260812-native-action-ui-01";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
@@ -19,7 +18,6 @@ export function createShortVideoListView(context = {}) {
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
   const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
   const resetListLoadMoreObserver = (...args) => context.resetListLoadMoreObserver(...args);
-  const showCollectionPicker = (...args) => context.showCollectionPicker(...args);
   const openShortVideoAuthor = (...args) => context.openShortVideoAuthor(...args);
   const readSearchHistory = (...args) => context.readSearchHistory(...args);
   const sortedAuthorFacets = (...args) => context.sortedAuthorFacets(...args);
@@ -575,9 +573,6 @@ export function createShortVideoListView(context = {}) {
     syncRenderedVideoCardMetric(card, metric, video, createIcon, formatCompact);
     card.append(thumb);
     wrap.append(card);
-    if (options.allowCollections !== false) {
-      appendCollectionCardAction(wrap, video, showCollectionPicker);
-    }
     return wrap;
   }
 

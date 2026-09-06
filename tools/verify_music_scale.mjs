@@ -390,6 +390,7 @@ try {
   const androidMusicAutoCollectionViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-auto-collection-view.js"), "utf8");
   const androidMusicHistoryActionsViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-history-actions-view.js"), "utf8");
   const androidMusicListRequestSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-list-request.js"), "utf8");
+  const androidMusicListPaginationSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-list-pagination.js"), "utf8");
   const androidMusicLibraryViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-library-view.js"), "utf8");
   const androidMusicLibrarySortSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-library-sort.js"), "utf8");
   const androidMusicCollectionViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-collection-view.js"), "utf8");
@@ -397,7 +398,7 @@ try {
   const androidMusicSheetsSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-sheets.js"), "utf8");
   const androidMusicProgressWriterSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-progress-writer.js"), "utf8");
   const androidMusicStateSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-state.js"), "utf8");
-  const androidClient = [androidMusicStateSource, androidMusicSearchControllerSource, androidMusicSheetsSource, androidMusicProgressWriterSource, androidMusicHomeViewSource, androidMusicPlaylistViewSource, androidMusicAutoCollectionViewSource, androidMusicHistoryActionsViewSource, androidMusicListRequestSource, androidMusicLibraryViewSource, androidMusicLibrarySortSource, androidMusicCollectionViewSource, androidMusicViewSource].join("\n");
+  const androidClient = [androidMusicStateSource, androidMusicSearchControllerSource, androidMusicSheetsSource, androidMusicProgressWriterSource, androidMusicHomeViewSource, androidMusicPlaylistViewSource, androidMusicAutoCollectionViewSource, androidMusicHistoryActionsViewSource, androidMusicListRequestSource, androidMusicListPaginationSource, androidMusicLibraryViewSource, androidMusicLibrarySortSource, androidMusicCollectionViewSource, androidMusicViewSource].join("\n");
   const androidMusicStyles = [
     fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "styles.css"), "utf8"),
     fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "home.css"), "utf8"),
@@ -523,7 +524,8 @@ try {
   assert.match(androidMusicLibraryViewSource, /function returnToMusicHome\(\)[\s\S]*?dashboard: true[\s\S]*?function browseAllSongs\(\)[\s\S]*?favorite: false/, "Android focused-library back and empty paths should return to the dashboard or all songs");
   assert.match(androidMusicViewSource, /const AUTO_COLLECTION_LIMIT = 300[\s\S]*?autoCollectionLimit: AUTO_COLLECTION_LIMIT/, "Android automatic collections should pass their larger first-page limit to the request builder");
   assert.match(androidMusicListRequestSource, /state\.mode === "history"[\s\S]*?autoCollectionLimit[\s\S]*?state\.smartId \? autoCollectionLimit : defaultLimit/, "Android automatic collections should load a useful first page instead of truncating short recent and smart lists at the generic limit");
-  assert.match(androidMusicViewSource, /!\["library", "artists", "albums", "smart"\]\.includes\(state\.mode\)/, "Android large smart playlists should retain incremental loading");
+  assert.match(androidMusicListPaginationSource, /!\["library", "artists", "albums", "smart"\]\.includes\(state\.mode\)/, "Android large smart playlists should retain incremental loading");
+  assert.match(androidMusicViewSource, /cancelPending: cancelMusicPagination, loadMoreTracks \} = createMusicListPagination\(/, "Android music must use the cancellable list pagination controller");
   assert.match(androidMusicHomeViewSource, /music-mobile-home-tools[\s\S]*?music-mobile-home-search[\s\S]*?music-mobile-home-settings/, "Android music should keep search and settings in one compact top utility row");
   assert.match(androidMusicViewSource, /if \(!searchFocused\) shell\.append\(renderMiniPlayer\(\)\)[\s\S]*?classList\.toggle\("music-search-open", searchFocused\)/, "Android music search should remove persistent playback chrome while typing or reviewing results");
   assert.match(androidMusicViewSource, /music-mobile-track\$\{track\.coverUrl \? "" : " no-cover"\}/, "Android music rows should distinguish missing cover art so large fallback tiles do not dominate the list");

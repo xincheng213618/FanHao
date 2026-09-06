@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ResultReceiver;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -29,15 +30,6 @@ import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
 
-import org.json.JSONObject;
-
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 @UnstableApi
 public class NativePlayerActivity extends Activity {
   private static final String TAG = "FanHaoNativePlayer";
@@ -52,9 +44,11 @@ public class NativePlayerActivity extends Activity {
   public static final String EXTRA_MODE = "mode";
   public static final String EXTRA_POSITION = "position";
   public static final String EXTRA_DURATION = "duration";
+  public static final String EXTRA_PROGRESS_RECEIVER = "progressReceiver";
+  public static final String EXTRA_PROGRESS_AUTH_TOKEN = "progressAuthToken";
 
   private final Handler handler = new Handler(Looper.getMainLooper());
-  private final ExecutorService executor = Executors.newSingleThreadExecutor();
+  private NativePlaybackProgress progress;
   private ExoPlayer player;
   private PlayerView playerView;
   private TextView statusView;
@@ -105,6 +99,8 @@ public class NativePlayerActivity extends Activity {
     subtitle = stringExtra(EXTRA_SUBTITLE);
     progressUrl = stringExtra(EXTRA_PROGRESS_URL);
     workId = stringExtra(EXTRA_WORK_ID);
+    ResultReceiver progressReceiver = getIntent().getParcelableExtra(EXTRA_PROGRESS_RECEIVER);
+    progress = createProgress(progressReceiver, progressUrl, getIntent().getStringExtra(EXTRA_PROGRESS_AUTH_TOKEN));
     probedDurationSeconds = getIntent().getDoubleExtra(EXTRA_DURATION, 0.0);
     double positionSeconds = getIntent().getDoubleExtra(EXTRA_POSITION, 0.0);
 
@@ -145,12 +141,12 @@ public class NativePlayerActivity extends Activity {
     });
 
     playUrl(url, secondsToMs(positionSeconds));
-    handler.post(progressTicker);
   }
 
   @Override
   protected void onPause() {
     super.onPause();
+    handler.removeCallbacks(progressTicker);
     reportProgress(true);
     if (player != null) player.pause();
   }
@@ -159,6 +155,8 @@ public class NativePlayerActivity extends Activity {
   protected void onResume() {
     super.onResume();
     hideSystemBars();
+    handler.removeCallbacks(progressTicker);
+    if (player != null) handler.post(progressTicker);
   }
 
   @Override
@@ -173,12 +171,20 @@ public class NativePlayerActivity extends Activity {
     handler.removeCallbacks(progressTicker);
     handler.removeCallbacks(statusHideRunnable);
     handler.removeCallbacks(overlayHideRunnable);
+    if (progress != null) progress.close();
     if (player != null) {
       player.release();
       player = null;
     }
-    executor.shutdownNow();
     super.onDestroy();
+  }
+
+  private static NativePlaybackProgress createProgress(ResultReceiver receiver, String expectedUrl, String ownerToken) {
+    // The accepted worker may outlive this Activity. Capture only its immutable
+    // receipt endpoint and URL, never the Activity, player, or a View.
+    return new NativePlaybackProgress(expectedUrl, ownerToken, snapshot -> {
+      if (receiver != null && snapshot.url.equals(expectedUrl)) receiver.send(Activity.RESULT_OK, null);
+    });
   }
 
   private void buildUi() {
@@ -371,6 +377,8 @@ public class NativePlayerActivity extends Activity {
 
   private void reportProgress(boolean force) {
     if (!hasText(progressUrl) || player == null) return;
+    int playbackState = player.getPlaybackState();
+    if (playbackState != Player.STATE_READY && playbackState != Player.STATE_ENDED) return;
     long now = System.currentTimeMillis();
     if (!force && now - lastProgressAt < 4500) return;
     long positionMs = Math.max(0, streamOffsetMs + player.getCurrentPosition());
@@ -382,34 +390,7 @@ public class NativePlayerActivity extends Activity {
 
     double position = positionMs / 1000.0;
     double duration = durationMs / 1000.0;
-    executor.execute(() -> postProgress(position, duration));
-  }
-
-  private void postProgress(double position, double duration) {
-    HttpURLConnection connection = null;
-    try {
-      JSONObject body = new JSONObject();
-      body.put("workId", workId);
-      body.put("position", position);
-      body.put("duration", duration);
-      byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
-
-      connection = (HttpURLConnection) new URL(progressUrl).openConnection();
-      connection.setConnectTimeout(3500);
-      connection.setReadTimeout(3500);
-      connection.setRequestMethod("POST");
-      connection.setDoOutput(true);
-      connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-      connection.setFixedLengthStreamingMode(payload.length);
-      try (OutputStream output = connection.getOutputStream()) {
-        output.write(payload);
-      }
-      connection.getResponseCode();
-    } catch (Exception ignored) {
-      // Progress is best effort; playback should never stop because state sync failed.
-    } finally {
-      if (connection != null) connection.disconnect();
-    }
+    progress.report(progressUrl, workId, position, duration);
   }
 
   private String withFallbackSeek(String url, long positionMs) {

@@ -427,8 +427,10 @@ assert.doesNotMatch(
   /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStart|downloadStop)"/
 );
 assert.match(managerIndexSource, /20260809-home-simplify-01/);
-assert.match(managerIndexSource, /app\.js\?v=20260825-profile-history-01/);
+assert.match(managerIndexSource, /app\.js\?v=20260902-extract-reset-01/);
 assert.match(managerIndexSource, /采集到新作品就直接下载，无需手动开关/);
+assert.match(managerIndexSource, /id="resumeDownloads"[^>]*hidden>恢复自动下载/);
+assert.match(managerIndexSource, /id="activityResetExtract"[^>]*hidden>重置当前采集/);
 
 const linksFeatureSource = fs.readFileSync(
   path.join(moduleDir, "static", "features", "links.js"),
@@ -438,7 +440,8 @@ assert.match(linksFeatureSource, /profile_nickname/);
 assert.match(linksFeatureSource, /profile_tab === "like"/);
 
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
-assert.match(managerAppSource, /features\/downloads\.js\?v=20260822-auto-download-01/);
+assert.match(managerAppSource, /features\/downloads\.js\?v=20260825-auto-resume-01/);
+assert.match(managerAppSource, /features\/activity\.js\?v=20260902-extract-reset-01/);
 assert.match(managerAppSource, /features\/library\.js\?v=20260812-latest-request-01/);
 assert.match(managerAppSource, /features\/links\.js\?v=20260812-latest-request-01/);
 assert.match(managerAppSource, /features\/profiles\.js\?v=20260825-profile-history-01/);

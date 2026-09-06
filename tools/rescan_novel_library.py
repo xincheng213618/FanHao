@@ -10,12 +10,14 @@ import json
 import re
 import sqlite3
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from novel_text_formatter import format_novel_text, is_chapter_title, read_text_file
+from novel_chapter_identity import migrate_chapter_schema, prepare_chapter_replacement, finish_chapter_replacement
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,7 @@ DEFAULT_ROOTS = [
     Path(r"C:\Users\17917\OneDrive\小说\小说"),
 ]
 MAX_CHAPTER_CHARS = 12000
+LIBRARY_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 
 
 @dataclass
@@ -292,10 +295,41 @@ def build_book(root: Path, source_path: Path) -> BookRecord:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        PRAGMA journal_mode = WAL;
-        PRAGMA busy_timeout = 5000;
+    try:
+        _ensure_schema(conn)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _validate_library_metadata(conn: sqlite3.Connection):
+    # Refuse an unknown or corrupt identity before DDL or source replacement.
+    identity = None
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'novel_meta'").fetchone():
+        version = conn.execute("SELECT value FROM novel_meta WHERE key = 'schema_version'").fetchone()
+        if version:
+            try:
+                parsed_version = int(version[0])
+            except (TypeError, ValueError) as error:
+                raise ValueError("小说库版本标记无效，未修改原库") from error
+            if parsed_version < 0:
+                raise ValueError("小说库版本标记无效，未修改原库")
+            if parsed_version > 5:
+                raise ValueError("小说库来自更新版本，当前程序不能修改")
+        identity = conn.execute("SELECT value FROM novel_meta WHERE key = 'library_id'").fetchone()
+        if identity and (not isinstance(identity[0], str) or not LIBRARY_ID_PATTERN.fullmatch(identity[0])):
+            raise ValueError("小说库来源身份无效，未重新分配身份或修改原库")
+    return identity
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    _validate_library_metadata(conn)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("BEGIN IMMEDIATE")
+    identity = _validate_library_metadata(conn)
+    # Fixed internal DDL only; executescript would implicitly commit this lock.
+    schema = """
         CREATE TABLE IF NOT EXISTS novel_meta (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -360,12 +394,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           deleted_at TEXT NOT NULL
         );
         """
-    )
+    for statement in schema.split(";"):
+        if statement.strip():
+            conn.execute(statement)
     schema_version = conn.execute("SELECT value FROM novel_meta WHERE key = 'schema_version'").fetchone()
     if not schema_version or int(schema_version[0] or 0) < 2:
         conn.execute("DROP TABLE IF EXISTS novel_search")
-    if not schema_version or int(schema_version[0] or 0) < 4:
-        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
+    if not schema_version or int(schema_version[0] or 0) < 5:
+        migrate_chapter_schema(conn)
+    if not identity:
+        conn.execute("INSERT INTO novel_meta (key, value) VALUES ('library_id', ?) ON CONFLICT(key) DO NOTHING", (str(uuid.uuid4()),))
+    identity = conn.execute("SELECT value FROM novel_meta WHERE key = 'library_id'").fetchone()
+    if not identity or not isinstance(identity[0], str) or not LIBRARY_ID_PATTERN.fullmatch(identity[0]):
+        raise ValueError("小说库缺少有效的持久来源身份")
+    if not schema_version or int(schema_version[0] or 0) < 5:
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '5')")
+    # The callers start their own replacement transaction immediately below.
+    # Commit this one-time durable initialization independently of that import.
+    conn.commit()
 
 
 def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord]) -> None:
@@ -374,13 +420,18 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
     try:
         ensure_schema(conn)
         print("[db] schema ready", flush=True)
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM novel_chapters")
-        conn.execute("DELETE FROM novel_books")
-        print("[db] target cleared", flush=True)
+        conn.execute("BEGIN IMMEDIATE")
+        existing_ids = {row[0] for row in conn.execute("SELECT id FROM novel_books")}
+        seen = set()
         insert_book = conn.cursor()
         insert_chapter = conn.cursor()
         for book in records:
+            if book.id in seen:
+                raise sqlite3.IntegrityError("UNIQUE constraint failed: novel_books.id")
+            seen.add(book.id)
+            replacement = prepare_chapter_replacement(conn, book.id, [dict(index=c.index, title=c.title, content=c.content) for c in book.chapters])
+            conn.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book.id,))
+            conn.execute("DELETE FROM novel_books WHERE id = ?", (book.id,))
             insert_book.execute(
                 """
                 INSERT INTO novel_books (
@@ -403,8 +454,8 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
                     book.encoding,
                     book.char_count,
                     book.chapter_count,
-                    book.first_chapter_id,
-                    book.latest_chapter_id,
+                    replacement["chapters"][0]["id"] if replacement["chapters"] else "",
+                    replacement["chapters"][-1]["id"] if replacement["chapters"] else "",
                     book.latest_chapter_title,
                     book.summary,
                     book.tags_json,
@@ -414,9 +465,8 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
                 ),
             )
             chapter_rows = []
-            for chapter in book.chapters:
-                chapter_id = f"{book.id}-{chapter.index:05d}"
-                chapter_rows.append((chapter_id, book.id, chapter.index, chapter.title, chapter.content, len(chapter.content), book.updated_at))
+            for chapter in replacement["chapters"]:
+                chapter_rows.append((chapter["id"], book.id, chapter["index"], chapter["title"], chapter["content"], len(chapter["content"]), book.updated_at))
             insert_chapter.executemany(
                 """
                 INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
@@ -424,6 +474,12 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
                 """,
                 chapter_rows,
             )
+            finish_chapter_replacement(conn, book.id, replacement)
+        for missing_id in existing_ids - seen:
+            conn.execute("DELETE FROM novel_chapters WHERE book_id = ?", (missing_id,))
+            conn.execute("DELETE FROM novel_books WHERE id = ?", (missing_id,))
+            # Keep the old reading anchor, but never present an absent snapshot as resolved.
+            conn.execute("UPDATE novel_reading_state SET status = 'unresolved', reason = 'book_missing', candidate_json = NULL WHERE book_id = ?", (missing_id,))
         conn.execute(
             """
             UPDATE novel_books
@@ -440,7 +496,6 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
         conn.execute("DELETE FROM novel_reading_state WHERE book_id IN (SELECT book_id FROM novel_book_deletions)")
         conn.execute("DELETE FROM novel_book_overrides WHERE book_id IN (SELECT book_id FROM novel_book_deletions)")
         conn.execute("DELETE FROM novel_books WHERE id IN (SELECT book_id FROM novel_book_deletions)")
-        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)", (now_iso(),))
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('roots_json', ?)", (json.dumps([str(root.resolve()) for root in roots], ensure_ascii=False),))
         conn.commit()
@@ -459,6 +514,7 @@ def write_record(db_path: Path, book: BookRecord) -> None:
     try:
         ensure_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
+        replacement = prepare_chapter_replacement(conn, book.id, [dict(index=c.index, title=c.title, content=c.content) for c in book.chapters])
         conn.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book.id,))
         conn.execute("DELETE FROM novel_book_deletions WHERE book_id = ?", (book.id,))
         conn.execute(
@@ -504,8 +560,8 @@ def write_record(db_path: Path, book: BookRecord) -> None:
                 book.encoding,
                 book.char_count,
                 book.chapter_count,
-                book.first_chapter_id,
-                book.latest_chapter_id,
+                replacement["chapters"][0]["id"] if replacement["chapters"] else "",
+                replacement["chapters"][-1]["id"] if replacement["chapters"] else "",
                 book.latest_chapter_title,
                 book.summary,
                 book.tags_json,
@@ -521,15 +577,15 @@ def write_record(db_path: Path, book: BookRecord) -> None:
             """,
             [
                 (
-                    f"{book.id}-{chapter.index:05d}",
+                    chapter["id"],
                     book.id,
-                    chapter.index,
-                    chapter.title,
-                    chapter.content,
-                    len(chapter.content),
+                    chapter["index"],
+                    chapter["title"],
+                    chapter["content"],
+                    len(chapter["content"]),
                     book.updated_at,
                 )
-                for chapter in book.chapters
+                for chapter in replacement["chapters"]
             ],
         )
         override = conn.execute(
@@ -541,31 +597,7 @@ def write_record(db_path: Path, book: BookRecord) -> None:
                 "UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ? WHERE id = ?",
                 (override[0] or book.title, override[1] or "", override[2] or book.category, override[3] or "", book.id),
             )
-        progress = conn.execute(
-            "SELECT chapter_index, scroll_ratio, updated_at FROM novel_reading_state WHERE book_id = ?",
-            (book.id,),
-        ).fetchone()
-        if progress:
-            if book.chapter_count <= 0:
-                conn.execute("DELETE FROM novel_reading_state WHERE book_id = ?", (book.id,))
-            else:
-                previous_index = max(1, int(progress[0] or 1))
-                chapter_index = min(previous_index, book.chapter_count)
-                conn.execute(
-                    """
-                    UPDATE novel_reading_state
-                    SET chapter_id = ?, chapter_index = ?, scroll_ratio = ?, updated_at = ?
-                    WHERE book_id = ?
-                    """,
-                    (
-                        f"{book.id}-{chapter_index:05d}",
-                        chapter_index,
-                        float(progress[1] or 0) if chapter_index == previous_index else 0,
-                        progress[2] or book.updated_at,
-                        book.id,
-                    ),
-                )
-        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
+        finish_chapter_replacement(conn, book.id, replacement)
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)", (book.updated_at,))
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_reimported_at', ?)", (book.updated_at,))
         conn.commit()

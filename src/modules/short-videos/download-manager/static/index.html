@@ -60,6 +60,7 @@
                 <div class="muted">程序启动后持续监听；采集到新作品就直接下载，无需手动开关。</div>
               </div>
               <div class="actions download-actions">
+                <button id="resumeDownloads" hidden>恢复自动下载</button>
                 <button id="openLibraryHome">查看已下载</button>
                 <button id="resetFailedCurrent">当前失败转待下载</button>
               </div>
@@ -345,7 +346,10 @@
                   <div class="panel-title">正在执行</div>
                   <div class="muted">当前采集、下载及其他运行中的任务</div>
                 </div>
-                <span id="activityRunningCount" class="activity-count">0</span>
+                <div class="actions">
+                  <button id="activityResetExtract" class="danger" hidden>重置当前采集</button>
+                  <span id="activityRunningCount" class="activity-count">0</span>
+                </div>
               </div>
               <div id="activityRunning" class="activity-job-list"></div>
             </section>
@@ -388,6 +392,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260825-profile-history-01"></script>
+    <script type="module" src="/app.js?v=20260902-extract-reset-01"></script>
   </body>
 </html>

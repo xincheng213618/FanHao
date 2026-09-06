@@ -1,11 +1,11 @@
 const ENTRY_ROOT = "./modules/";
 const FALLBACK_MODULES = Object.freeze([
-  fallback("fanhao", "番号", 10, "categories", "fanhao"),
+  fallback("fanhao", "番号", 10, "people", "fanhao"),
   fallback("photos", "图库", 20, "channel", "photo", { channel: "photo" }),
   fallback("media", "影视", 30, "channel", "media", { channel: "media" }),
   fallback("novels", "小说", 40, "novels", "novels", { order: 50 }),
   fallback("short-videos", "短视频", 50, "shortVideos", "shortVideos", { order: 40 }),
-  fallback("music", "音乐", 60, "music", "music"),
+  fallback("music", "音乐", 60, "music", "novels"),
   fallback("tools", "小工具", 70, "tools", "tools", { title: "我的" })
 ]);
 
@@ -95,6 +95,7 @@ function normalizeModule(value, definition) {
     definition,
     routes: Object.freeze(routes),
     rootViews,
+    isRootView: typeof value.isRootView === "function" ? value.isRootView : null,
     bottomKey: String(value.bottomKey || definition.client?.android?.bottomKey || definition.id),
     search: value.search && typeof value.search === "object" ? value.search : null,
     renderChrome: typeof value.renderChrome === "function" ? value.renderChrome : null,

@@ -42,7 +42,7 @@ export function createFanhaoDependencies(deps) {
       "workFacets",
       "workQueryStamp"
     ]),
-    works: pick(deps, [
+    works: { ...pick(deps, [
       "actorMovieInfoStamp",
       "adminCoreMutationService",
       "actorMovieStamp",
@@ -115,7 +115,7 @@ export function createFanhaoDependencies(deps) {
       "workLocalMutationService",
       "workMoveJobService",
       "workQueryStamp"
-    ])
+    ]), scheduleBackground: deps.scheduleBackground }
   };
 }
 

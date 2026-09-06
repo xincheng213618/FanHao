@@ -164,6 +164,11 @@ try {
     host: "192.168.1.20:29998",
     headers: { origin: "http://localhost" }
   })), "", "a remote client must not gain Android CORS access by spoofing localhost Origin");
+  const remoteApp = fakeRequest({ remoteAddress: "203.0.113.10", host: "public.example",
+    headers: { origin: "http://localhost", "x-fanhao-client": "android" } });
+  assert.equal(auth.requestCorsOrigin(remoteApp), "http://localhost", "a packaged app may submit a password to a configured public server");
+  assert.equal(auth.requestAuthState(remoteApp, publicUrl).allowed, false, "CORS must never authenticate an app");
+  assert.equal(authServices("").requestCorsOrigin(remoteApp), "", "unconfigured public servers must not expose app CORS");
 
   const corsHandler = createRequestHandler({
     requestCorsOrigin: auth.requestCorsOrigin,
@@ -208,6 +213,117 @@ try {
     headers: { origin: "https://attacker.example" }
   }), rejectedSimpleResponse);
   assert.equal(rejectedSimpleResponse.status, 403, "disallowed simple cross-origin reads must fail before routing");
+
+  const publicUpdateCalls = [];
+  const publicUpdateHandler = createRequestHandler({
+    requestCorsOrigin: auth.requestCorsOrigin,
+    requestAuthState: auth.requestAuthState,
+    attachAccessAnalytics() {},
+    attachAccessLogger() {},
+    routeAuth: async () => false,
+    sendLoginRequired: (_req, res) => {
+      res.status = 401;
+      res.end();
+    },
+    routeApi: async (req, res, url) => {
+      publicUpdateCalls.push([req.method, url.pathname]);
+      res.status = 200;
+      res.end();
+      return true;
+    },
+    routeMedia: async () => assert.fail("unauthenticated update requests must never reach media routes"),
+    renderAndroidUpdatePage: () => "<h1>FanHao Android download</h1>",
+    serveStatic: () => assert.fail("unauthenticated update requests must never reach static files"),
+    sendHtml(res, status, html) {
+      res.status = status;
+      res.end(html);
+    },
+    sendJson: (res, status, payload) => {
+      res.status = status;
+      res.payload = payload;
+    },
+    sendText: (res, status) => {
+      res.status = status;
+      res.end();
+    }
+  });
+  const publicManifestResponse = fakeResponse();
+  await publicUpdateHandler(fakeRequest({
+    remoteAddress: "203.0.113.10",
+    host: "xc213618.ddns.me:29998",
+    url: "/api/android/update?channel=debug",
+    headers: { origin: "http://localhost", ...androidHeaders() }
+  }), publicManifestResponse);
+  assert.equal(publicManifestResponse.status, 200, "the exact read-only update manifest must be public");
+  assert.equal(publicManifestResponse.headers.get("access-control-allow-origin"), "http://localhost", "the packaged Android origin must be able to read the public DDNS update manifest");
+
+  const publicApkResponse = fakeResponse();
+  await publicUpdateHandler(fakeRequest({
+    remoteAddress: "203.0.113.10",
+    host: "xc213618.ddns.me:29998",
+    method: "HEAD",
+    url: "/api/android/update/apk/debug/fanhao-debug.apk"
+  }), publicApkResponse);
+  assert.equal(publicApkResponse.status, 200, "the exact read-only APK lane must be public for GET and HEAD");
+  assert.deepEqual(publicUpdateCalls, [
+    ["GET", "/api/android/update"],
+    ["HEAD", "/api/android/update/apk/debug/fanhao-debug.apk"]
+  ]);
+
+  for (const method of ["GET", "HEAD"]) {
+    const pageResponse = fakeResponse();
+    await publicUpdateHandler(fakeRequest({
+      remoteAddress: "203.0.113.10",
+      host: "xc213618.ddns.me:29998",
+      method,
+      url: "/android-update?channel=debug"
+    }), pageResponse);
+    assert.equal(pageResponse.status, 200, `${method} download page must work before login`);
+    assert.equal(pageResponse.headers.get("cache-control"), "no-store", "download page must reflect the latest published manifest");
+    assert.match(pageResponse.headers.get("content-security-policy"), /default-src 'none'/);
+    assert.equal(publicUpdateCalls.length, 2, "the page must not fall through to API routes");
+  }
+
+  const publicUpdatePreflightResponse = fakeResponse();
+  await publicUpdateHandler(fakeRequest({
+    remoteAddress: "203.0.113.10",
+    host: "xc213618.ddns.me:29998",
+    method: "OPTIONS",
+    url: "/api/android/update?channel=debug",
+    headers: {
+      origin: "http://localhost",
+      "access-control-request-headers": "accept,x-fanhao-client",
+      "access-control-request-method": "GET"
+    }
+  }), publicUpdatePreflightResponse);
+  assert.equal(publicUpdatePreflightResponse.status, 204, "the exact update route must accept the Android preflight through DDNS");
+
+  for (const denied of [
+    { method: "POST", url: "/api/android/update" },
+    { method: "GET", url: "/api/android/update/apk/debug/fanhao-debug.apk/extra" },
+    { method: "GET", url: "/api/modules" },
+    { method: "GET", url: "/media/example.mp4" },
+    { method: "GET", url: "/" },
+    { method: "POST", url: "/android-update" },
+    { method: "GET", url: "/android-update/extra" }
+  ]) {
+    const response = fakeResponse();
+    await publicUpdateHandler(fakeRequest({
+      remoteAddress: "203.0.113.10",
+      host: "xc213618.ddns.me:29998",
+      ...denied
+    }), response);
+    assert.equal(response.status, 401, `${denied.method} ${denied.url} must remain authenticated`);
+  }
+
+  const rejectedPublicUpdateOriginResponse = fakeResponse();
+  await publicUpdateHandler(fakeRequest({
+    remoteAddress: "203.0.113.10",
+    host: "xc213618.ddns.me:29998",
+    url: "/api/android/update",
+    headers: { origin: "https://attacker.example" }
+  }), rejectedPublicUpdateOriginResponse);
+  assert.equal(rejectedPublicUpdateOriginResponse.status, 403, "the public update endpoint must not grant CORS to arbitrary web origins");
 
   await verifyCoverMutationsRequireLocalAdmin();
 
@@ -270,6 +386,19 @@ try {
   }), publicUrl);
   assert.equal(authenticatedWithCurrentPassword.allowed, true);
   assert.equal(authenticatedWithCurrentPassword.reason, "password");
+  const bearerToken = decodeURIComponent(webCookie.slice(webCookie.indexOf("=") + 1));
+  assert.equal(originalPasswordAuth.requestAuthState(fakeRequest({
+    remoteAddress: "203.0.113.50", headers: { authorization: `Bearer ${bearerToken}` }
+  }), publicUrl).allowed, true, "native app requests must accept the password-bound session as a bearer token");
+  assert.equal(originalPasswordAuth.requestAuthState(fakeRequest({
+    remoteAddress: "203.0.113.50", headers: { authorization: `Bearer ${bearerToken.slice(0, -3)}bad` }
+  }), publicUrl).allowed, false, "tampered bearer tokens must fail closed");
+  const nativeAuth = authServices("app-password", { password: "app-password", client: "android" });
+  const nativeLogin = await login(nativeAuth, { remoteAddress: "203.0.113.51", headers: { accept: "application/json" } });
+  assert.equal(nativeLogin.status, 200);
+  assert.match(nativeLogin.payload.token, /^web\./);
+  assert.equal(nativeLogin.headers.get("cache-control"), "no-store");
+  assert.equal(originalLogin.payload.token, undefined, "ordinary browser logins need not expose a bearer token");
 
   const changedPasswordAuth = authServices("changed-password");
   const authenticatedAfterPasswordChange = changedPasswordAuth.requestAuthState(fakeRequest({
@@ -277,6 +406,9 @@ try {
     headers: { cookie: webCookie }
   }), publicUrl);
   assert.equal(authenticatedAfterPasswordChange.allowed, false, "changing the configured password must revoke existing web sessions");
+  assert.equal(changedPasswordAuth.requestAuthState(fakeRequest({
+    remoteAddress: "203.0.113.50", headers: { authorization: `Bearer ${bearerToken}` }
+  }), publicUrl).allowed, false, "password changes must also revoke app bearer sessions");
 
   const revertedPasswordAuth = authServices("original-password");
   const authenticatedAfterPasswordReuse = revertedPasswordAuth.requestAuthState(fakeRequest({
@@ -329,7 +461,8 @@ function authServices(remoteWebPassword, options = {}) {
     remoteWebPassword,
     ensureDataDir: () => fs.mkdirSync(tempRoot, { recursive: true }),
     readBodyText: async () => JSON.stringify({
-      password: typeof options.password === "function" ? options.password() : options.password || ""
+      password: typeof options.password === "function" ? options.password() : options.password || "",
+      client: options.client
     }),
     sendJson: (res, status, payload) => {
       res.status = status;

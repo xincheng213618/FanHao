@@ -35,6 +35,17 @@ export function createImageLibraryService({
     return items.filter((item) => selected.has(item.mediaKind));
   }
 
+  function latestUpdatedAt(items = [], fallback = "") {
+    return items.reduce((latest, item) => {
+      const candidate = String(item?.updatedAt || "").trim();
+      if (!candidate) return latest;
+      const candidateTime = new Date(candidate).getTime();
+      if (!Number.isFinite(candidateTime)) return latest;
+      const latestTime = new Date(latest || 0).getTime();
+      return !Number.isFinite(latestTime) || candidateTime > latestTime ? candidate : latest;
+    }, String(fallback || "").trim());
+  }
+
   function isEpisodicMediaKind(kind) {
     return kind === "tv" || kind === "anime";
   }
@@ -374,7 +385,7 @@ export function createImageLibraryService({
       total: sorted.length,
       limit,
       offset,
-      scannedAt: index.scannedAt || "",
+      scannedAt: mode === "manga" ? latestUpdatedAt(source, index.scannedAt || "") : index.scannedAt || "",
       items
     };
   }

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { photoCatalogCollections } from "../public/modules/content-index/photo-catalog.js";
+import { photoCatalogCollections as androidPhotoCatalogCollections } from "../android-client/www/platform/content-index/photo-catalog.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -70,10 +72,19 @@ const catalogItems = photoCatalogCollections([
 ], "updated");
 assert.deepEqual(catalogItems.map((item) => item.id), ["new", "large"], "Photo catalog sorting must follow the selected order");
 assert.equal(catalogItems[0].catalogCategory, "分类甲", "Flattened photo collections must keep their category context");
+const sharedCatalogFixture = [{ category: "甲", collections: [
+  { id: "a", title: "A2", albumCount: 10, size: 30, updatedAt: "2026-01-01" },
+  { id: "b", title: "A10", albumCount: 20, size: 10, updatedAt: "2026-02-01" }
+] }, { category: "乙", collections: [
+  { id: "b", title: "duplicate", albumCount: 100 },
+  { id: "c", title: "A1", albumCount: 20, size: 20, updatedAt: "2026-03-01" }
+] }];
+for (const sort of ["count", "updated", "size", "title"]) {
+  assert.deepEqual(androidPhotoCatalogCollections(sharedCatalogFixture, sort), photoCatalogCollections(sharedCatalogFixture, sort), `Android and Web collection flattening, deduplication and ${sort} ordering must agree`);
+}
 
 const androidViews = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [
-  'sort: text ? "relevance"',
   "mergeChannelPageData",
   "limit - offset",
   "channelSearchMatchText",
@@ -82,6 +93,34 @@ for (const marker of [
 ]) {
   assert(androidViews.includes(marker), `Android photo search is missing: ${marker}`);
 }
+// Execute the actual path builder: media supports explicit search ordering,
+// while photo search still requires relevance irrespective of a prior sort.
+const photoSearchPath = source => {
+  const functions = ["channelItemsPath", "normalizeChannelSort"].map(name => {
+    const match = new RegExp(`^  function ${name}\\([\\s\\S]*?^  \\}`, "m").exec(source);
+    assert(match, `Missing Android path function ${name}`);
+    return match[0];
+  });
+  return vm.runInNewContext(`(() => {${functions.join("\n")}\nreturn channelItemsPath;})()`, { URLSearchParams });
+};
+const verifyPhotoSearchOrder = source => {
+  const buildPath = photoSearchPath(source);
+  for (const sort of ["updated", "count", "title", "size", "rating"]) {
+    const query = new URL(buildPath("photo", 24, { query: "  合成 人物  ", sort, category: "分类甲", person: "人物甲" }, 24), "https://synthetic.invalid").searchParams;
+    assert.equal(query.get("sort"), "relevance");
+    assert.equal(query.get("q"), "合成 人物");
+    assert.equal(query.get("category"), "分类甲");
+    assert.equal(query.get("person"), "人物甲");
+    assert.equal(query.get("offset"), "24");
+    assert.equal(query.get("limit"), "24");
+  }
+  assert.equal(new URL(buildPath("photo", 24, { sort: "count", photoView: "collections" }), "https://synthetic.invalid").searchParams.get("sort"), "count");
+};
+verifyPhotoSearchOrder(androidViews);
+const searchOrderBranch = ': text ? "relevance" : normalizeChannelSort(filters.sort)';
+assert.equal(androidViews.split(searchOrderBranch).length, 2, "One photo search ordering branch");
+assert.throws(() => verifyPhotoSearchOrder(androidViews.replace(searchOrderBranch, ': normalizeChannelSort(filters.sort)')), assert.AssertionError,
+  "Removing photo relevance must fail the behavioral check");
 assert(androidViews.includes('{ requireScrollIntent: mode === "photo" }'), "Android photo list pagination must require fresh downward scroll intent");
 assert(androidViews.includes("}, { requireScrollIntent: true });"), "Android photo reader pagination must require fresh downward scroll intent");
 

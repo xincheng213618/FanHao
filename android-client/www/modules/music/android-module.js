@@ -9,7 +9,7 @@ export function createAndroidModule({ host }) {
     replaceViewParams: host.navigation.replaceViewParams
   });
   return {
-    bottomKey: "music",
+    bottomKey: "novels",
     rootViews: ["music"],
     routes: [
       { view: "music", render: (params, guard) => musicViews.renderMusicList(params, guard) }

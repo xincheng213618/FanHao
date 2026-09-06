@@ -28,12 +28,9 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLDecoder;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.Charset;
-import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 
 @CapacitorPlugin(name = "FanHaoNovel")
@@ -48,11 +45,11 @@ public class FanHaoNovelPlugin extends Plugin {
     DocumentsContract.Document.COLUMN_LAST_MODIFIED,
     DocumentsContract.Document.COLUMN_FLAGS
   };
-  private static Intent pendingTextIntent = null;
+  private static final PendingTextImportQueue<Intent> pendingTextIntents = new PendingTextImportQueue<>();
 
   static void capturePendingTextIntent(Context context, Intent intent) {
-    if (!shouldHandleTextIntent(context, intent)) return;
-    pendingTextIntent = new Intent(intent);
+    if (intent == null || pendingTextIntents.hasSeen(intent) || !shouldHandleTextIntent(context, intent)) return;
+    pendingTextIntents.offer(intent, new Intent(intent));
   }
 
   @PluginMethod
@@ -150,12 +147,44 @@ public class FanHaoNovelPlugin extends Plugin {
         }
         if (metadata.sizeKnown) BoundedTextReader.requireAllowedKnownSize(metadata.sizeBytes, MAX_TEXT_BYTES);
         byte[] bytes = readAllBytes(resolver, contentUri);
-        DecodedText decoded = decodeText(bytes);
+        NativeTextDecoder.Result decoded = decodeText(bytes);
         resolvePluginCall(call, textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, contentUri.toString()));
       } catch (Exception error) {
         rejectPluginCall(call, error.getMessage() == null ? "读取 TXT 失败" : error.getMessage(), error);
+      } catch (OutOfMemoryError error) {
+        rejectPluginCall(call, "内存不足，无法读取这本文本，请尝试较小的文件", null);
       }
     }, "FanHaoTextRead").start();
+  }
+
+  @PluginMethod
+  public void readPickedTextFile(PluginCall call) {
+    String rawUri = call.getString("uri", "");
+    if (!isContentUriString(rawUri)) {
+      call.reject("只能读取系统文件选择器返回的 content URI");
+      return;
+    }
+    new Thread(() -> {
+      try {
+        Uri uri = Uri.parse(rawUri);
+        ContentResolver resolver = getContext().getContentResolver();
+        String fileName = displayName(resolver, uri);
+        if (!isTextFileName(fileName) && !isTextUri(uri)) {
+          throw new IllegalArgumentException("这个文档不是 TXT 文件");
+        }
+        DocumentMetadata metadata = queryOptionalDocumentMetadata(resolver, uri);
+        if (metadata.virtual) throw new IllegalArgumentException("虚拟文档不能作为 TXT 导入");
+        if (metadata.sizeKnown) BoundedTextReader.requireAllowedKnownSize(metadata.sizeBytes, MAX_TEXT_BYTES);
+        String mime = resolver.getType(uri);
+        byte[] bytes = readAllBytes(resolver, uri);
+        NativeTextDecoder.Result decoded = decodeText(bytes);
+        resolvePluginCall(call, textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, uri.toString()));
+      } catch (Exception error) {
+        rejectPluginCall(call, error.getMessage() == null ? "读取 TXT 失败" : error.getMessage(), error);
+      } catch (OutOfMemoryError error) {
+        rejectPluginCall(call, "内存不足，无法读取这本文本，请尝试较小的文件", null);
+      }
+    }, "FanHaoPickedTextRead").start();
   }
 
   @PluginMethod
@@ -166,9 +195,10 @@ public class FanHaoNovelPlugin extends Plugin {
     }
 
     String text = call.getString("text", "");
-    byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-    if (bytes.length > MAX_TEXT_BYTES) {
-      call.reject("文本文件太大，暂时只支持 80MB 以内");
+    try {
+      NativeTextDecoder.utf8Size(text, MAX_TEXT_BYTES);
+    } catch (IllegalArgumentException error) {
+      call.reject(error.getMessage());
       return;
     }
 
@@ -201,8 +231,8 @@ public class FanHaoNovelPlugin extends Plugin {
     String text = call.getString("text", "");
     new Thread(() -> {
       try {
+        NativeTextDecoder.utf8Size(text, MAX_TEXT_BYTES);
         byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_TEXT_BYTES) throw new IllegalArgumentException("文本文件太大，暂时只支持 80MB 以内");
         ContentResolver resolver = getContext().getContentResolver();
         try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
           if (output == null) throw new IllegalArgumentException("无法写入这个文件位置");
@@ -218,6 +248,8 @@ public class FanHaoNovelPlugin extends Plugin {
         resolvePluginCall(call, response);
       } catch (Exception error) {
         rejectPluginCall(call, error.getMessage() == null ? "保存 TXT 失败" : error.getMessage(), error);
+      } catch (OutOfMemoryError error) {
+        rejectPluginCall(call, "内存不足，无法保存这本文本，请尝试较小的文件", null);
       }
     }, "FanHaoTextExport").start();
   }
@@ -251,20 +283,23 @@ public class FanHaoNovelPlugin extends Plugin {
   @ActivityCallback
   private void textDocumentPickerResult(PluginCall call, ActivityResult result) {
     if (call == null) return;
+    boolean deferredRead = Boolean.TRUE.equals(call.getBoolean("deferredRead", false));
     if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
       JSObject canceled = new JSObject();
       canceled.put("canceled", true);
       canceled.put("items", new JSArray());
+      if (deferredRead) canceled.put("documents", new JSArray());
       call.resolve(canceled);
       return;
     }
 
     Intent data = result.getData();
     new Thread(() -> {
-      JSArray items = new JSArray();
-      JSArray errors = new JSArray();
       try {
-        ArrayList<Uri> uris = new ArrayList<>();
+        JSArray items = new JSArray();
+        JSArray documents = new JSArray();
+        JSArray errors = new JSArray();
+        LinkedHashSet<Uri> uris = new LinkedHashSet<>();
         ClipData clipData = data.getClipData();
         if (clipData != null) {
           for (int index = 0; index < clipData.getItemCount(); index += 1) {
@@ -288,10 +323,19 @@ public class FanHaoNovelPlugin extends Plugin {
               errors.put(skipped);
               continue;
             }
-            String mime = resolver.getType(uri);
-            byte[] bytes = readAllBytes(resolver, uri);
-            DecodedText decoded = decodeText(bytes);
-            items.put(textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, uri.toString()));
+            if (deferredRead) {
+              // Negotiate with the page so new imports never retain a whole batch of bodies here.
+              JSObject document = new JSObject();
+              document.put("uri", uri.toString());
+              document.put("fileName", sanitizeFileName(fileName));
+              documents.put(document);
+            } else {
+              // Compatibility for an older cached page that still expects eager items.
+              String mime = resolver.getType(uri);
+              byte[] bytes = readAllBytes(resolver, uri);
+              NativeTextDecoder.Result decoded = decodeText(bytes);
+              items.put(textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, uri.toString()));
+            }
           } catch (Exception error) {
             JSObject failed = new JSObject();
             failed.put("uri", uri == null ? "" : uri.toString());
@@ -303,10 +347,13 @@ public class FanHaoNovelPlugin extends Plugin {
         JSObject response = new JSObject();
         response.put("canceled", false);
         response.put("items", items);
+        if (deferredRead) response.put("documents", documents);
         response.put("errors", errors);
         resolvePluginCall(call, response);
       } catch (Exception error) {
         rejectPluginCall(call, error.getMessage() == null ? "文件管理器导入失败" : error.getMessage(), error);
+      } catch (OutOfMemoryError error) {
+        rejectPluginCall(call, "内存不足，文件选择未完成，请减少选择的文件", null);
       }
     }, "FanHaoDocumentPickerRead").start();
   }
@@ -369,28 +416,39 @@ public class FanHaoNovelPlugin extends Plugin {
 
   @PluginMethod
   public void consumePendingTextFile(PluginCall call) {
-    Intent intent = pendingTextIntent != null
-      ? pendingTextIntent
-      : getActivity() == null ? null : getActivity().getIntent();
-    if (!looksLikeTextIntent(getContext(), intent)) {
-      String message = unsupportedTextIntentMessage(intent);
-      JSObject result = unavailableResult(message);
-      if (!message.isEmpty()) {
-        showToast(message);
-        clearPendingIntent();
-      }
+    if (call == null || call.isReleased()) return;
+    Activity activity = getActivity();
+    capturePendingTextIntent(getContext(), activity == null ? null : activity.getIntent());
+    PendingTextImportQueue.Claim<Intent> claim = pendingTextIntents.claim();
+    if (claim == null) {
+      JSObject result = unavailableResult("");
+      result.put("busy", pendingTextIntents.isBusy());
+      result.put("hasPending", pendingTextIntents.hasPending());
       call.resolve(result);
       return;
     }
 
+    JSObject result;
     try {
-      JSObject result = readIntentText(intent);
-      clearPendingIntent();
-      call.resolve(result);
+      if (!looksLikeTextIntent(getContext(), claim.snapshot)) {
+        String message = unsupportedTextIntentMessage(claim.snapshot);
+        result = unavailableResult(message);
+        if (!message.isEmpty()) showToast(message);
+      } else {
+        result = readIntentText(claim.snapshot);
+      }
     } catch (Exception error) {
-      clearPendingIntent();
-      call.reject(error.getMessage() == null ? "读取本地文本失败" : error.getMessage(), error);
+      // A failed provider read consumes this delivery once, but must not hide B/C.
+      String message = error.getMessage();
+      result = unavailableResult(message == null || message.trim().isEmpty() ? "读取本地文本失败" : message);
+    } catch (OutOfMemoryError error) {
+      result = unavailableResult("内存不足，无法读取这本文本，请尝试较小的文件");
+    } finally {
+      pendingTextIntents.complete(claim);
+      clearPendingIntent(claim.source);
     }
+    result.put("hasPending", pendingTextIntents.hasPending());
+    if (!call.isReleased()) call.resolve(result);
   }
 
   static boolean looksLikeTextIntent(Intent intent) {
@@ -423,7 +481,10 @@ public class FanHaoNovelPlugin extends Plugin {
     if (Intent.ACTION_SEND.equals(action)) {
       CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
       if (text != null && text.length() > 0) {
-        return textResult("shared-text.txt", "text/plain", "utf-8", text.toString(), text.length(), "");
+        BoundedTextReader.requireAllowedKnownSize(text.length(), MAX_TEXT_BYTES);
+        String sharedText = text.toString();
+        long sizeBytes = NativeTextDecoder.utf8Size(sharedText, MAX_TEXT_BYTES);
+        return textResult("shared-text.txt", "text/plain", "utf-8", sharedText, sizeBytes, "");
       }
     }
 
@@ -438,7 +499,7 @@ public class FanHaoNovelPlugin extends Plugin {
     String mime = resolver.getType(uri);
     String fileName = displayName(resolver, uri);
     byte[] bytes = readAllBytes(resolver, uri);
-    DecodedText decoded = decodeText(bytes);
+    NativeTextDecoder.Result decoded = decodeText(bytes);
     return textResult(fileName, mime, decoded.encoding, decoded.text, bytes.length, uri.toString());
   }
 
@@ -649,6 +710,23 @@ public class FanHaoNovelPlugin extends Plugin {
     }
   }
 
+  private DocumentMetadata queryOptionalDocumentMetadata(ContentResolver resolver, Uri uri) {
+    try {
+      return queryDocumentMetadata(resolver, uri);
+    } catch (Exception unavailable) {
+      // Ordinary openable providers need not expose DocumentsContract flags.
+      try (Cursor cursor = resolver.query(uri, new String[] { OpenableColumns.SIZE }, null, null, null)) {
+        if (cursor != null && cursor.moveToFirst()) {
+          boolean sizeKnown = !cursorNull(cursor, OpenableColumns.SIZE);
+          return new DocumentMetadata(sizeKnown ? cursorLong(cursor, OpenableColumns.SIZE) : -1L, sizeKnown, false);
+        }
+      } catch (Exception ignored) {
+        // Unknown metadata is not a failed stream read; the byte limit remains mandatory below.
+      }
+      return new DocumentMetadata(-1L, false, false);
+    }
+  }
+
   private String cursorString(Cursor cursor, String column) {
     int index = cursor.getColumnIndex(column);
     return index < 0 || cursor.isNull(index) ? "" : String.valueOf(cursor.getString(index)).trim();
@@ -670,27 +748,8 @@ public class FanHaoNovelPlugin extends Plugin {
     }
   }
 
-  private DecodedText decodeText(byte[] bytes) {
-    if (bytes.length >= 3 && (bytes[0] & 0xff) == 0xef && (bytes[1] & 0xff) == 0xbb && (bytes[2] & 0xff) == 0xbf) {
-      return new DecodedText("utf-8-sig", new String(bytes, 3, bytes.length - 3, StandardCharsets.UTF_8));
-    }
-    if (bytes.length >= 2 && (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe) {
-      return new DecodedText("utf-16le", new String(bytes, 2, bytes.length - 2, Charset.forName("UTF-16LE")));
-    }
-    if (bytes.length >= 2 && (bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff) {
-      return new DecodedText("utf-16be", new String(bytes, 2, bytes.length - 2, Charset.forName("UTF-16BE")));
-    }
-    try {
-      String text = StandardCharsets.UTF_8
-        .newDecoder()
-        .onMalformedInput(CodingErrorAction.REPORT)
-        .onUnmappableCharacter(CodingErrorAction.REPORT)
-        .decode(ByteBuffer.wrap(bytes))
-        .toString();
-      return new DecodedText("utf-8", text);
-    } catch (CharacterCodingException ignored) {
-      return new DecodedText("gb18030", new String(bytes, Charset.forName("GB18030")));
-    }
+  private NativeTextDecoder.Result decodeText(byte[] bytes) {
+    return NativeTextDecoder.decode(bytes);
   }
 
   private String displayName(ContentResolver resolver, Uri uri) {
@@ -715,12 +774,16 @@ public class FanHaoNovelPlugin extends Plugin {
     return clean;
   }
 
-  private void clearPendingIntent() {
-    pendingTextIntent = null;
-    if (getActivity() == null) return;
-    Intent clean = new Intent(Intent.ACTION_MAIN);
-    clean.setPackage(getContext().getPackageName());
-    getActivity().setIntent(clean);
+  private void clearPendingIntent(Intent consumedIntent) {
+    Activity activity = getActivity();
+    if (activity == null) return;
+    activity.runOnUiThread(() -> {
+      // A newer onNewIntent delivery owns the Activity fallback, even if its URI matches A.
+      if (activity.getIntent() != consumedIntent) return;
+      Intent clean = new Intent(Intent.ACTION_MAIN);
+      clean.setPackage(activity.getPackageName());
+      activity.setIntent(clean);
+    });
   }
 
   private static boolean isTextUri(Uri uri) {
@@ -771,16 +834,6 @@ public class FanHaoNovelPlugin extends Plugin {
     if (uri != null) return uri;
     Object stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
     return stream instanceof Uri ? (Uri) stream : null;
-  }
-
-  private static final class DecodedText {
-    final String encoding;
-    final String text;
-
-    DecodedText(String encoding, String text) {
-      this.encoding = encoding;
-      this.text = text;
-    }
   }
 
   private static final class DocumentMetadata {

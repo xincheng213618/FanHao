@@ -1,0 +1,476 @@
+/* Media-only presentation. Shared photo, manga and western layouts stay unchanged. */
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) > .view-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+}
+
+.media-list-count {
+  min-width: 0;
+}
+
+.media-list-search {
+  flex: 0 0 44px;
+}
+
+.search-expanded .media-list-search {
+  visibility: hidden;
+}
+
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .channel-filter-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  gap: 4px;
+}
+
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .channel-filter-row {
+  display: flex;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  gap: 6px;
+  padding: 2px 2px 4px;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .channel-filter-row button {
+  flex: 0 0 auto;
+  font-weight: 650;
+}
+
+.channel-list.media-poster-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 18px 10px;
+  min-width: 0;
+}
+
+.channel-list.media-episode-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-width: 0;
+}
+
+.channel-card.media-poster-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.channel-card.media-episode-card {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 84px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 0;
+  box-shadow: none;
+}
+
+.media-episode-list .media-episode-card:last-child {
+  border-bottom: 0;
+}
+
+.channel-card:is(.media-poster-card, .media-episode-card) .media-card-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.channel-card.media-episode-card .media-card-cover {
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+}
+
+/* The loader replaces .channel-thumb and gives img an inline natural aspect ratio.
+   Two definite dimensions inside an absolute frame keep that ratio out of layout. */
+.channel-card:is(.media-poster-card, .media-episode-card) .media-card-cover > :is(.channel-thumb, img) {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: inherit;
+  background: var(--surface-soft);
+  object-fit: cover;
+  object-position: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.channel-card:is(.media-poster-card, .media-episode-card) .channel-summary {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 0;
+}
+
+.channel-card:is(.media-poster-card, .media-episode-card) .channel-summary > strong {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.channel-card.media-poster-card .channel-summary > strong {
+  min-height: 2.8em;
+}
+
+.channel-card.media-episode-card .channel-summary > strong {
+  font-size: 15px;
+}
+
+.channel-card:is(.media-poster-card, .media-episode-card) .media-card-meta {
+  display: block;
+  min-width: 0;
+  min-height: 1.4em;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-card-cover .media-poster-rating {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 1;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 3px 5px;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.content-panel:is([data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .channel-tv-series-row.media-series-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 64px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 2px 0 12px;
+}
+
+.media-series-context .media-series-copy {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.media-series-context .media-series-copy > strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.content-panel:is([data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-series-context .media-series-copy > span {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.content-panel:is([data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-series-context button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--mobile-accent);
+  padding: 0 12px;
+  font-weight: 650;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-panel {
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-head {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-title strong {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-title span {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-action-row {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-action-row button {
+  min-width: 72px;
+  min-height: 44px;
+  border-radius: 10px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-native-play-surface {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  min-height: 44px;
+  aspect-ratio: 16 / 9;
+  overflow: visible;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  margin: 0 0 28px;
+  padding: 0;
+  isolation: isolate;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) :is(.media-native-play-visual, .media-native-play-image) {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--surface-soft);
+  object-fit: cover;
+  object-position: center;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-panel.is-movie .media-native-play-image {
+  object-fit: contain;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-native-play-surface::after {
+  display: none;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-native-play-mark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 52px;
+  height: 52px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  padding-left: 3px;
+  font-size: 23px;
+}
+
+/* Keep status text below the picture rather than over a face or subtitle. */
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-native-play-label {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-facts {
+  gap: 6px 12px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-facts:empty {
+  display: none;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-facts span {
+  background: transparent;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-episode-nav {
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr) minmax(72px, auto);
+  min-width: 0;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-episode-nav button {
+  min-height: 44px;
+  font-weight: 650;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-episode-nav-label {
+  font-weight: 500;
+}
+
+.media-episode-nav-status {
+  display: grid;
+  min-width: 0;
+  justify-items: center;
+  gap: 4px;
+}
+
+.media-episode-nav-status .media-episode-nav-label {
+  max-width: 100%;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-summary {
+  display: block;
+  min-width: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-summary > summary {
+  min-height: 44px;
+  padding: 13px 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-file-content {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 0 0 14px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-path {
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.media-chrome-tabs button,
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) button,
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) button {
+  min-width: 44px;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.media-chrome-tabs button:focus-visible,
+.content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) button:focus-visible,
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) :is(button, summary):focus-visible {
+  outline: 2px solid var(--mobile-accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 359px) {
+  .channel-list.media-poster-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 600px) {
+  .channel-list.media-poster-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 20px 12px;
+  }
+}
+
+@media (min-width: 900px) {
+  .channel-list.media-poster-grid {
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  }
+}
+.media-metadata-warning {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}

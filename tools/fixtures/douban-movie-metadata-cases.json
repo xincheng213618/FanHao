@@ -1,0 +1,725 @@
+{
+  "note": "Synthetic only. No real media paths, service calls, cookies or copied database data. Legacy functions frozen verbatim from the indicated Git HEAD source hashes.",
+  "canonical": [
+    {
+      "input": "http://movie.douban.com/subject/10002/?x=1#foo",
+      "expected": "https://movie.douban.com/subject/10002/"
+    },
+    {
+      "input": "/subject/10002/",
+      "expected": "https://movie.douban.com/subject/10002/"
+    },
+    {
+      "input": "https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F10002%2F",
+      "expected": "https://movie.douban.com/subject/10002/"
+    },
+    {
+      "input": "https://evil.invalid/subject/10002/",
+      "expected": ""
+    },
+    {
+      "input": "https://movie.douban.com.evil.invalid/subject/10002/",
+      "expected": ""
+    },
+    {
+      "input": "https://movie.douban.com@evil.invalid/subject/10002/",
+      "expected": ""
+    },
+    {
+      "input": "https://evil.invalid/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F10002%2F",
+      "expected": ""
+    },
+    {
+      "input": "text https://movie.douban.com/subject/10002/ tail",
+      "expected": ""
+    },
+    {
+      "input": "https://movie.douban.com/subject/10002/other",
+      "expected": ""
+    }
+  ],
+  "clean": [
+    {
+      "input": "唐顿庄园3.2025.1080p.WEB-DL.mkv",
+      "contains": [
+        "唐顿庄园3",
+        "2025"
+      ],
+      "excludes": [
+        "1080",
+        "mkv",
+        "WEB"
+      ]
+    },
+    {
+      "input": "1917 (2019).1080p.mkv",
+      "contains": [
+        "1917",
+        "2019"
+      ],
+      "excludes": [
+        "1080",
+        "mkv"
+      ]
+    },
+    {
+      "input": "2001太空漫游 (1968).1080p.mkv",
+      "contains": [
+        "2001",
+        "太空漫游",
+        "1968"
+      ],
+      "excludes": [
+        "1080",
+        "mkv"
+      ]
+    },
+    {
+      "input": "TheWorldIsNotEnough.1999.1080p.mkv",
+      "contains": [
+        "TheWorldIsNotEnough",
+        "1999"
+      ],
+      "excludes": [
+        "1080",
+        "mkv"
+      ]
+    }
+  ],
+  "metas": {
+    "tv": {
+      "doubanId": "10001",
+      "doubanUrl": "https://movie.douban.com/subject/10001/",
+      "title": "唐顿庄园 第一季",
+      "year": "2010",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "TVSeries",
+        "name": "唐顿庄园 第一季"
+      },
+      "info": {
+        "季数": "1",
+        "集数": "7",
+        "单集片长": "50分钟"
+      },
+      "episodeCount": 7
+    },
+    "sequel": {
+      "doubanId": "10002",
+      "doubanUrl": "https://movie.douban.com/subject/10002/",
+      "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+      "year": "2025",
+      "originalTitle": "Downton Abbey The Grand Finale",
+      "aliases": [
+        "唐顿庄园3",
+        "Downton Abbey: The Grand Finale"
+      ],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "唐顿庄园3 Downton Abbey The Grand Finale"
+      },
+      "info": {}
+    },
+    "previous": {
+      "doubanId": "10003",
+      "doubanUrl": "https://movie.douban.com/subject/10003/",
+      "title": "唐顿庄园2",
+      "year": "2022",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "唐顿庄园2"
+      },
+      "info": {}
+    },
+    "war": {
+      "doubanId": "10004",
+      "doubanUrl": "https://movie.douban.com/subject/10004/",
+      "title": "1917",
+      "year": "2019",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "1917"
+      },
+      "info": {}
+    },
+    "space": {
+      "doubanId": "10005",
+      "doubanUrl": "https://movie.douban.com/subject/10005/",
+      "title": "2001太空漫游",
+      "year": "1968",
+      "originalTitle": "2001: A Space Odyssey",
+      "aliases": [
+        "2001太空漫游"
+      ],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "2001太空漫游"
+      },
+      "info": {}
+    },
+    "bilingual": {
+      "doubanId": "10006",
+      "doubanUrl": "https://movie.douban.com/subject/10006/",
+      "title": "黑客帝国 The Matrix",
+      "year": "1999",
+      "originalTitle": "The Matrix",
+      "aliases": [
+        "黑客帝国"
+      ],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "黑客帝国 The Matrix"
+      },
+      "info": {}
+    },
+    "bond": {
+      "doubanId": "10007",
+      "doubanUrl": "https://movie.douban.com/subject/10007/",
+      "title": "黑日危机 The World Is Not Enough",
+      "year": "1999",
+      "originalTitle": "The World Is Not Enough",
+      "aliases": [
+        "黑日危机"
+      ],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "黑日危机 The World Is Not Enough"
+      },
+      "info": {}
+    },
+    "echo": {
+      "doubanId": "10008",
+      "doubanUrl": "https://movie.douban.com/subject/10008/",
+      "title": "归途",
+      "year": "2020",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "归途"
+      },
+      "info": {}
+    },
+    "echoWrong": {
+      "doubanId": "10009",
+      "doubanUrl": "https://movie.douban.com/subject/10009/",
+      "title": "归途",
+      "year": "2010",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "归途"
+      },
+      "info": {}
+    },
+    "duplicate": {
+      "doubanId": "10010",
+      "doubanUrl": "https://movie.douban.com/subject/10010/",
+      "title": "归途",
+      "year": "2020",
+      "originalTitle": "",
+      "aliases": [],
+      "rating": 8.1,
+      "ratingCount": 123,
+      "genres": [
+        "剧情"
+      ],
+      "summary": "Synthetic movie synopsis.",
+      "coverUrl": "",
+      "detailSource": "subject",
+      "jsonLd": {
+        "@type": "Movie",
+        "name": "归途"
+      },
+      "info": {}
+    }
+  },
+  "sequelTarget": {
+    "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+    "searchTitle": "唐顿庄园3 2025",
+    "samples": [
+      "电影/唐顿庄园3.2025.1080p.mkv"
+    ]
+  },
+  "cases": [
+    {
+      "name": "duplicate primary sample must not create basename alias",
+      "target": {"movieTitle":"Face/Off", "searchTitle":"Face/Off", "samples":["Face/Off","电影/Face.Off.1997.mkv"]},
+      "candidates": [{"doubanId":"10014","doubanUrl":"https://movie.douban.com/subject/10014/","title":"Off","year":"1997","detailSource":"subject","jsonLd":{"@type":"Movie"},"info":{}}],
+      "expectedError":true
+    },
+    {
+      "name": "primary title slash is not treated as a file path",
+      "target": {"movieTitle":"Face/Off", "searchTitle":"Face/Off", "samples":["Synthetic/Face.Off.1997.mkv"]},
+      "candidates": [{"doubanId":"10013","doubanUrl":"https://movie.douban.com/subject/10013/","title":"Face/Off","year":"1997","detailSource":"subject","jsonLd":{"@type":"Movie"},"info":{}}],
+      "expectedId":"10013"
+    },
+    {
+      "name": "matching original title does not bypass local release year",
+      "target": {"movieTitle":"The Matrix (2000)", "searchTitle":"The Matrix 2000", "samples":[]},
+      "candidates":["bilingual"],
+      "expectedError":true
+    },
+    {
+      "name": "reject TV first and choose exact sequel second",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        "tv",
+        "sequel"
+      ],
+      "expectedId": "10002"
+    },
+    {
+      "name": "sequel digit distinguishes previous film",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        "previous"
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "numeric title 1917 is not release year",
+      "target": {
+        "movieTitle": "1917 (2019)",
+        "searchTitle": "1917 2019",
+        "samples": [
+          "1917.2019.mkv"
+        ]
+      },
+      "candidates": [
+        "war"
+      ],
+      "expectedId": "10004"
+    },
+    {
+      "name": "numeric title 2001 retains release 1968",
+      "target": {
+        "movieTitle": "2001太空漫游 (1968)",
+        "searchTitle": "2001太空漫游 1968",
+        "samples": [
+          "2001太空漫游.1968.mkv"
+        ]
+      },
+      "candidates": [
+        "space"
+      ],
+      "expectedId": "10005"
+    },
+    {
+      "name": "same title wrong release year rejected",
+      "target": {
+        "movieTitle": "归途 (2020)",
+        "searchTitle": "归途 2020",
+        "samples": []
+      },
+      "candidates": [
+        "echoWrong"
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "same title chooses release year",
+      "target": {
+        "movieTitle": "归途 (2020)",
+        "searchTitle": "归途 2020",
+        "samples": []
+      },
+      "candidates": [
+        "echoWrong",
+        "echo"
+      ],
+      "expectedId": "10008"
+    },
+    {
+      "name": "bilingual title exact alias allowed",
+      "target": {
+        "movieTitle": "黑客帝国 The Matrix (1999)",
+        "searchTitle": "黑客帝国 1999",
+        "samples": []
+      },
+      "candidates": [
+        "bilingual"
+      ],
+      "expectedId": "10006"
+    },
+    {
+      "name": "camelcase English compact title allowed",
+      "target": {
+        "movieTitle": "TheWorldIsNotEnough.1999.1080p.mkv",
+        "searchTitle": "TheWorldIsNotEnough 1999",
+        "samples": []
+      },
+      "candidates": [
+        "bond"
+      ],
+      "expectedId": "10007"
+    },
+    {
+      "name": "unknown type is not movie evidence",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://movie.douban.com/subject/10002/",
+          "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+          "year": "2025",
+          "originalTitle": "Downton Abbey The Grand Finale",
+          "aliases": [
+            "唐顿庄园3",
+            "Downton Abbey: The Grand Finale"
+          ],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "subject",
+          "jsonLd": {},
+          "info": {}
+        }
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "no subject title rejected",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://movie.douban.com/subject/10002/",
+          "title": "",
+          "year": "2025",
+          "originalTitle": "",
+          "aliases": [],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "subject",
+          "jsonLd": {
+            "@type": "Movie"
+          },
+          "info": {}
+        }
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "search-only metadata cannot be accepted",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://movie.douban.com/subject/10002/",
+          "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+          "year": "2025",
+          "originalTitle": "Downton Abbey The Grand Finale",
+          "aliases": [
+            "唐顿庄园3",
+            "Downton Abbey: The Grand Finale"
+          ],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "search",
+          "jsonLd": {
+            "@type": "Movie",
+            "name": "唐顿庄园3 Downton Abbey The Grand Finale"
+          },
+          "info": {}
+        }
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "missing detail source rejected",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://movie.douban.com/subject/10002/",
+          "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+          "year": "2025",
+          "originalTitle": "Downton Abbey The Grand Finale",
+          "aliases": [
+            "唐顿庄园3",
+            "Downton Abbey: The Grand Finale"
+          ],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "",
+          "jsonLd": {
+            "@type": "Movie",
+            "name": "唐顿庄园3 Downton Abbey The Grand Finale"
+          },
+          "info": {}
+        }
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "two distinct matching subjects ambiguous",
+      "target": {
+        "movieTitle": "归途 2020",
+        "searchTitle": "归途 2020",
+        "samples": []
+      },
+      "candidates": [
+        "echo",
+        "duplicate"
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "duplicate same subject is not ambiguity",
+      "target": {
+        "movieTitle": "归途 2020",
+        "searchTitle": "归途 2020",
+        "samples": []
+      },
+      "candidates": [
+        "echo",
+        "echo"
+      ],
+      "expectedId": "10008"
+    },
+    {
+      "name": "foreign subject URL rejected",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://evil.invalid/subject/10002/",
+          "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+          "year": "2025",
+          "originalTitle": "Downton Abbey The Grand Finale",
+          "aliases": [
+            "唐顿庄园3",
+            "Downton Abbey: The Grand Finale"
+          ],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "subject",
+          "jsonLd": {
+            "@type": "Movie",
+            "name": "唐顿庄园3 Downton Abbey The Grand Finale"
+          },
+          "info": {}
+        }
+      ],
+      "expectedError": true
+    },
+    {
+      "name": "Movie type cannot overrule TV structure",
+      "target": {
+        "movieTitle": "唐顿庄园3 Downton Abbey The Grand Finale",
+        "searchTitle": "唐顿庄园3 2025",
+        "samples": [
+          "电影/唐顿庄园3.2025.1080p.mkv"
+        ]
+      },
+      "candidates": [
+        {
+          "doubanId": "10002",
+          "doubanUrl": "https://movie.douban.com/subject/10002/",
+          "title": "唐顿庄园3 Downton Abbey The Grand Finale",
+          "year": "2025",
+          "originalTitle": "Downton Abbey The Grand Finale",
+          "aliases": [
+            "唐顿庄园3",
+            "Downton Abbey: The Grand Finale"
+          ],
+          "rating": 8.1,
+          "ratingCount": 123,
+          "genres": [
+            "剧情"
+          ],
+          "summary": "Synthetic movie synopsis.",
+          "coverUrl": "",
+          "detailSource": "subject",
+          "jsonLd": {
+            "@type": "Movie",
+            "name": "唐顿庄园3 Downton Abbey The Grand Finale"
+          },
+          "info": {
+            "集数": "7"
+          }
+        }
+      ],
+      "expectedError": true
+    }
+  ],
+  "legacy": {
+    "node": {
+      "path": "tools/backfill_douban_tv_metadata.mjs",
+      "sourceSha256": "749a5dc86af53b0f5f66c0a869d8cd2ece8e70d462af189180733567f200994d",
+      "functions": {
+        "cleanMovieQueryTitle": "function cleanMovieQueryTitle(value) {\n  const source = String(value || \"\");\n  const year = /\\b(19\\d{2}|20\\d{2})\\b/.exec(source)?.[1] || \"\";\n  const text = source\n    .replace(/\\[[^\\]]+\\]/g, \" \")\n    .replace(/\\([^)]*\\)/g, \" \")\n    .replace(/\\b(?:2160p|1080p|720p|480p|4k|8k|uhd|remux|bluray|blu[-_. ]?ray|web[-_. ]?dl|hdtv|hdr|dv|p7|hevc|x265|x264|h\\\\.264|h\\\\.265|aac|dts|truehd|atmos|multi|proper|repack)\\b/gi, \" \")\n    .replace(/\\b(?:cd\\d+|part\\d+|disc\\d+)\\b/gi, \" \")\n    .replace(/\\b\\d{1,3}(?:\\\\.\\\\d+)?\\s*(?:gb|mb)\\b/gi, \" \")\n    .replace(/\\.(?:mkv|mp4|m2ts|ts|avi|mov|wmv)$/i, \" \")\n    .replace(/[._-]+/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n  const yearIndex = year ? text.indexOf(year) : -1;\n  const beforeYear = yearIndex >= 0 ? text.slice(0, yearIndex).trim() : text;\n  const chinese = /[\\p{Script=Han}][\\p{Script=Han}\\s·：:]+/u.exec(beforeYear || text)?.[0]?.trim();\n  return [chinese || beforeYear || text, year].filter(Boolean).join(\" \").trim();\n}",
+        "subjectUrlFromValue": "function subjectUrlFromValue(value) {\n  const text = htmlDecode(String(value || \"\"));\n  const direct = /https:\\/\\/movie\\.douban\\.com\\/subject\\/\\d+\\//.exec(text)?.[0] || \"\";\n  if (direct) return direct;\n  const encoded = /url=(https%3A%2F%2Fmovie\\.douban\\.com%2Fsubject%2F\\d+%2F)/i.exec(text)?.[1] || \"\";\n  if (encoded) {\n    try {\n      return decodeURIComponent(encoded);\n    } catch {}\n  }\n  return \"\";\n}",
+        "fetchDoubanMeta": "async function fetchDoubanMeta(group, options) {\n  const rawQuery = group.searchTitle || group.seriesName || group.movieTitle || \"\";\n  const query = options.kind === \"movie\" ? cleanMovieQueryTitle(rawQuery) || rawQuery : cleanQueryTitle(rawQuery) || rawQuery;\n  const searchUrl = `https://www.douban.com/search?cat=1002&q=${encodeURIComponent(query)}`;\n  const searchHtml = await fetchText(searchUrl, { cookie: options.cookie });\n  const subjectUrl = extractSubjectUrlFromSearch(searchHtml);\n  if (!subjectUrl) throw new Error(`豆瓣没有搜索结果：${query}`);\n  const searchMeta = parseSearchPage(searchHtml);\n  let subjectMeta = {};\n  try {\n    const subjectHtml = await fetchText(subjectUrl, { cookie: options.cookie, referer: searchUrl });\n    subjectMeta = parseSubjectPage(subjectHtml, subjectUrl);\n  } catch (error) {\n    if (!(error instanceof DoubanSecurityPageError)) {\n      subjectMeta = {};\n    }\n  }\n  return mergeMeta(subjectMeta, { ...searchMeta, doubanUrl: subjectUrl });\n}",
+        "upsertError": "function upsertError(db, kind, group, error) {\n  const config = metadataConfig(kind);\n  const now = new Date().toISOString();\n  db.prepare(\n    `\n    INSERT INTO ${config.table} (\n      ${config.keyColumn}, category, ${config.titleColumn}, source, status, error, fetched_at, updated_at\n    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n    ON CONFLICT(${config.keyColumn}) DO UPDATE SET\n      category = excluded.category,\n      ${config.titleColumn} = excluded.${config.titleColumn},\n      source = excluded.source,\n      status = excluded.status,\n      error = excluded.error,\n      fetched_at = excluded.fetched_at,\n      updated_at = excluded.updated_at\n    `\n  ).run(group.key, group.category, targetTitle(group), \"douban\", \"error\", String(error?.message || error).slice(0, 1000), now, now);\n}"
+      },
+      "support": {
+        "htmlDecode": "function htmlDecode(value) {\n  return String(value || \"\")\n    .replace(/&quot;/g, '\"')\n    .replace(/&#34;/g, '\"')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&amp;/g, \"&\")\n    .replace(/&lt;/g, \"<\")\n    .replace(/&gt;/g, \">\");\n}",
+        "extractJsonLd": "function extractJsonLd(html) {\n  const matches = [...String(html || \"\").matchAll(/<script[^>]+type=[\"']application\\/ld\\+json[\"'][^>]*>([\\s\\S]*?)<\\/script>/gi)];\n  for (const match of matches) {\n    try {\n      const parsed = JSON.parse(htmlDecode(match[1]).trim());\n      if (parsed && typeof parsed === \"object\") return parsed;\n    } catch {}\n  }\n  return null;\n}",
+        "firstMatch": "function firstMatch(text, pattern) {\n  return pattern.exec(text)?.[1]?.trim() || \"\";\n}",
+        "stripTags": "function stripTags(value) {\n  return htmlDecode(value)\n    .replace(/<[^>]+>/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}",
+        "normalizeSpaces": "function normalizeSpaces(value) {\n  return htmlDecode(String(value || \"\"))\n    .replace(/&nbsp;/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}",
+        "parseRatingCount": "function parseRatingCount(value) {\n  const match = /(\\d[\\d,]*)\\s*人评价/.exec(String(value || \"\"));\n  return match ? Number(match[1].replace(/,/g, \"\")) || 0 : 0;\n}",
+        "parseSearchPage": "function parseSearchPage(html) {\n  const resultBlock = firstMatch(html, /<div class=[\"']result[\"'][^>]*>([\\s\\S]*?)(?=<div class=[\"']result[\"']|<\\/div>\\s*<\\/div>\\s*<\\/div>)/i);\n  const block = resultBlock || html;\n  const subjectUrl = subjectUrlFromValue(block);\n  const title =\n    htmlDecode(firstMatch(block, /<a[^>]+title=[\"']([^\"']+)[\"'][^>]*>\\s*<img/i)) ||\n    stripTags(firstMatch(block, /<h3>[\\s\\S]*?<a[^>]+>([\\s\\S]*?)<\\/a>/i));\n  const rating = Number(firstMatch(block, /<span class=[\"']rating_nums[\"']>([^<]+)/i) || 0) || null;\n  const ratingText = firstMatch(block, /<div class=[\"']rating-info[\"'][^>]*>([\\s\\S]*?)<\\/div>/i);\n  const ratingCount = parseRatingCount(ratingText);\n  const castText = stripTags(firstMatch(block, /<span class=[\"']subject-cast[\"']>([\\s\\S]*?)<\\/span>/i));\n  const castParts = castText\n    .replace(/^原名:[^/]+\\/\\s*/, \"\")\n    .split(\"/\")\n    .map((part) => part.trim())\n    .filter(Boolean);\n  const year = (castParts.find((part) => /^\\d{4}$/.test(part)) || firstMatch(castText, /(\\d{4})\\s*$/)) || \"\";\n  const actors = castParts.filter((part) => part !== year).slice(0, 12);\n  const summary = stripTags(firstMatch(block, /<p>([\\s\\S]*?)<\\/p>/i));\n  const coverUrl = htmlDecode(firstMatch(block, /<img[^>]+src=[\"']([^\"']+)/i));\n  const doubanId = firstMatch(subjectUrl, /subject\\/(\\d+)/) || firstMatch(block, /sid:\\s*(\\d+)/i) || \"\";\n  return {\n    doubanId,\n    doubanUrl: subjectUrl,\n    title,\n    year,\n    originalTitle: \"\",\n    aliases: [],\n    officialSite: \"\",\n    rating,\n    ratingCount,\n    ratingStars: {},\n    ratingBetterThan: [],\n    directors: [],\n    writers: [],\n    genres: [],\n    actors,\n    countries: [],\n    languages: [],\n    pubdate: \"\",\n    releaseDates: [],\n    seasonCount: null,\n    episodeCount: null,\n    episodeDuration: \"\",\n    durations: [],\n    imdbId: \"\",\n    info: {},\n    jsonLd: {},\n    summary,\n    coverUrl\n  };\n}",
+        "extractSubjectUrlFromSearch": "function extractSubjectUrlFromSearch(html) {\n  const linked = subjectUrlFromValue(html);\n  if (linked) return linked;\n  const href = firstMatch(html, /<a[^>]+href=[\"'](https:\\/\\/movie\\.douban\\.com\\/subject\\/\\d+\\/)[\"'][^>]*>/i);\n  return href || \"\";\n}",
+        "mergeMeta": "function mergeMeta(primary, fallback) {\n  return {\n    doubanId: primary.doubanId || fallback.doubanId || \"\",\n    doubanUrl: primary.doubanUrl || fallback.doubanUrl || \"\",\n    title: primary.title || fallback.title || \"\",\n    year: primary.year || fallback.year || \"\",\n    originalTitle: primary.originalTitle || fallback.originalTitle || \"\",\n    aliases: primary.aliases?.length ? primary.aliases : fallback.aliases || [],\n    officialSite: primary.officialSite || fallback.officialSite || \"\",\n    rating: primary.rating || fallback.rating || null,\n    ratingCount: primary.ratingCount || fallback.ratingCount || 0,\n    ratingStars: Object.keys(primary.ratingStars || {}).length ? primary.ratingStars : fallback.ratingStars || {},\n    ratingBetterThan: primary.ratingBetterThan?.length ? primary.ratingBetterThan : fallback.ratingBetterThan || [],\n    directors: primary.directors?.length ? primary.directors : fallback.directors || [],\n    writers: primary.writers?.length ? primary.writers : fallback.writers || [],\n    genres: primary.genres?.length ? primary.genres : fallback.genres || [],\n    actors: primary.actors?.length ? primary.actors : fallback.actors || [],\n    countries: primary.countries?.length ? primary.countries : fallback.countries || [],\n    languages: primary.languages?.length ? primary.languages : fallback.languages || [],\n    pubdate: primary.pubdate || fallback.pubdate || \"\",\n    releaseDates: primary.releaseDates?.length ? primary.releaseDates : fallback.releaseDates || [],\n    seasonCount: primary.seasonCount || fallback.seasonCount || null,\n    episodeCount: primary.episodeCount || fallback.episodeCount || null,\n    episodeDuration: primary.episodeDuration || fallback.episodeDuration || \"\",\n    durations: primary.durations?.length ? primary.durations : fallback.durations || [],\n    imdbId: primary.imdbId || fallback.imdbId || \"\",\n    info: Object.keys(primary.info || {}).length ? primary.info : fallback.info || {},\n    jsonLd: Object.keys(primary.jsonLd || {}).length ? primary.jsonLd : fallback.jsonLd || {},\n    summary: primary.summary || fallback.summary || \"\",\n    coverUrl: primary.coverUrl || fallback.coverUrl || \"\",\n    detailSource: primary.title || primary.summary || primary.genres?.length || primary.actors?.length ? \"subject\" : fallback.detailSource || \"search\"\n  };\n}",
+        "cleanQueryTitle": "function cleanQueryTitle(value) {\n  const cleaned = String(value || \"\")\n    .replace(/\\[[^\\]]+\\]/g, \" \")\n    .replace(/\\([^)]*\\)/g, \" \")\n    .replace(/S\\d{1,3}|Season\\s*\\d+/gi, \" \")\n    .replace(/\\b(?:WEB[-_. ]?DL|BluRay|HDTV|NF|AMZN|HBO|Disney|Netflix)\\b/gi, \" \")\n    .replace(/[._-]+/g, \" \")\n    .replace(/\\b\\d{4}\\b/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n  const chinese = /[\\p{Script=Han}][\\p{Script=Han}\\s·：:]+/u.exec(cleaned)?.[0]?.trim();\n  return chinese || cleaned;\n}"
+      }
+    },
+    "python": {
+      "path": "tools/backfill_douban_movie_metadata_browser.py",
+      "sourceSha256": "e394e150c77c67813746def6431188ade1e9d8131753586cafc73ab5256107b2",
+      "functions": {
+        "clean_movie_query_title": "def clean_movie_query_title(value: str) -> str:\n    source = str(value or \"\")\n    year_match = re.search(r\"\\b(19\\d{2}|20\\d{2})\\b\", source)\n    year = year_match.group(1) if year_match else \"\"\n    text = re.sub(r\"\\[[^\\]]+\\]\", \" \", source)\n    text = re.sub(r\"\\([^)]*\\)\", \" \", text)\n    text = re.sub(\n        r\"\\b(?:2160p|1080p|720p|480p|4k|8k|uhd|remux|bluray|blu[-_. ]?ray|web[-_. ]?dl|\"\n        r\"hdtv|hdr|dv|p7|hevc|x265|x264|h\\.264|h\\.265|aac|dts|truehd|atmos|multi|proper|repack)\\b\",\n        \" \",\n        text,\n        flags=re.I,\n    )\n    text = re.sub(r\"\\b(?:cd\\d+|part\\d+|disc\\d+)\\b\", \" \", text, flags=re.I)\n    text = re.sub(r\"\\b\\d{1,3}(?:\\.\\d+)?\\s*(?:gb|mb)\\b\", \" \", text, flags=re.I)\n    text = re.sub(r\"\\.(?:mkv|mp4|m2ts|ts|avi|mov|wmv)$\", \" \", text, flags=re.I)\n    text = re.sub(r\"[._-]+\", \" \", text)\n    text = normalize_spaces(text)\n    year_index = text.find(year) if year else -1\n    before_year = text[:year_index].strip() if year_index >= 0 else text\n    chinese = re.search(r\"[\\u4e00-\\u9fff][\\u4e00-\\u9fff\\s·：:]+\", before_year or text)\n    title = normalize_spaces(chinese.group(0) if chinese else before_year or text)\n    return normalize_spaces(\" \".join(part for part in [title, year] if part))",
+        "subject_url_from_value": "def subject_url_from_value(value: str) -> str:\n    text = normalize_spaces(value)\n    match = re.search(r\"(?:https?:)?//(?:movie\\.)?douban\\.com/subject/(\\d+)/?\", text)\n    if match:\n        return f\"https://movie.douban.com/subject/{match.group(1)}/\"\n    match = re.search(r\"\\bsubject/(\\d+)/?\", text)\n    if match:\n        return f\"https://movie.douban.com/subject/{match.group(1)}/\"\n    if re.fullmatch(r\"\\d{5,}\", text):\n        return f\"https://movie.douban.com/subject/{text}/\"\n    return \"\"",
+        "fetch_movie_meta": "def fetch_movie_meta(context, page, target: MovieTarget, args: argparse.Namespace) -> dict:\n    queries = unique([target.search_title, re.sub(r\"\\b(19\\d{2}|20\\d{2})\\b\", \"\", target.search_title).strip(), target.movie_title], 3)\n    last_no_result = None\n    for query in queries:\n        if not query:\n            continue\n        subject_url = suggest_subject_url(context, query)\n        if not subject_url:\n            try:\n                subject_url = search_subject_url(page, query, args)\n            except DoubanNoResultError as error:\n                last_no_result = error\n                continue\n        return fetch_subject_page_meta(page, subject_url, args)\n    raise last_no_result or DoubanNoResultError(f\"豆瓣没有搜索结果：{target.search_title}\")",
+        "upsert_error": "def upsert_error(conn: sqlite3.Connection, target: MovieTarget, error: Exception) -> None:\n    now = datetime.now(timezone.utc).isoformat().replace(\"+00:00\", \"Z\")\n    conn.execute(\n        \"\"\"\n        INSERT INTO movie_metadata (media_id, category, movie_title, source, status, error, fetched_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(media_id) DO UPDATE SET\n          category=excluded.category,\n          movie_title=excluded.movie_title,\n          source=excluded.source,\n          status=excluded.status,\n          error=excluded.error,\n          fetched_at=excluded.fetched_at,\n          updated_at=excluded.updated_at\n        \"\"\",\n        (target.key, target.category, target.movie_title, \"douban-browser\", \"error\", str(error)[:1000], now, now),\n    )\n    conn.commit()"
+      }
+    }
+  }
+}

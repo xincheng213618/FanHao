@@ -3,11 +3,12 @@ import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-person-categories-21";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260830-fanhao-single-category-28";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
+import { mergePersonIdentity } from "./features/people/person-portrait.js?v=20260830-western-portrait-33";
 import { createWorkActions } from "./features/works/actions.js?v=20260812-android-work-move-02";
 import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46";
 import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=20260812-android-work-move-02";
@@ -76,7 +77,8 @@ export function createDetailViews(context) {
     const title = els.moduleChrome?.querySelector("[data-fanhao-detail-title]");
     if (title) title.textContent = String(value || "").trim() || "详情";
   };
-  async function renderPersonDetail(personId, isActive = () => true) {
+  async function renderPersonDetail(personId, requestedScope = "main", isActive = () => true) {
+    const scope = String(requestedScope || "main").toLowerCase() === "western" ? "western" : "main";
     const activeUrl = getActiveUrl();
     setActiveBottom("people");
     els.viewKicker.textContent = "演员";
@@ -84,21 +86,18 @@ export function createDetailViews(context) {
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载演员资料</div>`;
     const selectedYear = getPersonWorkYear(personId);
-    const path = personDetailPath(personId, { ...getWorkListRequestState(), year: selectedYear, limit: getWorksLimit() });
+    const path = personDetailPath(personId, { ...getWorkListRequestState(), scope, year: selectedYear, limit: getWorksLimit() });
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
     if (indexedPerson) renderPersonPreview(indexedPerson);
     const renderPersonData = (data) => {
-      const person = mergeIndexedPerson(indexedPerson, data.person, data.works);
+      const person = mergePersonIdentity(indexedPerson, data.person);
       const works = data.works || [];
       setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
       els.viewTitle.textContent = "演员详情";
       els.viewMeta.textContent = "";
       els.viewContent.innerHTML = "";
-      els.viewContent.append(renderPersonHero(person, {
-        categories: data.categories,
-        filmographyCount: data.filmographyCount
-      }));
+      els.viewContent.append(renderPersonHero(person, { filmographyCount: data.filmographyCount }));
       els.viewContent.append(createDetailSectionTitle("作品", ""));
       renderWorks(works, "这个演员下面还没有作品。", {
         facets: data.facets,
@@ -176,20 +175,6 @@ export function createDetailViews(context) {
     loading.className = "loading-row";
     loading.textContent = "正在加载作品";
     els.viewContent.append(loading);
-  }
-
-  function mergeIndexedPerson(indexedPerson, detailPerson, works = []) {
-    const fallbackAvatarUrl = detailPerson?.avatarUrl
-      || indexedPerson?.avatarUrl
-      || works.map((work) => imageUrlForWork(work)).find(Boolean)
-      || "";
-    if (!indexedPerson) return { ...detailPerson, avatarUrl: fallbackAvatarUrl };
-    return {
-      ...indexedPerson,
-      ...detailPerson,
-      actorProfile: detailPerson?.actorProfile || indexedPerson.actorProfile || null,
-      avatarUrl: fallbackAvatarUrl
-    };
   }
 
   function renderPersonFallback(personId, error) {
@@ -333,7 +318,7 @@ export function createDetailViews(context) {
     author.textContent = workPersonName(work) ? `演员：${workPersonName(work)}` : "演员：未知";
     if (work.personId) {
       author.type = "button";
-      author.addEventListener("click", () => showView("personDetail", { personId: work.personId }, { push: true }));
+      author.addEventListener("click", () => showView("personDetail", { personId: work.personId, scope: personScopeForWork(work) }, { push: true }));
     }
 
     const titleBlock = document.createElement("div");
@@ -595,14 +580,14 @@ export function createDetailViews(context) {
       card.type = "button";
       card.className = `work-actor-card${actors.length > 1 ? " compact" : ""}`;
       if (actor.person?.id) {
-        card.addEventListener("click", () => showView("personDetail", { personId: actor.person.id }, { push: true }));
+        card.addEventListener("click", () => showView("personDetail", { personId: actor.person.id, scope: personScopeForWork(work) }, { push: true }));
       } else {
         card.addEventListener("click", () => showView("search", { query: actor.name }, { push: true }));
       }
 
       const visual = createFallbackCover(actor.name);
       card.append(visual);
-      const imagePath = actor.person ? imageUrlForPerson(actor.person) : "";
+      const imagePath = actor.person ? portraitUrlForPerson(actor.person) : "";
       if (imagePath) loadPreviewImage(visual, absoluteUrl(activeUrl, imagePath), { cacheBaseUrl: activeUrl });
 
       const body = document.createElement("div");
@@ -736,4 +721,8 @@ export function createDetailViews(context) {
     renderPersonDetail,
     renderWorkDetail
   };
+}
+
+function personScopeForWork(work) {
+  return String(getWorkSource(work)?.variant || "").includes("western") ? "western" : "main";
 }

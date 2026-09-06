@@ -3,12 +3,14 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { createNovelCollectionService } from "../src/modules/novels/server/collection-service.js";
 import { createNovelCredentialService } from "../src/modules/novels/server/credential-service.js";
 import { createNovelSettingsProvider } from "../src/modules/novels/server/settings.js";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
+execFileSync(process.env.PYTHON || "python", [path.join(projectRoot, "tools", "verify_cool18_collector.py")], { stdio: "inherit" });
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-novel-collection-"));
 const novelsDbPath = path.join(tempDir, "novels.sqlite");
 const collectionDbPath = path.join(tempDir, "novel-collection.sqlite");

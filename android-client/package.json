@@ -7,6 +7,7 @@
     "build:debug": "powershell -ExecutionPolicy Bypass -File ./build-debug.ps1",
     "build:debug:update": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "install:debug": "powershell -ExecutionPolicy Bypass -File ./build-debug.ps1 -Install",
+    "install:published": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./install-published-debug.ps1",
     "publish:debug": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "verify:security": "node scripts/verify-android-security.mjs",
     "verify:gradle-config": "node scripts/verify-gradle-proxy-hygiene.mjs",

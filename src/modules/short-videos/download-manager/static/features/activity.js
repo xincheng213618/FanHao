@@ -1,4 +1,5 @@
-import { $, escapeHtml } from "../core/dom.js";
+import { post } from "../core/api.js";
+import { $, escapeHtml, toast } from "../core/dom.js";
 import { formatDateTime } from "../core/format.js";
 
 const JOB_STATUS_LABELS = Object.freeze({
@@ -23,12 +24,47 @@ const EVENT_LEVEL_LABELS = Object.freeze({
   success: "完成",
 });
 
-export function createActivityFeature() {
-  function bind() {}
+export function createActivityFeature(options = {}) {
+  let latestExtract = {};
+  let resetPending = false;
+
+  async function resetCurrentExtract() {
+    if (!latestExtract.active || resetPending) return;
+    const queued = Array.isArray(latestExtract.queue) ? latestExtract.queue.length : 0;
+    const suffix = queued ? `，后面的 ${queued} 个排队任务会保留` : "";
+    if (!window.confirm(`确定重置当前采集吗？\n\n当前采集会停止${suffix}。`)) return;
+    resetPending = true;
+    const button = $("activityResetExtract");
+    if (button) button.disabled = true;
+    try {
+      const result = await post("/api/extract/reset");
+      const preserved = Number(result.preserved_queued || 0);
+      toast(preserved ? `正在重置当前采集，已保留 ${preserved} 个排队任务` : "正在重置当前采集");
+      await options.refreshState?.();
+    } finally {
+      resetPending = false;
+      if (button) button.disabled = false;
+    }
+  }
+
+  function bind() {
+    $("activityResetExtract")?.addEventListener("click", () => {
+      resetCurrentExtract().catch((error) => toast(error.message));
+    });
+  }
 
   function render(state = {}) {
     const jobs = Array.isArray(state.jobs) ? state.jobs : [];
     const extract = state.extract && typeof state.extract === "object" ? state.extract : {};
+    latestExtract = extract;
+    const resetButton = $("activityResetExtract");
+    if (resetButton) {
+      resetButton.hidden = !extract.active;
+      resetButton.disabled = resetPending;
+      resetButton.title = extract.active
+        ? "停止当前采集批次并保留后面的排队任务"
+        : "当前没有采集任务";
+    }
     const jobsById = new Map(jobs.map((job) => [jobKey(job.id), job]));
     const runningIds = new Set();
     const queuedIds = new Set();

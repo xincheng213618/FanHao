@@ -25,6 +25,19 @@ function Write-Utf8Json {
   [IO.File]::WriteAllText($Path, "$(($Value | ConvertTo-Json -Depth 8))`n", $utf8NoBom)
 }
 
+function Get-PolicyFileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $stream = [IO.File]::Open([IO.Path]::GetFullPath($Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function New-CaseDirectory {
   param([string]$Name)
   $path = Join-Path $TestRoot $Name
@@ -87,7 +100,7 @@ function Write-ValidManifest {
     notes = @("fixture")
     updatedAt = "2026-08-11T00:00:00.0000000Z"
     size = [long]$item.Length
-    sha256 = (Get-FileHash -LiteralPath $ApkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    sha256 = Get-PolicyFileSha256 -Path $ApkPath
   })
 }
 
@@ -134,7 +147,7 @@ function Invoke-PolicyTest {
 function Get-FileFingerprint {
   param([string]$Path)
   if (-not (Test-Path -LiteralPath $Path)) { return "missing" }
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+  return Get-PolicyFileSha256 -Path $Path
 }
 
 function Get-Plan {

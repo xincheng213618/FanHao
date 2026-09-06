@@ -17,18 +17,34 @@ final class FeedScreenState extends ScreenState {
   final String nextCursor;
   final boolean hasMore;
   final int currentIndex;
+  final NativeShortVideoFeedPlayback.Snapshot playback;
 
   FeedScreenState(List<ShortVideoItem> items, String feedUrl, int nextOffset, String nextCursor, boolean hasMore, int currentIndex) {
+    this(items, feedUrl, nextOffset, nextCursor, hasMore, currentIndex, null);
+  }
+
+  FeedScreenState(List<ShortVideoItem> items, String feedUrl, int nextOffset, String nextCursor, boolean hasMore,
+      int currentIndex, NativeShortVideoFeedPlayback.Snapshot playback) {
     if (items != null) this.items.addAll(items);
     this.feedUrl = feedUrl == null ? "" : feedUrl;
     this.nextOffset = Math.max(0, nextOffset);
     this.nextCursor = nextCursor == null ? "" : nextCursor;
     this.hasMore = hasMore;
     this.currentIndex = Math.max(0, currentIndex);
+    this.playback = playback;
   }
 
   FeedScreenState copy() {
-    return new FeedScreenState(items, feedUrl, nextOffset, nextCursor, hasMore, currentIndex);
+    return new FeedScreenState(items, feedUrl, nextOffset, nextCursor, hasMore, currentIndex, playback);
+  }
+
+  int playbackIndex() {
+    if (playback != null) {
+      for (int index = 0; index < items.size(); index++) {
+        if (playback.itemId.equals(items.get(index).id)) return index;
+      }
+    }
+    return Math.max(0, Math.min(currentIndex, items.size() - 1));
   }
 }
 

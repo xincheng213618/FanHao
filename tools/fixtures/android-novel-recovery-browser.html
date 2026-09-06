@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小说恢复 · 隔离界面验证</title>
+  <style>
+    body{margin:0;font:16px/1.55 system-ui,sans-serif;background:var(--bg,#f6f7f9);color:var(--ink,#161b22)}
+    #fixture-head{padding:14px 20px;background:var(--surface,#fff);border-bottom:1px solid var(--line,#dce2e8)}
+    #fixture-head h1{font-size:20px;margin:0}#fixture-head p{margin:6px 0;font-size:13px;color:var(--muted)}
+    #fixture-controls{padding:12px 20px;border-bottom:1px solid var(--line);background:var(--surface-soft,#eef3f7)}
+    #fixture-controls button{padding:8px;margin:3px;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:var(--ink,#161b22);font:inherit;font-size:13px}
+    #fixture-controls output{display:block;font-size:12px;margin:4px 0;overflow-wrap:anywhere}
+    #fixture-report{white-space:pre-wrap;font-size:12px;background:var(--surface,#fff);padding:12px;overflow-wrap:anywhere}
+    #app-header,#view{max-width:720px;margin:0 auto;padding:14px 20px}#app-header h2{margin:0}
+    #view{min-height:280px}button{cursor:pointer}button:disabled{cursor:default;opacity:.55}
+  </style>
+</head>
+<body>
+  <header id="fixture-head">
+    <h1>小说升级恢复：真实源码界面验证</h1>
+    <p>仅本页随机名称的合成 IndexedDB；14 本旧书中故意放入损坏章节。电脑 API 与文件保存为合成响应，不读取真实库、不保存 TXT 到设备。</p>
+    <p>页面交互是真实浏览器，不是 Android WebView 或系统 SAF 验证。错误状态不应被解释成空书库或书籍已删除。</p>
+  </header>
+  <aside id="fixture-controls" aria-label="隔离测试控制">
+    <button id="library" disabled>打开小说列表</button>
+    <button id="detail" disabled>打开本地合成书详情</button>
+    <button id="reader" disabled>打开本地合成章</button>
+    <button id="leave" disabled>离开小说</button>
+    <button id="hold-list" disabled>延迟旧库列表返回</button>
+    <button id="release-list" disabled>释放旧库列表返回</button>
+    <button id="hold-entry" disabled>延迟旧库正文返回</button>
+    <button id="release-entry" disabled>释放旧库正文返回</button>
+    <button id="save-ok" disabled>模拟保存成功</button>
+    <button id="save-cancel" disabled>模拟保存取消</button>
+    <button id="save-fail" disabled>模拟保存失败</button>
+    <button id="theme-light" disabled>测试浅色主题</button>
+    <button id="theme-dark" disabled>测试深色主题</button>
+    <button id="inspect" disabled>核对原库与导出记录</button>
+    <button id="cleanup" disabled>清理本页隔离数据库</button>
+    <output id="fixture-status" role="status">正在冻结源码并准备合成旧库</output>
+    <output id="fixture-calls">旧库列表 0 次，旧库正文 0 次，保存请求 0 次</output>
+    <details><summary>本页检查记录</summary><pre id="fixture-report">{ "status": "not-run" }</pre></details>
+  </aside>
+  <header id="app-header"><small id="kicker"></small><h2 id="title">准备中</h2><p id="meta"></p></header>
+  <main id="view"></main>
+  <script type="module" src="/fixture.mjs"></script>
+</body>
+</html>

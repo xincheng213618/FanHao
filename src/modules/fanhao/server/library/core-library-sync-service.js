@@ -1,14 +1,64 @@
+import fs from "node:fs";
+
+import { parseCoreInfoCandidates, applyParsedInfoToCoreWork } from "../../../../../lib/core-info-metadata.js";
+
 export function createCoreLibrarySyncService({
   fileBase,
   getCoreDb,
   hasCoreDb,
   normalizeExt,
   normalizeWorkCode,
+  pathExists = fs.existsSync,
   relativeFromRoot,
   sourcePathToAbsolute,
   storedWorkCodeKey,
   workCodeKeys
 }) {
+  const parsedInfoByWork = new WeakMap();
+
+  function parsedInfoForWork(work) {
+    if (!work || typeof work !== "object") return { status: "missing", file: null, parsed: null };
+    const cached = parsedInfoByWork.get(work);
+    if (cached) return cached;
+    const result = parseCoreInfoCandidates(work.infos || [], {
+      title: work.title || "",
+      directoryName: work.directoryName || ""
+    });
+    parsedInfoByWork.set(work, result);
+    return result;
+  }
+
+  function normalizedLocalPath(value) {
+    return String(value || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+  }
+
+  function localPathExists(value) {
+    const localPath = String(value || "").trim();
+    if (!localPath) return false;
+    try {
+      return Boolean(pathExists(localPath));
+    } catch {
+      // A transient filesystem error must never make an existing row eligible
+      // for destructive path migration.
+      return true;
+    }
+  }
+
+  function ambiguousBindingError(personId, work, localPath, candidates, reason) {
+    const candidateWorkIds = candidates.map((candidate) => candidate.workId).join(", ");
+    const detectedCode = workCodeKeys(work)[0] || work?.infoSummary?.code || work?.title || "unknown";
+    const error = new Error(
+      `[AMBIGUOUS_LOCAL_WORK_BINDING] personId=${personId} code=${detectedCode} `
+      + `localPath=${localPath || "unknown"} candidateWorkIds=${candidateWorkIds || "none"}: ${reason}`
+    );
+    error.code = "AMBIGUOUS_LOCAL_WORK_BINDING";
+    return error;
+  }
+
   function workIdForScannedWork(personId, work) {
     if (!hasCoreDb() || !personId || !work) return null;
     const corePersonId = Number(personId);
@@ -19,35 +69,113 @@ export function createCoreLibrarySyncService({
     const db = getCoreDb();
     const lookup = db.prepare(
       `
-      SELECT w.id
+      SELECT w.id, lw.id AS local_work_id, lw.local_path
       FROM works w
       JOIN work_people wp ON wp.work_id = w.id
+      LEFT JOIN local_works lw ON lw.work_id = w.id
       WHERE w.code_search = ?
         AND wp.person_id = ?
         AND wp.role = 'actor'
-      ORDER BY wp.sort_order ASC, w.id ASC
-      LIMIT 1
+      ORDER BY wp.sort_order ASC, w.id ASC, lw.id ASC
       `
     );
+    const candidatesByWorkId = new Map();
     for (const codeKey of codeKeys) {
-      const row = lookup.get(codeKey, corePersonId);
-      if (row?.id) return String(row.id);
+      for (const row of lookup.all(codeKey, corePersonId)) {
+        const workId = String(row.id || "");
+        if (!workId) continue;
+        if (!candidatesByWorkId.has(workId)) {
+          candidatesByWorkId.set(workId, { workId, localWorks: new Map() });
+        }
+        if (row.local_work_id) {
+          candidatesByWorkId
+            .get(workId)
+            .localWorks.set(Number(row.local_work_id), String(row.local_path || ""));
+        }
+      }
     }
-    return null;
+    const candidates = [...candidatesByWorkId.values()].map((candidate) => ({
+      workId: candidate.workId,
+      localWorks: [...candidate.localWorks].map(([id, localPath]) => ({ id, localPath }))
+    }));
+    if (!candidates.length) return null;
+
+    const localPath = sourcePathToAbsolute(work.relativePath) || work.relativePath || "";
+    const localPathKey = normalizedLocalPath(localPath);
+    const exactCandidates = candidates.filter((candidate) =>
+      candidate.localWorks.some((localWork) => normalizedLocalPath(localWork.localPath) === localPathKey)
+    );
+    if (exactCandidates.length === 1) return exactCandidates[0].workId;
+    if (exactCandidates.length > 1) {
+      throw ambiguousBindingError(
+        corePersonId,
+        work,
+        localPath,
+        exactCandidates,
+        "multiple core works already claim the scanned local path"
+      );
+    }
+
+    if (candidates.length === 1) return candidates[0].workId;
+
+    const missingPathCandidates = candidates.filter((candidate) =>
+      candidate.localWorks.length === 1 && !localPathExists(candidate.localWorks[0].localPath)
+    );
+    if (missingPathCandidates.length === 1) return missingPathCandidates[0].workId;
+    if (missingPathCandidates.length > 1) {
+      throw ambiguousBindingError(
+        corePersonId,
+        work,
+        localPath,
+        missingPathCandidates,
+        "multiple core works have a missing local path that could be migrated"
+      );
+    }
+
+    const noLocalCandidates = candidates.filter((candidate) => candidate.localWorks.length === 0);
+    if (noLocalCandidates.length === 1) return noLocalCandidates[0].workId;
+    throw ambiguousBindingError(
+      corePersonId,
+      work,
+      localPath,
+      noLocalCandidates.length ? noLocalCandidates : candidates,
+      noLocalCandidates.length
+        ? "multiple core works have no local path"
+        : "duplicate code candidates cannot be matched safely"
+    );
   }
 
   function linkedScannedWork(personId, work) {
     const coreWorkId = workIdForScannedWork(personId, work);
-    return coreWorkId ? { ...work, id: coreWorkId } : work;
+    if (!coreWorkId) return work;
+    const parsedInfo = parsedInfoForWork(work);
+    const parsed = parsedInfo.status === "parsed" ? parsedInfo.parsed : null;
+    const linked = {
+      ...work,
+      id: coreWorkId,
+      title: parsed?.title || work.title,
+      infoSummary: parsed
+        ? {
+            ...(work.infoSummary || {}),
+            code: parsed.code || work.infoSummary?.code || "",
+            title: parsed.title || work.infoSummary?.title || work.title || "",
+            releaseDate: parsed.releaseDate || work.infoSummary?.releaseDate || "",
+            durationMinutes: parsed.durationMinutes ?? work.infoSummary?.durationMinutes ?? null,
+            rating: parsed.rating ?? work.infoSummary?.rating ?? null,
+            ratingCount: parsed.ratingCount ?? work.infoSummary?.ratingCount ?? null,
+            director: parsed.director || work.infoSummary?.director || "",
+            actors: parsed.actors?.length ? parsed.actors : (work.infoSummary?.actors || []),
+            tags: parsed.tags?.length ? parsed.tags : (work.infoSummary?.tags || [])
+          }
+        : work.infoSummary
+    };
+    parsedInfoByWork.set(linked, parsedInfo);
+    return linked;
   }
 
   function localWorkKey(workId, localPath) {
     const coreWorkId = Number(workId);
-    const normalizedPath = String(localPath || "")
-      .trim()
-      .replace(/\\/g, "/")
-      .replace(/\/+$/, "")
-      .toLowerCase();
+    const normalizedPath = normalizedLocalPath(localPath);
     return Number.isFinite(coreWorkId) && normalizedPath ? `${coreWorkId}|${normalizedPath}` : "";
   }
 
@@ -157,23 +285,32 @@ export function createCoreLibrarySyncService({
       ...(work.images || []).map((file, index) => ({ file, type: "image", index })),
       ...(work.infos || []).map((file, index) => ({ file, type: "info", index }))
     ];
-    const sourceInfo = work.infos?.[0] || null;
+    const parsedInfo = parsedInfoForWork(work);
+    const sourceInfo = parsedInfo.file || work.infos?.[0] || null;
     const sourceVideo = work.videos?.[0] || null;
     const detectedCode = normalizeWorkCode(work.infoSummary?.code || work.title || work.directoryName || work.relativePath);
     const detectedCodeSearch = workCodeKeys(work)[0] || storedWorkCodeKey(detectedCode);
     db.exec("BEGIN IMMEDIATE");
     try {
-      let localWork = db
-        .prepare(
-          `
-          SELECT id
-          FROM local_works
-          WHERE work_id = ?
-          ORDER BY CASE WHEN local_path = ? THEN 0 ELSE 1 END, id ASC
-          LIMIT 1
-          `
-        )
-        .get(coreWorkId, localPath);
+      const existingLocalWorks = db
+        .prepare("SELECT id, local_path FROM local_works WHERE work_id = ? ORDER BY id ASC")
+        .all(coreWorkId);
+      const exactLocalWorks = existingLocalWorks.filter(
+        (candidate) => normalizedLocalPath(candidate.local_path) === normalizedLocalPath(localPath)
+      );
+      if (exactLocalWorks.length > 1) {
+        throw ambiguousBindingError(
+          work.personId || "unknown",
+          work,
+          localPath,
+          [{ workId: String(coreWorkId), localWorks: exactLocalWorks }],
+          "multiple local_works rows already claim the scanned local path"
+        );
+      }
+      let localWork = exactLocalWorks[0] || null;
+      if (!localWork && existingLocalWorks.length === 1 && !localPathExists(existingLocalWorks[0].local_path)) {
+        localWork = existingLocalWorks[0];
+      }
       if (!localWork?.id) {
         const result = db
           .prepare(
@@ -249,6 +386,9 @@ export function createCoreLibrarySyncService({
           now,
           now
         );
+      }
+      if (parsedInfo.status === "parsed") {
+        applyParsedInfoToCoreWork(db, coreWorkId, parsedInfo.parsed, { write: true, now });
       }
       db.exec("COMMIT");
     } catch (error) {

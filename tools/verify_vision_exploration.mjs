@@ -26,7 +26,7 @@ const toolViews = read("android-client/www/modules/tools/tool-views.js");
 
 assert(mainActivity.includes("registerPlugin(FanHaoVisionExplorationPlugin.class)"), "native vision plugin is not registered");
 assert(plugin.includes('@CapacitorPlugin(name = "FanHaoVisionExploration")'), "Capacitor plugin name is missing");
-for (const method of ["startDocumentScan", "startFaceVerification", "listSessions", "openSession", "deleteSession"]) {
+for (const method of ["startDocumentScan", "startFaceVerification", "listSessions", "openSession", "resumeSession", "deleteSession"]) {
   assert(plugin.includes(`void ${method}(`), `native plugin method is missing: ${method}`);
 }
 
@@ -86,8 +86,11 @@ for (const dependency of [
 for (const label of ["证卡扫描", "人脸与真人验证", "身份证人像面→国徽面", "自动扫描"]) {
   assert(toolViews.includes(label), `Android tool copy is missing: ${label}`);
 }
-assert(toolViews.includes('runExploration("startDocumentScan")'), "document tool launcher is missing");
-assert(toolViews.includes('runExploration("startFaceVerification")'), "face tool launcher is missing");
+assert(toolViews.includes('runExploration(view, "startDocumentScan")'), "document tool launcher is missing");
+assert(toolViews.includes('runExploration(view, "startFaceVerification")'), "face tool launcher is missing");
+assert(toolViews.includes('runExploration(view, "resumeSession", sessionId)'), "pending record recovery launcher is missing");
+assert(store.includes("getRecoverableSession"), "recoverable sessions require a validated store entry point");
+assert(plugin.includes('"preserved"') && plugin.includes('"discarded"'), "native cancellation result must distinguish preserved from deleted data");
 assert(toolViews.includes("plugin.openSession"), "saved-session review action is missing");
 assert(toolViews.includes("不代表真实认证结果"), "tool-page demo warning is missing");
 

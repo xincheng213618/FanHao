@@ -5,10 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260812-android-work-move-02" />
+    <link rel="stylesheet" href="./styles.css?v=20260831-remote-auth-01-1046d3cbbfb6" />
+    <link rel="stylesheet" href="./platform/accounts/account.css?v=20260902-accounts" />
   </head>
-  <body>
-    <main class="app-shell">
+  <body class="app-starting">
+    <section id="appStartup" class="app-startup" aria-label="启动状态">
+      <i class="app-startup-spinner" aria-hidden="true"></i>
+      <p id="appStartupMessage" role="status" aria-live="polite">正在打开资料库</p>
+      <button id="appStartupRetry" type="button" hidden>重新打开</button>
+    </section>
+    <main class="app-shell" hidden>
       <header id="moduleChrome" class="module-chrome" aria-label="当前模块工具栏" hidden></header>
 
       <form id="searchForm" class="search-bar" autocomplete="off" hidden>
@@ -42,7 +48,7 @@
         </button>
         <button type="button" data-open-channel="media">
           <strong>影视</strong>
-          <span id="channelMediaCount">电影 / 电视剧</span>
+          <span id="channelMediaCount">电影 / 电视剧 / 动漫</span>
         </button>
       </nav>
 
@@ -70,7 +76,7 @@
         </button>
         <button type="button" data-open-view="categories">
           <strong>作品分类</strong>
-          <span><span id="worksCount">0</span> · 全部 / 有码 / 欧美</span>
+          <span><span id="worksCount">0</span> · 番号作品</span>
         </button>
         <button type="button" data-open-view="studios">
           <strong>厂牌</strong>
@@ -188,22 +194,28 @@
             <h2 id="settingsSheetTitle">设置</h2>
             <button id="settingsCloseButton" class="settings-close-button" type="button" aria-label="关闭设置">×</button>
           </header>
-        <section class="settings-group settings-connection-group" aria-label="服务地址">
+        <section class="settings-group settings-connection-group" aria-label="内容服务地址">
           <form id="connectForm" autocomplete="off">
-            <label for="serverUrl">服务地址</label>
+            <label for="serverUrl">内容服务地址</label>
             <div class="address-row">
-              <input id="serverUrl" name="serverUrl" type="url" inputmode="url" autocomplete="url" placeholder="192.168.31.86:29998" required />
-              <button type="submit">保存</button>
+              <input id="serverUrl" name="serverUrl" type="text" inputmode="url" autocomplete="url" autocapitalize="off" spellcheck="false" placeholder="192.168.31.86:29998" required />
+              <button id="connectServerButton" type="submit" aria-label="保存地址并连接">连接</button>
             </div>
+            <label for="serverPassword">原访问密码（使用用户账号时无需填写）</label>
+            <input id="serverPassword" name="serverPassword" type="password" autocomplete="current-password" placeholder="局域网无需填写；登录后不保存密码" />
+            <p class="status-text">HTTP 连接为明文传输，公网长期使用建议配置 HTTPS。</p>
             <p id="statusText" class="status-text" role="status">保持 29998 服务运行</p>
           </form>
           <div class="server-list" aria-label="可选地址">
             <button type="button" data-url="http://192.168.31.86:29998">192.168.31.86</button>
-            <button type="button" data-url="http://192.168.192.50:29998">192.168.192.50</button>
-            <button type="button" data-url="http://172.21.96.1:29998">172.21.96.1</button>
+            <button type="button" data-url="http://xc213618.ddns.me:29998">xc213618.ddns.me</button>
           </div>
         </section>
 
+        <section class="settings-group settings-account-group" aria-label="用户中心">
+          <strong class="settings-group-title">用户中心</strong>
+          <div id="accountSettingsRoot" class="account-ui account-embedded"></div>
+        </section>
         <section class="settings-group" aria-labelledby="themeTitle">
           <strong id="themeTitle" class="settings-group-title">主题</strong>
           <div class="segmented-control" aria-label="主题设置">
@@ -215,6 +227,11 @@
 
         <section class="settings-group" aria-labelledby="appUpdateTitle">
           <strong id="appUpdateTitle" class="settings-group-title">应用更新</strong>
+          <div class="app-update-source-panel">
+            <span class="settings-meta">默认更新地址 · 自动切换</span>
+            <ol id="appUpdateSources" class="app-update-sources" aria-label="默认更新地址"></ol>
+            <span id="appUpdateSourceStatus" class="settings-meta" role="status">更新地址独立于上方内容服务地址</span>
+          </div>
           <span id="appUpdateStatus" class="settings-meta">正在自动检查更新</span>
           <div class="app-version-line" aria-label="应用版本">
             <span>当前 <strong id="appCurrentVersion">-</strong></span>
@@ -225,42 +242,127 @@
           </div>
         </section>
 
-        <section class="settings-group" aria-labelledby="cacheTitle">
-          <strong id="cacheTitle" class="settings-group-title">缓存</strong>
-          <span id="cacheStatus" class="settings-meta">正在检查</span>
-          <div class="settings-action-row single-action">
-            <button id="clearCacheButton" type="button">清理缓存</button>
-          </div>
+        <section class="settings-group storage-settings-group" aria-labelledby="cacheTitle">
+          <strong id="cacheTitle" class="settings-group-title">存储与缓存</strong>
+
+          <article class="storage-card" aria-labelledby="phoneCacheTitle">
+            <div class="storage-card-head">
+              <strong id="phoneCacheTitle">手机本地缓存</strong>
+              <span id="cacheStatus" class="settings-meta">正在检查</span>
+            </div>
+            <div class="storage-metric-grid" aria-label="手机缓存占用">
+              <span><small>总占用</small><strong id="cacheBytes">0 B</strong></span>
+              <span><small>数据</small><strong id="cacheResponseCount">0</strong></span>
+              <span><small>图片</small><strong id="cacheImageCount">0</strong></span>
+              <span><small>最近更新</small><strong id="cacheUpdated">-</strong></span>
+            </div>
+            <div class="settings-action-row storage-action-row">
+              <button id="refreshCacheButton" type="button">刷新占用</button>
+              <button id="clearResponseCacheButton" type="button">清数据</button>
+              <button id="clearImageCacheButton" type="button">清图片</button>
+              <button id="clearCacheButton" class="danger" type="button">全部清理</button>
+            </div>
+          </article>
+
+          <article class="storage-card manga-storage-card" aria-labelledby="mangaStorageTitle">
+            <div class="storage-card-head">
+              <strong id="mangaStorageTitle">电脑漫画书库</strong>
+              <span id="mangaStorageStatus" class="settings-meta">正在统计</span>
+            </div>
+            <div class="storage-metric-grid" aria-label="电脑漫画书库存储">
+              <span><small>原图占用</small><strong id="mangaStorageBytes">-</strong></span>
+              <span><small>漫画</small><strong id="mangaStorageComics">-</strong></span>
+              <span><small>章节</small><strong id="mangaStorageChapters">-</strong></span>
+              <span><small>图片</small><strong id="mangaStorageImages">-</strong></span>
+            </div>
+            <div id="mangaStorageHealth" class="manga-storage-health">
+              <div class="manga-storage-health-head">
+                <span>原图完整性</span>
+                <strong id="mangaStorageHealthStatus">正在检查</strong>
+              </div>
+              <div id="mangaStorageProgressTrack" class="storage-progress" role="progressbar" aria-label="漫画原图完整性" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <i id="mangaStorageProgress"></i>
+              </div>
+              <small id="mangaStorageIssues">正在核对已完成、失败与待处理图片</small>
+            </div>
+            <div class="storage-trash-summary">
+              <span>回收站</span>
+              <strong id="mangaTrashStatus">正在检查</strong>
+            </div>
+            <div id="mangaTrashList" class="storage-trash-list" aria-label="可恢复的漫画" hidden></div>
+            <p id="mangaStorageHelp" class="storage-help">漫画原图属于受保护内容；清理手机缓存和按上限整理都不会删除。删除漫画后会先进入电脑回收站。</p>
+            <div class="settings-action-row">
+              <button id="openMangaStorageButton" type="button">打开漫画书库</button>
+              <button id="clearMangaTrashButton" class="danger" type="button" disabled>清空回收站</button>
+            </div>
+          </article>
+
+          <article class="storage-card" aria-labelledby="readerCacheTitle">
+            <div class="storage-card-head">
+              <strong id="readerCacheTitle">电脑阅读缓存</strong>
+              <span id="readerCacheStatus" class="settings-meta">正在连接</span>
+            </div>
+            <div id="readerCacheProgressTrack" class="storage-progress" role="progressbar" aria-label="电脑阅读缓存占用" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <i id="readerCacheProgress"></i>
+            </div>
+            <div class="storage-metric-grid" aria-label="电脑阅读缓存占用">
+              <span><small>当前占用</small><strong id="readerCacheBytes">-</strong></span>
+              <span><small>缓存上限</small><strong id="readerCacheLimit">-</strong></span>
+              <span><small>缓存文件</small><strong id="readerCacheFiles">-</strong></span>
+              <span><small>自动整理</small><strong id="readerCacheCleanup">-</strong></span>
+            </div>
+            <label class="storage-limit-field" for="readerCacheLimitInput">
+              <span>缓存上限</span>
+              <span class="storage-limit-input"><input id="readerCacheLimitInput" type="number" inputmode="decimal" min="0" max="200" step="0.25" value="200" /><em>GB</em></span>
+            </label>
+            <p class="storage-help">上限只影响电脑端生成的阅读与播放缓存，不会删除漫画原图或源文件。</p>
+            <div class="settings-action-row">
+              <button id="saveReaderCacheLimitButton" type="button">保存上限</button>
+              <button id="cleanupReaderCacheButton" type="button">按上限整理</button>
+            </div>
+          </article>
         </section>
         </section>
       </div>
 
+      <div id="appConfirmOverlay" class="app-confirm-overlay" data-tone="standard" hidden>
+        <button id="appConfirmBackdrop" class="app-confirm-backdrop" type="button" aria-label="取消操作"></button>
+        <section id="appConfirmSheet" class="app-confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="appConfirmTitle" aria-describedby="appConfirmMessage">
+          <span id="appConfirmMark" class="app-confirm-mark" aria-hidden="true">i</span>
+          <strong id="appConfirmTitle">确认操作</strong>
+          <p id="appConfirmMessage"></p>
+          <div class="app-confirm-actions">
+            <button id="appConfirmCancelButton" type="button">取消</button>
+            <button id="appConfirmAcceptButton" class="primary" type="button">确认</button>
+          </div>
+        </section>
+      </div>
+
       <nav class="bottom-nav channel-bottom-nav" aria-label="底部导航">
-        <button class="active" type="button" data-fanhao-home data-bottom-key="fanhao">
-          <span>番号</span>
+        <button class="bottom-nav-item bottom-nav-fanhao active" type="button" data-fanhao-home data-home-switcher data-home-mode-current="fanhao" data-bottom-key="fanhao" aria-label="首页，当前番号，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择番号或欧美">
+          <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><path d="M3.5 10.4 12 3.5l8.5 6.9v9.1a1 1 0 0 1-1 1h-5.2v-6.2H9.7v6.2H4.5a1 1 0 0 1-1-1Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M2.7 10.1 12 2.5l9.3 7.6a1 1 0 0 1 .4.8v9.2a1.6 1.6 0 0 1-1.6 1.6h-6.4v-6.4h-3.4v6.4H3.9a1.6 1.6 0 0 1-1.6-1.6v-9.2a1 1 0 0 1 .4-.8Z"/></svg></span>
+          <span class="bottom-nav-label">番号</span>
         </button>
-        <button type="button" data-open-channel="photo" data-bottom-key="photo">
-          <span>套图</span>
+        <button class="bottom-nav-item bottom-nav-photos" type="button" data-open-channel="photo" data-bottom-key="photo" data-gallery-switcher data-gallery-mode-current="photo" aria-label="图库与影视，当前套图，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择套图、韩漫、电影、电视剧或动漫">
+          <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.3" cy="9" r="1.6"/><path d="m4.5 17 4.2-4 3.2 2.8 3.3-3.3 4.3 4.5"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M5 3h14a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Zm3.2 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm-4 10.8c0 .7.5 1.2 1.2 1.2h13.2c.7 0 1.2-.5 1.2-1.2l-4.6-4.7-3.3 3.3-3.2-2.8Z"/></svg></span>
+          <span class="bottom-nav-label">套图</span>
         </button>
-        <button type="button" data-open-channel="media" data-bottom-key="media">
-          <span>影视</span>
+        <button class="bottom-nav-item bottom-nav-short-videos bottom-nav-primary" type="button" data-open-view="shortVideos" data-bottom-key="shortVideos" aria-label="短视频">
+          <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="4"/><path d="m10 9 5 3-5 3Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="m9 7 8 5-8 5Z"/></svg></span>
+          <span class="bottom-nav-label">短视频</span>
         </button>
-        <button type="button" data-open-view="shortVideos" data-bottom-key="shortVideos">
-          <span>短视频</span>
+        <button class="bottom-nav-item bottom-nav-novels" type="button" data-open-view="novels" data-bottom-key="novels" data-reading-switcher data-reading-mode-current="novels" aria-label="阅读，当前小说，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择小说或音乐">
+          <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><path d="M4 4.5h5.2c1.5 0 2.8 1.1 2.8 2.6v13c0-1.4-1.3-2.6-2.8-2.6H4Zm16 0h-5.2c-1.5 0-2.8 1.1-2.8 2.6v13c0-1.4 1.3-2.6 2.8-2.6H20Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M3 3h6.1c1.1 0 2.1.4 2.9 1.2V20c-.8-.8-1.8-1.2-2.9-1.2H3Zm18 0h-6.1c-1.1 0-2.1.4-2.9 1.2V20c.8-.8 1.8-1.2 2.9-1.2H21Z"/></svg></span>
+          <span class="bottom-nav-label">小说</span>
         </button>
-        <button type="button" data-open-view="novels" data-bottom-key="novels">
-          <span>小说</span>
-        </button>
-        <button type="button" data-open-view="music" data-bottom-key="music">
-          <span>音乐</span>
-        </button>
-        <button type="button" data-open-view="tools" data-bottom-key="tools">
-          <span>我的</span>
+        <button class="bottom-nav-item bottom-nav-tools" type="button" data-open-view="tools" data-bottom-key="tools" aria-label="我的">
+          <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c.5-4.2 3.2-6.2 7.5-6.2s7 2 7.5 6.2"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><circle cx="12" cy="7.7" r="4.2"/><path d="M3.4 21c.4-5.2 3.4-7.8 8.6-7.8s8.2 2.6 8.6 7.8Z"/></svg></span>
+          <span class="bottom-nav-label">我的</span>
         </button>
       </nav>
     </main>
 
-    <script src="./app.js?v=20260813-tv-series-work-01-5c293a6f8867" type="module"></script>
+    <script src="./app.js?v=20260831-remote-auth-01-1046d3cbbfb6" type="module"></script>
   </body>
 </html>
 

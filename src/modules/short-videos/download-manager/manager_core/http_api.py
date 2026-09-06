@@ -28,7 +28,7 @@ from .database import add_event, db, set_setting, setting
 from .domain_manifest import profile_output_dir
 from .download_supervisor import download_manager
 from .downloader_client import fetch_aweme_comments
-from .extraction import start_extract, start_following_import, start_refresh_profiles, stop_extract
+from .extraction import reset_extract, start_extract, start_following_import, start_refresh_profiles, stop_extract
 from .library import list_library, open_library_folder, resolve_library_media, shared_player_detail, shared_player_list, shared_player_neighbor, shared_player_row, shared_player_summary, shared_player_video_from_row
 from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links, retry_link
 from .profiles_links import current_profile_id, import_manifest_to_db, upsert_links, upsert_profile
@@ -227,6 +227,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(start_following_import(payload))
             if parsed.path == "/api/extract/stop":
                 return self.send_json(stop_extract())
+            if parsed.path == "/api/extract/reset":
+                return self.send_json(reset_extract())
             if parsed.path == "/api/download/start":
                 concurrency = normalize_int(payload.get("concurrency", setting("concurrency", "8")), 8, 1, MAX_CONCURRENCY)
                 set_setting("concurrency", str(concurrency))
@@ -240,6 +242,18 @@ class Handler(SimpleHTTPRequestHandler):
                         limit,
                         current_profile_id(create=False),
                         watch_new,
+                    )
+                )
+            if parsed.path == "/api/download/resume":
+                concurrency = normalize_int(setting("concurrency", "8"), 8, 1, MAX_CONCURRENCY)
+                return self.send_json(
+                    download_manager.start(
+                        concurrency,
+                        retry_failed=False,
+                        limit=0,
+                        profile_id=None,
+                        watch_new=True,
+                        manual=True,
                     )
                 )
             if parsed.path == "/api/download/stop":

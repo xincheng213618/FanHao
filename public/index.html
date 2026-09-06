@@ -20,7 +20,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-3c7c352440af";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-b370d2204ba4";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -56,6 +56,11 @@
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/content-index/styles.css?v=20260717-photo-album-parser-02"
         ];
+        const mangaStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/photos/manga.css?v=20260829-manga-library-06"
+        ];
         const novelStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/modules/novels/styles.css?v=20260727-novel-manage-04",
@@ -82,8 +87,10 @@
             ? shortVideoStyleUrls
             : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
           : standaloneStyleEntry
-            ? (/^\/(?:novel|novels)(?:\/|$)/.test(window.location.pathname)
-              ? novelStyleUrls
+            ? (/^\/manga(?:\/|$)/.test(window.location.pathname) || /^\/photo\/manga(?:\/|$)/.test(window.location.pathname)
+              ? mangaStyleUrls
+              : /^\/(?:novel|novels)(?:\/|$)/.test(window.location.pathname)
+                ? novelStyleUrls
               : /^\/(?:music|musics|songs)(?:\/|$)/.test(window.location.pathname)
                 ? musicStyleUrls
                 : /^\/tools(?:\/|$)/.test(window.location.pathname)
@@ -138,6 +145,7 @@
         <a class="product-tab" href="/modules/market-dashboard/index.html" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="marketDashboard">行情</a>
       </nav>
       <div class="product-actions">
+        <a class="product-action" href="/account">用户中心</a>
         <a class="product-action" href="/android-update">手机端</a>
         <a class="product-action" id="topAdminLink" href="/admin#overview">设置与运维</a>
       </div>
@@ -224,7 +232,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-3c7c352440af");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-b370d2204ba4");
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;

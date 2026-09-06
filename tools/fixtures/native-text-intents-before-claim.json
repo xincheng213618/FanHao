@@ -1,0 +1,8 @@
+{
+  "description": "Frozen production pending-Intent methods before FIFO/claim fix, 2026-08-30",
+  "methods": {
+    "capturePendingTextIntent": "  static void capturePendingTextIntent(Context context, Intent intent) {\r\n    if (!shouldHandleTextIntent(context, intent)) return;\r\n    pendingTextIntent = new Intent(intent);\r\n  }",
+    "consumePendingTextFile": "  public void consumePendingTextFile(PluginCall call) {\r\n    Intent intent = pendingTextIntent != null\r\n      ? pendingTextIntent\r\n      : getActivity() == null ? null : getActivity().getIntent();\r\n    if (!looksLikeTextIntent(getContext(), intent)) {\r\n      String message = unsupportedTextIntentMessage(intent);\r\n      JSObject result = unavailableResult(message);\r\n      if (!message.isEmpty()) {\r\n        showToast(message);\r\n        clearPendingIntent();\r\n      }\r\n      call.resolve(result);\r\n      return;\r\n    }\r\n\r\n    try {\r\n      JSObject result = readIntentText(intent);\r\n      clearPendingIntent();\r\n      call.resolve(result);\r\n    } catch (Exception error) {\r\n      clearPendingIntent();\r\n      call.reject(error.getMessage() == null ? \"读取本地文本失败\" : error.getMessage(), error);\r\n    }\r\n  }",
+    "clearPendingIntent": "  private void clearPendingIntent() {\r\n    pendingTextIntent = null;\r\n    if (getActivity() == null) return;\r\n    Intent clean = new Intent(Intent.ACTION_MAIN);\r\n    clean.setPackage(getContext().getPackageName());\r\n    getActivity().setIntent(clean);\r\n  }"
+  }
+}

@@ -158,6 +158,15 @@ function renderCard(item) {
   const sourceCell = card.querySelector('[data-field="source"]');
   const sourceLink = createExternalLink(item.source || "--", item.sourceUrl, "quote-source-link");
   sourceCell.replaceChildren(sourceLink || document.createTextNode(item.source || "--"));
+  const chartLink = createExternalLink("查看走势 ↗", item.chartUrl, "quote-chart-link");
+  const chartActions = card.querySelector(".quote-actions");
+  if (chartLink) {
+    chartLink.setAttribute("aria-label", `${item.title}走势图（TradingView，新窗口打开）`);
+    chartLink.title = `在 TradingView 查看${item.title}走势图（新窗口打开）`;
+    chartActions.append(chartLink);
+  } else {
+    chartActions.hidden = true;
+  }
   return fragment;
 }
 

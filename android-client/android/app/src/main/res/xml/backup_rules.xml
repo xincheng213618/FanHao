@@ -2,4 +2,5 @@
 <full-backup-content>
     <!-- Sensitive identity/card/face demo photos stay on this installation only. -->
     <exclude domain="file" path="vision-exploration/" />
+    <exclude domain="sharedpref" path="fanhao.server-auth.v1.xml" />
 </full-backup-content>

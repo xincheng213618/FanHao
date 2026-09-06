@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小说阅读隔离回归</title>
+  <link rel="stylesheet" href="/android-client/modules/novels/styles.css">
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #f4f1e7; }
+    #fixture-controls { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 100000; padding: 10px; background: #fff; border: 1px solid #aaa; max-height: 180px; overflow: auto; }
+    #fixture-controls button { margin: 3px; padding: 7px; }
+    #fixture-controls output { display: block; font-size: 12px; margin: 4px; }
+    #fixture-toggle { position: fixed; top: 8px; right: 8px; z-index: 100001; padding: 8px; }
+    #fixture-head { padding: 8px; }
+    .novel-reader-screen { padding-bottom: 220px; }
+  </style>
+</head>
+<body>
+  <button id="fixture-toggle">收起测试控制</button>
+  <header id="fixture-head"><small id="kicker"></small><h2 id="title">准备隔离测试书</h2><p id="meta"></p></header>
+  <main id="view"></main>
+  <aside id="fixture-controls" aria-label="回归控制">
+    <button id="open-a">打开本地 A</button><button id="open-b">打开本地 B</button><button id="open-remote">打开远程测试书</button><button id="leave">离开阅读</button>
+    <button id="delay-read">延迟 A 读取</button><button id="release-read">释放 A 读取</button><button id="delay-save">延迟 A 保存回调</button><button id="release-save">释放 A 保存回调</button>
+    <button id="inspect">查看存储进度</button>
+    <output id="notice">正在初始化</output><output id="writes">本轮保存 0 次</output><output id="stored"></output><output id="native"></output>
+  </aside>
+  <script type="module">
+    import { createNovelViews } from "/android-client/modules/novels/novel-views.js";
+    import { saveLocalNovelEntry, readLocalNovelEntry } from "/android-client/js/local-novels.js";
+    const byId = (id) => document.getElementById(id);
+    byId("fixture-toggle").onclick = () => {
+      byId("fixture-controls").hidden = !byId("fixture-controls").hidden;
+      byId("fixture-toggle").textContent = byId("fixture-controls").hidden ? "展开测试控制" : "收起测试控制";
+    };
+    window.readerFixture = {
+      holdRead: false, holdSave: false, readers: [], saves: [], writes: [],
+      notice(value) { byId("notice").textContent = value; },
+      updateWrites() { byId("writes").textContent = `本轮保存 ${this.writes.length} 次：` + this.writes.map((item) => `${item.id.split(":").at(-1)} ${Math.round(item.progress.scrollRatio * 100)}%`).join("，"); }
+    };
+    window.Capacitor = { Plugins: { FanHaoNovel: {
+      setReaderImmersive({ immersive }) { byId("native").textContent = `模拟原生沉浸：${immersive}`; return Promise.resolve(); },
+      clearReaderBrightness() { return Promise.resolve(); }, setReaderBrightness() { return Promise.resolve(); }
+    } } };
+    let version = 0;
+    const els = { viewKicker: byId("kicker"), viewTitle: byId("title"), viewMeta: byId("meta"), viewContent: byId("view") };
+    let views;
+    function showView(view, params = {}) {
+      version += 1;
+      const current = version;
+      window.dispatchEvent(new CustomEvent("fanhaoViewWillRender", { detail: { view, params } }));
+      window.dispatchEvent(new CustomEvent("fanhaoViewChanged", { detail: { view, params } }));
+      document.body.classList.toggle("novel-reader-view", view === "novelReader");
+      if (view === "novelReader") views.renderNovelReader(params.id, params.chapterIndex || "1", () => current === version).catch((error) => readerFixture.notice(`错误：${error.message}`));
+      else { els.viewContent.innerHTML = "<h1>已离开阅读页</h1><p>迟到结果不得覆盖这里。</p>"; els.viewTitle.textContent = "隔离测试主页"; }
+    }
+    views = createNovelViews({ els, getActiveUrl: () => location.origin, showView,
+      goBack: () => showView("tools"), setActiveBottom() {}, renderCurrentView() {}, renderCurrentViewPreservingScroll() {}, setStatus: (text) => readerFixture.notice(text) });
+    for (const letter of ["A", "B"]) {
+      await saveLocalNovelEntry({ book: { id: `local:fixture:${letter}`, title: `本地书 ${letter}`, author: "隔离回归", progress: { chapterIndex: 1, scrollRatio: letter === "A" ? 0.35 : 0.1 } },
+        chapters: [1, 2].map((index) => ({ index, title: `${letter} 第 ${index} 章`, content: Array.from({ length: 100 }, (_, line) => `这是 ${letter} 的第 ${line + 1} 段隔离测试正文，用于确认滚动和阅读位置不会被旧结果覆盖。`).join("\n\n") })) });
+    }
+    byId("open-a").onclick = () => showView("novelReader", { id: "local:fixture:A" });
+    byId("open-b").onclick = () => showView("novelReader", { id: "local:fixture:B" });
+    byId("open-remote").onclick = () => showView("novelReader", { id: "remote-fixture" });
+    byId("leave").onclick = () => showView("tools");
+    byId("delay-read").onclick = () => { readerFixture.holdRead = true; readerFixture.notice("下一次 A 读取将延迟"); };
+    byId("release-read").onclick = () => { readerFixture.holdRead = false; readerFixture.readers.splice(0).forEach((resolve) => resolve()); readerFixture.notice("A 读取已释放"); };
+    byId("delay-save").onclick = () => { readerFixture.holdSave = true; readerFixture.notice("A 保存完成回调将延迟"); };
+    byId("release-save").onclick = () => { readerFixture.holdSave = false; readerFixture.saves.splice(0).forEach((resolve) => resolve()); readerFixture.notice("A 保存回调已释放"); };
+    byId("inspect").onclick = async () => {
+      const rows = await Promise.all(["A", "B"].map((letter) => readLocalNovelEntry(`local:fixture:${letter}`)));
+      byId("stored").textContent = "存储进度：" + rows.map((row) => `${row.book.title} / 第${row.book.progress?.chapterIndex || 1}章 / ${Math.round((row.book.progress?.scrollRatio || 0) * 100)}%`).join("；");
+    };
+    readerFixture.notice("准备完成，仅使用此端口的隔离测试书库");
+  </script>
+</body>
+</html>

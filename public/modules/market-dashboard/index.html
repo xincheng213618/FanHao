@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f5f6f8">
     <title>市场聚合看板 · FanHao</title>
     <style>html.app-module-loading body { visibility: hidden; }</style>
-    <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./styles.css?v=20260830-fx-charts-01">
   </head>
   <body>
     <header class="topbar">
@@ -39,7 +39,7 @@
           <strong id="totalCount">--</strong>
         </div>
         <div>
-          <span class="summary-label">USD/CNY</span>
+          <span class="summary-label">美元兑人民币 · USD/CNY</span>
           <strong id="usdCnyValue">--</strong>
         </div>
         <div>
@@ -101,6 +101,8 @@
           <div><strong>刷新</strong><span>服务端缓存约 12 秒，页面默认每 30 秒刷新一次。</span></div>
           <div><strong>时区</strong><span>页面以北京时间展示；休市期间保留数据源最近一次行情。</span></div>
           <div><strong>换算</strong><span>人民币/克 = 美元/盎司 × USD/CNY ÷ 31.1034768。</span></div>
+          <div><strong>汇率</strong><span>主值表示 1 单位外币可兑换多少人民币，副值保留反向换算。</span></div>
+          <div><strong>走势</strong><span>点击卡片下方「查看走势」，在新窗口打开对应品种的 TradingView 图表。图表与本页的数据源及更新时间可能不同。</span></div>
           <div><strong>用途</strong><span>聚合结果用于快速查看，交易前请前往官方或专业行情页面核对。</span></div>
         </div>
       </details>
@@ -160,13 +162,16 @@
             <dd data-field="source"></dd>
           </div>
         </dl>
+        <div class="quote-actions">
+          <span>TradingView 图表</span>
+        </div>
       </article>
     </template>
 
     <footer class="page-footer">行情数据仅供查看，不构成投资建议。</footer>
     <script type="module">
       try {
-        await import("./app.js?v=20260727-initial-route-reveal-01");
+        await import("./app.js?v=20260830-fx-charts-01");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

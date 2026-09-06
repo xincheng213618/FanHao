@@ -6,15 +6,14 @@ import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
-import android.media.ExifInterface;
 import android.media.Image;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Rational;
 import android.util.Size;
@@ -42,12 +41,14 @@ import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
+import androidx.camera.core.UseCase;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.android.gms.tasks.Task;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.face.Face;
 import com.google.mlkit.vision.face.FaceDetection;
@@ -55,6 +56,7 @@ import com.google.mlkit.vision.face.FaceDetector;
 import com.google.mlkit.vision.face.FaceDetectorOptions;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
 
 import org.json.JSONArray;
@@ -71,6 +73,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class NativeVisionExplorationActivity extends AppCompatActivity {
   public static final String EXTRA_MODE = "fanhao.vision.mode";
@@ -83,6 +86,20 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   public static final String RESULT_CHALLENGE = "fanhao.vision.result.challenge";
   public static final String RESULT_FILE_COUNT = "fanhao.vision.result.fileCount";
   public static final String RESULT_DELETED = "fanhao.vision.result.deleted";
+  public static final String RESULT_PRESERVED = "fanhao.vision.result.preserved";
+  public static final String RESULT_DISCARDED = "fanhao.vision.result.discarded";
+  private static final String STATE_SESSION = "vision.capture.session";
+  private static final String STATE_KIND = "vision.capture.kind";
+  private static final String STATE_CHALLENGE = "vision.capture.challenge";
+  private static final String STATE_EXIT_CONFIRMATION = "vision.capture.exitConfirmation";
+  private static final String STATE_FATAL_MESSAGE = "vision.capture.fatalMessage";
+  private static final String STATE_PERMISSION_REQUEST = "vision.capture.permissionRequest";
+  private static final String STATE_PERMISSION_RESULT = "vision.capture.permissionResult";
+  private static final String STATE_COMPLETED_COUNT = "vision.capture.completedCount";
+  private static final String STATE_REVIEW_SESSION = "vision.review.session";
+  private static final String STATE_REVIEW_DELETE = "vision.review.deletePending";
+  private static final String STATE_REVIEW_SHARE = "vision.review.shareInFlight";
+  private static final String STATE_REVIEW_ERROR = "vision.review.exportError";
 
   private enum Step {
     ID_FRONT,
@@ -92,13 +109,16 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private final AtomicBoolean faceBusy = new AtomicBoolean(false);
+  private final VisionCaptureLifecycle captureLifecycle = new VisionCaptureLifecycle();
+  private final Handler captureHandler = new Handler(Looper.getMainLooper());
   private final SecureRandom secureRandom = new SecureRandom();
   private final ActivityResultLauncher<String> cameraPermissionLauncher = registerForActivityResult(
     new ActivityResultContracts.RequestPermission(),
-    granted -> {
-      if (granted) beginCaptureSession();
-      else showFatal("需要相机权限才能体验证卡扫描和人脸验证。");
-    }
+    this::onCameraPermissionResult
+  );
+  private final ActivityResultLauncher<Intent> archiveShareLauncher = registerForActivityResult(
+    new ActivityResultContracts.StartActivityForResult(),
+    result -> onArchiveShareResult()
   );
 
   private FrameLayout root;
@@ -109,6 +129,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   private TextView instructionView;
   private TextView statusView;
   private ProcessCameraProvider cameraProvider;
+  private Preview cameraPreview;
   private ImageCapture imageCapture;
   private ImageAnalysis imageAnalysis;
   private ExecutorService cameraExecutor;
@@ -117,16 +138,33 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   private File sessionDirectory;
   private String mode;
   private String kind = "";
-  private Step step;
+  private String restoredCheckpoint;
+  private String pendingSessionId = "";
+  private Bundle startupState;
+  private boolean startupPending = true;
+  private boolean permissionRequestInFlight;
+  private Boolean cameraPermissionResult;
+  private boolean exitConfirmationPending;
+  private String fatalMessage;
+  private String reviewSessionId = "";
+  private boolean reviewDeletePending;
+  private boolean reviewDeleteInProgress;
+  private boolean reviewShareInFlight;
+  private String reviewExportError;
+  private Button reviewExportButton;
+  private Button reviewDeleteButton;
+  private volatile Step step;
   private boolean terminalResult = false;
+  private int completedFileCount;
+  private AlertDialog captureDialog;
   private boolean faceChallengeTurn = false;
   private String faceChallenge = "";
   private int facePhase = 0;
   private int stableFrames = 0;
-  private boolean faceCaptureStarted = false;
+  private volatile boolean faceCaptureStarted = false;
   private Integer activeFaceTrackingId;
   private int documentStableFrames = 0;
-  private boolean documentCaptureStarted = false;
+  private volatile boolean documentCaptureStarted = false;
   private long documentStepStartedAt = 0L;
   private long documentStableSince = 0L;
   private long lastDocumentUiAt = 0L;
@@ -134,6 +172,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
+    initializeCaptureState(savedInstanceState);
     String requestedMode = getIntent().getStringExtra(EXTRA_MODE);
     if (MODE_FACE.equals(requestedMode)) mode = MODE_FACE;
     else if (MODE_REVIEW.equals(requestedMode)) mode = MODE_REVIEW;
@@ -157,10 +196,176 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
         confirmExit();
       }
     });
-    if (MODE_FACE.equals(mode)) {
-      kind = "face-verification";
+  }
+
+  private void initializeCaptureState(Bundle savedInstanceState) {
+    initializeReviewState(savedInstanceState);
+    captureLifecycle.suspend(VisionCaptureLifecycle.BACKGROUND);
+    startupPending = true;
+    startupState = savedInstanceState;
+    String requestedSession = getIntent().getStringExtra(EXTRA_SESSION_ID);
+    pendingSessionId = requestedSession == null ? "" : requestedSession;
+    if (savedInstanceState == null) return;
+    kind = savedInstanceState.getString(STATE_KIND, "");
+    faceChallenge = savedInstanceState.getString(STATE_CHALLENGE, "");
+    pendingSessionId = savedInstanceState.getString(STATE_SESSION, pendingSessionId);
+    exitConfirmationPending = savedInstanceState.getBoolean(STATE_EXIT_CONFIRMATION, false);
+    fatalMessage = savedInstanceState.getString(STATE_FATAL_MESSAGE, null);
+    permissionRequestInFlight = savedInstanceState.getBoolean(STATE_PERMISSION_REQUEST, false);
+    int permission = savedInstanceState.getInt(STATE_PERMISSION_RESULT, -1);
+    cameraPermissionResult = permission == -1 ? null : permission == 1;
+    completedFileCount = savedInstanceState.getInt(STATE_COMPLETED_COUNT, 0);
+    if (exitConfirmationPending) captureLifecycle.suspend(VisionCaptureLifecycle.EXIT_CONFIRMATION);
+    if (fatalMessage != null) captureLifecycle.suspend(VisionCaptureLifecycle.FATAL_ERROR);
+  }
+
+  @Override
+  protected void onResume() {
+    super.onResume();
+    captureLifecycle.resume(VisionCaptureLifecycle.BACKGROUND);
+    if (!canControlCapture()) return;
+    updateReviewActions();
+    if (fatalMessage != null || exitConfirmationPending) {
+      presentPendingDialog();
+      return;
+    }
+    if (MODE_REVIEW.equals(mode)) presentReviewDialog();
+    else resumeForegroundCapture();
+  }
+
+  @Override
+  protected void onPause() {
+    suspendCapture(VisionCaptureLifecycle.BACKGROUND);
+    dismissCaptureDialog();
+    updateReviewActions();
+    super.onPause();
+  }
+
+  private boolean canControlCapture() {
+    return captureLifecycle.isAlive() && !terminalResult && !isFinishing() && !isDestroyed();
+  }
+
+  private void suspendCapture(int reason) {
+    captureLifecycle.suspend(reason);
+    captureHandler.removeCallbacksAndMessages(null);
+    unbindCamera();
+  }
+
+  private void dismissCaptureDialog() {
+    AlertDialog dialog = captureDialog;
+    captureDialog = null;
+    if (dialog != null) dialog.dismiss();
+  }
+
+  private void resumeForegroundCapture() {
+    if (!canUseUi(captureLifecycle.generation()) || MODE_REVIEW.equals(mode)) return;
+    if (captureLifecycle.isCompleted()) {
+      deliverSuccess(completedFileCount);
+      return;
+    }
+    // Do not reset faceBusy: an old model task still owns that gate until its
+    // completion releases it. Its old generation cannot update the new step.
+    step = null;
+    if (startupPending) {
+      startupPending = false;
+      Bundle saved = startupState;
+      startupState = null;
+      if (restoreRequestedSession(saved)) return;
+    } else if (sessionDirectory != null || !pendingSessionId.isEmpty()) {
+      restoreCaptureSession(sessionDirectory != null ? sessionDirectory.getName() : pendingSessionId);
+      return;
+    }
+    if (MODE_FACE.equals(mode)) kind = "face-verification";
+    if (!kind.isEmpty()) requestCameraAndStart();
+    else showDocumentTypePicker();
+  }
+
+  private boolean restoreRequestedSession(Bundle savedInstanceState) {
+    String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+    if (savedInstanceState != null) {
+      kind = savedInstanceState.getString(STATE_KIND, "");
+      faceChallenge = savedInstanceState.getString(STATE_CHALLENGE, "");
+      sessionId = savedInstanceState.getString(STATE_SESSION, sessionId == null ? "" : sessionId);
+    }
+    if (sessionId != null && !sessionId.isEmpty()) {
+      restoreCaptureSession(sessionId);
+      return true;
+    }
+    if (savedInstanceState != null && !kind.isEmpty()) {
       requestCameraAndStart();
-    } else showDocumentTypePicker();
+      return true;
+    }
+    return false;
+  }
+
+  @Override
+  protected void onSaveInstanceState(@NonNull Bundle outState) {
+    saveReviewState(outState);
+    outState.putString(STATE_KIND, kind);
+    outState.putString(STATE_CHALLENGE, faceChallenge);
+    if (sessionDirectory != null) outState.putString(STATE_SESSION, sessionDirectory.getName());
+    else if (!pendingSessionId.isEmpty()) outState.putString(STATE_SESSION, pendingSessionId);
+    outState.putBoolean(STATE_EXIT_CONFIRMATION, exitConfirmationPending);
+    outState.putString(STATE_FATAL_MESSAGE, fatalMessage);
+    outState.putBoolean(STATE_PERMISSION_REQUEST, permissionRequestInFlight);
+    outState.putInt(STATE_PERMISSION_RESULT, cameraPermissionResult == null ? -1 : cameraPermissionResult ? 1 : 0);
+    outState.putInt(STATE_COMPLETED_COUNT, completedFileCount);
+    super.onSaveInstanceState(outState);
+  }
+
+  private void restoreCaptureSession(String sessionId) {
+    if (!canUseUi(captureLifecycle.generation())) return;
+    step = null;
+    pendingSessionId = sessionId;
+    try {
+      sessionDirectory = VisionExplorationStore.resolveSessionDirectory(this, sessionId);
+      JSONObject completed = null;
+      try { completed = VisionExplorationStore.getCompletedSession(this, sessionId); }
+      catch (IllegalStateException pending) {
+        if (!"探索记录尚未完成".equals(pending.getMessage())) throw pending;
+      }
+      if (completed != null) {
+        kind = completed.optString("kind", "");
+        mode = "face-verification".equals(kind) ? MODE_FACE : MODE_DOCUMENT;
+        faceChallenge = completed.optString("challenge", "");
+        VisionCaptureLifecycle.discardAbandonedCaptures(sessionDirectory);
+        step = MODE_FACE.equals(mode) ? Step.FACE : "id-card".equals(kind) ? Step.ID_BACK : Step.BANK_FRONT;
+        showCompletion(new String[0], completed.getJSONArray("files").length());
+      } else {
+        JSONObject pending = VisionExplorationStore.getRecoverableSession(this, sessionId);
+        kind = pending.optString("kind", "");
+        mode = "face-verification".equals(kind) ? MODE_FACE : MODE_DOCUMENT;
+        faceChallenge = pending.optString("challenge", "");
+        restoredCheckpoint = pending.optString("nextStep", "");
+        VisionCaptureLifecycle.discardAbandonedCaptures(sessionDirectory);
+        if ("COMPLETE".equals(restoredCheckpoint)) resumeCaptureSession();
+        else requestCameraAndStart();
+      }
+    } catch (Exception error) {
+      showFatal("无法恢复本地演示存档：" + error.getMessage());
+    }
+  }
+
+  private boolean canUseUi(long token) {
+    return captureLifecycle.accepts(token) && !terminalResult && !isFinishing() && !isDestroyed();
+  }
+
+  private void postCaptureUi(long token, Runnable action) {
+    runOnUiThread(() -> { if (canUseUi(token)) action.run(); });
+  }
+
+  private void postCaptureDelayed(long token, Runnable action, long delay) {
+    captureHandler.postDelayed(() -> { if (canUseUi(token)) action.run(); }, delay);
+  }
+
+  private void unbindCamera() {
+    if (imageAnalysis != null) imageAnalysis.clearAnalyzer();
+    if (cameraProvider == null) return;
+    List<UseCase> useCases = new ArrayList<>();
+    if (cameraPreview != null) useCases.add(cameraPreview);
+    if (imageCapture != null) useCases.add(imageCapture);
+    if (imageAnalysis != null) useCases.add(imageAnalysis);
+    if (!useCases.isEmpty()) cameraProvider.unbind(useCases.toArray(new UseCase[0]));
   }
 
   private void configureWindow() {
@@ -266,7 +471,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void showArchivedSession() {
-    String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+    String sessionId = reviewSessionId;
     try {
       JSONObject manifest = VisionExplorationStore.getCompletedSession(this, sessionId);
       File directory = VisionExplorationStore.resolveSessionDirectory(this, sessionId);
@@ -327,17 +532,23 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
         ImageView image = new ImageView(this);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(rounded(Color.BLACK, 16));
-        image.setImageBitmap(decodePreview(imageFile, 1400));
-        int imageHeight = "face-verification".equals(kind) ? dp(420) : dp(250);
-        page.addView(image, new LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.MATCH_PARENT,
-          imageHeight
-        ));
+        Bitmap preview = decodePreview(imageFile, 1400);
+        if (preview == null) {
+          TextView unavailable = label(13, Color.rgb(255, 206, 147), false);
+          unavailable.setText("暂时无法生成照片预览，原文件未改动。可返回后重开，或尝试导出原文件。");
+          page.addView(unavailable, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        } else {
+          image.setImageBitmap(preview);
+          int imageHeight = "face-verification".equals(kind) ? dp(420) : dp(250);
+          page.addView(image, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, imageHeight));
+        }
       }
 
       TextView privacy = label(12, Color.rgb(164, 177, 194), false);
       privacy.setLineSpacing(0, 1.25f);
-      privacy.setText("照片保存在 App 私有目录，其他普通应用无法读取；该目录已排除 Android 云备份。需要长期保留时，可主动导出副本并自行选择保存位置。\n\n此记录只用于技术效果复核，不代表证件、银行卡或真人身份认证通过。");
+      privacy.setText("照片保存在 App 私有目录，其他普通应用无法读取；该目录已排除 Android 云备份。需要长期保留时，可主动导出副本并自行选择保存位置。分享窗口关闭不代表副本已保存，请确认接收应用保存后再删除本地记录。\n\n此记录只用于技术效果复核，不代表证件、银行卡或真人身份认证通过。");
       LinearLayout.LayoutParams privacyParams = new LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
@@ -346,6 +557,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       page.addView(privacy, privacyParams);
 
       Button export = new Button(this);
+      reviewExportButton = export;
       export.setAllCaps(false);
       export.setText("导出备份副本");
       export.setTextColor(Color.WHITE);
@@ -360,6 +572,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       page.addView(export, exportParams);
 
       Button delete = new Button(this);
+      reviewDeleteButton = delete;
       delete.setAllCaps(false);
       delete.setText("删除本次本地记录");
       delete.setTextColor(Color.rgb(255, 199, 194));
@@ -377,12 +590,16 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       scroll.setFillViewport(true);
       scroll.addView(page);
       setContentView(scroll);
+      updateReviewActions();
     } catch (Exception error) {
       showFatal("无法读取本地演示记录：" + error.getMessage());
     }
   }
 
   private void shareArchivedSession(String sessionId) {
+    if (!canStartReviewAction(sessionId)) return;
+    reviewShareInFlight = true;
+    updateReviewActions();
     try {
       JSONObject manifest = VisionExplorationStore.getCompletedSession(this, sessionId);
       File directory = VisionExplorationStore.resolveSessionDirectory(this, sessionId);
@@ -403,39 +620,139 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       ClipData clipData = ClipData.newUri(getContentResolver(), "视觉技术探索照片", uris.get(0));
       for (int index = 1; index < uris.size(); index++) clipData.addItem(new ClipData.Item(uris.get(index)));
       share.setClipData(clipData);
-      startActivity(Intent.createChooser(share, "导出本次演示照片"));
+      archiveShareLauncher.launch(Intent.createChooser(share, "导出本次演示照片"));
     } catch (Exception error) {
-      new AlertDialog.Builder(this)
-        .setTitle("无法导出")
-        .setMessage(error.getMessage())
-        .setPositiveButton("知道了", null)
-        .show();
+      reviewShareInFlight = false;
+      if (!canControlCapture()) return;
+      reviewExportError = "无法打开分享窗口：" + error.getMessage();
+      updateReviewActions();
+      presentReviewDialog();
     }
   }
 
   private void confirmDeleteArchivedSession(String sessionId) {
-    new AlertDialog.Builder(this)
-      .setTitle("删除本次记录？")
-      .setMessage("身份证、银行卡或人脸演示照片将从本机永久删除。")
-      .setPositiveButton("删除", (dialog, which) -> {
-        try {
-          if (!VisionExplorationStore.deleteSession(this, sessionId)) {
-            throw new IllegalStateException("记录不存在或已经删除");
-          }
-          finishReview(true);
-        } catch (Exception error) {
-          showFatal("无法删除本地演示记录：" + error.getMessage());
-        }
-      })
-      .setNegativeButton("取消", null)
-      .show();
+    if (!canStartReviewAction(sessionId)) return;
+    reviewDeletePending = true;
+    updateReviewActions();
+    presentReviewDialog();
+  }
+
+  private void initializeReviewState(Bundle savedInstanceState) {
+    String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
+    reviewSessionId = sessionId == null ? "" : sessionId;
+    reviewDeletePending = false;
+    reviewDeleteInProgress = false;
+    reviewShareInFlight = false;
+    reviewExportError = null;
+    if (savedInstanceState == null || reviewSessionId.isEmpty()
+      || !reviewSessionId.equals(savedInstanceState.getString(STATE_REVIEW_SESSION, ""))) return;
+    reviewDeletePending = savedInstanceState.getBoolean(STATE_REVIEW_DELETE, false);
+    reviewShareInFlight = savedInstanceState.getBoolean(STATE_REVIEW_SHARE, false);
+    reviewExportError = savedInstanceState.getString(STATE_REVIEW_ERROR, null);
+  }
+
+  private void saveReviewState(Bundle outState) {
+    outState.putString(STATE_REVIEW_SESSION, reviewSessionId);
+    outState.putBoolean(STATE_REVIEW_DELETE, reviewDeletePending);
+    outState.putBoolean(STATE_REVIEW_SHARE, reviewShareInFlight);
+    outState.putString(STATE_REVIEW_ERROR, reviewExportError);
+  }
+
+  private boolean canReviewUi() {
+    return MODE_REVIEW.equals(mode) && canUseUi(captureLifecycle.generation());
+  }
+
+  private boolean canStartReviewAction(String sessionId) {
+    return canReviewUi() && !reviewSessionId.isEmpty() && reviewSessionId.equals(sessionId)
+      && !reviewDeletePending && !reviewDeleteInProgress && !reviewShareInFlight
+      && reviewExportError == null && captureDialog == null;
+  }
+
+  private void updateReviewActions() {
+    boolean enabled = canStartReviewAction(reviewSessionId);
+    if (reviewExportButton != null) {
+      reviewExportButton.setEnabled(enabled);
+      reviewExportButton.setText(reviewShareInFlight ? "分享窗口处理中…" : "导出备份副本");
+    }
+    if (reviewDeleteButton != null) reviewDeleteButton.setEnabled(enabled);
+  }
+
+  private void onArchiveShareResult() {
+    if (!canControlCapture() || !MODE_REVIEW.equals(mode)) return;
+    // The result only releases our launch gate; a receiver's result is not proof
+    // that a backup was saved. In-flight state is restored before result delivery.
+    reviewShareInFlight = false;
+    updateReviewActions();
+  }
+
+  private void presentReviewDialog() {
+    if (!canReviewUi() || captureDialog != null || reviewShareInFlight || reviewDeleteInProgress) return;
+    if (reviewExportError != null) {
+      captureDialog = new AlertDialog.Builder(this)
+        .setTitle("无法导出")
+        .setMessage(reviewExportError)
+        .setPositiveButton("知道了", (dialog, which) -> dismissReviewExportError((AlertDialog) dialog))
+        .setOnCancelListener(dialog -> dismissReviewExportError((AlertDialog) dialog))
+        .show();
+    } else if (reviewDeletePending) {
+      final String sessionId = reviewSessionId;
+      captureDialog = new AlertDialog.Builder(this)
+        .setTitle("删除本次记录？")
+        .setMessage("身份证、银行卡或人脸演示照片将从本机永久删除。若刚导出，请先确认接收应用已保存副本。")
+        .setPositiveButton("删除", (dialog, which) -> deleteReviewedSession((AlertDialog) dialog, sessionId))
+        .setNegativeButton("取消", (dialog, which) -> cancelReviewDelete((AlertDialog) dialog))
+        .setOnCancelListener(dialog -> cancelReviewDelete((AlertDialog) dialog))
+        .show();
+    }
+  }
+
+  private void cancelReviewDelete(AlertDialog dialog) {
+    if (!canReviewUi() || dialog == null || captureDialog != dialog || !reviewDeletePending) return;
+    reviewDeletePending = false;
+    dismissCaptureDialog();
+    updateReviewActions();
+  }
+
+  private void dismissReviewExportError(AlertDialog dialog) {
+    if (!canReviewUi() || dialog == null || captureDialog != dialog || reviewExportError == null) return;
+    reviewExportError = null;
+    dismissCaptureDialog();
+    updateReviewActions();
+  }
+
+  private void deleteReviewedSession(AlertDialog dialog, String sessionId) {
+    if (!canReviewUi() || dialog == null || captureDialog != dialog || !reviewDeletePending || reviewDeleteInProgress
+      || reviewShareInFlight || !reviewSessionId.equals(sessionId)) return;
+    // Consume explicit confirmation before the synchronous store call so neither
+    // duplicate button events nor a dismissed old dialog can delete again.
+    reviewDeletePending = false;
+    reviewDeleteInProgress = true;
+    dismissCaptureDialog();
+    updateReviewActions();
+    try {
+      File directory = VisionExplorationStore.resolveSessionDirectory(this, sessionId);
+      if (!VisionExplorationStore.deleteSession(this, sessionId) || directory.exists()) {
+        throw new IllegalStateException("记录未被完整删除，请返回列表核对");
+      }
+      finishReview(true);
+    } catch (Exception error) {
+      showFatal("无法删除本地演示记录：" + error.getMessage());
+    } finally {
+      reviewDeleteInProgress = false;
+      updateReviewActions();
+    }
   }
 
   private void finishReview(boolean deleted) {
-    if (terminalResult) return;
+    if (!canControlCapture() || !MODE_REVIEW.equals(mode)
+      || captureLifecycle.isSuspended(VisionCaptureLifecycle.BACKGROUND)) return;
+    reviewDeletePending = false;
+    reviewExportError = null;
+    dismissCaptureDialog();
     Intent data = new Intent();
     data.putExtra(RESULT_DELETED, deleted);
     terminalResult = true;
+    updateReviewActions();
     setResult(Activity.RESULT_OK, data);
     finish();
   }
@@ -456,39 +773,81 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void showDocumentTypePicker() {
-    new AlertDialog.Builder(this)
+    if (!canUseUi(captureLifecycle.generation())) return;
+    dismissCaptureDialog();
+    captureDialog = new AlertDialog.Builder(this)
       .setTitle("证卡自动扫描")
       .setItems(new String[] { "身份证（人像面 → 国徽面）", "银行卡（正面）" }, (dialog, which) -> {
+        if (captureDialog != dialog || !canUseUi(captureLifecycle.generation())) return;
+        captureDialog = null;
         kind = which == 0 ? "id-card" : "bank-card";
         requestCameraAndStart();
       })
-      .setNegativeButton("取消", (dialog, which) -> finishCanceled())
-      .setOnCancelListener(dialog -> finishCanceled())
+      .setNegativeButton("取消", (dialog, which) -> { if (captureDialog == dialog) finishCanceled(); })
+      .setOnCancelListener(dialog -> { if (captureDialog == dialog) finishCanceled(); })
       .show();
   }
 
   private void requestCameraAndStart() {
+    if (!canUseUi(captureLifecycle.generation())) return;
+    if (Boolean.FALSE.equals(cameraPermissionResult)) {
+      showFatal("需要相机权限才能体验证卡扫描和人脸验证。");
+      return;
+    }
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+      cameraPermissionResult = true;
+      permissionRequestInFlight = false;
       beginCaptureSession();
-    } else {
-      cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+    } else if (!permissionRequestInFlight) {
+      cameraPermissionResult = null;
+      permissionRequestInFlight = true;
+      try {
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+      } catch (Exception error) {
+        permissionRequestInFlight = false;
+        showFatal("无法请求相机权限：" + error.getMessage());
+      }
     }
   }
 
+  private void onCameraPermissionResult(boolean granted) {
+    if (!canControlCapture()) return;
+    permissionRequestInFlight = false;
+    cameraPermissionResult = granted;
+    if (!granted) showFatal("需要相机权限才能体验证卡扫描和人脸验证。");
+    else if (!startupPending && canUseUi(captureLifecycle.generation())) resumeForegroundCapture();
+  }
+
   private void beginCaptureSession() {
-    if (sessionDirectory != null) return;
+    if (!captureLifecycle.canCapture(captureLifecycle.generation()) || !canUseUi(captureLifecycle.generation())) return;
+    if (step != null) return;
     try {
-      sessionDirectory = VisionExplorationStore.createSession(this, kind);
+      if (sessionDirectory == null) sessionDirectory = VisionExplorationStore.createSession(this, kind);
+      pendingSessionId = sessionDirectory.getName();
     } catch (Exception error) {
       showFatal("无法创建本地演示存档：" + error.getMessage());
       return;
     }
-    if (MODE_FACE.equals(mode)) beginStep(Step.FACE);
-    else if ("id-card".equals(kind)) beginStep(Step.ID_FRONT);
-    else beginStep(Step.BANK_FRONT);
+    resumeCaptureSession();
+  }
+
+  private void resumeCaptureSession() {
+    String checkpoint = restoredCheckpoint != null ? restoredCheckpoint : VisionCaptureLifecycle.resumeStep(kind, sessionDirectory);
+    restoredCheckpoint = null;
+    if (!"COMPLETE".equals(checkpoint)) {
+      beginStep(Step.valueOf(checkpoint));
+    } else if (MODE_FACE.equals(mode)) {
+      step = Step.FACE;
+      finishFaceSession(new File(sessionDirectory, "face-verification.jpg"));
+    } else {
+      step = "id-card".equals(kind) ? Step.ID_BACK : Step.BANK_FRONT;
+      finishDocumentSession();
+    }
   }
 
   private void beginStep(Step next) {
+    if (!canUseUi(captureLifecycle.generation()) || captureLifecycle.isCompleted()) return;
+    captureLifecycle.nextStep();
     step = next;
     documentStableFrames = 0;
     documentCaptureStarted = false;
@@ -518,8 +877,16 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       titleView.setText("将脸移入圆框");
       instructionView.setText("跟随蓝色扫描光保持居中，系统会自动完成动作验证");
       statusView.setText("正在启动前置摄像头…");
-      faceChallengeTurn = secureRandom.nextBoolean();
-      faceChallenge = faceChallengeTurn ? "缓慢转头" : "微笑一下";
+      if (faceChallenge.isEmpty()) {
+        faceChallengeTurn = secureRandom.nextBoolean();
+        faceChallenge = faceChallengeTurn ? "缓慢转头" : "微笑一下";
+      } else faceChallengeTurn = "缓慢转头".equals(faceChallenge);
+      try {
+        VisionExplorationStore.saveChallenge(sessionDirectory, faceChallenge);
+      } catch (Exception error) {
+        showFatal("无法保存本地人脸动作：" + error.getMessage());
+        return;
+      }
       facePhase = 0;
       stableFrames = 0;
       faceCaptureStarted = false;
@@ -531,13 +898,16 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void bindCamera() {
+    long token = captureLifecycle.generation();
     ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
     future.addListener(() -> {
+      if (!canUseUi(token) || !captureLifecycle.canCapture(token)) return;
       try {
         cameraProvider = future.get();
-        cameraProvider.unbindAll();
+        unbindCamera();
         int rotation = getWindowManager().getDefaultDisplay().getRotation();
         Preview preview = new Preview.Builder().setTargetRotation(rotation).build();
+        cameraPreview = preview;
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
         imageCapture = new ImageCapture.Builder()
           .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -555,7 +925,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
             .setTargetResolution(new Size(640, 480))
             .setTargetRotation(rotation)
             .build();
-          imageAnalysis.setAnalyzer(cameraExecutor, this::analyzeFace);
+          imageAnalysis.setAnalyzer(cameraExecutor, createAnalyzer(token, true));
           cameraProvider.bindToLifecycle(this, selector, preview, imageCapture, imageAnalysis);
         } else {
           imageAnalysis = new ImageAnalysis.Builder()
@@ -563,7 +933,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
             .setTargetResolution(new Size(640, 480))
             .setTargetRotation(rotation)
             .build();
-          imageAnalysis.setAnalyzer(cameraExecutor, this::analyzeDocument);
+          imageAnalysis.setAnalyzer(cameraExecutor, createAnalyzer(token, false));
           cameraProvider.bindToLifecycle(this, selector, preview, imageCapture, imageAnalysis);
         }
       } catch (Exception error) {
@@ -572,16 +942,31 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
     }, ContextCompat.getMainExecutor(this));
   }
 
-  private void analyzeDocument(ImageProxy imageProxy) {
+  private ImageAnalysis.Analyzer createAnalyzer(long token, boolean face) {
+    // The binding, not eventual executor delivery, owns the frame generation.
+    return imageProxy -> {
+      if (face) analyzeFace(imageProxy, token);
+      else analyzeDocument(imageProxy, token);
+    };
+  }
+
+  private void analyzeDocument(ImageProxy imageProxy, long token) {
     try {
-      if (step == null || step == Step.FACE || documentCaptureStarted || isFinishing()) return;
+      if (!captureLifecycle.canCapture(token) || step == null || step == Step.FACE || documentCaptureStarted) return;
       long now = SystemClock.elapsedRealtime();
+      DocumentAssessment assessment = assessDocumentFrame(imageProxy);
+      postCaptureUi(token, () -> processDocumentAssessment(assessment, now));
+    } finally {
+      imageProxy.close();
+    }
+  }
+
+  private void processDocumentAssessment(DocumentAssessment assessment, long now) {
+      if (documentCaptureStarted || captureLifecycle.isCompleted()) return;
       if (now - documentStepStartedAt < 650L) {
         updateDocumentUi(0.06f, "正在校准相机与光线…", false);
         return;
       }
-
-      DocumentAssessment assessment = assessDocumentFrame(imageProxy);
       if (assessment.ready) {
         if (documentStableFrames == 0) documentStableSince = now;
         documentStableFrames++;
@@ -607,11 +992,8 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
       }
       if (documentStableFrames >= 8 && stableDuration >= 1050L && !documentCaptureStarted) {
         documentCaptureStarted = true;
-        runOnUiThread(this::captureDocumentAutomatically);
+        captureDocumentAutomatically();
       }
-    } finally {
-      imageProxy.close();
-    }
   }
 
   private DocumentAssessment assessDocumentFrame(ImageProxy imageProxy) {
@@ -722,21 +1104,22 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void updateDocumentUi(float progress, String message, boolean completed) {
-    runOnUiThread(() -> {
-      if (step == null || step == Step.FACE || isFinishing()) return;
+    postCaptureUi(captureLifecycle.generation(), () -> {
+      if (step == null || step == Step.FACE) return;
       statusView.setText(message);
       scanOverlay.updateDocument(progress, message, completed);
     });
   }
 
   private void captureDocumentAutomatically() {
-    if (step == Step.FACE || imageCapture == null || sessionDirectory == null) {
+    if (!canUseUi(captureLifecycle.generation()) || captureLifecycle.isCompleted()
+      || step == Step.FACE || imageCapture == null || sessionDirectory == null) {
       documentCaptureStarted = false;
       return;
     }
     statusView.setText("识别稳定，正在自动拍摄…");
     scanOverlay.updateDocument(0.98f, "正在自动拍摄…", false);
-    File output = new File(sessionDirectory, fileNameForStep(step));
+    File output = VisionCaptureLifecycle.temporaryCapture(sessionDirectory);
     takePicture(output, () -> confirmCapturedDocument(output), message -> {
       documentCaptureStarted = false;
       documentStableFrames = 0;
@@ -747,51 +1130,113 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void takePicture(File output, Runnable success, java.util.function.Consumer<String> failure) {
-    ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(output).build();
-    imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
+    long token = captureLifecycle.generation();
+    if (!canUseUi(token) || !captureLifecycle.canCapture(token)) {
+      VisionCaptureLifecycle.discardTemporary(output);
+      return;
+    }
+    AtomicInteger outcome = null;
+    try {
+      // 0=pending, 1=handed to the success owner, 2=failed/aborted. A late
+      // callback from a failed launch cannot revive it or delete a newer request.
+      AtomicInteger requestOutcome = new AtomicInteger();
+      outcome = requestOutcome;
+      ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(output).build();
+      imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
       @Override
       public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
-        success.run();
+        if (!requestOutcome.compareAndSet(0, 1)) {
+          if (requestOutcome.get() == 2) VisionCaptureLifecycle.discardTemporary(output);
+          return;
+        }
+        if (canUseUi(token) && captureLifecycle.canCapture(token)) success.run();
+        else VisionCaptureLifecycle.discardTemporary(output);
       }
 
       @Override
       public void onError(@NonNull ImageCaptureException exception) {
-        failure.accept("拍摄失败：" + exception.getMessage());
+        if (!requestOutcome.compareAndSet(0, 2)) return;
+        VisionCaptureLifecycle.discardTemporary(output);
+        if (canUseUi(token) && captureLifecycle.canCapture(token)) failure.accept("拍摄失败：" + exception.getMessage());
       }
-    });
+      });
+    } catch (RuntimeException | OutOfMemoryError error) {
+      if (outcome == null || outcome.compareAndSet(0, 2)) {
+        VisionCaptureLifecycle.discardTemporary(output);
+        if (canUseUi(token) && captureLifecycle.canCapture(token)) failure.accept("拍摄暂时不可用，请重试");
+      }
+    }
   }
 
   private void confirmCapturedDocument(File file) {
-    Bitmap preview = decodePreview(file, 1100);
-    String quality = assessImageQuality(preview);
-    if (preview == null || !quality.startsWith("光线与对比度正常")) {
-      retryDocumentAutomatically(file, quality + " 正在自动重试");
-      return;
+    long token = captureLifecycle.generation();
+    Bitmap preview = null;
+    try {
+      if (!canUseUi(token) || !captureLifecycle.canCapture(token)) {
+        VisionCaptureLifecycle.discardTemporary(file);
+        return;
+      }
+      preview = decodePreview(file, 1100);
+      String quality = assessImageQuality(preview);
+      if (!canUseUi(token) || !captureLifecycle.canCapture(token)) {
+        VisionCaptureLifecycle.discardTemporary(file);
+        return;
+      }
+      if (preview == null || !quality.startsWith("光线与对比度正常")) {
+        retryDocumentAutomatically(file, quality + " 正在自动重试");
+        return;
+      }
+      if (step == Step.ID_FRONT || step == Step.ID_BACK) {
+        validateIdentityCardSide(file, preview, step);
+        // OCR now owns its completion cleanup, including synchronous failure.
+        preview = null;
+        return;
+      }
+      acceptCapturedDocument(file);
+    } catch (RuntimeException | OutOfMemoryError invalidPreview) {
+      if (canUseUi(token) && captureLifecycle.canCapture(token)) {
+        retryDocumentAutomatically(file, "无法处理本次预览，正在自动重试");
+      } else VisionCaptureLifecycle.discardTemporary(file);
+    } finally {
+      if (preview != null) preview.recycle();
     }
-
-    if (step == Step.ID_FRONT || step == Step.ID_BACK) {
-      validateIdentityCardSide(file, preview, step);
-      return;
-    }
-    acceptCapturedDocument();
   }
 
   private void validateIdentityCardSide(File file, Bitmap preview, Step expectedStep) {
-    if (textRecognizer == null) {
-      textRecognizer = TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
-    }
-    statusView.setText(expectedStep == Step.ID_FRONT ? "正在确认身份证人像面…" : "正在确认身份证国徽面…");
-    scanOverlay.updateDocument(0.99f, "正在校验证件面别…", false);
-    textRecognizer.process(InputImage.fromBitmap(preview, 0))
+    long token = captureLifecycle.generation();
+    Runnable releasePreview = VisionCaptureLifecycle.releaseOnce(preview::recycle);
+    AtomicBoolean resultAllowed = new AtomicBoolean(true);
+    boolean recognitionOwnsPreview = false;
+    try {
+      if (textRecognizer == null) {
+        textRecognizer = TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
+      }
+      statusView.setText(expectedStep == Step.ID_FRONT ? "正在确认身份证人像面…" : "正在确认身份证国徽面…");
+      scanOverlay.updateDocument(0.99f, "正在校验证件面别…", false);
+      Task<Text> recognition = textRecognizer.process(InputImage.fromBitmap(preview, 0));
+      if (recognition == null) throw new IllegalStateException("Missing recognition task");
+      recognitionOwnsPreview = true;
+      recognition.addOnCompleteListener(VisionCaptureLifecycle.RELEASE_EXECUTOR, task -> {
+        releasePreview.run();
+        if (task.isCanceled() || !resultAllowed.get() || !captureLifecycle.accepts(token)) VisionCaptureLifecycle.discardTemporary(file);
+      })
+      .addOnCompleteListener(ContextCompat.getMainExecutor(this), task -> {
+        if (resultAllowed.get() && task.isCanceled() && step == expectedStep && canUseUi(token) && captureLifecycle.canCapture(token)) {
+          retryDocumentAutomatically(file, "面别识别已取消，正在自动重试");
+        }
+      })
       .addOnSuccessListener(result -> {
-        if (step != expectedStep || isFinishing()) return;
+        if (!resultAllowed.get() || step != expectedStep || !canUseUi(token)) {
+          VisionCaptureLifecycle.discardTemporary(file);
+          return;
+        }
         String recognized = result.getText().replaceAll("\\s+", "");
         int portraitScore = countKeywords(recognized, "姓名", "性别", "民族", "出生", "住址", "公民身份号码");
         int emblemScore = countKeywords(recognized, "中华人民共和国", "居民身份证", "签发机关", "有效期限");
         boolean valid = expectedStep == Step.ID_FRONT
           ? portraitScore >= 2 && portraitScore > emblemScore
           : emblemScore >= 1 && emblemScore >= portraitScore;
-        if (valid) acceptCapturedDocument();
+        if (valid) acceptCapturedDocument(file);
         else retryDocumentAutomatically(
           file,
           expectedStep == Step.ID_FRONT
@@ -800,10 +1245,19 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
         );
       })
       .addOnFailureListener(error -> {
-        if (step == expectedStep && !isFinishing()) {
+        if (resultAllowed.get() && step == expectedStep && canUseUi(token)) {
           retryDocumentAutomatically(file, "面别识别不清晰，请保持证件平整后重试");
-        }
+        } else VisionCaptureLifecycle.discardTemporary(file);
       });
+    } catch (Exception | OutOfMemoryError error) {
+      resultAllowed.set(false);
+      // A returned Task may still read the bitmap even if registering its listeners
+      // fails. Its completion owns cleanup; if no listener was registered, let the
+      // input become GC-eligible with the task instead of recycling it prematurely.
+      if (!recognitionOwnsPreview) releasePreview.run();
+      if (step == expectedStep && canUseUi(token) && captureLifecycle.canCapture(token)) retryDocumentAutomatically(file, "面别识别暂时不可用，请重新对齐证件");
+      else VisionCaptureLifecycle.discardTemporary(file);
+    }
   }
 
   private int countKeywords(String text, String... keywords) {
@@ -813,7 +1267,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void retryDocumentAutomatically(File file, String message) {
-    if (file.exists()) file.delete();
+    VisionCaptureLifecycle.discardTemporary(file);
     documentCaptureStarted = false;
     documentStableFrames = 0;
     documentStableSince = 0L;
@@ -821,22 +1275,33 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
     scanOverlay.updateDocument(0.08f, "自动重新识别", false);
   }
 
-  private void acceptCapturedDocument() {
-    if (cameraProvider != null) cameraProvider.unbindAll();
+  private void acceptCapturedDocument(File file) {
+    if (!canUseUi(captureLifecycle.generation()) || captureLifecycle.isCompleted()) {
+      VisionCaptureLifecycle.discardTemporary(file);
+      return;
+    }
+    try {
+      VisionCaptureLifecycle.promote(file, sessionDirectory, fileNameForStep(step));
+    } catch (Exception error) {
+      VisionCaptureLifecycle.discardTemporary(file);
+      showFatal("无法确认本地演示照片：" + error.getMessage());
+      return;
+    }
+    unbindCamera();
     String confirmed = step == Step.ID_FRONT
       ? "人像面已识别并自动确认"
       : step == Step.ID_BACK ? "国徽面已识别并自动确认" : "银行卡已识别并自动确认";
     statusView.setText(confirmed);
     scanOverlay.updateDocument(1f, confirmed, true);
     root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-    root.postDelayed(() -> {
-      if (isFinishing()) return;
+    postCaptureDelayed(captureLifecycle.generation(), () -> {
       if (step == Step.ID_FRONT) beginStep(Step.ID_BACK);
       else finishDocumentSession();
     }, 900L);
   }
 
   private void finishDocumentSession() {
+    if (!canUseUi(captureLifecycle.generation()) || captureLifecycle.isCompleted()) return;
     try {
       if ("id-card".equals(kind)) {
         VisionExplorationStore.completeSession(sessionDirectory, kind, "", "id-front.jpg", "id-back.jpg");
@@ -862,65 +1327,151 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
     faceDetector = FaceDetection.getClient(options);
   }
 
-  private void analyzeFace(ImageProxy imageProxy) {
-    if (step != Step.FACE || faceDetector == null || faceCaptureStarted || !faceBusy.compareAndSet(false, true)) {
+  private void analyzeFace(ImageProxy imageProxy, long token) {
+    FaceDetector detector = faceDetector;
+    if (!captureLifecycle.canCapture(token) || step != Step.FACE || detector == null
+      || faceCaptureStarted || !faceBusy.compareAndSet(false, true)) {
       imageProxy.close();
       return;
     }
-    Image mediaImage = imageProxy.getImage();
-    if (mediaImage == null) {
-      faceBusy.set(false);
-      imageProxy.close();
-      return;
+    Runnable frameCleanup = null;
+    Runnable busyCleanup = null;
+    AtomicBoolean resultAllowed = null;
+    Task<List<Face>> detection = null;
+    try {
+      Runnable releaseFrame = VisionCaptureLifecycle.releaseOnce(imageProxy::close);
+      frameCleanup = releaseFrame;
+      Runnable releaseBusy = VisionCaptureLifecycle.releaseOnce(() -> faceBusy.set(false));
+      busyCleanup = releaseBusy;
+      AtomicBoolean allowed = new AtomicBoolean(true);
+      resultAllowed = allowed;
+      Image mediaImage = imageProxy.getImage();
+      if (mediaImage == null) throw new IllegalStateException("Missing camera image");
+      int rotation = imageProxy.getImageInfo().getRotationDegrees();
+      int uprightWidth = rotation == 90 || rotation == 270 ? imageProxy.getHeight() : imageProxy.getWidth();
+      int uprightHeight = rotation == 90 || rotation == 270 ? imageProxy.getWidth() : imageProxy.getHeight();
+      InputImage input = InputImage.fromMediaImage(mediaImage, rotation);
+      detection = detector.process(input);
+      if (detection == null) throw new IllegalStateException("Missing face detection task");
+      // A completed Task can enqueue UI work while listeners are still being
+      // registered. Publish either the whole setup or its failure before that work.
+      synchronized (allowed) {
+        try {
+          detection.addOnCompleteListener(VisionCaptureLifecycle.RELEASE_EXECUTOR, task -> releaseFrame.run())
+            .addOnCompleteListener(ContextCompat.getMainExecutor(this), task -> {
+              synchronized (allowed) { if (!allowed.get()) return; }
+              try {
+                if (!canUseUi(token) || !captureLifecycle.canCapture(token) || step != Step.FACE) return;
+                if (task.isSuccessful()) processFaces(task.getResult(), uprightWidth, uprightHeight);
+                else resetFaceTracking(task.isCanceled()
+                  ? "人脸检测已中断，请重新正对镜头" : "人脸检测暂时失败，请重新正对镜头");
+              } catch (RuntimeException | OutOfMemoryError invalidResult) {
+                if (canUseUi(token) && captureLifecycle.canCapture(token) && step == Step.FACE) {
+                  resetFaceTracking("无法处理人脸结果，请重新正对镜头");
+                }
+              } finally {
+                // This task alone owns the gate, even if fallback also finishes.
+                releaseBusy.run();
+              }
+            });
+        } catch (RuntimeException | OutOfMemoryError registrationFailure) {
+          allowed.set(false);
+          throw registrationFailure;
+        }
+      }
+    } catch (RuntimeException | OutOfMemoryError error) {
+      if (resultAllowed != null) resultAllowed.set(false);
+      // Only this exceptional path waits, on the existing CameraX analysis worker.
+      // ML Kit uses its own default pool. Never close an in-flight camera buffer,
+      // or wait for a main-thread callback that may have been dropped on pause.
+      if (detection != null) awaitFaceTaskCompletion(detection);
+      try {
+        if (frameCleanup != null) frameCleanup.run();
+        else imageProxy.close();
+        postCaptureUi(token, () -> {
+          if (step == Step.FACE && captureLifecycle.canCapture(token)) {
+            resetFaceTracking("人脸检测暂时失败，请重新正对镜头");
+          }
+        });
+      } finally {
+        if (busyCleanup != null) busyCleanup.run();
+        else faceBusy.set(false);
+      }
     }
-    int rotation = imageProxy.getImageInfo().getRotationDegrees();
-    int uprightWidth = rotation == 90 || rotation == 270 ? imageProxy.getHeight() : imageProxy.getWidth();
-    int uprightHeight = rotation == 90 || rotation == 270 ? imageProxy.getWidth() : imageProxy.getHeight();
-    InputImage input = InputImage.fromMediaImage(mediaImage, rotation);
-    faceDetector.process(input)
-      .addOnSuccessListener(cameraExecutor, faces -> processFaces(faces, uprightWidth, uprightHeight))
-      .addOnFailureListener(cameraExecutor, error -> updateFaceUi(0.04f, "人脸检测暂时失败，请调整位置", false))
-      .addOnCompleteListener(cameraExecutor, task -> {
-        faceBusy.set(false);
-        imageProxy.close();
-      });
+  }
+
+  private void awaitFaceTaskCompletion(Task<?> task) {
+    boolean interrupted = false;
+    try {
+      while (!task.isComplete()) {
+        try { Thread.sleep(50L); }
+        catch (InterruptedException interruption) { interrupted = true; }
+      }
+    } finally {
+      if (interrupted) Thread.currentThread().interrupt();
+    }
+  }
+
+  private void resetFaceTracking(String message) {
+    facePhase = 0;
+    stableFrames = 0;
+    activeFaceTrackingId = null;
+    if (!faceCaptureStarted) updateFaceUi(0.04f, message, false);
   }
 
   private void processFaces(List<Face> faces, int width, int height) {
     if (faceCaptureStarted || step != Step.FACE) return;
+    if (faces == null || width <= 0 || height <= 0) {
+      resetFaceTracking("无法确认连续的人脸图像，请重新正对镜头");
+      return;
+    }
     if (faces.size() != 1) {
-      stableFrames = 0;
-      updateFaceUi(0.05f, faces.isEmpty() ? "请将脸移入圆框" : "请保持只有一人入镜", false);
+      resetFaceTracking(faces.isEmpty() ? "请将脸移入圆框，重新开始动作" : "请保持只有一人入镜，重新开始动作");
       return;
     }
 
     Face face = faces.get(0);
+    if (face == null) {
+      resetFaceTracking("无法确认连续的人脸图像，请重新正对镜头");
+      return;
+    }
     Integer trackingId = face.getTrackingId();
     if (trackingId == null) {
-      facePhase = 0;
-      stableFrames = 0;
-      activeFaceTrackingId = null;
-      updateFaceUi(0.05f, "正在建立连续人脸跟踪，请保持正对镜头", false);
+      resetFaceTracking("正在建立连续人脸跟踪，请保持正对镜头");
       return;
     }
     if (activeFaceTrackingId != null && !activeFaceTrackingId.equals(trackingId)) {
-      facePhase = 0;
-      stableFrames = 0;
+      resetFaceTracking("检测到人脸变化，请重新开始动作");
       activeFaceTrackingId = trackingId;
-      updateFaceUi(0.05f, "检测到人脸变化，请重新开始动作", false);
+      return;
+    }
+
+    Rect box = face.getBoundingBox();
+    if (box == null || box.left < 0 || box.top < 0 || box.right > width || box.bottom > height
+      || box.right <= box.left || box.bottom <= box.top) {
+      resetFaceTracking("请让完整脸部回到圆框，重新开始动作");
+      return;
+    }
+    double centerX = ((long) box.left + box.right) / 2d;
+    double centerY = ((long) box.top + box.bottom) / 2d;
+    long boxWidth = (long) box.right - box.left;
+    boolean centered = Math.abs(centerX - width / 2d) < width * 0.20d
+      && Math.abs(centerY - height / 2d) < height * 0.22d
+      && boxWidth > width * 0.20d && boxWidth < width * 0.78d;
+    float yaw = face.getHeadEulerAngleY();
+    float roll = face.getHeadEulerAngleZ();
+    Float smileProbability = face.getSmilingProbability();
+    if (!centered || !Float.isFinite(yaw) || !Float.isFinite(roll)) {
+      resetFaceTracking("请让脸部保持居中，重新开始动作");
+      return;
+    }
+    if (!faceChallengeTurn && facePhase < 2 && (smileProbability == null
+      || !Float.isFinite(smileProbability) || smileProbability < 0f || smileProbability > 1f)) {
+      resetFaceTracking("暂时无法确认表情，请重新正对镜头");
       return;
     }
     if (activeFaceTrackingId == null) activeFaceTrackingId = trackingId;
-
-    Rect box = face.getBoundingBox();
-    boolean centered = Math.abs(box.centerX() - width / 2f) < width * 0.20f
-      && Math.abs(box.centerY() - height / 2f) < height * 0.22f
-      && box.width() > width * 0.20f
-      && box.width() < width * 0.78f;
-    float yaw = face.getHeadEulerAngleY();
-    float roll = face.getHeadEulerAngleZ();
     boolean frontal = centered && Math.abs(yaw) < 12f && Math.abs(roll) < 12f;
-    Float smileProbability = face.getSmilingProbability();
 
     if (facePhase == 0) {
       boolean neutralReady = faceChallengeTurn
@@ -943,8 +1494,8 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
 
     if (facePhase == 1) {
       boolean actionPassed = faceChallengeTurn
-        ? Math.abs(yaw) > 19f
-        : smileProbability != null && smileProbability > 0.72f;
+        ? Math.abs(roll) < 12f && Math.abs(yaw) > 19f
+        : frontal && smileProbability != null && smileProbability > 0.72f;
       stableFrames = actionPassed ? stableFrames + 1 : 0;
       float progress = 0.38f + Math.min(1f, stableFrames / 4f) * 0.28f;
       updateFaceUi(progress, actionPassed ? "动作已识别，保持一下" : "请完成动作：" + faceChallenge, false);
@@ -963,8 +1514,8 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void updateFaceUi(float progress, String message, boolean success) {
-    runOnUiThread(() -> {
-      if (step != Step.FACE || isFinishing()) return;
+    postCaptureUi(captureLifecycle.generation(), () -> {
+      if (step != Step.FACE) return;
       statusView.setText(message);
       stepBadge.setText(success ? "真人验证 · 已完成" : "真人验证 · " + Math.round(progress * 100f) + "%");
       if (facePhase == 0) {
@@ -982,20 +1533,50 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void captureVerifiedFace() {
-    if (faceCaptureStarted) return;
+    long token = captureLifecycle.generation();
+    if (faceCaptureStarted || step != Step.FACE || !canUseUi(token) || !captureLifecycle.canCapture(token)) return;
     faceCaptureStarted = true;
-    runOnUiThread(() -> {
-      updateFaceUi(1f, "动作序列完成，正在保存演示照片", true);
-      File output = new File(sessionDirectory, "face-verification.jpg");
-      takePicture(output, () -> finishFaceSession(output), message -> {
-        faceCaptureStarted = false;
-        stableFrames = 0;
-        updateFaceUi(0.72f, message + "，请重新正对镜头", false);
+    AtomicBoolean pendingUi = null;
+    try {
+      AtomicBoolean uiAttempt = new AtomicBoolean(true);
+      pendingUi = uiAttempt;
+      postCaptureUi(token, () -> {
+        if (!uiAttempt.compareAndSet(true, false)) return;
+        File pendingOutput = null;
+        try {
+          updateFaceUi(0.98f, "动作序列完成，正在保存演示照片", false);
+          if (sessionDirectory == null || imageCapture == null) throw new IllegalStateException("Camera session unavailable");
+          File output = VisionCaptureLifecycle.temporaryCapture(sessionDirectory);
+          pendingOutput = output;
+          takePicture(output, () -> {
+            try {
+              VisionCaptureLifecycle.promote(output, sessionDirectory, "face-verification.jpg");
+              finishFaceSession(new File(sessionDirectory, "face-verification.jpg"));
+            } catch (Exception | OutOfMemoryError error) {
+              VisionCaptureLifecycle.discardTemporary(output);
+              showFatal("无法确认人脸演示照片，请关闭后从本地记录检查");
+            }
+          }, message -> retryFaceCapture(output, token, message));
+        } catch (RuntimeException | OutOfMemoryError setupFailure) {
+          retryFaceCapture(pendingOutput, token, "无法启动人脸拍照，请重新开始动作");
+        }
       });
-    });
+    } catch (RuntimeException | OutOfMemoryError unavailableUi) {
+      if (pendingUi == null || pendingUi.compareAndSet(true, false)) {
+        retryFaceCapture(null, token, "无法启动人脸拍照，请重新开始动作");
+      }
+    }
+  }
+
+  private void retryFaceCapture(File output, long token, String message) {
+    VisionCaptureLifecycle.discardTemporary(output);
+    if (step != Step.FACE || !canUseUi(token) || !captureLifecycle.canCapture(token)) return;
+    faceCaptureStarted = false;
+    resetFaceTracking(message);
   }
 
   private void finishFaceSession(File output) {
+    if (!canUseUi(captureLifecycle.generation()) || captureLifecycle.isCompleted()) return;
     try {
       VisionExplorationStore.completeSession(sessionDirectory, kind, faceChallenge, output.getName());
       showCompletion(new String[] { output.getName() }, 1);
@@ -1005,7 +1586,9 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private void showCompletion(String[] fileNames, int fileCount) {
-    if (cameraProvider != null) cameraProvider.unbindAll();
+    if (!canUseUi(captureLifecycle.generation()) || !captureLifecycle.markCompleted()) return;
+    completedFileCount = fileCount;
+    unbindCamera();
     String detail;
     if ("id-card".equals(kind)) detail = "人像面与国徽面已自动确认并保存";
     else if ("bank-card".equals(kind)) detail = "银行卡正面已自动确认并保存";
@@ -1017,49 +1600,138 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
     if (Step.FACE.equals(step)) scanOverlay.showFace(1f, true);
     else scanOverlay.updateDocument(1f, "已自动确认并保存", true);
     root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-    root.postDelayed(() -> {
-      if (!isFinishing()) deliverSuccess(fileCount);
-    }, 1250L);
+    postCaptureDelayed(captureLifecycle.generation(), () -> deliverSuccess(fileCount), 1250L);
   }
 
   private void deliverSuccess(int fileCount) {
+    if (!captureLifecycle.deliver()) return;
     Intent data = new Intent();
     data.putExtra(RESULT_SESSION_ID, sessionDirectory.getName());
     data.putExtra(RESULT_KIND, kind);
     data.putExtra(RESULT_CHALLENGE, faceChallenge);
     data.putExtra(RESULT_FILE_COUNT, fileCount);
+    data.putExtra(RESULT_PRESERVED, true);
+    data.putExtra(RESULT_DISCARDED, false);
     terminalResult = true;
     setResult(Activity.RESULT_OK, data);
     finish();
   }
 
   private void confirmExit() {
+    if (!canUseUi(captureLifecycle.generation())) return;
+    if (captureLifecycle.isCompleted()) {
+      deliverSuccess(completedFileCount);
+      return;
+    }
     if (sessionDirectory == null) {
       finishCanceled();
       return;
     }
-    new AlertDialog.Builder(this)
-      .setTitle("退出本次探索？")
-      .setMessage("尚未完成的照片会被删除。")
-      .setPositiveButton("退出并删除", (dialog, which) -> finishCanceled())
-      .setNegativeButton("继续体验", null)
-      .show();
+    exitConfirmationPending = true;
+    suspendCapture(VisionCaptureLifecycle.EXIT_CONFIRMATION);
+    dismissCaptureDialog();
+    presentPendingDialog();
   }
 
   private void showFatal(String message) {
-    runOnUiThread(() -> new AlertDialog.Builder(this)
-      .setTitle("无法继续")
-      .setMessage(message)
-      .setPositiveButton("关闭", (dialog, which) -> finishCanceled())
-      .setCancelable(false)
-      .show());
+    if (!canControlCapture()) return;
+    fatalMessage = message;
+    suspendCapture(VisionCaptureLifecycle.FATAL_ERROR);
+    dismissCaptureDialog();
+    updateReviewActions();
+    // Error control must remain reachable even though capture callbacks are suspended.
+    runOnUiThread(this::presentPendingDialog);
+  }
+
+  private void presentPendingDialog() {
+    if (!canControlCapture() || captureLifecycle.isSuspended(VisionCaptureLifecycle.BACKGROUND) || captureDialog != null) return;
+    if (fatalMessage != null) {
+      captureDialog = new AlertDialog.Builder(this)
+        .setTitle("无法继续")
+        .setMessage(fatalMessage)
+        .setPositiveButton("关闭", (dialog, which) -> { if (captureDialog == dialog) finishAfterError(); })
+        .setCancelable(false)
+        .show();
+    } else if (exitConfirmationPending) {
+      captureDialog = new AlertDialog.Builder(this)
+        .setTitle("退出本次探索？")
+        .setMessage("可以保留已确认照片，稍后从本地记录继续；也可以删除本次记录。")
+        .setPositiveButton("退出并删除", (dialog, which) -> { if (captureDialog == dialog) finishCanceled(); })
+        .setNeutralButton("保留并退出", (dialog, which) -> { if (captureDialog == dialog) finishCapture(false); })
+        .setNegativeButton("继续体验", (dialog, which) -> { if (captureDialog == dialog) resumeAfterExitConfirmation(); })
+        .setOnCancelListener(dialog -> { if (captureDialog == dialog) resumeAfterExitConfirmation(); })
+        .show();
+    }
+  }
+
+  private void resumeAfterExitConfirmation() {
+    if (!canControlCapture() || !exitConfirmationPending) return;
+    exitConfirmationPending = false;
+    dismissCaptureDialog();
+    captureLifecycle.resume(VisionCaptureLifecycle.EXIT_CONFIRMATION);
+    resumeForegroundCapture();
   }
 
   private void finishCanceled() {
+    finishCapture(true);
+  }
+
+  private void finishAfterError() {
+    if (MODE_REVIEW.equals(mode)) finishReview(false);
+    else finishCapture(false);
+  }
+
+  private void finishCapture(boolean discardFiles) {
     if (terminalResult) return;
-    VisionExplorationStore.discardSession(this, sessionDirectory);
+    if (captureLifecycle.isCompleted() || completedFileCount > 0) {
+      fatalMessage = null;
+      exitConfirmationPending = false;
+      dismissCaptureDialog();
+      captureLifecycle.resume(VisionCaptureLifecycle.FATAL_ERROR);
+      captureLifecycle.resume(VisionCaptureLifecycle.EXIT_CONFIRMATION);
+      if (!canUseUi(captureLifecycle.generation())) return;
+      if (!captureLifecycle.isCompleted()) {
+        // A Bundle hint protects completed records from deletion; it is not proof
+        // of disk completion and must never restart scanning when closing an error.
+        completedFileCount = 0;
+        try {
+          if (sessionDirectory == null) sessionDirectory = VisionExplorationStore.resolveSessionDirectory(this, pendingSessionId);
+          JSONObject completed = VisionExplorationStore.getCompletedSession(this, sessionDirectory.getName());
+          kind = completed.optString("kind", "");
+          faceChallenge = completed.optString("challenge", "");
+          completedFileCount = completed.getJSONArray("files").length();
+          captureLifecycle.markCompleted();
+        } catch (Exception unverifiedCompletion) {
+          finishCapture(false);
+          return;
+        }
+      }
+      deliverSuccess(completedFileCount);
+      return;
+    }
+    if (!captureLifecycle.cancel()) return;
+    captureHandler.removeCallbacksAndMessages(null);
+    dismissCaptureDialog();
+    unbindCamera();
+    if (sessionDirectory == null && !pendingSessionId.isEmpty()) {
+      try { sessionDirectory = VisionExplorationStore.resolveSessionDirectory(this, pendingSessionId); }
+      catch (Exception ignored) { /* Missing/unavailable records are not reported as preserved. */ }
+    }
+    boolean discarded = false;
+    if (discardFiles && sessionDirectory != null) {
+      try {
+        discarded = VisionExplorationStore.deleteSession(this, sessionDirectory.getName()) && !sessionDirectory.exists();
+      } catch (Exception ignored) {
+        // A failed/partial delete must not be reported as successful deletion.
+      }
+    }
+    Intent data = new Intent();
+    if (sessionDirectory != null) data.putExtra(RESULT_SESSION_ID, sessionDirectory.getName());
+    else if (!pendingSessionId.isEmpty()) data.putExtra(RESULT_SESSION_ID, pendingSessionId);
+    data.putExtra(RESULT_PRESERVED, sessionDirectory != null && sessionDirectory.exists());
+    data.putExtra(RESULT_DISCARDED, discarded);
     terminalResult = true;
-    setResult(Activity.RESULT_CANCELED);
+    setResult(Activity.RESULT_CANCELED, data);
     finish();
   }
 
@@ -1070,34 +1742,7 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
   }
 
   private Bitmap decodePreview(File file, int maxWidth) {
-    BitmapFactory.Options bounds = new BitmapFactory.Options();
-    bounds.inJustDecodeBounds = true;
-    BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
-    int sample = 1;
-    while (bounds.outWidth / sample > maxWidth * 1.5f) sample *= 2;
-    BitmapFactory.Options options = new BitmapFactory.Options();
-    options.inSampleSize = Math.max(1, sample);
-    options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-    Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-    if (bitmap == null) return null;
-    try {
-      int orientation = new ExifInterface(file.getAbsolutePath()).getAttributeInt(
-        ExifInterface.TAG_ORIENTATION,
-        ExifInterface.ORIENTATION_NORMAL
-      );
-      float rotation = 0f;
-      if (orientation == ExifInterface.ORIENTATION_ROTATE_90) rotation = 90f;
-      else if (orientation == ExifInterface.ORIENTATION_ROTATE_180) rotation = 180f;
-      else if (orientation == ExifInterface.ORIENTATION_ROTATE_270) rotation = 270f;
-      if (rotation != 0f) {
-        Matrix matrix = new Matrix();
-        matrix.postRotate(rotation);
-        Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-        if (rotated != bitmap) bitmap.recycle();
-        bitmap = rotated;
-      }
-    } catch (Exception ignored) {}
-    return bitmap;
+    return VisionPreviewDecoder.decode(file, maxWidth);
   }
 
   private String assessImageQuality(Bitmap bitmap) {
@@ -1163,11 +1808,17 @@ public class NativeVisionExplorationActivity extends AppCompatActivity {
 
   @Override
   protected void onDestroy() {
-    if (cameraProvider != null) cameraProvider.unbindAll();
-    if (faceDetector != null) faceDetector.close();
-    if (textRecognizer != null) textRecognizer.close();
-    if (cameraExecutor != null) cameraExecutor.shutdownNow();
-    if (!terminalResult) VisionExplorationStore.discardSession(this, sessionDirectory);
+    if (captureLifecycle.destroy()) {
+      captureHandler.removeCallbacksAndMessages(null);
+      dismissCaptureDialog();
+      unbindCamera();
+      if (faceDetector != null) faceDetector.close();
+      if (textRecognizer != null) textRecognizer.close();
+      // Drain already queued analyzers: they see the destroyed owner and close their frames.
+      if (cameraExecutor != null) cameraExecutor.shutdown();
+      // Session files belong to the workflow, not this Activity instance. Only explicit
+      // cancellation discards them; configuration/process recreation restores the checkpoint.
+    }
     super.onDestroy();
   }
 }

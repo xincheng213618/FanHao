@@ -179,8 +179,13 @@ try {
   assert.equal(reimported.book.author, "校正作者", "reimport must retain corrected author");
   assert.equal(reimported.book.category, "校正分类", "reimport must retain corrected category");
   assert.equal(reimported.book.summary, "人工校正简介", "reimport must retain corrected summary");
-  assert.equal(reimported.book.progress.chapterIndex, 1, "reimport must clamp progress when the new catalog is shorter");
-  assert.equal(reimported.book.progress.scrollRatio, 0, "clamped reimport progress must start at the surviving chapter");
+  assert.equal(reimported.book.progress, null, "deleted chapter progress must not clamp onto unrelated surviving text");
+  assert.equal(reimported.book.progressRecovery.status, "unresolved");
+  assert.equal(reimported.book.progressRecovery.previous.chapterId, uploaded.chapters[1].id);
+  assert.equal(reimported.book.progressRecovery.previous.chapterIndex, 2);
+  assert.equal(reimported.book.progressRecovery.previous.scrollRatio, 0.75, "retain the old anchor until explicit confirmation");
+  tempStore.saveProgress(uploaded.book.id, { sourceRealm: reimported.sourceRealm, catalogRevision: reimported.catalogRevision,
+    chapterId: reimported.chapters[0].id, chapterIndex: 1, scrollRatio: 0 });
   const authorPage = tempStore.authorDetail("校正作者", new URL("http://127.0.0.1/api/novels/authors/%E6%A0%A1%E6%AD%A3%E4%BD%9C%E8%80%85?limit=48"));
   assert.equal(authorPage.author.bookCount, 1);
   assert.equal(authorPage.books[0].id, uploaded.book.id);
@@ -252,6 +257,7 @@ try {
   );
   assert.equal(firstImport.status, 0, firstImport.stderr || firstImport.stdout);
   assert.equal(tempStore.bookMeta(localBookId).book.chapterCount, 2);
+  const oldLocalChapter = tempStore.chapterDetail(localBookId, 2).chapter;
   tempStore.saveProgress(localBookId, { chapterIndex: 2, scrollRatio: 0.6 });
   tempStore.updateBookMetadata(localBookId, {
     title: "本地校正书名",
@@ -286,8 +292,14 @@ try {
   assert.equal(localReimported.id, localBookId);
   assert.equal(localReimported.chapterCount, 1, "single-file reimport must replace the old catalog");
   assert.equal(localReimported.title, "本地校正书名", "single-file reimport must retain metadata overrides");
-  assert.equal(localReimported.progress.chapterIndex, 1, "single-file reimport must clamp reading progress");
-  assert.equal(localReimported.progress.scrollRatio, 0);
+  assert.equal(localReimported.progress, null, "single-file reimport must not clamp a removed chapter onto different text");
+  assert.equal(localReimported.progressRecovery.status, "unresolved");
+  assert.equal(localReimported.progressRecovery.previous.chapterId, oldLocalChapter.id);
+  assert.equal(localReimported.progressRecovery.previous.chapterIndex, 2);
+  assert.equal(localReimported.progressRecovery.previous.scrollRatio, 0.6);
+  const newLocalChapter = tempStore.chapterDetail(localBookId, 1).chapter;
+  tempStore.saveProgress(localBookId, { sourceRealm: localReimported.sourceRealm, catalogRevision: localReimported.catalogRevision,
+    chapterId: newLocalChapter.id, chapterIndex: 1, scrollRatio: 0 });
   tempStore.deleteBook(localBookId);
 
   tempStore.deleteBook(catalogBook.book.id);
@@ -306,12 +318,20 @@ try {
   tempDb.close();
 } finally {
   tempStore.invalidate();
-  fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const resolved = fs.realpathSync(tempDir), parent = fs.realpathSync(os.tmpdir());
+  assert.equal(path.dirname(resolved).toLowerCase(), parent.toLowerCase());
+  assert(path.basename(resolved).startsWith("fanhao-novel-storage-"));
+  if (process.platform === "win32") {
+    const cleanup = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$target=(Resolve-Path -LiteralPath $env:FANHAO_STORAGE_TEST_DIRECTORY).Path; $parent=(Resolve-Path -LiteralPath ([System.IO.Path]::GetTempPath())).Path.TrimEnd('\\'); if ([System.IO.Path]::GetDirectoryName($target) -ne $parent -or -not ([System.IO.Path]::GetFileName($target).StartsWith('fanhao-novel-storage-'))) { throw 'Unsafe cleanup target' }; Remove-Item -LiteralPath $target -Recurse -Force"],
+      { windowsHide: true, encoding: "utf8", env: { ...process.env, FANHAO_STORAGE_TEST_DIRECTORY: resolved } });
+    assert.ifError(cleanup.error); assert.equal(cleanup.status, 0, cleanup.stderr);
+  } else fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 let database = null;
 let counts = null;
-if (fs.existsSync(dbPath)) {
+if (process.env.FANHAO_NOVEL_VERIFY_SYNTHETIC_ONLY !== "1" && fs.existsSync(dbPath)) {
   database = new DatabaseSync(dbPath, { readOnly: true });
   const legacy = database.prepare("SELECT name FROM sqlite_master WHERE name = 'novel_search'").get();
   assert.equal(legacy, undefined, "live novel database must not retain the retired novel FTS table");
@@ -322,4 +342,4 @@ if (fs.existsSync(dbPath)) {
   database.close();
 }
 
-console.log(`novel-storage: ok${counts ? ` (${counts.books} books, ${counts.chapters} chapters, no FTS)` : " (source only)"}`);
+console.log(`novel-storage: ok${counts ? ` (${counts.books} books, ${counts.chapters} chapters, no FTS)` : " (synthetic only)"}`);

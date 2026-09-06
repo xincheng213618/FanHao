@@ -107,10 +107,12 @@ export function createShortVideoLocalActions({
   return Object.freeze({ schedule, sourceFile });
 }
 
-export function openShortVideoLocalTarget(target = {}) {
+export function openShortVideoLocalTarget(target = {}, {
+  platform = process.platform,
+  spawnProcess = spawn
+} = {}) {
   const targetPath = path.resolve(String(target.path || ""));
   const reveal = target.action === "reveal";
-  const platform = process.platform;
   const command = platform === "win32"
     ? "explorer.exe"
     : platform === "darwin"
@@ -121,10 +123,10 @@ export function openShortVideoLocalTarget(target = {}) {
     : platform === "darwin"
       ? (reveal ? ["-R", targetPath] : [targetPath])
       : [reveal ? path.dirname(targetPath) : targetPath];
-  const child = spawn(command, args, {
+  const child = spawnProcess(command, args, {
     detached: true,
     stdio: "ignore",
-    windowsHide: true
+    windowsHide: false
   });
   child.unref();
 }

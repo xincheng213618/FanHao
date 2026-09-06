@@ -1,4 +1,5 @@
-import { CLIENT_VERSION } from "./config.js?v=20260813-tv-series-work-01-5c293a6f8867";
+import { CLIENT_VERSION } from "./config.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { accountPayloadOwner, captureAccountOwner, confirmAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload } from "./account-owner.js";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
@@ -23,27 +24,39 @@ const responseInvalidationState = globalThis.__fanhaoResponseCacheInvalidationSt
 };
 
 export async function readCachedJson(baseUrl, path) {
+  await prepareAccountOwner(baseUrl);
   const fence = captureCachedJsonFence(baseUrl);
+  if (fence.account.owner === "pending") return null;
   const db = await openCacheDb();
   const entry = await runCacheTransaction(
     db,
     RESPONSE_STORE,
     "readonly",
-    (store) => requestToPromise(store.get(cacheKey(baseUrl, path)))
+    (store) => requestToPromise(store.get(cacheKey(baseUrl, path, fence.account)))
   );
   if (!isCachedJsonFenceCurrent(fence) || !entry || !entry.payload || !isCurrentResponseCache(entry)) return null;
   touchCachedResponse(entry, fence).catch(() => {});
+  rememberAccountPayload(entry.payload, fence.account);
+  confirmAccountOwner(fence.account);
   return entry;
 }
 
 export async function writeCachedJson(baseUrl, path, payload, options = {}) {
-  const fence = options.fence || captureCachedJsonFence(baseUrl);
+  const payloadOwner = accountPayloadOwner(payload);
+  if (payloadOwner && !isAccountOwnerCurrent(payloadOwner)) return null;
+  const fence = options.fence || captureCachedJsonFence(baseUrl, payloadOwner || captureAccountOwner(baseUrl));
+  if (fence.account.origin !== captureAccountOwner(baseUrl).origin) return null;
+  // Cloned/merged responses lose their WeakMap provenance. Such callers must
+  // capture a fence before their first await, rather than adopting a new login.
+  if (!payloadOwner && !options.fence && (fence.account.owner !== "guest" || fence.account.revision > 0)) return null;
+  if (fence.account.owner === "pending") return null;
   const db = await openCacheDb();
   if (!isCachedJsonFenceCurrent(fence)) return null;
   const entry = {
-    key: cacheKey(baseUrl, path),
+    key: cacheKey(baseUrl, path, fence.account),
     baseUrl: normalizeBaseUrl(baseUrl),
     path,
+    accountOwner: fence.account.owner,
     version: RESPONSE_CACHE_VERSION,
     payload,
     accessedAt: new Date().toISOString(),
@@ -116,18 +129,31 @@ export async function getCacheStats(baseUrl = "") {
 }
 
 export async function clearCachedData(baseUrl = "") {
+  await clearCachedResponses(baseUrl);
+  await clearCachedImages(baseUrl);
+}
+
+export async function clearCachedResponses(baseUrl = "") {
   const normalizedBase = baseUrl ? normalizeBaseUrl(baseUrl) : "";
   invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
   if (!normalizedBase) {
     await runCacheTransaction(db, RESPONSE_STORE, "readwrite", (store) => requestToPromise(store.clear()));
-    if (db.objectStoreNames.contains(IMAGE_STORE)) {
-      await runCacheTransaction(db, IMAGE_STORE, "readwrite", (store) => requestToPromise(store.clear()));
-    }
     return;
   }
 
   await deleteByBaseUrl(db, RESPONSE_STORE, normalizedBase);
+}
+
+export async function clearCachedImages(baseUrl = "") {
+  const normalizedBase = baseUrl ? normalizeBaseUrl(baseUrl) : "";
+  const db = await openCacheDb();
+  if (!db.objectStoreNames.contains(IMAGE_STORE)) return;
+  if (!normalizedBase) {
+    await runCacheTransaction(db, IMAGE_STORE, "readwrite", (store) => requestToPromise(store.clear()));
+    return;
+  }
+
   if (db.objectStoreNames.contains(IMAGE_STORE)) await deleteByBaseUrl(db, IMAGE_STORE, normalizedBase);
 }
 
@@ -135,17 +161,21 @@ export async function clearCachedJson(baseUrl = "") {
   return clearCachedData(baseUrl);
 }
 
-export async function clearCachedJsonByPrefix(baseUrl, pathPrefix) {
+export async function clearCachedJsonByPrefix(baseUrl, pathPrefix, { accountScope = null } = {}) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const normalizedPrefix = String(pathPrefix || "").trim();
   if (!normalizedBase || !normalizedPrefix) return;
+  if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
   invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
+  if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
   await runCacheTransaction(db, RESPONSE_STORE, "readwrite", async (store) => {
     const entries = await requestToPromise(store.index("baseUrl").getAll(normalizedBase));
+    if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
     await Promise.all(
       entries
         .filter((entry) => String(entry?.path || "").startsWith(normalizedPrefix))
+        .filter((entry) => !accountScope || (entry.accountOwner || "guest") === accountScope.owner)
         .map((entry) => requestToPromise(store.delete(entry.key)))
     );
   });
@@ -166,10 +196,11 @@ export function cacheAgeText(updatedAt) {
   return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }
 
-export function captureCachedJsonFence(baseUrl) {
+export function captureCachedJsonFence(baseUrl, account = captureAccountOwner(baseUrl)) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   return Object.freeze({
     baseUrl: normalizedBase,
+    account,
     epoch: responseInvalidationState.epoch,
     generation: responseInvalidationState.baseGenerations.get(normalizedBase) || 0
   });
@@ -178,7 +209,7 @@ export function captureCachedJsonFence(baseUrl) {
 export function isCachedJsonFenceCurrent(fence) {
   if (!fence || typeof fence !== "object") return false;
   const normalizedBase = normalizeBaseUrl(fence.baseUrl);
-  return Number(fence.epoch) === responseInvalidationState.epoch
+  return (!fence.account || isAccountOwnerCurrent(fence.account)) && Number(fence.epoch) === responseInvalidationState.epoch
     && Number(fence.generation) === (responseInvalidationState.baseGenerations.get(normalizedBase) || 0);
 }
 
@@ -246,8 +277,10 @@ function openCacheDb() {
   return dbPromise;
 }
 
-function cacheKey(baseUrl, path) {
-  return `${normalizeBaseUrl(baseUrl)} ${RESPONSE_CACHE_VERSION} ${path}`;
+function cacheKey(baseUrl, path, account = captureAccountOwner(baseUrl)) {
+  // Existing unscoped responses belong to the legacy guest, never a new account.
+  const owner = account.owner === "guest" ? "" : ` ${account.owner}`;
+  return `${normalizeBaseUrl(baseUrl)} ${RESPONSE_CACHE_VERSION}${owner} ${path}`;
 }
 
 function isCurrentResponseCache(entry) {

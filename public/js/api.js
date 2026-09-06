@@ -1,11 +1,15 @@
+import { captureWebAccount, checkWebAccountResponse } from "../platform/accounts/session-context.js";
+
 export function createApiClient(options = {}) {
   const { isAndroidClient = false } = options;
 
   return async function api(path, requestOptions = {}) {
+    const account = captureWebAccount();
     const init = { ...requestOptions };
     const returnResponse = init.returnResponse === true;
     delete init.returnResponse;
     const headers = { ...(init.headers || {}) };
+    if (account.owner && !/^\/api\/(?:auth|accounts)(?:\/|$)/.test(path)) headers["X-FanHao-Account-Owner"] = account.owner;
     if (isAndroidClient) headers["X-FanHao-Client"] = "android";
     if (init.body && typeof init.body !== "string") {
       init.body = JSON.stringify(init.body);
@@ -15,6 +19,7 @@ export function createApiClient(options = {}) {
 
     const response = await fetch(path, init);
     const payload = await response.json().catch(() => ({}));
+    checkWebAccountResponse(response, account);
     if (!response.ok) {
       if (response.status === 401 && payload.loginUrl) {
         window.location.assign(payload.loginUrl);

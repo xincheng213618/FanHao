@@ -7,6 +7,14 @@ from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from cool18_parser import (
+    PARSER_VERSION as COOL18_PARSER_VERSION,
+    build_chapters as build_cool18_chapters,
+    clean_post_text as clean_cool18_post_text,
+    clean_series_title as clean_cool18_series_title,
+    extract_post as extract_cool18_post,
+    title_metadata as cool18_title_metadata,
+)
 
 from core import (
     Chapter,
@@ -33,12 +41,6 @@ DIYIBANZHU_NOISE = [
     r"^(?:首页|排行|全本|阅读史|阅读记录|书库|安卓APP|sitemap)$",
     r"(?:下载安卓APP|APP网址|网址被屏蔽|chrome浏览器)",
     r"(?:第一版主|diyibanzhu)",
-]
-COOL18_NOISE = [
-    r"^送交者\s*[:：]",
-    r"^(?:作者|楼主|发表于|来源)\s*[:：]",
-    r"(?:cool18|6park|留园|禁忌书屋)",
-    r"(?:广告|二维码|扫码|版主|AI检测)",
 ]
 ALICESW_NOISE = [
     r"^(?:首页|文章|爱丽丝书屋|分类|最新章节|书架|排行|登录|注册|返回)",
@@ -500,7 +502,7 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
     author = ""
     series_title = ""
 
-    while queue and len(chapters) < max_pages:
+    while queue and len(visited) < max_pages:
         current_url = queue.pop(0)
         key = thread_key(current_url)
         queued.discard(key)
@@ -509,12 +511,13 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
         cached = context.restore_chapter(
             Chapter(title=f"帖子 {len(chapters) + 1}", url=current_url)
         )
-        if cached:
-            metadata = context.checkpoint_metadata(current_url)
+        metadata = context.checkpoint_metadata(current_url)
+        if cached and metadata.get("parserVersion") == COOL18_PARSER_VERSION:
             if not series_title:
                 series_title = str(metadata.get("seriesTitle") or clean_cool18_series_title(cached.title))
             if not author:
                 author = str(metadata.get("author") or "")
+            cached.content = clean_cool18_post_text(cached.content, cached.title, series_title)
             for saved_url in metadata.get("nextUrls") or []:
                 try:
                     candidate = normalize_http_url(saved_url, current_url)
@@ -533,14 +536,13 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
         context.progress(len(chapters), max_pages, f"正在采集帖子 {len(chapters) + 1}")
         html = context.fetch(current_url)
         soup = BeautifulSoup(html, "html.parser")
-        page_title = clean_title(
-            selected_text(soup, ".main-title", "帖子标题") or fallback_page_title(soup),
-            f"帖子 {len(chapters) + 1}",
-        )
+        page_title = selected_text(soup, ".main-title", "帖子标题") or fallback_page_title(soup) or f"帖子 {len(chapters) + 1}"
+        book_title, title_author = cool18_title_metadata(page_title)
         if not series_title:
-            series_title = clean_cool18_series_title(page_title)
+            series_title = book_title
+        content, body_author = extract_cool18_post(soup, page_title, series_title)
         if not author:
-            author = clean_author(selected_text(soup, ".sender", "作者"))
+            author = title_author or body_author
         root = soup.select_one("#content-section") or soup.select_one(".post-content") or soup.select_one("article") or soup
         discovered_urls: list[str] = []
         for anchor in root.select("a[href]"):
@@ -553,22 +555,6 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
                 queue.append(candidate)
                 queued.add(child_key)
                 discovered_urls.append(candidate)
-        content = extract_content(
-            html,
-            "#content-section, .post-content, article, .main-content",
-            remove_selectors=[
-                "a[href*='threadview']",
-                ".comment-section",
-                ".ad-container",
-                ".view_ad_bottom",
-                ".view_ad_incontent",
-                ".action-buttons",
-                ".vote-section",
-                ".warning-info",
-            ],
-            line_patterns=COOL18_NOISE,
-            first_only=True,
-        )
         if content:
             chapter = Chapter(title=page_title, url=current_url, content=content, order=len(chapters) + 1)
             chapters.append(chapter)
@@ -578,6 +564,7 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
                     "nextUrls": discovered_urls,
                     "author": author,
                     "seriesTitle": series_title,
+                    "parserVersion": COOL18_PARSER_VERSION,
                 },
                 total=max_pages,
             )
@@ -588,9 +575,10 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
             context.pause()
     if not chapters:
         raise CollectionError("没有从帖子链采集到有效正文")
-    chapters.sort(key=lambda chapter: (*numeric_sort_key(chapter.title), chapter.order))
-    for index, chapter in enumerate(chapters, 1):
-        chapter.order = index
+    chapters = build_cool18_chapters(chapters)
+    if not chapters:
+        raise CollectionError("帖子正文没有可导入的章节")
+    context.progress(len(visited), len(visited), f"已整理 {len(chapters)} 章")
     return {
         "title": series_title or clean_cool18_series_title(chapters[0].title),
         "author": author,
@@ -601,6 +589,7 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
             "driver": "cool18",
             "pagesVisited": len(visited),
             "chaptersImported": len(chapters),
+            "parserVersion": COOL18_PARSER_VERSION,
         },
     }
 
@@ -670,12 +659,6 @@ def chinese_number(value: str) -> int:
             total += (current or 1) * unit
             current = 0
     return total + current
-
-
-def clean_cool18_series_title(value: str) -> str:
-    title = re.sub(r"\s*[（(]\s*\d{1,3}\s*(?:[-－—~至]\s*\d{1,3})?\s*[）)]\s*$", "", value or "")
-    title = re.sub(r"\s*-\s*(?:禁忌书屋|cool18|酷18).*$", "", title, flags=re.I)
-    return clean_title(title, "Cool18 小说")
 
 
 def thread_key(url: str) -> str:

@@ -1,11 +1,13 @@
 import argparse
 import json
+import math
 import random
 import re
 import sqlite3
 import sys
 import time
 from dataclasses import dataclass
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -13,6 +15,12 @@ from urllib.parse import quote
 from bs4 import BeautifulSoup
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from douban_movie_match import (
+    canonical_douban_subject_url,
+    choose_movie_metadata,
+    clean_movie_search_title,
+    validate_manual_movie_metadata,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +33,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 MAX_COVER_BYTES = 2 * 1024 * 1024
+MAX_MOVIE_CANDIDATES = 5
 
 
 class DoubanBlockedError(RuntimeError):
@@ -56,13 +65,13 @@ def json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill Douban movie metadata with a visible Playwright browser.")
     parser.add_argument("--write", action="store_true", help="Write results to data/image-gallery.sqlite.")
     parser.add_argument("--refresh", action="store_true", help="Refresh existing ok rows.")
     parser.add_argument("--limit", type=int, default=0, help="0 means all targets.")
-    parser.add_argument("--sleep", type=float, default=5.0, help="Base delay between movies.")
-    parser.add_argument("--jitter", type=float, default=2.0, help="Extra random delay between movies.")
+    parser.add_argument("--sleep", type=float, default=5.0, help="Minimum delay between consecutive collector requests.")
+    parser.add_argument("--jitter", type=float, default=2.0, help="Extra random delay between collector requests.")
     parser.add_argument("--category", default="", help="Filter by movie category.")
     parser.add_argument("--title", default="", help="Filter by movie title keyword.")
     parser.add_argument("--series", default="", help="Alias of --title for compatibility.")
@@ -73,11 +82,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--browser-channel", default="chrome", help="Playwright Chromium channel, e.g. chrome or msedge.")
     parser.add_argument("--headless", action="store_true", help="Run without a visible browser window.")
     parser.add_argument("--headed", dest="headless", action="store_false", help=argparse.SUPPRESS)
-    parser.add_argument("--rate-limit-wait", type=float, default=60.0, help="Seconds to wait when Douban says search is too frequent.")
-    parser.add_argument("--rate-limit-retries", type=int, default=5, help="Retries for the current movie after search rate limiting.")
+    parser.add_argument("--rate-limit-wait", type=float, default=60.0, help="Compatibility option only; rate-limit pages now stop the run without retry.")
+    parser.add_argument("--rate-limit-retries", type=int, default=5, help="Compatibility option only; rate-limit pages now stop the run without retry.")
     parser.add_argument("--search-timeout-ms", type=int, default=15000)
     parser.add_argument("--detail-timeout-ms", type=int, default=45000)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def read_json(path: Path, fallback):
@@ -88,28 +97,7 @@ def read_json(path: Path, fallback):
 
 
 def clean_movie_query_title(value: str) -> str:
-    source = str(value or "")
-    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", source)
-    year = year_match.group(1) if year_match else ""
-    text = re.sub(r"\[[^\]]+\]", " ", source)
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(
-        r"\b(?:2160p|1080p|720p|480p|4k|8k|uhd|remux|bluray|blu[-_. ]?ray|web[-_. ]?dl|"
-        r"hdtv|hdr|dv|p7|hevc|x265|x264|h\.264|h\.265|aac|dts|truehd|atmos|multi|proper|repack)\b",
-        " ",
-        text,
-        flags=re.I,
-    )
-    text = re.sub(r"\b(?:cd\d+|part\d+|disc\d+)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*(?:gb|mb)\b", " ", text, flags=re.I)
-    text = re.sub(r"\.(?:mkv|mp4|m2ts|ts|avi|mov|wmv)$", " ", text, flags=re.I)
-    text = re.sub(r"[._-]+", " ", text)
-    text = normalize_spaces(text)
-    year_index = text.find(year) if year else -1
-    before_year = text[:year_index].strip() if year_index >= 0 else text
-    chinese = re.search(r"[\u4e00-\u9fff][\u4e00-\u9fff\s·：:]+", before_year or text)
-    title = normalize_spaces(chinese.group(0) if chinese else before_year or text)
-    return normalize_spaces(" ".join(part for part in [title, year] if part))
+    return clean_movie_search_title(value)
 
 
 def movie_targets(index: dict) -> list[MovieTarget]:
@@ -416,6 +404,9 @@ def douban_blocked_reason(status: int | None, url: str, html: str) -> str:
         "请输入验证码",
         "有异常请求从你的 IP 发出",
         "Please verify you are a human",
+        "搜索访问太频繁",
+        "访问过于频繁",
+        "Too Many Requests",
     ]
     for marker in markers:
         if marker in text:
@@ -437,20 +428,42 @@ def is_search_rate_limited(status: int | None, url: str, html: str) -> bool:
 
 
 def subject_url_from_value(value: str) -> str:
-    text = normalize_spaces(value)
-    match = re.search(r"(?:https?:)?//(?:movie\.)?douban\.com/subject/(\d+)/?", text)
-    if match:
-        return f"https://movie.douban.com/subject/{match.group(1)}/"
-    match = re.search(r"\bsubject/(\d+)/?", text)
-    if match:
-        return f"https://movie.douban.com/subject/{match.group(1)}/"
-    if re.fullmatch(r"\d{5,}", text):
-        return f"https://movie.douban.com/subject/{text}/"
-    return ""
+    return canonical_douban_subject_url(value)
 
 
-def suggest_subject_url(context, query: str) -> str:
+class RequestPacer:
+    """One run-wide boundary for explicit collector requests (not browser subresources)."""
+
+    def __init__(self, args, sleep_fn=None, log=None):
+        self.base = float(args.sleep)
+        self.jitter = float(args.jitter)
+        if not all(math.isfinite(value) and value >= 0 for value in [self.base, self.jitter]):
+            raise ValueError("sleep/jitter 必须是有限非负数")
+        self.sleep_fn = sleep_fn or time.sleep
+        self.log = log or print
+        self.started = False
+
+    def before_request(self):
+        if self.started:
+            seconds = self.base + random.uniform(0, self.jitter)
+            if seconds:
+                self.log(f"  wait {seconds:.1f}s")
+                self.sleep_fn(seconds)
+        self.started = True
+
+
+def check_response(status, url, text):
+    reason = douban_blocked_reason(status, url, text)
+    if reason:
+        raise DoubanBlockedError(f"{reason} {url}")
+    if status is None or not 200 <= status < 300:
+        raise RuntimeError(f"资料请求失败 HTTP {status} {url}")
+
+
+def suggest_subject_urls(context, query: str, pace=None) -> list[str]:
     url = f"https://movie.douban.com/j/subject_suggest?q={quote(query)}"
+    if pace:
+        pace.before_request()
     response = context.request.get(
         url,
         headers={
@@ -460,22 +473,27 @@ def suggest_subject_url(context, query: str) -> str:
         },
         timeout=15000,
     )
-    if response.status == 429:
-        raise DoubanRateLimitedError(f"subject_suggest HTTP {response.status}")
-    if response.status in {403, 418}:
-        raise DoubanBlockedError(f"subject_suggest HTTP {response.status}")
+    check_response(response.status, response.url, "")
+    check_response(response.status, response.url, response.text())
     try:
         items = response.json()
-    except Exception:
-        items = []
+    except Exception as error:
+        raise RuntimeError("subject_suggest 返回无效 JSON，待核对") from error
+    if not isinstance(items, list):
+        raise RuntimeError("subject_suggest 返回无效候选列表，待核对")
+    result = []
     for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
         url = subject_url_from_value(item.get("url", ""))
-        if url:
-            return url
-    return ""
+        if url and url not in result:
+            result.append(url)
+        if len(result) == MAX_MOVIE_CANDIDATES:
+            break
+    return result
 
 
-def extract_subject_url_from_page(page, html: str) -> str:
+def extract_subject_urls_from_page(page, html: str) -> list[str]:
     try:
         links = page.eval_on_selector_all(
             'a[href*="movie.douban.com/subject/"]',
@@ -483,69 +501,95 @@ def extract_subject_url_from_page(page, html: str) -> str:
         )
     except Exception:
         links = []
+    # Parse actual href attributes, never search arbitrary text for a URL.
+    links += [{"href": node.get("href", "")} for node in BeautifulSoup(html or "", "html.parser").select("a[href]")]
+    result = []
     for item in links:
         url = subject_url_from_value(item.get("href", ""))
-        if url:
-            return url
-    return subject_url_from_value(html)
+        if url and url not in result:
+            result.append(url)
+        if len(result) == MAX_MOVIE_CANDIDATES:
+            break
+    return result
 
 
-def search_subject_url(page, query: str, args: argparse.Namespace) -> str:
+def search_subject_urls(page, query: str, args: argparse.Namespace, pace=None) -> list[str]:
     search_urls = [
         f"https://search.douban.com/movie/subject_search?search_text={quote(query)}&cat=1002",
         f"https://www.douban.com/search?cat=1002&q={quote(query)}",
     ]
     for url in search_urls:
+        if pace:
+            pace.before_request()
         response = page.goto(url, wait_until="domcontentloaded", timeout=args.detail_timeout_ms)
+        check_response(response.status if response else None, page.url, "")
         page.wait_for_timeout(1200)
         try:
             page.wait_for_selector('a[href*="movie.douban.com/subject/"]', timeout=args.search_timeout_ms)
         except PlaywrightTimeoutError:
             pass
         html = page.content()
-        if is_search_rate_limited(response.status if response else None, page.url, html):
-            raise DoubanRateLimitedError(f"搜索访问太频繁：{page.url}")
-        blocked_reason = douban_blocked_reason(response.status if response else None, page.url, html)
-        if blocked_reason:
-            raise DoubanBlockedError(f"{blocked_reason} {page.url}")
-        subject_url = extract_subject_url_from_page(page, html)
-        if subject_url:
-            return subject_url
+        check_response(response.status if response else None, page.url, html)
+        subject_urls = extract_subject_urls_from_page(page, html)
+        if subject_urls:
+            return subject_urls
     raise DoubanNoResultError(f"豆瓣没有搜索结果：{query}")
 
 
-def fetch_subject_page_meta(page, subject_url: str, args: argparse.Namespace) -> dict:
-    response = page.goto(subject_url, wait_until="domcontentloaded", timeout=args.detail_timeout_ms)
+def fetch_subject_page_meta(page, subject_url: str, args: argparse.Namespace, pace=None) -> dict:
+    canonical = subject_url_from_value(subject_url)
+    if not canonical:
+        raise RuntimeError("无效豆瓣详情地址，待核对")
+    if pace:
+        pace.before_request()
+    response = page.goto(canonical, wait_until="domcontentloaded", timeout=args.detail_timeout_ms)
+    check_response(response.status if response else None, page.url, "")
     page.wait_for_timeout(1200)
     html = page.content()
-    if is_search_rate_limited(response.status if response else None, page.url, html):
-        raise DoubanRateLimitedError(f"访问太频繁：{page.url}")
-    blocked_reason = douban_blocked_reason(response.status if response else None, page.url, html)
-    if blocked_reason:
-        raise DoubanBlockedError(f"{blocked_reason} {page.url}")
-    return parse_subject_page(html, subject_url_from_value(page.url) or subject_url)
+    check_response(response.status if response else None, page.url, html)
+    if subject_url_from_value(page.url) != canonical:
+        raise RuntimeError("豆瓣详情跳转至其它条目/未知页面，待核对")
+    meta = parse_subject_page(html, canonical)
+    if not meta.get("title"):
+        raise RuntimeError("豆瓣详情缺少标题，待核对")
+    return meta
 
 
-def fetch_movie_meta(context, page, target: MovieTarget, args: argparse.Namespace) -> dict:
+def fetch_movie_meta(context, page, target: MovieTarget, args: argparse.Namespace, pace=None) -> dict:
+    pace = pace or RequestPacer(args)
     queries = unique([target.search_title, re.sub(r"\b(19\d{2}|20\d{2})\b", "", target.search_title).strip(), target.movie_title], 3)
     last_no_result = None
+    subject_urls = []
     for query in queries:
         if not query:
             continue
-        subject_url = suggest_subject_url(context, query)
-        if not subject_url:
+        found = suggest_subject_urls(context, query, pace)
+        if not found:
             try:
-                subject_url = search_subject_url(page, query, args)
+                found = search_subject_urls(page, query, args, pace)
             except DoubanNoResultError as error:
                 last_no_result = error
                 continue
-        return fetch_subject_page_meta(page, subject_url, args)
-    raise last_no_result or DoubanNoResultError(f"豆瓣没有搜索结果：{target.search_title}")
+        for url in found:
+            if url not in subject_urls:
+                subject_urls.append(url)
+            if len(subject_urls) >= MAX_MOVIE_CANDIDATES:
+                break
+        if subject_urls:
+            break
+    if not subject_urls:
+        raise last_no_result or DoubanNoResultError(f"豆瓣没有搜索结果：{target.search_title}")
+    # A failed listed detail invalidates the whole decision: never choose using
+    # only the successfully fetched subset, or fall back to search snippets.
+    candidates = [fetch_subject_page_meta(page, url, args, pace) for url in subject_urls]
+    return choose_movie_metadata({"movieTitle": target.movie_title, "searchTitle": target.search_title, "samples": target.samples}, candidates)
 
 
-def fetch_cover(context, url: str) -> tuple[bytes | None, str]:
+def fetch_cover(context, url: str, pace=None) -> tuple[bytes | None, str]:
     if not url:
         return None, ""
+    if pace:
+        pace.before_request()
     response = context.request.get(
         url,
         headers={
@@ -555,9 +599,14 @@ def fetch_cover(context, url: str) -> tuple[bytes | None, str]:
         },
         timeout=30000,
     )
-    if not response.ok:
-        raise RuntimeError(f"封面下载失败 HTTP {response.status}")
+    check_response(response.status, response.url, "")
     body = response.body()
+    reason = douban_blocked_reason(response.status, response.url, body.decode("utf-8", errors="replace"))
+    if reason:
+        raise DoubanBlockedError(f"{reason} {response.url}")
+    if "text" in (response.headers.get("content-type") or "").lower():
+        check_response(response.status, response.url, body.decode("utf-8", errors="replace"))
+        raise RuntimeError("封面返回非图片内容")
     if not body or len(body) > MAX_COVER_BYTES:
         raise RuntimeError(f"封面大小异常 {len(body) if body else 0}")
     mime = (response.headers.get("content-type") or "image/jpeg").split(";")[0]
@@ -615,7 +664,8 @@ def upsert_ok(conn: sqlite3.Connection, target: MovieTarget, meta: dict, cover_b
         if column == "media_id":
             continue
         if column in {"cover_mime", "cover_blob", "cover_bytes"}:
-            updates.append(f"{column}=COALESCE(excluded.{column}, {column})")
+            updates.append(f"{column}=CASE WHEN excluded.douban_id <> '' AND excluded.douban_id = movie_metadata.douban_id "
+                           f"THEN COALESCE(excluded.{column}, movie_metadata.{column}) ELSE excluded.{column} END")
         else:
             updates.append(f"{column}=excluded.{column}")
     updates_sql = ", ".join(updates)
@@ -644,6 +694,7 @@ def upsert_error(conn: sqlite3.Connection, target: MovieTarget, error: Exception
           error=excluded.error,
           fetched_at=excluded.fetched_at,
           updated_at=excluded.updated_at
+        WHERE movie_metadata.status <> 'ok'
         """,
         (target.key, target.category, target.movie_title, "douban-browser", "error", str(error)[:1000], now, now),
     )
@@ -659,19 +710,112 @@ def pause(args: argparse.Namespace, index_in_run: int, total: int) -> None:
         time.sleep(seconds)
 
 
-def fetch_movie_meta_with_rate_limit(context, page, target: MovieTarget, args: argparse.Namespace) -> dict:
-    retries = max(0, args.rate_limit_retries)
-    wait_seconds = max(0.0, args.rate_limit_wait)
-    for attempt in range(retries + 1):
+def fetch_movie_meta_with_rate_limit(context, page, target: MovieTarget, args: argparse.Namespace, pace=None) -> dict:
+    # Compatibility entry point only: explicit rate limiting now stops the run.
+    # Do not switch queries or retry after the service requests a stop.
+    return fetch_movie_meta(context, page, target, args, pace)
+
+
+def run(args, *, conn=None, index=None, cookie_state=None, context=None, page=None,
+        sleep_fn=None, log=None, playwright_factory=None) -> dict:
+    """Run the real workflow, with complete external boundaries injectable.
+
+    Tests must inject all five data/browser boundaries together; omission is an
+    error, not permission to fall through to the user's DB, cookies or browser.
+    Injected connections/context/page remain owned by the caller.
+    """
+    log = log or print
+    injected = [conn, index, cookie_state, context, page]
+    if any(value is not None for value in injected) and not all(value is not None for value in injected):
+        raise ValueError("测试/嵌入运行必须同时提供 conn/index/cookie_state/context/page")
+    pace = RequestPacer(args, sleep_fn, log)
+    stats = {"ok": 0, "failed": 0, "blocked": False, "targets": 0, "exitCode": 0}
+    keyword = normalize_spaces(args.title or args.series)
+    media_id = normalize_spaces(args.media_id)
+    manual_value = normalize_spaces(args.douban_url or args.douban_id)
+    if re.fullmatch(r"\d{5,}", manual_value, flags=re.ASCII):
+        manual_value = f"https://movie.douban.com/subject/{manual_value}/"
+    manual_subject_url = subject_url_from_value(manual_value)
+    if (args.douban_url or args.douban_id) and not manual_subject_url:
+        log("error 手动豆瓣条目无效：请传豆瓣 subject 链接或纯数字 subject id。")
+        return {**stats, "exitCode": 1}
+    if manual_subject_url and not media_id:
+        log("error 手动校准需要同时传 --media-id，避免误覆盖其它电影。")
+        return {**stats, "exitCode": 1}
+    with ExitStack() as resources:
+        if conn is None:
+            cookie_state = read_cookie_state(args.cookie_file)
+            index = read_json(INDEX_PATH, {})
+            conn = sqlite3.connect(DB_PATH, timeout=30)
+            resources.callback(conn.close)
+        conn.row_factory = sqlite3.Row
+        ensure_db(conn)
+        existing = existing_rows(conn)
+        cookie_header, cookie_source, cookies = cookie_state
+        targets_by_key = {}
+        for target in movie_targets(index):
+            targets_by_key.setdefault(target.key, target)
+        targets = list(targets_by_key.values())
+        if media_id:
+            targets = [target for target in targets if target.key == media_id]
+            if not targets:
+                log(f"error 找不到 media-id={media_id} 对应的电影。请先刷新电影索引。")
+                return {**stats, "exitCode": 1}
+        if args.category:
+            targets = [target for target in targets if target.category == args.category]
+        if keyword:
+            targets = [target for target in targets if any(keyword in value for value in [target.movie_title, target.search_title, *target.samples] if value)]
+        if not args.refresh and not manual_subject_url:
+            targets = [target for target in targets if not existing.get(target.key) or existing[target.key]["status"] != "ok" or not existing[target.key]["cover_bytes"]]
+        if args.limit and args.limit > 0:
+            targets = targets[:args.limit]
+        stats["targets"] = len(targets)
+        log(f"豆瓣电影资料目标：{len(targets)} 部电影 write={'yes' if args.write else 'no'} refresh={'yes' if args.refresh else 'no'} cookie={'yes' if cookie_header else 'no'}")
+        if targets and not args.category:
+            log(f"分类分布：{category_summary(targets)}")
+        if cookie_source:
+            log(f"Cookie 来源：{cookie_source}")
+        if not targets:
+            return stats
+        if context is None:
+            playwright = resources.enter_context((playwright_factory or sync_playwright)())
+            browser = playwright.chromium.launch(channel=args.browser_channel or None, headless=args.headless)
+            resources.callback(browser.close)
+            context = browser.new_context(user_agent=USER_AGENT, locale="zh-CN", timezone_id="Asia/Shanghai",
+                                          viewport={"width": 1365, "height": 900},
+                                          extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7"})
+            resources.callback(context.close)
+            if cookies:
+                context.add_cookies(cookies)
+            page = context.new_page()
         try:
-            return fetch_movie_meta(context, page, target, args)
-        except DoubanRateLimitedError as error:
-            if attempt >= retries:
-                raise DoubanBlockedError(f"{error}；已等待重试 {retries} 次仍被限速") from error
-            print(f"  rate-limit {error}")
-            print(f"  搜索访问太频繁，等待 {wait_seconds:.0f}s 后重试当前影片 ({attempt + 1}/{retries})")
-            time.sleep(wait_seconds)
-    raise DoubanBlockedError("搜索访问太频繁")
+            pace.before_request()
+            response = page.goto("https://movie.douban.com/", wait_until="domcontentloaded", timeout=args.detail_timeout_ms)
+            check_response(response.status if response else None, page.url, "")
+            check_response(response.status if response else None, page.url, page.content())
+            for index_in_run, target in enumerate(targets):
+                try:
+                    log(f"[{index_in_run + 1}/{len(targets)}] {target.category} / {target.movie_title} -> {target.search_title}")
+                    meta = validate_manual_movie_metadata(fetch_subject_page_meta(page, manual_subject_url, args, pace)) if manual_subject_url else fetch_movie_meta_with_rate_limit(context, page, target, args, pace)
+                    cover_blob, cover_mime = fetch_cover(context, meta.get("coverUrl", ""), pace)
+                    if args.write:
+                        upsert_ok(conn, target, meta, cover_blob, cover_mime)
+                    stats["ok"] += 1
+                    log(f"  ok {meta.get('title') or '-'} {meta.get('year') or ''} rating={meta.get('rating') or '-'} detail={meta.get('detailSource') or '-'} cover={len(cover_blob or b'')}")
+                except DoubanBlockedError:
+                    raise
+                except Exception as error:
+                    stats["failed"] += 1
+                    if args.write:
+                        upsert_error(conn, target, error)
+                    log(f"  error {error}；已有 ok 资料保持不变")
+        except DoubanBlockedError as error:
+            stats["blocked"] = True
+            stats["exitCode"] = 2
+            log(f"  blocked {error}")
+            log("  已停止：豆瓣返回限流/拦截/验证页；不自动重试或切换查询，不覆盖已有 ok 资料，未把剩余作品写成 error。")
+    log(f"完成 ok={stats['ok']} failed={stats['failed']} blocked={'yes' if stats['blocked'] else 'no'}")
+    return stats
 
 
 def main() -> int:
@@ -679,109 +823,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    args = parse_args()
-    keyword = normalize_spaces(args.title or args.series)
-    media_id = normalize_spaces(args.media_id)
-    manual_subject_url = subject_url_from_value(args.douban_url or args.douban_id)
-    if (args.douban_url or args.douban_id) and not manual_subject_url:
-        print("error 手动豆瓣条目无效：请传豆瓣 subject 链接或纯数字 subject id。")
-        return 1
-    if manual_subject_url and not media_id:
-        print("error 手动校准需要同时传 --media-id，避免误覆盖其它电影。")
-        return 1
-    cookie_header, cookie_source, cookies = read_cookie_state(args.cookie_file)
-    index = read_json(INDEX_PATH, {})
-
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    ensure_db(conn)
-    existing = existing_rows(conn)
-
-    targets = movie_targets(index)
-    if media_id:
-        targets = [target for target in targets if target.key == media_id]
-        if not targets:
-            print(f"error 找不到 media-id={media_id} 对应的电影。请先刷新电影索引。")
-            return 1
-    if args.category:
-        targets = [target for target in targets if target.category == args.category]
-    if keyword:
-        targets = [
-            target
-            for target in targets
-            if any(keyword in value for value in [target.movie_title, target.search_title, *target.samples] if value)
-        ]
-    if not args.refresh and not manual_subject_url:
-        targets = [target for target in targets if not existing.get(target.key) or existing[target.key]["status"] != "ok" or not existing[target.key]["cover_bytes"]]
-    if args.limit and args.limit > 0:
-        targets = targets[: args.limit]
-
-    scope = [
-        f"分类={args.category}" if args.category else "全部分类",
-        f"关键词={keyword}" if keyword else "",
-        "刷新已有资料" if args.refresh else "只补缺失/无封面",
-        f"上限={args.limit}" if args.limit and args.limit > 0 else "全量",
-        f"media-id={media_id}" if media_id else "",
-        f"手动豆瓣={manual_subject_url}" if manual_subject_url else "",
-    ]
-    print(f"豆瓣电影资料目标：{len(targets)} 部电影 ({'，'.join(item for item in scope if item)}) write={'yes' if args.write else 'no'} cookie={'yes' if cookie_header else 'no'} browser={args.browser_channel} headless={'yes' if args.headless else 'no'}")
-    if targets and not args.category:
-        print(f"分类分布：{category_summary(targets)}")
-    if cookie_source:
-        print(f"Cookie 来源：{cookie_source}")
-
-    ok = 0
-    failed = 0
-    blocked = False
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel=args.browser_channel or None, headless=args.headless)
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1365, "height": 900},
-            extra_http_headers={
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-            },
-        )
-        if cookies:
-            context.add_cookies(cookies)
-        page = context.new_page()
-        page.goto("https://movie.douban.com/", wait_until="domcontentloaded", timeout=args.detail_timeout_ms)
-
-        for index_in_run, target in enumerate(targets):
-            try:
-                print(f"[{index_in_run + 1}/{len(targets)}] {target.category} / {target.movie_title} -> {target.search_title}")
-                meta = fetch_subject_page_meta(page, manual_subject_url, args) if manual_subject_url else fetch_movie_meta_with_rate_limit(context, page, target, args)
-                cover_blob, cover_mime = None, ""
-                try:
-                    cover_blob, cover_mime = fetch_cover(context, meta.get("coverUrl", ""))
-                except Exception as cover_error:
-                    print(f"  warn 封面未更新：{cover_error}")
-                if args.write:
-                    upsert_ok(conn, target, meta, cover_blob, cover_mime)
-                ok += 1
-                print(
-                    f"  ok {meta.get('title') or '-'} {meta.get('year') or ''} "
-                    f"rating={meta.get('rating') or '-'} detail={meta.get('detailSource') or '-'} cover={len(cover_blob or b'')}"
-                )
-            except DoubanBlockedError as error:
-                blocked = True
-                print(f"  blocked {error}")
-                print("  已停止：豆瓣返回拦截/验证页，未把剩余作品写成 error。默认会弹出浏览器，完成验证后再继续；后台静默运行才加 --headless。")
-                break
-            except Exception as error:
-                failed += 1
-                if args.write:
-                    upsert_error(conn, target, error)
-                print(f"  error {error}")
-            pause(args, index_in_run, len(targets))
-
-        context.close()
-        browser.close()
-    conn.close()
-    print(f"完成 ok={ok} failed={failed} blocked={'yes' if blocked else 'no'}")
-    return 2 if blocked else 0
+    return run(parse_args())["exitCode"]
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
-import { createShortVideoApi } from "./api.js?v=20260813-tv-series-work-01-5c293a6f8867";
-import { createShortVideoCollections } from "./collections/controller.js?v=20260812-collection-management-03";
-import { createShortVideoListController } from "./list/controller.js?v=20260813-tv-series-work-01-5c293a6f8867";
-import { createShortVideoListView } from "./list/view.js?v=20260813-tv-series-work-01-5c293a6f8867";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260813-tv-series-work-01-5c293a6f8867";
+import { createShortVideoApi } from "./api.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { createShortVideoListController } from "./list/controller.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { createShortVideoListView } from "./list/view.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260831-remote-auth-01-1046d3cbbfb6";
 import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
 import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260812-collection-review-02";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";
@@ -35,7 +34,6 @@ export function createShortVideoViews(deps) {
   Object.assign(context, createShortVideoSearch(context));
   Object.assign(context, createShortVideoListView(context));
   Object.assign(context, createShortVideoNativeFeed(context));
-  Object.assign(context, createShortVideoCollections(context));
 
   async function renderList(params = {}, renderGuard = null) {
     deactivateTransientUi();
@@ -71,18 +69,7 @@ export function createShortVideoViews(deps) {
     if (listState.query) await context.loadList(renderGuard);
   }
 
-  async function renderCollections(params = {}, renderGuard = null) {
-    deactivateTransientUi();
-    await context.renderCollections(params, renderGuard);
-  }
-
-  async function renderCollection(params = {}, renderGuard = null) {
-    deactivateTransientUi();
-    await context.renderCollection(params, renderGuard);
-  }
-
   function deactivateTransientUi() {
-    context.deactivateCollections?.();
     document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
   }
@@ -91,8 +78,6 @@ export function createShortVideoViews(deps) {
     deactivate: deactivateTransientUi,
     getSearchState: context.getSearchState,
     renderList,
-    renderCollection,
-    renderCollections,
     renderSearch,
     submitSearch: context.submitSearch
   });

@@ -2,13 +2,14 @@ import { openFanhaoSheet } from "./sheet.js?v=20260731-mobile-action-sheet-01";
 
 export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "categories", "codePrefixes", "studios"]);
 
-const CHROME_TABS = Object.freeze([
-  { label: "演员", view: "people" },
-  { label: "分类", view: "categories" },
-  { key: "favorites", label: "收藏", view: "works", params: { favorite: "1" } },
-  { label: "榜单", view: "rankings" },
-  { label: "厂牌", view: "studios" }
-]);
+const ROOT_TITLES = Object.freeze({
+  people: "演员",
+  works: "番号",
+  rankings: "榜单",
+  categories: "番号",
+  codePrefixes: "番号前缀",
+  studios: "厂牌"
+});
 
 export function renderFanhaoChrome({ container, params, view }, host, views) {
   if (view === "search") return false;
@@ -19,59 +20,92 @@ export function renderFanhaoChrome({ container, params, view }, host, views) {
     renderDetailChrome(container, view, host);
     return true;
   }
-  const row = document.createElement("nav");
-  row.className = "fanhao-chrome-row";
-  row.setAttribute("aria-label", "番号导航和排序");
-  const tabs = document.createElement("div");
-  tabs.className = "fanhao-chrome-tabs";
-  const activeView = fanhaoTabForView(view, params);
-  const activeSort = sortConfigForView(view, views);
 
-  for (const tab of CHROME_TABS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "fanhao-chrome-tag";
-    const tabKey = tab.key || tab.view;
-    const active = tabKey === activeView;
-    const opensSort = tab.view === view && Boolean(activeSort?.options.length);
-    button.classList.toggle("active", active);
-    button.classList.toggle("has-menu", opensSort);
-    if (opensSort) {
-      const selectedOption = activeSort.options.find((option) => option.value === activeSort.value);
-      const sortLabel = selectedOption?.label || "默认排序";
-      const menuLabel = activeSort.menuLabel || "排序";
-      const visibleValue = activeSort.showValue ? ` ${selectedOption?.shortLabel || sortLabel}` : "";
-      button.setAttribute("aria-label", `${tab.label}，当前${sortLabel}，点按选择${menuLabel}`);
-      button.title = `${tab.label}${menuLabel} · ${sortLabel}`;
-      button.innerHTML = `<span>${tab.label}</span><svg aria-hidden="true" viewBox="0 0 12 12"><path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-      button.querySelector("span").textContent = `${tab.label}${visibleValue}`;
-    } else {
-      button.textContent = tab.label;
-    }
-    button.addEventListener("click", () => {
-      if (active) {
-        if (activeSort?.options.length) openSortDialog(host, activeSort);
-        else host.ui.scrollToTop();
-        return;
-      }
-      host.navigation.showView(tab.view, tab.params || {}, { resetStack: true });
-      host.ui.scrollToTop();
-    });
-    tabs.append(button);
+  renderFeedAppBar(container, view, params, host, views);
+  return true;
+}
+
+function renderFeedAppBar(container, view, params, host, views) {
+  const row = document.createElement("header");
+  row.className = "fanhao-feed-appbar";
+  const primary = usesPrimaryLibraryNavigation(view)
+    ? createPrimaryLibraryNavigation(view, params, host)
+    : createFeedTitle(view, params);
+  const actions = document.createElement("div");
+  actions.className = "fanhao-feed-appbar-actions";
+  const sort = sortConfigForView(view, params, views);
+
+  if (sort?.options.length) {
+    const sortButton = document.createElement("button");
+    sortButton.type = "button";
+    sortButton.className = "fanhao-feed-appbar-action";
+    const selected = sort.options.find((option) => option.value === sort.value);
+    const selectedLabel = selected?.label || "默认排序";
+    sortButton.setAttribute("aria-label", `排序，当前${selectedLabel}`);
+    sortButton.title = `排序 · ${selectedLabel}`;
+    sortButton.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 6h10M9 12h6m-4 6h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    sortButton.addEventListener("click", () => openSortDialog(host, sort));
+    actions.append(sortButton);
   }
 
   const search = document.createElement("button");
   search.type = "button";
-  search.className = "fanhao-chrome-icon";
-  search.setAttribute("aria-label", "搜索番号、作品或演员");
+  search.className = "fanhao-feed-appbar-action";
+  search.setAttribute("aria-label", `搜索${feedTitle(view, params)}`);
   search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   search.addEventListener("click", () => {
-    host.navigation.showView("search", { query: "" }, { push: true });
+    host.navigation.showView("search", { query: "", category: searchCategoryForView(view, params) }, { push: true });
     host.ui.scrollToTop();
   });
-  row.append(tabs, search);
+  actions.append(search);
+  row.append(primary, actions);
   container.append(row);
-  return true;
+}
+
+function createFeedTitle(view, params) {
+  const title = document.createElement("strong");
+  title.className = "fanhao-feed-appbar-title";
+  title.textContent = feedTitle(view, params);
+  return title;
+}
+
+function usesPrimaryLibraryNavigation(view) {
+  return view === "people" || view === "rankings" || view === "categories";
+}
+
+function createPrimaryLibraryNavigation(view, params, host) {
+  const western = searchCategoryForView(view, params) === "western";
+  const navigation = document.createElement("nav");
+  navigation.className = "fanhao-primary-nav";
+  navigation.setAttribute("aria-label", western ? "欧美浏览方式" : "番号浏览方式");
+  const items = western
+    ? [
+        { view: "people", label: "人物", params: { scope: "western" } },
+        { view: "categories", label: "作品", params: { category: "western" } }
+      ]
+    : [
+        { view: "people", label: "人物", params: { scope: "main" } },
+        { view: "categories", label: "番号", params: { category: "censored" } },
+        { view: "rankings", label: "排行", params: {} }
+      ];
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = item.label;
+    const active = view === item.view;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    button.addEventListener("click", () => {
+      if (active) {
+        host.ui.scrollToTop();
+        return;
+      }
+      host.navigation.showView(item.view, item.params, { resetStack: true });
+      host.ui.scrollToTop();
+    });
+    navigation.append(button);
+  }
+  return navigation;
 }
 
 function renderDetailChrome(container, view, host) {
@@ -92,17 +126,18 @@ function renderDetailChrome(container, view, host) {
   container.append(row);
 }
 
-function fanhaoTabForView(view, params = {}) {
-  if (view === "people" || view === "personDetail") return "people";
-  if (view === "rankings") return "rankings";
-  if (view === "works" && String(params.favorite || "") === "1") return "favorites";
-  if (view === "works" || view === "categories") return "categories";
-  if (view === "codePrefixes" || view === "codePrefixDetail") return "studios";
-  if (view === "studios" || view === "studioDetail") return "studios";
-  return "categories";
+function feedTitle(view, params = {}) {
+  if (view === "categories") return searchCategoryForView(view, params) === "western" ? "欧美" : "番号";
+  if (view === "works" && String(params.favorite || "") === "1") return "收藏";
+  return ROOT_TITLES[view] || "番号";
 }
 
-function sortConfigForView(view, views) {
+function searchCategoryForView(view, params = {}) {
+  if (view === "people") return String(params.scope || "main").toLowerCase() === "western" ? "western" : "censored";
+  return view === "categories" && String(params.category || "").toLowerCase() === "western" ? "western" : "censored";
+}
+
+function sortConfigForView(view, params, views) {
   if (view === "people") {
     return {
       title: "演员排序",
@@ -113,16 +148,12 @@ function sortConfigForView(view, views) {
   }
   if (view === "rankings") {
     const rankingMenu = views.workViews.getRankingMenu();
-    return {
-      title: "选择榜单年代",
-      menuLabel: "年代",
-      showValue: true,
-      ...rankingMenu
-    };
+    return { title: "选择榜单年代", ...rankingMenu };
   }
   if (view === "works" || view === "categories") {
+    const category = searchCategoryForView(view, params);
     return {
-      title: view === "categories" ? "分类作品排序" : "作品排序",
+      title: view === "categories" && category === "western" ? "欧美作品排序" : "番号作品排序",
       options: views.workViews.getSortOptions(view),
       value: views.workViews.getSortMode(view),
       select: (value) => views.workViews.setSortMode(view, value)

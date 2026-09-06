@@ -9,10 +9,12 @@ import { createMusicPlaylistView } from "./music-playlist-view.js?v=20260730-mus
 import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=20260730-music-palette-ui-42";
 import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=20260730-music-palette-ui-42";
 import { createMusicListRequestBuilder } from "./music-list-request.js?v=20260730-music-palette-ui-42";
+import { createMusicListPagination } from "./music-list-pagination.js?v=20260830-music-pagination-01";
 import { createMusicLibraryView } from "./music-library-view.js?v=20260730-music-palette-ui-42";
 import { createMusicLibrarySort } from "./music-library-sort.js?v=20260730-music-palette-ui-42";
 import { createMusicCollectionView } from "./music-collection-view.js?v=20260730-music-palette-ui-42";
 import { createMusicProgressWriter } from "./music-progress-writer.js?v=20260812-music-write-retry-01";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=20260901-android-auth-audio-01";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -181,6 +183,7 @@ export function createMusicViews(deps) {
 
   let audio = null;
   const audioEventTargets = new WeakSet();
+  const audioSourceStore = createMusicAudioSourceStore({ fetchImpl: (...args) => window.fetch(...args) });
   let playReportSession = 0;
   const progressWriter = createMusicProgressWriter({
     send(record, played) {
@@ -213,6 +216,15 @@ export function createMusicViews(deps) {
   let gaplessPreloadTrackId = "";
   let gaplessHandoffPending = false;
   let moduleActive = false;
+  const { cancelPending: cancelMusicPagination, loadMoreTracks } = createMusicListPagination({
+    state,
+    getActiveUrl,
+    isActive: () => moduleActive,
+    musicListQuery,
+    fetchJson,
+    collapseDuplicateTracks,
+    render: renderMusicUiPreservingSearch
+  });
   const {
     clearSearchHistory,
     closeSearch,
@@ -397,6 +409,7 @@ export function createMusicViews(deps) {
   installLifecycle();
 
   async function renderMusicList(params = {}, renderGuard = null) {
+    cancelMusicPagination();
     moduleActive = true;
     ensureAudio();
     applyRouteParams(params);
@@ -459,6 +472,7 @@ export function createMusicViews(deps) {
   }
 
   async function loadMusic(renderGuard = null) {
+    cancelMusicPagination();
     const requestUrl = getActiveUrl();
     const unifiedSearch = state.mode === "library" && Boolean(state.query);
     const lyricOnlySearch = unifiedSearch && state.searchScope === "lyrics";
@@ -470,7 +484,6 @@ export function createMusicViews(deps) {
       ? { ...emptyLyricSearch(), loading: true }
       : emptyLyricSearch();
     if (lyricOnlySearch) {
-      state.loading = false;
       state.status = "";
       state.data = { ...(state.data || {}), query: state.query, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
       renderShell();
@@ -511,37 +524,6 @@ export function createMusicViews(deps) {
       state.loading = false;
       state.status = error?.message || "音乐库读取失败";
       renderShell();
-    }
-  }
-
-  async function loadMoreTracks() {
-    if (state.loadingMore || !state.hasMore || !["library", "artists", "albums", "smart"].includes(state.mode)) return;
-    state.loadingMore = true;
-    renderMusicUiPreservingSearch();
-    try {
-      const params = new URLSearchParams(musicListQuery());
-      params.set("offset", String(state.mode === "artists"
-        ? state.data?.artists?.length || 0
-        : state.mode === "albums"
-          ? state.data?.albums?.length || 0
-          : state.data?.rawLoaded ?? state.data?.tracks?.length ?? 0));
-      const endpoint = state.mode === "artists" ? "/api/music/artists" : state.mode === "albums" ? "/api/music/albums" : "/api/music/tracks";
-      const data = await fetchJson(getActiveUrl(), `${endpoint}?${params}`, { timeoutMs: 18000 });
-      if (state.mode === "artists") {
-        state.data = { ...data, artists: [...(state.data?.artists || []), ...(data.artists || [])] };
-      } else if (state.mode === "albums") {
-        state.data = { ...data, albums: [...(state.data?.albums || []), ...(data.albums || [])] };
-      } else {
-        const rawTracks = [...(state.data?.rawTracks || state.data?.tracks || []), ...(data.tracks || [])];
-        const tracks = state.mode === "library" && state.query ? collapseDuplicateTracks(rawTracks) : rawTracks;
-        state.data = { ...data, tracks, rawTracks, rawLoaded: rawTracks.length };
-        if (!state.query) state.queue = tracks;
-      }
-      state.summary = data.summary || state.summary;
-      state.hasMore = Boolean(data.hasMore);
-    } finally {
-      state.loadingMore = false;
-      renderMusicUiPreservingSearch();
     }
   }
 
@@ -691,6 +673,7 @@ export function createMusicViews(deps) {
   }
 
   async function refreshMountedSearchResults(query) {
+    cancelMusicPagination();
     const value = String(query || "").trim();
     if (normalizeSearchComparison(state.query) !== normalizeSearchComparison(value)) {
       state.searchCollapsedGroups = new Set();
@@ -869,7 +852,9 @@ export function createMusicViews(deps) {
         state.fullscreen = true;
         state.fullPanel = "lyrics";
       }
-      loadAudioTrack(state.current, options.autoplay !== false);
+      const loaded = await loadAudioTrack(state.current, options.autoplay !== false);
+      if (!loaded || (options.renderGuard && !options.renderGuard()) || state.current?.id !== id) return;
+      state.loading = false;
       if (hasRequestedSeek && audio.readyState >= 1) audio.currentTime = requestedSeekMs / 1000;
       scheduleGaplessPreload();
       renderShell();
@@ -893,16 +878,19 @@ export function createMusicViews(deps) {
     state.queue = [track, ...queue];
   }
 
-  function loadAudioTrack(track, autoplay) {
-    if (!track?.streamUrl) return;
+  async function loadAudioTrack(track, autoplay) {
+    if (!track?.streamUrl) return false;
     ensureAudio();
     const target = absoluteUrl(getActiveUrl(), track.streamUrl);
-    if (audio.src !== target) {
-      audio.src = target;
-      audio.load();
-    }
-    audio.playbackRate = state.playbackSpeed;
+    const targetAudio = audio;
+    const loaded = await audioSourceStore.load("current", targetAudio, target, {
+      clearBefore: true,
+      guard: () => targetAudio === audio && state.current?.id === track.id
+    });
+    if (!loaded) return false;
+    targetAudio.playbackRate = state.playbackSpeed;
     if (autoplay) playAudio();
+    return true;
   }
 
   function ensureAudio() {
@@ -1661,6 +1649,7 @@ export function createMusicViews(deps) {
   }
 
   function focusSearchDiscoveryScope(scope) {
+    cancelMusicPagination();
     const nextScope = normalizeSearchScope(scope, "library");
     state.mode = nextScope === "artists" ? "artists" : nextScope === "albums" ? "albums" : "library";
     state.searchScope = nextScope;
@@ -2314,6 +2303,7 @@ export function createMusicViews(deps) {
   }
 
   function switchSearchScope(scope) {
+    cancelMusicPagination();
     const nextScope = normalizeSearchScope(scope, "library");
     if (["all", "songs", "lyrics", "playlists"].includes(nextScope) && state.mode === "library") {
       const previousScope = state.searchScope;
@@ -4014,8 +4004,12 @@ export function createMusicViews(deps) {
     gaplessPreloadAudio.preload = "auto";
     gaplessPreloadAudio.volume = 0;
     gaplessPreloadAudio.playbackRate = state.playbackSpeed;
-    gaplessPreloadAudio.src = absoluteUrl(getActiveUrl(), candidate.streamUrl);
-    gaplessPreloadAudio.load();
+    const target = gaplessPreloadAudio;
+    audioSourceStore.load("gapless", target, absoluteUrl(getActiveUrl(), candidate.streamUrl), {
+      guard: () => target === gaplessPreloadAudio && candidate.id === gaplessPreloadTrackId
+    }).catch(() => {
+      if (target === gaplessPreloadAudio) clearGaplessPreload();
+    });
   }
 
   function nextQueueCandidate() {
@@ -4135,14 +4129,11 @@ export function createMusicViews(deps) {
 
   function retireAudioElement(target) {
     if (!target || target === audio) return;
-    try {
-      target.pause();
-      target.removeAttribute("src");
-      target.load();
-    } catch {}
+    audioSourceStore.release(target);
   }
 
   function clearGaplessPreload() {
+    audioSourceStore.cancel("gapless");
     const target = gaplessPreloadAudio;
     gaplessPreloadAudio = null;
     gaplessPreloadTrackId = "";
@@ -4960,6 +4951,7 @@ export function createMusicViews(deps) {
   }
 
   function updateListParams(patch = {}, options = {}) {
+    cancelMusicPagination();
     mountedSearchController?.abort();
     const searchFocus = captureMusicSearchFocus();
     if (searchFocus) pendingSearchFocus = searchFocus;
@@ -5157,6 +5149,7 @@ export function createMusicViews(deps) {
   }
 
   function deactivate() {
+    cancelMusicPagination();
     moduleActive = false;
     disposeMusicSearchPendingWork();
     mountedSearchController?.abort();

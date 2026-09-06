@@ -8,9 +8,12 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 MODULE_DIR = Path(__file__).resolve().parents[1]
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
 
 
 class CollectionQueueTest(unittest.TestCase):
@@ -160,6 +163,79 @@ class CollectionQueueTest(unittest.TestCase):
         self.assertFalse(result["status"]["active"])
         self.assertEqual([row["status"] for row in result["jobs"]], ["stopped", "stopped"])
         self.assertEqual(result["jobs"][1]["message"], "采集队列已取消")
+
+    def test_reset_preserves_waiting_collection_requests(self) -> None:
+        result = self.run_isolated(
+            """
+            import json
+            import threading
+            import time
+
+            from manager_core import extraction
+            from manager_core.database import db, init_db, update_job
+
+            init_db()
+            started = threading.Event()
+            executed = []
+
+            def fake_run(job_id, url, *args, **kwargs):
+                executed.append([job_id, url])
+                if len(executed) == 1:
+                    started.set()
+                    deadline = time.time() + 5
+                    while not extraction.extract_cancel_event.is_set() and time.time() < deadline:
+                        time.sleep(0.01)
+                    update_job(job_id, status="stopped", finished_at="done", message="fake reset")
+                    return
+                update_job(job_id, status="complete", finished_at="done", message="fake complete")
+
+            extraction.run_extract_job = fake_run
+            first = extraction.start_extract({"url": "https://www.douyin.com/user/first"})
+            assert started.wait(2)
+            second = extraction.start_extract({"url": "https://www.douyin.com/user/second"})
+            reset = extraction.reset_extract()
+            deadline = time.time() + 5
+            while extraction.extract_status()["active"] and time.time() < deadline:
+                time.sleep(0.02)
+            with db() as connection:
+                jobs = [dict(row) for row in connection.execute("SELECT id, status, message FROM jobs ORDER BY id")]
+            print(json.dumps({
+                "first": first,
+                "second": second,
+                "reset": reset,
+                "status": extraction.extract_status(),
+                "executed": executed,
+                "jobs": jobs,
+            }, ensure_ascii=False))
+            """
+        )
+        self.assertTrue(result["second"]["queued"])
+        self.assertEqual(result["reset"]["job_id"], result["first"]["job_id"])
+        self.assertEqual(result["reset"]["preserved_queued"], 1)
+        self.assertFalse(result["status"]["active"])
+        self.assertEqual([row[1] for row in result["executed"]], [
+            "https://www.douyin.com/user/first",
+            "https://www.douyin.com/user/second",
+        ])
+        self.assertEqual([row["status"] for row in result["jobs"]], ["stopped", "complete"])
+
+    def test_extract_monitor_terminates_a_silent_process(self) -> None:
+        from manager_core import extraction
+
+        process = MagicMock()
+        process.poll.return_value = None
+        with (
+            patch.object(extraction.time, "monotonic", side_effect=[0.0, 181.0]),
+            patch.object(extraction, "_terminate_extract_process") as terminate,
+        ):
+            result = extraction._monitor_extract_process(
+                process,
+                lambda: False,
+                no_progress_timeout_seconds=180,
+            )
+
+        self.assertEqual(result, "stalled")
+        terminate.assert_called_once_with(process)
 
     def test_screen_reader_marker_is_repaired_from_work_author(self) -> None:
         result = self.run_isolated(

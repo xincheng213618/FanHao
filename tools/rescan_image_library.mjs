@@ -18,6 +18,10 @@ const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
 const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "movie", "tv", "anime"]);
 
+function emitProgress(progress = {}) {
+  console.log(`IMAGE_LIBRARY_PROGRESS ${JSON.stringify(progress)}`);
+}
+
 function normalizeExt(fileName) {
   return path.extname(fileName).toLowerCase();
 }
@@ -325,9 +329,30 @@ function scanPhotoSetLibrary(photoRoots) {
   const roots = rootStatuses(photoRoots);
   const albums = [];
   const seen = new Set();
-  for (const root of roots) {
+  for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+    const root = roots[rootIndex];
+    const rootPosition = rootIndex + 1;
+    const startPercent = 5 + Math.round((rootIndex / Math.max(1, roots.length)) * 80);
+    emitProgress({
+      phase: "photo-root",
+      percent: startPercent,
+      root: root.root,
+      rootIndex: rootPosition,
+      rootTotal: roots.length,
+      itemCount: albums.length,
+      message: `正在扫描 ${root.label}`
+    });
     if (!root.exists) {
       console.log(`[photo] missing ${root.root}`);
+      emitProgress({
+        phase: "photo-root-complete",
+        percent: 5 + Math.round((rootPosition / Math.max(1, roots.length)) * 80),
+        root: root.root,
+        rootIndex: rootPosition,
+        rootTotal: roots.length,
+        itemCount: albums.length,
+        message: `${root.label} 不可用，已跳过`
+      });
       continue;
     }
     console.log(`[photo] scanning ${root.root}`);
@@ -339,6 +364,15 @@ function scanPhotoSetLibrary(photoRoots) {
       seen.add(key);
       albums.push(publicPhotoSetArchive(filePath, root.root));
     }
+    emitProgress({
+      phase: "photo-root-complete",
+      percent: 5 + Math.round((rootPosition / Math.max(1, roots.length)) * 80),
+      root: root.root,
+      rootIndex: rootPosition,
+      rootTotal: roots.length,
+      itemCount: albums.length,
+      message: `已扫描 ${rootPosition}/${roots.length} 个目录`
+    });
   }
   albums.sort((a, b) => {
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
@@ -450,8 +484,22 @@ const startedAt = Date.now();
 const options = parseArgs(process.argv.slice(2));
 console.log(`[image-library] scope=${options.scope}`);
 console.log(`[image-library] cache=${IMAGE_LIBRARY_INDEX_PATH}`);
+emitProgress({ phase: "start", percent: 1, message: "正在准备图库扫描" });
 const index = buildIndex(options);
+emitProgress({
+  phase: "write",
+  percent: 94,
+  itemCount: (index.photoSets || []).length,
+  message: "正在写入图库索引"
+});
 writeIndex(index);
+emitProgress({
+  phase: "complete",
+  percent: 100,
+  photoSets: (index.photoSets || []).length,
+  itemCount: (index.photoSets || []).length,
+  message: "图库索引刷新完成"
+});
 console.log(
   [
     `[image-library] done in ${Math.round((Date.now() - startedAt) / 1000)}s`,

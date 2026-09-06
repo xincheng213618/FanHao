@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>视觉记录窄屏预览</title>
+<style>body{margin:12px;font:14px sans-serif;background:#ddd}button{padding:10px;margin:4px}iframe{display:block;border:1px solid #777;background:white;height:1200px;width:320px}output{display:block;max-width:700px;overflow-wrap:anywhere}</style>
+</head><body>
+<p>真实工具模块 · 合成数据 · 独立窄屏视口</p>
+<button data-width="320">320 像素</button><button data-width="360">360 像素</button><button data-width="412">412 像素</button>
+<button data-theme="light">浅色主题</button><button data-theme="dark">深色主题</button>
+<iframe src="/" title="工具页手机预览"></iframe>
+<output id="metrics" aria-label="布局测量"></output>
+<script>
+for(const button of document.querySelectorAll('[data-width]'))button.onclick=()=>document.querySelector('iframe').style.width=button.dataset.width+'px';
+for(const button of document.querySelectorAll('[data-theme]'))button.onclick=()=>document.querySelector('iframe').src='/?theme='+button.dataset.theme;
+window.addEventListener('message', event=>{if(event.origin===location.origin&&event.data?.type==='vision-layout')document.getElementById('metrics').textContent=JSON.stringify(event.data);});
+</script>
+</body></html>

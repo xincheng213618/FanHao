@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createAccountServices } from "./accounts/service.js";
 
 const WEB_AUTH_COOKIE = "fanhao_web_auth";
 const APP_AUTH_COOKIE = "fanhao_app_auth";
@@ -11,6 +12,7 @@ const LOGIN_BUCKET_LIMIT = 2048;
 
 export function createAuthServices({
   authSecretPath,
+  accountsDbPath,
   remoteWebPassword,
   ensureDataDir,
   readBodyText,
@@ -21,6 +23,7 @@ export function createAuthServices({
 }) {
   const loginFailures = new Map();
   let authSecretCache = "";
+  const accounts = accountsDbPath ? createAccountServices({ dbPath: accountsDbPath, now, readBodyText, sendJson, sendHtml, requestAccess, requestCorsOrigin }) : null;
 
   function getAuthSecret() {
     if (authSecretCache) return authSecretCache;
@@ -340,7 +343,10 @@ export function createAuthServices({
       if (originUrl.host.toLowerCase() === requestHost) return rawOrigin;
 
       const access = requestAccess(req);
-      if (!isTrustedNetworkAccess(access) || !isTrustedRequestHost(access)) return "";
+      const trustedNetwork = isTrustedNetworkAccess(access) && isTrustedRequestHost(access);
+      // CORS permits the packaged client to send a login; it never grants access.
+      // Public hosts still require a password-bound session on every request.
+      if (!trustedNetwork && ((!remoteWebPassword && !accounts) || isTrustedRequestHost(access))) return "";
       const localOriginPath = originUrl.protocol === "capacitor:"
         ? originUrl.pathname === "" || originUrl.pathname === "/"
         : originUrl.pathname === "/";
@@ -359,15 +365,15 @@ export function createAuthServices({
   }
 
   function isSameTrustedNetworkOrigin(req, access = requestAccess(req)) {
-    if (!isTrustedNetworkAccess(access)) return false;
+    // A public reverse proxy may connect from loopback; app origins must not grant LAN privileges through it.
+    if (!isTrustedNetworkAccess(access) || !isTrustedRequestHost(access)) return false;
     const origin = String(req.headers.origin || "").trim();
-    const trustedRequestHost = isTrustedRequestHost(access);
-    if (!origin) return trustedRequestHost;
+    if (!origin) return true;
 
     try {
       const originUrl = new URL(origin);
       const requestHost = String(req.headers.host || "").toLowerCase();
-      if (originUrl.host.toLowerCase() === requestHost) return trustedRequestHost;
+      if (originUrl.host.toLowerCase() === requestHost) return true;
       return isAppClientOrigin(req) && String(req.headers["x-fanhao-client"] || "").toLowerCase() === "android";
     } catch {
       return false;
@@ -399,23 +405,30 @@ export function createAuthServices({
 
   function requestAuthState(req, url) {
     const access = requestAccess(req);
+    const accountLoginRequired = Boolean(accounts?.settings().accountLoginRequired);
+    const state = { access, accountLoginRequired };
     const appClient = isAndroidAppClient(req, url);
     const trustedNetwork = isTrustedNetworkAccess(access) && isTrustedRequestHost(access);
     const cookies = parseCookies(req);
-    const webTokenValid = validateWebAuthToken(cookies[WEB_AUTH_COOKIE]);
+    const bearer = /^Bearer ([A-Za-z0-9._-]+)$/.exec(String(req.headers.authorization || ""))?.[1];
+    const webTokenValid = validateWebAuthToken(bearer || cookies[WEB_AUTH_COOKIE]);
+    const user = accounts?.user(req);
+    if (user) return { ...state, allowed: true, required: true, reason: "account", user };
+    if (accounts?.token(req)?.startsWith("usr.")) return { ...state, allowed: false, required: true, reason: "expired-account", user: null };
+    if (accountLoginRequired) return { ...state, allowed: false, required: true, reason: "account-required", user: null };
 
     if (trustedNetwork && appClient) {
       return {
-        access,
+        ...state,
         allowed: true,
         required: false,
         reason: "app"
       };
     }
 
-    if (trustedNetwork) return { access, allowed: true, required: false, reason: "trusted-network" };
-    if (webTokenValid) return { access, allowed: true, required: true, reason: "password" };
-    return { access, allowed: false, required: true, reason: "missing-password" };
+    if (trustedNetwork) return { ...state, allowed: true, required: false, reason: "trusted-network" };
+    if (webTokenValid) return { ...state, allowed: true, required: true, reason: "password" };
+    return { ...state, allowed: false, required: true, reason: "missing-password" };
   }
 
   function isHtmlRequest(req, url) {
@@ -428,23 +441,29 @@ export function createAuthServices({
   function sendLoginRequired(req, res, url, authState) {
     const next = safeNextPath(`${url.pathname}${url.search || ""}`);
     if (isHtmlRequest(req, url)) {
+      if (accounts) { redirect(res, `/login?next=${encodeURIComponent(next)}`); return; }
       sendHtml(res, 200, loginPageHtml({ next }));
       return;
     }
 
     sendJson(res, 401, {
-      error: "远程网页访问需要登录",
+      error: authState.accountLoginRequired ? "访问资料库需要登录用户账号" : "远程网页访问需要登录",
+      reason: authState.reason,
+      accountLoginRequired: authState.accountLoginRequired,
       loginUrl: `/login?next=${encodeURIComponent(next)}`,
       access: authState.access
     });
   }
 
   async function routeAuth(req, res, url, authState) {
+    if (accounts && await accounts.route(req, res, url)) return true;
     if (url.pathname === "/api/auth/status" && req.method === "GET") {
       sendJson(res, 200, {
         required: authState.required,
         authenticated: authState.allowed,
         reason: authState.reason,
+        accountLoginRequired: authState.accountLoginRequired,
+        user: authState.user || null,
         access: authState.access
       });
       return true;
@@ -461,6 +480,16 @@ export function createAuthServices({
 
     if (url.pathname === "/auth/login" && req.method === "POST") {
       const fallbackNext = safeNextPath(url.searchParams.get("next") || "/");
+      const requireAccountLogin = (next) => {
+        if (!accounts?.settings().accountLoginRequired) return false;
+        const loginUrl = `/login?next=${encodeURIComponent(next)}`;
+        res.setHeader("Cache-Control", "no-store");
+        if (String(req.headers.accept || "").includes("application/json")) {
+          sendJson(res, 403, { error: "当前需要用户账号登录，请前往用户中心", reason: "account-required", accountLoginRequired: true, loginUrl });
+        } else redirect(res, loginUrl, 303);
+        return true;
+      };
+      if (requireAccountLogin(fallbackNext)) return true;
       const activeBlockSeconds = activeLoginBlock(req);
       if (activeBlockSeconds) {
         sendLoginFailure(req, res, fallbackNext, activeBlockSeconds);
@@ -469,6 +498,8 @@ export function createAuthServices({
 
       const body = await readAuthBody(req);
       const next = safeNextPath(body.next || fallbackNext);
+      // A settings update may arrive while this request's body is being read.
+      if (requireAccountLogin(next)) return true;
       if (!remoteWebPassword || !safeEqualText(body.password, remoteWebPassword)) {
         const retryAfterSeconds = remoteWebPassword ? recordLoginFailure(req) : null;
         sendLoginFailure(req, res, next, retryAfterSeconds);
@@ -477,12 +508,17 @@ export function createAuthServices({
 
       clearLoginFailures(req);
 
+      const token = createWebAuthToken();
       const headers = {
-        "Set-Cookie": serializeCookie(WEB_AUTH_COOKIE, createWebAuthToken(), { maxAge: WEB_AUTH_MAX_AGE_SECONDS })
+        "Set-Cookie": serializeCookie(WEB_AUTH_COOKIE, token, { maxAge: WEB_AUTH_MAX_AGE_SECONDS })
       };
+      res.setHeader("Cache-Control", "no-store");
       if (String(req.headers.accept || "").includes("application/json")) {
         res.setHeader("Set-Cookie", headers["Set-Cookie"]);
-        sendJson(res, 200, { ok: true, next });
+        sendJson(res, 200, {
+          ok: true, next,
+          ...(body.client === "android" ? { token, expiresIn: WEB_AUTH_MAX_AGE_SECONDS } : {})
+        });
       } else {
         redirect(res, next, 303, headers);
       }
@@ -490,6 +526,7 @@ export function createAuthServices({
     }
 
     if (url.pathname === "/auth/logout" && req.method === "POST") {
+      accounts?.revoke(accounts.token(req));
       redirect(res, "/login", 303, {
         "Set-Cookie": [clearCookie(WEB_AUTH_COOKIE), clearCookie(APP_AUTH_COOKIE)]
       });
@@ -502,6 +539,7 @@ export function createAuthServices({
   getAuthSecret();
 
   return {
+    closeAccounts: () => accounts?.close(),
     isSameLocalOrigin,
     isSameTrustedNetworkOrigin,
     isTrustedNetworkAccess,

@@ -4,6 +4,7 @@ import argparse
 import base64
 import os
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -676,7 +677,14 @@ def delete_stale_local_works(conn: sqlite3.Connection, ids: list[int], write: bo
         conn.execute("DELETE FROM local_works WHERE id = ?", (local_work_id,))
 
 
-def scan_all(conn: sqlite3.Connection, roots: list[Path], write: bool, delete_stale: bool, limit_people: int = 0) -> dict:
+def scan_all(
+    conn: sqlite3.Connection,
+    roots: list[Path],
+    write: bool,
+    delete_stale: bool,
+    limit_people: int = 0,
+    processed_person_dirs: list[Path] | None = None,
+) -> dict:
     available_roots = [root for root in roots if root.exists()]
     nested_roots = {path_key(root) for root in available_roots}
     people = load_people(conn)
@@ -706,6 +714,8 @@ def scan_all(conn: sqlite3.Connection, roots: list[Path], write: bool, delete_st
                 processed_people += 1
                 if limit_people and processed_people > limit_people:
                     break
+                if processed_person_dirs is not None:
+                    processed_person_dirs.append(person_dir)
                 stats["person_dirs_seen"] += 1
                 person_source = clean_path(person_dir)
                 person_id = upsert_person(conn, people, person_dir.name, person_source, write, stats)
@@ -946,6 +956,28 @@ def scan_candidates(
     return stats
 
 
+def sync_info_metadata(db_path: Path, person_dirs: list[Path], write: bool) -> None:
+    script_path = PROJECT_ROOT / "tools" / "sync_core_info_metadata.mjs"
+    command = ["node", str(script_path), "--db", str(Path(db_path).resolve())]
+    for person_dir in person_dirs:
+        command.extend(("--person-dir", clean_path(person_dir)))
+    if write:
+        command.append("--write")
+
+    mode = "write" if write else "dry-run"
+    scope = f"person-dirs={len(person_dirs)}" if person_dirs else "full"
+    print(f"[metadata] mode={mode} {scope}", flush=True)
+    try:
+        result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
+    except OSError as error:
+        print(f"[metadata] failed: {error}", file=sys.stderr, flush=True)
+        raise SystemExit(127) from error
+    if result.returncode != 0:
+        print(f"[metadata] failed exit={result.returncode}", file=sys.stderr, flush=True)
+        raise SystemExit(result.returncode)
+    print("[metadata] done", flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Full scan local library roots into fanhao-core-v2.sqlite.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -979,6 +1011,7 @@ def main() -> int:
         raise SystemExit("no roots selected")
     if args.person_dir and args.changed_only:
         raise SystemExit("--person-dir and --changed-only cannot be used together")
+    metadata_person_dirs: list[Path] = []
     if args.person_dir:
         available_roots = [root for root in roots if root.exists()]
         person_dirs: list[Path] = []
@@ -1003,6 +1036,7 @@ def main() -> int:
         for path in person_dirs:
             print(f"  {clean_path(path)}", flush=True)
         stats = scan_candidates(conn, roots, person_dirs, args.write, args.delete_stale, args.limit_people)
+        metadata_person_dirs = person_dirs[: args.limit_people or None]
     elif args.changed_only:
         candidates = candidate_person_dirs(conn, roots, args.recent_hours, modified_since)
         print(f"[inventory] candidate person dirs={len(candidates)}", flush=True)
@@ -1011,9 +1045,21 @@ def main() -> int:
         if len(candidates) > 30:
             print(f"  ... +{len(candidates) - 30} more", flush=True)
         stats = scan_candidates(conn, roots, candidates, args.write, args.delete_stale, args.limit_people)
+        metadata_person_dirs = candidates[: args.limit_people or None]
     else:
-        stats = scan_all(conn, roots, args.write, args.delete_stale, args.limit_people)
+        limited_person_dirs: list[Path] | None = [] if args.limit_people else None
+        stats = scan_all(
+            conn,
+            roots,
+            args.write,
+            args.delete_stale,
+            args.limit_people,
+            limited_person_dirs,
+        )
+        if limited_person_dirs is not None:
+            metadata_person_dirs = limited_person_dirs
     conn.close()
+    sync_info_metadata(args.db, metadata_person_dirs, args.write)
     mode = "write" if args.write else "dry-run"
     print(f"[done] mode={mode} stats={stats}", flush=True)
     return 0

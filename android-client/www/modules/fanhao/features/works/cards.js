@@ -1,5 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
 import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { getWorkSource } from "../../../../js/work-source.js?v=20260710-western-merge-01";
 import {
   compactWorkCardTitle,
   compactWorkCode,
@@ -62,9 +63,13 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
       }
       const personName = hidePerson ? "" : workGridPerson(work);
       if (personName) {
-        const personLine = document.createElement("span");
+        const personLine = document.createElement(work.personId ? "button" : "span");
         personLine.className = "work-card-grid-person";
         personLine.textContent = personName;
+        if (work.personId) {
+          personLine.type = "button";
+          Object.assign(personLine.dataset, { personId: String(work.personId), workIntentIgnore: "1" });
+        }
         identity.append(personLine);
       }
       if (identity.children.length) body.append(identity);
@@ -119,9 +124,10 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     root.addEventListener("click", (event) => {
       const card = event.target?.closest?.(".work-card");
       if (!card || !root.contains(card)) return;
-      const person = event.target?.closest?.(".work-person[data-person-id]");
+      const person = event.target?.closest?.(".work-person[data-person-id], .work-card-grid-person[data-person-id]");
       if (person && card.contains(person)) {
-        showView("personDetail", { personId: person.dataset.personId }, { push: true });
+        const work = cardWorks.get(card);
+        showView("personDetail", { personId: person.dataset.personId, scope: personScopeForWork(work) }, { push: true });
         return;
       }
       const work = cardWorks.get(card);
@@ -155,6 +161,10 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     progressPercent,
     resetCoverLoading: coverLoader.reset
   };
+}
+
+function personScopeForWork(work) {
+  return String(getWorkSource(work)?.variant || "").includes("western") ? "western" : "main";
 }
 
 export function createChip(text, variant = "") {

@@ -1,5 +1,5 @@
 import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
-import { createNovelViews } from "./novel-views.js?v=20260731-novel-actions-ui-53";
+import { createNovelViews } from "./novel-views.js?v=20260830-novel-chapters-75";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
@@ -20,7 +20,7 @@ export function createAndroidModule({ host }) {
       { view: "novels", render: (_params, guard) => novelViews.renderNovelList(guard) },
       { view: "novelSearch", render: (params, guard) => novelViews.renderNovelSearch(params, guard) },
       { view: "novelDetail", render: (params, guard) => novelViews.renderNovelDetail(params.id, guard) },
-      { view: "novelReader", render: (params, guard) => novelViews.renderNovelReader(params.id, params.chapterIndex, guard) }
+      { view: "novelReader", render: (params, guard) => novelViews.renderNovelReader(params.id, params.chapterIndex, guard, params) }
     ],
     renderChrome: (context) => renderNovelChrome(context, host, novelViews),
     handleBack(view, params) {

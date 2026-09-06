@@ -1,66 +1,89 @@
-.fanhao-chrome-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
+.fanhao-feed-appbar {
+  display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 12px;
   width: 100%;
   min-width: 0;
 }
 
-.fanhao-chrome-tabs {
-  display: flex;
+.fanhao-feed-appbar-title {
   min-width: 0;
-  gap: 4px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 950;
+  letter-spacing: -.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fanhao-primary-nav {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
   overflow-x: auto;
-  overscroll-behavior-inline: contain;
   scrollbar-width: none;
 }
 
-.fanhao-chrome-tabs::-webkit-scrollbar {
+.fanhao-primary-nav::-webkit-scrollbar {
   display: none;
 }
 
-.fanhao-chrome-icon,
-.fanhao-chrome-tag {
+.fanhao-primary-nav > button {
+  position: relative;
   flex: 0 0 auto;
-  min-height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--ink);
+  min-width: 48px;
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 9px 2px;
   font: inherit;
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 900;
 }
 
-.fanhao-chrome-tag {
-  padding: 0 11px;
+.fanhao-primary-nav > button.active {
+  color: var(--ink);
 }
 
-.fanhao-chrome-tag.active {
-  border-color: rgba(47, 128, 237, .4);
-  background: var(--button-soft);
-  color: var(--blue);
+.fanhao-primary-nav > button.active::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 2px;
+  left: 10px;
+  height: 3px;
+  border-radius: 99px;
+  background: var(--blue);
 }
 
-.fanhao-chrome-tag.has-menu {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding-right: 8px;
-}
-
-.fanhao-chrome-tag.has-menu > svg {
-  width: 11px;
-  height: 11px;
+.fanhao-feed-appbar-actions {
+  display: flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 
-.fanhao-chrome-icon {
+.fanhao-feed-appbar-action {
   display: grid;
-  width: 40px;
+  width: 42px;
+  min-height: 42px;
   place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
   padding: 0;
+}
+
+.fanhao-feed-appbar-action:active {
+  background: var(--surface-soft);
+  color: var(--blue);
 }
 
 .fanhao-brand-switch {
@@ -265,7 +288,7 @@
   }
 }
 
-.fanhao-chrome-icon > svg {
+.fanhao-feed-appbar-action > svg {
   width: 21px;
   height: 21px;
 }
@@ -1056,6 +1079,46 @@ body.fanhao-search-page-view .bottom-nav {
   color: white;
   padding: 0 14px;
   font-weight: 950;
+}
+
+.favorite-folder-form[hidden],
+.favorite-folder-delete[hidden],
+.favorite-folder-delete-confirm[hidden] {
+  display: none;
+}
+
+.favorite-folder-sheet .favorite-folder-delete {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px 14px;
+  background: var(--surface-raised);
+  color: #c44545;
+  font-weight: 850;
+}
+
+.favorite-folder-delete-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.favorite-folder-delete-confirm p {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.favorite-folder-delete-confirm > button:last-child {
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 9px 16px;
 }
 
 .favorite-folder-sheet button:disabled,

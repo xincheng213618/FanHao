@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260812-android-work-move-02";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260812-android-work-move-02";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260830-fanhao-person-home-31";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260830-western-person-link-34";
 import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-fanhao-nav-ui-44";
 
 export function createAndroidModule({ host }) {
@@ -45,7 +45,8 @@ export function createAndroidModule({ host }) {
     showView: host.navigation.showView,
     openInLibrary: host.navigation.openInLibrary,
     setActiveBottom: host.ui.setActiveBottom,
-    createLoadMoreButton: workViews.createLoadMoreButton
+    createLoadMoreButton: workViews.createLoadMoreButton,
+    pageDataService: workViews.pageDataService
   });
   const detailViews = createDetailViews({
     els: host.els,
@@ -80,7 +81,7 @@ export function createAndroidModule({ host }) {
     bottomKey: "fanhao",
     rootViews: FANHAO_ROOT_VIEWS,
     routes: [
-      route("people", (_params, guard) => peopleViews.renderPeopleIndex(guard)),
+      route("people", (params, guard) => peopleViews.renderPeopleIndex(params.scope, guard)),
       route("works", (params, guard) => workViews.renderAllWorks(params, guard)),
       route("rankings", (_params, guard) => workViews.renderRankings(guard)),
       route("categories", (params, guard) => workViews.renderCategories(params.category, guard)),
@@ -89,8 +90,8 @@ export function createAndroidModule({ host }) {
       route("studios", (_params, guard) => workViews.renderStudios(guard)),
       route("studioDetail", (params, guard) => workViews.renderStudioDetail(params.studioId, params.seriesId, guard)),
       route("history", (_params, guard) => workViews.renderHistory(guard)),
-      route("search", (params, guard) => workViews.renderSearchResults(params.query || "", guard)),
-      route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, guard)),
+      route("search", (params, guard) => workViews.renderSearchResults(params, guard)),
+      route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, params.scope, guard)),
       route("workDetail", (params, guard) => detailViews.renderWorkDetail(params.workId, guard))
     ],
     handleBack: () => detailViews.handleBack?.() === true,
@@ -107,25 +108,34 @@ function createSearchController(host, workViews) {
     showHistory: () => false,
     hideBottom: () => false,
     isExpanded: () => false,
-    placeholder: () => "搜番号、作品或演员",
+    placeholder: (view, params) => searchCategory(view, params) === "western" ? "搜欧美作品或演员" : "搜番号、作品或演员",
     value: (view, params) => view === "search" ? String(params.query || "") : "",
-    prepare(query) {
-      return workViews.warmSearch(query);
+    prepare(query, context = {}) {
+      return workViews.warmSearch(query, context.params?.category);
     },
     submit(query) {
-      host.navigation.showView("search", { query }, { skipHistory: true, replaceHistory: true });
+      const category = String(host.navigation.currentParams()?.category || "").toLowerCase() === "western" ? "western" : "censored";
+      host.navigation.showView("search", { query, category }, { skipHistory: true, replaceHistory: true });
     },
     open(context) {
       if (context.view === "search") return;
-      host.navigation.showView("search", { query: "" }, context.view === "home" ? { resetStack: true } : { push: true });
+      const category = searchCategory(context.view, context.params);
+      host.navigation.showView("search", { query: "", category }, context.view === "home" ? { resetStack: true } : { push: true });
     },
     close(context) {
       if (context.view !== "search") return false;
       if (host.navigation.hasBackStack()) host.navigation.goBack();
-      else host.navigation.showView("categories", {}, { resetStack: true });
+      else host.navigation.showView("people", { scope: context.params?.category === "western" ? "western" : "main" }, { resetStack: true });
       return true;
     }
   };
+}
+
+function searchCategory(view, params = {}) {
+  if (view === "people" || view === "personDetail") {
+    return String(params.scope || "main").toLowerCase() === "western" ? "western" : "censored";
+  }
+  return String(params.category || "").toLowerCase() === "western" ? "western" : "censored";
 }
 
 function route(view, render) {

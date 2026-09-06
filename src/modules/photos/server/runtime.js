@@ -9,6 +9,12 @@ export function createPhotosRuntime(deps) {
   }
 
   async function routeMedia(req, res, url) {
+    const mangaCoverMatch = /^\/media\/manga-cover\/([^/]+)$/.exec(url.pathname);
+    if (mangaCoverMatch && ["GET", "HEAD"].includes(req.method)) {
+      await deps.mangaService.serveCover(req, res, mangaCoverMatch[1]);
+      return true;
+    }
+
     const photoSetCoverMatch = /^\/media\/gallery-cover\/([^/]+)$/.exec(url.pathname);
     if (photoSetCoverMatch && req.method === "GET") {
       await deps.photoSetService.serveCover(res, decodeURIComponent(photoSetCoverMatch[1]));

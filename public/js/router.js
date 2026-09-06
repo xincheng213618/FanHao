@@ -1,4 +1,4 @@
-export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
+export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "manga", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
@@ -34,6 +34,7 @@ const VIEW_PATHS = {
   favorites: "/fanhao/favorites",
   history: "/fanhao/history",
   rankings: "/fanhao/rankings",
+  manga: "/manga",
   novels: "/novels",
   shortVideos: "/short-videos",
   music: "/music",
@@ -58,6 +59,8 @@ export function routeFromUrl(url = window.location.href) {
   const routePath = normalizeRoutePath(parsed.pathname);
   const peopleRoute = peopleRouteFromPath(routePath, params);
   if (peopleRoute) return peopleRoute;
+  const mangaRoute = mangaRouteFromPath(routePath, params);
+  if (mangaRoute) return mangaRoute;
   const galleryRoute = galleryRouteFromPath(routePath, params);
   if (galleryRoute) return galleryRoute;
   const novelRoute = novelRouteFromPath(routePath, params);
@@ -147,6 +150,10 @@ export function normalizeRoute(route = {}) {
     gallerySeriesKey: view === "gallery" && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
     galleryPhotoDate: view === "gallery" ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
     gallerySort: view === "gallery" ? normalizeGallerySort(route.gallerySort) : "updated",
+    mangaComicId: view === "manga" ? String(route.mangaComicId || "").trim() : "",
+    mangaChapterIndex: view === "manga" ? String(route.mangaChapterIndex || "").trim() : "",
+    mangaQuery: view === "manga" ? String(route.mangaQuery || route.q || "").trim() : "",
+    mangaSort: view === "manga" && ["updated", "title", "chapters"].includes(route.mangaSort) ? route.mangaSort : "updated",
     novelBookId: view === "novels" ? String(route.novelBookId || "").trim() : "",
     novelChapterIndex: view === "novels" ? String(route.novelChapterIndex || "").trim() : "",
     novelQuery: view === "novels" ? String(route.novelQuery || route.q || "").trim() : "",
@@ -196,7 +203,7 @@ export function routeUrl(route, options = {}) {
     if (value) params.set(key, value);
   }
   const pathname = routePath(next);
-  if (next.view && !VIEW_PATHS[next.view] && !["people", "search", "gallery", "novels", "shortVideos", "music", "tools"].includes(next.view)) {
+  if (next.view && !VIEW_PATHS[next.view] && !["people", "search", "gallery", "manga", "novels", "shortVideos", "music", "tools"].includes(next.view)) {
     params.set("view", next.view);
   }
   if (next.personId) params.set("personId", next.personId);
@@ -221,6 +228,9 @@ export function routeUrl(route, options = {}) {
       ? "count"
       : "updated";
     if (next.gallerySort && next.gallerySort !== defaultGallerySort) params.set("sort", next.gallerySort);
+  } else if (next.view === "manga") {
+    if (next.mangaQuery) params.set("q", next.mangaQuery);
+    if (next.mangaSort && next.mangaSort !== "updated") params.set("sort", next.mangaSort);
   } else if (next.view === "novels") {
     if (next.novelQuery) params.set("q", next.novelQuery);
     if (next.novelCategory && next.novelCategory !== "all") params.set("category", next.novelCategory);
@@ -475,6 +485,27 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
   return route;
 }
 
+function mangaRouteFromPath(routePath, params = new URLSearchParams()) {
+  const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
+  const direct = segments[0] === "manga";
+  const legacy = segments[0] === "photo" && segments[1] === "manga";
+  if (!direct && !legacy) return null;
+  const rest = segments.slice(direct ? 1 : 2);
+  const reader = rest[1] === "read";
+  return {
+    view: "manga",
+    galleryMode: "",
+    mangaComicId: decodeRouteSegment(rest[0] || ""),
+    mangaChapterIndex: decodeRouteSegment(reader ? rest[2] || "" : legacy ? rest[1] || "" : ""),
+    mangaQuery: params.get("q") || params.get("search") || "",
+    mangaSort: ["updated", "title", "chapters"].includes(params.get("sort")) ? params.get("sort") : "updated",
+    personId: "",
+    q: "",
+    workId: "",
+    videoId: ""
+  };
+}
+
 function novelRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   if (!segments.length || !["novel", "novels"].includes(segments[0])) return null;
@@ -618,6 +649,13 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
 }
 
 function routePath(route) {
+  if (route.view === "manga") {
+    if (route.mangaComicId && route.mangaChapterIndex) {
+      return `/manga/${encodeRouteSegment(route.mangaComicId)}/read/${encodeRouteSegment(route.mangaChapterIndex)}`;
+    }
+    if (route.mangaComicId) return `/manga/${encodeRouteSegment(route.mangaComicId)}`;
+    return "/manga";
+  }
   if (route.view === "gallery") {
     const mode = route.galleryMode || "photo";
     const base = GALLERY_MODE_PATHS[mode] || "/photo";

@@ -14,6 +14,7 @@ export function createCollectionPage(deps) {
   const { api, appendLoadedWorkPage, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const collectionRequests = createLatestRequestGate();
   const collectionPrefetches = new Map();
+  let folderMutationPending = false;
 
   function cancelPendingRequests() {
     collectionRequests.cancel();
@@ -180,8 +181,30 @@ export function createCollectionPage(deps) {
     addButton.type = "button";
     addButton.className = "stat-filter-chip";
     addButton.textContent = "新建";
+    addButton.dataset.folderMutation = "create";
+    addButton.disabled = folderMutationPending;
     addButton.addEventListener("click", createFavoriteFolder);
-    wrap.append(group, addButton);
+    const actions = document.createElement("div");
+    actions.className = "stat-filter-group";
+    actions.append(addButton);
+    wrap.append(group, actions);
+    const selected = folderById(state.selectedFavoriteFolderId);
+    if (selected && selected.id !== "default") {
+      for (const [action, label, handler] of [
+        ["rename", "重命名", renameFavoriteFolder],
+        ["delete", "删除收藏夹", deleteFavoriteFolder]
+      ]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "stat-filter-chip";
+        button.dataset.folderMutation = action;
+        button.textContent = label;
+        button.setAttribute("aria-label", `${label}：${selected.name}`);
+        button.disabled = folderMutationPending;
+        button.addEventListener("click", () => handler(selected));
+        actions.append(button);
+      }
+    }
     els.statsRow.append(wrap);
   }
 
@@ -338,14 +361,64 @@ export function createCollectionPage(deps) {
   }
 
   async function createFavoriteFolder() {
+    if (folderMutationPending) return;
     const name = window.prompt("新收藏夹名称");
     if (!name?.trim()) return;
+    await mutateFavoriteFolder("/api/favorite-folders", { method: "POST", body: { name } });
+  }
+
+  async function renameFavoriteFolder(folder) {
+    if (folderMutationPending) return;
+    const name = window.prompt("收藏夹新名称", folder.name);
+    if (name === null) return;
+    await mutateFavoriteFolder(`/api/favorite-folders/${encodeURIComponent(folder.id)}`, {
+      method: "PATCH", body: { name }
+    }, folder.id);
+  }
+
+  async function deleteFavoriteFolder(folder) {
+    if (folderMutationPending) return;
+    const destination = folderById("default")?.name || "默认收藏";
+    if (!window.confirm(`删除收藏夹“${folder.name}”？其中的收藏将移回“${destination}”，已收藏的作品会保留。`)) return;
+    await mutateFavoriteFolder(`/api/favorite-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" }, folder.id);
+  }
+
+  async function mutateFavoriteFolder(path, options, sourceFolderId = "") {
+    folderMutationPending = true;
+    setFolderMutationPending();
+    invalidatePrefetches();
     try {
-      const data = await api("/api/favorite-folders", { method: "POST", body: { name } });
+      const data = await api(path, options);
+      invalidatePrefetches();
+      // Refresh favorites without cancelling a later navigation to history or VR.
+      if (state.activeView === "favorites") collectionRequests.cancel();
       state.favoriteFolders = data.folders || state.favoriteFolders;
+      if (state.library && data.user) state.library.user = data.user;
+      const destination = data.deletedFolderId ? data.defaultFolder : data.folder;
+      if (sourceFolderId && destination) {
+        const works = new Set([...(state.works || []), ...(state.library?.works || []), state.currentWork]);
+        for (const work of works) {
+          if (work?.favorite && work.favoriteFolderId === sourceFolderId) {
+            work.favoriteFolderId = destination.id;
+            work.favoriteFolderName = destination.name;
+          }
+        }
+      }
+      if (data.deletedFolderId && state.selectedFavoriteFolderId === data.deletedFolderId) {
+        state.selectedFavoriteFolderId = data.defaultFolder?.id || "default";
+      }
       await loadFavorites();
     } catch (error) {
-      alert(error.message);
+      if (error?.code !== "ACCOUNT_CHANGED") window.alert(error.message || "收藏夹更新失败");
+    } finally {
+      folderMutationPending = false;
+      setFolderMutationPending();
+    }
+  }
+
+  function setFolderMutationPending() {
+    for (const button of els.statsRow.querySelectorAll("button[data-folder-mutation]")) {
+      button.disabled = folderMutationPending;
     }
   }
 

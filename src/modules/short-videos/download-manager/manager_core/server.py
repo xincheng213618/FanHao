@@ -22,6 +22,7 @@ from .download_supervisor import download_manager
 from .downloader_client import free_port
 from .extraction import stop_extract
 from .http_api import Handler
+from .queue import set_download_queue_change_handler
 from .runtime import acquire_single_instance, release_single_instance, write_runtime_info
 
 
@@ -85,6 +86,20 @@ def start_automatic_downloads() -> dict[str, object]:
     )
 
 
+def ensure_automatic_downloads() -> dict[str, object]:
+    """Restore the permanent watcher after a later queue-producing change."""
+    if runtime.APP_QUIT_REQUESTED:
+        return {"ok": True, "started": False, "reason": "app_quitting"}
+    snapshot = download_manager.snapshot()
+    if bool(snapshot.get("active")):
+        return {"ok": True, "started": False, "reason": "already_active"}
+    guard = snapshot.get("failure_guard") or {}
+    if bool(guard.get("active")):
+        return {"ok": True, "started": False, "reason": "failure_guard"}
+    result = start_automatic_downloads()
+    return {**result, "started": bool(result.get("ok"))}
+
+
 def main() -> None:
     runtime.APP_QUIT_REQUESTED = False
     if not acquire_single_instance():
@@ -103,6 +118,7 @@ def main() -> None:
                 f"数据库补全 {int(link_backfill.get('inserted') or 0)}",
             )
         add_event("info", "服务启动")
+        set_download_queue_change_handler(ensure_automatic_downloads)
         if not download_manager.restore_failure_guard():
             start_automatic_downloads()
         host = os.environ.get("DOUYIN_MANAGER_HOST", "127.0.0.1")
@@ -123,6 +139,7 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
     finally:
+        set_download_queue_change_handler(None)
         if server is not None:
             stop_runtime()
             server.server_close()

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 
 export function createUserStateService({
   defaultFavoriteFolderId = "default",
@@ -8,6 +9,8 @@ export function createUserStateService({
   warn = console.warn
 }) {
   let stateRevision = 0;
+  let coverRevision = 0;
+  let coverSnapshot = "{}";
   const state = emptyState();
 
   function emptyState() {
@@ -29,6 +32,7 @@ export function createUserStateService({
     for (const key of Object.keys(state)) delete state[key];
     Object.assign(state, nextState);
     stateRevision += 1;
+    updateCoverRevision();
     return state;
   }
 
@@ -136,8 +140,10 @@ export function createUserStateService({
     return state;
   }
 
-  function save() {
+  function save(options = {}) {
+    if (options.strict) return saveStrict();
     stateRevision += 1;
+    updateCoverRevision();
     try {
       ensureDataDir();
       fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
@@ -147,9 +153,32 @@ export function createUserStateService({
     return state;
   }
 
+  function saveStrict() {
+    const temporaryPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      ensureDataDir();
+      fs.writeFileSync(temporaryPath, JSON.stringify(state, null, 2), { encoding: "utf8", flag: "wx" });
+      fs.renameSync(temporaryPath, statePath);
+    } catch (error) {
+      try { fs.unlinkSync(temporaryPath); }
+      catch (cleanupError) { if (cleanupError.code !== "ENOENT") warn("[state-cleanup]", cleanupError.message); }
+      throw error;
+    }
+    stateRevision += 1;
+    updateCoverRevision();
+    return state;
+  }
+
   function revision() {
     return stateRevision;
   }
+
+  function updateCoverRevision() {
+    const next = JSON.stringify(state.manualCovers || {});
+    if (next !== coverSnapshot) { coverSnapshot = next; coverRevision += 1; }
+  }
+
+  function manualCoverRevision() { return coverRevision; }
 
   return {
     cleanFavoriteFolderName,
@@ -158,6 +187,7 @@ export function createUserStateService({
     defaultFavoriteFolders,
     emptyState,
     load,
+    manualCoverRevision,
     normalizeFavoriteFolderId,
     normalizeFavoriteFolders,
     normalizeFavoriteRecord,

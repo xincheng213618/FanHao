@@ -92,6 +92,11 @@ function verifyAndroidShortVideoCacheIdentity() {
     "app.js",
     "js/android-module-registry.js",
     "js/cache.js",
+    "js/media-navigation-state.js",
+    "js/channel-history-state.js",
+    "modules/media/android-module.js",
+    "modules/media/styles.css",
+    "platform/content-index/channel-views.js",
     "modules/short-videos/android-module.js",
     "modules/short-videos/api.js",
     "modules/short-videos/index.js",
@@ -120,10 +125,20 @@ function verifyAndroidShortVideoCacheIdentity() {
   const shortVideoApiSource = readNormalized(path.join(moduleDir, "api.js"));
   const cacheSource = readNormalized(path.join(wwwDir, "js", "cache.js"));
   const nativeFeedSource = readNormalized(path.join(moduleDir, "player", "native-feed.js"));
+  const mediaEntrySource = readNormalized(path.join(wwwDir, "modules", "media", "android-module.js"));
+  const photosEntrySource = readNormalized(path.join(wwwDir, "modules", "photos", "android-module.js"));
+  const rootStylesSource = readNormalized(path.join(wwwDir, "styles.css"));
   assert(indexSource.includes(`src="./app.js?v=${clientVersion}"`), "Android index must cache-bust app.js with CLIENT_VERSION");
   assert(appSource.includes(`./js/config.js?v=${clientVersion}`), "Android app.js must load the matching CLIENT_VERSION config module");
   assert(appSource.includes(`./js/cache.js?v=${clientVersion}`), "Android app.js must load the matching response-cache implementation");
   assert(appSource.includes(`./js/android-module-registry.js?v=${clientVersion}`), "Android app.js must load the matching module registry identity");
+  assert(appSource.includes(`./js/media-navigation-state.js?v=${clientVersion}`), "Android shell must load the current media-trail sanitizer identity");
+  assert(appSource.includes(`./js/channel-history-state.js?v=${clientVersion}`), "Android shell must load the matching session-only channel range helper");
+  assert(mediaEntrySource.includes(`../../js/media-navigation-state.js?v=${clientVersion}`), "Android media adapter must use the same media-trail helper identity as the shell");
+  assert(rootStylesSource.includes(`./modules/media/styles.css?v=${clientVersion}`), "Android styles must load the matching media presentation stylesheet identity");
+  for (const [name, source] of [["media", mediaEntrySource], ["photos", photosEntrySource]]) {
+    assert(source.includes(`../../platform/content-index/channel-views.js?v=${clientVersion}`), `Android ${name} entry must load the refreshed shared channel renderer identity`);
+  }
   assert(cacheSource.includes(`./config.js?v=${clientVersion}`), "Android response cache must load the matching CLIENT_VERSION config module");
   assert(registrySource.includes('url.searchParams.set("client", String(clientVersion))'), "Android dynamic module entries must include CLIENT_VERSION in their URL identity");
   assert(shortVideoEntrySource.includes(`./index.js?v=${clientVersion}`), "Android short-video entry must propagate CLIENT_VERSION to its facade");
@@ -838,6 +853,8 @@ for (const style of ["list"]) {
 
 const androidEntrySource = readNormalized(path.join(moduleDir, "android-module.js"));
 const androidIndexSource = readNormalized(path.join(moduleDir, "index.js"));
+const androidAppSource = readNormalized(path.join(root, "android-client", "www", "app.js"));
+const androidRouteContractSource = readNormalized(path.join(root, "android-client", "www", "js", "short-video-route-contract.js"));
 const androidApiSource = readNormalized(path.join(moduleDir, "api.js"));
 const androidTransportSource = readNormalized(path.join(root, "android-client", "www", "js", "api.js"));
 const androidCacheSource = readNormalized(path.join(root, "android-client", "www", "js", "cache.js"));
@@ -851,12 +868,17 @@ const androidAccountStatusViewSource = readNormalized(path.join(moduleDir, "list
 const androidListStylesSource = readNormalized(path.join(moduleDir, "styles", "list.css"));
 const androidShortVideoStylesSource = readNormalized(path.join(moduleDir, "styles.css"));
 const androidRootStylesSource = readNormalized(path.join(root, "android-client", "www", "styles.css"));
+const androidSettingsNavStylesSource = readNormalized(path.join(root, "android-client", "www", "css", "settings-nav.css"));
+const androidModuleNavigationSource = readNormalized(path.join(root, "android-client", "www", "js", "module-navigation.js"));
 const androidIndexHtmlSource = readNormalized(path.join(root, "android-client", "www", "index.html"));
+const androidConfigSource = readNormalized(path.join(root, "android-client", "www", "js", "config.js"));
+const androidClientVersion = /export const CLIENT_VERSION = "([^"]+)";/u.exec(androidConfigSource)?.[1] || "";
 const androidNativeFeedSource = readNormalized(path.join(moduleDir, "player", "native-feed.js"));
 const androidNativeFeedContractSource = readNormalized(path.join(moduleDir, "player", "native-feed-contract.js"));
 const androidPlayerPluginSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"));
 const androidNativePlayerSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActivity.java"));
 const androidNativePlaybackFallbackSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPlaybackFallback.java"));
+const androidNativeFeedPlaybackSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedPlayback.java"));
 const webPlaybackRenditionPolicySource = readNormalized(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"));
 const androidNativePageViewSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPageView.java"));
 const androidNativeCommentsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoCommentsController.java"));
@@ -880,27 +902,27 @@ const androidNativeActionResultDecoderSource = readNormalized(path.join(root, "a
 const androidNativeImageLoaderSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoImageLoader.java"));
 const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
-assert(androidEntrySource.includes('view: "shortVideoCollections"') && androidEntrySource.includes('view: "shortVideoCollection"') && androidEntrySource.includes('textContent = "清单"'), "Android short videos must expose stable collection index/detail routes and a direct chrome entry");
-assert(androidCollectionsSource.includes('method: "POST"') && androidCollectionsSource.includes('method: "PATCH"') && androidCollectionsSource.includes('method: "PUT"') && androidCollectionsSource.includes('method: "DELETE"') && androidCollectionsSource.includes("feedUrl: new URL(feedPath"), "Android collections must create, rename, delete, add, remove, and open the same paged feed contract without native permissions");
-assert(androidCollectionsSource.includes("retryShortVideoCollectionRequest") && androidCollectionsSource.includes("const collectionApi ="), "Android collection requests must use the bounded BUSY retry helper");
-assert.equal(androidCollectionsSource.match(/await loadCollections\(true\)/g)?.length, 2, "Android collection index entry and picker opening must bypass the loaded snapshot while sharing the in-flight request");
-assert(androidCollectionsSource.includes("collectionMutationRevision") && androidCollectionsSource.includes("mergeCollectionRefresh(data?.collections, requestRevision)") && androidCollectionsSource.includes("mutation.revision <= requestRevision") && androidCollectionsSource.includes("rememberCollectionMutation(result.collection)"), "Android collection refreshes must merge local creations made after a pending server snapshot without retaining them past a later refresh");
-assert(androidCollectionsSource.includes("rememberCollectionDeletion") && androidCollectionsSource.includes("mutation.deleted") && androidCollectionsSource.includes("window.confirm") && androidCollectionsSource.includes("context.discardPushedView?.()") && androidCollectionsSource.includes('showView("shortVideoCollections", {}, { skipHistory: true, replaceHistory: true })'), "Android collection deletion must confirm, fence stale list snapshots, discard a pushed detail history entry, and replace a direct detail route");
-assert(androidCollectionsSource.includes('setAttribute("aria-label", "清单名称")') && androidCollectionsSource.includes('status.textContent = "请输入清单名称"') && androidCollectionsSource.includes("input.focus()") && androidCollectionsSource.includes("rename.focus()"), "Android collection rename must expose an accessible focused input and retain focus across empty, failed, canceled, and successful edits");
-assert(androidEntrySource.includes("discardPushedView: host.navigation.discardPushedView") && androidIndexSource.includes("./collections/controller.js?v=20260812-collection-management-03"), "Android collection management and native action UI changes must propagate through the JavaScript module cache-version chain");
-assert(androidIndexHtmlSource.includes("./styles.css?v=20260812-android-work-move-02") && androidRootStylesSource.includes("./modules/short-videos/styles.css?v=20260812-collection-management-01") && androidShortVideoStylesSource.includes("./styles/list.css?v=20260812-collection-management-01"), "Android collection management styles must propagate through the integrated stylesheet cache-version chain");
-assert(androidCollectionRequestSource.includes("Number(error?.status) === 503") && androidCollectionRequestSource.includes("error?.retryable === true") && androidCollectionRequestSource.includes("3100"), "Android collection retries must be finite and limited to explicitly retryable 503 responses");
+assert(!androidEntrySource.includes('view: "shortVideoCollections"') && !androidEntrySource.includes('view: "shortVideoCollection"'), "Android short videos must not register collection index or detail routes");
+assert(!androidIndexSource.includes("collections/controller.js") && !androidIndexSource.includes("createShortVideoCollections") && !androidIndexSource.includes("renderCollections") && !androidIndexSource.includes("renderCollection"), "Android short-video composition must not load or expose collection management");
+assert(!androidListSource.includes("appendCollectionCardAction") && !androidListSource.includes("showCollectionPicker") && !androidListSource.includes("allowCollections") && !androidListSource.includes("加入清单"), "Android short-video cards must not expose an add-to-collection action");
+assert(!androidAppSource.includes('"shortVideoCollections"') && !androidAppSource.includes('"shortVideoCollection"') && !androidRouteContractSource.includes('view === "shortVideoCollections"') && !androidRouteContractSource.includes('view === "shortVideoCollection"'), "Android history and canonical route handling must reject retired collection views");
+assert(!androidEntrySource.includes('textContent = "清单"') && !androidEntrySource.includes("short-video-chrome-collections"), "Android short-video chrome must stay free of collection shortcuts");
+assert(androidClientVersion && androidIndexHtmlSource.includes(`./styles.css?v=${androidClientVersion}`) && androidRootStylesSource.includes("./modules/short-videos/styles.css?v=20260812-collection-management-01") && androidShortVideoStylesSource.includes("./styles/list.css?v=20260812-collection-management-01"), "Android short-video styles must propagate through the integrated stylesheet cache-version chain");
+assert(androidAppSource.includes('bottomNavKeyFor() === "photo" ? alternateGalleryMode(currentMode) : currentMode') && androidAppSource.includes('bottomNavKeyFor() === "fanhao" ? alternateHomeMode(currentMode) : currentMode') && androidAppSource.includes('bottomNavKeyFor() === "novels" ? alternateReadingMode(currentMode) : currentMode'), "active paired bottom tabs must switch their mode on a second tap");
+assert(androidAppSource.includes("openHomeModePicker()") && androidAppSource.includes("openGalleryModePicker()") && androidAppSource.includes("openReadingModePicker()") && androidAppSource.includes("bottomNavLongPressTimer"), "second-tap mode switching must retain the long-press mode pickers");
+assert(androidAppSource.includes('label.textContent = mode === "western" ? "欧美" : "番号"') && androidAppSource.includes("galleryModeLabel(mode)") && androidAppSource.includes("label.textContent = modeLabel") && androidAppSource.includes('label.textContent = mode === "music" ? "音乐" : "小说"') && !androidRootStylesSource.includes('button[data-gallery-switcher] .bottom-nav-icon::after'), "switchable bottom tabs must show their current mode as the label without floating badge markers");
+for (const [mode, label] of [["photo", "套图"], ["manga", "韩漫"], ["movie", "电影"], ["tv", "电视剧"]]) {
+  assert(androidAppSource.includes(`mode: "${mode}", label: "${label}"`), `Android gallery options must retain ${mode}/${label}`);
+}
+assert(androidAppSource.includes('button.setAttribute("aria-current", "page")') && androidAppSource.includes('button.removeAttribute("aria-current")') && androidAppSource.includes(`./js/module-navigation.js?v=${androidClientVersion}`), "bottom navigation must expose exactly the active destination with standard current-page semantics and load the refreshed icon contract");
+assert(androidModuleNavigationSource.includes('<svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="4"/>') && androidSettingsNavStylesSource.includes('.bottom-nav .bottom-nav-primary.active .bottom-nav-icon'), "the short-video destination must be a neutral outline while inactive and reserve its branded capsule for the selected state");
+assert(androidRootStylesSource.includes(`./css/settings-nav.css?v=${androidClientVersion}`) && androidSettingsNavStylesSource.includes("-webkit-user-select: none") && androidSettingsNavStylesSource.includes("user-select: none") && androidAppSource.includes('addEventListener("selectstart", (event) => event.preventDefault())'), "bottom navigation labels must behave like non-selectable TextBlock content");
 assert(androidTransportSource.includes("error.status = response.status") && androidTransportSource.includes("payload.retryable === true"), "Android transport errors must retain sanitized collection retry metadata");
-assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(previousVideos, page.videos)") && androidCollectionsSource.includes("appendCollectionCursorBoundary("), "Android collection management must append every cursor page, de-duplicate video ids, and retain trusted continuation boundaries");
-assert(androidCollectionsSource.includes("if (collectionPageRequest) return collectionPageRequest.promise") && androidCollectionsSource.includes("expectedRenderId !== collectionRenderId") && androidCollectionsSource.includes("deactivateCollections"), "Android collection pagination must reject duplicate requests and stale renders");
-assert(androidCollectionsSource.includes('event.key === "Escape"') && androidCollectionsSource.includes('event.key !== "Tab"') && androidCollectionsSource.includes("trigger?.isConnected") && androidCollectionsSource.includes("trigger.focus()"), "Android collection picker must trap Tab, close on Escape, and restore trigger focus");
-assert(androidCollectionsSource.includes("document.body.append(overlay);\n    create.input.focus();\n    try"), "Android collection picker must enter the modal before awaiting a slow or failed collection request");
-assert(androidCollectionsSource.includes("overlay.isConnected") && androidCollectionsSource.includes("isActiveCollectionRender"), "Android collection callbacks must ignore detached picker and stale detail renders");
-assert(androidCollectionCardActionSource.includes('aria-label", "加入清单"') && androidListSource.includes("appendCollectionCardAction") && androidApiSource.includes("fetchJson") && androidTransportSource.includes('"X-FanHao-Client": "android"') && androidTransportSource.includes("JSON.stringify(requestOptions.body)"), "Android list cards must use the authenticated WebView mutation transport for collection selection");
+assert(androidApiSource.includes("fetchJson") && androidTransportSource.includes('"X-FanHao-Client": "android"') && androidTransportSource.includes("JSON.stringify(requestOptions.body)"), "Android short-video requests must keep the authenticated WebView transport");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
 assert(androidEntrySource.includes("if (value === activeGroup)") && androidEntrySource.includes("openSortDialog(host, params)"), "tapping the active Android short-video group must open sorting");
-assert(androidEntrySource.includes("row.append(tabs, collections, search)"), "Android short-video search must stay at the far right of the scrollable group row while collections remain directly accessible");
+assert(androidEntrySource.includes("row.append(tabs, search)"), "Android short-video search must stay at the far right of the compact group row after removing the collection shortcut");
 assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
 assert(androidEntrySource.includes('["recommended", "推荐"]') && androidEntrySource.includes('["history", "历史"]') && androidEntrySource.includes('["following", "关注"]') && androidEntrySource.includes("FOLLOWING_AUTHOR_SORT_OPTIONS"), "Android short-video chrome must expose recommended, history, following, and author choices");
 assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
@@ -962,6 +984,7 @@ assert(androidNativePlayerSource.includes("createFeedSearchController()") && and
 assert(androidNativeFeedSearchSource.includes("final class NativeShortVideoFeedSearchController") && androidNativeFeedSearchSource.includes("EditorInfo.IME_ACTION_SEARCH") && androidNativeFeedSearchSource.includes("host.pausePlayback()") && androidNativeFeedSearchSource.includes("host.applySearch(query)"), "Android feed-search controller must own the search overlay while coordinating playback and query submission through its host");
 assert(androidNativePlayerSource.split(/\r?\n/).length <= 5600, "Android native short-video Activity exceeded its lifecycle-safe HTTP/UI orchestration budget");
 assert(androidNativePlaybackFallbackSource.split(/\r?\n/).length <= 220 && androidNativePlaybackFallbackSource.includes("NativeShortVideoHttpResponse.readUtf8"), "Android short-video compatibility playback must stay in a bounded controller with shared safe HTTP response handling");
+assert(androidNativeFeedPlaybackSource.split(/\r?\n/).length <= 180 && androidNativeFeedPlaybackSource.includes("final class NativeShortVideoFeedPlayback"), "Android author-return playback snapshots must remain in a bounded, independently tested state owner");
 assert(androidNativeActionStateSource.includes("final class NativeShortVideoActionState") && androidNativeActionStateSource.split(/\r?\n/).length <= 300, "Android action race handling must remain in its bounded, independently testable state owner");
 assert(androidNativeActionPreferencesSource.includes("final class NativeShortVideoActionPreferences") && androidNativeActionPreferencesSource.split(/\r?\n/).length <= 196, "Android server-scoped action persistence and legacy migration exceeded its exact extraction budget");
 assert(androidNativeActionSnapshotsSource.includes("final class NativeShortVideoActionSnapshots") && androidNativeActionSnapshotsSource.split(/\r?\n/).length <= 103, "Android canonical action snapshots exceeded their exact bounded model-consistency budget");
@@ -993,7 +1016,7 @@ assert(androidNativePlayerSource.includes("topSearchButton = new ImageView(this)
 assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, "原声"'), "Android native player rail must not expose an external original-video link");
 assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_menu_manage, "更多"'), "Android native player rail must rely on stage long-press for playback tools");
 assert(androidNativePlayerSource.includes("icon.setBackgroundColor(Color.TRANSPARENT)"), "Android native player rail icons must not restore circular shadow backgrounds");
-assert(androidNativePlayerSource.includes("loadGalleryImage(holder, item, galleryIndex, direction);\n      scheduleGalleryAutoAdvance(holder, item, galleryIndex);"), "Android native gallery images must start their four-second timer when each page is bound");
+assert(androidNativePlayerSource.includes("loadGalleryImage(holder, item, galleryIndex, direction);\n      if (currentGallery) scheduleGalleryAutoAdvance(holder, item, galleryIndex);"), "Android native gallery images must start their four-second timer only when the current page is bound");
 assert(androidNativePlayerSource.includes("liked ? R.drawable.ic_short_heart : R.drawable.ic_short_heart_outline"), "Android native author tiles must distinguish liked and unliked works with solid and outline hearts");
 assert(!androidNativePlayerSource.includes('badge.setBackground(roundedDrawable(0x99000000'), "Android native author tile hearts must not restore a dark pill background");
 assert(androidCardActionMetricSource.includes("Boolean(video.actions?.liked)") && androidCardActionMetricSource.includes('liked ? "heart" : "heartOutline"'), "Android work grids must render each video's real liked state instead of guessing from the active page");
@@ -1022,7 +1045,7 @@ const views = createShortVideoViews({
 });
 assert.deepEqual(
   Object.keys(views).sort(),
-  ["deactivate", "getSearchState", "renderCollection", "renderCollections", "renderList", "renderSearch", "submitSearch"],
+  ["deactivate", "getSearchState", "renderList", "renderSearch", "submitSearch"],
   "short-video public contract changed"
 );
 assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-video state must initialize account status independently from following filters");
@@ -1030,7 +1053,7 @@ assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-v
 const appSource = readNormalized(path.join(root, "android-client", "www", "app.js"));
 assert(!appSource.includes("shortVideoBrowser"), "Android shell must not retain the legacy WebView playback route");
 assert(appSource.includes("canonicalShortVideoViewParams(view, params)") && appSource.includes('account: query.get("account") || "all"'), "Android shell routes must parse and canonicalize account=banned links");
-assert(appSource.includes("function discardPushedView()") && appSource.includes("returnToStackView({ discardHistoryEntry: true })") && appSource.includes("options.discardHistoryEntry") && appSource.includes("window.history.back()"), "Android collection deletion must discard both the in-memory stack entry and its browser-history entry");
+assert(appSource.includes("function discardPushedView()") && appSource.includes("returnToStackView({ discardHistoryEntry: true })") && appSource.includes("options.discardHistoryEntry") && appSource.includes("window.history.back()"), "Android nested-detail replacement must discard both the in-memory stack entry and its browser-history entry");
 assert(
   appSource.includes("shortVideoViews?.deactivate?.()")
     || appSource.includes("androidModuleRegistry?.deactivateExcept(currentView, currentViewParams)"),

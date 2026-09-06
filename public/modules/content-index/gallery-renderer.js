@@ -145,6 +145,10 @@ function galleryImageModuleButton(mode, label) {
     button.setAttribute("aria-label", `${label}，${formatNumber(total)} 项`);
   }
   button.addEventListener("click", () => {
+    if (mode === "manga") {
+      window.location.assign("/manga");
+      return;
+    }
     if (state.gallery.mode === mode) return;
     state.gallery.mode = mode;
     state.gallery.photoView = "collections";

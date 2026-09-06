@@ -16,7 +16,6 @@ const PEOPLE_FILTERS = [
   { value: "recommended", label: "推荐", title: "推荐演员" },
   { value: "female", label: "女演员", title: "女演员" },
   { value: "male", label: "男演员", title: "男演员" },
-  { value: "western", label: "欧美", title: "欧美演员" },
   { value: "all", label: "全部", title: "全部演员" }
 ];
 
@@ -41,17 +40,27 @@ export function normalizePeopleFilter(value) {
 }
 
 export function filterPeopleForIndex(people, requestedFilter = "recommended") {
+  if (String(requestedFilter || "").trim().toLowerCase() === "western") {
+    return (people || []).filter(isBrowsableAuthor).filter((person) => person?.isWestern);
+  }
   const filter = normalizePeopleFilter(requestedFilter);
   const candidates = (people || []).filter(isBrowsableAuthor);
   if (filter === "female") return candidates.filter((person) => person?.actorProfile?.gender === "female");
   if (filter === "male") return candidates.filter((person) => person?.actorProfile?.gender === "male");
-  if (filter === "western") return candidates.filter((person) => person?.isWestern);
   if (filter === "all") return candidates;
   return candidates.filter((person) => (
     person?.actorProfile?.gender !== "male"
     && !person?.isWestern
     && Boolean(portraitUrlForPerson(person))
   ));
+}
+
+export function shouldUseCompactPeopleLayout(people, scope = "main") {
+  if (normalizePeopleScope(scope) !== "western") return false;
+  const candidates = (Array.isArray(people) ? people : []).filter(isBrowsableAuthor);
+  if (candidates.length < 6) return false;
+  const portraitCount = candidates.filter((person) => Boolean(portraitUrlForPerson(person))).length;
+  return portraitCount * 2 < candidates.length;
 }
 
 export function createPeopleViews(context) {
@@ -63,7 +72,8 @@ export function createPeopleViews(context) {
     increasePeopleLimit,
     showView,
     setActiveBottom,
-    createLoadMoreButton
+    createLoadMoreButton,
+    pageDataService
   } = context;
   const previewAvatarLoader = createViewportImageLoader({
     getActiveUrl,
@@ -74,6 +84,7 @@ export function createPeopleViews(context) {
     rootMargin: PERSON_AVATAR_ROOT_MARGIN
   });
   let peopleIndexCache = null;
+  let activePeopleScope = "main";
 
   function renderPreviewPeople(people) {
     const list = filterPeopleForIndex(people, "recommended").sort((a, b) => comparePeople(a, b, "smart")).slice(0, 12);
@@ -89,37 +100,71 @@ export function createPeopleViews(context) {
     }
   }
 
-  function renderPeopleIndex() {
+  async function renderPeopleIndex(requestedScope = "main", isActive = () => true) {
+    const scope = normalizePeopleScope(requestedScope);
+    activePeopleScope = scope;
     setActiveBottom("people");
+    if (scope === "main") {
+      renderPeopleData(getLibrary()?.people || [], scope);
+      return;
+    }
+
+    els.viewKicker.textContent = "欧美";
+    els.viewTitle.textContent = "人物";
+    els.viewMeta.textContent = "正在读取欧美人物";
+    els.viewContent.innerHTML = `<div class="loading-row">正在整理欧美人物</div>`;
+    let renderedCache = false;
+    try {
+      const result = await pageDataService.load(getActiveUrl(), "/api/library?scope=western", {
+        signal: isActive.signal,
+        isActive,
+        onCached(data) {
+          renderedCache = true;
+          renderPeopleData(data.people || [], scope);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (!result.unchanged) renderPeopleData(result.data?.people || [], scope);
+    } catch (error) {
+      if (!isActive() || renderedCache) return;
+      els.viewMeta.textContent = "读取失败";
+      const message = document.createElement("div");
+      message.className = "message-box error";
+      message.textContent = String(error?.message || "欧美人物读取失败");
+      els.viewContent.replaceChildren(message);
+    }
+  }
+
+  function renderPeopleData(sourcePeople, scope) {
     const sortMode = getPeopleSortMode();
-    const filterMode = getPeopleFilterMode();
-    const sourcePeople = getLibrary()?.people || [];
-    if (restorePeopleIndex(sourcePeople, sortMode, filterMode)) return;
+    const filterMode = scope === "western" ? "western" : getPeopleFilterMode();
+    if (restorePeopleIndex(sourcePeople, scope, sortMode, filterMode)) return;
 
     const people = filterPeopleForIndex(sourcePeople, filterMode).sort((a, b) => comparePeople(a, b, sortMode));
     const visible = people.slice(0, getPeopleLimit());
     indexAvatarLoader.reset();
 
-    els.viewKicker.textContent = "演员";
-    els.viewTitle.textContent = peopleFilterTitle(filterMode);
+    els.viewKicker.textContent = scope === "western" ? "欧美" : "演员";
+    els.viewTitle.textContent = scope === "western" ? "人物" : peopleFilterTitle(filterMode);
     els.viewMeta.textContent = `${formatNumber(people.length)} 位演员 · ${sortDescription(sortMode)}`;
-    const filterStrip = createPeopleFilterStrip(sourcePeople, filterMode);
+    const filterStrip = scope === "western" ? null : createPeopleFilterStrip(sourcePeople, filterMode);
     const grid = document.createElement("div");
     grid.className = "people-grid";
-    appendPeopleCards(grid, visible, indexAvatarLoader);
-    peopleIndexCache = { filterMode, filterStrip, grid, loadMore: null, people, sortMode, sourcePeople };
-    els.viewContent.replaceChildren(filterStrip, grid);
+    grid.classList.toggle("is-compact", shouldUseCompactPeopleLayout(people, scope));
+    appendPeopleCards(grid, visible, indexAvatarLoader, scope);
+    peopleIndexCache = { filterMode, filterStrip, grid, loadMore: null, people, scope, sortMode, sourcePeople };
+    els.viewContent.replaceChildren(...[filterStrip, grid].filter(Boolean));
     appendPeopleIndexLoadMore(peopleIndexCache);
   }
 
-  function restorePeopleIndex(sourcePeople, sortMode, filterMode) {
+  function restorePeopleIndex(sourcePeople, scope, sortMode, filterMode) {
     const cache = peopleIndexCache;
-    if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode || cache.filterMode !== filterMode) return false;
+    if (!cache || cache.sourcePeople !== sourcePeople || cache.scope !== scope || cache.sortMode !== sortMode || cache.filterMode !== filterMode) return false;
     syncPeopleLimit(cache.grid.children.length);
-    els.viewKicker.textContent = "演员";
-    els.viewTitle.textContent = peopleFilterTitle(filterMode);
+    els.viewKicker.textContent = scope === "western" ? "欧美" : "演员";
+    els.viewTitle.textContent = scope === "western" ? "人物" : peopleFilterTitle(filterMode);
     els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位演员 · ${sortDescription(sortMode)}`;
-    const nodes = cache.loadMore ? [cache.filterStrip, cache.grid, cache.loadMore] : [cache.filterStrip, cache.grid];
+    const nodes = (cache.loadMore ? [cache.filterStrip, cache.grid, cache.loadMore] : [cache.filterStrip, cache.grid]).filter(Boolean);
     els.viewContent.replaceChildren(...nodes);
     return true;
   }
@@ -145,9 +190,9 @@ export function createPeopleViews(context) {
     return strip;
   }
 
-  function appendPeopleCards(grid, people, avatarLoader) {
+  function appendPeopleCards(grid, people, avatarLoader, scope = activePeopleScope) {
     const fragment = document.createDocumentFragment();
-    for (const person of people) fragment.append(createPersonCard(person, "index", avatarLoader));
+    for (const person of people) fragment.append(createPersonCard(person, "index", avatarLoader, scope));
     grid.append(fragment);
   }
 
@@ -164,7 +209,7 @@ export function createPeopleViews(context) {
       syncPeopleLimit(start);
       increasePeopleLimit(PEOPLE_PAGE_SIZE);
       const nextLimit = Math.min(people.length, getPeopleLimit());
-      appendPeopleCards(grid, people.slice(start, nextLimit), indexAvatarLoader);
+      appendPeopleCards(grid, people.slice(start, nextLimit), indexAvatarLoader, cache.scope);
       loadMore.remove();
       cache.loadMore = null;
       appendPeopleIndexLoadMore(cache);
@@ -202,7 +247,7 @@ export function createPeopleViews(context) {
     const normalized = normalizePeopleFilter(value);
     if (normalized === getPeopleFilterMode()) return false;
     localStorage.setItem(PEOPLE_FILTER_STORAGE_KEY, normalized);
-    renderPeopleIndex();
+    void renderPeopleIndex(activePeopleScope);
     return true;
   }
 
@@ -213,7 +258,7 @@ export function createPeopleViews(context) {
   function setPeopleSortMode(value) {
     if (!PEOPLE_SORTS.some((item) => item.value === value) || value === getPeopleSortMode()) return false;
     localStorage.setItem(PEOPLE_SORT_STORAGE_KEY, value);
-    renderPeopleIndex();
+    void renderPeopleIndex(activePeopleScope);
     return true;
   }
 
@@ -250,15 +295,16 @@ export function createPeopleViews(context) {
     return isBrowsableAuthor(person) ? 1 : 0;
   }
 
-  function createPersonCard(person, mode, avatarLoader = mode === "preview" ? previewAvatarLoader : indexAvatarLoader) {
+  function createPersonCard(person, mode, avatarLoader = mode === "preview" ? previewAvatarLoader : indexAvatarLoader, scope = "main") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = mode === "preview" ? "person-card" : "index-person-card";
-    button.addEventListener("click", () => showView("personDetail", { personId: person.id }, { push: true }));
+    button.addEventListener("click", () => showView("personDetail", { personId: person.id, scope }, { push: true }));
 
     const visual = createFallbackCover(person.name);
     button.append(visual);
     const imagePath = portraitUrlForPerson(person);
+    button.classList.add(imagePath ? "has-portrait" : "is-placeholder");
     if (imagePath) {
       avatarLoader.schedule(visual, imagePath);
     }
@@ -297,4 +343,8 @@ export function createPeopleViews(context) {
     setSortMode: setPeopleSortMode,
     sortPeople
   };
+}
+
+function normalizePeopleScope(value) {
+  return String(value || "main").trim().toLowerCase() === "western" ? "western" : "main";
 }

@@ -12,6 +12,27 @@ const TONGHUASHUN_SOURCE = Object.freeze({
   sourceUrl: "https://stock.10jqka.com.cn/"
 });
 
+const CHART_SYMBOLS = Object.freeze({
+  gold: "XAUUSD",
+  silver: "XAGUSD",
+  "usd-cny": "USDCNY",
+  "jpy-cny": "JPYCNY",
+  "krw-cny": "KRWCNY",
+  sse: "SSE-000001",
+  "szse-component": "SZSE-399001",
+  chinext: "SZSE-399006",
+  csi300: "SSE-000300",
+  sse50: "SSE-000016",
+  csi500: "SSE-000905",
+  nikkei225: "TVC-NI225",
+  kospi: "KRX-KOSPI",
+  "taiwan-weighted": "TWSE-IX0001",
+  "hang-seng": "HSI-HSI",
+  sp500: "SPX",
+  nasdaq: "NASDAQ-IXIC",
+  dow: "TVC-DJI"
+});
+
 const SINA_SYMBOLS = [
   "sh000001",
   "sz399001",
@@ -55,9 +76,21 @@ const US_INDICES = [
 ];
 
 const FX_QUOTES = [
-  ["fx_scnyusd", "cny-usd", "人民币/美元", "CNY/USD", "1 CNY 可兑换美元", "USD", "1 USD = {value} CNY"],
-  ["fx_scnyjpy", "cny-jpy", "人民币/日元", "CNY/JPY", "1 CNY 可兑换日元", "JPY", "1 JPY = {value} CNY"],
-  ["fx_scnykrw", "cny-krw", "人民币/韩元", "CNY/KRW", "1 CNY 可兑换韩元", "KRW", "1 KRW = {value} CNY"]
+  {
+    sourceSymbol: "fx_susdcny", fallbackSymbol: "fx_scnyusd", invert: false,
+    id: "usd-cny", title: "美元/人民币", symbol: "USD/CNY",
+    subtitle: "1 USD 可兑换人民币", inverseLabel: "1 CNY = {value} USD"
+  },
+  {
+    sourceSymbol: "fx_scnyjpy", invert: true,
+    id: "jpy-cny", title: "日元/人民币", symbol: "JPY/CNY",
+    subtitle: "1 JPY 可兑换人民币", inverseLabel: "1 CNY = {value} JPY"
+  },
+  {
+    sourceSymbol: "fx_scnykrw", invert: true,
+    id: "krw-cny", title: "韩元/人民币", symbol: "KRW/CNY",
+    subtitle: "1 KRW 可兑换人民币", inverseLabel: "1 CNY = {value} KRW"
+  }
 ];
 
 function toNumber(value) {
@@ -75,6 +108,24 @@ function round(value, digits = 4) {
 function percentChange(price, previous) {
   if (!Number.isFinite(price) || !Number.isFinite(previous) || previous === 0) return null;
   return ((price - previous) / previous) * 100;
+}
+
+function positiveRate(value) {
+  const number = toNumber(value);
+  return number > 0 ? number : null;
+}
+
+function inverseRate(value) {
+  const number = positiveRate(value);
+  const inverse = number === null ? null : 1 / number;
+  return Number.isFinite(inverse) ? inverse : null;
+}
+
+function fxLastPrice(raw) {
+  const last = raw?.[8];
+  // Sina's FX quote page uses [8] for latest and [3] for previous close;
+  // [1]/[2] are buy/sell quotes, not the latest/previous-close pair.
+  return positiveRate(last === undefined || last === null || last === "" ? raw?.[1] : last);
 }
 
 export function parseSinaPayload(text) {
@@ -216,34 +267,45 @@ function buildMetal(raw, options, usdCny) {
   };
 }
 
-function buildFx(raw, options) {
+function buildFx(raw, options, invert) {
   if (!raw || raw.length < 12) return null;
-  const price = toNumber(raw[1]);
+  const convert = invert ? inverseRate : positiveRate;
+  const price = convert(fxLastPrice(raw));
+  const previous = convert(raw[3]);
   return {
     ...options,
     value: price,
-    change: round(toNumber(raw[11]), 6),
-    changePercent: round(toNumber(raw[10]), 2),
-    open: toNumber(raw[5]),
-    high: toNumber(raw[6]),
-    low: toNumber(raw[7]),
-    previousClose: toNumber(raw[2]),
+    change: round(Number.isFinite(price) && Number.isFinite(previous) ? price - previous : null, 6),
+    changePercent: round(percentChange(price, previous), 2),
+    open: convert(raw[5]),
+    high: convert(raw[invert ? 7 : 6]),
+    low: convert(raw[invert ? 6 : 7]),
+    previousClose: previous,
     marketTime: `${raw[17]} ${raw[0]}`,
-    unit: options.unit,
+    unit: "CNY",
     ...SINA_SOURCE,
-    inverseValue: Number.isFinite(price) && price !== 0 ? round(1 / price, 6) : null,
+    inverseValue: round(inverseRate(price), 6),
     inverseLabel: options.inverseLabel
   };
 }
 
 function compactItem(item) {
-  return item && Number.isFinite(item.value) ? item : null;
+  if (!item || !Number.isFinite(item.value)) return null;
+  const chartSymbol = CHART_SYMBOLS[item.id];
+  return {
+    ...item,
+    chartUrl: chartSymbol ? `https://cn.tradingview.com/symbols/${chartSymbol}/` : null
+  };
 }
 
 export function buildMarketPayload(sinaRecords, summaryRecords = new Map(), sourceIssues = [], generatedAt = new Date()) {
-  const usdCny = toNumber(sinaRecords.fx_susdcny?.[1]) || (
-    toNumber(sinaRecords.fx_scnyusd?.[1]) ? 1 / toNumber(sinaRecords.fx_scnyusd[1]) : null
-  );
+  const fx = FX_QUOTES.map(({ sourceSymbol, fallbackSymbol, invert, ...options }) => {
+    const quote = compactItem(buildFx(sinaRecords[sourceSymbol], { ...options, category: "汇率" }, invert));
+    return quote || (fallbackSymbol
+      ? compactItem(buildFx(sinaRecords[fallbackSymbol], { ...options, category: "汇率" }, !invert))
+      : null);
+  }).filter(Boolean);
+  const usdCny = fx.find((item) => item.id === "usd-cny")?.value ?? null;
   const metals = [
     compactItem(buildMetal(sinaRecords.hf_XAU, {
       id: "gold",
@@ -260,11 +322,6 @@ export function buildMarketPayload(sinaRecords, summaryRecords = new Map(), sour
       category: "贵金属"
     }, usdCny))
   ].filter(Boolean);
-  const fx = FX_QUOTES.map((spec) => compactItem(buildFx(sinaRecords[spec[0]], {
-    ...quoteOptions(spec, "汇率"),
-    unit: spec[5],
-    inverseLabel: spec[6]
-  }))).filter(Boolean);
   const chinaIndices = CHINA_INDICES
     .map((spec) => compactItem(buildChinaIndex(sinaRecords[spec[0]], quoteOptions(spec, "A 股指数"))))
     .filter(Boolean);
@@ -287,7 +344,7 @@ export function buildMarketPayload(sinaRecords, summaryRecords = new Map(), sour
   const missingSummary = summaryRecords.has("台湾加权指数") ? [] : ["台湾加权"];
   const groups = [
     { id: "metals", title: "贵金属", note: "现货报价，主值为美元/盎司，副值按 USD/CNY 折算成人民币/克。", items: metals },
-    { id: "fx", title: "人民币汇率", note: "主值均为 1 CNY 可兑换的目标货币数量。", items: fx },
+    { id: "fx", title: "人民币汇率", note: "主值均为 1 单位外币可兑换的人民币金额，副值为反向汇率。", items: fx },
     { id: "china-indices", title: "A 股指数", note: "覆盖上证、深证、创业板以及沪深/中证核心宽基指数。", items: chinaIndices },
     { id: "asia-indices", title: "亚太指数", note: "覆盖日本、韩国、台湾和香港主要市场指数。", items: asiaIndices },
     { id: "us-indices", title: "美股指数", note: "覆盖标普 500、纳斯达克和道琼斯。", items: usIndices }

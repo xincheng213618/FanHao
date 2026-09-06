@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小说章节身份 · 原生存储验证</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:960px;margin:30px auto;padding:0 20px;background:#f5f7fb;color:#172334}button{font:inherit;background:#195cc0;color:white;padding:12px 20px;border:0;border-radius:8px}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:18px;border-radius:8px}.pass{color:#146439}.fail{color:#a52232}li{margin:8px 0}</style></head>
+<body><h1>稳定章节与进度 · 原生 IndexedDB 验证</h1>
+<p>运行当前生产存储模块及章节协调模块。仅替换数据库名，所有数据库使用本页随机生成的 UUID；绝不打开实际小说库。</p>
+<p>检查 v2→v3 当前内容保留、失败回滚、插章/调序/删章/改正文、旧会话拒绝及取回旧副本。此页不是 Android 真机或掉电测试。</p>
+<button id="run">运行隔离验证</button><p id="status" role="status">尚未运行</p><ol id="cases"></ol><pre id="report">{}</pre>
+<script type="module" src="/fixture.mjs"></script></body></html>

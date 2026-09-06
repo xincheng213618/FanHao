@@ -9,6 +9,13 @@ const targetDir = path.resolve(projectDir, "www", "games");
 const expectedTarget = path.join(projectDir, "www", "games");
 const webOnlyGames = new Set(["gomoku", "jump"]);
 
+// The account form is shared by Web and Android; do not hand-edit its app copy.
+const accountTarget = path.join(projectDir, "www", "platform", "accounts");
+fs.mkdirSync(accountTarget, { recursive: true });
+for (const file of ["account-ui.js", "account.css"]) {
+  fs.copyFileSync(path.join(projectDir, "..", "public", "platform", "accounts", file), path.join(accountTarget, file));
+}
+
 if (targetDir !== expectedTarget) throw new Error(`Unexpected shared asset target: ${targetDir}`);
 if (!fs.statSync(sourceDir, { throwIfNoEntry: false })?.isDirectory()) {
   throw new Error(`Shared game assets are missing: ${sourceDir}`);

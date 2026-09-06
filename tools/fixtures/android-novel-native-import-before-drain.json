@@ -1,0 +1,6 @@
+{
+  "description": "Actual pre-drain handler frozen from repository HEAD after production change began; reproduces dropped busy notifications and non-drained native queues.",
+  "functions": {
+    "importPendingNativeTextFile": "  async function importPendingNativeTextFile() {\n    const plugin = nativeNovelPlugin();\n    if (!plugin?.consumePendingTextFile || importingNativeText) return;\n    importingNativeText = true;\n    try {\n      const file = await plugin.consumePendingTextFile();\n      if (!file?.available || typeof file.text !== \"string\") {\n        if (file?.message) setStatus?.(file.message, \"error\");\n        return;\n      }\n      await importNativeTextFile(file);\n    } catch (error) {\n      setStatus?.(`本地文本读取失败：${error.message || error}`, \"error\");\n    } finally {\n      importingNativeText = false;\n    }\n  }"
+  }
+}

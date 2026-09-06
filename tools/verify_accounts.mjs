@@ -1,0 +1,106 @@
+import assert from "node:assert/strict";
+import { Readable } from "node:stream";
+import { DatabaseSync } from "node:sqlite";
+import { createAccountFixture } from "./fixtures/account-service.mjs";
+import { createAccountStore } from "../src/platform/server/accounts/store.js";
+
+let time = Date.now();
+const fixture = createAccountFixture({ now: () => time });
+const password = "Fixture-password-123";
+let client = 1;
+async function call(pathname, { method = "GET", body, token, remote = `203.0.113.${client++}`, host = "public.example", headers = {}, raw } = {}) {
+  const req = Readable.from([raw ?? (body ? JSON.stringify(body) : "")]);
+  req.method = method; req.url = pathname;
+  req.headers = { host, accept: "application/json", ...(body ? { "content-type": "application/json" } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers };
+  req.socket = { remoteAddress: remote, encrypted: false };
+  const result = { status: 0, headers: {} };
+  const res = { setHeader(name, value) { result.headers[name.toLowerCase()] = value; }, getHeader(name) { return result.headers[name.toLowerCase()]; },
+    writeHead(status, values = {}) { result.status = status; Object.entries(values).forEach(([name, value]) => this.setHeader(name, value)); },
+    end(value) { result.text = String(value || ""); try { result.body = JSON.parse(result.text); } catch {} } };
+  await fixture.handler(req, res); return result;
+}
+const register = (username, extra = {}, options = {}) => call("/api/accounts/register", { method: "POST", body: { username, password, client: "android", ...extra }, ...options });
+try {
+  assert.equal((await call("/api/protected")).status, 401);
+  const policy = await call("/api/accounts/status");
+  assert.equal(policy.body.registrationEnabled, true); assert.equal(policy.body.invitationRequired, false); assert.equal(policy.body.setupAvailable, false);
+  assert.equal((await call("/api/accounts/setup", { method: "POST", body: { username: "attacker", password } })).status, 403);
+  assert.equal((await call("/api/accounts/setup", { method: "POST", body: { username: "attacker", password }, host: "localhost", remote: "203.0.113.1" })).status, 403);
+  const local = { host: "localhost", remote: "127.0.0.1" };
+  assert.equal((await call("/api/accounts/status", local)).body.setupAvailable, true);
+  const registered = await register("alice", { role: "admin", displayName: "<img src=x onerror=alert(1)>" });
+  assert.equal(registered.status, 201); assert.equal(registered.body.user.role, "user");
+  const userToken = registered.body.token;
+  assert.match(userToken, /^usr\./); assert.match(registered.headers["set-cookie"], /HttpOnly; SameSite=Lax/);
+  assert.equal((await call("/api/protected", { token: userToken })).status, 200);
+  assert.equal((await call("/api/accounts/admin/users", { token: userToken, ...local })).status, 403);
+  assert.equal((await register("ALICE")).status, 409);
+  assert.equal((await register("short-pass", { password: "short" })).status, 400);
+  const setup = await call("/api/accounts/setup", { method: "POST", body: { username: "owner", password, client: "android" }, ...local });
+  assert.equal(setup.status, 201); assert.equal(setup.body.user.role, "admin"); const admin = setup.body.token;
+  assert.equal((await call("/api/accounts/setup", { method: "POST", body: { username: "owner2", password }, ...local })).status, 409);
+  assert.equal((await call(`/api/accounts/admin/users/${setup.body.user.id}`, { method: "PATCH", token: admin, body: { disabled: true } })).status, 409);
+  assert.equal((await call(`/api/accounts/admin/users/${setup.body.user.id}`, { method: "PATCH", token: admin, body: { role: "user" } })).status, 409);
+  const adminSettings = (body) => call("/api/accounts/admin/settings", { method: "PATCH", token: admin, body });
+  assert.equal((await adminSettings({ registrationEnabled: true, invitationRequired: "false" })).status, 400);
+  assert.equal((await adminSettings({ registrationEnabled: true, invitationRequired: true })).status, 200);
+  assert.equal((await register("missing-code")).status, 400);
+  assert.equal((await register("invalid-code", { inviteCode: "invalid" })).status, 400);
+  const created = await call("/api/accounts/admin/invites", { method: "POST", token: admin, body: { count: 3, maxUses: 1, expiresInDays: 1, note: "fixture" } });
+  assert.equal(created.status, 201); assert.equal(created.body.invites.length, 3);
+  const [one, two, three] = created.body.invites;
+  const results = await Promise.all([register("parallel-a", { inviteCode: one.code }), register("parallel-b", { inviteCode: one.code })]);
+  assert.deepEqual(results.map((value) => value.status).sort(), [201, 400], "one-use code must have exactly one winner");
+  assert.equal((await register("alice", { inviteCode: two.code })).status, 409);
+  const reusedAfterFailure = await register("bob", { inviteCode: two.code.toLowerCase() });
+  assert.equal(reusedAfterFailure.status, 201, "failed username insert must not consume invitation");
+  assert.equal((await call(`/api/accounts/admin/invites/${three.id}/revoke`, { method: "POST", token: admin, body: {} })).status, 200);
+  assert.equal((await register("revoked", { inviteCode: three.code })).status, 400);
+  const list = await call("/api/accounts/admin/invites", { token: admin });
+  assert.equal(list.body.invites.find((entry) => entry.id === one.id).uses, 1);
+  assert(!list.text.includes(one.code)); assert(!list.text.includes("code_hash"));
+  assert.equal((await adminSettings({ registrationEnabled: false, invitationRequired: false })).status, 200);
+  assert.equal((await register("closed")).status, 403);
+  const login = await call("/api/accounts/login", { method: "POST", body: { username: "ALICE", password, client: "android" } });
+  assert.equal(login.status, 200, "closed registration does not prevent login");
+  const browserLogin = await call("/api/accounts/login", { method: "POST", body: { username: "alice", password } });
+  assert.equal(browserLogin.status, 200); assert.equal(browserLogin.body.token, undefined);
+  assert.equal((await call("/api/accounts/me", { method: "PATCH", token: userToken, body: { displayName: "爱丽丝", role: "admin" } })).body.user.role, "user");
+  assert.equal((await call("/api/accounts/password", { method: "POST", token: userToken, body: { currentPassword: "wrong", newPassword: "New-password-123" } })).status, 400);
+  assert.equal((await call("/api/accounts/password", { method: "POST", token: userToken, body: { currentPassword: password, newPassword: "New-password-123" } })).status, 200);
+  for (const old of [userToken, login.body.token]) assert.equal((await call("/api/protected", { token: old, ...local })).status, 401, "revoked account must not fall back to LAN trust");
+  const newLogin = await call("/api/accounts/login", { method: "POST", body: { username: "alice", password: "New-password-123", client: "android" } });
+  assert.equal(newLogin.status, 200);
+  assert.equal((await call(`/api/accounts/admin/users/${registered.body.user.id}`, { method: "PATCH", token: admin, body: { disabled: true } })).status, 200);
+  assert.equal((await call("/api/protected", { token: newLogin.body.token })).status, 401);
+  assert.equal((await call("/api/accounts/login", { method: "POST", body: { username: "alice", password: "New-password-123" } })).status, 401);
+  assert.equal((await call("/api/accounts/logout", { method: "POST", token: reusedAfterFailure.body.token, body: {} })).status, 200);
+  assert.equal((await call("/api/protected", { token: reusedAfterFailure.body.token })).status, 401);
+  assert.equal((await call("/api/accounts/admin/users?search=%25", { token: admin })).body.total, 0);
+  const allUsers = await call("/api/accounts/admin/users", { token: admin });
+  assert(!allUsers.text.includes("password_hash")); assert(!allUsers.text.includes(password));
+  assert.equal((await call("/api/accounts/login", { method: "POST", body: {}, headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal((await call("/api/accounts/login", { method: "POST", raw: "password=x", headers: { "content-type": "application/x-www-form-urlencoded" } })).status, 415);
+  assert.equal((await call("/api/accounts/login", { method: "POST", raw: "null", headers: { "content-type": "application/json" } })).status, 400);
+  assert.equal((await call("/api/accounts/status", { headers: { origin: "http://localhost" } })).headers["access-control-allow-origin"], "http://localhost", "Android can register even without a legacy remote password");
+  assert.equal((await call("/account-assets/account-ui.js")).status, 200);
+  assert.equal((await call("/account-assets/private.txt")).status, 401);
+  const expiryInvite = await call("/api/accounts/admin/invites", { method: "POST", token: admin, body: { expiresInDays: 1 } });
+  await adminSettings({ registrationEnabled: true, invitationRequired: true });
+  time += 86400001;
+  assert.equal((await register("expired", { inviteCode: expiryInvite.body.invites[0].code })).status, 400);
+  const observer = new DatabaseSync(fixture.dbPath, { readOnly: true });
+  const saved = observer.prepare("SELECT password_hash FROM account_users WHERE username='owner'").get();
+  assert.match(saved.password_hash, /^scrypt-v1\$/); assert(!saved.password_hash.includes(password));
+  assert.equal(observer.prepare("SELECT token_hash FROM account_sessions LIMIT 1").get().token_hash.length, 64);
+  observer.close();
+  const reopened = createAccountStore({ dbPath: fixture.dbPath, now: () => time });
+  assert.equal(reopened.session(admin).role, "admin", "sessions and settings survive reopen"); assert.equal(reopened.settings().invitationRequired, true); reopened.close();
+  time += 31 * 86400000;
+  assert.equal((await call("/api/protected", { token: admin })).status, 401);
+  for (let n = 0; n < 21; n++) {
+    const response = await call("/api/accounts/login", { method: "POST", remote: "198.51.100.8", headers: { "x-forwarded-for": `10.0.0.${n}` }, body: { username: "no-user", password: "wrong" } });
+    assert.equal(response.status, n < 20 ? 401 : 429);
+  }
+  console.log("accounts: ok (registration, bootstrap, RBAC, invitation concurrency/rollback/expiry, session revocation, persistence, CSRF, native CORS, throttling)");
+} finally { await fixture.close(); }

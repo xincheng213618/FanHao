@@ -1,5 +1,6 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
-import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
+import { updateCachedWorkDetail } from "./detail-cache.js";
+import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
 import { syncFavoriteButton } from "./favorite-folders.js?v=20260811-favorite-folders-02";
 export function createWorkActions(deps) {
@@ -12,6 +13,7 @@ export function createWorkActions(deps) {
     onUserStateChange,
     renderMessage, renderWorkDetail, workMove
   } = deps;
+  const updateCachedDetail = (work, baseUrl = getActiveUrl(), accountScope) => updateCachedWorkDetail(work, baseUrl, accountScope);
 
   function createActionRow(work) {
     const actions = document.createElement("div");
@@ -151,6 +153,8 @@ export function createWorkActions(deps) {
 
   async function toggleFavorite(work, button) {
     const activeBaseUrl = String(getActiveUrl() || "").replace(/\/+$/u, "");
+    const accountScope = captureAccountOwner(activeBaseUrl);
+    const cacheWork = structuredClone(work);
     const wasFavorite = Boolean(work.favorite);
     button.disabled = true;
     button.classList.add("pending");
@@ -159,6 +163,7 @@ export function createWorkActions(deps) {
       const data = favoriteFolders
         ? await favoriteFolders.toggleFavorite(work, () => syncFavoriteButton(button, work))
         : await postJson(activeBaseUrl, `/api/favorites/${encodeURIComponent(work.id)}`);
+      if (!isAccountOwnerCurrent(accountScope)) throw accountChangedError();
       if (!favoriteFolders) {
         work.favorite = Boolean(data.favorite);
         work.favoriteFolderId = String(data.favoriteFolder?.folderId || "");
@@ -166,7 +171,9 @@ export function createWorkActions(deps) {
       }
       syncFavoriteButton(button, work);
       if (!favoriteFolders && data.user) onUserStateChange?.(data.user);
-      if (activeBaseUrl) updateCachedDetail(work, activeBaseUrl).catch(() => {});
+      Object.assign(cacheWork, { favorite: Boolean(data.favorite), favoriteFolderId: String(data.favoriteFolder?.folderId || ""),
+        favoriteFolderName: String(data.favoriteFolder?.folderName || "") });
+      if (activeBaseUrl) updateCachedDetail(cacheWork, activeBaseUrl, accountScope).catch(() => {});
     } catch (error) {
       syncFavoriteButton(button, work);
       renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
@@ -175,13 +182,6 @@ export function createWorkActions(deps) {
       button.classList.remove("pending");
       syncFavoriteButton(button, work);
     }
-  }
-
-  async function updateCachedDetail(work, baseUrl = getActiveUrl()) {
-    if (!work?.id) return null;
-    const path = `/api/works/${encodeURIComponent(work.id)}`;
-    const cached = await readCachedJson(baseUrl, path).catch(() => null);
-    return writeCachedJson(baseUrl, path, { ...(cached?.payload || {}), work });
   }
 
   return { createActionRow };

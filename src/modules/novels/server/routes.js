@@ -222,7 +222,11 @@ export async function routeNovelApi(req, res, url, deps) {
   const chapterMatch = /^\/api\/novels\/([^/]+)\/chapters\/([^/]+)$/.exec(url.pathname);
   if (chapterMatch && req.method === "GET") {
     try {
-      const data = novelStore.chapterDetail(decodeURIComponent(chapterMatch[1]), decodeURIComponent(chapterMatch[2]));
+      const options = {};
+      for (const key of ["sourceRealm", "catalogRevision", "chapterId"]) {
+        if (url.searchParams.has(key)) options[key] = url.searchParams.get(key);
+      }
+      const data = novelStore.chapterDetail(decodeURIComponent(chapterMatch[1]), decodeURIComponent(chapterMatch[2]), options);
       if (!data) {
         notFound(res);
         return true;
@@ -284,7 +288,8 @@ export async function routeNovelApi(req, res, url, deps) {
   if (bookMatch && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const deleted = novelStore.deleteBook(decodeURIComponent(bookMatch[1]));
+      const sourceRealm = url.searchParams.get("sourceRealm");
+      const deleted = novelStore.deleteBook(decodeURIComponent(bookMatch[1]), sourceRealm === null ? {} : { sourceRealm });
       if (!deleted) {
         notFound(res);
         return true;

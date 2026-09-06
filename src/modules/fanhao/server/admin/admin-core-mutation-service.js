@@ -1727,7 +1727,8 @@ export function createAdminCoreMutationService({
       createdPerson: plan.createdPerson ? { id: plan.createdPerson.id, name: plan.createdPerson.name, created: plan.createdPerson.created } : null,
       before: plan.before || [],
       person: nextPerson ? publicPerson(nextPerson) : publicPerson(plan.targetPerson),
-      work: nextWork ? publicWork(nextWork, true) : null
+      // This result is persisted in the shared job journal, outside an account's library.
+      work: nextWork ? publicWork(nextWork, true, { includeUserState: false }) : null
     };
   }
 

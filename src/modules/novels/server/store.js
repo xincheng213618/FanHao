@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { reconcileChapters } from "./chapter-identity.js";
 
 const DEFAULT_LIMIT = 5000;
 const MAX_LIMIT = 5000;
@@ -9,6 +10,11 @@ const MAX_CHAPTER_CHARS = 12000;
 const MAX_UPLOAD_TEXT_CHARS = 50 * 1024 * 1024;
 const UPLOAD_SOURCE_ROOT = "上传";
 const COLLECTION_SOURCE_ROOT = "网页采集";
+const LIBRARY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index AS progress_chapter_index,
+  s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
+  s.catalog_revision AS progress_revision, s.status AS progress_status,
+  s.reason AS progress_reason, s.anchor_json AS progress_anchor, s.candidate_json AS progress_candidate`;
 
 export function createNovelStore(options = {}) {
   const dbPath = options.dbPath;
@@ -18,8 +24,10 @@ export function createNovelStore(options = {}) {
   function getDb() {
     if (!db) {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      db = new DatabaseSync(dbPath);
-      ensureSchema(db);
+      const candidate = new DatabaseSync(dbPath);
+      try { ensureSchema(candidate); }
+      catch (error) { candidate.close(); throw error; }
+      db = candidate;
     }
     return db;
   }
@@ -33,6 +41,10 @@ export function createNovelStore(options = {}) {
     }
   }
 
+  function withReadDb(callback) {
+    return withDb(database => inReadSnapshot(database, callback));
+  }
+
   function invalidate() {
     if (!db) return;
     try {
@@ -42,10 +54,11 @@ export function createNovelStore(options = {}) {
   }
 
   function summary() {
-    return withDb((database) => summaryFromDb(database));
+    return withReadDb((database) => summaryFromDb(database));
   }
 
   function summaryFromDb(database) {
+    const sourceRealm = sourceRealmFromDb(database);
     const totals =
       database
         .prepare(
@@ -86,7 +99,7 @@ export function createNovelStore(options = {}) {
     const recent = database
       .prepare(
         `
-        SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+        SELECT b.*, ${PROGRESS_COLUMNS}
         FROM novel_reading_state s
         JOIN novel_books b ON b.id = s.book_id
         WHERE b.status = 'ok'
@@ -95,8 +108,9 @@ export function createNovelStore(options = {}) {
       `
       )
       .all()
-      .map(publicBook);
+      .map((row) => publicBook(row, sourceRealm));
     return {
+      sourceRealm,
       dbPath,
       scannedAt: metaValue(database, "scanned_at"),
       roots,
@@ -113,8 +127,10 @@ export function createNovelStore(options = {}) {
     };
   }
 
-  function listBooks(url) {
-    return withDb((database) => {
+  function listBooks(url, existingDatabase = null) {
+    const run = existingDatabase ? callback => callback(existingDatabase) : withReadDb;
+    return run((database) => {
+      const sourceRealm = sourceRealmFromDb(database);
       const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
       const category = String(url.searchParams.get("category") || "all").trim() || "all";
       const author = String(url.searchParams.get("author") || "").trim();
@@ -151,7 +167,7 @@ export function createNovelStore(options = {}) {
       const rows = database
         .prepare(
           `
-          SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+          SELECT b.*, ${PROGRESS_COLUMNS}
           FROM novel_books b
           LEFT JOIN novel_reading_state s ON s.book_id = b.id
           ${where}
@@ -173,7 +189,8 @@ export function createNovelStore(options = {}) {
         .all()
         .map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) }));
       return {
-        books: rows.map(publicBook),
+        sourceRealm,
+        books: rows.map((row) => publicBook(row, sourceRealm)),
         total: Number(countRow?.count || 0),
         limit,
         offset,
@@ -189,7 +206,8 @@ export function createNovelStore(options = {}) {
   }
 
   function listAuthors(url) {
-    return withDb((database) => {
+    return withReadDb((database) => {
+      const sourceRealm = sourceRealmFromDb(database);
       const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
       const sort = normalizeAuthorSort(url.searchParams.get("sort"));
       const limit = clampInteger(url.searchParams.get("limit"), 5000, 1, 5000);
@@ -230,6 +248,7 @@ export function createNovelStore(options = {}) {
           updatedAt: row.updated_at || ""
         }));
       return {
+        sourceRealm,
         authors,
         total: Number(total?.count || 0),
         query,
@@ -246,8 +265,8 @@ export function createNovelStore(options = {}) {
     if (!author) throw httpError(400, "作者名不能为空");
     const requestUrl = new URL(url.toString());
     requestUrl.searchParams.set("author", author);
-    const page = listBooks(requestUrl);
-    const profile = withDb((database) => {
+    return withReadDb((database) => {
+      const page = listBooks(requestUrl, database);
       const row = database
         .prepare(
           `
@@ -264,7 +283,7 @@ export function createNovelStore(options = {}) {
         `
         )
         .get(author);
-      return row
+      const profile = row
         ? {
             name: row.name || author,
             bookCount: Number(row.book_count || 0),
@@ -274,20 +293,20 @@ export function createNovelStore(options = {}) {
             updatedAt: row.updated_at || ""
           }
         : null;
+      if (!profile) return null;
+      return { ...page, author: profile };
     });
-    if (!profile) return null;
-    return { ...page, author: profile };
   }
 
   function bookDetail(bookId) {
-    return withDb((database) => bookDetailFromDb(database, bookId));
+    return withReadDb((database) => bookDetailFromDb(database, bookId));
   }
 
   function bookMeta(bookId) {
-    return withDb((database) => {
+    return withReadDb((database) => {
       const book = bookRecordFromDb(database, bookId);
       return book
-        ? { book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
+        ? { sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision, book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
         : null;
     });
   }
@@ -332,8 +351,11 @@ export function createNovelStore(options = {}) {
     });
   }
 
-  function deleteBook(bookId) {
+  function deleteBook(bookId, { sourceRealm } = {}) {
     return withDb((database) => {
+      if (sourceRealm !== undefined && sourceRealm !== sourceRealmFromDb(database)) {
+        throw httpError(409, "小说库来源已变化，请重新打开这本书后再删除");
+      }
       const book = database
         .prepare("SELECT id, title, source_path FROM novel_books WHERE id = ? AND status = 'ok'")
         .get(bookId);
@@ -372,29 +394,36 @@ export function createNovelStore(options = {}) {
     const book = bookRecordFromDb(database, bookId);
     if (!book) return null;
     return {
+      sourceRealm: book.sourceRealm,
+      catalogRevision: book.catalogRevision,
       book,
       chapters: chapterList(database, bookId)
     };
   }
 
-  function bookRecordFromDb(database, bookId) {
+  function bookRecordFromDb(database, bookId, { includeRealm = true } = {}) {
+    if (!includeRealm) {
+      const row = database.prepare("SELECT * FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
+      return row ? publicBook(row) : null;
+    }
     const row = database
       .prepare(
         `
-        SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+        SELECT b.*, ${PROGRESS_COLUMNS}
         FROM novel_books b
         LEFT JOIN novel_reading_state s ON s.book_id = b.id
         WHERE b.id = ? AND b.status = 'ok'
       `
       )
       .get(bookId);
-    return row ? publicBook(row) : null;
+    return row ? publicBook(row, includeRealm ? sourceRealmFromDb(database) : undefined) : null;
   }
 
-  function chapterDetail(bookId, chapterIndex) {
-    return withDb((database) => {
+  function chapterDetail(bookId, chapterIndex, options = {}) {
+    return withReadDb((database) => {
       const book = bookRecordFromDb(database, bookId);
       if (!book) return null;
+      checkBookPreconditions(book, options);
       const chapter = database
         .prepare(
           `
@@ -405,6 +434,7 @@ export function createNovelStore(options = {}) {
         )
         .get(bookId, clampInteger(chapterIndex, 1, 1, Number.MAX_SAFE_INTEGER));
       if (!chapter) return null;
+      if (options.chapterId !== undefined && options.chapterId !== chapter.id) throw httpError(409, "章节已变化，请刷新目录");
       const previous = database
         .prepare(
           `
@@ -428,6 +458,8 @@ export function createNovelStore(options = {}) {
         )
         .get(bookId, chapter.chapter_index);
       return {
+        sourceRealm: book.sourceRealm,
+        catalogRevision: book.catalogRevision,
         book,
         chapter: publicChapter(chapter, true),
         chapters: [],
@@ -440,8 +472,12 @@ export function createNovelStore(options = {}) {
   }
 
   function catalog(bookId, url) {
-    return withDb((database) => {
+    return withReadDb((database) => {
       const book = bookRecordFromDb(database, bookId);
+      if (book) checkBookPreconditions(book, {
+        sourceRealm: url.searchParams.has("sourceRealm") ? url.searchParams.get("sourceRealm") : undefined,
+        catalogRevision: url.searchParams.has("catalogRevision") ? url.searchParams.get("catalogRevision") : undefined
+      });
       if (!book) return null;
       const query = String(url?.searchParams?.get("q") || "").replace(/\s+/g, " ").trim().slice(0, 80);
       const order = String(url?.searchParams?.get("order") || "asc").toLowerCase() === "desc" ? "desc" : "asc";
@@ -481,6 +517,8 @@ export function createNovelStore(options = {}) {
         .all(...params, limit, offset);
       const chapters = rows.map((row) => publicChapter(row, false));
       return {
+        sourceRealm: book.sourceRealm,
+        catalogRevision: book.catalogRevision,
         bookId,
         chapters,
         total: Number(book.chapterCount || 0),
@@ -497,33 +535,59 @@ export function createNovelStore(options = {}) {
   }
 
   function saveProgress(bookId, body = {}) {
-    return withDb((database) => {
-      const chapterIndex = clampInteger(body.chapterIndex ?? body.chapter_index, 1, 1, Number.MAX_SAFE_INTEGER);
-      const chapter = database.prepare("SELECT id, chapter_index FROM novel_chapters WHERE book_id = ? AND chapter_index = ?").get(bookId, chapterIndex);
+    return withDb((database) => inTransaction(database, "BEGIN IMMEDIATE", () => {
+      if (body.sourceRealm !== undefined && body.sourceRealm !== sourceRealmFromDb(database)) {
+        throw httpError(409, "小说库来源已变化，请重新打开这本书后再保存进度");
+      }
+      const book = database.prepare("SELECT catalog_revision, legacy_write_allowed FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
+      if (!book) return null;
+      const saved = database.prepare("SELECT status FROM novel_reading_state WHERE book_id = ?").get(bookId);
+      const modern = body.catalogRevision !== undefined || body.chapterId !== undefined || !book.legacy_write_allowed || (saved && saved.status !== "resolved");
+      let chapter;
+      if (modern) {
+        if (body.catalogRevision !== book.catalog_revision || typeof body.chapterId !== "string" || !body.chapterId) {
+          throw httpError(409, "目录版本已变化，请刷新后再保存进度");
+        }
+        chapter = database.prepare("SELECT id, chapter_index FROM novel_chapters WHERE book_id = ? AND id = ?").get(bookId, body.chapterId);
+        const suppliedIndex = body.chapterIndex ?? body.chapter_index;
+        if (!chapter || (suppliedIndex !== undefined && suppliedIndex !== chapter.chapter_index)) throw httpError(409, "章节已变化，请刷新后再保存进度");
+      } else {
+        // Compatibility only before this book's first v5 replacement. An index
+        // alone cannot prove which historic snapshot an old client displayed.
+        const chapterIndex = clampInteger(body.chapterIndex ?? body.chapter_index, 1, 1, Number.MAX_SAFE_INTEGER);
+        chapter = database.prepare("SELECT id, chapter_index FROM novel_chapters WHERE book_id = ? AND chapter_index = ?").get(bookId, chapterIndex);
+      }
       if (!chapter) return null;
-      const ratio = Math.max(0, Math.min(1, Number(body.scrollRatio ?? body.scroll_ratio ?? 0) || 0));
+      const suppliedRatio = body.scrollRatio ?? body.scroll_ratio ?? 0;
+      if (modern && (typeof suppliedRatio !== "number" || !Number.isFinite(suppliedRatio) || suppliedRatio < 0 || suppliedRatio > 1)) {
+        throw httpError(400, "阅读位置无效");
+      }
+      const ratio = Math.max(0, Math.min(1, Number(suppliedRatio) || 0));
       const updatedAt = new Date().toISOString();
       database
         .prepare(
           `
-          INSERT INTO novel_reading_state (book_id, chapter_id, chapter_index, scroll_ratio, updated_at)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO novel_reading_state (book_id, chapter_id, chapter_index, scroll_ratio, updated_at, catalog_revision, status, reason, anchor_json, candidate_json)
+          VALUES (?, ?, ?, ?, ?, ?, 'resolved', '', NULL, NULL)
           ON CONFLICT(book_id) DO UPDATE SET
             chapter_id = excluded.chapter_id,
             chapter_index = excluded.chapter_index,
             scroll_ratio = excluded.scroll_ratio,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            catalog_revision = excluded.catalog_revision, status = 'resolved', reason = '', anchor_json = NULL, candidate_json = NULL
         `
         )
-        .run(bookId, chapter.id, Number(chapter.chapter_index), ratio, updatedAt);
-      return { bookId, chapterId: chapter.id, chapterIndex: Number(chapter.chapter_index), scrollRatio: ratio, updatedAt };
-    });
+        .run(bookId, chapter.id, Number(chapter.chapter_index), ratio, updatedAt, book.catalog_revision);
+      return { bookId, status: "resolved", chapterId: chapter.id, chapterIndex: Number(chapter.chapter_index), scrollRatio: ratio, updatedAt, catalogRevision: book.catalog_revision };
+    }));
   }
 
   function openDownload(bookId) {
     const database = new DatabaseSync(dbPath, { readOnly: true });
     try {
-      const book = bookRecordFromDb(database, bookId);
+      // This internal DTO only supplies TXT headers; downloads remain read-only
+      // even for a legacy database which has not yet received a library_id.
+      const book = bookRecordFromDb(database, bookId, { includeRealm: false });
       if (!book) {
         database.close();
         return null;
@@ -577,21 +641,21 @@ export function createNovelStore(options = {}) {
   function uploadBook(body = {}) {
     return withDb((database) => {
       const bookId = uploadBookIntoDb(database, body);
-      return bookDetailFromDb(database, bookId);
+      return inReadSnapshot(database, () => bookDetailFromDb(database, bookId));
     });
   }
 
   function reimportBook(bookId, body = {}) {
     return withDb((database) => {
       const importedBookId = reimportBookIntoDb(database, bookId, body);
-      return importedBookId ? bookDetailFromDb(database, importedBookId) : null;
+      return importedBookId ? inReadSnapshot(database, () => bookDetailFromDb(database, importedBookId)) : null;
     });
   }
 
   function importCollectedBook(body = {}) {
     return withDb((database) => {
       const bookId = importCollectedBookIntoDb(database, body);
-      return bookDetailFromDb(database, bookId);
+      return inReadSnapshot(database, () => bookDetailFromDb(database, bookId));
     });
   }
 
@@ -617,9 +681,11 @@ export function createNovelStore(options = {}) {
 }
 
 function ensureSchema(db) {
+  const existingIdentity = validateExistingLibraryMetadata(db);
+  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL");
+  inTransaction(db, "BEGIN IMMEDIATE", () => {
+  validateExistingLibraryMetadata(db); // The writer lock may have waited behind an upgrade.
   db.exec(`
-    PRAGMA busy_timeout = 5000;
-    PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS novel_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -688,7 +754,85 @@ function ensureSchema(db) {
   if (schemaVersion < 2) {
     db.exec("DROP TABLE IF EXISTS novel_search");
   }
-  if (schemaVersion < 4) db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')").run();
+  if (schemaVersion < 5) migrateChapterSchema(db);
+  // Concurrent initializers may propose different UUIDs; only the persisted
+  // winner is ever exposed. Neither URLs nor book/file identities define a library.
+  if (!existingIdentity) {
+    db.prepare("INSERT INTO novel_meta (key, value) VALUES ('library_id', ?) ON CONFLICT(key) DO NOTHING").run(crypto.randomUUID());
+  }
+  sourceRealmFromDb(db);
+  if (schemaVersion < 5) db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '5')").run();
+  });
+}
+
+function validateExistingLibraryMetadata(db) {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'novel_meta'").get()) return;
+  const versionRow = db.prepare("SELECT value FROM novel_meta WHERE key = 'schema_version'").get();
+  if (versionRow) {
+    const version = Number(versionRow.value);
+    if (!Number.isInteger(version) || version < 0) throw new Error("小说库版本标记无效，未修改原库");
+    if (version > 5) throw new Error("小说库来自更新版本，当前程序不能修改");
+  }
+  const identity = db.prepare("SELECT value FROM novel_meta WHERE key = 'library_id'").get();
+  if (identity && (typeof identity.value !== "string" || !LIBRARY_ID_PATTERN.test(identity.value))) {
+    throw new Error("小说库来源身份无效，未重新分配身份或修改原库");
+  }
+  return identity?.value;
+}
+
+function sourceRealmFromDb(db) {
+  const identity = db.prepare("SELECT value FROM novel_meta WHERE key = 'library_id'").get();
+  if (!identity || typeof identity.value !== "string" || !LIBRARY_ID_PATTERN.test(identity.value)) {
+    throw new Error("小说库缺少有效的持久来源身份");
+  }
+  return `server:${identity.value}`;
+}
+
+function inTransaction(database, begin, callback) {
+  database.exec(begin);
+  try {
+    const result = callback(database);
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function inReadSnapshot(database, callback) {
+  return inTransaction(database, "BEGIN", callback);
+}
+
+function checkBookPreconditions(book, options) {
+  if (options.sourceRealm !== undefined && options.sourceRealm !== book.sourceRealm) throw httpError(409, "小说库来源已变化，请重新打开");
+  if (options.catalogRevision !== undefined && options.catalogRevision !== book.catalogRevision) throw httpError(409, "目录版本已变化，请刷新目录");
+}
+
+function migrateChapterSchema(database) {
+  // DDL, all backfill and the version marker share the caller's transaction.
+  // Do not rename legacy chapter IDs or rewrite any pre-v5 progress columns.
+  database.exec(`
+    ALTER TABLE novel_books ADD COLUMN catalog_revision TEXT;
+    ALTER TABLE novel_books ADD COLUMN legacy_write_allowed INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE novel_reading_state ADD COLUMN catalog_revision TEXT;
+    ALTER TABLE novel_reading_state ADD COLUMN status TEXT NOT NULL DEFAULT 'unresolved';
+    ALTER TABLE novel_reading_state ADD COLUMN reason TEXT NOT NULL DEFAULT 'legacy_unverified';
+    ALTER TABLE novel_reading_state ADD COLUMN anchor_json TEXT;
+    ALTER TABLE novel_reading_state ADD COLUMN candidate_json TEXT;
+  `);
+  const invalid = database.prepare(`SELECT c.id FROM novel_chapters c LEFT JOIN novel_books b ON b.id = c.book_id
+    WHERE b.id IS NULL OR typeof(c.id) != 'text' OR c.id = '' OR typeof(c.chapter_index) != 'integer'
+      OR c.chapter_index < 1 OR typeof(c.title) != 'text' OR typeof(c.content) != 'text' LIMIT 1`).get();
+  if (invalid) throw new Error("旧章节记录损坏，升级已回滚");
+  for (const book of database.prepare("SELECT id FROM novel_books").iterate()) {
+    database.prepare("UPDATE novel_books SET catalog_revision = ? WHERE id = ?").run(crypto.randomUUID(), book.id);
+  }
+  for (const row of database.prepare("SELECT * FROM novel_reading_state").iterate()) {
+    const anchor = { chapterId: row.chapter_id ?? null, chapterIndex: row.chapter_index ?? null,
+      scrollRatio: row.scroll_ratio ?? null, catalogRevision: null };
+    database.prepare("UPDATE novel_reading_state SET anchor_json = ? WHERE book_id = ?").run(JSON.stringify(anchor), row.book_id);
+  }
 }
 
 function metaValue(db, key) {
@@ -726,8 +870,7 @@ function uploadBookIntoDb(database, body = {}) {
   const uploadKey = `${Date.now()}-${crypto.randomBytes(5).toString("hex")}`;
   const sourcePath = `upload://${uploadKey}/${fileName}`;
   const bookId = crypto.createHash("sha1").update(sourcePath).digest("hex").slice(0, 20);
-  const chapters = splitUploadedChapters(text);
-  const firstChapter = chapters[0] || null;
+  let chapters = splitUploadedChapters(text);
   const latestChapter = chapters[chapters.length - 1] || null;
   const summary = summarizeNovelText(chapters.slice(0, 2).map((chapter) => chapter.content).join("\n\n") || text);
   const sizeBytes = clampInteger(body.sizeBytes ?? body.size_bytes, Buffer.byteLength(text, "utf8"), 0, Number.MAX_SAFE_INTEGER);
@@ -735,6 +878,8 @@ function uploadBookIntoDb(database, body = {}) {
 
   database.exec("BEGIN IMMEDIATE");
   try {
+    const replacement = prepareChapterReplacement(database, bookId, chapters);
+    chapters = replacement.chapters;
     database
       .prepare(
         `
@@ -759,8 +904,8 @@ function uploadBookIntoDb(database, body = {}) {
         body.encoding || "browser-text",
         text.length,
         chapters.length,
-        firstChapter ? chapterId(bookId, firstChapter.index) : "",
-        latestChapter ? chapterId(bookId, latestChapter.index) : "",
+        chapters[0]?.id || "",
+        chapters[chapters.length - 1]?.id || "",
         latestChapter?.title || "",
         summary,
         JSON.stringify(tags),
@@ -776,9 +921,10 @@ function uploadBookIntoDb(database, body = {}) {
     `
     );
     for (const chapter of chapters) {
-      const id = chapterId(bookId, chapter.index);
+      const id = chapter.id;
       insertChapter.run(id, bookId, chapter.index, chapter.title, chapter.content, chapter.content.length, now);
     }
+    finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_uploaded_at', ?)").run(now);
     database.exec("COMMIT");
@@ -817,8 +963,7 @@ function reimportBookIntoDb(database, bookId, body = {}) {
       ? body.category || ""
       : current.category || UPLOAD_SOURCE_ROOT
   ).trim().slice(0, 80) || UPLOAD_SOURCE_ROOT;
-  const chapters = splitUploadedChapters(text);
-  const firstChapter = chapters[0];
+  let chapters = splitUploadedChapters(text);
   const latestChapter = chapters[chapters.length - 1];
   const summary = String(
     Object.hasOwn(body, "summary")
@@ -839,6 +984,10 @@ function reimportBookIntoDb(database, bookId, body = {}) {
 
   database.exec("BEGIN IMMEDIATE");
   try {
+    const lockedBook = database.prepare("SELECT catalog_revision FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
+    if (!lockedBook || lockedBook.catalog_revision !== current.catalog_revision) throw httpError(409, "书籍已删除或目录已更新，请重新打开后再导入");
+    const replacement = prepareChapterReplacement(database, bookId, chapters);
+    chapters = replacement.chapters;
     database.prepare("DELETE FROM novel_chapters WHERE book_id = ?").run(bookId);
     database.prepare("DELETE FROM novel_book_deletions WHERE book_id = ?").run(bookId);
     database
@@ -863,8 +1012,8 @@ function reimportBookIntoDb(database, bookId, body = {}) {
         body.encoding || current.encoding || "browser-text",
         text.length,
         chapters.length,
-        chapterId(bookId, firstChapter.index),
-        chapterId(bookId, latestChapter.index),
+        chapters[0].id,
+        chapters[chapters.length - 1].id,
         latestChapter.title,
         summary,
         JSON.stringify(tags),
@@ -880,7 +1029,7 @@ function reimportBookIntoDb(database, bookId, body = {}) {
     );
     for (const chapter of chapters) {
       insertChapter.run(
-        chapterId(bookId, chapter.index),
+        chapter.id,
         bookId,
         chapter.index,
         chapter.title,
@@ -900,7 +1049,7 @@ function reimportBookIntoDb(database, bookId, body = {}) {
           bookId
         );
     }
-    clampReadingProgress(database, bookId, chapters.length);
+    finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_reimported_at', ?)").run(now);
     database.exec("COMMIT");
@@ -920,12 +1069,11 @@ function importCollectedBookIntoDb(database, body = {}) {
   const author = String(body.author || "").trim().slice(0, 80);
   const category = String(body.category || COLLECTION_SOURCE_ROOT).trim().slice(0, 80) || COLLECTION_SOURCE_ROOT;
   const adapterName = String(body.adapterName || body.adapter_name || body.adapterId || "").trim().slice(0, 80);
-  const chapters = normalizeCollectedChapters(body.chapters);
+  let chapters = normalizeCollectedChapters(body.chapters);
   const totalChars = chapters.reduce((total, chapter) => total + chapter.content.length, 0);
   if (totalChars > MAX_UPLOAD_TEXT_CHARS) throw httpError(413, "采集正文超过 50 MiB 上限");
   const sourcePath = `collector://${crypto.createHash("sha1").update(sourceUrl).digest("hex")}`;
   const bookId = crypto.createHash("sha1").update(sourcePath).digest("hex").slice(0, 20);
-  const firstChapter = chapters[0];
   const latestChapter = chapters[chapters.length - 1];
   const summary = String(body.summary || summarizeNovelText(chapters.slice(0, 2).map((chapter) => chapter.content).join("\n\n")))
     .replace(/\s+/g, " ")
@@ -940,6 +1088,8 @@ function importCollectedBookIntoDb(database, body = {}) {
 
   database.exec("BEGIN IMMEDIATE");
   try {
+    const replacement = prepareChapterReplacement(database, bookId, chapters);
+    chapters = replacement.chapters;
     database.prepare("DELETE FROM novel_chapters WHERE book_id = ?").run(bookId);
     database.prepare("DELETE FROM novel_book_deletions WHERE book_id = ?").run(bookId);
     database
@@ -987,8 +1137,8 @@ function importCollectedBookIntoDb(database, body = {}) {
         "utf-8",
         totalChars,
         chapters.length,
-        chapterId(bookId, firstChapter.index),
-        chapterId(bookId, latestChapter.index),
+        chapters[0].id,
+        chapters[chapters.length - 1].id,
         latestChapter.title,
         summary,
         JSON.stringify(tags),
@@ -1003,7 +1153,7 @@ function importCollectedBookIntoDb(database, body = {}) {
     );
     for (const chapter of chapters) {
       insertChapter.run(
-        chapterId(bookId, chapter.index),
+        chapter.id,
         bookId,
         chapter.index,
         chapter.title,
@@ -1023,7 +1173,7 @@ function importCollectedBookIntoDb(database, body = {}) {
           bookId
         );
     }
-    clampReadingProgress(database, bookId, chapters.length);
+    finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_collected_at', ?)").run(now);
     database.exec("COMMIT");
@@ -1037,32 +1187,34 @@ function importCollectedBookIntoDb(database, body = {}) {
   return bookId;
 }
 
-function clampReadingProgress(database, bookId, chapterCount) {
-  const progress = database
-    .prepare("SELECT chapter_index, scroll_ratio, updated_at FROM novel_reading_state WHERE book_id = ?")
-    .get(bookId);
+function prepareChapterReplacement(database, bookId, incomingChapters) {
+  const book = database.prepare("SELECT catalog_revision FROM novel_books WHERE id = ?").get(bookId);
+  const oldChapters = database.prepare("SELECT id, chapter_index AS 'index', title, content FROM novel_chapters WHERE book_id = ? ORDER BY chapter_index").all(bookId);
+  const row = database.prepare("SELECT * FROM novel_reading_state WHERE book_id = ?").get(bookId);
+  const revision = crypto.randomUUID();
+  const progress = row ? {
+    status: row.status, reason: row.reason, chapterId: row.chapter_id, chapterIndex: row.chapter_index,
+    scrollRatio: row.scroll_ratio, catalogRevision: row.catalog_revision,
+    ...(row.anchor_json ? { previous: JSON.parse(row.anchor_json) } : {}),
+    ...(oldChapters.find(chapter => chapter.id === row.chapter_id) ? { title: oldChapters.find(chapter => chapter.id === row.chapter_id).title } : {})
+  } : null;
+  const result = reconcileChapters({ oldChapters, incomingChapters, oldRevision: book?.catalog_revision, newRevision: revision, progress });
+  return { ...result, revision, existed: Boolean(book) };
+}
+
+function finishChapterReplacement(database, bookId, replacement) {
+  database.prepare("UPDATE novel_books SET catalog_revision = ?, legacy_write_allowed = ? WHERE id = ?")
+    .run(replacement.revision, replacement.existed ? 0 : 1, bookId);
+  const progress = replacement.progress;
   if (!progress) return;
-  if (chapterCount <= 0) {
-    database.prepare("DELETE FROM novel_reading_state WHERE book_id = ?").run(bookId);
-    return;
+  if (progress.status === "resolved") {
+    database.prepare(`UPDATE novel_reading_state SET chapter_id = ?, chapter_index = ?, scroll_ratio = ?,
+      catalog_revision = ?, status = 'resolved', reason = '', anchor_json = NULL, candidate_json = NULL WHERE book_id = ?`)
+      .run(progress.chapterId, progress.chapterIndex, progress.scrollRatio, progress.catalogRevision, bookId);
+  } else {
+    database.prepare("UPDATE novel_reading_state SET status = ?, reason = ?, anchor_json = ?, candidate_json = ? WHERE book_id = ?")
+      .run(progress.status, progress.reason, JSON.stringify(progress.previous), progress.candidate ? JSON.stringify(progress.candidate) : null, bookId);
   }
-  const previousIndex = Math.max(1, Number(progress.chapter_index || 1));
-  const chapterIndex = Math.min(previousIndex, chapterCount);
-  database
-    .prepare(
-      `
-      UPDATE novel_reading_state
-      SET chapter_id = ?, chapter_index = ?, scroll_ratio = ?, updated_at = ?
-      WHERE book_id = ?
-    `
-    )
-    .run(
-      chapterId(bookId, chapterIndex),
-      chapterIndex,
-      chapterIndex === previousIndex ? Number(progress.scroll_ratio || 0) : 0,
-      progress.updated_at || new Date().toISOString(),
-      bookId
-    );
 }
 
 function normalizeCollectedChapters(value) {
@@ -1105,9 +1257,21 @@ function validIsoDate(value) {
   return new Date(text).toISOString();
 }
 
-function publicBook(row) {
+function publicBook(row, sourceRealm) {
+  const resolved = row.progress_status === "resolved" && row.progress_revision === row.catalog_revision;
+  const recovery = row.progress_status && !resolved ? {
+    status: row.progress_status === "needs_review" ? "needs_review" : "unresolved",
+    reason: row.progress_reason || "stale_revision",
+    previous: row.progress_anchor ? JSON.parse(row.progress_anchor) : {
+      chapterId: row.progress_chapter_id ?? null, chapterIndex: row.progress_chapter_index ?? null,
+      scrollRatio: row.progress_scroll_ratio ?? null, catalogRevision: row.progress_revision ?? null
+    },
+    ...(row.progress_candidate ? { candidate: JSON.parse(row.progress_candidate) } : {})
+  } : null;
   return {
     id: row.id,
+    ...(sourceRealm ? { sourceRealm } : {}),
+    catalogRevision: row.catalog_revision || null,
     title: row.title || "",
     author: row.author || "",
     category: row.category || "全部",
@@ -1126,8 +1290,12 @@ function publicBook(row) {
     summary: row.summary || "",
     tags: parseJsonArray(row.tags_json),
     updatedAt: row.updated_at || "",
-    progress: row.progress_chapter_index
+    progressRecovery: recovery,
+    progress: resolved && row.progress_chapter_index
       ? {
+          status: "resolved",
+          chapterId: row.progress_chapter_id,
+          catalogRevision: row.progress_revision,
           chapterIndex: Number(row.progress_chapter_index || 0),
           scrollRatio: Number(row.progress_scroll_ratio || 0),
           updatedAt: row.progress_updated_at || ""
@@ -1324,10 +1492,6 @@ function isChapterTitle(value) {
   const text = String(value || "").trim();
   if (!text || text.length > 90) return false;
   return /^(?:第\s*[\d零〇一二两兩三四五六七八九十百千万萬壹贰貳叁參肆伍陆陸柒捌玖拾佰仟\s]{1,18}\s*(?:章|章节|节|回|话|卷|部|篇|幕)|(?:序章|序言|楔子|正文|尾声|后记|後記|番外|番外篇|外传|外傳|前传|前傳|间章|間章|特别篇|特别章|大结局|全书完|全文完)(?:\s|$|[:：]))/iu.test(text);
-}
-
-function chapterId(bookId, index) {
-  return `${bookId}-${String(index).padStart(5, "0")}`;
 }
 
 function httpError(statusCode, message) {

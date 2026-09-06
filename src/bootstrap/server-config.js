@@ -1,4 +1,6 @@
 import os from "node:os";
+import fs from "node:fs";
+import { loadEnvFile } from "node:process";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -12,6 +14,8 @@ import {
 } from "../platform/server/root-config.js";
 
 const DEFAULT_PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const localEnvPath = path.join(DEFAULT_PROJECT_ROOT, ".env");
+if (fs.existsSync(localEnvPath)) loadEnvFile(localEnvPath);
 
 export function createServerConfig({
   env = process.env,

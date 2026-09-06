@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import threading
@@ -54,6 +55,64 @@ extract_queue: deque[dict[str, Any]] = deque()
 
 
 extract_current_request: dict[str, Any] | None = None
+
+
+EXTRACT_NO_PROGRESS_TIMEOUT_SECONDS = 180
+EXTRACT_PROCESS_STOP_TIMEOUT_SECONDS = 5
+
+
+def _terminate_extract_process(proc: subprocess.Popen[Any]) -> None:
+    """Bound termination to the current extractor and its browser children."""
+    if proc.poll() is not None:
+        return
+    pid = int(getattr(proc, "pid", 0) or 0)
+    if os.name == "nt" and pid > 0:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=EXTRACT_PROCESS_STOP_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=EXTRACT_PROCESS_STOP_TIMEOUT_SECONDS)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _monitor_extract_process(
+    proc: subprocess.Popen[Any],
+    consume_stream: Any,
+    *,
+    no_progress_timeout_seconds: float = EXTRACT_NO_PROGRESS_TIMEOUT_SECONDS,
+) -> str:
+    """Wait for an extractor while bounding a silent Playwright/CDP stall."""
+    last_progress_at = time.monotonic()
+    timeout_seconds = max(1.0, float(no_progress_timeout_seconds))
+    while proc.poll() is None:
+        if bool(consume_stream()):
+            last_progress_at = time.monotonic()
+        if extract_stop_event.is_set():
+            _terminate_extract_process(proc)
+            return "stopped"
+        if time.monotonic() - last_progress_at >= timeout_seconds:
+            _terminate_extract_process(proc)
+            return "stalled"
+        time.sleep(1.0)
+    consume_stream()
+    return ""
 
 
 def _public_request(request: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -323,16 +382,16 @@ def run_extract_job(
         if result.get("full_scan_required") and not full_scan:
             add_event("warn", str(result.get("full_scan_reason") or "作品数明显减少，已安排下次全量确认"))
 
-    def consume_stream() -> None:
+    def consume_stream() -> bool:
         nonlocal offset, partial, total_seen, inserted_total, updated_total, consecutive_existing, incremental_stop_triggered, incremental_stop_reason, profile_aweme_count, target_count_stop_triggered, like_sequence, page_account_status, account_status_restored, banned_event_emitted
         if not stream_path.exists():
-            return
+            return False
         with stream_path.open("rb") as stream:
             stream.seek(offset)
             data = stream.read()
             offset = stream.tell()
         if not data:
-            return
+            return False
         text = partial + data.decode("utf-8", errors="replace")
         lines = text.splitlines(keepends=True)
         if lines and not lines[-1].endswith(("\n", "\r")):
@@ -485,6 +544,7 @@ def run_extract_job(
                     page_account_status = incoming_account_status
                 if total_seen > 0 and page_account_status == "active" and not account_status_restored:
                     account_status_restored = restore_profile_account_if_active(profile_id)
+        return True
 
     try:
         try:
@@ -503,10 +563,15 @@ def run_extract_job(
             )
             with extract_lock:
                 extract_process = proc
-            while proc.poll() is None:
-                consume_stream()
-                time.sleep(1.0)
-            consume_stream()
+            monitor_result = _monitor_extract_process(proc, consume_stream)
+        if monitor_result == "stalled":
+            message = (
+                f"采集连续 {EXTRACT_NO_PROGRESS_TIMEOUT_SECONDS} 秒没有进度，"
+                "已自动重置采集子进程"
+            )
+            update_job(job_id, status="failed", finished_at=now_iso(), message=message)
+            add_event("error", message)
+            return
         if extract_stop_event.is_set():
             if target_count_stop_triggered:
                 deletion_suffix, full_scan_confirmed = finish_full_scan_flag()
@@ -1018,6 +1083,30 @@ def start_following_import(payload: dict[str, Any]) -> dict[str, Any]:
         runner=run_following_import_job,
         args=(url, max_users, scrolls, idle_rounds, headed),
     )
+
+
+def reset_extract() -> dict[str, Any]:
+    """Stop only the current collection request and preserve queued work."""
+    with extract_lock:
+        running = extract_thread is not None and extract_thread.is_alive()
+        proc = extract_process
+        current_job_id = int(extract_job_id or 0)
+        preserved_queued = len(extract_queue)
+        if not running:
+            return {"ok": False, "message": "当前没有采集任务"}
+        extract_cancel_event.set()
+        extract_stop_event.set()
+    if current_job_id > 0:
+        update_job(current_job_id, message="正在重置当前采集；排队任务将保留")
+    if proc is not None and proc.poll() is None:
+        _terminate_extract_process(proc)
+    suffix = f"，保留 {preserved_queued} 个排队任务" if preserved_queued else ""
+    add_event("warn", f"正在重置当前采集{suffix}")
+    return {
+        "ok": True,
+        "job_id": current_job_id or None,
+        "preserved_queued": preserved_queued,
+    }
 
 
 def stop_extract() -> dict[str, Any]:

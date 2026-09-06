@@ -17,6 +17,7 @@ from manager_core.queue import (
     clear_download_queue_changed,
     notify_download_queue_changed,
     queue_pending_count,
+    set_download_queue_change_handler,
     wait_for_download_queue_changed,
 )
 from manager_core import download_supervisor, profiles_links, server
@@ -24,6 +25,7 @@ from manager_core import download_supervisor, profiles_links, server
 
 class DownloadQueueIdleTests(unittest.TestCase):
     def tearDown(self) -> None:
+        set_download_queue_change_handler(None)
         clear_download_queue_changed()
 
     def test_pending_count_is_a_single_read_only_query(self) -> None:
@@ -66,6 +68,14 @@ class DownloadQueueIdleTests(unittest.TestCase):
         finally:
             timer.cancel()
         self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_queue_change_invokes_registered_runtime_repair(self) -> None:
+        repair = MagicMock()
+        set_download_queue_change_handler(repair)
+
+        notify_download_queue_changed()
+
+        repair.assert_called_once_with()
 
     def test_newly_inserted_link_notifies_the_idle_watcher(self) -> None:
         connection = MagicMock()
@@ -182,6 +192,21 @@ class DownloadQueueIdleTests(unittest.TestCase):
             watch_new=True,
             manual=False,
         )
+
+    def test_server_repairs_an_inactive_unguarded_watcher(self) -> None:
+        with (
+            patch.object(server.runtime, "APP_QUIT_REQUESTED", False),
+            patch.object(
+                server.download_manager,
+                "snapshot",
+                return_value={"active": False, "failure_guard": {"active": False}},
+            ),
+            patch.object(server, "start_automatic_downloads", return_value={"ok": True}) as start,
+        ):
+            result = server.ensure_automatic_downloads()
+
+        self.assertTrue(result["started"])
+        start.assert_called_once_with()
 
 
 if __name__ == "__main__":

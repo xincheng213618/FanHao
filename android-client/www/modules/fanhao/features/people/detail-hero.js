@@ -40,9 +40,7 @@ export function createPersonDetailHero(person, options = {}) {
   const workCountUnit = document.createElement("span");
   workCountUnit.textContent = filmographyCount === null ? "部作品" : "部影片";
   workCount.append(workCountPrefix, workCountValue, workCountUnit);
-  const categories = createPersonCategoryStrip(options.categories);
   body.append(name, alias, workCount);
-  if (categories) body.append(categories);
   hero.append(body);
   return hero;
 }
@@ -66,26 +64,4 @@ function personAliasText(person) {
     if (aliases.length >= 3) break;
   }
   return aliases.join(" · ");
-}
-
-function createPersonCategoryStrip(categories = []) {
-  const items = (Array.isArray(categories) ? categories : [])
-    .map((category) => ({
-      count: finiteCount(category?.count),
-      label: String(category?.label || "").trim(),
-      value: String(category?.value || "").trim()
-    }))
-    .filter((category) => category.label && category.count > 0);
-  if (!items.length) return null;
-  const strip = document.createElement("div");
-  strip.className = "person-category-strip";
-  strip.setAttribute("aria-label", "作品分类");
-  for (const category of items) {
-    const chip = document.createElement("span");
-    chip.className = "person-category-chip";
-    if (category.value) chip.dataset.category = category.value;
-    chip.textContent = `${category.label} ${formatNumber(category.count)}`;
-    strip.append(chip);
-  }
-  return strip;
 }

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>视觉记录恢复 · 隔离回归</title>
+  <link rel="stylesheet" href="/base.css">
+  <link rel="stylesheet" href="/tools.css">
+  <style>
+    body { margin: 0; padding: 12px; }
+    main { max-width: 480px; margin: auto; }
+    #fixture { max-width: 480px; margin: 20px auto; padding: 12px; border: 1px dashed var(--line); }
+    #fixture button { min-height: 44px; margin: 4px; }
+    #fixture label, #fixture output { display: block; padding: 6px 0; }
+    #fixture h2 { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header hidden><small id="kicker"></small><h1 id="title"></h1><p id="meta"></p></header>
+  <main id="view"></main>
+  <aside id="fixture" aria-label="合成记录测试控制">
+    <h2>隔离测试 · 不访问设备或真实记录</h2>
+    <label><input id="hold" type="checkbox">延迟原生动作返回</label>
+    <label><input id="delete-fail" type="checkbox">模拟删除失败</label>
+    <label><input id="list-fail" type="checkbox">模拟列表读取失败</label>
+    <label><input id="dark" type="checkbox">深色主题</label>
+    <button id="release">释放原生返回</button><button id="rerender">重新进入我的</button>
+    <output id="calls" aria-live="polite">原生动作调用 0 次</output>
+  </aside>
+  <script type="module">
+    import { createToolViews } from "/tool-views.js";
+    const el = (id) => document.getElementById(id);
+    document.documentElement.dataset.theme = new URL(location.href).searchParams.get("theme") === "dark" ? "dark" : "light";
+    let calls = 0;
+    const held = [];
+    const rows = [
+      { sessionId: "20260830-120000-11111111", kind: "id-card", status: "capturing", canResume: true, canReview: false,
+        nextStep: "ID_BACK", createdAt: 1788062400000, bytes: 442000, files: [{ name: "id-front.jpg" }] },
+      { sessionId: "20260830-120100-22222222", kind: "bank-card", status: "complete", canResume: false, canReview: true,
+        completedAt: 1788062460000, bytes: 248000, files: [{ name: "bank-card-front.jpg" }] },
+      { sessionId: "20260830-120200-33333333", kind: "face-verification", status: "unavailable", canResume: false, canReview: false,
+        createdAt: 1e100, bytes: 556000, issue: "照片已保留，但缺少动作存档，无法安全继续。" }
+    ];
+    async function action(result) {
+      calls += 1;
+      el("calls").textContent = `原生动作调用 ${calls} 次`;
+      if (el("hold").checked) await new Promise((resolve) => held.push(resolve));
+      return result;
+    }
+    window.Capacitor = { Plugins: { FanHaoVisionExploration: {
+      async listSessions() { if (el("list-fail").checked) throw new Error("合成读取失败"); return { sessions: rows.slice() }; },
+      async startDocumentScan() { return action({ canceled: true, preserved: true, discarded: false }); },
+      async startFaceVerification() { return action({ canceled: true, preserved: false, discarded: false }); },
+      async resumeSession({ sessionId }) {
+        const row = rows.find((entry) => entry.sessionId === sessionId);
+        const result = await action({ canceled: false, kind: row.kind, fileCount: 2 });
+        Object.assign(row, { status: "complete", canReview: true, canResume: false });
+        return result;
+      },
+      async openSession() { return action({ opened: true, deleted: false }); },
+      async deleteSession({ sessionId }) {
+        const result = await action({ deleted: !el("delete-fail").checked });
+        if (result.deleted) { const index = rows.findIndex((row) => row.sessionId === sessionId); if (index >= 0) rows.splice(index, 1); }
+        return result;
+      }
+    } } };
+    const views = createToolViews({ els: { viewKicker: el("kicker"), viewTitle: el("title"), viewMeta: el("meta"), viewContent: el("view") },
+      setActiveBottom() {}, openSettings() {} });
+    el("release").onclick = () => held.splice(0).forEach((resolve) => resolve());
+    el("rerender").onclick = () => views.renderTools();
+    el("dark").onchange = () => document.documentElement.dataset.theme = el("dark").checked ? "dark" : "light";
+    views.renderTools();
+    function measureLayout() {
+      if (window.parent === window) return;
+      window.parent.postMessage({ type: "vision-layout", theme: document.documentElement.dataset.theme,
+        viewport: window.innerWidth, pageWidth: document.documentElement.scrollWidth,
+        rows: [...document.querySelectorAll('.vision-exploration-session')].map(e => ({width:e.getBoundingClientRect().width, scrollWidth:e.scrollWidth})),
+        buttons: [...document.querySelectorAll('.vision-exploration-session-actions button')].map(e => ({text:e.textContent,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height}))
+      }, location.origin);
+    }
+    new ResizeObserver(measureLayout).observe(document.documentElement);
+    window.addEventListener('resize', measureLayout);
+  </script>
+</body>
+</html>

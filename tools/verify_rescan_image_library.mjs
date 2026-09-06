@@ -36,6 +36,15 @@ try {
   });
   const firstRun = run();
   assert.equal(firstRun.status, 0, firstRun.stderr || firstRun.stdout);
+  const progressLines = firstRun.stdout.split(/\r?\n/u).filter((line) => line.startsWith("IMAGE_LIBRARY_PROGRESS "));
+  assert(progressLines.length >= 4, "rescan must expose machine-readable progress from scan start through index commit");
+  const progress = progressLines.map((line) => JSON.parse(line.slice("IMAGE_LIBRARY_PROGRESS ".length)));
+  assert.equal(progress[0].phase, "start");
+  assert(progress.some((item) => item.phase === "photo-root" && item.rootIndex === 1 && item.rootTotal === 1));
+  assert(progress.some((item) => item.phase === "write" && item.percent === 94));
+  assert.equal(progress.at(-1).phase, "complete");
+  assert.equal(progress.at(-1).percent, 100);
+  assert.equal(progress.at(-1).photoSets, 1);
   const indexPath = path.join(dataDir, "image-library-index.json");
   const first = JSON.parse(fs.readFileSync(indexPath, "utf8"));
   assert.equal(first.schemaVersion, CURRENT_INDEX_SCHEMA);

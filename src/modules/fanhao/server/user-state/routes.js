@@ -41,6 +41,22 @@ export async function routeUserStateApi(req, res, url, deps) {
     return true;
   }
 
+  const managedFolderMatch = /^\/api\/favorite-folders\/([^/]+)$/.exec(url.pathname);
+  if (managedFolderMatch && ["PATCH", "DELETE"].includes(req.method)) {
+    try {
+      const body = await readJsonBody(req);
+      const folderId = decodeURIComponent(managedFolderMatch[1]);
+      const result = req.method === "PATCH"
+        ? { folder: favoriteStateService.renameFavoriteFolder(folderId, body?.name) }
+        : favoriteStateService.deleteFavoriteFolder(folderId);
+      sendJson(res, 200, { ok: true, ...result, folders: favoriteStateService.publicFavoriteFolders(), user: playbackProgressService.userStateSummary() });
+    } catch (error) {
+      const status = error instanceof URIError ? 400 : error.statusCode || 500;
+      sendJson(res, status, { error: status < 500 ? error.message : "保存收藏夹失败，请重试" });
+    }
+    return true;
+  }
+
   const favoriteFolderMatch = /^\/api\/favorites\/([^/]+)\/folder$/.exec(url.pathname);
   if (favoriteFolderMatch && req.method === "PUT") {
     const workId = decodeURIComponent(favoriteFolderMatch[1]);

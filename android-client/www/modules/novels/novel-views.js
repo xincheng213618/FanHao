@@ -1,7 +1,7 @@
 import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260731-novel-actions-ui-53";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260830-novel-chapters-75";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelEntries, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress } from "../../js/local-novels.js?v=20260702-novel-local-manage-74";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=20260830-novel-chapters-75";
 import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
@@ -50,8 +50,19 @@ export function createNovelViews(context) {
   } = context;
 
   const listState = { ...DEFAULT_QUERY_STATE, sort: readNovelSort(), uploading: false, busyAction: "" };
+  const novelBusyOwners = new Map();
   const localBooks = new Map();
+  const localBookReadVersions = new Map();
+  const localBookProgressVersions = new Map();
+  const remoteSourceRealms = new Map();
+  const remoteSourceReceiptWrites = new Map();
+  const remoteBookOrigins = new WeakMap();
+  let localLibraryVersion = 0;
+  let localLibraryRequestId = 0;
   const selectedLocalBookIds = new Set();
+  let novelPage = null;
+  let recoveryPanel = null;
+  let recoveryExportInFlight = false;
   const catalogState = {
     bookId: "",
     query: "",
@@ -67,12 +78,24 @@ export function createNovelViews(context) {
   let detailCatalogRequestId = 0;
   const detailState = { book: null, cacheEntry: null, chapters: [], progressChapterTitle: "" };
   let importingNativeText = false;
+  let nativeTextDrainRequested = false;
+  let nativeTextRetryTimer = null;
   let cachingBookId = "";
+  let preparingCache = false;
   const prefetchedRemoteChapters = new Map();
   const remoteChapterPrefetchRequests = new Map();
+  const localProgressWriteIds = new Map();
+  const remoteProgressWrites = new Map();
+  let progressWriteId = 0;
   const readerState = {
     active: false,
+    session: null,
+    screen: null,
+    restoreFrame: null,
+    restoreEpoch: 0,
+    restoreRatio: null,
     book: null,
+    bookSourceUrl: null,
     chapter: null,
     progressTimer: null,
     settings: normalizeSettings(readSettings()),
@@ -91,6 +114,260 @@ export function createNovelViews(context) {
   installReaderProgress();
   installNativeTextIntentHandler();
   installReaderLifecycle();
+  installLocalRecoveryLifecycle();
+
+  function beginNovelPage(routeGuard, kind) {
+    closeLocalRecovery(false);
+    const page = { kind, routeGuard, sourceUrl: getActiveUrl(), issue: null, retryBusy: false, localData: null, remoteData: null, remoteCache: null };
+    page.isActive = () => novelPage === page && routeGuard() && page.sourceUrl === getActiveUrl();
+    page.isActive.signal = routeGuard.signal;
+    novelPage = page;
+    return page;
+  }
+
+  function installLocalRecoveryLifecycle() {
+    const leave = () => { novelPage = null; closeLocalRecovery(false); };
+    window.addEventListener("fanhaoViewWillRender", leave);
+    window.addEventListener("fanhaoViewChanged", (event) => {
+      if (!["novels", "novelSearch", "novelDetail", "novelReader"].includes(event.detail?.view)) leave();
+    });
+    window.addEventListener("pagehide", leave);
+  }
+
+  function recordLocalLibraryError(page, error, retry, retryLabel = "重试读取") {
+    if (!page?.isActive()) return;
+    page.issue = { message: String(error?.message || error || "本机小说库读取失败"), retry, retryLabel };
+    renderLocalLibraryErrorCard();
+  }
+
+  function clearLocalLibraryError(page) {
+    if (!page?.isActive()) return;
+    page.issue = null;
+    renderLocalLibraryErrorCard();
+  }
+
+  function renderLocalLibraryErrorCard() {
+    els.viewContent.querySelector("[data-local-novel-error]")?.remove();
+    const page = novelPage;
+    if (!page?.isActive() || !page.issue) return;
+    const card = document.createElement("section");
+    card.className = "novel-local-library-error";
+    card.setAttribute("data-local-novel-error", "");
+    card.setAttribute("role", "alert");
+    const title = document.createElement("strong");
+    title.textContent = "本机小说库暂时无法读取";
+    const message = document.createElement("p");
+    message.textContent = page.issue.message;
+    const explanation = document.createElement("p");
+    explanation.textContent = "读取失败不表示书籍已删除。已有摘要和选择仍保留，但未能刷新；远程内容仍可查看。不会自动清库、修复或上传。";
+    const actions = document.createElement("div");
+    actions.className = "novel-local-recovery-actions";
+    actions.append(actionButton(page.retryBusy ? "正在重试读取…" : page.issue.retryLabel, () => retryLocalLibraryRead(page), page.retryBusy));
+    const recover = actionButton("只读取回旧库正文", () => openLocalRecovery(page, recover));
+    recover.setAttribute("data-local-novel-recovery", "");
+    actions.append(recover);
+    card.append(title, message, explanation, actions);
+    els.viewContent.prepend(card);
+    if (page.kind === "collection") {
+      els.viewMeta.textContent = listState.source === "local"
+        ? (localBooks.size ? `本机库未能刷新 · 保留 ${formatNumber(localBooks.size)} 本旧摘要` : "本机库读取失败 · 数量未知")
+        : "远程内容可查看 · 本机库读取失败，数量未知";
+    }
+  }
+
+  async function retryLocalLibraryRead(page) {
+    if (!page?.isActive() || page.retryBusy || !page.issue?.retry) return;
+    const retry = page.issue.retry;
+    const retryLabel = page.issue.retryLabel;
+    const owner = setNovelBusy("local-retry");
+    page.retryBusy = true;
+    renderLocalLibraryErrorCard();
+    try { await retry(); }
+    catch (error) { recordLocalLibraryError(page, error, retry, retryLabel); }
+    finally {
+      clearNovelBusy(owner);
+      page.retryBusy = false;
+      if (page.isActive()) renderLocalLibraryErrorCard();
+    }
+  }
+
+  function isCurrentRecovery(state) {
+    return recoveryPanel === state && state.page.isActive() && state.overlay.isConnected;
+  }
+
+  function closeLocalRecovery(restoreFocus = true) {
+    const state = recoveryPanel;
+    if (!state) return;
+    recoveryPanel = null;
+    window.removeEventListener("keydown", state.keydown);
+    state.overlay.remove();
+    if (restoreFocus && state.page.isActive()) {
+      const target = state.trigger?.isConnected ? state.trigger : els.viewContent.querySelector("[data-local-novel-recovery]");
+      target?.focus();
+    }
+  }
+
+  function openLocalRecovery(page, trigger) {
+    if (!page?.isActive()) return;
+    closeLocalRecovery(false);
+    const overlay = document.createElement("div");
+    overlay.className = "novel-local-recovery-overlay";
+    const dialog = document.createElement("section");
+    dialog.className = "novel-local-recovery-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "只读取回旧库正文");
+    dialog.tabIndex = -1;
+    overlay.append(dialog);
+    const state = { page, trigger, overlay, dialog, items: [], version: null, afterKey: undefined,
+      history: [], nextKey: null, hasMore: false, busy: false, error: false, expired: false, notice: "", retry: null };
+    state.keydown = (event) => {
+      if (!isCurrentRecovery(state)) return;
+      if (event.key === "Escape") { event.preventDefault(); closeLocalRecovery(); }
+      if (event.key !== "Tab") return;
+      const buttons = [...dialog.querySelectorAll("button")].filter((button) => !button.disabled);
+      const target = event.shiftKey ? buttons.at(-1) : buttons[0];
+      if (!dialog.contains(document.activeElement) || (event.shiftKey ? document.activeElement === buttons[0] : document.activeElement === buttons.at(-1))) {
+        event.preventDefault(); target?.focus();
+      }
+    };
+    recoveryPanel = state;
+    document.body.append(overlay);
+    window.addEventListener("keydown", state.keydown);
+    renderLocalRecovery(state);
+    void loadLocalRecoveryPage(state, undefined, []);
+  }
+
+  function renderLocalRecovery(state) {
+    if (!isCurrentRecovery(state)) return;
+    state.dialog.innerHTML = "";
+    const heading = document.createElement("h2");
+    heading.textContent = "只读取回旧库正文";
+    const close = actionButton("关闭取回窗口", () => closeLocalRecovery());
+    close.className = "novel-local-recovery-close";
+    const warning = document.createElement("p");
+    warning.textContent = "只读旧库，不升级、不修改、不删除。逐本主动导出 TXT，仅包含可读正文，不是包含阅读进度和元数据的完整备份。";
+    const version = document.createElement("p");
+    version.className = "novel-local-recovery-version";
+    version.textContent = state.version === 1 ? "v1：尚未升级的旧库正文。"
+      : state.version === 2 || state.version === 3 ? `v${state.version}：升级前保留的旧副本，可能不是当前最新正文。` : "点击入口后才读取旧库，每页最多 10 本。";
+    state.dialog.append(heading, close, warning, version);
+    const status = document.createElement("p");
+    status.className = "novel-local-recovery-status";
+    status.setAttribute("role", state.error ? "alert" : "status");
+    status.setAttribute("aria-live", "polite");
+    status.textContent = state.notice;
+    state.dialog.append(status);
+    if (state.error && !state.busy) {
+      state.dialog.append(actionButton(state.expired ? "重新打开旧库" : state.retryLabel || "重试读取旧库", () => {
+        if (state.expired) openLocalRecovery(state.page, state.trigger);
+        else state.retry?.();
+      }));
+    }
+    const list = document.createElement("div");
+    list.className = "novel-local-recovery-list";
+    for (const item of state.items) {
+      const row = document.createElement("article");
+      const name = document.createElement("strong"); name.textContent = item.title || item.fileName || "未命名旧书";
+      const count = document.createElement("p");
+      count.textContent = `可读 ${formatNumber(item.readableChapters)}/${formatNumber(item.totalChapters)} 章` + (item.omittedChapters ? ` · 不完整，遗漏 ${formatNumber(item.omittedChapters)} 章` : "");
+      const label = !item.exportable ? "没有可读正文" : item.omittedChapters
+        ? `导出可读正文（不完整，遗漏 ${formatNumber(item.omittedChapters)} 章）` : "取回正文并导出 TXT";
+      row.append(name, count, actionButton(label, () => exportLocalRecoveryBook(state, item), state.busy || state.expired || recoveryExportInFlight || !item.exportable));
+      list.append(row);
+    }
+    state.dialog.append(list);
+    const pages = document.createElement("div");
+    pages.className = "novel-local-recovery-actions";
+    pages.append(actionButton("上一页", () => loadLocalRecoveryPage(state, state.history.at(-1), state.history.slice(0, -1)), state.busy || state.expired || !state.history.length),
+      actionButton("下一页", () => loadLocalRecoveryPage(state, state.nextKey, [...state.history, state.afterKey]), state.busy || state.expired || !state.hasMore));
+    state.dialog.append(pages);
+    if (!state.dialog.contains(document.activeElement)) close.focus();
+  }
+
+  async function loadLocalRecoveryPage(state, afterKey, history) {
+    if (!isCurrentRecovery(state) || state.busy) return;
+    const owner = setNovelBusy("recovery-read");
+    state.busy = true; state.error = false; state.notice = "正在只读旧库摘要…";
+    state.retry = () => loadLocalRecoveryPage(state, afterKey, history);
+    state.retryLabel = "重试读取旧库";
+    renderLocalRecovery(state);
+    try {
+      const result = await listLocalNovelRecoveryBooks({ afterKey, limit: 10, ...(state.version == null ? {} : { expectedVersion: state.version }) });
+      if (!isCurrentRecovery(state)) return;
+      if (![1, 2, 3].includes(result?.version) || (state.version != null && state.version !== result.version)) throw Object.assign(new Error("旧库版本已变化，请重新打开。"), { code: "RECOVERY_STALE_VERSION" });
+      state.version = result.version;
+      state.items = (Array.isArray(result.items) ? result.items : []).slice(0, 10).map((item) => ({
+        key: item.key, title: item.title, fileName: item.fileName, totalChapters: item.totalChapters,
+        readableChapters: item.readableChapters, omittedChapters: item.omittedChapters, exportable: item.exportable === true
+      }));
+      state.afterKey = afterKey; state.history = history; state.nextKey = result.nextKey; state.hasMore = result.hasMore === true;
+      state.notice = state.items.length ? `当前第 ${history.length + 1} 页；点击单本按钮才读取该书正文。` : "这页旧副本没有可列出的书籍；这不代表当前本机库没有书。";
+    } catch (error) {
+      if (!isCurrentRecovery(state)) return;
+      state.error = true;
+      state.expired = ["RECOVERY_STALE_VERSION", "RECOVERY_VERSION_CHANGED"].includes(error?.code);
+      state.notice = state.expired ? "旧库版本已变化。本次列表已失效，请重新打开旧库后再取回。" : `旧库读取失败：${error?.message || error}。原库未更改，可重试。`;
+    } finally {
+      clearNovelBusy(owner); state.busy = false;
+      if (isCurrentRecovery(state)) renderLocalRecovery(state);
+    }
+  }
+
+  async function exportLocalRecoveryBook(state, item) {
+    if (!isCurrentRecovery(state) || state.busy || state.expired || recoveryExportInFlight || !item.exportable) return;
+    const owner = setNovelBusy("recovery-export");
+    recoveryExportInFlight = true; state.busy = true; state.error = false; state.notice = "正在取回这一本的可读正文…";
+    state.retry = () => exportLocalRecoveryBook(state, item);
+    state.retryLabel = "重试取回并导出 TXT";
+    renderLocalRecovery(state);
+    try {
+      const result = await readLocalNovelRecoveryEntry(item.key, { expectedVersion: state.version });
+      if (!isCurrentRecovery(state)) return;
+      if (!result) throw new Error("这本旧书已经不可读取，请重新打开旧库列表");
+      if (result.version !== state.version) throw Object.assign(new Error("旧库版本已变化"), { code: "RECOVERY_STALE_VERSION" });
+      const chapters = (Array.isArray(result.entry?.chapters) ? result.entry.chapters : []).filter((chapter) => typeof chapter?.content === "string" && chapter.content.trim());
+      const total = Math.max(chapters.length, Number(result.totalChapters) || 0);
+      const omitted = Math.max(Number(result.omittedChapters) || 0, total - chapters.length);
+      if (!chapters.length) throw new Error("没有可读正文，不能导出空白 TXT");
+      const limit = 80 * 1024 * 1024;
+      const parts = [];
+      let minimumBytes = 0;
+      for (const chapter of chapters) {
+        const heading = !chapter.preamble && typeof chapter.title === "string" && chapter.title.trim() ? `${chapter.title}\n\n` : "";
+        minimumBytes += heading.length + chapter.content.length + 2;
+        if (minimumBytes > limit) throw new Error("可读正文超过 80 MiB 导出上限；原库未更改");
+        parts.push(heading, chapter.content, "\n\n");
+      }
+      if (new Blob(parts, { type: "text/plain;charset=utf-8" }).size > limit) throw new Error("可读正文按 UTF-8 编码超过 80 MiB 导出上限；原库未更改");
+      const countsChanged = total !== item.totalChapters || chapters.length !== item.readableChapters || omitted !== item.omittedChapters;
+      if ((omitted > 0 || countsChanged) && !window.confirm(`本次可取回 ${chapters.length}/${total} 章，遗漏 ${omitted} 章。${omitted ? "导出的 TXT 不完整。" : "数量与列表显示不同。"}\n仅包含正文，不是含进度和元数据的完整备份。继续导出？`)) {
+        state.notice = "已取消导出，原库未更改。"; return;
+      }
+      if (!isCurrentRecovery(state)) return;
+      const fileName = sanitizeTxtFileName(item.fileName || result.entry?.book?.fileName || `${item.title || "取回的旧书"}.txt`);
+      const content = parts.join("");
+      const plugin = nativeNovelPlugin();
+      if (plugin?.exportTextFile) {
+        const saved = await plugin.exportTextFile({ fileName, text: content });
+        if (!isCurrentRecovery(state)) return;
+        if (saved?.canceled) { state.notice = "已取消导出，原库未更改。"; return; }
+        if (saved?.available === false) throw new Error(saved.message || "保存入口不可用");
+        state.notice = `已保存${omitted ? "不完整的" : ""}正文 TXT：${saved?.fileName || fileName}；遗漏 ${omitted} 章。不是完整备份，原库未更改。`;
+      } else {
+        downloadTextFile(fileName, content);
+        state.notice = `已发起${omitted ? "不完整的" : ""}正文 TXT 下载；遗漏 ${omitted} 章。请检查下载结果，原库未更改。`;
+      }
+    } catch (error) {
+      if (!isCurrentRecovery(state)) return;
+      state.error = true;
+      state.expired = ["RECOVERY_STALE_VERSION", "RECOVERY_VERSION_CHANGED"].includes(error?.code);
+      state.notice = state.expired ? "旧库版本已变化，请重新打开旧库。未启动新的导出。" : `正文取回或导出失败：${error?.message || error}。原库未更改，可重试。`;
+    } finally {
+      clearNovelBusy(owner); recoveryExportInFlight = false; state.busy = false;
+      if (recoveryPanel) renderLocalRecovery(recoveryPanel);
+    }
+  }
 
   async function renderNovelList(isActive = () => true) {
     listState.searchPage = false;
@@ -108,6 +385,7 @@ export function createNovelViews(context) {
     listState.source = "remote";
     listState.sourceTouched = true;
     if (!listState.query) {
+      beginNovelPage(isActive, "collection");
       deactivateReader();
       setActiveBottom("novels");
       renderNovelSearchData({ books: [], total: 0 });
@@ -117,6 +395,8 @@ export function createNovelViews(context) {
   }
 
   async function renderNovelCollection(isActive = () => true) {
+    const page = beginNovelPage(isActive, "collection");
+    isActive = page.isActive;
     deactivateReader();
     setActiveBottom("novels");
     const loadingTitle = listState.searchPage ? "搜索" : "小说";
@@ -128,29 +408,43 @@ export function createNovelViews(context) {
     const path = novelListPath();
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-    const localData = await loadLocalListData().catch((error) => {
-      setStatus?.(`本地小说库读取失败：${error.message || error}`, "error");
-      return emptyLocalListData();
-    });
+    const refreshLocal = async () => {
+      const data = await loadLocalListData();
+      if (!isActive()) return;
+      page.localData = data;
+      clearLocalLibraryError(page);
+      renderNovelListData(mergeNovelListData(page.remoteData || {}, data), page.remoteCache);
+    };
+    try { page.localData = await loadLocalListData(); }
+    catch (error) {
+      if (!isActive()) return;
+      page.localData = { ...localListData([...localBooks.values()]), unavailable: true };
+      recordLocalLibraryError(page, error, refreshLocal);
+    }
     if (!isActive()) return;
+    renderNovelListData(mergeNovelListData({}, page.localData));
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isActive()) return;
-    if (cached?.payload?.books) {
+    if (cached?.payload?.books && canUseRemotePayload(activeUrl, cached.payload)) {
+      rememberRemoteSourceRealm(activeUrl, cached.payload, { cached: true });
       renderedCache = true;
-      renderNovelListData(mergeNovelListData(cached.payload, localData), cached);
+      page.remoteData = cached.payload; page.remoteCache = cached;
+      renderNovelListData(mergeNovelListData(page.remoteData, page.localData), cached);
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
-      renderNovelListData(mergeNovelListData(data, localData));
+      rememberRemoteSourceRealm(activeUrl, data);
+      writeCachedJson(activeUrl, path, data).catch(() => {});
+      page.remoteData = data; page.remoteCache = null;
+      renderNovelListData(mergeNovelListData(data, page.localData));
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
         renderMessage("电脑端暂时连不上，当前显示的是上次内容。", "quiet", false);
       } else {
-        renderMessage(error.message || "小说内容读取失败", "error");
+        renderMessage(error.message || "小说内容读取失败", "error", listState.source !== "local");
       }
     }
   }
@@ -171,9 +465,10 @@ export function createNovelViews(context) {
     els.viewContent.innerHTML = "";
     els.viewContent.className = "content-list novel-mobile-library-content";
     notifyLibrarySourceChanged();
+    renderLocalLibraryErrorCard();
 
     if (!books.length) {
-      els.viewContent.append(createNovelEmptyState(data));
+      if (!novelPage?.issue || listState.source !== "local") els.viewContent.append(createNovelEmptyState(data));
       return;
     }
 
@@ -193,6 +488,7 @@ export function createNovelViews(context) {
     els.viewContent.innerHTML = "";
     els.viewContent.className = "content-list novel-mobile-search-page-content";
     els.viewContent.append(createNovelSearchHeader());
+    renderLocalLibraryErrorCard();
 
     if (!listState.query) {
       const prompt = document.createElement("div");
@@ -307,10 +603,43 @@ export function createNovelViews(context) {
   }
 
   async function loadPersistentLocalLibrary() {
-    const entries = await loadLocalNovelEntries();
-    localBooks.clear();
-    for (const entry of entries) localBooks.set(entry.book.id, entry);
-    return entries;
+    const version = localLibraryVersion;
+    const progressVersions = new Map(localBookProgressVersions);
+    const requestId = ++localLibraryRequestId;
+    const entries = await loadLocalNovelSummaries();
+    if (version !== localLibraryVersion || requestId !== localLibraryRequestId) return Array.from(localBooks.values());
+    const present = new Set();
+    for (const entry of entries) {
+      const summary = rememberLocalBookSummary(entry, progressVersions.get(entry.book.id) || 0);
+      if (summary) present.add(summary.book.id);
+    }
+    for (const id of localBooks.keys()) if (!present.has(id)) localBooks.delete(id);
+    return Array.from(localBooks.values());
+  }
+
+  function rememberLocalBookSummary(entry, progressVersion = localBookProgressVersions.get(entry?.book?.id) || 0) {
+    if (!entry?.book?.id) return null;
+    const previous = localBooks.get(entry.book.id);
+    const generation = entry.generation ?? entry.book.localGeneration;
+    const keepProgress = generation != null && previous?.generation === generation
+      && progressVersion !== (localBookProgressVersions.get(entry.book.id) || 0);
+    // Never retain a catalog or a full import/export entry in the shelf cache.
+    // A same-generation read begun before a local progress commit must not
+    // overwrite that commit. Content reads use a separate invalidation epoch.
+    const summary = {
+      id: entry.book.id, book: { ...entry.book, ...(keepProgress ? { progress: previous.book.progress,
+        progressRecovery: previous.book.progressRecovery || null } : {}) }, generation,
+      createdAt: entry.createdAt ?? previous?.createdAt, updatedAt: entry.updatedAt ?? previous?.updatedAt,
+      bytes: entry.bytes ?? previous?.bytes
+    };
+    localBooks.set(summary.book.id, summary);
+    return summary;
+  }
+
+  function invalidateLocalBookReads(bookId) {
+    localBookReadVersions.set(bookId, (localBookReadVersions.get(bookId) || 0) + 1);
+    localLibraryVersion += 1;
+    localProgressWriteIds.delete(bookId);
   }
 
   function emptyLocalListData() {
@@ -540,34 +869,36 @@ export function createNovelViews(context) {
 
   function visibleLocalBooksForRemote(remoteBooks = [], localBooksList = []) {
     if (!remoteBooks.length) return localBooksList;
-    const visibleRemoteIds = new Set(remoteBooks.map((book) => remoteBookSourceId(book)).filter(Boolean));
+    const visibleRemoteIds = new Set(remoteBooks.map((book) => remoteCacheIdFromSourceId(remoteBookSourceId(book), book.sourceRealm)).filter(Boolean));
     if (!visibleRemoteIds.size) return localBooksList;
-    return localBooksList.filter((book) => !isRemoteCacheBook(book) || !visibleRemoteIds.has(remoteCacheSourceId(book)));
+    return localBooksList.filter((book) => !isRemoteCacheBook(book)
+      || !visibleRemoteIds.has(remoteCacheIdFromSourceId(remoteCacheSourceId(book), book.sourceRealm)));
   }
 
   function markRemoteBookWithCache(book = {}) {
     if (!book?.id || isLocalBookId(book.id)) return book;
-    const entry = cachedRemoteEntryForSourceId(book.id);
+    const entry = cachedRemoteEntryForSourceId(book.id, book.sourceRealm);
     const cachedBook = entry?.book;
-    if (!cachedBook) return book;
-    return {
+    const marked = {
       ...book,
-      cachedLocal: true,
-      cachedLocalId: cachedBook.id,
-      cachedAt: cachedBook.cachedAt || entry.updatedAt || cachedBook.updatedAt || "",
-      localProgress: cachedBook.progress || null,
-      progress: book.progress || cachedBook.progress || null
+      cachedLocal: Boolean(cachedBook),
+      cachedLocalId: cachedBook?.id || "",
+      cachedAt: cachedBook?.cachedAt || entry?.updatedAt || cachedBook?.updatedAt || "",
+      localProgress: cachedBook?.progress || null,
+      localProgressRecovery: cachedBook?.progressRecovery || null,
+      progress: book.progress || (book.progressRecovery ? null : cachedBook?.progress) || null
     };
+    remoteBookOrigins.set(marked, { sourceUrl: getActiveUrl(), page: novelPage });
+    return marked;
   }
 
-  function cachedRemoteEntryForSourceId(sourceId) {
-    const id = remoteCacheIdFromSourceId(sourceId);
+  function cachedRemoteEntryForSourceId(sourceId, sourceRealm) {
+    const id = remoteCacheIdFromSourceId(sourceId, sourceRealm);
     if (!id) return null;
     const direct = localBooks.get(id);
-    if (direct?.book && isRemoteCacheBook(direct.book)) return direct;
-    for (const entry of localBooks.values()) {
-      if (isRemoteCacheBook(entry?.book) && remoteCacheSourceId(entry.book) === String(sourceId || "")) return entry;
-    }
+    if (direct?.book && isRemoteCacheBook(direct.book)
+      && remoteCacheSourceId(direct.book) === String(sourceId || "").trim()
+      && normalizeSourceRealm(direct.book.sourceRealm) === normalizeSourceRealm(sourceRealm)) return direct;
     return null;
   }
 
@@ -590,9 +921,96 @@ export function createNovelViews(context) {
     return String(book.sourceBookId || book.id || "").trim();
   }
 
-  function remoteCacheIdFromSourceId(sourceId) {
+  function remoteCacheIdFromSourceId(sourceId, sourceRealm) {
     const id = String(sourceId || "").trim();
-    return id ? `local:remote:${id}` : "";
+    const realm = normalizeSourceRealm(sourceRealm);
+    // A reversible tuple, not a lossy hash or an address-derived identity.
+    return id && realm ? `local:remote:v2:${encodeURIComponent(realm)}:${encodeURIComponent(id)}` : "";
+  }
+
+  function normalizeSourceRealm(value) {
+    return typeof value === "string" && /^server:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) ? value : "";
+  }
+
+  function remotePayloadRealm(data = {}) {
+    const values = [data.sourceRealm, data.book?.sourceRealm, ...(Array.isArray(data.books) ? data.books : []).map((book) => book.sourceRealm)]
+      .filter((value) => value !== undefined && value !== null && value !== "");
+    if (!values.length) return ""; // Older servers remain readable, but unbound.
+    const realm = normalizeSourceRealm(values[0]);
+    if (!realm || values.some((value) => value !== realm)) throw new Error("小说响应的书库来源不一致，请重新打开书库");
+    return realm;
+  }
+
+  function rememberRemoteSourceRealm(sourceUrl, data, { cached = false } = {}) {
+    const realm = remotePayloadRealm(data);
+    if (cached && remoteSourceRealms.has(sourceUrl)) return remoteSourceRealms.get(sourceUrl);
+    remoteSourceRealms.set(sourceUrl, realm);
+    if (!cached) {
+      // This receipt only remembers the server's last assertion. Losing it must
+      // disable automatic linking, never guess a realm from the current URL.
+      const previous = remoteSourceReceiptWrites.get(sourceUrl) || Promise.resolve();
+      const pending = previous.catch(() => {}).then(() => writeCachedJson(sourceUrl, "/api/novels/source-identity", { sourceRealm: realm })).catch(() => {});
+      remoteSourceReceiptWrites.set(sourceUrl, pending);
+      pending.finally(() => { if (remoteSourceReceiptWrites.get(sourceUrl) === pending) remoteSourceReceiptWrites.delete(sourceUrl); });
+    }
+    return realm;
+  }
+
+  async function readRemoteSourceRealm(sourceUrl) {
+    if (remoteSourceRealms.has(sourceUrl)) return remoteSourceRealms.get(sourceUrl);
+    const receipt = await readCachedJson(sourceUrl, "/api/novels/source-identity").catch(() => null);
+    if (!remoteSourceRealms.has(sourceUrl) && receipt?.payload) {
+      remoteSourceRealms.set(sourceUrl, normalizeSourceRealm(receipt.payload.sourceRealm));
+    }
+    return remoteSourceRealms.get(sourceUrl) || "";
+  }
+
+  function matchesRemotePayload(data, bookId, sourceRealm, chapterIndex, anchor = {}) {
+    if (!data || String(data.book?.id || data.bookId || "") !== String(bookId)) return false;
+    let realm;
+    try { realm = remotePayloadRealm(data); } catch { return false; }
+    if (sourceRealm !== undefined && realm !== sourceRealm) return false;
+    if (anchor.sourceRealm && realm !== anchor.sourceRealm) return false;
+    if (data.chapter?.bookId !== undefined && String(data.chapter.bookId) !== String(bookId)) return false;
+    const revision = data.book?.catalogRevision ?? data.catalogRevision;
+    if (data.catalogRevision && data.book?.catalogRevision && data.catalogRevision !== data.book.catalogRevision) return false;
+    if (anchor.catalogRevision && revision !== anchor.catalogRevision) return false;
+    if (anchor.chapterId && data.chapter?.id !== anchor.chapterId) return false;
+    return chapterIndex === undefined || Number(data.chapter?.index) === Number(chapterIndex);
+  }
+
+  function chapterAnchor(book = {}, chapter = {}) {
+    return book.catalogRevision ? { catalogRevision: book.catalogRevision,
+      ...(chapter.id ? { chapterId: chapter.id } : {}),
+      ...(normalizeSourceRealm(book.sourceRealm) ? { sourceRealm: book.sourceRealm } : {}) } : {};
+  }
+
+  function addCatalogPreconditions(params, book) {
+    for (const [key, value] of Object.entries(chapterAnchor(book))) params.set(key, value);
+  }
+
+  function progressMatchesChapter(book, chapter) {
+    const progress = book.progress;
+    if (!progress || book.progressRecovery) return false;
+    if (book.catalogRevision) return progress.catalogRevision === book.catalogRevision && progress.chapterId === chapter.id;
+    return Number(progress.chapterIndex || 0) === Number(chapter.index || 0);
+  }
+
+  function canUseRemotePayload(sourceUrl, data) {
+    try { const realm = remotePayloadRealm(data); return !remoteSourceRealms.has(sourceUrl) || remoteSourceRealms.get(sourceUrl) === realm; }
+    catch { return false; }
+  }
+
+  function captureRemoteOperation(book) {
+    const origin = remoteBookOrigins.get(book) || { sourceUrl: getActiveUrl(), page: novelPage };
+    const sourceRealm = normalizeSourceRealm(book.sourceRealm);
+    const isActive = () => origin.sourceUrl === getActiveUrl() && (!origin.page || origin.page.isActive())
+      && (!remoteSourceRealms.has(origin.sourceUrl) || remoteSourceRealms.get(origin.sourceUrl) === sourceRealm);
+    return { ...origin, sourceRealm, isActive };
+  }
+
+  function requireRemoteOperation(operation) {
+    if (!operation.isActive()) throw new Error("书库或页面已切换，请在当前书库重新操作");
   }
 
   function mergeTotals(remote = {}, local = {}) {
@@ -973,13 +1391,20 @@ export function createNovelViews(context) {
   }
 
   function setNovelBusy(action) {
+    // External text intents can overlap a picker or browser import. Each task
+    // releases only its own busy state; action labels are not unique owners.
+    const owner = {};
+    novelBusyOwners.set(owner, action || "");
     listState.uploading = true;
     listState.busyAction = action || "";
+    return owner;
   }
 
-  function clearNovelBusy() {
-    listState.uploading = false;
+  function clearNovelBusy(owner) {
+    if (!novelBusyOwners.delete(owner)) return;
+    listState.uploading = novelBusyOwners.size > 0;
     listState.busyAction = "";
+    for (const action of novelBusyOwners.values()) listState.busyAction = action;
   }
 
   function busyButtonLabel(action, label) {
@@ -1106,12 +1531,13 @@ export function createNovelViews(context) {
   }
 
   function readingProgressText(book = {}) {
+    if (book.progressRecovery) return "续读位置待确认";
     if (!book.progress) return book.chapterCount ? `共 ${formatNumber(book.chapterCount)} 章` : "未读";
     return `已读 ${Math.round(readingProgress(book).overallRatio * 1000) / 10}%`;
   }
 
   function shouldShowInContinueReading(book = {}) {
-    if (!book?.progress) return false;
+    if (!book?.progress && !book?.progressRecovery) return false;
     if (!book.local) return true;
     if (book.sourceType === "remote-cache") return true;
     return !isSmallSharedTextBook(book);
@@ -1253,6 +1679,7 @@ export function createNovelViews(context) {
       await removeLocalBook(book);
       return;
     }
+    const operation = captureRemoteOperation(book);
     const title = book.title || "这本小说";
     if (!window.confirm(`确认从书库删除《${title}》？\n\n磁盘中的原始 TXT 不会删除，这本书也不会在重新扫描后自动恢复。`)) return;
     if (button) {
@@ -1260,12 +1687,17 @@ export function createNovelViews(context) {
       button.textContent = "正在删除";
     }
     try {
-      await deleteJson(getActiveUrl(), novelDetailPath(book.id));
+      requireRemoteOperation(operation);
+      const suffix = operation.sourceRealm ? `?sourceRealm=${encodeURIComponent(operation.sourceRealm)}` : "";
+      await deleteJson(operation.sourceUrl, novelDetailPath(book.id) + suffix);
       if (book.cachedLocalId) {
+        invalidateLocalBookReads(book.cachedLocalId);
         await deleteLocalNovelEntry(book.cachedLocalId).catch(() => {});
+        invalidateLocalBookReads(book.cachedLocalId);
         localBooks.delete(book.cachedLocalId);
       }
-      await clearCachedJsonByPrefix(getActiveUrl(), "/api/novels").catch(() => {});
+      await clearCachedJsonByPrefix(operation.sourceUrl, "/api/novels").catch(() => {});
+      if (!operation.isActive()) return;
       close?.();
       setStatus?.(`已删除小说：${title}`);
       renderCurrentViewPreservingScroll();
@@ -1292,6 +1724,8 @@ export function createNovelViews(context) {
   }
 
   async function renderNovelDetail(id, isActive = () => true) {
+    const page = beginNovelPage(isActive, "detail");
+    isActive = page.isActive;
     deactivateReader();
     const bookId = String(id || "").trim();
     const path = novelMetaPath(bookId);
@@ -1311,48 +1745,84 @@ export function createNovelViews(context) {
     }
 
     if (isLocalBookId(bookId)) {
-      const entry = await ensureLocalNovelEntry(bookId).catch(() => null);
-      if (!isActive()) return;
-      if (!entry) {
-        renderMessage("这本本地小说已经不在手机本地库里。", "error");
-        return;
-      }
-      focusLocalSource();
-      renderNovelDetailData(localDetailData(entry));
+      await renderLocalNovelDetail(bookId, page);
       return;
     }
 
-    const cachedRemoteEntry = await ensureLocalNovelEntry(remoteCacheIdFromSourceId(bookId)).catch(() => null);
-    if (!isActive()) return;
+    let sourceRealm = await readRemoteSourceRealm(activeUrl);
     const cached = await readCachedJson(activeUrl, fullDetailPath).catch(() => null);
     if (!isActive()) return;
-    if (cached?.payload?.book) {
+    if (matchesRemotePayload(cached?.payload, bookId) && canUseRemotePayload(activeUrl, cached.payload)) {
+      sourceRealm = rememberRemoteSourceRealm(activeUrl, cached.payload, { cached: true });
       renderedCache = true;
       renderNovelDetailData(cached.payload, cached);
     }
+    let cachedRemoteEntry = await readOptionalLocalSummary(remoteCacheIdFromSourceId(bookId, sourceRealm), page,
+      (entry, guard) => renderLocalNovelDetail(entry.book.id, page, guard));
+    if (!isActive()) return;
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
+      if (!isActive() || page.preferRecoveredLocal) return;
+      if (!matchesRemotePayload(data, bookId)) throw new Error("返回的小说与请求不一致");
+      const nextRealm = rememberRemoteSourceRealm(activeUrl, data);
+      if (nextRealm !== sourceRealm) { renderedCache = false; cachedRemoteEntry = null; }
+      sourceRealm = nextRealm;
       writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
+      await readOptionalLocalSummary(remoteCacheIdFromSourceId(bookId, sourceRealm), page);
+      if (!isActive() || page.preferRecoveredLocal) return;
       await renderRemoteNovelDetailMeta(data, isActive);
     } catch (error) {
-      if (!isActive()) return;
+      if (!isActive() || page.preferRecoveredLocal) return;
       if (renderedCache) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存详情。", "quiet", false);
       } else if (cachedRemoteEntry) {
-        focusLocalSource();
-        renderNovelDetailData(localDetailData(cachedRemoteEntry));
-        renderMessage("电脑端暂时连不上，当前显示的是手机离线缓存。", "quiet", false);
+        await renderLocalNovelDetail(cachedRemoteEntry.book.id, page);
       } else {
         renderMessage(error.message || "书籍详情读取失败", "error");
       }
     }
   }
 
+  async function readOptionalLocalSummary(bookId, page, onRecovered) {
+    if (!bookId) return null;
+    const retry = async () => {
+      const entry = await ensureLocalNovelEntry(bookId);
+      if (!page.isActive()) return null;
+      clearLocalLibraryError(page);
+      if (entry && !page.contentReady && onRecovered) {
+        const didRecover = await onRecovered(entry, () => page.isActive() && !page.contentReady);
+        if (page.isActive() && didRecover) page.preferRecoveredLocal = true;
+      }
+      return entry;
+    };
+    try { return await ensureLocalNovelEntry(bookId); }
+    catch (error) { recordLocalLibraryError(page, error, retry); return null; }
+  }
+
+  async function renderLocalNovelDetail(bookId, page, isActive = page.isActive) {
+    const retry = () => renderLocalNovelDetail(bookId, page, isActive);
+    try {
+      const entry = await readLocalCatalog(bookId);
+      if (!isActive()) return;
+      clearLocalLibraryError(page);
+      if (!entry) { renderMessage("这本本地小说已经不在手机本地库里。", "error"); return; }
+      focusLocalSource();
+      renderNovelDetailData(localDetailData(entry));
+      return true;
+    } catch (error) {
+      if (!isActive()) return;
+      els.viewMeta.textContent = "本机库未能读取，书籍是否存在尚未确认";
+      renderMessage("无法读取本地目录，请重试。旧库正文只能通过下方入口主动取回。", "error");
+      recordLocalLibraryError(page, error, retry);
+    }
+  }
+
   async function renderRemoteNovelDetailMeta(data = {}, isActive = () => true) {
     const book = markRemoteBookWithCache(data.book || {});
-    const sameDetailBook = String(detailState.book?.id || "") === String(book.id || "");
+    const sameDetailBook = String(detailState.book?.id || "") === String(book.id || "")
+      && detailState.book?.sourceRealm === book.sourceRealm
+      && detailState.book?.catalogRevision === book.catalogRevision;
     const fallbackChapters = sameDetailBook
       ? detailState.chapters
       : [];
@@ -1376,6 +1846,7 @@ export function createNovelViews(context) {
   }
 
   function renderNovelDetailData(data = {}, cacheEntry = null, options = {}) {
+    if (novelPage?.isActive()) novelPage.contentReady = true;
     const book = markRemoteBookWithCache(data.book || {});
     const chapters = Array.isArray(data.chapters) ? data.chapters : [];
     const remotePaged = Boolean(options.remotePaged);
@@ -1405,6 +1876,8 @@ export function createNovelViews(context) {
     }
 
     els.viewContent.append(createDetailHero(book, chapters));
+    const recoveryBook = readableBookForReader(book);
+    if (recoveryBook.progressRecovery) els.viewContent.append(createProgressRecoveryPanel(recoveryBook));
     if (book.summary) {
       const summary = document.createElement("section");
       summary.className = "novel-mobile-summary-panel";
@@ -1439,6 +1912,7 @@ export function createNovelViews(context) {
       }));
     }
     els.viewContent.append(catalog);
+    renderLocalLibraryErrorCard();
   }
 
   function createDetailHero(book, chapters) {
@@ -1457,7 +1931,9 @@ export function createNovelViews(context) {
     reading.className = "novel-mobile-reading-status";
     if (cachedRemote) {
       const offline = document.createElement("small");
-      offline.textContent = "已缓存到手机，可离线阅读";
+      offline.textContent = isRemoteCacheBook(book) && !normalizeSourceRealm(book.sourceRealm)
+        ? "旧缓存来源未绑定，可本地阅读或导出，不会自动关联当前书库"
+        : "已缓存到手机，可离线阅读";
       reading.append(offline);
     }
     const activeProgress = cachedRemote ? book.localProgress || book.progress : book.progress;
@@ -1489,7 +1965,7 @@ export function createNovelViews(context) {
     const read = document.createElement("button");
     read.type = "button";
     read.className = "primary";
-    read.textContent = cachedRemote
+    read.textContent = readableBookForReader(book).progressRecovery ? "选择续读位置" : cachedRemote
       ? (book.progress ? "继续离线" : "离线阅读")
       : (book.progress ? "继续阅读" : "开始阅读");
     read.addEventListener("click", () => openReader(book, 1));
@@ -1538,8 +2014,37 @@ export function createNovelViews(context) {
     const title = document.createElement("strong");
     title.textContent = `${formatNumber(chapter.index)} · ${chapter.title}`;
     button.append(caption, title);
-    button.addEventListener("click", () => openReader(book, chapter.index, { exactChapter }));
+    button.addEventListener("click", () => openReader(book, chapter.index, { exactChapter, chapter }));
     return button;
+  }
+
+  function createProgressRecoveryPanel(book) {
+    const recovery = book.progressRecovery || {};
+    const previous = recovery.previous || {};
+    const panel = document.createElement("section");
+    panel.className = "novel-mobile-summary-panel novel-progress-recovery";
+    panel.setAttribute("role", "status");
+    const title = document.createElement("strong");
+    title.textContent = "续读位置待确认";
+    const text = document.createElement("p");
+    const oldPosition = previous.title || (previous.chapterIndex ? `原第 ${previous.chapterIndex} 章` : "原阅读位置");
+    const oldRatio = Number.isFinite(previous.scrollRatio)
+      ? `（旧章内 ${Math.round(previous.scrollRatio * 100)}%）` : "";
+    text.textContent = recovery.reason === "legacy_unverified"
+      ? `已保留${oldPosition}${oldRatio}的旧记录，但旧数据没有可验证的内容版本。请从目录确认续读章节。`
+      : `已保留${oldPosition}${oldRatio}的旧记录。正文或目录已变化，暂不自动恢复阅读位置，请确认后继续。`;
+    panel.append(title, text);
+    const candidate = recovery.candidate;
+    if (candidate?.chapterId && candidate.catalogRevision === book.catalogRevision) {
+      const button = actionButton(`查看候选：${candidate.title || `第 ${candidate.chapterIndex} 章`}（从章首）`, () =>
+        openReader(book, candidate.chapterIndex, { exactChapter: true,
+          chapter: { id: candidate.chapterId, index: candidate.chapterIndex } }));
+      panel.append(button);
+    }
+    const hint = document.createElement("small");
+    hint.textContent = "选择目录中的章节或候选章节后，才会建立新的续读位置。";
+    panel.append(hint);
+    return panel;
   }
 
   function isCachedRemoteBookForUi(book = {}) {
@@ -1551,7 +2056,7 @@ export function createNovelViews(context) {
     button.type = "button";
     button.className = "novel-mobile-chapter";
     if (book.progress?.chapterIndex === chapter.index) button.classList.add("active");
-    button.addEventListener("click", () => openReader(book, chapter.index || 1, { exactChapter: true }));
+    button.addEventListener("click", () => openReader(book, chapter.index || 1, { exactChapter: true, chapter }));
     const title = document.createElement("strong");
     title.textContent = chapter.title || `第 ${chapter.index || ""} 章`.trim();
     const meta = document.createElement("span");
@@ -1703,14 +2208,31 @@ export function createNovelViews(context) {
     return shell;
   }
 
-  async function renderNovelReader(id, chapterIndex, isActive = () => true) {
+  async function renderNovelReader(id, chapterIndex, isActive = () => true, anchor = {}) {
+    const page = beginNovelPage(isActive, "reader");
+    isActive = page.isActive;
+    deactivateReader();
     const bookId = String(id || "").trim();
     const index = String(chapterIndex || "1").trim();
-    const path = novelChapterPath(bookId, index);
+    const path = novelChapterPath(bookId, index, anchor);
     const activeUrl = getActiveUrl();
+    const previousProgress = readerState.bookSourceUrl === activeUrl && String(readerState.book?.id || "") === bookId
+      ? readerState.book?.progress || null : null;
+    const previousRealm = normalizeSourceRealm(readerState.book?.sourceRealm);
     let renderedCache = false;
 
+    const routeGuard = isActive;
+    const session = { sourceUrl: activeUrl, routeGuard, bookId, anchor,
+      confirmProgress: anchor.confirmProgress === "1" };
+    readerState.session = session;
+    readerState.progressBlocked = false;
     readerState.active = true;
+    readerState.book = null;
+    readerState.chapter = null;
+    readerState.chapters = [];
+    readerState.screen = null;
+    isActive = () => isCurrentReaderSession(session);
+    isActive.signal = routeGuard.signal;
     readerState.catalogOpen = false;
     readerState.catalogLoading = false;
     readerState.catalogError = "";
@@ -1728,28 +2250,35 @@ export function createNovelViews(context) {
     }
 
     if (isLocalBookId(bookId)) {
-      await renderLocalNovelReader(bookId, index);
+      await renderLocalNovelReader(bookId, index, isActive);
       return;
     }
 
-    const cachedRemoteEntry = await ensureLocalNovelEntry(remoteCacheIdFromSourceId(bookId)).catch(() => null);
+    const sourceRealm = await readRemoteSourceRealm(activeUrl);
+    if (!isActive()) return;
+    session.sourceRealm = sourceRealm;
+    const cachedRemoteEntry = await readOptionalLocalSummary(remoteCacheIdFromSourceId(bookId, sourceRealm), page,
+      (entry, guard) => renderCachedReader(entry, index, anchor, () => isActive() && guard()));
     if (!isActive()) return;
     if (cachedRemoteEntry?.book) {
-      await renderLocalNovelReader(cachedRemoteEntry.book.id, index);
-      return;
+      try {
+        if (await renderCachedReader(cachedRemoteEntry, index, anchor, isActive)) return;
+      } catch (error) {
+        if (!isActive()) return;
+        recordLocalLibraryError(page, error, () => renderCachedReader(cachedRemoteEntry, index, anchor, isActive));
+      }
     }
 
-    const prefetchKey = remoteChapterPrefetchKey(activeUrl, bookId, index);
+    const prefetchKey = remoteChapterPrefetchKey(activeUrl, bookId, index, sourceRealm, anchor.catalogRevision);
     const prefetched = takePrefetchedRemoteChapter(prefetchKey);
-    if (prefetched?.chapter) {
-      const currentProgress = String(readerState.book?.id || "") === bookId
-        ? readerState.book?.progress || null
-        : null;
+    if (matchesRemotePayload(prefetched, bookId, sourceRealm, index, anchor)) {
       const data = {
         ...prefetched,
         book: {
           ...prefetched.book,
-          progress: currentProgress || prefetched.book?.progress || null
+          progress: (!prefetched.book?.progressRecovery && previousRealm === remotePayloadRealm(prefetched)
+            && previousProgress?.catalogRevision === prefetched.book?.catalogRevision ? previousProgress : null)
+            || prefetched.book?.progress || null
         }
       };
       writeCachedJson(activeUrl, path, data).catch(() => {});
@@ -1761,7 +2290,8 @@ export function createNovelViews(context) {
 
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isActive()) return;
-    if (cached?.payload?.chapter) {
+    if (matchesRemotePayload(cached?.payload, bookId, undefined, index, anchor) && canUseRemotePayload(activeUrl, cached.payload)) {
+      session.sourceRealm = rememberRemoteSourceRealm(activeUrl, cached.payload, { cached: true });
       renderedCache = true;
       renderNovelReaderData(cached.payload, cached);
     }
@@ -1770,12 +2300,31 @@ export function createNovelViews(context) {
       const pendingPrefetch = remoteChapterPrefetchRequests.get(prefetchKey);
       const data = await (pendingPrefetch || fetchJson(activeUrl, path, { timeoutMs: 18000, signal: isActive.signal }));
       prefetchedRemoteChapters.delete(prefetchKey);
+      if (!isActive() || page.preferRecoveredLocal) return;
+      if (!matchesRemotePayload(data, bookId, undefined, index, anchor)) {
+        const error = new Error("章节或内容版本已变化，请返回详情重新选择续读位置");
+        error.status = 409;
+        throw error;
+      }
+      const nextRealm = rememberRemoteSourceRealm(activeUrl, data);
+      if (session.sourceRealm !== nextRealm) renderedCache = false;
+      session.sourceRealm = nextRealm;
       writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
-      renderNovelReaderData(data);
+      const sameContent = readerState.book?.catalogRevision === data.book?.catalogRevision
+        && readerState.chapter?.id === data.chapter?.id && readerState.chapter?.content === data.chapter?.content;
+      const restoreRatio = renderedCache && sameContent && isReaderScreenMounted()
+        ? readerState.restoreFrame !== null ? readerState.restoreRatio : captureReaderRatio()
+        : undefined;
+      renderNovelReaderData(data, null, restoreRatio === undefined ? {} : { restoreRatio });
       prefetchNextRemoteChapter(activeUrl, data);
     } catch (error) {
-      if (!isActive()) return;
+      if (!isActive() || page.preferRecoveredLocal) return;
+      if (error.status === 409 || error.statusCode === 409) {
+        readerState.progressBlocked = true;
+        renderMessage("目录已更新，旧位置未覆盖。请返回详情确认续读章节。", "error");
+        els.viewContent.append(actionButton("重新打开详情", () => showView("novelDetail", { id: bookId }, { push: true })));
+        return;
+      }
       if (renderedCache) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存章节。", "quiet", false);
       } else {
@@ -1784,8 +2333,10 @@ export function createNovelViews(context) {
     }
   }
 
-  function remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex) {
-    return `${String(activeUrl || "").replace(/\/+$/, "")}|${String(bookId || "")}|${String(chapterIndex || "")}`;
+  function remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex, sourceRealm = remoteSourceRealms.get(activeUrl) || "", catalogRevision = "") {
+    const tuple = [String(activeUrl || "").replace(/\/+$/, ""), sourceRealm, String(bookId || ""), String(chapterIndex || "")];
+    if (catalogRevision) tuple.push(catalogRevision);
+    return JSON.stringify(tuple);
   }
 
   function takePrefetchedRemoteChapter(key) {
@@ -1809,11 +2360,17 @@ export function createNovelViews(context) {
     const bookId = String(data.book?.id || "");
     const chapterIndex = Number(data.next?.index || 0);
     if (!bookId || !chapterIndex || remoteChapterPrefetchRequests.size >= NOVEL_CHAPTER_PREFETCH_LIMIT) return;
-    const key = remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex);
+    const sourceRealm = remotePayloadRealm(data);
+    const key = remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex, sourceRealm, data.book?.catalogRevision);
     if (prefetchedRemoteChapters.has(key) || remoteChapterPrefetchRequests.has(key)) return;
-    const path = novelChapterPath(bookId, chapterIndex);
+    const anchor = chapterAnchor(data.book, data.next);
+    const path = novelChapterPath(bookId, chapterIndex, anchor);
     const request = fetchJson(activeUrl, path, { timeoutMs: 12000 })
       .then((chapterData) => {
+        if (!matchesRemotePayload(chapterData, bookId, sourceRealm, chapterIndex, anchor)
+          || (remoteSourceRealms.has(activeUrl) && remoteSourceRealms.get(activeUrl) !== sourceRealm)) {
+          throw new Error("预取章节来源已变化");
+        }
         storePrefetchedRemoteChapter(key, chapterData);
         return chapterData;
       })
@@ -1823,23 +2380,43 @@ export function createNovelViews(context) {
   }
 
   function renderNovelReaderData(data = {}, cacheEntry = null, options = {}) {
+    if (!isCurrentReaderSession(readerState.session)) return;
+    if (novelPage?.isActive()) novelPage.contentReady = true;
+    cancelReaderRestore();
+    window.clearTimeout(readerState.progressTimer);
+    readerState.progressTimer = null;
+    if (readerState.progressFrame !== null) window.cancelAnimationFrame(readerState.progressFrame);
+    readerState.progressFrame = null;
     const book = data.book || {};
     const chapter = data.chapter || {};
+    if (book.progressRecovery && !readerState.session.confirmProgress) {
+      readerState.book = book;
+      readerState.chapter = null;
+      readerState.screen = null;
+      els.viewContent.innerHTML = "";
+      els.viewContent.append(createProgressRecoveryPanel(book),
+        actionButton("打开目录确认位置", () => showView("novelDetail", { id: book.id }, { push: true })));
+      return;
+    }
     const settings = readerState.settings;
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
     const previousBookId = String(readerState.book?.id || "");
+    const previousSourceRealm = readerState.book?.sourceRealm;
+    const previousRevision = readerState.book?.catalogRevision;
     const previousChapters = Array.isArray(readerState.chapters) ? readerState.chapters : [];
 
     readerState.book = book;
+    readerState.bookSourceUrl = readerState.session.sourceUrl;
     readerState.chapter = chapter;
     readerState.prev = data.prev || null;
     readerState.next = data.next || null;
     const incomingChapters = Array.isArray(data.chapters) ? data.chapters : [];
     readerState.chapters = incomingChapters.length
       ? incomingChapters
-      : previousBookId === String(book.id || "") ? previousChapters : [];
+      : previousBookId === String(book.id || "") && previousSourceRealm === book.sourceRealm
+        && previousRevision === book.catalogRevision ? previousChapters : [];
     if (options.restore !== false) {
-      readerState.pendingScrollRatio = Number(book.progress?.chapterIndex || 0) === Number(chapter.index || 0)
+      readerState.pendingScrollRatio = progressMatchesChapter(book, chapter)
         ? Number(book.progress?.scrollRatio || 0)
         : 0;
     }
@@ -1850,6 +2427,7 @@ export function createNovelViews(context) {
     els.viewContent.innerHTML = "";
 
     const screen = document.createElement("article");
+    readerState.screen = screen;
     screen.className = [
       "novel-reader-screen",
       `theme-${settings.theme}`,
@@ -1902,7 +2480,7 @@ export function createNovelViews(context) {
     }
 
     const ratioForControls = Number(options.restoreRatio ?? readerState.pendingScrollRatio ?? (
-      Number(book.progress?.chapterIndex || 0) === Number(chapter.index || 0) ? book.progress?.scrollRatio : 0
+      progressMatchesChapter(book, chapter) ? book.progress?.scrollRatio : 0
     ) ?? 0);
     const toolbar = createReaderToolbar(Math.max(0, Math.min(1, ratioForControls)));
 
@@ -1910,6 +2488,7 @@ export function createNovelViews(context) {
     if (readerState.settingsOpen) screen.append(createReaderSettingsPanel());
     els.viewContent.append(screen);
     if (readerState.catalogOpen) els.viewContent.append(createCatalogDrawer());
+    renderLocalLibraryErrorCard();
     applyReaderImmersiveState();
     scheduleReaderMenuAutoHide();
     if (options.restoreRatio !== undefined) restoreReaderScroll(options.restoreRatio);
@@ -2161,16 +2740,25 @@ export function createNovelViews(context) {
   }
 
   async function loadReaderCatalog() {
+    const page = novelPage;
+    const session = readerState.session;
     const book = readerState.book || {};
     const bookId = String(book.id || "");
     if (!bookId) return;
     if (!isLocalBookId(bookId)) {
       return loadRemoteReaderCatalogPage({ anchor: readerState.chapter?.index || 1 });
     }
+    const requestId = ++catalogRequestId;
+    const isCurrent = () => isCurrentReaderSession(session) && requestId === catalogRequestId
+      && bookId === String(readerState.book?.id || "");
+    let catalogReadFinished = false;
     try {
-      const entry = await ensureLocalNovelEntry(bookId);
+      const entry = await readLocalCatalog(bookId);
+      catalogReadFinished = true;
+      if (!isCurrent()) return;
+      if (!entry || entry.generation !== readerState.book?.localGeneration) throw new Error("本地内容已更新，请重新打开章节。");
       const chapters = (entry?.chapters || []).map(({ content, ...summary }) => summary);
-      if (bookId !== String(readerState.book?.id || "")) return;
+      if (!isCurrent()) return;
       readerState.chapters = chapters;
       catalogState.remotePaged = false;
       catalogState.bookId = bookId;
@@ -2178,14 +2766,16 @@ export function createNovelViews(context) {
       catalogState.filteredTotal = chapters.length;
       catalogState.offset = 0;
       readerState.catalogError = "";
+      clearLocalLibraryError(page);
       if (!catalogState.query) {
         catalogState.page = catalogPageForChapter(readerState.chapters, readerState.chapter?.index, catalogState.descending);
       }
     } catch (error) {
-      if (bookId !== String(readerState.book?.id || "")) return;
+      if (!isCurrent()) return;
       readerState.catalogError = error.message || "章节目录读取失败";
+      if (!catalogReadFinished) recordLocalLibraryError(page, error, () => loadReaderCatalog());
     } finally {
-      if (bookId !== String(readerState.book?.id || "")) return;
+      if (!isCurrent()) return;
       readerState.catalogLoading = false;
       if (readerState.catalogOpen) {
         const ratio = captureReaderRatio();
@@ -2195,9 +2785,13 @@ export function createNovelViews(context) {
   }
 
   async function loadRemoteReaderCatalogPage(options = {}) {
+    const session = readerState.session;
+    const book = readerState.book || {};
     const bookId = String(readerState.book?.id || "");
     if (!bookId) return;
     const requestId = ++catalogRequestId;
+    const isCurrent = () => isCurrentReaderSession(session) && requestId === catalogRequestId
+      && bookId === String(readerState.book?.id || "");
     const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
     catalogState.query = query;
     const params = new URLSearchParams({
@@ -2207,13 +2801,16 @@ export function createNovelViews(context) {
     if (query) params.set("q", query);
     if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
     else params.set("offset", String(Math.max(0, Number(options.page ?? catalogState.page ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
+    addCatalogPreconditions(params, book);
     const ratio = captureReaderRatio();
     readerState.catalogLoading = true;
     readerState.catalogError = "";
     if (readerState.catalogOpen) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
     try {
-      const data = await fetchJson(getActiveUrl(), novelCatalogPath(bookId, params), { timeoutMs: 16000 });
-      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      const data = await fetchJson(session.sourceUrl, novelCatalogPath(bookId, params), { timeoutMs: 16000, signal: session.routeGuard.signal });
+      if (!isCurrent()) return;
+      if (!canUseRemotePayload(session.sourceUrl, data)
+        || !matchesRemotePayload(data, bookId, session.sourceRealm || "", undefined, chapterAnchor(book))) throw new Error("目录所属书库、书籍或内容版本已变化，请重新打开详情");
       readerState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
       catalogState.remotePaged = true;
       catalogState.bookId = bookId;
@@ -2223,10 +2820,10 @@ export function createNovelViews(context) {
       catalogState.page = Math.floor(catalogState.offset / NOVEL_CATALOG_PAGE_SIZE);
       readerState.catalogError = "";
     } catch (error) {
-      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      if (!isCurrent()) return;
       readerState.catalogError = error.message || "章节目录读取失败";
     } finally {
-      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      if (!isCurrent()) return;
       readerState.catalogLoading = false;
       if (readerState.catalogOpen) {
         const nextRatio = captureReaderRatio();
@@ -2237,6 +2834,7 @@ export function createNovelViews(context) {
 
   async function loadRemoteDetailCatalogPage(options = {}) {
     const book = detailState.book || {};
+    const operation = captureRemoteOperation(book);
     const bookId = String(book.id || "");
     if (!bookId) return;
     const requestId = ++detailCatalogRequestId;
@@ -2250,19 +2848,28 @@ export function createNovelViews(context) {
     if (query) params.set("q", query);
     if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
     else params.set("offset", String(Math.max(0, Number(options.page ?? catalogState.page ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
+    addCatalogPreconditions(params, book);
     const path = novelCatalogPath(bookId, params);
     const scrollY = window.scrollY;
     try {
       let data;
       try {
-        data = await fetchJson(getActiveUrl(), path, { timeoutMs: 16000, signal: isActive.signal });
-        writeCachedJson(getActiveUrl(), path, data).catch(() => {});
+        requireRemoteOperation(operation);
+        data = await fetchJson(operation.sourceUrl, path, { timeoutMs: 16000, signal: isActive.signal });
+        requireRemoteOperation(operation);
+        if (!canUseRemotePayload(operation.sourceUrl, data)
+          || !matchesRemotePayload(data, bookId, operation.sourceRealm, undefined, chapterAnchor(book))) throw new Error("目录所属书库、书籍或内容版本已变化，请重新打开详情");
+        writeCachedJson(operation.sourceUrl, path, data).catch(() => {});
       } catch (error) {
-        const cached = await readCachedJson(getActiveUrl(), path).catch(() => null);
+        requireRemoteOperation(operation);
+        const cached = await readCachedJson(operation.sourceUrl, path).catch(() => null);
         if (!cached?.payload?.chapters) throw error;
+        if (!canUseRemotePayload(operation.sourceUrl, cached.payload)
+          || !matchesRemotePayload(cached.payload, bookId, operation.sourceRealm, undefined, chapterAnchor(book))) throw error;
         data = cached.payload;
       }
-      if (!isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")) return;
+      if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")
+        || book.sourceRealm !== detailState.book?.sourceRealm) return;
       detailState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
       catalogState.remotePaged = true;
       catalogState.bookId = bookId;
@@ -2275,10 +2882,15 @@ export function createNovelViews(context) {
           remotePaged: true,
           catalog: data
         });
-        window.requestAnimationFrame(() => window.scrollTo({ top: scrollY, behavior: "auto" }));
+        window.requestAnimationFrame(() => {
+          if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId
+            || bookId !== String(detailState.book?.id || "") || book.sourceRealm !== detailState.book?.sourceRealm) return;
+          window.scrollTo({ top: scrollY, behavior: "auto" });
+        });
       }
     } catch (error) {
-      if (!isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")) return;
+      if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")
+        || book.sourceRealm !== detailState.book?.sourceRealm) return;
       if (detailState.chapters.length >= Number(book.chapterCount || 0)) {
         renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry);
         renderMessage("目录服务暂时不可用，当前显示完整缓存目录。", "quiet", false);
@@ -2314,8 +2926,7 @@ export function createNovelViews(context) {
   function openAdjacent(direction) {
     const target = direction < 0 ? readerState.prev : readerState.next;
     if (!target || !readerState.book?.id) return;
-    flushReaderProgress();
-    showView("novelReader", { id: readerState.book.id, chapterIndex: String(target.index || 1) }, { push: true });
+    openReader(readerState.book, target.index || 1, { exactChapter: true, chapter: target });
   }
 
   function openNovelLibrary() {
@@ -2330,12 +2941,25 @@ export function createNovelViews(context) {
     const target = readableBookForReader(book);
     if (!target?.id) return;
     flushReaderProgress();
+    if (!options.exactChapter && target.progressRecovery) {
+      showView("novelDetail", { id: target.id }, { push: true });
+      return;
+    }
     const chapterIndex = options.exactChapter
       ? fallbackIndex
       : target.progress?.chapterIndex || fallbackIndex || 1;
+    // A remote catalog cannot select an ordinal in a different offline edition.
+    if (options.exactChapter && target.id !== book.id) {
+      showView("novelDetail", { id: target.id }, { push: true });
+      setStatus?.("已打开本机缓存目录，请在此选择离线章节");
+      return;
+    }
+    const chapter = options.exactChapter ? options.chapter || {} : { id: target.progress?.chapterId };
     showView("novelReader", {
       id: target.id,
-      chapterIndex: String(chapterIndex)
+      chapterIndex: String(chapterIndex),
+      ...chapterAnchor(target, chapter),
+      ...(options.exactChapter ? { confirmProgress: "1" } : {})
     }, { push: true });
   }
 
@@ -2347,7 +2971,9 @@ export function createNovelViews(context) {
       ...book,
       id: book.cachedLocalId,
       local: true,
-      progress: book.localProgress || book.progress || null
+      progress: book.localProgress || null,
+      progressRecovery: book.localProgressRecovery || null,
+      catalogRevision: undefined
     };
   }
 
@@ -2371,7 +2997,7 @@ export function createNovelViews(context) {
       return;
     }
     if (listState.uploading) return;
-    setNovelBusy("scan");
+    const busyOwner = setNovelBusy("scan");
     setStatus?.("请选择一个目录扫描 TXT");
     renderCurrentView();
 
@@ -2383,7 +3009,7 @@ export function createNovelViews(context) {
           maxNodes: DEVICE_TEXT_SCAN_NODE_LIMIT
         });
         if (scan?.canceled) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           setStatus?.("已取消目录扫描。");
           renderCurrentView();
           return;
@@ -2391,7 +3017,7 @@ export function createNovelViews(context) {
         const errors = Array.isArray(scan?.errors) ? scan.errors : [];
         const scanTruncated = Boolean(scan?.truncated);
         if (scan?.rootFailed) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           setStatus?.("所选目录无法读取，请重新选择一个可访问的目录。", "error");
           renderCurrentView();
           return;
@@ -2399,7 +3025,7 @@ export function createNovelViews(context) {
 
         const items = Array.isArray(scan?.items) ? scan.items : [];
         if (!items.length) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           const partialText = scanTruncated ? "扫描已达到安全上限，可能仍有目录未检查。" : "";
           setStatus?.(errors.length
             ? `目录中没有可导入的 TXT，另有 ${formatNumber(errors.length)} 个子目录无法读取。${partialText}`
@@ -2410,7 +3036,7 @@ export function createNovelViews(context) {
 
         const selectedItems = await confirmScanImport(items, scanTruncated);
         if (!selectedItems?.length) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           setStatus?.("已取消扫描导入。");
           renderCurrentView();
           return;
@@ -2424,7 +3050,7 @@ export function createNovelViews(context) {
             await saveLocalTextFile({
               fileName: file.fileName || item.fileName,
               sizeBytes: Number(file.sizeBytes || item.sizeBytes || 0),
-              lastModified: Number(item.lastModified || Date.now()),
+              lastModified: Number(file.lastModified || item.lastModified || 0),
               encoding: file.encoding,
               text: file.text,
               sourceUri: file.uri || item.uri || "",
@@ -2438,7 +3064,7 @@ export function createNovelViews(context) {
           }
         }
 
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         focusLocalLibraryAfterImport();
         const directorySkips = errors.length;
         const partialText = scanTruncated ? "；扫描已达到安全上限，可能仍有目录未检查" : "";
@@ -2448,7 +3074,7 @@ export function createNovelViews(context) {
         renderCurrentView();
       })
       .catch((error) => {
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         setStatus?.(`扫描导入失败：${error.message || error}`, "error");
         renderCurrentView();
       });
@@ -2462,58 +3088,88 @@ export function createNovelViews(context) {
       return;
     }
     if (listState.uploading) return;
-    setNovelBusy("picker");
+    const busyOwner = setNovelBusy("picker");
     setStatus?.("正在打开系统文件管理器");
     renderCurrentView();
 
     Promise.resolve()
       .then(async () => {
-        const result = await plugin.openTextDocumentPicker();
-        const items = Array.isArray(result?.items) ? result.items : [];
+        const result = await plugin.openTextDocumentPicker({ deferredRead: true });
         const errors = Array.isArray(result?.errors) ? result.errors : [];
         if (result?.canceled) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           setStatus?.("已取消文件管理器导入。");
           renderCurrentView();
           return;
         }
+        if (result?.available === false) throw new Error(result.message || "文件管理器暂时不可用");
+        // Older native versions ignore deferredRead and return complete items.
+        // A documents array is authoritative even when empty: never import both.
+        const deferredRead = Array.isArray(result?.documents);
+        const selected = deferredRead ? result.documents : Array.isArray(result?.items) ? result.items : [];
+        const seenUris = new Set();
+        const items = selected.filter((item) => {
+          const uri = typeof item?.uri === "string" ? item.uri.trim() : "";
+          if (!uri) return true;
+          if (seenUris.has(uri)) return false;
+          seenUris.add(uri);
+          return true;
+        });
         if (!items.length) {
-          clearNovelBusy();
+          clearNovelBusy(busyOwner);
           setStatus?.(errors.length ? `没有导入 TXT，${formatNumber(errors.length)} 个文件读取失败或不是 TXT。` : "没有选择可导入的 TXT。", errors.length ? "error" : "");
           renderCurrentView();
           return;
         }
+        if (deferredRead && typeof plugin.readPickedTextFile !== "function") {
+          throw new Error("当前原生组件不支持逐本读取 TXT，请更新应用后重试");
+        }
 
         let imported = 0;
         let skipped = 0;
-        for (const file of items) {
+        let firstFailure = "";
+        for (const item of items) {
           try {
+            setStatus?.(`文件管理器读取 ${formatNumber(imported + skipped + 1)}/${formatNumber(items.length)}：${item?.fileName || "TXT"}`);
+            const uri = typeof item?.uri === "string" ? item.uri.trim() : "";
+            if (deferredRead && !uri) throw new Error("所选文档缺少 URI");
+            const file = deferredRead ? await plugin.readPickedTextFile({ uri }) : item;
+            if (file?.available === false || typeof file?.text !== "string") {
+              throw new Error(file?.message || "未读取到 TXT 正文");
+            }
+            if (!/\S/.test(file.text)) throw new Error("TXT 内容为空，未替换已保存的小说");
+            // Keep this read + durable save serial; the next document's text is
+            // not requested while this document is being decoded or persisted.
             await saveLocalTextFile({
-              fileName: file.fileName || "local-text.txt",
-              sizeBytes: Number(file.sizeBytes || 0),
-              lastModified: Date.now(),
+              fileName: file.fileName || item?.fileName || "local-text.txt",
+              sizeBytes: Number(file.sizeBytes || item?.sizeBytes || 0),
+              lastModified: Number(file.lastModified || item?.lastModified || 0),
               encoding: file.encoding,
               text: file.text,
-              sourceUri: file.uri || "",
+              sourceUri: file.sourceUri || file.uri || uri,
               sourceType: "system-picker"
             });
             imported += 1;
-            setStatus?.(`文件管理器导入 ${formatNumber(imported)}/${formatNumber(items.length)}：${file.fileName || "TXT"}`);
+            setStatus?.(`文件管理器导入 ${formatNumber(imported + skipped)}/${formatNumber(items.length)}：${file.fileName || item?.fileName || "TXT"}`);
           } catch (error) {
             skipped += 1;
-            setStatus?.(`已跳过 ${formatNumber(skipped)} 本导入失败的 TXT：${file.fileName || "TXT"}`);
+            const reason = String(error?.message || error || "未知错误");
+            firstFailure ||= reason;
+            setStatus?.(`已跳过 ${formatNumber(skipped)} 本导入失败的 TXT：${item?.fileName || "TXT"}；${reason}`, "error");
           }
         }
 
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         focusLocalLibraryAfterImport();
-        setStatus?.(skipped || errors.length
+        firstFailure ||= String(errors.find((error) => error?.message)?.message || "");
+        const summary = skipped || errors.length
           ? `已导入 ${formatNumber(imported)} 本，跳过 ${formatNumber(skipped + errors.length)} 个文件`
-          : `已从文件管理器导入 ${formatNumber(imported)} 本`);
+          : `已从文件管理器导入 ${formatNumber(imported)} 本`;
+        setStatus?.(`${summary}${firstFailure ? `；首个失败原因：${firstFailure}` : ""}`, skipped || errors.length ? "error" : "");
         renderCurrentView();
       })
       .catch((error) => {
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         setStatus?.(`文件管理器导入失败：${error.message || error}`, "error");
         renderCurrentView();
       });
@@ -2635,7 +3291,7 @@ export function createNovelViews(context) {
   function uploadNovelFiles(files = []) {
     const txtFiles = files.filter((file) => file && (/\.txt$/i.test(file.name) || String(file.type || "").startsWith("text/")));
     if (!txtFiles.length) return;
-    setNovelBusy("upload");
+    const busyOwner = setNovelBusy("upload");
     setStatus?.(`正在上传 ${formatNumber(txtFiles.length)} 本小说`);
     renderCurrentView();
 
@@ -2666,7 +3322,7 @@ export function createNovelViews(context) {
             setStatus?.(`电脑书库不可用，已保存到手机本地：${file.name}`);
           }
         }
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         if (localImported) focusLocalLibraryAfterImport();
         setStatus?.(
           localImported
@@ -2676,7 +3332,7 @@ export function createNovelViews(context) {
         renderCurrentView();
       })
       .catch((error) => {
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         setStatus?.(`上传失败：${error.message || error}`, "error");
         renderCurrentView();
       });
@@ -2685,7 +3341,7 @@ export function createNovelViews(context) {
   function importLocalNovelFiles(files = []) {
     const txtFiles = files.filter((file) => file && (/\.txt$/i.test(file.name) || String(file.type || "").startsWith("text/")));
     if (!txtFiles.length) return;
-    setNovelBusy("local");
+    const busyOwner = setNovelBusy("local");
     setStatus?.(`正在导入 ${formatNumber(txtFiles.length)} 本到手机本地`);
     renderCurrentView();
 
@@ -2704,13 +3360,13 @@ export function createNovelViews(context) {
           imported += 1;
           setStatus?.(`已本地导入 ${formatNumber(imported)}/${formatNumber(txtFiles.length)}：${file.name}`);
         }
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         focusLocalLibraryAfterImport();
         setStatus?.(`已导入 ${formatNumber(imported)} 本到手机本地书库`);
         renderCurrentView();
       })
       .catch((error) => {
-        clearNovelBusy();
+        clearNovelBusy(busyOwner);
         setStatus?.(`本地导入失败：${error.message || error}`, "error");
         renderCurrentView();
       });
@@ -2719,7 +3375,17 @@ export function createNovelViews(context) {
   async function downloadBook(bookId) {
     if (!bookId) return;
     if (isLocalBookId(bookId)) {
-      const entry = await ensureLocalNovelEntry(bookId).catch(() => null);
+      const page = novelPage;
+      let entry;
+      try { entry = await readLocalNovelEntry(bookId); }
+      catch (error) {
+        if (page && !page.isActive()) return;
+        recordLocalLibraryError(page, error, () => downloadBook(bookId), "重试导出");
+        setStatus?.(`本地正文读取失败，尚未开始导出：${error.message || error}`, "error");
+        return;
+      }
+      if (page && !page.isActive()) return;
+      clearLocalLibraryError(page);
       if (!entry) {
         setStatus?.("这本本地小说已经不在手机本地库里。", "error");
         return;
@@ -2755,25 +3421,32 @@ export function createNovelViews(context) {
   }
 
   async function cacheBookFromList(book = {}) {
-    if (!book.id || cachingBookId) return;
+    if (!book.id || cachingBookId || preparingCache) return;
+    const operation = captureRemoteOperation(book);
+    preparingCache = true;
     setStatus?.(`正在准备缓存《${book.title || "小说"}》`);
     try {
+      requireRemoteOperation(operation);
+      if (!operation.sourceRealm) throw new Error("电脑端尚未提供稳定书库身份，请更新电脑端后再缓存");
       const path = novelDetailPath(book.id);
-      const cached = await readCachedJson(getActiveUrl(), path).catch(() => null);
+      const cached = await readCachedJson(operation.sourceUrl, path).catch(() => null);
+      requireRemoteOperation(operation);
       let data = cached?.payload || null;
-      if (!data?.book || !Array.isArray(data.chapters)) {
-        data = await fetchJson(getActiveUrl(), path, { timeoutMs: 18000 });
-        writeCachedJson(getActiveUrl(), path, data).catch(() => {});
+      if (book.cachedLocal || !matchesRemotePayload(data, book.id, operation.sourceRealm, undefined, chapterAnchor(book)) || !Array.isArray(data.chapters)) {
+        data = await fetchJson(operation.sourceUrl, path, { timeoutMs: 18000 });
+        requireRemoteOperation(operation);
+        if (!matchesRemotePayload(data, book.id, operation.sourceRealm)) throw new Error("小说目录的来源已变化，请重新打开书库");
+        writeCachedJson(operation.sourceUrl, path, data).catch(() => {});
       }
       const detailBook = { ...book, ...(data.book || {}) };
       const chapters = Array.isArray(data.chapters) ? data.chapters : [];
       if (!chapters.length) throw new Error("没有读到目录");
-      const saved = await cacheWholeBook(detailBook, chapters, { renderDetail: false });
-      if (saved?.book) localBooks.set(saved.book.id, saved);
+      await cacheWholeBook(detailBook, chapters, { renderDetail: false, operation });
     } catch (error) {
       setStatus?.(`缓存失败：${error.message || error}`, "error");
     } finally {
-      renderCurrentViewPreservingScroll();
+      preparingCache = false;
+      if (operation.isActive()) renderCurrentViewPreservingScroll();
     }
   }
 
@@ -2784,46 +3457,83 @@ export function createNovelViews(context) {
     openReader(entry.book, 1);
   }
 
-  async function renderLocalNovelReader(bookId, chapterIndex) {
-    const entry = await ensureLocalNovelEntry(bookId).catch(() => null);
-    if (!entry) {
-      renderMessage("这本本地小说已经不在手机本地库里，请重新导入。", "error");
+  async function renderCachedReader(entry, chapterIndex, anchor, isActive) {
+    if (anchor.sourceRealm && normalizeSourceRealm(entry.book.sourceRealm) !== anchor.sourceRealm) return false;
+    if (anchor.catalogRevision && entry.book.sourceCatalogRevision !== anchor.catalogRevision) return false;
+    let localAnchor = {};
+    if (anchor.chapterId) {
+      const catalog = await readLocalCatalog(entry.book.id);
+      if (!isActive()) return false;
+      const chapter = catalog?.chapters.find((item) => item.sourceChapterId === anchor.chapterId
+        && item.sourceCatalogRevision === anchor.catalogRevision);
+      if (!chapter) return false;
+      chapterIndex = chapter.index;
+      localAnchor = chapterAnchor(catalog.book, chapter);
+    }
+    return renderLocalNovelReader(entry.book.id, chapterIndex, isActive, localAnchor);
+  }
+
+  async function renderLocalNovelReader(bookId, chapterIndex, isActive = () => true, anchor = readerState.session?.anchor || {}) {
+    const page = novelPage;
+    const version = localBookReadVersions.get(bookId) || 0;
+    const progressVersion = localBookProgressVersions.get(bookId) || 0;
+    let data;
+    try { data = await readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), anchor); }
+    catch (error) {
+      if (!isActive() || version !== (localBookReadVersions.get(bookId) || 0)) return;
+      els.viewMeta.textContent = "本机库未能读取，章节是否存在尚未确认";
+      renderMessage("本地章节读取失败，请重试。没有改用旧副本继续阅读。", "error");
+      recordLocalLibraryError(page, error, () => renderLocalNovelReader(bookId, chapterIndex, isActive, anchor));
       return;
     }
+    if (!isActive() || version !== (localBookReadVersions.get(bookId) || 0)) return;
+    clearLocalLibraryError(page);
+    if (!data?.chapter) {
+      if (anchor.catalogRevision || anchor.chapterId) {
+        readerState.progressBlocked = true;
+        renderMessage("本地章节已更新或不再存在，旧位置未覆盖。请重新打开详情确认续读位置。", "error");
+        els.viewContent.append(actionButton("重新打开详情", () => showView("novelDetail", { id: bookId }, { push: true })));
+      } else renderMessage("这本本地小说或章节已经不在手机本地库里，请重新打开或导入。", "error");
+      return;
+    }
+    const summary = rememberLocalBookSummary(data, progressVersion);
     focusLocalSource();
-    const index = Math.max(1, Number(chapterIndex || 1));
-    const chapter = entry.chapters.find((item) => item.index === index) || entry.chapters[0];
-    const currentIndex = entry.chapters.findIndex((item) => item.index === chapter.index);
-    renderNovelReaderData({
-      book: entry.book,
-      chapter,
-      chapters: entry.chapters.map(({ content, ...summary }) => summary),
-      prev: currentIndex > 0 ? entry.chapters[currentIndex - 1] : null,
-      next: currentIndex >= 0 && currentIndex < entry.chapters.length - 1 ? entry.chapters[currentIndex + 1] : null
-    });
+    renderNovelReaderData({ ...data, book: summary.book });
+    return true;
   }
 
   async function saveLocalTextFile(file = {}) {
     const entry = createLocalBookEntry(file);
-    const existing = await readLocalNovelEntry(entry.book.id).catch(() => null);
+    if (readerState.active && (readerState.book?.id === entry.book.id || readerState.session?.bookId === entry.book.id)) deactivateReader();
+    invalidateLocalBookReads(entry.book.id);
+    const existing = await readLocalNovelEntry(entry.book.id);
     if (existing) {
       entry.createdAt = existing.createdAt || entry.createdAt;
-      const progress = existing.book?.progress;
-      if (progress && entry.chapters.some((chapter) => Number(chapter.index) === Number(progress.chapterIndex))) {
-        entry.book.progress = progress;
-      }
     }
-    const saved = await saveLocalNovelEntry(entry);
-    localBooks.set(saved.book.id, saved);
-    return saved;
+    const saved = await saveLocalNovelEntry(entry, { expectedGeneration: existing?.generation ?? null });
+    if (!saved) throw new Error("本地小说已被其他操作更新，未覆盖内容；请重新导入");
+    invalidateLocalBookReads(saved.book.id);
+    return rememberLocalBookSummary(saved);
   }
 
   async function ensureLocalNovelEntry(bookId) {
+    // Metadata-only lookup; whole-book reads are reserved for export/reimport.
     const id = String(bookId || "");
     if (localBooks.has(id)) return localBooks.get(id);
-    const entry = await readLocalNovelEntry(id);
-    if (entry) localBooks.set(id, entry);
-    return entry;
+    const version = localBookReadVersions.get(id) || 0;
+    const progressVersion = localBookProgressVersions.get(id) || 0;
+    const entry = await readLocalNovelSummary(id);
+    if (version !== (localBookReadVersions.get(id) || 0)) return localBooks.get(id) || null;
+    return entry ? rememberLocalBookSummary(entry, progressVersion) : null;
+  }
+
+  async function readLocalCatalog(bookId) {
+    const version = localBookReadVersions.get(bookId) || 0;
+    const progressVersion = localBookProgressVersions.get(bookId) || 0;
+    const entry = await readLocalNovelCatalog(bookId);
+    if (version !== (localBookReadVersions.get(bookId) || 0)) return null;
+    const summary = entry ? rememberLocalBookSummary(entry, progressVersion) : null;
+    return summary ? { ...entry, book: summary.book } : null;
   }
 
   function localDetailData(entry) {
@@ -2839,7 +3549,9 @@ export function createNovelViews(context) {
     const title = book.title || (cachedRemote ? "缓存小说" : "本地小说");
     const target = cachedRemote ? "离线缓存" : "本地书库";
     if (!window.confirm(`从手机${target}移除《${title}》？`)) return;
+    invalidateLocalBookReads(book.id);
     await deleteLocalNovelEntry(book.id);
+    invalidateLocalBookReads(book.id);
     localBooks.delete(book.id);
     setStatus?.(`已移除${cachedRemote ? "缓存" : "本地小说"}：${title}`);
     showView("novels", {}, { resetStack: true });
@@ -2849,12 +3561,14 @@ export function createNovelViews(context) {
     const ids = Array.from(selectedLocalBookIds).filter((id) => isLocalBookId(id) && localBooks.has(id));
     if (!ids.length) return;
     if (!window.confirm(`从手机本地书架移除选中的 ${formatNumber(ids.length)} 本？不会删除原始 TXT 文件。`)) return;
-    setNovelBusy("remove");
+    const busyOwner = setNovelBusy("remove");
     setStatus?.(`正在移除 ${formatNumber(ids.length)} 本本地小说`);
     try {
       let removed = 0;
       for (const id of ids) {
+        invalidateLocalBookReads(id);
         await deleteLocalNovelEntry(id);
+        invalidateLocalBookReads(id);
         localBooks.delete(id);
         selectedLocalBookIds.delete(id);
         removed += 1;
@@ -2864,13 +3578,13 @@ export function createNovelViews(context) {
     } catch (error) {
       setStatus?.(`删除书架失败：${error.message || error}`, "error");
     } finally {
-      clearNovelBusy();
+      clearNovelBusy(busyOwner);
       renderCurrentView();
     }
   }
 
   async function removeCachedRemoteBook(book = {}) {
-    const cachedId = book.cachedLocalId || remoteCacheIdFromSourceId(book.id);
+    const cachedId = book.cachedLocalId || remoteCacheIdFromSourceId(book.id, book.sourceRealm);
     if (!cachedId) return;
     const entry = await ensureLocalNovelEntry(cachedId).catch(() => null);
     await removeLocalBook(entry?.book || { ...book, id: cachedId, local: true });
@@ -2882,7 +3596,7 @@ export function createNovelViews(context) {
     const chapters = splitLocalTextChapters(text);
     const charCount = chapters.reduce((sum, chapter) => sum + chapter.charCount, 0);
     const now = new Date().toISOString();
-    const sourceUri = String(file.uri || "").trim();
+    const sourceUri = String(file.sourceUri || "").trim() || String(file.uri || "").trim();
     const sourceType = file.sourceType || (sourceUri ? "native-file" : "local-file");
     const title = localBookTitle(fileName, text, sourceType);
     const lastModified = Number(file.lastModified || 0) || 0;
@@ -2913,7 +3627,6 @@ export function createNovelViews(context) {
       book,
       chapters: chapters.map((chapter) => ({
         ...chapter,
-        id: `${bookId}-${String(chapter.index).padStart(5, "0")}`,
         bookId,
         updatedAt: now
       }))
@@ -2923,7 +3636,9 @@ export function createNovelViews(context) {
   function createCachedRemoteBookEntry(book = {}, chapters = []) {
     const now = new Date().toISOString();
     const remoteId = String(book.id || `${book.title || "novel"}:${book.author || ""}`);
-    const localId = `local:remote:${remoteId}`;
+    const sourceRealm = normalizeSourceRealm(book.sourceRealm);
+    const localId = remoteCacheIdFromSourceId(remoteId, sourceRealm);
+    if (!localId) throw new Error("电脑端尚未提供稳定书库身份，请更新电脑端后再缓存；已有本机小说仍可阅读和导出");
     const normalizedChapters = chapters
       .map((chapter, index) => {
         const chapterIndex = Math.max(1, Number(chapter?.index || index + 1) || index + 1);
@@ -2931,7 +3646,9 @@ export function createNovelViews(context) {
         if (!content) return null;
         return {
           ...chapter,
-          id: `${localId}-${String(chapterIndex).padStart(5, "0")}`,
+          id: undefined,
+          sourceChapterId: chapter.id,
+          sourceCatalogRevision: book.catalogRevision,
           bookId: localId,
           index: chapterIndex,
           title: String(chapter?.title || `正文 ${chapterIndex}`).trim(),
@@ -2950,7 +3667,14 @@ export function createNovelViews(context) {
       id: localId,
       local: true,
       sourceBookId: book.id || "",
+      sourceRealm,
       sourceType: "remote-cache",
+      catalogRevision: undefined,
+      sourceCatalogRevision: book.catalogRevision,
+      sourceProgress: book.progress || null,
+      sourceProgressRecovery: book.progressRecovery || null,
+      progress: null,
+      progressRecovery: null,
       title,
       author: book.author || "远端书库",
       category: book.category || "离线缓存",
@@ -2978,13 +3702,15 @@ export function createNovelViews(context) {
     const matches = Array.from(source.matchAll(pattern));
     if (matches.length >= 2) {
       const chapters = [];
+      const preamble = source.slice(0, matches[0].index).trim();
+      if (preamble) chapters.push({ index: 1, title: "序言", content: preamble, charCount: preamble.length, preamble: true });
       for (let index = 0; index < matches.length; index += 1) {
         const match = matches[index];
         const start = match.index + match[0].length;
         const end = index + 1 < matches.length ? matches[index + 1].index : source.length;
         const title = String(match[1] || `正文 ${index + 1}`).trim();
         const content = source.slice(start, end).trim() || title;
-        chapters.push({ index: index + 1, title, content, charCount: content.length });
+        chapters.push({ index: chapters.length + 1, title, content, charCount: content.length });
       }
       return chapters;
     }
@@ -3040,9 +3766,13 @@ export function createNovelViews(context) {
   }
 
   function composeLocalNovelText(entry = {}) {
-    const title = entry.book?.title ? `${entry.book.title}\n\n` : "";
+    // Imported TXT already has its title in the filename. An added heading here
+    // becomes another preamble on every export/reimport cycle.
+    const title = entry.book?.sourceType === "remote-cache" && entry.book?.title ? `${entry.book.title}\n\n` : "";
     return title + (entry.chapters || [])
-      .map((chapter) => `${chapter.title || `正文 ${chapter.index || ""}`.trim()}\n\n${chapter.content || ""}`.trim())
+      .map((chapter) => chapter.preamble || (entry.chapters.length === 1 && chapter.title === "正文")
+        ? String(chapter.content || "").trim()
+        : `${chapter.title || `正文 ${chapter.index || ""}`.trim()}\n\n${chapter.content || ""}`.trim())
       .join("\n\n");
   }
 
@@ -3050,12 +3780,16 @@ export function createNovelViews(context) {
     const blob = new Blob([String(content || "")], { type: "text/plain;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = href;
-    link.download = sanitizeTxtFileName(fileName);
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    try {
+      link.href = href;
+      link.download = sanitizeTxtFileName(fileName);
+      document.body.append(link);
+      link.click();
+    } finally {
+      link.remove();
+      try { window.setTimeout(() => URL.revokeObjectURL(href), 1000); }
+      catch { URL.revokeObjectURL(href); }
+    }
   }
 
   function sanitizeTxtFileName(value) {
@@ -3079,6 +3813,7 @@ export function createNovelViews(context) {
 
   async function cacheWholeBook(book = {}, chapters = [], options = {}) {
     if (!book.id || !chapters.length || cachingBookId) return;
+    const operation = options.operation || captureRemoteOperation(book);
     const renderDetail = options.renderDetail !== false;
     if (options.confirmLarge !== false && !confirmWholeBookCache(book, chapters)) {
       setStatus?.("已取消整本缓存。");
@@ -3089,17 +3824,38 @@ export function createNovelViews(context) {
     setStatus?.(`正在缓存《${book.title || "小说"}》到手机离线缓存`);
     if (renderDetail) renderNovelDetailData({ book, chapters });
     try {
+      requireRemoteOperation(operation);
+      if (!operation.sourceRealm) throw new Error("电脑端尚未提供稳定书库身份，请更新电脑端后再缓存");
+      if (normalizeSourceRealm(book.sourceRealm) !== operation.sourceRealm) throw new Error("小说目录的书库来源不一致");
+      if (!book.catalogRevision) throw new Error("电脑端尚未提供内容版本，请更新电脑端后再缓存；已有本机缓存仍可阅读");
+      const localId = remoteCacheIdFromSourceId(book.id, operation.sourceRealm);
+      const existing = await readLocalNovelSummary(localId);
+      requireRemoteOperation(operation);
+      const chapterIndexes = chapters.map((chapter) => Number(chapter.index));
+      const chapterIds = chapters.map((chapter) => chapter.id);
+      if (new Set(chapterIndexes).size !== chapters.length || chapterIndexes.some((index) => !Number.isInteger(index) || index < 1)
+        || chapterIds.some((id) => typeof id !== "string" || !id) || new Set(chapterIds).size !== chapters.length
+        || Number(book.chapterCount) !== chapters.length) {
+        throw new Error("小说目录含重复或无效章节，尚未缓存");
+      }
       let cached = 0;
       const localChapters = [];
       let latestBook = book;
       for (const chapter of chapters) {
+        requireRemoteOperation(operation);
         const index = chapter.index || cached + 1;
-        const path = novelChapterPath(book.id, index);
-        const cachedEntry = await readCachedJson(getActiveUrl(), path).catch(() => null);
+        const anchor = chapterAnchor(book, chapter);
+        const path = novelChapterPath(book.id, index, anchor);
+        const cachedEntry = await readCachedJson(operation.sourceUrl, path).catch(() => null);
+        requireRemoteOperation(operation);
         let data = cachedEntry?.payload || null;
-        if (!data?.chapter?.content) {
-          data = await fetchJson(getActiveUrl(), path, { timeoutMs: 22000 });
-          await writeCachedJson(getActiveUrl(), path, data);
+        if (!matchesRemotePayload(data, book.id, operation.sourceRealm, index, anchor) || typeof data?.chapter?.content !== "string" || !data.chapter.content.trim()) {
+          data = await fetchJson(operation.sourceUrl, path, { timeoutMs: 22000 });
+          requireRemoteOperation(operation);
+          if (!matchesRemotePayload(data, book.id, operation.sourceRealm, index, anchor)) throw new Error("章节来源、身份或内容版本已变化，未保存整本缓存");
+          if (typeof data?.chapter?.content !== "string" || !data.chapter.content.trim()) throw new Error("章节正文为空，未保存整本缓存");
+          await writeCachedJson(operation.sourceUrl, path, data);
+          requireRemoteOperation(operation);
         }
         if (data?.book) latestBook = { ...latestBook, ...data.book };
         if (data?.chapter?.content) localChapters.push(data.chapter);
@@ -3109,17 +3865,26 @@ export function createNovelViews(context) {
         }
       }
       if (!localChapters.length) throw new Error("没有读到可保存的章节正文");
-      const saved = await saveLocalNovelEntry(createCachedRemoteBookEntry(latestBook, localChapters));
-      localBooks.set(saved.book.id, saved);
+      requireRemoteOperation(operation);
+      const entry = createCachedRemoteBookEntry(latestBook, localChapters);
+      invalidateLocalBookReads(entry.book.id);
+      const saved = await saveLocalNovelEntry(entry, { expectedGeneration: existing?.generation ?? null });
+      if (!saved) throw new Error("本机缓存已被其他操作更新或移除，未覆盖内容；请重新操作");
+      invalidateLocalBookReads(saved.book.id);
+      rememberLocalBookSummary(saved);
       savedEntry = saved;
-      setStatus?.(`《${book.title || "小说"}》已保存到手机离线缓存`);
+      if (operation.isActive()) setStatus?.(`《${book.title || "小说"}》已保存到手机离线缓存`);
       return savedEntry;
     } catch (error) {
       setStatus?.(`缓存失败：${error.message || error}`, "error");
       return null;
     } finally {
+      const catalog = renderDetail && savedEntry ? await readLocalCatalog(savedEntry.book.id).catch(() => null) : null;
       cachingBookId = "";
-      if (renderDetail) renderNovelDetailData(savedEntry ? localDetailData(savedEntry) : { book, chapters });
+      if (renderDetail && operation.isActive()) {
+        renderNovelDetailData(catalog ? localDetailData(catalog) : { book: savedEntry?.book || book,
+          chapters: chapters.map(({ content, ...summary }) => summary) });
+      }
     }
   }
 
@@ -3148,14 +3913,37 @@ export function createNovelViews(context) {
 
   function installReaderLifecycle() {
     if (typeof window === "undefined") return;
+    window.addEventListener("fanhaoViewWillRender", deactivateReader);
     window.addEventListener("fanhaoViewChanged", (event) => {
       if (event.detail?.view !== "novelReader") deactivateReader();
     });
     window.addEventListener("pagehide", deactivateReader);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) flushReaderProgress();
+      else if (isCurrentReaderSession(readerState.session) && isReaderScreenMounted()) {
+        applyNativeReaderImmersive(!readerState.settingsOpen, true);
+        applyReaderBrightness();
+      }
+    });
+    for (const type of ["pointerdown", "touchstart", "wheel", "keydown"]) {
+      window.addEventListener(type, (event) => {
+        if (type === "keydown") {
+          if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+          if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+          if (event.target?.closest?.("input, textarea, select, [contenteditable]")) return;
+        }
+        cancelReaderRestore();
+      }, { passive: true });
+    }
   }
 
   function deactivateReader() {
+    if (!readerState.active && !readerState.session) return;
     flushReaderProgress();
+    cancelReaderRestore();
+    catalogRequestId += 1;
+    window.clearTimeout(catalogSearchTimer);
+    catalogSearchTimer = null;
     window.clearTimeout(readerState.menuAutoHideTimer);
     if (readerState.progressFrame !== null) {
       window.cancelAnimationFrame(readerState.progressFrame);
@@ -3165,11 +3953,30 @@ export function createNovelViews(context) {
     applyNativeReaderImmersive(false, true);
     document.body.classList.remove("novel-reader-immersive");
     readerState.active = false;
+    readerState.session = null;
+    readerState.screen = null;
     readerState.menuOpen = false;
     readerState.settingsOpen = false;
     readerState.catalogOpen = false;
     readerState.catalogLoading = false;
     readerState.catalogError = "";
+  }
+
+  function isCurrentReaderSession(session) {
+    return Boolean(session && readerState.active && readerState.session === session
+      && session.routeGuard() && session.sourceUrl === getActiveUrl());
+  }
+
+  function isReaderScreenMounted() {
+    return Boolean(readerState.active && readerState.screen
+      && els.viewContent.contains(readerState.screen));
+  }
+
+  function cancelReaderRestore() {
+    readerState.restoreEpoch += 1;
+    if (readerState.restoreFrame !== null) window.cancelAnimationFrame(readerState.restoreFrame);
+    readerState.restoreFrame = null;
+    readerState.restoreRatio = null;
   }
 
   function applyNativeReaderBrightness(percent) {
@@ -3233,17 +4040,42 @@ export function createNovelViews(context) {
 
   async function importPendingNativeTextFile() {
     const plugin = nativeNovelPlugin();
-    if (!plugin?.consumePendingTextFile || importingNativeText) return;
+    if (!plugin?.consumePendingTextFile) return;
+    if (importingNativeText) {
+      nativeTextDrainRequested = true;
+      return;
+    }
+    window.clearTimeout(nativeTextRetryTimer);
+    nativeTextRetryTimer = null;
     importingNativeText = true;
     try {
-      const file = await plugin.consumePendingTextFile();
-      if (!file?.available || typeof file.text !== "string") {
-        if (file?.message) setStatus?.(file.message, "error");
-        return;
-      }
-      await importNativeTextFile(file);
-    } catch (error) {
-      setStatus?.(`本地文本读取失败：${error.message || error}`, "error");
+      do {
+        nativeTextDrainRequested = false;
+        try {
+          const file = await plugin.consumePendingTextFile();
+          if (file?.busy) {
+            // A previous bridge instance may still own native IO after recreation.
+            // Retry later without spinning or relying on another user notification.
+            nativeTextRetryTimer = window.setTimeout(() => {
+              nativeTextRetryTimer = null;
+              importPendingNativeTextFile();
+            }, 500);
+            return;
+          }
+          if (file?.available && typeof file.text === "string") {
+            await importNativeTextFile(file);
+            // Successful consumption may expose another already queued share,
+            // including notifications received before this module was ready.
+            nativeTextDrainRequested = true;
+          } else {
+            if (file?.message) setStatus?.(file.message, "error");
+            nativeTextDrainRequested ||= file?.hasPending === true;
+          }
+        } catch (error) {
+          setStatus?.(`本地文本读取失败：${error.message || error}`, "error");
+          nativeTextDrainRequested ||= error?.data?.hasPending === true;
+        }
+      } while (nativeTextDrainRequested);
     } finally {
       importingNativeText = false;
     }
@@ -3251,7 +4083,7 @@ export function createNovelViews(context) {
 
   async function importNativeTextFile(file = {}) {
     const fileName = file.fileName || "local-text.txt";
-    setNovelBusy("local");
+    const busyOwner = setNovelBusy("local");
     setStatus?.(`正在加入手机本地书库：${fileName}`);
     renderCurrentView();
     try {
@@ -3263,12 +4095,12 @@ export function createNovelViews(context) {
         encoding: file.encoding || "utf-8",
         text: file.text
       });
-      clearNovelBusy();
+      clearNovelBusy(busyOwner);
       focusLocalLibraryAfterImport();
       setStatus?.(`已加入手机本地书库：${entry.book.title || fileName}`);
       openReader(entry.book, 1);
     } catch (error) {
-      clearNovelBusy();
+      clearNovelBusy(busyOwner);
       setStatus?.(`本地文本导入失败：${error.message || error}`, "error");
       renderCurrentView();
     }
@@ -3331,15 +4163,22 @@ export function createNovelViews(context) {
   }
 
   function scheduleReaderProgress() {
-    if (!readerState.active || !readerState.book?.id || !readerState.chapter?.index) return;
+    if (!isReaderScreenMounted() || !readerState.book?.id || !readerState.chapter?.index) return;
+    const session = readerState.session;
+    const screen = readerState.screen;
     if (readerState.progressFrame === null) {
       readerState.progressFrame = window.requestAnimationFrame(() => {
+        if (readerState.session !== session || readerState.screen !== screen) return;
         readerState.progressFrame = null;
         updateReaderProgressUi();
       });
     }
     window.clearTimeout(readerState.progressTimer);
-    readerState.progressTimer = window.setTimeout(saveReaderProgress, 600);
+    readerState.progressTimer = window.setTimeout(() => {
+      if (readerState.session !== session || readerState.screen !== screen) return;
+      readerState.progressTimer = null;
+      saveReaderProgress();
+    }, 600);
   }
 
   function updateReaderProgressUi(inputRatio = captureReaderRatio()) {
@@ -3354,34 +4193,100 @@ export function createNovelViews(context) {
   }
 
   function saveReaderProgress() {
-    if (!readerState.active || !readerState.book?.id || !readerState.chapter?.index) return;
+    if (!isReaderScreenMounted() || readerState.restoreFrame !== null
+      || readerState.progressBlocked || !readerState.book?.id || !readerState.chapter?.index) return;
+    const session = readerState.session;
+    const bookId = readerState.book.id;
+    const chapterIndex = readerState.chapter.index;
+    const chapterId = readerState.chapter.id;
+    const catalogRevision = readerState.book.catalogRevision;
     const ratio = captureReaderRatio();
     readerState.book = {
       ...readerState.book,
       progress: {
         chapterIndex: Number(readerState.chapter.index),
+        ...(catalogRevision ? { chapterId, catalogRevision } : {}),
         scrollRatio: ratio,
         updatedAt: new Date().toISOString()
       }
     };
-    if (isLocalBookId(readerState.book.id)) {
-      saveLocalNovelProgress(readerState.book.id, {
-        chapterIndex: readerState.chapter.index,
+    if (isLocalBookId(bookId)) {
+      const expectedGeneration = readerState.book.localGeneration;
+      const writeId = ++progressWriteId;
+      localProgressWriteIds.set(bookId, writeId);
+      saveLocalNovelProgress(bookId, {
+        chapterIndex,
+        ...(catalogRevision ? { chapterId, catalogRevision } : {}),
         scrollRatio: ratio
-      })
+      }, { expectedGeneration })
         .then((entry) => {
-          if (entry) {
-            localBooks.set(entry.book.id, entry);
-            readerState.book = entry.book;
+          if (!entry && isCurrentReaderSession(session)) {
+            readerState.progressBlocked = true;
+            setStatus?.("本地内容已更新，旧位置未覆盖；请重新打开详情确认续读章节", "error");
+          }
+          if (entry && localProgressWriteIds.get(bookId) === writeId) {
+            localBookProgressVersions.set(bookId, (localBookProgressVersions.get(bookId) || 0) + 1);
+            rememberLocalBookSummary(entry);
+            if (isCurrentReaderSession(session) && readerState.book?.id === bookId
+              && readerState.chapter?.id === chapterId && readerState.book?.catalogRevision === catalogRevision) {
+              readerState.book = { ...readerState.book, progress: entry.book.progress,
+                progressRecovery: entry.book.progressRecovery || null };
+            }
           }
         })
-        .catch(() => {});
+        .catch((error) => {
+          if (isCurrentReaderSession(session)) setStatus?.(`阅读位置尚未保存：${error.message || error}`, "error");
+        })
+        .finally(() => {
+          if (localProgressWriteIds.get(bookId) === writeId) localProgressWriteIds.delete(bookId);
+        });
       return;
     }
-    postJson(getActiveUrl(), `/api/novels/${encodeURIComponent(readerState.book.id)}/progress`, {
-      chapterIndex: readerState.chapter.index,
-      scrollRatio: ratio
-    }).catch(() => {});
+    queueRemoteReaderProgress(session.sourceUrl, bookId, {
+      chapterIndex,
+      ...(catalogRevision ? { chapterId, catalogRevision } : {}),
+      scrollRatio: ratio,
+      ...(normalizeSourceRealm(readerState.book.sourceRealm) ? { sourceRealm: readerState.book.sourceRealm } : {})
+    }, session);
+  }
+
+  function queueRemoteReaderProgress(sourceUrl, bookId, progress, session = readerState.session) {
+    const key = remoteChapterPrefetchKey(sourceUrl, bookId, "progress", progress.sourceRealm || "");
+    let pending = remoteProgressWrites.get(key);
+    if (pending) {
+      pending.next = { progress, session };
+      return;
+    }
+    pending = { next: { progress, session } };
+    remoteProgressWrites.set(key, pending);
+    void (async () => {
+      try {
+        while (pending.next) {
+          const { progress: snapshot, session: owner } = pending.next;
+          pending.next = null;
+          try {
+            const result = await fetchJson(sourceUrl, `/api/novels/${encodeURIComponent(bookId)}/progress`, {
+              method: "POST", body: snapshot, timeoutMs: 12000
+            });
+            if (isCurrentReaderSession(owner) && readerState.book?.id === bookId
+              && readerState.book?.catalogRevision === snapshot.catalogRevision
+              && readerState.chapter?.id === snapshot.chapterId) {
+              readerState.book = { ...readerState.book, progress: result?.progress || snapshot, progressRecovery: null };
+            }
+          } catch (error) {
+            if (isCurrentReaderSession(owner) && readerState.book?.id === bookId
+              && readerState.book?.catalogRevision === snapshot.catalogRevision) {
+              if (error.status === 409 || error.statusCode === 409) {
+                readerState.progressBlocked = true;
+                setStatus?.("目录已更新，旧位置未覆盖；请返回详情确认续读章节", "error");
+              } else setStatus?.(`阅读位置尚未同步：${error.message || error}`, "error");
+            }
+          }
+        }
+      } finally {
+        if (remoteProgressWrites.get(key) === pending) remoteProgressWrites.delete(key);
+      }
+    })().catch(() => {});
   }
 
   function flushReaderProgress() {
@@ -3404,12 +4309,24 @@ export function createNovelViews(context) {
   }
 
   function restoreReaderScroll(forcedRatio) {
+    cancelReaderRestore();
     const ratio = Math.max(0, Math.min(1, Number(forcedRatio ?? readerState.pendingScrollRatio ?? 0)));
+    readerState.restoreRatio = ratio;
     readerState.pendingScrollRatio = 0;
-    window.requestAnimationFrame(() => {
+    const session = readerState.session;
+    const screen = readerState.screen;
+    const epoch = readerState.restoreEpoch;
+    readerState.restoreFrame = window.requestAnimationFrame(() => {
+      if (epoch !== readerState.restoreEpoch || !isCurrentReaderSession(session)
+        || readerState.screen !== screen || !isReaderScreenMounted()) return;
+      readerState.restoreFrame = null;
       scrollReaderToRatio(ratio);
       window.clearTimeout(readerState.progressTimer);
-      readerState.progressTimer = window.setTimeout(saveReaderProgress, 80);
+      readerState.progressTimer = window.setTimeout(() => {
+        if (!isCurrentReaderSession(session) || readerState.screen !== screen) return;
+        readerState.progressTimer = null;
+        saveReaderProgress();
+      }, 80);
     });
   }
 
@@ -3467,8 +4384,13 @@ export function createNovelViews(context) {
     return `/api/novels/${encodeURIComponent(String(id || ""))}/catalog${query ? `?${query}` : ""}`;
   }
 
-  function novelChapterPath(id, chapterIndex) {
-    return `/api/novels/${encodeURIComponent(String(id || ""))}/chapters/${encodeURIComponent(String(chapterIndex || "1"))}`;
+  function novelChapterPath(id, chapterIndex, anchor = {}) {
+    const params = new URLSearchParams();
+    for (const key of ["catalogRevision", "chapterId", "sourceRealm"]) {
+      if (anchor[key]) params.set(key, anchor[key]);
+    }
+    const query = params.toString();
+    return `/api/novels/${encodeURIComponent(String(id || ""))}/chapters/${encodeURIComponent(String(chapterIndex || "1"))}${query ? `?${query}` : ""}`;
   }
 
   function renderMessage(message, tone = "quiet", replace = true) {
@@ -3477,6 +4399,7 @@ export function createNovelViews(context) {
     box.className = `message-box ${tone}`;
     box.textContent = message;
     els.viewContent.append(box);
+    renderLocalLibraryErrorCard();
   }
 
   return {

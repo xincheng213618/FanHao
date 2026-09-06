@@ -1,5 +1,5 @@
 import { putJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
-import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
+import { captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../../../js/detail-ui.js";
 import { formatNumber } from "../../../../js/format.js";
 import { absoluteUrl } from "../../../../js/image.js";
@@ -111,8 +111,9 @@ export function createWorkPreviewMedia(deps) {
   async function updateCache(work) {
     const activeUrl = getActiveUrl();
     const path = `/api/works/${encodeURIComponent(work.id)}`;
+    const fence = captureCachedJsonFence(activeUrl);
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    return writeCachedJson(activeUrl, path, { ...(cached?.payload || {}), work });
+    return writeCachedJson(activeUrl, path, { ...(cached?.payload || {}), work }, { fence });
   }
 
   return { render };

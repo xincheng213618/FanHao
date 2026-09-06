@@ -207,7 +207,8 @@ h1 { font-size: 28px; line-height: 1.2; }
 
 .site-links a:focus-visible,
 .source-title-link:focus-visible,
-.quote-source-link:focus-visible {
+.quote-source-link:focus-visible,
+.quote-chart-link:focus-visible {
   outline: 3px solid var(--blue-soft);
   outline-offset: 2px;
 }
@@ -307,7 +308,7 @@ h1 { font-size: 28px; line-height: 1.2; }
 .quote-card {
   display: grid;
   min-height: 290px;
-  grid-template-rows: auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto 1fr auto auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
@@ -353,6 +354,35 @@ h1 { font-size: 28px; line-height: 1.2; }
 .meta-grid div { min-width: 0; }
 .meta-grid dt { color: var(--muted); font-size: 12px; }
 .meta-grid dd { margin: 3px 0 0; overflow: hidden; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+
+.quote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 10px;
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.quote-actions[hidden] { display: none; }
+.quote-actions > span { color: var(--muted); font-size: 11px; }
+.quote-chart-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: #eff6ff;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.quote-chart-link:hover { border-color: var(--blue); background: var(--blue-soft); }
 .page-footer { padding: 0 0 28px; color: var(--muted); font-size: 12px; text-align: center; }
 
 @media (max-width: 1100px) {

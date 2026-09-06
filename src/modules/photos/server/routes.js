@@ -7,6 +7,7 @@ export async function routePhotosApi(req, res, url, deps) {
     notFound,
     photoSetService,
     publicAppConfig,
+    readJsonBody,
     requireLocalAdmin,
     sendJson
   } = deps;
@@ -34,14 +35,140 @@ export async function routePhotosApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/manga/storage" && req.method === "GET") {
+    sendJson(res, 200, { storage: mangaService.storageStatus(url.searchParams.get("refresh") === "1") });
+    return true;
+  }
+
+  if (url.pathname === "/api/manga/trash" && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, mangaService.purgeTrash());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画回收站清理失败" });
+    }
+    return true;
+  }
+
+  const mangaTrashRestoreMatch = /^\/api\/manga\/trash\/([^/]+)\/restore$/.exec(url.pathname);
+  if (mangaTrashRestoreMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, mangaService.restoreTrashEntry(decodeURIComponent(mangaTrashRestoreMatch[1])));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画恢复失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/manga/add" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const result = mangaService.startAdd(body?.url);
+      sendJson(res, result.started ? 202 : 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "新增漫画启动失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/manga/jobs" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    sendJson(res, 200, { jobs: mangaService.listJobs(url.searchParams.get("limit")) });
+    return true;
+  }
+
+  if (url.pathname === "/api/manga/jobs/history" && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, mangaService.clearFinishedJobs());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画任务记录清理失败" });
+    }
+    return true;
+  }
+
+  const mangaJobRetryMatch = /^\/api\/manga\/jobs\/([^/]+)\/retry$/.exec(url.pathname);
+  if (mangaJobRetryMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const result = mangaService.retryJob(decodeURIComponent(mangaJobRetryMatch[1]));
+      sendJson(res, result.started ? 202 : 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画任务重试失败" });
+    }
+    return true;
+  }
+
+  const mangaJobMatch = /^\/api\/manga\/jobs\/([^/]+)$/.exec(url.pathname);
+  if (mangaJobMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const job = mangaService.jobStatus(decodeURIComponent(mangaJobMatch[1]));
+    if (!job) {
+      notFound(res);
+      return true;
+    }
+    sendJson(res, 200, { job });
+    return true;
+  }
+
+  const mangaUpdateMatch = /^\/api\/manga\/([^/]+)\/update$/.exec(url.pathname);
+  if (mangaUpdateMatch && ["GET", "POST"].includes(req.method)) {
+    if (!requireLocalAdmin(req, res)) return true;
+    const mangaId = decodeURIComponent(mangaUpdateMatch[1]);
+    if (req.method === "GET") {
+      const job = mangaService.updateStatus(mangaId);
+      if (!job) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, { job });
+      return true;
+    }
+    try {
+      const result = mangaService.startUpdate(mangaId);
+      sendJson(res, result.started ? 202 : 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画更新启动失败" });
+    }
+    return true;
+  }
+
+  const mangaDownloadMatch = /^\/api\/manga\/([^/]+)\/download$/.exec(url.pathname);
+  if (mangaDownloadMatch && ["GET", "HEAD"].includes(req.method)) {
+    await mangaService.serveComicDownload(req, res, mangaDownloadMatch[1]);
+    return true;
+  }
+
+  const mangaChapterDownloadMatch = /^\/api\/manga\/([^/]+)\/chapters\/([^/]+)\/download$/.exec(url.pathname);
+  if (mangaChapterDownloadMatch && ["GET", "HEAD"].includes(req.method)) {
+    await mangaService.serveChapterDownload(req, res, mangaChapterDownloadMatch[1], mangaChapterDownloadMatch[2]);
+    return true;
+  }
+
   const mangaDetailMatch = /^\/api\/manga\/([^/]+)$/.exec(url.pathname);
+  if (mangaDetailMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, mangaService.trashComic(decodeURIComponent(mangaDetailMatch[1])));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "漫画删除失败" });
+    }
+    return true;
+  }
   if (mangaDetailMatch && req.method === "GET") {
-    const cacheDir = mangaService.cacheById(decodeURIComponent(mangaDetailMatch[1]));
+    const mangaId = decodeURIComponent(mangaDetailMatch[1]);
+    const cacheDir = mangaService.cacheById(mangaId);
     if (!cacheDir) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { comic: mangaService.publicDetail(cacheDir), cache: imageReaderCacheStatus() });
+    sendJson(res, 200, {
+      comic: mangaService.publicDetail(cacheDir),
+      update: mangaService.updateStatus(mangaId),
+      cache: imageReaderCacheStatus()
+    });
     return true;
   }
 

@@ -1,6 +1,6 @@
 import { cacheAgeText } from "../../../../js/cache.js?v=20260811-favorite-folders-02";
 import { formatNumber } from "../../../../js/format.js";
-import { createWorkListState } from "../../../../js/work-filtering.js?v=20260726-work-sort-01";
+import { createWorkListState } from "../../../../js/work-filtering.js?v=20260830-fanhao-compact-filter-02";
 import { workCollectionPath } from "./collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createFavoriteFolderFeature } from "./favorite-folders.js?v=20260811-favorite-folders-02";
 
@@ -39,6 +39,7 @@ export function createFavoriteWorkViews(context) {
 
     const applyHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
+      folders.rememberWorks(works);
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       context.els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个收藏${suffix}`;
@@ -58,6 +59,13 @@ export function createFavoriteWorkViews(context) {
       applyHeader(data, cacheEntry);
       context.els.viewContent.innerHTML = "";
       context.els.viewContent.append(folders.createFolderStrip(selectedFolderId, {
+        onChanged(change) {
+          if (!pageIsActive()) return;
+          if (change.type === "deleted" && change.folderId === selectedFolderId) {
+            context.replaceViewParams("works", { favorite: "1", folder: change.defaultFolderId || "default" });
+          }
+          context.renderCurrentView();
+        },
         onSelect(folderId) {
           if (folderId === selectedFolderId) return;
           context.showView("works", {

@@ -76,6 +76,7 @@ export function createWorkMoveJobService({
   maxConcurrentJobs = 1,
   now = () => new Date().toISOString(),
   schedule = setImmediate,
+  runInBackground = (callback) => callback(),
   warn = console.warn,
   workerClass = Worker,
   workerDataPatch = {},
@@ -599,7 +600,7 @@ export function createWorkMoveJobService({
   function scheduleJob(jobId) {
     if (closing || activeRuns.has(jobId) || pendingJobs.has(jobId)) return;
     pendingJobs.add(jobId);
-    pumpQueue();
+    runInBackground(pumpQueue);
   }
 
   function scheduleClaimRetry(jobId) {

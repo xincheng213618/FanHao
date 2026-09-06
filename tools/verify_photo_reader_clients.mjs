@@ -69,9 +69,18 @@ assert.match(
   /function loadPendingPhotoDetailImage\(image\)[\s\S]*?if \(!imageUrl \|\| !image\?\.isConnected\) return;\s*delete image\.dataset\.photoSrc;/,
   "Android photo reader must preserve the pending URL until the image is mounted"
 );
+assert.match(androidReader, /function photoViewerItemsFromImages\(album = \{\}, images = \[\]\) \{\s*const title = album\.title \|\| album\.personName/, "Android photo viewer must show the album title instead of an internal archive filename");
+assert(!androidReader.includes("createPhotoModeRow"), "photo categories must not duplicate the top navigation with another browsing-mode row");
+assert(androidReader.includes("photo-collection-context-copy"), "photo collection pages need a named native context row");
 
 const androidStyles = read("android-client", "www", "css", "lists.css");
 assert(androidStyles.includes(".photo-preview-tile.load-failed"), "Android photo reader needs a visible retry state");
+assert(!androidReader.includes("createPhotoIndexManager"), "photo browsing must not expose index maintenance or poll admin tasks");
+assert(androidStyles.includes(".channel-list.photo-list.photo-catalog-grid"), "photo categories must display actual small collections as a cover grid");
+assert(!androidReader.includes('title.textContent = "浏览"'), "photo browsing must not render a fake third segment label");
+const photoChrome = read("android-client", "www", "modules", "photos", "android-module.js");
+assert(photoChrome.includes('"fanhao-primary-nav photo-chrome-tabs"'), "photo categories must reuse the FanHao top navigation style");
+assert(photoChrome.includes('"fanhao-feed-appbar-action photo-sort-action"'), "photo sorting must reuse the FanHao app-bar action");
 
 const photoRoutes = read("src", "modules", "photos", "server", "routes.js");
 assert(photoRoutes.includes("imageOffset"), "photo detail API must support incremental image offsets");
