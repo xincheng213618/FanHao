@@ -94,3 +94,8 @@ nul
 
 # Local screenshots, design audits, and other generated evidence.
 /outputs/
+/.codex-artifacts/
+/.codex-remote-attachments/
+/data/design-audits/
+/data/disk-usage/
+/data/short-video-cache/

@@ -5,6 +5,37 @@ import { createLatestRequestLifecycle } from "../core/latest-request.js";
 
 const PAGE_SIZE = 100;
 
+function formatDuration(value) {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${Math.round(bytes)} B`;
+}
+
+function downloadProgressText(progress) {
+  if (!progress) return "等待下载器返回进度";
+  const parts = [String(progress.phase || "下载中"), formatDuration(progress.elapsed_seconds)];
+  const downloaded = Math.max(0, Number(progress.bytes_downloaded) || 0);
+  const total = Math.max(0, Number(progress.bytes_total) || 0);
+  if (total > 0) {
+    const percent = Math.min(100, Math.round((downloaded / total) * 100));
+    parts.push(`${formatBytes(downloaded)} / ${formatBytes(total)} · ${percent}%`);
+  } else if (downloaded > 0) {
+    parts.push(formatBytes(downloaded));
+  }
+  const speed = Math.max(0, Number(progress.speed_bytes_per_second) || 0);
+  if (speed > 0) parts.push(`${(speed * 8 / 1000000).toFixed(1)} Mbps`);
+  return parts.join(" · ");
+}
+
 export function createLinksFeature(options) {
   const settings = options.settings;
   const refreshState = options.refreshState;
@@ -15,7 +46,13 @@ export function createLinksFeature(options) {
   let loading = false;
   let searchTimer = null;
   let summary = null;
+  let runtimeProgressByAweme = new Map();
   const requests = createLatestRequestLifecycle();
+
+  function isContentUnavailable(link) {
+    const issue = String(link.last_error || link.actual_probe_error || "");
+    return String(link.status || "") === "failed" && issue.includes("作品已不可用");
+  }
 
   function currentQuerySnapshot() {
     return `${currentFilter}\n${String($("linksSearch")?.value || "").trim()}`;
@@ -33,6 +70,7 @@ export function createLinksFeature(options) {
   function linkStatusTime(link) {
     const status = String(link.status || "");
     if (status === "downloaded") return ["完成", link.downloaded_at];
+    if (isContentUnavailable(link)) return ["确认", link.failed_at || link.last_started_at];
     if (status === "failed") return ["失败", link.failed_at || link.last_started_at];
     if (status === "downloading") return ["开始", link.last_started_at];
     if (status === "pending") return ["发现", link.discovered_at || link.last_seen_at];
@@ -55,7 +93,11 @@ export function createLinksFeature(options) {
         .map(
           (link) => {
             const status = String(link.status || "");
-            const statusClass = ["pending", "downloading", "downloaded", "failed"].includes(status) ? status : "pending";
+            const contentUnavailable = isContentUnavailable(link);
+            const statusClass = contentUnavailable
+              ? "unavailable"
+              : (["pending", "downloading", "downloaded", "failed"].includes(status) ? status : "pending");
+            const statusText = contentUnavailable ? "已不可用" : statusLabel(status);
             const href = safeUrl(link.url);
             const profileHref = safeUrl(link.profile_url);
             const profileName = String(link.profile_nickname || link.profile_title || `主页 #${link.profile_id || ""}`).trim();
@@ -65,11 +107,18 @@ export function createLinksFeature(options) {
             const title = !rawTitle || rawTitle === "no_title" ? "未命名作品" : rawTitle;
             const kindLabel = link.media_type === "gallery" || link.kind === "note" ? "图集" : "视频";
             const createDate = link.create_time ? new Date(Number(link.create_time) * 1000).toLocaleDateString() : "日期未知";
-            const issue = String(link.last_error || link.actual_probe_error || "").trim()
+            const rawIssue = String(link.last_error || link.actual_probe_error || "").trim();
+            const runtimeProgress = runtimeProgressByAweme.get(String(link.aweme_id || ""));
+            const downloadProgress = status === "downloading"
+              ? downloadProgressText(runtimeProgress)
+              : "";
+            const issue = downloadProgress || (contentUnavailable
+              ? "作者可能已删除作品或更改可见权限；可移除此记录。"
+              : rawIssue)
               || (link.download_intent === "quality_upgrade" ? "等待最高画质重下" : "");
             const issueIsWarning = status === "failed" || link.download_intent === "quality_upgrade";
             return `
-            <tr>
+            <tr data-link-aweme-id="${escapeHtml(link.aweme_id || "")}">
               <td class="work-cell">
                 <div class="link-work-summary">
                   ${link.cover_url
@@ -87,7 +136,7 @@ export function createLinksFeature(options) {
                 ${authorName && authorName !== profileName ? `<div class="muted">作者 ${escapeHtml(authorName)}</div>` : ""}
               </td>
               <td>
-                <span class="badge ${statusClass}">${escapeHtml(statusLabel(status))}</span>
+                <span class="badge ${statusClass}">${escapeHtml(statusText)}</span>
                 ${link.download_intent === "quality_upgrade" ? '<span class="badge quality-upgrade">高清重下</span>' : ""}
               </td>
               <td class="time-cell">
@@ -95,7 +144,11 @@ export function createLinksFeature(options) {
                 <div class="muted">尝试 ${escapeHtml(link.attempts ?? 0)} 次</div>
               </td>
               <td class="issue-cell">
-                <div class="link-issue ${issueIsWarning ? "has-issue" : ""}">${escapeHtml(issue || "—")}</div>
+                <div
+                  class="link-issue ${status === "downloading" ? "is-progress" : ""} ${issueIsWarning ? "has-issue" : ""}"
+                  ${status === "downloading" ? 'data-download-progress="true"' : ""}
+                  title="${escapeHtml(runtimeProgress?.current_file || "")}"
+                >${escapeHtml(issue || "—")}</div>
                 <details class="link-row-details">
                   <summary>技术详情</summary>
                   <dl>
@@ -108,7 +161,7 @@ export function createLinksFeature(options) {
                 <a class="link-open-button" href="${href}" target="_blank" rel="noreferrer">打开</a>
                 <details class="row-actions-menu">
                   <summary>更多</summary>
-                  ${status === "failed" && supportsLinkRetry() ? `
+                   ${status === "failed" && !contentUnavailable && supportsLinkRetry() ? `
                     <button
                       class="link-retry-button"
                       data-link-retry="${escapeHtml(link.id || "")}"
@@ -119,8 +172,8 @@ export function createLinksFeature(options) {
                     class="danger link-delete-button"
                     data-link-delete="${escapeHtml(link.id || "")}"
                     data-link-aweme-id="${escapeHtml(link.aweme_id)}"
-                    title="只删除这条数据库记录"
-                  >删除数据库记录</button>
+                    title="${contentUnavailable ? "移除这条已不可用的数据库记录" : "只删除这条数据库记录"}"
+                  >${contentUnavailable ? "移除已不可用记录" : "删除数据库记录"}</button>
                 </details>
               </td>
             </tr>
@@ -322,5 +375,19 @@ export function createLinksFeature(options) {
     $("dbPath").textContent = state.paths?.database || "";
   }
 
-  return { bind, render, refresh, refreshLoaded };
+  function renderRuntime(state) {
+    const items = Array.isArray(state.download?.items) ? state.download.items : [];
+    runtimeProgressByAweme = new Map(
+      items.map((item) => [String(item.aweme_id || ""), item])
+    );
+    document.querySelectorAll("#linksBody tr[data-link-aweme-id]").forEach((row) => {
+      const progress = runtimeProgressByAweme.get(String(row.dataset.linkAwemeId || ""));
+      const node = row.querySelector("[data-download-progress]");
+      if (!node || !progress) return;
+      node.textContent = downloadProgressText(progress);
+      node.title = String(progress.current_file || progress.detail || "");
+    });
+  }
+
+  return { bind, render, renderRuntime, refresh, refreshLoaded };
 }

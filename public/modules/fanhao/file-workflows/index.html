@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#172e29"><title>整理与迁移 · 番号</title>
+  <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/modules/fanhao/file-workflows/styles.css">
+</head>
+<body>
+  <main class="workspace">
+    <header class="topbar"><a class="brand" href="/fanhao"><b>FH</b><span>番号资料库</span></a><a href="/admin#tasks">后台任务 ↗</a></header>
+    <section class="hero"><div><p class="eyebrow">LIBRARY WORKSPACE</p><h1>整理与迁移</h1><p>从下载目录到有序资料库，每一步都看得清楚。</p></div><span class="badge">先预览，再执行</span></section>
+    <section class="pipeline" aria-label="文件处理流程"><div><span>01</span><strong>115 下载</strong><p>在 115 完成下载，保留本地文件。</p></div><div><span>02</span><strong>本地整理</strong><p>识别番号，归档到对应目录。</p></div><div><span>03</span><strong>目录迁移</strong><p>核对路径与冲突，迁移并校验文件。</p></div></section>
+    <div class="layout">
+      <section class="panel setup"><h2>新建文件计划</h2>
+        <form id="planForm">
+          <fieldset><legend>处理方式</legend><label class="choice"><input type="radio" name="kind" value="organize" checked><span><strong>按番号整理</strong><small>创建番号目录，保留原始名称与后缀</small></span></label><label class="choice"><input type="radio" name="kind" value="migrate"><span><strong>保持结构迁移</strong><small>迁移文件，保留源目录中的相对路径</small></span></label></fieldset>
+          <label class="field">源目录<input id="source" name="source" required autocomplete="off" placeholder="填写已下载文件所在的完整目录"></label>
+          <label class="field">目标目录<input id="target" name="target" required autocomplete="off" placeholder="填写已创建的整理或迁移目录"></label>
+          <details><summary>允许操作的目录</summary><ul id="allowedRoots"></ul><p>需要其他目录时，配置服务的 FANHAO_WORKFLOW_ROOTS。</p></details>
+          <button class="primary" id="preview" type="submit">生成文件预览 <span>→</span></button>
+        </form>
+        <div class="note"><strong>已入库作品</strong><p>请从作品详情发起迁移，同时更新人物关联、路径和资料库记录。</p><a href="/admin#tasks">查看作品迁移任务 ↗</a></div>
+      </section>
+      <section class="panel preview"><div class="panel-head"><div><p class="eyebrow">PREVIEW & PROGRESS</p><h2 id="planTitle">文件预览</h2></div><span id="statusBadge" class="status">等待预览</span></div>
+        <p class="notice" id="notice" role="status" aria-live="polite">选择源目录和目标目录，预览不会移动文件。</p>
+        <div class="metrics"><div><span>可处理文件</span><strong id="totalFiles">—</strong></div><div><span>数据大小</span><strong id="totalBytes">—</strong></div><div><span>保留 / 冲突</span><strong id="skippedFiles">—</strong></div></div>
+        <progress id="progress" value="0" max="1" aria-label="文件任务进度"></progress><p id="progressText" class="muted">尚未执行</p>
+        <div class="table-scroll"><table><thead><tr><th>源文件</th><th>目标位置</th><th>大小</th><th>处理结果</th></tr></thead><tbody id="files"><tr><td colspan="4" class="empty">这里将列出具体文件、目标路径和跳过原因。</td></tr></tbody></table></div>
+        <div class="actions"><button id="execute" class="primary" type="button" disabled>确认并执行</button><button id="stop" type="button" disabled>完成当前文件后停止</button></div>
+        <p class="muted">同名文件不会覆盖；未完成下载、无法识别的番号和已入库文件会保留原位。迁移后保留空目录。</p>
+      </section>
+    </div>
+    <section class="panel history"><div class="panel-head"><h2>最近的文件计划</h2><button id="refresh" type="button">刷新</button></div><div id="history" class="history-list"><p class="muted">正在读取任务记录…</p></div></section>
+  </main>
+  <dialog id="confirm"><form method="dialog"><h2>执行这份文件计划？</h2><p id="confirmText"></p><p>每个文件复制并校验成功后移除源文件。冲突和跳过项保持原位。</p><div class="actions"><button value="cancel">返回检查</button><button value="run" class="primary">开始执行</button></div></form></dialog>
+  <script type="module" src="/modules/fanhao/file-workflows/app.js"></script>
+</body>
+</html>

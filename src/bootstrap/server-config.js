@@ -4,6 +4,7 @@ import { loadEnvFile } from "node:process";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { productDataDirectory, productProfile } from "./product-profile.js";
 import {
   galleryMediaSources,
   parseLibraryRoots,
@@ -15,7 +16,7 @@ import {
 
 const DEFAULT_PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const localEnvPath = path.join(DEFAULT_PROJECT_ROOT, ".env");
-if (fs.existsSync(localEnvPath)) loadEnvFile(localEnvPath);
+if (process.env.FANHAO_LOAD_ENV !== "0" && fs.existsSync(localEnvPath)) loadEnvFile(localEnvPath);
 
 export function createServerConfig({
   env = process.env,
@@ -23,20 +24,23 @@ export function createServerConfig({
   projectRoot = DEFAULT_PROJECT_ROOT,
   spawn = spawnSync
 } = {}) {
-  const DATA_DIR = path.join(projectRoot, "data");
+  const profile = productProfile(env.FANHAO_PRODUCT || "suite");
+  const DATA_DIR = productDataDirectory(projectRoot, env);
   const MANGA_LIBRARY_ROOT = env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
   const FFMPEG_PATH = env.FFMPEG_PATH || "ffmpeg";
   const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 
   return {
+    PRODUCT: profile,
     PROJECT_ROOT: projectRoot,
     MODULES_DIR: path.join(projectRoot, "src", "modules"),
     ARCHIVE_READER_HELPER_PATH: path.join(projectRoot, "tools", "archive_image_reader.py"),
-    PORT: Number(env.PORT || 29998),
+    PORT: Number(env.PORT || profile.port),
     HOST: env.HOST || "0.0.0.0",
     LIBRARY_ROOTS: parseLibraryRoots(env),
     PUBLIC_DIR: path.join(projectRoot, "public"),
     DATA_DIR,
+    FILE_WORKFLOW_ROOTS: parseRootList(env.FANHAO_WORKFLOW_ROOTS, parseLibraryRoots(env).join(";")),
     MANGA_LIBRARY_ROOT,
     MANGA_DATABASE_PATH: env.FANHAO_MANGA_DATABASE || path.join(MANGA_LIBRARY_ROOT, "manga.sqlite"),
     PHOTO_SET_ROOTS: parsePhotoSetRoots(env),
@@ -44,13 +48,13 @@ export function createServerConfig({
     WESTERN_LIBRARY_ROOTS: parseRootList(env.FANHAO_WESTERN_ROOTS, "R:\\"),
     IMAGE_LIBRARY_INDEX_PATH: path.join(DATA_DIR, "image-library-index.json"),
     USER_STATE_PATH: path.join(DATA_DIR, "user-state.json"),
-    CORE_DB_PATH: path.join(DATA_DIR, "fanhao-core-v2.sqlite"),
+    CORE_DB_PATH: env.FANHAO_CORE_DB || path.join(DATA_DIR, "fanhao-core-v2.sqlite"),
     CORE_IMAGE_DB_PATH: env.FANHAO_CORE_IMAGE_DB || path.join(DATA_DIR, "fanhao-core-images.sqlite"),
     IMAGE_GALLERY_DB_PATH: path.join(DATA_DIR, "image-gallery.sqlite"),
     NOVEL_DB_PATH: path.join(DATA_DIR, "novels.sqlite"),
     MUSIC_DB_PATH: path.join(DATA_DIR, "music.sqlite"),
     MUSIC_ROOTS: parseMusicRoots(env),
-    SHORT_VIDEO_DB_PATH: path.join(DATA_DIR, "short-videos.sqlite"),
+    SHORT_VIDEO_DB_PATH: env.FANHAO_SHORT_VIDEO_DB || path.join(DATA_DIR, "short-videos.sqlite"),
     SHORT_VIDEO_ROOTS: parseShortVideoRoots(env),
     SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH: env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB
       || path.join(projectRoot, "src", "modules", "short-videos", "download-manager", "data", "douyin_downloads.sqlite"),
@@ -59,7 +63,7 @@ export function createServerConfig({
     NOVEL_UPLOAD_MAX_BODY_BYTES: 80 * 1024 * 1024,
     APP_CONFIG_PATH: path.join(DATA_DIR, "app-config.json"),
     AUTH_SECRET_PATH: path.join(DATA_DIR, "auth-secret.txt"),
-    ACCESS_LOG_PATH: path.join(projectRoot, "logs", "access.log"),
+    ACCESS_LOG_PATH: env.FANHAO_ACCESS_LOG || (profile.id === "suite" ? path.join(projectRoot, "logs", "access.log") : path.join(DATA_DIR, "logs", "access.log")),
     ACCESS_ANALYTICS_DB_PATH: env.FANHAO_ACCESS_ANALYTICS_DB || path.join(DATA_DIR, "access-analytics.sqlite"),
     IP2REGION_XDB_PATH: env.FANHAO_IP2REGION_XDB || path.join(DATA_DIR, "ip2region_v4.xdb"),
     ADMIN_TASKS_PATH: path.join(DATA_DIR, "admin-tasks.json"),

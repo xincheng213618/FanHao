@@ -27,7 +27,9 @@ npm run sync
 npm run open
 ```
 
-`npm run sync` 会先把仓库根目录 `public\games` 同步到 `www\games`，再执行 Capacitor 同步。`www\games` 是生成目录，不直接维护；小游戏只修改 `public\games` 中的源文件。
+`npm run sync` 会先把仓库根目录 `public\games` 同步到 `www\games`，自动同步缓存版本，再执行 Capacitor 同步。`www\games` 是生成目录，不直接维护；小游戏只修改 `public\games` 中的源文件。
+
+`CLIENT_VERSION` 和已有本地 JS/CSS 静态引用中的 `?v=` 由 `www` 源码内容自动生成，无需手工改日期或补哈希。构建和相关验证会自动同步；也可在此目录运行 `npm run sync:cache`，或用只读的 `npm run verify:cache` 检查一致性。首次在仓库根目录运行 `npm run setup:android-verification` 准备验证依赖，日常检查不再重装依赖。
 
 如果要直接安装到手机，需要本机有 Android SDK / platform-tools，并且手机已开启 USB 调试：
 
@@ -50,7 +52,7 @@ android\app\build\outputs\apk\debug\app-debug.apk
 npm run release:android-debug -- -Notes "本次更新说明"
 ```
 
-该入口会依次运行 Android 发布门禁、调用原子发布脚本、验证本机与公网的新旧版本查询、APK HEAD、完整公网下载、包身份、签名、大小和 SHA-256。它只发布，不会安装到已连接手机。
+该入口会依次运行 Android 发布门禁、调用原子发布脚本、验证本机与公网的新旧版本查询、APK HEAD、完整公网下载、包身份、签名、大小和 SHA-256。它只发布，不会安装到手机，也不要求 ADB 设备在线。
 
 发布完成后如需通过 ADB 安装，只安装 `latest.json` 当前精确引用、并已重新验证大小、SHA-256、包名、版本和 signer 的 APK：
 
@@ -60,7 +62,7 @@ npm run install:android-published
 npm run install:android-published -- -Serial CYLJX475IJIFIJTO
 ```
 
-该入口不重新构建源码、不允许降级，并在安装后通过 `dumpsys package` 回读版本。未发布源码构建仍由 `build-debug.ps1 -Install` 的 tracked `version.json` 契约保护。
+该入口不重新构建源码、不允许降级，并在安装后通过 `dumpsys package` 回读版本。开发构建也可用 `build-debug.ps1 -Install -VersionCode <code>` 显式安装合法的发布范围版本；它会校验包名、签名和版本，并拒绝覆盖设备上的更高版本。`-LocalOnly` 使用保留的高版本空间，仍禁止安装，避免污染后续更新链。
 
 只查看下一版本计划，或只复核当前已发布版本：
 

@@ -29,63 +29,6 @@ function Get-FanHaoAndroidVersionLimits {
   }
 }
 
-function New-FanHaoAuthorizedDeviceCheck {
-  param(
-    [string]$AdbPath = "adb",
-    [scriptblock]$DeviceQuery = $null
-  )
-
-  if ($null -eq $DeviceQuery) {
-    if ([string]::IsNullOrWhiteSpace($AdbPath)) {
-      throw "ADB path must be non-empty."
-    }
-    $resolvedAdbPath = $AdbPath
-    $DeviceQuery = {
-      $savedErrorActionPreference = $ErrorActionPreference
-      try {
-        $ErrorActionPreference = "Continue"
-        $lines = @(& $resolvedAdbPath devices -l 2>&1)
-        $exitCode = $LASTEXITCODE
-      } finally {
-        $ErrorActionPreference = $savedErrorActionPreference
-      }
-      [pscustomobject]@{
-        ExitCode = $exitCode
-        Lines = @($lines | ForEach-Object { $_.ToString() })
-      }
-    }.GetNewClosure()
-  }
-
-  $query = $DeviceQuery
-  return {
-    param([string[]]$ExpectedSerials = @())
-
-    $queryResults = @(& $query)
-    if ($queryResults.Count -ne 1 -or $null -eq $queryResults[0]) {
-      throw "ADB device query returned an invalid result; refusing to publish."
-    }
-    $queryResult = $queryResults[0]
-    $exitCode = [int]$queryResult.ExitCode
-    if ($exitCode -ne 0) {
-      throw "ADB device query failed; refusing to publish (exit $exitCode)."
-    }
-    $authorizedSerials = @($queryResult.Lines | ForEach-Object {
-      if ($_.ToString() -match '^(?<serial>\S+)\s+device(?:\s|$)') { $Matches.serial }
-    } | Sort-Object -Unique)
-    if ($authorizedSerials.Count -eq 0) {
-      throw "No authorized Android device is visible; refusing to publish."
-    }
-    if ($ExpectedSerials.Count -gt 0) {
-      $expected = @($ExpectedSerials | Sort-Object -Unique)
-      if (($expected -join "`n") -cne ($authorizedSerials -join "`n")) {
-        throw "The authorized ADB device set changed during the publish build; refusing to commit."
-      }
-    }
-    Write-Host "ADB publish preflight: $($authorizedSerials.Count) authorized device(s) visible; no APK will be installed by the publish command."
-    return $authorizedSerials
-  }.GetNewClosure()
-}
-
 function Read-FanHaoVersionContract {
   param([string]$Path = $script:FanHaoDefaultVersionContractPath)
 
@@ -248,17 +191,16 @@ function Resolve-FanHaoBuildIdentity {
 function Assert-FanHaoInstallIdentity {
   param(
     [Parameter(Mandatory = $true)]$Identity,
-    [Parameter(Mandatory = $true)]$VersionContract
+    $VersionContract = $null
   )
 
   $versionCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $Identity -Name "VersionCode" -Label "install identity") -Label "install versionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
   $versionName = ConvertTo-FanHaoVersionName -Value (Get-FanHaoRequiredProperty -Object $Identity -Name "VersionName" -Label "install identity") -Label "install versionName" -RequireCanonical
-  $contractCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $VersionContract -Name "CurrentVersionCode" -Label "Android version contract") -Label "Android version contract currentVersionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
-  $contractName = ConvertTo-FanHaoVersionName -Value (Get-FanHaoRequiredProperty -Object $VersionContract -Name "DefaultVersionName" -Label "Android version contract") -Label "Android version contract defaultVersionName" -RequireCanonical
-  if ($versionCode -ne $contractCode -or $versionName -cne $contractName) {
-    throw "-Install requires the tracked Android version contract identity $contractCode / $contractName. Update version.json in a reviewed commit before installing a newer identity."
+  [pscustomobject]@{
+    VersionCode = $versionCode
+    VersionName = $versionName
+    LocalOnly = $false
   }
-  return $Identity
 }
 
 function Assert-FanHaoDebugApkIdentity {
@@ -423,6 +365,43 @@ function Get-FanHaoDebugPublishPlan {
   }
 }
 
+function Remove-FanHaoSupersededDebugApks {
+  param(
+    [Parameter(Mandatory = $true)][string]$UpdateDir,
+    [Parameter(Mandatory = $true)][string]$KeepApkPath
+  )
+
+  Assert-FanHaoDirectory -Path $UpdateDir -Label "debug publish directory"
+  Assert-FanHaoRegularFile -Path $KeepApkPath -Label "current debug APK"
+  $resolvedUpdateDir = [IO.Path]::GetFullPath($UpdateDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  $resolvedKeepApk = [IO.Path]::GetFullPath($KeepApkPath)
+  $resolvedKeepParent = [IO.Path]::GetDirectoryName($resolvedKeepApk).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  if ($resolvedKeepParent -cne $resolvedUpdateDir) {
+    throw "Current debug APK must be a direct child of the verified update directory."
+  }
+  if ([IO.Path]::GetFileName($resolvedKeepApk) -notmatch '^fanhao-debug-\d+\.apk$') {
+    throw "Current debug APK has a non-canonical file name: $resolvedKeepApk"
+  }
+
+  $removedCount = 0
+  foreach ($publishedApk in @(Get-ChildItem -LiteralPath $resolvedUpdateDir -File -Filter "fanhao-debug-*.apk")) {
+    $resolvedPublishedApk = [IO.Path]::GetFullPath($publishedApk.FullName)
+    if ($resolvedPublishedApk -ceq $resolvedKeepApk) { continue }
+    if ([IO.Path]::GetDirectoryName($resolvedPublishedApk).TrimEnd([IO.Path]::DirectorySeparatorChar) -cne $resolvedUpdateDir) {
+      throw "Superseded APK resolved outside the verified update directory: $resolvedPublishedApk"
+    }
+    if (($publishedApk.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Superseded APK must not be a reparse point: $resolvedPublishedApk"
+    }
+    if ($publishedApk.Name -notmatch '^fanhao-debug-\d+\.apk$') {
+      throw "Superseded APK has a non-canonical file name: $resolvedPublishedApk"
+    }
+    Remove-Item -LiteralPath $resolvedPublishedApk -Force
+    $removedCount += 1
+  }
+  return $removedCount
+}
+
 function Publish-FanHaoDebugArtifact {
   param(
     [Parameter(Mandatory = $true)][string]$SourceApkPath,
@@ -523,6 +502,13 @@ function Publish-FanHaoDebugArtifact {
       }
     }
 
+    $removedSupersededApkCount = 0
+    try {
+      $removedSupersededApkCount = Remove-FanHaoSupersededDebugApks -UpdateDir $UpdateDir -KeepApkPath $targetApk
+    } catch {
+      Write-Warning "Publish committed successfully, but superseded APK cleanup did not complete: $($_.Exception.Message)"
+    }
+
     [pscustomobject]@{
       ApkPath = $targetApk
       ManifestPath = $latestPath
@@ -532,6 +518,7 @@ function Publish-FanHaoDebugArtifact {
       Sha256 = $stagedHash
       PackageName = $sourceIdentity.PackageName
       SignerSha256 = $stagedIdentity.SignerSha256
+      RemovedSupersededApkCount = $removedSupersededApkCount
     }
   } catch {
     $publishError = $_
@@ -844,7 +831,6 @@ function Assert-FanHaoDirectory {
 
 Export-ModuleMember -Function @(
   "Get-FanHaoAndroidVersionLimits",
-  "New-FanHaoAuthorizedDeviceCheck",
   "Read-FanHaoVersionContract",
   "Get-FanHaoAndroidSdkRoot",
   "Get-FanHaoApkIdentity",
@@ -853,6 +839,7 @@ Export-ModuleMember -Function @(
   "Assert-FanHaoDebugApkIdentity",
   "Get-FanHaoDebugPublishPlan",
   "Publish-FanHaoDebugArtifact",
+  "Remove-FanHaoSupersededDebugApks",
   "Write-FanHaoLocalOnlyMarker",
   "Read-FanHaoUpdateManifest",
   "Assert-FanHaoUpdateManifest"

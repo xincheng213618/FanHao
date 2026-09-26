@@ -37,6 +37,8 @@ export function createNovelPage(deps) {
   let progressLifecycleInstalled = false;
   let keyboardListenerInstalled = false;
   let libraryObserver = null;
+  let libraryList = null;
+  let libraryFooter = null;
   const chapterCache = new Map();
   const chapterRequests = new Map();
   const collectionAdmin = createNovelCollectionAdmin({
@@ -77,6 +79,7 @@ export function createNovelPage(deps) {
     state.novel.chapter = state.novel.chapter || null;
     state.novel.loading = Boolean(state.novel.loading);
     state.novel.loadingMore = Boolean(state.novel.loadingMore);
+    state.novel.libraryError = state.novel.libraryError || "";
     state.novel.hasMore = Boolean(state.novel.hasMore);
     state.novel.uploading = Boolean(state.novel.uploading);
     state.novel.status = state.novel.status || "";
@@ -177,13 +180,15 @@ export function createNovelPage(deps) {
     const append = Boolean(!paged && options.append && state.novel.data && !state.novel.loading && !state.novel.loadingMore);
     if (options.append && !append) return;
     const request = beginLibraryRequest();
+    state.novel.libraryError = "";
     if (append) state.novel.loadingMore = true;
     else state.novel.loading = true;
     if (!append) state.novel.status = "正在读取小说书库";
     state.novel.book = options.keepBook ? state.novel.book : null;
     state.novel.chapter = options.keepChapter ? state.novel.chapter : null;
     setReaderBodyClass();
-    renderView();
+    if (append && libraryList) updateLibraryTail();
+    else renderView();
     const params = new URLSearchParams();
     if (query.query) params.set("q", query.query);
     if (query.mode === "mine") params.set("reading", "1");
@@ -224,8 +229,10 @@ export function createNovelPage(deps) {
       state.novel.loading = false;
       state.novel.loadingMore = false;
       state.novel.status = error.message || (append ? "继续加载失败" : "小说书库读取失败");
+      state.novel.libraryError = state.novel.status;
       renderStats();
-      renderView();
+      if (append && libraryList) updateLibraryTail();
+      else renderView();
       throw error;
     }
     if (!isCurrentLibraryRequest(request)) return false;
@@ -258,7 +265,7 @@ export function createNovelPage(deps) {
     state.novel.loading = false;
     state.novel.loadingMore = false;
     const loadedEntries = state.novel.data?.books || [];
-    state.novel.hasMore = !paged && query.mode !== "manage" && loadedEntries.length < Number(data.total || 0);
+    state.novel.hasMore = !paged && query.mode !== "manage" && loadedEntries.length < Number(data.total || 0) && (!append || Boolean(data.books?.length));
     if (!paged) state.novel.page = 0;
     state.novel.status = query.mode === "manage"
       ? ""
@@ -274,7 +281,8 @@ export function createNovelPage(deps) {
                 ? "没有找到匹配的小说。"
                 : "这里还没有小说，请到“管理”页面刷新书库。";
     renderStats();
-    renderView();
+    if (append && libraryList) updateLibraryTail(data.books || []);
+    else renderView();
   }
 
   async function openBook(bookId, options = {}) {
@@ -598,6 +606,14 @@ export function createNovelPage(deps) {
   function renderView() {
     ensureState();
     if (!els.workGrid) return;
+    document.title = state.novel.chapter
+      ? `${state.novel.chapter.title} · ${state.novel.book?.title || "小说阅读"}`
+      : state.novel.book ? `${state.novel.book.title} · 小说书库`
+        : `${({ mine: "我的阅读", rankings: "小说排行", manage: "小说管理", author: state.novel.author })[state.novel.mode] || "小说书库"} · 本地阅读`;
+    const readerFocus = document.activeElement?.dataset?.readerFocus;
+    libraryObserver?.disconnect();
+    libraryList = null;
+    libraryFooter = null;
     els.workGrid.innerHTML = "";
     setReaderBodyClass();
     if (state.novel.loading && !state.novel.data && !state.novel.book && !state.novel.chapter) {
@@ -606,6 +622,7 @@ export function createNovelPage(deps) {
     }
     if (state.novel.chapter) {
       renderReader();
+      if (readerFocus) focusReaderControl(readerFocus);
       return;
     }
     if (state.novel.book) {
@@ -657,11 +674,8 @@ export function createNovelPage(deps) {
       return;
     }
 
-    if (state.novel.mode === "mine") {
-      shell.append(renderNovelPageHeading("我的阅读", "阅读记录和继续阅读入口"));
-    }
-
-    const head = document.createElement("div");
+    shell.classList.add("novel-library");
+    const head = document.createElement("header");
     head.className = "novel-home-head";
     const authorProfile = state.novel.mode === "author" ? data.author || null : null;
     if (authorProfile) {
@@ -674,21 +688,49 @@ export function createNovelPage(deps) {
     const titleWrap = document.createElement("div");
     const eyebrow = document.createElement("div");
     eyebrow.className = "eyebrow";
-    eyebrow.textContent = authorProfile ? "小说作者" : "本地小说";
-    const title = document.createElement("h2");
-    title.textContent = authorProfile?.name || "小说书库";
+    eyebrow.textContent = authorProfile ? "作者作品" : "本地藏书";
+    const title = document.createElement("h1");
+    title.textContent = authorProfile?.name || (state.novel.mode === "mine" ? "我的阅读" : "小说书库");
     const meta = document.createElement("p");
     const totals = summary.totals || {};
     meta.textContent = authorProfile
       ? `${formatNumber(authorProfile.bookCount || 0)} 本作品 · ${formatNumber(authorProfile.chapterCount || 0)} 章 · ${formatNumber(authorProfile.charCount || 0)} 字 · ${formatBytes(authorProfile.sizeBytes || 0)}`
-      : `${formatNumber(totals.books || 0)} 本 · ${formatNumber(totals.authors || 0)} 位作者 · ${formatNumber(totals.chapters || 0)} 章 · ${formatBytes(totals.bytes || 0)}`;
+      : state.novel.mode === "mine"
+        ? "从上次读到的地方继续。"
+        : `${formatNumber(totals.books || 0)} 本藏书 · ${formatNumber(totals.authors || 0)} 位作者`;
     titleWrap.append(eyebrow, title, meta);
     head.append(titleWrap);
 
+    const workspace = document.createElement("div");
+    workspace.className = "novel-library-workspace";
+    const sidebar = document.createElement("aside");
+    sidebar.className = "novel-library-sidebar";
+    const results = document.createElement("section");
+    results.className = "novel-library-results";
+    results.setAttribute("aria-label", "小说列表");
+    results.setAttribute("aria-busy", String(state.novel.loading));
     const controls = document.createElement("div");
     controls.className = "novel-controls";
+    const resultHeading = document.createElement("div");
+    resultHeading.className = "novel-results-heading";
+    const resultTitle = document.createElement("h2");
+    resultTitle.textContent = state.novel.query ? `“${state.novel.query}”的搜索结果` : state.novel.mode === "mine" ? "阅读记录" : state.novel.category !== "all" ? displayNovelCategory(state.novel.category) : "全部作品";
+    const resultCount = document.createElement("span");
+    resultCount.className = "novel-results-count";
+    resultCount.textContent = `${formatNumber(data.total || 0)} 本`;
+    resultHeading.append(resultTitle, resultCount);
+    controls.append(resultHeading);
+    if (state.novel.query) {
+      const clearSearch = document.createElement("button");
+      clearSearch.type = "button";
+      clearSearch.className = "novel-text-button";
+      clearSearch.textContent = "清除搜索";
+      clearSearch.addEventListener("click", () => openNovelSearch(""));
+      controls.append(clearSearch);
+    }
     const sort = document.createElement("select");
     sort.className = "novel-sort";
+    sort.setAttribute("aria-label", "小说排序");
     const sortOptions = [["updated", "最近更新"], ["chars", "字数最多"], ["progress", "最近阅读"], ["chapters", "章节最多"], ["size", "文件最大"], ["title", "书名"]];
     for (const option of sortOptions) {
       const item = document.createElement("option");
@@ -702,15 +744,44 @@ export function createNovelPage(deps) {
       state.novel.page = 0;
       loadNovels({ replaceRoute: true }).catch(() => {});
     });
-    if (!authorProfile && state.novel.mode !== "mine") controls.append(sort);
-    if (controls.childElementCount === 1) controls.classList.add("single");
+    if (state.novel.mode !== "mine") controls.append(sort);
 
     const categories = document.createElement("div");
     categories.className = "novel-category-row";
+    categories.setAttribute("aria-label", "书库分类，数量为全库统计");
     if (state.novel.mode === "books") {
+      const categoryHeading = document.createElement("h2");
+      categoryHeading.className = "novel-sidebar-heading";
+      categoryHeading.textContent = "分类";
+      const categoryHint = document.createElement("span");
+      categoryHint.textContent = "全库";
+      categoryHeading.append(categoryHint);
+      sidebar.append(categoryHeading);
       categories.append(categoryButton("all", "全部", summary.totals?.books || 0));
       for (const item of data.facets || summary.categories || []) {
         categories.append(categoryButton(item.name, item.name, item.count));
+      }
+      sidebar.append(categories);
+      const recentBook = summary.recent?.[0];
+      if (recentBook) {
+        const resume = document.createElement("section");
+        resume.className = "novel-resume";
+        const caption = document.createElement("h2");
+        caption.textContent = "接着上次读";
+        const bookTitle = document.createElement("button");
+        bookTitle.type = "button";
+        bookTitle.className = "novel-resume-title";
+        bookTitle.textContent = recentBook.title;
+        bookTitle.addEventListener("click", () => openBook(recentBook.id));
+        const progress = document.createElement("p");
+        progress.textContent = recentBook.progressRecovery ? "旧阅读位置待确认" : compactBookProgress(recentBook);
+        const resumeRead = document.createElement("button");
+        resumeRead.type = "button";
+        resumeRead.className = "novel-resume-read";
+        resumeRead.textContent = recentBook.progressRecovery ? "查看阅读位置 →" : "继续阅读 →";
+        resumeRead.addEventListener("click", () => openReading(recentBook));
+        resume.append(caption, bookTitle, progress, resumeRead);
+        sidebar.append(resume);
       }
     }
 
@@ -719,35 +790,68 @@ export function createNovelPage(deps) {
     if (!list) {
       list = document.createElement("div");
       list.className = "novel-book-list";
-      for (const [index, entry] of entries.entries()) {
+      for (const entry of entries) {
         list.append(renderBookRow(entry));
       }
     }
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "novel-empty-card";
-      empty.textContent = state.novel.status || (state.novel.query ? "没有找到匹配的小说。" : "没有匹配的小说。");
+      empty.setAttribute("role", "status");
+      const emptyTitle = document.createElement("h3");
+      emptyTitle.textContent = state.novel.loading ? "正在读取书库" : state.novel.libraryError ? "书库暂时无法读取" : state.novel.query ? "没有找到这本书" : state.novel.mode === "mine" ? "还没有阅读记录" : "这里还没有小说";
+      const emptyCopy = document.createElement("p");
+      emptyCopy.textContent = state.novel.libraryError || (state.novel.query ? "试试其他书名或作者，也可以清除搜索后浏览。" : state.novel.mode === "mine" ? "在书库打开一本书，阅读位置会自动保存在这里。" : "可以在管理页面导入本地 TXT 文件。");
+      empty.append(emptyTitle, emptyCopy);
+      if (!state.novel.loading) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "novel-secondary-button";
+        action.textContent = state.novel.libraryError ? "重试" : state.novel.query ? "清除搜索" : state.novel.mode === "mine" ? "浏览书库" : "导入小说";
+        action.addEventListener("click", () => state.novel.libraryError ? loadNovels({ skipRoute: true }).catch(() => {}) : state.novel.query ? openNovelSearch("") : openNovelSection(state.novel.mode === "mine" ? "books" : "manage"));
+        empty.append(action);
+      }
       list.append(empty);
     }
 
-    if (authorProfile) shell.append(head);
-    if (controls.childElementCount) shell.append(controls);
-    if (categories.childElementCount) shell.append(categories);
+    shell.append(head);
+    results.append(controls);
     if (state.novel.status && entries.length) {
       const status = document.createElement("div");
       status.className = "novel-status-line";
       status.textContent = state.novel.status;
-      shell.append(status);
+      results.append(status);
     }
-    shell.append(list);
-    if (state.novel.hasMore || state.novel.loadingMore) {
-      const sentinel = document.createElement("div");
-      sentinel.className = "novel-library-autoload";
-      sentinel.setAttribute("role", "status");
-      sentinel.textContent = state.novel.loadingMore ? "正在继续加载…" : "继续向下滚动加载更多";
-      shell.append(sentinel);
-    }
+    results.append(list);
+    libraryList = state.novel.mode === "mine" ? list.querySelector(".novel-recent-strip") || list : list;
+    libraryFooter = document.createElement("div");
+    libraryFooter.className = "novel-library-autoload";
+    results.append(libraryFooter);
+    if (sidebar.childElementCount) workspace.append(sidebar);
+    else workspace.classList.add("without-sidebar");
+    workspace.append(results);
+    shell.append(workspace);
     els.workGrid.append(shell);
+    updateLibraryTail();
+  }
+
+  function updateLibraryTail(newBooks = []) {
+    if (!libraryList || !libraryFooter) return;
+    for (const book of newBooks) libraryList.append(state.novel.mode === "mine" ? renderRecentItem(book) : renderBookRow(book));
+    libraryFooter.replaceChildren();
+    const loaded = state.novel.data?.books?.length || 0;
+    const count = document.createElement("span");
+    count.setAttribute("role", "status");
+    count.textContent = state.novel.loadingMore ? "正在继续加载…" : state.novel.libraryError ? `加载中断：${state.novel.libraryError}` : loaded ? `已显示 ${formatNumber(loaded)} / ${formatNumber(state.novel.data?.total || loaded)} 本` : "";
+    libraryFooter.append(count);
+    if (state.novel.hasMore && !state.novel.loadingMore) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "novel-text-button";
+      more.textContent = state.novel.libraryError ? "重试加载" : "加载更多";
+      more.addEventListener("click", () => loadNovels({ append: true, skipRoute: true }).catch(() => {}));
+      libraryFooter.append(more);
+    }
     armLibraryAutoload();
   }
 
@@ -755,17 +859,13 @@ export function createNovelPage(deps) {
     libraryObserver?.disconnect();
     libraryObserver = null;
     const sentinel = document.querySelector(".novel-library-autoload");
-    if (!sentinel || !state.novel.hasMore || state.novel.loading || state.novel.loadingMore) return;
+    if (!sentinel || !state.novel.hasMore || state.novel.loading || state.novel.loadingMore || state.novel.libraryError) return;
     libraryObserver = new IntersectionObserver(
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         libraryObserver?.disconnect();
         libraryObserver = null;
-        loadNovels({ append: true, skipRoute: true }).catch((error) => {
-          state.novel.loadingMore = false;
-          state.novel.status = error.message || "继续加载失败";
-          renderView();
-        });
+        loadNovels({ append: true, skipRoute: true }).catch(() => {});
       },
       { rootMargin: "600px 0px" }
     );
@@ -787,6 +887,11 @@ export function createNovelPage(deps) {
     const nav = document.createElement("nav");
     nav.className = "novel-section-menu";
     nav.setAttribute("aria-label", "小说功能");
+    const brand = document.createElement("a");
+    brand.className = "novel-brand";
+    brand.href = "/novels";
+    brand.textContent = "小说";
+    nav.append(brand);
     for (const [mode, label] of [["books", "书库"], ["mine", "我的"], ["rankings", "排行榜"], ["manage", "管理"]]) {
       const button = document.createElement("button");
       button.type = "button";
@@ -1267,7 +1372,8 @@ export function createNovelPage(deps) {
       });
       meta.append(author);
     }
-    for (const value of [book.category, `${formatNumber(book.chapterCount)} 章`, formatBytes(book.sizeBytes)].filter(Boolean)) {
+    const length = book.charCount >= 10000 ? `${formatNumber(Math.round(book.charCount / 1000) / 10)} 万字` : book.charCount ? `${formatNumber(book.charCount)} 字` : `${formatNumber(book.chapterCount)} 章`;
+    for (const value of [displayNovelCategory(book.category), length].filter(Boolean)) {
       meta.append(document.createTextNode(` · ${value}`));
     }
     return meta;
@@ -1295,7 +1401,12 @@ export function createNovelPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `novel-chip${state.novel.category === value ? " active" : ""}`;
-    button.textContent = `${label} ${formatNumber(count || 0)}`;
+    button.setAttribute("aria-pressed", String(state.novel.category === value));
+    const name = document.createElement("span");
+    name.textContent = displayNovelCategory(label);
+    const total = document.createElement("small");
+    total.textContent = formatNumber(count || 0);
+    button.append(name, total);
     button.addEventListener("click", () => {
       if (state.novel.category === value) return;
       state.novel.category = value;
@@ -1313,20 +1424,22 @@ export function createNovelPage(deps) {
     title.textContent = "继续阅读";
     const strip = document.createElement("div");
     strip.className = "novel-recent-strip";
-    for (const book of items) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "novel-recent-item";
-      const strong = document.createElement("strong");
-      strong.textContent = book.title;
-      const span = document.createElement("span");
-      span.textContent = compactBookProgress(book);
-      button.append(strong, span);
-      button.addEventListener("click", () => openChapter(book.id, book.progress?.chapterIndex || 1, { restoreProgress: true }));
-      strip.append(button);
-    }
+    for (const book of items) strip.append(renderRecentItem(book));
     panel.append(title, strip);
     return panel;
+  }
+
+  function renderRecentItem(book) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "novel-recent-item";
+    const strong = document.createElement("strong");
+    strong.textContent = book.title;
+    const span = document.createElement("span");
+    span.textContent = book.progressRecovery ? "旧阅读位置待确认" : compactBookProgress(book);
+    button.append(strong, span);
+    button.addEventListener("click", () => openReading(book));
+    return button;
   }
 
   function renderBookRow(book, rank = 0) {
@@ -1343,22 +1456,19 @@ export function createNovelPage(deps) {
     const body = document.createElement("div");
     body.className = "novel-book-row-body";
     const title = document.createElement("h3");
-    title.textContent = book.title;
+    const titleLink = document.createElement("button");
+    titleLink.type = "button";
+    titleLink.className = "novel-book-title";
+    titleLink.textContent = book.title;
+    titleLink.addEventListener("click", () => openBook(book.id));
+    title.append(titleLink);
     const meta = renderBookMeta(book, rank);
     const summary = document.createElement("p");
     summary.className = "novel-book-summary";
-    summary.textContent = book.summary || book.latestChapterTitle || book.relativePath;
-    const latest = document.createElement(book.latestChapterTitle && book.chapterCount ? "button" : "div");
+    summary.textContent = book.summary || "暂无简介，可打开目录浏览章节。";
+    const latest = document.createElement("div");
     latest.className = "novel-book-latest";
-    latest.textContent = book.latestChapterTitle ? `最新：${book.latestChapterTitle}` : "TXT 本地导入";
-    if (latest instanceof HTMLButtonElement) {
-      latest.type = "button";
-      latest.title = "打开最新章节";
-      latest.addEventListener("click", (event) => {
-        event.stopPropagation();
-        openChapter(book.id, book.chapterCount, { restoreProgress: false });
-      });
-    }
+    latest.textContent = book.progressRecovery ? "阅读位置待确认" : book.progress ? compactBookProgress(book) : `${formatNumber(book.chapterCount)} 章${book.updatedAt ? ` · ${formatNovelDate(book.updatedAt)} 更新` : ""}`;
     body.append(title, meta, summary, latest);
     const actions = document.createElement("div");
     actions.className = "novel-book-actions";
@@ -1372,17 +1482,13 @@ export function createNovelPage(deps) {
     });
     const read = document.createElement("button");
     read.type = "button";
-    read.className = "primary";
-    read.textContent = book.progress ? "继续阅读" : "开始阅读";
+    read.className = book.progress || book.progressRecovery ? "primary" : "novel-read-link";
+    read.textContent = book.progressRecovery ? "查看进度" : book.progress ? "继续阅读" : "开始阅读";
     read.addEventListener("click", (event) => {
       event.stopPropagation();
       openReading(book);
     });
-    const download = document.createElement("button");
-    download.type = "button";
-    download.textContent = "下载TXT";
-    download.addEventListener("click", (event) => downloadBook(book, event));
-    actions.append(read, detail, download);
+    actions.append(detail, read);
     row.append(body, actions);
     return row;
   }
@@ -1399,16 +1505,39 @@ export function createNovelPage(deps) {
     hero.append(renderCover(book, "large"));
     const info = document.createElement("div");
     info.className = "novel-detail-info";
+    const eyebrow = document.createElement("p");
+    eyebrow.className = "novel-detail-eyebrow";
+    eyebrow.textContent = "本地藏书";
     const title = document.createElement("h2");
+    title.className = "novel-detail-title";
     title.textContent = book.title;
     const meta = document.createElement("p");
-    meta.textContent = [book.author || "未知作者", book.category, `${formatNumber(book.chapterCount)} 章`, formatBytes(book.sizeBytes)].join(" · ");
+    meta.className = "novel-detail-byline";
+    const authorName = String(book.author || "未知作者").trim() || "未知作者";
+    if (authorName === "未知作者") {
+      const author = document.createElement("span");
+      author.textContent = authorName;
+      meta.append(author);
+    } else {
+      const author = document.createElement("button");
+      author.type = "button";
+      author.className = "novel-detail-author";
+      author.textContent = authorName;
+      author.title = `查看 ${authorName} 的作品`;
+      author.addEventListener("click", () => openNovelAuthor(authorName));
+      meta.append(author);
+    }
+    if (book.category) {
+      const category = document.createElement("span");
+      category.className = "novel-detail-category";
+      category.textContent = book.category;
+      meta.append(category);
+    }
     const metrics = document.createElement("div");
     metrics.className = "novel-detail-metrics";
     for (const item of [
-      ["字数", `${formatNumber(book.charCount)}`],
-      ["章节", `${formatNumber(book.chapterCount)}`],
-      ["进度", book.progress ? `${Math.round(readingProgress(book).overallRatio * 1000) / 10}%` : "未读"]
+      ["字", `${formatNumber(book.charCount)}`],
+      ["章", `${formatNumber(book.chapterCount)}`]
     ]) {
       const metric = document.createElement("span");
       const strong = document.createElement("strong");
@@ -1424,12 +1553,19 @@ export function createNovelPage(deps) {
     start.type = "button";
     start.className = "novel-primary-button";
     start.textContent = book.progress ? "继续阅读" : "开始阅读";
-    start.addEventListener("click", () => openChapter(book.id, book.progress?.chapterIndex || 1, { restoreProgress: Boolean(book.progress) }));
+    start.addEventListener("click", () => openReading(book));
     const catalogButton = document.createElement("button");
     catalogButton.type = "button";
     catalogButton.className = "novel-secondary-button";
     catalogButton.textContent = "查看目录";
     catalogButton.addEventListener("click", () => document.querySelector(".novel-catalog")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    actions.append(start, catalogButton);
+    const tools = document.createElement("details");
+    tools.className = "novel-detail-tools";
+    const toolsSummary = document.createElement("summary");
+    toolsSummary.textContent = "书籍工具";
+    const toolsContent = document.createElement("div");
+    toolsContent.className = "novel-detail-tools-content";
     const download = document.createElement("button");
     download.type = "button";
     download.className = "novel-secondary-button";
@@ -1445,12 +1581,31 @@ export function createNovelPage(deps) {
     correct.className = "novel-secondary-button";
     correct.textContent = "校正信息";
     correct.addEventListener("click", () => openBookCorrectionDialog(book));
-    actions.append(start, catalogButton, download, reimport, correct);
-    info.append(title, meta, metrics, actions);
+    toolsContent.append(download, reimport, correct);
+    if (book.sizeBytes) {
+      const fileSize = document.createElement("span");
+      fileSize.className = "novel-detail-file-size";
+      fileSize.textContent = `TXT · ${formatBytes(book.sizeBytes)}`;
+      toolsContent.append(fileSize);
+    }
+    tools.append(toolsSummary, toolsContent);
+    info.append(eyebrow, title, meta, metrics, actions, tools);
     const side = document.createElement("aside");
     side.className = "novel-detail-reading";
     const sideTitle = document.createElement("strong");
-    sideTitle.textContent = "阅读状态";
+    sideTitle.textContent = "阅读记录";
+    side.append(sideTitle);
+    if (book.progressRecovery) {
+      const recovery = document.createElement("p");
+      recovery.className = "novel-detail-recovery-note";
+      recovery.textContent = "阅读位置有变化，打开正文后可确认接续位置。";
+      side.append(recovery);
+    } else if (book.progress) {
+      const progress = document.createElement("p");
+      progress.className = "novel-detail-progress";
+      progress.textContent = `已读 ${Math.round(readingProgress(book).overallRatio * 1000) / 10}%`;
+      side.append(progress);
+    }
     const progressChapter = book.progress
       ? chapters.find((chapter) => Number(chapter.index) === Number(book.progress.chapterIndex)) || {
           index: Number(book.progress.chapterIndex),
@@ -1465,18 +1620,18 @@ export function createNovelPage(deps) {
       : null;
     if (progressChapter) {
       side.append(createDetailChapterAction("上次读到", book, progressChapter, true));
-    } else {
+    } else if (!book.progressRecovery) {
       const unread = document.createElement("p");
-      unread.textContent = "还没有阅读记录，从第一章开始即可。";
+      unread.textContent = "尚未开始阅读";
       side.append(unread);
     }
     if (latestChapter && Number(latestChapter.index) !== Number(progressChapter?.index)) {
       side.append(createDetailChapterAction("最新章节", book, latestChapter));
     }
     const updated = document.createElement("span");
+    updated.className = "novel-detail-updated";
     updated.textContent = book.updatedAt ? `书库更新于 ${formatDateTime(book.updatedAt)}` : "";
-    side.prepend(sideTitle);
-    side.append(updated);
+    if (book.updatedAt) side.append(updated);
     hero.append(info, side);
 
     const intro = document.createElement("section");
@@ -1484,12 +1639,13 @@ export function createNovelPage(deps) {
     const introTitle = document.createElement("h3");
     introTitle.textContent = "作品简介";
     const introText = document.createElement("p");
-    introText.textContent = book.summary || "本地 TXT 暂无简介，已按章节切分并保存到独立数据库。";
+    introText.textContent = String(book.summary || "").trim() || "这本书还没有简介。先翻开正文看看，也可以在书籍工具中补充简介。";
     intro.append(introTitle, introText);
 
     const catalog = document.createElement("section");
     catalog.className = "novel-catalog";
     const catalogHead = document.createElement("div");
+    catalogHead.className = "novel-detail-catalog-head";
     const catalogTitle = document.createElement("h3");
     catalogTitle.textContent = "目录";
     const catalogMeta = document.createElement("span");
@@ -1853,6 +2009,7 @@ export function createNovelPage(deps) {
 
     const paper = document.createElement("article");
     paper.className = "novel-reader-paper";
+    paper.inert = state.novel.catalogOpen;
     paper.append(renderBreadcrumbs([{ label: "小说书库", action: showHome }, { label: book.title, action: () => openBook(book.id) }, { label: chapter.title }]));
     if (book.progressRecovery) {
       const notice = document.createElement("div");
@@ -1905,6 +2062,8 @@ export function createNovelPage(deps) {
   function renderReaderToolbar() {
     const toolbar = document.createElement("aside");
     toolbar.className = "novel-reader-toolbar";
+    toolbar.inert = state.novel.catalogOpen;
+    toolbar.setAttribute("aria-label", "阅读工具");
     toolbar.append(toolbarButton("目录", "☰", () => toggleCatalog()));
     toolbar.append(toolbarButton("书页", "□", () => openBook(state.novel.book.id)));
     toolbar.append(toolbarButton("夜间", "☾", () => updateSettings({ night: !state.novel.settings.night })));
@@ -1917,6 +2076,10 @@ export function createNovelPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-toolbar-button";
+    button.dataset.readerFocus = `toolbar-${label}`;
+    button.setAttribute("aria-label", label);
+    if (label === "夜间") button.setAttribute("aria-pressed", String(state.novel.settings.night));
+    if (label === "目录" || label === "设置") button.setAttribute("aria-expanded", String(label === "目录" ? state.novel.catalogOpen : state.novel.settingsOpen));
     const strong = document.createElement("strong");
     strong.textContent = icon;
     const span = document.createElement("span");
@@ -1931,6 +2094,9 @@ export function createNovelPage(deps) {
     wrap.className = "novel-reader-drawer";
     const panel = document.createElement("aside");
     panel.className = "novel-reader-drawer-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", "章节目录");
     const head = document.createElement("div");
     head.className = "novel-reader-drawer-head";
     const title = document.createElement("strong");
@@ -1938,6 +2104,7 @@ export function createNovelPage(deps) {
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "关闭";
+    close.dataset.readerFocus = "catalog-close";
     close.addEventListener("click", () => toggleCatalog(false));
     head.append(title, close);
     panel.append(head);
@@ -1973,6 +2140,7 @@ export function createNovelPage(deps) {
     search.type = "search";
     search.placeholder = "搜索章节名或章数";
     search.setAttribute("aria-label", "搜索章节");
+    if (options.compact) search.dataset.readerFocus = "catalog-search";
     search.value = state.novel.catalogQuery || "";
     const order = document.createElement("button");
     order.type = "button";
@@ -2045,6 +2213,8 @@ export function createNovelPage(deps) {
   function renderSettingsPanel() {
     const panel = document.createElement("aside");
     panel.className = "novel-settings-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "阅读设置");
     const title = document.createElement("strong");
     title.textContent = "阅读设置";
     panel.append(title);
@@ -2057,6 +2227,7 @@ export function createNovelPage(deps) {
     close.type = "button";
     close.className = "novel-secondary-button";
     close.textContent = "完成";
+    close.dataset.readerFocus = "settings-close";
     close.addEventListener("click", () => toggleSettings(false));
     panel.append(close);
     return panel;
@@ -2082,6 +2253,8 @@ export function createNovelPage(deps) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = `theme-${value}${state.novel.settings.theme === value ? " active" : ""}`;
+      button.dataset.readerFocus = `theme-${value}`;
+      button.setAttribute("aria-pressed", String(state.novel.settings.theme === value && !state.novel.settings.night));
       button.textContent = label;
       button.addEventListener("click", () => updateSettings({ theme: value, night: false }));
       wrap.append(button);
@@ -2100,6 +2273,8 @@ export function createNovelPage(deps) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = state.novel.settings.font === value ? "active" : "";
+      button.dataset.readerFocus = `font-${value}`;
+      button.setAttribute("aria-pressed", String(state.novel.settings.font === value));
       button.textContent = label;
       button.addEventListener("click", () => updateSettings({ font: value }));
       wrap.append(button);
@@ -2113,11 +2288,18 @@ export function createNovelPage(deps) {
     const minus = document.createElement("button");
     minus.type = "button";
     minus.textContent = "-";
+    const settingName = { fontSize: "字号", lineHeight: "行距", width: "宽度" }[key] || key;
+    minus.setAttribute("aria-label", `减小${settingName}`);
+    minus.dataset.readerFocus = `${key}-minus`;
+    minus.disabled = Number(state.novel.settings[key]) <= min;
     const value = document.createElement("span");
     value.textContent = label;
     const plus = document.createElement("button");
     plus.type = "button";
     plus.textContent = "+";
+    plus.setAttribute("aria-label", `增大${settingName}`);
+    plus.dataset.readerFocus = `${key}-plus`;
+    plus.disabled = Number(state.novel.settings[key]) >= max;
     minus.addEventListener("click", () => updateSettings({ [key]: Math.max(min, Number(state.novel.settings[key]) - step) }));
     plus.addEventListener("click", () => updateSettings({ [key]: Math.min(max, Number(state.novel.settings[key]) + step) }));
     wrap.append(minus, value, plus);
@@ -2139,12 +2321,19 @@ export function createNovelPage(deps) {
   function renderCover(book, size = "") {
     const cover = document.createElement("div");
     cover.className = `novel-cover ${size}`.trim();
+    cover.setAttribute("aria-hidden", "true");
+    const hash = Array.from(String(book.id || book.title || "")).reduce((value, char) => (value * 31 + char.codePointAt(0)) >>> 0, 0);
+    cover.dataset.tone = String(hash % 5);
     const short = document.createElement("span");
-    short.textContent = (book.category || "小说").slice(0, 4);
+    short.textContent = "藏书";
     const title = document.createElement("strong");
     title.textContent = book.title;
     cover.append(short, title);
     return cover;
+  }
+
+  function displayNovelCategory(value) {
+    return String(value || "").replace(/^[\[【](.*)[\]】]$/, "$1");
   }
 
   function renderBreadcrumbs(items) {
@@ -2262,6 +2451,7 @@ export function createNovelPage(deps) {
     state.novel.pendingScrollRatio = ratio;
     renderView();
     restoreReaderScroll();
+    focusReaderControl(opening ? state.novel.catalogLoading ? "catalog-close" : "catalog-search" : "toolbar-目录");
     if (needsCatalog) loadReaderCatalog().catch(() => {});
   }
 
@@ -2343,6 +2533,13 @@ export function createNovelPage(deps) {
     state.novel.pendingScrollRatio = ratio;
     renderView();
     restoreReaderScroll();
+    focusReaderControl(state.novel.settingsOpen ? `theme-${state.novel.settings.theme}` : "toolbar-设置");
+  }
+
+  function focusReaderControl(key) {
+    const control = Array.from(document.querySelectorAll("[data-reader-focus]")).find((item) => item.dataset.readerFocus === key);
+    if (control?.disabled) control.parentElement?.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+    else control?.focus({ preventScroll: true });
   }
 
   function updateSettings(patch) {
@@ -2483,18 +2680,34 @@ export function createNovelPage(deps) {
     keyboardListenerInstalled = true;
     window.addEventListener("keydown", (event) => {
       if (state.activeView !== "novels" || !state.novel?.chapter) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("input, select, textarea, button, a")) return;
       if (event.key === "Escape" && (state.novel.catalogOpen || state.novel.settingsOpen)) {
         event.preventDefault();
+        const returnFocus = state.novel.catalogOpen ? "toolbar-目录" : "toolbar-设置";
         const ratio = currentReaderRatio();
         state.novel.catalogOpen = false;
         state.novel.settingsOpen = false;
         state.novel.pendingScrollRatio = ratio;
         renderView();
         restoreReaderScroll();
+        focusReaderControl(returnFocus);
         return;
       }
+      if (event.key === "Tab" && state.novel.catalogOpen) {
+        const panel = document.querySelector(".novel-reader-drawer-panel");
+        const controls = Array.from(panel?.querySelectorAll("button:not(:disabled), input:not(:disabled)") || []);
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+        return;
+      }
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, select, textarea, button, a")) return;
       if (state.novel.catalogOpen || state.novel.settingsOpen) return;
       if (event.key === "ArrowLeft") {
         event.preventDefault();

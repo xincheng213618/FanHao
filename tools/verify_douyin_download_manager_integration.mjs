@@ -426,10 +426,11 @@ assert.doesNotMatch(
   managerIndexSource,
   /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStart|downloadStop)"/
 );
-assert.match(managerIndexSource, /20260809-home-simplify-01/);
-assert.match(managerIndexSource, /app\.js\?v=20260902-extract-reset-01/);
+assert.match(managerIndexSource, /styles\/links\.css\?v=20260925-download-progress-01/);
+assert.match(managerIndexSource, /app\.js\?v=20260925-download-progress-01/);
 assert.match(managerIndexSource, /采集到新作品就直接下载，无需手动开关/);
-assert.match(managerIndexSource, /id="resumeDownloads"[^>]*hidden>恢复自动下载/);
+assert.match(managerIndexSource, /id="testDownloadApi"[^>]*hidden>测试作品接口/);
+assert.match(managerIndexSource, /id="resumeDownloads"[^>]*class="primary"[^>]*hidden>恢复自动下载/);
 assert.match(managerIndexSource, /id="activityResetExtract"[^>]*hidden>重置当前采集/);
 
 const linksFeatureSource = fs.readFileSync(
@@ -440,12 +441,22 @@ assert.match(linksFeatureSource, /profile_nickname/);
 assert.match(linksFeatureSource, /profile_tab === "like"/);
 
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
-assert.match(managerAppSource, /features\/downloads\.js\?v=20260825-auto-resume-01/);
+assert.match(managerAppSource, /features\/downloads\.js\?v=20260917-api-probe-02/);
 assert.match(managerAppSource, /features\/activity\.js\?v=20260902-extract-reset-01/);
 assert.match(managerAppSource, /features\/library\.js\?v=20260812-latest-request-01/);
-assert.match(managerAppSource, /features\/links\.js\?v=20260812-latest-request-01/);
+assert.match(managerAppSource, /features\/links\.js\?v=20260925-download-progress-01/);
 assert.match(managerAppSource, /features\/profiles\.js\?v=20260825-profile-history-01/);
 assert.match(managerAppSource, /features\/settings\.js\?v=20260823-auto-collection-01/);
+
+const downloadsFeatureSource = fs.readFileSync(
+  path.join(moduleDir, "static", "features", "downloads.js"),
+  "utf8"
+);
+assert.match(downloadsFeatureSource, /resumeButton\.hidden = active \|\| plannedPause/);
+assert.match(downloadsFeatureSource, /guard\.active \? "立即继续下载" : "恢复自动下载"/);
+assert.match(downloadsFeatureSource, /已跳过保护冷却，自动下载已恢复/);
+assert.match(downloadsFeatureSource, /api\("\/api\/download\/probe"\)/);
+assert.match(downloadsFeatureSource, /\/aweme\/v1\/web\/aweme\/detail\//);
 
 const downloadStateSource = fs.readFileSync(
   path.join(moduleDir, "manager_core", "download_state.py"),

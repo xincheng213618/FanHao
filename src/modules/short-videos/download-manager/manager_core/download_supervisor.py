@@ -306,6 +306,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                 self.active = False
                 self.active_jobs.clear()
                 self.active_job_started.clear()
+                self.active_job_progress.clear()
 
         if self._job_status(job_id) == "running":
             update_job(

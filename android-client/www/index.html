@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260831-remote-auth-01-1046d3cbbfb6" />
-    <link rel="stylesheet" href="./platform/accounts/account.css?v=20260902-accounts" />
+    <link rel="stylesheet" href="./styles.css?v=assets-0f97d6765d71" />
+    <link rel="stylesheet" href="./platform/accounts/account.css?v=assets-0f97d6765d71" />
   </head>
   <body class="app-starting">
     <section id="appStartup" class="app-startup" aria-label="启动状态">
@@ -15,6 +15,10 @@
       <button id="appStartupRetry" type="button" hidden>重新打开</button>
     </section>
     <main class="app-shell" hidden>
+      <div id="moduleModeSwitch" class="module-mode-switch" hidden>
+        <label for="moduleModeSelect">浏览分类</label>
+        <select id="moduleModeSelect" aria-label="切换浏览分类"></select>
+      </div>
       <header id="moduleChrome" class="module-chrome" aria-label="当前模块工具栏" hidden></header>
 
       <form id="searchForm" class="search-bar" autocomplete="off" hidden>
@@ -212,10 +216,10 @@
           </div>
         </section>
 
-        <section class="settings-group settings-account-group" aria-label="用户中心">
-          <strong class="settings-group-title">用户中心</strong>
+        <details class="settings-group settings-account-group" aria-label="用户中心">
+          <summary class="settings-group-title">用户中心<span class="settings-account-summary">登录、个人资料与邀请码</span></summary>
           <div id="accountSettingsRoot" class="account-ui account-embedded"></div>
-        </section>
+        </details>
         <section class="settings-group" aria-labelledby="themeTitle">
           <strong id="themeTitle" class="settings-group-title">主题</strong>
           <div class="segmented-control" aria-label="主题设置">
@@ -339,11 +343,11 @@
       </div>
 
       <nav class="bottom-nav channel-bottom-nav" aria-label="底部导航">
-        <button class="bottom-nav-item bottom-nav-fanhao active" type="button" data-fanhao-home data-home-switcher data-home-mode-current="fanhao" data-bottom-key="fanhao" aria-label="首页，当前番号，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择番号或欧美">
+        <button class="bottom-nav-item bottom-nav-fanhao active" type="button" data-fanhao-home data-home-switcher data-home-mode-current="fanhao" data-bottom-key="fanhao" aria-label="首页，当前番号，点击回到当前分类，长按选择" aria-haspopup="menu" aria-expanded="false" title="点击回到当前分类；长按选择番号或欧美">
           <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><path d="M3.5 10.4 12 3.5l8.5 6.9v9.1a1 1 0 0 1-1 1h-5.2v-6.2H9.7v6.2H4.5a1 1 0 0 1-1-1Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M2.7 10.1 12 2.5l9.3 7.6a1 1 0 0 1 .4.8v9.2a1.6 1.6 0 0 1-1.6 1.6h-6.4v-6.4h-3.4v6.4H3.9a1.6 1.6 0 0 1-1.6-1.6v-9.2a1 1 0 0 1 .4-.8Z"/></svg></span>
           <span class="bottom-nav-label">番号</span>
         </button>
-        <button class="bottom-nav-item bottom-nav-photos" type="button" data-open-channel="photo" data-bottom-key="photo" data-gallery-switcher data-gallery-mode-current="photo" aria-label="图库与影视，当前套图，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择套图、韩漫、电影、电视剧或动漫">
+        <button class="bottom-nav-item bottom-nav-photos" type="button" data-open-channel="photo" data-bottom-key="photo" data-gallery-switcher data-gallery-mode-current="photo" aria-label="图库与影视，当前套图，点击回到当前分类，长按选择" aria-haspopup="menu" aria-expanded="false" title="点击回到当前分类；长按选择套图、韩漫、电影、电视剧或动漫">
           <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.3" cy="9" r="1.6"/><path d="m4.5 17 4.2-4 3.2 2.8 3.3-3.3 4.3 4.5"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M5 3h14a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Zm3.2 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm-4 10.8c0 .7.5 1.2 1.2 1.2h13.2c.7 0 1.2-.5 1.2-1.2l-4.6-4.7-3.3 3.3-3.2-2.8Z"/></svg></span>
           <span class="bottom-nav-label">套图</span>
         </button>
@@ -351,7 +355,7 @@
           <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="4"/><path d="m10 9 5 3-5 3Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="m9 7 8 5-8 5Z"/></svg></span>
           <span class="bottom-nav-label">短视频</span>
         </button>
-        <button class="bottom-nav-item bottom-nav-novels" type="button" data-open-view="novels" data-bottom-key="novels" data-reading-switcher data-reading-mode-current="novels" aria-label="阅读，当前小说，再次点击切换，长按选择" aria-haspopup="menu" aria-expanded="false" title="再次点击切换；长按选择小说或音乐">
+        <button class="bottom-nav-item bottom-nav-novels" type="button" data-open-view="novels" data-bottom-key="novels" data-reading-switcher data-reading-mode-current="novels" aria-label="阅读，当前小说，点击回到当前分类，长按选择" aria-haspopup="menu" aria-expanded="false" title="点击回到当前分类；长按选择小说或音乐">
           <span class="bottom-nav-icon" aria-hidden="true"><svg class="bottom-nav-icon-outline" viewBox="0 0 24 24"><path d="M4 4.5h5.2c1.5 0 2.8 1.1 2.8 2.6v13c0-1.4-1.3-2.6-2.8-2.6H4Zm16 0h-5.2c-1.5 0-2.8 1.1-2.8 2.6v13c0-1.4 1.3-2.6 2.8-2.6H20Z"/></svg><svg class="bottom-nav-icon-filled" viewBox="0 0 24 24"><path d="M3 3h6.1c1.1 0 2.1.4 2.9 1.2V20c-.8-.8-1.8-1.2-2.9-1.2H3Zm18 0h-6.1c-1.1 0-2.1.4-2.9 1.2V20c.8-.8 1.8-1.2 2.9-1.2H21Z"/></svg></span>
           <span class="bottom-nav-label">小说</span>
         </button>
@@ -362,7 +366,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260831-remote-auth-01-1046d3cbbfb6" type="module"></script>
+    <script src="./app.js?v=assets-0f97d6765d71" type="module"></script>
   </body>
 </html>
 

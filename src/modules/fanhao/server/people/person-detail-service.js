@@ -62,6 +62,7 @@ export function createPersonDetailService({
   coreMissingWorksForPerson,
   corePersonFallbackRecord,
   dedupeWorksForDisplay,
+  emptyPersonCleanupService,
   enrichLocalWorksWithActorMovieInfo,
   library,
   manualCoverStateService,
@@ -95,13 +96,13 @@ export function createPersonDetailService({
   }
 
   function actorProfilePayload(personId) {
-    const person = resolveLibraryPersonByPublicId(personId);
+    const person = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     if (!person) return null;
     return completedActorProfilePayload(person);
   }
 
   function updateActorProfile(personId, body) {
-    const person = resolveLibraryPersonByPublicId(personId);
+    const person = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     if (!person) return null;
 
     let result = null;
@@ -168,7 +169,8 @@ export function createPersonDetailService({
     const result = adminCoreMutationService.mergePeopleIntoTarget(
       targetPersonId,
       body.sourcePersonIds || body.sources || [],
-      { preserveSourceNames: body.preserveSourceNames !== false }
+      { preserveSourceNames: body.preserveSourceNames !== false, preview: body.preview === true,
+        displayName: body.displayName, confirmDifferentExternalIds: body.confirmDifferentExternalIds === true }
     );
     return { ok: true, ...result };
   }
@@ -339,10 +341,17 @@ export function createPersonDetailService({
     };
   }
 
+  function cleanupEmptyPerson(personId, options = {}) {
+    return options.preview === true
+      ? emptyPersonCleanupService.preview(personId)
+      : emptyPersonCleanupService.remove(personId, options);
+  }
+
   return {
     actorProfileOperation,
     actorProfilePayload,
     collectRevokedActorProfileImages,
+    cleanupEmptyPerson,
     coverBodyLimit,
     deleteLocalFiles,
     detailPayload,

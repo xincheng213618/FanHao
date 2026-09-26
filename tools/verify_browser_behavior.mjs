@@ -36,6 +36,7 @@ try {
     await verifyAndroidMangaReadingProgress(browser);
     await verifyStandaloneStyles(browser);
     await verifyNovelLibraryIntent(browser);
+    await verifyNovelLibraryAppendRecovery(browser);
     await verifyNovelCardAccessibility(browser);
     await verifyNovelRankingClampHistory(browser);
     await verifyNovelManageExitStopsPolling(browser);
@@ -181,6 +182,129 @@ async function verifyNovelLibraryIntent(browser) {
     await bookTitle().filter({ hasText: "失败后恢复" }).waitFor({ state: "visible", timeout: 5000 });
 
   } finally {
+    await page.close();
+  }
+}
+
+async function verifyNovelLibraryAppendRecovery(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const requests = [];
+  const pageErrors = [];
+  const total = 120;
+  const draft = "尚未提交的搜索草稿";
+  const base = fixtureNovels(new URL("/api/novels", baseUrl));
+  const books = Array.from({ length: total }, (_, index) => ({
+    ...base.books[0],
+    id: `fixture-append-novel-${index + 1}`,
+    title: `分页测试小说 ${String(index + 1).padStart(3, "0")}`
+  }));
+  let releaseAppend;
+  let releaseRetry;
+  const pendingAppend = new Promise((resolve) => { releaseAppend = resolve; });
+  const pendingRetry = new Promise((resolve) => { releaseRetry = resolve; });
+  let failLastPage = true;
+  page.on("pageerror", (error) => pageErrors.push(String(error)));
+  async function assertRetained(snapshot, message) {
+    const actual = await page.evaluate((original) => {
+      const rows = [...document.querySelectorAll(".novel-book-row")];
+      return {
+        rows: original.rows.every((row, index) => row === rows[index] && row.isConnected),
+        list: original.list === document.querySelector(".novel-book-list"),
+        search: original.search === document.querySelector("input[aria-label='搜索小说']"),
+        draft: original.search.value,
+        focus: document.activeElement === original.focusTarget
+      };
+    }, snapshot);
+    assert.deepEqual(actual, { rows: true, list: true, search: true, draft, focus: true }, message);
+  }
+  async function scrollToTail() {
+    await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
+  }
+  try {
+    await page.route((url) => url.pathname === "/api/novels", async (route) => {
+      const url = new URL(route.request().url());
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const limit = Number(url.searchParams.get("limit") || 48);
+      requests.push(offset);
+      if (offset === 48) await pendingAppend;
+      if (offset === 96) {
+        if (failLastPage) return route.fulfill({ status: 503, json: { error: "fixture next page unavailable" } });
+        await pendingRetry;
+      }
+      return route.fulfill({ json: {
+        ...base,
+        books: books.slice(offset, offset + limit),
+        limit,
+        offset,
+        total,
+        facets: [{ name: "科幻", count: total }],
+        summary: { categories: [{ name: "科幻", count: total }], totals: { authors: 1, books: total, bytes: total * 12000, chapters: total * 3 } }
+      } });
+    });
+    await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll(".novel-book-row").length === 48);
+    assert.equal(await page.locator(".novel-library h1").textContent(), "小说书库");
+    assert.equal(await page.locator(".novel-results-heading h2").textContent(), "全部作品");
+    assert.equal(await page.locator(".novel-results-count").textContent(), "120 本", "the result count must describe all matching books, not only the loaded page");
+    const search = page.getByRole("searchbox", { name: "搜索小说" });
+    await search.fill(draft);
+    const originalNodes = await page.evaluateHandle(() => {
+      const rows = [...document.querySelectorAll(".novel-book-row")];
+      const focusTarget = rows.at(-1).querySelector(".novel-book-detail");
+      focusTarget.focus({ preventScroll: true });
+      return { rows, list: rows[0].parentElement, search: document.querySelector("input[aria-label='搜索小说']"), focusTarget };
+    });
+    await scrollToTail();
+    await page.locator(".novel-library-autoload", { hasText: "正在继续加载" }).waitFor({ state: "visible" });
+    assert.deepEqual(requests, [0, 48], "scrolling into the tail must request exactly the next page");
+    await assertRetained(originalNodes, "starting an append must preserve all existing rows, row focus and the unsubmitted search draft");
+    const scrollBeforeAppend = await page.evaluate(() => window.scrollY);
+    releaseAppend();
+    await page.waitForFunction(() => document.querySelectorAll(".novel-book-row").length === 96);
+    await assertRetained(originalNodes, "a successful append must retain the existing DOM and focused detail button");
+    assert(Math.abs(await page.evaluate(() => window.scrollY) - scrollBeforeAppend) < 4, "appending books must retain the current scroll position");
+    assert.match(await page.locator(".novel-library-autoload").textContent(), /已显示 96 \/ 120 本/);
+
+    const loadedNodes = await page.evaluateHandle(() => {
+      const rows = [...document.querySelectorAll(".novel-book-row")];
+      const search = document.querySelector("input[aria-label='搜索小说']");
+      search.focus({ preventScroll: true });
+      return { rows, list: rows[0].parentElement, search, focusTarget: search };
+    });
+    await scrollToTail();
+    const retry = page.getByRole("button", { name: "重试加载", exact: true });
+    await retry.waitFor({ state: "visible" });
+    assert.match(await page.locator(".novel-library-autoload").textContent(), /加载中断：fixture next page unavailable/);
+    await assertRetained(loadedNodes, "a failed append must retain every loaded row and the focused search draft");
+    for (let index = 0; index < 2; index += 1) {
+      await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+      await page.waitForTimeout(50);
+      await scrollToTail();
+      await page.waitForTimeout(100);
+    }
+    assert.deepEqual(requests, [0, 48, 96], "a visible failed sentinel must not retry automatically, including after scrolling away and back");
+    assert.equal(await page.locator(".novel-book-row").count(), 96, "a failed page must leave already loaded books available");
+
+    failLastPage = false;
+    await retry.click();
+    await page.locator(".novel-library-autoload", { hasText: "正在继续加载" }).waitFor({ state: "visible" });
+    await page.evaluate((original) => original.search.focus({ preventScroll: true }), loadedNodes);
+    await assertRetained(loadedNodes, "explicit retry must preserve the list and search input while pending");
+    releaseRetry();
+    await page.waitForFunction(() => document.querySelectorAll(".novel-book-row").length === 120);
+    await assertRetained(loadedNodes, "the successful retry must append without replacing any previous rows or focused input");
+    assert.deepEqual(await page.locator(".novel-book-row h3").allTextContents(), books.map((book) => book.title), "successful pages must retain order without duplicates or omissions");
+    assert.match(await page.locator(".novel-library-autoload").textContent(), /已显示 120 \/ 120 本/);
+    assert.equal(await retry.count(), 0);
+    assert.equal(await page.getByRole("button", { name: "加载更多", exact: true }).count(), 0);
+    await scrollToTail();
+    await page.waitForTimeout(150);
+    assert.deepEqual(requests, [0, 48, 96, 96], "loading every book must stop further pagination requests");
+    assert.equal(await search.inputValue(), draft);
+    assert.deepEqual(pageErrors, [], "novel pagination recovery must not produce browser errors");
+  } finally {
+    releaseAppend();
+    releaseRetry();
     await page.close();
   }
 }
@@ -2160,9 +2284,10 @@ async function verifyAndroidRestartActionConvergence(browser) {
   try {
     await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
     await page.evaluate(async () => {
+      const { CLIENT_VERSION } = await import("/android-client/js/config.js");
       const [{ createShortVideoViews }, cache, { createShortVideoApi }, { createShortVideoListController }] = await Promise.all([
         import("/android-client/modules/short-videos/index.js?restart-action-fixture=1"),
-        import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867"),
+        import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`),
         import("/android-client/modules/short-videos/api.js?restart-action-fixture=2"),
         import("/android-client/modules/short-videos/list/controller.js?restart-action-fixture=2")
       ]);
@@ -2722,7 +2847,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
     assert.equal(await firstPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-thumb-metric`).evaluate((node) => node.classList.contains("is-liked")), false);
     await waitFor(
       () => firstPage.evaluate(async ({ requestPath }) => {
-        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+        const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
         const entry = await cache.readCachedJson(location.origin, requestPath);
         return entry?.payload?.videos?.[0]?.actions?.liked;
       }, { requestPath: expectedPath }),
@@ -2756,7 +2882,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
     await coldPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
     await coldPage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
     const observed = await coldPage.evaluate(async ({ requestPath }) => {
-      const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+      const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+      const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
       const entry = await cache.readCachedJson(location.origin, requestPath);
       const transportEntry = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
       return {
@@ -2799,7 +2926,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
         await stalePage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
         await stalePage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
         const retained = await stalePage.evaluate(async ({ requestPath }) => {
-          const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+          const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+          const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
           const entry = await cache.readCachedJson(location.origin, requestPath);
           const transportEntry = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
           return {
@@ -2825,7 +2953,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
     const cacheClearingPage = await context.newPage();
     await cacheClearingPage.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
     await cacheClearingPage.evaluate(async () => {
-      const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+      const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+      const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
       await cache.clearCachedData();
     });
     await cacheClearingPage.close();
@@ -2842,7 +2971,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
       await noLocalPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
       await noLocalPage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
       const noLocal = await noLocalPage.evaluate(async ({ requestPath }) => {
-        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+        const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
         return {
           canonical: await cache.readCachedJson(location.origin, requestPath),
           nativeActions: globalThis.__coldRestartNativePayloads.at(-1)?.videos?.[0]?.actions || null,
@@ -2866,7 +2996,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
       await recoveredPage.locator(`[data-video-id='${videoId}']`).waitFor({ state: "visible", timeout: 10000 });
       await recoveredPage.waitForFunction((id) => document.querySelector(`[data-video-id='${id}'] .short-video-mobile-thumb-metric`)?.classList.contains("is-liked"), videoId, { timeout: 5000 });
       const recovered = await recoveredPage.evaluate(async ({ requestPath }) => {
-        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        const { CLIENT_VERSION } = await import("/android-client/js/config.js");
+        const cache = await import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`);
         const canonical = await cache.readCachedJson(location.origin, requestPath);
         const transport = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
         return {
@@ -3611,10 +3742,11 @@ async function verifyAndroidFavoriteFolders(browser) {
     assert.deepEqual(mutationRace.queuedCallbacks, ["http://scope-a.local"], "queued old-server moves must not call a current-server UI callback");
 
     const cacheScopeRace = await page.evaluate(async () => {
+      const { CLIENT_VERSION } = await import("/android-client/js/config.js");
       const [{ createFavoriteFolderFeature }, { createWorkActions }, cache] = await Promise.all([
         import("/android-client/modules/fanhao/features/works/favorite-folders.js?cache-scope-race=3"),
         import("/android-client/modules/fanhao/features/works/actions.js?cache-scope-race=3"),
-        import("/android-client/js/cache.js?v=20260705-mobile-actions-01")
+        import(`/android-client/js/cache.js?v=${CLIENT_VERSION}`)
       ]);
       const deferred = () => {
         let resolve;

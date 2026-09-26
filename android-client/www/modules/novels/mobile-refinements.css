@@ -1,0 +1,155 @@
+/* Compact book browsing and touch controls for the independently bundled app. */
+.module-chrome[data-module="novels"] { gap: 6px; }
+.novel-chrome-tabs { gap: 4px; }
+.novel-chrome-tabs button {
+  min-height: 44px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+}
+.novel-chrome-action { min-width: 44px; height: 44px; font-size: 13px; font-weight: 600; }
+.module-chrome[data-module="novels"] .module-chrome-search { font-size: 13px; }
+
+#contentPanel[data-view="novels"] > .section-head,
+#contentPanel[data-view="novelDetail"] > .section-head { display: flex; padding: 10px 2px 0; }
+#contentPanel[data-view="novels"] .section-head h2 { font-size: 24px; line-height: 1.4; font-weight: 700; }
+#contentPanel[data-view="novels"] #viewKicker,
+#contentPanel[data-view="novelDetail"] .section-head h2,
+#contentPanel[data-view="novelDetail"] > #viewMeta { display: none; }
+#contentPanel[data-view="novelDetail"] #viewKicker { margin: 0; color: var(--ink); font-size: 16px; font-weight: 600; }
+#contentPanel[data-view="novelDetail"] #viewBack { min-width: 44px; min-height: 44px; }
+#contentPanel[data-view="novels"] > #viewMeta { font-size: 12px; font-weight: 400; padding-bottom: 8px; }
+.novel-mobile-shelf-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; border-bottom: 1px solid var(--line); }
+.novel-mobile-shelf-toolbar nav { display: flex; gap: 18px; }
+.novel-mobile-shelf-toolbar button { min-height: 44px; border: 0; padding: 0 2px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; }
+.novel-mobile-shelf-toolbar button[aria-pressed="true"] { border-bottom: 2px solid var(--mobile-accent); color: var(--mobile-accent); }
+.novel-mobile-shelf-toolbar .novel-mobile-shelf-import { color: var(--mobile-accent); }
+
+.novel-mobile-list:not(.manage) { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 0 16px; }
+.novel-mobile-card.novel-mobile-book-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 16px 2px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.novel-mobile-book-detail {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  touch-action: pan-y;
+}
+.novel-mobile-book-row .novel-mobile-cover,
+.novel-mobile-detail-hero .novel-mobile-cover {
+  --book-paper: #e5e9df;
+  --book-ink: #424f3c;
+  position: relative;
+  width: 68px;
+  aspect-ratio: 0.7;
+  border: 1px solid color-mix(in srgb, var(--book-ink) 12%, transparent);
+  border-left: 4px solid color-mix(in srgb, var(--book-ink) 25%, var(--book-paper));
+  border-radius: 2px 5px 5px 2px;
+  padding: 11px 8px;
+  background: var(--book-paper);
+  color: var(--book-ink);
+  box-shadow: 2px 3px 6px #0000000a;
+}
+.novel-mobile-cover[data-tone="1"] { --book-paper: #e7e0d6; --book-ink: #63513e; }
+.novel-mobile-cover[data-tone="2"] { --book-paper: #dfe6ea; --book-ink: #3c5565; }
+.novel-mobile-cover[data-tone="3"] { --book-paper: #e9dfe0; --book-ink: #68474a; }
+.novel-mobile-cover[data-tone="4"] { --book-paper: #e4e1e9; --book-ink: #554967; }
+.novel-mobile-book-row .novel-mobile-cover strong,
+.novel-mobile-detail-hero .novel-mobile-cover strong {
+  color: inherit;
+  font-family: "Noto Serif CJK SC", "Songti SC", serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.65;
+  -webkit-line-clamp: 4;
+}
+.novel-mobile-book-row .novel-mobile-card-body { align-content: start; justify-items: stretch; gap: 6px; padding-top: 1px; text-align: left; }
+.novel-mobile-book-row .novel-mobile-card-body strong { color: var(--ink); font-size: 16px; font-weight: 650; line-height: 1.5; -webkit-line-clamp: 2; }
+.novel-mobile-book-row .novel-mobile-card-body > span { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; text-align: left; }
+.novel-mobile-book-footer { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.novel-mobile-book-footer > span { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.novel-mobile-book-footer button { min-height: 44px; min-width: 44px; border: 0; border-radius: 7px; padding: 0 10px; background: transparent; color: var(--mobile-accent); font-size: 12px; font-weight: 600; }
+.novel-mobile-book-footer .novel-mobile-book-more { color: var(--muted); font-size: 20px; }
+.novel-mobile-book-footer button:active,
+.novel-mobile-book-detail:active { background: var(--surface-soft); }
+.novel-mobile-book-row button:focus-visible,
+.novel-mobile-detail-hero button:focus-visible { outline: 2px solid var(--mobile-accent); outline-offset: 3px; }
+.novel-mobile-load-more { background: var(--surface); color: var(--muted); border-color: var(--line); }
+
+.novel-mobile-detail-hero,
+.novel-mobile-summary-panel,
+.novel-mobile-catalog { border-radius: 10px; box-shadow: none; }
+.novel-mobile-detail-hero { grid-template-columns: 88px minmax(0, 1fr); align-items: start; gap: 16px; padding: 18px 16px 8px; }
+.novel-mobile-detail-hero .novel-mobile-cover.large { width: 88px; }
+.novel-mobile-detail-hero .novel-mobile-cover strong { font-size: 14px; -webkit-line-clamp: 5; }
+.novel-mobile-detail-body { gap: 10px; align-content: start; }
+.novel-mobile-detail-body h1 { margin: 0; font-size: 22px; line-height: 1.4; font-weight: 650; overflow-wrap: anywhere; }
+.novel-mobile-detail-body > span { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.8; white-space: normal; }
+.novel-mobile-detail-hero > .novel-mobile-detail-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; margin: 0; gap: 10px; }
+.novel-mobile-detail-actions button { min-height: 46px; font-size: 13px; font-weight: 600; }
+.novel-mobile-detail-actions button.primary { border-color: var(--mobile-accent); background: var(--mobile-accent); }
+.novel-mobile-reading-status { grid-column: 1 / -1; gap: 4px; padding-top: 4px; }
+.novel-mobile-chapter-shortcut { min-height: 44px; gap: 4px; padding: 4px 0; }
+.novel-mobile-chapter-shortcut strong { color: var(--mobile-accent); font-weight: 500; font-size: 13px; }
+.novel-mobile-book-tools { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+.novel-mobile-book-tools > summary { min-height: 44px; padding: 13px 0; color: var(--muted); font-size: 12px; cursor: pointer; }
+.novel-mobile-book-tools .novel-mobile-detail-actions { padding-bottom: 8px; }
+.novel-mobile-summary-panel { padding: 16px; gap: 10px; }
+.novel-mobile-summary-panel > strong,
+.novel-mobile-catalog > div > strong { font-size: 16px; font-weight: 650; color: var(--ink); }
+.novel-mobile-summary-panel p { font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; white-space: pre-line; }
+.novel-mobile-summary-panel.collapsed p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.novel-mobile-summary-toggle { justify-self: start; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--mobile-accent); font-size: 12px; }
+.novel-mobile-catalog { padding: 16px; scroll-margin-top: 12px; }
+.novel-mobile-catalog-tools input,
+.novel-mobile-catalog-tools select,
+.novel-mobile-catalog-tools button { min-height: 44px; }
+.novel-mobile-chapter { min-height: 50px; padding: 8px 0; }
+.novel-mobile-chapter strong { font-size: 14px; font-weight: 500; }
+
+.novel-reader-screen { align-content: start; }
+.novel-reader-action-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.novel-reader-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.novel-reader-panel-head > strong { font-size: 16px; font-weight: 600; }
+.novel-reader-panel-head button { min-width: 56px; }
+.novel-reader-settings-panel { overscroll-behavior: contain; }
+.novel-reader-setting-row > span { font-weight: 500; }
+.novel-reader-option-row button { padding: 0 10px; font-weight: 500; }
+.novel-reader-catalog-drawer { color: var(--ink); overscroll-behavior: contain; }
+.novel-reader-catalog-drawer.night {
+  color-scheme: dark;
+  --surface: #242a33;
+  --surface-raised: #2e3540;
+  --ink: #d7dde5;
+  --muted: #aeb7c5;
+  --quiet: #97a3b3;
+  --line: #414a57;
+}
+.novel-reader-catalog-drawer .novel-mobile-catalog-status { color: var(--muted); }
+.novel-reader-catalog-drawer .novel-mobile-chapter { min-height: 50px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 0; background: transparent; }
+@media (min-width: 680px) {
+  .novel-mobile-list:not(.manage) { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 26px; }
+}
+@media (max-width: 360px) {
+  .novel-mobile-book-detail { gap: 12px; }
+  .novel-mobile-detail-hero { grid-template-columns: 76px minmax(0, 1fr); padding: 14px 12px 4px; gap: 12px; }
+  .novel-mobile-detail-hero .novel-mobile-cover.large { width: 76px; }
+  .novel-mobile-detail-body h1 { font-size: 20px; }
+  .novel-reader-setting-row { gap: 6px; }
+}

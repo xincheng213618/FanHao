@@ -38,6 +38,7 @@ export function createAdminMaintenanceTaskService({
     const sleep = clampInteger(body.sleep, 2, 0, 60);
     const maxPages = clampInteger(body.maxPages, fullScan ? 0 : 1, 0, 1000);
     const fullActorScan = maxPages === 0;
+    const actorWaitSeconds = clampInteger(body.actorWaitSeconds, fullActorScan ? 300 : 120, 15, 600);
     const args = [
       "-u",
       path.join("tools", "refresh_core_javdb_actor_movies.py"),
@@ -46,6 +47,8 @@ export function createAdminMaintenanceTaskService({
       "--write",
       "--max-pages",
       String(maxPages),
+      "--actor-wait-seconds",
+      String(actorWaitSeconds),
       "--fast",
       "--sleep",
       String(sleep),

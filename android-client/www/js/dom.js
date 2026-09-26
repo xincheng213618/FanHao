@@ -17,6 +17,8 @@ export function getElements() {
     appConfirmCancelButton: document.querySelector("#appConfirmCancelButton"),
     appConfirmAcceptButton: document.querySelector("#appConfirmAcceptButton"),
     moduleChrome: document.querySelector("#moduleChrome"),
+    moduleModeSwitch: document.querySelector("#moduleModeSwitch"),
+    moduleModeSelect: document.querySelector("#moduleModeSelect"),
     searchForm: document.querySelector("#searchForm"),
     searchCloseButton: document.querySelector("#searchCloseButton"),
     searchInput: document.querySelector("#searchInput"),

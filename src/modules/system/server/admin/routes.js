@@ -190,6 +190,22 @@ export async function routeAdminApi(req, res, url, deps) {
     return true;
   }
 
+  if (["/api/admin/person-folder/rename", "/api/admin/person-folder/relink"].includes(url.pathname) && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const mode = url.pathname.endsWith("/relink") ? "relink" : "rename";
+      sendJson(res, 200, adminPersonService.mutatePersonFolderPayload(body, mode));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, {
+        error: error.message || "人物文件夹操作失败",
+        code: error.code || "PERSON_FOLDER_FAILED",
+        operationId: error.operationId || ""
+      });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/admin/rescan-person" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);

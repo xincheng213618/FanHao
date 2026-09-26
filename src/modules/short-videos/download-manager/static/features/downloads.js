@@ -1,6 +1,73 @@
-import { post } from "../core/api.js";
+import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { displayDouyinId, formatCompact, formatCountdown, formatDateTime } from "../core/format.js";
+
+export function inferProbeDiagnostic(result) {
+  if (result.diagnostic) return result.diagnostic;
+  const message = String(result.message || "").replace(/\s+/g, " ").trim();
+  if (result.kind === "busy" || message.includes("自动下载正在运行")) {
+    return {
+      outcome: "not_tested",
+      rule: "runtime.busy",
+      label: "自动下载运行中",
+      detail: "当前监听器正在占用下载 Sidecar，本次没有向抖音发起测试请求。",
+      action: "无需处理；发生异常保护暂停后，再用测试按钮验证新的 VPN、代理或 Cookie。",
+    };
+  }
+  const error = String(result.error || "").replace(/\s+/g, " ").trim();
+  const lowered = error.toLowerCase();
+  const signatureReasons = [
+    ["uifid not found", "访客身份缺失", "Cookie 中缺少签名所需的 UIFID；请重新获取 Cookie，切换 VPN 不能补齐它。"],
+    ["signature not found", "签名参数缺失", "请求没有携带完整的 WebSign；需要更新签名实现，而不是更换 Cookie。"],
+    ["sign invalid", "签名校验失败", "签名已被识别但内容不匹配；检查算法、User-Agent 与已编码 URL 是否保持一致。"],
+    ["sign expired", "签名已过期", "检查系统时间，并重新生成签名后再测试。"],
+  ];
+  for (const [detail, label, action] of signatureReasons) {
+    if (lowered.includes(detail)) return { outcome: "risk_control", rule: "signature.refused", label, detail, action };
+  }
+  if (result.download_ready) {
+    return { outcome: "ok", rule: "default.ok", label: "接口正常", detail: "作品详情载荷完整", action: "可以继续下载。" };
+  }
+  if (result.kind === "login_required") {
+    return { outcome: "business_error", rule: "identity.login_required", label: "Cookie 登录失效", detail: "平台要求重新登录", action: "重新登录或导入最新 Cookie 后再测试。" };
+  }
+  if (!result.transport_ok) {
+    return { outcome: "network_error", rule: "network.exception", label: "网络连接失败", detail: error || "没有收到平台响应", action: "检查 VPN、代理、DNS 和本机网络后重新测试。" };
+  }
+  if ([401, 403, 405, 412, 429, 444].includes(Number(result.http_status))) {
+    return { outcome: "risk_control", rule: "http.risk_status", label: Number(result.http_status) === 429 ? "请求频率受限" : "平台拒绝当前请求", detail: `http ${result.http_status}`, action: "检查当前出口、Cookie 和请求指纹；保留原始响应用于继续诊断。" };
+  }
+  return { outcome: "business_error", rule: "probe.unclassified", label: "接口返回异常", detail: error || result.kind || "unknown", action: "查看原始响应继续诊断。" };
+}
+
+export function buildProbePresentation(result) {
+  const endpoint = result.endpoint || "/aweme/v1/web/aweme/detail/";
+  const status = result.http_status ? `HTTP ${result.http_status}` : "未收到 HTTP 响应";
+  const elapsed = Number.isFinite(Number(result.elapsed_ms)) ? ` · ${Number(result.elapsed_ms)} ms` : "";
+  const busy = result.kind === "busy" || String(result.message || "").includes("自动下载正在运行");
+  if (busy) {
+    return {
+      summary: result.message || "自动下载正在运行，本次未重复测试接口",
+      tone: "is-warning",
+      diagnostic: inferProbeDiagnostic(result),
+      rawError: "",
+    };
+  }
+  if (result.download_ready) {
+    return {
+      summary: `测试通过 · ${status}${elapsed} · ${endpoint}`,
+      tone: "is-success",
+      diagnostic: inferProbeDiagnostic(result),
+      rawError: "",
+    };
+  }
+  return {
+    summary: `${result.transport_ok ? "已连接抖音，但暂不可下载" : "连接失败"} · ${status}${elapsed} · ${endpoint}`,
+    tone: result.transport_ok ? "is-warning" : "is-error",
+    diagnostic: inferProbeDiagnostic(result),
+    rawError: result.error || "",
+  };
+}
 
 export function createDownloadsFeature(options) {
   const refreshState = options.refreshState;
@@ -208,11 +275,62 @@ export function createDownloadsFeature(options) {
 
   async function resumeDownloads() {
     const button = $("resumeDownloads");
+    const wasGuarded = Boolean(latestStatus?.download?.failure_guard?.active);
     button.disabled = true;
     try {
       await post("/api/download/resume");
-      toast("自动下载已恢复");
+      toast(wasGuarded ? "已跳过保护冷却，自动下载已恢复" : "自动下载已恢复");
       await refreshState();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function showProbeResult(message, tone = "") {
+    const node = $("downloadProbeResult");
+    node.hidden = false;
+    node.textContent = message;
+    node.className = `download-probe-result ${tone}`.trim();
+  }
+
+  function showStructuredProbeResult(presentation) {
+    const node = $("downloadProbeResult");
+    node.hidden = false;
+    node.className = `download-probe-result ${presentation.tone}`.trim();
+    const diagnostic = presentation.diagnostic;
+    const diagnosticHtml = diagnostic
+      ? `
+          <div class="download-probe-diagnostic">
+            <div class="download-probe-tags">
+              <span class="download-probe-label">${escapeHtml(diagnostic.label || "未分类异常")}</span>
+              <code>${escapeHtml(diagnostic.rule || "probe.unclassified")}</code>
+            </div>
+            ${diagnostic.detail ? `<div><strong>判定依据：</strong>${escapeHtml(diagnostic.detail)}</div>` : ""}
+            ${diagnostic.action ? `<div><strong>建议处理：</strong>${escapeHtml(diagnostic.action)}</div>` : ""}
+            ${presentation.rawError ? `<details><summary>原始响应</summary><code class="download-probe-raw">${escapeHtml(presentation.rawError)}</code></details>` : ""}
+          </div>
+        `
+      : "";
+    node.innerHTML = `<div class="download-probe-summary">${escapeHtml(presentation.summary)}</div>${diagnosticHtml}`;
+  }
+
+  async function testDownloadApi() {
+    const button = $("testDownloadApi");
+    button.disabled = true;
+    showProbeResult("正在使用当前 Cookie、代理和 VPN 测试真实作品详情接口…", "is-running");
+    try {
+      const result = await api("/api/download/probe");
+      showStructuredProbeResult(buildProbePresentation(result));
+      if (result.download_ready) {
+        toast("作品详情接口测试通过，可以继续下载");
+      } else if (result.transport_ok) {
+        toast(result.message || "已连接抖音，但作品接口暂不可用");
+      } else {
+        toast(result.message || "作品详情接口连接失败");
+      }
+    } catch (error) {
+      showProbeResult(`测试失败 · ${error.message}`, "is-error");
+      toast(error.message);
     } finally {
       button.disabled = false;
     }
@@ -236,6 +354,7 @@ export function createDownloadsFeature(options) {
 
   function bind() {
     $("quitApp").addEventListener("click", () => quitApplication().catch((err) => toast(err.message)));
+    $("testDownloadApi").addEventListener("click", () => testDownloadApi());
     $("resumeDownloads").addEventListener("click", () => resumeDownloads().catch((err) => toast(err.message)));
     $("sortQueueByPending").addEventListener("click", () => sortQueueByPending().catch((err) => toast(err.message)));
     $("downloadQueue").addEventListener("click", (event) => {
@@ -271,6 +390,7 @@ export function createDownloadsFeature(options) {
     latestStatus = state;
     $("quitApp").hidden = !(state.app?.desktop || state.app?.frozen);
     const guard = state.download?.failure_guard || {};
+    const plannedPause = guard.kind === "cycle_limit";
     renderDownloadGuard(state);
     renderDownloadCycle(state);
     const active = Boolean(state.download?.active);
@@ -283,7 +403,12 @@ export function createDownloadsFeature(options) {
     let primaryStatus = "自动下载准备中";
     let nextAction = "程序会自动启动监听，采集到新作品后直接下载";
     let statusClass = "is-idle";
-    $("resumeDownloads").hidden = active || Boolean(guard.active);
+    const resumeButton = $("resumeDownloads");
+    const probeButton = $("testDownloadApi");
+    resumeButton.hidden = active || plannedPause;
+    probeButton.hidden = active || plannedPause;
+    resumeButton.textContent = guard.active ? "立即继续下载" : "恢复自动下载";
+    resumeButton.title = guard.active ? "跳过本次保护冷却并立即恢复自动下载" : "重新启动自动下载监听";
     if (active && inflight > 0) {
       primaryStatus = `正在下载 · ${inflight} 个任务`;
       nextAction = watching ? "完成当前任务后继续监听新链接" : "正在处理当前下载队列";
@@ -304,7 +429,7 @@ export function createDownloadsFeature(options) {
         statusClass = "is-resting";
       } else {
         primaryStatus = "异常保护暂停";
-        nextAction = "检查代理或 Cookie 后可立即重试";
+        nextAction = "切换 VPN 或更新 Cookie 后，先测试作品接口；通过后再立即继续下载";
         statusClass = "is-warning";
       }
     }

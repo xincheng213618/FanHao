@@ -1,5 +1,5 @@
-import { createShortVideoViews } from "./index.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260812-collection-review-02";
+import { createShortVideoViews } from "./index.js?v=assets-0f97d6765d71";
+import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-0f97d6765d71";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({

@@ -1,4 +1,9 @@
-import { actualVideoQualityWhere, shortVideoMediaWhere } from "./query-contract.js";
+import {
+  actualVideoQualityWhere,
+  escapeLike,
+  shortVideoFtsMatchQuery,
+  shortVideoMediaWhere
+} from "./query-contract.js";
 
 export function createShortVideoListPageQueries({ listVideoColumns }) {
   if (!String(listVideoColumns || "").trim()) {
@@ -48,6 +53,57 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     return {
       total,
       rows: orderedCatalogRows(database, ids)
+    };
+  }
+
+  function fastShortQueryVideoPage(database, filter, sort, limit, offset) {
+    const eligible = filter.source === "all"
+      && Boolean(filter.q)
+      && !shortVideoFtsMatchQuery(filter.q)
+      && !filter.topic
+      && !filter.soundKey
+      && !filter.author
+      && filter.media === "all"
+      && filter.quality === "all"
+      && filter.deleted === "all"
+      && ["published", "publishedAsc"].includes(sort);
+    if (!eligible) return null;
+
+    const like = `%${escapeLike(filter.q)}%`;
+    const searchWhere = `${filter.includePending ? "" : "visibility = 'local_only' AND "}(
+      title LIKE ? ESCAPE '\\' OR
+      description LIKE ? ESCAPE '\\' OR
+      author_name LIKE ? ESCAPE '\\' OR
+      aweme_id LIKE ? ESCAPE '\\' OR
+      tags_text LIKE ? ESCAPE '\\'
+    )`;
+    const args = [like, like, like, like, like];
+    const orderBy = sort === "publishedAsc"
+      ? "video.published_at ASC, video.liked_at ASC, video.id DESC"
+      : "video.published_at DESC, video.liked_at DESC, video.id DESC";
+    const page = database.prepare(`
+      WITH matched_video_ids AS MATERIALIZED (
+        SELECT video_id
+        FROM short_video_search
+        WHERE ${searchWhere}
+      )
+      SELECT video.id, COUNT(*) OVER() AS match_total
+      FROM matched_video_ids matched
+      JOIN short_videos video ON video.id = matched.video_id
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `).all(...args, limit, offset);
+    const total = page.length
+      ? Number(page[0].match_total || 0)
+      : Number(database.prepare(`
+          SELECT COUNT(*) AS count
+          FROM short_video_search
+          WHERE ${searchWhere}
+        `).get(...args)?.count || 0);
+    const ids = page.map((row) => String(row.id || "")).filter(Boolean);
+    return {
+      total,
+      rows: ids.length ? orderedCatalogRows(database, ids) : []
     };
   }
 
@@ -316,7 +372,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
         SELECT id
         FROM short_videos INDEXED BY idx_short_videos_author_published
         WHERE author_sec_uid = ?
-        UNION
+        UNION ALL
         SELECT video.id
         FROM short_video_users author
         CROSS JOIN short_videos video INDEXED BY idx_short_videos_owner
@@ -324,8 +380,9 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
         WHERE author.platform = 'douyin'
           AND author.sec_uid = ?
           AND author.sec_uid <> ''
+          AND COALESCE(video.author_sec_uid, '') <> ?
       )`,
-      args: [author, author]
+      args: [author, author, author]
     };
   }
 
@@ -372,6 +429,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     fastFilteredVideoPage,
     fastHistoryVideoPage,
     fastPublishedVideoPage,
+    fastShortQueryVideoPage,
     fastSourceTotalCacheKey,
     shortVideoRelationshipTotal
   };

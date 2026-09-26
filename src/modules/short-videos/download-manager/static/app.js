@@ -3,9 +3,9 @@ import { toast } from "./core/dom.js";
 import { createSingleFlightPoller } from "./core/poller.js";
 import { createActivityFeature } from "./features/activity.js?v=20260902-extract-reset-01";
 import { createAuthFeature } from "./features/auth.js";
-import { createDownloadsFeature } from "./features/downloads.js?v=20260825-auto-resume-01";
+import { createDownloadsFeature } from "./features/downloads.js?v=20260917-api-probe-02";
 import { createLibraryFeature } from "./features/library.js?v=20260812-latest-request-01";
-import { createLinksFeature } from "./features/links.js?v=20260812-latest-request-01";
+import { createLinksFeature } from "./features/links.js?v=20260925-download-progress-01";
 import { createProfilesFeature } from "./features/profiles.js?v=20260825-profile-history-01";
 import { createSettingsFeature } from "./features/settings.js?v=20260823-auto-collection-01";
 
@@ -99,6 +99,7 @@ async function fetchAndRenderStatus() {
   if (!state) state = await api("/api/state");
   profilesFeature.renderStatus(state);
   downloadsFeature.renderStatus(state);
+  linksFeature.renderRuntime(state);
 }
 
 async function fetchAndRenderActivity() {

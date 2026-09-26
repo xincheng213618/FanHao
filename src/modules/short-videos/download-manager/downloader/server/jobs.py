@@ -9,6 +9,7 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
+import inspect
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 
@@ -43,7 +44,22 @@ class DownloadJob:
         self.error: Optional[str] = None
         self.records: List[Dict[str, Any]] = []
         self.records_truncated = 0
+        self.phase = "等待开始"
+        self.detail = ""
+        self.item_total = 0
+        self.item_completed = 0
+        self.bytes_downloaded = 0
+        self.bytes_total: Optional[int] = None
+        self.speed_bytes_per_second = 0.0
+        self.current_file = ""
+        self.progress_updated_at: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+
+    def update_progress(self, **values: Any) -> None:
+        for key, value in values.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        self.progress_updated_at = _now_iso()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,7 +76,53 @@ class DownloadJob:
             "error": self.error,
             "records": self.records,
             "records_truncated": self.records_truncated,
+            "progress": {
+                "phase": self.phase,
+                "detail": self.detail,
+                "item_total": self.item_total,
+                "item_completed": self.item_completed,
+                "bytes_downloaded": self.bytes_downloaded,
+                "bytes_total": self.bytes_total,
+                "speed_bytes_per_second": self.speed_bytes_per_second,
+                "current_file": self.current_file,
+                "updated_at": self.progress_updated_at,
+            },
         }
+
+
+class ServerProgressReporter:
+    """Expose downloader progress through the sidecar job endpoint."""
+
+    def __init__(self, job: DownloadJob):
+        self.job = job
+
+    def update_step(self, step: str, detail: str = "") -> None:
+        self.job.update_progress(phase=str(step or "处理中"), detail=str(detail or ""))
+
+    def set_item_total(self, total: int, detail: str = "") -> None:
+        self.job.update_progress(item_total=max(0, int(total)), detail=str(detail or ""))
+
+    def advance_item(self, status: str, detail: str = "") -> None:
+        completed = min(self.job.item_total or self.job.item_completed + 1, self.job.item_completed + 1)
+        self.job.update_progress(
+            item_completed=completed,
+            phase="完成" if status == "success" else str(status or "处理中"),
+            detail=str(detail or ""),
+        )
+
+    def on_transfer(self, progress: Dict[str, Any]) -> None:
+        self.job.update_progress(
+            bytes_downloaded=max(0, int(progress.get("bytes_downloaded") or 0)),
+            bytes_total=(
+                max(0, int(progress["bytes_total"]))
+                if progress.get("bytes_total") is not None
+                else None
+            ),
+            speed_bytes_per_second=max(
+                0.0, float(progress.get("speed_bytes_per_second") or 0.0)
+            ),
+            current_file=str(progress.get("current_file") or ""),
+        )
 
 
 class JobManager:
@@ -86,6 +148,7 @@ class JobManager:
         max_concurrency: int = 2,
         max_jobs: int = DEFAULT_MAX_JOBS,
         job_ttl_seconds: float = DEFAULT_JOB_TTL_SECONDS,
+        progress_reporter_factory: Optional[Callable[[DownloadJob], Any]] = None,
     ):
         self.executor = executor
         self._jobs: Dict[str, DownloadJob] = {}
@@ -93,6 +156,7 @@ class JobManager:
         self._lock = asyncio.Lock()
         self.max_jobs = max(1, int(max_jobs))
         self.job_ttl_seconds = max(0.0, float(job_ttl_seconds))
+        self.progress_reporter_factory = progress_reporter_factory
 
     async def submit(self, url: str) -> DownloadJob:
         job_id = uuid.uuid4().hex[:12]
@@ -138,7 +202,23 @@ class JobManager:
             job.status = JobStatus.RUNNING
             job.started_at = _now_iso()
             try:
-                counts = await self.executor(job.url)
+                reporter = (
+                    self.progress_reporter_factory(job)
+                    if self.progress_reporter_factory is not None
+                    else None
+                )
+                accepts_reporter = False
+                if reporter is not None:
+                    try:
+                        inspect.signature(self.executor).bind(job.url, reporter)
+                        accepts_reporter = True
+                    except (TypeError, ValueError):
+                        pass
+                counts = (
+                    await self.executor(job.url, reporter)
+                    if accepts_reporter
+                    else await self.executor(job.url)
+                )
                 job.total = int(counts.get("total", 0))
                 job.success = int(counts.get("success", 0))
                 job.failed = int(counts.get("failed", 0))

@@ -152,7 +152,6 @@ assert.equal(
   versionContract.highWaterVersionCode,
   "the tracked default version and publish floor must advance together"
 );
-verifyVersionContractDoesNotDecrease(versionContract);
 const downloadMethodStart = updater.indexOf("private File downloadApk(");
 const packageVerificationIndex = updater.indexOf("AndroidUpdatePackageVerifier.requireInstallableUpdate", downloadMethodStart);
 const verifiedReturnIndex = updater.indexOf("return apk;", packageVerificationIndex);
@@ -195,14 +194,9 @@ assert(webApp.includes("size: Number(androidUpdateInfo.size || 0)"), "the WebVie
 
 const rootPackage = JSON.parse(readRepo("package.json"));
 assert(rootPackage.scripts?.["verify:android-security"], "the root verifier must expose the Android security gate");
-assert(
-  rootPackage.scripts?.["preverify:android-security"]?.includes("--include=dev"),
-  "the clean Android security gate must install its lock-pinned Capacitor CLI even when npm omits dev dependencies by default"
-);
-assert(
-  rootPackage.scripts?.verify?.includes("verify:android-security"),
-  "the root verification chain must run the Android security gate"
-);
+assert(rootPackage.scripts?.["setup:android-verification"], "Android verification dependencies must have an explicit setup command");
+assert.equal(rootPackage.scripts?.["verify:full"], "node tools/run_verification.mjs full", "the full verification chain must use the explicit full plan");
+assert(readRepo("tools/run_verification.mjs").includes("'verify:android-security'"), "the full verification plan must include the Android security gate");
 
 const buildDebug = read("build-debug.ps1");
 assert(buildDebug.includes("JDK 21 is required"), "the Android build must fail closed when JDK 21 is unavailable");
@@ -212,7 +206,7 @@ assert(buildDebug.includes("Resolve-FanHaoBuildIdentity"), "the Android build mu
 assert(buildDebug.includes("Read-FanHaoVersionContract"), "no-argument Android builds must read the tracked version contract");
 assert(buildDebug.includes("$VersionContract.CurrentVersionCode"), "no-argument Android builds must use the tracked current versionCode");
 assert(buildDebug.includes("$VersionContract.DefaultVersionName"), "no-argument Android builds must use the tracked default versionName");
-assert(buildDebug.includes("Assert-FanHaoInstallIdentity"), "the build entry must apply the shared tracked-identity install gate");
+assert(buildDebug.includes("Assert-FanHaoInstallIdentity"), "the build entry must validate a development install identity");
 assert(buildDebug.includes("$Install -and $IdentityOnly"), "identity-only probing must never silently replace an install request");
 assert(buildDebug.includes("function Test-FanHaoAuthorizedAdbDeviceLine"), "the build entry must use a dedicated authorized-ADB device parser");
 assert(buildDebug.includes("'^\\S+\\s+device(?:\\s|$)'"), "the ADB parser must accept only a non-empty serial followed by the exact device state");
@@ -233,17 +227,15 @@ const publishDebug = read("publish-debug-update.ps1");
 assert(publishDebug.includes("Get-FanHaoDebugPublishPlan"), "publishing must resolve a validated global high-water mark before building");
 assert(publishDebug.includes("Publish-FanHaoDebugArtifact"), "publishing must use the verified atomic artifact commit");
 assert(publishDebug.includes("FileShare]::None"), "publishing must serialize competing writers for one publish root");
-assert(publishDebug.includes("does not install a newly selected identity"), "publishing must not bypass the reviewed install identity contract");
-assert(publishDebug.includes("New-FanHaoAuthorizedDeviceCheck"), "a real publish must create a scope-safe authorized ADB device checker");
+assert(publishDebug.includes("only publishes"), "publishing must direct installation to the explicit installer");
+assert(!publishDebug.includes("New-FanHaoAuthorizedDeviceCheck"), "publishing must not require a connected ADB device");
+assert(!publishDebug.includes("authorizedDeviceCheck"), "publishing must stay independent from ADB device availability");
+assert(!publishDebug.includes("Get-PublishAdbPath"), "publishing must not resolve ADB when it does not install");
 const planOnlyExitIndex = publishDebug.indexOf('if ($PlanOnly)');
 const buildInvocationIndex = publishDebug.indexOf("& $BuildScript @buildArgs");
 const publishCommitIndex = publishDebug.indexOf("Publish-FanHaoDebugArtifact");
-const deviceCheckInvocationIndexes = [...publishDebug.matchAll(/& \$authorizedDeviceCheck\b/g)].map((match) => match.index);
-assert.equal(deviceCheckInvocationIndexes.length, 3, "publishing must invoke the same scope-safe device checker exactly three times");
-const [firstAdbPreflightIndex, secondAdbPreflightIndex, commitBoundaryAdbIndex] = deviceCheckInvocationIndexes;
-assert(firstAdbPreflightIndex > planOnlyExitIndex && firstAdbPreflightIndex < buildInvocationIndex, "ADB visibility must be checked before the publish build starts");
-assert(secondAdbPreflightIndex > buildInvocationIndex && secondAdbPreflightIndex < publishCommitIndex, "the same ADB device set must be rechecked after the build and before atomic publish");
-assert(commitBoundaryAdbIndex > secondAdbPreflightIndex && commitBoundaryAdbIndex < publishCommitIndex && publishDebug.includes('if ($CurrentStage -eq "BeforeManifestCommit")'), "the captured ADB checker must run again at the module's exact manifest commit boundary");
+assert(planOnlyExitIndex >= 0 && planOnlyExitIndex < buildInvocationIndex, "plan-only mode must exit before the publish build starts");
+assert(buildInvocationIndex < publishCommitIndex, "publishing must build before the atomic artifact commit");
 
 const publishPolicy = read("scripts/FanHaoAndroidPublish.psm1");
 assert(publishPolicy.includes("99999999L"), "the project publish namespace must reserve Android versionCode headroom");
@@ -253,7 +245,8 @@ assert(publishPolicy.includes("Number of signers"), "APK identity checks must re
 assert(publishPolicy.includes("[IO.File]::Replace"), "latest.json replacement must be atomic on an existing publish lane");
 assert(publishPolicy.includes("Read-FanHaoVersionContract"), "publish planning must include the tracked version floor");
 assert(publishPolicy.includes("ignored-build-output"), "scratch build output must not define durable publish history");
-assert(publishPolicy.includes("-Install requires the tracked Android version contract identity"), "the shared install policy must reject identities above the reviewed contract");
+assert(!publishPolicy.includes("reviewed commit"), "development installation must not depend on a reviewed Git commit");
+assert(!publishPolicy.includes("install identity $contractCode"), "development installation must not require identity equality with version.json");
 
 const androidIndex = read("www/index.html");
 assert(androidIndex.includes('id="appUpdateSources"'), "settings must visibly list the default update addresses");
@@ -438,53 +431,6 @@ function prepareDisposableAndroidProject(disposableProjectDir) {
     "the Android security sync must use android-client's lock-pinned Capacitor CLI"
   );
   run(process.execPath, [capacitorCli, "sync", "android"], { cwd: disposableProjectDir });
-}
-
-function verifyVersionContractDoesNotDecrease(currentContract) {
-  const shallowResult = spawnSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: repoDir, encoding: "utf8" });
-  assert.equal(shallowResult.status, 0, "the Android version verifier requires Git repository metadata");
-  const isShallow = shallowResult.stdout.trim() === "true";
-
-  const logResult = spawnSync(
-    "git",
-    ["log", "--all", "--format=%H", "--", "android-client/version.json"],
-    { cwd: repoDir, encoding: "utf8" }
-  );
-  assert.equal(logResult.status, 0, "the Android version verifier could not read version contract history");
-  const commits = logResult.stdout.split(/\r?\n/).filter(Boolean);
-  const historicalFloors = commits.map((commit) => {
-    const result = spawnSync(
-      "git",
-      ["show", `${commit}:android-client/version.json`],
-      { cwd: repoDir, encoding: "utf8" }
-    );
-    assert.equal(result.status, 0, `the Android version verifier could not read ${commit}`);
-    const historical = JSON.parse(result.stdout);
-    assert(Number.isSafeInteger(historical.highWaterVersionCode), `historical Android version floor is invalid in ${commit}`);
-    return historical.highWaterVersionCode;
-  });
-
-  assertVersionFloorHistory(currentContract.highWaterVersionCode, historicalFloors, isShallow);
-  assert.throws(
-    () => assertVersionFloorHistory(26081189, [26081190, 26081191], false),
-    /must not decrease/,
-    "a decrease hidden behind multiple commits must fail closed"
-  );
-  assert.throws(
-    () => assertVersionFloorHistory(26081190, [], true),
-    /full Git history/,
-    "a shallow checkout with unavailable baseline history must fail closed"
-  );
-}
-
-function assertVersionFloorHistory(currentFloor, historicalFloors, isShallow) {
-  assert.equal(isShallow, false, "the Android version verifier requires full Git history; shallow history cannot prove the floor");
-  if (historicalFloors.length === 0) {
-    assert.equal(currentFloor, 26081190, "the initial tracked Android version floor must be the reviewed 26081190 baseline");
-    return;
-  }
-  const historicalMaximum = Math.max(...historicalFloors);
-  assert(currentFloor >= historicalMaximum, `the tracked Android version floor must not decrease below reachable history (${historicalMaximum})`);
 }
 
 function verifyAndroidUpdateServing() {

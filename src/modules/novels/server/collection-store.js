@@ -49,7 +49,7 @@ export const BUILTIN_NOVEL_ADAPTERS = Object.freeze([
       delayMs: 5000,
       timeoutMs: 30000,
       maxChapters: 0,
-      useEnvProxy: false
+      useEnvProxy: true
     })
   })
 ]);

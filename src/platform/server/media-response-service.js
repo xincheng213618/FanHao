@@ -157,6 +157,18 @@ export function createMediaResponseService({
     return mimeTypes[file?.ext] || "application/octet-stream";
   }
 
+  function localImageSourceMtime(file) {
+    const value = String(file?.modifiedAt || "").trim();
+    if (!value) return "";
+    // Core scans retain microseconds while Node filesystem dates expose rounded
+    // milliseconds. Round the stored fraction before comparing cache keys.
+    const precise = value.match(/^(.*T\d{2}:\d{2}:\d{2})\.(\d{4,})(Z|[+-]\d{2}:?\d{2})$/i);
+    const parsed = precise
+      ? Date.parse(`${precise[1]}${precise[3]}`) + Math.round(Number(`0.${precise[2]}`) * 1000)
+      : Date.parse(value);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value;
+  }
+
   function localImageCacheRow(file) {
     try {
       return (
@@ -172,11 +184,35 @@ export function createMediaResponseService({
               AND source_mtime = ?
             `
           )
-          .get(file.id, Number(file.size || 0), file.modifiedAt || "") || null
+          .get(file.id, Number(file.size || 0), localImageSourceMtime(file)) || null
       );
     } catch (error) {
       warn("[local-image-cache]", error.message || error);
       return null;
+    }
+  }
+
+  function localImageCacheReady(file) {
+    try {
+      return Boolean(
+        getCoreDb()
+          .prepare(
+            `
+            SELECT 1 AS ready
+            FROM fanhao_images.local_image_cache
+            WHERE file_id = ?
+              AND image_blob IS NOT NULL
+              AND length(image_blob) > 0
+              AND source_size = ?
+              AND source_mtime = ?
+            LIMIT 1
+            `
+          )
+          .get(file.id, Number(file.size || 0), localImageSourceMtime(file))
+      );
+    } catch (error) {
+      warn("[local-image-cache]", error.message || error);
+      return false;
     }
   }
 
@@ -189,7 +225,7 @@ export function createMediaResponseService({
 
   function upsertLocalImageCache(file, stat, buffer) {
     const now = new Date().toISOString();
-    const sourceMtime = stat?.mtime?.toISOString() || file.modifiedAt || "";
+    const sourceMtime = stat?.mtime?.toISOString() || localImageSourceMtime(file);
     const sourceSize = Number(stat?.size ?? file.size ?? buffer.length) || 0;
     const contentType = localImageMime(file);
     getCoreDb()
@@ -258,7 +294,7 @@ export function createMediaResponseService({
           file.relativePath || "",
           localImageMime(file),
           Number(file.size || 0),
-          file.modifiedAt || "",
+          localImageSourceMtime(file),
           String(error?.message || error || "local image cache failed").slice(0, 1000),
           now
         );
@@ -335,7 +371,7 @@ export function createMediaResponseService({
   }
 
   function localImageLoad(file) {
-    const key = `${file.id || file.path}:${Number(file.size || 0)}:${file.modifiedAt || ""}`;
+    const key = `${file.id || file.path}:${Number(file.size || 0)}:${localImageSourceMtime(file)}`;
     const active = localImageInflight.get(key);
     if (active) return active;
 
@@ -346,6 +382,39 @@ export function createMediaResponseService({
       () => localImageInflight.delete(key)
     );
     return task;
+  }
+
+  async function prewarmLocalImages(files = [], options = {}) {
+    const limit = Math.max(0, Math.floor(Number(options.limit ?? files.length) || 0));
+    if (!limit) return { requested: 0, cached: 0, warmed: 0, failed: 0 };
+    const candidates = [];
+    const seen = new Set();
+    for (const file of Array.isArray(files) ? files : []) {
+      const key = `${file?.id || file?.path || ""}:${Number(file?.size || 0)}:${localImageSourceMtime(file)}`;
+      if (!file?.id || !file?.path || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(file);
+      if (candidates.length >= limit) break;
+    }
+
+    let cached = 0;
+    let warmed = 0;
+    let failed = 0;
+    for (const file of candidates) {
+      if (localImageCacheReady(file)) {
+        cached += 1;
+        continue;
+      }
+      try {
+        // Keep background warming serial so normal page requests retain the
+        // remaining local-image and libuv filesystem capacity.
+        await localImageLoad(file);
+        warmed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { requested: candidates.length, cached, warmed, failed };
   }
 
   function enqueueLocalImageRead(file) {
@@ -642,6 +711,7 @@ export function createMediaResponseService({
     localImageMime,
     localImageCacheRow,
     prewarmRemoteImagesForWorks,
+    prewarmLocalImages,
     proxiedRemoteImageUrlArray,
     remoteImageTargetUrl,
     serveActorAvatar,

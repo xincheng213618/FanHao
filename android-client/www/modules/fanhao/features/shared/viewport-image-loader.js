@@ -1,4 +1,4 @@
-import { absoluteUrl, loadPreviewImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { absoluteUrl, loadPreviewImage } from "../../../../js/image.js?v=assets-0f97d6765d71";
 
 const DEFAULT_ROOT_MARGIN = "720px 0px";
 

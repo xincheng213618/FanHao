@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { attachCoreImageStore } from "../../../../platform/server/core-image-store.js";
 import { ensureActorProfilePublicationTable } from "../people/actor-profile-publication-schema.js";
+import { ensurePersonIdentitySchema } from "../people/person-identity.js";
 import { readTableStampRow, tableStampValue } from "./table-stamp-query.js";
 import { createTableStampWorkerClient } from "./table-stamp-worker-client.js";
 
@@ -61,6 +62,7 @@ function ensureCoreSchema(db) {
     ensureColumn(db, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
     ensureCoreTables(db);
     ensureActorProfilePublicationTable(db);
+    ensurePersonIdentitySchema(db);
     db.exec("RELEASE SAVEPOINT fanhao_core_schema_init");
   } catch (error) {
     try {

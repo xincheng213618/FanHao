@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/modules/novels
 from bs4 import BeautifulSoup
 from adapters import collect_cool18
 from cool18_parser import build_chapters, chapter_heading, extract_post, title_metadata
-from core import Chapter, CollectionError, CollectorContext
+from core import Chapter, CollectionError, CollectorContext, ReportingRetry
 
 
 TITLE = "【旅途】（０１－０４完）作 者：测试作者"
@@ -29,6 +29,18 @@ def page(body, title=TITLE):
 
 
 class Cool18Tests(unittest.TestCase):
+    def test_retry_events_are_reported(self):
+        events = []
+        retry = ReportingRetry(
+            total=3,
+            connect=3,
+            read=3,
+            retry_total=3,
+            retry_reporter=lambda attempt, total, reason: events.append((attempt, total, reason)),
+        )
+        retry.increment(method="GET", url="/fixture", error=Exception("fixture failure"))
+        self.assertEqual(events, [(1, 3, "Exception")])
+
     def test_title_author_and_fullwidth_range(self):
         self.assertEqual(title_metadata(TITLE + " - 禁忌书屋 cool18"), ("旅途", "测试作者"))
         self.assertEqual(title_metadata("旅途（21.2完）作者：测试作者"), ("旅途", "测试作者"))

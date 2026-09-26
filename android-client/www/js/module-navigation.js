@@ -42,14 +42,14 @@ export function renderAndroidModuleNavigation(container, modules) {
       button.dataset.galleryModeCurrent = "photo";
       button.setAttribute("aria-haspopup", "menu");
       button.setAttribute("aria-expanded", "false");
-      button.title = "再次点击切换；长按选择套图、韩漫、电影、电视剧或动漫";
+      button.title = "点击回到当前分类；长按选择套图、韩漫、电影、电视剧或动漫";
     }
     if (module.id === "novels") {
       button.dataset.readingSwitcher = "";
       button.dataset.readingModeCurrent = "novels";
       button.setAttribute("aria-haspopup", "menu");
       button.setAttribute("aria-expanded", "false");
-      button.title = "再次点击切换；长按选择小说或音乐";
+      button.title = "点击回到当前分类；长按选择小说或音乐";
     }
     if (module.id === "fanhao") {
       button.dataset.fanhaoHome = "";
@@ -57,7 +57,7 @@ export function renderAndroidModuleNavigation(container, modules) {
       button.dataset.homeModeCurrent = "fanhao";
       button.setAttribute("aria-haspopup", "menu");
       button.setAttribute("aria-expanded", "false");
-      button.title = "再次点击切换；长按选择番号或欧美";
+      button.title = "点击回到当前分类；长按选择番号或欧美";
     }
     else if (surface.channel) button.dataset.openChannel = surface.channel;
     else if (surface.view) button.dataset.openView = surface.view;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import vm from "node:vm";
 import { createGalleryHarness, appFunction } from "./fixtures/android-gallery-navigation-harness.mjs";
 
 // Read-only source + deterministic VM DOM/events. Actual shell functions,
@@ -73,13 +74,39 @@ for (const fallback of [false, true]) {
   });
 }
 
-test("inactive click uses remembered destination then active clicks cycle photo/manga/movie/tv/anime", input => {
+test("inactive click restores its category; repeated root taps preserve filters and scroll to top", input => {
   const h = harness(input);
-  for (const mode of [...MODES, "photo"]) { h.button().querySelector(".bottom-nav-label").click(); routed(h, mode); }
-  assert.equal(h.observations.renders.length, MODES.length + 1);
-  assert.equal(h.observations.scrolls, MODES.length + 1);
+  h.button().querySelector(".bottom-nav-label").click(); routed(h, "photo");
+  h.context.currentViewParams.category = "synthetic-filter";
+  h.context.channelLimit = 108;
+  for (let index = 0; index < 5; index++) h.button().querySelector(".bottom-nav-label").click();
+  assert.equal(h.route().params.mode, "photo");
+  assert.equal(h.route().params.category, "synthetic-filter");
+  assert.equal(h.context.channelLimit, 108);
+  assert.equal(h.observations.renders.length, 1);
+  assert.equal(h.observations.scrolls, 6);
   assert.deepEqual(plain(h.context.viewStack), []);
   assert.equal(h.observations.unrelated.length, 0);
+});
+
+test("visible gallery selector lists every category and routes explicit choices only on root pages", input => {
+  const h = harness(input);
+  h.context.els.moduleModeSwitch = h.document.createElement("div");
+  const select = h.context.els.moduleModeSelect = h.document.createElement("select");
+  vm.runInContext(appFunction(input.app, "syncModuleModeSwitch"), h.context);
+  const start = input.app.indexOf('els.moduleModeSelect?.addEventListener("change"');
+  const end = input.app.indexOf('els.profileSettingsButton?.addEventListener', start);
+  assert(start >= 0 && end > start);
+  vm.runInContext(input.app.slice(start, end), h.context);
+  h.context.navigateToGalleryMode("photo");
+  for (const mode of MODES) {
+    assert.equal(h.context.els.moduleModeSwitch.hidden, false);
+    assert.deepEqual(select.children.map(option => option.value), MODES);
+    select.value = mode; h.fire(select, "change"); routed(h, mode);
+    assert.equal(select.children.find(option => option.selected).value, mode);
+  }
+  h.context.showView("mediaDetail", { id: "synthetic", mode: "anime" });
+  assert.equal(h.context.els.moduleModeSwitch.hidden, true, "The selector must leave detail space to the content");
 });
 
 for (const mode of MODES) {
@@ -149,7 +176,7 @@ for (const mode of ["movie", "tv", "anime", "media", undefined]) {
     assert.deepEqual(h.observations.media.at(-1), { kind: "detail", id: "synthetic-media-id", mode });
     h.context.openGalleryModePicker(); menu(h, selected);
     const restarted = h.reboot(); selection(restarted, selected);
-    restarted.button().click(); routed(restarted, MODES[(MODES.indexOf(selected) + 1) % MODES.length]);
+    restarted.button().click(); routed(restarted, selected);
   });
 }
 
@@ -163,10 +190,10 @@ test("western stays in FanHao and does not overwrite gallery memory", input => {
   h.button().click(); routed(h, "tv");
 });
 
-test("photo/manga details retain their existing grouping and cycle position", input => {
-  for (const [view, selected, next] of [["photoDetail", "photo", "manga"], ["mangaDetail", "manga", "movie"], ["mangaChapter", "manga", "movie"]]) {
+test("photo/manga detail bottom taps return to their own category", input => {
+  for (const [view, selected] of [["photoDetail", "photo"], ["mangaDetail", "manga"], ["mangaChapter", "manga"]]) {
     const h = harness(input); h.context.showView(view, { id: "synthetic", chapterIndex: 1 });
-    selection(h, selected); h.button().click(); routed(h, next);
+    selection(h, selected); h.button().click(); routed(h, selected);
   }
 });
 
@@ -185,9 +212,24 @@ test("outside pointer closes one existing picker without changing current mode",
   h.context.openGalleryModePicker(); const picker = h.picker();
   h.context.openGalleryModePicker(); assert.equal(h.picker(), picker);
   assert.equal(h.bar.querySelectorAll(".bottom-nav-gallery-picker").length, 1);
-  h.fire(h.document.body, "pointerdown");
+  const card = h.document.createElement("button"); h.document.body.append(card);
+  let underlyingClicks = 0; card.addEventListener("click", () => underlyingClicks++);
+  assert.equal(h.fire(card, "pointerdown").defaultPrevented, true);
+  card.click();
+  assert.equal(underlyingClicks, 0, "Dismissing the picker must consume the underlying card click in capture phase");
   assert.equal(picker.hidden, true); selection(h, "tv");
+  h.fire(card, "pointerdown"); card.click();
+  assert.equal(underlyingClicks, 1, "The next deliberate gesture must still work");
   h.context.openGalleryModePicker(); menu(h, "tv");
+});
+
+test("a long press without a synthetic click cannot swallow the next physical bottom tap", input => {
+  const h = harness(input); h.context.navigateToGalleryMode("movie");
+  h.fire(h.button(), "touchstart", { touches: [{ clientX: 14, clientY: 16 }] });
+  h.elapse(520); h.fire(h.button(), "touchend");
+  h.context.showView("mediaDetail", { id: "synthetic", mode: "movie" });
+  h.fire(h.button(), "pointerdown"); h.button().click();
+  routed(h, "movie");
 });
 
 const controls = [
@@ -195,7 +237,9 @@ const controls = [
   { name: "missing movie/tv menu choices", target: 0, mutate: input => ({ ...input, app: replaceFunction(input.app, "ensureGalleryModePicker", text => text.replace("GALLERY_MODE_OPTIONS", "GALLERY_MODE_OPTIONS.slice(0, 2)")) }) },
   { name: "photo-only parameters leak into movie", target: "raw movie navigation", mutate: input => ({ ...input, app: replaceFunction(input.app, "galleryNavigationParams", () => 'function galleryNavigationParams(mode = preferredGalleryMode()) { return { mode, photoView: "collections" }; }') }) },
   { name: "media registry still selects FanHao", target: "movie direct and registry", mutate: input => ({ ...input, app: replaceFunction(input.app, "bottomNavKeyFor", text => text.replace('if (resolvedKey === "media") return "photo";', 'if (resolvedKey === "media") return "fanhao";')) }) },
-  { name: "active cycle still stops after two", target: "inactive click", mutate: input => ({ ...input, app: replaceFunction(input.app, "alternateGalleryMode", () => 'function alternateGalleryMode(mode = preferredGalleryMode()) { return mode === "manga" ? "photo" : "manga"; }') }) },
+  { name: "repeated root tap rerenders and loses filters", target: "inactive click", mutate: input => ({ ...input, app: input.app.replace('button.classList.contains("active") && isRootNavigationView()', 'button.classList.contains("active") && false') }) },
+  { name: "outside dismissal lets the underlying click through", target: "outside pointer", mutate: input => ({ ...input, app: input.app.replace('if (!dismissModePickerClick) return;', 'if (true) return;') }) },
+  { name: "long-press suppression leaks into next physical gesture", target: "a long press without", mutate: input => ({ ...input, app: input.app.replace('  suppressedBottomNavButton = null;\n  dismissModePickerClick = false;', '  dismissModePickerClick = false;') }) },
   { name: "gallery choice listener disconnected", target: "long press chooses tv", mutate: input => ({ ...input, app: input.app.replace('navigateToGalleryMode(button.dataset.galleryModeChoice);', 'void button.dataset.galleryModeChoice;') }) },
   { name: "showView forgets gallery memory", target: "media detail tv", mutate: input => ({ ...input, app: replaceFunction(input.app, "showView", text => text.replace('rememberGalleryMode(currentView, currentViewParams);', 'void currentViewParams;')) }) }
 ];

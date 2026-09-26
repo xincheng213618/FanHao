@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { canonicalPersonId, hasIdentityTable, personLocations, personPathKey } from "../people/person-identity.js";
 
 export function linkedLocalWorkIdsForPeople(db, personIds = []) {
   const ids = [...new Set((personIds || [])
@@ -88,8 +89,9 @@ export function createCoreLibraryService({
   }
 
   function personRow(personId) {
-    const coreId = Number(personId);
-    if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+    if (!hasCoreDb()) return null;
+    const coreId = Number(canonicalPersonId(getCoreDb(), personId));
+    if (!Number.isSafeInteger(coreId) || coreId <= 0) return null;
     try {
       return getCoreDb().prepare("SELECT * FROM people WHERE id = ?").get(coreId) || null;
     } catch (error) {
@@ -101,7 +103,7 @@ export function createCoreLibraryService({
   function personFallbackRecord(personId) {
     const row = personRow(personId);
     if (!row?.id) return null;
-    const sourcePaths = uniqueTextArray([row.folder_path], { maxLength: 260, maxItems: 4 });
+    const sourcePaths = uniqueTextArray([...personLocations(getCoreDb(), row.id).map((location) => location.path), row.folder_path], { maxLength: 32767, maxItems: 100 });
     return {
       id: String(row.id),
       name: row.display_name || row.name || String(row.id),
@@ -144,19 +146,44 @@ export function createCoreLibraryService({
 
   function peopleByFolderName(db) {
     const people = new Map();
-    const rows = db.prepare("SELECT id, name, display_name FROM people").all();
+    const rows = db.prepare("SELECT id, name, display_name, folder_path FROM people").all();
+    people.locations = [];
+    people.locationOwners = new Map();
     for (const row of rows) {
-      const names = uniquePersonNames([row.name, row.display_name]);
-      for (const name of names) {
+      if (canonicalPersonId(db, row.id) !== String(row.id)) continue;
+      const locations = personLocations(db, row.id);
+      if (!locations.length && row.folder_path) locations.push({ path: row.folder_path });
+      for (const location of locations) {
+        const entry = { id: row.id, name: row.name, displayName: row.display_name || row.name,
+          path: sourcePathToAbsolute(location.path) };
+        people.locations.push(entry);
+        const locationKey = personPathKey(entry.path);
+        if (!people.locationOwners.has(locationKey)) people.locationOwners.set(locationKey, []);
+        people.locationOwners.get(locationKey).push(entry);
+      }
+      const declaredFolderPath = sourcePathToAbsolute(row.folder_path);
+      const declaredFolderName = declaredFolderPath ? path.basename(declaredFolderPath) : "";
+      const names = [
+        ...uniquePersonNames([row.name, row.display_name]).map((name) => ({ name, declaredFolderPath: "" })),
+        ...(declaredFolderName ? [{ name: declaredFolderName, declaredFolderPath }] : [])
+      ];
+      for (const candidate of names) {
+        const name = candidate.name;
         const key = normalizePersonSearchValue(name);
         if (!key) continue;
         if (!people.has(key)) people.set(key, []);
         const entries = people.get(key);
-        if (!entries.some((entry) => Number(entry.id) === Number(row.id))) {
+        const existing = entries.find((entry) => Number(entry.id) === Number(row.id));
+        if (existing) {
+          if (candidate.declaredFolderPath && !existing.declaredFolderPaths.includes(candidate.declaredFolderPath)) {
+            existing.declaredFolderPaths.push(candidate.declaredFolderPath);
+          }
+        } else {
           entries.push({
             id: row.id,
             name: row.name || "",
-            displayName: row.display_name || row.name || ""
+            displayName: row.display_name || row.name || "",
+            declaredFolderPaths: candidate.declaredFolderPath ? [candidate.declaredFolderPath] : []
           });
         }
       }
@@ -165,8 +192,24 @@ export function createCoreLibraryService({
   }
 
   function personFromLocalPath(peopleByFolderNameMap, localPath) {
+    const absolutePath = sourcePathToAbsolute(localPath);
+    const bound = [];
+    // O(path depth), not O(all directories) for each of tens of thousands of works.
+    for (let key = personPathKey(absolutePath); key; ) {
+      bound.push(...(peopleByFolderNameMap.locationOwners?.get(key) || []));
+      const separator = key.lastIndexOf("/");
+      if (separator < 0) break;
+      key = key.slice(0, separator);
+    }
+    const owners = new Set(bound.map((location) => location.id));
+    if (owners.size === 1) return bound[0];
+    if (owners.size > 1) return null;
     const folderName = localPathPersonName(localPath);
     const matches = peopleByFolderNameMap.get(normalizePersonSearchValue(folderName)) || [];
+    const declaredMatches = matches.filter((person) => (person.declaredFolderPaths || [])
+      .some((folderPath) => pathWithinRoot(absolutePath, folderPath)));
+    if (declaredMatches.length === 1) return declaredMatches[0];
+    if (declaredMatches.length > 1) return null;
     return matches.length === 1 ? matches[0] : null;
   }
 
@@ -342,7 +385,7 @@ export function createCoreLibraryService({
       const personName = displayPerson.displayName || displayPerson.name || "";
       if (!personName) continue;
       const personId = corePersonId;
-      const sourcePath = localPersonSourcePath(row.local_path);
+      const sourcePath = folderPerson?.path ? relativeFromRoot(folderPerson.path) : localPersonSourcePath(row.local_path);
       if (!personBuckets.has(personId)) {
         personBuckets.set(personId, {
           id: personId,
@@ -390,6 +433,16 @@ export function createCoreLibraryService({
       registerFiles(index, [...videos, ...images, ...infos]);
     }
 
+    // A declared directory remains a person even when offline or temporarily empty.
+    if (hasIdentityTable(db, "person_library_locations")) {
+      for (const location of peopleByFolderNameMap.locations) {
+        const id = String(location.id);
+        if (!personBuckets.has(id)) personBuckets.set(id, { id, name: location.displayName, sourcePaths: [], works: [] });
+        const bucket = personBuckets.get(id);
+        const sourcePath = relativeFromRoot(location.path);
+        if (!bucket.sourcePaths.includes(sourcePath)) bucket.sourcePaths.push(sourcePath);
+      }
+    }
     for (const bucket of personBuckets.values()) {
       const person = personRecordFromWorks(bucket, bucket.sourcePaths, bucket.works);
       index.people.push(person);

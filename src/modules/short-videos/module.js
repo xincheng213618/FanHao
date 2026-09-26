@@ -1,4 +1,5 @@
 import { createShortVideosRuntime } from "./server/runtime.js";
+import { createShortVideoProduct } from "./server/product.js";
 
 export const moduleDefinition = {
   id: "short-videos",
@@ -13,5 +14,6 @@ export const moduleDefinition = {
 };
 
 export function createModule({ moduleDeps }) {
+  if (moduleDeps.shortVideos.config) return createShortVideoProduct(moduleDeps.shortVideos);
   return createShortVideosRuntime(moduleDeps.shortVideos);
 }

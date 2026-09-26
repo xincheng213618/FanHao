@@ -3,12 +3,14 @@ export function createFanhaoDependencies(deps) {
     throw new TypeError("Missing FanHao dependency: diskUsage");
   }
   return {
+    workflows: deps.workflows,
     diskUsage: deps.diskUsage,
     catalog: pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]),
     library: pick(deps, [
       "appConfigService",
       "getLastScanError",
       "getLibrary",
+      "mediaResponseService",
       "peopleScopeService",
       "personListService",
       "peoplePayloadStamp",
@@ -60,6 +62,7 @@ export function createFanhaoDependencies(deps) {
       "displayWorkTitle",
       "enrichLocalWorksWithActorMovieIndex",
       "enrichLocalWorksWithActorMovieInfo",
+      "emptyPersonCleanupService",
       "fastMissingCodeSearch",
       "favoriteStateService",
       "galleryMediaService",

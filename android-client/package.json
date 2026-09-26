@@ -11,10 +11,12 @@
     "publish:debug": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "verify:security": "node scripts/verify-android-security.mjs",
     "verify:gradle-config": "node scripts/verify-gradle-proxy-hygiene.mjs",
-    "sync": "npm run sync:assets && cap sync android",
+    "sync": "npm run sync:assets && npm run sync:cache && cap sync android",
     "sync:assets": "node scripts/sync-shared-assets.mjs",
+    "sync:cache": "node scripts/sync-cache-version.mjs",
+    "verify:cache": "node scripts/sync-cache-version.mjs --check",
     "open": "cap open android",
-    "run:android": "npm run sync:assets && cap run android"
+    "run:android": "npm run sync:assets && npm run sync:cache && cap run android"
   },
   "dependencies": {
     "@capacitor/android": "8.4.2",

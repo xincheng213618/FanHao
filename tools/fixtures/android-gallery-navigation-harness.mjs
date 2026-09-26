@@ -7,12 +7,24 @@ import { createChannelHistoryState } from "../../android-client/www/js/channel-h
 // navigation buttons and media route adapter; no browser, network or device runs.
 const dataName = name => name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 class Events {
-  constructor() { this.listeners = new Map(); }
-  addEventListener(type, handler) { if (!this.listeners.has(type)) this.listeners.set(type, []); this.listeners.get(type).push(handler); }
+  constructor() { this.listeners = new Map(); this.listenerCaptures = new Map(); }
+  addEventListener(type, handler, options = {}) {
+    if (!this.listeners.has(type)) { this.listeners.set(type, []); this.listenerCaptures.set(type, []); }
+    this.listeners.get(type).push(handler);
+    this.listenerCaptures.get(type).push(options === true || options.capture === true);
+  }
   dispatchEvent(event) {
-    event.target ||= this; event.currentTarget = this;
-    for (const handler of this.listeners.get(event.type) || []) handler(event);
-    if (event.bubbles && !event.stopped) this.parentNode?.dispatchEvent(event);
+    event.target ||= this;
+    const path = [];
+    for (let node = this; node; node = node.parentNode) path.push(node);
+    const invoke = (node, capture) => {
+      event.currentTarget = node;
+      for (const [index, handler] of (node.listeners.get(event.type) || []).entries()) {
+        if (node.listenerCaptures.get(event.type)?.[index] === capture) handler(event);
+      }
+    };
+    for (const node of [...path].reverse()) { invoke(node, true); if (event.stopped) return !event.defaultPrevented; }
+    for (const node of path) { invoke(node, false); if (event.stopped || !event.bubbles) break; }
     return !event.defaultPrevented;
   }
 }
@@ -127,7 +139,7 @@ export function createGalleryHarness(sources, { storage = new Map(), fallback = 
   };
   vm.createContext(context);
   const galleryNames = [...sources.app.matchAll(/^function (\w*[Gg]allery\w*)\(/gm)].map(match => match[1]);
-  const names = [...new Set([...galleryNames, "normalizeChannelMode", "normalizeChannelSort", "primaryChannelMode", "bottomNavKeyFor", "setActiveBottom",
+  const names = [...new Set([...galleryNames, "isRootNavigationView", "normalizeChannelMode", "normalizeChannelSort", "primaryChannelMode", "bottomNavKeyFor", "setActiveBottom",
     "sanitizeViewParams", "showView", "showPrimaryView", "rememberViewState", "shouldRememberView", "readLastViewState", "defaultViewState", "readInitialViewState",
     "captureChannelRange", "restoreChannelRange", "sameViewParams", "viewRouteHash"] )];
   const constantNames = ["GALLERY_MODE_STORAGE_KEY", "GALLERY_MODES", "RESTORABLE_VIEWS"];
@@ -151,7 +163,7 @@ export function createGalleryHarness(sources, { storage = new Map(), fallback = 
   };
   const definitions = context.registryApi.androidModuleFallbackCatalog();
   const media = context.registryApi.normalizeModule(context.mediaFactory({ host }), definitions.find(value => value.id === "media"));
-  const photos = { id: "photos", bottomKey: "photo", routes: [
+  const photos = { id: "photos", bottomKey: "photo", rootViews: new Set(["channel"]), routes: [
     { view: "channel", match: params => ["photo", "manga"].includes(params.mode), render: no },
     ...["photoDetail", "mangaDetail", "mangaChapter"].map(view => ({ view, render: no }))
   ] };

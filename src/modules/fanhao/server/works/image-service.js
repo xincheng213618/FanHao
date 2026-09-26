@@ -1,4 +1,5 @@
 import { hasActorProfilePublicationReadModel } from "../people/actor-profile-publication-schema.js";
+import { personIdentityMembers } from "../people/person-identity.js";
 
 const WORK_COVER_METADATA_BATCH_SIZE = 200;
 
@@ -25,6 +26,15 @@ export function createWorkImageService({
   }
 
   function corePersonAvatarMetadataRow(personId) {
+    if (!hasCoreDb()) return null;
+    for (const id of personIdentityMembers(getCoreDb(), personId)) {
+      const row = exactPersonAvatarMetadataRow(id);
+      if (row) return row;
+    }
+    return null;
+  }
+
+  function exactPersonAvatarMetadataRow(personId) {
     const coreId = Number(personId);
     if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
     try {
@@ -108,6 +118,15 @@ export function createWorkImageService({
   }
 
   function corePersonAvatarRow(personId, options = {}) {
+    if (!hasCoreDb()) return null;
+    for (const id of personIdentityMembers(getCoreDb(), personId)) {
+      const row = exactPersonAvatarRow(id, options);
+      if (row) return row;
+    }
+    return null;
+  }
+
+  function exactPersonAvatarRow(personId, options = {}) {
     const coreId = Number(personId);
     if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
     const source = String(options.source || "").trim();

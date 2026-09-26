@@ -110,7 +110,7 @@ class Element extends Events {
   click() { if (!this.disabled) this.dispatchEvent(new FixtureEvent("click", { bubbles: true })); }
 }
 
-export function createVisionHarness(productionSource) {
+export function createVisionHarness(productionSource, toolContext = {}) {
   // The sole source transformation removes the ES export for VM evaluation.
   // No private function is exposed, replaced, or called by this harness.
   assert(productionSource.includes("export function createToolViews(context)"));
@@ -158,7 +158,7 @@ export function createVisionHarness(productionSource) {
   document.body.append(...Object.values(els));
   const sandbox = vm.createContext({ window, document, console, Intl, Date, Number, String, Object, Array, Map, Set, Promise, Error, CustomEvent: FixtureEvent, Element });
   vm.runInContext(productionSource.replace("export function createToolViews", "function createToolViews"), sandbox, { filename: "tool-views-under-test.js" });
-  const api = sandbox.createToolViews({ els, setActiveBottom() {}, openSettings() {} });
+  const api = sandbox.createToolViews({ els, setActiveBottom() {}, openSettings() {}, ...toolContext });
   return {
     api, window, document, els, plugin, calls, confirms, timers,
     setSessions(value) { sessions = value; },

@@ -5,7 +5,7 @@
   display: grid;
   align-items: end;
   justify-items: center;
-  padding-top: calc(28px + env(safe-area-inset-top));
+  padding-top: calc(28px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
 }
 
 .settings-overlay[hidden] {
@@ -27,7 +27,7 @@
   display: grid;
   gap: 10px;
   width: min(100%, 560px);
-  max-height: calc(100dvh - 28px - env(safe-area-inset-top));
+  max-height: calc(100dvh - 28px - var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   overflow-y: auto;
   margin: 0;
   padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
@@ -193,6 +193,21 @@ body.app-confirm-open {
   font-size: 15px;
   font-weight: 950;
 }
+
+.settings-account-group { display: block; }
+.settings-account-group > summary {
+  min-height: 44px;
+  align-content: center;
+  cursor: pointer;
+}
+.settings-account-summary {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.settings-account-group[open] > summary { margin-bottom: 12px; }
 
 #connectForm {
   display: grid;

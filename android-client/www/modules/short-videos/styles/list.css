@@ -107,7 +107,7 @@ body.short-video-mobile-view #viewContent {
   content: "更新中";
   position: sticky;
   z-index: 12;
-  top: calc(58px + env(safe-area-inset-top));
+  top: calc(58px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   justify-self: center;
   border: 1px solid var(--mobile-accent-border);
   border-radius: 999px;
@@ -594,7 +594,7 @@ body.short-video-search-page-view .bottom-nav {
 
 .short-video-mobile-tabs {
   position: sticky;
-  top: calc(54px + env(safe-area-inset-top));
+  top: calc(54px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   z-index: 7;
   display: flex;
   align-items: center;
@@ -981,7 +981,7 @@ body.short-video-search-page-view .bottom-nav {
 
 .short-video-mobile-filterbar {
   position: sticky;
-  top: calc(58px + env(safe-area-inset-top));
+  top: calc(58px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   z-index: 5;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);

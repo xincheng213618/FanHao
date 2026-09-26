@@ -1,17 +1,24 @@
 import { createAdminRuntime } from "./admin/runtime.js";
 import { createAndroidUpdateRuntime } from "./android-update/runtime.js";
+import { createComputerControlRuntime } from "./computer-control/runtime.js";
 import { createLocalOpenRuntime } from "./local-open/runtime.js";
 import { createStatusRuntime } from "./status/runtime.js";
 
 export function createSystemRuntime(deps) {
   const admin = createAdminRuntime(deps.admin);
   const androidUpdate = createAndroidUpdateRuntime(deps.androidUpdate);
+  const computerControl = createComputerControlRuntime({
+    readJsonBody: deps.admin.readJsonBody,
+    requireLocalAdmin: deps.admin.requireLocalAdmin,
+    sendJson: deps.admin.sendJson
+  });
   const localOpen = createLocalOpenRuntime(deps.localOpen);
   const status = createStatusRuntime(deps.status);
 
   async function routeApi(req, res, url) {
     if (await status.routeApi(req, res, url)) return true;
     if (await androidUpdate.routeApi(req, res, url)) return true;
+    if (await computerControl.routeApi(req, res, url)) return true;
     if (await admin.routeApi(req, res, url)) return true;
     return localOpen.routeApi(req, res, url);
   }
@@ -25,6 +32,7 @@ export function createSystemRuntime(deps) {
   return {
     renderAndroidUpdatePage: androidUpdate.renderPage,
     routeApi,
-    routeMedia
+    routeMedia,
+    settings: computerControl.settings
   };
 }

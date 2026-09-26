@@ -22,7 +22,7 @@ class VideoDownloader(BaseDownloader):
         timing_event("video_download_begin", aweme_id=aweme_id)
         result.total = 1
         self._progress_set_item_total(1, "单作品下载")
-        self._progress_update_step("下载作品", "单作品资源下载中")
+        self._progress_update_step("检查本地状态", f"作品 {aweme_id}")
 
         should_started = time.monotonic()
         should_download = await self._should_download(aweme_id)
@@ -39,6 +39,7 @@ class VideoDownloader(BaseDownloader):
             return result
 
         detail_started = time.monotonic()
+        self._progress_update_step("获取作品详情", f"作品 {aweme_id}")
         await self.rate_limiter.acquire()
 
         aweme_data = await self.api_client.get_video_detail(aweme_id)
@@ -50,9 +51,17 @@ class VideoDownloader(BaseDownloader):
         )
         if not aweme_data:
             last_error = str(getattr(self.api_client, "last_error", "") or "").strip()
-            message = f"Failed to get video detail: {aweme_id}"
-            if last_error:
-                message = f"{message} ({last_error})"
+            error_kind = str(getattr(self.api_client, "last_error_kind", "") or "").strip()
+            if error_kind == "content_unavailable":
+                message = f"{last_error or '作品已不可用（作者可能已删除作品或更改可见权限）'}：{aweme_id}"
+            elif error_kind == "anti_bot":
+                message = f"详情接口被抖音风控拦截，稍后自动重试：{aweme_id}"
+                if last_error:
+                    message = f"{message}（{last_error}）"
+            else:
+                message = f"Failed to get video detail: {aweme_id}"
+                if last_error:
+                    message = f"{message} ({last_error})"
             logger.error("%s", message)
             result.failed += 1
             result.add_error(message)
@@ -91,6 +100,7 @@ class VideoDownloader(BaseDownloader):
             return result
 
         asset_started = time.monotonic()
+        self._progress_update_step("准备下载资源", str(aweme_id))
         success = await self._download_aweme(aweme_data)
         timing_event(
             "video_assets_done",

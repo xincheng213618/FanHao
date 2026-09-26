@@ -166,6 +166,13 @@ td.time-cell {
   color: #9b5d00;
 }
 
+.link-issue.is-progress {
+  color: #0b6f78;
+  display: block;
+  font-weight: 800;
+  -webkit-line-clamp: unset;
+}
+
 .link-row-details {
   margin-top: 6px;
 }
@@ -305,6 +312,10 @@ td.time-cell {
 
 .badge.failed {
   background: var(--danger);
+}
+
+.badge.unavailable {
+  background: #475467;
 }
 
 .badge.quality-upgrade {

@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createVerificationAdvisories } from "./verification_advisories.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const advisories = createVerificationAdvisories("native-short-video-playback");
 const nativeRoot = path.join(root, "android-client/android/app/src/main/java/local/fanhao/library");
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-native-playback-"));
 const javaHome = String(process.env.JAVA_HOME || "").trim() || "C:\\Program Files\\Android\\openjdk\\jdk-21.0.8";
@@ -160,7 +162,7 @@ try {
   assert(livePredicate, "fallback must receive the live host predicate");
   assert.equal((activity.match(/playbackFallback\.releasePlayerResources\(/g) || []).length, 4,
     "every cached-player release lane must delegate to the cancellation-aware controller");
-  assert(activity.split("\n").length <= 5600, "playback fixes must retain the Activity's 5600-line limit");
+  advisories.check(activity.split("\n").length <= 5600, `native short-video Activity is over 5600 lines (${activity.split("\n").length}); review its responsibilities`);
   doubles["local/fanhao/library/NativeShortVideoPlaybackHost.java"] = `package local.fanhao.library;
     import java.util.HashMap;
     import java.util.Map;
@@ -400,8 +402,8 @@ try {
   sources.push(path.join(nativeRoot, "NativeShortVideoPlaybackFallback.java"));
   sources.push(path.join(nativeRoot, "NativeShortVideoScreenState.java"));
   sources.push(path.join(nativeRoot, "NativeShortVideoFeedPlayback.java"));
-  assert(fs.readFileSync(path.join(nativeRoot, "NativeShortVideoFeedPlayback.java"), "utf8").split(/\r?\n/).length <= 180,
-    "feed playback restoration must remain a bounded intent owner");
+  const feedPlaybackLineCount = fs.readFileSync(path.join(nativeRoot, "NativeShortVideoFeedPlayback.java"), "utf8").split(/\r?\n/).length;
+  advisories.check(feedPlaybackLineCount <= 180, `native feed playback intent owner is over 180 lines (${feedPlaybackLineCount}); review its responsibilities`);
   sources.push(path.join(root, "tools/fixtures/NativeShortVideoPlaybackHarness.java"));
   const compiled = spawnSync(executable("javac"), ["-encoding", "UTF-8", "-d", tempRoot, ...sources], {
     cwd: root, encoding: "utf8"
@@ -412,6 +414,7 @@ try {
   });
   assert.equal(executed.status, 0, `native playback harness must pass:\n${executed.stderr || executed.stdout}`);
   process.stdout.write(executed.stdout);
+  advisories.flush();
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

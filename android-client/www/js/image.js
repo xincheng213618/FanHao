@@ -1,4 +1,4 @@
-import { readCachedImage, writeCachedImage } from "./cache.js?v=20260702-novel-local-manage-74";
+import { readCachedImage, writeCachedImage } from "./cache.js?v=assets-0f97d6765d71";
 
 const IMAGE_PREPARE_RETRY_DELAYS_MS = Object.freeze([700, 900, 1200, 1600, 2200, 3000]);
 
@@ -29,6 +29,11 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
   let renderedCache = false;
   let renderSequence = 0;
   const cacheReadTimeoutMs = Math.max(0, Number(options.cacheReadTimeoutMs ?? 140));
+  const showImageError = (sequence = renderSequence) => {
+    if (sequence === renderSequence && currentNode === target && target.isConnected && target.dataset?.imageErrorText) {
+      target.textContent = target.dataset.imageErrorText;
+    }
+  };
 
   const renderBlob = (blob, source = "network") => {
     if (!blob || !currentNode?.isConnected) return;
@@ -58,6 +63,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     });
     img.addEventListener("error", () => {
       URL.revokeObjectURL(objectUrl);
+      showImageError(sequence);
     });
   };
 
@@ -72,6 +78,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     img.referrerPolicy = "no-referrer";
     img.src = imageUrl;
     img.dataset.imageSource = "direct";
+    img.addEventListener("error", () => showImageError(sequence));
     img.addEventListener("load", () => {
       if (sequence !== renderSequence) return;
       if (img.naturalWidth > 0 && img.naturalHeight > 0) {
@@ -105,6 +112,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     // Keep the text fallback, or the cached image if one already rendered.
     if (renderedCache) return;
     if (/^https?:\/\//i.test(imageUrl)) renderDirect();
+    else showImageError();
   }
 }
 

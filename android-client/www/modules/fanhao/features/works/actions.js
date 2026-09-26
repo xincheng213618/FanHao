@@ -1,8 +1,8 @@
-import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
+import { postJson } from "../../../../js/api.js?v=assets-0f97d6765d71";
 import { updateCachedWorkDetail } from "./detail-cache.js";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
-import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
-import { syncFavoriteButton } from "./favorite-folders.js?v=20260811-favorite-folders-02";
+import { openFanhaoSheet } from "../../sheet.js?v=assets-0f97d6765d71";
+import { syncFavoriteButton } from "./favorite-folders.js?v=assets-0f97d6765d71";
 export function createWorkActions(deps) {
   const {
     detailErrorMessage,

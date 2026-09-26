@@ -22,14 +22,8 @@ $VersionNameWasSpecified = $PSBoundParameters.ContainsKey("VersionName")
 
 Import-Module -Name $PublishModule -Force
 
-function Get-PublishAdbPath {
-  $sdkAdb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
-  if (Test-Path -LiteralPath $sdkAdb) { return $sdkAdb }
-  return "adb"
-}
-
 if ($Install) {
-  throw "publish-debug-update.ps1 does not install a newly selected identity. Publish first, then raise version.json in a reviewed commit before using install:debug."
+  throw "publish-debug-update.ps1 only publishes. Use install-published-debug.ps1 (npm run install:android-published) to install the manifest-verified APK explicitly."
 }
 if ($VersionNameWasSpecified -and [string]::IsNullOrWhiteSpace($VersionName)) {
   throw "Explicit versionName must be non-empty after trimming."
@@ -70,9 +64,6 @@ try {
   Write-Host "Selected publish identity: $($plan.VersionCode) / $($plan.VersionName)"
   if ($PlanOnly) { return $plan }
 
-  $authorizedDeviceCheck = New-FanHaoAuthorizedDeviceCheck -AdbPath (Get-PublishAdbPath)
-  $authorizedDeviceSerials = @(& $authorizedDeviceCheck)
-
   $buildArgs = @{
     VersionCode = $plan.VersionCode
     VersionName = $plan.VersionName
@@ -99,22 +90,14 @@ try {
   if ($preCommitPlan.VersionCode -ne $plan.VersionCode -or $preCommitPlan.VersionName -cne $plan.VersionName) {
     throw "Android publish identity changed during the build; refusing to commit."
   }
-  $null = & $authorizedDeviceCheck -ExpectedSerials $authorizedDeviceSerials
 
   $noteList = if ($Notes) { @($Notes) } else { @() }
-  $commitDeviceGate = {
-    param($CurrentStage)
-    if ($CurrentStage -eq "BeforeManifestCommit") {
-      $null = & $authorizedDeviceCheck -ExpectedSerials $authorizedDeviceSerials
-    }
-  }.GetNewClosure()
   $published = Publish-FanHaoDebugArtifact `
     -SourceApkPath $ApkPath `
     -UpdateDir $UpdateDir `
     -VersionCode $plan.VersionCode `
     -VersionName $plan.VersionName `
-    -Notes $noteList `
-    -CommitHook $commitDeviceGate
+    -Notes $noteList
 
   Write-Host "Debug update published atomically:"
   Write-Host "  APK: $($published.ApkPath)"

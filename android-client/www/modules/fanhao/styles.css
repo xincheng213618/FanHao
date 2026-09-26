@@ -341,7 +341,7 @@
 
 .content-panel[data-view="personDetail"],
 .content-panel[data-view="workDetail"] {
-  margin-top: calc(64px + env(safe-area-inset-top));
+  margin-top: calc(64px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
 }
 
 .fanhao-sort-overlay {

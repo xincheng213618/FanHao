@@ -2,10 +2,12 @@
 title: 架构总览
 description: FanHao 的运行单元、请求链路、模块边界与源码阅读顺序。
 status: maintained
-verified_at: 2026-08-30
+verified_at: 2026-09-20
 sources:
   - package.json
   - server.js
+  - server-fanhao.js
+  - server-short-videos.js
   - src/bootstrap/server-config.js
   - src/fanhao/module-registry.js
   - src/platform/server/http-app.js
@@ -29,12 +31,16 @@ FanHao 是以本地资料库为中心的 Web 与 Android 应用。服务端负�
 | 单元 | 入口 | 职责与边界 |
 | --- | --- | --- |
 | 主服务 | `server.js` | 创建共享依赖、发现模块、启动 HTTP 服务；默认端口 `29998`，可配置 |
+| 独立番号 | `server-fanhao.js` | 仅装配番号及管理模块；默认端口 `29997`，使用产品数据目录 |
+| 独立短视频 | `server-short-videos.js` | 仅装配短视频产品；默认端口 `29996`，独立设置和缓存 |
 | Web 客户端 | `public/` | 主服务提供的静态页面与浏览器模块 |
 | Android 客户端 | `android-client/` | Capacitor WebView 与原生 Android 工程；通过 API 连接主服务 |
 | 下载管理器 | `src/modules/short-videos/download-manager/` | 独立的采集与下载服务；主服务默认连接本机 `8765` |
 | 工具与作业 | `tools/` | 扫描、导入、迁移、构建与验证；部分由后台作业调用 |
 
 主服务与下载管理器有独立的运行状态和数据。主服务能访问，不等于下载管理器健康；反之亦然。静态文档站可部署到 GitHub Pages，但 Pages 不会运行这些服务或托管本地媒体库。
+
+独立部署的数据库配置、115 边界和整理迁移界面见[独立产品与文件工作流](./product-boundaries.md)。
 
 ## 服务端装配
 

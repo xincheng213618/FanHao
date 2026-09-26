@@ -5,13 +5,12 @@ import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
 import { SERVER_CONFIG } from "./src/bootstrap/server-config.js";
 import { discoverFanHaoModules } from "./src/fanhao/module-registry.js";
-import { createImageGalleryDbService } from "./src/modules/content-index/server/image-gallery-db-service.js";
-import { createImageLibraryIndexService } from "./src/modules/content-index/server/image-library-index-service.js";
-import { createImageLibraryService } from "./src/modules/content-index/server/image-library-service.js";
 import { createActorAvatarService } from "./src/modules/fanhao/server/people/actor-avatar-service.js";
 import { createActorMovieService } from "./src/modules/fanhao/server/people/actor-movie-service.js";
 import { createActorProfileService } from "./src/modules/fanhao/server/people/actor-profile-service.js";
 import { createActorProfilePublicationLifecycleService } from "./src/modules/fanhao/server/people/actor-profile-publication-lifecycle-service.js";
+import { createEmptyPersonCleanupService } from "./src/modules/fanhao/server/people/empty-person-cleanup-service.js";
+import { createPersonFolderMutationService } from "./src/modules/fanhao/server/people/person-folder-mutation-service.js";
 import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin/admin-actor-avatar-service.js";
 import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin/admin-core-mutation-service.js";
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
@@ -23,6 +22,7 @@ import { createCoreLibraryService } from "./src/modules/fanhao/server/library/co
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
 import { ensureRealPathWithinRoots } from "./src/platform/server/library-path-safety.js";
 import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
+import { createFanhaoProcessAdapter } from "./src/modules/fanhao/server/admin/product-processes.js";
 import { createFavoriteStateService } from "./src/modules/fanhao/server/collections/favorite-state-service.js";
 import { createLibraryPathServices } from "./src/modules/fanhao/server/library/library-paths.js";
 import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/library/local-library-index-service.js";
@@ -34,6 +34,7 @@ import { createPeopleScopeService } from "./src/modules/fanhao/server/people/peo
 import { createPersonLibraryService } from "./src/modules/fanhao/server/people/person-library-service.js";
 import { createPersonListService } from "./src/modules/fanhao/server/people/person-list-service.js";
 import { createPersonMergeService } from "./src/modules/fanhao/server/people/person-merge-service.js";
+import { bindPersonLocation, canonicalPersonId } from "./src/modules/fanhao/server/people/person-identity.js";
 import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createCodePrefixService } from "./src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { createRankingService } from "./src/modules/fanhao/server/catalog/ranking-service.js";
@@ -51,10 +52,6 @@ import { createWorkMoveJobService } from "./src/modules/fanhao/server/works/work
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
 import { comparePopularityMetadata, compareRatingCountMetadata } from "./src/modules/fanhao/server/works/work-sort-metadata.js";
 import { isAnimeWork } from "./src/modules/fanhao/server/works/work-category.js";
-import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
-import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
-import { createMangaService } from "./src/modules/photos/server/manga-service.js";
-import { createPhotoSetService } from "./src/modules/photos/server/photo-set-service.js";
 import { createAdminScriptService } from "./src/modules/system/server/admin-script-service.js";
 import { createAdminSettingsService } from "./src/modules/system/server/admin-settings-service.js";
 import { createAdminTaskOrchestrationService } from "./src/modules/system/server/admin-task-orchestration-service.js";
@@ -79,6 +76,19 @@ import { createServerHost } from "./src/platform/server/server-host.js";
 import { createStaticFileServer } from "./src/platform/server/static-files.js";
 import { createVideoProbeCacheService } from "./src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
+
+const product = SERVER_CONFIG.PRODUCT;
+if (product.id === "short-videos") throw new Error("Use server-short-videos.js for the standalone short-video product");
+const withGallery = product.id === "suite";
+// Disabled products are not imported: a FanHao-only installation does not need
+// the photos/media/content-index source trees or their runtime state.
+const { createImageGalleryDbService } = withGallery ? await import("./src/modules/content-index/server/image-gallery-db-service.js") : {};
+const { createImageLibraryIndexService } = withGallery ? await import("./src/modules/content-index/server/image-library-index-service.js") : {};
+const { createImageLibraryService } = withGallery ? await import("./src/modules/content-index/server/image-library-service.js") : {};
+const { createGalleryMediaService } = withGallery ? await import("./src/modules/media/server/gallery-media-service.js") : {};
+const { createGalleryMetadataService } = withGallery ? await import("./src/modules/media/server/gallery-metadata-service.js") : {};
+const { createMangaService } = withGallery ? await import("./src/modules/photos/server/manga-service.js") : {};
+const { createPhotoSetService } = withGallery ? await import("./src/modules/photos/server/photo-set-service.js") : {};
 
 const {
   ACCESS_ANALYTICS_DB_PATH,
@@ -151,10 +161,6 @@ const {
   PYTHON_PATH,
   RECENT_WATCHED_DAYS,
   REMOTE_WEB_PASSWORD,
-  SHORT_VIDEO_DB_PATH,
-  SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
-  SHORT_VIDEO_DOWNLOAD_MANAGER_URL,
-  SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
   SHORT_VIDEO_ROOTS,
   TOOL_DOWNLOAD_DIR,
   TOOL_DOWNLOAD_TTL_MS,
@@ -180,7 +186,7 @@ const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer
   notFound,
   safeStat
 });
-const mangaService = createMangaService({
+const mangaService = withGallery ? createMangaService({
   databasePath: MANGA_DATABASE_PATH,
   projectRoot: PROJECT_ROOT,
   pythonPath: PYTHON_PATH,
@@ -190,8 +196,8 @@ const mangaService = createMangaService({
   notFound,
   safeStat,
   serveArchiveMemberImage
-});
-const imageLibraryIndexService = createImageLibraryIndexService({
+}) : null;
+const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
   archiveExts: ARCHIVE_EXTS,
   createId,
   directVideoExts: DIRECT_VIDEO_EXTS,
@@ -206,13 +212,16 @@ const imageLibraryIndexService = createImageLibraryIndexService({
   readJsonFile,
   safeStat,
   videoExts: VIDEO_EXTS
-});
-const imageGalleryDbService = createImageGalleryDbService({
+}) : null;
+const imageGalleryDbService = withGallery ? createImageGalleryDbService({
   dbPath: IMAGE_GALLERY_DB_PATH,
   ensureDataDir
-});
-const getImageGalleryDb = imageGalleryDbService.getDb;
-const photoSetService = createPhotoSetService({
+}) : null;
+const getImageGalleryDb = () => {
+  if (!imageGalleryDbService) throw new Error("Gallery storage is disabled in this product");
+  return imageGalleryDbService.getDb();
+};
+const photoSetService = withGallery ? createPhotoSetService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
   archiveImageSignature,
   archiveImagesPayload,
@@ -231,12 +240,12 @@ const photoSetService = createPhotoSetService({
   safeChildPath,
   safeStat,
   serveArchiveMemberImage
-});
-const galleryMetadataService = createGalleryMetadataService({
+}) : null;
+const galleryMetadataService = withGallery ? createGalleryMetadataService({
   createId,
   getImageGalleryDb,
   notFound
-});
+}) : null;
 const appConfigService = createAppConfigService({
   configPath: APP_CONFIG_PATH,
   defaultImageReaderCacheMaxBytes: DEFAULT_IMAGE_READER_CACHE_MAX_BYTES,
@@ -310,7 +319,7 @@ archiveImageService = createArchiveImageService({
   serveInlineFile,
   warn: console.warn
 });
-const imageLibraryService = createImageLibraryService({
+const imageLibraryService = withGallery ? createImageLibraryService({
   clampInteger,
   galleryMediaRootStatuses: imageLibraryIndexService.galleryMediaRootStatuses,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
@@ -321,7 +330,7 @@ const imageLibraryService = createImageLibraryService({
   photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
   photoSetRootStatuses: imageLibraryIndexService.photoSetRootStatuses,
   photoSetService
-});
+}) : null;
 const videoProbeCacheService = createVideoProbeCacheService({ getDb: getCoreDb });
 videoProbeCacheService.start();
 const videoProbeService = createVideoProbeService({
@@ -371,7 +380,7 @@ const mediaStreamService = createMediaStreamService({
   serveRangedFile
 });
 const mediaFileRelocationService = createMediaFileRelocationService({ safeStat });
-const galleryMediaService = createGalleryMediaService({
+const galleryMediaService = withGallery ? createGalleryMediaService({
   coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
   coverGeneratorVersion: GALLERY_MEDIA_COVER_GENERATOR_VERSION,
   coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
@@ -387,7 +396,7 @@ const galleryMediaService = createGalleryMediaService({
   safeChildPath,
   safeStat,
   videoProbeCached: videoProbeService.probeCached
-});
+}) : { byId: () => null, videoFile: () => null };
 const actorProfileService = createActorProfileService({
   actorProfileAliases,
   actorProfileJavdbRefs,
@@ -552,6 +561,7 @@ const studioService = createStudioService({
   workQueryStamp
 });
 const personMergeService = createPersonMergeService({
+  resolveCanonicalId: (id) => hasCoreDb() ? canonicalPersonId(getCoreDb(), id) : id,
   actorMovieRows,
   actorProfileAliases,
   actorProfileRow,
@@ -748,11 +758,12 @@ const workPresenterService = createWorkPresenterService({
   workInfoDetailRow
 });
 const adminScriptService = createAdminScriptService({
-  definitions: ADMIN_SCRIPT_DEFINITIONS,
+  definitions: product.id === "fanhao" ? ADMIN_SCRIPT_DEFINITIONS.filter((script) => script.id === "core-local-scan") : ADMIN_SCRIPT_DEFINITIONS,
   hasPerson: (personId) => library.peopleById.has(String(personId || "")),
   nodeCommand: process.execPath
 });
 const adminTaskService = createAdminTaskService({
+  prepareProcess: product.id === "fanhao" ? createFanhaoProcessAdapter(SERVER_CONFIG) : undefined,
   cwd: PROJECT_ROOT,
   ensureDataDir,
   historyLimit: ADMIN_TASK_HISTORY_LIMIT,
@@ -843,7 +854,7 @@ const {
   sourcePathToAbsolute
 } = createLibraryPathServices({
   libraryRoots: LIBRARY_ROOTS,
-  extraOpenRoots: GALLERY_MEDIA_SOURCES.flatMap((source) => source.roots || []),
+  extraOpenRoots: withGallery ? GALLERY_MEDIA_SOURCES.flatMap((source) => source.roots || []) : [],
   getAvailableRoots: () => library.availableRoots
 });
 const coreLibrarySyncService = createCoreLibrarySyncService({
@@ -875,6 +886,15 @@ localLibraryIndexService = createLocalLibraryIndexService({
   }
 });
 const personLibraryService = createPersonLibraryService({
+  resolvePerson: resolveLibraryPersonByPublicId,
+  bindSourcePaths: (personId, sourcePaths) => {
+    const db = getCoreDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const sourcePath of sourcePaths) bindPersonLocation(db, personId, sourcePathToAbsolute(sourcePath));
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+  },
   actorProfileSearchNames,
   compareNaturalTitle,
   getLibrary: () => library,
@@ -889,6 +909,30 @@ const personLibraryService = createPersonLibraryService({
   scanPersonDirectory: localLibraryScanService.scanPersonDirectory,
   sourcePathToAbsolute
 });
+const emptyPersonCleanupService = createEmptyPersonCleanupService({
+  actorMovieRows,
+  getCoreDb,
+  hasCoreDb,
+  invalidateTableStamp,
+  refreshLibrary,
+  resolveLibraryPersonByPublicId,
+  safeStat,
+  sourcePathToAbsolute
+});
+const personFolderMutationService = createPersonFolderMutationService({
+  ensureLibraryDirectoryPath,
+  getCoreDb,
+  hasCoreDb,
+  refreshLibrary,
+  relativeFromRoot,
+  resolveLibraryPersonByPublicId,
+  sourcePathToAbsolute
+});
+try {
+  personFolderMutationService.recoverPendingOperations();
+} catch (error) {
+  console.warn("[person-folder-recovery]", error?.message || error);
+}
 const workMoveJobService = createWorkMoveJobService({
   adminCoreMutationService,
   getCoreDb,
@@ -898,9 +942,11 @@ const workMoveJobService = createWorkMoveJobService({
 });
 const adminPersonService = createAdminPersonService({
   actorMovieService,
+  corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
   enrichLocalWorksWithActorMovieInfo,
   getLibrary: () => library,
   pagedWorksPayload,
+  personFolderMutationService,
   personLibraryService,
   publicPerson,
   resolveLibraryPersonByPublicId,
@@ -908,6 +954,8 @@ const adminPersonService = createAdminPersonService({
 });
 const moduleRegistry = await discoverFanHaoModules({
   modulesDir: MODULES_DIR,
+  product,
+  enabledModules: product.modules,
   context: {
     moduleDeps: {
       system: {
@@ -955,6 +1003,11 @@ const moduleRegistry = await discoverFanHaoModules({
         }
       },
       fanhao: createFanhaoDependencies({
+        workflows: {
+          dataDir: DATA_DIR, roots: SERVER_CONFIG.FILE_WORKFLOW_ROOTS,
+          indexedPaths: () => getCoreDb().prepare("SELECT file_path FROM local_files").all().map((row) => row.file_path),
+          requireLocalAdmin, readJsonBody, sendJson
+        },
         diskUsage: {
           cacheDir: path.join(DATA_DIR, "disk-usage"),
           excludedNames: [...EXCLUDED_DIRS],
@@ -971,6 +1024,7 @@ const moduleRegistry = await discoverFanHaoModules({
           sources: [
             ...LIBRARY_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "番号" })),
             ...WESTERN_LIBRARY_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "欧美" })),
+            ...(withGallery ? [
             ...PHOTO_SET_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "图库" })),
             { path: MANGA_LIBRARY_ROOT, label: "韩漫" },
             ...GALLERY_MEDIA_SOURCES.flatMap((source) =>
@@ -978,6 +1032,7 @@ const moduleRegistry = await discoverFanHaoModules({
             ),
             ...MUSIC_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "音乐" })),
             ...SHORT_VIDEO_ROOTS.map((sourcePath) => ({ path: sourcePath, label: "短视频" }))
+            ] : [])
           ],
           videoExtensions: VIDEO_EXTS,
           videoProbeService
@@ -1001,6 +1056,7 @@ const moduleRegistry = await discoverFanHaoModules({
         displayWorkTitle,
         enrichLocalWorksWithActorMovieIndex,
         enrichLocalWorksWithActorMovieInfo,
+        emptyPersonCleanupService,
         fastMissingCodeSearch: missingCodeSearchService.search,
         favoriteStateService,
         filterWorkList: workFilterService.filter,
@@ -1107,26 +1163,8 @@ const moduleRegistry = await discoverFanHaoModules({
         sendJson
       },
       shortVideos: {
-        dbPath: SHORT_VIDEO_DB_PATH,
-        downloadManagerDbPath: SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
-        downloadManagerUrl: SHORT_VIDEO_DOWNLOAD_MANAGER_URL,
-        downloadManagerSyncMs: SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
-        ffmpegPath: FFMPEG_PATH,
-        ffprobePath: FFPROBE_PATH,
-        hasNvenc: HAS_NVENC,
-        mediaResponseService,
-        mediaStreamService,
-        notFound,
-        readJsonBody,
-        requireLocalAdmin,
-        roots: SHORT_VIDEO_ROOTS,
-        sendJson,
-        serveDownloadFile,
-        sharedCache: imageReaderCacheService,
-        getTranscodeConcurrency: () => appConfigService.shortVideoTranscodeConcurrency(),
-        setTranscodeConcurrency: (value) => appConfigService.patch({
-          shortVideoTranscodeConcurrency: value
-        }).shortVideoTranscodeConcurrency
+        config: SERVER_CONFIG,
+        requireLocalAdmin
       },
       music: {
         dbPath: MUSIC_DB_PATH,
@@ -1469,8 +1507,8 @@ function hasCoreDb() {
 }
 
 function resolveLibraryPersonByPublicId(personId) {
-  const value = String(personId || "");
-  return library.peopleById.get(value) || null;
+  const value = hasCoreDb() ? canonicalPersonId(getCoreDb(), personId) : String(personId || "");
+  return library.peopleById.get(value) || coreLibraryService.personFallbackRecord(value);
 }
 
 function resolveLibraryWorkByPublicId(workId) {
@@ -1939,6 +1977,7 @@ function actorProfileMergeCandidates(personId, names = []) {
   const addMatch = (person, matchedName) => {
     const id = String(person?.id || "");
     if (!id || id === targetId) return;
+    if (canonicalPersonId(db, id) !== id) return;
     if (!matches.has(id)) {
       matches.set(id, {
         id,
@@ -2084,11 +2123,11 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("localImages")) invalidateTableStamp("local_image_cache");
   if (invalidates.has("remoteImages")) invalidateTableStamp("remote_image_cache");
   if (invalidates.has("imageLibrary")) {
-    imageLibraryIndexService.invalidate();
+    imageLibraryIndexService?.invalidate();
     archiveImageService?.clearListCache();
   }
   if (invalidates.has("tvMetadata") || invalidates.has("movieMetadata") || invalidates.has("galleryMediaCovers")) {
-    imageLibraryIndexService.invalidate();
+    imageLibraryIndexService?.invalidate();
   }
   if (invalidates.has("novels")) {
     moduleRegistry.get("novels")?.invalidate?.();
@@ -2350,6 +2389,7 @@ const serverHost = createServerHost({
   getLibraryState: () => library,
   beginStop: () => moduleRegistry.beginStop(),
   stop: async () => {
+    imageReaderCacheService.stop();
     await accessAnalyticsService.close();
     await workMoveJobService.close();
     actorProfilePublicationLifecycleService.close();
@@ -2362,3 +2402,4 @@ const serverHost = createServerHost({
 });
 
 serverHost.listen();
+export { serverHost };

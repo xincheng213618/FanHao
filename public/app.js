@@ -15,7 +15,9 @@ import {
   createWorkActions,
   selectVisibleWorks,
   workServerMoreState
-} from "./modules/fanhao/index.js?v=20260726-work-sort-01";
+} from "./modules/fanhao/index.js?v=20260919-browse-02";
+import { createBrowseNavigation } from "./modules/fanhao/browse-navigation.js?v=20260919-browse-01";
+import { createBrowseFilterControls, nextBrowseFilters } from "./modules/fanhao/browse-filters.js?v=20260919-browse-01";
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260724-code-prefix-catalog-01";
@@ -55,6 +57,7 @@ const els = {
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
+const browseNavigation = createBrowseNavigation();
 let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
@@ -150,22 +153,20 @@ const codePrefixPage = createCodePrefixPage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260724-person-local-refresh-01");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260920-empty-person-01");
     return createPersonProfile({
       api,
       coverUrl,
       els,
       formatLibraryPath,
       formatNumber,
-      isPersonBulkDeleteActive,
-      isTrustedNetworkFeatureAvailable,
       linesFromTextarea,
       normalizeSourcePath,
       renderPeople: renderPeopleIndex,
       selectPerson,
+      showPeopleIndex,
       sourcePriority,
       state,
-      togglePersonBulkDeleteMode,
       workCoverUrl
     });
   },
@@ -639,8 +640,10 @@ function syncNavigationState(view = state.activeView) {
       ? activeView === "people" && (state.peopleScope || "main") === peopleScope
       : codePrefixPage.navigationButtonActive(button, activeView) ?? button.dataset.view === activeView;
     button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   }
+  browseNavigation.sync();
 }
 
 function setActiveView(view, options = {}) {
@@ -775,9 +778,10 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("code-prefix-detail-view", state.activeView === "codes" && Boolean(state.selectedCodePrefix));
   document.body.classList.toggle("ranking-view", state.activeView === "rankings");
   document.body.classList.toggle("studio-index-view", state.activeView === "studios" && !state.selectedStudio);
-  els.missingLocalToggle?.closest(".toggle-control")?.removeAttribute("hidden");
-  els.collectionToggle?.closest(".toggle-control")?.removeAttribute("hidden");
-  els.compilationConfigButton?.removeAttribute("hidden");
+  const indexOnly = (state.activeView === "people" && !state.selectedPersonId)
+    || (state.activeView === "codes" && !state.selectedCodePrefix)
+    || (state.activeView === "studios" && !state.selectedStudio);
+  els.missingLocalToggle.closest(".toolbar-controls").hidden = indexOnly;
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
   const showPersonBack = state.activeView === "people" && Boolean(state.selectedPersonId);
@@ -827,12 +831,12 @@ const WORK_SORT_OPTIONS = [
 
 const WORK_FILTER_OPTIONS = [
   ["all", "全部"],
-  ["localMarkedA", "显示A"],
+  ["localMarkedA", "A 标记"],
   ["playable", "可播放"],
   ["favorite", "已收藏"],
   ["progress", "有进度"],
   ["info", "有资料"],
-  ["localOnly", "本地"],
+  ["localOnly", "本地记录"],
   ["rated", "有评分"],
   ["highRating", "高分"],
   ["vr", "VR"],
@@ -867,26 +871,12 @@ function createWorkSortControls() {
 }
 
 function createWorkFilterControls() {
-  const group = document.createElement("div");
-  group.className = "stat-filter-group stat-filter-list-group";
-
-  const list = document.createElement("div");
-  list.className = "stat-filter-list";
-  list.setAttribute("role", "list");
-  list.setAttribute("aria-label", "作品筛选");
-  for (const [value, text] of WORK_FILTER_OPTIONS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `stat-filter-chip${workFilterIsActive(value) ? " active" : ""}`;
-    button.textContent = text;
-    button.setAttribute("aria-pressed", String(workFilterIsActive(value)));
-    button.addEventListener("click", () => toggleWorkFilter(value));
-    list.append(button);
-  }
-  els.filterList = list;
-
-  group.append(list);
-  return group;
+  els.filterList = createBrowseFilterControls({
+    options: WORK_FILTER_OPTIONS, filters: selectedWorkFilters(),
+    includeMissing: state.showMissingLocalWorks, toggle: toggleWorkFilter,
+    clear: () => setWorkFilters([])
+  });
+  return els.filterList;
 }
 
 function handleSortModeChange(event) {
@@ -941,7 +931,7 @@ function renderStatsForWorks(works, person = null) {
       ? [
           ["本地作品", person.workCount],
           ["视频", person.videoCount],
-          ["JavDB作品", person.actorMovieCount ?? person.actorProfile?.movieCount ?? 0],
+          ["来源目录记录", person.actorMovieCount ?? person.actorProfile?.movieCount ?? 0],
           ["未下载", person.missingLocalWorkCount ?? works.filter((work) => work.missingLocal).length]
         ]
       : [
@@ -997,14 +987,28 @@ function renderPersonWorkStats() {
     return;
   }
 
+  const focusedFilter = document.activeElement?.dataset.workFilter;
   els.statsRow.innerHTML = "";
+  const summary = document.createElement("div");
+  summary.className = "browse-result-summary";
+  summary.textContent = `当前结果 ${formatNumber(state.personWorksTotal)} 部`;
+  els.statsRow.append(summary);
   appendWorkControls(state.works);
+  if (focusedFilter) els.filterList?.querySelector(`[data-work-filter="${focusedFilter}"]`)?.focus({ preventScroll: true });
 }
 
 function appendWorkControls(works) {
   const wrap = document.createElement("div");
   wrap.className = "stat-quick-filters";
   wrap.append(createWorkFilterControls(), createWorkSortControls());
+  if (isPersonBulkDeleteAvailable() && !isPersonBulkDeleteActive()) {
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "folder-button browse-select-works";
+    select.textContent = "多选";
+    select.addEventListener("click", () => togglePersonBulkDeleteMode());
+    wrap.append(select);
+  }
   appendPersonBulkDeleteControls(works, wrap);
   appendMetadataQuickFilters(works, wrap);
   els.statsRow.append(wrap);
@@ -1137,7 +1141,8 @@ async function deleteSelectedPersonLocalWorks(button) {
 }
 
 function appendMetadataQuickFilters(works, wrap) {
-  appendLocalMarkerQuickFilters(works, wrap);
+  // A marker is already available in the common filters; avoid a second control
+  // with a misleading count based only on the currently loaded page.
 
   const groups = [
     ["片商", topInfoValues(works, (info) => [info.maker, info.label], 6)]
@@ -1163,28 +1168,6 @@ function appendMetadataQuickFilters(works, wrap) {
 
     wrap.append(group);
   }
-}
-
-function appendLocalMarkerQuickFilters(works, wrap) {
-  const count = (works || []).filter((work) => (work.localMarkers || []).includes("A")).length;
-  if (!count) return;
-
-  const group = document.createElement("div");
-  group.className = "stat-filter-group";
-  const heading = document.createElement("span");
-  heading.className = "stat-filter-label";
-  heading.textContent = "显示";
-  group.append(heading);
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `stat-filter-chip${workFilterIsActive("localMarkedA") ? " active" : ""}`;
-  button.textContent = `显示A ${formatNumber(count)}`;
-  button.title = "只显示 A 标记作品";
-  button.addEventListener("click", () => setLocalMarkerFilter("A"));
-  group.append(button);
-
-  wrap.append(group);
 }
 
 function workFilterLabel(filter) {
@@ -1231,13 +1214,12 @@ function setWorkFilters(filters) {
 }
 
 function toggleWorkFilter(value) {
-  if (value === "all") {
-    setWorkFilters([]);
-    return;
+  if ((value === "all" || value === "missingLocal") && !state.showMissingLocalWorks) {
+    state.showMissingLocalWorks = true;
+    els.missingLocalToggle.checked = true;
+    writeStoredFlag("fanhao.showMissingLocalWorks", true);
   }
-  const filters = selectedWorkFilters();
-  const next = filters.includes(value) ? filters.filter((item) => item !== value) : [...filters, value];
-  setWorkFilters(next);
+  setWorkFilters(nextBrowseFilters(selectedWorkFilters(), value));
 }
 
 function topInfoValues(works, selectValues, limit) {
@@ -1345,24 +1327,6 @@ function applyWorkSearch(query) {
 
 function clearWorkFilter() {
   state.filterMode = "all";
-}
-
-function setLocalMarkerFilter(marker = "A") {
-  const nextFilter = String(marker || "").toUpperCase() === "A" ? "localMarkedA" : "all";
-  state.filterMode = nextFilter;
-  resetWorkPaging();
-  if (state.activeView === "search" && state.searchQuery) {
-    loadSearchResults(state.searchQuery);
-    return;
-  }
-  if (state.activeView === "people" && state.selectedPersonId) {
-    selectPerson(state.selectedPersonId, { resetFilter: false });
-    return;
-  }
-  if (state.activeView === "rankings") {
-    renderRankingStats();
-  }
-  renderWorks();
 }
 
 async function loadSearchResults(query, options = {}) {
@@ -2050,6 +2014,8 @@ function loadQueuedCoverImage(img) {
 function createWorkCard(work, index = 0) {
   const card = document.createElement("article");
   card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
+  const isRankingCard = state.activeView === "rankings";
+  if (isRankingCard) card.classList.add("ranking-card");
   card.dataset.workId = work.id;
   if (isPersonBulkDeleteActive() && state.personBulkDeleteSelectedIds.has(String(work.id))) {
     card.classList.add("bulk-delete-selected");
@@ -2066,6 +2032,16 @@ function createWorkCard(work, index = 0) {
     appendProgressiveCoverImage(cover, resolvedCoverUrl, index);
   } else {
     cover.append(els.placeholderTemplate.content.cloneNode(true));
+  }
+
+  const rankNo = Number(work.ranking?.rankNo);
+  if (Number.isInteger(rankNo) && rankNo > 0) {
+    const rank = document.createElement("span");
+    rank.className = `cover-ranking${rankNo <= 3 ? ` podium-${rankNo}` : ""}`;
+    rank.textContent = `TOP ${formatNumber(rankNo)}`;
+    rank.setAttribute("aria-hidden", "true");
+    cover.setAttribute("aria-label", `${rank.textContent}，${cover.getAttribute("aria-label")}`);
+    cover.append(rank);
   }
 
   const favorite = document.createElement("button");
@@ -2104,9 +2080,8 @@ function createWorkCard(work, index = 0) {
 
   const flags = document.createElement("div");
   flags.className = "work-card-flags";
-  if (work.ranking?.rankNo) flags.append(createInfoChip(`TOP ${formatNumber(work.ranking.rankNo)}`, "rank"));
   for (const chip of createAvailabilityChips(work)) flags.append(chip);
-  if (work.infoCount > 0) flags.append(createInfoChip(`${formatNumber(work.infoCount)} 资料`));
+  if (!isRankingCard && work.infoCount > 0) flags.append(createInfoChip(`${formatNumber(work.infoCount)} 资料`));
   if (work.progress?.percent) flags.append(createInfoChip(`看到 ${Math.floor(work.progress.percent)}%`, "progress"));
   if (work.missingLocal && state.accessMode === "local") {
     const compilationButton = document.createElement("button");
@@ -2431,7 +2406,10 @@ for (const button of els.viewTabs) {
   button.addEventListener("pointerenter", prefetchCollection, { passive: true });
   button.addEventListener("pointerdown", prefetchCollection, { passive: true });
   button.addEventListener("focus", prefetchCollection);
-  button.addEventListener("click", async () => {
+  button.addEventListener("click", async (event) => {
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    event.preventDefault();
+    browseNavigation.close();
     clearWorkSearch();
     if (codePrefixPage.handleNavigationButton(button)) return;
     if (button.dataset.view === "people" && button.dataset.peopleScope) {

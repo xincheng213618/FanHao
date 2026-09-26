@@ -1,6 +1,6 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-0f97d6765d71";
 import { PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS } from "../../platform/content-index/photo-catalog.js";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-0f97d6765d71";
 
 const DEFAULT_CATEGORY = "我喜欢的";
 const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];

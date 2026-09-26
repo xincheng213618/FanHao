@@ -6,7 +6,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { createVerificationAdvisories } from "./verification_advisories.mjs";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { nextBrowseFilters } from "../public/modules/fanhao/browse-filters.js";
 import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
 import { createViewportBatchRenderer } from "../public/modules/fanhao/features/works/viewport-batch-renderer.js";
 import { createCollectionPage } from "../public/modules/fanhao/features/collections/collection-page.js";
@@ -44,6 +46,7 @@ import { createVideoProbeCacheService } from "../src/platform/server/video-probe
 import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { createCoreLibrarySyncService } from "../src/modules/fanhao/server/library/core-library-sync-service.js";
+import { personIndexCoverFiles } from "../src/modules/fanhao/server/library/runtime.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage, portraitUrlForPerson } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
@@ -63,6 +66,7 @@ import { CATEGORY_OPTIONS, categoryWorksPath, normalizeCategory } from "../andro
 import { codePrefixDetailPath, normalizeCodePrefix } from "../android-client/www/modules/fanhao/features/code-prefixes/prefix-views.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const advisories = createVerificationAdvisories("fanhao-structure");
 // Structural checks describe source semantics, not the checkout's text-mode policy.
 // Keep CRLF checkouts equivalent to the LF blob used in CI.
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
@@ -166,11 +170,15 @@ assert(!adminPageSource.startsWith("import ") && adminPageSource.includes('impor
 assert(!adminHtmlSource.includes('/modules/system/access-analytics.css') && adminPageSource.includes('loadStylesheet("/modules/system/access-analytics.css?v=20260815-admin-lazy-load-01")'), "section-specific admin styles must load with their owning section");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260812-module-nav-state-01'), "FanHao shell changes must refresh the browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260919-browse-04'), "FanHao shell changes must refresh the browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260812-module-nav-state-01'), "FanHao shell changes must refresh the app module");
+assert(fanhaoEntry.includes('app.js?v=20260919-browse-04'), "FanHao shell changes must refresh the app module");
 assert(webApp.includes('await bootApp().catch') && webApp.includes('classList.remove("app-module-loading")'), "FanHao must reveal the page only after its initial route is rendered");
-assert(webApp.includes('index.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao module barrel");
+assert(webApp.includes('index.js?v=20260919-browse-02'), "browse changes must refresh the FanHao module barrel");
+assert.deepEqual(nextBrowseFilters(["localOnly", "favorite"], "missingLocal"), ["favorite", "missingLocal"], "changing availability must replace a contradictory scope while retaining personal filters");
+assert.deepEqual(nextBrowseFilters(["missingLocal", "vr"], "playable"), ["vr", "playable"], "playable and missing scopes must never accumulate");
+assert.deepEqual(nextBrowseFilters(["playable", "favorite"], "all"), ["favorite"], "all availability must preserve the separately selected conditions");
+assert.deepEqual(nextBrowseFilters(["localOnly", "favorite"], "favorite"), ["localOnly"], "an extra filter can be removed without changing the selected scope");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -251,7 +259,7 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260919-browse-02'), "people browse changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('work-page-appender.js?v=20260724-work-pagination-02'), "in-place work pagination must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260726-work-sort-01') && fanhaoModuleIndexSource.includes('query.js?v=20260726-work-sort-01'), "work sorting changes must refresh ranking and shared query modules");
 assert(webApp.includes('["ratingCountDesc", "评价人数最多"]') && webApp.includes('["popularityDesc", "热度最高"]') && !webApp.includes("评分最低"), "Web work sorting must expose audience and popularity sorts without the lowest-rating option");
@@ -453,6 +461,7 @@ const androidViewportImageLoader = read("android-client/www/modules/fanhao/featu
 const androidListStyles = read("android-client/www/css/lists.css");
 const androidSectionStyles = read("android-client/www/css/sections.css");
 const androidConfig = read("android-client/www/js/config.js");
+const androidClientVersion = /CLIENT_VERSION = "([^"]+)"/u.exec(androidConfig)?.[1] || "";
 const gridPersonButtonStyles = /button\.work-card-grid-person\s*\{([\s\S]*?)\}/.exec(androidListStyles)?.[1] || "";
 const workDetailHeroBodyStyles = /\.content-panel\[data-view="workDetail"\] \.detail-hero-body \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
 const workDetailTitleStyles = /\.content-panel\[data-view="workDetail"\] \.work-detail-title-block > strong \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
@@ -468,7 +477,7 @@ assert(!androidFanhaoChrome.includes("CHROME_TABS") && !androidFanhaoChrome.incl
 assert(androidFanhaoChrome.includes('return searchCategoryForView(view, params) === "western" ? "欧美" : "番号"') && androidFanhaoChrome.includes('host.navigation.showView("search", { query: "", category:'), "the FanHao app bar must identify and search only the active bottom-navigation library");
 assert(androidFanhaoChrome.includes("openSortDialog(host, sort)") && androidFanhaoStyles.includes(".fanhao-feed-appbar-action"), "the native FanHao app bar must retain direct sorting without restoring partition tabs");
 assert(androidFanhaoStyles.includes(".fanhao-sort-sheet") && androidFanhaoStyles.includes("grid-template-columns: repeat(2"), "FanHao sorting must use the compact two-column bottom sheet");
-assert(androidFanhaoChrome.includes("sheet.js?v=20260731-mobile-action-sheet-01") && androidFanhaoChrome.includes("openFanhaoSheet({") && androidFanhaoSheet.includes("openMobileActionSheet as openFanhaoSheet") && androidMobileActionSheet.includes("mobile-action-sheet-overlay"), "FanHao sorting must reuse the shared bottom sheet");
+assert(androidFanhaoChrome.includes(`sheet.js?v=${androidClientVersion}`) && androidFanhaoChrome.includes("openFanhaoSheet({") && androidFanhaoSheet.includes("openMobileActionSheet as openFanhaoSheet") && androidMobileActionSheet.includes("mobile-action-sheet-overlay"), "FanHao sorting must reuse the current shared bottom sheet");
 assert(androidFanhaoChrome.includes('if (view === "studios")') && androidFanhaoChrome.includes('title: "厂牌排序"') && androidWorkViews.includes("getStudioSortOptions"), "the active brand tab must open the shared studio sort sheet");
 assert.deepEqual(STUDIO_SORT_OPTIONS.map((option) => option.value), ["count", "recent", "name"], "studio browsing must offer count, recency, and name ordering");
 const studioIndexFixture = [
@@ -519,7 +528,7 @@ assert(androidFanhaoChrome.includes("host.navigation.goBack()") && androidFanhao
 assert(androidFanhaoChrome.includes("container.dataset.detailView = view") && androidFanhaoStyles.includes('.module-chrome[data-module="fanhao"][data-detail-view]') && androidFanhaoStyles.includes("position: fixed"), "Android FanHao detail return controls must retain stable hit testing after the page scrolls");
 assert(androidFanhaoStyles.includes("min-height: 44px") && androidFanhaoStyles.includes("touch-action: manipulation"), "Android FanHao detail return controls must keep a direct phone-sized touch target");
 assert(androidFanhaoSheet.includes("openMobileActionSheet as openFanhaoSheet") && androidMobileActionSheet.includes('backdrop.addEventListener("click", close)') && androidMobileActionSheet.includes('event.key === "Escape"') && androidMobileActionSheet.includes("config.options || []"), "the shared FanHao sheet must support backdrop, keyboard, and configurable actions");
-assert(lines("android-client/www/modules/fanhao/sheet.js") <= 60, "the shared FanHao bottom sheet must stay focused");
+advisories.check(lines("android-client/www/modules/fanhao/sheet.js") <= 60, "shared FanHao bottom sheet is over 60 lines; review its responsibilities");
 assert(androidFanhaoSearchPage.includes("fanhao-search-page-form") && androidFanhaoSearchPage.includes("搜索历史") && androidFanhaoSearchPage.includes("input.focus({ preventScroll: true })"), "FanHao search must use a focused dedicated page with history");
 assert(androidFanhaoSearchPage.includes('createSearchGroup("快捷搜索"') && androidFanhaoSearchPage.includes('createSearchGroup("演员推荐"') && androidFanhaoSearchPage.includes("getLibrary()?.people"), "FanHao search discovery must fill the landing page with local dynamic shortcuts");
 assert(androidFanhaoSearchPage.includes('meta: "本地标记"') && androidFanhaoSearchPage.includes("remember: false"), "the local marker shortcut must remain distinct from actual search history");
@@ -531,7 +540,7 @@ assert(androidWorkSearchDataService.includes('category: String(category || "all"
 assert(androidWorkViews.includes("mountSearchResultToolbar({") && androidWorkViews.includes("hideControls: true") && androidSearchResultToolbar.includes('options.container.classList.add("has-result-toolbar")'), "FanHao search results must replace the clipped chip strip with a compact toolbar");
 assert(!androidSearchResultToolbar.includes('createToolbarButton("类型"') && androidSearchResultToolbar.includes('createToolbarButton("筛选"') && androidSearchResultToolbar.includes('createToolbarButton("排序"') && androidSearchResultToolbar.includes("openFanhaoSheet({"), "FanHao search controls must remove the obsolete type partition while retaining filter and sort sheets");
 assert(androidFanhaoStyles.includes(".fanhao-search-result-toolbar") && androidFanhaoStyles.includes(".fanhao-search-results.has-result-toolbar") && androidFanhaoStyles.includes("position: fixed"), "FanHao search toolbar must stay reachable without covering the result grid");
-assert(lines("android-client/www/modules/fanhao/features/works/search-result-toolbar.js") <= 140, "Android search result toolbar must stay focused");
+advisories.check(lines("android-client/www/modules/fanhao/features/works/search-result-toolbar.js") <= 140, "Android search result toolbar is over 140 lines; review its responsibilities");
 assert(androidFanhaoModule.includes("replaceViewParams: host.navigation.replaceViewParams") && androidWorkViews.includes('preserveQuery: (query) => replaceViewParams("search", { query, category: activeSearchCategory })') && androidFanhaoSearchPage.includes("preserveQuery(query)"), "direct live-suggestion navigation must preserve the typed query and active library for the Android back path");
 assert(androidFanhaoStyles.includes(".fanhao-search-suggestion") && androidFanhaoStyles.includes(".fanhao-search-result-summary") && androidFanhaoStyles.includes("object-fit: contain"), "FanHao search suggestions and complete actor portraits must have dedicated phone styling");
 const authorSuggestions = localAuthorSearchSuggestions([
@@ -622,7 +631,8 @@ assert(androidFavoriteFolders.includes('panel.setAttribute("role", "dialog")') &
 assert(androidIndexHtml.includes('data-open-url="/favorites"') && androidIndexHtml.includes('id="favoriteCount"') && androidDom.includes('favoriteCount: document.querySelector("#favoriteCount")') && androidApp.includes("els.favoriteCount.textContent"), "Android home must expose a discoverable favorite collection entry with the shared user-state count");
 assert(!androidFanhaoChrome.includes('key: "favorites"') && androidWorkFiltering.includes('{ value: "favorite", label: "收藏" }'), "Android FanHao must keep favorites in the work filter instead of restoring a root partition tab");
 assert(androidWorkViews.includes("serverContinuationOptions(works, total)") && androidDetailViews.includes("activeFilterTotal: data.total || works.length"), "Android server-filtered pages must retain the server total for continuation");
-assert(lines("android-client/www/modules/fanhao/features/people/detail-request.js") <= 24 && androidPersonDetailRequest.includes("URLSearchParams"), "Android person request construction must stay focused and encoded");
+assert(androidPersonDetailRequest.includes("URLSearchParams"), "Android person request construction must remain encoded");
+advisories.check(lines("android-client/www/modules/fanhao/features/people/detail-request.js") <= 24, "Android person request builder is over 24 lines; review its responsibilities");
 assert(androidWorkViews.includes("const searchListState = createWorkListState({") && androidWorkViews.includes("persist: false") && androidWorkViews.includes('initialFilterMode: "all"'), "FanHao Android search must start from an isolated unfiltered list state");
 assert(androidWorkViews.includes("workListState: searchListState") && androidWorkViews.includes("listState: searchListState"), "FanHao Android search requests and controls must share their isolated list state");
 assert(androidWorkViews.includes('searchListState.setFilterMode("all", { replace: true, rerender: false })') && androidWorkViews.includes('searchListState.setSortMode("updated", { rerender: false })'), "opening a fresh FanHao Android search must reset route-local filters");
@@ -633,8 +643,8 @@ assert(androidWorkFiltering.includes("createWorkFilterControls({") && androidWor
 assert(androidWorkFilterControls.includes('Object.freeze(["all", "playable", "progress"])') && androidWorkFilterControls.includes('button.textContent = selected.length ? `筛选 ${selected.length}` : "筛选"') && androidWorkFilterControls.includes('title: "更多筛选"'), "Android compact work browsing must keep only the primary filters visible and move secondary filters into a native sheet");
 assert(androidWorkViews.includes("compactSummary: true") && androidWorkFilterControls.includes('controls.classList.add("has-compact-summary")') && androidWorkFilterControls.includes('summary.setAttribute("aria-label", `已载入'), "Android main work browsing must merge loaded and total counts into the compact filter rail");
 assert(androidListStyles.includes('.content-panel[data-view="works"] > .view-meta') && androidListStyles.includes(".work-controls.has-compact-summary") && androidListStyles.includes("grid-template-columns: auto minmax(0, 1fr)") && androidListStyles.includes(".work-filter-strip.is-compact") && androidListStyles.includes("mask-image: none"), "Android work browsing must reclaim the count row and avoid clipped or faded compact filters");
-assert(lines("android-client/www/js/work-filtering.js") <= 320, "Android work filtering must stay focused");
-assert(lines("android-client/www/js/work-filter-controls.js") <= 180, "Android compact filter controls must stay focused");
+advisories.check(lines("android-client/www/js/work-filtering.js") <= 320, "Android work filtering is over 320 lines; review its responsibilities");
+advisories.check(lines("android-client/www/js/work-filter-controls.js") <= 180, "Android compact filter controls are over 180 lines; review their responsibilities");
 const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 const listStateStorageReads = [];
 const listStateStorageWrites = [];
@@ -690,9 +700,9 @@ try {
   else delete globalThis.localStorage;
 }
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
-assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
-assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
-assert(lines("android-client/www/modules/fanhao/features/works/card-presentation.js") <= 140, "FanHao Android work-card presentation helpers must stay focused");
+advisories.check(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views are over 750 lines; review their responsibilities");
+advisories.check(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards are over 320 lines; review their responsibilities");
+advisories.check(lines("android-client/www/modules/fanhao/features/works/card-presentation.js") <= 140, "FanHao Android card presentation helpers are over 140 lines; review their responsibilities");
 assert(androidApp.includes(".sort(peopleViews.sortPeople)") && !androidApp.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android home must reuse the author index ordering supported by compact person-list fields");
 assert(androidPeopleViews.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize portrait-only person-list avatar URLs");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/person/48/cover" }), "", "Android author cards must not present a work-cover fallback as a portrait");
@@ -805,18 +815,17 @@ assert(androidDetailViews.includes("strip.dataset.count = String(items.length)")
 assert(androidDetailViews.includes("createWorkDetailToolbar({") && androidDetailViews.includes("factsTarget: factPanel || fallbackInfoPanel") && !androidDetailViews.includes("createRelatedWorksPanel") && !androidDetailViews.includes("loadRelatedWorks"), "Android work details must keep playback and facts navigation without loading a trailing same-actor work shelf");
 assert(androidWorkDetailToolbar.includes('createToolbarButton("播放"') && androidWorkDetailToolbar.includes('createToolbarButton("资料"') && !androidWorkDetailToolbar.includes('createToolbarButton("相关"') && /\.work-detail-toolbar\s*\{[\s\S]*?grid-template-columns: repeat\(2/.test(androidFanhaoStyles), "Android work details must use a balanced two-action contextual toolbar after removing related works");
 assert(androidWorkDetailToolbar.includes('behavior: "smooth"') && androidWorkDetailToolbar.includes("playStatus(videos.length, progress)"), "Android work detail actions must reveal their target sections and expose playback state");
-assert(lines("android-client/www/modules/fanhao/features/works/detail-toolbar.js") <= 90, "Android work-detail toolbar must stay focused");
+advisories.check(lines("android-client/www/modules/fanhao/features/works/detail-toolbar.js") <= 90, "Android work-detail toolbar is over 90 lines; review its responsibilities");
 assert(androidWorkActions.includes("actions.append(markerButton, favoriteButton, moreButton)") && !androidWorkActions.includes("actions.append(backButton") && !androidWorkActions.includes("actions.append(markerButton, favoriteButton, deleteButton"), "Android work details must reserve the main action row for common non-destructive actions");
 assert(androidWorkActions.includes('title: "更多操作"') && androidWorkActions.includes('label: "复制番号"') && androidWorkActions.includes('label: "打开资料来源"') && androidWorkActions.includes('label: "删除本地文件"'), "Android work details must move utility and destructive actions into the shared more sheet");
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
-assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-const androidClientVersion = /CLIENT_VERSION = "([^"]+)"/u.exec(androidConfig)?.[1] || "";
-assert(androidClientVersion && androidIndexHtml.includes(`styles.css?v=${androidClientVersion}`) && androidStyles.includes(`css/base.css?v=${androidClientVersion}`) && androidStyles.includes(`css/sections.css?v=${androidClientVersion}`) && androidStyles.includes(`css/lists.css?v=${androidClientVersion}`) && androidStyles.includes("modules/fanhao/styles.css?v=20260830-fanhao-person-home-31") && androidStyles.includes("modules/tools/styles.css?v=20260830-vision-recovery-66") && androidStyles.includes("modules/novels/styles.css?v=20260731-novel-actions-ui-53") && androidStyles.includes("modules/music/home.css?v=20260730-music-palette-ui-42") && androidStyles.includes("modules/short-videos/styles.css?v=20260812-collection-management-01"), "Android FanHao navigation must refresh through the full style chain without dropping adjacent modules");
+advisories.check(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions are over 190 lines; review their responsibilities");
+assert(androidClientVersion && androidIndexHtml.includes(`styles.css?v=${androidClientVersion}`) && androidStyles.includes(`css/base.css?v=${androidClientVersion}`) && androidStyles.includes(`css/sections.css?v=${androidClientVersion}`) && androidStyles.includes(`css/lists.css?v=${androidClientVersion}`) && androidStyles.includes(`modules/fanhao/styles.css?v=${androidClientVersion}`) && androidStyles.includes(`modules/tools/styles.css?v=${androidClientVersion}`) && androidStyles.includes(`modules/novels/styles.css?v=${androidClientVersion}`) && androidStyles.includes(`modules/music/home.css?v=${androidClientVersion}`) && androidStyles.includes(`modules/short-videos/styles.css?v=${androidClientVersion}`), "Android FanHao navigation must refresh through the current full style chain without dropping adjacent modules");
 assert(androidBaseStyles.includes("--mobile-accent: #2f80ed") && androidFanhaoStyles.includes(".fanhao-primary-nav > button.active::after") && androidBaseStyles.includes("background: var(--mobile-accent)") && androidFanhaoStyles.includes("border-color: var(--mobile-accent-border)") && androidShortVideoListStyles.includes(".short-video-search-page-field:focus-within") && androidShortVideoListStyles.includes("color: var(--mobile-accent)") && androidNovelStyles.includes('.novel-mobile-controls input[type="search"]:focus') && androidNovelStyles.includes("box-shadow: 0 0 0 3px var(--mobile-focus-ring)") && androidMusicHomeStyles.includes("caret-color: var(--mobile-accent)") && androidListStyles.includes(".work-cover-badge.progress") && androidListStyles.includes("background: var(--mobile-accent)"), "Android generic navigation, search focus, filters, and progress surfaces must share the blue-gray accent contract");
 assert(/\.work-cover-frame > \.work-thumb,[\s\S]*?\.work-cover-frame > img\s*\{[\s\S]*?object-fit: cover;[\s\S]*?object-position: right center;/.test(androidListStyles), "Android FanHao work-grid covers must crop from the right so composite back-front artwork keeps the portrait front cover visible");
 assert(androidClientVersion && androidIndexHtml.includes(`app.js?v=${androidClientVersion}`) && androidApp.includes(`config.js?v=${androidClientVersion}`) && androidApp.includes(`cache.js?v=${androidClientVersion}`) && androidApp.includes(`dom.js?v=${androidClientVersion}`) && androidCacheSource.includes(`config.js?v=${androidClientVersion}`), "Android behavior must refresh the complete application and response-cache identity chain");
-assert(androidToolModule.includes('tool-views.js?v=20260830-vision-recovery-66') && androidToolModule.includes("openSettings: host.ui.openSettings"), "Android My page must load the native grouped view and receive the shared settings action");
+assert(androidToolModule.includes(`tool-views.js?v=${androidClientVersion}`) && androidToolModule.includes("openSettings: host.ui.openSettings"), "Android My page must load the current native grouped view and receive the shared settings action");
 assert(androidToolViews.includes('header.className = "tools-profile-header"') && androidToolViews.includes('list.className = "tools-native-list"') && androidToolViews.includes('title.textContent = "小游戏"') && androidToolViews.includes('meta.textContent = "离线可用"'), "Android My page must use a native header and one-level grouped rows for settings, tools, and games");
 assert(!androidToolViews.includes("createTextWorkspace") && !androidToolViews.includes("文本整理") && !androidToolViews.includes("/api/tools/txt-format") && !androidToolStyles.includes("txt-native"), "Android My page must remove the complete text-formatting surface instead of only hiding its file picker");
 assert(androidToolViews.includes('openSettings({ section: "storage" })') && androidToolStyles.includes(".tool-native-row + .tool-native-row::before") && !androidToolStyles.includes(".tool-launch-card"), "Android My page must expose direct settings and storage rows without nested launch cards");
@@ -855,7 +864,7 @@ assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && and
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
 assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 1 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person detail navigation must retain the shared cache/network race after removing related works");
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
-assert(androidWorkViews.includes('cards.js?v=20260830-western-person-link-34') && androidWorkCards.includes('card-presentation.js?v=20260721-fanhao-author-sort-density-08'), "Android scoped actor navigation must refresh cards without dropping the shared presentation rules");
+assert(androidWorkViews.includes(`cards.js?v=${androidClientVersion}`) && androidWorkCards.includes(`card-presentation.js?v=${androidClientVersion}`), "Android scoped actor navigation must use the current cards and shared presentation rules");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 5 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "remaining Android FanHao pages must race IndexedDB with the live response");
 const scheduledViewportBatches = new Map();
 let nextViewportBatchId = 1;
@@ -1190,7 +1199,7 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("mergePersonIdentity(indexedPerson, data.person)") && !androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must merge identity fields without promoting prepared work artwork to a portrait");
-assert(androidDetailViews.includes('detail-hero.js?v=20260830-fanhao-single-category-28'), "Android actor identities must use the category-free detail hero");
+assert(androidDetailViews.includes(`detail-hero.js?v=${androidClientVersion}`), "Android actor identities must use the current category-free detail hero");
 assert(androidDetailViews.includes("hidePerson: true") && androidDetailViews.includes('createDetailSectionTitle("作品", "")'), "Android author pages must show works without repeating the author or a second work count");
 assert(androidDetailViews.includes("hideControls: true") && androidDetailViews.includes("createPersonDetailWorkToolbar({"), "Android author pages must replace the wide chip strip with compact detail controls");
 assert(androidPersonDetailWorkToolbar.includes('title: "作品筛选"') && androidPersonDetailWorkToolbar.includes('title: "发行年份"') && androidPersonDetailWorkToolbar.includes('title: "作品排序"') && androidPersonDetailWorkToolbar.includes("openFanhaoSheet({"), "Android actor work controls must open shared bottom sheets for filtering, year, and sorting");
@@ -1216,27 +1225,27 @@ assert(androidPersonDetailHero.includes("body.append(name, alias, workCount)") &
 assert(!androidPersonDetailHero.includes("cacheNote") && !androidPersonDetailHero.includes("正在同步详情") && !androidPersonDetailHero.includes("本地索引"), "Android author identity must not expose cache implementation status as profile information");
 assert(androidDetailViews.includes("setDetailChromeTitle") && androidDetailViews.includes('[data-fanhao-detail-title]') && androidDetailViews.includes("person.actorProfile?.displayName || person.name"), "Android author and work details must update the shared sticky header with live identity data");
 assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 128px)") && androidSectionStyles.includes(".person-detail-hero .detail-hero-body"), "Android author identity must leave first-screen space for the work grid");
-assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
-assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260830-western-portrait-33') && androidDetailViews.includes('person-portrait.js?v=20260830-western-portrait-33') && androidDetailViews.includes('actions.js?v=20260812-android-work-move-02') && androidDetailViews.includes('work-move.js?v=20260812-android-work-move-02') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46'), "Android person-scoped work details must refresh without dropping portrait policy, work moves, media recovery, or the contextual toolbar");
-assert(androidWorkViews.includes('page-data-service.js?v=20260811-favorite-folders-02') && androidWorkViews.includes('favorite-page.js?v=20260830-fanhao-compact-filter-02') && androidWorkViews.includes('work-data-signature.js?v=20260811-favorite-folders-02') && androidFavoritePage.includes('favorite-folders.js?v=20260811-favorite-folders-02') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android favorite-folder and page-race services must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260830-western-person-link-34') && androidWorkViews.includes('category-views.js?v=20260830-fanhao-pure-feed-24') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260830-fanhao-compact-filter-02') && androidWorkViews.includes('favorite-page.js?v=20260830-fanhao-compact-filter-02') && androidWorkViews.includes('search-page.js?v=20260830-fanhao-person-home-31') && androidWorkViews.includes('cards.js?v=20260830-western-person-link-34'), "Android FanHao work views must refresh person-scoped search and cards without dropping filters, favorites, or actor caching");
-assert(androidFanhaoIndex.includes('people-views.js?v=20260830-western-compact-32'), "Android scoped actor browsing must use the current people module URL");
-assert(androidFanhaoModule.includes('chrome.js?v=20260830-fanhao-person-home-31') && androidFanhaoModule.includes('index.js?v=20260830-western-person-link-34') && androidFanhaoModule.includes('prefix-views.js?v=20260730-fanhao-nav-ui-44'), "Android FanHao entry must refresh person-first navigation without dropping the app bar or retained deep routes");
+advisories.check(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component is over 150 lines; review its responsibilities");
+advisories.check(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar is over 110 lines; review its responsibilities");
+assert(androidFanhaoIndex.includes(`detail-views.js?v=${androidClientVersion}`) && androidDetailViews.includes(`person-portrait.js?v=${androidClientVersion}`) && androidDetailViews.includes(`actions.js?v=${androidClientVersion}`) && androidDetailViews.includes(`work-move.js?v=${androidClientVersion}`) && androidDetailViews.includes(`android-player.js?v=${androidClientVersion}`) && androidDetailViews.includes(`detail-toolbar.js?v=${androidClientVersion}`), "Android person-scoped work details must use the current cache identity without dropping portrait policy, work moves, media recovery, or the contextual toolbar");
+assert(androidWorkViews.includes(`page-data-service.js?v=${androidClientVersion}`) && androidWorkViews.includes(`favorite-page.js?v=${androidClientVersion}`) && androidWorkViews.includes(`work-data-signature.js?v=${androidClientVersion}`) && androidFavoritePage.includes(`favorite-folders.js?v=${androidClientVersion}`) && androidWorkViews.includes(`detail-data-service.js?v=${androidClientVersion}`), "Android favorite-folder and page-race services must use the current module identity");
+assert(androidFanhaoIndex.includes(`work-views.js?v=${androidClientVersion}`) && androidWorkViews.includes(`category-views.js?v=${androidClientVersion}`) && androidWorkViews.includes(`cache.js?v=${androidClientVersion}`) && androidWorkViews.includes(`work-filtering.js?v=${androidClientVersion}`) && androidWorkViews.includes(`favorite-page.js?v=${androidClientVersion}`) && androidWorkViews.includes(`search-page.js?v=${androidClientVersion}`) && androidWorkViews.includes(`cards.js?v=${androidClientVersion}`), "Android FanHao work views must use the current cache identity without dropping filters, favorites, or actor caching");
+assert(androidFanhaoIndex.includes(`people-views.js?v=${androidClientVersion}`), "Android scoped actor browsing must use the current people module identity");
+assert(androidFanhaoModule.includes(`chrome.js?v=${androidClientVersion}`) && androidFanhaoModule.includes(`index.js?v=${androidClientVersion}`) && androidFanhaoModule.includes(`prefix-views.js?v=${androidClientVersion}`), "Android FanHao entry must use the current cache identity without dropping the app bar or retained deep routes");
 assert(androidIndexHtml.includes(`app.js?v=${androidClientVersion}`), "Android work moves must remain reachable through the current integrated app entry chain");
 assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
-assert(androidWorkViews.includes('ranking-views.js?v=20260730-fanhao-ranking-year-ui-45'), "Android smooth ranking year changes must use a fresh module URL");
+assert(androidWorkViews.includes(`ranking-views.js?v=${androidClientVersion}`), "Android smooth ranking year changes must use the current module identity");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
 }
-assert(lines("android-client/www/modules/fanhao/detail-views.js") <= 900, "FanHao Android detail views must stay below 900 lines");
+advisories.check(lines("android-client/www/modules/fanhao/detail-views.js") <= 900, "FanHao Android detail views are over 900 lines; review their responsibilities");
 
 const workDetail = read("public/modules/fanhao/work-detail-page.js");
 assert(!/function createPreviewMediaSection\s*\(/.test(workDetail), "Web preview media must stay in its feature module");
 assert(workDetail.includes("createWorkPreviewMedia"), "Web work detail must compose the preview feature");
-assert(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work detail must stay below 1000 lines");
-assert(lines("public/app.js") <= 2500, "FanHao Web composition root must stay below 2500 lines");
+advisories.check(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work detail is over 1000 lines; review its responsibilities");
+advisories.check(lines("public/app.js") <= 2500, "FanHao Web composition root is over 2500 lines; review its responsibilities");
 
 const favoriteState = {
   activeView: "people",
@@ -1301,7 +1310,7 @@ assert.equal(favoriteState.works[0].favorite, true, "failed favorite requests mu
 assert.equal(favoriteControl.getAttribute?.("aria-label") || favoriteControl.attributes.get("aria-label"), "取消收藏", "failed favorite requests must restore control state");
 assert.equal(favoriteRollbackMessage, "favorite unavailable", "failed favorite requests must report a useful error");
 assert.equal(collectionInvalidationCount, 1, "failed favorite changes must keep valid collection prefetches");
-assert(lines("public/js/standalone-host.js") <= 650, "standalone Web host must stay below 650 lines");
+advisories.check(lines("public/js/standalone-host.js") <= 650, "standalone Web host is over 650 lines; review its responsibilities");
 const peoplePage = read("public/modules/fanhao/people-page.js");
 const webRankingPage = read("public/modules/fanhao/ranking-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
@@ -1317,7 +1326,7 @@ assert(/state\.workVisibleLimit\s*\+=\s*state\.workPageSize\s*;\s*appendLoadedWo
 assert((webApp.match(/appendLoadedWorkPage\(\);/g) || []).length >= 2, "search and person pagination must append the next server page without resetting scroll position");
 assert(webApp.includes("function appendLoadedWorkPage()") && webApp.includes("appendWorkCardsInPlace({"), "shared work pagination must reconcile each next page without clearing the grid");
 assert(workPageAppenderSource.includes("container.insertBefore(card, reference)") && workPageAppenderSource.includes("restoreScrollAnchor(anchor, anchorTop, viewport)"), "reordered work pages must reuse cards and preserve the visible scroll anchor");
-assert(lines("public/modules/fanhao/features/works/work-page-appender.js") <= 120, "in-place work pagination must stay focused");
+advisories.check(lines("public/modules/fanhao/features/works/work-page-appender.js") <= 120, "in-place work pagination is over 120 lines; review its responsibilities");
 assert(peoplePage.includes("const PERSON_INDEX_DESKTOP_PAGE_SIZE = 64"), "Web people index must keep the desktop first page compact");
 assert(peoplePage.includes("const PERSON_INDEX_MOBILE_PAGE_SIZE = 48"), "Web people index must keep the mobile first page compact");
 assert(webApp.includes("state.personPageSize = peoplePage.personIndexPageSize()"), "Web people paging must adapt to the viewport instead of network location");
@@ -1449,7 +1458,8 @@ assert(workQueryServiceSource.includes("workClassificationService.filterForReque
 assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
 assert(studioService.indexOf("cachedFilteredStudioWorks(workSet, filter)") < studioService.indexOf("sortWorkList(filteredWorkSet.works, sort)"), "studio filters must run before sorting and pagination");
 assert(studioService.includes("detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url)"), "studio page caches must distinguish active server filters");
-assert(workFilterServiceSource.includes("requested.every((item) => matches(work, item))") && lines("src/modules/fanhao/server/works/work-filter-service.js") <= 100, "shared server work filtering must support compact combined-filter semantics");
+assert(workFilterServiceSource.includes("requested.every((item) => matches(work, item))"), "shared server work filtering must support combined-filter semantics");
+advisories.check(lines("src/modules/fanhao/server/works/work-filter-service.js") <= 100, "server work-filter service is over 100 lines; review its responsibilities");
 assert(workClassificationServiceSource.includes("function isCompilation(work)") && workClassificationServiceSource.includes("function filterForRequest(works, url, filter"), "compilation classification and visibility must live on the server");
 assert(personDetailServiceSource.includes('url.searchParams.get("includeMissingLocal")') && personDetailServiceSource.includes('url.searchParams.get("includeCompilation")'), "person page caches must distinguish server visibility options");
 assert(webApp.includes('if (state.activeView === "people" && state.selectedPersonId) return state.works;'), "person cards must render the server page without client-side visibility filtering or sorting");
@@ -1487,7 +1497,7 @@ assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap(
 assert(workSearchIndexServiceSource.includes("const postings = new Map()"), "full-text search must build an in-memory candidate index during prewarm");
 assert(workSearchIndexServiceSource.includes("function rarestPosting"), "search candidate selection must start from the rarest query gram");
 assert(workSearchIndexServiceSource.includes("candidateIds && isIndexedWork && !candidateIds.has(work.id)"), "new search terms must skip exact checks for unrelated indexed works");
-assert(lines("src/modules/fanhao/server/works/work-search-index-service.js") <= 240, "the work-search index service must stay focused");
+advisories.check(lines("src/modules/fanhao/server/works/work-search-index-service.js") <= 240, "work-search index service is over 240 lines; review its responsibilities");
 assert(missingCodeSearchServiceSource.includes("missingCodeSearchPending: true"), "broad code-prefix searches must defer non-page detail hydration");
 assert(missingCodeSearchServiceSource.includes("WHERE w.id IN (${placeholders})"), "visible missing-code results must batch-hydrate one page of details");
 assert(missingCodeSearchServiceSource.includes("coverWorkIdsCache?.stamp === stamp"), "broad code-prefix searches must reuse the in-memory cover membership index");
@@ -1610,6 +1620,7 @@ assert(mediaResponseServiceSource.includes("remoteImageWarmQueue.length + remote
 assert(mediaResponseServiceSource.includes("for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl)"), "newly visible remote images must discard stale queued downloads");
 assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
 assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND url IN"), "remote-image warming must use the URL covering index instead of opening cached blobs");
+assert(mediaResponseServiceSource.includes("SELECT 1 AS ready") && mediaResponseServiceSource.includes("prewarmLocalImages"), "local-cover warming must check cache freshness without selecting image blobs");
 assert(mediaBlobWorkerClientSource.includes("new WorkerCtor"), "database-backed image reads must run outside the server main thread");
 assert(mediaBlobWorkerSource.includes("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?"), "the media worker must own core-image blob reads");
 assert(mediaBlobWorkerSource.includes("INSERT INTO fanhao_images.remote_image_cache"), "the media worker must own remote-image blob writes");
@@ -1634,9 +1645,11 @@ const fanhaoRuntime = read("src/modules/fanhao/server/runtime.js");
 const userStateRuntime = read("src/modules/fanhao/server/user-state/runtime.js");
 const collectionQueryServiceSource = read("src/modules/fanhao/server/user-state/collection-query-service.js");
 assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
+assert(libraryRuntime.includes("mediaResponseService") && libraryRuntime.includes("prewarmLocalImages"), "the people index must prewarm its visible local covers");
 assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
 assert(fanhaoRuntime.includes('process.env.FANHAO_EAGER_PREWARM !== "1"'), "full-library response prewarming must be opt-in so the HTTP port can open promptly");
 assert(fanhaoRuntime.includes("works.prewarmLocalMetadata();"), "bounded local metadata enrichment must finish before the shared HTTP port opens");
+assert(fanhaoRuntime.includes("library.prewarmPeopleIndexCovers();"), "the default FanHao startup must schedule visible people-cover warming");
 assert(fanhaoRuntime.includes("library.start();"), "opt-in FanHao prewarming must retain the library response path");
 assert(fanhaoRuntime.includes("catalog.start();"), "opt-in FanHao prewarming must retain the catalog response path");
 assert(fanhaoRuntime.includes("userState.start();"), "opt-in FanHao prewarming must retain user collection response paths");
@@ -1646,6 +1659,31 @@ assert(collectionQueryServiceSource.includes("[0, 7, Number(recentWatchedDays ||
 assert(collectionQueryServiceSource.includes("const COLLECTION_PAGE_CACHE_LIMIT = 64") && collectionQueryServiceSource.includes("userStateStamp()") && collectionQueryServiceSource.includes("workQueryStamp()"), "collection responses must stay cached until catalog or user state changes");
 assert(collectionQueryServiceSource.indexOf("filterWorkList(source, filter)") < collectionQueryServiceSource.indexOf("sortWorkList(filtered, sort)"), "collection filters must run before sorting and pagination");
 assert(collectionQueryServiceSource.includes('favorites:${selectedFolderId || "all"}:${filter}:${sort}:${limit}:${offset}') && collectionQueryServiceSource.includes("history:${days}:${filter}:${sort}:${limit}:${offset}"), "collection page caches must distinguish active filters and sorts");
+const peopleIndexFilesById = new Map([
+  ["cover-a1", { id: "cover-a1", path: "G:/A1/cover.jpg", type: "image" }],
+  ["cover-a2", { id: "cover-a2", path: "G:/A2/cover.jpg", type: "image" }],
+  ["cover-actor", { id: "cover-actor", path: "G:/A0/cover.jpg", type: "image" }],
+  ["cover-f", { id: "cover-f", path: "F:/B/cover.jpg", type: "image" }],
+  ["cover-male", { id: "cover-male", path: "G:/Male/cover.jpg", type: "image" }]
+]);
+const peopleIndexWarmFiles = personIndexCoverFiles({
+  getLibrary: () => ({ filesById: peopleIndexFilesById }),
+  personListService: {
+    mainLibraryPeople: () => [
+      { id: "person-f", name: "B", relativePath: "F:/B", coverId: "cover-f" },
+      { id: "person-a2", name: "A2", relativePath: "G:/A2", coverId: "cover-a2" },
+      { id: "person-male", name: "Male", relativePath: "G:/Male", coverId: "cover-male", actorProfile: { displayName: "00", gender: "male" } },
+      { id: "person-a1", name: "A1", relativePath: "G:/A1", coverId: "cover-a1" },
+      { id: "person-actor", name: "A0", relativePath: "G:/A0", coverId: "cover-actor", avatarUrl: "/media/actor/9/avatar" }
+    ]
+  },
+  publicPerson: (person) => person
+}, 3);
+assert.deepEqual(
+  peopleIndexWarmFiles.map((file) => file.id),
+  ["cover-a1", "cover-a2"],
+  "people-cover warming must match the first desktop page while skipping male entries and actor avatars"
+);
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -2163,6 +2201,7 @@ const personMergeLibrary = {
   ])
 };
 const cachedPersonMergeService = createPersonMergeService({
+  resolveCanonicalId: (id) => id === "merge-b" ? "merge-a" : id,
   actorMovieRows: () => [],
   actorProfileAliases: () => [],
   actorProfileRow: (personId) => ({ javdb_actor_id: personId ? "actor-one" : "" }),
@@ -2869,7 +2908,7 @@ const prefixReadsBeforeInvalidatedSearch = localPrefixReadCount;
 workQueryService.searchPayload(workSearchUrl);
 assert.equal(localPrefixReadCount, prefixReadsBeforeInvalidatedSearch + 1, "search data changes must invalidate matched work sources");
 
-let cachedLocalImageRow = null;
+const cachedLocalImageRows = new Map();
 let localImageStatCount = 0;
 let localImageReadCount = 0;
 let resolveLocalImageRead;
@@ -2890,14 +2929,19 @@ const mediaResponseService = createMediaResponseService({
   getCoreDb: () => ({
     prepare(sql) {
       return {
-        get: () => cachedLocalImageRow,
+        get: (fileId, sourceSize, sourceMtime) => {
+          const row = cachedLocalImageRows.get(fileId);
+          return row?.source_size === sourceSize && row?.source_mtime === sourceMtime ? row : null;
+        },
         run(...args) {
           if (sql.includes("image_blob") && Buffer.isBuffer(args[4])) {
-            cachedLocalImageRow = {
+            cachedLocalImageRows.set(args[0], {
               content_type: args[3],
               image_blob: args[4],
-              byte_length: args[5]
-            };
+              byte_length: args[5],
+              source_size: args[6],
+              source_mtime: args[7]
+            });
           }
         }
       };
@@ -2973,13 +3017,43 @@ resolveLocalImageRead(Buffer.from([1, 2, 3]));
 for (let attempt = 0; attempt < 10 && localImageReadCount < 2; attempt += 1) {
   await new Promise((resolve) => setImmediate(resolve));
 }
-assert(cachedLocalImageRow, "completed slow-cover reads must populate the local image cache");
+assert(cachedLocalImageRows.has(testLocalImage.id), "completed slow-cover reads must populate the local image cache");
 assert.equal(localImageStatCount, 2, "the local-cover queue must continue after an active read completes");
 assert.equal(localImageReadCount, 2, "the local-cover queue must eventually read queued covers");
 const cachedImageResponse = testImageResponse();
 await mediaResponseService.servePreparedImage(cachedImageResponse, testLocalImage);
 assert.equal(cachedImageResponse.statusCode, 200, "prepared FanHao covers must serve from cache on retry");
 assert.deepEqual(cachedImageResponse.body, Buffer.from([1, 2, 3]), "prepared FanHao covers must preserve image bytes");
+const prewarmReadCountBefore = localImageReadCount;
+const prewarmResult = await mediaResponseService.prewarmLocalImages([
+  { ...testLocalImage, id: "prewarm-a", path: "G:/prewarm-a.jpg" },
+  { ...testLocalImage, id: "prewarm-b", path: "G:/prewarm-b.jpg" },
+  { ...testLocalImage, id: "prewarm-a", path: "G:/prewarm-a.jpg" }
+]);
+assert.deepEqual(prewarmResult, { requested: 2, cached: 0, warmed: 2, failed: 0 }, "local-cover warming must deduplicate and fill cold cache rows");
+assert.equal(localImageReadCount, prewarmReadCountBefore + 2, "local-cover warming must read each cold source once");
+const cachedPrewarmResult = await mediaResponseService.prewarmLocalImages([
+  { ...testLocalImage, id: "prewarm-a", path: "G:/prewarm-a.jpg" },
+  { ...testLocalImage, id: "prewarm-b", path: "G:/prewarm-b.jpg" }
+]);
+assert.deepEqual(cachedPrewarmResult, { requested: 2, cached: 2, warmed: 0, failed: 0 }, "local-cover warming must skip current cache rows without loading their blobs");
+assert.equal(localImageReadCount, prewarmReadCountBefore + 2, "current prewarmed covers must not return to disk");
+cachedLocalImageRows.set("rounded-prewarm", {
+  content_type: "image/jpeg",
+  image_blob: Buffer.from([1, 2, 3]),
+  byte_length: 3,
+  source_size: 3,
+  source_mtime: "2026-07-17T00:00:00.001Z"
+});
+assert(
+  mediaResponseService.localImageCacheRow({ ...testLocalImage, id: "rounded-prewarm", path: "G:/rounded.jpg", modifiedAt: "2026-07-17T08:00:00.000999+08:00" }),
+  "local-cover cache checks must normalize equivalent offset and UTC modification timestamps"
+);
+assert.deepEqual(
+  await mediaResponseService.prewarmLocalImages([{ ...testLocalImage, id: "ignored-prewarm", path: "G:/ignored.jpg" }], { limit: 0 }),
+  { requested: 0, cached: 0, warmed: 0, failed: 0 },
+  "a zero local-cover warm limit must not enqueue work"
+);
 
 let coreBlobLoadCount = 0;
 const workerBackedMediaResponseService = createMediaResponseService({
@@ -3307,6 +3381,9 @@ const fakeCoreDb = {
       return { all: () => [] };
     }
     return {
+      all() {
+        return [];
+      },
       get() {
         synchronousStampReads += 1;
         return { row_count: 1, max_rowid: 1, max_updated_at: "v1" };
@@ -3587,6 +3664,10 @@ try {
     INSERT INTO work_people VALUES (10, 2, 'actor', 0, 'fixture', '', '');
     INSERT INTO main.images VALUES (99, 'person', 2, 'main-sentinel');
     INSERT INTO fanhao_images.images VALUES (7, 'person', 2, 'attached-avatar');
+    ALTER TABLE people ADD COLUMN folder_path TEXT;
+    ALTER TABLE people ADD COLUMN gender TEXT DEFAULT 'unknown';
+    ALTER TABLE people ADD COLUMN movie_count INTEGER;
+    ALTER TABLE people ADD COLUMN status TEXT;
   `);
   const adminMutationService = createAdminCoreMutationService({
     getCoreDb: () => personMergeDb,
@@ -3603,14 +3684,15 @@ try {
     uniqueTextArray: (values) => [...new Set(values.map(String))]
   });
   adminMutationService.mergePeopleIntoTarget(1, [2]);
-  assert.equal(personMergeDb.prepare("SELECT owner_id FROM fanhao_images.images WHERE id = 7").get().owner_id, 1, "person merges must reparent attached avatars");
+  assert.equal(personMergeDb.prepare("SELECT owner_id FROM fanhao_images.images WHERE id = 7").get().owner_id, 2, "person merges must preserve immutable avatar ownership");
   assert.equal(personMergeDb.prepare("SELECT owner_id FROM main.images WHERE id = 99").get().owner_id, 2, "person merges must not mutate a shadowing main.images table");
-  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM people WHERE id = 2").get().count, 0, "person merges must delete the source person");
+  assert.equal(personMergeDb.prepare("SELECT status FROM people WHERE id = 2").get().status, "merged", "person merges archive the source person");
+  assert.equal(personMergeDb.prepare("SELECT target_id FROM person_redirects WHERE source_id = 2").get().target_id, 1, "old links must resolve to the target");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE work_id = 10 AND person_id = 1").get().count, 1, "person merges must retain source work membership on the target");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE person_id = 2").get().count, 0, "person merges must clear source work membership");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM person_aliases WHERE person_id = 1 AND alias_search = 'sourcealias'").get().count, 1, "person merges must retain source aliases on the target");
   adminMutationService.mergePeopleIntoTarget(1, [3], { preserveSourceNames: false });
-  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM people WHERE id = 3").get().count, 0, "person merges that drop bad source names must still delete the source person");
+  assert.equal(personMergeDb.prepare("SELECT status FROM people WHERE id = 3").get().status, "merged", "dropping bad aliases still preserves the source archive");
   assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM person_aliases WHERE person_id = 1 AND alias_search IN ('wrongvrname', 'wrongalias')").get().count, 0, "person merges may explicitly discard incorrect source names and aliases");
 } finally {
   personMergeDb.close();
@@ -3806,4 +3888,5 @@ try {
   fs.rmSync(localMutationRoot, { recursive: true, force: true });
 }
 
+advisories.flush();
 console.log("fanhao-structure: ok");

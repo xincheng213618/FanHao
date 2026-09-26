@@ -6,7 +6,7 @@ export const moduleDefinition = {
   description: "FanHao 壳层、状态、管理和本机能力。",
   order: 0,
   visible: false,
-  capabilities: ["status", "admin", "android-update", "local-open"]
+  capabilities: ["status", "admin", "android-update", "local-open", "computer-control"]
 };
 
 export function createModule({ moduleDeps }) {

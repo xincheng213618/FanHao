@@ -3054,6 +3054,12 @@ body.short-video-author-page-active .main {
   color: #ffe2a8;
 }
 
+.short-video-author-page-actions .short-video-author-page-delete {
+  border-color: rgba(248, 113, 113, .62);
+  background: rgba(220, 38, 38, .2);
+  color: #fecaca;
+}
+
 .short-video-author-page-banned {
   display: inline-flex;
   align-items: center;
@@ -3070,6 +3076,11 @@ body.short-video-author-page-active .main {
 .short-video-author-page-actions .short-video-author-confirm-action:hover,
 .short-video-author-page-actions .short-video-author-confirm-action:focus-visible {
   background: rgba(245, 158, 11, .34);
+}
+
+.short-video-author-page-actions .short-video-author-page-delete:hover,
+.short-video-author-page-actions .short-video-author-page-delete:focus-visible {
+  background: rgba(220, 38, 38, .36);
 }
 
 .short-video-author-page-actions button:hover,

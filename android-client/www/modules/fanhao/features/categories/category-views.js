@@ -1,4 +1,4 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-0f97d6765d71";
 import { formatNumber } from "../../../../js/format.js";
 
 export const CATEGORY_OPTIONS = Object.freeze([

@@ -2,9 +2,10 @@
 title: 任务路由
 description: 把常见开发任务映射到需要读取的文档、源码入口和现有验证。
 status: maintained
-verified_at: 2026-08-30
+verified_at: 2026-09-19
 sources:
   - package.json
+  - tools/run_verification.mjs
   - src/fanhao/module-registry.js
   - src/modules/short-videos/server/delete-job-service.js
   - src/modules/short-videos/server/watch-write-service.js
@@ -17,6 +18,9 @@ sources:
 
 先选择任务，再加载上下文。下表的验证是起点，不代表只运行一条命令就能证明整个功能正确。
 命令的环境依赖与副作用见[验证矩阵](../reference/verification.md)。
+
+先用 `npm run verify:changed -- --plan` 检查当前 Git 改动会选择哪些入口；需要复核指定文件时使用 `--files`。
+普通 `npm run verify` 是日常轻量门禁，完整回归使用 `npm run verify:full`。
 
 ## 按变更范围定位
 
@@ -32,7 +36,7 @@ sources:
 | 改跨目录文件移动 | `src/modules/fanhao/server/works/work-move-job-service.js` | `npm run verify:work-move-jobs` |
 | 改音乐扫描与分页 | `src/modules/music/server/` | `npm run verify:music-rescan-worker`、`npm run verify:music-scale` |
 | 改小说存储或采集 | `src/modules/novels/server/` | `npm run verify:novels` |
-| 改 Android WebView 或原生桥 | `android-client/www/`、`android-client/android/app/src/main/java/` | `npm run verify:android-security`，按当前包脚本补充相关原生与页面验证 |
+| 改 Android WebView 或原生桥 | `android-client/www/`、`android-client/android/app/src/main/java/` | 首次准备运行 `npm run setup:android-verification`；用 `npm run verify:changed -- --plan` 按小说、音乐、媒体、图片或短视频域选择回归，共享壳或原生桥变更再运行 `npm run verify:android-full` |
 | 改行情页面或服务 | `src/modules/market-dashboard/server/`、`public/modules/market-dashboard/` | `npm run verify:market-dashboard` |
 | 改下载管理器集成 | `src/modules/short-videos/download-manager/` | `npm run verify:douyin-manager` |
 | 改文档、导航或 AI 导出 | `docs/site/`、`docs/.vitepress/` | `npm --prefix docs test`、`npm --prefix docs run build` |

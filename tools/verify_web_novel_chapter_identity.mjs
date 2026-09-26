@@ -84,6 +84,31 @@ test("late confirmation cannot erase a newer snapshot's recovery",async()=>{
   assert.equal(writes,2);nextPending.resolve({progress:{chapterId:"r2-1",chapterIndex:1,catalogRevision:"r2",scrollRatio:0}});await nextClick;
   assert.equal(h.state.novel.book.progressRecovery,null);
 });
+test("Escape closes reader panels while a catalog input or settings control has focus",async({production=source}={})=>{
+  for (const [panel, tag] of [["catalogOpen", "input"], ["settingsOpen", "button"]]) {
+    const h=harness({production});
+    await h.page.openChapter("book",1);
+    h.state.novel[panel]=true;
+    h.page.renderView();
+    const target=h.document.createElement(tag);
+    target.closest=selector=>selector.split(",").map(value=>value.trim()).includes(tag)?target:null;
+    const before=h.requests.length;
+    let prevented=false;
+    for (const listener of h.window.events.get("keydown")||[]) {
+      await listener({key:"ArrowRight",target,preventDefault(){}});
+    }
+    assert.equal(h.requests.length,before,"arrow keys in panel controls must not navigate chapters");
+    for (const listener of h.window.events.get("keydown")||[]) {
+      await listener({key:"Escape",target,preventDefault(){prevented=true;}});
+    }
+    assert(prevented,`${panel}: Escape must be handled from a focused control`);
+    assert.equal(h.state.novel.catalogOpen,false);
+    assert.equal(h.state.novel.settingsOpen,false);
+    assert.equal(h.grid.querySelector(".novel-reader-drawer"),null);
+    assert.equal(h.grid.querySelector(".novel-settings-panel"),null);
+    assert.equal(h.state.novel.chapter.index,1,"closing a panel must preserve the current chapter");
+  }
+});
 test("a response from another revision cannot be mounted or cached under the current chapter",async()=>{
   const h=harness({respond:r=>r.url.includes("/chapters/1")?detail("r2"):undefined});assert.equal(await h.page.openChapter("book",1),false);
   assert.equal(h.state.novel.book.catalogRevision,"r1");assert.equal(h.state.novel.chapter,null);
@@ -91,7 +116,8 @@ test("a response from another revision cannot be mounted or cached under the cur
 for(const item of tests){await item.run();passed++;console.log(`PASS ${item.name}`);}
 for(const [name,from,to,prefix] of [
   ["auto-save clears recovery", "if (book.progressRecovery && !options.confirmRecovery) return;", "", "recovery survives"],
-  ["save omits revision identity", "...(book.catalogRevision ? { catalogRevision: book.catalogRevision, chapterId: chapter.id } : {})", "", "public openChapter"]
+  ["save omits revision identity", "...(book.catalogRevision ? { catalogRevision: book.catalogRevision, chapterId: chapter.id } : {})", "", "public openChapter"],
+  ["focused controls swallow Escape", '      if (event.key === "Escape" && (state.novel.catalogOpen || state.novel.settingsOpen)) {', '      if (event.target instanceof Element && event.target.closest("input, select, textarea, button, a")) return;\n      if (event.key === "Escape" && (state.novel.catalogOpen || state.novel.settingsOpen)) {', "Escape closes reader panels"]
 ]){
   assert.equal(source.split(from).length,2);let error;try{await tests.find(t=>t.name.startsWith(prefix)).run({production:source.replace(from,to)});}catch(e){error=e;}
   assert.equal(error?.code,"ERR_ASSERTION",name);negative++;console.log(`CONTROL rejected ${name}`);

@@ -67,7 +67,65 @@ export function createShortVideoAuthorCleanup(options = {}) {
     }
   }
 
-  return { isActive: () => active, run };
+  async function runDeleteAll(item = {}, trigger = null) {
+    const secUid = String(item.secUid || item.authorSecUid || "").trim();
+    if (!secUid) return null;
+    if (active || recovery.hasPending()) {
+      showToast?.("请先等待上一项删除恢复完成");
+      return null;
+    }
+    active = true;
+    setTriggerBusy(trigger, "正在预览…");
+    try {
+      const path = `/api/short-videos/authors/${encodeURIComponent(secUid)}/delete`;
+      const proposal = await api(path);
+      if (proposal?.manager?.available !== true) {
+        throw new Error(proposal?.manager?.error || "8765 采集服务不可用，不能安全删除作者记录");
+      }
+      const preview = proposal.preview || {};
+      const confirmed = await confirmCleanup(deleteAllPrompt(preview, proposal.manager), {
+        title: "确认删除用户",
+        commitLabel: "删除用户及全部作品"
+      });
+      if (!confirmed) return null;
+      if (recovery.hasPending()) {
+        showToast?.("请先等待上一项删除恢复完成");
+        return null;
+      }
+      setTriggerBusy(trigger, "正在删除…");
+      const request = {
+        method: "POST",
+        body: {
+          totalCount: Number(preview.totalCount || 0),
+          operationId: cleanupOperationId(secUid)
+        }
+      };
+      const result = preview.totalCount > 0
+        ? await requestShortVideoDelete(api, path, request)
+        : await api(path, request);
+      if (preview.totalCount > 0) recovery.track(result);
+      if (result?.committed === false) {
+        showToast?.(shortVideoDeleteRecoveryMessage(result));
+        return result;
+      }
+      const summary = result?.payload?.authorDelete || result?.authorDelete || {};
+      if (result?.pending) {
+        showToast?.(`${shortVideoDeletePendingMessage(result)}；完成后请再次点击删除用户`);
+        return result;
+      }
+      showToast?.(deleteAllResultMessage(preview, summary));
+      await onCompleted({ mode: "delete", preview, result, summary, trigger });
+      return result;
+    } catch (error) {
+      showToast?.(error?.message || "作者删除失败");
+      return null;
+    } finally {
+      active = false;
+      clearTriggerBusy(trigger);
+    }
+  }
+
+  return { isActive: () => active, run, runDeleteAll };
 }
 
 function cleanupPrompt(preview, manager) {
@@ -90,6 +148,26 @@ function cleanupResultMessage(preview, result, summary) {
   }
   if (result?.pending) return `${shortVideoDeletePendingMessage(result)}；已取消关注并移除监听`;
   return `已保留 ${Number(preview.likedCount || 0)} 条点赞视频，删除 ${Number(preview.deleteCount || 0)} 条未点赞视频，并移除监听`;
+}
+
+function deleteAllPrompt(preview, manager) {
+  const profileCount = Number(manager?.profileCount || 0);
+  const managerText = profileCount
+    ? `删除 8765 中同一用户的 ${profileCount} 条主页记录及关联任务`
+    : "清除本地作者资料（8765 当前没有这个用户的主页记录）";
+  return [
+    `${preview.name || "未知作者"}`,
+    `删除：${Number(preview.totalCount || 0)} 个本地作品（含 ${Number(preview.likedCount || 0)} 个点赞作品、${Number(preview.galleryCount || 0)} 个图文，共 ${formatBytes(preview.totalBytes)}）`,
+    `文件夹：删除 ${Number(preview.folderCount || 0)} 个作者文件夹及其中全部内容`,
+    `数据库：${managerText}，并删除本地作者与关注记录。`,
+    "这是完整删除，不会保留点赞作品或文件夹内的其他文件；删除后无法从资料库恢复。"
+  ].join("\n\n");
+}
+
+function deleteAllResultMessage(preview, summary) {
+  const removedFolders = Number(summary?.folderCleanup?.removedCount || 0);
+  const removedProfiles = Number(summary?.removal?.removed?.length || 0);
+  return `已删除 ${preview.name || "该用户"}、${Number(preview.totalCount || 0)} 个作品、${removedFolders} 个作者文件夹和 ${removedProfiles} 条采集记录`;
 }
 
 function cleanupOperationId(secUid) {

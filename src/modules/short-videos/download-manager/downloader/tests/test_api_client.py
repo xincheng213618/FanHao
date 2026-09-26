@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import types
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -13,6 +14,29 @@ def test_default_query_uses_existing_ms_token():
     assert params["msToken"] == "token-1"
 
 
+def test_default_query_matches_user_agent_and_abogus_browser_info():
+    from utils.abogus_v2 import decode, structure_error
+
+    client = DouyinAPIClient({"msToken": "token-1"})
+    params = asyncio.run(client._default_query())
+
+    assert params["browser_version"] in client.headers["User-Agent"]
+    assert params["engine_version"] == params["browser_version"]
+    assert params["browser_platform"] == "Win32"
+    assert params["os_name"] == "Windows"
+    assert params["screen_width"] == "1920"
+    assert params["screen_height"] == "1080"
+
+    signed_url, signed_ua = client.build_signed_path(
+        "/aweme/v1/web/aweme/detail/", params
+    )
+    encoded_signature = parse_qs(urlsplit(signed_url).query)["a_bogus"][0]
+    signature = unquote(encoded_signature)
+    assert signed_ua == client.headers["User-Agent"]
+    assert structure_error(signature) is None
+    assert decode(signature)["browser_info"] == client._browser_info
+
+
 def test_build_signed_path_fallbacks_to_xbogus_when_abogus_disabled():
     client = DouyinAPIClient({"msToken": "token-1"})
     client._abogus_enabled = False
@@ -21,29 +45,76 @@ def test_build_signed_path_fallbacks_to_xbogus_when_abogus_disabled():
 
 
 def test_build_signed_path_prefers_abogus(monkeypatch):
-    class _FakeFp:
-        @staticmethod
-        def generate_fingerprint(_browser):
-            return "fp"
-
     class _FakeABogus:
-        def __init__(self, fp, user_agent):
-            self.fp = fp
+        def __init__(self, user_agent, browser_info):
             self.user_agent = user_agent
+            self.browser_info = browser_info
 
-        def generate_abogus(self, params, body=""):
-            return (f"{params}&a_bogus=fake_ab", "fake_ab", self.user_agent, body)
+        def get_value(self, params):
+            assert params == "a=1"
+            return "fake/ab="
 
     import core.api_client as api_module
 
-    monkeypatch.setattr(api_module, "BrowserFingerprintGenerator", _FakeFp)
     monkeypatch.setattr(api_module, "ABogus", _FakeABogus)
 
     client = DouyinAPIClient({"msToken": "token-1"})
     client._abogus_enabled = True
 
     signed_url, _ua = client.build_signed_path("/aweme/v1/web/aweme/detail/", {"a": 1})
-    assert "a_bogus=fake_ab" in signed_url
+    assert "a_bogus=fake%2Fab%3D" in signed_url
+
+
+def test_build_signed_request_adds_web_signature_after_abogus(monkeypatch):
+    client = DouyinAPIClient(
+        {
+            "msToken": "token-1",
+            "UIFID_TEMP": "visitor-1",
+            "s_v_web_id": "verify-1",
+        }
+    )
+    monkeypatch.setattr(
+        client,
+        "build_signed_path",
+        lambda _path, _params: (
+            "https://www.douyin.com/aweme/v1/web/aweme/detail/?aid=6383&a_bogus=bogus",
+            "test-ua",
+        ),
+    )
+    monkeypatch.setattr("utils.websign.time.time", lambda: 1_700_000_000)
+
+    signed_url, headers = client.build_signed_request(
+        "/aweme/v1/web/aweme/detail/", {"aid": "6383"}
+    )
+
+    assert signed_url.index("a_bogus=") < signed_url.index("verifyFp=")
+    assert signed_url.index("verifyFp=") < signed_url.index("uifid=")
+    assert "fp=verify-1" in signed_url
+    assert "uifid=visitor-1" in signed_url
+    assert "timestamp=1700000000" in signed_url
+    assert f"x-secsdk-web-signature={headers['x-secsdk-web-signature']}" in signed_url
+    assert headers["User-Agent"] == "test-ua"
+    assert headers["uifid"] == "visitor-1"
+    assert headers["x-secsdk-web-expire"] == "1700000000"
+
+
+def test_build_signed_request_leaves_unprotected_endpoint_unsigned(monkeypatch):
+    client = DouyinAPIClient({"UIFID_TEMP": "visitor-1", "msToken": "token-1"})
+    monkeypatch.setattr(
+        client,
+        "build_signed_path",
+        lambda _path, _params: (
+            "https://www.douyin.com/aweme/v1/web/user/profile/other/?sec_user_id=user-1",
+            "test-ua",
+        ),
+    )
+
+    signed_url, headers = client.build_signed_request(
+        "/aweme/v1/web/user/profile/other/", {"sec_user_id": "user-1"}
+    )
+
+    assert "x-secsdk-web-signature" not in signed_url
+    assert "x-secsdk-web-signature" not in headers
 
 
 def test_browser_fallback_caps_warmup_wait(monkeypatch):
@@ -431,6 +502,43 @@ class _FakeSession:
         self.closed = True
 
 
+class _FakeApiResponse:
+    def __init__(self, status: int, body: bytes, json_data=None):
+        self.status = status
+        self._body = body
+        self._json_data = json_data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def read(self):
+        return self._body
+
+    async def json(self, content_type=None):
+        if self._json_data is None:
+            raise ValueError("no JSON fixture")
+        return self._json_data
+
+
+class _FakeApiSession:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.closed = False
+        self.get_count = 0
+        self.urls = []
+
+    def get(self, url, *_args, **_kwargs):
+        self.get_count += 1
+        self.urls.append(url)
+        return self.responses.pop(0)
+
+    async def close(self):
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_resolve_short_url_returns_final_url_on_200():
     client = DouyinAPIClient({"msToken": "t"})
@@ -456,6 +564,82 @@ async def test_resolve_short_url_returns_none_on_500():
     client._session = _FakeSession(502, "https://www.douyin.com/error")
     resolved = await client.resolve_short_url("https://v.douyin.com/xyz")
     assert resolved is None
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_json_preserves_argus_403_as_antibot_error(monkeypatch):
+    client = DouyinAPIClient({"msToken": "t"})
+    client._session = _FakeApiSession(
+        _FakeApiResponse(403, b"Blocked by ArgusSecurityPlugin Uifid Not Found")
+    )
+    monkeypatch.setattr(client, "build_signed_path", lambda _path, _params: ("https://example.invalid", "ua"))
+
+    result = await client._request_json(
+        "/aweme/v1/web/aweme/detail/",
+        {"aweme_id": "123", "aid": "6383"},
+        max_retries=1,
+    )
+
+    assert result == {}
+    assert client.last_error_kind == "anti_bot"
+    assert "ArgusSecurityPlugin Uifid Not Found" in client.last_error
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_json_preserves_web_signature_query_bytes(monkeypatch):
+    client = DouyinAPIClient({"msToken": "t"})
+    detail = {"aweme_detail": {"aweme_id": "123"}, "status_code": 0}
+    session = _FakeApiSession(
+        _FakeApiResponse(200, b'{"aweme_detail":{"aweme_id":"123"}}', detail)
+    )
+    client._session = session
+    signed_url = (
+        "https://example.invalid/aweme/v1/web/aweme/detail/"
+        "?a_bogus=part%2Fpart&x-secsdk-web-signature=abc"
+    )
+    monkeypatch.setattr(client, "build_signed_path", lambda _path, _params: (signed_url, "ua"))
+
+    result = await client._request_json(
+        "/aweme/v1/web/aweme/detail/",
+        {"aweme_id": "123", "aid": "6383"},
+        max_retries=1,
+    )
+
+    assert result == detail
+    assert session.urls[0].raw_query_string == (
+        "a_bogus=part%2Fpart&x-secsdk-web-signature=abc"
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_json_retries_argus_403_with_fresh_signature(monkeypatch):
+    client = DouyinAPIClient({"msToken": "t"})
+    detail = {"aweme_detail": {"aweme_id": "123"}, "status_code": 0}
+    session = _FakeApiSession(
+        _FakeApiResponse(403, b"Blocked by ArgusSecurityPlugin Signature Not Found"),
+        _FakeApiResponse(200, b'{"aweme_detail":{"aweme_id":"123"}}', detail),
+    )
+    client._session = session
+    monkeypatch.setattr(client, "build_signed_path", lambda _path, _params: ("https://example.invalid", "ua"))
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("core.api_client.asyncio.sleep", _no_sleep)
+
+    result = await client._request_json(
+        "/aweme/v1/web/aweme/detail/",
+        {"aweme_id": "123", "aid": "6383"},
+        max_retries=2,
+    )
+
+    assert result == detail
+    assert session.get_count == 2
+    assert client.last_error == ""
+    assert client.last_error_kind == ""
     await client.close()
 
 
@@ -521,3 +705,30 @@ async def test_get_video_detail_returns_on_first_success():
     assert detail is not None
     assert detail["aweme_id"] == "456"
     assert call_count == 1  # no retry needed
+
+
+@pytest.mark.asyncio
+async def test_get_video_detail_marks_status_self_see_as_content_unavailable():
+    client = DouyinAPIClient({"msToken": "t"})
+    call_count = 0
+
+    async def _fake_request_json(path, params, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {
+            "aweme_detail": None,
+            "filter_detail": {
+                "filter_reason": "status_self_see",
+                "aweme_id": "789",
+            },
+            "status_code": 0,
+        }
+
+    client._request_json = _fake_request_json
+
+    detail = await client.get_video_detail("789")
+
+    assert detail is None
+    assert call_count == 1
+    assert client.last_error_kind == "content_unavailable"
+    assert client.last_error == "作品已不可用（作者可能已删除作品或更改可见权限）"

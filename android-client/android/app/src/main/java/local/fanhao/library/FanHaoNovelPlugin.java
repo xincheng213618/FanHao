@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -46,6 +47,9 @@ public class FanHaoNovelPlugin extends Plugin {
     DocumentsContract.Document.COLUMN_FLAGS
   };
   private static final PendingTextImportQueue<Intent> pendingTextIntents = new PendingTextImportQueue<>();
+  private Window readerWindow;
+  private int readerPreviousSystemUi;
+  private int readerPreviousCutoutMode;
 
   static void capturePendingTextIntent(Context context, Intent intent) {
     if (intent == null || pendingTextIntents.hasSeen(intent) || !shouldHandleTextIntent(context, intent)) return;
@@ -394,6 +398,18 @@ public class FanHaoNovelPlugin extends Plugin {
         Window window = getActivity().getWindow();
         View decor = window.getDecorView();
         if (immersive) {
+          if (readerWindow != window) {
+            readerWindow = window;
+            readerPreviousSystemUi = decor.getSystemUiVisibility();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+              readerPreviousCutoutMode = window.getAttributes().layoutInDisplayCutoutMode;
+            }
+          }
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            window.setAttributes(attributes);
+          }
           decor.setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
               | View.SYSTEM_UI_FLAG_FULLSCREEN
@@ -402,8 +418,14 @@ public class FanHaoNovelPlugin extends Plugin {
               | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
               | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
           );
-        } else {
-          decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        } else if (readerWindow == window) {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.layoutInDisplayCutoutMode = readerPreviousCutoutMode;
+            window.setAttributes(attributes);
+          }
+          decor.setSystemUiVisibility(readerPreviousSystemUi);
+          readerWindow = null;
         }
         JSObject result = new JSObject();
         result.put("immersive", immersive);

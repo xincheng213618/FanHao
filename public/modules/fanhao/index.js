@@ -1,5 +1,5 @@
 export { createCodePrefixPage } from "./code-prefix-page.js?v=20260724-code-prefix-pagination-03";
-export { createPeoplePage } from "./people-page.js?v=20260724-person-local-refresh-01";
+export { createPeoplePage } from "./people-page.js?v=20260919-browse-02";
 export { createPlaybackPrefetch } from "./playback-prefetch.js?v=20260717-fanhao-work-card-lifecycle-01";
 export { createRankingPage } from "./ranking-page.js?v=20260726-work-sort-01";
 export { createFanhaoState } from "./state.js?v=20260717-fanhao-people-first-paint-01";

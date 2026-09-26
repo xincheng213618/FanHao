@@ -18,13 +18,66 @@ try {
     await verifyProfilesDerivedPendingCount(browser);
     await verifyProfilesQueueStatus(browser);
     await verifyLibraryLatestFailure(browser);
+    await verifyLinksUnavailablePresentation(browser);
+    await verifyLinksDownloadProgress(browser);
     await verifyLinksResetSupersedesAppend(browser);
+    await verifyDownloadProbeClassification(browser);
   } finally {
     await browser.close();
   }
   console.log("Douyin manager latest-request browser checks passed.");
 } finally {
   await new Promise((resolve) => server.close(resolve));
+}
+
+async function verifyDownloadProbeClassification(browser) {
+  const page = await openFixture(browser);
+  try {
+    const result = await page.evaluate(async () => {
+      const { buildProbePresentation } = await import("/manager/features/downloads.js?probe-classification-fixture=1");
+      const structured = buildProbePresentation({
+        endpoint: "/aweme/v1/web/aweme/detail/",
+        transport_ok: true,
+        download_ready: false,
+        http_status: 403,
+        elapsed_ms: 80,
+        error: "HTTP 403: Blocked by ArgusSecurityPlugin Signature Not Found",
+        diagnostic: {
+          outcome: "risk_control",
+          rule: "signature.refused",
+          label: "签名参数缺失",
+          detail: "signature not found",
+          action: "更新签名实现",
+        },
+      });
+      const legacy = buildProbePresentation({
+        endpoint: "/aweme/v1/web/aweme/detail/",
+        transport_ok: true,
+        download_ready: false,
+        http_status: 403,
+        elapsed_ms: 80,
+        error: "HTTP 403: Blocked by ArgusSecurityPlugin Sign Invalid",
+      });
+      const busy = buildProbePresentation({
+        ok: false,
+        message: "自动下载正在运行，无需单独测试接口",
+      });
+      return { structured, legacy, busy };
+    });
+    assert.equal(result.structured.tone, "is-warning");
+    assert.match(result.structured.summary, /HTTP 403/);
+    assert.equal(result.structured.diagnostic.rule, "signature.refused");
+    assert.equal(result.structured.diagnostic.label, "签名参数缺失");
+    assert.match(result.structured.rawError, /ArgusSecurityPlugin/);
+    assert.equal(result.legacy.diagnostic.rule, "signature.refused");
+    assert.equal(result.legacy.diagnostic.label, "签名校验失败");
+    assert.equal(result.busy.tone, "is-warning");
+    assert.equal(result.busy.diagnostic.rule, "runtime.busy");
+    assert.equal(result.busy.diagnostic.label, "自动下载运行中");
+    assert.doesNotMatch(result.busy.summary, /连接失败/);
+  } finally {
+    await page.close();
+  }
 }
 
 async function verifyProfilesDerivedPendingCount(browser) {
@@ -263,6 +316,88 @@ async function verifyLinksResetSupersedesAppend(browser) {
     assert.equal(result.allCount, "1");
     assert.equal(result.failedCount, "1");
     assert.equal(result.toast, "", "the superseded append must not raise an error prompt");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyLinksUnavailablePresentation(browser) {
+  const page = await openFixture(browser);
+  try {
+    await page.evaluate(async () => {
+      const { createLinksFeature } = await import("/manager/features/links.js?unavailable-fixture=1");
+      const feature = createLinksFeature({
+        settings: { save: async () => {} },
+        refreshState: async () => {},
+      });
+      window.linksUnavailable = feature.refresh();
+    });
+    await waitForRequests(page, 1);
+    await settleRequest(page, 0, {
+      links: [{
+        ...linkFixture(4, "已下架图文", "failed"),
+        last_error: "作品已不可用（作者可能已删除作品或更改可见权限）：7681299406105568677",
+      }],
+      total: 1,
+      summary: { all: 1, pending: 0, failed: 1 },
+    });
+    await page.evaluate(() => window.linksUnavailable);
+
+    const result = await page.evaluate(() => ({
+      row: document.getElementById("linksBody").textContent,
+      retryExists: Boolean(document.querySelector("[data-link-retry]")),
+      deleteText: document.querySelector("[data-link-delete]")?.textContent,
+    }));
+    assert.match(result.row, /已不可用/);
+    assert.match(result.row, /作者可能已删除作品或更改可见权限；可移除此记录/);
+    assert.equal(result.retryExists, false);
+    assert.match(result.deleteText || "", /移除已不可用记录/);
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyLinksDownloadProgress(browser) {
+  const page = await openFixture(browser);
+  try {
+    await page.evaluate(async () => {
+      const { createLinksFeature } = await import("/manager/features/links.js?download-progress-fixture=1");
+      const feature = createLinksFeature({
+        settings: { save: async () => {} },
+        refreshState: async () => {},
+      });
+      window.linksProgressFeature = feature;
+      window.linksProgressLoad = feature.refresh();
+    });
+    await waitForRequests(page, 1);
+    await settleRequest(page, 0, {
+      links: [linkFixture(5, "慢速视频", "downloading")],
+      total: 1,
+      summary: { all: 1, downloading: 1 },
+    });
+    await page.evaluate(() => window.linksProgressLoad);
+    await page.evaluate(() => window.linksProgressFeature.renderRuntime({
+      download: {
+        items: [{
+          aweme_id: "fixture-5",
+          phase: "下载视频",
+          elapsed_seconds: 42,
+          bytes_downloaded: 5 * 1024 * 1024,
+          bytes_total: 10 * 1024 * 1024,
+          speed_bytes_per_second: 250000,
+          current_file: "fixture-5.mp4",
+        }],
+      },
+    }));
+
+    const result = await page.evaluate(() => ({
+      text: document.querySelector("[data-download-progress]")?.textContent,
+      title: document.querySelector("[data-download-progress]")?.title,
+    }));
+    assert.match(result.text || "", /下载视频 · 00:42/);
+    assert.match(result.text || "", /5\.0 MB \/ 10\.0 MB · 50%/);
+    assert.match(result.text || "", /2\.0 Mbps/);
+    assert.equal(result.title, "fixture-5.mp4");
   } finally {
     await page.close();
   }

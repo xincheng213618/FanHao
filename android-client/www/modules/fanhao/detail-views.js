@@ -1,18 +1,18 @@
-import { createAndroidVideoSection } from "../../js/android-player.js?v=20260721-fanhao-media-relocate-16";
-import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
+import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-0f97d6765d71";
+import { cacheAgeText } from "../../js/cache.js?v=assets-0f97d6765d71";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
-import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
-import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260830-fanhao-single-category-28";
-import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
-import { mergePersonIdentity } from "./features/people/person-portrait.js?v=20260830-western-portrait-33";
-import { createWorkActions } from "./features/works/actions.js?v=20260812-android-work-move-02";
-import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46";
-import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=20260812-android-work-move-02";
-import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
+import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-0f97d6765d71";
+import { getWorkSource } from "../../js/work-source.js?v=assets-0f97d6765d71";
+import { personDetailPath } from "./features/people/detail-request.js?v=assets-0f97d6765d71";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-0f97d6765d71";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-0f97d6765d71";
+import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-0f97d6765d71";
+import { createWorkActions } from "./features/works/actions.js?v=assets-0f97d6765d71";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-0f97d6765d71";
+import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-0f97d6765d71";
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-0f97d6765d71";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 export function createDetailViews(context) {

@@ -8,8 +8,8 @@
     <link rel="stylesheet" href="/styles/auth.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/controls.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/profiles.css?v=20260825-profile-history-01" />
-    <link rel="stylesheet" href="/styles/home.css?v=20260809-home-simplify-01" />
-    <link rel="stylesheet" href="/styles/links.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/home.css?v=20260917-api-probe-02" />
+    <link rel="stylesheet" href="/styles/links.css?v=20260925-download-progress-01" />
     <link rel="stylesheet" href="/styles/library.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/activity.css?v=20260824-task-list-01" />
     <link rel="stylesheet" href="/styles/responsive.css?v=20260809-home-simplify-01" />
@@ -60,11 +60,13 @@
                 <div class="muted">程序启动后持续监听；采集到新作品就直接下载，无需手动开关。</div>
               </div>
               <div class="actions download-actions">
-                <button id="resumeDownloads" hidden>恢复自动下载</button>
+                <button id="testDownloadApi" hidden>测试作品接口</button>
+                <button id="resumeDownloads" class="primary" hidden>恢复自动下载</button>
                 <button id="openLibraryHome">查看已下载</button>
                 <button id="resetFailedCurrent">当前失败转待下载</button>
               </div>
             </div>
+            <div id="downloadProbeResult" class="download-probe-result" role="status" aria-live="polite" hidden></div>
             <div id="downloadGuard" class="download-guard" role="alert" hidden>
               <div id="downloadGuardTitle" class="download-guard-title">下载保护已暂停</div>
               <div id="downloadGuardReason"></div>
@@ -392,6 +394,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260902-extract-reset-01"></script>
+    <script type="module" src="/app.js?v=20260925-download-progress-01"></script>
   </body>
 </html>

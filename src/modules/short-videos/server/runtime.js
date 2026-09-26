@@ -45,7 +45,7 @@ const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
 const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v5-action-baselines";
 const SHORT_VIDEO_LIST_STABLE_QUERY_ATTEMPTS = 3;
 const SHORT_VIDEO_SMOOTH_RECENT_JOB_LIMIT = 12;
-const STORE_MEDIA_DELETE_METHODS = new Set(["cleanupAuthorUnliked", "deleteVideo", "deleteVideoGroup", "deleteVideos"]);
+const STORE_MEDIA_DELETE_METHODS = new Set(["cleanupAuthorUnliked", "deleteAuthorAllWorks", "deleteVideo", "deleteVideoGroup", "deleteVideos"]);
 
 export function createShortVideosRuntime({
   dbPath,

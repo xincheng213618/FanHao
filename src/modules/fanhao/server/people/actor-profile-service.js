@@ -1,4 +1,5 @@
 import { hasActorProfilePublicationReadModel } from "./actor-profile-publication-schema.js";
+import { canonicalPersonId, hasIdentityTable } from "./person-identity.js";
 
 const PUBLISHED_PROFILE_ROWS_SQL = `
   WITH avatar_candidates AS (
@@ -197,6 +198,17 @@ export function createActorProfileService({
       for (const row of db.prepare(query).all()) {
         rows.set(String(row.core_person_id), { ...row, person_id: String(row.core_person_id) });
       }
+      if (hasIdentityTable(db, "person_redirects")) {
+        for (const redirect of db.prepare("SELECT source_id, target_id FROM person_redirects ORDER BY source_id").all()) {
+          const source = rows.get(String(redirect.source_id));
+          const target = rows.get(canonicalPersonId(db, redirect.target_id));
+          if (target && !target.avatar_candidate_present && source?.avatar_candidate_present) {
+            for (const [key, value] of Object.entries(source)) if (key.startsWith("avatar_")) target[key] = value;
+            target.avatar_owner_id = source.avatar_owner_id || source.core_person_id;
+          }
+        }
+        for (const [id] of rows) if (canonicalPersonId(db, id) !== id) rows.delete(id);
+      }
     } catch (error) {
       console.warn("[core-actor-profile]", error.message);
       if (actorProfileCache?.rows) return actorProfileCache.rows;
@@ -207,7 +219,7 @@ export function createActorProfileService({
   }
 
   function row(personId) {
-    return rowsById().get(personId) || null;
+    return rowsById().get(canonicalPersonId(getCoreDb(), personId)) || null;
   }
 
   function avatarForProfileRow(profileRow) {
@@ -215,7 +227,7 @@ export function createActorProfileService({
     if (!profileRow.avatar_candidate_present) return null;
     const avatarUrl = coreImageUrl?.({
       id: profileRow.avatar_image_id,
-      owner_id: profileRow.core_person_id,
+      owner_id: profileRow.avatar_owner_id || profileRow.core_person_id,
       remote_url: profileRow.avatar_url,
       local_path: profileRow.avatar_local_path,
       source: profileRow.avatar_source,

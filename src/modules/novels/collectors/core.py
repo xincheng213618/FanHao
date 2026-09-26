@@ -68,6 +68,49 @@ class CollectionError(RuntimeError):
     """A user-facing collection failure."""
 
 
+class ReportingRetry(Retry):
+    """Retry policy that reports each retry without exposing request secrets."""
+
+    def __init__(self, *args, retry_reporter=None, retry_total: int | None = None, **kwargs):
+        self.retry_reporter = retry_reporter
+        self.retry_total = int(retry_total if retry_total is not None else (kwargs.get("total") or 0))
+        super().__init__(*args, **kwargs)
+
+    def new(self, **kwargs):
+        kwargs["retry_reporter"] = self.retry_reporter
+        kwargs["retry_total"] = self.retry_total
+        return super().new(**kwargs)
+
+    def increment(
+        self,
+        method=None,
+        url=None,
+        response=None,
+        error=None,
+        _pool=None,
+        _stacktrace=None,
+    ):
+        retry = super().increment(
+            method=method,
+            url=url,
+            response=response,
+            error=error,
+            _pool=_pool,
+            _stacktrace=_stacktrace,
+        )
+        if self.retry_reporter:
+            if response is not None or error is not None:
+                try:
+                    self.retry_reporter(
+                        len(retry.history),
+                        self.retry_total,
+                        retry_reason(response=response, error=error),
+                    )
+                except Exception:
+                    pass
+        return retry
+
+
 @dataclass
 class Chapter:
     title: str
@@ -97,7 +140,7 @@ class CollectorContext:
         self.emit = emit
         self.timeout = max(3.0, float(config.get("timeoutMs", 30000)) / 1000.0)
         self.delay = max(0.0, float(config.get("delayMs", 800)) / 1000.0)
-        self.session = build_session(config)
+        self.session = build_session(config, retry_reporter=self._report_retry)
         self.checkpoint_path = Path(checkpoint_path).resolve() if checkpoint_path else None
         self.checkpoint_identity = {
             str(key): str(value or "")
@@ -105,6 +148,9 @@ class CollectorContext:
         }
         self._checkpoint_chapters: dict[str, dict[str, Any]] = {}
         self._load_checkpoint()
+
+    def _report_retry(self, attempt: int, total: int, reason: str) -> None:
+        self.warning(f"网页请求失败（{reason}），正在重试（{attempt}/{total}）")
 
     def fetch(self, url: str) -> str:
         target = normalize_http_url(url)
@@ -256,7 +302,7 @@ class CollectorContext:
         os.replace(temporary, self.checkpoint_path)
 
 
-def build_session(config: dict[str, Any]) -> requests.Session:
+def build_session(config: dict[str, Any], retry_reporter=None) -> requests.Session:
     session = requests.Session()
     session.trust_env = bool(config.get("useEnvProxy", False))
     headers = {
@@ -274,19 +320,33 @@ def build_session(config: dict[str, Any]) -> requests.Session:
     if cookie:
         headers["Cookie"] = cookie
     session.headers.update(headers)
-    retry = Retry(
-        total=3,
+    retry_total = 3
+    retry = ReportingRetry(
+        total=retry_total,
         connect=3,
         read=3,
         status=3,
         backoff_factor=0.7,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=("GET",),
+        retry_reporter=retry_reporter,
+        retry_total=retry_total,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+def retry_reason(*, response=None, error=None) -> str:
+    if response is not None:
+        return f"HTTP {getattr(response, 'status', '错误')}"
+    name = error.__class__.__name__ if error is not None else "网络错误"
+    if name == "ConnectTimeoutError":
+        return "连接超时"
+    if name == "ReadTimeoutError":
+        return "读取超时"
+    return name
 
 
 def normalize_http_url(value: str, base_url: str = "") -> str:

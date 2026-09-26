@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -84,15 +85,33 @@ def stable_id(source_path: Path) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:20]
 
 
-def iter_txt_files(roots: Iterable[Path], limit: int = 0) -> list[tuple[Path, Path]]:
+def iter_txt_files(
+    roots: Iterable[Path], limit: int = 0, *, complete_roots: list[Path] | None = None
+) -> list[tuple[Path, Path]]:
     files: list[tuple[Path, Path]] = []
     for root in roots:
-        if not root.exists():
-            print(f"[warn] root not found: {root}", file=sys.stderr)
+        if not root.is_dir():
+            print(f"[warn] root unavailable; existing books retained: {root}", file=sys.stderr)
             continue
-        for path in root.rglob("*.txt"):
-            if path.is_file():
-                files.append((root, path))
+        errors: list[OSError] = []
+        # Unlike rglob, walk's error callback makes an incomplete enumeration
+        # explicit. An inaccessible subtree must never imply deleted books.
+        for directory, _subdirectories, names in os.walk(root, onerror=errors.append):
+            for name in names:
+                path = Path(directory) / name
+                if path.suffix.lower() != ".txt":
+                    continue
+                try:
+                    if path.is_file():
+                        files.append((root, path))
+                    else:
+                        errors.append(OSError(f"TXT file unavailable: {path}"))
+                except OSError as error:
+                    errors.append(error)
+        if errors:
+            print(f"[warn] incomplete root; existing books retained: {root}", file=sys.stderr)
+        elif limit <= 0 and complete_roots is not None:
+            complete_roots.append(root.resolve())
     files.sort(key=lambda item: str(item[1]).lower())
     return files[:limit] if limit and limit > 0 else files
 
@@ -414,14 +433,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord]) -> None:
+def write_records(
+    db_path: Path, roots: list[Path], records: Iterable[BookRecord], *, complete_roots: Iterable[Path] = ()
+) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
         ensure_schema(conn)
         print("[db] schema ready", flush=True)
         conn.execute("BEGIN IMMEDIATE")
-        existing_ids = {row[0] for row in conn.execute("SELECT id FROM novel_books")}
+        requested_roots = {root.resolve() for root in roots}
+        cleanup_roots = [root.resolve() for root in complete_roots if root.is_dir() and root.resolve() in requested_roots]
+        # Only an explicitly completed filesystem scan can retire missing files.
+        # Uploads and collected books belong to their own source lifecycle.
+        existing_ids = set()
+        for book_id, source_path in conn.execute("SELECT id, source_path FROM novel_books"):
+            local_path = Path(source_path)
+            if local_path.is_absolute() and any(local_path.resolve().is_relative_to(root) for root in cleanup_roots):
+                existing_ids.add(book_id)
         seen = set()
         insert_book = conn.cursor()
         insert_chapter = conn.cursor()
@@ -646,7 +675,8 @@ def main() -> int:
         return 0
 
     roots = [Path(item) for item in (args.roots or [str(root) for root in DEFAULT_ROOTS])]
-    files = iter_txt_files(roots, args.limit)
+    complete_roots: list[Path] = []
+    files = iter_txt_files(roots, args.limit, complete_roots=complete_roots)
     counters = {"books": 0, "parsed": 0, "errors": 0, "chapters": 0, "chars": 0, "bytes": 0}
 
     def scan_records() -> Iterable[BookRecord]:
@@ -668,7 +698,7 @@ def main() -> int:
         for _record in records:
             pass
     else:
-        write_records(Path(args.db), roots, records)
+        write_records(Path(args.db), roots, records, complete_roots=complete_roots)
 
     summary = {
         "ok": True,

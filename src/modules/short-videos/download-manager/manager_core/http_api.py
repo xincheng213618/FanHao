@@ -23,6 +23,7 @@ from .collection_scheduler import (
     MIN_AUTOMATIC_COLLECTION_INTERVAL_HOURS,
     automatic_collection_scheduler,
 )
+from .connectivity import probe_download_api
 from .config import BASE_DIR, DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_OUTPUT_DIR, FANHAO_PUBLIC_DIR, MAX_CONCURRENCY, STATIC_DIR, TEST_PROFILE_URL
 from .database import add_event, db, set_setting, setting
 from .domain_manifest import profile_output_dir
@@ -102,6 +103,8 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             return self.send_json({"ok": True, "paths": {"base": str(BASE_DIR)}})
+        if parsed.path == "/api/download/probe":
+            return self.send_json(probe_download_api())
         if parsed.path == "/api/state":
             return self.send_json(get_state())
         if parsed.path == "/api/status":

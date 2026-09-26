@@ -2,11 +2,17 @@ export function createToolViews(context) {
   const {
     els,
     setActiveBottom,
-    openSettings = () => {}
+    openSettings = () => {},
+    getActiveUrl = () => "",
+    getComputerControlStatus = async () => ({ actions: [] }),
+    confirmAction = async ({ message }) => window.confirm(message || "确认继续吗？"),
+    sleepComputer = async () => { throw new Error("当前版本未连接电脑控制服务。"); }
   } = context;
   let explorationView = null;
   // The native activity owns one camera/session at a time, even across page renders.
   let explorationBusy = false;
+  let computerControlView = null;
+  let computerControlBusy = false;
 
   function renderTools() {
     setActiveBottom("tools");
@@ -17,10 +23,119 @@ export function createToolViews(context) {
     els.viewContent.replaceChildren(
       createProfileHeader(),
       createSettingsSection(),
-      createVisionExplorationSection(),
-      createGamesSection()
+      createComputerControlSection(),
+      createLocalToolsSection()
     );
+    void refreshComputerControlAccess();
     void refreshExplorationSessions();
+  }
+
+  function createLocalToolsSection() {
+    const group = document.createElement("details");
+    group.className = "tools-local-group";
+    const summary = document.createElement("summary");
+    summary.textContent = "本机工具与实验";
+    const description = document.createElement("span");
+    description.textContent = "证卡扫描、人脸验证与小游戏";
+    summary.append(description);
+    group.append(summary, createVisionExplorationSection(), createGamesSection());
+    return group;
+  }
+
+  function createComputerControlSection() {
+    const section = document.createElement("section");
+    section.className = "tools-native-section computer-control-section";
+    section.hidden = true;
+    const view = { section, button: null, detail: null, sourceUrl: getActiveUrl(), allowed: false, accessRequest: 0 };
+    computerControlView = view;
+
+    const head = document.createElement("div");
+    head.className = "tools-section-head";
+    const title = document.createElement("strong");
+    title.textContent = "电脑控制";
+    const meta = document.createElement("span");
+    meta.textContent = "仅本机或局域网";
+    head.append(title, meta);
+
+    const list = document.createElement("div");
+    list.className = "tools-native-list";
+    const button = createNativeRow({
+      icon: "sleep",
+      title: "休眠电脑",
+      detail: "让运行 FanHao 的电脑进入休眠",
+      onOpen: () => { void requestComputerSleep(view); }
+    });
+    view.button = button;
+    view.detail = button.querySelector("small");
+    button.disabled = computerControlBusy;
+    button.setAttribute("aria-busy", String(computerControlBusy));
+    list.append(button);
+    section.append(head, list);
+    return section;
+  }
+
+  async function refreshComputerControlAccess() {
+    const view = computerControlView;
+    if (!view?.section.isConnected) return;
+    const request = ++view.accessRequest;
+    view.sourceUrl = getActiveUrl();
+    view.allowed = false;
+    view.section.hidden = true;
+    view.button.disabled = true;
+    try {
+      // This uncached GET uses the same server-side network/admin gate as POST.
+      const status = await getComputerControlStatus(view.sourceUrl);
+      if (!isComputerControlViewActive(view) || request !== view.accessRequest) return;
+      view.allowed = status?.ok === true && Array.isArray(status.actions) && status.actions.some(action => action.id === "sleep");
+      view.section.hidden = !view.allowed;
+      view.button.disabled = computerControlBusy || !view.allowed;
+    } catch {
+      // Unknown, offline and forbidden connections never expose host controls.
+    }
+  }
+
+  async function requestComputerSleep(view) {
+    if (computerControlBusy || !view.allowed || !isComputerControlViewActive(view)) return;
+    const sourceUrl = view.sourceUrl;
+    const accessRequest = view.accessRequest;
+    setComputerControlBusy(true);
+    try {
+      const confirmed = await confirmAction({
+        title: "让电脑休眠？",
+        message: "将让当前连接的 FanHao 主机进入休眠。休眠后手机会暂时无法连接，确定继续吗？",
+        confirmLabel: "立即休眠",
+        danger: false
+      });
+      if (!confirmed) return;
+      if (!view.allowed || !isComputerControlViewActive(view) || view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
+      updateComputerControlDetail(view, "正在发送休眠指令…", "busy");
+      const result = await sleepComputer(sourceUrl);
+      if (view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
+      updateComputerControlDetail(view, result?.message || "休眠指令已发送，电脑即将进入休眠", "success");
+    } catch (error) {
+      if (view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
+      updateComputerControlDetail(view, `休眠失败：${error?.message || "请确认手机与电脑在同一局域网"}`, "error");
+    } finally {
+      setComputerControlBusy(false);
+    }
+  }
+
+  function isComputerControlViewActive(view) {
+    return view === computerControlView && Boolean(view?.section.isConnected) && view.sourceUrl === getActiveUrl();
+  }
+
+  function setComputerControlBusy(busy) {
+    computerControlBusy = busy;
+    const view = computerControlView;
+    if (!isComputerControlViewActive(view)) return;
+    view.button.disabled = busy || !view.allowed;
+    view.button.setAttribute("aria-busy", String(busy));
+  }
+
+  function updateComputerControlDetail(view, message, state) {
+    if (!isComputerControlViewActive(view) || !view.detail) return;
+    view.detail.textContent = message;
+    view.detail.dataset.state = state;
   }
 
   function createProfileHeader() {
@@ -207,6 +322,7 @@ export function createToolViews(context) {
       account: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg>',
       settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.6-1.4.9-1.9-2.1-2.1-1.9.9-1.4-.6-.7-2h-3l-.7 2-1.4.6-1.9-.9-2.1 2.1.9 1.9-.6 1.4-2 .7v3l2 .7.6 1.4-.9 1.9 2.1 2.1 1.9-.9 1.4.6.7 2h3l.7-2 1.4-.6 1.9.9 2.1-2.1-.9-1.9.6-1.4z"/></svg>',
       storage: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6m-15 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/></svg>',
+      sleep: '<svg viewBox="0 0 24 24"><path d="M20 15.2A8 8 0 0 1 8.8 4a8 8 0 1 0 11.2 11.2z"/></svg>',
       document: '<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5"/><circle cx="9" cy="11" r="2"/><path d="M13 10h4m-4 3h4m-9 3h9"/></svg>',
       face: '<svg viewBox="0 0 24 24"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3m12 4h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="11" r="4"/><path d="M10.5 10h.1m2.8 0h.1m-3.2 3c1 .8 2.4.8 3.4 0"/></svg>',
       game: '<svg viewBox="0 0 24 24"><path d="M7 8h10c2.2 0 4 1.8 4 4v3.5c0 2-2.3 3.2-3.9 2l-2.1-1.6H9l-2.1 1.6c-1.6 1.2-3.9 0-3.9-2V12c0-2.2 1.8-4 4-4z"/><path d="M8 11v4m-2-2h4m6-1h.1m2 2h.1"/></svg>',
@@ -446,6 +562,7 @@ export function createToolViews(context) {
   }
 
   return {
-    renderTools
+    renderTools,
+    refreshComputerControlAccess
   };
 }

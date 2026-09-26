@@ -189,6 +189,11 @@ try {
   const initial = service.snapshot();
   assert.equal(initial.adapters.length, 3, "three built-in adapters must be available");
   assert.equal(initial.credentials.alicesw.configured, true);
+  assert.equal(
+    initial.adapters.find((adapter) => adapter.id === "alicesw")?.config?.useEnvProxy,
+    true,
+    "AliceSW collection must inherit the local proxy environment"
+  );
   assert.doesNotMatch(JSON.stringify(initial), /fixture-session/, "collection snapshot must not expose Cookie values");
 
   const adapter = service.createAdapter({

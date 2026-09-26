@@ -15,6 +15,8 @@ export function createImageReaderCacheService({
   let inventoryBytes = 0;
   let cleanupPending = false;
   let cleanupActive = false;
+  let cleanupTimer = null;
+  let cleanupInterval = null;
 
   function collectEntries() {
     const root = path.resolve(rootDir);
@@ -146,7 +148,8 @@ export function createImageReaderCacheService({
   function scheduleCleanup() {
     if (cleanupPending) return;
     cleanupPending = true;
-    setTimeout(() => {
+    cleanupTimer = setTimeout(() => {
+      cleanupTimer = null;
       cleanupPending = false;
       try {
         cleanup();
@@ -157,13 +160,15 @@ export function createImageReaderCacheService({
   }
 
   function startCleanupTimer() {
-    setInterval(() => {
+    if (cleanupInterval) return;
+    cleanupInterval = setInterval(() => {
       try {
         cleanup({ refresh: true });
       } catch (error) {
         warn("[image-reader-cache-cleanup]", error.message || error);
       }
-    }, cleanupIntervalMs).unref?.();
+    }, cleanupIntervalMs);
+    cleanupInterval.unref?.();
     scheduleCleanup();
   }
 
@@ -194,6 +199,13 @@ export function createImageReaderCacheService({
     rootDir,
     scheduleCleanup,
     startCleanupTimer,
+    stop() {
+      clearInterval(cleanupInterval);
+      clearTimeout(cleanupTimer);
+      cleanupInterval = null;
+      cleanupTimer = null;
+      cleanupPending = false;
+    },
     status,
     touch
   };

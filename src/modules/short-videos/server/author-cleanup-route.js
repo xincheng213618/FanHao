@@ -1,22 +1,31 @@
 import { sendShortVideoPublicError } from "./public-errors.js";
 
-const CLEANUP_ROUTE = /^\/api\/short-videos\/authors\/([^/]+)\/cleanup$/;
+const CLEANUP_ROUTE = /^\/api\/short-videos\/authors\/([^/]+)\/(cleanup|delete)$/;
 
 export async function routeShortVideoAuthorCleanup(options) {
   const { req, res, url, store, readJsonBody, requireLocalAdmin, sendJson, downloadManagerRequest, onMutation } = options;
   const match = CLEANUP_ROUTE.exec(url.pathname);
   if (!match || !["GET", "POST"].includes(req.method)) return false;
+  const deleteAll = match[2] === "delete";
   if (req.method === "POST" && !requireLocalAdmin(req, res)) return true;
   try {
     const secUid = decodeURIComponent(match[1]);
-    const preview = store.authorCleanupPreview(secUid);
-    const manager = await managerProfiles(downloadManagerRequest, secUid);
+    const preview = deleteAll ? store.authorDeletePreview(secUid) : store.authorCleanupPreview(secUid);
+    const manager = await managerProfiles(downloadManagerRequest, secUid, { allTabs: deleteAll });
     if (req.method === "GET") {
-      sendJson(res, 200, { ok: true, preview, manager: publicManagerState(manager) });
+      sendJson(res, 200, { ok: true, mode: deleteAll ? "delete" : "cleanup", preview, manager: publicManagerState(manager) });
       return true;
     }
-    if (!manager.available) throw publicError("8765 采集服务不可用，已取消清理", 503, "SHORT_VIDEO_AUTHOR_CLEANUP_MANAGER_UNAVAILABLE");
+    if (!manager.available) throw publicError(
+      deleteAll ? "8765 采集服务不可用，已取消删除" : "8765 采集服务不可用，已取消清理",
+      503,
+      deleteAll ? "SHORT_VIDEO_AUTHOR_DELETE_MANAGER_UNAVAILABLE" : "SHORT_VIDEO_AUTHOR_CLEANUP_MANAGER_UNAVAILABLE"
+    );
     const body = await readJsonBody(req);
+    if (deleteAll) {
+      await deleteAuthor({ body, downloadManagerRequest, manager, onMutation, res, secUid, sendJson, store });
+      return true;
+    }
     const cleanup = await store.cleanupAuthorUnliked(secUid, {
       deleteCount: body?.deleteCount,
       likedCount: body?.likedCount,
@@ -43,9 +52,51 @@ export async function routeShortVideoAuthorCleanup(options) {
     }
     sendJson(res, deletionHttpStatus(deletion), { ...deletion, authorCleanup });
   } catch (error) {
-    sendShortVideoPublicError(res, sendJson, error, "作者清理失败", { includeDetails: true });
+    sendShortVideoPublicError(res, sendJson, error, deleteAll ? "作者删除失败" : "作者清理失败", { includeDetails: true });
   }
   return true;
+}
+
+async function deleteAuthor(options) {
+  const { body, downloadManagerRequest, manager, onMutation, res, secUid, sendJson, store } = options;
+  const authorDelete = await store.deleteAuthorAllWorks(secUid, {
+    totalCount: body?.totalCount,
+    operationId: String(body?.operationId || "").trim()
+  });
+  const deletion = authorDelete.deletion;
+  if (deletion && (deletion.logicalDeleteCommitted !== true || deletion.physicalCleanupComplete !== true)) {
+    sendJson(res, deletionHttpStatus(deletion), {
+      ...deletion,
+      authorDelete: deleteSummary(authorDelete, manager, false)
+    });
+    return;
+  }
+  const removal = await removeManagerProfiles(downloadManagerRequest, manager.profiles);
+  if (removal.failed.length) {
+    sendJson(res, 502, {
+      ok: false,
+      accepted: false,
+      pending: false,
+      status: "manager_cleanup_failed",
+      message: removal.failed[0].message || "8765 作者记录删除失败，请重试",
+      authorDelete: { ...deleteSummary(authorDelete, manager, false), removal }
+    });
+    return;
+  }
+  const record = store.deleteAuthorRecord(secUid);
+  onMutation?.();
+  const summary = { ...deleteSummary(authorDelete, manager, true), removal, record };
+  if (!deletion) {
+    sendJson(res, 200, {
+      ok: true,
+      accepted: true,
+      pending: false,
+      status: "author_deleted",
+      authorDelete: summary
+    });
+    return;
+  }
+  sendJson(res, 200, { ...deletion, authorDelete: summary });
 }
 
 function cancelAuthorFollow(store, secUid) {
@@ -56,12 +107,13 @@ function cancelAuthorFollow(store, secUid) {
   }
 }
 
-async function managerProfiles(request, secUid) {
+async function managerProfiles(request, secUid, options = {}) {
   try {
     const params = new URLSearchParams({ scope: "all", q: secUid, limit: "100" });
     const payload = await request(`/api/profiles?${params}`);
     const profiles = (Array.isArray(payload?.profiles) ? payload.profiles : [])
-      .filter((profile) => String(profile?.sec_uid || "").trim() === secUid && String(profile?.tab || "post") === "post");
+      .filter((profile) => String(profile?.sec_uid || "").trim() === secUid
+        && (options.allTabs || String(profile?.tab || "post") === "post"));
     return { available: true, profiles };
   } catch (error) {
     return { available: false, profiles: [], error: String(error?.message || "8765 采集服务不可用") };
@@ -96,6 +148,15 @@ function cleanupSummary(cleanup, manager, monitoringRemoved) {
   return {
     preview: cleanup.preview,
     monitoringRemoved,
+    managerProfiles: manager.profiles.map((profile) => Number(profile.id || 0))
+  };
+}
+
+function deleteSummary(authorDelete, manager, recordsRemoved) {
+  return {
+    preview: authorDelete.preview,
+    folderCleanup: authorDelete.folderCleanup,
+    recordsRemoved,
     managerProfiles: manager.profiles.map((profile) => Number(profile.id || 0))
   };
 }

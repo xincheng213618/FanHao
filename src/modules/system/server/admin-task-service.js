@@ -41,6 +41,7 @@ function commandPreview(command, args) {
 }
 
 export function createAdminTaskService({
+  prepareProcess = (value) => value,
   cwd,
   ensureDataDir,
   historyLimit,
@@ -151,6 +152,9 @@ export function createAdminTaskService({
   }
 
   function startProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone }) {
+    const preparedProcess = prepareProcess({ command, args });
+    command = preparedProcess.command;
+    args = preparedProcess.args;
     const task = {
       id: `task_${++seq}`,
       type,
@@ -176,7 +180,7 @@ export function createAdminTaskService({
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
+      env: { ...process.env, ...preparedProcess.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
     });
     task.child = child;
     task.pid = child.pid || null;

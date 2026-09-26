@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260718-photo-gesture-03";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
+import { fetchJson } from "../../js/api.js?v=assets-0f97d6765d71";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-0f97d6765d71";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-0f97d6765d71";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
 import { absoluteUrl, loadPreviewImage } from "../../js/image.js";
@@ -815,7 +815,8 @@ export function createChannelViews(context) {
       frame.setAttribute("aria-hidden", "true");
       const thumb = document.createElement("div");
       thumb.className = "channel-thumb";
-      thumb.textContent = "暂无封面";
+      thumb.textContent = item.coverUrl ? "封面加载中" : "暂无封面";
+      if (item.coverUrl) thumb.dataset.imageErrorText = "封面加载失败";
       frame.append(thumb);
       if (item.coverUrl) loadChannelPreviewImage(thumb, absoluteUrl(getActiveUrl(), item.coverUrl), mode, options.index);
       if (presentation.rating) {

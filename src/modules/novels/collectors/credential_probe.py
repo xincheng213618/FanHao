@@ -36,7 +36,7 @@ def probe(cookie_file: Path, url: str) -> dict[str, Any]:
             "cookieFile": str(cookie_file.resolve()),
             "delayMs": 0,
             "timeoutMs": 30000,
-            "useEnvProxy": False,
+            "useEnvProxy": True,
         },
         lambda *_args, **_kwargs: None,
     )

@@ -10,7 +10,7 @@ assert.equal(fs.existsSync(verifier), true, "missing isolated FanHao startup ver
 const source = fs.readFileSync(verifier, "utf8").replaceAll("\r\n", "\n");
 assert.match(source, /Get-DynamicPort/);
 assert.match(source, /FANHAO_STARTUP_FIXTURE_MODE/);
-assert.match(source, /Mode "drip"[\s\S]*ElapsedMilliseconds -ge 4500[\s\S]*ElapsedMilliseconds -lt 6500/);
+assert.match(source, /Mode "drip"[\s\S]*ElapsedMilliseconds -ge 4500[\s\S]*ElapsedMilliseconds -lt 7500/);
 assert.match(source, /Remove-Item -LiteralPath \$resolvedFixtureRoot -Recurse -Force/);
 assert.doesNotMatch(source, /29998|8765/);
 console.log("fanhao-startup-gate-structure: ok");

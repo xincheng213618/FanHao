@@ -107,13 +107,14 @@ test("failed empty local shelf says unknown, never claims empty library", async 
   h.books.clear(); h.api.__test.listState.source = "local";
   const wait = h.queueListRead(); const pending = h.api.__test.renderNovelCollection();
   wait.reject(new Error("synthetic failure")); await settle();
-  h.fetches.at(-1).wait.resolve({ books: [], total: 0 }); await pending;
+  await pending;
+  assert.equal(h.fetches.length, 0, "the offline shelf must not depend on remote availability");
   assert(card(h)); assert(h.els.viewMeta.textContent.includes("数量未知"));
   assert(!h.els.viewContent.textContent.includes("暂时没有小说"));
   assert(!h.els.viewMeta.textContent.includes("0 本"));
 });
 test("list retry is single-flight and a later remote response uses retried summaries", async (h) => {
-  h.api.__test.listState.source = "local";
+  h.api.__test.listState.source = "all";
   const first = h.queueListRead(); const pending = h.api.__test.renderNovelCollection();
   first.reject(new Error("first failure")); await settle();
   const retry = h.queueListRead(); const trigger = button(h, "重试读取"); trigger.click(); trigger.click();

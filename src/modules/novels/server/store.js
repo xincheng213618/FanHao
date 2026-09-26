@@ -682,7 +682,11 @@ export function createNovelStore(options = {}) {
 
 function ensureSchema(db) {
   const existingIdentity = validateExistingLibraryMetadata(db);
-  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
+  // A current library needs no DDL or writer lock just to read a chapter.
+  // Keep checking each newly opened connection so external upgrades are seen.
+  if (existingIdentity && Number(metaValue(db, "schema_version")) === 5) return;
+  db.exec("PRAGMA journal_mode = WAL");
   inTransaction(db, "BEGIN IMMEDIATE", () => {
   validateExistingLibraryMetadata(db); // The writer lock may have waited behind an upgrade.
   db.exec(`
@@ -801,7 +805,12 @@ function inTransaction(database, begin, callback) {
 }
 
 function inReadSnapshot(database, callback) {
-  return inTransaction(database, "BEGIN", callback);
+  return inTransaction(database, "BEGIN", () => {
+    // Validate within the same snapshot as the response, including an upgrade
+    // committed between opening the connection and beginning this transaction.
+    validateExistingLibraryMetadata(database);
+    return callback(database);
+  });
 }
 
 function checkBookPreconditions(book, options) {

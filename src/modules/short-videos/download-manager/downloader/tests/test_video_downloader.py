@@ -101,6 +101,45 @@ async def test_video_downloader_reports_item_progress(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_kind", "last_error", "expected"),
+    [
+        (
+            "content_unavailable",
+            "作品已不可用（作者可能已删除作品或更改可见权限）",
+            "作品已不可用（作者可能已删除作品或更改可见权限）：123",
+        ),
+        (
+            "anti_bot",
+            "HTTP 403: Blocked by ArgusSecurityPlugin Uifid Not Found",
+            "详情接口被抖音风控拦截，稍后自动重试：123",
+        ),
+    ],
+)
+async def test_video_downloader_distinguishes_unavailable_and_antibot(
+    tmp_path, monkeypatch, error_kind, last_error, expected
+):
+    downloader, api_client = _build_downloader(tmp_path)
+
+    async def _fake_should_download(self, _aweme_id):
+        return True
+
+    async def _fake_get_video_detail(_aweme_id: str):
+        api_client.last_error_kind = error_kind
+        api_client.last_error = last_error
+        return None
+
+    downloader._should_download = _fake_should_download.__get__(downloader, VideoDownloader)
+    monkeypatch.setattr(api_client, "get_video_detail", _fake_get_video_detail)
+
+    result = await downloader.download({"aweme_id": "123"})
+
+    assert result.failed == 1
+    assert expected in result.errors[0]
+    await api_client.close()
+
+
+@pytest.mark.asyncio
 async def test_video_downloader_downloads_note_video_fallback(tmp_path, monkeypatch):
     downloader, api_client = _build_downloader(tmp_path)
     downloader.config.update(music=False, cover=False, avatar=False, json=False, folderstyle=True)

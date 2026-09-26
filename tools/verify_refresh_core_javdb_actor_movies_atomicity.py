@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import refresh_core_javdb_actor_movies as refresh_module
+from backfill_javdb_actor_page import actor_page_looks_ready
 from refresh_core_javdb_actor_movies import (
     PersonRefreshRollbackError,
     refresh_error_message,
@@ -32,6 +33,7 @@ def main() -> None:
             assert conn.execute("PRAGMA main.journal_mode").fetchone()[0] == "wal"
             assert conn.execute("PRAGMA fanhao_images.journal_mode").fetchone()[0] == "wal"
             create_schema(conn)
+            verify_security_challenge_is_not_an_actor_page()
             verify_failed_first_person_does_not_leak_into_second(conn)
             verify_reservation_and_publication_guards(conn)
             verify_rollback_failure_keeps_original_error()
@@ -39,6 +41,29 @@ def main() -> None:
         finally:
             conn.close()
     print("core JavDB actor per-person atomicity verification passed")
+
+
+def verify_security_challenge_is_not_an_actor_page() -> None:
+    challenge = """
+    <html><body><h1>javdb.com</h1><h2>正在进行安全验证</h2>
+    <p>请验证您是真人</p></body></html>
+    """
+    assert not actor_page_looks_ready(challenge, "https://javdb.com/", "9DQgV")
+    assert not actor_page_looks_ready(challenge, "https://javdb.com/actors/9DQgV", "9DQgV")
+
+    actor_page = """
+    <html><body>
+      <section class="actor-section">
+        <h1 class="actor-section-name">ゆめ莉りか</h1>
+        <div class="actor-section-meta">123 部影片</div>
+      </section>
+      <div class="movie-list"><div class="item">
+        <a class="box" href="/v/example"><strong>TEST-123</strong></a>
+      </div></div>
+    </body></html>
+    """
+    assert actor_page_looks_ready(actor_page, "https://javdb.com/actors/9DQgV", "9DQgV")
+    assert not actor_page_looks_ready(actor_page, "https://javdb.com/actors/other", "9DQgV")
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
@@ -314,7 +339,11 @@ def run_fatal_child() -> None:
                 return self
             if "FROM sqlite_schema" in statement:
                 return self
+            if "SELECT person_id FROM person_external_refs" in statement:
+                return self
             if statement.startswith("SAVEPOINT "):
+                return self
+            if statement.startswith("DELETE FROM person_aliases"):
                 return self
             if "UPDATE people" in statement:
                 raise ValueError("original image write failure")

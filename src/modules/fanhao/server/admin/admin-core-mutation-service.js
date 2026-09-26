@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { assertExternalIdentityOwner, bindPersonLocation, canonicalPersonId, findPersonByIdentity, mergePersonIdentities, previewPersonMerge } from "../people/person-identity.js";
 import {
   stageActorProfileImage,
   verifyActorProfileImageStage,
@@ -136,21 +137,7 @@ export function createAdminCoreMutationService({
     let personId = null;
     db.exec("BEGIN IMMEDIATE");
     try {
-      existing = db
-        .prepare(
-          `
-          SELECT *
-          FROM people
-          WHERE name_search = ?
-             OR lower(trim(name)) = lower(trim(?))
-             OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
-          ORDER BY
-            CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
-            id ASC
-          LIMIT 1
-          `
-        )
-        .get(nameSearch, name, displayName || name, name, displayName || name);
+      existing = findPersonByIdentity(db, { personId: payload.personId, actorKey, folderPath, name });
 
       assertActorProfileMutationAllowed(db, existing?.id ? Number(existing.id) : [], { actorKeys: actorKey ? [actorKey] : [] });
 
@@ -183,6 +170,8 @@ export function createAdminCoreMutationService({
       }
 
       assertActorProfileMutationAllowed(db, personId, { actorKeys: actorKey ? [actorKey] : [] });
+      assertExternalIdentityOwner(db, personId, actorKey ? [actorKey] : []);
+      bindPersonLocation(db, personId, folderPath);
 
       if (actorKey) {
         db.prepare(
@@ -310,7 +299,7 @@ export function createAdminCoreMutationService({
       FROM people
       ORDER BY COALESCE(NULLIF(display_name, ''), name), id
     `).all();
-    const people = peopleRows.map((row) => {
+    const people = peopleRows.filter((row) => canonicalPersonId(db, row.id) === String(row.id)).map((row) => {
       const id = String(row.id || "");
       // This bulk row is sufficient when the in-memory library has not yet
       // loaded a person. Calling corePersonFallbackRecord here would issue
@@ -741,21 +730,7 @@ export function createAdminCoreMutationService({
       throw error;
     }
 
-    const existing = db
-      .prepare(
-        `
-        SELECT *
-        FROM people
-        WHERE name_search = ?
-           OR lower(trim(name)) = lower(trim(?))
-           OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
-        ORDER BY
-          CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
-          id ASC
-        LIMIT 1
-        `
-      )
-      .get(nameSearch, cleanName, cleanName, cleanName, cleanName);
+    const existing = findPersonByIdentity(db, { folderPath, name: cleanName });
     if (existing?.id) return existing;
 
     const now = new Date().toISOString();
@@ -853,6 +828,7 @@ export function createAdminCoreMutationService({
   }
 
   function assertActorProfileMutationPreparation(db, plan, context = {}) {
+    assertExternalIdentityOwner(db, plan.personId, actorKeysForPlan(plan));
     assertActorProfileMutationAllowed(db, plan.personId, {
       actorKeys: actorKeysForPlan(plan),
       operationId: context.operationId
@@ -974,6 +950,7 @@ export function createAdminCoreMutationService({
       assertActorProfileMutationAllowed(db, corePersonId, {
         actorKeys: hasActorUrlInput ? javdbUrls.map(actorIdFromJavdbUrl) : [payload.javdbActorId || existing?.javdb_actor_id || ""]
       });
+      assertExternalIdentityOwner(db, corePersonId, hasActorUrlInput ? javdbUrls.map(actorIdFromJavdbUrl) : [payload.javdbActorId || existing?.javdb_actor_id || ""].filter(Boolean));
       db
         .prepare(
           `
@@ -1125,104 +1102,18 @@ export function createAdminCoreMutationService({
   }
 
   function mergePeopleIntoTarget(targetPersonId, sourcePersonIds = [], options = {}) {
-    if (!hasCoreDb()) {
-      const error = new Error("core DB 不可用");
-      error.statusCode = 500;
-      throw error;
-    }
-    const targetId = Number(targetPersonId);
-    const sourceIds = uniqueTextArray(sourcePersonIds).map(Number).filter((id) => Number.isFinite(id) && id !== targetId);
-    if (!Number.isFinite(targetId) || !sourceIds.length) {
-      const error = new Error("合并人物参数无效");
-      error.statusCode = 400;
-      throw error;
-    }
-
+    if (!hasCoreDb()) throw new Error("core DB 不可用");
     const db = getCoreDb();
-    const target = db.prepare("SELECT id, name, display_name FROM people WHERE id = ?").get(targetId);
-    if (!target?.id) {
-      const error = new Error("目标人物不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-
-    const sources = sourceIds.map((id) => db.prepare("SELECT id, name, display_name FROM people WHERE id = ?").get(id)).filter(Boolean);
-    if (!sources.length) {
-      const error = new Error("没有可合并的来源人物");
-      error.statusCode = 404;
-      throw error;
-    }
-
-    const now = new Date().toISOString();
-    const targetPrimaryKeys = new Set(uniquePersonNames([target.name, target.display_name]).map(normalizePersonSearchValue).filter(Boolean));
-    const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, 'manual_merge')");
-    const sourceAliases = db.prepare("SELECT alias FROM person_aliases WHERE person_id = ? ORDER BY id");
-    const sourceWorkPeople = db.prepare("SELECT work_id, role, sort_order, source, created_at FROM work_people WHERE person_id = ?");
-    const insertWorkPerson = db.prepare(
-      `
-      INSERT OR IGNORE INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'manual_merge', ?, ?)
-      `
-    );
-    const sourceRefs = db.prepare("SELECT id, provider, external_key, url, source, created_at FROM person_external_refs WHERE person_id = ?");
-    const targetRefExists = db.prepare("SELECT id FROM person_external_refs WHERE person_id = ? AND provider = ? AND external_key = ?");
-    const updateRef = db.prepare("UPDATE person_external_refs SET person_id = ?, source = 'manual_merge', updated_at = ? WHERE id = ?");
-    const deleteRef = db.prepare("DELETE FROM person_external_refs WHERE id = ?");
-
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      assertActorProfileMutationAllowed(db, [targetId, ...sources.map((source) => source.id)]);
-      clearActorProfilePublication(db, [targetId, ...sources.map((source) => source.id)]);
-      for (const source of sources) {
-        if (options.preserveSourceNames !== false) {
-          for (const alias of uniquePersonNames([source.name, source.display_name, ...sourceAliases.all(source.id).map((row) => row.alias)])) {
-            const key = normalizePersonSearchValue(alias);
-            if (key && !targetPrimaryKeys.has(key)) insertAlias.run(targetId, alias, key);
-          }
-        }
-
-        for (const row of sourceWorkPeople.all(source.id)) {
-          insertWorkPerson.run(row.work_id, targetId, row.role || "actor", row.sort_order || 0, row.created_at || now, now);
-        }
-        db.prepare("DELETE FROM work_people WHERE person_id = ?").run(source.id);
-
-        for (const ref of sourceRefs.all(source.id)) {
-          if (ref.provider === "javdb-actor" && targetRefExists.get(targetId, ref.provider, ref.external_key)) {
-            deleteRef.run(ref.id);
-            continue;
-          }
-          if (targetRefExists.get(targetId, ref.provider, ref.external_key)) {
-            deleteRef.run(ref.id);
-          } else {
-            updateRef.run(targetId, now, ref.id);
-          }
-        }
-
-        db.prepare("UPDATE fanhao_images.images SET owner_id = ?, updated_at = ? WHERE owner_type = 'person' AND owner_id = ?").run(targetId, now, source.id);
-        db.prepare("DELETE FROM person_aliases WHERE person_id = ?").run(source.id);
-        db.prepare("DELETE FROM people WHERE id = ?").run(source.id);
-      }
-      db.prepare("UPDATE people SET updated_at = ? WHERE id = ?").run(now, targetId);
-      db.exec("COMMIT");
-    } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
-
+    if (options.preview) return { preview: true, ...previewPersonMerge(db, targetPersonId, sourcePersonIds, options) };
+    const result = mergePersonIdentities(db, targetPersonId, sourcePersonIds, options);
+    workMoveTargetDirectoryIndexCache = null;
     invalidateTableStamp("actor_profiles", "actor_movies", "work_info", "work_covers");
     invalidateActorProfiles();
     invalidateActorMovies();
     invalidatePersonMerge();
     resetWorkSearch();
     refreshLibrary();
-
-    return {
-      targetPersonId: String(targetId),
-      mergedPersonIds: sources.map((source) => String(source.id)),
-      person: publicMergedPersonById(String(targetId))
-    };
+    return { ...result, person: publicMergedPersonById(result.targetPersonId) };
   }
 
   function correctWorkActorFromLocalFolder(workId) {

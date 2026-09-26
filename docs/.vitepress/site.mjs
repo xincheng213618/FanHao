@@ -1,7 +1,7 @@
 export const repository = 'https://github.com/xincheng213618/FanHao';
 export const sections = [
   { title: '开始使用', pages: ['guide/quick-start', 'guide/development', 'guide/operations'] },
-  { title: '理解系统', pages: ['architecture/overview', 'architecture/repository-map', 'architecture/modules', 'architecture/data-flow'] },
+  { title: '理解系统', pages: ['architecture/overview', 'architecture/repository-map', 'architecture/modules', 'architecture/data-flow', 'architecture/product-boundaries'] },
   { title: '与 AI 协作', pages: ['ai/context', 'ai/tasks', 'ai/safety'] },
   { title: '查阅契约', pages: ['reference/configuration', 'reference/api', 'reference/user-accounts', 'reference/account-access', 'reference/account-library', 'reference/account-recovery', 'reference/verification', 'reference/legacy'] },
   { title: '维护文档', pages: ['contributing/documentation', 'contributing/github-pages', 'decisions/0001-documentation'] }

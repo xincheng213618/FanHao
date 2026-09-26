@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const forbiddenTrackedPath = /^(?:artifacts|tmp|logs|tmp-apk-labels|outputs)(?:\/|$)/i;
+const forbiddenTrackedPath = /^(?:(?:artifacts|tmp|logs|tmp-apk-labels|outputs|\.codex-artifacts|\.codex-remote-attachments)(?:\/|$)|data\/(?:design-audits|disk-usage|short-video-cache)(?:\/|$))/i;
 const runtimeStatePath = /^data\/short-video-list-(?:cache-generation|watch-overlays)\.json$/i;
 const rootServedDump = /^[^/]+-served\.[^/]+$/i;
 const sourceExtensions = new Set([

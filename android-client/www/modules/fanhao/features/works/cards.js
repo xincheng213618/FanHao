@@ -1,6 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
-import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
-import { getWorkSource } from "../../../../js/work-source.js?v=20260710-western-merge-01";
+import { imageUrlForWork } from "../../../../js/image.js?v=assets-0f97d6765d71";
+import { getWorkSource } from "../../../../js/work-source.js?v=assets-0f97d6765d71";
 import {
   compactWorkCardTitle,
   compactWorkCode,
@@ -14,8 +14,8 @@ import {
   workGridMeta,
   workGridPerson,
   workGridRankBadge
-} from "./card-presentation.js?v=20260721-fanhao-author-sort-density-08";
-import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
+} from "./card-presentation.js?v=assets-0f97d6765d71";
+import { createWorkCoverLoader } from "./cover-loader.js?v=assets-0f97d6765d71";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
   const coverLoader = createWorkCoverLoader({ getActiveUrl });

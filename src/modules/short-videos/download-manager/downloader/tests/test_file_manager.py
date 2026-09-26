@@ -357,12 +357,22 @@ async def test_download_file_atomic_write(tmp_path):
 
     mock_session = MagicMock()
     mock_session.get.return_value = ctx
+    progress = []
 
-    result = await fm.download_file("https://example.com/v.mp4", save_path, session=mock_session)
+    result = await fm.download_file(
+        "https://example.com/v.mp4",
+        save_path,
+        session=mock_session,
+        progress_callback=progress.append,
+    )
     assert result is True
     assert save_path.exists()
     assert save_path.read_bytes() == content
     assert not save_path.with_suffix(".mp4.tmp").exists()
+    assert progress[-1]["current_file"] == "video.mp4"
+    assert progress[-1]["bytes_downloaded"] == len(content)
+    assert progress[-1]["bytes_total"] == len(content)
+    assert progress[-1]["speed_bytes_per_second"] > 0
 
 
 def _aiohttp_session_returning_status(status):

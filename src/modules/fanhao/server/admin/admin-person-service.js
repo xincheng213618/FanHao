@@ -1,15 +1,17 @@
 export function createAdminPersonService({
   actorMovieService,
+  corePersonFallbackRecord = () => null,
   enrichLocalWorksWithActorMovieInfo,
   getLibrary,
   pagedWorksPayload,
+  personFolderMutationService,
   personLibraryService,
   publicPerson,
   resolveLibraryPersonByPublicId,
   sortWorkList
 }) {
   function mappingPayload(personId, url) {
-    const person = resolveLibraryPersonByPublicId(personId);
+    const person = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     if (!person) return null;
     const extraSourcePaths = url.searchParams.getAll("sourcePath");
     return {
@@ -46,8 +48,20 @@ export function createAdminPersonService({
     };
   }
 
+  function mutatePersonFolderPayload(body = {}, mode = "rename") {
+    const result = mode === "relink"
+      ? personFolderMutationService.relinkPersonFolder(body)
+      : personFolderMutationService.renamePersonFolder(body);
+    const person = resolveLibraryPersonByPublicId(body.personId) || corePersonFallbackRecord(body.personId);
+    return {
+      ...result,
+      person: person ? publicPerson(person) : null
+    };
+  }
+
   return {
     mappingPayload,
+    mutatePersonFolderPayload,
     rescanPersonPayload
   };
 }

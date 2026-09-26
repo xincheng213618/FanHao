@@ -133,6 +133,16 @@ class BaseDownloader(ABC):
         except Exception as exc:
             logger.debug("Progress advance_item failed: %s", exc)
 
+    def _progress_transfer(self, progress: Dict[str, Any]) -> None:
+        if not self.progress_reporter:
+            return
+        try:
+            fn = getattr(self.progress_reporter, "on_transfer", None)
+            if callable(fn):
+                fn(progress)
+        except Exception as exc:
+            logger.debug("Progress on_transfer failed: %s", exc)
+
     def _progress_report_author(
         self,
         nickname: Optional[str] = None,
@@ -248,6 +258,13 @@ class BaseDownloader(ABC):
 
     def _mark_local_aweme_downloaded(self, aweme_id: str):
         if not aweme_id:
+            return
+
+        # The FanHao sidecar disables both local dedupe and the downloader's
+        # private database. In that mode no later job consults this index, so
+        # building it after a successful download only walks the entire media
+        # library for no benefit.
+        if not self.config.get("local_dedupe", True) and not self.database:
             return
 
         if self._local_aweme_ids is None:
@@ -499,6 +516,7 @@ class BaseDownloader(ABC):
 
             video_url, video_headers = video_info
             video_path = save_dir / f"{file_stem}.mp4"
+            self._progress_update_step("下载视频", video_path.name)
             video_started = time.monotonic()
             if not await self._download_with_retry(
                 video_url, video_path, session, headers=video_headers
@@ -557,6 +575,10 @@ class BaseDownloader(ABC):
         elif media_type == "gallery":
             image_url_candidates = self._collect_image_url_candidates(aweme_data)
             image_live_urls = self._collect_image_live_urls(aweme_data)
+            self._progress_update_step(
+                "下载图集",
+                f"图片 {len(image_url_candidates)} 张，实况 {len(image_live_urls)} 个",
+            )
             logger.info(
                 "Gallery aweme %s: %d image(s), %d live photo(s)",
                 aweme_id,
@@ -694,6 +716,7 @@ class BaseDownloader(ABC):
                 )
 
         if optional_assets:
+            self._progress_update_step("下载附加资源", f"共 {len(optional_assets)} 项")
             optional_started = time.monotonic()
             # 不变量：登记的协程（_download_first_available / _download_with_retry）
             # 内部捕获所有 Exception 并返回 False，不会让 gather 抛出——
@@ -713,6 +736,7 @@ class BaseDownloader(ABC):
             )
 
         if self.config.get("json"):
+            self._progress_update_step("写入元数据", f"作品 {aweme_id}")
             json_path = save_dir / f"{file_stem}_data.json"
             json_started = time.monotonic()
             if await self.metadata_handler.save_metadata(aweme_data, json_path):
@@ -846,6 +870,7 @@ class BaseDownloader(ABC):
                     transcript_result.get("error", "unknown"),
                 )
 
+        self._progress_update_step("完成收尾", f"作品 {aweme_id}")
         self._mark_local_aweme_downloaded(aweme_id)
         logger.info("Downloaded %s: %s (%s)", media_type, desc, aweme_id)
         timing_event(
@@ -887,6 +912,7 @@ class BaseDownloader(ABC):
                 proxy=getattr(self.api_client, "proxy", None),
                 prefer_response_content_type=prefer_response_content_type,
                 return_saved_path=return_saved_path,
+                progress_callback=self._progress_transfer,
             )
             if not download_result:
                 raise RuntimeError(f"Download failed for {url}")

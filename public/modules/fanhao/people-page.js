@@ -63,8 +63,8 @@ function showPeopleIndex(options = {}) {
   syncNavigationState("people");
   hidePersonProfile();
   setMainHeader(
-    state.peopleScope === "western" ? "欧美人物" : "人物索引",
-    state.peopleScope === "western" ? "R:\\ 欧美分支" : "按人物浏览全部资料库"
+    state.peopleScope === "western" ? "欧美人物" : "人物",
+    `${formatNumber(filteredPeople().length)} 位人物 · 按人物浏览资料库`
   );
   renderPeopleIndexStats();
   renderPeopleIndex();
@@ -221,6 +221,7 @@ function createPersonIndexCard(person) {
   const name = document.createElement("div");
   name.className = "person-index-name";
   name.textContent = displayName;
+  name.title = displayName;
 
   body.append(name);
   card.append(avatar, body);

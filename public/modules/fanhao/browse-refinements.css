@@ -1,0 +1,132 @@
+/* Scoped library refinements, loaded after the shared responsive rules. */
+.fanhao-sidebar { overflow-y: auto; gap: 20px; }
+.fanhao-subnav { flex: 1; gap: 22px; overflow: visible; }
+.fanhao-nav-group { display: grid; gap: 3px; }
+.fanhao-nav-group h3 {
+  margin: 0 12px 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .04em;
+}
+.fanhao-subnav .view-tab {
+  min-height: 38px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 500;
+}
+.fanhao-subnav .view-tab:hover { background: var(--panel-soft); }
+.fanhao-subnav .view-tab.active {
+  background: #e7f1eb;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+.fanhao-nav-management { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); }
+.fanhao-navigation-button { display: none; }
+.fanhao-navigation-dialog {
+  width: min(320px, calc(100vw - 24px));
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  padding: max(20px, env(safe-area-inset-top)) 18px 24px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: #fbfcfa;
+  color: var(--ink);
+  overflow-y: auto;
+}
+.fanhao-navigation-dialog::backdrop { background: rgb(20 35 29 / 32%); }
+.fanhao-navigation-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+.fanhao-navigation-dialog h2 { margin: 0; font-size: 18px; }
+.fanhao-navigation-dialog header button, .fanhao-navigation-button {
+  min-height: 40px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--panel); color: var(--accent-strong); font: inherit;
+}
+.fanhao-navigation-dialog .fanhao-subnav { display: flex; flex-direction: column; gap: 20px; }
+.fanhao-navigation-dialog .fanhao-nav-management { margin-top: 8px; }
+.toolbar-controls[hidden] { display: none; }
+body.people-index-view .toolbar { padding: 20px 0 18px; }
+.person-index-body { width: 100%; gap: 6px; align-content: start; }
+.person-index-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  width: 100%;
+  min-height: 2.7em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.person-index-card { gap: 12px; padding: 10px; }
+.person-detail-view .toolbar-title { display: block; }
+.person-detail-view .toolbar-title .eyebrow,
+.person-detail-view .toolbar-title h2 { display: none; }
+.person-detail-view .toolbar { align-items: center; flex-wrap: wrap; }
+.person-detail-view .toolbar-back { margin: 0; min-height: 38px; }
+.person-detail-view .work-search { flex-basis: 280px; max-width: 420px; }
+.person-detail-view .toolbar-controls { flex-wrap: wrap; }
+.person-profile { align-items: start; padding-block: 22px; }
+.person-profile-name-row h3 { white-space: normal; margin: 0; font-size: 25px; font-weight: 650; }
+.person-profile-summary { display: flex; flex-wrap: wrap; gap: 9px 20px; white-space: normal; overflow: visible; font-weight: 400; margin-top: 12px; }
+.person-profile-summary strong { font-weight: 650; color: var(--ink); }
+.person-profile-source-note { flex-basis: 100%; font-size: 12px; }
+.person-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.person-profile-actions .folder-button { min-height: 38px; font-weight: 500; }
+.browse-more-filters summary {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--muted); background: var(--panel); cursor: pointer; font-size: 12px; font-weight: 500;
+}
+.person-detail-view .stats-row { gap: 10px; padding-block: 8px 18px; }
+.browse-result-summary { width: 100%; color: var(--muted); font-size: 13px; }
+.stat-quick-filters { gap: 12px 18px; align-items: start; padding: 14px; }
+.browse-filter-controls.stat-filter-list { display: grid; gap: 10px; flex: 1 1 540px; min-width: 0; }
+.browse-filter-scopes, .browse-filter-extras { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.browse-filter-controls .stat-filter-chip { min-height: 34px; padding: 6px 11px; font-weight: 500; background: var(--panel); border-color: var(--line); color: var(--muted); }
+.browse-filter-controls .stat-filter-chip.active { background: var(--panel-soft); color: var(--accent-strong); border-color: var(--accent); }
+.browse-filter-scopes .stat-filter-chip.active { background: var(--accent); color: white; }
+.browse-filter-reset { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; padding: 8px; cursor: pointer; }
+.browse-more-filters { position: relative; }
+.browse-more-filters > .browse-filter-extras {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 14;
+  width: 280px; max-width: calc(100vw - 48px); padding: 12px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow);
+}
+.stat-quick-filters .stat-sort-group { padding-top: 1px; margin-left: auto; }
+.stat-sort-select { min-height: 34px; font-weight: 500; background: var(--panel); }
+.browse-select-works { min-height: 34px; font-weight: 500; }
+.stat-quick-filters .bulk-delete-controls { flex-basis: 100%; }
+.fanhao-subnav a:focus-visible, .person-index-card:focus-visible,
+.browse-filter-controls button:focus-visible, .person-profile-actions button:focus-visible,
+.browse-more-filters summary:focus-visible, .fanhao-navigation-button:focus-visible,
+.fanhao-navigation-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 900px) {
+  .fanhao-sidebar { padding: 8px 14px; overflow: visible; }
+  .fanhao-navigation-button { display: inline-flex; align-items: center; align-self: start; }
+  .fanhao-sidebar > .fanhao-subnav { display: none; }
+  .person-detail-view .toolbar { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .person-detail-view .work-search { max-width: none; }
+  .person-detail-view .toolbar-back { min-height: 32px; }
+  .person-detail-view .toolbar-controls .toggle-control { flex: 1 1 auto; font-size: 12px; }
+  .person-detail-view .toolbar-controls .filter-rule-button { flex: 0 1 auto; }
+  .person-profile { grid-template-columns: 76px minmax(0, 1fr); gap: 14px; padding-block: 16px; }
+  .person-profile .person-avatar { width: 76px; height: 76px; }
+  .person-profile-name-row h3 { font-size: 22px; }
+  .person-profile-summary { gap: 6px 12px; font-size: 12px; }
+  .stat-quick-filters { gap: 12px; padding: 10px; }
+  .stat-quick-filters .stat-sort-group { margin-left: 0; }
+  .browse-filter-controls.stat-filter-list { flex-basis: 100%; }
+  .browse-filter-controls .stat-filter-chip { min-height: 40px; }
+  .browse-more-filters[open] { flex-basis: 100%; }
+  .browse-more-filters[open] > summary { width: fit-content; }
+  .browse-more-filters > .browse-filter-extras {
+    position: static; width: 100%; max-width: none; margin-top: 8px; box-shadow: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .person-index-card { transition: none; }
+  .person-index-card:hover { transform: none; }
+}

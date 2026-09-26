@@ -1,0 +1,150 @@
+.novel-reader-page {
+  --reader-panel-bg: #fffaf0;
+  --reader-panel-ink: #4d463d;
+  --reader-panel-muted: #776e62;
+  --reader-control-bg: #fffdf8;
+  --reader-control-line: rgba(101, 86, 59, 0.18);
+  --reader-focus: #b52c40;
+}
+
+.novel-reader-page.theme-green {
+  --reader-panel-bg: #f0f6ed;
+  --reader-control-bg: #f8fcf5;
+}
+
+.novel-reader-page.theme-white {
+  --reader-panel-bg: #fff;
+  --reader-control-bg: #f7f7f8;
+}
+
+.novel-reader-page.night {
+  color-scheme: dark;
+  --reader-panel-bg: #272d34;
+  --reader-panel-ink: #d8dde3;
+  --reader-panel-muted: #a8b2bf;
+  --reader-control-bg: #333b45;
+  --reader-control-line: #495360;
+  --reader-focus: #ff91a0;
+}
+
+body.novel-reader-active:has(.novel-reader-page.night) {
+  background: #1d2228;
+  color-scheme: dark;
+}
+
+.novel-reader-page :is(button, input, select) {
+  font-family: inherit;
+}
+
+.novel-reader-page :is(button, input, select):focus-visible {
+  outline: 2px solid var(--reader-focus);
+  outline-offset: 3px;
+}
+
+.novel-reader-page :is(.novel-reader-drawer-panel, .novel-settings-panel) {
+  color: var(--reader-panel-ink);
+  background: var(--reader-panel-bg);
+  border: 1px solid var(--reader-control-line);
+}
+
+.novel-reader-page .novel-settings-panel {
+  max-height: calc(100dvh - 196px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.novel-reader-page .novel-reader-drawer-panel {
+  overscroll-behavior: contain;
+}
+
+.novel-reader-page :is(.novel-setting-row > span, .novel-catalog-status, .novel-catalog-loading) {
+  color: var(--reader-panel-muted);
+}
+
+.novel-reader-page :is(.novel-theme-buttons button, .novel-font-buttons button, .novel-stepper button,
+  .novel-reader-drawer-head button, .novel-settings-panel > button, .novel-reader-drawer-panel input,
+  .novel-reader-drawer-panel .novel-catalog-order) {
+  color: var(--reader-panel-ink);
+  background: var(--reader-control-bg);
+  border-color: var(--reader-control-line);
+}
+
+.novel-reader-page .novel-stepper button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.novel-reader-page :is(.novel-theme-buttons button.active, .novel-font-buttons button.active) {
+  border-color: var(--reader-focus);
+  color: var(--reader-focus);
+}
+
+.novel-reader-page.night .novel-breadcrumbs button {
+  color: #a8b2bf;
+}
+
+.novel-reader-page.night .novel-reader-drawer {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.novel-reader-page.night .novel-chapter-button {
+  color: var(--reader-panel-ink);
+  border-color: var(--reader-control-line);
+}
+
+.novel-reader-page.night .novel-chapter-button:is(:hover, .active) {
+  color: var(--reader-focus);
+  background: #3c303a;
+}
+
+.novel-reader-page.night .novel-catalog-order {
+  color: var(--reader-focus) !important;
+}
+
+.novel-reader-page.night input::placeholder {
+  color: var(--reader-panel-muted);
+  opacity: 1;
+}
+
+@media (max-width: 900px) {
+  .novel-reader-page {
+    padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .novel-reader-page .novel-reader-toolbar {
+    top: auto;
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    left: max(12px, env(safe-area-inset-left, 0px));
+    width: auto;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid var(--reader-control-line);
+    border-radius: 10px;
+    background: var(--reader-panel-bg);
+    box-shadow: 0 6px 24px rgba(30, 25, 20, 0.15);
+  }
+
+  .novel-reader-page .novel-toolbar-button {
+    width: 100%;
+    min-width: 0;
+    min-height: 50px;
+    border: 0;
+    background: transparent;
+    color: var(--reader-panel-ink);
+  }
+
+  .novel-reader-page .novel-toolbar-button:hover {
+    background: var(--reader-control-bg);
+  }
+
+  .novel-reader-page .novel-settings-panel {
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 116px - env(safe-area-inset-bottom, 0px));
+  }
+
+  .novel-reader-page .novel-reader-drawer-panel {
+    bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  }
+}

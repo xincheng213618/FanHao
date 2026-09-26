@@ -86,6 +86,37 @@ test("new empty library persists its UUID before exposing a realm; reopen and al
   const independent = newStore(factory); assert.notEqual(independent.store.summary().sourceRealm, first.sourceRealm);
 });
 
+test("current-library reads remain available during an independent WAL writer transaction", ({ factory }) => {
+  const { store, dbPath } = newStore(factory), detail = store.uploadBook(upload);
+  const writer = new DatabaseSync(dbPath);
+  try {
+    writer.exec("BEGIN IMMEDIATE");
+    writer.prepare("UPDATE novel_chapters SET content = 'uncommitted synthetic body' WHERE id = ?").run(detail.chapters[0].id);
+    assert.equal(store.summary().totals.books, 1);
+    assert.equal(store.listBooks(new URL("http://synthetic.invalid?limit=48")).books[0].id, detail.book.id);
+    assert.equal(store.bookMeta(detail.book.id).catalogRevision, detail.catalogRevision);
+    assert.equal(store.catalog(detail.book.id, new URL("http://synthetic.invalid?limit=20")).total, 2);
+    const chapter = store.chapterDetail(detail.book.id, 1).chapter;
+    assert.equal(chapter.content, "仅用于合成测试的第一章正文。");
+  } finally {
+    writer.exec("ROLLBACK"); writer.close(); store.invalidate();
+  }
+});
+
+test("a schema upgrade immediately before the read snapshot is rejected without exposing a response", ({ factory }) => {
+  const { store, dbPath } = newStore(factory); store.uploadBook(upload);
+  const original = DatabaseSync.prototype.exec; let armed = true;
+  DatabaseSync.prototype.exec = function(statement, ...args) {
+    if (armed && statement === "BEGIN") {
+      armed = false;
+      sql(dbPath, db => db.prepare("UPDATE novel_meta SET value = '6' WHERE key = 'schema_version'").run());
+    }
+    return original.call(this, statement, ...args);
+  };
+  try { assert.throws(() => store.summary(), /更新版本/); assert.equal(armed, false); }
+  finally { DatabaseSync.prototype.exec = original; }
+});
+
 test("every public book DTO and empty/list/catalog envelope carries the persistent realm", ({ factory }) => {
   const { store, dbPath } = newStore(factory), first = store.uploadBook(upload), id = first.book.id;
   const realm = `server:${metadata(dbPath, "library_id")}`;
@@ -224,6 +255,50 @@ test("Python-created library keeps the same UUID through Node reads, full rescan
   assert.equal(metadata(dbPath, "library_id"), id); assert.equal(store.bookMeta(book.id).book.sourceRealm, realm); assert.equal(store.bookMeta(book.id).book.chapterCount, 3);
 });
 
+test("a complete scan retires only missing files in its roots, preserving other sources and recovery anchors", ({ factory, pythonSource }) => {
+  const { store, dbPath } = newStore(factory), first = sourceFixture(), other = sourceFixture();
+  scan(dbPath, ["--root", first.sourceRoot, "--root", other.sourceRoot], { source: pythonSource });
+  const local = store.listBooks(new URL("http://synthetic.invalid")).books;
+  const missing = local.find(book => book.sourcePath === first.file), retained = local.find(book => book.sourcePath === other.file);
+  store.saveProgress(missing.id, { chapterIndex: 1, scrollRatio: 0.4 });
+  const uploaded = store.uploadBook(upload), imported = store.importCollectedBook(collected);
+  const before = [retained.id, uploaded.book.id, imported.book.id].map(id => store.bookDetail(id));
+  fs.unlinkSync(first.file);
+  scan(dbPath, ["--root", first.sourceRoot], { source: pythonSource });
+  assert.equal(store.bookMeta(missing.id), null);
+  assert.deepEqual(before.map(detail => store.bookDetail(detail.book.id)), before);
+  const recovery = sql(dbPath, db => db.prepare("SELECT status, reason, chapter_index, scroll_ratio FROM novel_reading_state WHERE book_id = ?").get(missing.id), true);
+  assert.deepEqual({ ...recovery }, { status: "unresolved", reason: "book_missing", chapter_index: 1, scroll_ratio: 0.4 });
+});
+
+test("limited scans and unavailable roots never retire unobserved books", ({ factory, pythonSource }) => {
+  const { store, dbPath } = newStore(factory), fixture = sourceFixture();
+  const second = path.join(fixture.sourceRoot, "second.txt"); fs.writeFileSync(second, text, "utf8");
+  scan(dbPath, ["--root", fixture.sourceRoot], { source: pythonSource });
+  const ids = store.listBooks(new URL("http://synthetic.invalid")).books.map(book => book.id).sort();
+  scan(dbPath, ["--root", fixture.sourceRoot, "--limit", "1"], { source: pythonSource });
+  assert.deepEqual(store.listBooks(new URL("http://synthetic.invalid")).books.map(book => book.id).sort(), ids);
+  fs.unlinkSync(fixture.file); fs.unlinkSync(second); fs.rmdirSync(fixture.sourceRoot);
+  const before = ids.map(id => store.bookDetail(id));
+  scan(dbPath, ["--root", fixture.sourceRoot], { source: pythonSource });
+  assert.deepEqual(ids.map(id => store.bookDetail(id)), before);
+});
+
+test("an enumeration error preserves unseen files even when part of the root was readable", ({ factory }) => {
+  const { store, dbPath } = newStore(factory), fixture = sourceFixture();
+  const second = path.join(fixture.sourceRoot, "second.txt"); fs.writeFileSync(second, text, "utf8");
+  scan(dbPath, ["--root", fixture.sourceRoot]);
+  const before = store.summary().totals.books;
+  const injected = scannerSource.replace(
+    "for directory, _subdirectories, names in os.walk(root, onerror=errors.append):",
+    'errors.append(PermissionError("synthetic unreadable subtree"))\n        for directory, _subdirectories, names in [(str(root), [], ["synthetic.txt"])]:'
+  );
+  assert.notEqual(injected, scannerSource);
+  scan(dbPath, ["--root", fixture.sourceRoot], { source: injected });
+  assert.equal(store.summary().totals.books, before);
+  assert(store.listBooks(new URL("http://synthetic.invalid")).books.some(book => book.sourcePath === second));
+});
+
 test("Node-initialized identity survives a Python full rebuild, including rollback of a rejected import", ({ factory, pythonSource }) => {
   const { store, dbPath } = newStore(factory), realm = store.summary().sourceRealm, fixture = sourceFixture();
   scan(dbPath, ["--root", fixture.sourceRoot], { source: pythonSource }); assert.equal(store.summary().sourceRealm, realm);
@@ -248,7 +323,7 @@ for (const fault of ["identity", "future"]) test(`Python refuses ${fault} before
 });
 
 const mutants = [
-  { name: "replace UUID on every initialization", test: "new empty library", edits: [["if (!existingIdentity) {", "if (true) {"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]] },
+  { name: "replace UUID on every initialization", test: "new empty library", edits: [['if (existingIdentity && Number(metaValue(db, "schema_version")) === 5) return;', ""], ["if (!existingIdentity) {", "if (true) {"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]] },
   { name: "book DTO omits realm", test: "every public book", edits: [['...(sourceRealm ? { sourceRealm } : {}),', "/* no realm */"]] },
   { name: "progress ignores realm precondition", test: "wrong realm cannot write", edits: [["if (body.sourceRealm !== undefined && body.sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },
   { name: "delete ignores realm precondition", test: "wrong realm cannot delete", edits: [["if (sourceRealm !== undefined && sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },

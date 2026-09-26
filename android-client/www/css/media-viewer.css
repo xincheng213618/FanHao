@@ -31,7 +31,7 @@ body.media-viewer-open .bottom-nav {
 
 .media-viewer-head {
   position: absolute;
-  top: max(8px, env(safe-area-inset-top));
+  top: max(8px, var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   left: 10px;
   right: 10px;
   z-index: 2;

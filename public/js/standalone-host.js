@@ -37,7 +37,7 @@ async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
       import("../modules/content-index/gallery-page.js?v=20260813-tv-series-identity-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20260813-tv-series-identity-01")
+      import("../modules/content-index/gallery-renderer.js?v=20260908-library-browse-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -50,7 +50,7 @@ async function loadCurrentModule(view) {
     return { createPage: module.createMangaPage, view };
   }
   if (view === "novels") {
-    const module = await import("../modules/novels/novel-page.js?v=20260727-novel-task-log-04");
+      const module = await import("../modules/novels/novel-page.js?v=20260908-novel-library-01");
     return { createPage: module.createNovelPage, view };
   }
   if (view === "music") {

@@ -305,12 +305,11 @@ try {
       $trackedContract = Read-FanHaoVersionContract -Path $VersionContractPath
       Assert-Equal $defaultIdentity.VersionCode $trackedContract.CurrentVersionCode "no-argument build versionCode from contract"
       Assert-Equal $defaultIdentity.VersionName $trackedContract.DefaultVersionName "no-argument build versionName from contract"
-      $defaultInstallIdentity = Assert-FanHaoInstallIdentity -Identity $defaultIdentity -VersionContract $trackedContract
-      Assert-Equal $defaultInstallIdentity.VersionCode $trackedContract.CurrentVersionCode "default install versionCode from contract"
-      Assert-Equal $defaultInstallIdentity.VersionName $trackedContract.DefaultVersionName "default install versionName from contract"
-      Assert-Throws {
-        & $BuildScript -Install -VersionCode ($trackedContract.CurrentVersionCode + 1L)
-      } "requires the tracked Android version contract identity" "install above the tracked contract must fail before build or ADB"
+      $newerInstallIdentity = Assert-FanHaoInstallIdentity -Identity ([pscustomobject]@{
+        VersionCode = $trackedContract.CurrentVersionCode + 1L
+        VersionName = "0.1.$($trackedContract.CurrentVersionCode + 1L)-debug"
+      })
+      Assert-Equal $newerInstallIdentity.VersionCode ($trackedContract.CurrentVersionCode + 1L) "development install may use a valid identity newer than version.json"
       Assert-Throws {
         & $BuildScript -Install -IdentityOnly
       } "cannot be combined with -Install" "identity-only probe must not silently replace an install request"
@@ -346,7 +345,7 @@ try {
     } "JSON integer" "fractional entry versionCode"
     Assert-Throws {
       & $PublishScript -PublishRoot (Join-Path $validCase "no-publish-install") -Install -PlanOnly
-    } "does not install a newly selected identity" "publish entry must not install an untracked next identity"
+    } "only publishes" "publish entry must direct installation to the explicit manifest-verified installer"
   }
 
   Invoke-PolicyTest "local-only build range is explicit and cannot publish" {
@@ -464,18 +463,20 @@ try {
     Assert-Throws { Get-Plan -Root (Join-Path $case "publish") -Target (Join-Path $case "missing.apk") } "versionCode identity mismatch" "file-name/internal version mismatch"
   }
 
-  Invoke-PolicyTest "atomic artifact commit retains previous complete pair" {
+  Invoke-PolicyTest "atomic artifact commit keeps only the latest complete pair" {
     $case = New-CaseDirectory "atomic-success"
     $debug = Join-Path $case "publish\debug"
+    $olderApk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081189.apk") -VersionCode 26081189
     $oldApk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081190.apk") -VersionCode 26081190
     $latest = Join-Path $debug "latest.json"
     Write-ValidManifest -Path $latest -Channel "debug" -ApkPath $oldApk -VersionCode 26081190
-    $oldApkHash = Get-FileFingerprint $oldApk
     $source = New-FakeApk -Path (Join-Path $case "app-debug.apk") -VersionCode 26081191
     $published = Publish-FanHaoDebugArtifact -SourceApkPath $source -UpdateDir $debug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -Notes @("fixture") -ApkInspector $FakeInspector
-    Assert-True (Test-Path -LiteralPath $oldApk) "old APK must remain available"
-    Assert-Equal (Get-FileFingerprint $oldApk) $oldApkHash "old APK must not be overwritten"
+    Assert-True (-not (Test-Path -LiteralPath $olderApk)) "older APK must be removed after commit"
+    Assert-True (-not (Test-Path -LiteralPath $oldApk)) "previous APK must be removed after commit"
     Assert-True (Test-Path -LiteralPath $published.ApkPath) "new APK must be committed"
+    Assert-Equal $published.RemovedSupersededApkCount 2 "successful publish must report every removed superseded APK"
+    Assert-Equal @(Get-ChildItem -LiteralPath $debug -File -Filter "fanhao-debug-*.apk").Count 1 "only the latest APK may remain"
     $committed = [IO.File]::ReadAllText($latest) | ConvertFrom-Json
     Assert-Equal $committed.versionCode 26081191 "latest.json must switch last to the new APK"
     Assert-Equal @(Get-ChildItem -LiteralPath $debug -File -Filter ".*.tmp").Count 0 "temporary publish files must be removed"
@@ -537,56 +538,6 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $debug "fanhao-debug-26081191.apk"))) "failed first publish must remove its APK"
   }
 
-  Invoke-PolicyTest "authorized-device closure survives the module commit boundary" {
-    $case = New-CaseDirectory "device-gate-closure"
-    $debug = Join-Path $case "publish\debug"
-    $oldApk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081190.apk") -VersionCode 26081190
-    $latest = Join-Path $debug "latest.json"
-    Write-ValidManifest -Path $latest -Channel "debug" -ApkPath $oldApk -VersionCode 26081190
-    $source = New-FakeApk -Path (Join-Path $case "app-debug.apk") -VersionCode 26081191
-    $deviceState = [pscustomobject]@{ ExitCode = 0; Lines = @("fixture-device device product:fixture") }
-    $deviceQuery = {
-      [pscustomobject]@{ ExitCode = $deviceState.ExitCode; Lines = @($deviceState.Lines) }
-    }.GetNewClosure()
-    $deviceCheck = New-FanHaoAuthorizedDeviceCheck -DeviceQuery $deviceQuery
-    $expectedSerials = @(& $deviceCheck)
-    $commitGate = {
-      param($CurrentStage)
-      if ($CurrentStage -eq "BeforeManifestCommit") {
-        $null = & $deviceCheck -ExpectedSerials $expectedSerials
-      }
-    }.GetNewClosure()
-    $published = Publish-FanHaoDebugArtifact -SourceApkPath $source -UpdateDir $debug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -ApkInspector $FakeInspector -CommitHook $commitGate
-    Assert-Equal $published.VersionCode 26081191L "scope-safe device gate publish version"
-    Assert-Equal ([IO.File]::ReadAllText($latest) | ConvertFrom-Json).versionCode 26081191 "scope-safe device gate manifest"
-
-    $changedCase = New-CaseDirectory "device-gate-changed-set"
-    $changedDebug = Join-Path $changedCase "publish\debug"
-    $changedOldApk = New-FakeApk -Path (Join-Path $changedDebug "fanhao-debug-26081190.apk") -VersionCode 26081190
-    $changedLatest = Join-Path $changedDebug "latest.json"
-    Write-ValidManifest -Path $changedLatest -Channel "debug" -ApkPath $changedOldApk -VersionCode 26081190
-    $changedSource = New-FakeApk -Path (Join-Path $changedCase "app-debug.apk") -VersionCode 26081191
-    $changedState = [pscustomobject]@{ ExitCode = 0; Lines = @("first-device device product:fixture") }
-    $changedQuery = {
-      [pscustomobject]@{ ExitCode = $changedState.ExitCode; Lines = @($changedState.Lines) }
-    }.GetNewClosure()
-    $changedCheck = New-FanHaoAuthorizedDeviceCheck -DeviceQuery $changedQuery
-    $changedExpected = @(& $changedCheck)
-    $changedState.Lines = @("second-device device product:fixture")
-    $changedGate = {
-      param($CurrentStage)
-      if ($CurrentStage -eq "BeforeManifestCommit") {
-        $null = & $changedCheck -ExpectedSerials $changedExpected
-      }
-    }.GetNewClosure()
-    $oldManifestHash = Get-FileFingerprint $changedLatest
-    Assert-Throws {
-      Publish-FanHaoDebugArtifact -SourceApkPath $changedSource -UpdateDir $changedDebug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -ApkInspector $FakeInspector -CommitHook $changedGate
-    } "device set changed" "changed device set at commit boundary"
-    Assert-Equal (Get-FileFingerprint $changedLatest) $oldManifestHash "changed device set must preserve the old manifest"
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $changedDebug "fanhao-debug-26081191.apk"))) "changed device set must remove the uncommitted APK"
-  }
-
   Invoke-PolicyTest "rollback failure preserves an explicit recovery manifest" {
     $case = New-CaseDirectory "rollback-recovery"
     $debug = Join-Path $case "publish\debug"
@@ -643,6 +594,7 @@ try {
     }
     Assert-Equal $published.VersionCode 26081191L "locked backup cleanup must not turn a committed publish into failure"
     Assert-True (Test-Path -LiteralPath $published.ApkPath) "committed APK must remain available"
+    Assert-True (-not (Test-Path -LiteralPath $oldApk)) "superseded APK cleanup must continue when a manifest backup is locked"
     $committed = [IO.File]::ReadAllText($latest) | ConvertFrom-Json
     Assert-Equal $committed.versionCode 26081191 "committed manifest must remain current"
     $backups = @(Get-ChildItem -LiteralPath $debug -File -Filter ".latest.*.bak")

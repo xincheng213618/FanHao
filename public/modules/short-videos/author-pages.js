@@ -7,6 +7,7 @@ import {
   SHORT_VIDEO_LOAD_STALE
 } from "./author-navigation.js?v=20260811-author-load-contract-01";
 import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
+import { createShortVideoAuthorDeleteAction } from "./author-delete-action.js?v=20260917-author-delete-01";
 import { renderShortVideoAuthorProfileHistory } from "./author-profile-history.js?v=20260825-profile-history-01";
 export function createShortVideoAuthorPages(deps) {
   const {
@@ -19,6 +20,7 @@ export function createShortVideoAuthorPages(deps) {
     clearShortVideoDeleteSelection,
     createAuthorFollowButton,
     createIcon,
+    deleteRecovery,
     formatCompact,
     formatDate,
     formatNumber,
@@ -46,6 +48,17 @@ export function createShortVideoAuthorPages(deps) {
     sync: syncAuthorCollectorRouteLifecycle,
     wait: waitForAuthorCollector
   } = createAuthorCollectorPoll({ api, isCurrentAuthorPage: isAuthorPageActive });
+  const authorDelete = createShortVideoAuthorDeleteAction({
+    api,
+    recovery: deleteRecovery,
+    showToast: showBrowserToast,
+    onDeleted: () => {
+      shortVideoAuthorMentionCache.clear();
+      state.shortVideo.authorDetail = null;
+      state.shortVideo.authorVideo = null;
+      returnToShortVideoAuthorIndex();
+    }
+  });
 
   window.addEventListener("pagehide", () => cancelAuthorCollectorPolling(), { passive: true });
 
@@ -191,7 +204,7 @@ export function createShortVideoAuthorPages(deps) {
     }
     fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
       .catch((error) => showBrowserToast(error?.message || "数量确认启动失败")));
-    actions.append(follow, douyin, authorFolder, quickRefresh, fullRefresh);
+    actions.append(follow, douyin, authorFolder, quickRefresh, fullRefresh, authorDelete.button(author, state.shortVideo.authorPage));
     head.append(avatar, copy, actions);
     return head;
   }

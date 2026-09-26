@@ -224,6 +224,23 @@ async def test_mark_before_index_build_reaches_shared_cache(tmp_path):
     await api_b.close()
 
 
+@pytest.mark.asyncio
+async def test_mark_skips_library_scan_when_local_dedupe_and_database_are_disabled(
+    tmp_path, monkeypatch
+):
+    downloader, api_client = _build_downloader(tmp_path)
+    downloader.config.update(local_dedupe=False, database=False)
+
+    def _fail_index_build():  # pragma: no cover - defensive assertion
+        raise AssertionError("disabled local dedupe must not scan the media library")
+
+    monkeypatch.setattr(downloader, "_build_local_aweme_index", _fail_index_build)
+    downloader._mark_local_aweme_downloaded("7346971177114611006")
+
+    assert downloader._local_aweme_ids is None
+    await api_client.close()
+
+
 # ---------------------------------------------------------------------------
 # 3. 可选资产并行且失败不影响主媒体
 # ---------------------------------------------------------------------------

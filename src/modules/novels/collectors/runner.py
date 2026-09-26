@@ -32,7 +32,7 @@ BUILTIN_DIRECT_ADAPTERS = {
         "id": "alicesw",
         "name": "爱丽丝书屋",
         "driver": "alicesw",
-        "config": {"delayMs": 5000, "timeoutMs": 30000, "maxChapters": 0, "useEnvProxy": False},
+        "config": {"delayMs": 5000, "timeoutMs": 30000, "maxChapters": 0, "useEnvProxy": True},
     },
 }
 

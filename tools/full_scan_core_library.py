@@ -13,6 +13,7 @@ from pathlib import Path
 
 from code_parser import code_key, normalize_code
 from core_image_store import attach_core_image_store
+from person_identity import bind_location, canonical_person_id, has_table, location_key
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -307,14 +308,38 @@ def path_exists(value: str) -> bool:
         return False
 
 
-def load_people(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+class PersonIndex(dict):
+    def __init__(self):
+        super().__init__()
+        self.locations = {}
+
+
+def load_people(conn: sqlite3.Connection) -> PersonIndex:
     rows = conn.execute("SELECT id, name, display_name, folder_path FROM people").fetchall()
-    people: dict[str, sqlite3.Row] = {}
+    people = PersonIndex()
+    by_id = {int(row["id"]): row for row in rows}
+
+    def add(name, row):
+        key = normalize_person_search(name or "")
+        if canonical_person_id(conn, row["id"]) != row["id"]:
+            return
+        canonical = by_id.get(canonical_person_id(conn, row["id"]))
+        if not key or canonical is None:
+            return
+        if key not in people:
+            people[key] = canonical
+        elif people[key] is not None and people[key]["id"] != canonical["id"]:
+            people[key] = None  # Ambiguous names must never silently select the first row.
+
     for row in rows:
         for name in {row["name"] or "", row["display_name"] or ""}:
-            key = normalize_person_search(name)
-            if key and key not in people:
-                people[key] = row
+            add(name, row)
+        if row["folder_path"] and canonical_person_id(conn, row["id"]) == row["id"]:
+            key = location_key(row["folder_path"])
+            if key not in people.locations:
+                people.locations[key] = row
+            elif people.locations[key] is not None and people.locations[key]["id"] != row["id"]:
+                people.locations[key] = None
     for row in conn.execute(
         """
         SELECT p.id, p.name, p.display_name, p.folder_path, pa.alias
@@ -323,16 +348,22 @@ def load_people(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
         ORDER BY pa.id
         """
     ):
-        key = normalize_person_search(row["alias"] or "")
-        if key and key not in people:
-            people[key] = row
+        add(row["alias"], row)
+    if has_table(conn, "person_library_locations"):
+        for row in conn.execute("SELECT person_id,path_key FROM person_library_locations"):
+            people.locations[row["path_key"]] = by_id[canonical_person_id(conn, row["person_id"])]
     return people
 
 
 def upsert_person(conn: sqlite3.Connection, people: dict[str, sqlite3.Row], name: str, folder_path: str, write: bool, stats: dict) -> int:
     key = normalize_person_search(name)
-    existing = people.get(key)
+    folder_key = location_key(folder_path)
+    existing = people.locations.get(folder_key) if folder_key in people.locations else people.get(key)
+    if existing is None and (folder_key in people.locations or key in people):
+        raise RuntimeError(f"PERSON_NAME_AMBIGUOUS: {name}; select or merge the person before scanning")
     if existing:
+        if write:
+            bind_location(conn, existing["id"], folder_path, now_iso())
         if write and folder_path and (not existing["folder_path"] or not path_exists(existing["folder_path"])):
             conn.execute("UPDATE people SET folder_path = ?, updated_at = ? WHERE id = ?", (folder_path, now_iso(), existing["id"]))
         return int(existing["id"])
@@ -349,6 +380,8 @@ def upsert_person(conn: sqlite3.Connection, people: dict[str, sqlite3.Row], name
     )
     person_id = int(cur.lastrowid)
     people[key] = conn.execute("SELECT id, name, display_name, folder_path FROM people WHERE id = ?", (person_id,)).fetchone()
+    bind_location(conn, person_id, folder_path, now)
+    people.locations[folder_key] = people[key]
     return person_id
 
 
@@ -706,6 +739,7 @@ def scan_all(
     }
 
     conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    people = load_people(conn)
     try:
         processed_people = 0
         for root in available_roots:
@@ -905,6 +939,7 @@ def scan_candidates(
 
     conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
     try:
+        people = load_people(conn)
         for person_dir in person_dirs[: limit_people or None]:
             stats["person_dirs_seen"] += 1
             person_source = clean_path(person_dir)

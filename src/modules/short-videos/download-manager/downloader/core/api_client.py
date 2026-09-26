@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import aiohttp
+from yarl import URL
 
 from auth import MsTokenManager
 from utils.cookie_utils import sanitize_cookies
 from utils.logger import setup_logger
 from utils.timing import elapsed_ms, timing_event
+from utils.websign import add_web_signature, requires_web_signature
 from utils.xbogus import XBogus
 
 try:
-    from utils.abogus import ABogus, BrowserFingerprintGenerator
+    from utils.abogus_v2 import ABogus, browser_info_from_screen
 except Exception:  # pragma: no cover - optional dependency
     ABogus = None
-    BrowserFingerprintGenerator = None
+    browser_info_from_screen = None
 
 logger = setup_logger("APIClient")
 
@@ -49,16 +50,22 @@ def _is_login_required(data: object) -> bool:
     return code in _LOGIN_REQUIRED_STATUS_CODES or "请先登录" in msg
 
 
-_USER_AGENT_POOL = [
-    (
+_BROWSER_PROFILE = {
+    "user_agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
     ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-    ),
-]
+    "pc_libra_divert": "Windows",
+    "browser_platform": "Win32",
+    "browser_name": "Chrome",
+    "browser_version": "146.0.0.0",
+    "engine_name": "Blink",
+    "engine_version": "146.0.0.0",
+    "os_name": "Windows",
+    "os_version": "10",
+    "screen_width": 1920,
+    "screen_height": 1080,
+}
 
 
 class DouyinAPIClient:
@@ -85,7 +92,8 @@ class DouyinAPIClient:
         self._browser_post_aweme_items: Dict[str, Dict[str, Any]] = {}
         self._browser_post_stats: Dict[str, int] = {}
         self.last_error = ""
-        selected_ua = random.choice(_USER_AGENT_POOL)
+        self.last_error_kind = ""
+        selected_ua = _BROWSER_PROFILE["user_agent"]
         self.headers = {
             "User-Agent": selected_ua,
             "Referer": "https://www.douyin.com/?recommend=1",
@@ -96,7 +104,21 @@ class DouyinAPIClient:
         self._signer = XBogus(self.headers["User-Agent"])
         self._ms_token_manager = MsTokenManager(user_agent=self.headers["User-Agent"])
         self._ms_token = (self.cookies.get("msToken") or "").strip()
-        self._abogus_enabled = ABogus is not None and BrowserFingerprintGenerator is not None
+        self._browser_info = (
+            browser_info_from_screen(
+                int(_BROWSER_PROFILE["screen_width"]),
+                int(_BROWSER_PROFILE["screen_height"]),
+                str(_BROWSER_PROFILE["browser_platform"]),
+            )
+            if browser_info_from_screen is not None
+            else ""
+        )
+        self._abogus_signer = (
+            ABogus(selected_ua, browser_info=self._browser_info)
+            if ABogus is not None and self._browser_info
+            else None
+        )
+        self._abogus_enabled = self._abogus_signer is not None
 
     async def __aenter__(self) -> "DouyinAPIClient":
         await self._ensure_session()
@@ -147,21 +169,21 @@ class DouyinAPIClient:
             "channel": "channel_pc_web",
             "update_version_code": "170400",
             "pc_client_type": "1",
-            "pc_libra_divert": "Windows",
+            "pc_libra_divert": _BROWSER_PROFILE["pc_libra_divert"],
             "version_code": "290100",
             "version_name": "29.1.0",
             "cookie_enabled": "true",
-            "screen_width": "1536",
-            "screen_height": "864",
+            "screen_width": str(_BROWSER_PROFILE["screen_width"]),
+            "screen_height": str(_BROWSER_PROFILE["screen_height"]),
             "browser_language": "zh-CN",
-            "browser_platform": "Win32",
-            "browser_name": "Chrome",
-            "browser_version": "139.0.0.0",
+            "browser_platform": _BROWSER_PROFILE["browser_platform"],
+            "browser_name": _BROWSER_PROFILE["browser_name"],
+            "browser_version": _BROWSER_PROFILE["browser_version"],
             "browser_online": "true",
-            "engine_name": "Blink",
-            "engine_version": "139.0.0.0",
-            "os_name": "Windows",
-            "os_version": "10",
+            "engine_name": _BROWSER_PROFILE["engine_name"],
+            "engine_version": _BROWSER_PROFILE["engine_version"],
+            "os_name": _BROWSER_PROFILE["os_name"],
+            "os_version": _BROWSER_PROFILE["os_version"],
             "cpu_core_num": "16",
             "device_memory": "8",
             "platform": "PC",
@@ -170,7 +192,6 @@ class DouyinAPIClient:
             "round_trip_time": "200",
             "support_h265": "1",
             "support_dash": "1",
-            "uifid": "",
             "msToken": ms_token,
         }
 
@@ -186,17 +207,34 @@ class DouyinAPIClient:
             return ab_signed
         return self.sign_url(f"{base_url}?{query}")
 
+    def build_signed_request(
+        self, path: str, params: Dict[str, Any]
+    ) -> Tuple[str, Dict[str, str]]:
+        """Build a URL and matching headers for one Douyin API request.
+
+        Protected endpoints need a second signature after ``a_bogus``.  It is
+        bound to visitor cookies and covers the final query order, so it must be
+        the last URL-building step.
+        """
+
+        signed_url, ua = self.build_signed_path(path, params)
+        headers = {**self.headers, "User-Agent": ua}
+        if requires_web_signature(path):
+            signed_url, web_headers = add_web_signature(signed_url, self.cookies)
+            headers.update(web_headers)
+        return signed_url, headers
+
     def _build_abogus_url(self, base_url: str, query: str) -> Optional[Tuple[str, str]]:
-        if not self._abogus_enabled:
+        if not self._abogus_enabled or self._abogus_signer is None:
             return None
 
         started = time.monotonic()
         try:
-            browser_fp = BrowserFingerprintGenerator.generate_fingerprint("Chrome")
-            signer = ABogus(fp=browser_fp, user_agent=self.headers["User-Agent"])
-            params_with_ab, _ab, ua, _body = signer.generate_abogus(query, "")
+            signature = self._abogus_signer.get_value(query)
+            separator = "&" if query else ""
+            params_with_ab = f"{query}{separator}a_bogus={quote(signature, safe='')}"
             timing_event("api_sign_abogus", elapsed_ms=elapsed_ms(started), ok=True)
-            return f"{base_url}?{params_with_ab}", ua
+            return f"{base_url}?{params_with_ab}", self.headers["User-Agent"]
         except Exception as exc:
             timing_event("api_sign_abogus", elapsed_ms=elapsed_ms(started), ok=False, error=str(exc)[:300])
             logger.warning("Failed to generate a_bogus, fallback to X-Bogus: %s", exc)
@@ -212,6 +250,7 @@ class DouyinAPIClient:
     ) -> Dict[str, Any]:
         await self._ensure_session()
         self.last_error = ""
+        self.last_error_kind = ""
         delays = [1, 2, 5]
         last_exc: Optional[Exception] = None
         aweme_id = str(params.get("aweme_id") or "")
@@ -219,7 +258,7 @@ class DouyinAPIClient:
 
         for attempt in range(max_retries):
             sign_started = time.monotonic()
-            signed_url, ua = self.build_signed_path(path, params)
+            signed_url, request_headers = self.build_signed_request(path, params)
             timing_event(
                 "api_request_signed",
                 path=path,
@@ -232,8 +271,8 @@ class DouyinAPIClient:
             request_started = time.monotonic()
             try:
                 async with self._session.get(
-                    signed_url,
-                    headers={**self.headers, "User-Agent": ua},
+                    URL(signed_url, encoded=True),
+                    headers=request_headers,
                     proxy=self.proxy or None,
                 ) as response:
                     status = response.status
@@ -260,6 +299,7 @@ class DouyinAPIClient:
                                 attempt + 1,
                                 max_retries,
                             )
+                            self.last_error_kind = "anti_bot"
                             last_exc = RuntimeError(f"Empty 200 response for {path} (anti-bot)")
                             if attempt < max_retries - 1:
                                 delay = delays[min(attempt, len(delays) - 1)]
@@ -289,6 +329,8 @@ class DouyinAPIClient:
                                     path,
                                     len(body),
                                 )
+                                self.last_error = f"Non-JSON 200 response for {path}"
+                                self.last_error_kind = "anti_bot"
                                 return {}
                         result = data if isinstance(data, dict) else {}
                         if _is_login_required(result):
@@ -309,6 +351,8 @@ class DouyinAPIClient:
                                 str(result.get("status_msg") or ""),
                                 path,
                             )
+                        self.last_error = ""
+                        self.last_error_kind = ""
                         timing_event(
                             "api_request_attempt",
                             path=path,
@@ -324,6 +368,41 @@ class DouyinAPIClient:
                         )
                         return result
                     if response.status < 500 and response.status != 429:
+                        body = await response.read()
+                        body_text = " ".join(body.decode("utf-8", errors="replace").split())[:300]
+                        self.last_error = f"HTTP {response.status}"
+                        if body_text:
+                            self.last_error = f"{self.last_error}: {body_text}"
+                        is_antibot = response.status == 403 or any(
+                            marker in body_text.lower()
+                            for marker in ("argussecurityplugin", "uifid not found", "anti-bot")
+                        )
+                        if is_antibot:
+                            self.last_error_kind = "anti_bot"
+                        else:
+                            self.last_error_kind = "http_error"
+                        timing_event(
+                            "api_request_attempt",
+                            path=path,
+                            aweme_id=aweme_id,
+                            aid=aid,
+                            attempt=attempt + 1,
+                            status=status,
+                            body_len=len(body),
+                            elapsed_ms=elapsed_ms(request_started),
+                            result="retry_antibot_status" if is_antibot else "non_retry_status",
+                        )
+                        log_fn = logger.debug if suppress_error else logger.error
+                        log_fn(
+                            "Request failed: path=%s, status=%s, detail=%s",
+                            path,
+                            response.status,
+                            body_text,
+                        )
+                        if not is_antibot:
+                            return {}
+                        last_exc = RuntimeError(self.last_error)
+                    else:
                         timing_event(
                             "api_request_attempt",
                             path=path,
@@ -332,26 +411,9 @@ class DouyinAPIClient:
                             attempt=attempt + 1,
                             status=status,
                             elapsed_ms=elapsed_ms(request_started),
-                            result="non_retry_status",
+                            result="retry_status",
                         )
-                        log_fn = logger.debug if suppress_error else logger.error
-                        log_fn(
-                            "Request failed: path=%s, status=%s",
-                            path,
-                            response.status,
-                        )
-                        return {}
-                    timing_event(
-                        "api_request_attempt",
-                        path=path,
-                        aweme_id=aweme_id,
-                        aid=aid,
-                        attempt=attempt + 1,
-                        status=status,
-                        elapsed_ms=elapsed_ms(request_started),
-                        result="retry_status",
-                    )
-                    last_exc = RuntimeError(f"HTTP {response.status} for {path}")
+                        last_exc = RuntimeError(f"HTTP {response.status} for {path}")
             except LoginRequiredError:
                 raise
             except Exception as exc:
@@ -390,6 +452,8 @@ class DouyinAPIClient:
         log_fn = logger.debug if suppress_error else logger.error
         log_fn("Request failed after %d attempts: path=%s, error=%s", max_retries, path, last_exc)
         self.last_error = str(last_exc or "")
+        if self.last_error and not self.last_error_kind:
+            self.last_error_kind = "network"
         return {}
 
     @staticmethod
@@ -471,10 +535,13 @@ class DouyinAPIClient:
     # aid=1128 works for videos but filters out image/note content;
     # aid=6383 works for notes/gallery but may miss some video content.
     _DETAIL_AID_CANDIDATES = ("6383", "1128")
+    CONTENT_UNAVAILABLE_ERROR = "作品已不可用（作者可能已删除作品或更改可见权限）"
 
     async def get_video_detail(
         self, aweme_id: str, *, suppress_error: bool = False
     ) -> Optional[Dict[str, Any]]:
+        self.last_error = ""
+        self.last_error_kind = ""
         for aid in self._DETAIL_AID_CANDIDATES:
             params = await self._default_query()
             params.update(
@@ -500,15 +567,23 @@ class DouyinAPIClient:
             # filtered (e.g. filter_reason="images_base" for note/gallery).
             filter_info = data.get("filter_detail")
             if isinstance(filter_info, dict) and filter_info.get("filter_reason"):
+                filter_reason = str(filter_info["filter_reason"])
+                if filter_reason == "status_self_see":
+                    self.last_error = self.CONTENT_UNAVAILABLE_ERROR
+                    self.last_error_kind = "content_unavailable"
+                    logger.info("Aweme %s is unavailable (%s)", aweme_id, filter_reason)
+                    return None
                 logger.info(
                     "Aweme %s filtered with aid=%s (reason=%s), retrying",
                     aweme_id,
                     aid,
-                    filter_info["filter_reason"],
+                    filter_reason,
                 )
                 continue
 
             # aweme_detail is null without a filter reason — no retry needed
+            self.last_error = "详情接口未返回作品信息"
+            self.last_error_kind = "detail_missing"
             break
 
         return None

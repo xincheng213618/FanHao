@@ -1,0 +1,117 @@
+/* Local library browsing: book information first, maintenance in book details. */
+body.novel-view:not(.novel-reader-active) { background: #f6f5f2; }
+.novel-home, .novel-detail { color: #292c30; }
+.novel-section-menu {
+  gap: 4px;
+  background: #fff;
+  box-shadow: none;
+  border-color: #e6e4df;
+}
+.novel-brand {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-right: 30px;
+  color: #30332f;
+  font: 700 24px/1.2 "Noto Serif SC", "SimSun", serif;
+  letter-spacing: 3px;
+  text-decoration: none;
+}
+.novel-section-menu > button { min-width: 72px; padding: 0 16px; font-size: 14px; font-weight: 500; color: #686b70; }
+.novel-section-menu > button.active { color: #a23d3d; font-weight: 700; }
+.novel-section-menu > button.active::after { height: 2px; background: #b54343; }
+.novel-section-search { width: min(360px, 34vw); height: 36px; border-color: #e4e3df; border-radius: 5px; background: #f8f8f6; }
+.novel-section-search input { font-size: 13px; }
+.novel-section-search button { min-width: 56px; color: #a23d3d; }
+.novel-library .novel-home-head { padding: 10px 0 28px; border: 0; background: none; box-shadow: none; }
+.novel-library .novel-home-head h1 { margin: 6px 0 0; color: #292c30; font-size: 30px; line-height: 1.4; letter-spacing: 1px; }
+.novel-library .novel-home-head .eyebrow { color: #8a8172; font-size: 11px; letter-spacing: 3px; }
+.novel-library .novel-home-head p { margin: 8px 0 0; color: #777b7c; font-size: 13px; }
+.novel-library-workspace { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 32px; align-items: start; }
+.novel-library-workspace.without-sidebar { grid-template-columns: minmax(0, 1fr); }
+.novel-library-sidebar { min-width: 0; }
+.novel-sidebar-heading { display: flex; justify-content: space-between; align-items: center; margin: 0 0 12px; padding: 0 12px; color: #3e4243; font-size: 14px; }
+.novel-sidebar-heading > span { color: #8c8c86; font-size: 11px; font-weight: 400; }
+.novel-library .novel-category-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; margin: 0; }
+.novel-library .novel-chip { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 36px; border: 0; border-radius: 4px; padding: 6px 12px; color: #606366; background: none; font-size: 13px; text-align: left; }
+.novel-library .novel-chip small { color: #8c8c86; font-size: 11px; font-variant-numeric: tabular-nums; }
+.novel-library .novel-chip.active { color: #a43d3d; background: #eee5df; font-weight: 600; }
+.novel-library .novel-chip.active small { color: #a43d3d; }
+.novel-library .novel-chip:hover { background: #eeece7; }
+.novel-resume { margin: 28px 0 0; padding: 22px 12px 0; border-top: 1px solid #dfddd6; }
+.novel-resume h2 { margin: 0 0 14px; font-size: 12px; color: #7c7b74; font-weight: 500; }
+.novel-resume-title { padding: 0; border: 0; background: none; color: #393c3e; font-size: 14px; font-weight: 600; text-align: left; line-height: 1.6; cursor: pointer; overflow-wrap: anywhere; }
+.novel-resume p { margin: 9px 0 13px; color: #81837d; font-size: 11px; line-height: 1.7; }
+.novel-resume-read { min-height: 32px; padding: 0; border: 0; background: none; color: #a23d3d; font-size: 12px; cursor: pointer; }
+.novel-library-results { min-width: 0; border: 1px solid #e7e5df; border-radius: 6px; background: #fff; padding: 0 24px; }
+.novel-library .novel-controls { display: flex; align-items: center; gap: 16px; margin: 0; padding: 17px 0; border-bottom: 1px solid #eae8e3; }
+.novel-results-heading { display: flex; flex: 1; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 9px; }
+.novel-results-heading h2 { margin: 0; color: #303438; font-size: 16px; line-height: 1.6; overflow-wrap: anywhere; }
+.novel-results-count { color: #91918b; font-size: 12px; white-space: nowrap; }
+.novel-library .novel-sort { width: 125px; height: 32px; flex: 0 0 auto; padding: 0 6px; border-color: #e5e4df; border-radius: 4px; font-size: 12px; color: #686b6d; }
+.novel-text-button { min-height: 32px; padding: 0 4px; border: 0; background: none; color: #a23d3d; font-size: 12px; cursor: pointer; }
+.novel-library .novel-book-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; row-gap: 0; }
+.novel-library .novel-book-row { position: relative; grid-template-columns: 76px minmax(0, 1fr); gap: 0 16px; align-items: start; min-height: 188px; padding: 24px 0 20px; border: 0; border-bottom: 1px solid #eeece7; border-radius: 0; box-shadow: none; }
+.novel-cover { --novel-cover-bg: #dce2dd; --novel-cover-ink: #48584f; position: relative; width: 76px; padding: 10px 10px 12px; aspect-ratio: 3/4.2; border-radius: 1px 3px 3px 1px; border: 1px solid #00000009; border-left: 4px solid #00000015; background: var(--novel-cover-bg); color: var(--novel-cover-ink); box-shadow: 2px 3px 5px #20252610; }
+.novel-cover[data-tone="1"] { --novel-cover-bg: #e4ddd3; --novel-cover-ink: #6d5846; }
+.novel-cover[data-tone="2"] { --novel-cover-bg: #dce1e7; --novel-cover-ink: #4a5d70; }
+.novel-cover[data-tone="3"] { --novel-cover-bg: #e6dcda; --novel-cover-ink: #795b58; }
+.novel-cover[data-tone="4"] { --novel-cover-bg: #e1dfd3; --novel-cover-ink: #6d694c; }
+.novel-cover span { align-self: flex-start; padding: 0; background: none; color: inherit; font-size: 9px; font-weight: 400; letter-spacing: 2px; }
+.novel-cover strong { color: inherit; font-family: "Noto Serif SC", "SimSun", serif; font-size: 13px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; -webkit-line-clamp: 3; }
+.novel-library .novel-book-row h3 { white-space: normal; }
+.novel-book-title { display: -webkit-box; width: 100%; overflow: hidden; border: 0; padding: 0; background: none; color: #303438; font-family: inherit; font-size: 16px; font-weight: 600; line-height: 1.5; text-align: left; cursor: pointer; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.novel-library .novel-book-meta { display: block; margin: 6px 0 0; overflow: hidden; color: #70766f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.novel-library .novel-book-summary { margin-top: 9px; color: #70766f; font-size: 13px; line-height: 1.8; -webkit-line-clamp: 2; }
+.novel-library .novel-book-latest { margin-top: 9px; overflow: hidden; color: #74796f; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.novel-library .novel-book-actions { display: flex; grid-column: 2; gap: 14px; align-items: center; min-width: 0; margin-top: 8px; }
+.novel-library .novel-book-actions button { min-height: 30px; padding: 0; border: 0; background: none; color: #6f756d; font-size: 12px; font-weight: 400; }
+.novel-library .novel-book-actions button.primary { border-radius: 3px; padding: 0 8px; background: #f5eae7; color: #a23d3d; }
+.novel-library .novel-book-actions .novel-read-link { color: #a23d3d; }
+.novel-library :is(.novel-book-title, .novel-book-author, .novel-book-actions button, .novel-resume-title):hover { color: #a23d3d; text-decoration: underline; }
+.novel-library .novel-library-autoload { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 16px; min-height: 66px; color: #91928b; font-size: 12px; }
+.novel-library .novel-status-line { margin: 14px 0 0; font-size: 12px; }
+.novel-library .novel-empty-card { grid-column: 1/-1; border: 0; padding: 64px 16px; }
+.novel-library .novel-empty-card h3 { color: #565d5a; font-size: 17px; }
+.novel-library .novel-empty-card p { color: #858982; font-size: 13px; line-height: 1.8; }
+.novel-library .novel-empty-card button { margin-top: 12px; }
+.novel-library .novel-recent { padding: 20px 0; border: 0; box-shadow: none; margin: 0; }
+.novel-library .novel-recent > h3 { display: none; }
+.novel-library .novel-recent-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0; }
+.novel-library .novel-recent-item { min-height: 100px; background: #faf9f6; border-color: #e8e5de; }
+.novel-library .novel-recent-item strong { color: #424844; font-size: 14px; }
+.novel-library .novel-recent-item span { font-size: 11px; }
+.novel-library :is(button, a, select):focus-visible, .novel-section-menu :is(button, a):focus-visible { outline: 2px solid #b54343; outline-offset: 3px; }
+@media (max-width: 1050px) {
+  .novel-library-workspace { grid-template-columns: 148px minmax(0, 1fr); gap: 20px; }
+  .novel-library-results { padding: 0 20px; }
+  .novel-library .novel-book-list { grid-template-columns: minmax(0, 1fr); }
+  .novel-library .novel-book-row { min-height: 165px; }
+}
+@media (max-width: 700px) {
+  .novel-home, .novel-detail { width: calc(100% - 32px); }
+  .novel-section-menu { flex-wrap: wrap; gap: 0; padding: 0 16px 10px; }
+  .novel-brand { margin-right: auto; font-size: 20px; }
+  .novel-section-menu > button { min-width: 0; min-height: 48px; padding: 0 12px; font-size: 13px; }
+  .novel-section-search { flex: 1 0 100%; width: 100%; margin: 0; }
+  .novel-library .novel-home-head { padding: 0 0 22px; }
+  .novel-library .novel-home-head h1 { font-size: 26px; }
+  .novel-library-workspace { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .novel-library .novel-category-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .novel-sidebar-heading { padding: 0; }
+  .novel-library .novel-chip { min-height: 32px; padding: 5px 9px; background: #eeece6; gap: 7px; font-size: 12px; }
+  .novel-library .novel-chip small { font-size: 10px; }
+  .novel-resume { display: none; }
+  .novel-library-results { padding: 0 16px; }
+  .novel-library .novel-controls { flex-wrap: wrap; gap: 8px; padding: 14px 0; }
+  .novel-results-heading h2 { font-size: 15px; }
+  .novel-library .novel-sort { width: 110px; }
+  .novel-library .novel-book-row { grid-template-columns: 65px minmax(0, 1fr); gap: 0 13px; min-height: 168px; padding: 20px 0 16px; }
+  .novel-library .novel-cover { width: 65px; padding: 8px; }
+  .novel-library .novel-cover strong { font-size: 12px; }
+  .novel-library .novel-book-title { font-size: 15px; }
+  .novel-library .novel-book-meta { font-size: 11px; }
+  .novel-library .novel-book-summary { font-size: 12px; }
+  .novel-library .novel-recent-strip { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) { .novel-library * { scroll-behavior: auto; } }

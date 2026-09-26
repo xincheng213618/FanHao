@@ -2,9 +2,11 @@
 title: 配置参考
 description: 说明环境变量、路径优先级、运行期配置及本地访问控制的有效边界。
 status: maintained
-verified_at: 2026-08-30
+verified_at: 2026-09-20
 sources:
   - src/bootstrap/server-config.js
+  - src/bootstrap/product-profile.js
+  - src/modules/short-videos/server/product.js
   - src/platform/server/root-config.js
   - src/platform/server/auth.js
   - src/modules/system/server/app-config-service.js
@@ -21,7 +23,7 @@ sources:
 ## 加载与路径规则
 
 - `PORT`、`HOST` 等变量在启动进程前设置；修改当前终端的变量不会更新已运行的服务。
-- 现有启动入口没有自动加载 `.env` 的逻辑；被 Git 忽略不代表文件会生效。
+- 启动配置自动加载仓库根目录的 `.env`；已有进程环境变量优先。`FANHAO_LOAD_ENV=0` 禁用文件加载。
 - `start-fanhao.ps1` 用 `-Port`、`-HostName` 覆盖主服务的 `PORT`、`HOST`。
 - 根目录列表接受分号、逗号或竖线分隔。相对路径的结果取决于进程当前目录，部署时优先使用绝对路径。
 - 空字符串通常会触发默认值，不是“禁用扫描”。安全试跑应显式指向空目录。
@@ -33,7 +35,7 @@ sources:
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `29998` | 主服务 HTTP 端口。 |
+| `PORT` | 按产品入口 | 聚合应用 `29998`、独立番号 `29997`、独立短视频 `29996`。 |
 | `HOST` | `0.0.0.0` | 所有网卡监听；本机测试设为 `127.0.0.1`。 |
 | `FANHAO_WEB_PASSWORD` | 未配置 | 远程访问密码；不要写入仓库、命令输出或文档示例。 |
 
@@ -70,16 +72,20 @@ sources:
 
 | 变量或位置 | 默认关系 |
 | --- | --- |
-| 主数据目录 | 当前源码副本下的 `data/`；没有 `FANHAO_DATA_DIR` 配置。 |
-| `FANHAO_CORE_IMAGE_DB` | 默认 `data/fanhao-core-images.sqlite`。 |
+| `FANHAO_DATA_DIR` | 覆盖产品数据目录；聚合默认 `data/`，独立产品默认 `data/products/<产品 ID>/`。 |
+| `FANHAO_CORE_DB` | 默认产品数据目录下的 `fanhao-core-v2.sqlite`；独立番号需要已初始化的核心库。 |
+| `FANHAO_CORE_IMAGE_DB` | 默认产品数据目录下的 `fanhao-core-images.sqlite`。 |
+| `FANHAO_SHORT_VIDEO_DB` | 默认产品数据目录下的 `short-videos.sqlite`。 |
+| `FANHAO_WORKFLOW_ROOTS` | 整理迁移允许的目录列表；未设置时沿用番号资料根目录。 |
 | `FANHAO_MANGA_DATABASE` | 默认位于漫画根目录下的 `manga.sqlite`。 |
-| `FANHAO_ACCESS_ANALYTICS_DB` | 默认 `data/access-analytics.sqlite`。 |
-| `FANHAO_IP2REGION_XDB` | 默认 `data/ip2region_v4.xdb`，IP 地域查询数据。 |
+| `FANHAO_ACCESS_ANALYTICS_DB` | 默认产品数据目录下的 `access-analytics.sqlite`。 |
+| `FANHAO_IP2REGION_XDB` | 默认产品数据目录下的 `ip2region_v4.xdb`，IP 地域查询数据。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | 默认短视频下载器目录下的 `data/douyin_downloads.sqlite`。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_URL` | 默认 `http://127.0.0.1:8765`。 |
 | `FANHAO_DOUYIN_SYNC_MS` | 默认 `60000` 毫秒，同步轮询间隔。 |
 
 下载器启动端口与主服务使用的下载器 URL 是两项配置。
+独立运行和配置示例见[独立产品与文件工作流](../architecture/product-boundaries.md)。
 改变 `-DownloadManagerPort` 时需同时核对 `FANHAO_DOUYIN_DOWNLOAD_MANAGER_URL`，启动器不会自动替你重写该 URL。
 `-SkipDownloadManager` 不会阻止主服务读取已配置的下载器数据库。
 
@@ -97,7 +103,7 @@ sources:
 
 ## 运行期配置
 
-`data/app-config.json` 保存应用设置；加载时规范化，不存在时使用内存默认值，保存设置时才写文件。
+产品数据目录下的 `app-config.json` 保存应用设置；加载时规范化，不存在时使用内存默认值，保存设置时才写文件。
 不要手动编辑正在使用的配置文件绕过服务端校验。
 
 | 字段 | 约束或用途 |
@@ -106,7 +112,7 @@ sources:
 | `compilationKeywords` | 合集识别关键词。 |
 | `actorAvatarDataPath` | 可选头像数据路径，属于本机私有配置。 |
 | `imageReaderCacheMaxBytes` | 默认 2 GiB；正值限制为 128 MiB–200 GiB，非正值规范化为 0。 |
-| `shortVideoTranscodeConcurrency` | 默认 2，限制为 1–4。 |
+| `shortVideoTranscodeConcurrency` | 旧兼容字段；短视频未保存独立设置时读取，后续使用其数据库旁的 `short-video-settings.json`，默认 2，限制为 1–4。 |
 
 `auth-secret.txt`、Cookie 文件、SQLite、缓存和日志都是运行数据，不能随文档站公开。
 环境变量可覆盖的数据库并不包含全部数据库；迁移与备份应参照[运行维护](../guide/operations.md)逐项核对。

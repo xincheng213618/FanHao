@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 
 const MODULE_ENTRY_FILE = "module.js";
 
-export async function discoverFanHaoModules({ modulesDir, context, sendJson }) {
-  const discovered = await loadModuleEntries(modulesDir);
+export async function discoverFanHaoModules({ modulesDir, context, sendJson, enabledModules = null, product = null }) {
+  const discovered = await loadModuleEntries(modulesDir, enabledModules);
   const modules = [];
   for (const entry of discovered) {
     const runtime = entry.createModule
@@ -15,7 +15,7 @@ export async function discoverFanHaoModules({ modulesDir, context, sendJson }) {
   }
 
   modules.sort((a, b) => a.definition.order - b.definition.order || a.definition.id.localeCompare(b.definition.id, "en"));
-  return createModuleRegistry({ modules, sendJson });
+  return createModuleRegistry({ modules, sendJson, product });
 }
 
 export async function discoverFanHaoModuleDefinitions({ modulesDir }) {
@@ -23,9 +23,10 @@ export async function discoverFanHaoModuleDefinitions({ modulesDir }) {
   return Object.freeze(entries.map((entry) => entry.definition));
 }
 
-async function loadModuleEntries(modulesDir) {
+async function loadModuleEntries(modulesDir, enabledModules = null) {
+  const enabled = enabledModules === null ? null : new Set(enabledModules);
   const entries = fs.readdirSync(modulesDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && (!enabled || enabled.has(entry.name)))
     .sort((a, b) => a.name.localeCompare(b.name, "en"));
   const modules = [];
   const ids = new Set();
@@ -43,6 +44,11 @@ async function loadModuleEntries(modulesDir) {
   }
 
   modules.sort((a, b) => a.definition.order - b.definition.order || a.definition.id.localeCompare(b.definition.id, "en"));
+  if (enabled) {
+    for (const id of enabled) {
+      if (!ids.has(id)) throw new Error(`Enabled module is missing: ${id}`);
+    }
+  }
   return modules;
 }
 
@@ -191,13 +197,13 @@ function normalizeSettingsSchema(value, moduleId) {
   return Object.freeze({ ...value, sections: Object.freeze(sections) });
 }
 
-function createModuleRegistry({ modules, sendJson }) {
+function createModuleRegistry({ modules, sendJson, product }) {
   const byId = new Map(modules.map((entry) => [entry.definition.id, entry]));
   const settingsEntries = modules.filter((entry) => entry.runtime.settings);
 
   async function routeApi(req, res, url) {
     if (url.pathname === "/api/modules" && req.method === "GET") {
-      sendJson(res, 200, { modules: publicManifest() });
+      sendJson(res, 200, { modules: publicManifest(), ...(product ? { product: { id: product.id, title: product.title, home: product.home } } : {}) });
       return true;
     }
     for (const entry of modules) {

@@ -9,7 +9,7 @@ import uuid
 from datetime import timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import aiofiles
 import aiohttp
@@ -228,6 +228,7 @@ class FileManager:
         *,
         prefer_response_content_type: bool = False,
         return_saved_path: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[bool, Path]:
         started = time.monotonic()
         loop = asyncio.get_running_loop()
@@ -257,6 +258,7 @@ class FileManager:
                         headers=headers,
                         proxy=proxy,
                         prefer_response_content_type=prefer_response_content_type,
+                        progress_callback=progress_callback,
                     )
                 )
                 self._inflight_downloads[key] = task
@@ -311,6 +313,7 @@ class FileManager:
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
         prefer_response_content_type: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[bool, Path]:
         should_close = False
         can_resume = not prefer_response_content_type
@@ -382,6 +385,7 @@ class FileManager:
                                 initial_size=0,
                                 checkpoint=response_checkpoint,
                                 keep_partial=can_resume and response_checkpoint is not None,
+                                progress_callback=progress_callback,
                             )
                         except _UnsafePartialResponse:
                             self._discard_partial(save_path)
@@ -433,6 +437,7 @@ class FileManager:
                                     expected_body_length=range_end - range_start + 1,
                                     checkpoint=response_checkpoint,
                                     keep_partial=can_resume and response_checkpoint is not None,
+                                    progress_callback=progress_callback,
                                 )
                             except _UnsafePartialResponse as exc:
                                 logger.warning(
@@ -484,6 +489,7 @@ class FileManager:
                             proxy=proxy,
                             prefer_response_content_type=prefer_response_content_type,
                             return_saved_path=True,
+                            progress_callback=progress_callback,
                         )
                     else:
                         logger.debug(
@@ -858,6 +864,7 @@ class FileManager:
         expected_body_length: Optional[int] = None,
         checkpoint: Optional[dict[str, Any]] = None,
         keep_partial: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[bool, Path]:
         """Stream ``chunk_iter`` to a temp file and atomically rename it.
 
@@ -886,6 +893,31 @@ class FileManager:
         body_written = 0
         mode = "ab" if initial_size else "wb"
         metadata = dict(checkpoint) if checkpoint is not None else None
+        progress_started = time.monotonic()
+        last_progress_at = 0.0
+
+        def emit_progress(force: bool = False) -> None:
+            nonlocal last_progress_at
+            if progress_callback is None:
+                return
+            now = time.monotonic()
+            if not force and now - last_progress_at < 0.5:
+                return
+            elapsed = max(0.001, now - progress_started)
+            try:
+                progress_callback(
+                    {
+                        "current_file": final_path.name,
+                        "bytes_downloaded": written,
+                        "bytes_total": expected_size,
+                        "speed_bytes_per_second": body_written / elapsed,
+                    }
+                )
+            except Exception as exc:
+                logger.debug("Download progress callback failed: %s", exc)
+            last_progress_at = now
+
+        emit_progress(force=True)
         try:
             async with aiofiles.open(tmp_path, mode) as f:
                 async for chunk in chunk_iter:
@@ -905,6 +937,7 @@ class FileManager:
                     await f.flush()
                     written += chunk_size
                     body_written += chunk_size
+                    emit_progress()
                     if metadata is not None:
                         metadata["written_length"] = written
                         await self._write_checkpoint(meta_path, metadata)
@@ -942,6 +975,7 @@ class FileManager:
             return False
 
         os.replace(str(tmp_path), str(final_path))
+        emit_progress(force=True)
         try:
             meta_path.unlink(missing_ok=True)
         except OSError as exc:
@@ -957,6 +991,7 @@ class FileManager:
         proxy: Optional[str] = None,
         prefer_response_content_type: bool = False,
         return_saved_path: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[bool, Path]:
         """Download an asset via httpx, whose TLS fingerprint the Douyin image
         CDN accepts when aiohttp's is rejected (403). Mirrors aiohttp's
@@ -1014,6 +1049,7 @@ class FileManager:
                         keep_partial=(
                             not prefer_response_content_type and response_checkpoint is not None
                         ),
+                        progress_callback=progress_callback,
                     )
                     timing_event(
                         "httpx_download_done",

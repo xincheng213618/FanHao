@@ -246,6 +246,8 @@ test("Node and Python migration failures roll back DDL/version/identity and allo
 test("Node and Python revalidate metadata after a real interleaved upgrade wins the writer lock", ({factory=createNovelStore}={}) => {
   for(const language of ["Node","Python"]) {
     const {store,dbPath}=fresh();store.importCollectedBook(collected(base));
+    downgradeToV4(dbPath); // Initialization now needs a writer lock only for migration.
+    sql(dbPath, db => db.prepare("DELETE FROM novel_meta WHERE key='library_id'").run());
     const expected=snapshot(dbPath);expected.find(t=>t.name==="novel_meta").rows.find(r=>r.key==="schema_version").value="6";
     if(language==="Node") {
       const original=DatabaseSync.prototype.exec;let armed=true;
@@ -267,7 +269,7 @@ test("reimport refuses a deletion or newer catalog committed after its initial r
     const {store,dbPath}=fresh(factory), old=store.uploadBook({fileName:"synthetic.txt",text:"第一章 A\n\noriginal body"});
     const writer=createNovelStore({dbPath}), original=DatabaseSync.prototype.exec;let locks=0, committed=null;
     DatabaseSync.prototype.exec=function(statement,...args){
-      if(statement==="BEGIN IMMEDIATE" && ++locks===2) {
+      if(statement==="BEGIN IMMEDIATE" && ++locks===1) {
         if(action==="delete")writer.deleteBook(old.book.id);
         else writer.reimportBook(old.book.id,{text:"第一章 A\n\nnewer winning body"});
         committed=snapshot(dbPath);

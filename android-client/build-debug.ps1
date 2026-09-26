@@ -118,7 +118,7 @@ $VersionContract = Read-FanHaoVersionContract -Path $VersionContractPath
 $BuildIdentity = Resolve-FanHaoBuildIdentity -VersionCode (Resolve-VersionCode) -VersionName (Resolve-VersionName) -LocalOnly:$LocalOnly
 $ResolvedVersionCode = $BuildIdentity.VersionCode
 $ResolvedVersionName = $BuildIdentity.VersionName
-if ($Install) { $null = Assert-FanHaoInstallIdentity -Identity $BuildIdentity -VersionContract $VersionContract }
+if ($Install) { $null = Assert-FanHaoInstallIdentity -Identity $BuildIdentity }
 if ($IdentityOnly) {
   return $BuildIdentity
 }
@@ -193,6 +193,12 @@ if ($Install) {
   $devices = @($deviceOutput | Where-Object { Test-FanHaoAuthorizedAdbDeviceLine $_ })
   if (-not $devices) {
     throw "No authorized Android device found. Enable USB debugging and accept the authorization prompt."
+  }
+
+  $installedPackage = Invoke-CapturedNative $adb @("shell", "dumpsys", "package", $ActualIdentity.PackageName) "ADB installed-package query failed"
+  $installedVersionMatch = [regex]::Match(($installedPackage -join "`n"), '(?m)^\s*versionCode=(?<code>\d+)\b')
+  if ($installedVersionMatch.Success -and [long]$installedVersionMatch.Groups["code"].Value -gt $ActualIdentity.VersionCode) {
+    throw "Refusing to downgrade $($ActualIdentity.PackageName) from installed versionCode $($installedVersionMatch.Groups['code'].Value) to $($ActualIdentity.VersionCode)."
   }
 
   $installOutput = Invoke-CapturedNative $adb @("install", "-r", $ApkPath) "ADB install failed"

@@ -295,6 +295,22 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
+  const emptyPersonCleanupMatch = /^\/api\/people\/([^/]+)\/empty-cleanup$/.exec(url.pathname);
+  if (emptyPersonCleanupMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const result = personDetailService.cleanupEmptyPerson(decodeURIComponent(emptyPersonCleanupMatch[1]), body);
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, {
+        error: error.message || "清理空人物失败",
+        ...(error.code ? { code: error.code } : {})
+      });
+    }
+    return true;
+  }
+
   const personMatch = /^\/api\/people\/([^/]+)$/.exec(url.pathname);
   if (personMatch && req.method === "GET") {
     const payload = personDetailService.detailPayload(decodeURIComponent(personMatch[1]), url);

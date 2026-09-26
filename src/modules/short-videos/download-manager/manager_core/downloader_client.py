@@ -198,14 +198,21 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def sidecar_json(port: int, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def sidecar_json(
+    port: int,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = 10,
+) -> dict[str, Any]:
     body = None
     headers = {"Accept": "application/json"}
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
     req = Request(f"http://127.0.0.1:{port}{path}", data=body, headers=headers, method=method)
-    with urlopen(req, timeout=10) as resp:
+    with urlopen(req, timeout=max(0.1, float(timeout_seconds))) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     return json.loads(text) if text else {}
 

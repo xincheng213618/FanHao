@@ -4,6 +4,7 @@ export function createPersonMergeService({
   actorProfileRow,
   getLibrary,
   getStamp,
+  resolveCanonicalId = (id) => id,
   normalizePersonSearchValue,
   normalizeSourcePath,
   personHasVrMergeContent,
@@ -14,104 +15,26 @@ export function createPersonMergeService({
   const personRecordCache = new Map();
   let personRecordCacheStamp = "";
 
-  function preferCanonicalPerson(a, b) {
-    const aF = (a.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
-    const bF = (b.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
-    return (
-      Number(bF) - Number(aF) ||
-      actorMovieRows(b.id).length - actorMovieRows(a.id).length ||
-      Number(b.workCount || 0) - Number(a.workCount || 0) ||
-      Number(b.sourceCount || 0) - Number(a.sourceCount || 0) ||
-      String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" })
-    );
-  }
-
   function maps() {
     const stamp = getStamp();
     if (personMergeCache?.stamp === stamp) return personMergeCache.maps;
-
-    const library = getLibrary();
-    const parent = new Map();
-    const ensureParent = (personId) => {
-      if (!parent.has(personId)) parent.set(personId, personId);
-    };
-    const find = (personId) => {
-      ensureParent(personId);
-      const next = parent.get(personId);
-      if (next === personId) return personId;
-      const root = find(next);
-      parent.set(personId, root);
-      return root;
-    };
-    const union = (a, b) => {
-      const rootA = find(a);
-      const rootB = find(b);
-      if (rootA !== rootB) parent.set(rootB, rootA);
-    };
-    for (const person of library.people) ensureParent(person.id);
-
-    const byActorId = new Map();
-    for (const person of library.people) {
-      const actorId = String(actorProfileRow(person.id)?.javdb_actor_id || "").trim();
-      if (!actorId) continue;
-      if (!byActorId.has(actorId)) byActorId.set(actorId, []);
-      byActorId.get(actorId).push(person);
-    }
-
-    for (const people of byActorId.values()) {
-      if (people.length < 2 || people.some(personHasVrMergeContent)) continue;
-      for (const person of people.slice(1)) union(people[0].id, person.id);
-    }
-
-    const aliasOwners = new Map();
-    for (const person of library.people) {
-      const row = actorProfileRow(person.id);
-      if (!row) continue;
-      for (const alias of actorProfileAliases(row)) {
-        const key = normalizePersonSearchValue(alias);
-        if (!key) continue;
-        if (!aliasOwners.has(key)) aliasOwners.set(key, []);
-        aliasOwners.get(key).push(person);
-      }
-    }
-
-    for (const person of library.people) {
-      const key = normalizePersonSearchValue(person.name);
-      const owners = aliasOwners.get(key) || [];
-      for (const owner of owners) {
-        if (owner.id === person.id) continue;
-        const ownerActorId = String(actorProfileRow(owner.id)?.javdb_actor_id || "").trim();
-        const personActorId = String(actorProfileRow(person.id)?.javdb_actor_id || "").trim();
-        if (ownerActorId && personActorId && ownerActorId !== personActorId) continue;
-        union(owner.id, person.id);
-      }
-    }
-
-    const components = new Map();
-    for (const person of library.people) {
-      const root = find(person.id);
-      if (!components.has(root)) components.set(root, []);
-      components.get(root).push(person);
-    }
-
     const aliasToCanonical = new Map();
     const groupsByCanonical = new Map();
-    for (const people of components.values()) {
-      if (people.length < 2) continue;
-      const canonical = [...people].sort(preferCanonicalPerson)[0];
-      const memberIds = people.map((person) => person.id);
-      groupsByCanonical.set(canonical.id, memberIds);
-      for (const memberId of memberIds) aliasToCanonical.set(memberId, canonical.id);
+    for (const person of getLibrary().people) {
+      const canonical = canonicalId(person.id);
+      aliasToCanonical.set(String(person.id), canonical);
+      if (!groupsByCanonical.has(canonical)) groupsByCanonical.set(canonical, []);
+      groupsByCanonical.get(canonical).push(String(person.id));
     }
-
     const nextMaps = { aliasToCanonical, groupsByCanonical };
     personMergeCache = { stamp, maps: nextMaps };
     return nextMaps;
   }
 
+  // Names and aliases are search hints, never identity authority. Only a durable,
+  // explicitly confirmed merge may redirect an ID, independently of the library.
   function canonicalId(personId) {
-    const id = String(personId || "");
-    return maps().aliasToCanonical.get(id) || id;
+    return String(resolveCanonicalId(String(personId || "")));
   }
 
   function members(personId) {

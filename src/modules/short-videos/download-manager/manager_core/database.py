@@ -1225,7 +1225,9 @@ def is_antibot_error(error: str) -> bool:
         marker in text
         for marker in (
             "anti-bot",
+            "argussecurityplugin",
             "empty 200",
+            "uifid not found",
             "风控",
             "平台保护",
         )

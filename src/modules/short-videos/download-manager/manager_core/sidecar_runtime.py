@@ -7,9 +7,10 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from .common import elapsed_ms, normalize_proxy, now_iso, row_text, tail_text
-from .config import GALLERY_MUSIC_INTENT, LOG_DIR, QUALITY_UPGRADE_INTENT
+from .config import DEFAULT_OUTPUT_DIR, GALLERY_MUSIC_INTENT, LOG_DIR, QUALITY_UPGRADE_INTENT
 from .database import add_event, db, failure_guard_threshold, is_antibot_error, setting
 from .domain_manifest import download_record_hash, existing_downloaded_work, manifest_has
 from .downloader_client import downloader_command, free_port, sidecar_json, write_sidecar_config
@@ -99,6 +100,53 @@ class SidecarRuntimeMixin:
         with self.lock:
             self.sidecar_signature = signature
         return port
+
+    def probe_aweme_detail(self, aweme_id: str) -> dict[str, Any]:
+        """Run a read-only detail probe without clearing the download guard."""
+
+        text = str(aweme_id or "").strip()
+        if not (8 <= len(text) <= 32 and text.isdigit()):
+            return {"ok": False, "message": "没有可用于测试的有效作品 ID"}
+        with self.lock:
+            if self.active:
+                return {
+                    "ok": False,
+                    "kind": "busy",
+                    "message": "自动下载正在运行，无需单独测试接口",
+                    "diagnostic": {
+                        "outcome": "not_tested",
+                        "rule": "runtime.busy",
+                        "label": "自动下载运行中",
+                        "detail": "当前监听器正在占用下载 Sidecar，本次没有向抖音发起测试请求。",
+                        "action": "无需处理；发生异常保护暂停后，再用测试按钮验证新的 VPN、代理或 Cookie。",
+                    },
+                }
+            proc = self.sidecar_proc
+            port = self.sidecar_port
+            reuse_existing = proc is not None and proc.poll() is None and bool(port)
+
+        started_here = not reuse_existing
+        try:
+            if not reuse_existing:
+                output_dir = setting("output_dir", str(DEFAULT_OUTPUT_DIR))
+                port = self._ensure_sidecar(output_dir, 1)
+            return sidecar_json(
+                int(port),
+                "POST",
+                "/api/v1/probe/detail",
+                {"aweme_id": text},
+                timeout_seconds=40,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"接口测试未完成：{exc}",
+                "endpoint": "/aweme/v1/web/aweme/detail/",
+                "aweme_id": text,
+            }
+        finally:
+            if started_here:
+                self._stop_sidecar_process()
 
     def _start_sidecar(self, output_dir: str, concurrency: int) -> int:
         config_path = write_sidecar_config(output_dir, concurrency)
@@ -280,6 +328,10 @@ class SidecarRuntimeMixin:
                 with self.lock:
                     self.active_jobs[sidecar_job_id] = link
                     self.active_job_started[sidecar_job_id] = time.monotonic()
+                    self.active_job_progress[sidecar_job_id] = {
+                        "phase": "提交下载任务",
+                        "detail": str(link["aweme_id"] or ""),
+                    }
                 self._start_download_attempt(job_id, sidecar_job_id, link)
                 download_timing(
                     "submit_ok",
@@ -411,6 +463,10 @@ class SidecarRuntimeMixin:
         with self.lock:
             self.active_jobs[sidecar_job_id] = link
             self.active_job_started[sidecar_job_id] = time.monotonic()
+            self.active_job_progress[sidecar_job_id] = {
+                "phase": "恢复下载任务",
+                "detail": str(link["aweme_id"] or ""),
+            }
         return True
 
     def _poll_active_sidecar_jobs(
@@ -426,6 +482,11 @@ class SidecarRuntimeMixin:
                 state = sidecar_json(port, "GET", f"/api/v1/jobs/{sidecar_job_id}")
             except Exception:
                 continue
+            progress = state.get("progress")
+            if isinstance(progress, dict):
+                with self.lock:
+                    if sidecar_job_id in self.active_jobs:
+                        self.active_job_progress[sidecar_job_id] = dict(progress)
             status = str(state.get("status") or "")
             if status not in {"success", "failed"}:
                 continue
@@ -434,6 +495,7 @@ class SidecarRuntimeMixin:
             with self.lock:
                 self.active_jobs.pop(sidecar_job_id, None)
                 started = self.active_job_started.pop(sidecar_job_id, None)
+                self.active_job_progress.pop(sidecar_job_id, None)
             sidecar_elapsed = elapsed_ms(started)
             if status == "success" and (
                 int(state.get("success") or 0) > 0
@@ -534,6 +596,7 @@ class SidecarRuntimeMixin:
             links = list(self.active_jobs.values())
             self.active_jobs.clear()
             self.active_job_started.clear()
+            self.active_job_progress.clear()
         for link in links:
             self._mark_pending(link, message)
 

@@ -1,5 +1,5 @@
-import { putJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
-import { captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
+import { putJson } from "../../../../js/api.js?v=assets-0f97d6765d71";
+import { captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-0f97d6765d71";
 import { createDetailSectionTitle } from "../../../../js/detail-ui.js";
 import { formatNumber } from "../../../../js/format.js";
 import { absoluteUrl } from "../../../../js/image.js";

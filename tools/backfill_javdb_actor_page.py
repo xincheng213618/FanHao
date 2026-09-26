@@ -571,7 +571,7 @@ def crawl_actor_movies(client: JavDbClient, conn: sqlite3.Connection, person: di
         page_index += 1
         seen_pages.add(page_url)
         safe_driver_get(driver, page_url, args.actor_wait_seconds)
-        html = wait_for_actor_page(client, args.actor_wait_seconds)
+        html = wait_for_actor_page(client, args.actor_wait_seconds, actor_id_from_url(actor_url))
         if not first_html:
             first_html = html
             first_profile = parse_actor_page(html, page_url)
@@ -636,19 +636,65 @@ def dedupe_actor_movies(movies: list[ActorMovie]) -> list[ActorMovie]:
     return output
 
 
-def wait_for_actor_page(client: JavDbClient, wait_seconds: int) -> str:
+def actor_page_looks_ready(html: str, current_url: str, expected_actor_id: str = "") -> bool:
+    current_actor_id = actor_id_from_url(current_url)
+    if expected_actor_id and current_actor_id != expected_actor_id:
+        return False
+
+    movies = parse_actor_movies(html, current_url)
+    if movies:
+        return True
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    profile = parse_actor_page(html, current_url)
+    display_name = normalize_spaces(profile.get("display_name", ""))
+    generic_names = {"javdb", "javdb.com", "www.javdb.com"}
+    actor_section = soup.select_one(
+        ".actor-section, .actor-profile, .actor-section-name, .actor-section-meta, .actor-avatar"
+    )
+    return bool(
+        current_actor_id
+        and display_name
+        and display_name.lower() not in generic_names
+        and (actor_section or profile.get("movie_count") is not None)
+    )
+
+
+def wait_for_actor_page(client: JavDbClient, wait_seconds: int, expected_actor_id: str = "") -> str:
     driver = client.get_driver()
     deadline = time.time() + wait_seconds
     last_html = ""
+    verification_notice_written = False
     while time.time() < deadline:
         last_html = driver.page_source or ""
         reason = blocked_reason(last_html, driver.current_url)
         if reason:
             raise AccessBlockedError(reason)
-        if parse_actor_movies(last_html, driver.current_url) or parse_actor_page(last_html, driver.current_url).get("display_name"):
+        if actor_page_looks_ready(last_html, driver.current_url, expected_actor_id):
             return last_html
+        if not verification_notice_written and security_verification_visible(last_html):
+            print(
+                f"JavDB 正在等待手动完成安全验证（最多 {int(wait_seconds)} 秒）；请在弹出的浏览器窗口中操作。",
+                flush=True,
+            )
+            verification_notice_written = True
         time.sleep(1.0)
-    return last_html
+    raise RuntimeError(
+        "JavDB 演员页未就绪；如果浏览器显示安全验证，请在弹出的窗口中手动确认后重试"
+    )
+
+
+def security_verification_visible(html: str) -> bool:
+    text = normalize_spaces(BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True))
+    return any(
+        phrase in text
+        for phrase in (
+            "正在进行安全验证",
+            "正在验证您是否是真人",
+            "请验证您是真人",
+            "验证您不是自动程序",
+        )
+    )
 
 
 def safe_driver_get(driver, url: str, timeout_seconds: int) -> None:

@@ -1,20 +1,20 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-0f97d6765d71";
+import { fetchJson } from "./js/api.js?v=assets-0f97d6765d71";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { getElements } from "./js/dom.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-0f97d6765d71";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-0f97d6765d71";
+import { getElements } from "./js/dom.js?v=assets-0f97d6765d71";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
-import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-0f97d6765d71";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-0f97d6765d71";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-0f97d6765d71";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-0f97d6765d71";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260812-collection-review-02";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=20260831-remote-auth-01-1046d3cbbfb6";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=20260831-remote-auth-01-1046d3cbbfb6";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-0f97d6765d71";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-0f97d6765d71";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-0f97d6765d71";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -1422,6 +1422,7 @@ function updateServer(url) {
     library = null;
   }
   if (previousUrl !== activeUrl) workViews?.pageDataService?.invalidate(previousUrl, "/");
+  void toolViews?.refreshComputerControlAccess?.();
   syncConnectionControls();
 }
 
@@ -1904,7 +1905,10 @@ function showHome(options = {}) {
 }
 
 function showSettings(options = {}) {
-  if (!els.settingsOverlay || !els.settingsOverlay.hidden) return;
+  if (!els.settingsOverlay) return;
+  const accountGroup = els.settingsPanel?.querySelector(".settings-account-group");
+  if (accountGroup && (els.settingsOverlay.hidden || options.section === "account")) accountGroup.open = options.section === "account";
+  if (!els.settingsOverlay.hidden) return;
   els.settingsOverlay.hidden = false;
   document.body.classList.add("settings-open");
   refreshAccountSettings();
@@ -2638,11 +2642,30 @@ function setActiveBottom(name = currentView) {
   syncHomeModeNavigation();
   syncGalleryModeNavigation();
   syncReadingModeNavigation();
+  if (els.moduleModeSwitch) syncModuleModeSwitch(activeKey);
   if (els.profileSettingsButton) {
     const profileActive = currentView === "tools";
     els.profileSettingsButton.hidden = !profileActive;
     els.profileSettingsButton.setAttribute("aria-expanded", profileActive && !els.settingsOverlay?.hidden ? "true" : "false");
   }
+}
+
+function syncModuleModeSwitch(activeKey = bottomNavKeyFor()) {
+  const options = activeKey === "fanhao" ? [{ mode: "fanhao", label: "番号" }, { mode: "western", label: "欧美" }]
+    : activeKey === "photo" ? GALLERY_MODE_OPTIONS
+    : activeKey === "novels" ? [{ mode: "novels", label: "小说" }, { mode: "music", label: "音乐" }] : [];
+  const visible = options.length > 0 && isRootNavigationView();
+  els.moduleModeSwitch.hidden = !visible;
+  if (!visible) return;
+  const selected = activeKey === "fanhao" ? preferredHomeMode() : activeKey === "photo" ? preferredGalleryMode() : preferredReadingMode();
+  els.moduleModeSelect.replaceChildren(...options.map(({ mode, label }) => {
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = label;
+    option.selected = mode === selected;
+    return option;
+  }));
+  els.moduleModeSelect.dataset.group = activeKey;
 }
 
 function homeNavigationButton() {
@@ -2707,7 +2730,7 @@ function syncHomeModeNavigation() {
     homeButton.dataset.homeModeCurrent = mode;
     const label = homeButton.querySelector(".bottom-nav-label");
     if (label) label.textContent = mode === "western" ? "欧美" : "番号";
-    homeButton.setAttribute("aria-label", `首页，当前${mode === "western" ? "欧美" : "番号"}，再次点击切换，长按选择`);
+    homeButton.setAttribute("aria-label", `首页，当前${mode === "western" ? "欧美" : "番号"}，点击回到当前分类，长按选择`);
   }
   const picker = els.bottomNavBar?.querySelector(".bottom-nav-home-picker");
   if (!picker) return;
@@ -2797,7 +2820,7 @@ function syncGalleryModeNavigation() {
     galleryButton.dataset.galleryModeCurrent = mode;
     const label = galleryButton.querySelector(".bottom-nav-label");
     if (label) label.textContent = modeLabel;
-    galleryButton.setAttribute("aria-label", `图库与影视，当前${modeLabel}，再次点击切换，长按选择`);
+    galleryButton.setAttribute("aria-label", `图库与影视，当前${modeLabel}，点击回到当前分类，长按选择`);
   }
   const picker = els.bottomNavBar?.querySelector(".bottom-nav-gallery-picker");
   if (!picker) return;
@@ -2889,7 +2912,7 @@ function syncReadingModeNavigation() {
     readingButton.dataset.readingModeCurrent = mode;
     const label = readingButton.querySelector(".bottom-nav-label");
     if (label) label.textContent = mode === "music" ? "音乐" : "小说";
-    readingButton.setAttribute("aria-label", `阅读，当前${mode === "music" ? "音乐" : "小说"}，再次点击切换，长按选择`);
+    readingButton.setAttribute("aria-label", `阅读，当前${mode === "music" ? "音乐" : "小说"}，点击回到当前分类，长按选择`);
   }
   const picker = els.bottomNavBar?.querySelector(".bottom-nav-reading-picker");
   if (!picker) return;
@@ -3138,6 +3161,12 @@ window.fanhaoHandleNativeBack = () => {
 applyTheme(themePreference);
 replaceCurrentHistory();
 
+els.moduleModeSelect?.addEventListener("change", () => {
+  const { value, dataset } = els.moduleModeSelect;
+  if (dataset.group === "fanhao") navigateToHomeMode(value);
+  else if (dataset.group === "photo") navigateToGalleryMode(value);
+  else if (dataset.group === "novels") navigateToReadingMode(value);
+});
 els.profileSettingsButton?.addEventListener("click", () => toggleSettings(true));
 function refreshAccountSettings() {
   const root = document.getElementById("accountSettingsRoot");
@@ -3425,13 +3454,27 @@ els.bottomNavBar?.addEventListener("contextmenu", (event) => {
   else openReadingModePicker();
 });
 
+let dismissModePickerClick = false;
+document.addEventListener("click", (event) => {
+  if (!dismissModePickerClick) return;
+  dismissModePickerClick = false;
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
 document.addEventListener("pointerdown", (event) => {
+  // A new physical gesture must not inherit suppression from a long press that
+  // produced no synthetic click (as on some Android WebViews).
+  suppressedBottomNavButton = null;
+  dismissModePickerClick = false;
   if (!document.body.classList.contains("home-mode-picker-open") && !document.body.classList.contains("gallery-mode-picker-open") && !document.body.classList.contains("reading-mode-picker-open")) return;
   if (els.bottomNavBar?.contains(event.target)) return;
+  dismissModePickerClick = true;
+  event.preventDefault();
+  event.stopPropagation();
   closeHomeModePicker();
   closeGalleryModePicker();
   closeReadingModePicker();
-}, { passive: true });
+}, { capture: true });
 
 els.bottomNavBar?.addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -3442,6 +3485,13 @@ els.bottomNavBar?.addEventListener("click", (event) => {
     return;
   }
   suppressedBottomNavButton = null;
+  if (button.classList.contains("bottom-nav-item") && button.classList.contains("active") && isRootNavigationView()) {
+    closeHomeModePicker();
+    closeGalleryModePicker();
+    closeReadingModePicker();
+    scrollToTopInstant();
+    return;
+  }
   if (button.dataset.homeModeChoice) {
     navigateToHomeMode(button.dataset.homeModeChoice);
     return;
@@ -3456,7 +3506,7 @@ els.bottomNavBar?.addEventListener("click", (event) => {
   }
   if (button.dataset.gallerySwitcher !== undefined) {
     const currentMode = preferredGalleryMode();
-    navigateToGalleryMode(bottomNavKeyFor() === "photo" ? alternateGalleryMode(currentMode) : currentMode);
+    navigateToGalleryMode(currentMode);
     return;
   }
   closeHomeModePicker();
@@ -3469,12 +3519,12 @@ els.bottomNavBar?.addEventListener("click", (event) => {
   }
   if (button.dataset.homeSwitcher !== undefined || button.dataset.fanhaoHome !== undefined) {
     const currentMode = preferredHomeMode();
-    navigateToHomeMode(bottomNavKeyFor() === "fanhao" ? alternateHomeMode(currentMode) : currentMode);
+    navigateToHomeMode(currentMode);
     return;
   }
   if (button.dataset.readingSwitcher !== undefined) {
     const currentMode = preferredReadingMode();
-    navigateToReadingMode(bottomNavKeyFor() === "novels" ? alternateReadingMode(currentMode) : currentMode);
+    navigateToReadingMode(currentMode);
     return;
   }
   if (button.dataset.openView) {

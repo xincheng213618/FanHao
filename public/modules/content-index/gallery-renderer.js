@@ -71,6 +71,10 @@ export function createGalleryRenderer(deps) {
   let galleryMoreGestureReleaseTimer = 0;
   let galleryPagerCleanup = null;
   let galleryScrollRestoreGeneration = 0;
+  let mediaLayout = "posters";
+  try {
+    if (window.localStorage.getItem("fanhao.media.layout") === "list") mediaLayout = "list";
+  } catch { /* Browsing still works when storage is unavailable. */ }
 
 function setGalleryStatus(message) {
   getGalleryPage().setStatus(message);
@@ -237,7 +241,7 @@ function createPhotoCategoryStrip() {
   strip.setAttribute("role", "group");
   strip.setAttribute("aria-label", "套图大类");
 
-  const addChip = (value, label, count) => {
+  const addChip = (value, label, count, target = strip) => {
     const active = (state.gallery.category || "all") === value;
     const button = document.createElement("button");
     button.type = "button";
@@ -263,13 +267,83 @@ function createPhotoCategoryStrip() {
       renderGalleryView();
       syncGalleryRoute();
     });
-    strip.append(button);
+    target.append(button);
   };
 
   const facets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
   addChip("all", "全部大类", facets.reduce((sum, item) => sum + Number(item.count || 0), 0));
-  for (const item of facets) addChip(item.value, photoCategoryDisplayName(item.value), item.count);
+  const featured = facets.slice(0, 4);
+  const selected = facets.find((item) => item.value === state.gallery.category);
+  if (selected && !featured.includes(selected)) featured[featured.length - 1] = selected;
+  for (const item of featured) addChip(item.value, photoCategoryDisplayName(item.value), item.count);
+  if (facets.length > featured.length) {
+    const more = document.createElement("details");
+    more.className = "gallery-category-menu";
+    const summary = document.createElement("summary");
+    summary.textContent = `全部分类 · ${formatNumber(facets.length)}`;
+    const panel = document.createElement("div");
+    panel.className = "gallery-category-menu-panel";
+    panel.setAttribute("role", "group");
+    panel.setAttribute("aria-label", "全部套图分类");
+    for (const item of facets) {
+      addChip(item.value, photoCategoryDisplayName(item.value), item.count, panel);
+      const count = document.createElement("small");
+      count.textContent = formatNumber(item.count || 0);
+      count.setAttribute("aria-hidden", "true");
+      panel.lastElementChild.append(count);
+    }
+    more.append(summary, panel);
+    more.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      more.open = false;
+      summary.focus();
+    });
+    strip.append(more);
+  }
   return strip;
+}
+
+function createGalleryBrowseHeader() {
+  const isPhoto = state.gallery.mode === "photo";
+  const header = document.createElement("header");
+  header.className = "gallery-browse-header";
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "gallery-browse-eyebrow";
+  eyebrow.textContent = "我的资料库";
+  const title = document.createElement("h1");
+  title.textContent = isPhoto ? "套图图库" : "影视资料库";
+  const description = document.createElement("p");
+  description.textContent = isPhoto
+    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期套图，按合集与分类浏览` : "按合集与分类浏览套图"
+    : "电影、电视剧与动漫";
+  copy.append(eyebrow, title, description);
+  const nav = document.createElement("nav");
+  nav.className = "gallery-browse-nav";
+  nav.setAttribute("aria-label", "资料库导航");
+  for (const [label, href, active] of [["套图", "/photo/collections", isPhoto], ["影视", "/media", !isPhoto], ["韩漫", "/manga", false]]) {
+    const link = document.createElement("a");
+    link.textContent = label;
+    link.href = href;
+    if (active) link.setAttribute("aria-current", "page");
+    nav.append(link);
+  }
+  header.append(copy, nav);
+  return header;
+}
+
+function createGalleryResultsHeader(titleText, detailText) {
+  const header = document.createElement("div");
+  header.className = "gallery-results-header";
+  const copy = document.createElement("div");
+  const title = document.createElement("h2");
+  title.textContent = titleText;
+  const detail = document.createElement("span");
+  detail.textContent = detailText;
+  detail.setAttribute("role", "status");
+  copy.append(title, detail);
+  header.append(copy);
+  return header;
 }
 
 function appendFacetOption(select, label, value, count) {
@@ -338,8 +412,14 @@ function createMovieCategoryStrip() {
     button.type = "button";
     button.className = `gallery-media-kind-button${(state.gallery.mediaKind || "all") === value ? " active" : ""}`;
     button.textContent = label;
-    button.title = `${label} · ${formatNumber(count)}`;
-    button.setAttribute("aria-label", `${label}，${formatNumber(count)} 项`);
+    if (list) {
+      const badge = document.createElement("small");
+      badge.textContent = formatNumber(count);
+      badge.setAttribute("aria-hidden", "true");
+      button.append(badge);
+      button.title = `${label} · ${formatNumber(count)}`;
+      button.setAttribute("aria-label", `${label}，${formatNumber(count)} 项`);
+    }
     button.setAttribute("aria-pressed", String((state.gallery.mediaKind || "all") === value));
     button.addEventListener("click", () => {
       state.gallery.mediaKind = value;
@@ -511,20 +591,26 @@ function renderGalleryControls(options = {}) {
     if (state.gallery.mode === "photo") {
       controls.classList.add("gallery-photo-controls");
       searchRow.classList.add("gallery-photo-primary-row");
-      const title = document.createElement("h1");
-      title.className = "gallery-photo-title";
-      title.textContent = "套图图库";
       search.placeholder = "搜索标题、人物、合集";
+      const searchBox = document.createElement("div");
+      searchBox.className = "gallery-media-search-box";
+      const submit = document.createElement("button");
+      submit.type = "button";
+      submit.className = "gallery-media-search-submit";
+      submit.textContent = "搜索";
+      submit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
+      searchBox.append(search, submit);
       searchRow.append(
-        title,
-        createGalleryFilterField("搜索", search, "gallery-search-field gallery-photo-search-field"),
-        createGalleryControlGroup("内容", createGalleryImageModuleSwitch(), "gallery-photo-module-switch"),
+        createGalleryFilterField("搜索", searchBox, "gallery-search-field gallery-photo-search-field"),
         maintenance
       );
 
       hierarchy.classList.add("gallery-photo-secondary-row");
+      // Inside a collection, its breadcrumb owns navigation. Its local facets
+      // must not be presented as the categories or totals of the whole library.
+      if (state.gallery.photoCollection) hierarchy.classList.add("gallery-photo-collection-controls");
       hierarchy.append(
-        createPhotoCategoryStrip(),
+        ...(!state.gallery.photoCollection ? [createPhotoCategoryStrip()] : []),
         createGalleryControlGroup("浏览", photoViews, "gallery-photo-view-switch"),
         createGalleryControlGroup("排序", sort, "gallery-photo-sort")
       );
@@ -1892,6 +1978,7 @@ function gallerySearchMatchText(item = {}) {
 function renderPagedImageLibraryMessage(container, message, options = {}) {
   const empty = document.createElement("div");
   empty.className = "empty-state gallery-list-state";
+  empty.setAttribute("role", options.action === "重试" ? "alert" : "status");
   const text = document.createElement("span");
   text.textContent = message;
   empty.append(text);
@@ -1910,17 +1997,35 @@ function renderPagedPhotoCollectionsShelf(container, list) {
   const items = photoCatalogCollections(list.items, state.gallery.sort || "updated");
   const visibleLimit = Math.max(1, Number(state.gallery.visibleLimit || 80));
   const visibleItems = items.slice(0, visibleLimit);
+  const category = state.gallery.category === "all" ? "全部合集" : photoCategoryDisplayName(state.gallery.category);
+  const totalAlbums = items.reduce((sum, item) => sum + Number(item.albumCount || 0), 0);
+  const header = createGalleryResultsHeader(category, `${formatNumber(items.length)} 个合集 · ${formatNumber(totalAlbums)} 期`);
+  if (state.gallery.category !== "all") {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "text-button gallery-filter-clear";
+    clear.textContent = "查看全部分类";
+    clear.addEventListener("click", () => {
+      state.gallery.category = "all";
+      state.gallery.visibleLimit = 80;
+      renderGalleryView();
+      syncGalleryRoute();
+    });
+    header.append(clear);
+  }
+  container.append(header);
   const grid = document.createElement("div");
   grid.className = "gallery-grid gallery-collections-grid gallery-photo-catalog-grid";
 
   for (const [index, collection] of visibleItems.entries()) {
     const count = Number(collection.albumCount || 0);
+    const categoryLabel = photoCategoryDisplayName(collection.catalogCategory);
     const card = createGalleryCard(
       { title: collection.title, coverUrl: collection.coverUrl || "" },
       {
         badges: count ? [`${formatNumber(count)} 期`] : [],
-        meta: [count ? `${formatNumber(count)} 期` : "", formatBytes(collection.size)].filter(Boolean).join(" · "),
-        placeholder: photoCategoryDisplayName(collection.catalogCategory) || "合集",
+        meta: [categoryLabel === collection.title ? "" : categoryLabel, formatBytes(collection.size)].filter(Boolean).join(" · "),
+        placeholder: "暂无封面",
         onOpen: () => {
           state.gallery.photoView = "collections";
           state.gallery.photoCollection = collection.collectionId || collection.id;
@@ -1941,7 +2046,7 @@ function renderPagedPhotoCollectionsShelf(container, list) {
 
   container.append(grid);
   activateGalleryLazyImages(grid);
-  if (!items.length) renderPagedImageLibraryMessage(container, "没有匹配的小分类");
+  if (!items.length) renderPagedImageLibraryMessage(container, "这个分类下还没有合集，可尝试其他分类。");
   appendPhotoCatalogMore(container, visibleItems.length, items.length);
 }
 
@@ -1950,7 +2055,7 @@ function appendPhotoCatalogMore(container, shown, total) {
   const more = document.createElement("button");
   more.type = "button";
   more.className = "text-button gallery-more";
-  more.textContent = `显示更多小分类 ${formatNumber(shown)} / ${formatNumber(total)}`;
+  more.textContent = `加载更多合集 · 已显示 ${formatNumber(shown)} / ${formatNumber(total)}`;
   more.addEventListener("click", () => {
     state.gallery.visibleLimit = Math.min(total, Math.max(shown, Number(state.gallery.visibleLimit || 80)) + 80);
     renderGalleryResults({ preserveScroll: true });
@@ -1961,6 +2066,7 @@ function appendPhotoCatalogMore(container, shown, total) {
 
 function renderPagedPhotoShelf(container, list) {
   const items = Array.isArray(list.items) ? list.items : [];
+  if (!state.gallery.query) container.append(createGalleryResultsHeader("全部套图", `${formatNumber(list.total || 0)} 期`));
   renderPhotoPersonBar(container, Number(list.total || items.length));
   const grid = renderPagedPhotoCards(items);
   grid.classList.add("gallery-photo-catalog-grid", "gallery-photo-albums-grid");
@@ -2267,6 +2373,7 @@ function createMovieExploreItem(item, index) {
 
   const poster = document.createElement("div");
   poster.className = "gallery-movie-list-poster";
+  poster.dataset.placeholder = "暂无海报";
   const coverUrl = metadata.coverUrl || item.coverUrl || "";
   if (coverUrl) {
     const img = document.createElement("img");
@@ -2274,22 +2381,31 @@ function createMovieExploreItem(item, index) {
     img.loading = index < 12 ? "eager" : "lazy";
     if (index < 12) img.src = coverUrl;
     else img.dataset.gallerySrc = coverUrl;
-    img.addEventListener("error", () => poster.classList.add("empty"));
+    img.addEventListener("error", () => {
+      img.remove();
+      poster.classList.add("empty");
+    });
     poster.append(img);
   } else {
     poster.classList.add("empty");
-    poster.dataset.placeholder = isTvSeriesWork ? (item.mediaKind === "anime" ? "动漫" : "电视剧") : "电影";
   }
+
+  const kind = document.createElement("span");
+  kind.className = "gallery-media-card-kind";
+  kind.textContent = item.mediaKind === "anime" ? "动漫" : item.mediaKind === "tv" ? "电视剧" : "电影";
+  poster.append(kind);
 
   const copy = document.createElement("div");
   copy.className = "gallery-movie-list-copy";
   const title = document.createElement("strong");
   title.className = "gallery-movie-list-title";
-  title.textContent = movieDisplayTitle(item);
+  title.textContent = moviePrimaryTitle(item);
+  title.title = movieDisplayTitle(item);
 
   const meta = document.createElement("span");
   meta.className = "gallery-movie-list-meta";
-  meta.textContent = movieListMetaLine(item) || item.category || "";
+  meta.textContent = [metadata.year, (metadata.countries || []).slice(0, 1).join(""), (metadata.genres || []).slice(0, 2).join(" / ")].filter(Boolean).join(" · ") || item.category || "";
+  meta.title = movieListMetaLine(item);
 
   const people = document.createElement("span");
   people.className = "gallery-movie-list-people";
@@ -2300,7 +2416,7 @@ function createMovieExploreItem(item, index) {
   ratingRow.className = "gallery-movie-list-rating";
   if (rating) {
     const stars = document.createElement("i");
-    stars.textContent = "★★★★★";
+    stars.textContent = "豆瓣";
     const score = document.createElement("b");
     score.textContent = rating.score;
     ratingRow.append(stars, score);
@@ -2310,15 +2426,13 @@ function createMovieExploreItem(item, index) {
       ratingRow.append(count);
     }
   } else {
-    ratingRow.textContent = [formatBytes(item.size), item.updatedAt ? `最近 ${formatDateTime(item.updatedAt)}` : ""].filter(Boolean).join(" · ");
+    ratingRow.textContent = "暂无评分";
   }
 
   const local = document.createElement("small");
   local.textContent = [
-    isTvSeriesWork ? (item.mediaKind === "anime" ? "动漫" : "电视剧") : "电影",
-    item.category,
+    isTvSeriesWork ? "" : (item.ext || "").toUpperCase(),
     isTvSeriesWork ? `${formatNumber(item.episodeCount || 0)} 集` : formatBytes(item.size),
-    item.updatedAt ? `最近 ${formatDateTime(item.updatedAt)}` : ""
   ].filter(Boolean).join(" · ");
 
   copy.append(title, meta);
@@ -2328,38 +2442,27 @@ function createMovieExploreItem(item, index) {
   return button;
 }
 
-function renderMovieExploreSidebar(aside, items) {
-  const listState = currentImageLibraryList();
-  const allTotal = state.gallery.mode === "media"
-    ? (listState?.facets?.mediaKinds || []).reduce((sum, item) => sum + Number(item.count || 0), 0) || listState?.total || items.length
-    : Number(state.gallery.data?.totals?.movies ?? listState?.total ?? items.length);
-  const filteredTotal = Number(listState?.total ?? items.length);
-  const ratedCount = Number(listState?.stats?.ratedCount ?? items.filter((item) => Number(screenMetadata(item)?.rating || 0) > 0).length);
-  const totalSize = Number(listState?.stats?.totalBytes ?? items.reduce((sum, item) => sum + Number(item.size || 0), 0));
-  const mediaLabel = state.gallery.mode === "media" ? "影视" : "电影";
-
-  const summary = document.createElement("section");
-  summary.className = "gallery-movie-sidebar-section";
-  const summaryTitle = document.createElement("h3");
-  summaryTitle.textContent = state.gallery.mode === "media" ? "本地影视" : "本地片库";
-  const summaryList = document.createElement("div");
-  summaryList.className = "gallery-movie-sidebar-stats";
-  const hasActiveFilter = Boolean(state.gallery.query || state.gallery.category !== "all" || (state.gallery.mode === "media" && state.gallery.mediaKind !== "all"));
-  const rows = [
-    ...(hasActiveFilter ? [["当前筛选", `${formatNumber(filteredTotal)} 部`]] : []),
-    [`全部${mediaLabel}`, `${formatNumber(allTotal)} 部`],
-    ["豆瓣资料", `${formatNumber(ratedCount)} 部`],
-    ["总大小", formatBytes(totalSize)]
-  ];
-  for (const [statLabel, value] of rows) {
-    const row = document.createElement("span");
-    row.innerHTML = "<strong></strong><small></small>";
-    row.querySelector("strong").textContent = value;
-    row.querySelector("small").textContent = statLabel;
-    summaryList.append(row);
+function createMediaLayoutSwitch() {
+  const group = document.createElement("div");
+  group.className = "gallery-layout-switch";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "影视显示方式");
+  for (const [value, label] of [["posters", "海报"], ["list", "列表"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.dataset.layout = value;
+    button.setAttribute("aria-pressed", String(mediaLayout === value));
+    button.addEventListener("click", () => {
+      mediaLayout = value;
+      try { window.localStorage.setItem("fanhao.media.layout", value); } catch { /* Optional preference. */ }
+      const shelf = group.closest(".gallery-movie-explore");
+      if (shelf) shelf.dataset.layout = value;
+      for (const control of group.querySelectorAll("button")) control.setAttribute("aria-pressed", String(control.dataset.layout === value));
+    });
+    group.append(button);
   }
-  summary.append(summaryTitle, summaryList);
-  aside.append(summary);
+  return group;
 }
 
 function renderMovieShelf(container) {
@@ -2369,20 +2472,20 @@ function renderMovieShelf(container) {
 
   const shell = document.createElement("section");
   shell.className = "gallery-movie-explore";
+  shell.dataset.layout = mediaLayout;
 
   const main = document.createElement("div");
   main.className = "gallery-movie-explore-main";
-  const header = document.createElement("div");
-  header.className = "gallery-movie-explore-header";
-  const title = document.createElement("h2");
-  title.textContent = state.gallery.mode === "media" ? "选影视作品" : "选电影";
-  const meta = document.createElement("span");
-  meta.textContent = [
-    state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : "全部",
-    state.gallery.sort === "rating" ? "豆瓣高分" : "",
-    `${formatNumber(total)} 部`
-  ].filter(Boolean).join(" / ");
-  header.append(title, meta);
+  const kindLabel = { movie: "电影", tv: "电视剧", anime: "动漫" }[state.gallery.mediaKind] || "全部作品";
+  const heading = state.gallery.query ? `“${state.gallery.query}”的搜索结果` : state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : kindLabel;
+  const stats = currentImageLibraryList()?.stats;
+  const header = createGalleryResultsHeader(heading, [
+    `${formatNumber(total)} 部作品`,
+    stats?.ratedCount ? `${formatNumber(stats.ratedCount)} 部有评分` : "",
+    stats?.totalBytes ? formatBytes(stats.totalBytes) : ""
+  ].filter(Boolean).join(" · "));
+  header.classList.add("gallery-movie-explore-header");
+  header.append(createMediaLayoutSwitch());
 
   const list = document.createElement("div");
   list.className = "gallery-movie-list";
@@ -2392,10 +2495,7 @@ function renderMovieShelf(container) {
   main.append(header, list);
 
   if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = state.gallery.data ? `没有匹配的${state.gallery.mode === "media" ? "影视作品" : "电影"}` : "正在等待图像资料库索引";
-    main.append(empty);
+    renderPagedImageLibraryMessage(main, "没有找到匹配的作品，试试更短的片名，或清除筛选后重新浏览。");
   } else if (visible.length < total) {
     const more = document.createElement("button");
     more.type = "button";
@@ -2412,10 +2512,7 @@ function renderMovieShelf(container) {
     main.append(more);
   }
 
-  const aside = document.createElement("aside");
-  aside.className = "gallery-movie-sidebar";
-  renderMovieExploreSidebar(aside, items);
-  shell.append(main, aside);
+  shell.append(main);
   container.append(shell);
   activateGalleryLazyImages(list);
 }
@@ -3731,6 +3828,10 @@ function renderGalleryView(options = {}) {
   shell.className = "gallery-shell";
   const imageReaderOpen = Boolean(state.gallery.album || state.gallery.comic);
   const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all" && !state.gallery.media;
+  if (["photo", "media", "movie"].includes(state.gallery.mode) && !imageReaderOpen && !state.gallery.media && !seriesPageOpen) {
+    shell.classList.add("gallery-browse-shell");
+    shell.append(createGalleryBrowseHeader());
+  }
   if (state.gallery.mode === "photo" && !imageReaderOpen) {
     shell.classList.add("gallery-photo-shell");
     if (state.gallery.photoView === "collections" && !state.gallery.photoCollection) shell.classList.add("gallery-photo-catalog-shell");

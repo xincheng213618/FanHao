@@ -73,8 +73,13 @@ export function verifyActorProfileMainProjection(mainDb, plan, context) {
     if (stableStringList(urls) !== stableStringList(plan.javdbUrls)) return false;
   }
   if (plan.hasAliasesInput) {
-    const aliases = mainDb.prepare("SELECT alias FROM person_aliases WHERE person_id = ? AND source = ? ORDER BY alias").all(plan.personId, plan.aliasSource).map((row) => row.alias);
-    if (stableStringList(aliases) !== stableStringList(plan.aliases)) return false;
+    // Alias identity is unique across sources. INSERT OR IGNORE deliberately
+    // preserves an existing catalog alias instead of changing its provenance.
+    const rows = mainDb.prepare("SELECT alias, source FROM person_aliases WHERE person_id = ?").all(plan.personId);
+    const expected = new Set(plan.aliases);
+    const present = new Set(rows.map((row) => row.alias));
+    if ([...expected].some((alias) => !present.has(alias))) return false;
+    if (rows.some((row) => row.source === plan.aliasSource && !expected.has(row.alias))) return false;
   }
   if (plan.hasAvatarMutation) {
     const publication = mainDb.prepare(`

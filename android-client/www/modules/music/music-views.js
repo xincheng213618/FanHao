@@ -1,20 +1,20 @@
-import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=20260708-mobile-music-36";
-import { absoluteUrl } from "../../js/image.js?v=20260706-mobile-web-sync-01";
+import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-0f97d6765d71";
+import { absoluteUrl } from "../../js/image.js?v=assets-0f97d6765d71";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=20260713-music-search-versions-01";
-import { createMusicSearchController } from "./music-search-controller.js?v=20260730-music-palette-ui-42";
-import { createMusicSheets } from "./music-sheets.js?v=20260730-music-palette-ui-42";
-import { createMusicHomeView } from "./music-home-view.js?v=20260730-music-palette-ui-42";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=20260730-music-palette-ui-42";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=20260730-music-palette-ui-42";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=20260730-music-palette-ui-42";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=20260730-music-palette-ui-42";
-import { createMusicListPagination } from "./music-list-pagination.js?v=20260830-music-pagination-01";
-import { createMusicLibraryView } from "./music-library-view.js?v=20260730-music-palette-ui-42";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=20260730-music-palette-ui-42";
-import { createMusicCollectionView } from "./music-collection-view.js?v=20260730-music-palette-ui-42";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=20260812-music-write-retry-01";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=20260901-android-auth-audio-01";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-0f97d6765d71";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-0f97d6765d71";
+import { createMusicSheets } from "./music-sheets.js?v=assets-0f97d6765d71";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-0f97d6765d71";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-0f97d6765d71";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-0f97d6765d71";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-0f97d6765d71";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-0f97d6765d71";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-0f97d6765d71";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-0f97d6765d71";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-0f97d6765d71";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-0f97d6765d71";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-0f97d6765d71";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-0f97d6765d71";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -73,9 +73,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=20260716-music-state-01";
+} from "./music-state.js?v=assets-0f97d6765d71";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=20260716-music-state-01";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-0f97d6765d71";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;

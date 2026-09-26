@@ -26,6 +26,7 @@ class DownloadManager:
         self.sidecar_proc: subprocess.Popen[Any] | None = None
         self.sidecar_port: int | None = None
         self.active_jobs: dict[str, sqlite3.Row] = {}
+        self.active_job_progress: dict[str, dict[str, Any]] = {}
         self.limit = 0
         self.profile_id: int | None = None
         self.failure_guard_until: float | None = None
@@ -45,12 +46,46 @@ class DownloadManager:
                 if self.cycle_idle_since is not None and self.cycle_sidecar_success > 0
                 else None
             )
+            active_started = getattr(self, "active_job_started", {})
+            active_items = []
+            for sidecar_job_id, link in self.active_jobs.items():
+                progress = dict(self.active_job_progress.get(sidecar_job_id) or {})
+                started = active_started.get(sidecar_job_id)
+                active_items.append(
+                    {
+                        "sidecar_job_id": sidecar_job_id,
+                        "link_id": int(link["id"] or 0),
+                        "profile_id": int(link["profile_id"] or 0),
+                        "aweme_id": str(link["aweme_id"] or ""),
+                        "title": row_text(link, "desc"),
+                        "started_at": row_text(link, "last_started_at"),
+                        "elapsed_seconds": (
+                            max(0, int(time.monotonic() - started)) if started else 0
+                        ),
+                        "phase": str(progress.get("phase") or "等待下载器响应"),
+                        "detail": str(progress.get("detail") or ""),
+                        "bytes_downloaded": max(
+                            0, int(progress.get("bytes_downloaded") or 0)
+                        ),
+                        "bytes_total": (
+                            max(0, int(progress["bytes_total"]))
+                            if progress.get("bytes_total") is not None
+                            else None
+                        ),
+                        "speed_bytes_per_second": max(
+                            0.0, float(progress.get("speed_bytes_per_second") or 0.0)
+                        ),
+                        "current_file": str(progress.get("current_file") or ""),
+                        "updated_at": progress.get("updated_at"),
+                    }
+                )
             return {
                 "active": self.active,
                 "job_id": self.job_id,
                 "profile_id": self.profile_id,
                 "processes": len(self.active_jobs),
                 "inflight": len(self.active_jobs),
+                "items": active_items,
                 "sidecar_port": self.sidecar_port,
                 "proxy": normalize_proxy(setting("download_proxy", "")),
                 "watch_new": getattr(self, "watch_new", False),

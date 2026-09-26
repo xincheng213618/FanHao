@@ -1,3 +1,9 @@
+export function normalizeActorMappingInput(value) {
+  return String(value || "").split(/\r?\n/u)
+    .map((line) => line.trim().replace(/(\/actors\/[A-Za-z0-9]+\/?)[。．，；、.,;!！?？]+$/u, "$1"))
+    .filter(Boolean).join("\n");
+}
+
 export async function waitForActorProfileOperation({
   api,
   isRouteCurrent = () => true,
@@ -69,15 +75,13 @@ export function createPersonProfile(deps) {
     els,
     formatLibraryPath,
     formatNumber,
-    isPersonBulkDeleteActive,
-    isTrustedNetworkFeatureAvailable,
     linesFromTextarea,
     normalizeSourcePath,
     renderPeople,
     selectPerson,
+    showPeopleIndex,
     sourcePriority,
     state,
-    togglePersonBulkDeleteMode,
     workCoverUrl
   } = deps;
 
@@ -165,15 +169,6 @@ function renderPersonProfile(person) {
     nameRow.append(link);
   }
 
-  if (state.accessMode === "local") {
-    const editButton = document.createElement("button");
-    editButton.type = "button";
-    editButton.className = "person-profile-link";
-    editButton.textContent = profile?.javdbUrl ? "编辑映射" : "配置资料页";
-    editButton.addEventListener("click", () => openActorMappingModal(person));
-    nameRow.append(editButton);
-  }
-
   const summary = createProfileSummary(person, profile);
 
   copy.append(nameRow, summary);
@@ -195,7 +190,7 @@ async function saveActorProfileMapping(person, options) {
       || `actor-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const requestBody = {
         acceptAsyncOperation: true,
-        javdbUrl: options.javdbUrl,
+        javdbUrl: normalizeActorMappingInput(options.javdbUrl),
         displayName: options.displayName || person.name,
         gender: options.gender || person.actorProfile?.gender || "unknown",
         aliases: options.aliases || [],
@@ -252,13 +247,18 @@ async function maybeMergeActorCandidates(targetPersonId, candidates, status) {
     })
     .join("\n");
   const more = items.length > 6 ? `\n另有 ${formatNumber(items.length - 6)} 个候选` : "";
-  const ok = window.confirm(`检测到这些人物与当前映射的别名相同，是否合并到当前人物？\n\n${summary}${more}\n\n合并后旧人物会从数据库移除，作品关系会转到当前人物。`);
+  const sourcePersonIds = items.map((item) => item.id);
+  const preview = await api(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
+    method: "POST", body: { sourcePersonIds, preview: true }
+  });
+  const warnings = (preview.warnings || []).join("\n");
+  const ok = window.confirm(`这些人物的名字或别名相同，请核对是否确为同一人：\n\n${summary}${more}\n\n${warnings ? `${warnings}\n\n` : ""}合并后共 ${formatNumber(preview.workCount)} 部作品。目录与作品关系归到当前人物；旧 ID 保留并指向当前人物，原记录归档，不删除本地文件。`);
   if (!ok) return null;
 
   if (status) status.textContent = "正在合并人物";
   const data = await api(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
     method: "POST",
-    body: { sourcePersonIds: items.map((item) => item.id) }
+    body: { sourcePersonIds, confirmDifferentExternalIds: Boolean(warnings) }
   });
   return data || null;
 }
@@ -411,6 +411,8 @@ async function openActorMappingModal(person) {
   footer.className = "mapping-modal-footer";
   const status = document.createElement("span");
   status.className = "mapping-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
   const syncLocal = mappingButton("扫描本地并同步表单");
   const refreshJavdb = mappingButton("访问 JavDB 更新片单");
   const refreshAllJavdb = mappingButton("全量扫描当前人物");
@@ -429,8 +431,11 @@ async function openActorMappingModal(person) {
   let coverPickerOverlay = null;
   let coverPickerGrid = null;
   let coverPickerStatus = null;
+  let folderOperationOverlay = null;
 
   const closeModal = () => {
+    folderOperationOverlay?.remove();
+    folderOperationOverlay = null;
     coverPickerOverlay?.remove();
     coverPickerOverlay = null;
     coverPickerGrid = null;
@@ -455,6 +460,119 @@ async function openActorMappingModal(person) {
     if (options.syncProfileFields) applyProfileFields(modalPerson.actorProfile || {});
     renderSourceCandidates(data.sourceCandidates || []);
     status.textContent = "映射已同步";
+  }
+
+  function sourcePathParts(sourcePath) {
+    const normalized = String(sourcePath || "").replaceAll("\\", "/").replace(/\/+$/, "");
+    const separator = normalized.lastIndexOf("/");
+    return {
+      folderName: separator >= 0 ? normalized.slice(separator + 1) : normalized,
+      parentPath: separator >= 0 ? normalized.slice(0, separator) : ""
+    };
+  }
+
+  async function openFolderMutationDialog({ mode, sourcePath, targetPath = "" }) {
+    if (folderOperationOverlay) return;
+    const actionOverlay = document.createElement("div");
+    actionOverlay.className = "mapping-cover-picker-backdrop";
+    actionOverlay.setAttribute("role", "presentation");
+
+    const dialog = document.createElement("section");
+    dialog.className = "mapping-folder-operation-modal";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", mode === "rename" ? "重命名人物文件夹" : "重新关联人物文件夹");
+
+    const actionHeader = document.createElement("header");
+    actionHeader.className = "mapping-modal-header";
+    const actionHeading = document.createElement("div");
+    const actionTitle = document.createElement("h3");
+    actionTitle.textContent = mode === "rename" ? "重命名本地文件夹" : "重新关联已有文件夹";
+    const actionSubtitle = document.createElement("p");
+    actionSubtitle.textContent = mode === "rename"
+      ? "文件夹和数据库路径会一起更新"
+      : "用于已经在资源管理器中改名或移动的目录";
+    actionHeading.append(actionTitle, actionSubtitle);
+    const actionClose = mappingButton("关闭", "folder-button compact");
+    actionHeader.append(actionHeading, actionClose);
+
+    const actionBody = document.createElement("div");
+    actionBody.className = "mapping-folder-operation-body";
+    const currentLabel = document.createElement("span");
+    currentLabel.className = "mapping-folder-operation-label";
+    currentLabel.textContent = "当前登记路径";
+    const currentPath = document.createElement("code");
+    currentPath.className = "mapping-folder-operation-path";
+    currentPath.textContent = sourcePath;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    if (mode === "rename") {
+      input.value = sourcePathParts(sourcePath).folderName;
+      input.placeholder = "新的文件夹名称";
+    } else {
+      input.value = targetPath;
+      input.placeholder = "例如 G:/長谷川栞";
+    }
+    const field = createMappingField(mode === "rename" ? "新文件夹名称" : "现有文件夹完整路径", input);
+    const note = document.createElement("p");
+    note.className = "mapping-folder-operation-note";
+    note.textContent = mode === "rename"
+      ? "只修改文件夹名，不改变人物显示名；目标目录必须不存在。"
+      : "不会移动文件；系统会核对目标中的已登记作品目录后更新全部路径。";
+    const actionStatus = document.createElement("p");
+    actionStatus.className = "mapping-status";
+    actionBody.append(currentLabel, currentPath, field, note, actionStatus);
+
+    const actionFooter = document.createElement("footer");
+    actionFooter.className = "mapping-modal-footer";
+    const cancel = mappingButton("取消");
+    const confirm = mappingButton(mode === "rename" ? "确认重命名" : "确认重新关联");
+    actionFooter.append(cancel, confirm);
+    dialog.append(actionHeader, actionBody, actionFooter);
+    actionOverlay.append(dialog);
+    document.body.append(actionOverlay);
+    folderOperationOverlay = actionOverlay;
+
+    const closeAction = () => {
+      actionOverlay.remove();
+      if (folderOperationOverlay === actionOverlay) folderOperationOverlay = null;
+    };
+    actionClose.addEventListener("click", closeAction);
+    cancel.addEventListener("click", closeAction);
+    confirm.addEventListener("click", async () => {
+      const value = input.value.trim();
+      if (!value) {
+        actionStatus.textContent = mode === "rename" ? "请输入新文件夹名称" : "请输入现有文件夹路径";
+        return;
+      }
+      setButtonBusy(confirm, true, mode === "rename" ? "正在重命名" : "正在关联");
+      actionStatus.textContent = mode === "rename" ? "正在更新文件夹和数据库路径" : "正在核对并更新数据库路径";
+      try {
+        const endpoint = mode === "rename" ? "/api/admin/person-folder/rename" : "/api/admin/person-folder/relink";
+        const body = mode === "rename"
+          ? { personId: modalPerson.id, sourcePath, folderName: value }
+          : { personId: modalPerson.id, sourcePath, targetPath: value };
+        const data = await api(endpoint, { method: "POST", body });
+        modalPerson = data.person || modalPerson;
+        manualSourcePaths = [data.newPath, ...manualSourcePaths]
+          .filter(Boolean)
+          .filter((item, index, items) => items.findIndex((candidate) => normalizeSourcePath(candidate) === normalizeSourcePath(item)) === index);
+        closeAction();
+        await selectPerson(modalPerson.id, { resetFilter: false, replaceRoute: true, reusePrefetch: false });
+        await loadMapping({ syncProfileFields: true });
+        status.textContent = mode === "rename" ? "文件夹已重命名并同步" : "本地文件夹已重新关联";
+      } catch (error) {
+        const operationId = error.payload?.operationId || "";
+        actionStatus.textContent = operationId
+          ? `${error.message || "操作失败"}（操作 ${operationId}）`
+          : error.message || "操作失败";
+      } finally {
+        setButtonBusy(confirm, false);
+      }
+    });
+    input.focus();
+    if (mode === "rename") input.select();
   }
 
   async function loadCoverCandidates() {
@@ -651,6 +769,7 @@ async function openActorMappingModal(person) {
   function renderSourceCandidates(candidates) {
     sourceList.innerHTML = "";
     const visibleCandidates = candidates.filter((candidate) => candidate.selected || manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(candidate.sourcePath)));
+    const missingSelectedCandidate = candidates.find((candidate) => candidate.selected && !candidate.exists);
     if (!visibleCandidates.length) {
       const empty = document.createElement("div");
       empty.className = "mapping-source-empty";
@@ -660,20 +779,43 @@ async function openActorMappingModal(person) {
     }
 
     for (const candidate of visibleCandidates) {
-      const row = document.createElement("label");
+      const manualCandidate = manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(candidate.sourcePath));
+      const row = document.createElement("div");
       row.className = `mapping-source-row${candidate.exists ? "" : " missing"}`;
+      const selector = document.createElement("label");
+      selector.className = "mapping-source-selector";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.dataset.sourcePath = candidate.sourcePath;
-      checkbox.checked = Boolean((candidate.selected || manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(candidate.sourcePath))) && candidate.exists);
+      checkbox.checked = Boolean((candidate.selected || manualCandidate) && candidate.exists);
       checkbox.disabled = !candidate.exists;
       const main = document.createElement("span");
       main.className = "mapping-source-main";
       main.textContent = candidate.sourcePath;
+      selector.append(checkbox, main);
       const meta = document.createElement("span");
       meta.className = "mapping-source-meta";
       meta.textContent = `${candidate.root || "资料库"} · ${candidate.exists ? "已存在" : "未找到"}`;
-      row.append(checkbox, main, meta);
+      const actions = document.createElement("span");
+      actions.className = "mapping-source-actions";
+      if (candidate.selected && candidate.exists) {
+        const rename = mappingButton("重命名", "folder-button compact");
+        rename.addEventListener("click", () => openFolderMutationDialog({ mode: "rename", sourcePath: candidate.sourcePath }));
+        actions.append(rename);
+      } else if (candidate.selected && !candidate.exists) {
+        const relink = mappingButton("重新关联", "folder-button compact");
+        relink.addEventListener("click", () => openFolderMutationDialog({ mode: "relink", sourcePath: candidate.sourcePath }));
+        actions.append(relink);
+      } else if (manualCandidate && candidate.exists && missingSelectedCandidate) {
+        const relinkHere = mappingButton("关联到这里", "folder-button compact");
+        relinkHere.addEventListener("click", () => openFolderMutationDialog({
+          mode: "relink",
+          sourcePath: missingSelectedCandidate.sourcePath,
+          targetPath: candidate.sourcePath
+        }));
+        actions.append(relinkHere);
+      }
+      row.append(selector, meta, actions);
       sourceList.append(row);
     }
   }
@@ -759,7 +901,8 @@ async function openActorMappingModal(person) {
 
   refreshJavdb.addEventListener("click", async () => {
     setButtonBusy(refreshJavdb, true, "访问中");
-    status.textContent = "正在启动 JavDB 更新";
+    urlInput.value = normalizeActorMappingInput(urlInput.value);
+    status.textContent = "正在保存映射，随后启动片单更新";
     try {
       await saveActorProfileMapping(modalPerson, {
         javdbUrl: urlInput.value,
@@ -767,15 +910,16 @@ async function openActorMappingModal(person) {
         gender: genderSelect.value,
         aliases: linesFromTextarea(aliasesInput.value),
         status: null,
+        mergePrompt: false,
         throwOnError: true
       });
       const data = await api("/api/admin/refresh-actor-movies", {
         method: "POST",
         body: { personId: modalPerson.id, sleep: 1, maxPages: 1 }
       });
-      status.textContent = `JavDB 任务已启动：${data.task?.id || ""}`;
+      status.textContent = `JavDB 任务已启动：${data.task?.id || ""} · 如弹出安全验证请手动确认`;
       await waitForAdminTask(data.task?.id, status);
-      await selectPerson(modalPerson.id, { resetFilter: false });
+      await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
       status.textContent = "JavDB 片单已更新";
     } catch (error) {
@@ -787,7 +931,8 @@ async function openActorMappingModal(person) {
 
   refreshAllJavdb.addEventListener("click", async () => {
     setButtonBusy(refreshAllJavdb, true, "扫描中");
-    status.textContent = "正在启动当前人物全量 JavDB 扫描";
+    urlInput.value = normalizeActorMappingInput(urlInput.value);
+    status.textContent = "正在保存映射，随后启动当前人物全量扫描";
     try {
       await saveActorProfileMapping(modalPerson, {
         javdbUrl: urlInput.value,
@@ -795,15 +940,16 @@ async function openActorMappingModal(person) {
         gender: genderSelect.value,
         aliases: linesFromTextarea(aliasesInput.value),
         status: null,
+        mergePrompt: false,
         throwOnError: true
       });
       const data = await api("/api/admin/refresh-actor-movies", {
         method: "POST",
         body: { personId: modalPerson.id, sleep: 1, maxPages: 0 }
       });
-      status.textContent = `当前人物全量任务已启动：${data.task?.id || ""}`;
+      status.textContent = `当前人物全量任务已启动：${data.task?.id || ""} · 如弹出安全验证请手动确认`;
       await waitForAdminTask(data.task?.id, status);
-      await selectPerson(modalPerson.id, { resetFilter: false });
+      await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
       status.textContent = "当前人物全量 JavDB 扫描已完成";
     } catch (error) {
@@ -824,8 +970,8 @@ async function openActorMappingModal(person) {
 }
 
 async function waitForAdminTask(taskId, status) {
-  if (!taskId) return;
-  for (let index = 0; index < 180; index += 1) {
+  if (!taskId) throw new Error("未取得片单更新任务，请重新点击更新");
+  for (let index = 0; index < 420; index += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
     const data = await api("/api/admin/tasks");
     const task = (data.tasks || []).find((item) => item.id === taskId);
@@ -897,15 +1043,70 @@ async function refreshPersonLocal(person, button) {
   }
 }
 
+function canOfferEmptyPersonCleanup(person) {
+  return state.accessMode === "local"
+    && !person?.detailPending
+    && Number(person?.workCount || 0) === 0
+    && Number(person?.videoCount || 0) === 0
+    && Number(person?.actorMovieCount || 0) === 0
+    && Number(person?.missingLocalWorkCount || 0) === 0;
+}
+
+async function cleanupEmptyPerson(person, button) {
+  setButtonBusy(button, true, "检查中");
+  try {
+    const endpoint = `/api/people/${encodeURIComponent(person.id)}/empty-cleanup`;
+    const preview = await api(endpoint, { method: "POST", body: { preview: true } });
+    if (!preview.eligible || !preview.confirmationToken) {
+      throw new Error(preview.blockers?.[0]?.message || "这个人物当前不能清理");
+    }
+
+    const sourceSummary = (preview.sourcePaths || []).map(formatLibraryPath).join("\n");
+    const confirmed = window.confirm(
+      `“${preview.person?.name || person.name}”没有作品或外部资料，登记目录已经不存在。\n\n`
+      + `${sourceSummary ? `${sourceSummary}\n\n` : ""}`
+      + "清理只会删除人物及目录绑定的数据库元数据，不会删除任何文件。是否继续？"
+    );
+    if (!confirmed) {
+      setButtonBusy(button, false);
+      return;
+    }
+
+    button.textContent = "清理中";
+    await api(endpoint, {
+      method: "POST",
+      body: { confirmationToken: preview.confirmationToken }
+    });
+    state.people = state.people.filter((item) => String(item.id) !== String(person.id));
+    showPeopleIndex({ replaceRoute: true, restoreScroll: true });
+  } catch (error) {
+    setButtonBusy(button, false);
+    button.title = error.message || "清理空人物失败";
+    button.textContent = "清理失败";
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      button.textContent = "清理空人物";
+    }, 2200);
+  }
+}
+
 function createPersonProfileActions(person) {
   const canOpenLocalFolders = state.accessMode === "local";
   const canRefreshLocal = canOpenLocalFolders && Boolean(person?.id);
-  const canBulkDelete = typeof isTrustedNetworkFeatureAvailable === "function" && isTrustedNetworkFeatureAvailable();
   const paths = uniqueSourcePaths(person);
-  if (!paths.length && !canBulkDelete && !canRefreshLocal) return null;
+  if (!canOpenLocalFolders && !canRefreshLocal) return null;
 
   const actions = document.createElement("div");
   actions.className = "person-profile-actions";
+
+  if (state.accessMode === "local") {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "folder-button";
+    edit.textContent = person.actorProfile?.javdbUrl ? "编辑映射" : "配置资料页";
+    edit.addEventListener("click", () => openActorMappingModal(person));
+    actions.append(edit);
+  }
 
   if (canRefreshLocal) {
     const refreshButton = document.createElement("button");
@@ -918,6 +1119,16 @@ function createPersonProfileActions(person) {
     actions.append(refreshButton);
   }
 
+  if (canOfferEmptyPersonCleanup(person)) {
+    const cleanupButton = document.createElement("button");
+    cleanupButton.type = "button";
+    cleanupButton.className = "folder-button";
+    cleanupButton.textContent = "清理空人物";
+    cleanupButton.title = "仅在没有作品、外部资料且登记目录已不存在时清理人物元数据";
+    cleanupButton.addEventListener("click", () => cleanupEmptyPerson(person, cleanupButton));
+    actions.append(cleanupButton);
+  }
+
   if (canOpenLocalFolders) {
     for (const sourcePath of paths) {
       const button = document.createElement("button");
@@ -928,18 +1139,6 @@ function createPersonProfileActions(person) {
       button.addEventListener("click", () => openLocalFolder(sourcePath, button));
       actions.append(button);
     }
-  }
-
-  if (canBulkDelete && (person.workCount || 0) > 0) {
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "folder-button";
-    deleteButton.textContent = typeof isPersonBulkDeleteActive === "function" && isPersonBulkDeleteActive() ? "退出多选删除" : "多选删除";
-    deleteButton.title = "选择这个演员下的本地作品并批量删除文件夹";
-    deleteButton.addEventListener("click", () => {
-      if (typeof togglePersonBulkDeleteMode === "function") togglePersonBulkDeleteMode();
-    });
-    actions.append(deleteButton);
   }
 
   return actions;
@@ -972,19 +1171,32 @@ function createProfileSummary(person, profile) {
   const item = document.createElement("div");
   item.className = "person-profile-summary";
   if (person.detailPending) {
-    item.textContent = `本地 ${formatNumber(person.workCount)} 部 · 正在加载详情`;
+    item.textContent = "正在加载详情";
     return item;
   }
-  const parts = [`本地 ${formatNumber(person.workCount)} 部 / ${formatNumber(person.videoCount)} 视频`];
-  const actorCount = person.actorMovieCount ?? profile?.movieCount ?? 0;
-  if (actorCount > 0 || profile?.javdbUrl) {
-    parts.push(`JavDB ${formatNumber(actorCount)}`);
-    const missing = person.missingLocalWorkCount ?? 0;
-    if (missing > 0) parts.push(`未下载 ${formatNumber(missing)}`);
-  } else if (person.playableCount) {
-    parts.push(`可播 ${formatNumber(person.playableCount)}`);
+  const metrics = [
+    ["视频文件", person.videoCount, "个", "同一作品可能包含多个视频文件"]
+  ];
+  if (state.personWorksFacets?.playable !== undefined) {
+    metrics.push(["可播放作品", state.personWorksFacets.playable, "部", "至少有一个支持播放的视频文件的作品；未应用当前筛选"]);
   }
-  item.textContent = parts.join(" · ");
+  if (person.missingLocalWorkCount !== undefined) {
+    metrics.push(["未下载记录", person.missingLocalWorkCount, "部", "资料库已收录但当前没有本地作品记录；未应用当前筛选"]);
+  }
+  for (const [label, value, unit, help] of metrics) {
+    const metric = document.createElement("span");
+    metric.title = help;
+    const number = document.createElement("strong");
+    number.textContent = `${formatNumber(value || 0)} ${unit}`;
+    metric.append(document.createTextNode(`${label} `), number);
+    item.append(metric);
+  }
+  if (person.actorMovieCount !== undefined || profile?.movieCount) {
+    const source = document.createElement("span");
+    source.className = "person-profile-source-note";
+    source.textContent = `来源目录记录 ${formatNumber(person.actorMovieCount ?? profile?.movieCount ?? 0)} 条 · 非完整作品总数`;
+    item.append(source);
+  }
   return item;
 }
 

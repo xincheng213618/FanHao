@@ -129,11 +129,11 @@
 }
 
 body.search-expanded .content-panel {
-  margin-top: calc(58px + env(safe-area-inset-top));
+  margin-top: calc(58px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
 }
 
 body.search-view.search-expanded .content-panel {
-  margin-top: calc(110px + env(safe-area-inset-top));
+  margin-top: calc(110px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
 }
 
 .content-panel[data-feed-view="true"] .section-head {
@@ -1128,7 +1128,7 @@ button.work-detail-author {
 
 .content-panel[data-view="workDetail"] .work-facts-block,
 .content-panel[data-view="workDetail"] .related-works-block {
-  scroll-margin-top: calc(76px + env(safe-area-inset-top));
+  scroll-margin-top: calc(76px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
 }
 
 .work-fact-row {

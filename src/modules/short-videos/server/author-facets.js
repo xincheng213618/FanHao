@@ -63,8 +63,45 @@ export function followingAuthorFacet(db) {
 }
 
 export function authorFacet(db) {
+  return queryAuthorFacet(db);
+}
+
+export function searchAuthorFacet(db, query) {
+  const value = String(query || "").trim().slice(0, 120);
+  if (!value) return [];
+  const pattern = `%${escapeLike(value)}%`;
+  return queryAuthorFacet(db, {
+    matchingUsersCte: `
+      matching_users AS MATERIALIZED (
+        SELECT users.id, users.sec_uid
+        FROM short_video_users users
+        WHERE COALESCE(users.nickname, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR COALESCE(users.unique_id, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR COALESCE(users.sec_uid, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR COALESCE(users.id, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR EXISTS (
+            SELECT 1
+            FROM json_each(CASE WHEN json_valid(users.nickname_history_json) THEN users.nickname_history_json ELSE '[]' END) history
+            WHERE COALESCE(CAST(json_extract(history.value, '$.value') AS TEXT), '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+          )
+      ),`,
+    candidateWhere: `
+      COALESCE(v.author_name, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+      OR COALESCE(v.author_sec_uid, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+      OR COALESCE(v.owner_user_id, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+      OR v.owner_user_id IN (SELECT id FROM matching_users)
+      OR v.author_sec_uid IN (SELECT sec_uid FROM matching_users WHERE COALESCE(sec_uid, '') <> '')
+    `,
+    args: [pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern]
+  });
+}
+
+function queryAuthorFacet(db, options = {}) {
+  const matchingUsersCte = String(options.matchingUsersCte || "");
+  const candidateWhere = String(options.candidateWhere || "").trim();
+  const args = Array.isArray(options.args) ? options.args : [];
   return db.prepare(`
-    WITH grouped AS (
+    WITH ${matchingUsersCte} grouped AS (
       SELECT
         COALESCE(NULLIF(v.author_sec_uid, ''), NULLIF(v.author_name, ''), 'unknown') AS authorKey,
         MAX(NULLIF(v.author_sec_uid, '')) AS secUid,
@@ -78,6 +115,7 @@ export function authorFacet(db) {
       FROM short_videos v INDEXED BY idx_short_videos_author_facet
       WHERE v.visibility = 'local_only'
         AND (NULLIF(v.author_sec_uid, '') IS NOT NULL OR NULLIF(v.author_name, '') IS NOT NULL)
+        ${candidateWhere ? `AND (${candidateWhere})` : ""}
       GROUP BY authorKey
     )
     SELECT
@@ -100,7 +138,11 @@ export function authorFacet(db) {
     FROM grouped
     LEFT JOIN short_video_users author_user ON author_user.id = grouped.targetUserId
     ORDER BY count DESC, name COLLATE NOCASE
-  `).all().map(publicAuthorFacet);
+  `).all(...args).map(publicAuthorFacet);
+}
+
+function escapeLike(value) {
+  return String(value || "").replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
 function publicAuthorFacet(row) {

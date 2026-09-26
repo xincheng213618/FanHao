@@ -1,4 +1,4 @@
-import { fetchJson } from "./api.js?v=20260702-novel-local-manage-74";
+import { fetchJson } from "./api.js?v=assets-0f97d6765d71";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";

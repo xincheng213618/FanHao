@@ -4,6 +4,27 @@
   padding: 4px 0 12px;
 }
 
+.tools-local-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.tools-local-group > summary {
+  min-height: 48px;
+  align-content: center;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.tools-local-group > summary span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.tools-local-group > section { margin-top: 18px; }
+
 .tools-profile-header {
   display: grid;
   gap: 3px;
@@ -28,6 +49,8 @@
   display: grid;
   gap: 9px;
 }
+
+.computer-control-section[hidden] { display: none; }
 
 .tools-settings-section {
   margin-top: -6px;

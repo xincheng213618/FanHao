@@ -2,9 +2,11 @@
 title: 验证矩阵
 description: 按变更范围选择真实 package 脚本，明确依赖、临时写入和运行验收的区别。
 status: maintained
-verified_at: 2026-08-30
+verified_at: 2026-09-19
 sources:
   - package.json
+  - tools/run_verification.mjs
+  - tools/verify_verification_runner.mjs
   - android-client/package.json
   - tools/verify_fanhao_startup.mjs
   - tools/verify_fanhao_startup.ps1
@@ -20,7 +22,7 @@ sources:
 # 验证矩阵
 
 这里列出的应用命令来自根目录 `package.json`，不是新增的命令接口。
-根据改动选择最小相关验证，再决定是否执行完整门禁。
+日常门禁、按改动选择和完整门禁是三个显式入口。
 本页说明检查的用途与副作用，不表示它们在当前机器或当前提交上都已通过。
 
 ## 安装与查看实际脚本
@@ -46,6 +48,28 @@ npm --prefix docs run build
 写作约束见[文档规范](../contributing/documentation.md)。
 
 ## 按改动选择应用检查
+
+日常开发先运行轻量门禁：
+
+```powershell
+npm run verify
+```
+
+它检查仓库卫生、鉴权、写接口权限、模块结构、相对导入和验证 runner/cache-version 自测，不代表全模块回归已经执行。
+按当前 Git staged、unstaged 和 untracked 文件选择相关检查，可先只看计划：
+
+```powershell
+npm run verify:changed -- --plan
+npm run verify:changed
+```
+
+也可以传入明确路径，便于 CI 或复核某批文件；`--files` 后可跟多个路径：
+
+```powershell
+npm run verify:changed -- --files src/modules/novels/server/store.js public/modules/novels/novel-page.js --plan
+```
+
+计划会列出变更文件、模块入口和去重后的命令数量。选择规则按具体模块优先匹配，Android 小说、音乐、媒体、图片/视觉和短视频各自运行安全核心与相关行为；共享壳、桥接、Gradle 或发布工具变更才回退到全 Android。若计划包含 Android Web/客户端检查，还会明确标出执行前的 `sync:cache` 生成文件写入。无法归类的源码会明确提示，并保守选择完整门禁；不能把 changed 模式的成功描述成已执行所有检查。
 
 | 命令 | 检查内容 | 执行边界 |
 | --- | --- | --- |
@@ -93,13 +117,14 @@ npm --prefix docs run build
 
 | 命令 | 注意事项 |
 | --- | --- |
-| `npm run verify:android-security` | npm 会先运行 `preverify:android-security`，在 Android 目录执行 `ci --include=dev --ignore-scripts --no-audit --no-fund`；需要包源访问并改写其依赖目录。 |
+| `npm run setup:android-verification` | 显式在 Android 目录执行 `ci --include=dev --ignore-scripts --no-audit --no-fund`；需要包源访问并改写其依赖目录。首次运行或锁文件变化后执行。 |
+| `npm run verify:android-security` | 使用已有 Android 依赖运行安全检查；不会自动执行 `npm ci`。依赖缺失时先运行上面的 setup。 |
 | `npm run verify:android-gradle-config` | 调用 Android 工程自己的 Gradle 配置检查。 |
 | `npm run verify:short-video-client` | 已提交的短视频客户端检查入口；包含上述原生 JVM fixture，但不覆盖整个 Android 应用。 |
+| `npm run verify:android-release` | 发布所需的工作流、鉴权、写权限、安全、Gradle 配置和导入门禁；不包含所有 Android UI 回归。 |
+| `npm run verify:android-full` | 显式运行完整 Android 客户端、system control、作品移动、小说 UI、短视频原生、安全、鉴权和导入回归；runner 会把重复的缓存同步和叶子检查去重。 |
 
-开发工作区可能额外提供 `verify:android-client` 聚合脚本；先用 `npm run` 查看当前 `package.json`，不要假定干净克隆已包含它。
-若该脚本存在，继续核对它引用的每个验证器、JDK/SDK 依赖和临时写入范围；不能将它视为纯源码检查。
-稳定的基础入口是上表的安全、Gradle 配置和短视频客户端检查，但这些入口合在一起也不等于完整 Android 验收。
+`verify:android-security`、`verify:android-client` 和 `verify:short-video-client` 会先运行幂等的 `sync:cache`，同步 Android Web 缓存版本引用；这会改写需要更新的生成引用，但不会重装依赖。`verify:android-client` 继续作为客户端行为聚合入口使用，也不能替代真机验收。
 
 不要把 `install:debug`、`publish:debug` 等发布/安装脚本混进普通检查。
 它们的写入对象与授权要求不同，见[开发流程](../guide/development.md)。
@@ -107,11 +132,11 @@ npm --prefix docs run build
 ## 完整应用门禁
 
 ```powershell
-npm run verify
+npm run verify:full
 ```
 
-该命令按 `package.json` 中的顺序串行执行大量验证，前项失败会阻止后续项执行。
-除 Node 依赖外，还包括 Python 检查、Android npm 依赖安装、浏览器、PowerShell 及 Java fixture；须具备 JDK、上述 Android platform 与 Gradle JAR 缓存。
+该命令展开现有 `verify:*` 模块入口，按原有顺序执行全部行为检查，并对完全相同的叶子命令去重；例如 native video progress 和 media channel fixture 在一次完整门禁中各执行一次。模块入口本身保持兼容，可继续单独运行。
+前项失败会阻止后续项执行。除 Node 依赖外，还包括 Python 检查、浏览器、PowerShell 及 Java fixture；须先显式准备 Android npm 依赖，并具备 JDK、上述 Android platform 与 Gradle JAR 缓存。
 部分 Python 检查依赖第三方包，例如 `verify:javdb-card-facts` 使用 `bs4`；不能只装根目录 npm 依赖就承诺完整门禁可运行。
 按失败脚本的导入与所属工具要求补齐环境，不要为了让总命令变绿而跳过门禁。
 

@@ -11,17 +11,15 @@ export function createShortVideoListStatsService({ store, catalogWorker, ensureC
   async function list(urlOrOptions = {}, options = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = normalizeShortVideoStatsFilter(params);
-    if (filter.source === "recommended") {
+    if (filter.source === "recommended" || params.get("stats") === "0") {
       try {
         ensureCatalogSchema?.();
         return await catalogWorker.query(workerListUrl(urlOrOptions), "list");
       } catch (error) {
-        logger?.warn?.("[short-video-recommended-worker]", error?.message || error);
-        throw recommendedWorkerError(error);
+        const recommended = filter.source === "recommended";
+        logger?.warn?.(recommended ? "[short-video-recommended-worker]" : "[short-video-list-worker]", error?.message || error);
+        throw listWorkerError(error, { recommended });
       }
-    }
-    if (params.get("stats") === "0") {
-      return store.listVideos(urlOrOptions);
     }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -51,9 +49,9 @@ export function createShortVideoListStatsService({ store, catalogWorker, ensureC
   return { list };
 }
 
-function recommendedWorkerError(cause) {
-  const error = new Error("短视频推荐后台线程暂时不可用");
-  error.code = "SHORT_VIDEO_CATALOG_UNAVAILABLE";
+function listWorkerError(cause, { recommended = false } = {}) {
+  const error = new Error(recommended ? "短视频推荐后台线程暂时不可用" : "短视频列表后台线程暂时不可用");
+  error.code = recommended ? "SHORT_VIDEO_CATALOG_UNAVAILABLE" : "SHORT_VIDEO_LIST_UNAVAILABLE";
   error.statusCode = 503;
   error.retryable = true;
   error.expose = true;

@@ -158,7 +158,7 @@ WebView 的 HTTP(S) 文件下载（例如远程小说 TXT、音乐下载）交�
 
 Gradle、Android Studio、`cap run` 与 `FANHAO_VERSION_CODE` 也受同一 namespace gate：未显式进入 local-only 路径时最多只能构建 `99999999`。高段必须同时携带专用 Gradle property；`packageDebug` 开始前先在不会被 APK 输出清理覆盖的位置原子写 fail-closed guard，成功产出 APK 后再写 pending sidecar。`build-debug.ps1 -LocalOnly` 最后用 APK 大小、SHA 与 signer 绑定的完整 marker 原子替换 pending，并清除 guard；普通构建只在成功后清除两者，因此失败或中断不会把高段输出误当成可发布产物。
 
-无参数 `npm run build:debug` 与 `npm run install:debug` 都从 tracked 的 `android-client/version.json` 读取默认身份；当前固定为 `26081190 / 0.1.26081190-debug`。因此安装脚本不会再意外生成 `1 / 1.0`；`install:debug` 只允许 contract 当前的 code/name，显式传入更高或不同身份会在 JDK、Gradle 和 ADB 之前失败，必须先通过受审阅提交提高 `version.json`。身份通过后，脚本仍只在 ADB 存在已授权设备时执行 `adb install -r`。
+无参数 `npm run build:debug` 与 `npm run install:debug` 都从 `android-client/version.json` 读取默认身份，不再回退到 `1 / 1.0`。开发安装可以显式指定合法的发布范围版本，不要求身份等于该文件，也不要求先提交 Git。安装仍校验 APK 包名、签名、版本，要求已授权的 ADB 设备，并拒绝降级；保留高版本空间的 `-LocalOnly` 产物不能安装。
 
 普通、仅构建的显式 `-VersionCode` / `-VersionName` 仍可用于边界内的临时验证，但不会修改 contract，也不会推进 publish floor。直接绕过脚本手工执行 `adb install` 无法受此 gate 保护，可能把设备推进到未记录版本，属于需要人工避免的剩余操作风险。
 
@@ -214,7 +214,7 @@ npm run release:android-debug -- -Notes "本次更新说明"
 
 发布成功后的版本化 APK 与 `latest.json` 会自然成为后续计划的持久历史；发布脚本不会修改源码 contract。`version.json` 是在发布历史缺失或迁移时仍然生效的最低基线，只能通过单独、受审阅的 Git 变更同时提高 `currentVersionCode`、`highWaterVersionCode` 和对应默认名称，不得下降。
 
-因为自动发布候选必然高于当前 contract，`publish-debug-update.ps1 -Install` 已明确废弃并会在 JDK、Gradle 与 ADB 之前拒绝，避免把设备推进到尚未受审阅记录的身份。真实发布会在构建前和原子提交前两次确认同一组已授权 ADB 设备仍然可见，任一时点不可见或发生变化都拒绝发布，但发布命令本身不会安装 APK。发布后可由应用内更新链安装，也可运行 `npm run install:android-published`：该入口只读取仓库发布目录的 `latest.json`，重新验证规范文件名、大小、SHA-256、包名、版本和单 signer，再对唯一已授权设备执行不允许降级的 `adb install -r`，并回读已安装版本；多设备必须显式传 `-Serial`。它不构建当前源码，因此不会把“与发布版同版本但字节不同”的临时 APK 冒充为发布产物。未发布源码构建仍受 tracked `version.json` 安装契约保护。
+`publish-debug-update.ps1 -Install` 已废弃；发布和设备安装使用独立入口。发布不要求 ADB 或手机在线。发布后可由应用内更新链安装，也可运行 `npm run install:android-published`：该入口只读取发布目录的 `latest.json`，重新验证规范文件名、大小、SHA-256、包名、版本和单 signer，再对唯一已授权设备执行不允许降级的 `adb install -r`，并回读已安装版本；多设备必须显式传 `-Serial`。它不构建当前源码，确保安装的字节就是清单所指向的发布产物。开发源码安装使用 `build-debug.ps1 -Install`。
 
 APK 与清单先写入发布目录内的临时文件并完成回读验证，新版本 APK 使用不可覆盖的版本化文件名，`latest.json` 最后原子替换。下载端只提供当前 `latest.json` 精确引用的 APK，失败或中断产生的非当前文件不能经更新接口下载。
 

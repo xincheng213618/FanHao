@@ -74,7 +74,9 @@ const APP_PAGE_PREFIXES = [
 ];
 
 const STANDALONE_PAGE_FILES = new Map([
-  ["/disk-usage", "/modules/fanhao/disk-usage/index.html"]
+  ["/fanhao/file-workflows", "/modules/fanhao/file-workflows/index.html"],
+  ["/disk-usage", "/modules/fanhao/disk-usage/index.html"],
+  ["/system-control", "/modules/system/computer-control/index.html"]
 ]);
 
 export function isAppPagePath(routePath) {

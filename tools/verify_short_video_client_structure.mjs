@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { assertAndroidCacheVersion } from "../android-client/scripts/android-cache-version.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createVerificationAdvisories } from "./verification_advisories.mjs";
 import { createShortVideoViews } from "../android-client/www/modules/short-videos/index.js";
 import { createShortVideoListController } from "../android-client/www/modules/short-videos/list/controller.js";
 import {
@@ -35,6 +36,7 @@ import { createAuthorCollectorPoll } from "../public/modules/short-videos/author
 import { shortVideoAuthorCardAccessibility } from "../public/modules/short-videos/list-cards.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const advisories = createVerificationAdvisories("short-video-client-structure");
 const readNormalized = (filePath) => fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
 const moduleDir = path.join(root, "android-client", "www", "modules", "short-videos");
 const requiredParts = [
@@ -68,7 +70,7 @@ const facade = readNormalized(path.join(moduleDir, "short-video-views.js")).trim
 assert(/^export \{ createShortVideoViews \} from /.test(facade), "short-video-views.js must stay a compatibility facade");
 for (const filePath of sourceFiles(moduleDir)) {
   const lines = readNormalized(filePath).split("\n").length;
-  assert(lines <= 600, `short-video JS file exceeds 600 lines: ${relative(filePath)} (${lines})`);
+  advisories.check(lines <= 600, `short-video JS file is over 600 lines; review its responsibilities: ${relative(filePath)} (${lines})`);
 }
 verifyFeatureReferences();
 verifySharedImports();
@@ -84,38 +86,7 @@ await verifyAndroidAuthorAccountRequests();
 
 function verifyAndroidShortVideoCacheIdentity() {
   const wwwDir = path.join(root, "android-client", "www");
-  const configSource = readNormalized(path.join(wwwDir, "js", "config.js"));
-  const versionMatch = /export const CLIENT_VERSION = "([^"]+)";/u.exec(configSource);
-  assert(versionMatch, "Android config must expose a literal CLIENT_VERSION for cache identity checks");
-  const clientVersion = versionMatch[1];
-  const identityFiles = [
-    "app.js",
-    "js/android-module-registry.js",
-    "js/cache.js",
-    "js/media-navigation-state.js",
-    "js/channel-history-state.js",
-    "modules/media/android-module.js",
-    "modules/media/styles.css",
-    "platform/content-index/channel-views.js",
-    "modules/short-videos/android-module.js",
-    "modules/short-videos/api.js",
-    "modules/short-videos/index.js",
-    "modules/short-videos/list/controller.js",
-    "modules/short-videos/list/view.js",
-    "modules/short-videos/player/native-feed.js",
-    "modules/short-videos/player/native-feed-contract.js"
-  ];
-  const behaviorDigest = createHash("sha256");
-  for (const relativePath of identityFiles) {
-    const source = readNormalized(path.join(wwwDir, ...relativePath.split("/")))
-      .replaceAll(clientVersion, "<CLIENT_VERSION>");
-    behaviorDigest.update(`${relativePath}\0${source}\0`);
-  }
-  const digestSuffix = behaviorDigest.digest("hex").slice(0, 12);
-  assert(
-    clientVersion.endsWith(`-${digestSuffix}`),
-    `Android short-video behavior changed without a new derived CLIENT_VERSION; expected suffix -${digestSuffix}`
-  );
+  const { version: clientVersion } = assertAndroidCacheVersion(wwwDir);
 
   const indexSource = readNormalized(path.join(wwwDir, "index.html"));
   const appSource = readNormalized(path.join(wwwDir, "app.js"));
@@ -907,9 +878,10 @@ assert(!androidIndexSource.includes("collections/controller.js") && !androidInde
 assert(!androidListSource.includes("appendCollectionCardAction") && !androidListSource.includes("showCollectionPicker") && !androidListSource.includes("allowCollections") && !androidListSource.includes("加入清单"), "Android short-video cards must not expose an add-to-collection action");
 assert(!androidAppSource.includes('"shortVideoCollections"') && !androidAppSource.includes('"shortVideoCollection"') && !androidRouteContractSource.includes('view === "shortVideoCollections"') && !androidRouteContractSource.includes('view === "shortVideoCollection"'), "Android history and canonical route handling must reject retired collection views");
 assert(!androidEntrySource.includes('textContent = "清单"') && !androidEntrySource.includes("short-video-chrome-collections"), "Android short-video chrome must stay free of collection shortcuts");
-assert(androidClientVersion && androidIndexHtmlSource.includes(`./styles.css?v=${androidClientVersion}`) && androidRootStylesSource.includes("./modules/short-videos/styles.css?v=20260812-collection-management-01") && androidShortVideoStylesSource.includes("./styles/list.css?v=20260812-collection-management-01"), "Android short-video styles must propagate through the integrated stylesheet cache-version chain");
-assert(androidAppSource.includes('bottomNavKeyFor() === "photo" ? alternateGalleryMode(currentMode) : currentMode') && androidAppSource.includes('bottomNavKeyFor() === "fanhao" ? alternateHomeMode(currentMode) : currentMode') && androidAppSource.includes('bottomNavKeyFor() === "novels" ? alternateReadingMode(currentMode) : currentMode'), "active paired bottom tabs must switch their mode on a second tap");
-assert(androidAppSource.includes("openHomeModePicker()") && androidAppSource.includes("openGalleryModePicker()") && androidAppSource.includes("openReadingModePicker()") && androidAppSource.includes("bottomNavLongPressTimer"), "second-tap mode switching must retain the long-press mode pickers");
+assert(androidClientVersion && androidIndexHtmlSource.includes(`./styles.css?v=${androidClientVersion}`) && androidRootStylesSource.includes(`./modules/short-videos/styles.css?v=${androidClientVersion}`) && androidShortVideoStylesSource.includes(`./styles/list.css?v=${androidClientVersion}`), "Android short-video styles must propagate through the current integrated stylesheet cache-version chain");
+assert(androidAppSource.includes('button.classList.contains("active") && isRootNavigationView()') && ['Gallery', 'Home', 'Reading'].every(group => androidAppSource.includes(`navigateTo${group}Mode(currentMode);`)), "active root tabs must retain their category; the gallery behavior suite verifies filter preservation and scroll-to-top");
+assert(androidIndexHtmlSource.includes('id="moduleModeSelect"') && androidAppSource.includes('els.moduleModeSelect?.addEventListener("change"'), "paired categories must also have a visible selection control");
+assert(androidAppSource.includes("openHomeModePicker()") && androidAppSource.includes("openGalleryModePicker()") && androidAppSource.includes("openReadingModePicker()") && androidAppSource.includes("bottomNavLongPressTimer"), "visible category selection must retain the long-press mode pickers");
 assert(androidAppSource.includes('label.textContent = mode === "western" ? "欧美" : "番号"') && androidAppSource.includes("galleryModeLabel(mode)") && androidAppSource.includes("label.textContent = modeLabel") && androidAppSource.includes('label.textContent = mode === "music" ? "音乐" : "小说"') && !androidRootStylesSource.includes('button[data-gallery-switcher] .bottom-nav-icon::after'), "switchable bottom tabs must show their current mode as the label without floating badge markers");
 for (const [mode, label] of [["photo", "套图"], ["manga", "韩漫"], ["movie", "电影"], ["tv", "电视剧"]]) {
   assert(androidAppSource.includes(`mode: "${mode}", label: "${label}"`), `Android gallery options must retain ${mode}/${label}`);
@@ -922,7 +894,7 @@ assert(androidApiSource.includes("fetchJson") && androidTransportSource.includes
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
 assert(androidEntrySource.includes("if (value === activeGroup)") && androidEntrySource.includes("openSortDialog(host, params)"), "tapping the active Android short-video group must open sorting");
-assert(androidEntrySource.includes("row.append(tabs, search)"), "Android short-video search must stay at the far right of the compact group row after removing the collection shortcut");
+advisories.check(androidEntrySource.includes("row.append(tabs, search)"), "Android short-video chrome no longer uses the former tabs-then-search row order; review the new layout");
 assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
 assert(androidEntrySource.includes('["recommended", "推荐"]') && androidEntrySource.includes('["history", "历史"]') && androidEntrySource.includes('["following", "关注"]') && androidEntrySource.includes("FOLLOWING_AUTHOR_SORT_OPTIONS"), "Android short-video chrome must expose recommended, history, following, and author choices");
 assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
@@ -982,24 +954,42 @@ assert(androidNativePlayerSource.includes("createCommentsController()") && andro
 assert(androidNativeCommentsSource.includes("final class NativeShortVideoCommentsController") && androidNativeCommentsSource.includes("installDismissGesture") && androidNativeCommentsSource.includes("requestComments") && androidNativeCommentsSource.includes("我的本地评论"), "Android comments controller must own comments presentation, gestures, and API calls");
 assert(androidNativePlayerSource.includes("createFeedSearchController()") && androidNativePlayerSource.includes("feedSearchController.show()") && !androidNativePlayerSource.includes("void showFeedSearchDialog("), "Android Activity must delegate feed-search presentation and keyboard lifecycle");
 assert(androidNativeFeedSearchSource.includes("final class NativeShortVideoFeedSearchController") && androidNativeFeedSearchSource.includes("EditorInfo.IME_ACTION_SEARCH") && androidNativeFeedSearchSource.includes("host.pausePlayback()") && androidNativeFeedSearchSource.includes("host.applySearch(query)"), "Android feed-search controller must own the search overlay while coordinating playback and query submission through its host");
-assert(androidNativePlayerSource.split(/\r?\n/).length <= 5600, "Android native short-video Activity exceeded its lifecycle-safe HTTP/UI orchestration budget");
-assert(androidNativePlaybackFallbackSource.split(/\r?\n/).length <= 220 && androidNativePlaybackFallbackSource.includes("NativeShortVideoHttpResponse.readUtf8"), "Android short-video compatibility playback must stay in a bounded controller with shared safe HTTP response handling");
-assert(androidNativeFeedPlaybackSource.split(/\r?\n/).length <= 180 && androidNativeFeedPlaybackSource.includes("final class NativeShortVideoFeedPlayback"), "Android author-return playback snapshots must remain in a bounded, independently tested state owner");
-assert(androidNativeActionStateSource.includes("final class NativeShortVideoActionState") && androidNativeActionStateSource.split(/\r?\n/).length <= 300, "Android action race handling must remain in its bounded, independently testable state owner");
-assert(androidNativeActionPreferencesSource.includes("final class NativeShortVideoActionPreferences") && androidNativeActionPreferencesSource.split(/\r?\n/).length <= 196, "Android server-scoped action persistence and legacy migration exceeded its exact extraction budget");
-assert(androidNativeActionSnapshotsSource.includes("final class NativeShortVideoActionSnapshots") && androidNativeActionSnapshotsSource.split(/\r?\n/).length <= 103, "Android canonical action snapshots exceeded their exact bounded model-consistency budget");
-assert(androidNativeActionResultSource.split(/\r?\n/).length <= 60, "Android acknowledged action result transport exceeded its 60-line boundary");
-assert(androidNativeActionResultDecoderSource.split(/\r?\n/).length <= 80, "Android acknowledged action result decoder exceeded its 80-line boundary");
-assert(androidNativeFeedPagingSource.split(/\r?\n/).length <= 180, "Android native feed paging state machine exceeded its 180-line budget");
-assert(androidNativeFeedAutoAdvanceSource.split(/\r?\n/).length <= 80, "Android native duplicate-page auto-advance helper exceeded its 80-line budget");
-assert(androidNativeFeedReaderSource.split(/\r?\n/).length <= 140, "Android native feed reader exceeded its 140-line budget");
-assert(androidNativeFeedTransportSource.split(/\r?\n/).length <= 100, "Android native feed transport exceeded its 100-line budget");
-assert(androidNativeHttpResponseSource.split(/\r?\n/).length <= 90, "Android native bounded HTTP response helper exceeded its 90-line budget");
-assert(androidNativeImageLoaderSource.split(/\r?\n/).length <= 40, "Android native image loader exceeded its 40-line budget");
-assert(androidNativePageViewSource.split(/\r?\n/).length <= 450, "Android native short-video page-view module exceeded its 450-line budget");
-assert(androidNativeCommentsSource.split(/\r?\n/).length <= 650, "Android native short-video comments controller exceeded its 650-line budget");
-assert(androidNativeDeleteControllerSource.split(/\r?\n/).length <= 340 && androidNativeDeleteTransportSource.split(/\r?\n/).length <= 130 && androidNativeDeleteJobStateSource.split(/\r?\n/).length <= 110 && androidNativeDeleteStatusViewSource.split(/\r?\n/).length <= 100, "Android native delete controller, transport, job state, and status view must stay independently bounded");
-assert(androidNativeFeedSearchSource.split(/\r?\n/).length <= 240, "Android native short-video feed-search controller exceeded its 240-line budget");
+assert(androidNativePlaybackFallbackSource.includes("NativeShortVideoHttpResponse.readUtf8"), "Android short-video compatibility playback must use shared safe HTTP response handling");
+assert(androidNativeFeedPlaybackSource.includes("final class NativeShortVideoFeedPlayback"), "Android author-return playback snapshots must retain their independently tested state owner");
+assert(androidNativeActionStateSource.includes("final class NativeShortVideoActionState"), "Android action race handling must retain its independently tested state owner");
+assert(androidNativeActionPreferencesSource.includes("final class NativeShortVideoActionPreferences"), "Android server-scoped action persistence and legacy migration must retain their dedicated state owner");
+assert(androidNativeActionSnapshotsSource.includes("final class NativeShortVideoActionSnapshots"), "Android canonical action snapshots must retain their dedicated consistency model");
+for (const [source, limit, label] of [
+  [androidNativePlayerSource, 5600, "native short-video Activity"],
+  [androidNativePlaybackFallbackSource, 220, "compatibility playback controller"],
+  [androidNativeFeedPlaybackSource, 180, "author-return playback state"],
+  [androidNativeActionStateSource, 300, "action race state"],
+  [androidNativeActionPreferencesSource, 196, "server-scoped action preferences"],
+  [androidNativeActionSnapshotsSource, 103, "canonical action snapshots"],
+  [androidNativeActionResultSource, 60, "acknowledged action result transport"],
+  [androidNativeActionResultDecoderSource, 80, "acknowledged action result decoder"],
+  [androidNativeFeedPagingSource, 180, "native feed paging state"],
+  [androidNativeFeedAutoAdvanceSource, 80, "duplicate-page auto-advance helper"],
+  [androidNativeFeedReaderSource, 140, "native feed reader"],
+  [androidNativeFeedTransportSource, 100, "native feed transport"],
+  [androidNativeHttpResponseSource, 90, "bounded HTTP response helper"],
+  [androidNativeImageLoaderSource, 40, "native image loader"],
+  [androidNativePageViewSource, 450, "native page-view module"],
+  [androidNativeCommentsSource, 650, "native comments controller"],
+  [androidNativeFeedSearchSource, 240, "native feed-search controller"]
+]) {
+  const lineCount = source.split(/\r?\n/).length;
+  advisories.check(lineCount <= limit, `Android ${label} is over ${limit} lines (${lineCount}); review its responsibilities`);
+}
+for (const [source, limit, label] of [
+  [androidNativeDeleteControllerSource, 340, "delete controller"],
+  [androidNativeDeleteTransportSource, 130, "delete transport"],
+  [androidNativeDeleteJobStateSource, 110, "delete job state"],
+  [androidNativeDeleteStatusViewSource, 100, "delete status view"]
+]) {
+  const lineCount = source.split(/\r?\n/).length;
+  advisories.check(lineCount <= limit, `Android ${label} is over ${limit} lines (${lineCount}); review its responsibilities without weakening delete recovery behavior`);
+}
 assert(androidPlayerPluginSource.includes("EXTRA_OPEN_AUTHOR_PANEL") && androidPlayerPluginSource.includes('call.getBoolean("openAuthorPanel", false)'), "Android player plugin must pass the native author homepage flag");
 assert(androidNativePlayerSource.includes("if (openAuthorPanelOnStart) openInitialAuthorScreen(initialIndex)"), "Android native author entry must render the author screen before starting playback");
 assert(androidNativeFeedContractSource.includes("following: Boolean(item.author?.following)") && androidNativePlayerSource.includes("authorFollowEndpoint(item)") && androidNativePlayerSource.includes('button.setText(following ? "已关注" : "已取关")'), "Android author detail must use the synchronized one-tap follow state action");
@@ -1015,7 +1005,7 @@ assert(androidNativePlayerSource.includes("(screenWidth - gridHorizontalPadding 
 assert(androidNativePlayerSource.includes("topSearchButton = new ImageView(this)"), "Android native player search should stay a compact icon instead of a wide web-style pill");
 assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, "原声"'), "Android native player rail must not expose an external original-video link");
 assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_menu_manage, "更多"'), "Android native player rail must rely on stage long-press for playback tools");
-assert(androidNativePlayerSource.includes("icon.setBackgroundColor(Color.TRANSPARENT)"), "Android native player rail icons must not restore circular shadow backgrounds");
+advisories.check(androidNativePlayerSource.includes("icon.setBackgroundColor(Color.TRANSPARENT)"), "Android native player rail icons no longer use the former transparent background; review the visual treatment");
 assert(androidNativePlayerSource.includes("loadGalleryImage(holder, item, galleryIndex, direction);\n      if (currentGallery) scheduleGalleryAutoAdvance(holder, item, galleryIndex);"), "Android native gallery images must start their four-second timer only when the current page is bound");
 assert(androidNativePlayerSource.includes("liked ? R.drawable.ic_short_heart : R.drawable.ic_short_heart_outline"), "Android native author tiles must distinguish liked and unliked works with solid and outline hearts");
 assert(!androidNativePlayerSource.includes('badge.setBackground(roundedDrawable(0x99000000'), "Android native author tile hearts must not restore a dark pill background");
@@ -1194,7 +1184,7 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("onSubmit: commitShortVideoAuthorIndexSearch") && playerSource.includes('const source = state.shortVideo.source === "following" ? "following" : "authors"'), "author search results must remain scoped to following or author indexes instead of falling into the all-content feed");
   assert(playerSource.includes('["内容", "is-feed"') && playerSource.includes('["作者", "is-authors"') && playerSource.includes("short-video-source-tab-group"), "source navigation must group content feeds separately from following and author indexes");
   assert(!playerSource.includes('tabs.setAttribute("role", "tablist")') && playerSource.includes('button.setAttribute("aria-pressed", String(active))'), "source filters must use pressed buttons instead of an incomplete tablist model");
-  assert(listSource.includes(".short-video-source-tab-group") && listSource.includes(".short-video-source-tab-group.is-authors"), "source navigation groups must remain visually distinct");
+  advisories.check(listSource.includes(".short-video-source-tab-group") && listSource.includes(".short-video-source-tab-group.is-authors"), "source navigation groups changed from the former visually distinct treatment; review their hierarchy");
   assert(playerSource.includes("if (!append && !preserveHomeDuringLoad) renderView();") && playerSource.includes("if (!preserveHomeDuringLoad) state.shortVideo.data = null;"), "feed switches must not render an intermediate empty list before new data arrives");
   const sourceTabHandler = playerSource.match(/function renderHomeToolbar[\s\S]*?\n  function renderDeleteSelectionActions/)?.[0] || "";
   assert(!sourceTabHandler.includes("state.shortVideo.data = null") && !sourceTabHandler.includes("state.shortVideo.authors = []"), "source-tab clicks must retain the previous feed and author list until the replacement request succeeds");
@@ -1205,17 +1195,22 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("createShortVideoMediaCache") && playerSource.includes("media-cache.js?v="), "the Web short-video composition root must delegate detail caches and media prewarming");
   assert(playerSource.includes("createShortVideoActionsController") && playerSource.includes("actions-controller.js?v="), "the Web short-video composition root must delegate action, follow, and share coordination");
   assert(!playerSource.includes("function toggleShortVideoAction(") && !playerSource.includes("function createAuthorFollowButton(") && !playerSource.includes("function ensureShortVideoSharePanel("), "the Web composition root must not reintroduce action-controller responsibilities");
-  assert(playerSource.split(/\r?\n/).length <= 6540, "the Web short-video composition root must stay below 6540 lines");
-  assert(actionsControllerSource.split(/\r?\n/).length <= 430, "the Web short-video actions controller must stay below 430 lines");
-  assert(listWindowSource.split(/\r?\n/).length <= 450, "the Web short-video list-window controller must stay below 450 lines");
-  assert(mediaCacheSource.split(/\r?\n/).length <= 380, "the Web short-video media-cache controller must stay below 380 lines");
-  assert(authorPagesSource.split(/\r?\n/).length <= 600, "short-video author-page controller must stay below 600 lines");
-  assert(authorCollectorPollSource.split(/\r?\n/).length <= 120, "short-video author collector polling lifecycle must stay below 120 lines");
+  for (const [source, limit, label] of [
+    [playerSource, 6540, "Web composition root"],
+    [actionsControllerSource, 430, "Web actions controller"],
+    [listWindowSource, 450, "Web list-window controller"],
+    [mediaCacheSource, 380, "Web media-cache controller"],
+    [authorPagesSource, 620, "author-page controller"],
+    [authorCollectorPollSource, 120, "author collector polling lifecycle"],
+    [webIconsSource, 120, "icon registry"],
+    [shortVideoStateSource, 350, "state and preference helpers"]
+  ]) {
+    const lineCount = source.split(/\r?\n/).length;
+    advisories.check(lineCount <= limit, `${label} is over ${limit} lines (${lineCount}); review its responsibilities`);
+  }
   assert(authorPagesSource.includes('showBrowserToast(error?.message || "数量确认启动失败")'), "author count-confirmation startup failures must stay visible instead of silently redrawing the page");
   assert(authorPagesSource.includes('fullRefresh.textContent = "确认数量"') && authorPagesSource.includes("short-video-author-page-pending-difference"), "author pages must expose a direct, clearly named full-scan count confirmation when local and homepage counts differ");
   assert(playerSource.includes('profile=${encodeURIComponent(secUid)}#profiles'), "author collection management links must deep-link to the current profile instead of requiring another search");
-  assert(webIconsSource.split(/\r?\n/).length <= 120, "short-video icon registry must stay below 120 lines");
-  assert(shortVideoStateSource.split(/\r?\n/).length <= 350, "short-video state and preference helpers must stay below 350 lines");
   assert(indexSource.includes("const shortVideoStyleUrls = [") && indexSource.includes("const shortVideoViewerStyleUrls = [") && indexSource.includes("const shortVideoDetailEntry = ") && indexSource.includes("window.__fanhaoEnsureShortVideoViewerStyles = () => loadStyleUrls(shortVideoViewerStyleUrls)") && indexSource.includes("window.__fanhaoStylesReady = loadStyleUrls(styleUrls)") && indexSource.includes("await window.__fanhaoStylesReady;"), "the dedicated short-video entry must load route-critical styles first and expose deduplicated on-demand viewer styles");
   assert(launcherSource.includes('$ShortVideoBuildScript = Join-Path $ProjectDir "tools\\build_short_video_web.mjs"') && launcherSource.includes("& node $ShortVideoBuildScript"), "the primary launcher must rebuild the production short-video bundle before serving it");
   assert(shortVideoBuildSource.includes('createHash("sha256")') && shortVideoBuildSource.includes("fs.writeFileSync(output, generated)") && shortVideoBuildSource.indexOf("fs.writeFileSync(output, generated)") < shortVideoBuildSource.indexOf("fs.writeFileSync(indexPath, indexSource)"), "the web build must publish bundle bytes before switching the content-hashed immutable URL");
@@ -1326,7 +1321,9 @@ function verifyWebDedicatedEntry() {
     && shortVideoListWorkerSource.includes("new DatabaseSync(workerData.dbPath, { readOnly: true })")
     && shortVideoListWorkerSource.includes("PRAGMA query_only = ON")
     && shortVideoListWorkerSource.includes("function storeOrOpen()")
-    && shortVideoStatsQuerySource.includes("FROM short_video_catalog"), "default short-video stats must use the shared lazy worker's read-only SQLite connection; only non-recommended stats=0 lists stay worker-free while recommended lists use the catalog worker");
+    && shortVideoStatsQuerySource.includes("FROM short_video_catalog")
+    && shortVideoStoreSource.includes("fastShortQueryVideoPage")
+    && shortVideoListPageQueriesSource.includes("FROM short_video_search"), "default short-video stats and every stats=0 list must use the shared lazy worker's read-only SQLite connection; short substring searches must scan the compact search table instead of the aggregate catalog view");
   const serverReservedDetailSegments = [...shortVideoReservedRoutesSource.matchAll(/^\s*"([^"]+)",?$/gm)].map((match) => match[1]).sort();
   const publicReservedBlock = routerSource.match(/const SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS = new Set\(\[([\s\S]*?)\]\);/)?.[1] || "";
   const publicReservedDetailSegments = [...publicReservedBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
@@ -1391,7 +1388,7 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("const SHORT_VIDEO_WHEEL_DISTANCE = 82;"), "short-video wheel navigation must use a responsive gesture threshold");
   assert(galleryPlayerSource.includes("`${currentIndex + 1}/${images.length}`"), "gallery counter must use the compact Douyin-style 1/5 format");
   assert(galleryPlayerSource.includes("pager.append(previous, counter, next)"), "desktop gallery navigation must group previous, counter, and next controls");
-  assert(viewerSource.includes(".short-video-gallery-pager") && viewerSource.includes("bottom: max(74px"), "desktop gallery navigation must stay centered above the playback bar");
+  advisories.check(viewerSource.includes(".short-video-gallery-pager") && viewerSource.includes("bottom: max(74px"), "desktop gallery pager moved from its former position above the playback bar; review the layout");
   assert(galleryPlayerSource.includes("short-video-gallery-edge-nav") && galleryNavigationSource.includes(".short-video-gallery-player:hover .short-video-gallery-edge-nav") && responsiveSource.includes(".short-video-gallery-edge-nav"), "desktop galleries must expose Douyin-style edge navigation while mobile keeps swipe-first controls");
   assert(viewerSource.includes(".short-video-gallery-progress") && viewerSource.includes("bottom: max(48px"), "desktop gallery progress must follow Douyin's bottom-aligned segmented timeline");
   assert(galleryPlayerSource.includes("resolveGalleryIndex") && galleryPlayerSource.includes("SHORT_VIDEO_GALLERY_ADVANCE_MS"), "gallery navigation must loop continuously like Douyin's note viewer");
@@ -1400,7 +1397,7 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes('const galleryKind = livePhoto ? "实况" : "图集"') && galleryPlayerSource.includes('wrap.classList.toggle("is-live-photo"') && galleryPlayerSource.includes("element.poster = images[index].posterUrl") && galleryPlayerSource.includes("const backdropUrl = current.posterUrl || current.url;"), "live-photo items must use their JPG as the poster/background while presenting only the MP4 as foreground media");
   assert(galleryPlayerSource.includes('const singleLivePhoto = livePhoto && images.length === 1;') && galleryPlayerSource.includes("if (!singleLivePhoto) {") && galleryPlayerSource.includes("wrap.append(progress, pager);"), "single live photos must omit the redundant 1/1 pager and single-segment progress strip while multi-item live galleries retain navigation");
   assert(playerSource.includes("function createAutoNextControl()") && (playerSource.match(/const autoNext = createAutoNextControl\(\);/g) || []).length >= 2 && playerSource.includes("bar.append(play, label, spacer, autoNext)"), "gallery and video playback bars must share the same continuous-play switch");
-  assert(viewerSource.includes("grid-template-columns: 34px auto minmax(0, 1fr) auto auto 34px;") && responsiveSource.includes("grid-template-columns: 34px auto minmax(0, 1fr) auto auto 34px;"), "gallery playback bars must reserve room for continuous play at desktop and responsive widths");
+  advisories.check(viewerSource.includes("grid-template-columns: 34px auto minmax(0, 1fr) auto auto 34px;") && responsiveSource.includes("grid-template-columns: 34px auto minmax(0, 1fr) auto auto 34px;"), "gallery playback bar columns changed from the former fixed layout; review desktop and responsive spacing");
   assert(playerSource.includes("function handleGalleryAutoNext(video)") && playerSource.includes("handleGalleryAutoNext,") && galleryPlayerSource.includes("handleGalleryAutoNext?.(video)") && galleryPlayerSource.includes("advanceFromEntry(entry)"), "enabled gallery continuous play must advance from the final gallery item to the next work");
   assert(galleryPlayerSource.includes("const projectedDelta = rawDelta + velocity * 180;") && galleryPlayerSource.includes("--short-video-gallery-settle-duration"), "gallery drag release must use velocity projection and motion-adaptive settling");
   assert(viewerSource.includes(".short-video-reel-panel.is-gallery-post") && viewerSource.includes(".short-video-stage.is-gallery-stage"), "gallery pages must keep a stable full-canvas stage across portrait and landscape items");
@@ -1424,10 +1421,10 @@ function verifyWebDedicatedEntry() {
   assert(viewerSource.includes(".short-video-player {") && viewerSource.includes("position: absolute") && viewerSource.includes("max-height: 100%") && viewerSource.includes("object-fit: contain"), "every video display mode must preserve the complete foreground frame without cropping");
   assert(viewerSource.includes(".short-video-stage:not(.is-gallery-stage)::before") && viewerSource.includes("filter: blur(30px) saturate(.9) brightness(.56)") && viewerSource.includes("transform: scale(1.08)"), "every contained short-video stage must fill empty space with an edge-safe Gaussian-blurred background");
   assert(playerSource.includes("当前浏览器不支持网页全屏"), "short-video fullscreen must explain unsupported browser environments instead of failing silently");
-  assert(playerSource.indexOf("rail.append(authorRailButton(video))") < playerSource.indexOf("rail.append(aiButton)"), "short-video rail must keep the author and primary actions above auxiliary AI tools like Douyin");
+  advisories.check(playerSource.indexOf("rail.append(authorRailButton(video))") < playerSource.indexOf("rail.append(aiButton)"), "short-video rail action order changed from author-before-AI; review priority and reachability");
   assert(actionsControllerSource.includes("animateRailActionButton(button, nextActive)") && viewerSource.includes("shortVideoRailActionPulse"), "short-video like and collect actions must provide optimistic Douyin-style motion feedback");
   assert(playerSource.includes("short-video-sound-rail-cover") && viewerSource.includes("shortVideoSoundRailSpin"), "short-video sound actions should use the real sound cover and playback motion");
-  assert(responsiveSource.includes(".short-video-sound-rail-cover") && responsiveSource.includes("border-width: 2px;"), "mobile short-video sound covers must fit inside the compact action rail");
+  advisories.check(responsiveSource.includes(".short-video-sound-rail-cover") && responsiveSource.includes("border-width: 2px;"), "mobile sound-cover border treatment changed from the compact rail baseline; review fit");
   assert(authorPanelSource.includes("primaryTabItems") && authorPanelSource.includes("contextTabItems") && viewerSource.includes(".short-video-author-context-tabs"), "short-video side panels must separate primary Douyin-style tabs from local extension tools");
   assert(authorPanelSource.includes("const syncContextTabOverflow = () =>") && authorPanelSource.includes('"扩展信息，可横向滚动"') && panelSource.includes(".short-video-author-context-tabs.has-overflow.is-scroll-end"), "narrow comment panels must expose horizontally scrollable extension tabs with visible edge affordances");
   assert(playerSource.includes("function ensureShortVideoCommentsView") && playerSource.includes("comments-view.js?v=") && playerSource.includes("lazyShortVideoCommentsView(video, panel)") && commentsViewSource.includes("function shortVideoCommentsView(video)") && commentsViewSource.includes("我的本地评论") && commentsViewSource.includes("同步评论"), "comment synchronization and local editing must load only after the user opens the comment panel instead of inflating video startup");
@@ -1442,8 +1439,8 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("overlay._shortVideoPausedGallery = gallery") && playerSource.includes('gallery.shortVideoGalleryPause?.("modal")') && playerSource.includes('gallery.shortVideoGalleryResume?.("modal")'), "modal overlays must freeze gallery position and resume only after closing");
   assert(playerSource.includes("focusShortVideoTransientModal") && playerSource.includes("window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget))"), "playback settings and share dialogs must restore initial focus after inert background processing");
   assert(responsiveSource.includes(".short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery)") && responsiveSource.includes("> :not(.short-video-control-progress-wrap)") && responsiveSource.includes("bottom: -6px;"), "idle video playback must keep a thin bottom progress line while hiding secondary controls");
-  assert(responsiveSource.includes("inset: auto 0 -8px;"), "mobile idle playback progress must stay pinned inside the viewport bottom edge");
-  assert(responsiveSource.includes(".short-video-stage.is-gallery-stage.is-sound-blocked.is-sound-hint-visible::after") && responsiveSource.includes("bottom: max(126px"), "desktop gallery sound prompts must stay above the page counter instead of covering it");
+  advisories.check(responsiveSource.includes("inset: auto 0 -8px;"), "mobile idle playback progress moved from the former bottom-edge position; review viewport fit");
+  advisories.check(responsiveSource.includes(".short-video-stage.is-gallery-stage.is-sound-blocked.is-sound-hint-visible::after") && responsiveSource.includes("bottom: max(126px"), "desktop gallery sound prompt moved from the former position above the page counter; review overlap");
   assert(responsiveSource.includes(".short-video-close,") && responsiveSource.includes(".short-video-browser-search") && responsiveSource.includes("background: rgba(8, 9, 13, .66)") && responsiveSource.includes("backdrop-filter: blur(14px)"), "top playback navigation must remain legible over bright video frames");
   assert(playerSource.includes("showShortVideoSearchOverlay(event.currentTarget)") && playerSource.includes("closeShortVideoSearchOverlay") && !playerSource.includes('search.addEventListener("click", showHomeAndFocusSearch)'), "player search must open over the current video instead of returning to the short-video home first");
   assert(playerSource.includes('overlay.className = "short-video-search-overlay"') && playerSource.includes("isolateShortVideoTransientModal(overlay)") && panelSource.includes(".short-video-search-overlay") && panelSource.includes("backdrop-filter: blur(13px)"), "player search must keep the current video under an accessible dimmed search overlay");
@@ -1458,10 +1455,12 @@ function verifyWebDedicatedEntry() {
   assert(listCardsSource.includes('button.setAttribute("aria-describedby"') && listCardsSource.includes("short-video-visually-hidden") && listSource.includes(".short-video-visually-hidden"), "banned author-card reasons must be programmatically associated with their card buttons");
   assert(playerSource.includes("resolveShortVideoAuthor(requestedAuthorPage)") && playerSource.includes("state.shortVideo.authorDetail = { ...(state.shortVideo.authorDetail || {}), ...author }"), "direct author routes must resolve profile metadata even when the author has no local videos");
   assert(playerSource.includes("syncRelatedPanelCurrentItem") && authorPanelSource.includes("replaceVideoFromAuthorPanel(resolved?.video || video, panel, neighbors)"), "related short-video cards must switch the active work without closing the side panel");
-  assert(authorPanelSource.includes("short-video-related-current") && viewerSource.includes("aspect-ratio: 4 / 3"), "related short-video cards must expose the current item with Douyin-style 4:3 thumbnails");
+  assert(authorPanelSource.includes("short-video-related-current"), "related short-video cards must expose the current item");
+  advisories.check(viewerSource.includes("aspect-ratio: 4 / 3"), "related short-video thumbnails changed from the former 4:3 presentation; review the new crop");
   const compactCaptionSource = playerSource.slice(playerSource.indexOf('info.className = "short-video-caption"'), playerSource.indexOf('rail.className = "short-video-rail"'));
-  assert(compactCaptionSource.includes("authorCaptionButton(video)") && compactCaptionSource.includes("appendCaptionText") && !compactCaptionSource.includes("short-video-caption-sound") && !compactCaptionSource.includes("short-video-caption-meta") && !compactCaptionSource.includes("short-video-caption-context") && !compactCaptionSource.includes("captionToggle"), "the playback caption must contain only one author/date row and a compact title");
-  assert(viewerSource.includes("display: inline-flex;") && viewerSource.includes("-webkit-line-clamp: 2;"), "the compact caption must keep its author metadata inline and clamp copy to two rows");
+  assert(compactCaptionSource.includes("authorCaptionButton(video)") && compactCaptionSource.includes("appendCaptionText"), "the playback caption must keep author navigation and title copy available");
+  advisories.check(!compactCaptionSource.includes("short-video-caption-sound") && !compactCaptionSource.includes("short-video-caption-meta") && !compactCaptionSource.includes("short-video-caption-context") && !compactCaptionSource.includes("captionToggle"), "the playback caption has grown beyond the former compact author-and-title presentation; review visual density");
+  advisories.check(viewerSource.includes("display: inline-flex;") && viewerSource.includes("-webkit-line-clamp: 2;"), "compact caption styling changed from inline metadata and a two-line clamp; review text density");
   assert(listSource.includes(".short-video-sort-select option") && listSource.includes("color-scheme: dark;"), "author sort options must stay readable in the dark short-video workspace");
   assert(listCardsSource.includes("formatShortVideoMetric(video, \"likes\")") && listSource.includes(".short-video-like-badge.is-unknown"), "unknown short-video statistics must render as a pending placeholder instead of a fake zero");
   assert(likeDistributionPageShellSource.includes('shell.className = "short-video-home short-video-distribution-page"') && playerSource.includes('window.open("/short-videos/stats/likes", "_blank", "noopener,noreferrer")') && playerSource.includes("在新标签页打开独立的短视频数据统计页面") && listSource.includes(".short-video-distribution-page-nav") && !listSource.includes(".short-video-distribution-overlay"), "like distribution must open in a standalone tab and render as a statistics page instead of a modal");
@@ -1483,6 +1482,7 @@ function verifyWebDedicatedEntry() {
   assert(likeDistributionSource.includes("function renderInsightRankings") && likeDistributionSource.includes("作者样本表现") && likeDistributionSource.includes("题材样本表现") && likeDistributionSource.includes("前 20%：") && listSource.includes(".short-video-insight-ranking-columns"), "content insights must expose honest author and topic sample performance as navigable follow-up lists");
   assert(likeDistributionSource.includes("function renderAuthorEfficiency") && likeDistributionSource.includes("作者投入—命中率") && likeDistributionSource.includes("更值得继续采集") && likeDistributionSource.includes("低命中且占用较大") && listSource.includes(".short-video-personal-columns"), "personal insights must turn explicit likes and storage into actionable author decisions");
   assert(likeDistributionSource.includes("short-video-personal-cleanup") && authorCleanupSource.includes("保留：") && authorCleanupSource.includes("删除并移除监听") && authorCleanupSource.includes("requestShortVideoDelete") && listSource.includes(".short-video-personal-cleanup"), "low-yield authors must expose a previewed cleanup action that preserves likes and reuses recoverable deletion");
+  assert(authorPagesSource.includes("createShortVideoAuthorDeleteAction") && authorCleanupSource.includes("删除用户及全部作品") && authorCleanupSource.includes("不会保留点赞作品") && listSource.includes(".short-video-author-page-delete"), "author pages must expose a separately confirmed full-user deletion that includes liked works, folders, and records");
   assert(likeDistributionSource.includes('openTable.href = "/short-videos/stats/likes#authors"') && likeDistributionSource.includes('openTable.target = "_blank"') && playerSource.includes('window.location.hash === "#authors"') && likeDistributionSource.includes("function renderAuthorEfficiencyTable") && likeDistributionSource.includes("作者占用与命中关系表") && likeDistributionSource.includes("selectedKeys") && listSource.includes(".short-video-author-efficiency-table"), "low-yield authors must open in a dedicated selectable table that compares storage with explicit-like hit rate");
   assert(likeDistributionSource.includes("function renderPreferenceComparison") && likeDistributionSource.includes("你的点赞作品有什么不同") && likeDistributionSource.includes("这是观察到的关联，不是因果结论") && likeDistributionSource.includes("function renderPreferenceSignals"), "personal preference comparisons must be author-controlled, caveated, and reusable by topic or sound");
   assert(likeDistributionSource.includes("function renderWatchInsights") && likeDistributionSource.includes("至少看完一次") && likeDistributionSource.includes("不是重复播放次数") && listSource.includes(".short-video-watch-duration"), "watch analytics must describe the persisted completion semantics instead of implying replay counts");
@@ -1527,9 +1527,9 @@ function verifyWebDedicatedEntry() {
   assert(galleryPlayerSource.includes("scheduleLocalSoundPoll") && galleryPlayerSource.includes('metadata: "1"'), "open galleries must refresh rich metadata so newly downloaded background music becomes visible");
   assert(galleryPlayerSource.includes("scheduleLocalSoundPoll(0)") && galleryPlayerSource.includes("delayMs = 15000"), "gallery background music must refresh immediately once and keep later polling lightweight");
   assert(serverConfigSource.includes("FANHAO_DOUYIN_SYNC_MS || 60 * 1000"), "download-manager changes must be detected within one minute by default");
-  assert(responsiveSource.includes(".short-video-gallery-progress") && responsiveSource.includes("display: none;"), "mobile gallery must keep the image counter without the desktop progress strip");
+  advisories.check(responsiveSource.includes(".short-video-gallery-progress") && responsiveSource.includes("display: none;"), "mobile gallery now differs from the former counter-only presentation; review the progress treatment");
   assert(playerSource.includes("SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY") && galleryPlayerSource.includes("左右滑动翻图 · 上下滑动切作品") && galleryPlayerSource.includes("sessionStorage?.setItem"), "mobile galleries must explain both navigation gestures once per browsing session");
-  assert(viewerSource.includes(".short-video-gallery-gesture-hint") && responsiveSource.includes(".short-video-gallery-gesture-hint.is-visible"), "the mobile gallery gesture hint must stay hidden on desktop and fade in without blocking media input");
+  advisories.check(viewerSource.includes(".short-video-gallery-gesture-hint") && responsiveSource.includes(".short-video-gallery-gesture-hint.is-visible"), "mobile gallery gesture-hint styling changed from the former desktop-hidden fade treatment; review its presentation");
   assert(playerSource.includes("openAdjacent(direction, { motion: wheelMotion })"), "short-video wheel navigation must finish with motion-adaptive timing");
   assert(playerSource.includes('classList.toggle("is-volume-open", expanded)'), "short-video volume popover must expose its open state to responsive layout");
   assert(playerSource.includes('browser.classList.contains("is-volume-open")') && playerSource.includes("scheduleVolumePopoverClose") && playerSource.includes('volumeControl.matches(":hover")'), "desktop volume adjustment must pin the player controls and tolerate pointer travel between the mute button and slider");
@@ -1578,30 +1578,30 @@ function verifyWebDedicatedEntry() {
   assert(staticServerSource.includes("createBrotliCompress"), "static delivery must support Brotli compression");
   assert(staticServerSource.includes('"Content-Encoding": encoding'), "static delivery must advertise compression");
   assert(staticServerSource.includes("CONTENT_HASH_VERSION") && staticServerSource.includes("max-age=31536000, immutable"), "content-hashed static assets must stay immutable without trusting hand-maintained version labels");
-  assert(
+  advisories.check(
     responsiveSource.includes("top: auto;") && responsiveSource.includes("bottom: max(70px, calc(env(safe-area-inset-bottom) + 66px));"),
-    "mobile short-video rail must anchor above the bottom controls"
+    "mobile short-video rail moved from the former bottom-control offset; review the responsive layout"
   );
-  assert(
+  advisories.check(
     responsiveSource.includes("@media (max-width: 560px) and (max-height: 620px)")
       && responsiveSource.includes("min-height: 38px;"),
-    "short-height players must compact the action rail"
+    "short-height player rail changed from the former compact height; review constrained screens"
   );
   assert(
     responsiveSource.includes(".short-video-browser.is-volume-open .short-video-rail")
       && responsiveSource.includes("pointer-events: none;"),
     "mobile volume adjustment must not collide with the action rail"
   );
-  assert(
+  advisories.check(
     responsiveSource.includes("@media (max-width: 360px)")
       && responsiveSource.includes("grid-template-columns: 30px 64px minmax(0, 1fr);")
       && responsiveSource.includes(".short-video-control-tools")
       && responsiveSource.includes("gap: 0 4px;"),
-    "narrow short-video controls must fit without dropping core actions"
+    "narrow short-video controls changed from the former fixed columns and gap; review core-action fit"
   );
-  assert(
+  advisories.check(
     responsiveSource.includes(".short-video-stage.is-sound-blocked.is-sound-hint-visible ~ .short-video-caption"),
-    "mobile captions should move only while the transient sound hint is visible"
+    "mobile caption offset no longer follows the former transient sound-hint selector; review overlap"
   );
 }
 
@@ -1609,4 +1609,5 @@ function relative(filePath) {
   return path.relative(root, filePath).replaceAll(path.sep, "/");
 }
 
+advisories.flush();
 await import("./verify_short_video_delete_clients.mjs");

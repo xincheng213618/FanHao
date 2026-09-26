@@ -26,8 +26,9 @@ async function runFixtureVerification() {
   const fixture = createProductionShapeFixture(PRODUCTION_VIDEO_COUNT);
   let authorPageColdMs = 0;
   let authorResolveColdMs = 0;
+  let authorSearchColdMs = 0;
   try {
-    await verifyStatsZeroDoesNotStartWorker();
+    await verifyStatsZeroUsesWorker();
     await verifyRouteErrorMapping();
     await verifyRecommendedFailureMapping();
     await verifyEventLoopLagGate();
@@ -74,7 +75,7 @@ async function runFixtureVerification() {
       });
       const listService = createShortVideoListStatsService({ store: listStore, catalogWorker: client });
       try {
-        ({ authorPageColdMs, authorResolveColdMs } = verifyAuthorPageColdPerformance(listStore));
+        ({ authorPageColdMs, authorResolveColdMs, authorSearchColdMs } = verifyAuthorPageColdPerformance(listStore));
         for (const [name, params] of cases.filter(([caseName]) => ["default-liked", "history", "fts-query", "author-name"].includes(caseName))) {
           const legacyParams = new URLSearchParams(params);
           legacyParams.set("limit", "12");
@@ -83,6 +84,12 @@ async function runFixtureVerification() {
           const actual = await listService.list({ searchParams: new URLSearchParams(legacyParams) });
           assert.deepEqual(actual, legacy, `${name} full list payload must remain deeply equivalent`);
           assert.equal(JSON.stringify(actual), JSON.stringify(legacy), `${name} full list JSON order must remain byte-compatible`);
+          const workerParams = new URLSearchParams(legacyParams);
+          workerParams.set("stats", "0");
+          const workerExpected = listStore.listVideos({ searchParams: new URLSearchParams(workerParams) });
+          const workerActual = await listService.list({ searchParams: workerParams });
+          assert.deepEqual(workerActual, workerExpected, `${name} stats=0 worker list must match the direct store payload`);
+          assert.equal(JSON.stringify(workerActual), JSON.stringify(workerExpected), `${name} stats=0 worker JSON order must remain byte-compatible`);
         }
         const changedMetadata = listStore.updateActualVideoPlaybackMetadata("fixture-000001", {
           width: 3840,
@@ -141,6 +148,9 @@ async function runFixtureVerification() {
       assert(recommendedHealth.observedDuringStats > 0, "health probes must overlap cold recommendation construction");
       assert(recommendedHealth.p95Ms < 250, `cold recommendations must stay in the catalog worker (health p95 ${recommendedHealth.p95Ms.toFixed(1)}ms)`);
       assert(recommendedHealth.eventLoopMaxMs < 250, `cold recommendations must not block the event loop (observed ${recommendedHealth.eventLoopMaxMs.toFixed(1)}ms)`);
+      const shortQueryHealth = await measureConcurrentShortQueryHealth(fixture.dbPath, fixture.coverDbPath);
+      assert(shortQueryHealth.p95Ms < 250, `short-query lists must stay in the catalog worker (health p95 ${shortQueryHealth.p95Ms.toFixed(1)}ms)`);
+      assert(shortQueryHealth.eventLoopMaxMs < 250, `short-query lists must not block the event loop (observed ${shortQueryHealth.eventLoopMaxMs.toFixed(1)}ms)`);
 
       await verifyBusyRecovery();
       await verifyWorkerRestartAbortAndBoundedLru();
@@ -158,8 +168,11 @@ async function runFixtureVerification() {
         eventLoopMaxMs: round(health.eventLoopMaxMs),
         recommendedHealthP95Ms: round(recommendedHealth.p95Ms),
         recommendedEventLoopMaxMs: round(recommendedHealth.eventLoopMaxMs),
+        shortQueryHealthP95Ms: round(shortQueryHealth.p95Ms),
+        shortQueryEventLoopMaxMs: round(shortQueryHealth.eventLoopMaxMs),
         authorPageColdMs: round(authorPageColdMs),
         authorResolveColdMs: round(authorResolveColdMs),
+        authorSearchColdMs: round(authorSearchColdMs),
         singleFlightCallers: 100,
         statsDispatches: diagnostics.statsDispatches
       }));
@@ -188,17 +201,26 @@ function verifyAuthorPageColdPerformance(store) {
   assert.equal(new Set(result.videos.map((video) => video.id)).size, 48, "indexed author candidates must not duplicate canonical-owner matches");
   assert(elapsedMs < 250, `cold author-page reads must stay index-bounded (${elapsedMs.toFixed(1)}ms)`);
   assert(authorResolveColdMs < 100, `exact sec_uid resolution must stay index-bounded (${authorResolveColdMs.toFixed(1)}ms)`);
-  return { authorPageColdMs: elapsedMs, authorResolveColdMs };
+  const authorSearchStartedAt = performance.now();
+  const authorSearch = store.listVideos({
+    searchParams: new URLSearchParams("q=测试作者+7&source=all&sort=published&limit=24&facets=0&stats=0")
+  });
+  const authorSearchColdMs = performance.now() - authorSearchStartedAt;
+  assert.equal(authorSearch.usersTotal, 1, "aggregate search must find the matching author without building the full author facet");
+  assert.equal(authorSearch.users[0]?.name, "测试作者 7");
+  assert(authorSearchColdMs < 250, `cold aggregate author search must stay candidate-bounded (${authorSearchColdMs.toFixed(1)}ms)`);
+  return { authorPageColdMs: elapsedMs, authorResolveColdMs, authorSearchColdMs };
 }
 
-function verifyStatsZeroDoesNotStartWorker() {
+function verifyStatsZeroUsesWorker() {
   let workerQueries = 0;
+  let storeQueries = 0;
   const store = {
     catalogStamp: () => "fixture-stamp",
-    listVideos: (input) => ({
-      stats: input.searchParams.get("stats") === "0" ? null : { legacy: true },
-      videos: []
-    })
+    listVideos: () => {
+      storeQueries += 1;
+      return { stats: { legacy: true }, videos: [] };
+    }
   };
   const service = createShortVideoListStatsService({
     store,
@@ -218,8 +240,9 @@ function verifyStatsZeroDoesNotStartWorker() {
     service.list({ searchParams: new URLSearchParams("source=recommended&stats=0") }),
     service.list({ searchParams: new URLSearchParams("source=recommended") })
   ]).then(([withoutStats, recommendedWithoutStats, recommended]) => {
-    assert.equal(workerQueries, 2, "stats=0 must stay worker-free only for non-recommended lists; both recommendation shapes use the catalog worker");
-    assert.equal(withoutStats.stats, null);
+    assert.equal(workerQueries, 3, "every stats=0 list and every recommendation list must use the catalog worker");
+    assert.equal(storeQueries, 0, "stats=0 list construction must not block the HTTP thread");
+    assert.deepEqual(withoutStats, { stats: null, worker: true, videos: [] });
     assert.deepEqual(recommendedWithoutStats, { stats: null, worker: true, videos: [] });
     assert.deepEqual(recommended, { stats: null, worker: true, videos: [] });
   });
@@ -270,6 +293,17 @@ async function verifyRecommendedFailureMapping() {
     logger: { warn: (...values) => logged.push(values.map(String).join(" ")) }
   });
   try {
+    await assert.rejects(
+      service.list(new URL("http://fixture/api/short-videos?source=all&stats=0")),
+      (error) => {
+        assert.equal(error.statusCode, 503);
+        assert.equal(error.retryable, true);
+        assert.equal(error.expose, true);
+        assert.equal(error.message, "短视频列表后台线程暂时不可用");
+        assert(!error.message.includes("private-user"));
+        return true;
+      }
+    );
     await assert.rejects(
       service.list(new URL("http://fixture/api/short-videos?source=recommended&stats=0")),
       (error) => {
@@ -490,6 +524,19 @@ async function measureConcurrentRecommendedHealth(dbPath, coverDbPath) {
   const service = createShortVideoListStatsService({ store, catalogWorker: client });
   return measureConcurrentWorkerHealth(
     () => service.list(new URL("http://fixture/api/short-videos?source=recommended&stats=0&limit=12&facets=0")),
+    async () => {
+      await client.stop();
+      store.close();
+    }
+  );
+}
+
+async function measureConcurrentShortQueryHealth(dbPath, coverDbPath) {
+  const client = createShortVideoCatalogWorkerClient({ dbPath });
+  const store = createShortVideoStore({ dbPath, coverDbPath, roots: [], skipStartupMaintenance: true });
+  const service = createShortVideoListStatsService({ store, catalogWorker: client });
+  return measureConcurrentWorkerHealth(
+    () => service.list(new URL("http://fixture/api/short-videos?source=all&q=%E9%92%88&sort=published&stats=0&limit=12&facets=0")),
     async () => {
       await client.stop();
       store.close();

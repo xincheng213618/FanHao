@@ -20,7 +20,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-b370d2204ba4";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-82837fc56bca";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -32,7 +32,7 @@
         const shortVideoStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/short-videos/styles/list.css?v=20260825-sticky-toolbar-01",
+          "/modules/short-videos/styles/list.css?v=20260917-author-delete-01",
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
           "/modules/short-videos/styles/panels.css?v=20260823-delete-confirm-01",
@@ -49,12 +49,14 @@
           "/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01",
           "/modules/system/admin.css?v=20260727-hidden-overlays-01",
           "/css/player.css?v=20260710-web-css-modules-01",
-          "/css/responsive.css?v=20260712-module-settings-02"
+          "/css/responsive.css?v=20260712-module-settings-02",
+          "/modules/fanhao/browse-refinements.css?v=20260919-browse-03"
         ];
         const galleryStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/content-index/styles.css?v=20260717-photo-album-parser-02"
+          "/modules/content-index/styles.css?v=20260717-photo-album-parser-02",
+          "/modules/content-index/catalog.css?v=20260908-library-browse-01"
         ];
         const mangaStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
@@ -64,7 +66,10 @@
         const novelStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/modules/novels/styles.css?v=20260727-novel-manage-04",
-          "/css/shell.css?v=20260713-search-index-02"
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/novels/library.css?v=20260908-novel-library-01",
+          "/modules/novels/detail.css?v=20260908-novel-library-01",
+          "/modules/novels/reader-refinements.css?v=20260908-novel-library-01"
         ];
         const musicStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
@@ -152,21 +157,35 @@
     </header>
     <div class="app-shell">
       <aside class="sidebar fanhao-sidebar" aria-label="番号二级菜单">
+        <button class="fanhao-navigation-button" id="fanhaoNavigationButton" type="button" aria-haspopup="dialog" aria-controls="fanhaoNavigationDialog" aria-expanded="false">栏目 · 人物</button>
         <div class="fanhao-sidebar-heading">
           <span class="eyebrow">番号</span>
           <h2>资料库</h2>
         </div>
-        <nav class="view-tabs fanhao-subnav" aria-label="番号资料库视图">
-          <button class="view-tab active" type="button" data-view="people" data-people-scope="main" aria-pressed="true">人物</button>
-          <button class="view-tab" type="button" data-view="codes" aria-pressed="false">番号</button>
-          <button class="view-tab" type="button" data-view="codes" data-code-prefix="FC2" data-code-family="true" aria-pressed="false">FC2</button>
-          <button class="view-tab" type="button" data-view="studios" aria-pressed="false">厂商</button>
-          <button class="view-tab" type="button" data-view="rankings" aria-pressed="false">排行</button>
-          <button class="view-tab" type="button" data-view="vr" aria-pressed="false">VR</button>
-          <button class="view-tab" type="button" data-view="favorites" aria-pressed="false">收藏</button>
-          <button class="view-tab" type="button" data-view="history" aria-pressed="false">历史</button>
-          <button class="view-tab" type="button" data-view="people" data-people-scope="western" aria-pressed="false">欧美</button>
-          <a class="view-tab fanhao-side-link" href="/disk-usage">空间</a>
+        <nav class="view-tabs fanhao-subnav" id="fanhaoNavigation" aria-label="番号资料库视图">
+          <div class="fanhao-nav-group" role="group" aria-labelledby="fanhaoBrowseLabel">
+            <h3 id="fanhaoBrowseLabel">资料浏览</h3>
+            <a class="view-tab active" href="/fanhao" data-view="people" data-people-scope="main" aria-current="page">人物</a>
+            <a class="view-tab" href="/fanhao/codes" data-view="codes">番号</a>
+            <a class="view-tab" href="/fanhao/studios" data-view="studios">厂商</a>
+          </div>
+          <div class="fanhao-nav-group" role="group" aria-labelledby="fanhaoDiscoverLabel">
+            <h3 id="fanhaoDiscoverLabel">专题与发现</h3>
+            <a class="view-tab" href="/fanhao/codes?prefix=FC2&amp;family=1" data-view="codes" data-code-prefix="FC2" data-code-family="true">FC2</a>
+            <a class="view-tab" href="/fanhao/vr" data-view="vr">VR</a>
+            <a class="view-tab" href="/western" data-view="people" data-people-scope="western">欧美</a>
+            <a class="view-tab" href="/fanhao/rankings" data-view="rankings">排行</a>
+          </div>
+          <div class="fanhao-nav-group" role="group" aria-labelledby="fanhaoPersonalLabel">
+            <h3 id="fanhaoPersonalLabel">我的</h3>
+            <a class="view-tab" href="/fanhao/favorites" data-view="favorites">收藏</a>
+            <a class="view-tab" href="/fanhao/history" data-view="history">历史</a>
+          </div>
+          <div class="fanhao-nav-group fanhao-nav-management" role="group" aria-labelledby="fanhaoManagementLabel">
+            <h3 id="fanhaoManagementLabel">管理</h3>
+            <a class="view-tab fanhao-side-link" href="/disk-usage">存储空间</a>
+            <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows">整理与迁移</a>
+          </div>
         </nav>
       </aside>
 
@@ -179,18 +198,18 @@
           </div>
           <label class="search-box work-search">
             <span aria-hidden="true">⌕</span>
-            <input id="workSearch" type="search" placeholder="搜索番号 / 标题 / 人物 / 类别 / 片商" autocomplete="off" aria-label="搜索番号、标题、人物、类别或片商" />
+            <input id="workSearch" type="search" placeholder="全库搜索 · 番号 / 标题 / 人物" autocomplete="off" aria-label="全库搜索番号、标题、人物、类别或片商" />
           </label>
           <div class="toolbar-controls">
-            <label class="toggle-control" title="显示 JavDB 有记录但本地没有文件的作品">
+            <label class="toggle-control" title="包含资料库已收录但没有本地记录的作品">
               <input id="missingLocalToggle" type="checkbox" checked />
               <span>显示未下载</span>
             </label>
-            <label class="toggle-control" title="显示 OFJE 等合集作品">
+            <label class="toggle-control" title="仅控制未下载作品中的合集；本地合集始终保留">
               <input id="collectionToggle" type="checkbox" />
-              <span>显示合集</span>
+              <span>包含未下载合集</span>
             </label>
-            <button class="filter-rule-button" id="compilationConfigButton" type="button">设置</button>
+            <button class="filter-rule-button" id="compilationConfigButton" type="button">合集规则</button>
           </div>
         </header>
 
@@ -200,6 +219,9 @@
       </main>
     </div>
 
+    <dialog class="fanhao-navigation-dialog" id="fanhaoNavigationDialog" aria-labelledby="fanhaoNavigationTitle">
+      <header><h2 id="fanhaoNavigationTitle">资料库栏目</h2><button id="closeFanhaoNavigation" type="button">关闭</button></header>
+    </dialog>
     <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
     <section class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true" tabindex="-1">
       <header class="drawer-header">
@@ -227,12 +249,13 @@
       </div>
     </template>
 
+    <script type="module" src="/js/product-context.js"></script>
     <script type="module">
       const pathname = window.location.pathname;
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-b370d2204ba4");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-82837fc56bca");
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;
@@ -242,14 +265,14 @@
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
         try {
-          await import("/standalone-app.js?v=20260813-tv-series-identity-01");
+          await import("/standalone-app.js?v=20260908-novel-library-01");
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }
       } else {
         await window.__fanhaoStylesReady;
         try {
-          await import("/fanhao-app.js?v=20260812-module-nav-state-01");
+          await import("/fanhao-app.js?v=20260919-browse-04");
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }

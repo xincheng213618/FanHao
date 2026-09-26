@@ -33,6 +33,7 @@ from backfill_javdb_metadata import (  # noqa: E402
 )
 from code_parser import loose_code_key, normalize_code  # noqa: E402
 from core_image_store import attach_core_image_store  # noqa: E402
+from person_identity import canonical_person_id, assert_external_owner  # noqa: E402
 from import_javdb_actor import actor_id_from_url, download_avatar, parse_actor_page, profile_looks_ready  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -145,7 +146,9 @@ def save_person_refresh(conn: sqlite3.Connection, job: dict, crawl: dict, client
     conn.execute("BEGIN IMMEDIATE")
     savepoint_started = False
     try:
+        job = {**job, "id": canonical_person_id(conn, job["id"])}
         assert_actor_profile_mutation_allowed(conn, job["id"], job.get("actor_id"))
+        assert_external_owner(conn, job["id"], job.get("actor_id"))
         conn.execute(f"SAVEPOINT {PERSON_SAVEPOINT}")
         savepoint_started = True
         profile_result = save_profile(conn, job, crawl["profile"], client)
@@ -315,7 +318,7 @@ def crawl_actor(client: JavDbClient, job: dict, args: argparse.Namespace) -> dic
         seen_pages.add(page_url)
         pages += 1
         safe_driver_get(driver, page_url, args.actor_wait_seconds)
-        html = wait_for_actor_page(client, args.actor_wait_seconds)
+        html = wait_for_actor_page(client, args.actor_wait_seconds, job["actor_id"])
         if not profile:
             profile = parse_actor_page(html, driver.current_url)
             profile["javdb_url"] = job["actor_url"]
@@ -337,9 +340,21 @@ def crawl_actor(client: JavDbClient, job: dict, args: argparse.Namespace) -> dic
 
 def save_profile(conn: sqlite3.Connection, job: dict, profile: dict, client: JavDbClient) -> dict:
     now = timestamp()
-    display_name = clean_text(profile.get("display_name")) or job["name"]
-    aliases = unique_names([display_name, *(profile.get("aliases") or []), job["db_name"]])
+    parsed_display_name = clean_text(profile.get("display_name"))
+    display_name = parsed_display_name if valid_actor_name(parsed_display_name) else job["name"]
+    aliases = [
+        name
+        for name in unique_names([display_name, *(profile.get("aliases") or []), job["db_name"]])
+        if valid_actor_name(name)
+    ]
     movie_count = profile.get("movie_count")
+    conn.execute(
+        """
+        DELETE FROM person_aliases
+        WHERE person_id = ? AND source = ? AND lower(trim(alias)) IN ('javdb', 'javdb.com', 'www.javdb.com')
+        """,
+        (job["id"], SOURCE),
+    )
     conn.execute(
         """
         UPDATE people
@@ -563,6 +578,11 @@ def code_key(value: str) -> str:
 
 def normalize_person_search(value: str) -> str:
     return clean_text(value).lower().replace(" ", "")
+
+
+def valid_actor_name(value: object) -> bool:
+    normalized = normalize_person_search(value)
+    return bool(normalized and normalized not in {"javdb", "javdb.com", "www.javdb.com"})
 
 
 def clean_text(value: object) -> str:

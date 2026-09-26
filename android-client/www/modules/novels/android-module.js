@@ -1,5 +1,5 @@
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
-import { createNovelViews } from "./novel-views.js?v=20260830-novel-chapters-75";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-0f97d6765d71";
+import { createNovelViews } from "./novel-views.js?v=assets-0f97d6765d71";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
@@ -48,6 +48,7 @@ function renderNovelChrome({ container, view }, host, novelViews) {
     button.type = "button";
     button.textContent = item.label;
     button.classList.toggle("active", item.name === (state.category || "all"));
+    button.setAttribute("aria-pressed", String(item.name === (state.category || "all")));
     button.addEventListener("click", () => {
       if (!novelViews.setNovelCategory?.(item.name)) return;
       host.ui.renderCurrentView();
@@ -60,13 +61,13 @@ function renderNovelChrome({ container, view }, host, novelViews) {
   sort.className = "novel-chrome-action novel-chrome-sort";
   const activeSort = (novelViews.getNovelSortOptions?.() || []).find((option) => option.value === state.sort);
   sort.setAttribute("aria-label", `小说排序，当前${activeSort?.label || "最近更新"}`);
-  sort.textContent = "↕";
+  sort.textContent = "排序";
   sort.addEventListener("click", () => openNovelSortDialog(host, novelViews));
   const search = document.createElement("button");
   search.type = "button";
   search.className = "module-chrome-search novel-chrome-action";
   search.setAttribute("aria-label", "搜索小说");
-  search.innerHTML = '<span aria-hidden="true">⌕</span>';
+  search.textContent = "搜索";
   search.addEventListener("click", () => {
     host.navigation.showView("novelSearch", { query: "" }, { push: true });
     host.ui.scrollToTop();

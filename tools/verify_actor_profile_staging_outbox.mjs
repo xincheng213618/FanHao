@@ -16,7 +16,7 @@ import { createWorkPresenterService } from "../src/modules/fanhao/server/works/p
 import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
-import { saveActorProfileRequest } from "../public/modules/fanhao/person-profile.js";
+import { normalizeActorMappingInput, saveActorProfileRequest } from "../public/modules/fanhao/person-profile.js";
 import { createVerifiedTempDir, removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const CHILD = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "cross_store_staging_fault_child.mjs");
@@ -44,7 +44,7 @@ function createFixture(name) {
     CREATE TABLE person_aliases (
       id INTEGER PRIMARY KEY AUTOINCREMENT, person_id INTEGER NOT NULL, alias TEXT NOT NULL,
       alias_search TEXT NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '',
-      UNIQUE(person_id, alias_search, source)
+      UNIQUE(person_id, alias_search)
     );
     INSERT INTO people VALUES
       (1, 'Actor One', 'actorone', 'Actor One', NULL, 'unknown', 1, 'ok', NULL, 'migration', 'old', 'old'),
@@ -208,6 +208,37 @@ function createRuntime(fixture) {
   };
 }
 
+function verifyExistingAliasSource(fixture, runtime) {
+  fixture.db.exec(`
+    INSERT INTO person_aliases(person_id, alias, alias_search, source) VALUES
+      (5, 'Catalog Alias', 'catalogalias', 'actor_movies'),
+      (5, 'Unrelated Alias', 'unrelatedalias', 'migration'),
+      (5, 'Old Manual Alias', 'oldmanualalias', 'manual');
+  `);
+  const result = runtime.admin.upsertActorProfile(runtime.people.get("5"), {
+    aliases: ["Catalog Alias", "Manual Alias"],
+    idempotencyKey: "existing-catalog-alias-five",
+    source: "manual"
+  });
+  assert.equal(result.completed, true, "a pre-existing catalog alias must not block a manual mapping save");
+  const rows = fixture.db.prepare("SELECT alias, source FROM person_aliases WHERE person_id = 5 ORDER BY alias").all();
+  assert.deepEqual(rows.map((row) => [row.alias, row.source]), [
+    ["Catalog Alias", "actor_movies"], ["Manual Alias", "manual"], ["Unrelated Alias", "migration"]
+  ], "shared aliases retain their original source, old manual aliases are replaced, and foreign aliases survive");
+  const intent = fixture.db.prepare("SELECT payload_json FROM cross_store_intents WHERE aggregate_key = 'person-avatar:5' ORDER BY aggregate_seq DESC LIMIT 1").get();
+  const plan = JSON.parse(intent.payload_json);
+  fixture.db.exec("BEGIN");
+  try {
+    fixture.db.exec("DELETE FROM person_aliases WHERE person_id = 5 AND alias = 'Catalog Alias'");
+    assert.equal(runtime.admin.verifyActorProfileMainProjection(fixture.db, plan, {}), false, "verification must still reject a missing requested alias");
+  } finally { fixture.db.exec("ROLLBACK"); }
+  fixture.db.exec("BEGIN");
+  try {
+    fixture.db.exec("INSERT INTO person_aliases(person_id, alias, alias_search, source) VALUES (5, 'Unexpected', 'unexpected', 'manual')");
+    assert.equal(runtime.admin.verifyActorProfileMainProjection(fixture.db, plan, {}), false, "verification must reject leftover aliases owned by the edited source");
+  } finally { fixture.db.exec("ROLLBACK"); }
+}
+
 async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}) {
   const fixture = createFixture("real");
   if (announce) console.log(`REAL_TEMP ${fixture.tempDir}`);
@@ -275,6 +306,9 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     assert.equal(completedHttp.payload.profile.displayName, "Actor Three HTTP 200");
     assert.equal(Object.hasOwn(completedHttp.payload, "operation"), false, "the legacy 200 payload must not acquire an operation envelope");
 
+    assert.throws(() => runtime.admin.upsertActorProfile(runtime.people.get("1"), {
+      javdbUrls: ["https://javdb.test/actors/shared-owner"], source: "manual"
+    }), (error) => error.code === "PERSON_EXTERNAL_IDENTITY_OWNED", "a different external owner must be merged explicitly, never stolen");
     runtime.setFailMain(true);
     let blockedError = null;
     try {
@@ -284,7 +318,7 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
         avatarMime: "image/blocked",
         displayName: "Actor One Blocked",
         idempotencyKey: "blocked-one",
-        javdbUrls: ["https://javdb.test/actors/shared-owner"],
+        javdbUrls: ["https://javdb.test/actors/new-actor-one"],
         source: "manual"
       });
     } catch (error) {
@@ -298,15 +332,15 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     assert.ok(blockedSnapshot.avatarBytes.equals(Buffer.from("old-avatar")), "a blocked staged image must not reach media readers");
     assert.equal(fixture.db.prepare("SELECT COUNT(*) AS count FROM actor_profile_publications WHERE person_id = 1").get().count, 0);
     assert.equal(fixture.db.prepare("SELECT COUNT(*) AS count FROM fanhao_images.actor_profile_image_staging WHERE operation_id = ?").get(blockedId).count, 1);
-    assert.equal(fixture.db.prepare("SELECT COUNT(*) AS count FROM cross_store_aggregate_reservations WHERE op_id = ?").get(blockedId).count, 3, "target, actor key and current actor-key owner must be reserved atomically");
+    assert.equal(fixture.db.prepare("SELECT COUNT(*) AS count FROM cross_store_aggregate_reservations WHERE op_id = ?").get(blockedId).count, 2, "target and the new actor key must be reserved atomically");
     assert.deepEqual(
       fixture.db.prepare("SELECT aggregate_key FROM cross_store_aggregate_reservations WHERE op_id = ? ORDER BY aggregate_key").all(blockedId).map((row) => row.aggregate_key),
-      ["javdb-actor:shared-owner", "person-avatar:1", "person-avatar:2"]
+      ["javdb-actor:new-actor-one", "person-avatar:1"]
     );
     assert.equal(Object.hasOwn(blockedError.operation, "aggregateKey"), false);
     assert.equal(Object.hasOwn(blockedError.operation, "lastError"), false);
 
-    assert.throws(() => runtime.manualCover.replaceManualPersonAvatar(2, {
+    assert.throws(() => runtime.manualCover.replaceManualPersonAvatar(1, {
       sourceType: "local", localPath: "", remoteUrl: "", mime: "image/manual",
       blob: Buffer.from("must-not-write"), byteSize: 14, source: "manual_upload",
       legacyKey: "guard", now: new Date().toISOString()
@@ -314,7 +348,7 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     assert.throws(() => runtime.admin.upsertActorProfile(runtime.people.get("3"), {
       displayName: "Must Not Steal",
       idempotencyKey: "same-actor-other-target",
-      javdbUrls: ["https://javdb.test/actors/shared-owner"],
+      javdbUrls: ["https://javdb.test/actors/new-actor-one"],
       source: "manual"
     }), (error) => error.statusCode === 409 && error.operation?.id === blockedId, "the actor-key reservation must fence another target");
 
@@ -476,6 +510,7 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     await verifyActorAvatarCacheContract();
     verifyLeaseTakeoverReceiptRecheck();
     await verifyActorProfileRouteAndNetworkContract();
+    verifyExistingAliasSource(fixture, runtime);
   } finally {
     if (holder) {
       try { holder.exec("ROLLBACK"); } catch {}
@@ -705,6 +740,10 @@ function verifyTerminalActorProfileContract() {
 }
 
 async function verifyActorProfileRouteAndNetworkContract() {
+  assert.equal(normalizeActorMappingInput(" https://javdb.com/actors/p33Qb。 "), "https://javdb.com/actors/p33Qb");
+  assert.equal(normalizeActorMappingInput("https://javdb.com/actors/p33Qb。\r\nhttps://javdb.com/actors/EvkJ，"), "https://javdb.com/actors/p33Qb\nhttps://javdb.com/actors/EvkJ");
+  assert.equal(normalizeActorMappingInput("https://javdb.com/actors/p33Qb?sort=date"), "https://javdb.com/actors/p33Qb?sort=date");
+  assert.equal(normalizeActorMappingInput("not an actor URL。"), "not an actor URL。", "invalid input must still reach the server's strict URL validation");
   const completedPayload = {
     ok: true,
     profile: { personId: "1", displayName: "Completed", aliases: ["Alias"] },

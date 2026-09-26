@@ -131,6 +131,8 @@ export function removeLocalWorksFromLibrary(library, workIds, compareNaturalTitl
 
 export function createPersonLibraryService({
   actorProfileSearchNames,
+  bindSourcePaths = () => {},
+  resolvePerson = null,
   compareNaturalTitle,
   getLibrary,
   libraryIndexService,
@@ -173,7 +175,8 @@ export function createPersonLibraryService({
       sourcePaths.push(normalized);
     };
 
-    for (const name of actorProfileSearchNames(person)) {
+    const declaredPaths = [...(person.sourcePaths || []), person.relativePath].filter(Boolean);
+    for (const name of declaredPaths.length ? [] : actorProfileSearchNames(person)) {
       if (!name || /[\\/]/.test(name)) continue;
       for (const rootPath of libraryRoots) {
         const absolutePath = path.join(rootPath, name);
@@ -241,7 +244,7 @@ export function createPersonLibraryService({
 
   function refreshPerson(personId, options = {}) {
     const library = getLibrary();
-    const person = library.peopleById.get(personId);
+    const person = resolvePerson?.(personId) || library.peopleById.get(personId);
     if (!person) {
       const error = new Error("人物不存在");
       error.statusCode = 404;
@@ -260,8 +263,15 @@ export function createPersonLibraryService({
       error.statusCode = 400;
       throw error;
     }
+    if (!selectedSourcePaths.length && previousWorks.length && !options.allowMissingSource) {
+      const error = new Error("人物文件夹已失联，已保留原有作品记录；请重新关联文件夹后再刷新");
+      error.statusCode = 409;
+      error.code = "PERSON_FOLDER_DISCONNECTED";
+      throw error;
+    }
 
     const works = [];
+    if (hasExplicitSourcePaths) bindSourcePaths(person.id, selectedSourcePaths);
     const existingSourcePaths = [];
     for (const sourcePath of selectedSourcePaths) {
       const absolutePath = sourcePathToAbsolute(sourcePath);

@@ -8,6 +8,7 @@ import { appFunction, createNavigationFixtureDocument } from "./fixtures/android
 // Actual presentation/signature and complete card method execute. Only the DOM,
 // image loading and destination dispatch are doubles; no media/network/device.
 const source = fs.readFileSync(new URL("../android-client/www/platform/content-index/channel-views.js", import.meta.url), "utf8");
+const imageSource = fs.readFileSync(new URL("../android-client/www/js/image.js", import.meta.url), "utf8");
 const plain = value => JSON.parse(JSON.stringify(value));
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -109,6 +110,9 @@ test("missing and malformed metadata uses safe fallback without NaN labels", inp
 test("cover wrapper and accessible label survive preview-loader replacement", input => {
   const h = harness(input), item = { id: "poster", title: "合成电影", coverUrl: "/synthetic-cover.jpg", rating: 8.5, year: 2025 };
   const card = h.card("movie", item), frame = card.querySelector(".media-card-cover"), thumb = frame.querySelector(".channel-thumb");
+  assert.equal(thumb.textContent, "封面加载中");
+  assert.equal(thumb.dataset.imageErrorText, "封面加载失败");
+  assert.equal(h.card("movie", { id: "no-cover", title: "合成电影" }).querySelector(".channel-thumb").textContent, "暂无封面");
   assert.equal(card.tagName, "BUTTON"); assert.equal(card.type, "button"); assert.equal(frame.getAttribute("aria-hidden"), "true");
   assert.equal(frame.parentNode, card); assert.equal(h.calls.covers.length, 1);
   assert.equal(h.calls.covers[0][0], thumb); assert.deepEqual(h.calls.covers[0].slice(1), ["https://synthetic.invalid/synthetic-cover.jpg", "movie", 3]);
@@ -139,6 +143,36 @@ test("cache signature is stable for equal cloned data and changes on nested meta
   assert.notEqual(h.c.channelDataSignature(changed), h.c.channelDataSignature(data)); assert.deepEqual(data, before);
 });
 
+test("preview loading failures are distinct from missing covers and retain a successful cached image", async () => {
+  for (const scenario of ["success", "decode-error", "network-error", "cached-refresh-error"]) {
+    const images = [], revoked = [], replacements = [];
+    const target = { isConnected: true, textContent: "封面加载中", dataset: { imageErrorText: "封面加载失败" }, replaceWith: image => replacements.push(image) };
+    const context = vm.createContext({
+      document: { createElement() { const handlers = new Map(); const image = { style: {}, dataset: {}, isConnected: true,
+        addEventListener: (type, handler) => handlers.set(type, handler), fire: type => handlers.get(type)?.() }; images.push(image); return image; } },
+      URL: { createObjectURL: () => "blob:synthetic", revokeObjectURL: value => revoked.push(value) },
+      readCachedImage: async () => scenario === "cached-refresh-error" ? { blob: {} } : null,
+      writeCachedImage: async () => {},
+      fetch: async () => {
+        if (scenario === "cached-refresh-error") images[0].fire("load");
+        if (["network-error", "cached-refresh-error"].includes(scenario)) throw new Error("synthetic unavailable");
+        return { ok: true, blob: async () => ({}) };
+      }
+    });
+    vm.runInContext(imageSource.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
+    await context.loadPreviewImage(target, "https://synthetic.invalid/cover", { cacheReadTimeoutMs: 0, refresh: scenario === "cached-refresh-error" });
+    assert.equal(target.textContent, "封面加载中");
+    assert.equal(images.length, 1);
+    images[0].fire(scenario === "success" ? "load" : "error");
+    if (["decode-error", "network-error"].includes(scenario)) {
+      assert.equal(target.textContent, "封面加载失败"); assert.equal(replacements.length, 0);
+    } else {
+      assert.equal(replacements.length, 1); assert.equal(target.textContent, "封面加载中", "A late error cannot overwrite an image that already loaded");
+    }
+    if (scenario === "decode-error") assert.deepEqual(revoked, ["blob:synthetic"]);
+  }
+});
+
 const controls = [
   { name: "tvSeriesWork mistaken for an episode", target: "tvSeriesWork", mutate: text => {
     const old = appFunction(text.replace(/^export /gm, ""), "mediaCardPresentation");
@@ -148,7 +182,7 @@ const controls = [
   { name: "cover badge belongs to replaceable thumbnail", target: "cover wrapper", mutate: text => text.replace("frame.append(rating);", "thumb.append(rating);") }
 ];
 let failures = 0, passed = 0, rejected = 0;
-for (const item of tests) { try { item.run(source); passed++; console.log(`PASS ${item.name}`); } catch (error) { failures++; console.error(`FAIL ${item.name}\n${error.stack}`); } }
+for (const item of tests) { try { await item.run(source); passed++; console.log(`PASS ${item.name}`); } catch (error) { failures++; console.error(`FAIL ${item.name}\n${error.stack}`); } }
 if (!failures) for (const control of controls) {
   try {
     const changed = control.mutate(source); assert.notEqual(changed, source, `No-op control ${control.name}`);

@@ -3,8 +3,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
-import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory } from "./author-facets.js";
+import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory, searchAuthorFacet } from "./author-facets.js";
 import { createShortVideoAuthorCleanupService } from "./author-cleanup-service.js";
+import { createShortVideoAuthorDeleteService } from "./author-delete-service.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
 import { createShortVideoCommentsRepository } from "./comments-repository.js";
 import { createShortVideoCollectionsRepository } from "./collections-repository.js";
@@ -150,6 +151,7 @@ const {
   fastFilteredVideoPage,
   fastHistoryVideoPage,
   fastPublishedVideoPage,
+  fastShortQueryVideoPage,
   fastSourceTotalCacheKey,
   shortVideoRelationshipTotal
 } = createShortVideoListPageQueries({ listVideoColumns: LIST_VIDEO_COLUMNS });
@@ -247,6 +249,11 @@ export function createShortVideoStore(options = {}) {
     warn: options.deleteJobWarn || console.warn
   });
   const authorCleanup = createShortVideoAuthorCleanupService({ database: databaseOrOpen, deleteVideos: (...args) => deleteVideos(...args) });
+  const authorDelete = createShortVideoAuthorDeleteService({
+    database: databaseOrOpen,
+    deleteVideos: (...args) => deleteVideos(...args),
+    roots
+  });
   function database() {
     if (!db) {
       if (!readOnly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -429,6 +436,15 @@ export function createShortVideoStore(options = {}) {
     return deleteJobs?.beginClose() || Promise.resolve();
   }
 
+  function deleteAuthorRecord(secUid) {
+    const result = authorDelete.deleteRecord(secUid);
+    catalogCache.key = null;
+    catalogCache.summary = null;
+    catalogCache.authors = null;
+    catalogCache.followingAuthors = null;
+    return result;
+  }
+
   // 列表的 summary() 与 authorFacet() 每次分页都会重算（聚合 + GROUP BY），
   // 但二者只在入库（scan / importDownloadManagerDb）改变行集合时才会变化。
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
@@ -529,11 +545,15 @@ export function createShortVideoStore(options = {}) {
       } else {
         const like = `%${escapeLike(filter.q)}%`;
         where.push(`(
-          v.title LIKE ? ESCAPE '\\' OR
-          v.description LIKE ? ESCAPE '\\' OR
-          v.author_name LIKE ? ESCAPE '\\' OR
-          v.aweme_id LIKE ? ESCAPE '\\' OR
-          v.tags_text LIKE ? ESCAPE '\\'
+          v.id IN (
+            SELECT video_id
+            FROM short_video_search
+            WHERE title LIKE ? ESCAPE '\\' OR
+              description LIKE ? ESCAPE '\\' OR
+              author_name LIKE ? ESCAPE '\\' OR
+              aweme_id LIKE ? ESCAPE '\\' OR
+              tags_text LIKE ? ESCAPE '\\'
+          )
         )`);
         args.push(like, like, like, like, like);
       }
@@ -670,6 +690,20 @@ export function createShortVideoStore(options = {}) {
       offset,
       hasMore: offset + authors.length < filteredAuthors.length,
       authors
+    };
+  }
+
+  function searchAuthors(query, limit = 6) {
+    const value = String(query || "").trim().slice(0, 120);
+    if (!value) return { authors: [], total: 0, hasMore: false };
+    const normalizedQuery = value.toLocaleLowerCase("zh-CN");
+    const matchedAuthors = prepareAuthorSearchIndex(searchAuthorFacet(databaseOrOpen(), value))
+      .filter((author) => author._searchText.includes(normalizedQuery));
+    const authors = matchedAuthors.slice(0, limit);
+    return {
+      authors,
+      total: matchedAuthors.length,
+      hasMore: authors.length < matchedAuthors.length
     };
   }
 
@@ -896,7 +930,7 @@ export function createShortVideoStore(options = {}) {
     const filterArgs = [...authorArgs];
     const authorRows = database.prepare(`
       SELECT author_name AS label, COUNT(*) AS count
-      FROM short_videos v
+      FROM short_video_search v
       WHERE v.visibility = 'local_only'
         AND COALESCE(v.author_name, '') <> ''
         AND v.author_name LIKE ? ESCAPE '\\'
@@ -908,23 +942,23 @@ export function createShortVideoStore(options = {}) {
     `).all(like, ...filterArgs, limit);
     const tagRows = database.prepare(`
       SELECT tags_json
-      FROM short_videos v
+      FROM short_video_search v
       WHERE v.visibility = 'local_only'
         AND v.tags_text LIKE ? ESCAPE '\\'
         ${authorWhere}
         ${mediaWhere}
-      ORDER BY v.published_at DESC, v.id DESC
+      ORDER BY v.published_at DESC, v.video_id DESC
       LIMIT 160
     `).all(like, ...filterArgs);
     const titleRows = database.prepare(`
       SELECT title, author_name
-      FROM short_videos v
+      FROM short_video_search v
       WHERE v.visibility = 'local_only'
         AND COALESCE(v.title, '') <> ''
         AND v.title LIKE ? ESCAPE '\\'
         ${authorWhere}
         ${mediaWhere}
-      ORDER BY v.published_at DESC, v.id DESC
+      ORDER BY v.published_at DESC, v.video_id DESC
       LIMIT ?
     `).all(like, ...filterArgs, limit * 2);
     const suggestions = [];
@@ -1057,6 +1091,7 @@ function summary() {
     const fastPage = recommendationIds
       ? null
       : fastHistoryVideoPage(database, filter, sort, limit, offset)
+        ?? fastShortQueryVideoPage(database, filter, sort, limit, offset)
         ?? fastFilteredVideoPage(database, filter, sort, limit, offset, sourceTotalOverride, listCursor)
         ?? fastPublishedVideoPage(database, filter, sort, limit, offset, sourceTotalOverride);
     if (sourceTotalKey && fastPage && sourceTotalOverride === undefined) {
@@ -1100,13 +1135,7 @@ function summary() {
     }
     ensureGeneratedCovers(database, rows, coverGenerateLimit);
     const userPage = filter.q && params.get("users") !== "0"
-      ? listAuthors({
-          searchParams: new URLSearchParams({
-            q: filter.q,
-            limit: "6",
-            offset: "0"
-          })
-        })
+      ? searchAuthors(filter.q, 6)
       : null;
     return {
       summary: includeFacets ? cachedSummary() : null,
@@ -3300,7 +3329,11 @@ function summary() {
     backfillMissingCovers,
     backfillMissingCoversAsync,
     beginClose,
-    authorCleanupPreview: authorCleanup.preview, cleanupAuthorUnliked: authorCleanup.execute,
+    authorCleanupPreview: authorCleanup.preview,
+    authorDeletePreview: authorDelete.preview,
+    cleanupAuthorUnliked: authorCleanup.execute,
+    deleteAuthorAllWorks: authorDelete.execute,
+    deleteAuthorRecord,
     catalogStamp,
     close,
     collectionVideoDetail: collections.collectionVideoDetail,

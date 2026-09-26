@@ -23,12 +23,14 @@ export function videoFilter(params = new URLSearchParams()) {
       args.push(ftsQuery);
     } else {
       const like = `%${escapeLike(q)}%`;
-      whereParts.push(`(
-        title LIKE ? ESCAPE '\\' OR
-        description LIKE ? ESCAPE '\\' OR
-        author_name LIKE ? ESCAPE '\\' OR
-        aweme_id LIKE ? ESCAPE '\\' OR
-        tags_text LIKE ? ESCAPE '\\'
+      whereParts.push(`id IN (
+        SELECT video_id
+        FROM short_video_search
+        WHERE title LIKE ? ESCAPE '\\' OR
+          description LIKE ? ESCAPE '\\' OR
+          author_name LIKE ? ESCAPE '\\' OR
+          aweme_id LIKE ? ESCAPE '\\' OR
+          tags_text LIKE ? ESCAPE '\\'
       )`);
       args.push(like, like, like, like, like);
     }
