@@ -69,7 +69,7 @@ def get_activity_state() -> dict[str, Any]:
     return {"jobs": jobs, "events": events, "extract": extract}
 
 
-def get_state() -> dict[str, Any]:
+def get_state(*, include_profiles: bool = True) -> dict[str, Any]:
     profile_id = current_profile_id(create=False)
     with db() as conn:
         stats = link_stats(conn, profile_id)
@@ -133,7 +133,7 @@ def get_state() -> dict[str, Any]:
                 ,
                 (LIBRARY_SEC_UID,),
             ).fetchall()
-        ]
+        ] if include_profiles else []
         for profile in profiles:
             profile["is_self"] = int(
                 first_text(profile.get("sec_uid")) == LIBRARY_SEC_UID

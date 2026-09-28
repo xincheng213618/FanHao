@@ -380,6 +380,33 @@ class RuntimeCharacterizationTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_compact_state_omits_profile_list(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-compact-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    cursor = connection.execute(
+                        "INSERT INTO profiles(url, sec_uid, title, created_at, updated_at) "
+                        "VALUES(?, ?, ?, ?, ?)",
+                        ("https://www.douyin.com/user/compact-state", "compact-state", "Fixture", "2026-07-26", "2026-07-26"),
+                    )
+                    connection.execute(
+                        "INSERT INTO links(profile_id, aweme_id, kind, url, discovered_at, last_seen_at) "
+                        "VALUES(?, ?, ?, ?, ?, ?)",
+                        (cursor.lastrowid, "7664000000000000001", "video", "https://www.douyin.com/video/7664000000000000001", "2026-07-26", "2026-07-26"),
+                    )
+                    connection.commit()
+                state = runtime.json_request("/api/state")
+                compact_state = runtime.json_request("/api/state?compact=1")
+                self.assertEqual(len(state["profiles"]), 1)
+                self.assertEqual(set(compact_state), set(state))
+                self.assertEqual(compact_state["profiles"], [])
+                self.assertEqual(compact_state["download_queue"], state["download_queue"])
+                self.assertEqual(compact_state["settings"], state["settings"])
+            finally:
+                runtime.close()
+
     def test_isolated_http_contract_and_static_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-http-") as temp:
             runtime = IsolatedManager(Path(temp))

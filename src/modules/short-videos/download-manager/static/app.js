@@ -73,12 +73,12 @@ const features = [
 ];
 
 async function fetchAndRenderState() {
-  const state = await api("/api/state");
+  const state = await api("/api/state?compact=1");
   features.forEach((feature) => feature.render(state));
 }
 
 async function fetchAndRenderHomeState() {
-  const state = await api("/api/state");
+  const state = await api("/api/state?compact=1");
   profilesFeature.renderStatus(state);
   downloadsFeature.renderHome(state);
   downloadsFeature.renderStatus(state);
@@ -96,7 +96,7 @@ async function fetchAndRenderStatus() {
       lightweightEndpointConfirmed = false;
     }
   }
-  if (!state) state = await api("/api/state");
+  if (!state) state = await api("/api/state?compact=1");
   profilesFeature.renderStatus(state);
   downloadsFeature.renderStatus(state);
   linksFeature.renderRuntime(state);
@@ -111,7 +111,7 @@ async function fetchAndRenderActivity() {
       activityEndpointAvailable = false;
     }
   }
-  activityFeature.render(state || await api("/api/state"));
+  activityFeature.render(state || await api("/api/state?compact=1"));
 }
 
 statePoller = createSingleFlightPoller(fetchAndRenderHomeState, 15000);

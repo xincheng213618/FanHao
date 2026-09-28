@@ -106,7 +106,8 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/download/probe":
             return self.send_json(probe_download_api())
         if parsed.path == "/api/state":
-            return self.send_json(get_state())
+            compact = (parse_qs(parsed.query).get("compact") or ["0"])[0] == "1"
+            return self.send_json(get_state(include_profiles=not compact))
         if parsed.path == "/api/status":
             return self.send_json(get_runtime_status())
         if parsed.path == "/api/activity":
