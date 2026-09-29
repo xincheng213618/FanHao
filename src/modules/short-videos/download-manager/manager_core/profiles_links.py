@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,21 @@ from .database import db, merge_profile_history_value, parse_profile_history, se
 from .domain_manifest import author_sec_uid_from_manifest, douyin_user_url, kind_from_manifest, manifest_cover_path, manifest_music_metadata, manifest_preview_path, sync_manifest_files
 from .profile_domain import normalize_profile_metadata
 from .queue import ensure_profile_in_download_queue, notify_download_queue_changed
+
+
+def set_profile_auto_collect(payload: dict[str, Any]) -> dict[str, Any]:
+    profile_id = payload.get("profile_id")
+    enabled = payload.get("enabled")
+    if isinstance(profile_id, bool) or not isinstance(profile_id, int) or profile_id <= 0 or not isinstance(enabled, bool):
+        raise ValueError("需要有效的主页 ID 和启用状态")
+    with closing(db()) as conn, conn:
+        result = conn.execute(
+            "UPDATE profiles SET auto_collect_enabled=? WHERE id=?",
+            (int(enabled), profile_id),
+        )
+        if result.rowcount != 1:
+            raise ValueError("主页不存在")
+    return {"ok": True, "profile_id": profile_id, "auto_collect_enabled": int(enabled)}
 
 
 def manifest_import_row(record: dict[str, Any]) -> dict[str, Any] | None:

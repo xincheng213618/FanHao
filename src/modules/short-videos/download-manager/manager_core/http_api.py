@@ -32,7 +32,7 @@ from .downloader_client import fetch_aweme_comments
 from .extraction import reset_extract, start_extract, start_following_import, start_refresh_profiles, stop_extract
 from .library import list_library, open_library_folder, resolve_library_media, shared_player_detail, shared_player_list, shared_player_neighbor, shared_player_row, shared_player_summary, shared_player_video_from_row
 from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links, retry_link
-from .profiles_links import current_profile_id, import_manifest_to_db, upsert_links, upsert_profile
+from .profiles_links import current_profile_id, import_manifest_to_db, set_profile_auto_collect, upsert_links, upsert_profile
 from .queue import (
     ensure_profile_in_download_queue,
     move_download_queue_item,
@@ -223,6 +223,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(start_extract(payload))
             if parsed.path == "/api/profiles/refresh":
                 return self.send_json(start_refresh_profiles(payload))
+            if parsed.path == "/api/profiles/auto-collect":
+                try:
+                    return self.send_json(set_profile_auto_collect(payload))
+                except ValueError as exc:
+                    return self.send_json({"ok": False, "message": str(exc)}, status=400)
             if parsed.path == "/api/profiles/delete":
                 return self.send_json(delete_profile(payload))
             if parsed.path == "/api/comments/fetch":

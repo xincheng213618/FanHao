@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/styles/shell.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/auth.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/controls.css?v=20260809-home-simplify-01" />
-    <link rel="stylesheet" href="/styles/profiles.css?v=20260825-profile-history-01" />
+    <link rel="stylesheet" href="/styles/profiles.css?v=20260928-profile-auto-collect-01" />
     <link rel="stylesheet" href="/styles/home.css?v=20260917-api-probe-02" />
     <link rel="stylesheet" href="/styles/links.css?v=20260925-download-progress-01" />
     <link rel="stylesheet" href="/styles/library.css?v=20260809-home-simplify-01" />
@@ -225,7 +225,7 @@
             </label>
           </div>
           <div class="profile-refresh-policy-note muted">
-            每次采集都会更新本次遇到作品的点赞、评论、收藏和分享；快速采集刷新最近作品，全量确认刷新完整扫描范围。主页作品数明显减少时只安排一次全量确认。
+            每次采集都会更新本次遇到作品的点赞、评论、收藏和分享；快速采集刷新最近作品，全量确认刷新完整扫描范围。主页作品数明显减少时只安排一次全量确认。退出一键采集后，定时采集也会跳过该主页；单人手动采集和已入库作品的下载不受影响。
           </div>
           <div id="profileManagerList" class="profile-manager-list"></div>
         </section>
@@ -394,6 +394,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260927-compact-state-01"></script>
+    <script type="module" src="/app.js?v=20260928-profile-auto-collect-01"></script>
   </body>
 </html>

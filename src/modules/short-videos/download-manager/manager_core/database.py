@@ -77,6 +77,7 @@ def init_db() -> None:
               profile_raw_json TEXT NOT NULL DEFAULT '{}',
               profile_collected_at TEXT,
               is_following INTEGER NOT NULL DEFAULT 0,
+              auto_collect_enabled INTEGER NOT NULL DEFAULT 1,
               following_discovered_at TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
@@ -360,6 +361,7 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
         "profile_raw_json": "TEXT NOT NULL DEFAULT '{}'",
         "profile_collected_at": "TEXT",
         "is_following": "INTEGER NOT NULL DEFAULT 0",
+        "auto_collect_enabled": "INTEGER NOT NULL DEFAULT 1",
         "following_discovered_at": "TEXT",
     }
     for name, definition in specs.items():
@@ -869,6 +871,7 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
             WHEN COALESCE(profile_collected_at, '') >= COALESCE(?, '') THEN profile_collected_at ELSE ?
           END,
           is_following=MAX(COALESCE(is_following, 0), ?),
+          auto_collect_enabled=MIN(COALESCE(auto_collect_enabled, 1), ?),
           following_discovered_at=COALESCE(following_discovered_at, ?),
           created_at=CASE WHEN created_at <= ? THEN created_at ELSE ? END,
           updated_at=CASE WHEN updated_at >= ? THEN updated_at ELSE ? END,
@@ -901,6 +904,7 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
             source["profile_collected_at"],
             source["profile_collected_at"],
             int(source["is_following"] or 0),
+            int(source["auto_collect_enabled"] if source["auto_collect_enabled"] is not None else 1),
             source["following_discovered_at"],
             source["created_at"],
             source["created_at"],

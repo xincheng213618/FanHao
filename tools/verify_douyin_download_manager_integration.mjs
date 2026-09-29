@@ -427,7 +427,7 @@ assert.doesNotMatch(
   /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStart|downloadStop)"/
 );
 assert.match(managerIndexSource, /styles\/links\.css\?v=20260925-download-progress-01/);
-assert.match(managerIndexSource, /app\.js\?v=20260925-download-progress-01/);
+assert.match(managerIndexSource, /app\.js\?v=20260928-profile-auto-collect-01/);
 assert.match(managerIndexSource, /采集到新作品就直接下载，无需手动开关/);
 assert.match(managerIndexSource, /id="testDownloadApi"[^>]*hidden>测试作品接口/);
 assert.match(managerIndexSource, /id="resumeDownloads"[^>]*class="primary"[^>]*hidden>恢复自动下载/);
@@ -445,7 +445,7 @@ assert.match(managerAppSource, /features\/downloads\.js\?v=20260917-api-probe-02
 assert.match(managerAppSource, /features\/activity\.js\?v=20260902-extract-reset-01/);
 assert.match(managerAppSource, /features\/library\.js\?v=20260812-latest-request-01/);
 assert.match(managerAppSource, /features\/links\.js\?v=20260925-download-progress-01/);
-assert.match(managerAppSource, /features\/profiles\.js\?v=20260825-profile-history-01/);
+assert.match(managerAppSource, /features\/profiles\.js\?v=20260928-profile-auto-collect-01/);
 assert.match(managerAppSource, /features\/settings\.js\?v=20260823-auto-collection-01/);
 
 const downloadsFeatureSource = fs.readFileSync(

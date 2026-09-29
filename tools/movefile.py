@@ -83,34 +83,41 @@ class FileMover:
         else:
             print(f"[WARN] Source missing (skip): {src}")
 
-    # 收集任务：按原规则 i>j 且 dst 同名目录存在
+    # 只从暂存区收集任务，正式库根目录只作为目标。
     def collect_tasks(self) -> List["MoveTask"]:
         tasks: List["MoveTask"] = []
-        for i, src_root in enumerate(self.root_dirs):
+        destination_roots = [
+            root for root in self.root_dirs
+            if self.normalize_root(root) not in self.source_only_roots
+            and os.path.isdir(root)
+        ]
+        for src_root in self.root_dirs:
+            if self.normalize_root(src_root) not in self.source_only_roots:
+                continue
             if not os.path.isdir(src_root):
                 print(f"[WARN] Source root not found: {src_root}")
                 continue
-            for j, dst_root in enumerate(self.root_dirs):
-                if i <= j:
+            try:
+                folder_names = os.listdir(src_root)
+            except Exception as e:
+                print(f"[ERROR] Failed to list {src_root}: {e}")
+                continue
+            for folder_name in folder_names:
+                if folder_name.casefold() in {"vr", "noactor"}:
                     continue
-                if not os.path.isdir(dst_root):
+                src_folder = os.path.join(src_root, folder_name)
+                if not os.path.isdir(src_folder) or self.is_hidden(src_folder):
                     continue
-                if self.normalize_root(dst_root) in self.source_only_roots:
+                if os.path.isfile(os.path.join(src_folder, ".fanhao-move-plan.json")):
+                    print(f"[SKIP] Existing FanHao recovery plan: {src_folder}")
                     continue
-                try:
-                    folder_names = os.listdir(src_root)
-                except Exception as e:
-                    print(f"[ERROR] Failed to list {src_root}: {e}")
-                    continue
-                for folder_name in folder_names:
-                    src_folder = os.path.join(src_root, folder_name)
-                    if not os.path.isdir(src_folder) or self.is_hidden(src_folder):
-                        continue
+                for dst_root in destination_roots:
                     dst_folder = os.path.join(dst_root, folder_name)
-                    if not os.path.exists(dst_folder):
+                    if not os.path.isdir(dst_folder):
                         continue
                     dest_drive = os.path.splitdrive(dst_folder)[0].upper()
                     tasks.append(MoveTask(src_folder, dst_folder, dest_drive))
+                    break
         # 去重
         seen = set()
         uniq = []
@@ -197,10 +204,10 @@ class MoveTask:
             print(f"[ERROR] Task failed {self.label()}: {e}")
 
 
-DEFAULT_ROOTS_NORMAL = ["G:\\", "F:\\", "O:\\[珍藏1]", "O:\\[珍藏]", "O:\\", "D:\\", "D:\\Organized"]
-DEFAULT_ROOTS_VR = ["V:\\[A1]", "V:\\[A]", "V:\\AV\\VR", "D:\\VR", "D:\\Organized\\VR", "V:\\缓存\\VR"]
+DEFAULT_ROOTS_NORMAL = ["G:\\", "F:\\", "O:\\[珍藏1]", "O:\\[珍藏]", "O:\\", "D:\\Organized"]
+DEFAULT_ROOTS_VR = ["V:\\[A1]", "V:\\[A]", "V:\\AV\\VR", "D:\\Organized\\VR"]
 SOURCE_ONLY_ROOTS_NORMAL = ["D:\\Organized"]
-SOURCE_ONLY_ROOTS_VR = ["D:\\Organized\\VR", "V:\\缓存\\VR"]
+SOURCE_ONLY_ROOTS_VR = ["D:\\Organized\\VR"]
 PARALLEL_BY_DRIVE = True
 
 

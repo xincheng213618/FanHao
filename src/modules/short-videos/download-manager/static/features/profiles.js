@@ -18,6 +18,7 @@ export function createProfilesFeature(options) {
   let deferredCount = null;
   let fullScanRequiredCount = null;
   let bannedCount = null;
+  let pausedCount = null;
   let loading = false;
   let loadMoreCheckScheduled = false;
   let avatarObserver = null;
@@ -176,21 +177,24 @@ export function createProfilesFeature(options) {
     const localCandidates = allRows.filter(
       (profile) => Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1
     );
-    const localEligibleCount = localCandidates.filter(
+    const activeCandidates = localCandidates.filter((profile) => Number(profile.auto_collect_enabled ?? 1) === 1);
+    const localPausedCount = localCandidates.length - activeCandidates.length;
+    const localEligibleCount = activeCandidates.filter(
       (profile) => Number(profile.refresh_due || 0) === 1 || needsFullScan(profile)
     ).length;
-    const localFullScanCount = localCandidates.filter((profile) => needsFullScan(profile)).length;
+    const localFullScanCount = activeCandidates.filter((profile) => needsFullScan(profile)).length;
     const currentEligibleCount = eligibleCount === null ? localEligibleCount : eligibleCount;
     const currentDeferredCount = deferredCount === null
-      ? Math.max(0, localCandidates.length - localEligibleCount)
+      ? Math.max(0, activeCandidates.length - localEligibleCount)
       : deferredCount;
     const currentFullScanCount = fullScanRequiredCount === null
       ? localFullScanCount
       : Math.max(fullScanRequiredCount, localFullScanCount);
-    const localBannedCount = localCandidates.filter(
+    const localBannedCount = activeCandidates.filter(
       (profile) => String(profile.account_status || "active") === "banned"
     ).length;
     const currentBannedCount = bannedCount === null ? localBannedCount : bannedCount;
+    const currentPausedCount = pausedCount === null ? localPausedCount : pausedCount;
     const currentWaitingCount = Math.max(0, currentDeferredCount - currentBannedCount);
     const confirmPendingButton = $("confirmPendingProfiles");
     if (confirmPendingButton) {
@@ -205,7 +209,7 @@ export function createProfilesFeature(options) {
     const visibleRows = filteredRows;
     const totalRows = deletedWorks === "pending" ? filteredRows.length : Math.max(total, filteredRows.length);
     const queueSummary = extractQueue.length ? ` · 采集队列待执行 ${extractQueue.length} 个` : "";
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个${queueSummary}`;
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个，仅手动 ${currentPausedCount} 个${queueSummary}`;
     node.innerHTML = visibleRows.map((profile) => {
       const douyinId = displayDouyinId(profile) || "-";
       const name = cleanDisplayName(profile.nickname) || cleanDisplayName(profile.title) || (douyinId !== "-" ? douyinId : `主页 #${profile.id}`);
@@ -220,8 +224,9 @@ export function createProfilesFeature(options) {
       const latestWork = profileWorkDate(profile);
       const lastExtracted = formatDateTime(profile.last_extracted_at);
       const accountBanned = String(profile.account_status || "active") === "banned";
+      const autoCollectEnabled = Number(profile.auto_collect_enabled ?? 1) === 1;
       const fullScanPending = needsFullScan(profile);
-      const refreshDue = !accountBanned && (Number(profile.refresh_due || 0) === 1 || fullScanPending);
+      const refreshDue = autoCollectEnabled && !accountBanned && (Number(profile.refresh_due || 0) === 1 || fullScanPending);
       const refreshAt = formatDateTime(profile.refresh_due_at);
       const refreshInterval = formatRefreshInterval(profile.refresh_interval_seconds);
       const cadence = formatRefreshInterval(profile.refresh_cadence_seconds);
@@ -236,6 +241,9 @@ export function createProfilesFeature(options) {
       const bannedBadge = accountBanned
         ? ` <span class="profile-manager-badge is-account-banned" title="${escapeHtml(bannedReason)}">已封禁</span>`
         : "";
+      const manualOnlyBadge = !autoCollectEnabled
+        ? ' <span class="profile-manager-badge is-manual-only" title="一键智能采集和定时采集会跳过；单人手动采集仍可使用">仅手动采集</span>'
+        : "";
       const deletedWorksBadge = !accountBanned && Number(profile.has_deleted_works || 0) === 1
         ? ' <span class="profile-manager-badge is-deleted-works" title="已经过一次完整主页扫描确认">主页少作品</span>'
         : "";
@@ -243,10 +251,12 @@ export function createProfilesFeature(options) {
       const fullScanBadge = fullScanPending
         ? ` <span class="profile-manager-badge is-full-scan-required" title="${escapeHtml(fullScanReason)}">待全量确认</span>`
         : "";
-      const refreshBadge = profile.tab === "like" || fullScanPending || accountBanned
+      const refreshBadge = profile.tab === "like" || fullScanPending || accountBanned || !autoCollectEnabled
         ? ""
         : ` <span class="profile-manager-badge ${refreshDue ? "is-refresh-due" : "is-refresh-waiting"}">${refreshDue ? "已到期" : "暂缓"}</span>`;
-      const refreshTitle = accountBanned
+      const refreshTitle = !autoCollectEnabled
+        ? "已退出一键智能采集和定时采集；仍可点击单人采集"
+        : accountBanned
         ? `${bannedReason}；自动更新已暂停，点击“手动确认”可重新检查`
         : fullScanPending
         ? fullScanReason
@@ -282,7 +292,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-identity">
             ${avatar}
             <div>
-              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${bannedBadge}${fullScanBadge}${deletedWorksBadge}${refreshBadge}</div>
+              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${bannedBadge}${manualOnlyBadge}${fullScanBadge}${deletedWorksBadge}${refreshBadge}</div>
               <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
               ${historicalNames.length ? `<div class="profile-manager-history" title="${escapeHtml(historicalNames.join("、"))}">曾用名 ${escapeHtml(historicalNames.slice(-3).reverse().join("、"))}</div>` : ""}
             </div>
@@ -291,7 +301,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-metric"><span>粉丝</span><strong>${formatCompact(profile.follower_count || 0)}</strong></div>
           <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong>${historicalLikes.length > 1 ? `<small title="${escapeHtml(historicalLikes.map(formatCompact).join("、"))}">历史 ${escapeHtml(historicalLikes.map(formatCompact).join(" → "))}</small>` : ""}</div>
           <div class="profile-manager-date"><span>最新作品</span><strong>${escapeHtml(latestWork ? latestWork.slice(0, 10) : "暂无日期")}</strong></div>
-          <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(accountBanned ? "暂停自动更新" : fullScanPending ? "下次全量确认" : refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
+          <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(!autoCollectEnabled ? "仅手动采集" : accountBanned ? "暂停自动更新" : fullScanPending ? "下次全量确认" : refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
           <div class="profile-manager-row-actions">
             <span class="profile-manager-page-links" role="group" aria-label="${escapeHtml(name)}的主页">
               ${localAuthorUrl ? `<a class="queue-link is-local" href="${safeUrl(localAuthorUrl)}" target="_blank" rel="noreferrer" title="打开 FanHao 本地短视频作者主页">本地</a>` : ""}
@@ -299,6 +309,7 @@ export function createProfilesFeature(options) {
             </span>
             ${accountBanned ? "" : `<button data-profile-refresh="${escapeHtml(profile.id || "")}" ${quickRequestState ? "disabled" : ""}>${collectionButtonLabel(quickBaseLabel, quickRequestState)}</button>`}
             ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${fullRequestState ? "disabled" : ""}>${collectionButtonLabel(fullBaseLabel, fullRequestState)}</button>` : ""}
+            <button data-profile-auto-collect="${escapeHtml(profile.id || "")}" aria-pressed="${autoCollectEnabled ? "false" : "true"}" title="${escapeHtml(autoCollectEnabled ? "退出一键智能采集和定时采集；单人手动采集不受影响" : "重新加入一键智能采集和定时采集")}">${autoCollectEnabled ? "退出一键采集" : "加入一键采集"}</button>
             <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
           </div>
         </div>
@@ -336,6 +347,9 @@ export function createProfilesFeature(options) {
         : null;
       bannedCount = Object.prototype.hasOwnProperty.call(data, "banned_count")
         ? Number(data.banned_count || 0)
+        : null;
+      pausedCount = Object.prototype.hasOwnProperty.call(data, "paused_count")
+        ? Number(data.paused_count || 0)
         : null;
     } catch (error) {
       if (!requests.canCommit(request, currentQuery().toString())) return;
@@ -400,6 +414,20 @@ export function createProfilesFeature(options) {
     await refreshState();
   }
 
+  async function toggleAutoCollect(profileId, button) {
+    const profile = rows.find((item) => Number(item.id) === profileId);
+    if (!profile) return;
+    const enabled = Number(profile.auto_collect_enabled ?? 1) !== 1;
+    button.disabled = true;
+    try {
+      await post("/api/profiles/auto-collect", { profile_id: profileId, enabled });
+      await load({ reset: true });
+      toast(enabled ? "已加入一键采集和定时采集" : "已退出一键采集和定时采集；仍可手动采集");
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  }
+
   async function confirmPendingProfiles() {
     const button = $("confirmPendingProfiles");
     if (button?.disabled) return;
@@ -414,7 +442,8 @@ export function createProfilesFeature(options) {
     });
     try {
       const data = await api(`/api/profiles?${params.toString()}`);
-      const pending = (Array.isArray(data.profiles) ? data.profiles : []).filter(needsFullScan);
+      const pending = (Array.isArray(data.profiles) ? data.profiles : [])
+        .filter((profile) => Number(profile.auto_collect_enabled ?? 1) === 1 && needsFullScan(profile));
       if (!pending.length) {
         fullScanRequiredCount = 0;
         renderManager(rows, extractActive);
@@ -515,6 +544,12 @@ export function createProfilesFeature(options) {
       const loadMore = event.target.closest("button[data-profile-load-more]");
       if (loadMore) {
         load({ reset: false }).catch((err) => toast(err.message));
+        return;
+      }
+      const autoCollectButton = event.target.closest("button[data-profile-auto-collect]");
+      if (autoCollectButton) {
+        const profileId = Number(autoCollectButton.dataset.profileAutoCollect || 0);
+        if (profileId) toggleAutoCollect(profileId, autoCollectButton).catch((err) => toast(err.message));
         return;
       }
       const deleteButton = event.target.closest("button[data-profile-delete]");

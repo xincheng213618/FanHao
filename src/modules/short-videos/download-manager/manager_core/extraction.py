@@ -745,6 +745,7 @@ def run_refresh_profiles_job(
                       profiles.updated_at,
                       profiles.last_extracted_at,
                       profiles.account_status,
+                      profiles.auto_collect_enabled,
                       profiles.aweme_count,
                       profiles.has_deleted_works,
                       profiles.full_scan_required,
@@ -776,10 +777,13 @@ def run_refresh_profiles_job(
             rows = [
                 row
                 for row in rows
-                if int(row.get("link_total") or 0) > 0
-                or (
-                    first_text(row.get("sec_uid")) == LIBRARY_SEC_UID
-                    and str(row.get("tab") or "post") == "like"
+                if int(row.get("auto_collect_enabled", 1) or 0) == 1
+                and (
+                    int(row.get("link_total") or 0) > 0
+                    or (
+                        first_text(row.get("sec_uid")) == LIBRARY_SEC_UID
+                        and str(row.get("tab") or "post") == "like"
+                    )
                 )
             ]
             if not full_scan:

@@ -116,6 +116,7 @@ def get_state(*, include_profiles: bool = True) -> dict[str, Any]:
                   profiles.verification,
                   profiles.profile_collected_at,
                   profiles.is_following,
+                  profiles.auto_collect_enabled,
                   profiles.following_discovered_at,
                   COUNT(links.id) total,
                   SUM(CASE WHEN links.status='pending' THEN 1 ELSE 0 END) pending,
@@ -288,6 +289,7 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                   profiles.verification,
                   profiles.profile_collected_at,
                   profiles.is_following,
+                  profiles.auto_collect_enabled,
                   profiles.following_discovered_at,
                   profiles.created_at,
                   profiles.updated_at,
@@ -329,6 +331,7 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                    profiles.tab,
                    profiles.last_extracted_at,
                    profiles.account_status,
+                   profiles.auto_collect_enabled,
                    profiles.aweme_count,
                    profiles.has_deleted_works,
                    profiles.full_scan_required,
@@ -351,18 +354,22 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
             and str(profile.get("tab") or "post") == "like"
         )
         attach_profile_refresh_decision(profile, now_timestamp=now_timestamp)
+    paused_count = sum(int(profile.get("auto_collect_enabled", 1) or 0) == 0 for profile in refresh_candidates)
+    active_candidates = [
+        profile for profile in refresh_candidates if int(profile.get("auto_collect_enabled", 1) or 0) == 1
+    ]
     eligible_count = sum(
         int(profile_refresh_decision(profile, now_timestamp=now_timestamp)["refresh_due"])
-        for profile in refresh_candidates
+        for profile in active_candidates
     )
-    deferred_count = len(refresh_candidates) - eligible_count
+    deferred_count = len(active_candidates) - eligible_count
     full_scan_required_count = sum(
         int(profile_requires_full_scan(profile))
-        for profile in refresh_candidates
+        for profile in active_candidates
     )
     banned_count = sum(
         str(profile.get("account_status") or "active").strip().lower() == "banned"
-        for profile in refresh_candidates
+        for profile in active_candidates
     )
     return {
         "total": total,
@@ -370,7 +377,8 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         "deferred_count": deferred_count,
         "full_scan_required_count": full_scan_required_count,
         "banned_count": banned_count,
-        "auto_candidate_count": len(refresh_candidates),
+        "paused_count": paused_count,
+        "auto_candidate_count": len(active_candidates),
         "profiles": rows,
     }
 

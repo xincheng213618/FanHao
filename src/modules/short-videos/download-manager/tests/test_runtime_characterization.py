@@ -516,6 +516,26 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                     )
                     connection.commit()
 
+                profile_list = runtime.json_request("/api/profiles?scope=all")
+                author = next(row for row in profile_list["profiles"] if row["id"] == second_profile_id)
+                self.assertEqual(author["auto_collect_enabled"], 1)
+                paused = runtime.json_request(
+                    "/api/profiles/auto-collect",
+                    method="POST",
+                    payload={"profile_id": second_profile_id, "enabled": False},
+                )
+                self.assertEqual(paused["auto_collect_enabled"], 0)
+                profile_list = runtime.json_request("/api/profiles?scope=all")
+                author = next(row for row in profile_list["profiles"] if row["id"] == second_profile_id)
+                self.assertEqual(author["auto_collect_enabled"], 0)
+                self.assertEqual(profile_list["paused_count"], 1)
+                resumed = runtime.json_request(
+                    "/api/profiles/auto-collect",
+                    method="POST",
+                    payload={"profile_id": second_profile_id, "enabled": True},
+                )
+                self.assertEqual(resumed["auto_collect_enabled"], 1)
+
                 global_failed = runtime.json_request("/api/links?status=failed")
                 self.assertEqual(global_failed.get("total"), 2)
                 by_aweme_id = {
@@ -1354,24 +1374,26 @@ print(json.dumps({{
                 ).isoformat(timespec="seconds")
                 with closing(sqlite3.connect(runtime.db_path)) as connection:
                     profile_ids: dict[str, int] = {}
-                    for name, last_extracted_at, account_status in (
-                        ("smart-due", due_last_extracted, "active"),
-                        ("smart-waiting", waiting_last_extracted, "active"),
-                        ("smart-banned", due_last_extracted, "banned"),
+                    for name, last_extracted_at, account_status, auto_collect_enabled in (
+                        ("smart-due", due_last_extracted, "active", 1),
+                        ("smart-waiting", waiting_last_extracted, "active", 1),
+                        ("smart-banned", due_last_extracted, "banned", 1),
+                        ("smart-paused", due_last_extracted, "active", 0),
                     ):
                         cursor = connection.execute(
                             """
                             INSERT INTO profiles(
-                              url, sec_uid, tab, title, account_status,
+                              url, sec_uid, tab, title, account_status, auto_collect_enabled,
                               created_at, updated_at, last_extracted_at
                             )
-                            VALUES(?, ?, 'post', ?, ?, ?, ?, ?)
+                            VALUES(?, ?, 'post', ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 f"https://www.douyin.com/user/{name}",
                                 name,
                                 name,
                                 account_status,
+                                auto_collect_enabled,
                                 now,
                                 now,
                                 last_extracted_at,
@@ -1382,6 +1404,7 @@ print(json.dumps({{
                         "smart-due": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
                         "smart-waiting": [now_timestamp - 2 * 60 * 60, now_timestamp - 26 * 60 * 60],
                         "smart-banned": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
+                        "smart-paused": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
                     }
                     for name, timestamps in work_times.items():
                         for index, create_time in enumerate(timestamps, start=1):
@@ -1408,6 +1431,8 @@ print(json.dumps({{
 import json
 from manager_core import extraction
 from manager_core.database import create_job, db, update_job
+from manager_core.profiles_links import set_profile_auto_collect
+from manager_core.read_models import list_profiles
 
 calls = []
 
@@ -1436,13 +1461,30 @@ extraction.run_refresh_profiles_job(
     12,
     False,
 )
+batch_calls = list(calls)
+before = list_profiles({"scope": ["all"]})
+paused = next(profile for profile in before["profiles"] if profile["sec_uid"] == "smart-paused")
+manual_job_id = create_job("refresh", "test paused manual refresh")
+extraction.run_refresh_profiles_job(
+    manual_job_id, 0, [paused["id"]], 0, 10, 2, False, 12, False,
+)
+manual_calls = calls[len(batch_calls):]
+set_profile_auto_collect({"profile_id": paused["id"], "enabled": True})
+after = list_profiles({"scope": ["all"]})
+resumed = next(profile for profile in after["profiles"] if profile["id"] == paused["id"])
 with db() as connection:
     row = connection.execute(
         "SELECT status, total, processed, success, message FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
 print(json.dumps({
-    "calls": calls,
+    "calls": batch_calls,
+    "manual_calls": manual_calls,
+    "paused_before": paused["auto_collect_enabled"],
+    "paused_count_before": before["paused_count"],
+    "eligible_before": before["eligible_count"],
+    "paused_after": resumed["auto_collect_enabled"],
+    "eligible_after": after["eligible_count"],
     "status": row["status"],
     "total": row["total"],
     "processed": row["processed"],
@@ -1470,6 +1512,12 @@ print(json.dumps({
                 self.assertEqual(result["processed"], 1)
                 self.assertEqual(result["success"], 1)
                 self.assertIn("智能跳过 2 个", result["message"])
+                self.assertEqual(result["manual_calls"], ["https://www.douyin.com/user/smart-paused"])
+                self.assertEqual(result["paused_before"], 0)
+                self.assertEqual(result["paused_count_before"], 1)
+                self.assertEqual(result["eligible_before"], 1)
+                self.assertEqual(result["paused_after"], 1)
+                self.assertEqual(result["eligible_after"], 2)
             finally:
                 runtime.close()
 

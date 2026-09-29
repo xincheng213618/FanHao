@@ -134,6 +134,17 @@ def profile_refresh_decision(
             "refresh_mode": "manual",
         }
 
+    if int(profile.get("auto_collect_enabled", 1) or 0) == 0:
+        return {
+            "refresh_due": 0,
+            "refresh_due_at": None,
+            "refresh_interval_seconds": None,
+            "refresh_cadence_seconds": None,
+            "refresh_silence_seconds": None,
+            "refresh_basis": "manual_only",
+            "refresh_mode": "manual",
+        }
+
     if tab == "post" and profile_requires_full_scan(profile):
         return {
             "refresh_due": 1,
