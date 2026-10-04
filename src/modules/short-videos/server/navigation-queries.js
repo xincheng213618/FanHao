@@ -1,8 +1,9 @@
 import { LOCAL_SHORT_VIDEO_USER_ID } from "./constants.js";
+import { indexedAuthorVideoScope, shortQueryVideoPageEligible } from "./list-page-queries.js";
 import {
   actualVideoQualityWhere,
-  normalizeSourceFilter,
-  shortVideoMediaWhere
+  shortVideoMediaWhere,
+  videoFilter
 } from "./query-contract.js";
 
 export function createShortVideoNavigationQueries({
@@ -17,15 +18,58 @@ export function createShortVideoNavigationQueries({
     throw new Error("short-video navigation queries require sort and statistics contracts");
   }
 
+  // Store connections finish their additive schema setup before navigation.
+  // Cache only nullability metadata for that connection's lifetime.
+  const videoColumns = new WeakMap();
+  function nonNullable(database, column) {
+    let columns = videoColumns.get(database);
+    if (!columns) {
+      columns = new Map(database.prepare("PRAGMA table_info(short_videos)").all()
+        .map(item => [item.name, Boolean(item.notnull || item.pk)]));
+      videoColumns.set(database, columns);
+    }
+    return columns.get(column) === true;
+  }
+
+  function keyset(keys, movingNext) {
+    const conditions = [];
+    const args = [];
+    for (let index = 0; index < keys.length; index += 1) {
+      const current = keys[index];
+      const operator = movingNext === (current.direction === "ASC") ? ">" : "<";
+      // SQLite sorts NULL before non-NULL. Reversing traversal reverses each
+      // key's order; NULL still needs an explicit comparison/equality branch.
+      if (current.value == null && operator === "<") continue;
+      const prefix = keys.slice(0, index).map(key => key.value == null
+        ? `${key.expression} IS NULL` : `${key.expression} = ?`);
+      const comparison = current.value == null
+        ? `${current.expression} IS NOT NULL`
+        : operator === "<"
+          ? `(${current.expression} < ? OR ${current.expression} IS NULL)`
+          : `${current.expression} > ?`;
+      conditions.push(`(${[...prefix, comparison].join(" AND ")})`);
+      for (const key of keys.slice(0, index)) if (key.value != null) args.push(key.value);
+      if (current.value != null) args.push(current.value);
+    }
+    return {
+      where: conditions.join(" OR ") || "0",
+      args,
+      orderBy: keys.map(key => `${key.expression} ${movingNext
+        ? key.direction : key.direction === "ASC" ? "DESC" : "ASC"}`).join(", ")
+    };
+  }
+
   function adjacentOrder(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const requestedSort = normalizeSort(params.get("sort"));
-    const source = normalizeSourceFilter(params.get("source"));
+    const filter = videoFilter(params);
+    const source = filter.source;
     const sort = source === "liked" && requestedSort === "published"
       ? "liked"
       : source === "liked" && requestedSort === "publishedAsc"
         ? "likedAsc"
         : requestedSort;
+    const rawShortAscending = sort === "publishedAsc" && shortQueryVideoPageEligible(filter, sort);
     return {
       recommended: { column: "recommendation_order_score", fallback: "published_at", numeric: true },
       liked: {
@@ -55,11 +99,11 @@ export function createShortVideoNavigationQueries({
       published: { column: "published_at", fallback: "liked_at", numeric: false },
       publishedAsc: {
         column: "published_at",
-        expression: "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z')",
+        expression: rawShortAscending ? undefined : "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z')",
         fallback: "liked_at",
         numeric: false,
         direction: "ASC",
-        value: (item) => item.published_at || "9999-12-31T23:59:59.999Z"
+        value: rawShortAscending ? undefined : (item) => item.published_at || "9999-12-31T23:59:59.999Z"
       },
       likes: { column: "digg_count", fallback: "liked_at", numeric: true },
       likesAsc: {
@@ -108,17 +152,24 @@ export function createShortVideoNavigationQueries({
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
+    const nullablePublication = !nonNullable(database, "published_at");
+    const cursor = nullablePublication ? keyset([
+      { expression: "w.last_watched_at", value: row.last_watched_at, direction: "DESC" },
+      { expression: "v.published_at", value: row.published_at, direction: "DESC" },
+      { expression: "v.id", value: row.id, direction: "DESC" }
+    ], movingNext) : null;
     const ids = database.prepare(`
       SELECT v.id
       FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
       JOIN short_videos v ON v.id = w.video_id
       WHERE ${whereParts.join(" AND ")} AND (
-        w.last_watched_at ${operator} ?
+        ${cursor ? cursor.where : `w.last_watched_at ${operator} ?
         OR (w.last_watched_at = ? AND v.published_at ${operator} ?)
-        OR (w.last_watched_at = ? AND v.published_at = ? AND v.id ${operator} ?)
+        OR (w.last_watched_at = ? AND v.published_at = ? AND v.id ${operator} ?)`}
       )
       ORDER BY
         w.last_watched_at ${sortDirection},
@@ -126,12 +177,7 @@ export function createShortVideoNavigationQueries({
         v.id ${sortDirection}
       LIMIT ?
     `).all(
-      lastWatchedAt,
-      lastWatchedAt,
-      publishedAt,
-      lastWatchedAt,
-      publishedAt,
-      currentId,
+      ...(cursor ? cursor.args : [lastWatchedAt, lastWatchedAt, publishedAt, lastWatchedAt, publishedAt, currentId]),
       Math.max(1, Number(limit || 1))
     ).map((item) => String(item.id || "")).filter(Boolean);
     if (!ids.length) return [];
@@ -162,21 +208,23 @@ export function createShortVideoNavigationQueries({
 
     const likedSortAt = "v.liked_sort_at";
     const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
-    const likedSortTime = `COALESCE(v.liked_sort_time, ${ascending ? "1000000000000" : "-1"})`;
-    const currentTime = Number(order.value ? order.value(row) : row.liked_sort_time);
+    const likedSortTime = ascending ? "COALESCE(v.liked_sort_time, 1000000000000)" : "v.liked_sort_time";
+    const currentTime = row.liked_sort_time == null
+      ? (ascending ? 1000000000000 : -1)
+      : Number(order.value ? order.value(row) : row.liked_sort_time);
     const normalizedCurrentTime = Number.isFinite(currentTime)
       ? currentTime
       : (ascending ? 1000000000000 : -1);
-    const currentSortAt = String(row.liked_sort_at || "");
-    const currentPublishedAt = String(row.published_at || "");
+    const currentSortAt = row.liked_sort_at;
+    const currentPublishedAt = row.published_at;
     const currentId = String(row.id || "");
     const movingNext = direction > 0;
-    const primaryOperator = movingNext === ascending ? ">" : "<";
-    const idOperator = movingNext ? "<" : ">";
-    const primarySortDirection = movingNext
-      ? (ascending ? "ASC" : "DESC")
-      : (ascending ? "DESC" : "ASC");
-    const idSortDirection = movingNext ? "DESC" : "ASC";
+    const cursor = keyset([
+      { expression: likedSortTime, value: ascending ? normalizedCurrentTime : row.liked_sort_time, direction: ascending ? "ASC" : "DESC" },
+      { expression: likedSortAt, value: currentSortAt, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.published_at", value: currentPublishedAt, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.id", value: currentId, direction: "DESC" }
+    ], movingNext);
     const whereParts = [];
     const args = [];
     if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
@@ -184,7 +232,8 @@ export function createShortVideoNavigationQueries({
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     whereParts.push("v.is_liked = 1");
@@ -193,29 +242,14 @@ export function createShortVideoNavigationQueries({
       SELECT v.id
       FROM short_videos v ${indexHint}
       WHERE ${whereParts.join(" AND ")} AND (
-        ${likedSortTime} ${primaryOperator} ?
-        OR (${likedSortTime} = ? AND ${likedSortAt} ${primaryOperator} ?)
-        OR (${likedSortTime} = ? AND ${likedSortAt} = ? AND v.published_at ${primaryOperator} ?)
-        OR (${likedSortTime} = ? AND ${likedSortAt} = ? AND v.published_at = ? AND v.id ${idOperator} ?)
+        ${cursor.where}
       )
       ORDER BY
-        ${likedSortTime} ${primarySortDirection},
-        ${likedSortAt} ${primarySortDirection},
-        v.published_at ${primarySortDirection},
-        v.id ${idSortDirection}
+        ${cursor.orderBy}
       LIMIT ?
     `).all(
       ...args,
-      normalizedCurrentTime,
-      normalizedCurrentTime,
-      currentSortAt,
-      normalizedCurrentTime,
-      currentSortAt,
-      currentPublishedAt,
-      normalizedCurrentTime,
-      currentSortAt,
-      currentPublishedAt,
-      currentId,
+      ...cursor.args,
       Math.max(1, Number(limit || 1))
     ).map((item) => String(item.id || "")).filter(Boolean);
     if (!ids.length) return [];
@@ -239,25 +273,20 @@ export function createShortVideoNavigationQueries({
       && ["liked", "posts", "all", "local"].includes(filter.source)
       && order?.column === "published_at";
     if (!eligible) return null;
+    if (author && author !== "all" && (author.startsWith("name:")
+      || filter.media !== "all" || filter.quality !== "all")) return null;
+    const authorScope = indexedAuthorVideoScope(author);
 
     const movingNext = direction > 0;
     const whereParts = [];
-    const args = [];
+    const args = [...(authorScope?.args || [])];
     if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
-    if (author && author !== "all") {
-      if (author.startsWith("name:")) {
-        whereParts.push("v.author_name = ?");
-        args.push(author.slice(5));
-      } else {
-        whereParts.push("v.author_sec_uid = ?");
-        args.push(author);
-      }
-    }
     const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     if (filter.source === "liked") {
@@ -276,30 +305,40 @@ export function createShortVideoNavigationQueries({
     const publishedExpression = order.expression
       ? "COALESCE(NULLIF(v.published_at, ''), '9999-12-31T23:59:59.999Z')"
       : "v.published_at";
-    const publishedAt = order.value ? order.value(row) : row.published_at || "";
-    const likedAt = row.liked_at || "";
+    // Exact author/all author pages use fastPublishedVideoPage's raw ASC key;
+    // unscoped fastFilteredVideoPage puts unknown publication dates last.
+    const rawAscendingPage = Boolean(author && !author.startsWith("name:")
+      && filter.media === "all" && filter.quality === "all");
+    const effectivePublishedExpression = rawAscendingPage ? "v.published_at" : publishedExpression;
+    const publishedAt = !rawAscendingPage && order.value ? order.value(row) : row.published_at;
+    const likedAt = row.liked_at;
     const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
     const operator = movingNext === ascending ? ">" : "<";
     const sortDirection = movingNext
       ? (ascending ? "ASC" : "DESC")
       : (ascending ? "DESC" : "ASC");
-    const indexHint = qualityWhere
+    const cursor = keyset([
+      { expression: effectivePublishedExpression, value: publishedAt, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.liked_at", value: likedAt, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.id", value: row.id, direction: "DESC" }
+    ], movingNext);
+    const tupleSeek = !ascending && nonNullable(database, "published_at") && nonNullable(database, "liked_at");
+    const indexHint = authorScope ? "" : qualityWhere
       ? "INDEXED BY idx_short_videos_actual_pixels"
       : author && author !== "all" && !author.startsWith("name:")
         ? "INDEXED BY idx_short_videos_author_published"
         : "INDEXED BY idx_short_videos_published";
     const ids = database.prepare(`
+      ${authorScope?.queryPrefix || ""}
       SELECT v.id
-      FROM short_videos v ${indexHint}
+      ${authorScope ? "FROM author_video_ids author_match CROSS JOIN short_videos v ON v.id = author_match.id" : `FROM short_videos v ${indexHint}`}
       WHERE ${whereParts.length ? `${whereParts.join(" AND ")} AND ` : ""}
-        (${publishedExpression}, v.liked_at, v.id) ${operator} (?, ?, ?)
-      ORDER BY ${publishedExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}
+        ${tupleSeek ? `(${publishedExpression}, v.liked_at, v.id) ${operator} (?, ?, ?)` : `(${cursor.where})`}
+      ORDER BY ${tupleSeek ? `${publishedExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}` : cursor.orderBy}
       LIMIT ?
     `).all(
       ...args,
-      publishedAt,
-      likedAt,
-      row.id || "",
+      ...(tupleSeek ? [publishedAt, likedAt, row.id || ""] : cursor.args),
       Math.max(1, Number(limit || 1))
     ).map((item) => String(item.id || "")).filter(Boolean);
     if (!ids.length) return [];
@@ -341,17 +380,31 @@ export function createShortVideoNavigationQueries({
         END`
       : order.column === "duration_ms"
         ? "COALESCE(v.duration_ms, 0)"
-        : order.column === "digg_count"
-          ? "v.digg_count"
+        : ["digg_count", "size_bytes"].includes(order.column)
+          ? `v.${order.column}`
           : `COALESCE(v.${order.column}, 0)`;
-    const metricValue = Math.max(0, Number(order.value ? order.value(row) : row[order.column] || 0));
-    const likedAt = String(row.liked_at || "");
+    let metricValue = Number(order.value ? order.value(row) : row[order.column] || 0);
+    // Catalog statistics/assets can project a different value (or coalesce
+    // NULL) than the raw fast-list ordering. Read only that scalar key; default
+    // publication/liked navigation never needs this compatibility lookup.
+    if (order.column !== "duration_ms") {
+      metricValue = database.prepare(`SELECT ${metricExpression} AS value FROM short_videos v WHERE v.id = ?`).get(row.id)?.value ?? null;
+    }
+    const likedAt = row.liked_at;
     const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
     const movingNext = direction > 0;
     const operator = movingNext === ascending ? ">" : "<";
     const sortDirection = movingNext
       ? (ascending ? "ASC" : "DESC")
       : (ascending ? "DESC" : "ASC");
+    const cursor = keyset([
+      { expression: metricExpression, value: metricValue, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.liked_at", value: likedAt, direction: ascending ? "ASC" : "DESC" },
+      { expression: "v.id", value: row.id, direction: "DESC" }
+    ], movingNext);
+    const rawMetric = !likesAscending && ["digg_count", "size_bytes"].includes(order.column);
+    const ordinaryDescending = !ascending && (!rawMetric || nonNullable(database, order.column))
+      && nonNullable(database, "liked_at");
     const whereParts = [];
     const args = [];
     if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
@@ -359,7 +412,8 @@ export function createShortVideoNavigationQueries({
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     if (filter.source === "liked") {
@@ -388,20 +442,15 @@ export function createShortVideoNavigationQueries({
       SELECT v.id
       FROM short_videos v ${indexHint}
       WHERE ${whereParts.length ? `${whereParts.join(" AND ")} AND ` : ""}(
-        ${metricExpression} ${operator} ?
+        ${ordinaryDescending ? `${metricExpression} ${operator} ?
         OR (${metricExpression} = ? AND v.liked_at ${operator} ?)
-        OR (${metricExpression} = ? AND v.liked_at = ? AND v.id ${operator} ?)
+        OR (${metricExpression} = ? AND v.liked_at = ? AND v.id ${operator} ?)` : cursor.where}
       )
-      ORDER BY ${metricExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}
+      ORDER BY ${ordinaryDescending ? `${metricExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}` : cursor.orderBy}
       LIMIT ?
     `).all(
       ...args,
-      metricValue,
-      metricValue,
-      likedAt,
-      metricValue,
-      likedAt,
-      row.id || "",
+      ...(ordinaryDescending ? [metricValue, metricValue, likedAt, metricValue, likedAt, row.id || ""] : cursor.args),
       Math.max(1, Number(limit || 1))
     ).map((item) => String(item.id || "")).filter(Boolean);
     if (!ids.length) return [];
@@ -423,10 +472,17 @@ export function createShortVideoNavigationQueries({
     }
     const column = order.expression || order.column;
     const fallback = order.fallback;
-    const value = order.value ? order.value(row) : row[order.column] ?? (order.numeric ? 0 : "");
-    const fallbackValue = row[fallback] ?? (order.numeric ? "" : "");
+    const value = order.value ? order.value(row) : row[order.column];
+    const fallbackValue = row[fallback];
     const select = includeAllColumns ? "*" : "id";
     const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
+    if (ascending || (!order.expression && !nonNullable(database, order.column)) || !nonNullable(database, fallback)) {
+      return multiColumnAdjacentRows(database, row, direction, [
+        { expression: column, value: () => value, direction: ascending ? "ASC" : "DESC" },
+        { column: fallback, direction: ascending ? "ASC" : "DESC" },
+        { column: "id", direction: "DESC" }
+      ], includeAllColumns, filter, limit);
+    }
     const movingNext = direction > 0;
     const operator = movingNext === ascending ? ">" : "<";
     const sortDirection = movingNext
@@ -450,36 +506,21 @@ export function createShortVideoNavigationQueries({
   function multiColumnAdjacentRows(database, row, direction, keys, includeAllColumns = false, filter = null, limit = 1) {
     const normalizedKeys = keys.map((key) => ({
       expression: key.expression || key.column,
-      value: typeof key.value === "function" ? key.value(row) : row[key.column] ?? "",
+      value: typeof key.value === "function" ? key.value(row) : row[key.column],
       direction: String(key.direction || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC"
     }));
     const movingNext = direction > 0;
-    const conditions = [];
-    const orderArgs = [];
-    for (let index = 0; index < normalizedKeys.length; index += 1) {
-      const current = normalizedKeys[index];
-      const operator = movingNext === (current.direction === "ASC") ? ">" : "<";
-      const equalities = normalizedKeys.slice(0, index).map((key) => `${key.expression} = ?`);
-      conditions.push(`(${[...equalities, `${current.expression} ${operator} ?`].join(" AND ")})`);
-      for (let previous = 0; previous < index; previous += 1) orderArgs.push(normalizedKeys[previous].value);
-      orderArgs.push(current.value);
-    }
-    const orderBy = normalizedKeys.map((key) => {
-      const sqlDirection = movingNext
-        ? key.direction
-        : key.direction === "ASC" ? "DESC" : "ASC";
-      return `${key.expression} ${sqlDirection}`;
-    }).join(", ");
+    const cursor = keyset(normalizedKeys, movingNext);
     const filterWhere = filter?.where ? `${filter.where} AND ` : "";
     const filterArgs = filter?.args || [];
     const select = includeAllColumns ? "*" : "id";
     return database.prepare(`
       SELECT ${select}
       FROM short_video_catalog
-      WHERE ${filterWhere}(${conditions.join(" OR ")})
-      ORDER BY ${orderBy}
+      WHERE ${filterWhere}(${cursor.where})
+      ORDER BY ${cursor.orderBy}
       LIMIT ?
-    `).all(...filterArgs, ...orderArgs, Math.max(1, Number(limit || 1)));
+    `).all(...filterArgs, ...cursor.args, Math.max(1, Number(limit || 1)));
   }
 
   return {

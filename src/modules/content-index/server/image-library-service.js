@@ -1,7 +1,16 @@
+import { createHash, randomUUID } from "node:crypto";
+
+const imageNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+function compareImageNames(left, right) {
+  return imageNameCollator.compare(left, right);
+}
+
 export function createImageLibraryService({
   clampInteger,
   galleryMediaRootStatuses,
   getImageLibraryIndex,
+  getImageLibraryRevision = null,
   imageReaderCacheStatus,
   mangaService,
   maxItemLimit,
@@ -13,6 +22,33 @@ export function createImageLibraryService({
   let cachedPhotoCatalog = null;
   let cachedSummaryStatic = null;
   let imageSearchDocumentCache = new WeakMap();
+  const listRealm = randomUUID();
+  const sourceIdentities = new WeakMap();
+  let sourceSequence = 0;
+  let unstableSequence = 0;
+
+  function sourceIdentity(value) {
+    if (!value || typeof value !== "object") return "";
+    let identity = sourceIdentities.get(value);
+    if (!identity) { identity = ++sourceSequence; sourceIdentities.set(value, identity); }
+    return identity;
+  }
+
+  function listSourceStamp(index, mode) {
+    return JSON.stringify([
+      sourceIdentity(index), getImageLibraryRevision?.() ?? "",
+      sourceIdentity(index?.photoSets), index?.photoSets?.length || 0,
+      sourceIdentity(index?.mediaItems), index?.mediaItems?.length || 0,
+      index?.scannedAt || "", index?.cacheIdentity || "",
+      ["movie", "tv", "anime", "media"].includes(mode) ? metadataService.listRevision?.(mode) ?? "" : "",
+      mode === "manga" ? mangaService.listRevision?.() ?? "" : ""
+    ]);
+  }
+
+  function publicListRevision(before, after, mode, mangaSourceRevision) {
+    const stamp = before === after ? [listRealm, mode, before, mangaSourceRevision] : [listRealm, "unstable", ++unstableSequence];
+    return createHash("sha256").update(JSON.stringify(stamp)).digest("hex");
+  }
 
   function facetCounts(items, fieldName) {
     const counts = new Map();
@@ -23,7 +59,7 @@ export function createImageLibraryService({
     }
     return [...counts.entries()]
       .map(([value, count]) => ({ value, count }))
-      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" }));
+      .sort((a, b) => b.count - a.count || compareImageNames(a.value, b.value));
   }
 
   function mediaItemsByKind(items, kind) {
@@ -111,11 +147,18 @@ export function createImageLibraryService({
     return `/media/gallery-media-cover/${encodeURIComponent(mediaId)}${suffix}`;
   }
 
-  function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null) {
+  function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null, publicTvSeriesByKey = null) {
     const sourceSeriesKey = galleryMediaSourceSeriesKey(item);
-    const tvSeries = sourceSeriesKey ? metadataService.publicTvSeries(tvMetadataByKey?.get(sourceSeriesKey) || metadataService.tvSeriesRow(sourceSeriesKey)) : null;
+    let tvSeries = null;
+    if (sourceSeriesKey) {
+      if (publicTvSeriesByKey?.has(sourceSeriesKey)) tvSeries = publicTvSeriesByKey.get(sourceSeriesKey);
+      else {
+        tvSeries = metadataService.publicTvSeries(tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey));
+        publicTvSeriesByKey?.set(sourceSeriesKey, tvSeries);
+      }
+    }
     const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries);
-    const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById?.get(item.id) || metadataService.movieRow(item.id)) : null;
+    const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id)) : null;
     const movieCoverUrl = movieMetadata?.coverUrl || "";
     const fallbackCoverUrl = item.mediaKind === "movie" || isEpisodicMediaKind(item.mediaKind) ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
     return {
@@ -146,7 +189,8 @@ export function createImageLibraryService({
     }));
     const tvMetadataByKey = metadataService.tvSeriesRowsMap();
     const movieMetadataById = metadataService.movieRowsMap();
-    const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
+    const publicTvSeriesByKey = new Map();
+    const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey));
     const westernItems = mediaItemsByKind(mediaItems, "western");
     const movieItems = mediaItemsByKind(mediaItems, "movie");
     const tvItems = mediaItemsByKind(mediaItems, "tv");
@@ -268,11 +312,16 @@ export function createImageLibraryService({
     const collection = String(url.searchParams.get("collection") || "").trim();
     const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
     const index = getImageLibraryIndex(options);
+    const sourceStampBefore = listSourceStamp(index, mode);
+    let mangaSourceRevision = "";
     let mediaItems = [];
     if (!["photo", "manga"].includes(mode)) {
-      const tvMetadataByKey = metadataService.tvSeriesRowsMap();
-      const movieMetadataById = metadataService.movieRowsMap();
-      mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
+      const kinds = mode === "media" ? ["movie", "tv", "anime"] : [mode];
+      const rawItems = mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], kinds);
+      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap() : new Map();
+      const movieMetadataById = rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
+      const publicTvSeriesByKey = new Map();
+      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey));
     }
 
     let source = [];
@@ -303,22 +352,29 @@ export function createImageLibraryService({
           : filteredPhotoSets;
       sourceIsSorted = photoView === "albums" && defaultPhotoFilters && !collection && !query;
     } else if (mode === "manga") {
-      source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));
+      const mangaSourceHash = createHash("sha256");
+      source = mangaService.cacheDirs().map((cacheDir) => {
+        const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
+        mangaSourceHash.update(JSON.stringify(item)).update("\0");
+        return item;
+      });
+      mangaSourceRevision = mangaSourceHash.digest("hex");
     } else if (mode === "media") {
       const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
       const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
       const animeSource = mediaItemsByKind(mediaItems, "anime").map((item) => publicImageLibraryListItem(item, item.mediaKind));
       const episodicSource = [...tvSource, ...animeSource];
-      const episodicSeriesSource = tvSeriesGroups(episodicSource).map(publicTvSeriesListItem).filter(Boolean);
+      const episodicGroups = tvSeriesGroups(episodicSource);
+      const episodicSeriesSource = episodicGroups.map(publicTvSeriesListItem).filter(Boolean);
       const screenWorksSource = [...movieSource, ...episodicSeriesSource];
       facetsSource = screenWorksSource;
       if (seriesKey) {
         const categorySource = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
         source = categorySource.filter((item) => item.seriesKey === seriesKey);
-        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(episodicSource).find((group) => group.seriesKey === seriesKey) || null);
+        seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesKey === seriesKey) || null);
       } else if (person !== "all") {
         source = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
-        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(episodicSource).find((group) => group.seriesName === person && (mediaKind === "all" || group.mediaKind === mediaKind)) || null);
+        seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesName === person && (mediaKind === "all" || group.mediaKind === mediaKind)) || null);
       } else {
         source = filterMediaItemsForList(screenWorksSource, { category, person, mediaKind });
       }
@@ -326,18 +382,19 @@ export function createImageLibraryService({
       const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
       const categorySource = filterMediaItemsForList(mediaSource, { category, person });
       if (mode === "tv") {
-        const tvSeriesSource = tvSeriesGroups(mediaSource).map(publicTvSeriesListItem);
+        const groups = tvSeriesGroups(mediaSource);
+        const tvSeriesSource = groups.map(publicTvSeriesListItem);
         facetsSource = tvSeriesSource;
         if (seriesKey) {
           source = categorySource.filter((item) => item.seriesKey === seriesKey);
-          seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesKey === seriesKey) || null);
+          seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesKey === seriesKey) || null);
         } else if (person !== "all") {
           source = categorySource;
-          seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesName === person) || null);
+          seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesName === person) || null);
         } else if (tvView === "episodes") {
           source = categorySource;
         } else {
-          source = tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
+          source = category === "all" ? tvSeriesSource : tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
         }
       } else if (mode === "western") {
         facetsSource = mediaSource;
@@ -357,6 +414,9 @@ export function createImageLibraryService({
     const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
     const items = sorted.slice(offset, offset + limit).map((item) => {
       const match = searchResultsByItem?.get(item);
+      if (item.type === "photo" && item.albumNumber) {
+        item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
+      }
       return match ? { ...item, matchFields: match.matchFields } : item;
     });
     return {
@@ -385,6 +445,8 @@ export function createImageLibraryService({
       total: sorted.length,
       limit,
       offset,
+      nextOffset: offset + items.length,
+      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),
       scannedAt: mode === "manga" ? latestUpdatedAt(source, index.scannedAt || "") : index.scannedAt || "",
       items
     };
@@ -557,7 +619,7 @@ export function createImageLibraryService({
   }
 
   function comparePhotoPersonFacetValues(a, b) {
-    return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+    return compareImageNames(a, b);
   }
 
   function selectTopPhotoPersonFacetValues(values, limit) {
@@ -589,7 +651,7 @@ export function createImageLibraryService({
       .sort((a, b) => b.value.localeCompare(a.value));
   }
 
-  function publicImageLibraryListItem(item, mode) {
+  function publicImageLibraryListItem(item, mode, { deferPhotoSubject = false } = {}) {
     const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
     const movieMetadata = item?.movieMetadata || null;
     const movieTitle = normalizedMode === "movie" ? moviePrimaryDisplayTitle(item, movieMetadata) : "";
@@ -597,7 +659,9 @@ export function createImageLibraryService({
     const collectionTitle = normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "";
     const archiveDate = normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "";
     const albumNumber = normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "";
-    const albumSubject = normalizedMode === "photo" ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
+    // Unnumbered subjects participate in the person facet guard. Numbered
+    // subjects are display-only and can be derived for the returned page.
+    const albumSubject = normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
     const displayTitle =
       normalizedMode === "movie" && movieTitle
         ? [movieTitle, movieMetadata?.year ? `(${movieMetadata.year})` : ""].filter(Boolean).join(" ")
@@ -799,7 +863,7 @@ export function createImageLibraryService({
 
   function publicWesternPersonListItem(group) {
     const categories = [...(group?.categories || new Map()).entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+      .sort((a, b) => b[1] - a[1] || compareImageNames(a[0], b[0]))
       .map(([value, count]) => ({ value, count }));
     return {
       id: String(group?.personName || ""),
@@ -836,7 +900,7 @@ export function createImageLibraryService({
     if (cachedPhotoCatalog?.index === index) return cachedPhotoCatalog;
     imageSearchDocumentCache = new WeakMap();
     const rawItems = Array.isArray(index?.photoSets) ? index.photoSets : [];
-    const items = rawItems.map((item) => publicImageLibraryListItem(item, "photo"));
+    const items = rawItems.map((item) => publicImageLibraryListItem(item, "photo", { deferPhotoSubject: true }));
     cachedPhotoCatalog = {
       index,
       items,
@@ -993,7 +1057,7 @@ export function createImageLibraryService({
     const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
     if (scoreDiff) return scoreDiff;
     const timeDiff = new Date(b.item?.updatedAt || 0).getTime() - new Date(a.item?.updatedAt || 0).getTime();
-    return timeDiff || String(a.item?.title || "").localeCompare(String(b.item?.title || ""), undefined, { numeric: true, sensitivity: "base" });
+    return timeDiff || compareImageNames(String(a.item?.title || ""), String(b.item?.title || ""));
   }
 
   function filterPhotoSetsForList(items, filters = {}) {
@@ -1104,7 +1168,7 @@ export function createImageLibraryService({
         categories: [...group.categories],
         subCategories: [...group.subCategories]
       }))
-      .sort((a, b) => b.count - a.count || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime() || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      .sort((a, b) => b.count - a.count || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime() || compareImageNames(a.title, b.title));
   }
 
   function photoCollectionCategoryGroups(items = []) {
@@ -1142,7 +1206,7 @@ export function createImageLibraryService({
         ...group,
         collections: photoCollectionGroups(group.items)
       }))
-      .sort((a, b) => b.albumCount - a.albumCount || Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      .sort((a, b) => b.albumCount - a.albumCount || Number(b.size || 0) - Number(a.size || 0) || compareImageNames(a.title, b.title));
   }
 
   function photoCollectionSummary(items = [], collectionValue = "") {
@@ -1169,13 +1233,13 @@ export function createImageLibraryService({
   function sortImageLibraryItems(items, sort) {
     const list = [...items];
     if (sort === "count") {
-      return list.sort((a, b) => Number(b.albumCount || 0) - Number(a.albumCount || 0) || Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      return list.sort((a, b) => Number(b.albumCount || 0) - Number(a.albumCount || 0) || Number(b.size || 0) - Number(a.size || 0) || compareImageNames(a.title, b.title));
     }
     if (sort === "title") {
-      return list.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      return list.sort((a, b) => compareImageNames(a.title, b.title));
     }
     if (sort === "size") {
-      return list.sort((a, b) => Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      return list.sort((a, b) => Number(b.size || 0) - Number(a.size || 0) || compareImageNames(a.title, b.title));
     }
     if (sort === "rating") {
       return list.sort((a, b) => {
@@ -1185,21 +1249,21 @@ export function createImageLibraryService({
         const bHasRating = bRating > 0;
         if (aHasRating !== bHasRating) return aHasRating ? -1 : 1;
         if (aRating !== bRating) return bRating - aRating;
-        return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+        return compareImageNames(a.title, b.title);
       });
     }
     if (sort === "year") {
       return list.sort((a, b) => {
         const aYear = Number.parseInt(String(a?.year || a?.movieMetadata?.year || a?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
         const bYear = Number.parseInt(String(b?.year || b?.movieMetadata?.year || b?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
-        return bYear - aYear || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+        return bYear - aYear || compareImageNames(a.title, b.title);
       });
     }
     return list
       .map((item) => ({ item, updatedAt: new Date(item.updatedAt || 0).getTime() }))
       .sort((a, b) => {
         const timeDiff = b.updatedAt - a.updatedAt;
-        return timeDiff || a.item.title.localeCompare(b.item.title, undefined, { numeric: true, sensitivity: "base" });
+        return timeDiff || compareImageNames(a.item.title, b.item.title);
       })
       .map(({ item }) => item);
   }

@@ -89,9 +89,9 @@ function harness(input = source, options = {}) {
       throw new Error(`Unexpected fixture request: ${path}`);
     }
   });
-  const exposure = /  return \{\r?\n    deactivate: resetMangaReaderProgressTracker,/;
+  const exposure = /  return \{\r?\n(?=    deactivate:)/;
   assert(exposure.test(input), "Exact actual factory return needed for direct-entry testing");
-  const executable = input.replace(exposure, "  return {\n    __testCreateCard: createChannelCard,\n    deactivate: resetMangaReaderProgressTracker,");
+  const executable = input.replace(exposure, "  return {\n    __testCreateCard: createChannelCard,\n");
   vm.runInContext(strip(executable), c, { filename: "actual-channel-views.js" });
   const host = { els, normalizeChannelMode: c.normalizeChannelMode, getActiveUrl: () => ORIGIN,
     limits: { getChannel: () => 40, increaseChannel() {} }, recent: { record: value => calls.recent.push(plain(value)) }, favorites: { onChannelFavoriteChange() {} },

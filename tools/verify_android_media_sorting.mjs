@@ -39,9 +39,10 @@ function syntheticService() {
       if (kind === "movie") movies.set(id, meta); else tv.set(`Synthetic category|${title}`, meta);
     }
   }
+  const index = { scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items };
   return createImageLibraryService({
     clampInteger: (value, fallback, min, max) => Math.min(max, Math.max(min, Number.parseInt(value, 10) || fallback)),
-    getImageLibraryIndex: () => ({ scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items }),
+    getImageLibraryIndex: () => index,
     maxItemLimit: 1000, galleryMediaRootStatuses: () => [], imageReaderCacheStatus: () => ({}), photoSetRootStatuses: () => [],
     mangaService: { cacheDirs: () => [], publicSummary: value => value, rootStatus: () => ({}) },
     metadataService: { movieRowsMap: () => movies, tvSeriesRowsMap: () => tv, movieRow: id => movies.get(id),
@@ -88,9 +89,9 @@ function harness(input = sources, { storage = new Map(), hash = "", cache = new 
   const names = ["syncModuleChrome", "updateModuleChannelSearch", "goBack", "returnToStackView", "applyBackState", "isRootNavigationView",
     "readViewStateFromHash", "viewRouteHash", "routeHistoryState", "rememberCurrentScrollInHistory", "pushViewHistory", "replaceCurrentHistory"];
   vm.runInContext(names.map(name => appFunction(input.app, name)).join("\n"), c);
-  const expose = /  return \{\r?\n    deactivate: resetMangaReaderProgressTracker,/;
+  const expose = /  return \{\r?\n(?=    deactivate:)/;
   assert(expose.test(input.channel));
-  const channel = input.channel.replace(expose, "  return {\n    __testPath: channelItemsPath,\n    deactivate: resetMangaReaderProgressTracker,");
+  const channel = input.channel.replace(expose, "  return {\n    __testPath: channelItemsPath,\n");
   c.createChannelViews = vm.runInContext(`(function(){${strip(channel)};return createChannelViews;})()`, c);
   h.host.getActiveUrl = () => sourceUrl;
   Object.assign(h.host.limits, { getChannel: () => limit, increaseChannel: count => { limit += count; } });
@@ -211,7 +212,7 @@ test("late old-order response cannot replace newer requested ordering", async in
   await h.open({ mode: "movie", query: "Synthetic", sort: "title" }); const current = h.titles();
   hold.resolve(h.data({ mode: "movie", q: "Synthetic", sort: "size", limit: "40" })); await first;
   assert.deepEqual(h.active(), ["标题"]); assert.deepEqual(h.titles(), current);
-  const oldWrite = h.calls.cacheWrites.find(call => call.path.includes("sort=size")); assert.ok(oldWrite); assert.equal(oldWrite.payload.sort, "size");
+  assert.equal(h.calls.cacheWrites.some(call => call.path.includes("sort=size")), false, "Cancelled ordering response cannot overwrite its cache");
 });
 test("late sorting response cannot repaint an unrelated page", async input => {
   const h = harness(input), hold = deferred(); h.queue.push(hold); h.c.showView("channel", { mode: "movie", query: "Synthetic", sort: "title" }); await tick(); const first = h.pending;

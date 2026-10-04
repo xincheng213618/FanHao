@@ -16,16 +16,91 @@ export function createMediaStreamService({
   sendJson,
   serveRangedFile,
   spawnProcess = spawn,
-  warn = console.warn
+  warn = console.warn,
+  concurrency = 2,
+  capacity = 16,
+  queueTimeoutMs = 10000,
+  startupTimeoutMs = 15000,
+  childCloseTimeoutMs = 1500
 }) {
-  function serveVideo(req, res, file) {
-    serveRangedFile(req, res, file);
+  concurrency = boundedInteger(concurrency, 2, 1, 16);
+  capacity = boundedInteger(capacity, 16, concurrency, 512);
+  queueTimeoutMs = boundedInteger(queueTimeoutMs, 10000, 1, 600000);
+  startupTimeoutMs = boundedInteger(startupTimeoutMs, 15000, 1, 600000);
+  childCloseTimeoutMs = boundedInteger(childCloseTimeoutMs, 1500, 1, 60000);
+  const jobs = new Set();
+  const queue = [];
+  let accepting = true;
+  let generation = 0;
+  let pumping = false;
+  let stopTask = null;
+
+  function serveVideo(req, res, file, options) {
+    return serveRangedFile(req, res, file, options);
   }
 
   function serveTranscodedVideo(req, res, file, url) {
+    if (req.aborted || res.destroyed || res.writableEnded) return;
+    if (!accepting) {
+      rejectRequest(res, "视频转码服务正在停止", "TRANSCODE_STOPPED");
+      return;
+    }
+    if (jobs.size >= capacity) {
+      rejectRequest(res, "视频转码任务繁忙，请稍后重试", "TRANSCODE_BUSY");
+      return;
+    }
     const stat = safeStat(file.path);
     if (!stat) {
       notFound(res);
+      return;
+    }
+    if (req.method === "HEAD") {
+      res.writeHead(200, videoHeaders());
+      res.end();
+      return;
+    }
+
+    const job = { req, res, file, url, started: false, closed: false, responseDone: false, failureHandled: false, outputStarted: false, stdoutEnded: false, killRequested: false, closeUnconfirmed: false, stderrText: "", loggedBytes: 0 };
+    job.closedPromise = new Promise((resolve) => { job.resolveClosed = resolve; });
+    job.onResponseClose = () => {
+      job.responseDone = true;
+      if (!job.failureHandled) {
+        job.failureHandled = true;
+        removeQueued(job);
+        cancelChild(job);
+      }
+      dispose(job);
+    };
+    job.onResponseFinish = () => {
+      job.responseDone = true;
+      // Only our successful close+EOF path may finish an active response.
+      if (!job.closed) cancelChild(job);
+      dispose(job);
+    };
+    job.onResponseError = (error) => failJob(job, "视频转码失败", error);
+    job.onRequestAbort = () => {
+      if (!res.destroyed) res.destroy();
+      job.onResponseClose();
+    };
+    res.on("close", job.onResponseClose);
+    res.on("finish", job.onResponseFinish);
+    res.on("error", job.onResponseError);
+    req.on?.("aborted", job.onRequestAbort);
+    jobs.add(job);
+    queue.push(job);
+    job.queueTimer = setTimeout(() => failJob(job, "等待视频转码超时，请稍后重试", transcodeError("TRANSCODE_BUSY"), 503), queueTimeoutMs);
+    job.queueTimer.unref?.();
+    pump();
+  }
+
+  function launch(job) {
+    const { req, res, file, url } = job;
+    job.started = true;
+    clearTimeout(job.queueTimer);
+    if (req.aborted || res.destroyed || res.writableEnded) {
+      job.closed = true;
+      job.resolveClosed();
+      job.onResponseClose();
       return;
     }
 
@@ -60,50 +135,196 @@ export function createMediaStreamService({
       "pipe:1"
     );
 
-    const child = spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let outputStarted = false;
-    let failureHandled = false;
-    let stderrText = "";
-
-    child.stdout.once("data", (chunk) => {
-      if (res.destroyed || res.writableEnded) return;
-      outputStarted = true;
-      res.writeHead(200, {
-        "Content-Type": "video/mp4",
-        "Cache-Control": "no-store",
-        "Content-Disposition": "inline"
-      });
-      res.write(chunk);
-      child.stdout.pipe(res);
-    });
-    child.stderr.on("data", (chunk) => {
+    let child;
+    try {
+      child = spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      job.closed = true;
+      job.resolveClosed();
+      failJob(job, "FFmpeg 启动失败", error);
+      return;
+    }
+    job.child = child;
+    job.onFirstData = (chunk) => {
+      if (job.failureHandled || res.destroyed || res.writableEnded) return;
+      job.outputStarted = true;
+      clearTimeout(job.startupTimer);
+      try {
+        res.writeHead(200, videoHeaders());
+        if (res.write(chunk)) pipeOutput(job);
+        else {
+          child.stdout.pause();
+          job.onDrain = () => { job.onDrain = null; pipeOutput(job); };
+          res.once("drain", job.onDrain);
+        }
+      } catch (error) { failJob(job, "视频转码失败", error); }
+    };
+    job.onStdoutEnd = () => {
+      job.stdoutEnded = true;
+      if (!job.closed && !job.failureHandled) {
+        job.eofTimer = setTimeout(() => failJob(job, "视频转码失败", transcodeError("TRANSCODE_EXIT_TIMEOUT")), childCloseTimeoutMs);
+        job.eofTimer.unref?.();
+      }
+      finishSuccess(job);
+    };
+    job.onStdoutClose = () => {
+      if (!job.stdoutEnded && !job.failureHandled) failJob(job, "视频转码失败", transcodeError("TRANSCODE_OUTPUT_CLOSED"));
+    };
+    job.onPipeError = (error) => failJob(job, "视频转码失败", error);
+    job.onStderrData = (chunk) => {
       const text = String(chunk || "").trim();
       if (!text) return;
-      stderrText = `${stderrText}\n${text}`.trim().slice(-2000);
-      warn("[ffmpeg]", text);
-    });
-    child.on("error", (error) => {
+      job.stderrText = `${job.stderrText}\n${text}`.trim().slice(-2000);
+      // Retain the latest diagnostic without allowing a noisy child to flood logs.
+      const logged = text.slice(0, Math.max(0, 8000 - job.loggedBytes));
+      job.loggedBytes += logged.length;
+      if (logged) warn("[ffmpeg]", logged);
+    };
+    job.onChildError = (error) => {
       warn("[ffmpeg]", error.message);
-      failTranscode("FFmpeg 启动失败", error);
-    });
-    child.on("close", (code) => {
-      if (outputStarted || failureHandled || res.destroyed || res.writableEnded) return;
-      const detail = stderrText ? `: ${stderrText.split(/\r?\n/).at(-1)}` : "";
-      failTranscode("视频转码失败", new Error(`FFmpeg exited before output (code ${code})${detail}`));
-    });
-    res.on("close", () => {
-      if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
-    });
-
-    function failTranscode(message, error) {
-      if (failureHandled) return;
-      failureHandled = true;
-      if (!res.headersSent && !res.destroyed && !res.writableEnded) {
-        sendJson(res, 500, { error: message });
-        return;
+      failJob(job, "FFmpeg 启动失败", error);
+    };
+    job.onChildClose = (code, signal) => {
+      if (job.closed) return;
+      job.closed = true;
+      job.exitCode = code;
+      job.resolveClosed();
+      clearTimeout(job.closeTimer);
+      clearTimeout(job.eofTimer);
+      clearTimeout(job.startupTimer);
+      if (!job.failureHandled && (code !== 0 || signal || !job.outputStarted)) {
+        const detail = job.stderrText ? `: ${job.stderrText.split(/\r?\n/).at(-1)}` : "";
+        failJob(job, "视频转码失败", new Error(`FFmpeg exited (code ${code}, signal ${signal || "none"})${detail}`));
       }
-      if (!res.destroyed && !res.writableEnded) res.destroy(error);
+      finishSuccess(job);
+      dispose(job);
+      pump();
+    };
+    child.stdout.once("data", job.onFirstData);
+    child.stdout.on("end", job.onStdoutEnd);
+    child.stdout.on("close", job.onStdoutClose);
+    child.stdout.on("error", job.onPipeError);
+    child.stderr.on("data", job.onStderrData);
+    child.stderr.on("error", job.onPipeError);
+    child.on("error", job.onChildError);
+    child.on("close", job.onChildClose);
+    job.startupTimer = setTimeout(() => failJob(job, "视频转码启动超时", transcodeError("TRANSCODE_START_TIMEOUT"), 504), startupTimeoutMs);
+    job.startupTimer.unref?.();
+  }
+
+  function pipeOutput(job) {
+    if (!job.failureHandled && !job.res.destroyed && !job.res.writableEnded) job.child.stdout.pipe(job.res, { end: false });
+  }
+
+  function finishSuccess(job) {
+    if (job.closed && job.exitCode === 0 && job.stdoutEnded && job.outputStarted && !job.failureHandled && !job.res.destroyed && !job.res.writableEnded) job.res.end();
+  }
+
+  function rejectRequest(res, message, code) {
+    res.setHeader?.("Retry-After", "1");
+    sendJson(res, 503, { error: message, code });
+  }
+
+  function failJob(job, message, error, status = 500) {
+    if (job.failureHandled) return;
+    job.failureHandled = true;
+    clearTimeout(job.queueTimer);
+    clearTimeout(job.startupTimer);
+    clearTimeout(job.eofTimer);
+    removeQueued(job);
+    if (job.onDrain) { job.res.off("drain", job.onDrain); job.onDrain = null; }
+    job.child?.stdout.off("data", job.onFirstData);
+    job.child?.stdout.unpipe(job.res);
+    job.child?.stdout.resume();
+    cancelChild(job);
+    if (!job.res.headersSent && !job.res.destroyed && !job.res.writableEnded) {
+      sendJson(job.res, status, { error: message, ...(error?.code ? { code: error.code } : {}) });
+    } else if (!job.res.destroyed && !job.res.writableEnded) job.res.destroy(error);
+    dispose(job);
+  }
+
+  function cancelChild(job) {
+    if (!job.child || job.closed || job.killRequested) return;
+    job.killRequested = true;
+    if (job.onDrain) { job.res.off("drain", job.onDrain); job.onDrain = null; }
+    job.child.stdout.off("data", job.onFirstData);
+    job.child.stdout.unpipe(job.res);
+    job.child.stdout.resume();
+    try { job.child.kill("SIGKILL"); } catch (error) { warn("[ffmpeg:kill]", error.message); }
+    if (job.closed) return;
+    job.closeTimer = setTimeout(() => {
+      if (job.closed) return;
+      job.closeUnconfirmed = true;
+      beginStop();
+    }, childCloseTimeoutMs);
+    job.closeTimer.unref?.();
+  }
+
+  function removeQueued(job) {
+    const index = queue.indexOf(job);
+    if (index >= 0) queue.splice(index, 1);
+  }
+
+  function dispose(job) {
+    if (!job.responseDone || (job.started && !job.closed)) return;
+    jobs.delete(job);
+    removeQueued(job);
+    for (const timer of [job.queueTimer, job.startupTimer, job.eofTimer, job.closeTimer]) clearTimeout(timer);
+    job.req.off?.("aborted", job.onRequestAbort);
+    job.res.off("close", job.onResponseClose);
+    job.res.off("finish", job.onResponseFinish);
+    job.res.off("error", job.onResponseError);
+    if (job.onDrain) job.res.off("drain", job.onDrain);
+    if (job.child) {
+      job.child.stdout.off("data", job.onFirstData);
+      job.child.stdout.off("end", job.onStdoutEnd);
+      job.child.stdout.off("close", job.onStdoutClose);
+      job.child.stdout.off("error", job.onPipeError);
+      job.child.stderr.off("data", job.onStderrData);
+      job.child.stderr.off("error", job.onPipeError);
+      job.child.off("error", job.onChildError);
+      job.child.off("close", job.onChildClose);
     }
+    pump();
+  }
+
+  function activeCount() { return [...jobs].filter((job) => job.started && !job.closed).length; }
+
+  function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (accepting && activeCount() < concurrency && queue.length) launch(queue.shift());
+    } finally { pumping = false; }
+  }
+
+  function beginStop() {
+    generation++;
+    accepting = false;
+    for (const job of [...jobs]) failJob(job, "视频转码服务正在停止", transcodeError("TRANSCODE_STOPPED"), 503);
+  }
+
+  function stop() {
+    if (stopTask) return stopTask;
+    beginStop();
+    const owners = [...jobs].filter((job) => job.started && !job.closed);
+    stopTask = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(transcodeError("TRANSCODE_CLOSE_UNCONFIRMED")), childCloseTimeoutMs);
+      Promise.all(owners.map((job) => job.closedPromise)).then(() => { clearTimeout(timer); resolve(); });
+    });
+    return stopTask;
+  }
+
+  async function start() {
+    const intent = generation;
+    if (stopTask) {
+      try { await stopTask; } catch (error) { if (activeCount()) throw error; }
+    }
+    if (intent !== generation) throw transcodeError("TRANSCODE_STOPPED");
+    if ([...jobs].some((job) => job.killRequested && !job.closed)) throw transcodeError("TRANSCODE_CLOSE_UNCONFIRMED");
+    stopTask = null;
+    accepting = true;
+    pump();
   }
 
   function serveInfo(res, file) {
@@ -144,8 +365,23 @@ export function createMediaStreamService({
   }
 
   return {
+    start,
+    beginStop,
+    stop,
+    diagnostics: () => ({ accepting, active: activeCount(), queued: queue.length, jobs: jobs.size, closing: [...jobs].filter((job) => job.killRequested && !job.closed).length, unconfirmedClose: [...jobs].some((job) => job.closeUnconfirmed && !job.closed), concurrency, capacity }),
     serveInfo,
     serveTranscodedVideo,
     serveVideo
   };
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  return Math.max(minimum, Math.min(maximum, Number.isFinite(number) ? Math.floor(number) : fallback));
+}
+
+function transcodeError(code) { return Object.assign(new Error(code), { code }); }
+
+function videoHeaders() {
+  return { "Content-Type": "video/mp4", "Cache-Control": "no-store", "Content-Disposition": "inline" };
 }

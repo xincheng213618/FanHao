@@ -20,6 +20,11 @@ export async function bootStandaloneApp() {
   const state = createStandaloneState(initialRoute.view);
   const els = createElementIndex();
   const pages = await loadCurrentModule(initialRoute.view);
+  const startupRoute = normalizeRoute(routeFromUrl());
+  if (startupRoute.view !== initialRoute.view) {
+    window.location.replace(window.location.href);
+    return;
+  }
   const host = createHost({ api, els, initialParams, pages, state });
 
   prepareClientShell();
@@ -28,16 +33,17 @@ export async function bootStandaloneApp() {
   host.syncBodyClasses();
   installAndroidClientReturn({ isAndroidClient, initialParams });
   host.installHistory();
-  await host.applyRoute(initialRoute);
-  host.initializeHistory();
+  host.initializeHistory(startupRoute);
+  host.applyRoute(startupRoute);
+  await host.waitForRoute();
   document.documentElement.classList.remove("app-module-loading");
 }
 
 async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
-      import("../modules/content-index/gallery-page.js?v=20260813-tv-series-identity-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20260908-library-browse-01")
+      import("../modules/content-index/gallery-page.js?v=20261004-gallery-reader-owner-01"),
+      import("../modules/content-index/gallery-renderer.js?v=20261004-gallery-reader-owner-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -46,15 +52,15 @@ async function loadCurrentModule(view) {
     };
   }
   if (view === "manga") {
-    const module = await import("../modules/photos/manga-page.js?v=20260829-manga-library-08");
+    const module = await import("../modules/photos/manga-page.js?v=20261004-manga-reader-owner-01");
     return { createPage: module.createMangaPage, view };
   }
   if (view === "novels") {
-      const module = await import("../modules/novels/novel-page.js?v=20260908-novel-library-01");
+      const module = await import("../modules/novels/novel-page.js?v=20261004-novel-progress-01");
     return { createPage: module.createNovelPage, view };
   }
   if (view === "music") {
-    const module = await import("../modules/music/music-page.js?v=20260712-project-refactor-03");
+    const module = await import("../modules/music/music-page.js?v=20261004-music-list-02");
     return { createPage: module.createMusicPage, view };
   }
   const module = await import("../modules/tools/tools-page.js?v=20260727-game-library-redesign-01");
@@ -65,6 +71,8 @@ function createHost({ api, els, initialParams, pages, state }) {
   let page = null;
   let galleryRenderer = null;
   let routeApplication = Promise.resolve();
+  let routeWork = Promise.resolve();
+  let routeOwner = null;
 
   const shared = {
     api,
@@ -175,6 +183,11 @@ function createHost({ api, els, initialParams, pages, state }) {
 
   function writeRoute(overrides = {}, mode = "push") {
     if (!state.routeReady || !window.history?.pushState) return;
+    if (["gallery", "manga", "music", "novels"].includes(state.activeView)) {
+      routeOwner?.supersede();
+      routeOwner = null;
+      state.restoringRoute = false;
+    }
     if (state.restoringRoute && mode !== "replace") return;
     syncBodyClasses();
     const next = currentRouteSnapshot(overrides);
@@ -205,14 +218,38 @@ function createHost({ api, els, initialParams, pages, state }) {
 
   function applyRoute(route) {
     const next = normalizeRoute(route);
-    const run = routeApplication.catch(() => {}).then(() => applyRouteNow(next));
+    routeOwner?.supersede();
+    const owner = { supersede: null };
+    const superseded = new Promise(resolve => { owner.supersede = resolve; });
+    routeOwner = owner;
+    // These reader pages own cancellation and stale-response checks. Apply their
+    // next state now so history navigation cannot wait behind obsolete I/O.
+    // Other pages retain their existing serialization until they own that I/O.
+    const work = ["gallery", "manga", "music", "novels"].includes(state.activeView) || next.view !== state.activeView
+      ? applyRouteNow(next, owner)
+      : routeWork.catch(() => {}).then(() => applyRouteNow(next, owner));
+    routeWork = work;
+    const applied = work.catch(error => { if (routeOwner === owner) throw error; });
+    const run = Promise.race([applied, superseded]);
     routeApplication = run;
     return run;
   }
 
-  async function applyRouteNow(route) {
+  async function waitForRoute() {
+    while (true) {
+      const pending = routeApplication;
+      try { await pending; }
+      catch (error) { if (pending === routeApplication) throw error; }
+      if (pending === routeApplication) return;
+    }
+  }
+
+  async function applyRouteNow(route, owner) {
+    if (routeOwner !== owner) return;
     const next = normalizeRoute(route);
     if (next.view !== state.activeView) {
+      page.resetReader?.();
+      state.restoringRoute = false;
       window.location.assign(routeUrl(next, { initialParams }));
       return;
     }
@@ -243,15 +280,17 @@ function createHost({ api, els, initialParams, pages, state }) {
         page.renderView();
       }
     } finally {
-      state.restoringRoute = false;
-      syncBodyClasses();
+      if (routeOwner === owner) {
+        state.restoringRoute = false;
+        syncBodyClasses();
+      }
     }
   }
 
-  function initializeHistory() {
+  function initializeHistory(route) {
     if (state.routeReady) return;
     state.routeReady = true;
-    replaceRoute();
+    replaceRoute(route);
   }
 
   function installHistory() {
@@ -284,7 +323,8 @@ function createHost({ api, els, initialParams, pages, state }) {
     applyRoute,
     initializeHistory,
     installHistory,
-    syncBodyClasses
+    syncBodyClasses,
+    waitForRoute
   };
 }
 

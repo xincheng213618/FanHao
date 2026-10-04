@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { createGalleryMetadataService } from "../src/modules/media/server/gallery-metadata-service.js";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
 import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
 
 // Complete production publication/list/detail/cover services, synthetic records.
-// SQL reads, file stat and HTTP response are explicit in-memory boundaries; no
-// real DB opens, files/media reads, network requests or backfill execution.
-const source = fs.readFileSync(new URL("../src/modules/media/server/gallery-metadata-service.js", import.meta.url), "utf8");
+// SQLite schema/bulk reads, file stat and HTTP response are private in-memory
+// boundaries; no disk DB opens, media reads, network or backfill execution.
+const source = fs.readFileSync(new URL("../src/modules/media/server/gallery-metadata-service.js", import.meta.url), "utf8")
+  .replace('"../../../../lib/gallery-metadata-revision.js"',
+    JSON.stringify(new URL("../lib/gallery-metadata-revision.js", import.meta.url).href));
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
 const rawRow = (overrides = {}) => ({
@@ -20,11 +23,34 @@ const infoOnlyConflict = () => rawRow({ douban_title: "合成剧集 第一季", 
   info_json: JSON.stringify({ 首播: "2010-09-26", 季数: "1", 集数: "7", 单集片长: "50分钟" }) });
 function fixture(factory = createGalleryMetadataService, row = rawRow()) {
   const rows = new Map([[row.media_id, row]]), reads = [];
+  // Bulk projections run in SQLite, including PRAGMAs and cover presence CASE.
+  // Point doubles retain the arbitrary JS values used by publication validation
+  // (objects/NaN/Infinity are deliberately tested without persisting them).
+  const columns = [...new Set([...Object.keys(row), "media_id", "series_key"])];
+  const quote = name => `"${name.replaceAll('"', '""')}"`;
+  const withSqlite = run => {
+    const privateDb = new DatabaseSync(":memory:");
+    try {
+      for (const table of ["movie_metadata", "tv_series_metadata"]) privateDb.exec(`CREATE TABLE ${table}(${columns.map(name => quote(name)).join(",")})`);
+      return run(privateDb);
+    } finally { privateDb.close(); }
+  };
   const db = { prepare(sql) {
-    assert.match(sql, /^SELECT \* FROM (?:movie_metadata|tv_series_metadata)(?: WHERE (?:media_id|series_key) = \?)?$/, "Publication boundary must remain read-only");
+    const point = /^SELECT \* FROM (?:movie_metadata|tv_series_metadata) WHERE (?:media_id|series_key) = \?$/.test(sql);
+    const schema = sql === "PRAGMA schema_version" || /^PRAGMA table_info\("(?:movie_metadata|tv_series_metadata)"\)$/.test(sql);
+    const bulk = /^SELECT .+ FROM "?(?:movie_metadata|tv_series_metadata)"?$/.test(sql);
+    assert.ok(point || schema || bulk, "Publication boundary must remain read-only metadata/schema queries");
     reads.push(sql);
-    return { get: id => sql.includes("movie_metadata") ? rows.get(id) : row,
-      all: () => sql.includes("movie_metadata") ? [...rows.values()] : [] };
+    return {
+      get: id => point ? (sql.includes("movie_metadata") ? rows.get(id) : row) : withSqlite(privateDb => privateDb.prepare(sql).get()),
+      all: () => withSqlite(privateDb => {
+        if (bulk && sql.includes("movie_metadata")) {
+          const insert = privateDb.prepare(`INSERT INTO movie_metadata(${columns.map(quote).join(",")}) VALUES(${columns.map(() => "?").join(",")})`);
+          for (const value of rows.values()) insert.run(...columns.map(name => value[name] ?? null));
+        }
+        return privateDb.prepare(sql).all();
+      })
+    };
   } };
   const metadata = factory({ createId: (prefix, value) => `${prefix}:${value}`, getImageGalleryDb: () => db,
     notFound: res => { res.status = 404; res.notFound = true; } });

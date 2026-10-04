@@ -7,13 +7,32 @@ export function createVideoProbeCacheService({
 }) {
   let initialized = false;
   let writeStatement = null;
+  let cacheDatabase = null;
   const rowsByFile = new Map();
+
+  function withoutLockWait(db, callback) {
+    const previous = Number(db.prepare("PRAGMA busy_timeout").get().timeout);
+    db.exec("PRAGMA busy_timeout = 0");
+    try { return callback(); }
+    finally { db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(previous || 0))}`); }
+  }
 
   function initialize() {
     if (initialized) return true;
     try {
       const db = getDb();
-      db.exec(`
+      withoutLockWait(db, () => initializeDatabase(db));
+      cacheDatabase = db;
+      initialized = true;
+      return true;
+    } catch (error) {
+      warn("[video-probe-cache]", error?.message || error);
+      return false;
+    }
+  }
+
+  function initializeDatabase(db) {
+    db.exec(`
         CREATE TABLE IF NOT EXISTS video_probe_cache (
           file_id TEXT NOT NULL,
           file_path TEXT NOT NULL,
@@ -27,14 +46,14 @@ export function createVideoProbeCacheService({
         );
         CREATE INDEX IF NOT EXISTS idx_video_probe_cache_updated_at
           ON video_probe_cache(updated_at);
-      `);
-      const rows = db.prepare(`
+    `);
+    const rows = db.prepare(`
         SELECT file_id, file_path, source_size, source_mtime, schema_version, status, probe_json
         FROM video_probe_cache
-      `).all();
-      rowsByFile.clear();
-      for (const row of rows) rowsByFile.set(cacheKey(row.file_id, row.file_path), row);
-      writeStatement = db.prepare(`
+    `).all();
+    rowsByFile.clear();
+    for (const row of rows) rowsByFile.set(cacheKey(row.file_id, row.file_path), row);
+    writeStatement = db.prepare(`
         INSERT INTO video_probe_cache (
           file_id, file_path, source_size, source_mtime,
           schema_version, status, probe_json, updated_at
@@ -46,13 +65,7 @@ export function createVideoProbeCacheService({
           status = excluded.status,
           probe_json = excluded.probe_json,
           updated_at = excluded.updated_at
-      `);
-      initialized = true;
-      return true;
-    } catch (error) {
-      warn("[video-probe-cache]", error?.message || error);
-      return false;
-    }
+    `);
   }
 
   function get(file, stat) {
@@ -75,7 +88,7 @@ export function createVideoProbeCacheService({
   function set(file, stat, value) {
     if (!file?.id || !file?.path || !stat || !initialize()) return false;
     try {
-      writeStatement.run(
+      withoutLockWait(cacheDatabase, () => writeStatement.run(
         String(file.id),
         String(file.path),
         Number(stat.size) || 0,
@@ -84,7 +97,7 @@ export function createVideoProbeCacheService({
         value ? "ok" : "unavailable",
         value ? JSON.stringify(value) : null,
         String(now())
-      );
+      ));
       rowsByFile.set(cacheKey(file.id, file.path), {
         source_size: Number(stat.size) || 0,
         source_mtime: sourceMtime(stat),
@@ -101,7 +114,7 @@ export function createVideoProbeCacheService({
 
   function sourceMtime(stat) {
     if (stat?.cacheMtime) return String(stat.cacheMtime);
-    return String(Number(stat.mtimeMs) || 0);
+    return JSON.stringify(["disk", Number(stat.mtimeMs) || 0, String(stat.dev ?? ""), String(stat.ino ?? "")]);
   }
 
   function cacheKey(fileId, filePath) {

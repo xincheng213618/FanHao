@@ -169,7 +169,9 @@ export function createNovelCollectionStore({ dbPath } = {}) {
   function listTasks({ limit = MAX_TASK_HISTORY } = {}) {
     const safeLimit = clampInteger(limit, MAX_TASK_HISTORY, 1, MAX_TASK_HISTORY);
     return getDb()
-      .prepare("SELECT * FROM novel_collection_tasks ORDER BY created_at DESC LIMIT ?")
+      .prepare(`SELECT * FROM novel_collection_tasks
+        ORDER BY CASE WHEN (CASE WHEN json_valid(result_json) THEN json_extract(result_json, '$.outcome') ELSE '' END) = 'unknown' THEN 0 ELSE 1 END,
+          created_at DESC LIMIT ?`)
       .all(safeLimit)
       .map(publicTask);
   }
@@ -188,7 +190,8 @@ export function createNovelCollectionStore({ dbPath } = {}) {
         SELECT * FROM novel_collection_tasks
         WHERE start_url = ? AND mode = ?
         ORDER BY
-          CASE WHEN status IN ('queued', 'running', 'cancelling') THEN 0 ELSE 1 END,
+          CASE WHEN (CASE WHEN json_valid(result_json) THEN json_extract(result_json, '$.outcome') ELSE '' END) = 'unknown' THEN -1
+               WHEN status IN ('queued', 'running', 'cancelling') THEN 0 ELSE 1 END,
           updated_at DESC,
           created_at DESC
         LIMIT 1
@@ -392,14 +395,25 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     return getTask(id);
   }
 
+  function markImportPending(id, { operationId }) {
+    const current = requireTask(id);
+    const result = { outcome: "unknown", operationId, code: "NOVEL_WRITE_OUTCOME_UNKNOWN" };
+    getDb().prepare("UPDATE novel_collection_tasks SET result_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(result), new Date().toISOString(), current.id);
+    return getTask(current.id);
+  }
+
   function failTask(id, error, { cancelled = false, logTail = "" } = {}) {
     const now = new Date().toISOString();
     const message = cleanText(error?.message || error, 1500) || (cancelled ? "任务已取消" : "采集失败");
+    const failureResult = error?.outcome === "unknown"
+      ? JSON.stringify({ outcome: "unknown", operationId: String(error.operationId || getTask(id)?.result?.operationId || ""), code: String(error.code || "NOVEL_WRITE_OUTCOME_UNKNOWN") })
+      : error?.outcome === "not_committed" ? "{}" : null;
     getDb()
       .prepare(
         `
         UPDATE novel_collection_tasks
-        SET status = ?, message = ?, error = ?, log_tail = ?, finished_at = ?, updated_at = ?
+        SET status = ?, message = ?, error = ?, result_json = COALESCE(?, result_json), log_tail = ?, finished_at = ?, updated_at = ?
         WHERE id = ?
       `
       )
@@ -407,6 +421,7 @@ export function createNovelCollectionStore({ dbPath } = {}) {
         cancelled ? "cancelled" : "failed",
         cancelled ? "任务已取消" : message,
         cancelled ? "" : message,
+        failureResult,
         cleanLogTail(logTail),
         now,
         now,
@@ -471,6 +486,7 @@ export function createNovelCollectionStore({ dbPath } = {}) {
         WHERE id IN (
           SELECT id FROM novel_collection_tasks
           WHERE status NOT IN ('queued', 'running', 'cancelling')
+            AND (CASE WHEN json_valid(result_json) THEN json_extract(result_json, '$.outcome') ELSE '' END) IS NOT 'unknown'
           ORDER BY created_at DESC
           LIMIT -1 OFFSET ?
         )
@@ -494,6 +510,7 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     listAdapters,
     listTasks,
     markCancelling,
+    markImportPending,
     markRunning,
     prepareTaskRun,
     queuedTasks,

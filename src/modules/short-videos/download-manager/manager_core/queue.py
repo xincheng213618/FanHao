@@ -22,9 +22,14 @@ def set_download_queue_change_handler(handler: Callable[[], None] | None) -> Non
         _download_queue_change_handler = handler
 
 
-def notify_download_queue_changed() -> None:
-    """Wake the active watcher after a committed queue-producing change."""
+def wake_download_queue_waiter() -> None:
+    """Signal a waiter without restarting downloads or acquiring manager locks."""
     _download_queue_changed.set()
+
+
+def notify_download_queue_changed() -> None:
+    """Wake and repair the watcher after a committed queue-producing change."""
+    wake_download_queue_waiter()
     with _download_queue_change_handler_lock:
         handler = _download_queue_change_handler
     if handler is None:
@@ -145,6 +150,9 @@ def list_download_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         JOIN profiles ON profiles.id=q.profile_id
         LEFT JOIN links ON links.profile_id=profiles.id
         WHERE q.enabled=1
+          AND q.profile_id IN (
+            SELECT profile_id FROM links WHERE status IN ('pending', 'downloading')
+          )
         GROUP BY q.profile_id
         HAVING pending > 0 OR downloading > 0
         ORDER BY

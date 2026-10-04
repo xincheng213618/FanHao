@@ -28,22 +28,16 @@ WITH link_stats AS (
   FROM links
   WHERE profile_id IS NOT NULL
   GROUP BY profile_id
-),
-previous_work_times AS (
-  SELECT
-    links.profile_id,
-    MAX(links.create_time) previous_work_create_time
-  FROM links
-  JOIN link_stats ON link_stats.profile_id=links.profile_id
-  WHERE links.create_time IS NOT NULL
-    AND links.create_time<link_stats.latest_work_create_time
-  GROUP BY links.profile_id
 )
 SELECT
   link_stats.*,
-  previous_work_times.previous_work_create_time
+  (
+    SELECT MAX(previous.create_time)
+    FROM links previous
+    WHERE previous.profile_id=link_stats.profile_id
+      AND previous.create_time<link_stats.latest_work_create_time
+  ) previous_work_create_time
 FROM link_stats
-LEFT JOIN previous_work_times ON previous_work_times.profile_id=link_stats.profile_id
 """
 
 

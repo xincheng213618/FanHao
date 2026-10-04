@@ -20,28 +20,29 @@ export function createAdminActorAvatarService({
     return resolveLibraryPersonByPublicId(personId)?.id || personId;
   }
 
-  function importFromFiletreePayload(body = {}) {
+  async function importFromFiletreePayload(body = {}, options = {}) {
     const rootPath = updateAvatarConfig(body);
-    const summary = actorAvatarService.importFromFiletree(rootPath, { replace: Boolean(body.replace) });
+    const summary = await actorAvatarService.importFromFiletree(rootPath, { replace: Boolean(body.replace), signal: options.signal });
     return { ok: true, config: publicConfig(), summary };
   }
 
-  function candidatesPayload(body = {}) {
+  async function candidatesPayload(body = {}, options = {}) {
     const rootPath = updateAvatarConfig(body);
-    const summary = actorAvatarService.candidatesFromFiletree(rootPath, {
+    const summary = await actorAvatarService.candidatesFromFiletree(rootPath, {
       personId: resolvePersonId(body.personId),
-      limit: clampInteger(body.limit, 24, 1, 200)
+      limit: clampInteger(body.limit, 24, 1, 200),
+      signal: options.signal
     });
     return { ok: true, config: publicConfig(), summary };
   }
 
-  function applyCandidatePayload(body = {}) {
+  async function applyCandidatePayload(body = {}, options = {}) {
     const rootPath = updateAvatarConfig(body);
-    const result = actorAvatarService.importCandidate(
+    const result = await actorAvatarService.importCandidate(
       rootPath,
       resolvePersonId(body.personId),
       body.relPath,
-      { dryRun: Boolean(body.dryRun) }
+      { dryRun: Boolean(body.dryRun), signal: options.signal }
     );
     return { ok: true, config: publicConfig(), ...result };
   }

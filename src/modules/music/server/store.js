@@ -26,11 +26,14 @@ import { adjacentTracks, lyricsForTrack, publicAlbum, publicArtist, publicPlayli
 import { albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount } from "./facets.js";
 import { catalogFilter } from "./query.js";
 import { listLyricMatches } from "./lyrics-search.js";
-import { normalizeRoots, rootStatus, safeStoredFile } from "./scan.js";
+import { normalizeRoots, rootStatus, safeStoredFile, safeStoredFileAsync } from "./scan.js";
 import { createMusicScanService } from "./scan-service.js";
 import { ensureSchema } from "./schema.js";
 import { isMusicDatabaseBusyError, musicSchemaBusyError, runMusicWriteTransaction } from "./write-transaction.js";
+import { acceptMusicProgress, musicProgressClock, musicProgressIdentity, musicProgressPreviousSession, reserveMusicProgressSession } from "./progress-receipts.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
+
+const artistNameCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 
 export function createMusicStore(options = {}) {
   const dbPath = options.dbPath;
@@ -56,6 +59,7 @@ export function createMusicStore(options = {}) {
   let schemaReady = false;
   let summaryCache = null;
   let summaryCachedAt = 0;
+  const coverFileTasks = new Map();
 
   function database() {
     if (!db) {
@@ -87,10 +91,12 @@ export function createMusicStore(options = {}) {
     summaryCachedAt = 0;
   }
 
-  function mutate(operation) {
+  function mutate(operation, invalidatesSummary = true) {
     const result = runMusicWriteTransaction(dbOrOpen(), operation);
-    summaryCache = null;
-    summaryCachedAt = 0;
+    if (typeof invalidatesSummary === "function" ? invalidatesSummary(result) : invalidatesSummary) {
+      summaryCache = null;
+      summaryCachedAt = 0;
+    }
     return result;
   }
 
@@ -452,9 +458,11 @@ export function createMusicStore(options = {}) {
       }
     }
     const letter = String(params.get("letter") || "").trim();
+    let effectiveLetter = "";
     if (letter) {
       const lc = buildLetterCondition(letter, "name", "name");
       if (lc) {
+        effectiveLetter = /^[A-Za-z]$/.test(letter) ? letter.toUpperCase() : /^[0-9]$/.test(letter) ? "0-9" : letter;
         conditions.push(lc.sql);
         if (lc.args.length) args.push(...lc.args);
       }
@@ -465,10 +473,12 @@ export function createMusicStore(options = {}) {
       const buildSortedRows = () => database
           .prepare(`SELECT * FROM music_artists WHERE ${conditions.join(" AND ")}`)
           .all(...args)
-          .sort((left, right) => artistNameForSort(left.name).localeCompare(artistNameForSort(right.name), "zh-CN", { numeric: true, sensitivity: "base" }));
+          .map(row => ({ row, key: artistNameForSort(row.name) }))
+          .sort((left, right) => artistNameCollator.compare(left.key, right.key))
+          .map(entry => entry.row);
       const sortedRows = query
         ? buildSortedRows()
-        : cachedMusicFacet(database, `artist-browser:${language || "all"}:${letter || "all"}:name`, buildSortedRows);
+        : cachedMusicFacet(database, JSON.stringify(["artist-browser", language, effectiveLetter, "name"]), buildSortedRows);
       total = sortedRows.length;
       rows = sortedRows.slice(offset, offset + limit);
     } else {
@@ -678,6 +688,7 @@ export function createMusicStore(options = {}) {
     const lyrics = lyricsForTrack(database, row.id);
     const adjacent = adjacentTracks(database, row.id, urlOrOptions);
     return {
+      serverClockMs: musicProgressClock(database),
       track: publicTrack(row, { detail: true }),
       lyrics,
       prevId: adjacent.prevId,
@@ -686,30 +697,58 @@ export function createMusicStore(options = {}) {
   }
 
   function saveProgress(trackId, body = {}) {
+    return saveProgressOutcome(trackId, body)?.track || null;
+  }
+
+  function progressClock(trackId) {
+    const database = dbOrOpen();
+    if (!database.prepare("SELECT id FROM music_tracks WHERE id=? AND status='ok'").get(trackId)) return null;
+    return { trackId, serverClockMs: musicProgressClock(database) };
+  }
+
+  function claimProgressSession(trackId, body = {}) {
+    const previous = musicProgressPreviousSession(body);
     return mutate((database) => {
+      if (!database.prepare("SELECT id FROM music_tracks WHERE id=? AND status='ok'").get(trackId)) return null;
+      return reserveMusicProgressSession(database, trackId, previous);
+    }, false);
+  }
+
+  function saveProgressOutcome(trackId, body = {}) {
+    body = body || {};
+    const identity = musicProgressIdentity(body);
+    const outcome = mutate((database) => {
       const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
       if (!row) return null;
+      const accepted = acceptMusicProgress(database, row.id, identity);
+      if (accepted.error) return accepted;
+      const { progressApplied } = accepted;
       const positionMs = clampInt(body.positionMs ?? body.position_ms, 0, 0, Number.MAX_SAFE_INTEGER);
       const durationMs = clampInt(body.durationMs ?? body.duration_ms, Number(row.duration_ms || 0), 0, Number.MAX_SAFE_INTEGER);
-      const played = Boolean(body.played);
+      const playedApplied = Boolean(body.played) && accepted.playedAccepted;
+      if (!progressApplied && !playedApplied) return { track: publicTrack(trackRow(database, row.id), { detail: true }), progressApplied, playedApplied };
       const now = new Date().toISOString();
-      const current = database.prepare("SELECT play_count FROM music_track_state WHERE track_id = ?").get(row.id);
+      const current = database.prepare("SELECT play_count,position_ms,duration_ms FROM music_track_state WHERE track_id = ?").get(row.id);
       database
         .prepare(
           `
           INSERT INTO music_track_state (track_id, favorite, position_ms, duration_ms, play_count, last_played_at, updated_at)
           VALUES (?, 0, ?, ?, ?, ?, ?)
           ON CONFLICT(track_id) DO UPDATE SET
-            position_ms = excluded.position_ms,
-            duration_ms = excluded.duration_ms,
+            position_ms = CASE WHEN ? THEN excluded.position_ms ELSE music_track_state.position_ms END,
+            duration_ms = CASE WHEN ? THEN excluded.duration_ms ELSE music_track_state.duration_ms END,
             play_count = CASE WHEN ? THEN COALESCE(music_track_state.play_count, 0) + 1 ELSE COALESCE(music_track_state.play_count, 0) END,
             last_played_at = CASE WHEN ? THEN excluded.last_played_at ELSE COALESCE(music_track_state.last_played_at, '') END,
             updated_at = excluded.updated_at
         `
         )
-        .run(row.id, positionMs, durationMs, played ? Number(current?.play_count || 0) + 1 : Number(current?.play_count || 0), played ? now : "", now, played ? 1 : 0, played ? 1 : 0);
-      return publicTrack(trackRow(database, row.id), { detail: true });
-    });
+        .run(row.id, progressApplied ? positionMs : Number(current?.position_ms || 0), progressApplied ? durationMs : Number(current?.duration_ms || row.duration_ms || 0),
+          Number(current?.play_count || 0) + (playedApplied ? 1 : 0), playedApplied ? now : "", now,
+          progressApplied ? 1 : 0, progressApplied ? 1 : 0, playedApplied ? 1 : 0, playedApplied ? 1 : 0);
+      return { track: publicTrack(trackRow(database, row.id), { detail: true }), progressApplied, playedApplied };
+    }, result => Boolean(result?.track && (result.progressApplied || result.playedApplied)));
+    if (outcome?.error) throw outcome.error;
+    return outcome;
   }
 
   function toggleFavorite(trackId, body = {}) {
@@ -1084,6 +1123,26 @@ export function createMusicStore(options = {}) {
     return safeStoredFile(row.cover_path, "image", row.id);
   }
 
+  function coverFileAsync(albumId) {
+    const database = dbOrOpen();
+    const query = "SELECT id, cover_path, updated_at FROM music_albums WHERE id = ?";
+    const row = database.prepare(query).get(albumId);
+    if (!row?.cover_path) return Promise.resolve(null);
+    const stamp = value => JSON.stringify([value?.id, value?.cover_path, value?.updated_at]);
+    const key = stamp(row), previous = coverFileTasks.get(key);
+    if (previous?.database === database) return previous.promise;
+    const isCurrentSource = () => db === database && stamp(database.prepare(query).get(albumId)) === key;
+    const promise = (async () => {
+      const file = await safeStoredFileAsync(row.cover_path, "image", row.id, { statFile: options.coverStatFile });
+      return file && isCurrentSource() ? { ...file, isCurrentSource } : null;
+    })();
+    const task = { database, promise };
+    coverFileTasks.set(key, task);
+    const settled = () => { if (coverFileTasks.get(key) === task) coverFileTasks.delete(key); };
+    promise.then(settled, settled);
+    return promise;
+  }
+
   function dbOrOpen() {
     return database();
   }
@@ -1100,6 +1159,7 @@ export function createMusicStore(options = {}) {
 
   return {
     coverFile,
+    coverFileAsync,
     dbPath,
     facets,
     report,
@@ -1119,9 +1179,12 @@ export function createMusicStore(options = {}) {
     importM3uPlaylist,
     playlistDetail,
     playlistM3u,
+    progressClock,
+    claimProgressSession,
     reorderPlaylist,
     removeFromPlaylist,
     saveProgress,
+    saveProgressOutcome,
     scan: scanService.scan,
     scanDiagnostics: scanService.diagnostics,
     smartPlaylistDetail,

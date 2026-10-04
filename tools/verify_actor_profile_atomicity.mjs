@@ -7,13 +7,13 @@ import { createAdminCoreMutationService } from "../src/modules/fanhao/server/adm
 import { createActorAvatarService } from "../src/modules/fanhao/server/people/actor-avatar-service.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
-export function verifyActorProfileAtomicity() {
+export async function verifyActorProfileAtomicity() {
   const temporary = createVerifiedTempDir("fanhao-actor-atomicity-");
   const db = new DatabaseSync(path.join(temporary.tempDir, "core.sqlite"));
   try {
     createSchema(db, path.join(temporary.tempDir, "images.sqlite"));
     verifyAdminProfileRollback(db);
-    verifyLocalAvatarRollback(db, temporary.tempDir);
+    await verifyLocalAvatarRollback(db, temporary.tempDir);
   } finally {
     db.close();
     temporary.cleanup();
@@ -150,7 +150,7 @@ function verifyAdminProfileRollback(db) {
   assert.deepEqual(invalidations, [], "rolled-back profile state must not be published through caches");
 }
 
-function verifyLocalAvatarRollback(db, temporaryDir) {
+async function verifyLocalAvatarRollback(db, temporaryDir) {
   const avatarRoot = path.join(temporaryDir, "avatar-tree");
   const contentDir = path.join(avatarRoot, "Content", "group");
   fs.mkdirSync(contentDir, { recursive: true });
@@ -206,7 +206,7 @@ function verifyLocalAvatarRollback(db, temporaryDir) {
     }
   });
 
-  assert.throws(
+  await assert.rejects(
     () => service.importFromFiletree(avatarRoot, { replace: true }),
     /forced local avatar failure/
   );
@@ -221,6 +221,6 @@ function verifyLocalAvatarRollback(db, temporaryDir) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
-  verifyActorProfileAtomicity();
+  await verifyActorProfileAtomicity();
   console.log("actor profile ordinary-failure atomicity verification passed");
 }

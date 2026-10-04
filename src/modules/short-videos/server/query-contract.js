@@ -142,11 +142,11 @@ export function normalizeVideoQualityFilter(value) {
 export function actualVideoQualityWhere(quality, prefix = "") {
   const pixels = `${prefix}actual_pixels`;
   return {
-    "4k": `COALESCE(${pixels}, 0) >= 8294400`,
-    "1440p": `COALESCE(${pixels}, 0) >= 3686400 AND COALESCE(${pixels}, 0) < 8294400`,
-    "1080p": `COALESCE(${pixels}, 0) >= 2073600 AND COALESCE(${pixels}, 0) < 3686400`,
-    "720p": `COALESCE(${pixels}, 0) >= 921600 AND COALESCE(${pixels}, 0) < 2073600`,
-    "below720p": `COALESCE(${pixels}, 0) > 0 AND COALESCE(${pixels}, 0) < 921600`,
+    "4k": `${pixels} >= 8294400`,
+    "1440p": `${pixels} >= 3686400 AND ${pixels} < 8294400`,
+    "1080p": `${pixels} >= 2073600 AND ${pixels} < 3686400`,
+    "720p": `${pixels} >= 921600 AND ${pixels} < 2073600`,
+    "below720p": `${pixels} > 0 AND ${pixels} < 921600`,
     unknown: `COALESCE(${pixels}, 0) <= 0`
   }[quality] || "";
 }

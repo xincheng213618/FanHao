@@ -224,11 +224,23 @@ function createModuleRegistry({ modules, sendJson, product }) {
   }
 
   async function beginStop() {
-    for (const entry of [...modules].reverse()) await entry.runtime.beginStop?.();
+    const errors = [];
+    for (const entry of [...modules].reverse()) {
+      try { await entry.runtime.beginStop?.(); }
+      catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Multiple modules failed to begin stopping");
   }
 
   async function stop() {
-    for (const entry of [...modules].reverse()) await entry.runtime.stop?.();
+    const errors = [];
+    for (const entry of [...modules].reverse()) {
+      try { await entry.runtime.stop?.(); }
+      catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Multiple modules failed to stop");
   }
 
   function publicManifest() {

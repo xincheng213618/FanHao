@@ -29,13 +29,27 @@ from .config import (
 )
 
 
+class ManagedConnection(sqlite3.Connection):
+    """Keep SQLite transaction semantics and close at the end of a with block."""
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False, factory=ManagedConnection)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def init_db() -> None:
@@ -622,6 +636,22 @@ def migrate_link_preview_columns(conn: sqlite3.Connection) -> None:
         "ON links(profile_id, create_time DESC)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_media_type ON links(media_type)")
+    # Cover profile summaries without reading each work's large metadata row.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_profile_status_time "
+        "ON links(profile_id, status, create_time)"
+    )
+    # Keep both existing fallback orders, including legacy rows with no download time.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_downloaded_order ON links(status, "
+        "COALESCE(downloaded_at, last_started_at, last_seen_at, discovered_at) DESC, id DESC) "
+        "WHERE status='downloaded'"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_library_order ON links(status, "
+        "COALESCE(downloaded_at, last_started_at, last_seen_at) DESC, id DESC) "
+        "WHERE status='downloaded'"
+    )
 
 
 def migrate_link_profile_presence_columns(conn: sqlite3.Connection) -> None:

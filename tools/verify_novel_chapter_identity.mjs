@@ -314,14 +314,14 @@ try {
     assert.equal(error?.code,"ERR_ASSERTION",name); negative++; console.log(`CONTROL rejected ${name}`);
   }
   for(const [name,from,to,prefix] of [
-    ["omit coherent read transaction", "return withDb(database => inReadSnapshot(database, callback));", "return withDb(callback);", "a real SQLite writer"],
+    ["omit coherent read transaction", "return inReadSnapshot(database, callback);", "return callback(database);", "a real SQLite writer"],
     ["allow stale revision writes", "body.catalogRevision !== book.catalog_revision", "false", "legacy index clients"],
     ["legacy index writes remain allowed after replacement", "replacement.existed ? 0 : 1", "1", "legacy index clients"],
     ["skip locked metadata revalidation", "validateExistingLibraryMetadata(db); // The writer lock may have waited behind an upgrade.", "", "Node and Python revalidate"],
     ["skip locked reimport revision check", 'if (!lockedBook || lockedBook.catalog_revision !== current.catalog_revision)', 'if (false)', "reimport refuses"]
   ]) {
     assert.equal(storeSource.split(from).length,2);
-    const altered=storeSource.replace(from,to).replace('"./chapter-identity.js"',JSON.stringify(pathToFileURL(coordinatorPath).href));
+    const altered=storeSource.replace(from,to).replace('"./chapter-identity.js"',JSON.stringify(pathToFileURL(coordinatorPath).href)).replace('"./local-reimport-artifact.js"',JSON.stringify(pathToFileURL(path.join(root,"src/modules/novels/server/local-reimport-artifact.js")).href));
     const {createNovelStore:factory}=await import("data:text/javascript;base64,"+Buffer.from(altered).toString("base64"));
     let error; try{await tests.find(t=>t.name.startsWith(prefix)).run({factory});}catch(e){error=e;}
     assert.equal(error?.code,"ERR_ASSERTION",name);negative++;console.log(`CONTROL rejected ${name}`);

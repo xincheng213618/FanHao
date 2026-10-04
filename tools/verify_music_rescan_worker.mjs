@@ -4,7 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
@@ -71,7 +71,7 @@ async function verifyLegacyPersistenceEquivalence(fixture) {
     assert.deepEqual(normalizeSummary(workerSummary), normalizeSummary(directSummary), "worker success payload must match the legacy scan summary");
     assert.deepEqual(dumpCatalog(workerDbPath), dumpCatalog(directDbPath), "worker persistence must match the legacy transaction row-for-row");
 
-    const workerDb = new DatabaseSync(workerDbPath, { readOnly: true });
+    const workerDb = openInspectionDatabase(workerDbPath);
     try {
       const managed = workerDb.prepare("SELECT title,display_artist,album_title,codec,duration_ms,has_lrc,lrc_path FROM music_tracks WHERE file_name = '04-managed.flac'").get();
       assert.deepEqual({ ...managed, lrc_path: path.basename(managed.lrc_path) }, {
@@ -825,7 +825,7 @@ function seedIncompleteSchema(dbPath) {
 }
 
 function dumpMutableState(dbPath) {
-  const database = new DatabaseSync(dbPath, { readOnly: true });
+  const database = openInspectionDatabase(dbPath);
   try {
     return Object.fromEntries(["music_track_state", "music_playlists", "music_playlist_items"].map((table) => [
       table,
@@ -837,11 +837,25 @@ function dumpMutableState(dbPath) {
 }
 
 function dumpCatalog(dbPath) {
-  const database = new DatabaseSync(dbPath, { readOnly: true });
+  const database = openInspectionDatabase(dbPath);
   try {
     return dumpCatalogWithDatabase(database);
   } finally {
     database.close();
+  }
+}
+
+function openInspectionDatabase(dbPath) {
+  const database = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    // A committed scan ACK deliberately precedes its best-effort checkpoint.
+    // Fresh inspection connections may meet that WAL recovery's short lock;
+    // keep this wait bounded and leave production fail-fast connections alone.
+    database.exec("PRAGMA busy_timeout = 1000");
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
   }
 }
 
@@ -1031,7 +1045,23 @@ function createOwnedFixtureDirectory() {
       if (tempRoot !== ownership.tempRoot || target !== ownership.target) throw new Error("music rescan fixture cleanup refused a replaced path");
       const stat = fs.statSync(fixtureDir);
       if (String(stat.dev) !== ownership.device || String(stat.ino) !== ownership.inode) throw new Error("music rescan fixture cleanup refused a replacement target");
-      fs.rmSync(fixtureDir, { recursive: true, force: false });
+      if (process.platform === "win32") {
+        const cleanup = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+          $ErrorActionPreference = 'Stop'
+          $fixtureTarget = (Resolve-Path -LiteralPath $env:FANHAO_MUSIC_RESCAN_CLEANUP_TARGET).ProviderPath
+          $fixtureTempRoot = (Resolve-Path -LiteralPath $env:FANHAO_MUSIC_RESCAN_CLEANUP_TEMP_ROOT).ProviderPath
+          if (-not [string]::Equals([IO.Path]::GetDirectoryName($fixtureTarget), $fixtureTempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'cleanup target is outside its owned temporary parent' }
+          if (-not [IO.Path]::GetFileName($fixtureTarget).StartsWith('fanhao-music-rescan-worker-', [StringComparison]::Ordinal)) { throw 'cleanup target has an unexpected name' }
+          if ((Get-Item -LiteralPath $fixtureTarget).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'cleanup target is a reparse point' }
+          Remove-Item -LiteralPath $fixtureTarget -Recurse -Force
+        `], {
+          env: { ...process.env, FANHAO_MUSIC_RESCAN_CLEANUP_TARGET: fixtureDir, FANHAO_MUSIC_RESCAN_CLEANUP_TEMP_ROOT: tempRootPath },
+          encoding: "utf8", windowsHide: true
+        });
+        if (cleanup.status !== 0) throw new Error(`music rescan fixture cleanup failed: ${cleanup.stderr || cleanup.stdout || cleanup.error || cleanup.status}`);
+      } else {
+        fs.rmSync(fixtureDir, { recursive: true, force: false });
+      }
       cleaned = true;
     }
   };

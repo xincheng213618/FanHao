@@ -39,7 +39,7 @@ from .queue import (
     notify_download_queue_changed,
     sort_download_queue_by_pending,
 )
-from .read_models import get_activity_state, get_runtime_status, get_state, list_links, list_profiles
+from .read_models import get_activity_state, get_runtime_status, get_state, list_links, list_profiles, refresh_links
 from .runtime import activate_application, request_application_quit
 
 
@@ -155,8 +155,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": True, "auth": cookie_auth_status()})
         if parsed.path == "/api/profiles":
             return self.send_json(list_profiles(parse_qs(parsed.query)))
-        if parsed.path == "/api/links":
-            return self.send_json(list_links(parse_qs(parsed.query)))
+        if parsed.path in {"/api/links", "/api/links/refresh"}:
+            try:
+                reader = refresh_links if parsed.path == "/api/links/refresh" else list_links
+                return self.send_json(reader(parse_qs(parsed.query)))
+            except ValueError as exc:
+                return self.send_json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
         if parsed.path == "/api/export/links.txt":
             profile_id = current_profile_id(create=False)
             if profile_id is None:

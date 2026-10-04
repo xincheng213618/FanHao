@@ -36,5 +36,12 @@ export function createPhotosRuntime(deps) {
     return false;
   }
 
-  return { routeApi, routeMedia, settings };
+  return { routeApi, routeMedia, settings,
+    start: async () => { await deps.photoSetService.start?.(); },
+    beginStop: () => deps.photoSetService.beginStop?.(),
+    stop: async () => {
+      await deps.photoSetService.stop?.();
+      deps.releasePhotoSetLookup?.();
+    }
+  };
 }

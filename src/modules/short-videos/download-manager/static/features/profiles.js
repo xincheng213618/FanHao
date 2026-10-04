@@ -2,9 +2,11 @@ import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { displayDouyinId, formatCompact, formatDateTime, profileWorkDate } from "../core/format.js";
 import { createLatestRequestLifecycle } from "../core/latest-request.js";
+import { createKeyedListRenderer } from "../core/keyed-list.js";
 
 const PROFILE_AUTO_LOAD_DISTANCE = 320;
-const PROFILE_PAGE_SIZE = 40;
+// A few hundred profiles fit in one response; media stays lazy-loaded.
+const PROFILE_PAGE_SIZE = 500;
 const PROFILE_AVATAR_ROOT_MARGIN = "180px 0px";
 
 export function createProfilesFeature(options) {
@@ -20,6 +22,8 @@ export function createProfilesFeature(options) {
   let bannedCount = null;
   let pausedCount = null;
   let loading = false;
+  let hasLoaded = false;
+  let loadError = "";
   let loadMoreCheckScheduled = false;
   let avatarObserver = null;
   let wasExtractActive = false;
@@ -28,7 +32,11 @@ export function createProfilesFeature(options) {
   let extractQueue = [];
   let extractUiSignature = "";
   let deepLinkedProfile = "";
+  let completeScope = null;
+  let loadedQuery = "";
+  let hasMoreRows = false;
   const requests = createLatestRequestLifecycle();
+  const renderRows = createKeyedListRenderer($("profileManagerList"));
 
   function cleanDisplayName(value) {
     const name = String(value || "").trim();
@@ -85,8 +93,35 @@ export function createProfilesFeature(options) {
       q: String($("profileManagerSearch")?.value || "").trim(),
       sort: $("profileManagerSort")?.value || "last_extracted_desc",
       deleted_works: differenceFilter === "pending" ? "all" : differenceFilter,
-      limit: differenceFilter === "pending" ? "500" : String(PROFILE_PAGE_SIZE),
+      limit: String(PROFILE_PAGE_SIZE),
     });
+  }
+
+  function currentViewSnapshot() {
+    return `${currentQuery()}&view_difference=${$("profileManagerDeletedWorks")?.value || "all"}`;
+  }
+
+  function canFilterLocally() {
+    const scope = $("profileManagerScope")?.value || "collected";
+    return completeScope && (completeScope.scope === "all" || completeScope.scope === scope);
+  }
+
+  function refreshView() {
+    clearTimeout(searchTimer);
+    const list = $("profileManagerList");
+    const toolbar = document.querySelector(".profile-manager-controls");
+    const listStart = list.getBoundingClientRect().top + window.scrollY - (toolbar?.offsetHeight || 0) - 24;
+    if (window.scrollY > listStart) window.scrollTo({ top: Math.max(0, listStart), behavior: "instant" });
+    if (!canFilterLocally()) return load({ reset: true });
+    // Supersede any old request before committing a local view, too.
+    requests.finish(requests.begin(currentViewSnapshot()));
+    rows = completeScope.rows;
+    total = rows.length;
+    loading = false;
+    loadError = "";
+    $("profileManagerList").setAttribute("aria-busy", "false");
+    renderManager(rows, extractActive);
+    return Promise.resolve();
   }
 
   function formatRefreshInterval(value) {
@@ -135,13 +170,19 @@ export function createProfilesFeature(options) {
         loadAvatar(entry.target);
         avatarObserver?.unobserve(entry.target);
       });
-    }, { root: node, rootMargin: PROFILE_AVATAR_ROOT_MARGIN });
+    }, { rootMargin: PROFILE_AVATAR_ROOT_MARGIN });
     avatars.forEach((avatar) => avatarObserver.observe(avatar));
   }
 
   function renderManager(profiles, isExtractActive = false) {
     const node = $("profileManagerList");
     if (!node) return;
+    if (!rows.length && (loading || !hasLoaded || loadError)) {
+      const message = loadError || "正在读取主页…";
+      $("profileManagerSummary").textContent = message;
+      renderRows([], () => "", () => "", `<div class="muted profile-manager-empty" role="status">${escapeHtml(message)}</div>`);
+      return;
+    }
     const query = String($("profileManagerSearch")?.value || "").trim().toLowerCase();
     const sortMode = $("profileManagerSort")?.value || "last_extracted_desc";
     const scope = $("profileManagerScope")?.value || "collected";
@@ -207,10 +248,23 @@ export function createProfilesFeature(options) {
         : "当前没有待全量确认的主页";
     }
     const visibleRows = filteredRows;
-    const totalRows = deletedWorks === "pending" ? filteredRows.length : Math.max(total, filteredRows.length);
+    const hasMore = !canFilterLocally() && hasMoreRows;
+    const totalRows = canFilterLocally() || deletedWorks === "pending" ? filteredRows.length : Math.max(total, filteredRows.length);
+    const listSummary = !hasMore
+      ? `${totalRows} 个主页 · 全部已加载`
+      : deletedWorks === "pending"
+        ? `已找到 ${visibleRows.length} 个主页 · 已检查 ${rows.length}/${total} 个`
+        : `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个`;
     const queueSummary = extractQueue.length ? ` · 采集队列待执行 ${extractQueue.length} 个` : "";
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个，仅手动 ${currentPausedCount} 个${queueSummary}`;
-    node.innerHTML = visibleRows.map((profile) => {
+    $("profileManagerSummary").innerHTML = `<span class="profile-summary-main">${escapeHtml(listSummary)}</span><span class="profile-summary-policy">智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个，仅手动 ${currentPausedCount} 个${escapeHtml(queueSummary)}</span>`;
+    const items = hasMore ? [...visibleRows, null] : visibleRows;
+    renderRows(items, (profile) => profile ? `profile:${profile.id}` : "load-more", (profile) => {
+      if (!profile) {
+        const label = deletedWorks === "pending"
+          ? `继续查找（还有 ${total - rows.length} 个主页待筛选）`
+          : `继续加载（剩余 ${total - rows.length}）`;
+        return `<div class="profile-manager-load-more"><button data-profile-load-more ${loading ? "disabled" : ""}>${loading ? "加载中…" : label}</button></div>`;
+      }
       const douyinId = displayDouyinId(profile) || "-";
       const name = cleanDisplayName(profile.nickname) || cleanDisplayName(profile.title) || (douyinId !== "-" ? douyinId : `主页 #${profile.id}`);
       const historicalNames = profileHistoryValues(profile, "nickname_history_json")
@@ -288,7 +342,7 @@ export function createProfilesFeature(options) {
         ? `<img class="profile-manager-avatar" data-profile-avatar-src="${safeUrl(profile.avatar_url)}" alt="" loading="lazy" decoding="async" />`
         : '<div class="profile-manager-avatar placeholder"></div>';
       return `
-        <div class="profile-manager-row${fullScanPending ? " is-full-scan-required" : ""}${accountBanned ? " is-account-banned" : ""}">
+        <div data-profile-id="${escapeHtml(profile.id)}" class="profile-manager-row${fullScanPending ? " is-full-scan-required" : ""}${accountBanned ? " is-account-banned" : ""}">
           <div class="profile-manager-identity">
             ${avatar}
             <div>
@@ -308,30 +362,39 @@ export function createProfilesFeature(options) {
               <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer" title="打开抖音主页">抖音</a>
             </span>
             ${accountBanned ? "" : `<button data-profile-refresh="${escapeHtml(profile.id || "")}" ${quickRequestState ? "disabled" : ""}>${collectionButtonLabel(quickBaseLabel, quickRequestState)}</button>`}
-            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${fullRequestState ? "disabled" : ""}>${collectionButtonLabel(fullBaseLabel, fullRequestState)}</button>` : ""}
-            <button data-profile-auto-collect="${escapeHtml(profile.id || "")}" aria-pressed="${autoCollectEnabled ? "false" : "true"}" title="${escapeHtml(autoCollectEnabled ? "退出一键智能采集和定时采集；单人手动采集不受影响" : "重新加入一键智能采集和定时采集")}">${autoCollectEnabled ? "退出一键采集" : "加入一键采集"}</button>
-            <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
+            <details class="profile-row-menu">
+              <summary aria-label="${escapeHtml(name)}的更多操作" title="更多操作"><img src="/icons/ellipsis.svg" alt="" /></summary>
+              <div class="profile-menu-actions">
+                ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${fullRequestState ? "disabled" : ""}>${collectionButtonLabel(fullBaseLabel, fullRequestState)}</button>` : ""}
+                <button data-profile-auto-collect="${escapeHtml(profile.id || "")}" aria-pressed="${autoCollectEnabled ? "false" : "true"}" title="${escapeHtml(autoCollectEnabled ? "退出一键智能采集和定时采集；单人手动采集不受影响" : "重新加入一键智能采集和定时采集")}">${autoCollectEnabled ? "退出一键采集" : "加入一键采集"}</button>
+                <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
+              </div>
+            </details>
           </div>
         </div>
       `;
-    }).join("") + (totalRows > visibleRows.length
-      ? `<div class="profile-manager-load-more"><button data-profile-load-more ${loading ? "disabled" : ""}>${loading ? "加载中" : `显示更多（剩余 ${totalRows - visibleRows.length}）`}</button></div>`
-      : "") || '<div class="muted profile-manager-empty">没有符合条件的主页</div>';
+    }, '<div class="muted profile-manager-empty">没有符合条件的主页</div>');
     syncProfileAvatarLoading(node);
   }
 
   async function load(options = {}) {
-    const reset = options.reset !== false;
+    let reset = options.reset !== false;
     if (!reset && requests.inFlight) return;
     const query = currentQuery();
-    const querySnapshot = query.toString();
+    const querySnapshot = currentViewSnapshot();
+    if (!reset && loadedQuery !== query.toString()) reset = true;
+    if (reset) completeScope = null;
     const params = new URLSearchParams(query);
     params.set("offset", String(reset ? 0 : rows.length));
     const request = requests.begin(querySnapshot);
     loading = true;
+    loadError = "";
+    $("profileManagerList").setAttribute("aria-busy", "true");
+    if (!rows.length) renderManager(rows, extractActive);
     try {
       const data = await api(`/api/profiles?${params.toString()}`, { signal: request.signal });
-      if (!requests.canCommit(request, currentQuery().toString())) return;
+      if (!requests.canCommit(request, currentViewSnapshot())) return;
+      hasLoaded = true;
       const incoming = Array.isArray(data.profiles) ? data.profiles : [];
       if (reset) {
         rows = incoming;
@@ -340,6 +403,12 @@ export function createProfilesFeature(options) {
         rows.push(...incoming.filter((profile) => !known.has(Number(profile.id))));
       }
       total = Number(data.total || 0);
+      hasMoreRows = incoming.length > 0 && rows.length < total;
+      loadedQuery = query.toString();
+      // Only a complete, unfiltered scope is safe for local search and sorting.
+      if (!query.get("q") && query.get("deleted_works") === "all" && rows.length >= total) {
+        completeScope = { scope: query.get("scope"), rows };
+      }
       eligibleCount = Number(data.eligible_count || 0);
       deferredCount = Number(data.deferred_count || 0);
       fullScanRequiredCount = Object.prototype.hasOwnProperty.call(data, "full_scan_required_count")
@@ -352,12 +421,15 @@ export function createProfilesFeature(options) {
         ? Number(data.paused_count || 0)
         : null;
     } catch (error) {
-      if (!requests.canCommit(request, currentQuery().toString())) return;
+      if (!requests.canCommit(request, currentViewSnapshot())) return;
+      loadError = `主页读取失败：${error.message}`;
       throw error;
     } finally {
       if (requests.finish(request)) {
         loading = false;
+        $("profileManagerList").setAttribute("aria-busy", "false");
         renderManager(rows, extractActive);
+        if (!loadError) scheduleLoadMoreIfNeeded();
       }
     }
   }
@@ -368,10 +440,10 @@ export function createProfilesFeature(options) {
     window.requestAnimationFrame(() => {
       loadMoreCheckScheduled = false;
       const list = $("profileManagerList");
-      const differenceFilter = $("profileManagerDeletedWorks")?.value || "all";
-      if (!list || location.hash !== "#profiles" || differenceFilter === "pending") return;
-      if (loading || rows.length >= total) return;
-      const remainingScroll = list.scrollHeight - list.scrollTop - list.clientHeight;
+      if (!list || location.hash !== "#profiles") return;
+      if (loading || !hasMoreRows || canFilterLocally()) return;
+      if (!list.getClientRects().length) return;
+      const remainingScroll = list.getBoundingClientRect().bottom - window.innerHeight;
       if (remainingScroll > PROFILE_AUTO_LOAD_DISTANCE) return;
       load({ reset: false }).catch((err) => toast(err.message));
     });
@@ -507,6 +579,19 @@ export function createProfilesFeature(options) {
   }
 
   function bind() {
+    document.addEventListener("click", (event) => {
+      document.querySelectorAll(".profile-row-menu[open]").forEach((menu) => {
+        if (!menu.contains(event.target) || event.target.closest("button")) menu.open = false;
+      });
+    });
+    $("profileManagerList").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const menu = event.target.closest(".profile-row-menu[open]");
+      if (menu) {
+        menu.open = false;
+        menu.querySelector("summary").focus();
+      }
+    });
     const profileParam = String(new URLSearchParams(location.search).get("profile") || "").trim();
     if (profileParam) {
       deepLinkedProfile = profileParam;
@@ -528,18 +613,19 @@ export function createProfilesFeature(options) {
     $("profileManagerSearch").addEventListener("input", () => {
       deepLinkedProfile = "";
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => load({ reset: true }).catch((err) => toast(err.message)), 250);
+      searchTimer = setTimeout(() => refreshView().catch((err) => toast(err.message)), canFilterLocally() ? 0 : 250);
     });
     $("profileManagerSort").addEventListener("change", () => {
-      load({ reset: true }).catch((err) => toast(err.message));
+      refreshView().catch((err) => toast(err.message));
     });
     $("profileManagerScope").addEventListener("change", () => {
-      load({ reset: true }).catch((err) => toast(err.message));
+      refreshView().catch((err) => toast(err.message));
     });
     $("profileManagerDeletedWorks").addEventListener("change", () => {
-      load({ reset: true }).catch((err) => toast(err.message));
+      refreshView().catch((err) => toast(err.message));
     });
-    $("profileManagerList").addEventListener("scroll", scheduleLoadMoreIfNeeded, { passive: true });
+    window.addEventListener("scroll", scheduleLoadMoreIfNeeded, { passive: true });
+    window.addEventListener("resize", scheduleLoadMoreIfNeeded);
     $("profileManagerList").addEventListener("click", (event) => {
       const loadMore = event.target.closest("button[data-profile-load-more]");
       if (loadMore) {

@@ -28,34 +28,51 @@ export async function startShortVideoServer(config = SERVER_CONFIG) {
     }
     return true;
   }
-  const registry = await discoverFanHaoModules({
-    modulesDir: config.MODULES_DIR, enabledModules: ["short-videos"], product: config.PRODUCT, sendJson,
-    context: { moduleDeps: { shortVideos: { config, requireLocalAdmin } } }
-  });
-  const staticFiles = createStaticFileServer({ publicDir: config.PUBLIC_DIR, mimeTypes: config.MIME_TYPES,
-    normalizeExt: (file) => path.extname(file).toLowerCase(), notFound });
-  const handler = createRequestHandler({
-    ...auth, attachAccessAnalytics() {}, attachAccessLogger() {}, sendJson, sendText, sendHtml,
-    renderAndroidUpdatePage: () => "此独立产品未提供 Android 更新。",
-    async routeApi(req, res, url) {
-      if (req.method === "GET" && url.pathname === "/api/health") {
-        sendJson(res, 200, { ok: true, product: "short-videos" }); return true;
+  let registry, staticFiles;
+  async function stopResources() {
+    const results = await Promise.allSettled([
+      () => staticFiles?.stop(), () => registry?.stop()
+    ].map(stopResource => Promise.resolve().then(stopResource)));
+    const failures = results.filter(result => result.status === "rejected").map(result => result.reason);
+    try { auth.closeAccounts(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Short-video server resources failed to stop");
+  }
+  try {
+    registry = await discoverFanHaoModules({
+      modulesDir: config.MODULES_DIR, enabledModules: ["short-videos"], product: config.PRODUCT, sendJson,
+      context: { moduleDeps: { shortVideos: { config, requireLocalAdmin } } }
+    });
+    staticFiles = createStaticFileServer({ publicDir: config.PUBLIC_DIR, mimeTypes: config.MIME_TYPES,
+      normalizeExt: (file) => path.extname(file).toLowerCase(), notFound });
+    const handler = createRequestHandler({
+      ...auth, attachAccessAnalytics() {}, attachAccessLogger() {}, sendJson, sendText, sendHtml,
+      renderAndroidUpdatePage: () => "此独立产品未提供 Android 更新。",
+      async routeApi(req, res, url) {
+        if (req.method === "GET" && url.pathname === "/api/health") {
+          sendJson(res, 200, { ok: true, product: "short-videos" }); return true;
+        }
+        return registry.routeApi(req, res, url);
+      },
+      routeMedia: registry.routeMedia,
+      serveStatic(req, res, route) {
+        if (route === "/") { redirect(res, "/short-videos"); return; }
+        return staticFiles.serveStatic(req, res, route);
       }
-      return registry.routeApi(req, res, url);
-    },
-    routeMedia: registry.routeMedia,
-    serveStatic(req, res, route) {
-      if (route === "/") { redirect(res, "/short-videos"); return; }
-      staticFiles.serveStatic(req, res, route);
-    }
-  });
-  try { await registry.start(); } catch (error) { await registry.stop(); auth.closeAccounts(); throw error; }
-  const host = createServerHost({
-    requestHandler: handler, port: config.PORT, host: config.HOST,
-    getLibraryState: () => ({ availableRoots: config.SHORT_VIDEO_ROOTS, missingRoots: [] }),
-    beginStop: registry.beginStop,
-    async stop() { try { await registry.stop(); } finally { auth.closeAccounts(); } }
-  });
-  host.listen();
-  return host;
+    });
+    await staticFiles.start();
+    await registry.start();
+    const host = createServerHost({
+      requestHandler: handler, port: config.PORT, host: config.HOST,
+      getLibraryState: () => ({ availableRoots: config.SHORT_VIDEO_ROOTS, missingRoots: [] }),
+      beginStop() { staticFiles.beginStop(); return registry.beginStop(); },
+      stop: stopResources
+    });
+    host.listen();
+    return host;
+  } catch (error) {
+    try { await stopResources(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Short-video server startup and cleanup failed", { cause: error }); }
+    throw error;
+  }
 }

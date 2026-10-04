@@ -21,9 +21,21 @@ export const ACTOR_MOVIE_INFO_CACHE_TABLES = Object.freeze([
   "work_external_refs"
 ]);
 
+export const STUDIO_CATALOG_CACHE_TABLES = Object.freeze([
+  "works",
+  "makers",
+  "work_makers",
+  "maker_external_refs",
+  "series",
+  "series_external_refs",
+  "work_series",
+  "local_works"
+]);
+
 const CACHE_TABLE_DEPENDENCIES = Object.freeze({
   actor_profiles: ACTOR_PROFILE_CACHE_TABLES,
-  actor_movies: ACTOR_MOVIE_CACHE_TABLES
+  actor_movies: ACTOR_MOVIE_CACHE_TABLES,
+  studio_catalog: STUDIO_CATALOG_CACHE_TABLES
 });
 
 export function cacheDependencyTables(...tables) {

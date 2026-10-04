@@ -3,6 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../public/modules/novels/novel-page.js", import.meta.url), "utf8");
+const writerSource = fs.readFileSync(new URL("../public/modules/novels/progress-writer.js", import.meta.url), "utf8");
 const deferred = () => { let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject}; };
 const settle = async () => {for(let i=0;i<24;i++)await Promise.resolve();};
 class Element {
@@ -42,10 +43,11 @@ function harness({production=source,initial=detail(),respond}={}){
   window.fetch=(url,options)=>api(url,options);
   const context=vm.createContext({document,window,Element,URL,URLSearchParams,AbortController,console,Intl,Map,Set,Date,Promise,
     localStorage:{getItem(){return null;},setItem(){}},createNovelCollectionAdmin:()=>({ensureState(){},stopPolling(){}})});
-  vm.runInContext(production.replace(/^import .*\r?\n/,"").replace("export function createNovelPage","function createNovelPage")+"\nglobalThis.createPage=createNovelPage;",context,{filename:"production-novel-page.js"});
+  vm.runInContext(writerSource.replace("export function createNovelProgressWriter", "function createNovelProgressWriter"), context, { filename: "production-progress-writer.js" });
+  vm.runInContext(production.replace(/^import .*\r?\n/gm,"").replace("export function createNovelPage","function createNovelPage")+"\nglobalThis.createPage=createNovelPage;",context,{filename:"production-novel-page.js"});
   const noop=()=>{};const page=context.createPage({api,state,els:{workGrid:grid},formatBytes:String,formatDateTime:String,formatNumber:String,
     cancelScheduledWorkRendering:noop,disconnectPeopleIndexAutoload:noop,hidePersonProfile:noop,openAdminScript:noop,pushRoute:noop,replaceRoute:noop,resetProgressiveCoverLoading:noop,setMainHeader:noop,syncRouteAfterNavigation:noop});
-  return{page,state,requests,window,document,grid,setCurrent(next){current=next;},async timers(){const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await settle();},button(){return grid.querySelectorAll("button").find(b=>b.textContent==="确认从当前章节重新记录进度");}};
+  return{page,state,requests,window,document,grid,setCurrent(next){current=next;},async timers(){const readyFrames=frames.splice(0);readyFrames.forEach(fn=>fn());await settle();const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());await settle();},button(){return grid.querySelectorAll("button").find(b=>b.textContent==="确认从当前章节重新记录进度");}};
 }
 const tests=[];const test=(name,run)=>tests.push({name,run});let passed=0,negative=0;
 test("public openChapter and timer save send the exact ID, revision and realm",async({production=source}={})=>{

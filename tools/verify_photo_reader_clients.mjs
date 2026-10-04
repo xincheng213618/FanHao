@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 
-const webReader = read("public", "modules", "content-index", "gallery-renderer.js");
+const webReader = read("public", "modules", "content-index", "gallery-renderer.js")
+  + read("public", "modules", "content-index", "gallery-page.js");
 for (const marker of [
   "GALLERY_READER_IMAGE_CONCURRENCY = 4",
   "galleryReaderStartupFigure",

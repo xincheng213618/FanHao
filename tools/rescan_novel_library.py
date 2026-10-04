@@ -12,7 +12,7 @@ import re
 import sqlite3
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--file", help="Reimport one TXT file without rebuilding the whole library.")
     parser.add_argument("--source-root", help="Source root for --file; defaults to the file's parent directory.")
     parser.add_argument("--book-id", help="Expected stable book ID for --file.")
+    parser.add_argument("--export-only", help="Export one parsed BookRecord as UTF-8 JSON without opening a database.")
+    parser.add_argument("--export-max-bytes", type=int, default=0, help="Optional UTF-8 byte budget for --export-only; 0 means unlimited.")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Target SQLite database path.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum TXT files to scan. 0 means all.")
     parser.add_argument("--dry-run", action="store_true", help="Parse and summarize without writing the database.")
@@ -653,6 +655,20 @@ def main() -> int:
             raise SystemExit(record.error or "TXT 解析后没有有效章节")
         if args.book_id and record.id != str(args.book_id).strip():
             raise SystemExit(f"stable book ID changed: expected {args.book_id}, got {record.id}")
+        if args.export_only:
+            destination = Path(args.export_only)
+            encoder = json.JSONEncoder(ensure_ascii=False)
+            payload = {"formatVersion": 1, "bookRecord": asdict(record)}
+            exported_bytes = 0
+            with destination.open("w", encoding="utf-8", newline="\n") as output:
+                for chunk in encoder.iterencode(payload):
+                    exported_bytes += len(chunk.encode("utf-8"))
+                    if args.export_max_bytes > 0 and exported_bytes > args.export_max_bytes:
+                        print("NOVEL_REIMPORT_EXPORT_TOO_LARGE", file=sys.stderr)
+                        return 75
+                    output.write(chunk)
+            print(json.dumps({"ok": True, "exported": True}, ensure_ascii=True))
+            return 0
         if not args.dry_run:
             write_record(Path(args.db), record)
         print(
@@ -674,6 +690,8 @@ def main() -> int:
         )
         return 0
 
+    if args.export_only:
+        raise SystemExit("--export-only requires --file")
     roots = [Path(item) for item in (args.roots or [str(root) for root in DEFAULT_ROOTS])]
     complete_roots: list[Path] = []
     files = iter_txt_files(roots, args.limit, complete_roots=complete_roots)

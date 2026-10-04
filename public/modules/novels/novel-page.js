@@ -1,7 +1,9 @@
-import { createNovelCollectionAdmin } from "./collection-admin.js?v=20260727-novel-task-log-04";
+import { createNovelCollectionAdmin } from "./collection-admin.js?v=20261004-novel-reader-owner-01";
+import { createNovelProgressWriter } from "./progress-writer.js?v=20261004-novel-progress-01";
 
 const NOVEL_BOOK_PAGE_SIZE = 48;
 const NOVEL_RANKING_PAGE_SIZE = 48;
+const NOVEL_PREFIX_PAGE_SIZE = 5000;
 const NOVEL_CHAPTER_CACHE_LIMIT = 8;
 
 export function createNovelPage(deps) {
@@ -24,45 +26,82 @@ export function createNovelPage(deps) {
   } = deps;
 
   let catalogRequestId = 0;
+  let catalogController = null;
   let progressTimer = null;
-  let progressWrite = Promise.resolve();
   let progressRevision = 0;
   const recoveryWrites = new Map();
+  const progressSessions = new Map();
+  let progressClockSupported = false;
+  let progressClockRefresh = null;
   let navigationId = 0;
   let navigationController = null;
   let libraryRequestId = 0;
   let libraryRequestController = null;
   let readerStatusTimer = null;
+  let readerScrollFrame = null;
+  let readerScrollRevision = 0;
+  let scrollInputRevision = 0;
+  let pendingScrollRestore = null;
+  let appliedRouteNavigation = null;
   let scrollListenerInstalled = false;
   let progressLifecycleInstalled = false;
   let keyboardListenerInstalled = false;
   let libraryObserver = null;
   let libraryList = null;
   let libraryFooter = null;
+  let libraryPresentation = null;
   const chapterCache = new Map();
   const chapterRequests = new Map();
+  const progressWriter = createNovelProgressWriter({
+    send: record => api(`/api/novels/${encodeURIComponent(record.bookId)}/progress`, { method: "POST", body: record.body }),
+    sendKeepalive: record => window.fetch(`/api/novels/${encodeURIComponent(record.bookId)}/progress`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(record.body),
+      credentials: "same-origin", keepalive: true
+    }).then(async response => {
+      if (typeof response?.json !== "function") return response;
+      const data = await response.json();
+      if (!response.ok) throw Object.assign(new Error(data.error || "阅读进度保存失败"), { code: data.code });
+      return data;
+    }),
+    onResult: applyProgressReceipt,
+    onError: (record, error) => {
+      if (!isCurrentProgress(record)) return;
+      setReaderNavigationStatus(error.message || "进度保存失败，旧位置仍保留", "error");
+      if (error.code === "NOVEL_PROGRESS_SESSION_EXPIRED") refreshProgressSession(record);
+    },
+    onSettled: finishProgressWrite
+  });
   const collectionAdmin = createNovelCollectionAdmin({
     api,
     state,
     formatDateTime,
     formatNumber,
     openBook,
-    rerender: renderView,
+    isActive: canRenderManagement,
+    rerender: () => {
+      if (canRenderManagement()) renderView();
+      else collectionAdmin.stopPolling();
+    },
     onLibraryChanged: async () => {
-      if (state.novel?.mode !== "manage") return;
+      if (!canRenderManagement()) return;
       const requestId = libraryRequestId;
       try {
         const summary = await api("/api/novels/summary");
-        if (state.novel?.mode !== "manage" || requestId !== libraryRequestId) return;
+        if (!canRenderManagement() || requestId !== libraryRequestId) return;
         state.novel.summary = summary;
         state.novel.data = { summary, books: [], total: 0, limit: NOVEL_BOOK_PAGE_SIZE, offset: 0 };
       } catch {
-        if (state.novel?.mode !== "manage" || requestId !== libraryRequestId) return;
+        if (!canRenderManagement() || requestId !== libraryRequestId) return;
         state.novel.data = null;
         state.novel.summary = null;
       }
     }
   });
+
+  function canRenderManagement() {
+    return state.activeView === "novels" && state.novel?.mode === "manage"
+      && !state.novel.book && !state.novel.chapter && !navigationController;
+  }
 
   function ensureState() {
     if (!state.novel) state.novel = {};
@@ -106,7 +145,7 @@ export function createNovelPage(deps) {
     ensureState();
     if (options.reload) {
       chapterCache.clear();
-      chapterRequests.clear();
+      cancelChapterRequests();
     }
     state.selectedPersonId = null;
     state.selectedPerson = null;
@@ -135,6 +174,7 @@ export function createNovelPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    appliedRouteNavigation = resetReader();
     state.novel.query = route.novelQuery || "";
     state.novel.category = route.novelCategory || "all";
     state.novel.sort = route.novelSort || "updated";
@@ -145,15 +185,16 @@ export function createNovelPage(deps) {
 
   async function openRouteTarget(route = {}) {
     ensureState();
+    if (appliedRouteNavigation !== navigationId) resetReader();
+    appliedRouteNavigation = null;
     if (route.novelBookId && route.novelChapterIndex) {
-      await openChapter(route.novelBookId, route.novelChapterIndex, { skipRoute: true, restoreProgress: true });
+      await openChapter(route.novelBookId, route.novelChapterIndex, { skipRoute: true, restoreProgress: true, skipProgressFlush: true });
       return;
     }
     if (route.novelBookId) {
-      await openBook(route.novelBookId, { skipRoute: true });
+      await openBook(route.novelBookId, { skipRoute: true, skipProgressFlush: true });
       return;
     }
-    flushProgress();
     invalidateNavigation();
     state.novel.loading = false;
     state.novel.status = "";
@@ -166,6 +207,7 @@ export function createNovelPage(deps) {
 
   async function loadNovels(options = {}) {
     ensureState();
+    if (!options.append && !options.keepBook && !options.keepChapter) resetReader();
     if (state.novel.mode === "mine") state.novel.sort = "progress";
     if (state.novel.mode === "rankings" && !["chars", "updated"].includes(state.novel.sort)) state.novel.sort = "chars";
     const query = Object.freeze({
@@ -181,6 +223,7 @@ export function createNovelPage(deps) {
     if (options.append && !append) return;
     const request = beginLibraryRequest();
     state.novel.libraryError = "";
+    state.novel.libraryErrorAppend = null;
     if (append) state.novel.loadingMore = true;
     else state.novel.loading = true;
     if (!append) state.novel.status = "正在读取小说书库";
@@ -197,8 +240,10 @@ export function createNovelPage(deps) {
     if (query.sort !== "updated") params.set("sort", query.sort);
     const pageSize = paged ? NOVEL_RANKING_PAGE_SIZE : NOVEL_BOOK_PAGE_SIZE;
     params.set("limit", String(pageSize));
-    const existingEntries = state.novel.data?.books || [];
-    params.set("offset", String(paged ? query.page * pageSize : append ? existingEntries.length : 0));
+    const existingData = state.novel.data;
+    const existingEntries = existingData?.books || [];
+    const requestOffset = paged ? query.page * pageSize : append ? novelNextOffset(existingData, 0) : 0;
+    params.set("offset", String(requestOffset));
     const endpoint = query.mode === "author" && query.author
       ? `/api/novels/authors/${encodeURIComponent(query.author)}`
       : query.mode === "manage"
@@ -219,10 +264,17 @@ export function createNovelPage(deps) {
       });
     }
     let response;
+    let rebased = false;
     try {
       response = await api(`${endpoint}${query.mode !== "manage" && params.toString() ? `?${params}` : ""}`, {
         signal: request.controller.signal
       });
+      if (!isCurrentLibraryRequest(request)) return false;
+      if (append && novelListChanged(existingData, response)) {
+        response = await reloadNovelPrefix(endpoint, params, request, requestOffset + pageSize);
+        if (!response) return false;
+        rebased = true;
+      }
     } catch (error) {
       if (!isCurrentLibraryRequest(request)) return false;
       finishLibraryRequest(request);
@@ -230,6 +282,7 @@ export function createNovelPage(deps) {
       state.novel.loadingMore = false;
       state.novel.status = error.message || (append ? "继续加载失败" : "小说书库读取失败");
       state.novel.libraryError = state.novel.status;
+      state.novel.libraryErrorAppend = append;
       renderStats();
       if (append && libraryList) updateLibraryTail();
       else renderView();
@@ -249,11 +302,12 @@ export function createNovelPage(deps) {
         return loadNovels({ ...options, pageClamped: true, skipRoute: false, replaceRoute: true });
       }
     }
-    if (append) {
-      state.novel.data = { ...data, books: [...existingEntries, ...(data.books || [])] };
-    } else {
-      state.novel.data = data;
-    }
+    const merged = mergeNovelBooks(append && !rebased ? existingEntries : [], data.books || [], existingData?.sourceRealm, data.sourceRealm);
+    state.novel.data = {
+      ...data,
+      books: merged.books,
+      nextOffset: rebased ? data.nextOffset : novelNextOffset(data, requestOffset)
+    };
     if (query.mode === "manage") {
       await collectionAdmin.load({ silent: true });
     } else {
@@ -264,8 +318,7 @@ export function createNovelPage(deps) {
     state.novel.summary = data.summary || state.novel.summary;
     state.novel.loading = false;
     state.novel.loadingMore = false;
-    const loadedEntries = state.novel.data?.books || [];
-    state.novel.hasMore = !paged && query.mode !== "manage" && loadedEntries.length < Number(data.total || 0) && (!append || Boolean(data.books?.length));
+    state.novel.hasMore = !paged && query.mode !== "manage" && state.novel.data.nextOffset < Number(data.total || 0) && Boolean(data.books?.length);
     if (!paged) state.novel.page = 0;
     state.novel.status = query.mode === "manage"
       ? ""
@@ -281,14 +334,84 @@ export function createNovelPage(deps) {
                 ? "没有找到匹配的小说。"
                 : "这里还没有小说，请到“管理”页面刷新书库。";
     renderStats();
-    if (append && libraryList) updateLibraryTail(data.books || []);
+    if (append && !rebased && libraryList) updateLibraryTail(merged.added, merged.updated);
     else renderView();
+  }
+
+  function novelBookKey(book, realm = "") {
+    return JSON.stringify([String(book.sourceRealm || realm || ""), String(book.id)]);
+  }
+
+  function novelNextOffset(data, requestedOffset) {
+    const nextOffset = Number(data?.nextOffset);
+    return Number.isSafeInteger(nextOffset) && nextOffset >= requestedOffset
+      ? nextOffset
+      : requestedOffset + (data?.books?.length || 0);
+  }
+
+  function novelListChanged(previous, current) {
+    return Boolean(previous?.sourceRealm && current?.sourceRealm && previous.sourceRealm !== current.sourceRealm)
+      || Boolean(previous?.listRevision && current?.listRevision && previous.listRevision !== current.listRevision);
+  }
+
+  function mergeNovelBooks(previous, incoming, previousRealm, incomingRealm) {
+    const books = [];
+    const indexes = new Map();
+    const added = new Map();
+    const updated = new Map();
+    for (const book of previous) {
+      const key = novelBookKey(book, previousRealm);
+      if (!indexes.has(key)) { indexes.set(key, books.length); books.push(book); }
+    }
+    for (const book of incoming) {
+      const key = novelBookKey(book, incomingRealm);
+      if (indexes.has(key)) {
+        books[indexes.get(key)] = book;
+        if (added.has(key)) added.set(key, book);
+        else updated.set(key, book);
+      } else {
+        indexes.set(key, books.length);
+        books.push(book);
+        added.set(key, book);
+      }
+    }
+    return { books, added: [...added.values()], updated: [...updated.values()] };
+  }
+
+  async function reloadNovelPrefix(endpoint, initialParams, request, targetOffset) {
+    // A changed page cannot be joined to an older prefix. Re-read enough of one
+    // revision to preserve the displayed range and include the requested page.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let first = null;
+      let last = null;
+      let books = [];
+      let offset = 0;
+      while (offset < targetOffset) {
+        if (!isCurrentLibraryRequest(request)) return null;
+        const params = new URLSearchParams(initialParams);
+        params.set("offset", String(offset));
+        params.set("limit", String(Math.min(NOVEL_PREFIX_PAGE_SIZE, targetOffset - offset)));
+        const page = await api(`${endpoint}?${params}`, { signal: request.controller.signal });
+        if (!isCurrentLibraryRequest(request)) return null;
+        if (first && novelListChanged(first, page)) break;
+        first ||= page;
+        last = page;
+        books = mergeNovelBooks(books, page.books || [], first.sourceRealm, page.sourceRealm).books;
+        const nextOffset = novelNextOffset(page, offset);
+        if (nextOffset <= offset || !(page.books?.length) || nextOffset >= Number(page.total || 0)) {
+          return { ...last, offset: 0, nextOffset, books };
+        }
+        offset = nextOffset;
+        if (offset >= targetOffset) return { ...last, offset: 0, nextOffset: offset, books };
+      }
+    }
+    throw new Error("书库持续变化，请重试加载。");
   }
 
   async function openBook(bookId, options = {}) {
     ensureState();
     if (!bookId) return;
-    flushProgress();
+    if (!options.skipProgressFlush) flushProgress();
     const navigation = beginNavigation();
     state.novel.loading = true;
     state.novel.status = "正在读取书籍详情";
@@ -311,6 +434,7 @@ export function createNovelPage(deps) {
       return false;
     }
     if (!isCurrentNavigation(navigation)) return false;
+    noteProgressClock(data);
     state.novel.book = data.book;
     state.novel.chapters = [];
     state.novel.progressChapterTitle = "";
@@ -321,7 +445,7 @@ export function createNovelPage(deps) {
     state.novel.catalogFilteredTotal = state.novel.catalogTotal;
     state.novel.catalogOffset = 0;
     resetCatalogState(data.book, state.novel.chapters, data.book?.progress?.chapterIndex || 1);
-    await loadRemoteCatalogPage({ render: false });
+    await loadRemoteCatalogPage({ render: false, navigation });
     if (!isCurrentNavigation(navigation)) return false;
     finishNavigation(navigation);
     state.novel.loading = false;
@@ -340,12 +464,8 @@ export function createNovelPage(deps) {
     const previousBook = state.novel.book;
     const previousChapterIndex = Number(state.novel.chapter?.index || 0);
     const previousChapters = Array.isArray(state.novel.chapters) ? state.novel.chapters : [];
-    if (previousBookId && previousChapterIndex && (
-      previousBookId !== String(bookId) || previousChapterIndex !== Number(chapterIndex)
-    )) {
-      flushProgress();
-    }
-    const navigation = beginNavigation();
+    if (!options.skipProgressFlush && previousBookId && previousChapterIndex) flushProgress();
+    const navigation = beginNavigation({ bookId, chapterIndex, allowCache: options.restoreProgress === false });
     const readerVisible = Boolean(state.novel.chapter && document.querySelector(".novel-reader-page"));
     state.novel.loading = true;
     state.novel.status = "正在翻开章节";
@@ -365,6 +485,7 @@ export function createNovelPage(deps) {
       return false;
     }
     if (!isCurrentNavigation(navigation)) return false;
+    noteProgressClock(data);
     finishNavigation(navigation);
     const sameSnapshot = sameBookSnapshot(previousBook, data.book);
     const currentProgress = sameSnapshot ? state.novel.book?.progress : null;
@@ -399,24 +520,32 @@ export function createNovelPage(deps) {
     setReaderBodyClass();
     renderStats();
     renderView();
-    restoreReaderScroll();
-    scheduleProgressSave(120);
+    restoreReaderScroll({ saveProgress: true });
     if (!options.skipRoute) pushRoute({ view: "novels", novelBookId: bookId, novelChapterIndex: String(chapterIndex) });
     prefetchNextChapter(state.novel.book?.id, state.novel.next);
     return true;
   }
 
-  function beginNavigation() {
+  function beginNavigation(chapterTarget) {
     invalidateLibraryRequest();
+    invalidateProgressClock();
     navigationId += 1;
     navigationController?.abort();
     navigationController = new AbortController();
+    invalidateCatalogRequest();
+    cancelChapterRequests(chapterTarget);
+    cancelReaderScroll();
+    window.clearTimeout(progressTimer);
+    progressTimer = null;
+    collectionAdmin.stopPolling();
+    libraryObserver?.disconnect();
+    libraryObserver = null;
     clearReaderNavigationStatus();
     return { id: navigationId, controller: navigationController };
   }
 
   function isCurrentNavigation(navigation) {
-    return navigation?.id === navigationId
+    return state.activeView === "novels" && navigation?.id === navigationId
       && navigation?.controller === navigationController
       && !navigation.controller.signal.aborted;
   }
@@ -426,10 +555,47 @@ export function createNovelPage(deps) {
   }
 
   function invalidateNavigation() {
+    invalidateProgressClock();
     navigationId += 1;
     navigationController?.abort();
     navigationController = null;
+    invalidateCatalogRequest();
+    cancelChapterRequests();
+    cancelReaderScroll();
+    window.clearTimeout(progressTimer);
+    progressTimer = null;
     clearReaderNavigationStatus();
+  }
+
+  function resetReader() {
+    flushProgress();
+    invalidateNavigation();
+    invalidateLibraryRequest();
+    collectionAdmin.stopPolling();
+    libraryObserver?.disconnect();
+    libraryObserver = null;
+    if (state.novel) {
+      state.novel.loading = false;
+      state.novel.loadingMore = false;
+      state.novel.catalogLoading = false;
+      state.novel.catalogOpen = false;
+      state.novel.settingsOpen = false;
+      state.novel.status = "";
+    }
+    return navigationId;
+  }
+
+  function invalidateCatalogRequest() {
+    catalogRequestId += 1;
+    catalogController?.abort();
+    catalogController = null;
+  }
+
+  function cancelReaderScroll() {
+    readerScrollRevision += 1;
+    if (readerScrollFrame != null) window.cancelAnimationFrame?.(readerScrollFrame);
+    readerScrollFrame = null;
+    pendingScrollRestore = null;
   }
 
   function beginLibraryRequest() {
@@ -440,7 +606,7 @@ export function createNovelPage(deps) {
   }
 
   function isCurrentLibraryRequest(request) {
-    return request?.id === libraryRequestId
+    return state.activeView === "novels" && request?.id === libraryRequestId
       && request?.controller === libraryRequestController
       && !request.controller.signal.aborted;
   }
@@ -541,16 +707,30 @@ export function createNovelPage(deps) {
     }
     const key = chapterCacheKey(bookId, chapterIndex, book);
     const pending = chapterRequests.get(key);
-    if (pending && !pending.signal?.aborted) return pending.promise;
-    if (pending) chapterRequests.delete(key);
+    if (pending && !pending.controller.signal.aborted && options.allowCache && pending.prefetch) {
+      pending.navigation = navigationId;
+      pending.prefetch = Boolean(options.prefetch);
+      attachChapterSignal(pending, options.signal);
+      return pending.promise;
+    }
+    if (pending) {
+      pending.controller.abort();
+      chapterRequests.delete(key);
+    }
     const params = new URLSearchParams();
     if (book?.sourceRealm) params.set("sourceRealm", book.sourceRealm);
     if (book?.catalogRevision) params.set("catalogRevision", book.catalogRevision);
     if (book?.catalogRevision && target?.id) params.set("chapterId", target.id);
-    const request = api(`/api/novels/${encodeURIComponent(bookId)}/chapters/${encodeURIComponent(chapterIndex)}${params.size ? `?${params}` : ""}`, {
-      signal: options.signal
+    const request = { controller: new AbortController(), navigation: navigationId, prefetch: Boolean(options.prefetch), detach: null };
+    attachChapterSignal(request, options.signal);
+    chapterRequests.set(key, request);
+    request.promise = api(`/api/novels/${encodeURIComponent(bookId)}/chapters/${encodeURIComponent(chapterIndex)}${params.size ? `?${params}` : ""}`, {
+      signal: request.controller.signal
     })
       .then((data) => {
+        if (state.activeView !== "novels" || request.controller.signal.aborted || request.navigation !== navigationId || chapterRequests.get(key) !== request) {
+          throw new Error("章节读取已取消");
+        }
         if (String(data.book?.id || "") !== String(bookId) || Number(data.chapter?.index) !== Number(chapterIndex)
             || (book?.sourceRealm && data.book?.sourceRealm !== book.sourceRealm)
             || (book?.catalogRevision && (data.book?.catalogRevision !== book.catalogRevision || data.catalogRevision !== book.catalogRevision))
@@ -559,15 +739,40 @@ export function createNovelPage(deps) {
         return data;
       })
       .finally(() => {
-        if (chapterRequests.get(key)?.promise === request) chapterRequests.delete(key);
+        request.detach?.();
+        if (chapterRequests.get(key) === request) chapterRequests.delete(key);
       });
-    chapterRequests.set(key, { promise: request, signal: options.signal });
-    return request;
+    return request.promise;
+  }
+
+  function attachChapterSignal(request, signal) {
+    request.detach?.();
+    request.detach = null;
+    if (!signal) return;
+    const abort = () => request.controller.abort();
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    request.detach = () => signal.removeEventListener("abort", abort);
+  }
+
+  function cancelChapterRequests(target) {
+    const book = state.novel?.book;
+    const retainedKey = target?.allowCache && book?.catalogRevision && String(book.id) === String(target.bookId)
+      ? chapterCacheKey(target.bookId, target.chapterIndex, book) : null;
+    for (const [key, request] of chapterRequests) {
+      if (key === retainedKey && request.prefetch && !request.controller.signal.aborted) {
+        request.navigation = navigationId;
+        continue;
+      }
+      request.controller.abort();
+      request.detach?.();
+      chapterRequests.delete(key);
+    }
   }
 
   function prefetchNextChapter(bookId, chapter) {
     if (!bookId || !chapter?.index) return;
-    fetchChapterData(bookId, chapter.index, { allowCache: true }).catch(() => {});
+    fetchChapterData(bookId, chapter.index, { allowCache: true, prefetch: true }).catch(() => {});
   }
 
   function openAdjacent(direction) {
@@ -611,11 +816,13 @@ export function createNovelPage(deps) {
       : state.novel.book ? `${state.novel.book.title} · 小说书库`
         : `${({ mine: "我的阅读", rankings: "小说排行", manage: "小说管理", author: state.novel.author })[state.novel.mode] || "小说书库"} · 本地阅读`;
     const readerFocus = document.activeElement?.dataset?.readerFocus;
+    setReaderBodyClass();
+    if (updatePendingLibraryView()) return;
     libraryObserver?.disconnect();
     libraryList = null;
     libraryFooter = null;
+    libraryPresentation = null;
     els.workGrid.innerHTML = "";
-    setReaderBodyClass();
     if (state.novel.loading && !state.novel.data && !state.novel.book && !state.novel.chapter) {
       renderHomeLoading("正在读取小说书库");
       return;
@@ -630,6 +837,35 @@ export function createNovelPage(deps) {
       return;
     }
     renderHome();
+  }
+
+  function updatePendingLibraryView() {
+    if (state.activeView !== "novels" || !state.novel.loading || !libraryRequestController || navigationController
+        || state.novel.book || state.novel.chapter || !state.novel.data?.books?.length
+        || !libraryList?.isConnected || !libraryFooter?.isConnected || !libraryPresentation
+        || libraryPresentation.mode !== state.novel.mode
+        || libraryPresentation.author !== state.novel.author
+        || libraryPresentation.query !== state.novel.query) return false;
+    const { results, title, count, sort, categories, status } = libraryPresentation;
+    results.setAttribute("aria-busy", "true");
+    title.textContent = libraryResultTitle();
+    count.textContent = "正在读取…";
+    sort.value = state.novel.sort;
+    for (const button of categories.children) {
+      const active = button.dataset.novelCategory === state.novel.category;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    status.textContent = state.novel.status;
+    status.hidden = !state.novel.status;
+    updateLibraryTail();
+    return true;
+  }
+
+  function libraryResultTitle() {
+    return state.novel.query ? `“${state.novel.query}”的搜索结果`
+      : state.novel.mode === "mine" ? "阅读记录"
+        : state.novel.category !== "all" ? displayNovelCategory(state.novel.category) : "全部作品";
   }
 
   function renderHomeLoading(message) {
@@ -714,7 +950,7 @@ export function createNovelPage(deps) {
     const resultHeading = document.createElement("div");
     resultHeading.className = "novel-results-heading";
     const resultTitle = document.createElement("h2");
-    resultTitle.textContent = state.novel.query ? `“${state.novel.query}”的搜索结果` : state.novel.mode === "mine" ? "阅读记录" : state.novel.category !== "all" ? displayNovelCategory(state.novel.category) : "全部作品";
+    resultTitle.textContent = libraryResultTitle();
     const resultCount = document.createElement("span");
     resultCount.className = "novel-results-count";
     resultCount.textContent = `${formatNumber(data.total || 0)} 本`;
@@ -816,17 +1052,20 @@ export function createNovelPage(deps) {
 
     shell.append(head);
     results.append(controls);
-    if (state.novel.status && entries.length) {
-      const status = document.createElement("div");
-      status.className = "novel-status-line";
-      status.textContent = state.novel.status;
-      results.append(status);
-    }
+    const status = document.createElement("div");
+    status.className = "novel-status-line";
+    status.textContent = entries.length ? state.novel.status : "";
+    status.hidden = !status.textContent;
+    results.append(status);
     results.append(list);
     libraryList = state.novel.mode === "mine" ? list.querySelector(".novel-recent-strip") || list : list;
     libraryFooter = document.createElement("div");
     libraryFooter.className = "novel-library-autoload";
     results.append(libraryFooter);
+    libraryPresentation = {
+      mode: state.novel.mode, author: state.novel.author, query: state.novel.query,
+      results, title: resultTitle, count: resultCount, sort, categories, status
+    };
     if (sidebar.childElementCount) workspace.append(sidebar);
     else workspace.classList.add("without-sidebar");
     workspace.append(results);
@@ -835,21 +1074,30 @@ export function createNovelPage(deps) {
     updateLibraryTail();
   }
 
-  function updateLibraryTail(newBooks = []) {
+  function updateLibraryTail(newBooks = [], updatedBooks = []) {
     if (!libraryList || !libraryFooter) return;
+    if (updatedBooks.length) {
+      const rows = new Map([...libraryList.children].map(row => [row.dataset.novelBookKey, row]));
+      for (const book of updatedBooks) {
+        const row = rows.get(novelBookKey(book, state.novel.data?.sourceRealm));
+        if (row) row.replaceWith(state.novel.mode === "mine" ? renderRecentItem(book) : renderBookRow(book));
+      }
+    }
     for (const book of newBooks) libraryList.append(state.novel.mode === "mine" ? renderRecentItem(book) : renderBookRow(book));
     libraryFooter.replaceChildren();
     const loaded = state.novel.data?.books?.length || 0;
     const count = document.createElement("span");
     count.setAttribute("role", "status");
-    count.textContent = state.novel.loadingMore ? "正在继续加载…" : state.novel.libraryError ? `加载中断：${state.novel.libraryError}` : loaded ? `已显示 ${formatNumber(loaded)} / ${formatNumber(state.novel.data?.total || loaded)} 本` : "";
+    count.textContent = state.novel.loading ? "正在读取小说书库…" : state.novel.loadingMore ? "正在继续加载…" : state.novel.libraryError ? `加载中断：${state.novel.libraryError}` : loaded ? `已显示 ${formatNumber(loaded)} / ${formatNumber(state.novel.data?.total || loaded)} 本` : "";
     libraryFooter.append(count);
-    if (state.novel.hasMore && !state.novel.loadingMore) {
+    libraryPresentation?.results.setAttribute("aria-busy", String(state.novel.loading || state.novel.loadingMore));
+    const retryRead = state.novel.libraryError && state.novel.libraryErrorAppend !== true;
+    if ((retryRead || state.novel.hasMore) && !state.novel.loading && !state.novel.loadingMore) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "novel-text-button";
-      more.textContent = state.novel.libraryError ? "重试加载" : "加载更多";
-      more.addEventListener("click", () => loadNovels({ append: true, skipRoute: true }).catch(() => {}));
+      more.textContent = retryRead ? "重新读取" : state.novel.libraryError ? "重试加载" : "加载更多";
+      more.addEventListener("click", () => loadNovels({ append: !retryRead, skipRoute: true }).catch(() => {}));
       libraryFooter.append(more);
     }
     armLibraryAutoload();
@@ -860,8 +1108,11 @@ export function createNovelPage(deps) {
     libraryObserver = null;
     const sentinel = document.querySelector(".novel-library-autoload");
     if (!sentinel || !state.novel.hasMore || state.novel.loading || state.novel.loadingMore || state.novel.libraryError) return;
-    libraryObserver = new IntersectionObserver(
+    const owner = navigationId;
+    const observer = new IntersectionObserver(
       (entries) => {
+        if (libraryObserver !== observer || owner !== navigationId || !sentinel.isConnected
+            || state.activeView !== "novels" || state.novel.book || state.novel.chapter) return;
         if (!entries.some((entry) => entry.isIntersecting)) return;
         libraryObserver?.disconnect();
         libraryObserver = null;
@@ -869,7 +1120,8 @@ export function createNovelPage(deps) {
       },
       { rootMargin: "600px 0px" }
     );
-    libraryObserver.observe(sentinel);
+    libraryObserver = observer;
+    observer.observe(sentinel);
   }
 
   function renderNovelPageHeading(titleText, descriptionText) {
@@ -1401,6 +1653,7 @@ export function createNovelPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `novel-chip${state.novel.category === value ? " active" : ""}`;
+    button.dataset.novelCategory = value;
     button.setAttribute("aria-pressed", String(state.novel.category === value));
     const name = document.createElement("span");
     name.textContent = displayNovelCategory(label);
@@ -1433,6 +1686,7 @@ export function createNovelPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-recent-item";
+    button.dataset.novelBookKey = novelBookKey(book, state.novel.data?.sourceRealm);
     const strong = document.createElement("strong");
     strong.textContent = book.title;
     const span = document.createElement("span");
@@ -1445,6 +1699,7 @@ export function createNovelPage(deps) {
   function renderBookRow(book, rank = 0) {
     const row = document.createElement("article");
     row.className = `novel-book-row${rank ? " ranking" : ""}`;
+    row.dataset.novelBookKey = novelBookKey(book, state.novel.data?.sourceRealm);
     if (rank) {
       const badge = document.createElement("span");
       badge.className = `novel-rank-number${rank <= 3 ? " top" : ""}`;
@@ -2469,7 +2724,14 @@ export function createNovelPage(deps) {
     const book = state.novel.book;
     const bookId = String(state.novel.book?.id || "");
     if (!bookId) return;
+    const owner = navigationId;
     const requestId = ++catalogRequestId;
+    catalogController?.abort();
+    const controller = new AbortController();
+    catalogController = controller;
+    const isCurrent = () => state.activeView === "novels" && owner === navigationId
+      && requestId === catalogRequestId && catalogController === controller && !controller.signal.aborted
+      && sameBookSnapshot(book, state.novel.book) && (!options.navigation || isCurrentNavigation(options.navigation));
     const params = new URLSearchParams({
       all: "1",
       order: "asc"
@@ -2487,11 +2749,11 @@ export function createNovelPage(deps) {
       restoreReaderScroll();
     } else if (renderDetail) {
       renderView();
-      window.requestAnimationFrame(() => window.scrollTo({ top: detailScrollY, left: 0, behavior: "auto" }));
+      restoreDetailScroll(detailScrollY, owner, book);
     }
     try {
-      const data = await api(`/api/novels/${encodeURIComponent(bookId)}/catalog?${params}`);
-      if (requestId !== catalogRequestId || !sameBookSnapshot(book, state.novel.book)) return;
+      const data = await api(`/api/novels/${encodeURIComponent(bookId)}/catalog?${params}`, { signal: controller.signal });
+      if (!isCurrent()) return;
       if ((book.catalogRevision && data.catalogRevision !== book.catalogRevision) || (book.sourceRealm && data.sourceRealm !== book.sourceRealm)) throw new Error("目录版本已变化，请重新打开书籍");
       state.novel.chapters = Array.isArray(data.chapters) ? data.chapters : [];
       const progressIndex = Number(state.novel.book?.progress?.chapterIndex || 0);
@@ -2507,10 +2769,11 @@ export function createNovelPage(deps) {
       state.novel.catalogPage = 0;
       state.novel.catalogError = "";
     } catch (error) {
-      if (requestId !== catalogRequestId || !sameBookSnapshot(book, state.novel.book)) return;
+      if (!isCurrent()) return;
       state.novel.catalogError = error.message || "章节目录读取失败";
     } finally {
-      if (requestId !== catalogRequestId || !sameBookSnapshot(book, state.novel.book)) return;
+      if (!isCurrent()) return;
+      catalogController = null;
       state.novel.catalogLoading = false;
       if (state.novel.catalogOpen) {
         const ratio = currentReaderRatio();
@@ -2518,8 +2781,9 @@ export function createNovelPage(deps) {
         renderView();
         restoreReaderScroll();
       } else if (renderDetail) {
+        const currentDetailScrollY = window.scrollY;
         renderView();
-        window.requestAnimationFrame(() => window.scrollTo({ top: detailScrollY, left: 0, behavior: "auto" }));
+        restoreDetailScroll(currentDetailScrollY, owner, book);
       }
     }
   }
@@ -2553,6 +2817,9 @@ export function createNovelPage(deps) {
   }
 
   function currentReaderRatio() {
+    if (pendingScrollRestore && pendingScrollRestore.navigation === navigationId
+        && sameBookSnapshot(pendingScrollRestore.book, state.novel.book)
+        && pendingScrollRestore.chapterId === state.novel.chapter?.id) return pendingScrollRestore.ratio;
     const page = document.querySelector(".novel-reader-page");
     if (!page) return 0;
     const top = page.getBoundingClientRect().top + window.scrollY;
@@ -2560,19 +2827,47 @@ export function createNovelPage(deps) {
     return clampRatio((window.scrollY - top) / readable);
   }
 
-  function restoreReaderScroll() {
-    const ratio = Math.max(0, Math.min(1, Number(state.novel.pendingScrollRatio || 0)));
-    state.novel.pendingScrollRatio = 0;
+  function restoreDetailScroll(top, owner, book) {
+    const detail = document.querySelector(".novel-detail");
+    const inputRevision = scrollInputRevision;
     window.requestAnimationFrame(() => {
+      if (state.activeView !== "novels" || owner !== navigationId || state.novel.chapter
+          || inputRevision !== scrollInputRevision || !sameBookSnapshot(book, state.novel.book)
+          || !detail || detail !== document.querySelector(".novel-detail")) return;
+      window.scrollTo({ top, left: 0, behavior: "auto" });
+    });
+  }
+
+  function restoreReaderScroll(options = {}) {
+    const ratio = Math.max(0, Math.min(1, Number(state.novel.pendingScrollRatio || 0)));
+    const saveAfterRestore = Boolean(options.saveProgress || pendingScrollRestore?.saveProgress);
+    state.novel.pendingScrollRatio = 0;
+    cancelReaderScroll();
+    const owner = { navigation: navigationId, revision: readerScrollRevision, book: state.novel.book, ratio, saveProgress: saveAfterRestore,
+      chapterId: state.novel.chapter?.id, page: document.querySelector(".novel-reader-page") };
+    pendingScrollRestore = owner;
+    readerScrollFrame = window.requestAnimationFrame(() => {
+      if (pendingScrollRestore !== owner) return;
+      readerScrollFrame = null;
+      if (owner.navigation !== navigationId || owner.revision !== readerScrollRevision
+          || state.activeView !== "novels" || state.novel.loading || !sameBookSnapshot(owner.book, state.novel.book)
+          || owner.chapterId !== state.novel.chapter?.id) { pendingScrollRestore = null; return; }
       const page = document.querySelector(".novel-reader-page");
-      if (!page) return;
-      if (ratio <= 0.001) {
-        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      if (!page) { pendingScrollRestore = null; return; }
+      if (page !== owner.page) {
+        state.novel.pendingScrollRatio = ratio;
+        restoreReaderScroll({ saveProgress: saveAfterRestore });
         return;
       }
-      const top = page.getBoundingClientRect().top + window.scrollY;
-      const readable = Math.max(0, page.scrollHeight - window.innerHeight);
-      window.scrollTo({ top: top + readable * ratio, left: 0, behavior: "auto" });
+      pendingScrollRestore = null;
+      if (ratio <= 0.001) {
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      } else {
+        const top = page.getBoundingClientRect().top + window.scrollY;
+        const readable = Math.max(0, page.scrollHeight - window.innerHeight);
+        window.scrollTo({ top: top + readable * ratio, left: 0, behavior: "auto" });
+      }
+      if (saveAfterRestore) scheduleProgressSave(120);
     });
   }
 
@@ -2582,11 +2877,24 @@ export function createNovelPage(deps) {
     window.addEventListener(
       "scroll",
       () => {
-        if (state.activeView !== "novels" || !state.novel?.book || !state.novel?.chapter) return;
+        if (state.activeView !== "novels" || state.novel?.loading || navigationController
+            || !state.novel?.book || !state.novel?.chapter) return;
         scheduleProgressSave(500);
       },
       { passive: true }
     );
+    const cancelRestoreForInput = (event) => {
+      if (event.type === "keydown" && !["PageUp", "PageDown", "Home", "End", " ", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+      if (event.target instanceof Element && event.target.closest("input, select, textarea, button, a")) return;
+      if (state.activeView !== "novels") return;
+      scrollInputRevision += 1;
+      if (!pendingScrollRestore) return;
+      cancelReaderScroll();
+      scheduleProgressSave();
+    };
+    window.addEventListener("wheel", cancelRestoreForInput, { passive: true });
+    window.addEventListener("touchstart", cancelRestoreForInput, { passive: true });
+    window.addEventListener("keydown", cancelRestoreForInput);
   }
 
   function installProgressLifecycle() {
@@ -2598,32 +2906,43 @@ export function createNovelPage(deps) {
     window.addEventListener("pagehide", () => {
       window.clearTimeout(progressTimer);
       progressTimer = null;
-      saveProgress({ keepalive: true });
+      // Also flush books left earlier, even when the current view has no reader.
+      if (saveProgress({ keepalive: true }) !== true) progressWriter.flushKeepalive();
     });
+    window.addEventListener("pageshow", () => progressWriter.resume());
   }
 
   function scheduleProgressSave(delay = 500) {
     window.clearTimeout(progressTimer);
+    const owner = navigationId;
+    const book = state.novel.book;
+    const chapterId = state.novel.chapter?.id;
+    const page = document.querySelector(".novel-reader-page");
     progressTimer = window.setTimeout(() => {
       progressTimer = null;
+      if (state.activeView !== "novels" || state.novel.loading || navigationController || owner !== navigationId
+          || !sameBookSnapshot(book, state.novel.book) || chapterId !== state.novel.chapter?.id
+          || !page || page !== document.querySelector(".novel-reader-page")) return;
       saveProgress();
     }, delay);
   }
 
   function flushProgress() {
-    if (!state.novel?.book || !state.novel?.chapter) return;
     window.clearTimeout(progressTimer);
     progressTimer = null;
+    if (!state.novel?.book || !state.novel?.chapter) return;
     saveProgress();
   }
 
   function saveProgress(options = {}) {
     const book = state.novel?.book;
     const chapter = state.novel?.chapter;
-    if (!book || !chapter) return;
+    if (state.activeView !== "novels" || state.novel?.loading || navigationController || !book || !chapter
+        || !document.querySelector(".novel-reader-page")) return;
+    if (!options.confirmRecovery && pendingScrollRestore) return;
     if (book.progressRecovery && !options.confirmRecovery) return;
     if (options.confirmRecovery && hasPendingRecoveryWrite(book, chapter)) return;
-    const recoveryOwner = options.confirmRecovery ? { key: JSON.stringify([book.id, book.sourceRealm, book.catalogRevision, chapter.id]) } : null;
+    const recoveryKey = options.confirmRecovery ? JSON.stringify([book.id, book.sourceRealm, book.catalogRevision, chapter.id]) : "";
     const ratio = currentReaderRatio();
     const revision = ++progressRevision;
     const progress = {
@@ -2634,45 +2953,96 @@ export function createNovelPage(deps) {
       updatedAt: new Date().toISOString()
     };
     if (!book.progressRecovery) state.novel.book = { ...book, progress };
-    const path = `/api/novels/${encodeURIComponent(book.id)}/progress`;
     const body = { chapterIndex: chapter.index, scrollRatio: ratio,
       ...(book.sourceRealm ? { sourceRealm: book.sourceRealm } : {}),
       ...(book.catalogRevision ? { catalogRevision: book.catalogRevision, chapterId: chapter.id } : {}) };
+    const session = progressSessions.get(book.sourceRealm);
+    if (session && book.catalogRevision) {
+      body.progressSessionId = session.id;
+      body.progressSessionStartedAt = session.startedAt;
+      body.progressSequence = ++session.sequence;
+    } else if (progressClockSupported) {
+      setReaderNavigationStatus("阅读进度会话暂忙，请重新打开页面后保存", "error");
+      return options.confirmRecovery ? Promise.resolve(false) : undefined;
+    }
+    const record = { bookId: book.id, sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision,
+      chapterId: chapter.id, owner: navigationId, revision, recoveryKey, body };
     if (options.keepalive) {
-      window.fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        credentials: "same-origin",
-        keepalive: true
-      }).catch(() => {});
+      progressWriter.flushKeepalive(record);
+      return true;
+    }
+    if (!options.confirmRecovery) {
+      progressWriter.save(record);
       return;
     }
-    const request = progressWrite
-      .catch(() => {})
-      .then(() => api(path, { method: "POST", body }));
-    progressWrite = request;
-    if (recoveryOwner) recoveryWrites.set(recoveryOwner.key, recoveryOwner);
-    return request
-      .then((data) => {
-        if (revision === progressRevision && sameBookSnapshot(book, state.novel.book) && state.novel.chapter?.id === chapter.id && data?.progress
-            && (!book.catalogRevision || (data.progress.catalogRevision === book.catalogRevision && data.progress.chapterId === chapter.id))) {
-          state.novel.book = { ...state.novel.book, progress: data.progress, progressRecovery: null };
-          return true;
-        }
-        return false;
-      })
-      .catch((error) => {
-        if (sameBookSnapshot(book, state.novel.book) && state.novel.chapter?.id === chapter.id) setReaderNavigationStatus(error.message || "进度保存失败，旧位置仍保留", "error");
-        return false;
-      })
-      .finally(() => {
-        if (!recoveryOwner || recoveryWrites.get(recoveryOwner.key) !== recoveryOwner) return;
-        recoveryWrites.delete(recoveryOwner.key);
-        if (sameBookSnapshot(book, state.novel.book) && state.novel.chapter?.id === chapter.id) {
-          document.querySelectorAll(".novel-progress-recovery-confirm").forEach(button => { button.disabled = hasPendingRecoveryWrite(book, chapter); });
-        }
+    recoveryWrites.set(recoveryKey, revision);
+    return progressWriter.save(record, { explicit: true })
+      .then(data => validProgressReceipt(record, data) && isCurrentProgress(record))
+      .catch(() => false);
+  }
+
+  function matchesProgressReader(record) {
+    const book = state.novel?.book;
+    return state.activeView === "novels" && String(book?.id || "") === String(record.bookId)
+      && book?.sourceRealm === record.sourceRealm && book?.catalogRevision === record.catalogRevision
+      && state.novel.chapter?.id === record.chapterId;
+  }
+
+  function isCurrentProgress(record) {
+    return record.owner === navigationId && record.revision === progressRevision && matchesProgressReader(record);
+  }
+
+  function validProgressReceipt(record, data) {
+    return Boolean(data?.progress && data.progress.applied !== false
+      && (!record.catalogRevision || (data.progress.catalogRevision === record.catalogRevision && data.progress.chapterId === record.chapterId)));
+  }
+
+  function applyProgressReceipt(record, data) {
+    if (isCurrentProgress(record) && validProgressReceipt(record, data)) {
+      state.novel.book = { ...state.novel.book, progress: data.progress, progressRecovery: null };
+    }
+  }
+
+  function finishProgressWrite(record) {
+    if (!record.explicit || recoveryWrites.get(record.recoveryKey) !== record.revision) return;
+    recoveryWrites.delete(record.recoveryKey);
+    if (matchesProgressReader(record)) {
+      document.querySelectorAll(".novel-progress-recovery-confirm").forEach(button => {
+        button.disabled = hasPendingRecoveryWrite(state.novel.book, state.novel.chapter);
       });
+    }
+  }
+
+  function noteProgressClock(data) {
+    const clock = data?.serverClockMs;
+    progressClockSupported = Number.isSafeInteger(clock) && clock >= 0;
+    if (!progressClockSupported || !data.book?.sourceRealm) return;
+    const realm = data.book.sourceRealm;
+    const previous = progressSessions.get(realm);
+    if (previous && clock < previous.startedAt + 24 * 60 * 60 * 1000) return;
+    if (!previous && progressSessions.size >= 32) return;
+    // Server time avoids device wall-clock skew. Renew only after a fresh read
+    // proves the old session expired; old queued records keep their old identity.
+    progressSessions.set(realm, { id: window.crypto.randomUUID(), startedAt: clock, sequence: 0 });
+  }
+
+  function refreshProgressSession(record) {
+    if (progressClockRefresh) return;
+    const refresh = { controller: new AbortController() };
+    progressClockRefresh = refresh;
+    void api(`/api/novels/${encodeURIComponent(record.bookId)}?catalog=0`, { signal: refresh.controller.signal }).then(data => {
+      if (refresh.controller.signal.aborted || progressClockRefresh !== refresh || record.owner !== navigationId
+          || !matchesProgressReader(record) || !sameBookSnapshot(data.book, state.novel.book)) return;
+      noteProgressClock(data);
+      if (!record.explicit && !state.novel.book.progressRecovery) scheduleProgressSave(0);
+    }).catch(() => {}).finally(() => {
+      if (progressClockRefresh === refresh) progressClockRefresh = null;
+    });
+  }
+
+  function invalidateProgressClock() {
+    progressClockRefresh?.controller.abort();
+    progressClockRefresh = null;
   }
 
   function installReaderKeyboard() {
@@ -2732,7 +3102,8 @@ export function createNovelPage(deps) {
     openChapter,
     openRouteTarget,
     renderStats,
-    renderView
+    renderView,
+    resetReader
   };
 }
 

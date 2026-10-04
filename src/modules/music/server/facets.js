@@ -1,13 +1,15 @@
 // Music store sub-module: facets
 import { findSmartMix, smartMixCondition } from "./smart-mix.js";
-import { MUSIC_FACET_CACHE } from "./constants.js";
+import { cachedMusicFacet } from "./facet-cache.js";
 import { publicAlbum, publicArtist, publicGenre } from "./serializers.js";
 import { metaValue, parseJsonObject } from "./helpers.js";
 import { normalizeMusicLanguage } from "./language.js";
 
+export { cachedMusicFacet } from "./facet-cache.js";
+
 export function artistFacet(db, language = "", selectedArtistId = "") {
   const normalizedLanguage = normalizeMusicLanguage(language);
-  const rows = cachedMusicFacet(db, `artists:${normalizedLanguage || "all"}`, () => db
+  const rows = cachedMusicFacet(db, JSON.stringify(["artists", normalizedLanguage]), () => db
     .prepare(
       `
       SELECT id, name, language, album_count, track_count, duration_ms, size_bytes
@@ -41,7 +43,7 @@ export function albumFacet(db, artistId = "", genre = "", language = "", selecte
     where.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND language = ?)");
     args.push(normalizedLanguage);
   }
-  const cacheKey = `albums:${artistId || "all"}:${genre || "all"}:${normalizedLanguage || "all"}`;
+  const cacheKey = JSON.stringify(["albums", artistId && artistId !== "all" ? artistId : "", genre && genre !== "all" ? genre : "", normalizedLanguage]);
   const rows = cachedMusicFacet(db, cacheKey, () => db
     .prepare(
       `
@@ -70,7 +72,7 @@ export function genreFacet(db, artistId = "") {
     where.push("artist_id = ?");
     args.push(artistId);
   }
-  return cachedMusicFacet(db, `genres:${artistId || "all"}`, () => db
+  return cachedMusicFacet(db, JSON.stringify(["genres", artistId && artistId !== "all" ? artistId : ""]), () => db
     .prepare(
       `
       SELECT
@@ -93,7 +95,7 @@ export function genreFacet(db, artistId = "") {
 
 
 export function languageFacet(db) {
-  return cachedMusicFacet(db, "languages", () => db
+  return cachedMusicFacet(db, JSON.stringify(["languages"]), () => db
     .prepare(
       `
       SELECT a.language AS name, COALESCE(SUM(a.track_count), 0) AS track_count,
@@ -120,19 +122,6 @@ export function languageFacet(db) {
 }
 
 
-export function cachedMusicFacet(db, key, build) {
-  let cache = MUSIC_FACET_CACHE.get(db);
-  if (!cache) {
-    cache = new Map();
-    MUSIC_FACET_CACHE.set(db, cache);
-  }
-  if (cache.has(key)) return cache.get(key);
-  const value = build();
-  cache.set(key, value);
-  return value;
-}
-
-
 export function smartMixCount(db, mix) {
   const condition = smartMixCondition(mix);
   if (["newest", "hires", "lyrics", "longform"].includes(mix.id)) {
@@ -141,12 +130,16 @@ export function smartMixCount(db, mix) {
   }
   if (mix.id === "unplayed") {
     const total = Number(db.prepare("SELECT COALESCE(SUM(track_count), 0) AS count FROM music_artists WHERE status = 'ok'").get()?.count || 0);
-    const played = Number(db.prepare("SELECT COUNT(*) AS count FROM music_track_state WHERE COALESCE(play_count, 0) > 0 OR COALESCE(last_played_at, '') <> ''").get()?.count || 0);
+    const played = Number(db.prepare(`SELECT COUNT(*) AS count FROM music_track_state s
+      CROSS JOIN music_tracks t ON t.id=s.track_id
+      WHERE t.status='ok' AND (COALESCE(s.play_count, 0)>0 OR COALESCE(s.last_played_at, '')<>'')`).get()?.count || 0);
     return Math.max(0, total - played);
   }
   if (mix.id === "unrated") {
     const total = Number(db.prepare("SELECT COALESCE(SUM(track_count), 0) AS count FROM music_artists WHERE status = 'ok'").get()?.count || 0);
-    const rated = Number(db.prepare("SELECT COUNT(*) AS count FROM music_track_state WHERE COALESCE(rating, 0) > 0").get()?.count || 0);
+    const rated = Number(db.prepare(`SELECT COUNT(*) AS count FROM music_track_state s
+      CROSS JOIN music_tracks t ON t.id=s.track_id
+      WHERE t.status='ok' AND COALESCE(s.rating, 0)>0`).get()?.count || 0);
     return Math.max(0, total - rated);
   }
   const stateDriven = new Set(["recent", "topplayed", "favorites", "toprated", "rediscover"]);

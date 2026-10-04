@@ -18,6 +18,54 @@ export function createMangaPage(deps) {
     writeStoredFlag
   } = deps;
   const updatePolls = new Map();
+  let readerOwner = null;
+  let readerGeneration = 0;
+  let libraryVersion = 0;
+  const libraryReads = new Set();
+
+  function beginReaderRequest(type, comicId = "") {
+    ensureState();
+    readerOwner?.controller.abort();
+    const owner = { type, comicId, generation: ++readerGeneration, controller: new AbortController() };
+    readerOwner = owner;
+    state.manga.status = "";
+    return owner;
+  }
+
+  function readerRequestCurrent(owner) {
+    return Boolean(owner && owner === readerOwner && owner.generation === readerGeneration
+      && !owner.controller.signal.aborted && state.activeView === "manga");
+  }
+
+  function resetReader({ keepComic = false } = {}) {
+    ensureState();
+    readerOwner?.controller.abort();
+    readerOwner = null;
+    readerGeneration += 1;
+    state.manga.loading = false;
+    state.manga.status = "";
+    state.manga.chapter = null;
+    if (!keepComic) state.manga.comic = null;
+  }
+
+  async function readLibrary(options = {}) {
+    const version = ++libraryVersion;
+    const removed = new Set();
+    libraryReads.add(removed);
+    try {
+      const data = await api("/api/manga", options);
+      const current = removed.size && Array.isArray(data.comics)
+        ? { ...data, comics: data.comics.filter(comic => !removed.has(comic.id)) } : data;
+      if (version === libraryVersion && !options.signal?.aborted && state.activeView === "manga") state.manga.data = current;
+      return current;
+    } finally {
+      libraryReads.delete(removed);
+    }
+  }
+
+  function refreshBackgroundView() {
+    if (state.activeView === "manga" && !state.manga.chapter && !state.manga.loading) renderView();
+  }
 
   function ensureState() {
     state.manga ||= {};
@@ -51,12 +99,16 @@ export function createMangaPage(deps) {
     setMainHeader("漫画馆", "独立漫画书库");
     renderStats();
     renderView();
-    if (!options.deferInitialLoad && !state.manga.data) void loadLibrary();
+    if (!options.deferInitialLoad && !state.manga.data) {
+      if (state.manga.comic || state.manga.chapter) void readLibrary().then(refreshBackgroundView, () => {});
+      else void loadLibrary({ skipRoute: true });
+    }
     syncRouteAfterNavigation(options);
   }
 
   function applyRouteState(route = {}) {
     ensureState();
+    resetReader();
     state.manga.query = route.mangaQuery || "";
     state.manga.sort = ["updated", "title", "chapters"].includes(route.mangaSort) ? route.mangaSort : "updated";
   }
@@ -64,41 +116,52 @@ export function createMangaPage(deps) {
   async function openRouteTarget(route = {}) {
     ensureState();
     if (route.mangaComicId && route.mangaChapterIndex) {
-      await openComic(route.mangaComicId, { skipRoute: true, render: false });
-      await openChapter(route.mangaChapterIndex, { skipRoute: true });
+      const owner = beginReaderRequest("chapter", route.mangaComicId);
+      const comic = await openComic(route.mangaComicId, { skipRoute: true, render: false }, owner);
+      if (comic && readerRequestCurrent(owner)) await openChapter(route.mangaChapterIndex, { skipRoute: true }, owner);
       return;
     }
     if (route.mangaComicId) {
       await openComic(route.mangaComicId, { skipRoute: true });
       return;
     }
-    state.manga.comic = null;
-    state.manga.chapter = null;
     await loadLibrary({ skipRoute: true });
   }
 
   async function loadLibrary(options = {}) {
+    const owner = beginReaderRequest("library");
+    state.manga.comic = null;
+    state.manga.chapter = null;
     state.manga.loading = true;
     state.manga.status = "正在读取漫画书库";
     renderView();
     try {
-      state.manga.data = await api("/api/manga");
+      await readLibrary({ signal: owner.controller.signal });
+      if (!readerRequestCurrent(owner)) return null;
       state.manga.status = "";
     } catch (error) {
+      if (!readerRequestCurrent(owner)) return null;
       state.manga.status = error.message || "漫画书库读取失败";
     } finally {
-      state.manga.loading = false;
-      renderView();
-      if (!options.skipRoute) syncRouteAfterNavigation(options);
+      if (readerRequestCurrent(owner)) {
+        state.manga.loading = false;
+        renderView();
+        if (!options.skipRoute) syncRouteAfterNavigation(options);
+      }
     }
+    return state.manga.data;
   }
 
-  async function openComic(comicId, options = {}) {
+  async function openComic(comicId, options = {}, owner = beginReaderRequest("comic", comicId)) {
+    state.manga.comic = null;
+    state.manga.chapter = null;
+    state.manga.deleteError = "";
     state.manga.loading = true;
     state.manga.status = "正在读取作品资料和目录";
     if (options.render !== false) renderView();
     try {
-      const data = await api(`/api/manga/${encodeURIComponent(comicId)}`);
+      const data = await api(`/api/manga/${encodeURIComponent(comicId)}`, { signal: owner.controller.signal });
+      if (!readerRequestCurrent(owner)) return null;
       state.manga.comic = data.comic;
       state.manga.updates[comicId] = data.update || { status: "idle" };
       state.manga.chapter = null;
@@ -107,11 +170,14 @@ export function createMangaPage(deps) {
       syncRouteAfterNavigation(options);
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
       if (data.update?.status === "running") void watchComicUpdate(comicId);
+      return state.manga.comic;
     } catch (error) {
+      if (!readerRequestCurrent(owner)) return null;
       state.manga.status = error.message || "漫画详情读取失败";
       renderView();
+      return null;
     } finally {
-      state.manga.loading = false;
+      if (readerRequestCurrent(owner)) state.manga.loading = false;
     }
   }
 
@@ -192,11 +258,11 @@ export function createMangaPage(deps) {
   async function startComicUpdate(comicId) {
     if (!comicId || isUpdateRunning(comicUpdate(comicId))) return;
     state.manga.updates[comicId] = { status: "starting", message: "正在启动增量更新" };
-    renderView();
+    refreshBackgroundView();
     try {
       const result = await api(`/api/manga/${encodeURIComponent(comicId)}/update`, { method: "POST" });
       state.manga.updates[comicId] = result.job || { status: "running" };
-      renderView();
+      refreshBackgroundView();
       if (isUpdateRunning(result.job)) {
         void watchComicUpdate(comicId);
       } else if (result.job?.status === "complete") {
@@ -207,7 +273,7 @@ export function createMangaPage(deps) {
         status: "failed",
         message: error.message || "漫画更新启动失败"
       };
-      renderView();
+      refreshBackgroundView();
     }
   }
 
@@ -218,7 +284,7 @@ export function createMangaPage(deps) {
         await new Promise((resolve) => window.setTimeout(resolve, 1200));
         const data = await api(`/api/manga/${encodeURIComponent(comicId)}/update`);
         state.manga.updates[comicId] = data.job || { status: "idle" };
-        if (state.manga.comic?.id === comicId) renderView();
+        if (state.manga.comic?.id === comicId) refreshBackgroundView();
       }
       const job = comicUpdate(comicId);
       if (job.status === "complete") await refreshComicAfterUpdate(comicId, job);
@@ -228,7 +294,7 @@ export function createMangaPage(deps) {
         status: "failed",
         message: error.message || "漫画更新状态读取失败"
       };
-      if (state.manga.comic?.id === comicId) renderView();
+      if (state.manga.comic?.id === comicId) refreshBackgroundView();
       return state.manga.updates[comicId];
     }).finally(() => updatePolls.delete(comicId));
     updatePolls.set(comicId, polling);
@@ -236,19 +302,18 @@ export function createMangaPage(deps) {
   }
 
   async function refreshComicAfterUpdate(comicId, finishedJob) {
-    const [detail, library] = await Promise.all([
+    const generation = readerGeneration;
+    const [detail] = await Promise.all([
       api(`/api/manga/${encodeURIComponent(comicId)}`),
-      api("/api/manga")
+      readLibrary()
     ]);
-    state.manga.data = library;
     state.manga.updates[comicId] = detail.update?.status === "running"
       ? detail.update
       : finishedJob;
-    if (state.manga.comic?.id === comicId) {
-      state.manga.comic = detail.comic;
-      state.manga.chapter = null;
-      renderView();
+    if (generation === readerGeneration && state.manga.comic?.id === comicId) {
+      state.manga.comic = { ...state.manga.comic, ...detail.comic };
     }
+    refreshBackgroundView();
   }
 
   async function startAddComic(url) {
@@ -258,17 +323,17 @@ export function createMangaPage(deps) {
     state.manga.addError = "";
     state.manga.addCatalogSyncedJobId = "";
     state.manga.addJob = { status: "starting", message: "正在启动漫画采集", progressPercent: 1 };
-    renderView();
+    refreshBackgroundView();
     try {
       const result = await api("/api/manga/add", { method: "POST", body: { url: value } });
       state.manga.addJob = result.job;
-      renderView();
+      refreshBackgroundView();
       if (isUpdateRunning(result.job)) void watchAddJob(result.job.id);
       else if (result.job?.status === "complete") await refreshLibraryAfterAdd();
     } catch (error) {
       state.manga.addJob = { status: "failed", message: error.message || "漫画添加失败" };
       state.manga.addError = error.message || "漫画添加失败";
-      renderView();
+      refreshBackgroundView();
     }
   }
 
@@ -282,20 +347,19 @@ export function createMangaPage(deps) {
         state.manga.addJob = data.job;
         if (data.job?.comicId) state.manga.updates[data.job.comicId] = data.job;
         if (data.job?.totalChapters != null && state.manga.addCatalogSyncedJobId !== jobId) {
-          const library = await api("/api/manga");
-          state.manga.data = library;
+          const library = await readLibrary();
           if (library.comics?.some((comic) => comic.id === data.job.comicId)) {
             state.manga.addCatalogSyncedJobId = jobId;
           }
         }
-        if (!state.manga.comic) renderView();
+        if (!state.manga.comic) refreshBackgroundView();
       }
       if (state.manga.addJob?.status === "complete") await refreshLibraryAfterAdd();
       return state.manga.addJob;
     })().catch((error) => {
       state.manga.addJob = { status: "failed", message: error.message || "漫画采集状态读取失败" };
       state.manga.addError = state.manga.addJob.message;
-      if (!state.manga.comic) renderView();
+      if (!state.manga.comic) refreshBackgroundView();
       return state.manga.addJob;
     }).finally(() => updatePolls.delete(pollKey));
     updatePolls.set(pollKey, polling);
@@ -303,9 +367,8 @@ export function createMangaPage(deps) {
   }
 
   async function refreshLibraryAfterAdd() {
-    state.manga.data = await api("/api/manga");
-    state.manga.status = "";
-    if (!state.manga.comic) renderView();
+    await readLibrary();
+    if (!state.manga.comic) refreshBackgroundView();
   }
 
   async function deleteComicFromLibrary(comic) {
@@ -314,39 +377,48 @@ export function createMangaPage(deps) {
       `确定删除《${comic.title}》吗？\n\n整本漫画会移入本地回收区，并从自动采集列表移除。`
     );
     if (!confirmed) return;
+    libraryVersion += 1;
+    if (readerOwner?.comicId === comic.id) resetReader({ keepComic: true });
     state.manga.deletingComicId = comic.id;
     state.manga.deleteError = "";
     state.manga.status = "正在把漫画移入回收区";
     renderView();
     try {
       await api(`/api/manga/${encodeURIComponent(comic.id)}`, { method: "DELETE" });
+      for (const removed of libraryReads) removed.add(comic.id);
       if (state.manga.data?.comics) {
         state.manga.data.comics = state.manga.data.comics.filter((item) => item.id !== comic.id);
       }
       delete state.manga.updates[comic.id];
       forgetComicState(comic.id);
-      state.manga.comic = null;
-      state.manga.chapter = null;
-      state.manga.status = `《${comic.title}》已移入回收区`;
-      renderView();
-      pushRoute({ mangaComicId: "", mangaChapterIndex: "" });
-      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      if (state.manga.comic?.id === comic.id || readerOwner?.comicId === comic.id) {
+        resetReader();
+        state.manga.status = `《${comic.title}》已移入回收区`;
+        renderView();
+        pushRoute({ mangaComicId: "", mangaChapterIndex: "" });
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      } else {
+        refreshBackgroundView();
+      }
     } catch (error) {
-      state.manga.deleteError = error.message || "漫画删除失败";
+      if (state.manga.comic?.id === comic.id) state.manga.deleteError = error.message || "漫画删除失败";
     } finally {
       state.manga.deletingComicId = "";
-      if (state.manga.comic?.id === comic.id) renderView();
+      if (state.manga.comic?.id === comic.id) refreshBackgroundView();
     }
   }
 
-  async function openChapter(chapterIndex, options = {}) {
+  async function openChapter(chapterIndex, options = {}, owner) {
     const comic = state.manga.comic;
     if (!comic) return;
+    owner ||= beginReaderRequest("chapter", comic.id);
+    if (!readerRequestCurrent(owner) || owner.comicId !== comic.id) return null;
     state.manga.loading = true;
     state.manga.status = "正在读取章节";
     renderView();
     try {
-      const data = await api(`/api/manga/${encodeURIComponent(comic.id)}/chapters/${encodeURIComponent(String(chapterIndex))}`);
+      const data = await api(`/api/manga/${encodeURIComponent(comic.id)}/chapters/${encodeURIComponent(String(chapterIndex))}`, { signal: owner.controller.signal });
+      if (!readerRequestCurrent(owner) || state.manga.comic?.id !== comic.id) return null;
       state.manga.comic = { ...comic, ...(data.comic || {}) };
       state.manga.chapter = { ...data.chapter, comicId: comic.id };
       state.manga.status = "";
@@ -354,11 +426,13 @@ export function createMangaPage(deps) {
       renderView();
       syncRouteAfterNavigation(options);
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      return state.manga.chapter;
     } catch (error) {
+      if (!readerRequestCurrent(owner)) return null;
       state.manga.status = error.message || "章节读取失败";
       renderView();
     } finally {
-      state.manga.loading = false;
+      if (readerRequestCurrent(owner)) state.manga.loading = false;
     }
   }
 
@@ -599,7 +673,7 @@ export function createMangaPage(deps) {
       pages.append(img);
     }
     page.querySelectorAll('[data-action="detail"]').forEach((button) => button.addEventListener("click", () => {
-      state.manga.chapter = null;
+      resetReader({ keepComic: true });
       renderView();
       pushRoute({ mangaComicId: comic.id, mangaChapterIndex: "" });
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -647,7 +721,7 @@ export function createMangaPage(deps) {
     return node;
   }
 
-  return { applyRouteState, enter, openRouteTarget, renderStats, renderView };
+  return { applyRouteState, enter, openRouteTarget, renderStats, renderView, resetReader };
 }
 
 function coverMarkup(comic, title) {

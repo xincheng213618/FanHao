@@ -1,6 +1,7 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
 import { createLatestRequestLifecycle } from "../core/latest-request.js";
+import { createKeyedListRenderer } from "../core/keyed-list.js";
 
 const PAGE_SIZE = 48;
 
@@ -13,6 +14,7 @@ export function createLibraryFeature(options) {
   let loading = false;
   let searchTimer = null;
   const requests = createLatestRequestLifecycle();
+  const renderCards = createKeyedListRenderer($("libraryGrid"));
 
   function currentQuerySnapshot() {
     return String($("librarySearch")?.value || "").trim();
@@ -44,13 +46,12 @@ export function createLibraryFeature(options) {
   }
 
   function renderLibrary() {
-    const grid = $("libraryGrid");
-    grid.innerHTML = rows.map(libraryCard).join("") || `
+    renderCards(rows, (item) => item.id, libraryCard, `
       <div class="library-empty">
         <strong>${loading ? "正在读取…" : "还没有可显示的本地作品"}</strong>
         <span>下载完成并写入 manifest 后，会自动出现在这里。</span>
       </div>
-    `;
+    `);
     $("librarySummary").textContent = `已显示 ${rows.length} / ${total} 个本地作品`;
     $("libraryLoadMore").hidden = !hasMore;
     $("libraryLoadMore").disabled = loading;

@@ -20,6 +20,12 @@ export function createLatestRequestLifecycle() {
       return request;
     },
 
+    cancel() {
+      activeRequest?.controller.abort();
+      activeRequest = null;
+      generation += 1;
+    },
+
     canCommit(request, snapshot) {
       return activeRequest === request
         && request.generation === generation

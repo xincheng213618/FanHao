@@ -1,6 +1,6 @@
 import { formatNumber } from "../../js/format.js";
-import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=assets-0f97d6765d71";
-import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=assets-0f97d6765d71";
+import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=assets-07b744082137";
+import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=assets-07b744082137";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
 const PEOPLE_FILTER_STORAGE_KEY = "fanhao.android.peopleFilter";

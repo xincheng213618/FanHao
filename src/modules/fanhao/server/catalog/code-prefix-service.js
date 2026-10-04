@@ -3,8 +3,11 @@ import {
   normalizeRequestedCodePrefix,
   workCodePrefixForWork
 } from "../works/work-code-prefix.js";
+import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
 
 const DETAIL_SOURCE_CACHE_LIMIT = 96;
+const DETAIL_RESULT_CACHE_LIMIT = 96;
+const DETAIL_WORK_REFERENCE_BUDGET = 4_000_000;
 const FC2_PLATFORM = Object.freeze({
   id: "fc2-content-market",
   name: "FC2 内容市场",
@@ -27,11 +30,15 @@ export function createCodePrefixService({
   sortWorkList,
   userStateStamp = () => "",
   workClassificationService,
-  workFacets
+  workFacets,
+  workQueryStamp = getStamp
 }) {
   let catalogCache = null;
   let detailSourceStamp = "";
   const detailSourceCache = new Map();
+  const detailResultCache = new Map();
+  const detailBudget = createWeightedCacheBudget(DETAIL_WORK_REFERENCE_BUDGET);
+  let detailResultStamp = "";
   const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
   function sourceStamp() {
@@ -40,7 +47,7 @@ export function createCodePrefixService({
   }
 
   function responseStamp() {
-    return `${sourceStamp()}:${workClassificationService.visibilityStamp()}:${userStateStamp()}`;
+    return `${sourceStamp()}:${workQueryStamp()}:${workClassificationService.visibilityStamp()}:${userStateStamp()}`;
   }
 
   function ensureCatalog() {
@@ -66,8 +73,9 @@ export function createCodePrefixService({
       localWorkCount: items.reduce((sum, item) => sum + item.localCount, 0),
       mappedCount: items.filter((item) => Boolean(item.maker)).length
     };
-    detailSourceCache.clear();
+    detailBudget.clear();
     detailSourceStamp = stamp;
+    detailResultStamp = "";
     return catalogCache;
   }
 
@@ -99,20 +107,40 @@ export function createCodePrefixService({
     if (!source) return null;
 
     const filter = String(url.searchParams.get("filter") || "all").trim() || "all";
-    const visible = workClassificationService.filterForRequest(source.works, url, filter);
-    const filtered = filterWorkList(visible, filter);
     const sort = url.searchParams.get("sort") || "releaseDesc";
-    const sorted = sortWorkList(filtered, sort);
+    const stamp = responseStamp();
+    if (detailResultStamp !== stamp) {
+      detailResultStamp = stamp;
+      detailBudget.clear(detailResultCache);
+    }
+    // Pagination changes only the returned slice. Keep all other parameters in
+    // the key, including visibility flags and future request filters.
+    const query = new URLSearchParams(url.searchParams);
+    query.delete("limit");
+    query.delete("offset");
+    query.sort();
+    const cacheKey = JSON.stringify([prefix, family, query.toString()]);
+    let result = detailBudget.read(detailResultCache, cacheKey);
+    if (!result || result.source !== source) {
+      const visible = workClassificationService.filterForRequest(source.works, url, filter);
+      const filtered = filterWorkList(visible, filter);
+      result = { source, works: sortWorkList(filtered, sort), facets: workFacets(source.works) };
+      // Results strongly retain their source, even after its source-cache entry
+      // is evicted. Charge both arrays conservatively so this lifetime cannot
+      // escape the shared budget (measured in work references, not heap bytes).
+      detailBudget.write(detailResultCache, cacheKey, result, result.works.length + result.source.works.length, DETAIL_RESULT_CACHE_LIMIT);
+    }
+    const sorted = result.works;
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     hydrateMissingSearchWorks(sorted.slice(offset, offset + limit));
 
     return {
       codePrefix: source.codePrefix,
-      responseStamp: responseStamp(),
+      responseStamp: stamp,
       ...pagedWorksPayload(sorted, url, {
         filter,
-        facets: workFacets(source.works)
+        facets: result.facets
       })
     };
   }
@@ -121,10 +149,12 @@ export function createCodePrefixService({
     const stamp = sourceStamp();
     if (detailSourceStamp !== stamp) {
       detailSourceStamp = stamp;
-      detailSourceCache.clear();
+      detailBudget.clear();
+      detailResultStamp = "";
     }
     const cacheKey = `${family ? "family" : "prefix"}:${prefix}`;
-    if (detailSourceCache.has(cacheKey)) return touchDetailSource(cacheKey);
+    const cached = detailBudget.read(detailSourceCache, cacheKey);
+    if (cached) return cached;
 
     const catalog = ensureCatalog();
     const localGroups = family
@@ -146,10 +176,7 @@ export function createCodePrefixService({
           knownCount: works.length
         };
     const source = { codePrefix, works };
-    detailSourceCache.set(cacheKey, source);
-    while (detailSourceCache.size > DETAIL_SOURCE_CACHE_LIMIT) {
-      detailSourceCache.delete(detailSourceCache.keys().next().value);
-    }
+    detailBudget.write(detailSourceCache, cacheKey, source, works.length, DETAIL_SOURCE_CACHE_LIMIT);
     return source;
   }
 
@@ -226,13 +253,6 @@ export function createCodePrefixService({
     return rows;
   }
 
-  function touchDetailSource(key) {
-    const source = detailSourceCache.get(key);
-    detailSourceCache.delete(key);
-    detailSourceCache.set(key, source);
-    return source;
-  }
-
   function compareByCount(a, b) {
     return b.localCount - a.localCount || collator.compare(a.prefix, b.prefix);
   }
@@ -252,7 +272,8 @@ export function createCodePrefixService({
   function invalidate() {
     catalogCache = null;
     detailSourceStamp = "";
-    detailSourceCache.clear();
+    detailBudget.clear();
+    detailResultStamp = "";
   }
 
   return {

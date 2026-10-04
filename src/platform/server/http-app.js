@@ -87,7 +87,7 @@ export function createRequestHandler({
           return;
         }
 
-        serveStatic(req, res, url.pathname);
+        await serveStatic(req, res, url.pathname);
       });
     } catch (error) {
       logError("[request]", error);

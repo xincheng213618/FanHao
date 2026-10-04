@@ -19,6 +19,7 @@ sources:
   - android-client/www/js/android-module-registry.js
   - public/js/module-navigation.js
   - tools/verify_module_structure.mjs
+  - tools/verify_module_lifecycle.mjs
 ---
 
 # 模块清单与协议
@@ -78,11 +79,13 @@ sources:
 | `routeApi(req, res, url)` | 匹配 API；处理后返回 `true`，不匹配返回 `false` |
 | `routeMedia(req, res, url)` | 同样的接管协议，面向媒体响应 |
 | `start()` | 启动模块后台能力，注册器按正序等待 |
-| `beginStop()` | 停机预处理，注册器按逆序等待 |
-| `stop()` | 停止并释放资源，注册器按逆序等待 |
+| `beginStop()` | 停机预处理，注册器按逆序逐个等待；失败后继续调用剩余模块 |
+| `stop()` | 停止并释放资源，注册器按逆序逐个等待；失败后继续清理剩余模块 |
 | `invalidate(reason)` | 模块对外提供的失效入口；由具体调用方使用 |
 
 路由不能只完成参数匹配却不发响应就返回 `true`，否则后续模块无法接管。也不要用一个宽泛路径吞掉别的模块请求。
+
+停机钩子全部结束后，注册器重抛单个原始错误，或用 `AggregateError` 保留多个原始错误；服务宿主据此以失败状态退出。启动仍按正序执行，失败即停止后续启动。
 
 模块可另外暴露窄接口，由 `registry.get(id)` 获取；这些扩展不等于所有模块都实现的公共协议。
 

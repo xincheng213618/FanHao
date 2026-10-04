@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageLibraryIndexMatches } from "./image-library-index-contract.js";
 
 export function createImageLibraryIndexService({
@@ -19,6 +20,13 @@ export function createImageLibraryIndexService({
   videoExts = []
 }) {
   let cache = null;
+  let photoSetLookup = null;
+  const revisionRealm = randomUUID();
+  let publicationRevision = 0;
+
+  function listRevision() {
+    return `${revisionRealm}:${publicationRevision}`;
+  }
   const cacheIdentity = imageLibraryCacheIdentity({ archiveExts, directVideoExts, galleryMediaSources, photoSetRoots, videoExts });
 
   function isArchiveFile(fileName) {
@@ -360,7 +368,9 @@ export function createImageLibraryIndexService({
     if (cache) return cache;
     const cached = readJsonFile(imageLibraryIndexPath, null);
     if (imageLibraryIndexMatches(cached, cacheIdentity)) {
+      clearPhotoSetLookup();
       cache = cached;
+      publicationRevision += 1;
       return cache;
     }
     return null;
@@ -376,19 +386,45 @@ export function createImageLibraryIndexService({
       const cached = loadCache();
       if (cached) return cached;
     }
+    clearPhotoSetLookup();
     cache = scanImageLibrary();
+    publicationRevision += 1;
     saveCache(cache);
     return cache;
   }
 
   function invalidate() {
     cache = null;
+    publicationRevision += 1;
+    clearPhotoSetLookup();
+  }
+
+  function clearPhotoSetLookup() {
+    photoSetLookup = null;
+  }
+
+  function photoSetById(id) {
+    const target = String(id || "");
+    if (!target) return null;
+    const index = getIndex();
+    const albums = index.photoSets;
+    if (photoSetLookup?.index !== index || photoSetLookup.albums !== albums) {
+      // This owner replaces scanned/loaded snapshots; keep live row references
+      // so metadata and cover authority checks still see current source fields.
+      const byId = new Map();
+      for (const album of albums) if (!byId.has(album.id)) byId.set(album.id, album);
+      photoSetLookup = { index, albums, byId };
+    }
+    return photoSetLookup.byId.get(target) || null;
   }
 
   return {
     galleryMediaRootStatuses,
+    clearPhotoSetLookup,
     getIndex,
     invalidate,
+    listRevision,
+    photoSetById,
     photoSetRootStatuses,
     scanImageLibrary
   };

@@ -1,7 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import { ensureGalleryMetadataClocks } from "../../../../lib/gallery-metadata-revision.js";
 
 const TABLE_COLUMNS = {
   photo_set_covers: [
+    ["archive_identity", "TEXT"],
     ["archive_size", "INTEGER"],
     ["archive_mtime_ms", "INTEGER"],
     ["member_path", "TEXT"],
@@ -16,6 +18,7 @@ const TABLE_COLUMNS = {
     ["updated_at", "TEXT"]
   ],
   photo_set_image_indexes: [
+    ["archive_identity", "TEXT"],
     ["archive_path", "TEXT"],
     ["archive_size", "INTEGER"],
     ["archive_mtime_ms", "INTEGER"],
@@ -136,6 +139,7 @@ function ensureSchema(db) {
       archive_path TEXT NOT NULL,
       archive_size INTEGER,
       archive_mtime_ms INTEGER,
+      archive_identity TEXT,
       member_path TEXT,
       cover_mime TEXT,
       cover_blob BLOB,
@@ -154,6 +158,7 @@ function ensureSchema(db) {
       archive_path TEXT PRIMARY KEY,
       archive_size INTEGER,
       archive_mtime_ms INTEGER,
+      archive_identity TEXT,
       image_count INTEGER,
       images_json TEXT NOT NULL,
       indexer_version INTEGER NOT NULL DEFAULT 1,
@@ -274,6 +279,9 @@ function ensureSchema(db) {
       ensureColumn(db, table, column, definition);
     }
   }
+  // Older or malformed optional clock state keeps the conservative reader
+  // fallback; it must not make the established metadata schema unavailable.
+  ensureGalleryMetadataClocks(db);
 }
 
 export function createImageGalleryDbService({ dbPath, ensureDataDir }) {

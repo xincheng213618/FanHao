@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createCodePrefixService } from "../src/modules/fanhao/server/catalog/code-prefix-service.js";
+import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
+import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
 import {
   codePrefixMatches,
   normalizeRequestedCodePrefix,
@@ -39,6 +41,13 @@ const missingByPrefix = {
   FC2: [missingWork("103", "FC2-PPV-100002")]
 };
 
+let sortCalls = 0;
+let catalogStamp = "makers-v1";
+let metadataStamp = "metadata-v1";
+let ownerStamp = "account:alice:1";
+let visibilityStamp = "visibility-v1";
+let favoriteId = "1";
+const hydratedPages = [];
 const service = createCodePrefixService({
   clampInteger(value, fallback, min, max) {
     const number = Number(value);
@@ -52,6 +61,7 @@ const service = createCodePrefixService({
     return missingByPrefix[prefix] || [];
   },
   filterWorkList(works, filter) {
+    if (filter === "favorite") return works.filter((work) => work.id === favoriteId);
     if (filter === "localOnly") return works.filter((work) => !work.missingLocal);
     if (filter === "missingLocal") return works.filter((work) => work.missingLocal);
     return works;
@@ -65,8 +75,9 @@ const service = createCodePrefixService({
       worksById: new Map(localWorks.map((work) => [work.id, work]))
     };
   },
-  getStamp: () => "makers-v1",
-  hydrateMissingSearchWorks() {},
+  getStamp: () => catalogStamp,
+  workQueryStamp: () => metadataStamp,
+  hydrateMissingSearchWorks(works) { hydratedPages.push(works.map((work) => work.id)); },
   maxWorkLimit: 1000,
   pagedWorksPayload(works, url, extra) {
     const limit = Number(url.searchParams.get("limit") || 48);
@@ -82,16 +93,17 @@ const service = createCodePrefixService({
     };
   },
   sortWorkList(works) {
+    sortCalls += 1;
     return [...works];
   },
-  userStateStamp: () => "user-v1",
+  userStateStamp: () => ownerStamp,
   workClassificationService: {
     filterForRequest(works, url, filter) {
       const includeMissing = url.searchParams.get("includeMissingLocal") !== "0";
       if (includeMissing || filter === "missingLocal") return works;
       return works.filter((work) => !work.missingLocal);
     },
-    visibilityStamp: () => "visibility-v1"
+    visibilityStamp: () => visibilityStamp
   },
   workFacets(works) {
     return {
@@ -131,7 +143,159 @@ const fc2Family = service.detailPayload(
 assert.equal(fc2Family.total, 2, "the FC2 family shortcut must include every FC2 sub-prefix");
 assert.equal(fc2Family.codePrefix.maker.kind, "platform");
 
-console.log("code-prefix-catalog: ok");
+const prefixUrl = (query) => new URL(`http://fanhao.local/api/code-prefixes/IPX?${query}`);
+const beforePages = sortCalls;
+const firstPage = service.detailPayload("IPX", prefixUrl("sort=videos&limit=1&offset=0"));
+const secondPage = service.detailPayload("IPX", prefixUrl("offset=1&limit=1&sort=videos"));
+assert.equal(sortCalls, beforePages + 1, "pagination and query parameter order must share one sorted source");
+assert.notEqual(firstPage.works[0].id, secondPage.works[0].id);
+assert.deepEqual(hydratedPages.at(-1), secondPage.works.map((work) => work.id), "every page must still hydrate its visible slice");
+for (const change of [
+  () => { metadataStamp = "metadata-v2"; },
+  () => { visibilityStamp = "visibility-v2"; },
+  () => { catalogStamp = "makers-v2"; }
+]) {
+  const before = sortCalls;
+  change();
+  service.detailPayload("IPX", prefixUrl("sort=videos&limit=1&offset=0"));
+  assert.equal(sortCalls, before + 1, "metadata, visibility and library changes invalidate derived ordering");
+}
+const alice = service.detailPayload("IPX", prefixUrl("filter=favorite"));
+ownerStamp = "account:bob:1";
+favoriteId = "2";
+const bob = service.detailPayload("IPX", prefixUrl("filter=favorite"));
+assert.deepEqual(alice.works.map((work) => work.id), ["1"]);
+assert.deepEqual(bob.works.map((work) => work.id), ["2"], "equal account revisions must not share personal filtered results");
+service.detailPayload("IPX", prefixUrl("sort=videos&probe=oldest"));
+for (let index = 0; index < 96; index += 1) service.detailPayload("IPX", prefixUrl(`sort=videos&probe=${index}`));
+const beforeEviction = sortCalls;
+service.detailPayload("IPX", prefixUrl("sort=videos&probe=oldest"));
+assert.equal(sortCalls, beforeEviction + 1, "derived result cache remains bounded");
+service.invalidate();
+const beforeInvalidation = sortCalls;
+service.detailPayload("IPX", prefixUrl("sort=videos&probe=oldest"));
+assert.equal(sortCalls, beforeInvalidation + 1);
+verifyStudioVisibility();
+verifyStudioCacheBounds();
+console.log("code-prefix-catalog: ok (paging reuse, fresh metadata/visibility/library, account isolation, bounded invalidation, studio visibility and bounded sources)");
+
+function verifyStudioCacheBounds() {
+  const works = [localWork("cache-work", "IPX-001")];
+  let filters = 0;
+  let sorts = 0;
+  let sourceQueries = 0;
+  let makerQueries = 0;
+  const studios = createStudioService({
+    clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
+    getCoreDb: () => ({
+      prepare(sql) {
+        if (sql.includes("SELECT COUNT(*) FROM makers")) return { get: () => ({ maker_count: 1, series_count: 0, link_count: 1 }) };
+        if (sql.includes("FROM makers m")) return { get: (id) => { makerQueries += 1; return id === 1 ? { maker_id: "1", name: "fixture studio" } : null; } };
+        if (sql.includes("FROM series s")) return { all: () => [] };
+        if (sql.includes("FROM work_makers wm")) return { all: () => { sourceQueries += 1; return [{ work_id: "cache-work" }]; } };
+        throw new Error(`unexpected studio cache fixture query: ${sql}`);
+      }
+    }),
+    getLibrary: () => ({ worksById: new Map(works.map((work) => [work.id, work])) }),
+    getStamp: () => "fixture-cache:1",
+    filterWorkList: (items) => { filters += 1; return items; },
+    pagedWorksPayload: (items) => ({ total: items.length, works: items }),
+    publicRemoteUrl: (value) => value,
+    sortWorkList: (items) => { sorts += 1; return [...items]; },
+    workFacets: (items) => ({ all: items.length })
+  });
+  const detail = (query, maker = "1") => studios.detailPayload(maker, new URL(`http://fixture/api/studios/${maker}?${query}`));
+
+  for (let index = 0; index < 110; index += 1) assert.equal(detail(`filter=query-${index}`).total, 1);
+  const warmFilters = filters;
+  detail("filter=query-109&offset=1");
+  assert.equal(filters, warmFilters, "recent studio filter sources remain reusable across pages");
+  detail("filter=query-0&offset=1");
+  assert.equal(filters, warmFilters + 1, "studio filter source cache evicts and rebuilds old query combinations");
+
+  for (let index = 0; index < 40; index += 1) assert.equal(detail(`sort=query-${index}`).total, 1);
+  const warmSorts = sorts;
+  detail("sort=query-39&offset=1");
+  assert.equal(sorts, warmSorts, "recent studio ordering remains reusable across pages");
+  detail("sort=query-0&offset=1");
+  assert.equal(sorts, warmSorts, "studio unknown sorts share their updated fallback rather than allocating identical copies");
+  detail("sort=size&offset=1");
+  const beforeAlias = sorts;
+  detail("sort=sizeDesc&offset=1");
+  assert.equal(sorts, beforeAlias, "studio legacy sort aliases reuse the same ordering");
+  detail("filter=info,playable&offset=1");
+  const beforeEquivalent = filters;
+  detail("filter=playable,info&offset=2");
+  assert.equal(filters, beforeEquivalent, "equivalent studio AND filters share their array");
+
+  for (let index = 1; index <= 140; index += 1) assert.equal(detail(`seriesId=${index}`).total, 1);
+  const warmSources = sourceQueries;
+  detail("seriesId=140&offset=1");
+  assert.equal(sourceQueries, warmSources, "recent studio series sources are reused");
+  detail("seriesId=1&offset=1");
+  assert.equal(sourceQueries, warmSources + 1, "studio source cache evicts old series arrays");
+
+  for (let index = 2; index <= 145; index += 1) assert.equal(detail("", String(index)), null);
+  const warmMakers = makerQueries;
+  assert.equal(detail("", "145"), null);
+  assert.equal(makerQueries, warmMakers, "recent missing studio lookups are cached");
+  assert.equal(detail("", "2"), null);
+  assert.equal(makerQueries, warmMakers + 1, "missing studio lookup keys have the same bounded lifetime");
+}
+
+function verifyStudioVisibility() {
+  const works = [localWork("local-1", "IPX-001"), missingWork("missing", "IPX-002"), missingWork("compilation", "COMP-001"), localWork("local-2", "IPX-003")];
+  let prefixes = ["COMP"];
+  let owner = "alice:1";
+  let favorite = "local-1";
+  let sorts = 0;
+  const classification = createWorkClassificationService({ appConfigService: { current: () => ({ compilationPrefixes: prefixes, compilationKeywords: [] }) } });
+  const studios = createStudioService({
+    clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
+    getCoreDb: () => ({
+      prepare(sql) {
+        if (sql.includes("SELECT COUNT(*) FROM makers")) return { get: () => ({ maker_count: 1, series_count: 0, link_count: works.length }) };
+        if (sql.includes("FROM makers m")) return { get: () => ({ maker_id: "1", name: "fixture studio" }) };
+        if (sql.includes("FROM series s")) return { all: () => [] };
+        if (sql.includes("FROM work_makers wm")) return { all: () => works.map((work) => ({ work_id: work.id })) };
+        throw new Error(`unexpected studio fixture query: ${sql}`);
+      }
+    }),
+    getLibrary: () => ({ worksById: new Map(works.map((work) => [work.id, work])) }),
+    getStamp: () => "fixture-library:1",
+    filterWorkList: (items, filter) => filter === "missingLocal" ? items.filter((work) => work.missingLocal) : filter === "favorite" ? items.filter((work) => work.id === favorite) : items,
+    pagedWorksPayload(items, url, extra) {
+      const limit = Number(url.searchParams.get("limit") || 48);
+      const offset = Number(url.searchParams.get("offset") || 0);
+      return { ...extra, total: items.length, works: items.slice(offset, offset + limit), limit, offset };
+    },
+    publicRemoteUrl: (value) => value,
+    sortWorkList: (items) => { sorts += 1; return [...items]; },
+    userStateStamp: () => owner,
+    workClassificationService: classification,
+    workFacets: (items) => ({ all: items.length })
+  });
+  const detail = (query) => studios.detailPayload("1", new URL(`http://fixture/api/studios/1?${query}`));
+  assert.equal(detail("includeCompilation=1&includeMissingLocal=1").total, 4);
+  const first = detail("includeCompilation=0&includeMissingLocal=1&limit=1&offset=1");
+  const beforeNext = sorts;
+  const second = detail("includeCompilation=0&includeMissingLocal=1&limit=1&offset=2");
+  assert.equal(first.total, 3);
+  assert.deepEqual(first.works.map((work) => work.id), ["missing"]);
+  assert.deepEqual(second.works.map((work) => work.id), ["local-2"], "studio visibility must apply before pagination so hidden compilations do not leave missing cards");
+  assert.equal(sorts, beforeNext, "studio pages with the same visibility must share derived ordering");
+  assert.equal(first.facets.all, 4, "studio facets retain the complete maker source");
+  const onlyLocal = detail("includeCompilation=1&includeMissingLocal=0");
+  assert.deepEqual(onlyLocal.works.map((work) => work.id), ["local-1", "local-2"]);
+  assert.deepEqual(detail("filter=missingLocal&includeCompilation=0&includeMissingLocal=0").works.map((work) => work.id), ["missing"], "an explicit missing-local chip retains the shared visibility override semantics");
+  assert.equal(detail("includeCompilation=1&includeMissingLocal=1").total, 4, "visibility toggles must not reuse a narrower page cache");
+  prefixes = ["COMP", "IPX"];
+  assert.equal(detail("includeCompilation=0&includeMissingLocal=1&limit=1&offset=1").total, 2, "a compilation configuration change invalidates page and sorted-result caches");
+  assert.deepEqual(detail("filter=favorite").works.map((work) => work.id), ["local-1"]);
+  owner = "bob:1";
+  favorite = "local-2";
+  assert.deepEqual(detail("filter=favorite").works.map((work) => work.id), ["local-2"]);
+}
 
 function localWork(id, code) {
   return {

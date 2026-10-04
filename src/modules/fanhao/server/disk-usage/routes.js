@@ -115,10 +115,12 @@ export function createDiskUsageRoutes({
       if (["remux", "transcode"].includes(url.searchParams.get("mode")) && videoExtensions.has(extension)) {
         mediaStreamService.serveTranscodedVideo(req, res, file, url);
       } else {
-        serveRangedFile(req, res, file);
+        await serveRangedFile(req, res, file);
       }
     } catch (error) {
-      sendJson(res, Number(error?.statusCode) || 500, { error: error?.message || "文件播放失败" });
+      if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+        sendJson(res, Number(error?.statusCode) || 500, { error: error?.message || "文件播放失败" });
+      }
     }
     return true;
   }

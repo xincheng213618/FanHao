@@ -31,7 +31,8 @@ export function createNovelCollectionAdmin({
   formatNumber,
   onLibraryChanged,
   openBook,
-  rerender
+  rerender,
+  isActive = () => state.novel?.mode === "manage"
 }) {
   let pollTimer = null;
 
@@ -1229,12 +1230,13 @@ export function createNovelCollectionAdmin({
   function schedulePoll() {
     stopPolling();
     const collection = ensureState();
-    if (state.novel?.mode !== "manage" || !collection.tasks.some((task) => ACTIVE_STATUSES.has(task.status))) return;
+    if (!isActive() || !collection.tasks.some((task) => ACTIVE_STATUSES.has(task.status))) return;
     pollTimer = window.setTimeout(async () => {
       pollTimer = null;
-      if (state.novel?.mode !== "manage") return;
+      if (!isActive()) return;
       const previousTasks = collection.tasks;
       await load({ silent: true });
+      if (!isActive()) { stopPolling(); return; }
       if (canPatchPolledTasks(previousTasks, collection.tasks)) {
         patchPolledTaskRows(collection);
       } else {

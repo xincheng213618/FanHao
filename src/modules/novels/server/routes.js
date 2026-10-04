@@ -2,18 +2,24 @@ export async function routeNovelApi(req, res, url, deps) {
   const {
     collectionService,
     novelStore,
-    notFound,
+    notFound: notFoundResponse,
     readJsonBody,
     reimportService,
     requireLocalAdmin = () => true,
-    sendJson,
+    sendJson: sendJsonResponse,
     novelUploadMaxBodyBytes = 80 * 1024 * 1024
   } = deps;
+  const sendJson = (target, ...args) => {
+    if (!target.destroyed && !target.writableEnded) sendJsonResponse(target, ...args);
+  };
+  const notFound = (target) => {
+    if (!target.destroyed && !target.writableEnded) notFoundResponse(target);
+  };
 
   if (url.pathname === "/api/novels/collection" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 200, collectionService.snapshot());
+      sendJson(res, 200, await collectionService.snapshot());
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "小说采集后台读取失败" });
     }
@@ -23,7 +29,7 @@ export async function routeNovelApi(req, res, url, deps) {
   if (url.pathname === "/api/novels/collection/adapters" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 200, collectionService.listAdapters());
+      sendJson(res, 200, await collectionService.listAdapters());
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器读取失败" });
     }
@@ -34,9 +40,9 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 201, collectionService.createAdapter(body || {}));
+      sendJson(res, 201, await collectionService.createAdapter(body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器创建失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集适配器创建失败"));
     }
     return true;
   }
@@ -46,23 +52,23 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 200, collectionService.updateAdapter(decodeURIComponent(adapterMatch[1]), body || {}));
+      sendJson(res, 200, await collectionService.updateAdapter(decodeURIComponent(adapterMatch[1]), body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器保存失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集适配器保存失败"));
     }
     return true;
   }
   if (adapterMatch && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const data = collectionService.deleteAdapter(decodeURIComponent(adapterMatch[1]));
+      const data = await collectionService.deleteAdapter(decodeURIComponent(adapterMatch[1]));
       if (!data) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器删除失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集适配器删除失败"));
     }
     return true;
   }
@@ -70,7 +76,7 @@ export async function routeNovelApi(req, res, url, deps) {
   if (url.pathname === "/api/novels/collection/tasks" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 200, collectionService.listTasks());
+      sendJson(res, 200, await collectionService.listTasks());
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "采集任务读取失败" });
     }
@@ -81,9 +87,9 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 201, collectionService.createTask(body || {}));
+      sendJson(res, 201, await collectionService.createTask(body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务创建失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集任务创建失败"));
     }
     return true;
   }
@@ -94,11 +100,11 @@ export async function routeNovelApi(req, res, url, deps) {
     try {
       const taskId = decodeURIComponent(taskActionMatch[1]);
       const data = taskActionMatch[2] === "cancel"
-        ? collectionService.cancelTask(taskId)
-        : collectionService.runTask(taskId);
+        ? await collectionService.cancelTask(taskId)
+        : await collectionService.runTask(taskId);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务操作失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集任务操作失败"));
     }
     return true;
   }
@@ -107,7 +113,7 @@ export async function routeNovelApi(req, res, url, deps) {
   if (taskMatch && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const task = collectionService.taskDetail(decodeURIComponent(taskMatch[1]));
+      const task = await collectionService.taskDetail(decodeURIComponent(taskMatch[1]));
       if (!task) {
         notFound(res);
         return true;
@@ -121,14 +127,14 @@ export async function routeNovelApi(req, res, url, deps) {
   if (taskMatch && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const data = collectionService.deleteTask(decodeURIComponent(taskMatch[1]));
+      const data = await collectionService.deleteTask(decodeURIComponent(taskMatch[1]));
       if (!data) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务删除失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "采集任务删除失败"));
     }
     return true;
   }
@@ -179,10 +185,10 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req, novelUploadMaxBodyBytes);
-      const data = novelStore.uploadBook(body || {});
+      const data = await novelStore.uploadBook(body || {});
       sendJson(res, 201, { ok: true, ...data });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "小说上传失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "小说上传失败"));
     }
     return true;
   }
@@ -190,16 +196,25 @@ export async function routeNovelApi(req, res, url, deps) {
   const reimportMatch = /^\/api\/novels\/([^/]+)\/reimport$/.exec(url.pathname);
   if (reimportMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const closed = () => { if (!res.writableEnded) abort(); };
+    req.once?.("aborted", abort);
+    res.once?.("close", closed);
+    if (req.aborted || res.destroyed) abort();
     try {
       const body = await readJsonBody(req, novelUploadMaxBodyBytes);
-      const data = await reimportService.reimport(decodeURIComponent(reimportMatch[1]), body || {});
+      const data = await reimportService.reimport(decodeURIComponent(reimportMatch[1]), body || {}, { signal: controller.signal });
       if (!data) {
         notFound(res);
         return true;
       }
       sendJson(res, data.kind === "collection" ? 202 : 200, { ok: true, ...data });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "小说重新导入失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "小说重新导入失败"));
+    } finally {
+      req.removeListener?.("aborted", abort);
+      res.removeListener?.("close", closed);
     }
     return true;
   }
@@ -242,14 +257,14 @@ export async function routeNovelApi(req, res, url, deps) {
   if (progressMatch && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
-      const progress = novelStore.saveProgress(decodeURIComponent(progressMatch[1]), body || {});
+      const progress = await novelStore.saveProgress(decodeURIComponent(progressMatch[1]), body || {});
       if (!progress) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, { ok: true, progress });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "阅读进度保存失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "阅读进度保存失败"));
     }
     return true;
   }
@@ -289,14 +304,14 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const sourceRealm = url.searchParams.get("sourceRealm");
-      const deleted = novelStore.deleteBook(decodeURIComponent(bookMatch[1]), sourceRealm === null ? {} : { sourceRealm });
+      const deleted = await novelStore.deleteBook(decodeURIComponent(bookMatch[1]), sourceRealm === null ? {} : { sourceRealm });
       if (!deleted) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, { ok: true, deleted });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "小说删除失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "小说删除失败"));
     }
     return true;
   }
@@ -304,14 +319,14 @@ export async function routeNovelApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      const book = novelStore.updateBookMetadata(decodeURIComponent(bookMatch[1]), body || {});
+      const book = await novelStore.updateBookMetadata(decodeURIComponent(bookMatch[1]), body || {});
       if (!book) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, { ok: true, book });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "书籍信息保存失败" });
+      sendJson(res, error.statusCode || 500, writeErrorPayload(error, "书籍信息保存失败"));
     }
     return true;
   }
@@ -333,6 +348,14 @@ export async function routeNovelApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+function writeErrorPayload(error, fallback) {
+  return {
+    error: error.message || fallback,
+    ...(error.code === "NOVEL_PROGRESS_SESSION_EXPIRED" || error.code === "NOVEL_PROGRESS_BUSY" ? { code: error.code } : {}),
+    ...(error.outcome === "unknown" ? { outcome: "unknown", operationId: error.operationId } : {})
+  };
 }
 
 function attachmentDisposition(fileName) {

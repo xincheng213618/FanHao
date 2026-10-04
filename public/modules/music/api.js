@@ -47,6 +47,12 @@ export function createMusicApi(api) {
       const qs = params instanceof URLSearchParams ? params.toString() : String(params || "");
       return get(`/api/music/tracks/${encodeURIComponent(id)}?${qs}`, signal);
     },
+    getProgressClock(id, signal) {
+      return get(`/api/music/tracks/${encodeURIComponent(id)}/progress-clock`, signal);
+    },
+    claimProgressSession(id, previousSessionId, signal) {
+      return send(`/api/music/tracks/${encodeURIComponent(id)}/progress-session`, "POST", previousSessionId ? { previousSessionId } : {}, signal);
+    },
     getPlaylists(signal) {
       return get("/api/music/playlists", signal);
     },
@@ -64,6 +70,9 @@ export function createMusicApi(api) {
     },
     setProgress(id, body, signal) {
       return send(`/api/music/tracks/${encodeURIComponent(id)}/progress`, "POST", body, signal);
+    },
+    setProgressKeepalive(id, body) {
+      return api(`/api/music/tracks/${encodeURIComponent(id)}/progress`, { method: "POST", body, keepalive: true });
     },
     createPlaylist(body, signal) {
       return send("/api/music/playlists", "POST", body, signal);

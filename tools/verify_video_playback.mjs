@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import { createFileServer, entityValidators, ifRangeMatches, parseRange } from "../src/platform/server/file-server.js";
 import { createMediaFileRelocationService } from "../src/modules/fanhao/server/works/media-file-relocation-service.js";
 import { createMediaStreamService } from "../src/platform/server/media-stream-service.js";
+import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
+import { routeWorksMedia } from "../src/modules/fanhao/server/works/routes-media.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -52,6 +55,14 @@ assertPlaybackMode({ ext: ".wmv", videoCodec: "vc1", audioCodec: "wmapro", expec
 const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
 const routeSource = fs.readFileSync(path.join(root, "src", "modules", "fanhao", "server", "works", "routes-media.js"), "utf8");
 const streamSource = fs.readFileSync(path.join(root, "src", "platform", "server", "media-stream-service.js"), "utf8");
+let createRoutedMediaStreamService = createMediaStreamService;
+if (process.argv.includes("--legacy-video-forwarding")) {
+  const forwarding = "return serveRangedFile(req, res, file, options);";
+  assert.equal(streamSource.split(forwarding).length, 2, "negative must remove the actual video promise forwarding");
+  ({ createMediaStreamService: createRoutedMediaStreamService } = await import(
+    `data:text/javascript;base64,${Buffer.from(streamSource.replace(forwarding, "serveRangedFile(req, res, file, options);")).toString("base64")}`
+  ));
+}
 const fileServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "file-server.js"), "utf8");
 const playerHtmlSource = fs.readFileSync(path.join(root, "public", "player.html"), "utf8");
 const playerSource = fs.readFileSync(path.join(root, "public", "js", "player-page.js"), "utf8");
@@ -105,7 +116,7 @@ for (const option of ['"-fflags", "+genpts"', '"-avoid_negative_ts", "make_zero"
   assert(streamSource.includes(option), `missing compatibility option: ${option}`);
 }
 assert(streamSource.includes("TRANSCODE_MAX_EDGE = 4096") && streamSource.includes("force_original_aspect_ratio=decrease:force_divisible_by=2"), "shared compatibility transcoding must scale oversized sources within NVENC's supported edge");
-assert(streamSource.indexOf('child.stdout.once("data"') < streamSource.indexOf('res.writeHead(200'), "transcoded responses must not commit HTTP 200 until FFmpeg produces media bytes");
+assert(streamSource.includes('child.stdout.once("data", job.onFirstData)') && streamSource.includes('job.onFirstData = (chunk)'), "transcoded GET responses must commit headers from the first media data handler; HEAD does not spawn FFmpeg");
 
 async function verifyFileServerRangeContract() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-file-range-contract-"));
@@ -113,6 +124,9 @@ async function verifyFileServerRangeContract() {
   const emptyPath = path.join(fixtureRoot, "empty.mp4");
   const rewritePath = path.join(fixtureRoot, "rewrite.mp4");
   const sameSecondPath = path.join(fixtureRoot, "same-second.mp4");
+  const replacementPath = path.join(fixtureRoot, "replacement.mp4");
+  const retiredPath = path.join(fixtureRoot, "fixture-retired.mp4");
+  const prefixPath = path.join(fixtureRoot, "fixture.mp4.start");
   try {
     fs.writeFileSync(fixturePath, Buffer.from("0123456789"));
     fs.writeFileSync(emptyPath, Buffer.alloc(0));
@@ -132,7 +146,7 @@ async function verifyFileServerRangeContract() {
       defaultChunkBytes: 4,
       mimeTypes: { ".mp4": "video/mp4" },
       normalizeExt: (filePath) => path.extname(filePath).toLowerCase(),
-      notFound: () => assert.fail("controlled file fixture should exist"),
+      notFound: (res) => { res.writeHead(404); res.end(); },
       safeStat: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })
     });
 
@@ -142,6 +156,12 @@ async function verifyFileServerRangeContract() {
     assert.equal(full.headers["Content-Length"], 10);
     assert.equal(full.headers.ETag, validators.ETag);
     assert.ok(full.headers["Last-Modified"]);
+    for (const unavailablePath of [path.join(fixtureRoot, "missing.mp4"), fixtureRoot]) {
+      const unavailable = await captureFileResponse(fileServer, "serveRangedFile", "GET", {}, { path: unavailablePath, ext: ".mp4" });
+      assert.equal(unavailable.status, 404, "missing paths and directories must complete without media headers");
+      assert.equal(unavailable.headers["Content-Range"], undefined);
+      assert.equal(unavailable.body.length, 0);
+    }
     const limitedFull = await captureFileResponse(
       fileServer,
       "serveRangedFile",
@@ -354,8 +374,6 @@ async function verifyFileServerRangeContract() {
     assert.equal(sameSecondResume.headers["Content-Range"], undefined);
     assert.equal(sameSecondResume.body.toString(), "v2-data");
 
-    const replacementPath = path.join(fixtureRoot, "replacement.mp4");
-    const retiredPath = path.join(fixtureRoot, "fixture-retired.mp4");
     fs.writeFileSync(replacementPath, Buffer.from("abcdefghij"));
     fs.utimesSync(replacementPath, (stat.mtimeMs + 10_000) / 1000, (stat.mtimeMs + 10_000) / 1000);
     const replacementValidators = entityValidators(file, fs.statSync(replacementPath));
@@ -381,7 +399,6 @@ async function verifyFileServerRangeContract() {
     assert.equal(stableHandleResponse.headers["Content-Range"], "bytes 3-5/10");
     assert.equal(stableHandleResponse.body.toString(), "345", "206 bytes must come from the fstat-validated open handle");
 
-    const prefixPath = path.join(fixtureRoot, "fixture.mp4.start");
     fs.writeFileSync(prefixPath, Buffer.from("0123"));
     const impossibleFull = await captureFileResponse(
       fileServer,
@@ -402,7 +419,11 @@ async function verifyFileServerRangeContract() {
   } finally {
     const resolvedRoot = path.resolve(fixtureRoot);
     assert.ok(path.basename(resolvedRoot).startsWith("fanhao-file-range-contract-"));
-    fs.rmSync(resolvedRoot, { recursive: true, force: true });
+    for (const candidate of [fixturePath, emptyPath, rewritePath, sameSecondPath, replacementPath, retiredPath, prefixPath]) {
+      assert.equal(path.dirname(path.resolve(candidate)), resolvedRoot);
+      if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    }
+    fs.rmdirSync(resolvedRoot);
   }
 }
 
@@ -411,8 +432,9 @@ async function captureFileResponse(fileServer, methodName, method, headers, file
   req.method = method;
   req.headers = headers;
   const res = new CaptureResponse(onWriteHead);
-  fileServer[methodName](req, res, file, "fixture.mp4");
+  await fileServer[methodName](req, res, file, "fixture.mp4");
   if (!res.writableFinished) await once(res, "finish");
+  assert.equal(req.listenerCount("aborted"), 0, "the awaited file API must release request listeners before returning");
   return {
     status: res.status,
     headers: res.responseHeaders,
@@ -475,8 +497,112 @@ function assertPlaybackMode({ ext, videoCodec, audioCodec, expected }) {
 }
 
 await verifyFileServerRangeContract();
+await verifyVideoRouteForwarding();
 await verifyTranscodeResponseContract();
-console.log("video-playback: ok (range contract, direct fallback, bounded transcode, truthful failures)");
+console.log("video-playback: ok (range contract, awaited video routes, direct fallback, bounded transcode, truthful failures)");
+
+async function verifyVideoRouteForwarding() {
+  // Real works routing and the public HTTP boundary surround only a controlled
+  // final transport. No service, media path, database or process is opened.
+  for (const method of ["GET", "HEAD"]) {
+    const gate = controlledRangeGate(), entered = controlledRangeGate();
+    let rangeWork;
+    const fixture = videoRouteFixture((req, res, file) => {
+      assert.equal(fixture.realm.getStore()?.id, "fixture-user");
+      assert.equal(req.method, method);
+      assert.equal(file.id, "fixture-video");
+      assert.equal(file.cacheControl, "no-store");
+      entered.resolve();
+      rangeWork = gate.promise.then(() => {
+        assert.equal(fixture.realm.getStore()?.id, "fixture-user", "the awaited transport must retain the authenticated realm");
+        res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": 11 });
+        res.end(method === "HEAD" ? undefined : "route-video");
+      });
+      rangeWork.catch(() => {});
+      return rangeWork;
+    });
+    const req = capturedVideoRequest(method), res = new CaptureResponse();
+    let settled = false;
+    const pending = fixture.handler(req, res).then(() => { settled = true; });
+    try {
+      await entered.promise;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "the real request handler must await the video transport rather than a detached call");
+      assert.equal(res.headersSent, false);
+      gate.resolve(); await pending;
+      if (!res.writableFinished) await once(res, "finish");
+      assert.equal(res.status, 200);
+      assert.equal(Buffer.concat(res.chunks).toString(), method === "HEAD" ? "" : "route-video");
+      assert.deepEqual(fixture.errors, []);
+      assert.equal(fixture.staticCalls(), 0, "matched videos must not fall through to static content");
+    } finally { gate.resolve(); await Promise.allSettled([pending, rangeWork]); }
+  }
+
+  const gate = controlledRangeGate(), entered = controlledRangeGate();
+  const failure = new Error("controlled private video read failure");
+  let rangeWork;
+  const fixture = videoRouteFixture(() => {
+    entered.resolve();
+    rangeWork = gate.promise.then(() => { throw failure; });
+    rangeWork.catch(() => {});
+    return rangeWork;
+  });
+  const req = capturedVideoRequest("GET"), res = new CaptureResponse();
+  const pending = fixture.handler(req, res);
+  try {
+    await entered.promise; assert.equal(res.headersSent, false);
+    gate.resolve(); await pending;
+    if (!res.writableFinished) await once(res, "finish");
+    assert.equal(res.status, 500, "a late transport rejection must reach the public request boundary");
+    assert.deepEqual(JSON.parse(Buffer.concat(res.chunks).toString()), { error: "Internal server error" });
+    assert.deepEqual(fixture.errors, [failure]);
+    assert.equal(fixture.staticCalls(), 0);
+  } finally { gate.resolve(); await Promise.allSettled([pending, rangeWork]); }
+
+  const unmatched = videoRouteFixture(() => assert.fail("unmatched paths must not start a video transport"));
+  const unmatchedReq = capturedVideoRequest("GET", "/unmatched-video-fixture");
+  assert.equal(await unmatched.route(unmatchedReq, new CaptureResponse(), new URL(unmatchedReq.url, "http://fixture.local")), false);
+  const fallback = new CaptureResponse();
+  await unmatched.handler(unmatchedReq, fallback);
+  if (!fallback.writableFinished) await once(fallback, "finish");
+  assert.equal(fallback.status, 200);
+  assert.equal(Buffer.concat(fallback.chunks).toString(), "fixture-static");
+  assert.equal(unmatched.staticCalls(), 1);
+  console.log("PASS video route forwarding (held GET/HEAD, late rejection, unmatched false/static fallback)");
+}
+
+function videoRouteFixture(serveRangedFile) {
+  const realm = new AsyncLocalStorage(), errors = [];
+  const mediaStreamService = createRoutedMediaStreamService({ serveRangedFile });
+  let staticCalls = 0;
+  const route = (req, res, url) => routeWorksMedia(req, res, url, {
+    library: { filesById: new Map() }, mediaResponseService: {}, mediaStreamService,
+    notFound: () => assert.fail("controlled routed video must exist"),
+    resolveVideoFileByPublicId: id => id === "fixture-video" ? { id, type: "video", path: "controlled-route.mp4", ext: ".mp4" } : null,
+    resolveLibraryPersonByPublicId: () => null
+  });
+  const handler = createRequestHandler({
+    attachAccessAnalytics() {}, attachAccessLogger() {}, requestCorsOrigin: () => "",
+    requestAuthState: () => ({ allowed: true, user: { id: "fixture-user" } }),
+    runForUser: (user, action) => realm.run(user, action), routeAuth: async () => false,
+    routeApi: async () => false, routeMedia: route,
+    serveStatic(_req, res) { staticCalls++; res.writeHead(200); res.end("fixture-static"); },
+    sendJson(res, status, payload) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(payload)); },
+    logError(_prefix, error) { errors.push(error); }
+  });
+  return { handler, route, realm, errors, staticCalls: () => staticCalls };
+}
+
+function capturedVideoRequest(method, url = "/media/video/fixture-video") {
+  const req = new EventEmitter(); req.method = method; req.url = url; req.headers = { host: "fixture.local", range: "bytes=3-" };
+  return req;
+}
+
+function controlledRangeGate() {
+  let resolve;
+  const promise = new Promise(yes => { resolve = yes; });
+  return { promise, resolve };
+}
 
 async function verifyTranscodeResponseContract() {
   let spawnedArgs = [];

@@ -7,19 +7,34 @@
     <link rel="stylesheet" href="/styles/shell.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/auth.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/controls.css?v=20260809-home-simplify-01" />
-    <link rel="stylesheet" href="/styles/profiles.css?v=20260928-profile-auto-collect-01" />
+    <link rel="stylesheet" href="/styles/profiles.css?v=20261002-workspace-01" />
     <link rel="stylesheet" href="/styles/home.css?v=20260917-api-probe-02" />
-    <link rel="stylesheet" href="/styles/links.css?v=20260925-download-progress-01" />
+    <link rel="stylesheet" href="/styles/links.css?v=20261002-workspace-01" />
     <link rel="stylesheet" href="/styles/library.css?v=20260809-home-simplify-01" />
     <link rel="stylesheet" href="/styles/activity.css?v=20260824-task-list-01" />
-    <link rel="stylesheet" href="/styles/responsive.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/responsive.css?v=20261002-workspace-01" />
+    <link rel="stylesheet" href="/styles/workspace.css?v=20261002-workspace-01" />
   </head>
   <body>
     <main class="shell">
+      <aside class="app-sidebar">
+        <div class="app-brand"><span class="brand-mark"><img src="/icons/download.svg" alt="" /></span><div><strong>Douyin Tool</strong><span>本地媒体管理</span></div></div>
+        <div class="nav-caption">工作空间</div>
+        <nav class="module-tabs" aria-label="模块">
+          <button class="active" data-page-target="home"><img src="/icons/house.svg" alt="" />首页</button>
+          <button data-page-target="library"><img src="/icons/download.svg" alt="" />已下载</button>
+          <button data-page-target="profiles"><img src="/icons/users.svg" alt="" />主页管理</button>
+          <button data-page-target="settings"><img src="/icons/settings-2.svg" alt="" />配置</button>
+          <button data-page-target="activity"><img src="/icons/list-checks.svg" alt="" />任务列表</button>
+        </nav>
+        <div class="sidebar-footer"><span class="sidebar-dot" aria-hidden="true"></span>抖音下载管理</div>
+      </aside>
+      <div class="workspace-content">
       <section class="topbar">
         <div>
-          <div class="eyebrow">Douyin Tool</div>
-          <h1>抖音下载管理</h1>
+          <div class="eyebrow" id="workspaceEyebrow">WORKSPACE / OVERVIEW</div>
+          <h1 id="workspaceTitle">下载概览</h1>
+          <p id="workspaceDescription" class="workspace-description">从采集到归档，在这里管理你的媒体。</p>
         </div>
         <div class="topbar-actions">
           <div class="status-line">
@@ -31,14 +46,6 @@
           <button id="quitApp" class="topbar-button danger" hidden>退出程序</button>
         </div>
       </section>
-
-      <nav class="module-tabs" aria-label="模块">
-        <button class="active" data-page-target="home">首页</button>
-        <button data-page-target="library">已下载</button>
-        <button data-page-target="profiles">主页管理</button>
-        <button data-page-target="settings">配置</button>
-        <button data-page-target="activity">任务列表</button>
-      </nav>
 
       <section class="page-panel active" data-page-panel="home">
         <div class="home-layout">
@@ -92,7 +99,7 @@
           <div class="panel-head">
             <div>
               <div class="panel-title">下载队列</div>
-              <div class="muted">按队列顺序下载，当前下载项会高亮显示。右侧统计是当前未完成主页的合计，不是“我的喜欢”单独数量。</div>
+              <div class="muted">仅统计当前队列中的主页，按顺序自动下载。</div>
             </div>
             <div class="queue-head-actions">
               <button id="sortQueueByPending">待下载少优先</button>
@@ -103,7 +110,7 @@
         </section>
 
         <section class="panel links-panel home-links-panel">
-          <div class="panel-head">
+          <div class="panel-head links-head">
             <div>
               <div class="panel-title">全库数据库链接</div>
               <div class="muted">默认显示精简信息；展开单条详情可查看作品 ID、原链接和技术信息。</div>
@@ -180,7 +187,7 @@
         <section class="panel profile-manager-panel">
           <div class="panel-head profile-manager-head">
             <div>
-              <div class="panel-title">主页管理</div>
+              <div class="panel-title">作者列表</div>
               <div id="profileManagerSummary" class="muted">0 个主页</div>
             </div>
             <div class="profile-manager-actions">
@@ -224,9 +231,10 @@
               </select>
             </label>
           </div>
-          <div class="profile-refresh-policy-note muted">
+          <details class="profile-refresh-policy-note muted"><summary>采集规则与说明</summary><p>
             每次采集都会更新本次遇到作品的点赞、评论、收藏和分享；快速采集刷新最近作品，全量确认刷新完整扫描范围。主页作品数明显减少时只安排一次全量确认。退出一键采集后，定时采集也会跳过该主页；单人手动采集和已入库作品的下载不受影响。
-          </div>
+          </p></details>
+          <div class="profile-manager-columns" aria-hidden="true"><span>作者 / 主页</span><span>作品</span><span>粉丝</span><span>获赞</span><span>最新作品</span><span>采集计划</span><span>操作</span></div>
           <div id="profileManagerList" class="profile-manager-list"></div>
         </section>
       </section>
@@ -391,9 +399,11 @@
           </aside>
         </section>
       </section>
+      </div>
     </main>
 
+    <button id="backToTop" class="back-to-top" aria-label="回到顶部" title="回到顶部" hidden><img src="/icons/arrow-up.svg" alt="" /></button>
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260928-profile-auto-collect-01"></script>
+    <script type="module" src="/app.js?v=20261002-workspace-01"></script>
   </body>
 </html>

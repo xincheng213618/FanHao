@@ -43,9 +43,10 @@ function syntheticService(prefix) {
         title: `${series} Episode ${String(episode).padStart(3, "0")}` });
     }
   }
+  const index = { scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items };
   return createImageLibraryService({
     clampInteger: (value, fallback, min, max) => Math.min(max, Math.max(min, Number.parseInt(value, 10) || fallback)),
-    getImageLibraryIndex: () => ({ scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items }),
+    getImageLibraryIndex: () => index,
     maxItemLimit: 12000, galleryMediaRootStatuses: () => [], imageReaderCacheStatus: () => ({}), photoSetRootStatuses: () => [],
     mangaService: { cacheDirs: () => [], publicSummary: value => value, rootStatus: () => ({}) },
     metadataService: { movieRowsMap: () => movies, tvSeriesRowsMap: () => tv, movieRow: id => movies.get(id), tvSeriesRow: key => tv.get(key),
@@ -144,9 +145,9 @@ function harness(input = sources, { storage = new Map(), hash = "" } = {}) {
   assert(popstate && back, "Actual browser and UI back entry wiring"); vm.runInContext(`${popstate}\n${back}`, c);
   const cancelEvents = /for \(const eventName of \["pointerdown", "touchstart", "wheel"\]\) \{[\s\S]*?\n\}/.exec(input.app)?.[0];
   assert(cancelEvents, "Actual scroll cancellation event wiring"); vm.runInContext(cancelEvents, c);
-  const expose = /  return \{\r?\n    deactivate: resetMangaReaderProgressTracker,/;
+  const expose = /  return \{\r?\n(?=    deactivate:)/;
   assert(expose.test(input.channel), "Observable factory return boundary");
-  const channel = input.channel.replace(expose, "  return {\n    __testPageState: () => channelPageState,\n    deactivate: resetMangaReaderProgressTracker,");
+  const channel = input.channel.replace(expose, "  return {\n    __testPageState: () => channelPageState,\n");
   c.createChannelViews = vm.runInContext(`(function(){${strip(channel)};return createChannelViews;})()`, c);
   h.host.getActiveUrl = () => c.activeUrl;
   // Evaluate the exact host limit object; no fixed limit or synthetic reset.
@@ -310,7 +311,7 @@ const mutations = [
   { name: "same-signature shortcut leaves loading footer", target: "movie: cached append", from: "if (!loadingMore && renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)", to: "if (renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)" },
   { name: "cached complete hides retry footer", target: "cached tail considered complete", from: 'else if (paging.status === "error")', to: 'else if (paging.status === "error" && items.length < total)' },
   { name: "retry ignores changed target limit", target: "same-route explicit reopening", from: "currentPage && channelPageState.retry?.targetLimit === limit ? channelPageState.retry : null", to: "currentPage && channelPageState.retry ? channelPageState.retry : null" },
-  { name: "source-only change loses request fence", target: "source-only change", from: "const isCurrent = () => isActive() && getActiveUrl() === activeUrl;", to: "const isCurrent = () => isActive();" },
+  { name: "source-only change loses request fence", target: "source-only change", from: " && getActiveUrl() === activeUrl;", to: ";" },
   { name: "successful fresh response retains stale retry metadata", target: "movie: cached append", from: "channelPageState = { key: pageKey, data: mergedData };", to: "channelPageState = { key: pageKey, data: mergedData, ...(retryPage ? { retry: retryPage } : {}) };" }
 ];
 let passed = 0, failed = 0, oldRejected = 0, mutantRejected = 0;

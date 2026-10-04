@@ -71,7 +71,7 @@ export async function routeWorksMedia(req, res, url, deps) {
       return true;
     }
 
-    mediaStreamService.serveVideo(req, res, {
+    await mediaStreamService.serveVideo(req, res, {
       ...file,
       cacheControl: "no-store"
     });

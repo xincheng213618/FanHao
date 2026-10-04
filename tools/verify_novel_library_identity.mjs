@@ -336,6 +336,7 @@ try {
   for (const mutant of mutants) {
     let altered = storeSource;
     altered = altered.replace('"./chapter-identity.js"', JSON.stringify(pathToFileURL(path.join(root, "src/modules/novels/server/chapter-identity.js")).href));
+    altered = altered.replace('"./local-reimport-artifact.js"', JSON.stringify(pathToFileURL(path.join(root, "src/modules/novels/server/local-reimport-artifact.js")).href));
     for (const [from, to] of mutant.edits) { assert.equal(altered.split(from).length, 2, `non-unique mutation: ${mutant.name}`); altered = altered.replace(from, to); }
     // Loading outside the expected-failure block excludes syntax/module failures.
     const { createNovelStore: factory } = await import("data:text/javascript;base64," + Buffer.from(altered).toString("base64"));

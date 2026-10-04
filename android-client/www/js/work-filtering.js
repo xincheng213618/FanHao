@@ -1,7 +1,7 @@
 import { imageUrlForWork } from "./image.js";
-import { compareWorkPopularity, compareWorkRatingCount } from "./work-sort.js?v=assets-0f97d6765d71";
-import { isVrWork } from "./work-source.js?v=assets-0f97d6765d71";
-import { createWorkFilterControls } from "./work-filter-controls.js?v=assets-0f97d6765d71";
+import { compareWorkPopularity, compareWorkRatingCount } from "./work-sort.js?v=assets-07b744082137";
+import { isVrWork } from "./work-source.js?v=assets-07b744082137";
+import { createWorkFilterControls } from "./work-filter-controls.js?v=assets-07b744082137";
 
 const FILTER_STORAGE_KEY = "fanhao.android.workFilter";
 const SORT_STORAGE_KEY = "fanhao.android.workSort";

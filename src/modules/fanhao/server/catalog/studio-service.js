@@ -1,8 +1,17 @@
+import { createWeightedCacheBudget, normalizeWorkSortMode } from "../works/work-cache-budget.js";
+
 const DEFAULT_STUDIO_SORT = "releaseDesc";
 const STUDIO_DETAIL_PREWARM_PAGE_SIZE = 48;
 const STUDIO_DETAIL_PREWARM_LIMIT = 12;
 const STUDIO_PAGE_CACHE_LIMIT = 256;
 const STUDIO_SUMMARY_CACHE_LIMIT = 32;
+const STUDIO_SOURCE_CACHE_LIMIT = 128;
+const STUDIO_FILTER_CACHE_LIMIT = 96;
+const STUDIO_SORT_CACHE_LIMIT = 32;
+// Source, filtered, and ordered arrays share one reference budget. The page
+// budget fits 256 ordinary 48-row responses while excluding oversized pages.
+const STUDIO_DERIVED_WORK_REFERENCE_BUDGET = 4_000_000;
+const STUDIO_PAGE_WORK_BUDGET = 12288;
 
 export function createStudioService({
   clampInteger,
@@ -16,6 +25,7 @@ export function createStudioService({
   publicRemoteUrl,
   sortWorkList,
   userStateStamp = () => "",
+  workClassificationService = { filterForRequest: (works) => works, visibilityStamp: () => "" },
   workFacets,
   workQueryStamp = () => ""
 }) {
@@ -28,12 +38,14 @@ export function createStudioService({
   const studioPageCache = new Map();
   const studioSummaryPayloadCache = new Map();
   const studioWorksCache = new Map();
+  const derivedBudget = createWeightedCacheBudget(STUDIO_DERIVED_WORK_REFERENCE_BUDGET);
+  const pageBudget = createWeightedCacheBudget(STUDIO_PAGE_WORK_BUDGET);
 
   function ensureDetailCaches(stamp) {
     if (studioDetailCacheStamp === stamp) return;
     studioDetailCacheStamp = stamp;
     studioMakerCache.clear();
-    studioWorksCache.clear();
+    derivedBudget.clear();
   }
 
   function ensureCatalog({ force = false } = {}) {
@@ -230,10 +242,8 @@ export function createStudioService({
       if (!makerId) continue;
       cachedMakerDetail(makerId, db);
       const workSet = cachedStudioWorks(makerId, "all", db);
-      if (!workSet.sortedByMode.has(DEFAULT_STUDIO_SORT)) {
-        workSet.sortedByMode.set(DEFAULT_STUDIO_SORT, sortWorkList(workSet.works, DEFAULT_STUDIO_SORT));
-      }
-      for (const work of workSet.sortedByMode.get(DEFAULT_STUDIO_SORT).slice(0, STUDIO_DETAIL_PREWARM_PAGE_SIZE)) {
+      const sorted = cachedSortedStudioWorks(workSet, DEFAULT_STUDIO_SORT);
+      for (const work of sorted.slice(0, STUDIO_DETAIL_PREWARM_PAGE_SIZE)) {
         if (!work?.id || pageWorkIds.has(work.id)) continue;
         pageWorkIds.add(work.id);
         pageWorks.push(work);
@@ -262,70 +272,88 @@ export function createStudioService({
     const filter = String(url.searchParams.get("filter") || "all").trim() || "all";
     const sort = url.searchParams.get("sort") || DEFAULT_STUDIO_SORT;
     const pageCacheKey = detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url);
-    const cachedPage = readLru(studioPageCache, pageCacheKey);
+    const cachedPage = pageBudget.read(studioPageCache, pageCacheKey);
     if (cachedPage) return cachedPage;
-    const filteredWorkSet = cachedFilteredStudioWorks(workSet, filter);
-    let sorted = filteredWorkSet.sortedByMode.get(sort);
-    if (!sorted) {
-      sorted = sortWorkList(filteredWorkSet.works, sort);
-      filteredWorkSet.sortedByMode.set(sort, sorted);
-    }
+    const filteredWorkSet = cachedFilteredStudioWorks(workSet, filter, url);
+    const sorted = cachedSortedStudioWorks(filteredWorkSet, sort);
     const payload = {
       sync,
       studio: maker.studio,
       selectedSeriesId,
       ...pagedWorksPayload(sorted, url, { filter, facets: cachedStudioFacets(workSet) })
     };
-    writeLru(studioPageCache, pageCacheKey, payload, STUDIO_PAGE_CACHE_LIMIT);
+    pageBudget.write(studioPageCache, pageCacheKey, payload, payload.works.length, STUDIO_PAGE_CACHE_LIMIT);
     return payload;
   }
 
+  function cachedSortedStudioWorks(workSet, sort) {
+    const key = normalizeWorkSortMode(sort);
+    const cached = derivedBudget.read(workSet.sortedByMode, key);
+    if (cached) return cached;
+    const sorted = sortWorkList(workSet.works, key);
+    return derivedBudget.write(workSet.sortedByMode, key, sorted, sorted.length, STUDIO_SORT_CACHE_LIMIT);
+  }
+
   function ensurePageCache(stamp) {
-    const nextStamp = `${stamp}:${workQueryStamp()}:${userStateStamp()}`;
+    const nextStamp = `${stamp}:${queryStamp()}`;
     if (studioPageCacheStamp === nextStamp) return;
     studioPageCacheStamp = nextStamp;
-    studioPageCache.clear();
+    pageBudget.clear(studioPageCache);
   }
 
   function detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url) {
-    return [
+    return JSON.stringify([
       String(makerId || ""),
       selectedSeriesId,
       filter,
       sort,
+      ...visibilityFlags(url),
       url.searchParams.get("limit") || "",
       url.searchParams.get("offset") || "0"
-    ].join(":");
+    ]);
   }
 
   function cachedStudioFacets(workSet) {
-    const stamp = `${workQueryStamp()}:${userStateStamp()}`;
+    const stamp = queryStamp();
     if (workSet.facetsCache?.stamp === stamp) return workSet.facetsCache.facets;
     const facets = workFacets(workSet.works);
     workSet.facetsCache = { stamp, facets };
     return facets;
   }
 
-  function cachedFilteredStudioWorks(workSet, filter) {
-    const stamp = `${workQueryStamp()}:${userStateStamp()}`;
+  function queryStamp() {
+    return JSON.stringify([workQueryStamp(), userStateStamp(), workClassificationService.visibilityStamp?.() || ""]);
+  }
+
+  function visibilityFlags(url) {
+    return ["includeCompilation", "includeMissingLocal"].map((name) => !url.searchParams.has(name) || url.searchParams.get(name) === "1");
+  }
+
+  function cachedFilteredStudioWorks(workSet, filter, url) {
+    const stamp = queryStamp();
     if (workSet.queryCacheStamp !== stamp) {
       workSet.queryCacheStamp = stamp;
-      workSet.filteredByMode.clear();
-      workSet.sortedByMode.clear();
+      for (const filtered of workSet.filteredByMode.values()) derivedBudget.clear(filtered.sortedByMode);
+      derivedBudget.clear(workSet.filteredByMode);
+      derivedBudget.clear(workSet.sortedByMode);
     }
-    if (filter === "all") return workSet;
-    if (!workSet.filteredByMode.has(filter)) {
-      workSet.filteredByMode.set(filter, {
-        works: filterWorkList(workSet.works, filter),
-        sortedByMode: new Map()
-      });
+    const normalizedFilter = [...new Set(filter.split(",").map((item) => item.trim()).filter((item) => item && item !== "all"))].sort().join(",") || "all";
+    const key = JSON.stringify([normalizedFilter, ...visibilityFlags(url)]);
+    let filtered = derivedBudget.read(workSet.filteredByMode, key);
+    if (!filtered) {
+      const visible = workClassificationService.filterForRequest(workSet.works, url, filter);
+      filtered = {
+        works: filterWorkList(visible, filter),
+        sortedByMode: normalizedFilter === "all" && visible.length === workSet.works.length ? workSet.sortedByMode : new Map()
+      };
+      derivedBudget.write(workSet.filteredByMode, key, filtered, filtered.works.length, STUDIO_FILTER_CACHE_LIMIT);
     }
-    return workSet.filteredByMode.get(filter);
+    return filtered;
   }
 
   function cachedMakerDetail(makerId, db) {
     const cacheKey = String(makerId);
-    if (studioMakerCache.has(cacheKey)) return studioMakerCache.get(cacheKey);
+    if (studioMakerCache.has(cacheKey)) return readLru(studioMakerCache, cacheKey);
     const row = db
       .prepare(
         `
@@ -350,19 +378,19 @@ export function createStudioService({
       )
       .get(Number(makerId));
     if (!row) {
-      studioMakerCache.set(cacheKey, null);
+      writeLru(studioMakerCache, cacheKey, null, STUDIO_SOURCE_CACHE_LIMIT);
       return null;
     }
     const seriesRows = seriesRowsForMaker(makerId);
     const prefixRows = prefixRowsForMaker(makerId);
     const detail = { studio: publicMaker(row, seriesRows, prefixRows) };
-    studioMakerCache.set(cacheKey, detail);
+    writeLru(studioMakerCache, cacheKey, detail, STUDIO_SOURCE_CACHE_LIMIT);
     return detail;
   }
 
   function cachedStudioWorks(makerId, selectedSeriesId, db) {
     const cacheKey = `${makerId}:${selectedSeriesId}`;
-    const cached = studioWorksCache.get(cacheKey);
+    const cached = derivedBudget.read(studioWorksCache, cacheKey);
     if (cached) return cached;
     const filterBySeries = selectedSeriesId !== "all";
     const linkRows = filterBySeries
@@ -373,11 +401,11 @@ export function createStudioService({
     const detail = {
       works,
       facetsCache: null,
-      queryCacheStamp: `${workQueryStamp()}:${userStateStamp()}`,
+      queryCacheStamp: queryStamp(),
       filteredByMode: new Map(),
       sortedByMode: new Map()
     };
-    studioWorksCache.set(cacheKey, detail);
+    derivedBudget.write(studioWorksCache, cacheKey, detail, works.length, STUDIO_SOURCE_CACHE_LIMIT);
     return detail;
   }
 
@@ -390,6 +418,7 @@ export function createStudioService({
   }
 
   function writeLru(cache, key, value, limit) {
+    cache.delete(key);
     cache.set(key, value);
     while (cache.size > limit) cache.delete(cache.keys().next().value);
   }
@@ -401,9 +430,9 @@ export function createStudioService({
     studioSummaryPayloadCacheStamp = null;
     studioSummaryRowsCache = null;
     studioMakerCache.clear();
-    studioPageCache.clear();
+    pageBudget.clear();
     studioSummaryPayloadCache.clear();
-    studioWorksCache.clear();
+    derivedBudget.clear();
   }
 
   return {

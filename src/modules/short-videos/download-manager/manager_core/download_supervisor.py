@@ -16,10 +16,10 @@ from .download_state import DownloadManager
 from .queue import (
     clear_download_queue_changed,
     next_download_queue_profile,
-    notify_download_queue_changed,
     queue_pending_count,
     sync_download_queue,
     wait_for_download_queue_changed,
+    wake_download_queue_waiter,
 )
 from .runtime import download_timing
 from .download_guard import DownloadGuardMixin
@@ -131,7 +131,9 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
             if had_pause:
                 self._clear_failure_guard_locked()
             self.stop_event.set()
-            notify_download_queue_changed()
+            # Stopping only wakes the waiter. A producer's repair hook would
+            # reacquire this lock or restart the watcher we are stopping.
+            wake_download_queue_waiter()
             proc = self.sidecar_proc
             self.sidecar_proc = None
             self.sidecar_port = None

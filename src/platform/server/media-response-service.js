@@ -1,8 +1,18 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { hasSqliteTables } from "./sqlite-schema.js";
+import { createLocalImageReadQueue } from "./local-image-read-queue.js";
+import { createRemoteImageWarmQueue, readRemoteImageBody } from "./remote-image-warm-queue.js";
 
 const REMOTE_IMAGE_LOOKUP_BATCH_SIZE = 200;
+export const MAX_REMOTE_IMAGE_URL_LENGTH = 64 * 1024;
+const MAX_REMOTE_IMAGE_ENVELOPE_LENGTH = MAX_REMOTE_IMAGE_URL_LENGTH * 3 + 512;
+const MEDIA_BLOB_CACHE_ENTRY_BYTES = 512;
+
+function finiteCacheLimit(value,fallback,maximum) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0,Math.min(maximum,Math.trunc(number))) : fallback;
+}
 
 export function createMediaResponseService({
   coreImageRow,
@@ -10,36 +20,60 @@ export function createMediaResponseService({
   getCoreDb,
   mediaBlobStore,
   isAllowedRemoteImageUrl,
-  maxRemoteImageBytes,
+  maxRemoteImageBytes = 20 * 1024 * 1024,
   mimeTypes,
   normalizeExt,
   notFound,
   proxiedRemoteImageUrl,
   publicRemoteUrl,
-  safeStat,
   sendText,
   workCoverRow,
   localImageReadConcurrency = 4,
+  localImageReadCapacity = 128,
   localImageWaitMs = 800,
-  readFile = (filePath) => fs.promises.readFile(filePath),
+  readFile = (filePath, options) => fs.promises.readFile(filePath, options),
   statFile = (filePath) => fs.promises.stat(filePath),
+  resolveCurrentLocalImageSource,
   remoteImageWarmConcurrency = 6,
+  remoteImageWarmCapacity = 128,
+  remoteImageStopWaitMs = 2000,
+  fetchRemoteImage = (...args) => fetch(...args),
   mediaBlobCacheMaxBytes = 512 * 1024 * 1024,
+  mediaBlobCacheMaxEntries = 4096,
   warn = console.warn
 }) {
   const blobStore = mediaBlobStore || createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCoreDb, workCoverRow });
   const mediaBlobCache = new Map();
+  const cacheByteLimit = finiteCacheLimit(mediaBlobCacheMaxBytes,512 * 1024 * 1024,2 * 1024 * 1024 * 1024);
+  const cacheEntryLimit = finiteCacheLimit(mediaBlobCacheMaxEntries,4096,16384);
   let mediaBlobCacheBytes = 0;
-  const localImageInflight = new Map();
-  const localImageReadQueue = [];
-  const maxLocalImageReads = Math.max(1, Number(localImageReadConcurrency) || 1);
-  let localImageReadActive = 0;
-  const remoteImageWarmQueue = [];
-  const remoteImageWarmQueued = new Set();
-  let remoteImageWarmActive = 0;
+  const mediaBlobLoads = new Map();
+  let mediaGeneration = 0;
+  let accepting = true;
+  const localImageReader = createLocalImageReadQueue({
+    concurrency: localImageReadConcurrency,
+    capacity: localImageReadCapacity,
+    sourceKey: localImageSourceKey,
+    sourceId: (file) => String(file?.id || file?.path || ""),
+    statFile, readFile,
+    capture: captureLocalImageState,
+    current: localImageStateCurrent,
+    persist: (file, stat, buffer, context) => upsertLocalImageCache(file, stat, buffer, context.db),
+    persistError: (file, error, context) => upsertLocalImageCacheError(file, error, context.db),
+    fallback: (file, buffer) => ({ content_type: localImageMime(file), image_blob: buffer, byte_length: buffer.length, cache_control: "public, max-age=3600" }),
+    warn: (error) => warn("[local-image-cache]", error.message || error)
+  });
+  const remoteImageWarmer = createRemoteImageWarmQueue({
+    run: warmRemoteImage,
+    concurrency: remoteImageWarmConcurrency,
+    capacity: remoteImageWarmCapacity,
+    stopWaitMs: remoteImageStopWaitMs,
+    warn: (error) => warn("[remote-image-cache]", error.message || error)
+  });
   let remoteImageWarmGeneration = 0;
 
   function serveBlobRow(res, row, options = {}) {
+    if (res.destroyed || res.writableEnded) return true;
     const blob = row?.[options.blobField || "image_blob"];
     if (!blob) return false;
     const buffer = mediaBlobBuffer(blob);
@@ -69,6 +103,8 @@ export function createMediaResponseService({
   }
 
   async function serveActorAvatar(res, personId, options = {}) {
+    if (!accepting) throw Object.assign(new Error("媒体图片服务正在停止"), { statusCode: 503 });
+    const generation = mediaGeneration;
     const version = String(options.version || "");
     let row = null;
     if (version) {
@@ -94,7 +130,7 @@ export function createMediaResponseService({
       // versioned request. That keeps a pre-revoke cached BLOB from surviving
       // a logical revoke in the same server process.
       row = mediaBlobCache.get(key)?.row || authority.row;
-      rememberMediaBlobRow(key, authority.row);
+      if (generation === mediaGeneration) rememberMediaBlobRow(key, authority.row);
     } else {
       row = await blobStore.actorAvatar(personId, "");
     }
@@ -114,26 +150,35 @@ export function createMediaResponseService({
   }
 
   async function cachedMediaBlobRow(key, loader) {
+    if (!accepting) throw Object.assign(new Error("媒体图片服务正在停止"), { code: "MEDIA_IMAGE_STOPPED", statusCode: 503 });
     if (mediaBlobCache.has(key)) {
       const cached = mediaBlobCache.get(key);
       mediaBlobCache.delete(key);
       mediaBlobCache.set(key, cached);
       return cached.row;
     }
-    const row = await loader();
-    rememberMediaBlobRow(key, row);
-    return row;
+    if (mediaBlobLoads.has(key)) return mediaBlobLoads.get(key);
+    const generation = mediaGeneration;
+    const pending = Promise.resolve().then(loader).then((row) => {
+      if (accepting && generation === mediaGeneration) rememberMediaBlobRow(key, row);
+      return row;
+    }).finally(() => {
+      if (mediaBlobLoads.get(key) === pending) mediaBlobLoads.delete(key);
+    });
+    mediaBlobLoads.set(key, pending);
+    return pending;
   }
 
   function rememberMediaBlobRow(key, row) {
-    const bytes = mediaBlobRowBytes(row);
-    if (!bytes || bytes > mediaBlobCacheMaxBytes) return;
+    if (!accepting) return;
+    const bytes = mediaBlobRowBytes(row,key);
+    if (!bytes || bytes > cacheByteLimit || !cacheEntryLimit) return;
     const previous = mediaBlobCache.get(key);
     if (previous) mediaBlobCacheBytes -= previous.bytes;
     mediaBlobCache.delete(key);
     mediaBlobCache.set(key, { bytes, row });
     mediaBlobCacheBytes += bytes;
-    while (mediaBlobCacheBytes > mediaBlobCacheMaxBytes && mediaBlobCache.size > 1) {
+    while (mediaBlobCacheBytes > cacheByteLimit || mediaBlobCache.size > cacheEntryLimit) {
       const oldestKey = mediaBlobCache.keys().next().value;
       const oldest = mediaBlobCache.get(oldestKey);
       mediaBlobCache.delete(oldestKey);
@@ -148,9 +193,24 @@ export function createMediaResponseService({
     mediaBlobCacheBytes -= previous.bytes || 0;
   }
 
-  function mediaBlobRowBytes(row) {
+  function mediaBlobRowBytes(row,key) {
     const blob = row?.image_blob || row?.cover_blob;
-    return Number(blob?.byteLength || blob?.length || 0);
+    if (!Number(blob?.byteLength || blob?.length || 0)) return 0;
+    let bytes = MEDIA_BLOB_CACHE_ENTRY_BYTES + String(key).length * 2;
+    const backingStores = new Set();
+    for (const [name,value] of Object.entries(row)) {
+      bytes += name.length * 2 + 16;
+      if (typeof value === "string") bytes += value.length * 2;
+      else if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+        const backing = ArrayBuffer.isView(value) ? value.buffer : value;
+        if (!backingStores.has(backing)) { backingStores.add(backing); bytes += backing.byteLength; }
+      } else if (value && typeof value === "object") {
+        // Cache DTOs contain scalar metadata and BLOBs. Unknown compound
+        // metadata is served directly rather than retained with unknown cost.
+        return Infinity;
+      }
+    }
+    return bytes;
   }
 
   function localImageMime(file) {
@@ -158,6 +218,7 @@ export function createMediaResponseService({
   }
 
   function localImageSourceMtime(file) {
+    if (file?.cacheMtime) return String(file.cacheMtime);
     const value = String(file?.modifiedAt || "").trim();
     if (!value) return "";
     // Core scans retain microseconds while Node filesystem dates expose rounded
@@ -169,22 +230,68 @@ export function createMediaResponseService({
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value;
   }
 
+  function localImageSourceKey(file) {
+    return JSON.stringify([
+      String(file?.id || ""),
+      String(file?.path || ""),
+      Number(file?.size || 0),
+      localImageSourceMtime(file)
+    ]);
+  }
+
+  function observeLocalImageSource(file) {
+    return localImageReader.observe(file);
+  }
+
+  function withLocalCacheDb(database, callback) {
+    // This cache is optional. A lock must never make the main event loop wait;
+    // retain the application's original policy for every other database use.
+    if (typeof database.exec !== "function") return callback(database);
+    const previous = Number(database.prepare("PRAGMA busy_timeout").get().timeout);
+    database.exec("PRAGMA busy_timeout = 0");
+    try { return callback(database); }
+    finally { database.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(previous || 0))}`); }
+  }
+
+  function localImageRowStamp(database, file) {
+    const row = withLocalCacheDb(database, db => db.prepare(`SELECT file_path, source_size, source_mtime, status, byte_length, updated_at, error, cached_at, content_type, relative_path FROM fanhao_images.local_image_cache WHERE file_id = ?`).get(file.id));
+    return row ? JSON.stringify([row.file_path, row.source_size, row.source_mtime, row.status, row.byte_length, row.updated_at, row.error, row.cached_at, row.content_type, row.relative_path]) : "missing";
+  }
+
+  function captureLocalImageState(file) {
+    let database;
+    try { database = getCoreDb(); return { db: database, stamp: localImageRowStamp(database, file), valid: true }; }
+    catch { return { db: database, valid: false }; }
+  }
+
+  function localImageStateCurrent(file, context) {
+    if (!context.valid) return false;
+    try {
+      if (file.isCurrentSource && !file.isCurrentSource()) return false;
+      if (!file.isCurrentSource && resolveCurrentLocalImageSource && localImageSourceKey(resolveCurrentLocalImageSource(file)) !== localImageSourceKey(file)) return false;
+      return getCoreDb() === context.db && localImageRowStamp(context.db, file) === context.stamp;
+    } catch { return false; }
+  }
+
   function localImageCacheRow(file) {
+    if (!localImageReader.isAccepting()) return null;
+    observeLocalImageSource(file);
     try {
       return (
-        getCoreDb()
+        withLocalCacheDb(getCoreDb(), database => database
           .prepare(
             `
             SELECT *
             FROM fanhao_images.local_image_cache
             WHERE file_id = ?
+              AND file_path = ?
               AND image_blob IS NOT NULL
               AND length(image_blob) > 0
               AND source_size = ?
               AND source_mtime = ?
             `
           )
-          .get(file.id, Number(file.size || 0), localImageSourceMtime(file)) || null
+          .get(file.id, file.path || "", Number(file.size || 0), localImageSourceMtime(file))) || null
       );
     } catch (error) {
       warn("[local-image-cache]", error.message || error);
@@ -193,14 +300,17 @@ export function createMediaResponseService({
   }
 
   function localImageCacheReady(file) {
+    if (!localImageReader.isAccepting()) return false;
+    observeLocalImageSource(file);
     try {
       return Boolean(
-        getCoreDb()
+        withLocalCacheDb(getCoreDb(), database => database
           .prepare(
             `
             SELECT 1 AS ready
             FROM fanhao_images.local_image_cache
             WHERE file_id = ?
+              AND file_path = ?
               AND image_blob IS NOT NULL
               AND length(image_blob) > 0
               AND source_size = ?
@@ -208,7 +318,7 @@ export function createMediaResponseService({
             LIMIT 1
             `
           )
-          .get(file.id, Number(file.size || 0), localImageSourceMtime(file))
+          .get(file.id, file.path || "", Number(file.size || 0), localImageSourceMtime(file)))
       );
     } catch (error) {
       warn("[local-image-cache]", error.message || error);
@@ -219,16 +329,17 @@ export function createMediaResponseService({
   function serveLocalImageCacheRow(res, row) {
     return serveBlobRow(res, row, {
       mimeField: "content_type",
-      defaultMime: "application/octet-stream"
+      defaultMime: "application/octet-stream",
+      cacheControl: row?.cache_control
     });
   }
 
-  function upsertLocalImageCache(file, stat, buffer) {
+  function upsertLocalImageCache(file, stat, buffer, database = getCoreDb()) {
     const now = new Date().toISOString();
-    const sourceMtime = stat?.mtime?.toISOString() || localImageSourceMtime(file);
+    const sourceMtime = file.cacheMtime || stat?.mtime?.toISOString() || localImageSourceMtime(file);
     const sourceSize = Number(stat?.size ?? file.size ?? buffer.length) || 0;
     const contentType = localImageMime(file);
-    getCoreDb()
+    withLocalCacheDb(database, db => db
       .prepare(
         `
         INSERT INTO fanhao_images.local_image_cache (
@@ -261,7 +372,7 @@ export function createMediaResponseService({
         sourceMtime,
         now,
         now
-      );
+      ));
     return {
       content_type: contentType,
       image_blob: buffer,
@@ -269,10 +380,10 @@ export function createMediaResponseService({
     };
   }
 
-  function upsertLocalImageCacheError(file, error) {
+  function upsertLocalImageCacheError(file, error, database = getCoreDb()) {
     try {
       const now = new Date().toISOString();
-      getCoreDb()
+      withLocalCacheDb(database, db => db
         .prepare(
           `
           INSERT INTO fanhao_images.local_image_cache (
@@ -283,6 +394,9 @@ export function createMediaResponseService({
           ON CONFLICT(file_id) DO UPDATE SET
             file_path = excluded.file_path,
             relative_path = excluded.relative_path,
+            image_blob = CASE WHEN local_image_cache.file_path = excluded.file_path THEN local_image_cache.image_blob ELSE NULL END,
+            byte_length = CASE WHEN local_image_cache.file_path = excluded.file_path THEN local_image_cache.byte_length ELSE 0 END,
+            cached_at = CASE WHEN local_image_cache.file_path = excluded.file_path THEN local_image_cache.cached_at ELSE NULL END,
             status = 'error',
             error = excluded.error,
             updated_at = excluded.updated_at
@@ -297,59 +411,21 @@ export function createMediaResponseService({
           localImageSourceMtime(file),
           String(error?.message || error || "local image cache failed").slice(0, 1000),
           now
-        );
+        ));
     } catch (cacheError) {
       warn("[local-image-cache]", cacheError.message || cacheError);
     }
   }
 
-  function serveImage(res, file) {
-    if (serveLocalImageCacheRow(res, localImageCacheRow(file))) {
-      return;
-    }
-
-    const stat = safeStat(file.path);
-    if (!stat) {
-      notFound(res);
-      return;
-    }
-    if (stat.size <= 0) {
-      upsertLocalImageCacheError(file, new Error("empty local image"));
-      notFound(res);
-      return;
-    }
-
-    let buffer = null;
-    try {
-      buffer = fs.readFileSync(file.path);
-    } catch (error) {
-      upsertLocalImageCacheError(file, error);
-      warn("[local-image-cache]", error.message || error);
-      sendText(res, 500, "Local image read failed");
-      return;
-    }
-
-    try {
-      if (serveLocalImageCacheRow(res, upsertLocalImageCache(file, stat, buffer))) return;
-    } catch (error) {
-      warn("[local-image-cache]", error.message || error);
-    }
-
-    res.writeHead(200, {
-      "Content-Type": localImageMime(file),
-      "Content-Length": buffer.length,
-      "Cache-Control": "public, max-age=3600",
-      "Content-Disposition": "inline"
-    });
-    res.end(buffer);
-  }
-
   async function servePreparedImage(res, file) {
+    if (res.destroyed || res.writableEnded) return;
+    if (!localImageReader.isAccepting()) { sendText(res, 503, "Local image reader is stopping"); return; }
     if (serveLocalImageCacheRow(res, localImageCacheRow(file))) {
       return;
     }
 
     const result = await waitForLocalImage(localImageLoad(file));
+    if (res.destroyed || res.writableEnded) return;
     if (result.pending) {
       res.writeHead(503, {
         "Content-Length": "0",
@@ -362,7 +438,7 @@ export function createMediaResponseService({
     }
     if (result.error) {
       if (result.error.code === "ENOENT" || result.error.statusCode === 404) notFound(res);
-      else sendText(res, 500, "Local image read failed");
+      else sendText(res, result.error.statusCode || 500, "Local image read failed");
       return;
     }
     if (!serveLocalImageCacheRow(res, result.row)) {
@@ -370,27 +446,43 @@ export function createMediaResponseService({
     }
   }
 
-  function localImageLoad(file) {
-    const key = `${file.id || file.path}:${Number(file.size || 0)}:${localImageSourceMtime(file)}`;
-    const active = localImageInflight.get(key);
-    if (active) return active;
+  async function serveImageAsync(res, file, options = {}) {
+    if (options.signal?.aborted || res.destroyed || res.writableEnded) return;
+    if (!localImageReader.isAccepting()) { sendText(res, 503, "Local image reader is stopping"); return; }
+    const sourceCurrent = () => {
+      if (!options.requireCurrentSource) return true;
+      try { return typeof file?.isCurrentSource === "function" && file.isCurrentSource(); }
+      catch { return false; }
+    };
+    if (!sourceCurrent()) { notFound(res); return; }
+    if (serveLocalImageCacheRow(res, localImageCacheRow(file))) return;
+    try {
+      // Direct covers and short-video images retain their complete image/error
+      // response, without the prepared-image consumer's short-wait contract.
+      const row = await localImageLoad(file, options);
+      if (options.signal?.aborted || res.destroyed || res.writableEnded) return;
+      if (!sourceCurrent()) { notFound(res); return; }
+      if (!serveLocalImageCacheRow(res, row)) sendText(res, 500, "Local image read failed");
+    } catch (error) {
+      if (options.signal?.aborted || res.destroyed || res.writableEnded) return;
+      if (!sourceCurrent()) { notFound(res); return; }
+      if (error.code === "ENOENT" || error.statusCode === 404) notFound(res);
+      else sendText(res, error.statusCode || 500, "Local image read failed");
+    }
+  }
 
-    const task = enqueueLocalImageRead(file);
-    localImageInflight.set(key, task);
-    task.then(
-      () => localImageInflight.delete(key),
-      () => localImageInflight.delete(key)
-    );
-    return task;
+  function localImageLoad(file, options) {
+    return localImageReader.load(file, options);
   }
 
   async function prewarmLocalImages(files = [], options = {}) {
+    if (!localImageReader.isAccepting()) return { requested: 0, cached: 0, warmed: 0, failed: 0 };
     const limit = Math.max(0, Math.floor(Number(options.limit ?? files.length) || 0));
     if (!limit) return { requested: 0, cached: 0, warmed: 0, failed: 0 };
     const candidates = [];
     const seen = new Set();
     for (const file of Array.isArray(files) ? files : []) {
-      const key = `${file?.id || file?.path || ""}:${Number(file?.size || 0)}:${localImageSourceMtime(file)}`;
+      const key = localImageSourceKey(file);
       if (!file?.id || !file?.path || seen.has(key)) continue;
       seen.add(key);
       candidates.push(file);
@@ -401,6 +493,7 @@ export function createMediaResponseService({
     let warmed = 0;
     let failed = 0;
     for (const file of candidates) {
+      if (!localImageReader.isAccepting()) break;
       if (localImageCacheReady(file)) {
         cached += 1;
         continue;
@@ -415,57 +508,6 @@ export function createMediaResponseService({
       }
     }
     return { requested: candidates.length, cached, warmed, failed };
-  }
-
-  function enqueueLocalImageRead(file) {
-    return new Promise((resolve, reject) => {
-      localImageReadQueue.push({ file, reject, resolve });
-      drainLocalImageReadQueue();
-    });
-  }
-
-  function drainLocalImageReadQueue() {
-    while (localImageReadActive < maxLocalImageReads && localImageReadQueue.length) {
-      const job = localImageReadQueue.shift();
-      localImageReadActive += 1;
-      readAndCacheLocalImage(job.file)
-        .then(job.resolve, job.reject)
-        .finally(() => {
-          localImageReadActive -= 1;
-          drainLocalImageReadQueue();
-        });
-    }
-  }
-
-  async function readAndCacheLocalImage(file) {
-    try {
-      const stat = await statFile(file.path);
-      if (!stat?.isFile?.() || stat.size <= 0) {
-        const error = new Error("empty or missing local image");
-        error.statusCode = 404;
-        throw error;
-      }
-      const buffer = await readFile(file.path);
-      if (!buffer?.length) {
-        const error = new Error("empty local image");
-        error.statusCode = 404;
-        throw error;
-      }
-      try {
-        return upsertLocalImageCache(file, stat, buffer);
-      } catch (error) {
-        warn("[local-image-cache]", error.message || error);
-        return {
-          content_type: localImageMime(file),
-          image_blob: buffer,
-          byte_length: buffer.length
-        };
-      }
-    } catch (error) {
-      upsertLocalImageCacheError(file, error);
-      warn("[local-image-cache]", error.message || error);
-      throw error;
-    }
   }
 
   async function waitForLocalImage(task) {
@@ -486,28 +528,30 @@ export function createMediaResponseService({
 
   function remoteImageTargetUrl(value) {
     const raw = String(value || "").trim();
-    if (!raw) return "";
+    if (!raw || raw.length > MAX_REMOTE_IMAGE_ENVELOPE_LENGTH) return "";
 
     try {
       if (raw.startsWith("/media/remote-image")) {
         const parsed = new URL(raw, "http://localhost");
         const target = publicRemoteUrl(parsed.searchParams.get("url"));
-        return target && isAllowedRemoteImageUrl(new URL(target)) ? target : "";
+        const parsedTarget = target && new URL(target);
+        return target && target.length <= MAX_REMOTE_IMAGE_URL_LENGTH && parsedTarget.href.length <= MAX_REMOTE_IMAGE_URL_LENGTH && isAllowedRemoteImageUrl(parsedTarget) ? target : "";
       }
 
       const target = publicRemoteUrl(raw);
-      return target && isAllowedRemoteImageUrl(new URL(target)) ? target : "";
+      const parsedTarget = target && new URL(target);
+      return target && target.length <= MAX_REMOTE_IMAGE_URL_LENGTH && parsedTarget.href.length <= MAX_REMOTE_IMAGE_URL_LENGTH && isAllowedRemoteImageUrl(parsedTarget) ? target : "";
     } catch {
       return "";
     }
   }
 
   function prewarmRemoteImagesForWorks(works, limit = 1000, options = {}) {
+    if (!accepting) return 0;
     const queueLimit = Math.max(1, Math.min(512, Number(options.queueLimit) || limit));
     if (options.replaceQueued) {
       remoteImageWarmGeneration += 1;
-      for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl);
-      remoteImageWarmQueue.length = 0;
+      remoteImageWarmer.replaceQueued();
     }
     const seen = new Set();
     const remoteUrls = [];
@@ -538,9 +582,10 @@ export function createMediaResponseService({
 
   async function queueUncachedRemoteImages(remoteUrls, queueLimit, generation) {
     const cachedUrls = await cachedRemoteImageUrls(remoteUrls);
-    if (generation !== remoteImageWarmGeneration) return;
+    if (!accepting || generation !== remoteImageWarmGeneration) return;
     for (const remoteUrl of remoteUrls) {
-      if (remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit) break;
+      const pending = remoteImageWarmer.diagnostics();
+      if (pending.queued + pending.active >= queueLimit) break;
       if (!cachedUrls.has(remoteUrl)) enqueueRemoteImageWarm(remoteUrl);
     }
   }
@@ -600,9 +645,10 @@ export function createMediaResponseService({
     });
   }
 
-  async function downloadRemoteImage(remoteUrl) {
-    const response = await fetch(remoteUrl, {
-      signal: AbortSignal.timeout(15000),
+  async function downloadRemoteImage(remoteUrl, context) {
+    const signal = AbortSignal.any([context.signal, AbortSignal.timeout(15000)]);
+    const response = await fetchRemoteImage(remoteUrl, {
+      signal,
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
@@ -612,24 +658,15 @@ export function createMediaResponseService({
     });
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       const error = new Error(`远程图片请求失败：${response.status}`);
       error.statusCode = 502;
       throw error;
     }
 
-    const declaredLength = Number(response.headers.get("content-length") || 0);
-    if (declaredLength > maxRemoteImageBytes) {
-      const error = new Error("远程图片过大");
-      error.statusCode = 413;
-      throw error;
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > maxRemoteImageBytes) {
-      const error = new Error("远程图片过大");
-      error.statusCode = 413;
-      throw error;
-    }
+    const limit = Number.isFinite(Number(maxRemoteImageBytes)) && Number(maxRemoteImageBytes) > 0
+      ? Math.trunc(Number(maxRemoteImageBytes)) : 20 * 1024 * 1024;
+    const buffer = await readRemoteImageBody(response, limit, signal);
 
     return {
       buffer,
@@ -638,31 +675,13 @@ export function createMediaResponseService({
   }
 
   function enqueueRemoteImageWarm(remoteUrl) {
-    if (remoteImageWarmQueued.has(remoteUrl)) return false;
-    remoteImageWarmQueued.add(remoteUrl);
-    remoteImageWarmQueue.push(remoteUrl);
-    drainRemoteImageWarmQueue();
-    return true;
+    return accepting && remoteImageWarmer.enqueue(remoteUrl);
   }
 
-  function drainRemoteImageWarmQueue() {
-    while (remoteImageWarmActive < remoteImageWarmConcurrency && remoteImageWarmQueue.length) {
-      const remoteUrl = remoteImageWarmQueue.shift();
-      remoteImageWarmActive += 1;
-      warmRemoteImage(remoteUrl)
-        .catch((error) => {
-          warn("[remote-image-cache]", error.message || error);
-        })
-        .finally(() => {
-          remoteImageWarmActive -= 1;
-          remoteImageWarmQueued.delete(remoteUrl);
-          drainRemoteImageWarmQueue();
-        });
-    }
-  }
-
-  async function warmRemoteImage(remoteUrl) {
-    const downloaded = await downloadRemoteImage(remoteUrl);
+  async function warmRemoteImage(remoteUrl, context) {
+    if (!context.current()) return;
+    const downloaded = await downloadRemoteImage(remoteUrl, context);
+    if (!context.current()) return;
     const now = new Date().toISOString();
     const row = {
       content_type: downloaded.contentType,
@@ -682,19 +701,28 @@ export function createMediaResponseService({
   }
 
   async function serveCachedRemoteImage(req, res, url) {
-    const remoteUrl = publicRemoteUrl(url.searchParams.get("url"));
+    if (req.aborted || res.destroyed || res.writableEnded) return;
+    const requestedUrl = url.searchParams.get("url");
+    if (String(requestedUrl || "").length > MAX_REMOTE_IMAGE_URL_LENGTH) {
+      sendText(res,414,"Remote image URL is too long"); return;
+    }
+    const remoteUrl = publicRemoteUrl(requestedUrl);
     if (!remoteUrl) {
       sendText(res, 400, "Missing remote image URL");
       return;
     }
 
     const parsed = new URL(remoteUrl);
+    if (remoteUrl.length > MAX_REMOTE_IMAGE_URL_LENGTH || parsed.href.length > MAX_REMOTE_IMAGE_URL_LENGTH) {
+      sendText(res,414,"Remote image URL is too long"); return;
+    }
     if (!isAllowedRemoteImageUrl(parsed)) {
       sendText(res, 403, "Remote image host is not allowed");
       return;
     }
 
     const cachedRow = await cachedMediaBlobRow(`remote:${remoteUrl}`, () => blobStore.remoteImage(remoteUrl));
+    if (res.destroyed || res.writableEnded || req.aborted) return;
     if (serveRemoteImageRow(res, cachedRow)) {
       return;
     }
@@ -707,7 +735,39 @@ export function createMediaResponseService({
     res.end();
   }
 
+  function beginStop() {
+    accepting = false;
+    mediaGeneration += 1;
+    remoteImageWarmGeneration += 1;
+    mediaBlobLoads.clear();
+    mediaBlobCache.clear();
+    mediaBlobCacheBytes = 0;
+    localImageReader.beginStop();
+    remoteImageWarmer.beginStop();
+  }
+
+  async function stop() {
+    beginStop();
+    const stopped = await Promise.allSettled([localImageReader.stop(), remoteImageWarmer.stop()]);
+    const failed = stopped.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
+
+  async function start() {
+    const generation = mediaGeneration;
+    const started = await Promise.allSettled([localImageReader.start(), remoteImageWarmer.start()]);
+    const failed = started.find((result) => result.status === "rejected");
+    if (failed || generation !== mediaGeneration) {
+      beginStop();
+      throw failed?.reason || Object.assign(new Error("媒体图片服务启动已取消"), { statusCode: 503 });
+    }
+    accepting = true;
+  }
+
   return {
+    start, beginStop, stop,
+    remoteImageWarmDiagnostics: remoteImageWarmer.diagnostics,
+    localImageReaderDiagnostics: localImageReader.diagnostics,
     localImageMime,
     localImageCacheRow,
     prewarmRemoteImagesForWorks,
@@ -717,7 +777,7 @@ export function createMediaResponseService({
     serveActorAvatar,
     serveCachedRemoteImage,
     serveCoreImage,
-    serveImage,
+    serveImageAsync,
     servePreparedImage,
     serveLocalImageCacheRow,
     serveWorkCover

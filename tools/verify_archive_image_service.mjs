@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { ARCHIVE_IMAGE_INDEXER_VERSION, createArchiveImageService } from "../src/platform/server/archive-image-service.js";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
@@ -20,6 +21,7 @@ try {
     touch() {}
   };
   let archiveStatCount = 0;
+  let archiveSyncStatCount = 0;
   let persistedIndex = {
     archive_path: archivePath,
     archive_size: fs.statSync(archivePath).size,
@@ -28,25 +30,24 @@ try {
     images_json: JSON.stringify([{ path: "stale.jpg" }]),
     indexer_version: ARCHIVE_IMAGE_INDEXER_VERSION - 1
   };
+  const database = {
+    prepare: (sql) => ({
+      get: () => sql.startsWith("SELECT") ? persistedIndex : null,
+      run: (...args) => {
+        if (sql.includes("INSERT INTO photo_set_image_indexes")) persistedIndex = {
+          archive_path: args[0], archive_size: args[1], archive_mtime_ms: args[2], image_count: args[3],
+          images_json: args[4], indexer_version: args[5], archive_identity: args[8]
+        };
+        return { changes: 1 };
+      }
+    })
+  };
   const service = createArchiveImageService({
     archiveImageExts: new Set([".jpg"]),
     coverBoxSize: 480,
     coverMaxBytes: 1024 * 1024,
     ffmpegPath: process.execPath,
-    getImageGalleryDb: () => ({
-      prepare: (sql) => ({
-        get: () => sql.startsWith("SELECT") ? persistedIndex : null,
-        run: (...args) => {
-          if (sql.includes("INSERT INTO photo_set_image_indexes")) {
-            persistedIndex = {
-              archive_path: args[0], archive_size: args[1], archive_mtime_ms: args[2], image_count: args[3],
-              images_json: args[4], indexer_version: args[5]
-            };
-          }
-          return { changes: 1 };
-        }
-      })
-    }),
+    getImageGalleryDb: () => database,
     helperPath: fixture,
     imageReaderCacheService,
     listCacheTtlMs: 60_000,
@@ -58,12 +59,13 @@ try {
     pythonPath: process.execPath,
     safeStat: (value) => {
       try {
-        if (path.resolve(value) === path.resolve(archivePath)) archiveStatCount += 1;
+        if (path.resolve(value) === path.resolve(archivePath)) archiveSyncStatCount += 1;
         return fs.statSync(value);
       } catch {
         return null;
       }
     },
+    statFile: async value => { if (path.resolve(value) === path.resolve(archivePath)) archiveStatCount++; return fs.promises.stat(value); },
     sendText() {},
     serveInlineFile: () => true,
     warn() {}
@@ -87,7 +89,8 @@ try {
 
   await service.archiveImagesPayload(archivePath);
   assert.equal(countInvocations(`${archivePath}.list.count`), 1, "fresh archive lists must reuse the memory cache");
-  assert.equal(archiveStatCount, 1, "one reading burst must reuse the archive signature instead of blocking on repeated stats");
+  assert.equal(archiveStatCount, 4, "coalesced cold list and warm list must each check physical identity before and after loading");
+  assert.equal(archiveSyncStatCount, 0, "archive identity validation must not block the main thread on sync stat");
 
   await Promise.all([
     service.extractArchiveMemberToCache(archivePath, "cover.jpg", cachePath),
@@ -102,11 +105,17 @@ try {
     memberPath: "cover.jpg",
     contentType: "image/jpeg"
   });
-  assert.equal(archiveStatCount, 1, "serving a member must reuse the signature already resolved for its image list");
+  assert.equal(archiveStatCount, 9, "member extraction and serving must recheck physical archive identity");
 
   console.log("archive-image-service: ok");
 } finally {
-  removeVerifiedTempDir(tempDir);
+  if (process.platform === "win32") {
+    const resolved = fs.realpathSync(tempDir), temporary = fs.realpathSync(os.tmpdir());
+    assert.equal(path.dirname(resolved).toLowerCase(), temporary.toLowerCase());
+    assert.ok(path.basename(resolved).startsWith("fanhao-archive-service-"));
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $target=(Resolve-Path -LiteralPath $env:FANHAO_ARCHIVE_SERVICE_CLEANUP).ProviderPath; $temporary=(Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).ProviderPath.TrimEnd('\\'); if (-not [string]::Equals([IO.Path]::GetDirectoryName($target),$temporary,[StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid fixture parent' }; if (-not [IO.Path]::GetFileName($target).StartsWith('fanhao-archive-service-')) { throw 'Invalid fixture name' }; Remove-Item -LiteralPath $target -Recurse -Force"], { env: { ...process.env, FANHAO_ARCHIVE_SERVICE_CLEANUP: resolved }, encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+  } else removeVerifiedTempDir(tempDir);
 }
 
 function countInvocations(filePath) {

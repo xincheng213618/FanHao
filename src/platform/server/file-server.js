@@ -89,123 +89,235 @@ function diagnosticResponseHeaders(headers) {
   );
 }
 
-export function pipeFileRange(req, res, filePathOrDescriptor, range) {
-  const fileDescriptor = Number.isInteger(filePathOrDescriptor)
-    ? filePathOrDescriptor
-    : fs.openSync(filePathOrDescriptor, "r");
-  let stream;
+// Await the response without retaining listeners after finish or disconnect.
+// HEAD-only test adapters may not expose stream events.
+async function finishResponse(res, write) {
+  if (typeof res.once !== "function") { write(); return; }
+  let finish;
+  const ended = new Promise(resolve => { finish = resolve; });
+  res.once("finish", finish);
+  res.once("close", finish);
+  res.once("error", finish);
   try {
-    stream = fs.createReadStream(null, {
-      ...(range || {}),
-      fd: fileDescriptor,
-      autoClose: true
-    });
-  } catch (error) {
-    try {
-      fs.closeSync(fileDescriptor);
-    } catch {}
-    throw error;
-  }
-  let closed = false;
-  const closeStream = () => {
-    if (closed) return;
-    closed = true;
-    stream.destroy();
-  };
-
-  const detach = () => {
-    req.off("aborted", closeStream);
-    res.off("close", closeStream);
-  };
-
-  try {
-    req.once("aborted", closeStream);
-    res.once("close", closeStream);
-    stream.once("close", () => {
-      closed = true;
-      detach();
-    });
-    stream.once("error", () => {
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-      }
-      res.end();
-    });
-    stream.pipe(res);
-  } catch (error) {
-    detach();
-    stream.destroy();
-    throw error;
+    write();
+    if (res.writableFinished || res.destroyed) finish();
+    await ended;
+  } finally {
+    res.off("finish", finish);
+    res.off("close", finish);
+    res.off("error", finish);
   }
 }
 
-export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeExt, notFound, safeStat }) {
+export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeExt, notFound, stopTimeoutMs = 2000 }) {
   const normalizedDefaultChunkBytes = Math.max(0, Math.floor(Number(defaultChunkBytes || 0)));
+  const normalizedStopTimeoutMs = Math.max(1, Math.floor(Number(stopTimeoutMs) || 2000));
+  const owners = new Set();
+  let accepting = true, lifecycleGeneration = 0, stopTask = null;
+
+  const incompleteStop = () => Object.assign(new Error("File descriptors have not finished closing"), {
+    code: "FILE_SERVER_STOP_INCOMPLETE", statusCode: 503
+  });
+  function releaseOwner(owner) {
+    if (!owner.done || (owner.handle && !owner.closed)) return;
+    if (owners.delete(owner)) owner.release();
+  }
+  function beginStop() {
+    accepting = false;
+    lifecycleGeneration += 1;
+    for (const owner of owners) owner.controller.abort();
+  }
+  function stop() {
+    beginStop();
+    if (stopTask) return stopTask;
+    let timer;
+    const physicalDrain = Promise.all([...owners].map(owner => owner.released));
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(incompleteStop()), normalizedStopTimeoutMs); });
+    const task = Promise.race([physicalDrain, timeout]).finally(() => {
+      clearTimeout(timer);
+      if (stopTask === task) stopTask = null;
+    });
+    stopTask = task;
+    return task;
+  }
+  async function start() {
+    const generation = lifecycleGeneration;
+    if (stopTask) {
+      try { await stopTask; }
+      catch (error) { if (owners.size) throw error; }
+    }
+    if (generation !== lifecycleGeneration) return false;
+    for (const owner of owners) releaseOwner(owner);
+    if ((!accepting && owners.size) || [...owners].some(owner => owner.closeFailed)) throw incompleteStop();
+    accepting = true;
+    return true;
+  }
 
   function attachmentDisposition(fileName = "download") {
     const fallback = String(fileName || "download").replace(/[^\w.-]+/g, "_").slice(0, 180) || "download";
     return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(String(fileName || fallback))}`;
   }
 
-  function serveInlineFile(res, filePath, contentType = "") {
-    const stat = safeStat(filePath);
-    if (!stat?.isFile()) {
-      notFound(res);
-      return false;
-    }
-
+  function serveInlineFile(res, filePath, contentType = "", options = {}) {
     const ext = normalizeExt(filePath);
-    res.writeHead(200, {
+    return serveWholeFile(res.req, res, filePath, (stat) => ({
       "Content-Type": contentType || mimeTypes[ext] || "application/octet-stream",
       "Content-Length": stat.size,
       "Cache-Control": "public, max-age=3600",
       "Content-Disposition": "inline"
-    });
-    fs.createReadStream(filePath).pipe(res);
-    return true;
+    }), options);
   }
 
   function serveDownloadFile(req, res, file, fileName = "") {
-    const stat = safeStat(file?.path);
-    if (!stat?.isFile()) {
-      notFound(res);
-      return false;
-    }
-
-    const ext = file.ext || normalizeExt(file.path);
-    res.writeHead(200, {
+    const ext = file?.ext || normalizeExt(file?.path || "");
+    return serveWholeFile(req, res, file?.path, (stat) => ({
       "Content-Type": mimeTypes[ext] || "application/octet-stream",
       "Content-Length": stat.size,
       "Cache-Control": "no-store",
       "Content-Disposition": attachmentDisposition(fileName || file.name || file.fileName || "download")
-    });
-    if (req.method === "HEAD") {
-      res.end();
-      return true;
-    }
-    fs.createReadStream(file.path).pipe(res);
-    return true;
+    }));
   }
 
-  function serveRangedFile(req, res, file) {
-    let fileDescriptor;
-    let stat;
-    try {
-      fileDescriptor = fs.openSync(file.path, "r");
-      stat = fs.fstatSync(fileDescriptor);
-      if (!stat.isFile()) throw new Error("Media path is not a file");
-    } catch {
-      if (fileDescriptor !== undefined) {
-        try {
-          fs.closeSync(fileDescriptor);
-        } catch {}
+  function withOpenedFile(req, res, filePath, respond, options = {}) {
+    if (!accepting) {
+      if (req?.aborted || options.signal?.aborted || res.destroyed || res.writableEnded) {
+        if (!res.destroyed && !res.writableEnded) res.destroy();
+        return Promise.resolve(false);
       }
-      notFound(res);
-      return;
+      return finishResponse(res, () => {
+        res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8", "Content-Length": 0, "Cache-Control": "no-store" });
+        res.end();
+      }).then(() => false);
     }
+    const owner = { controller: new AbortController(), done: false, handle: null, closed: false, closeFailed: false };
+    owner.released = new Promise(resolve => { owner.release = resolve; });
+    const abort = () => owner.controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    owners.add(owner);
+    return runOpenedFile(req, res, filePath, respond, { ...options, signal: owner.controller.signal }, owner).finally(() => {
+      options.signal?.removeEventListener("abort", abort);
+      owner.done = true;
+      releaseOwner(owner);
+    });
+  }
 
-    let streamOwnsDescriptor = false;
+  async function runOpenedFile(req, res, filePath, respond, options, owner) {
+    const { signal, isCurrent, validateFile } = options;
+    let handle, stream, streamClosed;
+    let interrupted = false;
+    const unavailable = () => interrupted || signal?.aborted || req?.aborted || res.destroyed || res.writableEnded;
+    const current = () => {
+      try { return !isCurrent || isCurrent(); }
+      catch { return false; }
+    };
+    const disconnect = () => {
+      interrupted = true;
+      stream?.destroy();
+      if (!res.destroyed && !res.writableEnded) res.destroy();
+    };
+    req?.once?.("aborted", disconnect);
+    res.once?.("close", disconnect);
+    signal?.addEventListener("abort", disconnect, { once: true });
     try {
+      if (signal?.aborted || req?.aborted) disconnect();
+      if (unavailable()) return false;
+      if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+      let stat;
+      try {
+        handle = await fs.promises.open(filePath, "r");
+        owner.handle = handle;
+        const closeHandle = handle.close.bind(handle);
+        // Node marks fd=-1 and emits FileHandle.close before its native close
+        // finishes. Later close() calls can already resolve. Capture the first
+        // native close promise for both stream autoClose and our final drain.
+        handle.close = () => owner.closePromise ||= Promise.resolve().then(closeHandle);
+        // An ignored abort during open must close its late descriptor without
+        // starting more filesystem work or publishing headers.
+        if (unavailable()) return false;
+        if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+        stat = await handle.stat();
+        if (unavailable()) return false;
+        if (!stat.isFile()) throw Object.assign(new Error("File path is not a file"), { code: "ENOTDIR" });
+      } catch (error) {
+        if (!unavailable()) {
+          if (options.throwFileErrors && error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+          await finishResponse(res, () => notFound(res));
+        }
+        return false;
+      }
+      if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+      // Archive callers recheck source and path safety after the asynchronous
+      // open/stat boundary. Validation failures belong to their route handler.
+      if (validateFile) await validateFile(stat);
+      if (unavailable()) return false;
+      if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+
+      const pipe = async (range) => {
+        const failed = () => {
+          if (res.destroyed || res.writableEnded) return;
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+            res.end();
+          } else {
+            // A partial body cannot satisfy its advertised Content-Length.
+            res.destroy();
+          }
+        };
+        try {
+          stream = handle.createReadStream({ ...(range || {}), autoClose: true, emitClose: true });
+          streamClosed = new Promise(resolve => stream.once("close", resolve));
+          stream.on("error", failed);
+          stream.once("close", () => { if (!stream.readableEnded) failed(); });
+          await finishResponse(res, () => {
+            if (unavailable()) { stream.destroy(); return; }
+            stream.pipe(res);
+          });
+        } catch {
+          failed();
+        }
+      };
+      return await respond(stat, pipe);
+    } finally {
+      // Keep the serving promise pending through physical stream/FD closure,
+      // including ignored open/stat cancellation and autoClose stream errors.
+      try {
+        stream?.destroy();
+        if (stream && !stream.closed) await streamClosed;
+        try {
+          await handle?.close();
+          owner.closed = true;
+        } catch (error) {
+          // A rejected native close cannot prove descriptor release, even if
+          // Node's JS handle now says fd=-1. Keep shutdown failed instead of
+          // retrying an unknown descriptor number.
+          owner.closeFailed = true;
+          throw error;
+        }
+      } finally {
+        req?.off?.("aborted", disconnect);
+        res.off?.("close", disconnect);
+        signal?.removeEventListener("abort", disconnect);
+      }
+    }
+  }
+
+  function serveWholeFile(req, res, filePath, responseHeaders, options = {}) {
+    return withOpenedFile(req, res, filePath, async (stat, pipe) => {
+      // Headers and bytes refer to the same opened handle even if the lexical
+      // path is moved/replaced before streaming starts.
+      res.writeHead(200, responseHeaders(stat));
+      if (req?.method === "HEAD" || stat.size === 0) {
+        await finishResponse(res, () => res.end());
+        return true;
+      }
+      await pipe();
+      return true;
+    }, options);
+  }
+
+  function serveRangedFile(req, res, file, options = {}) {
+    return withOpenedFile(req, res, file?.path, async (stat, pipe) => {
       // A short-video startup cache may contain only the first chunk while still
       // representing the original media entity. Keep the HTTP range total and
       // validators tied to that original entity, but never read past the cached
@@ -248,7 +360,7 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
           "Content-Disposition": "inline",
           ...validators
         });
-        res.end();
+        await finishResponse(res, () => res.end());
         return;
       }
 
@@ -261,7 +373,7 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
             "Content-Length": 0,
             "Cache-Control": "no-store"
           });
-          res.end();
+          await finishResponse(res, () => res.end());
           return;
         }
 
@@ -275,11 +387,10 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
           ...validators
         });
         if (req.method === "HEAD" || stat.size === 0) {
-          res.end();
+          await finishResponse(res, () => res.end());
           return;
         }
-        streamOwnsDescriptor = true;
-        pipeFileRange(req, res, fileDescriptor);
+        await pipe();
         return;
       }
 
@@ -289,7 +400,7 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
           "Content-Length": 0,
           "Cache-Control": "no-store"
         });
-        res.end();
+        await finishResponse(res, () => res.end());
         return;
       }
 
@@ -308,21 +419,16 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
         "Content-Disposition": "inline",
         ...validators
       });
-      streamOwnsDescriptor = true;
-      pipeFileRange(req, res, fileDescriptor, responseRange);
+      await pipe(responseRange);
       return;
-    } finally {
-      if (!streamOwnsDescriptor) {
-        try {
-          fs.closeSync(fileDescriptor);
-        } catch {}
-      }
-    }
+    }, { ...options, isCurrent: options.isCurrent || file?.isCurrentSource }).then(() => undefined);
   }
 
   return {
     serveDownloadFile,
     serveInlineFile,
-    serveRangedFile
+    serveRangedFile,
+    start, beginStop, stop,
+    diagnostics: () => ({ accepting, active: owners.size, closeFailed: [...owners].filter(owner => owner.closeFailed).length })
   };
 }

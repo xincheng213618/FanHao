@@ -1,20 +1,24 @@
-import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-0f97d6765d71";
-import { absoluteUrl } from "../../js/image.js?v=assets-0f97d6765d71";
+import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-07b744082137";
+import { absoluteUrl } from "../../js/image.js?v=assets-07b744082137";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-0f97d6765d71";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-0f97d6765d71";
-import { createMusicSheets } from "./music-sheets.js?v=assets-0f97d6765d71";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-0f97d6765d71";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-0f97d6765d71";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-0f97d6765d71";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-0f97d6765d71";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-0f97d6765d71";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-0f97d6765d71";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-0f97d6765d71";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-0f97d6765d71";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-0f97d6765d71";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-0f97d6765d71";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-0f97d6765d71";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-07b744082137";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-07b744082137";
+import { createMusicSheets } from "./music-sheets.js?v=assets-07b744082137";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-07b744082137";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-07b744082137";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-07b744082137";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-07b744082137";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-07b744082137";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-07b744082137";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-07b744082137";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-07b744082137";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-07b744082137";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-07b744082137";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-07b744082137";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-07b744082137";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-07b744082137";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-07b744082137";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-07b744082137";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -73,9 +77,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-0f97d6765d71";
+} from "./music-state.js?v=assets-07b744082137";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-0f97d6765d71";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-07b744082137";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -185,22 +189,33 @@ export function createMusicViews(deps) {
   const audioEventTargets = new WeakSet();
   const audioSourceStore = createMusicAudioSourceStore({ fetchImpl: (...args) => window.fetch(...args) });
   let playReportSession = 0;
+  let progressSession = null;
+  let progressClaimRequired = false;
+  let currentPlaybackUrl = "";
+  let playedReport = null;
+  let progressClockRequest = null;
+  let progressHidden = false;
   const progressWriter = createMusicProgressWriter({
     send(record, played) {
-      return postJson(record.activeUrl, `/api/music/tracks/${encodeURIComponent(record.trackId)}/progress`, {
-        positionMs: record.positionMs,
-        durationMs: record.durationMs,
-        ...(played ? { played: true } : {})
-      });
+      return sendMusicProgress(record, played);
+    },
+    sendKeepalive(record, played) { return sendMusicProgress(record, played, true); },
+    onError(error, record) {
+      if (error?.code === "MUSIC_PROGRESS_SESSION_EXPIRED" && record?.trackId === state.current?.id
+          && record.activeUrl === currentPlaybackUrl && record.progressSessionId === progressSession?.id) void refreshProgressClock();
+      else if (["MUSIC_PROGRESS_QUEUE_FULL", "MUSIC_PLAYED_QUEUE_FULL", "MUSIC_PROGRESS_KEEPALIVE_FULL", "MUSIC_PROGRESS_CAPACITY"].includes(error?.code)) state.status = error.message;
     },
     onPlayed(record) {
-      if (record.session === playReportSession && state.current?.id === record.trackId) {
+      if (record.session === playReportSession && state.current?.id === record.trackId && record.activeUrl === currentPlaybackUrl) {
         state.playReportedTrackId = record.trackId;
       }
     }
   });
   let lyricRaf = 0;
   let progressBindings = [];
+  const mountedTrackLists = new WeakMap();
+  let playbackRowsGeneration = 0;
+  let playbackRowsKey = "";
   let currentLyricIndex = -1;
   let mediaSessionInstalled = false;
   let sleepTimerTimeout = 0;
@@ -214,8 +229,17 @@ export function createMusicViews(deps) {
   let crossfadeOutgoingAudio = null;
   let gaplessPreloadAudio = null;
   let gaplessPreloadTrackId = "";
+  let gaplessPreloadActiveUrl = "";
   let gaplessHandoffPending = false;
   let moduleActive = false;
+  let musicRenderGeneration = 0;
+  let openTrackGeneration = 0;
+  let pendingTrackSelection = 0;
+  const { loadSmartPlaylists, loadPlaylists } = createMusicCatalogueRequests({
+    fetchJson, getActiveUrl, isActive: () => moduleActive, state,
+    selectedSmartPlaylist, selectedPlaylist,
+    refreshMusicCatalogueUi: (kind) => refreshMusicCatalogueUi(kind)
+  });
   const { cancelPending: cancelMusicPagination, loadMoreTracks } = createMusicListPagination({
     state,
     getActiveUrl,
@@ -223,7 +247,9 @@ export function createMusicViews(deps) {
     musicListQuery,
     fetchJson,
     collapseDuplicateTracks,
-    render: renderMusicUiPreservingSearch
+    render: renderMusicUiPreservingSearch,
+    setLoadingState: setMusicPaginationLoadingState,
+    appendPage: appendMusicTrackPage
   });
   const {
     clearSearchHistory,
@@ -406,11 +432,31 @@ export function createMusicViews(deps) {
     updateListParams
   });
 
+  const { refreshMusicCatalogueUi } = createMusicCatalogueRefresh({
+    state, els, isActive: () => moduleActive,
+    renderShell, renderMusicUiPreservingSearch,
+    renderLibraryHeader, renderQuickAccess, renderRecentListening,
+    renderPlaylists, renderSmartPlaylists,
+    renderAutoCollectionHero, renderPlaylistHero, collectionView,
+    renderPlaylistSheet, renderPlaylistActionsSheet,
+    musicTitle, musicMeta, updatePlaybackUi
+  });
+
   installLifecycle();
 
   async function renderMusicList(params = {}, renderGuard = null) {
     cancelMusicPagination();
     moduleActive = true;
+    const generation = ++musicRenderGeneration;
+    const activeUrl = getActiveUrl();
+    const initialSelection = openTrackGeneration;
+    const initialPlaybackSession = playReportSession;
+    const isCurrent = () => moduleActive && generation === musicRenderGeneration
+      && getActiveUrl() === activeUrl && (!renderGuard || renderGuard());
+    isCurrent.signal = renderGuard?.signal;
+    const isListCurrent = () => isCurrent() && openTrackGeneration === initialSelection
+      && playReportSession === initialPlaybackSession;
+    isListCurrent.signal = renderGuard?.signal;
     ensureAudio();
     applyRouteParams(params);
     setActiveBottom("music");
@@ -420,13 +466,17 @@ export function createMusicViews(deps) {
     els.viewContent.className = "content-list music-mobile-content";
     renderShell();
     const openedTrackId = String(params.trackId || "").trim();
-    await Promise.all([loadSmartPlaylists(renderGuard), loadPlaylists(renderGuard), loadMusic(renderGuard)]);
+    await Promise.all([loadSmartPlaylists(isCurrent), loadPlaylists(isCurrent), loadMusic(isListCurrent)]);
+    if (!isCurrent() || openTrackGeneration !== initialSelection || playReportSession !== initialPlaybackSession) return;
     if (openedTrackId && state.current?.id !== openedTrackId) {
-      await openTrack(openedTrackId, { autoplay: false, renderGuard });
+      await openTrack(openedTrackId, { autoplay: false, renderGuard: isCurrent });
       return;
     }
-    await restorePlaybackQueue(renderGuard);
-    await restoreLastTrack(renderGuard);
+    const queueRestore = restorePlaybackQueue(isCurrent);
+    const restoringSelection = openTrackGeneration;
+    await queueRestore;
+    if (!isCurrent() || openTrackGeneration !== restoringSelection) return;
+    await restoreLastTrack(isCurrent);
   }
 
   function applyRouteParams(params = {}) {
@@ -785,54 +835,28 @@ export function createMusicViews(deps) {
     state.data = { ...common, tracks: [], rawTracks: [], rawLoaded: 0 };
   }
 
-  async function loadSmartPlaylists(renderGuard = null) {
-    try {
-      const data = await fetchJson(getActiveUrl(), "/api/music/smart-playlists", {
-        timeoutMs: 12000,
-        signal: renderGuard?.signal
-      });
-      if (renderGuard && !renderGuard()) return;
-      state.smartPlaylists = Array.isArray(data.smartPlaylists) ? data.smartPlaylists : [];
-      state.summary = data.summary || state.summary;
-      state.smartPlaylist = selectedSmartPlaylist();
-      renderMusicUiPreservingSearch();
-    } catch {
-      state.smartPlaylists = [];
-      state.smartPlaylist = null;
-    }
-  }
-
-  async function loadPlaylists(renderGuard = null) {
-    try {
-      const data = await fetchJson(getActiveUrl(), "/api/music/playlists", {
-        timeoutMs: 12000,
-        signal: renderGuard?.signal
-      });
-      if (renderGuard && !renderGuard()) return;
-      state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
-      state.playlist = selectedPlaylist();
-      renderMusicUiPreservingSearch();
-    } catch {
-      state.playlists = [];
-      state.playlist = null;
-    }
-  }
-
   async function openTrack(trackId, options = {}) {
     const id = String(trackId || "").trim();
-    if (!id) return;
+    if (!id || (options.renderGuard && !options.renderGuard())) return;
+    const generation = ++openTrackGeneration;
+    pendingTrackSelection = generation;
+    const activeUrl = getActiveUrl();
+    let playbackSession = playReportSession;
+    const isCurrent = () => generation === openTrackGeneration && getActiveUrl() === activeUrl
+      && playReportSession === playbackSession && (!options.renderGuard || options.renderGuard());
     ensureAudio();
     state.loading = true;
     state.status = "正在打开歌曲";
     renderShell();
     const query = musicListQuery();
     try {
-      const data = await fetchJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
+      const data = await fetchJson(activeUrl, `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
         timeoutMs: 18000,
         signal: options.renderGuard?.signal
       });
-      if (options.renderGuard && !options.renderGuard()) return;
+      if (!isCurrent()) return;
       cancelCrossfade();
+      gaplessHandoffPending = false;
       const hasRequestedSeek = Object.prototype.hasOwnProperty.call(options, "seekMs");
       const requestedSeekMs = Math.max(0, Number(options.seekMs || 0));
       state.current = hasRequestedSeek ? { ...data.track, positionMs: requestedSeekMs } : data.track;
@@ -842,6 +866,12 @@ export function createMusicViews(deps) {
       state.loading = false;
       state.status = "";
       playReportSession += 1;
+      playbackSession = playReportSession;
+      currentPlaybackUrl = activeUrl;
+      cancelProgressClock();
+      progressSession = createMusicProgressSession(state.current.id, activeUrl, data.serverClockMs);
+      progressClaimRequired = false;
+      playedReport = null;
       state.playReportedTrackId = "";
       state.lyricFollowPaused = false;
       currentLyricIndex = -1;
@@ -852,18 +882,20 @@ export function createMusicViews(deps) {
         state.fullscreen = true;
         state.fullPanel = "lyrics";
       }
-      const loaded = await loadAudioTrack(state.current, options.autoplay !== false);
-      if (!loaded || (options.renderGuard && !options.renderGuard()) || state.current?.id !== id) return;
+      const loaded = await loadAudioTrack(state.current, options.autoplay !== false, isCurrent, activeUrl);
+      if (!loaded || !isCurrent() || state.current?.id !== id) return;
       state.loading = false;
       if (hasRequestedSeek && audio.readyState >= 1) audio.currentTime = requestedSeekMs / 1000;
       scheduleGaplessPreload();
       renderShell();
       if (options.openLyrics && hasLyrics()) window.requestAnimationFrame(() => updateLyricHighlight(true));
     } catch (error) {
-      if (options.renderGuard && !options.renderGuard()) return;
+      if (!isCurrent()) return;
       state.loading = false;
       state.status = error?.message || "歌曲打开失败";
       renderShell();
+    } finally {
+      if (pendingTrackSelection === generation) pendingTrackSelection = 0;
     }
   }
 
@@ -878,16 +910,16 @@ export function createMusicViews(deps) {
     state.queue = [track, ...queue];
   }
 
-  async function loadAudioTrack(track, autoplay) {
-    if (!track?.streamUrl) return false;
+  async function loadAudioTrack(track, autoplay, guard = () => true, activeUrl = getActiveUrl()) {
+    if (!track?.streamUrl || !guard()) return false;
     ensureAudio();
-    const target = absoluteUrl(getActiveUrl(), track.streamUrl);
+    const target = absoluteUrl(activeUrl, track.streamUrl);
     const targetAudio = audio;
     const loaded = await audioSourceStore.load("current", targetAudio, target, {
       clearBefore: true,
-      guard: () => targetAudio === audio && state.current?.id === track.id
+      guard: () => targetAudio === audio && state.current?.id === track.id && guard()
     });
-    if (!loaded) return false;
+    if (!loaded || !guard()) return false;
     targetAudio.playbackRate = state.playbackSpeed;
     if (autoplay) playAudio();
     return true;
@@ -941,6 +973,7 @@ export function createMusicViews(deps) {
         expireSleepTimer();
         return;
       }
+      if (pendingTrackSelection) return;
       if (state.repeat === "one") {
         target.currentTime = 0;
         playAudio();
@@ -2612,6 +2645,7 @@ export function createMusicViews(deps) {
   }
 
   function renderTrackList(options = {}) {
+    playbackRowsGeneration += 1;
     const wrap = document.createElement("div");
     wrap.className = "music-mobile-list";
     const tracks = Array.isArray(options.tracks) ? options.tracks : state.data?.tracks || [];
@@ -2630,18 +2664,67 @@ export function createMusicViews(deps) {
         group.tracks?.length > 1 ? renderSearchTrackVersionGroup(group, index) : renderTrackRow(group.primary, index)
       ));
     } else {
-      tracks.forEach((track, index) => wrap.append(renderTrackRow(track, index)));
+      const rows = new Map();
+      tracks.forEach((track, index) => {
+        const row = renderTrackRow(track, index);
+        wrap.append(row);
+        rows.set(track.id, row);
+      });
+      mountedTrackLists.set(wrap, { tracks, rows });
     }
     if (showLoadMore && state.hasMore) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "music-mobile-load-more";
-      more.textContent = state.loadingMore ? "正在加载…" : `加载更多（已显示 ${formatNumber(tracks.length)} 首）`;
-      more.disabled = state.loadingMore;
-      more.addEventListener("click", () => loadMoreTracks().catch(() => {}));
-      wrap.append(more);
+      wrap.append(renderMusicLoadMore(tracks.length));
     }
     return wrap;
+  }
+
+  function renderMusicLoadMore(trackCount) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "music-mobile-load-more";
+    more.textContent = state.loadingMore ? "正在加载…" : `加载更多（已显示 ${formatNumber(trackCount)} 首）`;
+    more.disabled = state.loadingMore;
+    more.addEventListener("click", () => loadMoreTracks().catch(() => {}));
+    return more;
+  }
+
+  function setMusicPaginationLoadingState(loading) {
+    if (!["library", "smart"].includes(state.mode) || state.query || state.searchOpen) return false;
+    const more = els.viewContent?.querySelector(".music-mobile-shell > .music-mobile-list > .music-mobile-load-more");
+    if (!more) return false;
+    more.disabled = loading;
+    more.textContent = loading ? "正在加载…" : `加载更多（已显示 ${formatNumber(state.data?.tracks?.length || 0)} 首）`;
+    return true;
+  }
+
+  function appendMusicTrackPage({ mode, sourceData, data, incomingData }) {
+    // Search version groups require the merged result; keep their mounted-search renderer.
+    if (!["library", "smart"].includes(mode) || state.query || state.searchOpen) return false;
+    const list = els.viewContent?.querySelector(".music-mobile-shell > .music-mobile-list");
+    const mounted = list && mountedTrackLists.get(list);
+    if (!mounted || mounted.tracks !== sourceData.tracks) return false;
+    const fragment = document.createDocumentFragment();
+    for (const track of incomingData?.tracks || []) {
+      const previous = mounted.rows.get(track.id);
+      if (previous) {
+        const row = renderTrackRow(track, Number(previous.dataset.trackIndex || 0));
+        previous.replaceWith(row);
+        mounted.rows.set(track.id, row);
+      } else {
+        const row = renderTrackRow(track, mounted.rows.size);
+        mounted.rows.set(track.id, row);
+        fragment.append(row);
+      }
+    }
+    list.querySelector(".music-mobile-load-more")?.remove();
+    list.append(fragment);
+    mounted.tracks = data.tracks;
+    if (state.hasMore) list.append(renderMusicLoadMore(mounted.rows.size));
+    const total = els.viewContent.querySelector(".music-mobile-focused-library-search small");
+    if (total) total.textContent = `${formatNumber(data.total ?? mounted.rows.size)} 首`;
+    els.viewMeta.textContent = state.status || musicMeta(data);
+    updatePlaybackUi();
+    return true;
   }
 
   function renderSearchTrackVersionGroup(group, index) {
@@ -3378,6 +3461,7 @@ export function createMusicViews(deps) {
       if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
       audio.currentTime = (Number(progress.value || 0) / 1000) * audio.duration;
       updatePlaybackUi();
+      void refreshProgressClock();
     });
     const total = document.createElement("span");
     total.textContent = track ? formatClock(track.durationMs || 0) : "0:00";
@@ -3505,10 +3589,10 @@ export function createMusicViews(deps) {
     cover.className = `music-mobile-cover ${size}`.trim();
     if (!item?.coverUrl) cover.classList.add("is-fallback");
     const img = document.createElement("img");
-    img.src = coverSource(item);
     img.alt = item.album || item.title || "专辑封面";
     img.loading = ["cover", "detail"].includes(size) ? "eager" : "lazy";
     img.decoding = "async";
+    img.src = coverSource(item);
     img.addEventListener("error", () => {
       if (img.src.includes("/assets/music/default-cover-v1.jpg")) return;
       cover.classList.add("is-fallback");
@@ -3805,12 +3889,20 @@ export function createMusicViews(deps) {
   function playAudio() {
     ensureAudio();
     const target = audio;
+    const trackId = state.current?.id;
+    const playbackUrl = currentPlaybackUrl;
+    const session = playReportSession;
+    const selection = openTrackGeneration;
+    const isCurrent = () => target === audio && state.current?.id === trackId
+      && currentPlaybackUrl === playbackUrl && playReportSession === session
+      && openTrackGeneration === selection;
     const shouldFade = state.fadeSeconds > 0 && target.paused;
     cancelAudioFade();
     target.volume = shouldFade ? 0 : state.volume;
     target.play().then(() => {
-      if (shouldFade && target === audio) fadeAudioVolume(target, state.volume, state.fadeSeconds * 1000);
+      if (isCurrent() && shouldFade) fadeAudioVolume(target, state.volume, state.fadeSeconds * 1000);
     }).catch((error) => {
+      if (!isCurrent()) return;
       target.volume = state.volume;
       state.status = error?.message || "播放被系统阻止";
       renderShell();
@@ -3997,15 +4089,17 @@ export function createMusicViews(deps) {
       clearGaplessPreload();
       return;
     }
-    if (gaplessPreloadAudio && gaplessPreloadTrackId === candidate.id) return;
+    if (gaplessPreloadAudio && gaplessPreloadTrackId === candidate.id
+        && gaplessPreloadActiveUrl === (currentPlaybackUrl || getActiveUrl())) return;
     clearGaplessPreload();
     gaplessPreloadTrackId = candidate.id;
+    gaplessPreloadActiveUrl = currentPlaybackUrl || getActiveUrl();
     gaplessPreloadAudio = new Audio();
     gaplessPreloadAudio.preload = "auto";
     gaplessPreloadAudio.volume = 0;
     gaplessPreloadAudio.playbackRate = state.playbackSpeed;
     const target = gaplessPreloadAudio;
-    audioSourceStore.load("gapless", target, absoluteUrl(getActiveUrl(), candidate.streamUrl), {
+    audioSourceStore.load("gapless", target, absoluteUrl(gaplessPreloadActiveUrl, candidate.streamUrl), {
       guard: () => target === gaplessPreloadAudio && candidate.id === gaplessPreloadTrackId
     }).catch(() => {
       if (target === gaplessPreloadAudio) clearGaplessPreload();
@@ -4029,15 +4123,23 @@ export function createMusicViews(deps) {
   }
 
   function tryPromoteGaplessPreload(options = {}) {
-    if (!transitionPreloadEnabled() || gaplessHandoffPending || !audio || !gaplessPreloadAudio) return false;
+    if (pendingTrackSelection || !transitionPreloadEnabled() || gaplessHandoffPending || !audio || !gaplessPreloadAudio) return false;
     const candidate = nextQueueCandidate();
     if (!candidate?.id || candidate.id !== gaplessPreloadTrackId) return false;
+    if (currentPlaybackUrl && gaplessPreloadActiveUrl !== currentPlaybackUrl) return false;
     if (options.candidateId && candidate.id !== options.candidateId) return false;
     const minimumReadyState = options.force ? 2 : 3;
     if (gaplessPreloadAudio.readyState < minimumReadyState) return false;
 
     const outgoing = audio;
     const incoming = gaplessPreloadAudio;
+    const outgoingPlaybackUrl = currentPlaybackUrl;
+    const outgoingProgressSession = progressSession;
+    const outgoingClaimRequired = progressClaimRequired;
+    const outgoingPlayedReport = playedReport;
+    const outgoingPlayReportSession = playReportSession;
+    const outgoingReportedTrackId = state.playReportedTrackId;
+    currentPlaybackUrl = gaplessPreloadActiveUrl;
     const outgoingTrack = state.current;
     const crossfadeDurationMs = options.crossfade && !options.force
       ? Math.max(0, Number(state.crossfadeSeconds || 0) * 1000)
@@ -4045,6 +4147,7 @@ export function createMusicViews(deps) {
     gaplessHandoffPending = true;
     gaplessPreloadAudio = null;
     gaplessPreloadTrackId = "";
+    gaplessPreloadActiveUrl = "";
     cancelAudioFade();
     audio = incoming;
     installAudioEvents(incoming);
@@ -4053,6 +4156,12 @@ export function createMusicViews(deps) {
     state.current = { ...candidate, positionMs: 0 };
     state.lyrics = { lines: [], raw: "" };
     playReportSession += 1;
+    cancelProgressClock();
+    progressSession = createMusicProgressSession(candidate.id, currentPlaybackUrl, outgoingProgressSession?.startedAt);
+    // The inherited server clock fences early positions. A fresh claim supplies
+    // the birth time for this new play's receipt, even after a long old track.
+    progressClaimRequired = Boolean(outgoingProgressSession);
+    playedReport = null;
     state.playReportedTrackId = "";
     state.lyricFollowPaused = false;
     currentLyricIndex = -1;
@@ -4062,12 +4171,26 @@ export function createMusicViews(deps) {
     state.status = "";
     state.playing = true;
     renderMusicUiPreservingSearch();
+    const handoffSession = playReportSession, handoffUrl = currentPlaybackUrl;
+    const handoffSelection = openTrackGeneration;
+    const isCurrentHandoff = () => audio === incoming && state.current?.id === candidate.id
+      && playReportSession === handoffSession && currentPlaybackUrl === handoffUrl
+      && openTrackGeneration === handoffSelection;
+    const discardHandoff = () => {
+      if (audio !== outgoing) retireAudioElement(outgoing);
+      if (audio === incoming && playReportSession === handoffSession && currentPlaybackUrl === handoffUrl) {
+        gaplessHandoffPending = false;
+        if (!pendingTrackSelection) scheduleGaplessPreload();
+      }
+    };
 
     Promise.resolve(incoming.play()).then(async () => {
+      if (!isCurrentHandoff()) { discardHandoff(); return; }
       if (crossfadeDurationMs > 0) {
         crossfadeOutgoingAudio = outgoing;
         await crossfadeAudioPair(outgoing, incoming, crossfadeDurationMs);
       }
+      if (!isCurrentHandoff()) { discardHandoff(); return; }
       if (crossfadeOutgoingAudio === outgoing) crossfadeOutgoingAudio = null;
       retireAudioElement(outgoing);
       gaplessHandoffPending = false;
@@ -4075,9 +4198,17 @@ export function createMusicViews(deps) {
       hydratePromotedTrack(candidate.id).catch(() => {});
       updatePlaybackUi();
     }).catch(() => {
+      if (!isCurrentHandoff()) { discardHandoff(); return; }
       cancelCrossfade();
       audio = outgoing;
       state.current = outgoingTrack;
+      currentPlaybackUrl = outgoingPlaybackUrl;
+      cancelProgressClock();
+      progressSession = outgoingProgressSession;
+      progressClaimRequired = outgoingClaimRequired;
+      playedReport = outgoingPlayedReport;
+      playReportSession = outgoingPlayReportSession;
+      state.playReportedTrackId = outgoingReportedTrackId;
       gaplessHandoffPending = false;
       retireAudioElement(incoming);
       openTrack(candidate.id, { autoplay: true }).catch(() => {});
@@ -4097,12 +4228,16 @@ export function createMusicViews(deps) {
   async function hydratePromotedTrack(trackId) {
     const id = String(trackId || "").trim();
     if (!id) return;
+    const activeUrl = currentPlaybackUrl, session = playReportSession;
+    const selection = openTrackGeneration;
+    const isCurrent = () => state.current?.id === id && currentPlaybackUrl === activeUrl
+      && playReportSession === session && openTrackGeneration === selection;
     try {
       const query = musicListQuery();
-      const data = await fetchJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
+      const data = await fetchJson(activeUrl, `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
         timeoutMs: 18000
       });
-      if (state.current?.id !== id) return;
+      if (!isCurrent()) return;
       state.current = data.track || state.current;
       state.lyrics = data.lyrics || { lines: [], raw: "" };
       state.prevId = data.prevId || state.prevId;
@@ -4112,7 +4247,7 @@ export function createMusicViews(deps) {
       scheduleGaplessPreload();
       renderMusicUiPreservingSearch();
     } catch {
-      if (state.current?.id !== id) return;
+      if (!isCurrent()) return;
       state.status = "歌曲资料稍后补全，播放未中断";
       renderMusicUiPreservingSearch();
     }
@@ -4137,6 +4272,7 @@ export function createMusicViews(deps) {
     const target = gaplessPreloadAudio;
     gaplessPreloadAudio = null;
     gaplessPreloadTrackId = "";
+    gaplessPreloadActiveUrl = "";
     retireAudioElement(target);
   }
 
@@ -4312,6 +4448,7 @@ export function createMusicViews(deps) {
     state.lyricFollowPaused = false;
     els.viewContent.querySelector(".music-mobile-lyric-follow")?.classList.remove("visible");
     audio.currentTime = nextTime;
+    void refreshProgressClock();
     updatePlaybackUi();
     updateLyricHighlight(true);
     if (audio.paused) playAudio();
@@ -4688,11 +4825,14 @@ export function createMusicViews(deps) {
     if (state.current?.id === updated.id) rememberLastTrack(state.current);
   }
 
-  function reportPlayedOnce() {
+  function reportPlayedOnce({ claim = true } = {}) {
+    if (claim) void refreshProgressClock();
+    if (progressClaimRequired) return;
     const record = currentProgressRecord();
     const reportKey = record ? `${playReportSession}:${record.trackId}` : "";
     if (!record || state.playReportedTrackId === record.trackId) return;
-    progressWriter.reportPlayed({ ...record, reportKey, session: playReportSession });
+    playedReport ||= createMusicPlayedReport(progressSession);
+    progressWriter.reportPlayed({ ...record, ...playedReport, reportKey, session: playReportSession });
   }
 
   function saveProgressSoon(positionOverride = null) {
@@ -4708,12 +4848,47 @@ export function createMusicViews(deps) {
   function currentProgressRecord(positionOverride = null) {
     const track = state.current;
     if (!track || !audio) return null;
-    return {
-      activeUrl: getActiveUrl(),
+    const activeUrl = currentPlaybackUrl || getActiveUrl();
+    const record = {
+      ...captureMusicProgressOwner(activeUrl),
       trackId: track.id,
-      positionMs: positionOverride === null ? Math.round((audio.currentTime || 0) * 1000) : Number(positionOverride || 0),
-      durationMs: Math.round((audio.duration || 0) * 1000) || track.durationMs || 0
+      positionMs: positionOverride === null ? Math.round((Number.isFinite(audio.currentTime) ? audio.currentTime : 0) * 1000) : Number(positionOverride || 0),
+      durationMs: Math.round((Number.isFinite(audio.duration) ? audio.duration : 0) * 1000) || track.durationMs || 0
     };
+    return progressSession?.trackId === track.id && progressSession.activeUrl === activeUrl ? progressSession.capture(record) : record;
+  }
+
+  function cancelProgressClock() {
+    progressClockRequest?.controller.abort();
+    progressClockRequest = null;
+  }
+
+  async function refreshProgressClock() {
+    const trackId = state.current?.id, activeUrl = currentPlaybackUrl || getActiveUrl();
+    if (!trackId || !activeUrl || progressHidden) return;
+    if (progressClockRequest?.trackId === trackId && progressClockRequest.activeUrl === activeUrl
+        && progressClockRequest.session === playReportSession) return;
+    cancelProgressClock();
+    const request = { trackId, activeUrl, session: playReportSession, controller: new AbortController() };
+    progressClockRequest = request;
+    try {
+      const data = await fetchJson(activeUrl, `/api/music/tracks/${encodeURIComponent(trackId)}/progress-session`, {
+        method: "POST", body: progressSession?.id ? { previousSessionId: progressSession.id } : {}, signal: request.controller.signal
+      });
+      if (progressClockRequest !== request || request.controller.signal.aborted || progressHidden
+          || request.session !== playReportSession || state.current?.id !== trackId || currentPlaybackUrl !== activeUrl) return;
+      const next = createMusicProgressSession(trackId, activeUrl, data?.progressSessionStartedAt, data?.progressSessionId);
+      if (!next) return;
+      if (next.id !== progressSession?.id) progressSession = next;
+      const reportPending = progressClaimRequired;
+      progressClaimRequired = false;
+      saveProgress();
+      if (reportPending) reportPlayedOnce({ claim: false });
+    } catch {
+      // Failed or cancelled clock reads cannot relabel previously queued work.
+    } finally {
+      if (progressClockRequest === request) progressClockRequest = null;
+    }
   }
 
   function updatePlaybackUi() {
@@ -4749,6 +4924,9 @@ export function createMusicViews(deps) {
     }
 
     const currentId = String(state.current?.id || "");
+    const rowsKey = JSON.stringify([playbackRowsGeneration, currentId, playing]);
+    if (rowsKey === playbackRowsKey) return;
+    playbackRowsKey = rowsKey;
     for (const row of els.viewContent?.querySelectorAll(".music-mobile-list .music-mobile-track") || []) {
       const isCurrent = Boolean(currentId && row.dataset.trackId === currentId);
       const isPlaying = isCurrent && playing;
@@ -4815,6 +4993,7 @@ export function createMusicViews(deps) {
     setMediaAction("seekto", (details = {}) => {
       if (!audio || typeof details.seekTime !== "number") return;
       audio.currentTime = Math.max(0, details.seekTime);
+      void refreshProgressClock();
       updatePlaybackUi();
       if (state.fullscreen) updateLyricHighlight(true);
     });
@@ -4831,6 +5010,7 @@ export function createMusicViews(deps) {
     const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number(state.current?.durationMs || 0) / 1000;
     const target = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, Number(audio.currentTime || 0) + Number(offsetSeconds || 0)));
     audio.currentTime = target;
+    void refreshProgressClock();
     updatePlaybackUi();
     if (state.fullscreen) updateLyricHighlight(true);
   }
@@ -5128,7 +5308,25 @@ export function createMusicViews(deps) {
   }
 
   function installLifecycle() {
-    window.addEventListener("pagehide", () => saveProgress());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        progressHidden = true;
+        cancelProgressClock();
+        progressWriter.flushKeepalive(currentProgressRecord());
+      } else {
+        progressHidden = false;
+        progressWriter.resume();
+      }
+    });
+    window.addEventListener("pagehide", () => {
+      progressHidden = true;
+      cancelProgressClock();
+      progressWriter.flushKeepalive(currentProgressRecord());
+    });
+    window.addEventListener("pageshow", () => {
+      progressHidden = false;
+      progressWriter.resume();
+    });
     window.addEventListener("fanhaoViewChanged", (event) => {
       if (event.detail?.view !== "music") {
         state.fullscreen = false;

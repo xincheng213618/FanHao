@@ -339,15 +339,25 @@ export async function routeWorksApi(req, res, url, deps) {
   if (coverGenerateMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const workId = decodeURIComponent(coverGenerateMatch[1]);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => { if (!res.writableEnded) abort(); };
+    req.once?.("aborted", abort);
+    res.once?.("close", onClose);
+    if (req.aborted || res.destroyed) abort();
     try {
-      const payload = workMutationService.generateCover(workId);
+      const payload = await workMutationService.generateCover(workId, { signal: controller.signal });
+      if (res.destroyed || controller.signal.aborted) return true;
       if (!payload) {
         notFound(res);
         return true;
       }
       sendJson(res, 200, payload);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, workMutationService.coverGenerationErrorPayload(workId, error));
+      if (!res.destroyed && !controller.signal.aborted) sendJson(res, error.statusCode || 500, workMutationService.coverGenerationErrorPayload(workId, error));
+    } finally {
+      req.off?.("aborted", abort);
+      res.off?.("close", onClose);
     }
     return true;
   }

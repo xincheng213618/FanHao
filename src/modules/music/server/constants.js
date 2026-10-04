@@ -10,6 +10,10 @@ export const MAX_M3U_BYTES = 2 * 1024 * 1024;
 export const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
 export const REDISCOVER_DAYS = 30;
 export const MUSIC_FACET_CACHE = new WeakMap();
+export const MUSIC_FACET_CACHE_MAX_ENTRIES = 128;
+export const MUSIC_FACET_CACHE_MAX_ESTIMATED_BYTES = 16 * 1024 * 1024;
+export const MUSIC_FACET_CACHE_MAX_ENTRY_ESTIMATED_BYTES = 4 * 1024 * 1024;
+export const MUSIC_FACET_CACHE_MAX_KEY_BYTES = 4096;
 export const MUSIC_GENRE_ALIASES = new Map([
   ["c-pop", "华语流行"],
   ["cpop", "华语流行"],

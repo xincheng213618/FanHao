@@ -18,6 +18,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   let audio = null;
   let audioEventsInstalled = false;
+  let playGeneration = 0;
   let audioContext = null;
   let audioAnalyser = null;
   let audioSource = null;
@@ -45,11 +46,14 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     if (audioEventsInstalled) return;
     audioEventsInstalled = true;
     audio.addEventListener("play", () => {
+      if (audio.paused) return;
       music().playing = true;
       startVisualizer();
       callbacks.onPlay && callbacks.onPlay();
     });
     audio.addEventListener("pause", () => {
+      if (!audio.paused) return;
+      playGeneration += 1;
       music().playing = false;
       stopVisualizer({ draw: true });
       callbacks.onPause && callbacks.onPause();
@@ -78,25 +82,33 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
   function play() {
     ensureAudio();
     ensureAudioGraph();
+    const generation = ++playGeneration;
+    const source = audio.src;
+    const trackId = music().current?.id || "";
     audio.play().catch((error) => {
+      // A source change or a later playback intent can reject an older play().
+      // That promise no longer owns the current track's error surface.
+      if (generation !== playGeneration || audio.src !== source || (music().current?.id || "") !== trackId) return;
       callbacks.onError && callbacks.onError(error?.message || "浏览器阻止了自动播放");
     });
   }
 
   function pause() {
     ensureAudio();
+    playGeneration += 1;
     audio.pause();
   }
 
   function load(track, autoplay) {
     ensureAudio();
-    callbacks.onError && callbacks.onError("");
+    playGeneration += 1;
     const target = new URL(track.streamUrl, window.location.href).href;
     audio.playbackRate = normalizePlaybackSpeed(music().playbackSpeed);
     if (audio.src !== target) {
       audio.src = target;
       audio.load();
     }
+    callbacks.onError && callbacks.onError("");
     updateMediaSession();
     if (autoplay) play();
   }
@@ -241,10 +253,19 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     setMediaAction("pause", () => callbacks.onMediaPause && callbacks.onMediaPause());
     setMediaAction("previoustrack", () => callbacks.onMediaPrev && callbacks.onMediaPrev());
     setMediaAction("nexttrack", () => callbacks.onMediaNext && callbacks.onMediaNext());
-    setMediaAction("seekbackward", (details = {}) => seekRelative(-Number(details.seekOffset || 10)));
-    setMediaAction("seekforward", (details = {}) => seekRelative(Number(details.seekOffset || 10)));
+    setMediaAction("seekbackward", (details = {}) => {
+      const offset = Number(details.seekOffset || 10);
+      if (callbacks.onMediaSeekBackward) callbacks.onMediaSeekBackward(offset);
+      else seekRelative(-offset);
+    });
+    setMediaAction("seekforward", (details = {}) => {
+      const offset = Number(details.seekOffset || 10);
+      if (callbacks.onMediaSeekForward) callbacks.onMediaSeekForward(offset);
+      else seekRelative(offset);
+    });
     setMediaAction("seekto", (details = {}) => {
       if (typeof details.seekTime !== "number") return;
+      if (callbacks.onMediaSeekTo) { callbacks.onMediaSeekTo(details.seekTime); return; }
       seek(details.seekTime);
       callbacks.onTimeUpdate && callbacks.onTimeUpdate();
     });
@@ -398,7 +419,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     music().sleepMinutes = 0;
     music().sleepUntil = 0;
     ensureAudio();
-    if (!audio.paused) audio.pause();
+    if (!audio.paused) pause();
     music().status = "睡眠定时已暂停播放";
     callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
   }

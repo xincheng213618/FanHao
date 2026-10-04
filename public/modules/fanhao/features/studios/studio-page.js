@@ -1,4 +1,5 @@
 import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
+import { createPrefetchCache } from "../../prefetch-cache.js?v=20261004-fanhao-requests-01";
 
 const STUDIO_DESKTOP_PAGE_SIZE = 48;
 const STUDIO_MOBILE_PAGE_SIZE = 32;
@@ -9,11 +10,12 @@ const STUDIO_INDEX_BATCH_SIZE = 64;
 const STUDIO_INDEX_BATCH_DELAY_MS = 16;
 
 export function createStudioPage(deps) {
-  const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, getWorkFilterMode, hidePersonProfile, onNavigationStarted, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
-  const studioPrefetches = new Map();
+  const studioPrefetches = createPrefetchCache({ limit: STUDIO_PREFETCH_LIMIT, ttlMs: STUDIO_PREFETCH_TTL_MS });
   let studioIndexRenderTimer = null;
   let studioIndexRenderSeq = 0;
+  let studioPageOwner = null;
   bindStudioIntentSurface(els.workGrid, ".studio-card", (studioId) => {
     globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
     loadStudioDetail(studioId);
@@ -24,6 +26,8 @@ export function createStudioPage(deps) {
 
   function cancelPendingRequests() {
     studioRequests.cancel();
+    studioPageOwner = null;
+    state.studioWorksLoadingMore = false;
     studioPrefetches.clear();
     cancelIndexRendering();
   }
@@ -35,7 +39,10 @@ export function createStudioPage(deps) {
     return Math.max(24, Math.min(viewportLimit, Number(state.workPageSize) || viewportLimit));
   }
 
-  async function loadStudios() {
+  async function loadStudios(options = {}) {
+    onNavigationStarted?.(options);
+    studioPageOwner = null;
+    state.studioWorksLoadingMore = false;
     cancelIndexRendering();
     const request = studioRequests.begin();
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
@@ -57,14 +64,22 @@ export function createStudioPage(deps) {
   }
 
   async function loadStudioDetail(studioId, seriesId = "all", options = {}) {
+    if (!options.append) {
+      onNavigationStarted?.(options);
+      studioPageOwner = null;
+      state.studioWorksLoadingMore = false;
+    }
     cancelIndexRendering();
     const append = Boolean(options.append);
     const request = studioRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
     const path = studioDetailPath(studioId, seriesId, append ? state.works.length : 0);
+    const query = studioDetailPath(studioId, seriesId, 0);
+    const isCurrent = () => request.isCurrent() && state.activeView === "studios"
+      && query === studioDetailPath(studioId, seriesId, 0);
     try {
       const data = await fetchStudioDetail(path, request, !append);
-      if (!request.isCurrent() || state.activeView !== "studios") return;
+      if (!isCurrent()) return;
       if (!append) resetSelection();
       state.selectedStudio = data.studio || state.selectedStudio || null;
       state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
@@ -79,7 +94,7 @@ export function createStudioPage(deps) {
       if (append) appendLoadedWorkPage();
       else renderWorks("这个片商暂无本地作品。");
     } catch (error) {
-      if (!request.isCurrent() || state.activeView !== "studios") return;
+      if (!isCurrent()) return;
       if (append) throw error;
       setMainHeader("片商", "读取失败");
       els.workGrid.innerHTML = "";
@@ -93,6 +108,9 @@ export function createStudioPage(deps) {
     const params = new URLSearchParams({
       seriesId,
       sort: state.sortMode || "releaseDesc",
+      filter: getWorkFilterMode?.() || state.filterMode || "all",
+      includeMissingLocal: state.showMissingLocalWorks ? "1" : "0",
+      includeCompilation: state.showCompilationWorks ? "1" : "0",
       limit: String(studioPageSize()),
       offset: String(offset || 0)
     });
@@ -102,33 +120,17 @@ export function createStudioPage(deps) {
   function prefetchStudioDetail(studioId, seriesId = "all") {
     if (globalThis.navigator?.connection?.saveData) return null;
     const path = studioDetailPath(studioId, seriesId, 0);
-    const now = Date.now();
-    const cached = studioPrefetches.get(path);
-    if (cached?.expiresAt > now) return cached.promise;
-    if (cached) studioPrefetches.delete(path);
-    const promise = api(path).then(
-      (data) => ({ data, error: null }),
-      (error) => ({ data: null, error })
-    ).then((result) => {
-      if (result.error) studioPrefetches.delete(path);
-      return result;
-    });
-    studioPrefetches.set(path, { expiresAt: now + STUDIO_PREFETCH_TTL_MS, promise });
-    while (studioPrefetches.size > STUDIO_PREFETCH_LIMIT) {
-      studioPrefetches.delete(studioPrefetches.keys().next().value);
-    }
-    return promise;
+    return studioPrefetches.prefetch(path, (signal) => api(path, { signal }));
   }
 
   async function fetchStudioDetail(path, request, allowPrefetch) {
-    const prefetched = allowPrefetch ? studioPrefetches.get(path) : null;
-    if (prefetched?.expiresAt > Date.now()) {
-      studioPrefetches.delete(path);
-      const result = await prefetched.promise;
+    const prefetched = allowPrefetch ? studioPrefetches.consume(path, request.signal) : null;
+    if (prefetched) {
+      const result = await prefetched;
+      if (!request.isCurrent()) throw new DOMException("Request aborted", "AbortError");
       if (result.error) throw result.error;
-      return result.data;
+      if (result.data !== null) return result.data;
     }
-    if (prefetched) studioPrefetches.delete(path);
     return api(path, { signal: request.signal });
   }
 
@@ -143,7 +145,9 @@ export function createStudioPage(deps) {
   }
 
   async function loadMoreStudioWorks(button) {
-    if (state.studioWorksLoadingMore || state.works.length >= state.studioWorksTotal || !state.selectedStudio) return;
+    if (state.activeView !== "studios" || state.studioWorksLoadingMore || state.works.length >= state.studioWorksTotal || !state.selectedStudio) return;
+    const owner = {};
+    studioPageOwner = owner;
     state.studioWorksLoadingMore = true;
     const originalText = button?.textContent || "";
     if (button) {
@@ -153,12 +157,15 @@ export function createStudioPage(deps) {
     try {
       await loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId, { append: true });
     } catch (error) {
-      if (button?.isConnected) button.textContent = error.message || "加载失败";
+      if (studioPageOwner === owner && button?.isConnected) button.textContent = error.message || "加载失败";
     } finally {
-      state.studioWorksLoadingMore = false;
-      if (button?.isConnected) {
-        button.disabled = false;
-        if (button.textContent === "正在加载") button.textContent = originalText;
+      if (studioPageOwner === owner) {
+        studioPageOwner = null;
+        state.studioWorksLoadingMore = false;
+        if (button?.isConnected) {
+          button.disabled = false;
+          if (button.textContent === "正在加载") button.textContent = originalText;
+        }
       }
     }
   }

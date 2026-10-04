@@ -52,6 +52,16 @@ class Element extends Events {
     }
   }
   replaceChildren(...children) { this.innerHTML = ""; this.append(...children); }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(node => node !== this); this.parentNode = null; }
+  before(...nodes) {
+    const parent = this.parentNode; if (!parent) return;
+    for (const node of nodes) {
+      node.remove(); node.parentNode = parent;
+      parent.children.splice(parent.children.indexOf(this), 0, node);
+    }
+  }
+  replaceWith(node) { this.before(node); this.remove(); }
+  focus() { this.ownerDocument.activeElement = this; }
   contains(node) { return node === this || this.children.some(child => child.contains(node)); }
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
@@ -71,7 +81,11 @@ class Element extends Events {
         && (!match[3] || (this.getAttribute(match[3]) !== null && (match[4] === undefined || this.getAttribute(match[3]) === match[4])));
     });
   }
-  querySelectorAll(selector) { return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]); }
+  querySelectorAll(selector) {
+    const direct = /^:scope\s*>\s*(.+)$/.exec(selector);
+    if (direct) return this.children.filter(child => child.matches(direct[1]));
+    return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+  }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   closest(selector) { return this.matches(selector) ? this : this.parentNode?.closest?.(selector) || null; }
   click() { return this.dispatchEvent(event("click", this)); }

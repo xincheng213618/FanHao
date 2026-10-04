@@ -27,7 +27,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://fixture");
     if (await routeFileWorkflows(req, res, url, { service, requireLocalAdmin: () => true, readJsonBody, sendJson })) return;
-    staticFiles.serveStatic(req, res, url.pathname);
+    await staticFiles.serveStatic(req, res, url.pathname);
   } catch (error) { sendJson(res, 500, { error: error.message }); }
 });
 let browser;

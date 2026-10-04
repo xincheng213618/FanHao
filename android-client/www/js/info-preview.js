@@ -1,4 +1,4 @@
-import { fetchJson } from "./api.js?v=assets-0f97d6765d71";
+import { fetchJson } from "./api.js?v=assets-07b744082137";
 import { formatBytes, formatNumber } from "./format.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
 

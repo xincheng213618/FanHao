@@ -1,0 +1,132 @@
+name: Application checks
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "public/**"
+      - "android-client/**"
+      - "tools/**"
+      - "lib/**"
+      - "server*.js"
+      - "package*.json"
+      - "start-fanhao.*"
+      - ".github/workflows/application-checks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "android-client/**"
+      - "tools/**"
+      - "lib/**"
+      - "server*.js"
+      - "package*.json"
+      - "start-fanhao.*"
+      - ".github/workflows/application-checks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-and-request-behavior:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Core, request cancellation and ordering fixtures
+        run: npm run verify
+      - name: Prefix paging and account isolation
+        run: npm run verify:code-prefixes
+      - name: Cache row budgets and weak ownership fixture
+        run: npm run verify:work-cache-budget
+      - name: Browser navigation and delayed paging fixture
+        run: npm run verify:fanhao-requests-browser
+      - name: Gallery navigation ownership, paging and reader position fixture
+        run: npm run verify:photo-reader-browser
+      - name: Manga reader navigation and background refresh fixture
+        run: npm run verify:manga-reader-browser
+      - name: Manga ID lookup scale and source identity fixture
+        run: npm run verify:manga-lookup
+      - name: Music facet cache capacity and equivalent filter fixture
+        run: npm run verify:music-facet-cache
+      - name: Music summary reuse and active collection counts fixture
+        run: npm run verify:music-summary-cache
+      - name: Studio catalogue cache dependencies fixture
+        run: npm run verify:studio-cache
+      - name: Android music incremental list rendering fixture
+        run: npm run verify:android-music-rendering
+      - name: Music play promise ownership fixture
+        run: npm run verify:music-playback
+      - name: Music list and track request ownership fixture
+        run: npm run verify:music-requests
+      - name: Music reader history and ongoing playback fixture
+        run: npm run verify:music-reader-browser
+      - name: Music progress capacity, client transport and persisted receipts fixture
+        run: npm run verify:music-progress
+      - name: Music actual page leave and delayed progress fixture
+        run: npm run verify:music-progress-browser
+      - name: Novel reader chapter identity and recovery fixture
+        run: npm run verify:novel-reader
+      - name: Novel reader navigation, prefetch and progress fixture
+        run: npm run verify:novel-reader-browser
+      - name: Novel progress coalescing and persisted sequence fixture
+        run: npm run verify:novel-progress
+      - name: Novel page leave and progress ordering fixture
+        run: npm run verify:novel-progress-browser
+      - name: Archive source identity, helper lifecycle and reader cache fixture
+        run: npm run verify:archive-images
+      - name: Works cold response fixture
+        run: npm run verify:works-performance
+      - name: Image status responsiveness fixture
+        run: npm run verify:cover-cache-status
+      - name: Music cover lifecycle fixture
+        run: npm run verify:music-cover-async
+      - name: Work cover generation lifecycle fixture
+        run: npm run verify:work-cover-async
+      - name: Gallery cover generation lifecycle fixture
+        run: npm run verify:gallery-cover-async
+      - name: Image library query behavior and scale fixtures
+        run: npm run verify:image-library
+      - name: Video probe source freshness, bounded tasks and shutdown fixture
+        run: npm run verify:video-probe-cache
+      - name: Shared image Worker and remote image lifecycle fixtures
+        run: npm run verify:media-images
+      - name: Transcode admission, output failures and shutdown fixtures
+        run: npm run verify:media-streams
+      - name: File response failures and cancellation
+        run: npm run verify:file-streams
+      - name: Novel summary freshness fixture
+        run: npm run verify:novel-summary-cache
+      - name: Novel writer commit and shutdown fixture
+        run: npm run verify:novel-write-worker
+      - name: Novel credential probe lifecycle fixture
+        run: npm run verify:novel-credentials-async
+      - name: Novel collection Worker and child ownership fixture
+        run: npm run verify:novel-collection-worker
+      - name: Local TXT parse-only reimport and atomic writer fixture
+        run: npm run verify:novel-reimport-async

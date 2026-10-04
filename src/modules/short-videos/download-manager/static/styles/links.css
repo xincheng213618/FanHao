@@ -7,7 +7,8 @@
   overscroll-behavior: contain;
 }
 .home-links-panel .table-wrap {
-  max-height: min(560px, 48vh);
+  max-height: none;
+  overflow: visible;
 }
 
 .links-footer {

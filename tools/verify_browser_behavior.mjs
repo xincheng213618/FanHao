@@ -30,6 +30,11 @@ try {
   await waitForHealth(baseUrl);
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
+    if (process.argv.includes("--android-person-first")) {
+      await verifyAndroidPersonFirstLibraries(browser);
+    } else {
+    await verifyFanhaoRequestLifecycle(browser);
+    if (!process.argv.includes("--fanhao-requests")) {
     await verifyAndroidNavigationRestoration(browser, baseUrl, fixtureApi);
     await verifyAndroidMangaAddLifecycle(browser);
     await verifyAndroidMangaTaskNotices(browser);
@@ -63,12 +68,190 @@ try {
     await verifyAndroidFavoriteRoute(browser);
     await verifyAndroidFavoriteServerSwitch(browser);
     await verifyShortVideoCollections(browser);
+    }
+    }
   } finally {
     await browser.close();
   }
   console.log("Executable browser behavior checks passed.");
 } finally {
   if (ownedServer) await stopServer(ownedServer);
+}
+
+async function verifyFanhaoRequestLifecycle(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(String(error)));
+  let delayedLibrary = null, delayedAppend = null, delayedPrefixIndex = null, delayedPrefixAppend = null;
+  const studioRequests = [];
+  const delayedRequests = new Set();
+  function delayed() {
+    let arrived, release, requested = false;
+    const pending = { requested: new Promise((resolve) => { arrived = resolve; }), wait: new Promise((resolve) => { release = resolve; }), arrived: () => { requested = true; arrived(); }, isRequested: () => requested, release: () => { delayedRequests.delete(pending); release(); } };
+    delayedRequests.add(pending);
+    return pending;
+  }
+  const people = [{ id: "request-person", name: "请求测试人物", workCount: 128, sourceCount: 1 }];
+  try {
+    await page.route((url) => url.origin === new URL(baseUrl).origin && url.pathname.startsWith("/api/"), async (route) => {
+      const url = new URL(route.request().url());
+      let payload;
+      if (url.pathname === "/api/library") {
+        if (url.searchParams.get("scope") === "western" && delayedLibrary) {
+          const pending = delayedLibrary;
+          delayedLibrary = null;
+          pending.arrived();
+          await pending.wait;
+        }
+        payload = { scope: url.searchParams.get("scope") || "main", people, works: [], access: { mode: "local" }, totals: {}, user: {} };
+      } else if (url.pathname === "/api/people/request-person") {
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const sort = url.searchParams.get("sort") || "releaseDesc";
+        if (offset && delayedAppend) {
+          const pending = delayedAppend;
+          delayedAppend = null;
+          pending.arrived();
+          await pending.wait;
+        }
+        const favorite = (url.searchParams.get("filter") || "").split(",").includes("favorite");
+        const prefix = favorite ? "filtered" : sort === "ratingDesc" ? "fresh" : "obsolete";
+        payload = {
+          person: people[0], total: 128, facets: { all: 128 },
+          works: Array.from({ length: 64 }, (_, index) => ({
+            id: `${prefix}-${offset + index}`, title: `${prefix} ${offset + index}`, personId: people[0].id,
+            favorite, videoCount: 1, playableCount: 1, infoSummary: { rating: 4, releaseDate: "2026-10-04" }
+          }))
+        };
+      } else if (url.pathname === "/api/modules") payload = { modules: [] };
+      else if (url.pathname === "/api/code-prefixes") {
+        if (delayedPrefixIndex) {
+          const pending = delayedPrefixIndex; delayedPrefixIndex = null; pending.arrived(); await pending.wait;
+        }
+        payload = { prefixes: [{ prefix: "ABC", localCount: 128 }], localWorkCount: 128 };
+      } else if (url.pathname === "/api/code-prefixes/ABC") {
+        const offset = Number(url.searchParams.get("offset") || 0);
+        if (offset && delayedPrefixAppend) {
+          const pending = delayedPrefixAppend; delayedPrefixAppend = null; pending.arrived(); await pending.wait;
+        }
+        const favorite = (url.searchParams.get("filter") || "").split(",").includes("favorite");
+        const prefix = favorite ? "code-filtered" : "code-obsolete";
+        payload = { codePrefix: { prefix: "ABC", localCount: 128 }, total: 128, facets: { all: 128 }, works: Array.from({ length: Number(url.searchParams.get("limit")) }, (_, index) => ({ id: `${prefix}-${offset + index}`, title: `${prefix} ${offset + index}`, favorite, videoCount: 1, playableCount: 1 })) };
+      } else if (url.pathname === "/api/studios") {
+        payload = { makers: [{ id: "request-studio", name: "请求测试片商", localWorkCount: 160 }] };
+      } else if (url.pathname === "/api/studios/request-studio") {
+        studioRequests.push(url);
+        const favorite = (url.searchParams.get("filter") || "").split(",").includes("favorite");
+        // Matches occur beyond the first unfiltered page. Filtering precedes
+        // slicing, so both the visible first page and total must be complete.
+        const all = Array.from({ length: 160 }, (_, index) => ({ id: `studio-${index}`, title: `studio ${index}`, favorite: index >= 100, videoCount: 1, playableCount: 1 }));
+        const matches = favorite ? all.filter((work) => work.favorite) : all;
+        const offset = Number(url.searchParams.get("offset") || 0);
+        payload = { studio: { id: "request-studio", name: "请求测试片商", series: [] }, total: matches.length, facets: { all: 160, favorite: 60 }, works: matches.slice(offset, offset + Number(url.searchParams.get("limit"))) };
+      }
+      else if (url.pathname === "/api/favorites") payload = { works: [], total: 0, folders: [], selectedFolderId: "all" };
+      else payload = {};
+      // Superseded fetches are deliberately fulfilled after cancellation to
+      // exercise the real shell, while their client-side abort remains valid.
+      await route.fulfill({ json: payload }).catch((error) => {
+        if (!/already handled|Target closed|Invalid InterceptionId|cancel/i.test(String(error))) throw error;
+      });
+    });
+    await page.goto(`${baseUrl}/fanhao`, { waitUntil: "domcontentloaded" });
+    await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    const firstScope = delayed();
+    delayedLibrary = firstScope;
+    await page.locator('[data-view="people"][data-people-scope="western"]').click();
+    await firstScope.requested;
+    await page.locator('[data-view="people"][data-people-scope="main"]').click();
+    await page.locator('[data-view="people"][data-people-scope="main"][aria-current="page"]').waitFor();
+    firstScope.release();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator("#currentTitle").textContent(), "人物", "a late western scope must not replace the latest main navigation");
+
+    const secondScope = delayed();
+    delayedLibrary = secondScope;
+    await page.locator('[data-view="people"][data-people-scope="western"]').click();
+    await secondScope.requested;
+    await page.locator('[data-view="favorites"]').click();
+    await page.locator("#currentTitle", { hasText: "收藏" }).waitFor();
+    secondScope.release();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator("#currentTitle").textContent(), "收藏", "a completed scope request must not pull the user away from favorites");
+
+    await page.locator('[data-view="people"][data-people-scope="main"]').click();
+    await page.locator(".person-index-card", { hasText: people[0].name }).click();
+    await page.locator('.work-card[data-work-id="obsolete-0"]').waitFor();
+    const oldPage = delayed();
+    delayedAppend = oldPage;
+    // Reach the progressive renderer's final batch before its server-page
+    // continuation becomes available; the production observer then loads it.
+    for (let attempt = 0; attempt < 10 && !oldPage.isRequested(); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await page.waitForTimeout(50);
+    }
+    assert(oldPage.isRequested(), "scrolling the real list must request its next server page");
+    await oldPage.requested;
+    await page.locator("#sortSelect").selectOption("ratingDesc");
+    await page.locator('.work-card[data-work-id="fresh-0"]').waitFor();
+    oldPage.release();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('.work-card[data-work-id^="obsolete-"]').count(), 0, "late pagination must not contaminate the changed sort");
+
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.locator("#sortSelect").selectOption("releaseDesc");
+    await page.locator('.work-card[data-work-id="obsolete-0"]').waitFor();
+    const oldFilterPage = delayed();
+    delayedAppend = oldFilterPage;
+    for (let attempt = 0; attempt < 10 && !oldFilterPage.isRequested(); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await page.waitForTimeout(50);
+    }
+    assert(oldFilterPage.isRequested());
+    await page.locator('[data-work-filter="favorite"]').click();
+    await page.locator('.work-card[data-work-id="filtered-0"]').waitFor();
+    oldFilterPage.release();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('.work-card[data-work-id^="obsolete-"]').count(), 0, "late pagination must not contaminate the changed filter");
+
+    const index = delayed(); delayedPrefixIndex = index;
+    const codesTab = page.locator('[data-view="codes"]:not([data-code-prefix])');
+    await codesTab.click(); await index.requested;
+    await page.locator('[data-view="favorites"]').click();
+    await page.locator("#currentTitle", { hasText: "收藏" }).waitFor();
+    const favoriteUrl = page.url(); index.release(); await page.waitForTimeout(50);
+    assert.equal(page.url(), favoriteUrl, "a late prefix index must preserve the newer favorites URL");
+    assert.equal(await page.locator("#currentTitle").textContent(), "收藏");
+    await codesTab.click();
+    await page.locator(".code-prefix-row", { hasText: "ABC" }).click();
+    await page.locator('.work-card[data-work-id="code-obsolete-0"]').waitFor();
+    const prefixAppend = delayed(); delayedPrefixAppend = prefixAppend;
+    for (let attempt = 0; attempt < 12 && !prefixAppend.isRequested(); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(50);
+    }
+    assert(prefixAppend.isRequested(), "the real prefix list must request server pagination");
+    await page.locator('[data-work-filter="favorite"]').click();
+    await page.locator('.work-card[data-work-id="code-filtered-0"]').waitFor();
+    prefixAppend.release(); await page.waitForTimeout(50);
+    assert.equal(await page.locator('.work-card[data-work-id^="code-obsolete-"]').count(), 0);
+
+    await page.locator('[data-work-filter="favorite"][aria-pressed="true"]').click();
+    await page.locator('[data-view="studios"]').click();
+    await page.locator(".studio-card", { hasText: "请求测试片商" }).click();
+    await page.locator('.work-card[data-work-id="studio-0"]').waitFor();
+    await page.locator('[data-work-filter="favorite"]').click();
+    await page.locator('.work-card[data-work-id="studio-100"]').waitFor();
+    assert.equal(await page.locator("#currentPath").textContent(), "60 部本地作品", "the studio total must describe all server-side filter matches");
+    for (let attempt = 0; attempt < 12 && !studioRequests.some((url) => url.searchParams.get("filter") === "favorite" && Number(url.searchParams.get("offset")) > 0); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(50);
+    }
+    assert(studioRequests.some((url) => url.searchParams.get("filter") === "favorite" && url.searchParams.get("offset") === "48"), "studio pagination must retain its server filter and use matching-result offset");
+    await page.locator('.work-card[data-work-id="studio-159"]').waitFor();
+    assert.equal(await page.locator('.work-card[data-work-id="studio-0"]').count(), 0);
+    assert.deepEqual(pageErrors, [], "FanHao request fixtures must not emit browser script errors");
+  } finally {
+    for (const pending of delayedRequests) pending.release();
+    await page.close();
+  }
 }
 
 async function startFixtureServer(serverPort) {
@@ -925,9 +1108,21 @@ async function verifyAndroidReconnectFlow(browser) {
 }
 
 async function verifyAndroidPersonFirstLibraries(browser) {
-  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 }, hasTouch: true, isMobile: true });
+  const touchSession = await page.context().newCDPSession(page);
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error?.message || String(error)));
+  async function longPressChoice(button, choice) {
+    const box = await button.boundingBox();
+    assert(box, "the switcher must be visible before the touch gesture");
+    await touchSession.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }] });
+    try {
+      await choice.waitFor({ state: "visible", timeout: 5000 });
+    } finally {
+      await touchSession.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    }
+    await choice.click();
+  }
   try {
     await page.addInitScript(() => {
       localStorage.clear();
@@ -951,7 +1146,11 @@ async function verifyAndroidPersonFirstLibraries(browser) {
     await page.locator(".fanhao-detail-chrome-back").click();
     await page.locator(".index-person-card", { hasText: "测试女优" }).waitFor({ state: "visible", timeout: 5000 });
 
-    await page.locator("button[data-home-switcher]").click();
+    const homeSwitcher = page.locator("button[data-home-switcher]");
+    await homeSwitcher.click();
+    assert.equal(await homeSwitcher.locator(".bottom-nav-label").textContent(), "番号", "ordinary home clicks must return to the current category without switching it");
+    await page.locator(".index-person-card", { hasText: "测试女优" }).waitFor({ state: "visible", timeout: 5000 });
+    await longPressChoice(homeSwitcher, page.locator('[data-home-mode-choice="western"]'));
     await page.locator("button[data-home-switcher] .bottom-nav-label", { hasText: "欧美" }).waitFor({ state: "visible", timeout: 5000 });
     assert.deepEqual(await primaryNav.locator("button").allTextContents(), ["人物", "作品"], "western must expose person-first browsing with an optional work view");
     assert.equal(await primaryNav.locator("button.active").textContent(), "人物", "western must open on people");
@@ -968,9 +1167,13 @@ async function verifyAndroidPersonFirstLibraries(browser) {
     await readingSwitcher.click();
     await readingSwitcher.locator(".bottom-nav-label", { hasText: "小说" }).waitFor({ state: "visible", timeout: 5000 });
     await readingSwitcher.click();
+    assert.equal(await readingSwitcher.locator(".bottom-nav-label").textContent(), "小说", "ordinary reading clicks must retain the selected reading category");
+    await longPressChoice(readingSwitcher, page.locator('[data-reading-mode-choice="music"]'));
     await readingSwitcher.locator(".bottom-nav-label", { hasText: "音乐" }).waitFor({ state: "visible", timeout: 5000 });
     assert.equal(await readingSwitcher.getAttribute("aria-current"), "page", "music must keep the shared reading destination selected");
+    assert.deepEqual(pageErrors, [], "person-first category gestures must not produce script errors");
   } finally {
+    await touchSession.detach();
     await page.close();
   }
 }

@@ -1,4 +1,4 @@
-import { bootStandaloneApp } from "./js/standalone-host.js?v=20260908-novel-library-01";
+import { bootStandaloneApp } from "./js/standalone-host.js?v=20261004-reader-navigation-owner-06";
 
 document.documentElement.dataset.appModule = "standalone";
 await bootStandaloneApp();

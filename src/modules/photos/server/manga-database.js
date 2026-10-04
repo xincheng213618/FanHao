@@ -11,7 +11,7 @@ function closeDatabase(state) {
   }
   state.db = null;
   state.path = "";
-  state.mtimeMs = 0;
+  state.fileStamp = "";
 }
 
 function databaseFileStat(dbPath) {
@@ -23,9 +23,13 @@ function databaseFileStat(dbPath) {
   }
 }
 
+function fileStamp(stat) {
+  return JSON.stringify([stat.dev, stat.ino, stat.birthtimeMs, stat.ctimeMs, stat.mtimeMs, stat.size]);
+}
+
 export function createMangaDatabaseReader({ dbPath } = {}) {
   const configuredPath = String(dbPath || "").trim();
-  const state = { db: null, path: "", mtimeMs: 0 };
+  const state = { db: null, path: "", fileStamp: "", generation: 0 };
 
   function open() {
     if (!configuredPath) return null;
@@ -35,7 +39,8 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
       closeDatabase(state);
       return null;
     }
-    if (state.db && (state.path !== resolvedPath || state.mtimeMs !== stat.mtimeMs)) {
+    const stamp = fileStamp(stat);
+    if (state.db && (state.path !== resolvedPath || state.fileStamp !== stamp)) {
       closeDatabase(state);
     }
     if (state.db) return state.db;
@@ -52,7 +57,8 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
       }
       state.db = database;
       state.path = resolvedPath;
-      state.mtimeMs = stat.mtimeMs;
+      state.fileStamp = stamp;
+      state.generation += 1;
       return database;
     } catch {
       closeDatabase(state);
@@ -75,6 +81,28 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     if (!database) return null;
     try {
       return database.prepare("SELECT * FROM manga_comics WHERE cache_key = ?").get(String(cacheKey || "")) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function comics() {
+    const database = open();
+    if (!database) return null;
+    try {
+      return database.prepare("SELECT cache_key, source_url, downloaded_count FROM manga_comics").all();
+    } catch {
+      // Older collector schemas can still be read through comic().
+      return null;
+    }
+  }
+
+  function lookupStamp() {
+    const database = open();
+    if (!database) return null;
+    try {
+      const version = database.prepare("PRAGMA data_version").get()?.data_version;
+      return JSON.stringify([state.path, state.fileStamp, state.generation, version]);
     } catch {
       return null;
     }
@@ -145,5 +173,5 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     }
   }
 
-  return { chapter, chapters, comic, firstImage, image, images, status };
+  return { chapter, chapters, comic, comics, firstImage, image, images, lookupStamp, status };
 }

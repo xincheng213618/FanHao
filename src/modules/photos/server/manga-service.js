@@ -248,6 +248,7 @@ export function createMangaService({
   let updateSequence = 0;
   let lastJobHistorySave = 0;
   let storageSnapshot = null;
+  let directoryLookup = null;
 
   restoreJobHistory();
 
@@ -617,6 +618,7 @@ export function createMangaService({
       job.status = "complete";
     }
     job.message = updateJobMessage(job);
+    directoryLookup = null;
     persistJobHistory(true);
   }
 
@@ -657,8 +659,7 @@ export function createMangaService({
   }
 
   function sourceUrlForCache(cacheDir, dbComic = null) {
-    const catalog = readJsonFile(path.join(cacheDir, "catalog.json"), {});
-    const catalogUrl = String(dbComic?.source_url || catalog?.url || "").trim();
+    const catalogUrl = String(dbComic?.source_url || readJsonFile(path.join(cacheDir, "catalog.json"), {})?.url || "").trim();
     if (catalogUrl) return catalogUrl;
     const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
     const chapterUrl = String(manifest?.chapters?.[0]?.url || "").trim();
@@ -790,44 +791,78 @@ export function createMangaService({
     return { ok: true, removedCount, removedBytes, storage: storageStatus(true) };
   }
 
-  function cacheDirs() {
-    const status = rootStatus();
-    if (!status.exists) return [];
+  function directoryLookupStamp() {
+    const stat = safeStat(resolvedRoot);
+    return JSON.stringify([
+      stat?.isDirectory() ? [stat.dev, stat.ino, stat.birthtimeMs, stat.ctimeMs, stat.mtimeMs] : null,
+      database.lookupStamp()
+    ]);
+  }
+
+  function listRevision() {
+    return createHash("sha256").update(directoryLookupStamp()).digest("hex");
+  }
+
+  function buildDirectoryLookup(stamp = directoryLookupStamp()) {
+    const lookup = { stamp, byId: new Map(), dirs: [], reusable: false };
+    directoryLookup = lookup;
+    if (!rootStatus().exists) return lookup;
 
     let entries = [];
     try {
-      entries = fs.readdirSync(status.root, { withFileTypes: true });
+      entries = fs.readdirSync(resolvedRoot, { withFileTypes: true });
     } catch {
-      return [];
+      return lookup;
     }
 
-    const candidates = entries
+    const directories = entries
       .filter((entry) => entry.isDirectory() && isMangaCacheDirName(entry.name))
-      .map((entry) => path.join(status.root, entry.name))
-      .filter((dirPath) => fs.existsSync(path.join(dirPath, "manifest.json")))
+      .map((entry) => path.join(resolvedRoot, entry.name))
       .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true, sensitivity: "base" }));
+    const candidates = directories.filter(dirPath => fs.existsSync(path.join(dirPath, "manifest.json")));
+    const rows = database.comics();
+    const comicsByKey = new Map();
+    for (const row of rows || []) {
+      const key = String(row.cache_key || "");
+      // Keep comic().get()'s first-row behavior for legacy duplicate keys.
+      if (!comicsByKey.has(key)) comicsByKey.set(key, row);
+    }
+    let sqlSourcesOnly = rows !== null;
+    const records = candidates.map(dirPath => {
+      const key = databaseKey(dirPath);
+      const dbComic = rows === null ? database.comic(key) : comicsByKey.get(key);
+      if (!String(dbComic?.source_url || "").trim()) sqlSourcesOnly = false;
+      return { dirPath, sourceUrl: sourceUrlForCache(dirPath, dbComic), downloadedCount: Number(dbComic?.downloaded_count || 0) };
+    });
 
     // A failed/restarted crawl can leave two cache folders for the same
     // catalog (for example the old zero-image folder and a later *_full
     // folder). Prefer the copy with more downloaded images so the library
     // does not show duplicate comics.
     const bestBySource = new Map();
-    for (const dirPath of candidates) {
-      const key = databaseKey(dirPath);
-      const dbComic = database.comic(key);
-      const sourceUrl = sourceUrlForCache(dirPath, dbComic);
+    for (const { dirPath, sourceUrl, downloadedCount } of records) {
       if (!sourceUrl) continue;
-      const downloadedCount = Number(dbComic?.downloaded_count || 0);
       const current = bestBySource.get(sourceUrl);
       if (!current || downloadedCount > current.downloadedCount) {
         bestBySource.set(sourceUrl, { dirPath, downloadedCount });
       }
     }
-    return candidates.filter((dirPath) => {
-      const dbComic = database.comic(databaseKey(dirPath));
-      const sourceUrl = sourceUrlForCache(dirPath, dbComic);
-      return !sourceUrl || bestBySource.get(sourceUrl)?.dirPath === dirPath;
-    });
+    for (const { dirPath, sourceUrl } of records) {
+      if (sourceUrl && bestBySource.get(sourceUrl)?.dirPath !== dirPath) continue;
+      lookup.dirs.push(dirPath);
+      for (const id of [stableMangaId(sourceUrl, dirPath), createId("mg", path.resolve(dirPath))]) {
+        if (!lookup.byId.has(id)) lookup.byId.set(id, dirPath);
+      }
+    }
+    // File-derived identities can change without updating the root directory.
+    // Pending folders can likewise acquire a manifest in place. Rebuild those
+    // libraries on every lookup so these changes remain immediately visible.
+    lookup.reusable = sqlSourcesOnly && candidates.length === directories.length;
+    return lookup;
+  }
+
+  function cacheDirs() {
+    return buildDirectoryLookup().dirs.slice();
   }
 
   function idForDir(dirPath) {
@@ -838,8 +873,16 @@ export function createMangaService({
   function cacheById(id) {
     const targetId = String(id || "");
     if (!targetId) return null;
-    for (const dirPath of cacheDirs()) {
-      if (idForDir(dirPath) === targetId || createId("mg", path.resolve(dirPath)) === targetId) return dirPath;
+    const stamp = directoryLookupStamp();
+    const reused = directoryLookup?.reusable && directoryLookup.stamp === stamp;
+    let lookup = reused ? directoryLookup : buildDirectoryLookup(stamp);
+    let dirPath = lookup.byId.get(targetId);
+    if (dirPath && safeStat(dirPath)?.isDirectory() && fs.existsSync(path.join(dirPath, "manifest.json"))) return dirPath;
+    if (reused) {
+      // No negative caching, and a removed winner must expose its next copy.
+      lookup = buildDirectoryLookup();
+      dirPath = lookup.byId.get(targetId);
+      if (dirPath && safeStat(dirPath)?.isDirectory() && fs.existsSync(path.join(dirPath, "manifest.json"))) return dirPath;
     }
     return null;
   }
@@ -1143,6 +1186,7 @@ export function createMangaService({
       trashPath = path.join(trashRoot, trashName);
     }
     fs.renameSync(cacheDir, trashPath);
+    directoryLookup = null;
     storageSnapshot = null;
 
     const deletedAt = new Date().toISOString();
@@ -1197,6 +1241,7 @@ export function createMangaService({
     }
     if (fs.existsSync(targetPath)) throw updateError("原漫画目录已经存在，无法覆盖恢复", 409);
     fs.renameSync(entryPath, targetPath);
+    directoryLookup = null;
     try { fs.unlinkSync(path.join(targetPath, "deleted.json")); } catch {}
     const sourceTracked = addTrackedSource(sourceUrl);
     storageSnapshot = null;
@@ -1652,6 +1697,7 @@ export function createMangaService({
     imageUrl,
     jobStatus,
     listJobs,
+    listRevision,
     publicChapter,
     publicDetail,
     publicSummary,

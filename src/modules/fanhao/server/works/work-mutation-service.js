@@ -2,6 +2,7 @@ import { sanitizeWorkMoveJob } from "./work-move-job-query-service.js";
 
 export function createWorkMutationService({
   adminCoreMutationService,
+  cancelCoverGeneration = () => {},
   generateWorkCover,
   manualCoverStateService,
   publicWork,
@@ -9,12 +10,12 @@ export function createWorkMutationService({
   workLocalMutationService,
   workMoveJobService
 }) {
-  function generateCover(workId) {
+  async function generateCover(workId, options = {}) {
     const work = resolveLibraryWorkByPublicId(workId);
     if (!work) return null;
 
-    const cover = generateWorkCover(work);
-    return { ok: true, cover, work: publicWork(work, true) };
+    const cover = await generateWorkCover(work, options);
+    return { ok: true, cover, work: publicWork(resolveLibraryWorkByPublicId(workId) || work, true) };
   }
 
   function coverGenerationErrorPayload(workId, error) {
@@ -27,6 +28,7 @@ export function createWorkMutationService({
 
   function setManualCover(workId, body) {
     const result = manualCoverStateService.setWorkManualCover(workId, body.imageId || "");
+    cancelCoverGeneration(workId);
     return { ok: true, ...result };
   }
 

@@ -184,7 +184,7 @@ const service = createNovelCollectionService({
 });
 
 try {
-  service.start();
+  await service.start();
   assert.equal(service.runtimeStatus().ready, true, service.runtimeStatus().error);
   const initial = service.snapshot();
   assert.equal(initial.adapters.length, 3, "three built-in adapters must be available");
@@ -275,7 +275,7 @@ try {
   assert.equal(interrupted.checkpointCount, 1, "service restart must retain the completed chapter count");
 
   blockResumeChapterTwo = false;
-  service.start();
+  await service.start();
   const reused = service.createTask({
     name: "断点续采回归",
     url: `${baseUrl}/resume-catalog`,

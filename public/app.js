@@ -15,9 +15,10 @@ import {
   createWorkActions,
   selectVisibleWorks,
   workServerMoreState
-} from "./modules/fanhao/index.js?v=20260919-browse-02";
+} from "./modules/fanhao/index.js?v=20261004-request-lifecycle-02";
 import { createBrowseNavigation } from "./modules/fanhao/browse-navigation.js?v=20260919-browse-01";
 import { createBrowseFilterControls, nextBrowseFilters } from "./modules/fanhao/browse-filters.js?v=20260919-browse-01";
+import { createLatestRequestGate } from "./modules/fanhao/latest-request.js?v=20260717-fanhao-latest-request-01";
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260724-code-prefix-catalog-01";
@@ -57,6 +58,9 @@ const els = {
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
+const libraryRequests = createLatestRequestGate();
+let navigationSequence = 0;
+let searchLoadMoreOwner = null;
 const browseNavigation = createBrowseNavigation();
 let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
@@ -109,6 +113,7 @@ async function initializeModuleNavigation() {
 const peoplePage = createPeoplePage({
   api,
   appendEmpty,
+  appendLoadedWorkPage,
   cancelScheduledWorkRendering,
   clearWorkFilter,
   clearWorkSearch,
@@ -120,6 +125,7 @@ const peoplePage = createPeoplePage({
   formatNumber,
   getWorkFilterMode: serializedWorkFilterMode,
   hidePersonProfile,
+  onNavigationStarted: beginNavigation,
   preparePersonProfile: () => personProfilePage.load().catch(() => {}),
   renderPersonProfile,
   renderPersonWorkStats,
@@ -131,6 +137,7 @@ const peoplePage = createPeoplePage({
   state,
   syncNavigationState,
   syncRouteAfterNavigation,
+  toastInline,
   workCoverUrl
 });
 const codePrefixPage = createCodePrefixPage({
@@ -143,6 +150,8 @@ const codePrefixPage = createCodePrefixPage({
   els,
   formatNumber,
   hidePersonProfile,
+  isNavigationCurrent: (intent) => intent === navigationSequence,
+  onNavigationStarted: beginNavigation,
   renderWorks,
   resetWorkPaging,
   setMainHeader,
@@ -203,7 +212,9 @@ const studioPage = createStudioPage({
   appendEmpty,
   els,
   formatNumber,
+  getWorkFilterMode: serializedWorkFilterMode,
   hidePersonProfile,
+  onNavigationStarted: beginNavigation,
   renderStatsForWorks,
   renderWorks,
   resetWorkPaging,
@@ -372,7 +383,15 @@ function initializeRouteHistory() {
   replaceRoute();
 }
 
+function beginNavigation(options = {}) {
+  if (options.navigationIntent !== undefined) return options.navigationIntent;
+  state.restoringRoute = false;
+  return ++navigationSequence;
+}
+
 async function applyRoute(route) {
+  const navigationIntent = beginNavigation();
+  const isCurrent = () => navigationIntent === navigationSequence;
   const next = normalizeRoute(route);
   if (["gallery", "novels", "music", "tools", "shortVideos"].includes(next.view)) {
     window.location.replace(routeUrl(next, { initialParams }));
@@ -381,16 +400,17 @@ async function applyRoute(route) {
   if (routeNeedsLibrary(next)) {
     await ensureLibraryLoaded({ deferMainRender: true });
   }
+  if (!isCurrent()) return;
   state.restoringRoute = true;
   try {
     if (next.view === "search") {
       state.workQuery = next.q;
       els.workSearch.value = next.q;
-      await loadSearchResults(next.q, { skipRoute: true });
+      await loadSearchResults(next.q, { skipRoute: true, navigationIntent });
     } else if (next.view === "codes") {
-      await codePrefixPage.applyRoute(next);
+      await codePrefixPage.applyRoute(next, { navigationIntent });
     } else if (next.view === "people") {
-      await setPeopleScope(next.peopleScope || "main");
+      if (!await setPeopleScope(next.peopleScope || "main") || !isCurrent()) return;
       clearWorkSearch();
       const routePerson = next.personId
         ? state.people.find((person) => person.id === next.personId)
@@ -398,6 +418,7 @@ async function applyRoute(route) {
       if (routePerson) {
         await selectPerson(routePerson.id, {
           resetFilter: false,
+          navigationIntent,
           captureIndexScroll: false,
           skipRoute: routePerson.id === next.personId,
           replaceRoute: routePerson.id !== next.personId
@@ -405,22 +426,23 @@ async function applyRoute(route) {
       } else if (next.personId) {
         await selectPerson(next.personId, {
           resetFilter: false,
+          navigationIntent,
           captureIndexScroll: false,
           replaceRoute: true
         });
       } else {
-        showPeopleIndex({ restoreScroll: true, skipRoute: true });
+        showPeopleIndex({ restoreScroll: true, skipRoute: true, navigationIntent });
       }
     } else {
       clearWorkSearch();
-      setActiveView(next.view, { skipRoute: true });
+      setActiveView(next.view, { skipRoute: true, navigationIntent });
     }
 
-    if (next.workId) {
+    if (isCurrent() && next.workId) {
       window.location.href = playerPageUrl(next.workId, next.videoId || "");
     }
   } finally {
-    state.restoringRoute = false;
+    if (isCurrent()) state.restoringRoute = false;
   }
 }
 
@@ -490,48 +512,62 @@ function formatLibraryPaths(values) {
 }
 
 async function loadLibrary(options = {}) {
+  const request = libraryRequests.begin();
+  const scope = normalizePeopleScope(state.peopleScope);
   const params = new URLSearchParams();
-  if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
-  const data = await api(`/api/library${params.toString() ? `?${params}` : ""}`);
-  state.library = data;
-  state.peopleScope = normalizePeopleScope(data.scope || state.peopleScope);
-  state.accessMode = data.access?.mode || "local";
-  state.accessHints = data.access?.hints || {};
-  state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
-  if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
-  if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
-  if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
-  const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
-  state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
-  state.personPageSize = peoplePage.personIndexPageSize();
-  resetWorkPaging();
-  state.people = sortPeopleForList(data.people || []);
-  codePrefixPage.invalidateIndex();
-  resetPersonPaging();
+  if (scope !== "main") params.set("scope", scope);
+  try {
+    const data = await api(`/api/library${params.toString() ? `?${params}` : ""}`, { signal: request.signal });
+    if (!request.isCurrent() || state.peopleScope !== scope) return null;
+    state.library = data;
+    state.peopleScope = normalizePeopleScope(data.scope || state.peopleScope);
+    state.accessMode = data.access?.mode || "local";
+    state.accessHints = data.access?.hints || {};
+    state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
+    if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
+    if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
+    if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
+    const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
+    state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
+    state.personPageSize = peoplePage.personIndexPageSize();
+    resetWorkPaging();
+    state.people = sortPeopleForList(data.people || []);
+    codePrefixPage.invalidateIndex();
+    resetPersonPaging();
 
-  if (state.selectedPersonId && !state.people.some((person) => person.id === state.selectedPersonId)) {
-    state.selectedPersonId = null;
-  }
+    if (state.selectedPersonId && !state.people.some((person) => person.id === state.selectedPersonId)) {
+      state.selectedPersonId = null;
+    }
 
-  if (!options.deferMainRender) {
-    setActiveView(state.activeView || "people");
+    if (!options.deferMainRender) {
+      setActiveView(state.activeView || "people");
+    }
+    return data;
+  } catch (error) {
+    if (!request.isCurrent()) return null;
+    throw error;
+  } finally {
+    request.finish();
   }
 }
 
 let libraryLoadPromise = null;
+let libraryLoadScope = "";
 
 function routeNeedsLibrary(route) {
   return Boolean(route?.view && route.view !== "search");
 }
 
 async function ensureLibraryLoaded(options = {}) {
-  if (state.library) return state.library;
-  if (!libraryLoadPromise) {
-    libraryLoadPromise = loadLibrary(options)
-      .then(() => state.library)
+  const scope = normalizePeopleScope(state.peopleScope);
+  if (state.library && normalizePeopleScope(state.library.scope) === scope) return state.library;
+  if (!libraryLoadPromise || libraryLoadScope !== scope) {
+    libraryLoadScope = scope;
+    const pending = loadLibrary(options)
       .finally(() => {
-        libraryLoadPromise = null;
+        if (libraryLoadPromise === pending) libraryLoadPromise = null;
       });
+    libraryLoadPromise = pending;
   }
   return libraryLoadPromise;
 }
@@ -545,14 +581,26 @@ async function setPeopleScope(scope, options = {}) {
   const changed = state.peopleScope !== nextScope || options.force;
   state.peopleScope = nextScope;
   if (changed) {
+    libraryRequests.cancel();
+    peoplePage.cancelPendingSelection();
     state.selectedPersonId = null;
     state.selectedPerson = null;
     state.works = [];
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
     state.filterMode = "all";
-    await loadLibrary({ deferMainRender: true });
   }
+  const data = options.force
+    ? await loadLibrary({ deferMainRender: true })
+    : await ensureLibraryLoaded({ deferMainRender: true });
+  return Boolean(data && state.peopleScope === nextScope);
+}
+
+async function navigatePeopleScope(scope) {
+  const navigationIntent = beginNavigation();
+  if (!await setPeopleScope(scope) || navigationIntent !== navigationSequence) return false;
+  setActiveView("people", { navigationIntent });
+  return true;
 }
 
 function normalizeSourcePath(value) {
@@ -647,6 +695,7 @@ function syncNavigationState(view = state.activeView) {
 }
 
 function setActiveView(view, options = {}) {
+  options = { ...options, navigationIntent: beginNavigation(options) };
   view = URL_VIEW_NAMES.has(view) ? view : "people";
   if (["gallery", "novels", "music", "tools", "shortVideos"].includes(view)) {
     window.location.assign(routeUrl({ view }, { initialParams }));
@@ -654,7 +703,10 @@ function setActiveView(view, options = {}) {
   }
   if (view !== "people") peoplePage.cancelPendingSelection();
   if (view !== "codes") codePrefixPage.cancelPendingRequests();
-  if (view !== "search") searchRequests.cancel();
+  if (view !== "search") {
+    searchRequests.cancel();
+    resetSearchPagination();
+  }
   if (view !== "rankings") rankingPage.cancelPendingRequests();
   if (view !== "studios") studioPage.cancelPendingRequests();
   if (!["favorites", "history", "vr"].includes(view)) collectionPage.cancelPendingRequests();
@@ -695,7 +747,7 @@ function setActiveView(view, options = {}) {
   }
 
   if (view === "studios") {
-    studioPage.loadStudios();
+    studioPage.loadStudios(options);
     syncRouteAfterNavigation(options);
     return;
   }
@@ -707,7 +759,7 @@ function setActiveView(view, options = {}) {
     return;
   }
 
-  showPeopleIndex({ skipRoute: true });
+  showPeopleIndex({ ...options, skipRoute: true });
   syncRouteAfterNavigation(options);
 }
 
@@ -916,6 +968,10 @@ function handleFilterModeChange() {
     return;
   }
   if (codePrefixPage.reloadForActiveView()) return;
+  if (state.activeView === "studios" && state.selectedStudio) {
+    studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
+    return;
+  }
   if (state.activeView === "rankings") {
     renderRankingStats();
   }
@@ -1247,6 +1303,7 @@ function topInfoValues(works, selectValues, limit) {
 function visibleWorks() {
   if (state.activeView === "people" && state.selectedPersonId) return state.works;
   if (state.activeView === "codes" && state.selectedCodePrefix) return state.works;
+  if (state.activeView === "studios" && state.selectedStudio) return state.works;
   return selectVisibleWorks(state.works, {
     query: state.activeView === "search" ? "" : state.workQuery,
     filters: selectedWorkFilters(),
@@ -1305,9 +1362,15 @@ function resetPersonPaging() {
   peoplePage.resetPaging();
 }
 
+function resetSearchPagination() {
+  searchLoadMoreOwner = null;
+  state.searchLoadingMore = false;
+}
+
 function clearWorkSearch() {
   window.clearTimeout(state.searchTimer);
   searchRequests.cancel();
+  resetSearchPagination();
   state.workQuery = "";
   els.workSearch.value = "";
 }
@@ -1330,6 +1393,8 @@ function clearWorkFilter() {
 }
 
 async function loadSearchResults(query, options = {}) {
+  beginNavigation(options);
+  resetSearchPagination();
   const normalizedQuery = String(query || "").trim();
   state.workQuery = normalizedQuery;
   if (els.workSearch && els.workSearch.value !== normalizedQuery) {
@@ -1405,6 +1470,8 @@ async function loadSearchResults(query, options = {}) {
 
 async function loadMoreSearchResults(button) {
   if (state.searchLoadingMore || state.activeView !== "search" || !state.searchQuery) return;
+  const owner = {};
+  searchLoadMoreOwner = owner;
   state.searchLoadingMore = true;
   const originalText = button?.textContent || "";
   let restoreInFinally = true;
@@ -1417,7 +1484,7 @@ async function loadMoreSearchResults(button) {
   const offset = state.works.length;
   try {
     const data = await searchRequests.fetchPage(query, offset);
-    if (!data || state.activeView !== "search" || state.searchQuery !== query) return;
+    if (!data || searchLoadMoreOwner !== owner || state.activeView !== "search" || state.searchQuery !== query) return;
     const seen = new Set(state.works.map((work) => work.id));
     const nextWorks = (data.works || []).filter((work) => !seen.has(work.id));
     state.works.push(...nextWorks);
@@ -1428,55 +1495,23 @@ async function loadMoreSearchResults(button) {
     renderSearchStats();
     appendLoadedWorkPage();
   } catch (error) {
+    if (searchLoadMoreOwner !== owner || state.activeView !== "search" || state.searchQuery !== query) return;
     toastInline(button, error.message || "加载失败", originalText);
     restoreInFinally = false;
   } finally {
-    state.searchLoadingMore = false;
-    if (button && button.isConnected) button.disabled = false;
-    if (restoreInFinally && button && button.isConnected) {
-      button.disabled = false;
-      button.textContent = originalText || button.textContent;
+    if (searchLoadMoreOwner === owner) {
+      searchLoadMoreOwner = null;
+      state.searchLoadingMore = false;
+      if (button && button.isConnected) button.disabled = false;
+      if (restoreInFinally && button && button.isConnected) {
+        button.textContent = originalText || button.textContent;
+      }
     }
   }
 }
 
 async function loadMorePersonWorks(button) {
-  if (state.personWorksLoadingMore || state.activeView !== "people" || !state.selectedPersonId) return;
-  if (state.works.length >= state.personWorksTotal) return;
-
-  state.personWorksLoadingMore = true;
-  const originalText = button?.textContent || "";
-  let restoreInFinally = true;
-  if (button) {
-    button.disabled = true;
-    button.textContent = "正在加载";
-  }
-
-  try {
-    const personId = state.selectedPersonId;
-    const data = await fetchPersonWorksPage(personId, state.works.length);
-    if (state.selectedPersonId !== personId) return;
-    const seen = new Set(state.works.map((work) => work.id));
-    const nextWorks = (data.works || []).filter((work) => !seen.has(work.id));
-    state.works.push(...nextWorks);
-    state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
-    state.selectedPerson = data.person || state.selectedPerson;
-    state.personWorksTotal = data.total || state.personWorksTotal || state.works.length;
-    state.personWorksFacets = data.facets || state.personWorksFacets || null;
-    renderPersonProfile(state.selectedPerson);
-    renderPersonWorkStats();
-    appendLoadedWorkPage();
-  } catch (error) {
-    toastInline(button, error.message || "加载失败", originalText);
-    restoreInFinally = false;
-  } finally {
-    state.personWorksLoadingMore = false;
-    if (button && button.isConnected) button.disabled = false;
-    if (restoreInFinally && button && button.isConnected) {
-      button.disabled = false;
-      button.textContent = originalText || button.textContent;
-    }
-  }
+  return peoplePage.loadMoreWorks(button);
 }
 
 function toastInline(button, message, restoreText) {
@@ -2378,6 +2413,10 @@ els.missingLocalToggle?.addEventListener("change", (event) => {
     return;
   }
   if (codePrefixPage.reloadForActiveView()) return;
+  if (state.activeView === "studios" && state.selectedStudio) {
+    studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
+    return;
+  }
   renderWorks();
 });
 
@@ -2390,6 +2429,10 @@ els.collectionToggle?.addEventListener("change", (event) => {
     return;
   }
   if (codePrefixPage.reloadForActiveView()) return;
+  if (state.activeView === "studios" && state.selectedStudio) {
+    studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
+    return;
+  }
   if (state.activeView === "people" && !state.selectedPersonId) {
     renderPeopleIndexStats();
     renderPeopleIndex();
@@ -2411,10 +2454,10 @@ for (const button of els.viewTabs) {
     event.preventDefault();
     browseNavigation.close();
     clearWorkSearch();
+    beginNavigation();
     if (codePrefixPage.handleNavigationButton(button)) return;
     if (button.dataset.view === "people" && button.dataset.peopleScope) {
-      await setPeopleScope(button.dataset.peopleScope);
-      setActiveView("people");
+      await navigatePeopleScope(button.dataset.peopleScope);
       return;
     }
     setActiveView(button.dataset.view);

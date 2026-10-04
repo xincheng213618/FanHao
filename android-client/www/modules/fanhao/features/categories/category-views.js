@@ -1,4 +1,4 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=assets-0f97d6765d71";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-07b744082137";
 import { formatNumber } from "../../../../js/format.js";
 
 export const CATEGORY_OPTIONS = Object.freeze([

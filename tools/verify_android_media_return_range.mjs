@@ -40,9 +40,10 @@ function syntheticService(prefix) {
         title: `${series} Episode ${String(episode).padStart(3, "0")}` });
     }
   }
+  const index = { scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items };
   return createImageLibraryService({
     clampInteger: (value, fallback, min, max) => Math.min(max, Math.max(min, Number.parseInt(value, 10) || fallback)),
-    getImageLibraryIndex: () => ({ scannedAt: "2026-08-01T00:00:00Z", photoSets: [], mediaItems: items }),
+    getImageLibraryIndex: () => index,
     maxItemLimit: 12000, galleryMediaRootStatuses: () => [], imageReaderCacheStatus: () => ({}), photoSetRootStatuses: () => [],
     mangaService: { cacheDirs: () => [], publicSummary: value => value, rootStatus: () => ({}) },
     metadataService: { movieRowsMap: () => movies, tvSeriesRowsMap: () => tv, movieRow: id => movies.get(id), tvSeriesRow: key => tv.get(key),
@@ -117,9 +118,9 @@ function harness(input = sources, { storage = new Map(), hash = "" } = {}) {
   assert(popstate && back, "Actual browser and UI back entry wiring"); vm.runInContext(`${popstate}\n${back}`, c);
   const cancelEvents = /for \(const eventName of \["pointerdown", "touchstart", "wheel"\]\) \{[\s\S]*?\n\}/.exec(input.app)?.[0];
   assert(cancelEvents, "Actual scroll cancellation event wiring"); vm.runInContext(cancelEvents, c);
-  const expose = /  return \{\r?\n    deactivate: resetMangaReaderProgressTracker,/;
+  const expose = /  return \{\r?\n(?=    deactivate:)/;
   assert(expose.test(input.channel), "Observable factory return boundary");
-  const channel = input.channel.replace(expose, "  return {\n    __testPageState: () => channelPageState,\n    deactivate: resetMangaReaderProgressTracker,");
+  const channel = input.channel.replace(expose, "  return {\n    __testPageState: () => channelPageState,\n");
   c.createChannelViews = vm.runInContext(`(function(){${strip(channel)};return createChannelViews;})()`, c);
   h.host.getActiveUrl = () => c.activeUrl;
   // Evaluate the exact host limit object; no fixed limit or synthetic reset.
@@ -243,7 +244,7 @@ for (const stage of ["cache", "fresh", "error"]) test(`source changes during pen
   if (stage === "error") hold.reject(Error("STALE A ERROR")); else hold.resolve(stage === "cache" ? { updatedAt: "synthetic", payload: data } : data);
   await oldTask; await tick(); assert.equal(h.c.els.viewContent.textContent, "B WAITING"); assert.equal(h.pageState(), null, "Late old source cannot claim shared page state");
   if (stage === "cache") assert.equal(h.calls.network.length, 0);
-  else if (stage === "fresh") assert.equal(h.calls.cacheWrites.at(-1).source, "https://synthetic-a.invalid", "Permitted cache write stays bound to captured source");
+  else if (stage === "fresh") assert.equal(h.calls.cacheWrites.length, 0, "Cancelled source response cannot overwrite its cache");
   await h.refresh(); assert.equal(h.query().get("offset"), "0"); assert(h.titles().every(title => title.startsWith("B ")));
 });
 
@@ -334,7 +335,7 @@ const mutations = [
   { name: "range helper ignores route", target: 'changed route {"query"', field: "range", edit: source => source.replace(" && entry.route === route", "") },
   { name: "range store no longer bounded128", target: "full range helper", field: "range", edit: source => source.replace("if (entries.size > 128) entries.delete(entries.keys().next().value);", "/* unbounded */") },
   { name: "in-memory channel key drops source", target: "direct source switch offline", field: "channel", edit: source => source.replace("      sourceUrl,", "      /* omitted sourceUrl */") },
-  ...["cache", "fresh", "error"].map(stage => ({ name: `late ${stage} forgets source guard`, target: `source changes during pending ${stage}`, field: "channel", edit: source => source.replace("const isCurrent = () => isActive() && getActiveUrl() === activeUrl;", "const isCurrent = () => isActive();") })),
+  ...["cache", "fresh", "error"].map(stage => ({ name: `late ${stage} forgets source guard`, target: `source changes during pending ${stage}`, field: "channel", edit: source => source.replace(" && getActiveUrl() === activeUrl;", ";") })),
   { name: "slow timer uses only render identity", target: "manga slow-loading", field: "channel", edit: source => source.replace("if (renderedCache || !isCurrent()) return;", "if (renderedCache || !isActive()) return;") },
   { name: "settings same-view mismatch skips restore", target: "settings history with same view", field: "app", edit: source => source.replace("if (currentView !== settingsBaseView || !sameViewParams(currentViewParams, settingsBaseParams))", "if (currentView !== settingsBaseView)") },
   { name: "async render completion never rearms scroll", target: "async fresh return rearms", field: "app", edit: source => replaceFunction(source, "renderCurrentView", code => code.replace("return restoreAfterRender(androidModuleRegistry?.render(currentView, currentViewParams, renderGuard), renderGuard);", "return androidModuleRegistry?.render(currentView, currentViewParams, renderGuard);")) },

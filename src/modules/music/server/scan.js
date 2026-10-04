@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { Buffer } from "node:buffer";
+import { localImageDiskIdentity } from "../../../platform/server/local-image-read-queue.js";
 import { AUDIO_EXTS, IMAGE_EXTS, KUWO_UTF16LE_PREFIX, MAX_INTRO_BYTES, MAX_LYRIC_BYTES, MUSIC_ARTIST_GENRE_HINTS, MUSIC_FACET_CACHE, MUSIC_GENRE_ALIASES, MUSIC_TITLE_GENRE_HINTS } from "./constants.js";
 import { cleanAlbumTitle, cleanArtistName, cleanComparable, cleanTrackTitle, hashText, isJunkAssetName, normalizedPathKey, numberPrefix, safeReadDir, safeReadDirEntries, safeStat, sortKey, yearFromText } from "./helpers.js";
 import { buildMusicIdentityKnowledge, isUnknownMusicArtist, resolveMusicTrackIdentity } from "./identity.js";
@@ -771,6 +772,20 @@ export function safeStoredFile(filePath, type, id = "") {
     ext: path.extname(normalized).toLowerCase(),
     size: stat.size,
     modifiedAt: stat.mtime?.toISOString?.() || ""
+  };
+}
+
+export async function safeStoredFileAsync(filePath, type, id = "", { statFile = (file) => fs.promises.stat(file) } = {}) {
+  const normalized = path.resolve(filePath);
+  let stat;
+  try { stat = await statFile(normalized); } catch { return null; }
+  if (!stat?.isFile()) return null;
+  const modifiedAt = stat.mtime?.toISOString?.() || "";
+  return {
+    id: id || hashText(normalized).slice(0, 16), path: normalized, type,
+    ext: path.extname(normalized).toLowerCase(), size: stat.size, modifiedAt,
+    diskIdentity: localImageDiskIdentity(normalized, stat),
+    cacheMtime: JSON.stringify(["disk", Number(stat.mtimeMs ?? stat.mtime?.getTime?.()), String(stat.dev ?? ""), String(stat.ino ?? "")])
   };
 }
 

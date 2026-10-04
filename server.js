@@ -17,7 +17,7 @@ import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/a
 import { createAdminPersonService } from "./src/modules/fanhao/server/admin/admin-person-service.js";
 import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db-service.js";
 import { createCrossStoreOutboxService } from "./src/modules/fanhao/server/library/cross-store-outbox-service.js";
-import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
+import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, STUDIO_CATALOG_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
 import { ensureRealPathWithinRoots } from "./src/platform/server/library-path-safety.js";
@@ -50,7 +50,7 @@ import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-in
 import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createWorkMoveJobService } from "./src/modules/fanhao/server/works/work-move-job-service.js";
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
-import { comparePopularityMetadata, compareRatingCountMetadata } from "./src/modules/fanhao/server/works/work-sort-metadata.js";
+import { createWorkSorter } from "./src/modules/fanhao/server/works/work-sorter.js";
 import { isAnimeWork } from "./src/modules/fanhao/server/works/work-category.js";
 import { createAdminScriptService } from "./src/modules/system/server/admin-script-service.js";
 import { createAdminSettingsService } from "./src/modules/system/server/admin-settings-service.js";
@@ -80,6 +80,20 @@ import { createVideoProbeService } from "./src/platform/server/video-probe-servi
 const product = SERVER_CONFIG.PRODUCT;
 if (product.id === "short-videos") throw new Error("Use server-short-videos.js for the standalone short-video product");
 const withGallery = product.id === "suite";
+const sharedWorkSorter = createWorkSorter({
+  displayWorkTitle,
+  progressForWork: (work) => playbackProgressService.getWorkProgress(work),
+  metadataForWork: (work) => {
+    const infoRow = workInfoFacetRow(work.id);
+    return {
+      releaseDate: firstPresentText(infoRow?.release_date, work.infoSummary?.releaseDate),
+      rating: firstPresentNumber(infoRow?.rating, work.infoSummary?.rating),
+      ratingCount: firstPresentNumber(infoRow?.rating_count, work.infoSummary?.ratingCount) || 0,
+      duration: firstPresentNumber(infoRow?.duration_minutes, work.infoSummary?.durationMinutes) || 0,
+      code: infoRow?.code || work.infoSummary?.code || work.title || work.directoryName || ""
+    };
+  }
+});
 // Disabled products are not imported: a FanHao-only installation does not need
 // the photos/media/content-index source trees or their runtime state.
 const { createImageGalleryDbService } = withGallery ? await import("./src/modules/content-index/server/image-gallery-db-service.js") : {};
@@ -173,19 +187,20 @@ const {
   WESTERN_LIBRARY_ROOTS
 } = SERVER_CONFIG;
 
-const { serveStatic } = createStaticFileServer({
+const staticFiles = createStaticFileServer({
   publicDir: PUBLIC_DIR,
   mimeTypes: MIME_TYPES,
   normalizeExt,
   notFound
 });
-const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer({
+const { serveStatic } = staticFiles;
+const fileServer = createFileServer({
   defaultChunkBytes: DEFAULT_VIDEO_CHUNK_BYTES,
   mimeTypes: MIME_TYPES,
   normalizeExt,
-  notFound,
-  safeStat
+  notFound
 });
+const { serveDownloadFile, serveInlineFile, serveRangedFile } = fileServer;
 const mangaService = withGallery ? createMangaService({
   databasePath: MANGA_DATABASE_PATH,
   projectRoot: PROJECT_ROOT,
@@ -233,6 +248,7 @@ const photoSetService = withGallery ? createPhotoSetService({
   fileBase,
   getImageGalleryDb,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  photoSetById: imageLibraryIndexService.photoSetById,
   listArchiveImages,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -323,6 +339,7 @@ const imageLibraryService = withGallery ? createImageLibraryService({
   clampInteger,
   galleryMediaRootStatuses: imageLibraryIndexService.galleryMediaRootStatuses,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  getImageLibraryRevision: imageLibraryIndexService.listRevision,
   imageReaderCacheStatus: imageReaderCacheService.status,
   mangaService,
   maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT,
@@ -363,7 +380,7 @@ const mediaResponseService = createMediaResponseService({
   notFound,
   proxiedRemoteImageUrl,
   publicRemoteUrl,
-  safeStat,
+  resolveCurrentLocalImageSource: (file) => library.filesById.get(file.id),
   sendText,
   workCoverRow
 });
@@ -386,6 +403,7 @@ const galleryMediaService = withGallery ? createGalleryMediaService({
   coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
   directVideoExts: DIRECT_VIDEO_EXTS,
   ffmpegPath: FFMPEG_PATH,
+  ffprobePath: FFPROBE_PATH,
   getImageGalleryDb,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
   mediaStreamService,
@@ -394,8 +412,7 @@ const galleryMediaService = withGallery ? createGalleryMediaService({
   playbackProgressService,
   publicGalleryMediaItem: imageLibraryService.publicGalleryMediaItem,
   safeChildPath,
-  safeStat,
-  videoProbeCached: videoProbeService.probeCached
+  safeStat
 }) : { byId: () => null, videoFile: () => null };
 const actorProfileService = createActorProfileService({
   actorProfileAliases,
@@ -557,6 +574,7 @@ const studioService = createStudioService({
   publicRemoteUrl,
   sortWorkList,
   userStateStamp: () => accountUserStateService.revision(),
+  workClassificationService,
   workFacets,
   workQueryStamp
 });
@@ -627,7 +645,8 @@ const codePrefixService = createCodePrefixService({
   sortWorkList,
   userStateStamp: () => accountUserStateService.revision(),
   workClassificationService,
-  workFacets
+  workFacets,
+  workQueryStamp
 });
 const adminCoreMutationService = createAdminCoreMutationService({
   actorIdFromJavdbUrl,
@@ -722,6 +741,8 @@ const workCoverMutationService = createWorkCoverMutationService({
   ffprobePath: FFPROBE_PATH,
   getCoreDb,
   getWorks: () => [...library.worksById.values()],
+  resolveWork: resolveLibraryWorkByPublicId,
+  manualCoverStamp: (work) => JSON.stringify(manualCoverStateService.manualCoverRecord(work.id)),
   invalidateWorkImageCache: workImageService.invalidate,
   publicCoreWorkCover,
   publicWorkCover,
@@ -836,8 +857,7 @@ const actorAvatarService = createActorAvatarService({
   localAvatarSource: LOCAL_ACTOR_AVATAR_SOURCE,
   maxBytes: MAX_ACTOR_AVATAR_BYTES,
   normalizeExt,
-  publicPerson,
-  safeStat
+  publicPerson
 });
 const adminActorAvatarService = createAdminActorAvatarService({
   actorAvatarService,
@@ -1062,6 +1082,7 @@ const moduleRegistry = await discoverFanHaoModules({
         filterWorkList: workFilterService.filter,
         galleryMediaService,
         generateWorkCover: workCoverMutationService.generateWorkCover,
+        cancelCoverGeneration: workCoverMutationService.cancelWork,
         getLastScanError: () => lastScanError,
         getLibrary: () => library,
         hydrateMissingSearchWorks: missingCodeSearchService.hydrate,
@@ -1135,10 +1156,11 @@ const moduleRegistry = await discoverFanHaoModules({
         appConfigService,
         cleanupImageReaderCache: imageReaderCacheService.cleanup,
         imageLibraryService,
-        imageReaderCacheStatus: imageReaderCacheService.status,
+        imageReaderCacheStatus: imageReaderCacheService.statusAsync,
         mangaService,
         notFound,
         photoSetService,
+        releasePhotoSetLookup: imageLibraryIndexService?.clearPhotoSetLookup,
         publicAppConfig: appConfigService.publicConfig,
         readJsonBody,
         requireLocalAdmin,
@@ -1683,7 +1705,7 @@ function prewarmWorkInfoDetails(works) {
 }
 
 function studioCatalogStamp() {
-  return `${library.scannedAt || ""}:${workInfoStamp()}:studio-v1`;
+  return `${library.scannedAt || ""}:${workInfoStamp()}:${compositeTableStamp(tableDataStamp, STUDIO_CATALOG_CACHE_TABLES)}:studio-v2`;
 }
 
 function actorMovieRows(personId) {
@@ -2145,20 +2167,20 @@ async function archiveImagesPayload(archivePath, options = {}) {
   return archiveImageService.archiveImagesPayload(archivePath, options);
 }
 
-function archiveImageSignature(archivePath) {
-  return archiveImageService.archiveSignature(archivePath);
+function archiveImageSignature(archivePath, request = {}) {
+  return archiveImageService.archiveSignature(archivePath, request);
 }
 
 async function listArchiveImages(archivePath, options = {}) {
   return archiveImageService.listArchiveImages(archivePath, options);
 }
 
-async function extractArchiveMemberToCache(archivePath, memberPath, cachePath) {
-  return archiveImageService.extractArchiveMemberToCache(archivePath, memberPath, cachePath);
+async function extractArchiveMemberToCache(archivePath, memberPath, cachePath, request = {}) {
+  return archiveImageService.extractArchiveMemberToCache(archivePath, memberPath, cachePath, request);
 }
 
-async function compressImageFileToJpeg(filePath) {
-  return archiveImageService.compressImageFileToJpeg(filePath);
+async function compressImageFileToJpeg(filePath, request = {}) {
+  return archiveImageService.compressImageFileToJpeg(filePath, request);
 }
 
 async function serveArchiveMemberImage(res, options) {
@@ -2229,85 +2251,7 @@ function isVrWork(work) {
 }
 
 function sortWorkList(works, sort) {
-  const list = [...works];
-  const usesMetadata = ["releaseDesc", "releaseAsc", "ratingAsc", "ratingDesc", "ratingCountDesc", "popularityDesc", "duration", "durationDesc", "durationAsc", "codeAsc", "codeDesc"].includes(sort);
-  const metadataByWork = usesMetadata
-    ? new Map(list.map((work) => {
-      const infoRow = workInfoFacetRow(work.id);
-      return [work, {
-        releaseDate: firstPresentText(infoRow?.release_date, work.infoSummary?.releaseDate),
-        rating: firstPresentNumber(infoRow?.rating, work.infoSummary?.rating),
-        ratingCount: firstPresentNumber(infoRow?.rating_count, work.infoSummary?.ratingCount) || 0,
-        duration: firstPresentNumber(infoRow?.duration_minutes, work.infoSummary?.durationMinutes) || 0,
-        code: infoRow?.code || work.infoSummary?.code || work.title || work.directoryName || ""
-      }];
-    }))
-    : null;
-  const progressByWork = sort === "progress"
-    ? new Map(list.map((work) => [work, String(playbackProgressService.getWorkProgress(work)?.updatedAt || "")]))
-    : null;
-  list.sort((a, b) => {
-    const aMetadata = metadataByWork?.get(a);
-    const bMetadata = metadataByWork?.get(b);
-    const titleResult = displayWorkTitle(a.title || a.directoryName).localeCompare(displayWorkTitle(b.title || b.directoryName), undefined, { numeric: true, sensitivity: "base" });
-    if (sort === "title") return titleResult;
-    if (sort === "progress") {
-      const progressResult = progressByWork.get(b).localeCompare(progressByWork.get(a));
-      return progressResult || titleResult;
-    }
-    if (sort === "videos") {
-      return Number(b.videoCount || 0) - Number(a.videoCount || 0) || titleResult;
-    }
-    if (sort === "releaseDesc" || sort === "releaseAsc") {
-      const aDate = aMetadata.releaseDate;
-      const bDate = bMetadata.releaseDate;
-      const aHas = Boolean(aDate);
-      const bHas = Boolean(bDate);
-      if (aHas !== bHas) return aHas ? -1 : 1;
-      if (aDate !== bDate) return sort === "releaseAsc" ? aDate.localeCompare(bDate) : bDate.localeCompare(aDate);
-    }
-
-    if (sort === "ratingAsc" || sort === "ratingDesc") {
-      const aRating = aMetadata.rating;
-      const bRating = bMetadata.rating;
-      const aHas = aRating !== null;
-      const bHas = bRating !== null;
-      if (aHas !== bHas) return aHas ? -1 : 1;
-      if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
-      const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
-      if (countDiff) return countDiff;
-    }
-
-    if (sort === "ratingCountDesc") {
-      const result = compareRatingCountMetadata(aMetadata, bMetadata);
-      if (result) return result;
-    }
-
-    if (sort === "popularityDesc") {
-      const result = comparePopularityMetadata(aMetadata, bMetadata);
-      if (result) return result;
-    }
-
-    if (sort === "size" || sort === "sizeDesc" || sort === "sizeAsc") {
-      const aSize = (a.videos || []).reduce((sum, video) => sum + Number(video.size || 0), 0);
-      const bSize = (b.videos || []).reduce((sum, video) => sum + Number(video.size || 0), 0);
-      if (aSize !== bSize) return sort === "sizeAsc" ? aSize - bSize : bSize - aSize;
-    }
-
-    if (sort === "duration" || sort === "durationDesc" || sort === "durationAsc") {
-      const aDuration = aMetadata.duration;
-      const bDuration = bMetadata.duration;
-      if (aDuration !== bDuration) return sort === "durationAsc" ? aDuration - bDuration : bDuration - aDuration;
-    }
-
-    if (sort === "codeAsc" || sort === "codeDesc") {
-      const result = aMetadata.code.localeCompare(bMetadata.code, undefined, { numeric: true, sensitivity: "base" });
-      if (result) return sort === "codeDesc" ? -result : result;
-    }
-
-    return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")) || titleResult;
-  });
-  return list;
+  return sharedWorkSorter(works, sort);
 }
 
 function workFacets(works = allWorks()) {
@@ -2359,10 +2303,17 @@ async function routeMedia(req, res, url) {
 
 userStateService.load();
 appConfigService.load();
-imageReaderCacheService.startCleanupTimer();
+await imageReaderCacheService.start({ backgroundInventory: true });
 actorProfileOutboxService.start();
 actorProfilePublicationLifecycleService.start();
 localLibraryIndexService.initializeLibrary();
+await videoProbeService.start();
+await mediaBlobStore.start();
+await mediaResponseService.start();
+await fileServer.start();
+await staticFiles.start();
+await mediaStreamService.start();
+await archiveImageService.start();
 await moduleRegistry.start();
 
 const requestHandler = createRequestHandler({
@@ -2387,17 +2338,36 @@ const serverHost = createServerHost({
   port: PORT,
   host: HOST,
   getLibraryState: () => library,
-  beginStop: () => moduleRegistry.beginStop(),
+  beginStop: () => {
+    staticFiles.beginStop();
+    fileServer.beginStop();
+    videoProbeService.beginStop();
+    mediaResponseService.beginStop();
+    mediaStreamService.beginStop();
+    archiveImageService.beginStop();
+    imageReaderCacheService.beginStop();
+    mediaBlobStore.beginStop();
+    workCoverMutationService.beginStop();
+    return moduleRegistry.beginStop();
+  },
   stop: async () => {
-    imageReaderCacheService.stop();
-    await accessAnalyticsService.close();
-    await workMoveJobService.close();
-    actorProfilePublicationLifecycleService.close();
-    actorProfileOutboxService.close();
-    await moduleRegistry.stop();
-    await mediaBlobStore.close();
-    accountUserStateService.close();
-    closeAccounts();
+    const resourceStops = await Promise.allSettled([
+      () => videoProbeService.stop(), () => mediaResponseService.stop(), () => mediaStreamService.stop(),
+      () => archiveImageService.stop(), () => imageReaderCacheService.stop(), () => workCoverMutationService.stop(),
+      () => mediaBlobStore.close(), () => fileServer.stop(), () => staticFiles.stop()
+    ].map(stopResource => Promise.resolve().then(stopResource)));
+    const failures = resourceStops.filter(result => result.status === "rejected").map(result => result.reason);
+    // Preserve the shutdown order, while one failed cleanup must not skip the
+    // remaining workers, modules or account databases.
+    for (const closeResource of [
+      () => accessAnalyticsService.close(), () => workMoveJobService.close(),
+      () => actorProfilePublicationLifecycleService.close(), () => actorProfileOutboxService.close(),
+      () => moduleRegistry.stop(), () => accountUserStateService.close(), () => closeAccounts()
+    ]) {
+      try { await closeResource(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Server resources failed to stop");
   }
 });
 

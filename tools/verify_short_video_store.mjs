@@ -8,7 +8,10 @@ import { createVerificationAdvisories } from "./verification_advisories.mjs";
 import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
-import { createShortVideoPublicVideoMapper } from "../src/modules/short-videos/server/public-video-mapper.js";
+import { createShortVideoPublicVideoMapper, shortVideoStatisticsKnown } from "../src/modules/short-videos/server/public-video-mapper.js";
+import { createShortVideoListPageQueries } from "../src/modules/short-videos/server/list-page-queries.js";
+import * as navigationQueries from "../src/modules/short-videos/server/navigation-queries.js";
+import { videoFilter } from "../src/modules/short-videos/server/query-contract.js";
 
 const shortVideoStoreSource = fs.readFileSync(new URL("../src/modules/short-videos/server/store.js", import.meta.url), "utf8");
 const advisories = createVerificationAdvisories("short-video-store");
@@ -181,6 +184,137 @@ assert.doesNotMatch(contentStructureSource, /PERCENT_RANK\s*\(/, "content-struct
 assert.doesNotMatch(contentStructureSource, /v\.(?:title|share_url|published_at|liked_at|actual_width|actual_height|actual_long_edge)/, "content-structure analytics must not load unused presentation columns for every video");
 assert.match(contentStructureSource, /rows\.sort\(\(left, right\) => Number\(left\.engagement_score/, "content-structure analytics must compute the equivalent tied percentile in one in-memory numeric sort");
 assert.match(contentStructureSource, /medianSorted\(collectRatios\)/, "content-structure analytics must reuse its sorted ratio arrays instead of repeatedly sorting the full sample");
+
+await verifyNavigationListOrder();
+if (process.argv.includes("--navigation-only")) {
+  console.log("short-video-store: navigation-only ok");
+  process.exit(0);
+}
+
+async function verifyNavigationListOrder() {
+  let module = navigationQueries;
+  if (process.argv.includes("--legacy-navigation-order")) {
+    const declaration = "function keyset(keys, movingNext) {";
+    assert.equal(shortVideoNavigationQueriesSource.split(declaration).length, 2);
+    const source = shortVideoNavigationQueriesSource.replace(declaration, `${declaration}\n    keys = keys.map(key => /(?:^|\\.)id$/.test(key.expression) ? { ...key, direction: keys[0].direction } : key);`)
+      .replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) => `from ${JSON.stringify(new URL(relative, new URL("../src/modules/short-videos/server/navigation-queries.js", import.meta.url)).href)}`);
+    module = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  }
+  const normalizeSortSource = shortVideoStoreSource.slice(shortVideoStoreSource.indexOf("function normalizeSort("), shortVideoStoreSource.indexOf("function runSqliteBusyRetry("));
+  const normalizeSort = new Function(`${normalizeSortSource}; return normalizeSort;`)();
+  const listOrderSource = /const orderBy = (\{[\s\S]+?\}\[sort\] \|\| "published_at DESC, liked_at DESC");/.exec(shortVideoStoreSource.slice(shortVideoStoreSource.indexOf("  function listVideos(")))?.[1];
+  assert(listOrderSource, "read the actual store's fallback list order");
+  const listOrder = new Function("sort", `return ${listOrderSource};`);
+  const columns = "id,published_at,liked_at,liked_sort_at,liked_sort_time,digg_count,comment_count,collect_count,share_count,duration_ms,size_bytes,last_watched_at";
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  let schemaDatabase;
+  DatabaseSync.prototype.prepare = function(sql) { schemaDatabase = this; return originalPrepare.call(this,sql); };
+  const unopenedCoverPath = path.join(os.tmpdir(),`fanhao-navigation-unopened-${process.pid}.sqlite`);
+  const schemaStore = createShortVideoStore({ dbPath: ":memory:", coverDbPath: unopenedCoverPath, roots: [], skipStartupMaintenance: true });
+  let schema;
+  try {
+    schemaStore.prepareSchema();
+    schema = originalPrepare.call(schemaDatabase,"SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY rowid").all();
+    assert(!fs.existsSync(unopenedCoverPath),"navigation setup must not create a cover database");
+  } finally { DatabaseSync.prototype.prepare=originalPrepare; schemaStore.close(); }
+  let checks = 0;
+  for (const nullableLegacy of [false, true]) {
+    const db = new DatabaseSync(":memory:");
+    const queries = [];
+    const observed = { prepare(sql) { queries.push(sql); return db.prepare(sql); } };
+    const list = createShortVideoListPageQueries({ listVideoColumns: columns });
+    const navigation = module.createShortVideoNavigationQueries({ listVideoColumns: columns, normalizeSort, statisticsKnown: shortVideoStatisticsKnown });
+    try {
+      for (const item of schema.filter(item=>item.type === "table")) {
+        if (item.name.startsWith("sqlite_") || item.name.startsWith("short_video_search_")) continue;
+        let sql=item.sql;
+        if (nullableLegacy && item.name === "short_videos") for (const column of ["published_at","liked_at","liked_sort_at","size_bytes"]) {
+          sql=sql.replace(new RegExp(`(${column} (?:TEXT|INTEGER)) NOT NULL`),"$1");
+        }
+        db.exec(sql);
+      }
+      for (const item of schema.filter(item=>item.type === "index" || item.type === "view")) db.exec(item.sql);
+      // As in the quality fixture, ingestion/search maintenance triggers are
+      // outside these read scenarios. Tables, indexes and views are actual.
+      const seed = db.prepare("INSERT INTO short_videos(id,aweme_id,source_path,visibility,media_type,is_liked,author_following,author_sec_uid,author_name,published_at,liked_at,liked_sort_at,liked_sort_time,digg_count,comment_count,collect_count,share_count,duration_ms,size_bytes,actual_pixels) VALUES(?,?,'',?,?,1,1,'actor','actor',?,?,?,?,?,?,0,0,?,?,?)");
+      const rows = [
+        ["A","2026-01-02","2026-01-03",10,10,1,5,5], ["B","2026-01-02","2026-01-03",10,10,1,5,5], ["C","2026-01-02","2026-01-03",10,10,1,5,5],
+        ["D","2026-01-01","2026-01-01",9,9,1,4,4], ["E","2026-01-03","2026-01-04",11,11,1,6,6],
+        ["F","","",null,null,null,null,null], ["G","","",null,0,0,0,0], ["H",null,null,-1,null,null,null,null],
+        ["I",null,null,null,0,0,0,0], ["J","2026-01-02",null,1000000000000,0,0,0,0],
+        ["P","2026-01-02","2026-01-03",10,10,1,5,5], ["O","2026-01-02","2026-01-03",10,10,1,5,5]
+      ];
+      for (const [id,published,liked,time,likes,comments,duration,size] of rows) {
+        seed.run(id,id,id === "P" ? "download_pending" : "local_only",["F","G"].includes(id) ? "gallery" : "video",nullableLegacy ? published : published ?? "",nullableLegacy ? liked : liked ?? "",nullableLegacy ? liked : liked ?? "",time,likes,comments,duration,nullableLegacy ? size : size ?? 0,id === "E" ? 8294400 : ["F","G"].includes(id) ? 0 : 921600);
+        db.prepare("INSERT INTO short_video_watch_history(local_user_id,video_id,last_watched_at) VALUES('local:self',?,'2026-02-01')").run(id);
+        db.prepare("INSERT INTO short_video_topics(video_id,topic,topic_key) VALUES(?,'chosen','chosen')").run(id);
+        if (["A","B","D","F","H","O"].includes(id)) db.prepare("INSERT INTO short_video_source_memberships(aweme_id,source_type,source_profile_id) VALUES(?,'post','fixture')").run(id);
+      }
+      db.exec("INSERT INTO short_video_users(id,platform,sec_uid,nickname) VALUES('author:actor','douyin','actor','actor'); UPDATE short_videos SET owner_user_id='author:actor',author_sec_uid='',author_name='old name' WHERE id='O';");
+      db.exec("INSERT INTO short_video_stats(video_id,digg_count,comment_count) VALUES('B',99,88); INSERT INTO short_video_assets(id,video_id,asset_type,local_path,size_bytes) VALUES('asset:B','B','video','',99);");
+      db.exec("INSERT INTO short_video_search(video_id,title,author_name,visibility,published_at,author_sec_uid,media_type,tags_json) SELECT id,'xy xyz',author_name,visibility,published_at,author_sec_uid,media_type,'[]' FROM short_video_catalog;");
+      const page = (filter, sort) => list.fastHistoryVideoPage(db,filter,sort,300,0)
+        ?? list.fastShortQueryVideoPage(db,filter,sort,300,0)
+        ?? list.fastFilteredVideoPage(db,filter,sort,300,0)
+        ?? list.fastPublishedVideoPage(db,filter,sort,300,0)
+        ?? { rows: db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE ${filter.where} ORDER BY ${listOrder(sort)},id DESC`).all(...filter.args) };
+      const scenarios = [
+        ...["published","publishedAsc","likes","likesAsc","comments","duration","size"].map(sort => ({ source: "all", sort })),
+        { source: "liked", sort: "published" }, { source: "liked", sort: "publishedAsc" }, { source: "history", sort: "watched" },
+        { source: "following", sort: "publishedAsc" }, { source: "all", sort: "publishedAsc", author: "all" },
+        ...["actor","name:actor"].flatMap(author=>["published","publishedAsc","likesAsc"].map(sort=>({source:"all",sort,author}))),
+        ...["posts","local"].flatMap(source=>["published","publishedAsc","likesAsc"].map(sort=>({source,sort}))),
+        ...["video","gallery"].flatMap(media=>["publishedAsc","likesAsc"].map(sort=>({source:"all",sort,media}))),
+        ...["4k","unknown"].flatMap(quality=>["published","publishedAsc","likesAsc"].map(sort=>({source:"all",sort,quality}))),
+        ...["x","xy","xyz"].flatMap(q=>["published","publishedAsc"].map(sort=>({source:"all",sort,q}))),
+        {origin:"liked",sort:"publishedAsc"}, {source:"all",sort:"publishedAsc",search:"xy"},
+        ...[{media:"video"},{author:"all"},{topic:"chosen"}].map(extra=>({source:"all",sort:"publishedAsc",q:"xy",...extra})),
+        ...["published","publishedAsc","likes","likesAsc","duration","size"].map(sort => ({ source: "all", sort, topic: "chosen" })),
+        { source: "liked", sort: "published", topic: "chosen" }, { source: "liked", sort: "publishedAsc", topic: "chosen" }
+      ];
+      for (const scenario of scenarios) {
+        const params = new URLSearchParams(scenario), filter = videoFilter(params), order = navigation.adjacentOrder({ searchParams: params });
+        const sort = filter.source === "liked" && scenario.sort === "published" ? "liked" : filter.source === "liked" && scenario.sort === "publishedAsc" ? "likedAsc" : scenario.sort;
+        const visible = new Set(page(filter,sort).rows.map(row => row.id));
+        const allFilter = videoFilter(new URLSearchParams({ ...scenario, includePending: "1" }));
+        const all = page(allFilter,sort).rows;
+        for (const anchor of all) for (const direction of [-1,1]) for (const limit of [1,6]) {
+          const index = all.findIndex(row => row.id === anchor.id);
+          const expected = (direction > 0 ? all.slice(index+1) : all.slice(0,index).reverse()).filter(row => visible.has(row.id)).slice(0,limit).map(row => row.id);
+          const actual = navigation.fastHistoryAdjacentRows(observed,anchor,direction,filter,order,limit)
+            ?? navigation.fastLikedAdjacentRows(observed,anchor,direction,filter,order,limit)
+            ?? navigation.fastPublishedAdjacentRows(observed,anchor,direction,filter,order,limit)
+            ?? navigation.fastMetricAdjacentRows(observed,anchor,direction,filter,order,limit)
+            ?? navigation.adjacentRows(observed,anchor,direction,order,true,filter,limit);
+          assert.deepEqual(actual.map(row => row.id),expected,`${nullableLegacy ? "nullable" : "current"} ${params} anchor=${anchor.id} direction=${direction} limit=${limit}`);
+          checks++;
+        }
+      }
+      assert.equal(queries.filter(sql => sql === "PRAGMA table_info(short_videos)").length,1,"column metadata is checked once per connection");
+      if (!nullableLegacy) {
+        const filter = videoFilter(new URLSearchParams({ source: "all", sort: "published" }));
+        const order = navigation.adjacentOrder({ searchParams: new URLSearchParams({ source: "all", sort: "published" }) });
+        queries.length=0; navigation.fastPublishedAdjacentRows(observed,page(filter,"published").rows[0],1,filter,order,6);
+        assert.match(queries[0],/\(v\.published_at, v\.liked_at, v\.id\) < \(\?, \?, \?\)/,"normal DESC publication retains its tuple seek");
+        const publishedPlan=db.prepare(`EXPLAIN QUERY PLAN ${queries[0]}`).all(...Array((queries[0].match(/\?/g)||[]).length).fill(0)).map(row=>row.detail).join("\n");
+        assert.match(publishedPlan,/SEARCH v USING INDEX idx_short_videos_published \(published_at<\?\)/,"actual DESC publication retains its index range seek");
+        assert(!queries.some(sql=>/AS value FROM short_videos/.test(sql)),"publication navigation has no extra scalar anchor read");
+        const likedFilter=videoFilter(new URLSearchParams({ source: "liked" }));
+        const likedOrder=navigation.adjacentOrder({ searchParams: new URLSearchParams({ source: "liked" }) });
+        queries.length=0; navigation.fastLikedAdjacentRows(observed,page(likedFilter,"liked").rows[0],1,likedFilter,likedOrder,6);
+        const select=queries.find(sql=>/SELECT v\.id/.test(sql));
+        const paramsCount=(select.match(/\?/g)||[]).length;
+        const plan=db.prepare(`EXPLAIN QUERY PLAN ${select}`).all(...Array(paramsCount).fill(0)).map(row=>row.detail).join("\n");
+        assert.match(plan,/idx_short_videos_liked_sort_all/); assert.doesNotMatch(plan,/TEMP B-TREE/);
+        assert(!queries.some(sql=>/AS value FROM short_videos/.test(sql)),"default liked navigation has no extra scalar anchor read");
+        const metricParams=new URLSearchParams({source:"all",sort:"likes"});
+        queries.length=0; navigation.fastMetricAdjacentRows(observed,db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE id='B'`).get(),1,videoFilter(metricParams),navigation.adjacentOrder({searchParams:metricParams}),6);
+        assert.equal(queries.filter(sql=>/AS value FROM short_videos/.test(sql)).length,1,"overlaid metric anchor needs one bounded scalar read");
+      }
+    } finally { db.close(); }
+  }
+  console.log(`short-video-store: ${checks} in-memory navigation/list order checks passed`);
+}
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-store-"));
 const root = path.join(tempDir, "likes");

@@ -423,3 +423,22 @@ body.gallery-view .gallery-browse-shell .gallery-controls {
   .gallery-browse-shell .gallery-movie-list-item:hover .gallery-movie-list-poster,
   .gallery-browse-shell .gallery-photo-catalog-card:hover { transform: none; }
 }
+
+@supports (content-visibility: auto) {
+  /* The clamped poster copy uses 42 + 18 + 18 + 2*6 + 1 = 91px.
+     Give only this text slot a definite size: skipped copies otherwise retain
+     their previous width/layout height. Posters, focus outlines and cover IO
+     stay outside containment; the variable-height list layout is unchanged.
+     Keep these slots in sync when adding copy rows or changing their metrics. */
+  .gallery-browse-shell .gallery-movie-explore[data-layout="posters"] .gallery-movie-list > .gallery-movie-list-item > .gallery-movie-list-copy {
+    content-visibility: auto;
+    block-size: 91px;
+  }
+
+  @media (max-width: 480px) {
+    .gallery-browse-shell .gallery-movie-explore[data-layout="posters"] .gallery-movie-list > .gallery-movie-list-item > .gallery-movie-list-copy {
+      /* The small row adds 10px*1.42 + 6px; Chromium rounds to 111.1875px. */
+      block-size: 111.2px;
+    }
+  }
+}

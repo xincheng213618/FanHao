@@ -13,6 +13,28 @@ export async function routeAdminApi(req, res, url, deps) {
 
   if (!url.pathname.startsWith("/api/admin/")) return false;
 
+  async function actorAvatarRequest(operation, fallbackMessage) {
+    const controller = new AbortController();
+    const cancel = () => { if (!res.writableEnded) controller.abort(); };
+    req.once("aborted", cancel);
+    res.once("close", cancel);
+    try {
+      const body = await readJsonBody(req);
+      if (req.aborted || res.destroyed) controller.abort();
+      const payload = await operation(body, { signal: controller.signal });
+      if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) sendJson(res, 200, payload);
+    } catch (error) {
+      if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) {
+        const response = adminActorAvatarService.errorPayload(error, fallbackMessage);
+        sendJson(res, response.statusCode, response.payload);
+      }
+    } finally {
+      req.off("aborted", cancel);
+      res.off("close", cancel);
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/admin/access-stats" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
@@ -144,38 +166,17 @@ export async function routeAdminApi(req, res, url, deps) {
 
   if (url.pathname === "/api/admin/import-actor-avatars" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
-    try {
-      const body = await readJsonBody(req);
-      sendJson(res, 200, adminActorAvatarService.importFromFiletreePayload(body));
-    } catch (error) {
-      const response = adminActorAvatarService.errorPayload(error, "扫描演员头像失败");
-      sendJson(res, response.statusCode, response.payload);
-    }
-    return true;
+    return actorAvatarRequest((body, options) => adminActorAvatarService.importFromFiletreePayload(body, options), "扫描演员头像失败");
   }
 
   if (url.pathname === "/api/admin/actor-avatar-candidates" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
-    try {
-      const body = await readJsonBody(req);
-      sendJson(res, 200, adminActorAvatarService.candidatesPayload(body));
-    } catch (error) {
-      const response = adminActorAvatarService.errorPayload(error, "读取演员头像候选失败");
-      sendJson(res, response.statusCode, response.payload);
-    }
-    return true;
+    return actorAvatarRequest((body, options) => adminActorAvatarService.candidatesPayload(body, options), "读取演员头像候选失败");
   }
 
   if (url.pathname === "/api/admin/apply-actor-avatar-candidate" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
-    try {
-      const body = await readJsonBody(req);
-      sendJson(res, 200, adminActorAvatarService.applyCandidatePayload(body));
-    } catch (error) {
-      const response = adminActorAvatarService.errorPayload(error, "应用演员头像候选失败");
-      sendJson(res, response.statusCode, response.payload);
-    }
-    return true;
+    return actorAvatarRequest((body, options) => adminActorAvatarService.applyCandidatePayload(body, options), "应用演员头像候选失败");
   }
 
   const personMappingMatch = /^\/api\/admin\/person-mapping\/([^/]+)$/.exec(url.pathname);

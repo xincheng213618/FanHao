@@ -1,20 +1,28 @@
-@import "./css/base.css?v=assets-0f97d6765d71";
-@import "./css/sections.css?v=assets-0f97d6765d71";
-@import "./css/lists.css?v=assets-0f97d6765d71";
-@import "./modules/fanhao/styles.css?v=assets-0f97d6765d71";
-@import "./modules/tools/styles.css?v=assets-0f97d6765d71";
-@import "./modules/novels/styles.css?v=assets-0f97d6765d71";
-@import "./modules/novels/mobile-refinements.css?v=assets-0f97d6765d71";
-@import "./modules/music/styles.css?v=assets-0f97d6765d71";
-@import "./modules/music/home.css?v=assets-0f97d6765d71";
-@import "./modules/music/playlist.css?v=assets-0f97d6765d71";
-@import "./modules/music/auto-collection.css?v=assets-0f97d6765d71";
-@import "./modules/music/library.css?v=assets-0f97d6765d71";
-@import "./modules/music/collection.css?v=assets-0f97d6765d71";
-@import "./modules/short-videos/styles.css?v=assets-0f97d6765d71";
-@import "./css/settings-nav.css?v=assets-0f97d6765d71";
-@import "./css/media-viewer.css?v=assets-0f97d6765d71";
-@import "./modules/media/styles.css?v=assets-0f97d6765d71";
+@import "./css/base.css?v=assets-07b744082137";
+@import "./css/sections.css?v=assets-07b744082137";
+@import "./css/lists.css?v=assets-07b744082137";
+@import "./modules/fanhao/styles.css?v=assets-07b744082137";
+@import "./modules/tools/styles.css?v=assets-07b744082137";
+@import "./modules/novels/styles.css?v=assets-07b744082137";
+@import "./modules/novels/mobile-refinements.css?v=assets-07b744082137";
+@import "./modules/music/styles.css?v=assets-07b744082137";
+@import "./modules/music/home.css?v=assets-07b744082137";
+@import "./modules/music/playlist.css?v=assets-07b744082137";
+@import "./modules/music/auto-collection.css?v=assets-07b744082137";
+@import "./modules/music/library.css?v=assets-07b744082137";
+@import "./modules/music/collection.css?v=assets-07b744082137";
+@import "./modules/short-videos/styles.css?v=assets-07b744082137";
+@import "./css/settings-nav.css?v=assets-07b744082137";
+@import "./css/media-viewer.css?v=assets-07b744082137";
+@import "./modules/media/styles.css?v=assets-07b744082137";
+
+/* Flat rows: 51px content plus 14px padding and 1px border keeps the 66px row. */
+@supports (content-visibility: auto) and (contain-intrinsic-block-size: auto 51px) {
+  body.music-mobile-view .music-mobile-shell > .music-mobile-list > .music-mobile-track {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 51px;
+  }
+}
 
 
 

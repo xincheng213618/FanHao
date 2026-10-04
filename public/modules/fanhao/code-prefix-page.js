@@ -14,6 +14,8 @@ export function createCodePrefixPage(deps) {
     els,
     formatNumber,
     hidePersonProfile,
+    isNavigationCurrent,
+    onNavigationStarted,
     renderWorks,
     resetWorkPaging,
     setMainHeader,
@@ -23,9 +25,10 @@ export function createCodePrefixPage(deps) {
   } = deps;
 
   const detailRequests = createLatestRequestGate();
+  const indexRequests = createLatestRequestGate();
   let indexLoadObserver = null;
   let indexLoadPending = false;
-  let indexRequest = null;
+  let detailPageOwner = null;
 
   state.codePrefixSortMode = readPrefixSortMode();
 
@@ -33,18 +36,20 @@ export function createCodePrefixPage(deps) {
     return showIndex(options);
   }
 
-  async function applyRoute(route) {
+  async function applyRoute(route, options = {}) {
     clearWorkSearch();
     return route?.codePrefix
       ? selectPrefix(route.codePrefix, {
+          ...options,
           family: route.codePrefixFamily,
           resetFilter: false,
           skipRoute: true
         })
-      : showIndex({ skipRoute: true });
+      : showIndex({ ...options, skipRoute: true });
   }
 
   function invalidateIndex() {
+    indexRequests.cancel();
     state.codePrefixes = [];
     state.codePrefixIndexLocalCount = 0;
     state.codePrefixMappedCount = 0;
@@ -72,7 +77,10 @@ export function createCodePrefixPage(deps) {
   }
 
   async function showIndex(options = {}) {
+    const navigationIntent = onNavigationStarted?.(options);
+    const request = indexRequests.begin();
     detailRequests.cancel();
+    detailPageOwner = null;
     disconnectIndexAutoload();
     state.activeView = "codes";
     state.selectedCodePrefix = "";
@@ -88,49 +96,49 @@ export function createCodePrefixPage(deps) {
     setMainHeader("番号索引", "按番号前缀浏览本地资料库");
     renderIndexStats();
     renderIndex();
-    await loadIndex(options);
-    syncRouteAfterNavigation({
-      ...options,
-      routeOverrides: {
-        view: "codes",
-        codePrefix: "",
-        codePrefixFamily: false,
-        personId: "",
-        q: "",
-        workId: "",
-        videoId: ""
-      }
-    });
+    const isCurrent = () => request.isCurrent() && state.activeView === "codes" && !state.selectedCodePrefix
+      && (!isNavigationCurrent || isNavigationCurrent(navigationIntent));
+    try {
+      await loadIndex(request, isCurrent, options);
+      if (!isCurrent()) return;
+      syncRouteAfterNavigation({
+        ...options,
+        routeOverrides: {
+          view: "codes",
+          codePrefix: "",
+          codePrefixFamily: false,
+          personId: "",
+          q: "",
+          workId: "",
+          videoId: ""
+        }
+      });
+    } finally {
+      request.finish();
+    }
   }
 
-  async function loadIndex(options = {}) {
+  async function loadIndex(request, isCurrent, options = {}) {
     if (state.codePrefixes.length && !options.force) {
       renderIndexStats();
       renderIndex();
       return;
     }
-    if (indexRequest) return indexRequest;
     els.workGrid.innerHTML = `<div class="empty-state">正在整理番号与厂商对应关系</div>`;
-    indexRequest = api("/api/code-prefixes?sort=count")
-      .then((data) => {
-        state.codePrefixes = data.prefixes || [];
-        state.codePrefixIndexLocalCount = data.localWorkCount || 0;
-        state.codePrefixMappedCount = data.mappedCount || 0;
-        state.codePrefixVisibleLimit = prefixIndexPageSize();
-        if (state.activeView === "codes" && !state.selectedCodePrefix) {
-          renderIndexStats();
-          renderIndex();
-        }
-      })
-      .catch((error) => {
-        if (state.activeView !== "codes" || state.selectedCodePrefix) return;
-        els.workGrid.innerHTML = "";
-        appendEmpty(error.message || "番号索引读取失败");
-      })
-      .finally(() => {
-        indexRequest = null;
-      });
-    return indexRequest;
+    try {
+      const data = await api("/api/code-prefixes?sort=count", { signal: request.signal });
+      if (!isCurrent()) return;
+      state.codePrefixes = data.prefixes || [];
+      state.codePrefixIndexLocalCount = data.localWorkCount || 0;
+      state.codePrefixMappedCount = data.mappedCount || 0;
+      state.codePrefixVisibleLimit = prefixIndexPageSize();
+      renderIndexStats();
+      renderIndex();
+    } catch (error) {
+      if (!isCurrent()) return;
+      els.workGrid.innerHTML = "";
+      appendEmpty(error.message || "番号索引读取失败");
+    }
   }
 
   function renderIndexStats() {
@@ -321,9 +329,12 @@ export function createCodePrefixPage(deps) {
   }
 
   async function selectPrefix(prefix, options = {}) {
+    const navigationIntent = onNavigationStarted?.(options);
     const normalizedPrefix = String(prefix || "").trim().toUpperCase();
     if (!normalizedPrefix) return showIndex(options);
+    indexRequests.cancel();
     const request = detailRequests.begin();
+    detailPageOwner = null;
     disconnectIndexAutoload();
     state.activeView = "codes";
     state.selectedCodePrefix = normalizedPrefix;
@@ -338,6 +349,9 @@ export function createCodePrefixPage(deps) {
     state.codePrefixFacets = null;
     state.codePrefixLoadingMore = false;
     if (options.resetFilter !== false) clearWorkFilter();
+    const query = detailPath(normalizedPrefix, 0, state.selectedCodePrefixFamily);
+    const isCurrent = () => detailIsCurrent(request, query)
+      && (!isNavigationCurrent || isNavigationCurrent(navigationIntent));
     syncNavigationState("codes");
     hidePersonProfile();
     setMainHeader(normalizedPrefix, options.family ? "正在查询全部系列" : "正在读取番号作品");
@@ -345,11 +359,8 @@ export function createCodePrefixPage(deps) {
     els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
 
     try {
-      const data = await fetchDetailPage(normalizedPrefix, 0, {
-        family: Boolean(options.family),
-        signal: request.signal
-      });
-      if (!request.isCurrent() || state.activeView !== "codes" || state.selectedCodePrefix !== normalizedPrefix) return;
+      const data = await api(query, { signal: request.signal });
+      if (!isCurrent()) return;
       applyDetailPayload(data, false);
       resetWorkPaging();
       renderPrefixHeader();
@@ -368,7 +379,7 @@ export function createCodePrefixPage(deps) {
         }
       });
     } catch (error) {
-      if (request.signal.aborted) return;
+      if (!isCurrent()) return;
       els.statsRow.innerHTML = "";
       els.workGrid.innerHTML = "";
       appendEmpty(error.message || "番号作品读取失败");
@@ -390,6 +401,12 @@ export function createCodePrefixPage(deps) {
   async function loadMore(button) {
     if (state.codePrefixLoadingMore || state.activeView !== "codes" || !state.selectedCodePrefix) return;
     if (state.works.length >= state.codePrefixTotal) return;
+    const request = detailRequests.begin();
+    detailPageOwner = request;
+    const prefix = state.selectedCodePrefix;
+    const family = state.selectedCodePrefixFamily;
+    const query = detailPath(prefix, 0, family);
+    const path = detailPath(prefix, state.works.length, family);
     state.codePrefixLoadingMore = true;
     const originalText = button?.textContent || "";
     if (button) {
@@ -397,25 +414,34 @@ export function createCodePrefixPage(deps) {
       button.textContent = "正在加载";
     }
     try {
-      const prefix = state.selectedCodePrefix;
-      const family = state.selectedCodePrefixFamily;
-      const data = await fetchDetailPage(prefix, state.works.length, { family });
-      if (state.activeView !== "codes" || state.selectedCodePrefix !== prefix || state.selectedCodePrefixFamily !== family) return;
+      const data = await api(path, { signal: request.signal });
+      if (!detailIsCurrent(request, query) || detailPageOwner !== request) return;
       applyDetailPayload(data, true);
       state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
       renderPrefixHeader();
       renderDetailStats();
       appendLoadedWorkPage();
+    } catch (error) {
+      if (detailIsCurrent(request, query) && detailPageOwner === request) throw error;
     } finally {
-      state.codePrefixLoadingMore = false;
-      if (button?.isConnected) {
-        button.disabled = false;
-        button.textContent = originalText || button.textContent;
+      if (detailPageOwner === request) {
+        detailPageOwner = null;
+        state.codePrefixLoadingMore = false;
+        if (detailIsCurrent(request, query) && button?.isConnected) {
+          button.disabled = false;
+          button.textContent = originalText || button.textContent;
+        }
       }
+      request.finish();
     }
   }
 
-  function fetchDetailPage(prefix, offset, options = {}) {
+  function detailIsCurrent(request, query) {
+    return request.isCurrent() && state.activeView === "codes"
+      && query === detailPath(state.selectedCodePrefix, 0, state.selectedCodePrefixFamily);
+  }
+
+  function detailPath(prefix, offset, family) {
     const params = new URLSearchParams({
       limit: String(detailPageSize()),
       offset: String(offset || 0),
@@ -424,8 +450,16 @@ export function createCodePrefixPage(deps) {
       includeMissingLocal: state.showMissingLocalWorks ? "1" : "0",
       includeCompilation: state.showCompilationWorks ? "1" : "0"
     });
-    if (options.family) params.set("family", "1");
-    return api(`/api/code-prefixes/${encodeURIComponent(prefix)}?${params}`, options.signal ? { signal: options.signal } : {});
+    if (family) params.set("family", "1");
+    return `/api/code-prefixes/${encodeURIComponent(prefix)}?${params}`;
+  }
+
+  function cancelPendingRequests() {
+    indexRequests.cancel();
+    detailRequests.cancel();
+    detailPageOwner = null;
+    state.codePrefixLoadingMore = false;
+    disconnectIndexAutoload();
   }
 
   function applyDetailPayload(data, append) {
@@ -507,7 +541,7 @@ export function createCodePrefixPage(deps) {
 
   return {
     applyRoute,
-    cancelPendingRequests: detailRequests.cancel,
+    cancelPendingRequests,
     disconnectIndexAutoload,
     enter,
     handleNavigationButton,

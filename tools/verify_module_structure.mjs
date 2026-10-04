@@ -69,7 +69,8 @@ assert(serverSource.includes("createArchiveImageService({"), "server.js must del
 assert(!serverSource.includes("spawnSync") && !serverSource.includes("execFileSync"), "server.js must not block the request loop with synchronous subprocesses");
 advisories.check(serverSource.split(/\r?\n/).length <= 2400, "server.js has grown beyond 2400 lines; review whether composition can be made easier to navigate");
 const archiveImageServiceSource = fs.readFileSync(path.join(platformDir, "server", "archive-image-service.js"), "utf8");
-assert(archiveImageServiceSource.includes('import { execFile } from "node:child_process"') && archiveImageServiceSource.includes("listInflight") && archiveImageServiceSource.includes("extractInflight"), "archive image work must use asynchronous deduplicated subprocesses");
+const archiveTaskPoolSource = fs.readFileSync(path.join(platformDir, "server", "archive-task-pool.js"), "utf8");
+assert(archiveImageServiceSource.includes("createArchiveTaskPool") && archiveImageServiceSource.includes("await runArchiveChild") && archiveTaskPoolSource.includes('import { spawn } from "node:child_process"') && archiveTaskPoolSource.includes("shared.get(key)"), "archive image work must use asynchronous deduplicated subprocesses through the bounded shared pool");
 assert(!archiveImageServiceSource.includes("spawnSync") && !archiveImageServiceSource.includes("execFileSync"), "archive image service must not restore synchronous subprocesses");
 const photoSetServiceSource = fs.readFileSync(path.join(modulesDir, "photos", "server", "photo-set-service.js"), "utf8");
 assert(photoSetServiceSource.includes("async function publicDetail") && photoSetServiceSource.includes("await archiveImagesPayload") && photoSetServiceSource.includes("async function serveCover"), "photo-set routes must await asynchronous archive and cover work");

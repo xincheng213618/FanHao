@@ -1,3 +1,12 @@
+import { randomUUID } from "node:crypto";
+import {
+  GALLERY_METADATA_CLOCK_CONTRACT_SQL,
+  GALLERY_METADATA_CLOCK_TABLE,
+  galleryMetadataClockKinds,
+  trustedGalleryMetadataClockKinds,
+  validGalleryMetadataClock
+} from "../../../../lib/gallery-metadata-revision.js";
+
 function safeJsonArray(value) {
   try {
     const parsed = JSON.parse(value || "[]");
@@ -72,6 +81,78 @@ export function createGalleryMetadataService({
   getImageGalleryDb,
   notFound
 }) {
+  const metadataProjections = new WeakMap();
+  const listRevisions = new WeakMap();
+  const revisionRealm = randomUUID();
+  let connectionSequence = 0;
+  let unavailableSequence = 0;
+
+  function listRevision(mode = "media") {
+    try {
+      const db = getImageGalleryDb();
+      let state = listRevisions.get(db);
+      if (!state) {
+        state = {
+          identity: ++connectionSequence,
+          schemaChanges: db.prepare("PRAGMA schema_version"),
+          contract: db.prepare(GALLERY_METADATA_CLOCK_CONTRACT_SQL),
+          schemaVersion: null,
+          trustedKinds: new Set()
+        };
+        listRevisions.set(db, state);
+      }
+      const schemaVersion = state.schemaChanges.get().schema_version;
+      if (schemaVersion !== state.schemaVersion) {
+        // Schema changes can remove or replace a trigger under its original
+        // name. Trust its complete contract, rather than just its presence.
+        state.trustedKinds = trustedGalleryMetadataClockKinds(state.contract.all());
+        state.schemaVersion = schemaVersion;
+      }
+      const kinds = galleryMetadataClockKinds(mode);
+      if (kinds.every(kind => state.trustedKinds.has(kind))) {
+        state.clock ||= db.prepare(`SELECT epoch, revision FROM ${GALLERY_METADATA_CLOCK_TABLE} WHERE kind = ?`);
+        const clocks = kinds.map(kind => state.clock.get(kind));
+        if (clocks.every(validGalleryMetadataClock)) {
+          return JSON.stringify([revisionRealm, state.identity, schemaVersion, kinds, clocks]);
+        }
+      }
+      state.localChanges ||= db.prepare("SELECT total_changes() AS changes");
+      state.externalChanges ||= db.prepare("PRAGMA data_version");
+      return JSON.stringify([revisionRealm, state.identity, schemaVersion, "fallback",
+        state.localChanges.get().changes, state.externalChanges.get().data_version]);
+    } catch {
+      // A failed source probe must never authorize an append to an older page.
+      return JSON.stringify([revisionRealm, "unavailable", ++unavailableSequence]);
+    }
+  }
+
+  function metadataRowsMap(table, key) {
+    const db = getImageGalleryDb();
+    let state = metadataProjections.get(db);
+    if (!state) {
+      state = { schemaVersion: db.prepare("PRAGMA schema_version"), version: null, tables: new Map() };
+      metadataProjections.set(db, state);
+    }
+    const version = state.schemaVersion.get().schema_version;
+    if (version !== state.version) {
+      state.tables.clear();
+      state.version = version;
+    }
+    let statement = state.tables.get(table);
+    if (!statement) {
+      const quote = name => `"${String(name).replaceAll('"', '""')}"`;
+      const columns = db.prepare(`PRAGMA table_info(${quote(table)})`).all().map(row => row.name);
+      const projection = columns.map(name => name === "cover_blob"
+        // node:sqlite reads TEXT through its first NUL; SQLite length() has
+        // the same boundary. Empty BLOBs still become truthy Uint8Arrays.
+        ? `CASE typeof("cover_blob") WHEN 'blob' THEN 1 WHEN 'text' THEN length("cover_blob") > 0 WHEN 'integer' THEN "cover_blob" != 0 WHEN 'real' THEN "cover_blob" != 0 ELSE NULL END AS "cover_blob"`
+        : quote(name)).join(", ");
+      statement = db.prepare(`SELECT ${projection || "*"} FROM ${quote(table)}`);
+      state.tables.set(table, statement);
+    }
+    return new Map(statement.all().map(row => [row[key], row]));
+  }
+
   function tvSeriesKey(category, seriesName) {
     return createId("tvs", `${String(category || "").trim()}|${String(seriesName || "").trim()}`);
   }
@@ -90,8 +171,7 @@ export function createGalleryMetadataService({
 
   function tvSeriesRowsMap() {
     try {
-      const rows = getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata").all();
-      return new Map(rows.map((row) => [row.series_key, row]));
+      return metadataRowsMap("tv_series_metadata", "series_key");
     } catch (error) {
       console.warn("[tv-series-metadata-db]", error.message || error);
       return new Map();
@@ -110,8 +190,7 @@ export function createGalleryMetadataService({
 
   function movieRowsMap() {
     try {
-      const rows = getImageGalleryDb().prepare("SELECT * FROM movie_metadata").all();
-      return new Map(rows.map((row) => [row.media_id, row]));
+      return metadataRowsMap("movie_metadata", "media_id");
     } catch (error) {
       console.warn("[movie-metadata-db]", error.message || error);
       return new Map();
@@ -235,6 +314,7 @@ export function createGalleryMetadataService({
   }
 
   return {
+    listRevision,
     movieRow,
     movieRowsMap,
     publicMovie,

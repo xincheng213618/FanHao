@@ -1669,8 +1669,41 @@ try {
   const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || path.join(os.homedir(), "AppData/Local/Android/Sdk");
   const cachedJar = (pattern) => fs.existsSync(gradleCaches)
     ? fs.globSync(pattern, { cwd: gradleCaches }).sort().map((name) => path.join(gradleCaches, name)).at(-1) : null;
-  const tasksJar = cachedJar("*/transforms/*/transformed/play-services-tasks-*-runtime.jar");
-  const basementJar = cachedJar("*/transforms/*/transformed/play-services-basement-*-runtime.jar");
+  let archiveTool;
+  const resolveArchiveTool = () => {
+    if (archiveTool) return archiveTool;
+    const binaryName = process.platform === "win32" ? "jar.exe" : "jar";
+    const configured = javaHome && path.join(javaHome, "bin", binaryName);
+    if (configured && fs.existsSync(configured)) return archiveTool = configured;
+    // Windows javapath may expose java/javac without exposing jar on PATH.
+    const properties = spawnSync(executable("java"), ["-XshowSettings:properties", "-version"],
+      { encoding: "utf8", timeout: 15000 });
+    assert.equal(properties.status, 0, properties.error?.message || properties.stderr);
+    const runtimeHome = properties.stderr.match(/^\s*java\.home\s*=\s*(.+)$/m)?.[1].trim();
+    assert.ok(runtimeHome, "Java must report its home for the cached AAR probe");
+    archiveTool = path.join(runtimeHome, "bin", binaryName);
+    assert.ok(fs.existsSync(archiveTool), "the selected Java installation must include the JDK archive tool");
+    return archiveTool;
+  };
+  const cachedRuntimeJar = (packageName) => {
+    const transformed = cachedJar(`*/transforms/*/transformed/${packageName}-*-runtime.jar`);
+    if (transformed) return transformed;
+    // A previous APK build is not a prerequisite for this real-library probe.
+    // Extract only the fixed classes entry from the already cached dependency.
+    const archive = cachedJar(`modules-2/files-2.1/com.google.android.gms/${packageName}/*/*/${packageName}-*.aar`);
+    if (!archive) return null;
+    const directory = path.join(temporary, packageName);
+    fs.mkdirSync(directory);
+    const extraction = spawnSync(resolveArchiveTool(), ["xf", archive, "classes.jar"],
+      { cwd: directory, encoding: "utf8", timeout: 30000 });
+    assert.equal(extraction.status, 0, extraction.error?.message || `${extraction.stdout}\n${extraction.stderr}`);
+    const classes = path.join(directory, "classes.jar");
+    assert.ok(fs.statSync(classes).isFile(), `${packageName} archive must contain classes.jar`);
+    process.stdout.write(`google-tasks-probe: using cached ${path.basename(archive)} classes.jar\n`);
+    return classes;
+  };
+  const tasksJar = cachedRuntimeJar("play-services-tasks");
+  const basementJar = cachedRuntimeJar("play-services-basement");
   const androidJar = fs.existsSync(sdk)
     ? fs.globSync("platforms/android-*/android.jar", { cwd: sdk }).sort().map((name) => path.join(sdk, name)).at(-1) : null;
   assert.ok(tasksJar && basementJar && androidJar, "actual Google Tasks probe requires the project's cached Android/Google dependencies and Android SDK");

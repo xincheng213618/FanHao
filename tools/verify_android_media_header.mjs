@@ -24,39 +24,64 @@ const LEGACY = {"chrome":"function createMediaChrome(host) {\n  return {\n    up
 const LEGACY_SHA256 = "5dad0eba8bc631fb9e5128c2ee2e614417187f21ebb940e12c7497c3c511e30d";
 const strip = source => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const plain = value => JSON.parse(JSON.stringify(value));
+// Actual pre-reuse method from the previous frozen channel source. The rest of
+// the current factory still runs in this behavioral negative control.
+const LEGACY_SET_META = `  function setChannelMeta(mode, text) {
+    els.viewMeta.textContent = text;
+    if (["movie", "tv", "anime", "media"].includes(mode) && openMediaSearch) {
+      const count = document.createElement("span");
+      count.className = "media-list-count";
+      count.textContent = els.viewMeta.textContent;
+      const search = document.createElement("button");
+      search.type = "button";
+      search.className = "module-chrome-search media-list-search icon-only";
+      search.setAttribute("aria-label", mode === "tv" ? "搜索电视剧" : mode === "anime" ? "搜索动漫" : mode === "movie" ? "搜索电影" : "搜索影视");
+      search.innerHTML = '<span aria-hidden="true">⌕</span>';
+      search.addEventListener("click", openMediaSearch);
+      els.viewMeta.replaceChildren(count, search);
+    }
+  }`;
+const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 
-function harness(input = sources, { mode = "movie", cached = null } = {}) {
+function harness(input = sources, { mode = "movie", cached = null, limit = 40, search = true } = {}) {
   const document = createNavigationFixtureDocument(), proto = Object.getPrototypeOf(document.body);
   if (!Object.getOwnPropertyDescriptor(proto, "childElementCount")) Object.defineProperty(proto, "childElementCount", { get() { return this.children.length; } });
   const els = Object.fromEntries(["viewContent", "viewTitle", "viewMeta", "viewKicker", "contentPanel", "moduleChrome"].map(key => [key, document.createElement("div")]));
   document.body.append(...Object.values(els));
   const calls = { openSearch: 0, navigation: [], network: [] };
-  const c = vm.createContext({ document, console, URL, URLSearchParams, formatBytes, formatDate, formatNumber, formatTime, absoluteUrl,
+  const queued = [];
+  const c = vm.createContext({ document, console, URL, URLSearchParams, AbortController, formatBytes, formatDate, formatNumber, formatTime, absoluteUrl,
     captureMediaTrail, mediaBackTarget, cacheAgeText: () => "合成缓存时间", window: { history: { back() {} } },
     isChannelFavorite: () => false, toggleChannelFavorite: () => ({ favorite: true, items: [] }),
-    photoCatalogCollections: items => items, loadPreviewImage() {}, enhanceAutoLoadMore() {},
-    fetchJson: async (...args) => { calls.network.push(args); throw new Error("合成电脑端暂时不可读"); },
+    photoCatalogCollections: items => items, loadPreviewImage() {}, enhanceAutoLoadMore: button => button,
+    fetchJson: async (...args) => {
+      calls.network.push(args);
+      if (queued.length) { const value = queued.shift(); if (value instanceof Error) throw value; return await value; }
+      throw new Error("合成电脑端暂时不可读");
+    },
     readCachedJson: async () => cached, writeCachedJson: async () => {},
     els, currentView: "channel", currentViewParams: { mode }
   });
-  const marker = /  return \{\r?\n    deactivate: resetMangaReaderProgressTracker,/;
+  const marker = /  return \{\r?\n(?=    deactivate:)/;
   assert(marker.test(input.channel), "Private header exposure requires the exact real factory return");
-  const channel = input.channel.replace(marker, "  return {\n    __testApplyHeader: applyChannelHeader,\n    deactivate: resetMangaReaderProgressTracker,");
+  const channel = input.channel.replace(marker, "  return {\n    __testApplyHeader: applyChannelHeader,\n");
   vm.runInContext(strip(channel), c, { filename: "actual-channel-views.js" });
   vm.runInContext(appFunction(input.registry, "createRegistry") + "\n" + appFunction(input.app, "syncModuleChrome"), c);
   const host = {
     els, normalizeChannelMode: c.normalizeChannelMode, getActiveUrl: () => "https://synthetic.invalid",
-    limits: { getChannel: () => 40, increaseChannel() {} }, recent: { record() {} }, favorites: { onChannelFavoriteChange() {} },
+    limits: { getChannel: () => limit, increaseChannel: value => { limit += value; } }, recent: { record() {} }, favorites: { onChannelFavoriteChange() {} },
     navigation: { currentView: () => c.currentView, currentParams: () => c.currentViewParams, returnToStackView: () => false,
       showView: (...args) => calls.navigation.push(plain(args)), goBack() {}, openInLibrary() {} },
     ui: { setActiveBottom() {}, scrollToTop() {}, renderCurrentView() {}, renderCurrentViewPreservingScroll() {},
-      refreshChrome: () => c.syncModuleChrome(), openSearch: () => { calls.openSearch++; } },
+      refreshChrome: () => c.syncModuleChrome(), openSearch: search ? () => { calls.openSearch++; } : null },
     contentIndex: { updateChannelQuery() {}, updateChannelParams() {}, updateSearch() {} }
   };
   const factory = vm.runInContext(`(function(){\n${strip(input.media)}\nreturn createAndroidModule;\n})()`, c);
   const module = factory({ host });
   c.androidModuleRegistry = c.createRegistry([{ ...module, id: "media" }]);
   return { c, document, els, module, calls, host,
+    queue: value => queued.push(value), cache: value => { cached = value; }, setLimit: value => { limit = value; },
     header(nextMode = mode, data = {}, cache = null) { c.currentViewParams = { mode: nextMode }; module.api.channelViews.__testApplyHeader(nextMode, data, cache); },
     search: () => els.viewMeta.querySelector("button")
   };
@@ -87,11 +112,59 @@ test("episode, query, cache and empty counts retain their meaning with search", 
   h.header("tv", { total: 0, items: [] }); assert.match(h.els.viewMeta.querySelector("span").textContent, /共 0 部/);
   assert.equal(h.els.viewMeta.querySelectorAll("button").length, 1); h.search().click(); assert.equal(h.calls.openSearch, 1);
 });
-test("repeated header updates replace count and search without duplicate live buttons", input => {
+test("repeated header updates retain count and search without duplicate live buttons", input => {
   const h = harness(input); h.header("movie", { total: 1, items: [{ id: "one" }] });
+  const search = h.search(), count = h.els.viewMeta.querySelector("span"); search.focus();
   h.header("movie", { total: 200, items: [] }); h.header("movie", { total: 3, items: [] });
+  assert.equal(h.search(), search, "Repeated count updates retain the original search button");
+  assert.equal(h.els.viewMeta.querySelector("span"), count); assert.equal(h.document.activeElement, search);
   assert.equal(h.els.viewMeta.querySelectorAll("button").length, 1); assert.match(h.els.viewMeta.querySelector("span").textContent, /共 3/);
   h.search().click(); assert.equal(h.calls.openSearch, 1);
+});
+for (const count of [500, 1000]) test(`movie ${count}: metadata pending append error retry and cached tail retain focused search`, async input => {
+  const h = harness(input, { limit: count });
+  const payload = (size, offset = 0) => ({ mode: "movie", sort: "updated", facets: {}, total: 5000, offset, limit: size,
+    nextOffset: offset + size, listRevision: "private-stable", scannedAt: "private-scan",
+    items: Array.from({ length: size }, (_, i) => ({ id: `private-${offset + i}`, type: "movie", mediaKind: "movie", title: `Synthetic ${offset + i}`, size: 10000 })) });
+  const render = () => h.module.api.channelViews.renderChannel({ mode: "movie" }, () => true);
+  h.queue(payload(count)); await render(); assert.equal(h.els.viewContent.querySelectorAll(".channel-card").length, count, h.els.viewContent.textContent.slice(0, 600));
+  const search = h.search(), label = h.els.viewMeta.querySelector(".media-list-count"); search.focus();
+  const assertHeader = () => {
+    assert.equal(h.search() === search, true, "Owned header retains the original search button");
+    assert.equal(h.els.viewMeta.querySelector(".media-list-count") === label, true);
+    assert.equal(h.document.activeElement === search, true); assert(h.document.body.contains(search));
+    assert.equal(h.els.viewMeta.querySelectorAll("button").length, 1);
+  };
+  for (let i = 0; i < 3; i++) { h.header("movie", { ...payload(0), total: 5010 + i }); assertHeader(); }
+  const pending = deferred(); h.setLimit(count + 48); h.queue(pending.promise);
+  const task = render(); await tick(); assertHeader();
+  assert.equal(h.els.viewContent.querySelectorAll(".channel-card").length, count);
+  pending.resolve(payload(48, count)); await task; assertHeader();
+  assert.equal(h.els.viewContent.querySelectorAll(".channel-card").length, count + 48);
+  h.setLimit(count + 96); h.queue(new Error("Private failed tail")); await render(); assertHeader();
+  assert.match(h.els.viewContent.querySelector(".channel-more").textContent, /重试/);
+  h.queue(payload(48, count + 48)); await render(); assertHeader();
+  assert.equal(h.els.viewContent.querySelectorAll(".channel-card").length, count + 96);
+  h.setLimit(count + 144); h.cache({ updatedAt: "private", payload: payload(48, count + 96) });
+  h.queue(new Error("Private cached-tail offline")); await render(); assertHeader();
+  assert.equal(h.els.viewContent.querySelectorAll(".channel-card").length, count + 144);
+  assert(label.textContent.includes(`已显示 ${formatNumber(count + 144)}`));
+  const clicks = h.calls.openSearch; search.click(); assert.equal(h.calls.openSearch, clicks + 1, "Reuse never binds the search handler again");
+});
+test("mode and capability changes retain the original rebuild behavior", input => {
+  const h = harness(input); h.header("movie", { total: 1, items: [] }); const movie = h.search();
+  h.header("tv", { total: 2, items: [] }); const tv = h.search(); assert.notEqual(tv, movie);
+  assert.equal(h.document.body.contains(movie), false); assert.equal(tv.getAttribute("aria-label"), "搜索电视剧");
+  tv.click(); assert.equal(h.calls.openSearch, 1);
+  h.header("photo", { total: 2, items: [] }); assert.equal(h.search(), null); assert.equal(h.document.body.contains(tv), false);
+  const noSearch = harness(input, { search: false }); noSearch.header("movie", { total: 2, items: [] });
+  assert.equal(noSearch.search(), null); assert.match(noSearch.els.viewMeta.textContent, /共 2/);
+});
+test("externally replaced header layout rebuilds once then resumes reuse", input => {
+  const h = harness(input); h.header("movie", { total: 1, items: [] }); const first = h.search();
+  h.els.viewMeta.append(h.document.createElement("div")); h.header("movie", { total: 2, items: [] });
+  const next = h.search(); assert.notEqual(next, first); assert.equal(h.els.viewMeta.children.length, 2);
+  h.header("movie", { total: 3, items: [] }); assert.equal(h.search(), next); next.click(); assert.equal(h.calls.openSearch, 1);
 });
 for (const mode of ["photo", "manga", "western"]) test(`${mode}: shared header never receives the media search button`, input => {
   const h = harness(input); h.header("movie", { total: 40, items: [] }); assert(h.search());
@@ -142,10 +215,18 @@ test("CSS defines a media-list-only 44px inline metadata/search contract", input
   // and absence of visual blank space using the rendered application/device.
 });
 
-let passed = 0, failed = 0, legacyRejected = 0, mutantsRejected = 0;
+let passed = 0, failed = 0, legacyRejected = 0, legacyHeaderRejected = 0, mutantsRejected = 0;
 for (const item of tests) {
   try { await item.run(sources); passed++; console.log(`PASS ${item.name}`); }
   catch (error) { failed++; console.error(`FAIL ${item.name}\n${error.stack}`); }
+}
+if (!failed) {
+  const method = /^  function setChannelMeta\(mode, text\) \{[^]*?^  \}/m.exec(sources.channel)?.[0]; assert(method);
+  const old = { ...sources, channel: sources.channel.replace(method, () => LEGACY_SET_META) };
+  let failure; try { await tests.find(item => item.name.startsWith("movie 500:")).run(old); } catch (error) { failure = error; }
+  assert(failure instanceof assert.AssertionError, `Actual old header must fail identity/focus behavior: ${failure?.stack || "unexpected pass"}`);
+  assert.match(failure.message, /Owned header retains the original search button/); legacyHeaderRejected++;
+  console.log("REJECT actual old header discards focused search during metadata/loading updates");
 }
 if (!failed && LEGACY) {
   assert.equal(createHash("sha256").update(JSON.stringify(LEGACY)).digest("hex"), LEGACY_SHA256, "Frozen old actual chrome checksum");
@@ -171,6 +252,6 @@ if (!failed) for (const mutant of mutants) {
     mutantsRejected++; console.log(`REJECT mutant ${mutant.name}`);
   } catch (error) { failed++; console.error(`FAIL mutant ${mutant.name}\n${error.stack}`); }
 }
-console.log(`Media header: ${passed}/${tests.length} scenarios; ${legacyRejected}/1 actual old chrome control; ${mutantsRejected}/${mutants.length} wiring mutants; ${failed} failures.`);
+console.log(`Media header: ${passed}/${tests.length} scenarios; ${legacyRejected}/1 actual old chrome control; ${legacyHeaderRejected}/1 actual old header control; ${mutantsRejected}/${mutants.length} wiring mutants; ${failed} failures.`);
 for (const key of ["channel", "media", "css"]) console.log(`${key} SHA256: ${createHash("sha256").update(sources[key]).digest("hex")}`);
 process.exitCode = failed ? 1 : 0;

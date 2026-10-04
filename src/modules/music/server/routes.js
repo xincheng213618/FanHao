@@ -158,16 +158,42 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  const progressClockMatch = /^\/api\/music\/tracks\/([^/]+)\/progress-clock$/.exec(url.pathname);
+  if (progressClockMatch && req.method === "GET") {
+    try {
+      const clock = musicStore.progressClock(decodeURIComponent(progressClockMatch[1]));
+      if (!clock) notFound(res);
+      else sendJson(res, 200, clock);
+    } catch (error) {
+      sendMusicPublicError(res, sendJson, error, "播放进度时钟读取失败");
+    }
+    return true;
+  }
+
+  const progressSessionMatch = /^\/api\/music\/tracks\/([^/]+)\/progress-session$/.exec(url.pathname);
+  if (progressSessionMatch && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const session = musicStore.claimProgressSession(decodeURIComponent(progressSessionMatch[1]), body || {});
+      if (!session) notFound(res);
+      else sendJson(res, 200, session);
+    } catch (error) {
+      sendMusicPublicError(res, sendJson, error, "播放进度会话获取失败");
+    }
+    return true;
+  }
+
   const progressMatch = /^\/api\/music\/tracks\/([^/]+)\/progress$/.exec(url.pathname);
   if (progressMatch && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
-      const track = musicStore.saveProgress(decodeURIComponent(progressMatch[1]), body || {});
-      if (!track) {
+      const outcome = musicStore.saveProgressOutcome(decodeURIComponent(progressMatch[1]), body || {});
+      if (!outcome) {
         notFound(res);
         return true;
       }
-      sendJson(res, 200, { ok: true, track });
+      const fenced = ["progressSessionId", "progressSessionStartedAt", "progressSequence", "playedReportId", "playedReportStartedAt"].some(field => Object.hasOwn(body || {}, field));
+      sendJson(res, 200, { ok: true, track: outcome.track, ...(fenced ? { progressApplied: outcome.progressApplied, playedApplied: outcome.playedApplied } : {}) });
     } catch (error) {
       sendMusicPublicError(res, sendJson, error, "播放进度保存失败");
     }

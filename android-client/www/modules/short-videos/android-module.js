@@ -1,5 +1,5 @@
-import { createShortVideoViews } from "./index.js?v=assets-0f97d6765d71";
-import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-0f97d6765d71";
+import { createShortVideoViews } from "./index.js?v=assets-07b744082137";
+import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-07b744082137";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({

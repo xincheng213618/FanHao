@@ -1,5 +1,5 @@
 export function createMusicListPagination(deps) {
-  const { state, getActiveUrl, isActive, musicListQuery, fetchJson, collapseDuplicateTracks, render } = deps;
+  const { state, getActiveUrl, isActive, musicListQuery, fetchJson, collapseDuplicateTracks, render, setLoadingState, appendPage } = deps;
   let pendingController = null;
 
   function cancelPending() {
@@ -28,9 +28,10 @@ export function createMusicListPagination(deps) {
       && state.searchScope === searchScope
       && musicListQuery() === listQuery;
     let applied = false;
+    let incomingData = null;
     pendingController = controller;
     state.loadingMore = true;
-    render();
+    if (!setLoadingState?.(true)) render();
     try {
       const params = new URLSearchParams(listQuery);
       params.set("offset", String(mode === "artists"
@@ -42,13 +43,14 @@ export function createMusicListPagination(deps) {
       const data = await fetchJson(activeUrl, `${endpoint}?${params}`, { timeoutMs: 18000, signal: controller.signal });
       // Abort is best-effort: a completed response can still settle after navigation.
       if (!isCurrent() || state.data !== sourceData) return;
+      incomingData = data;
       if (mode === "artists") {
         state.data = { ...data, artists: [...(sourceData.artists || []), ...(data.artists || [])] };
       } else if (mode === "albums") {
         state.data = { ...data, albums: [...(sourceData.albums || []), ...(data.albums || [])] };
       } else {
         const rawTracks = [...(sourceData.rawTracks || sourceData.tracks || []), ...(data.tracks || [])];
-        const tracks = mode === "library" && query ? collapseDuplicateTracks(rawTracks) : rawTracks;
+        const tracks = mode === "library" && query ? collapseDuplicateTracks(rawTracks) : mergeTracksById(sourceData.tracks || [], data.tracks || []);
         state.data = { ...data, tracks, rawTracks, rawLoaded: rawTracks.length };
         if (!query) state.queue = tracks;
       }
@@ -63,10 +65,26 @@ export function createMusicListPagination(deps) {
         const shouldRender = isCurrent() && (applied || state.data === sourceData);
         pendingController = null;
         state.loadingMore = false;
-        if (shouldRender) render();
+        if (shouldRender) {
+          const appended = applied && appendPage?.({ mode, sourceData, data: state.data, incomingData });
+          const resetLoading = !applied && setLoadingState?.(false);
+          if (!appended && !resetLoading) render();
+        }
       }
     }
   }
 
   return { cancelPending, loadMoreTracks };
+}
+
+function mergeTracksById(previous, incoming) {
+  const tracks = [], positions = new Map();
+  for (const track of [...previous, ...incoming]) {
+    const position = positions.get(track.id);
+    if (position === undefined) {
+      positions.set(track.id, tracks.length);
+      tracks.push(track);
+    } else tracks[position] = track;
+  }
+  return tracks;
 }

@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { reconcileChapters } from "./chapter-identity.js";
+import { assertSourceSnapshot, loadLocalReimportArtifact, samePath } from "./local-reimport-artifact.js";
 
 const DEFAULT_LIMIT = 5000;
 const MAX_LIMIT = 5000;
@@ -11,6 +13,10 @@ const MAX_UPLOAD_TEXT_CHARS = 50 * 1024 * 1024;
 const UPLOAD_SOURCE_ROOT = "上传";
 const COLLECTION_SOURCE_ROOT = "网页采集";
 const LIBRARY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PROGRESS_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const PROGRESS_SESSION_LIMIT = 8192;
+const PROGRESS_BOOK_SESSION_LIMIT = 32;
+export const NOVEL_WRITE_METHODS = Object.freeze(["saveProgress", "updateBookMetadata", "uploadBook", "reimportBook", "importCollectedBook", "deleteBook", "reimportLocalBook"]);
 const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index AS progress_chapter_index,
   s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
   s.catalog_revision AS progress_revision, s.status AS progress_status,
@@ -20,6 +26,33 @@ export function createNovelStore(options = {}) {
   const dbPath = options.dbPath;
   if (!dbPath) throw new Error("novel dbPath is required");
   let db = null;
+  let summaryStaticCache = null;
+  let readStorageStamp = null;
+  let writeOperationActive = false;
+
+  function storageStamp() {
+    const stamp = (filePath, ignoreEmpty = false) => {
+      try {
+        const stat = fs.statSync(filePath, { bigint: true });
+        if (ignoreEmpty && stat.size === 0n) return "";
+        return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+      } catch (error) {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      }
+    };
+    return `${stamp(dbPath)}|${stamp(`${dbPath}-wal`, true)}`;
+  }
+
+  function listRevision(sourceRealm) {
+    // The rows belong to the read snapshot, not to a file stamp observed after
+    // another writer commits. An unstable read gets a one-use token so a later
+    // page cannot append to it as though both pages came from one revision.
+    const stamp = readStorageStamp !== null && storageStamp() === readStorageStamp
+      ? readStorageStamp
+      : crypto.randomUUID();
+    return crypto.createHash("sha256").update(`${sourceRealm}\n${stamp}`).digest("hex");
+  }
 
   function getDb() {
     if (!db) {
@@ -32,20 +65,35 @@ export function createNovelStore(options = {}) {
     return db;
   }
 
-  function withDb(callback) {
+  function withDb(callback, { changesCatalog = true } = {}) {
     const database = getDb();
     try {
       return callback(database);
     } finally {
-      invalidate();
+      if (changesCatalog) summaryStaticCache = null;
+      if (!writeOperationActive) closeDb();
     }
   }
 
-  function withReadDb(callback) {
-    return withDb(database => inReadSnapshot(database, callback));
+  function withReadDb(callback, { cacheSummary = false } = {}) {
+    return withDb((database) => {
+      // Capture before BEGIN's first read. A writer can commit while this
+      // snapshot is open; never associate its newer file stamp with old rows.
+      readStorageStamp = cacheSummary ? storageStamp() : null;
+      try {
+        return inReadSnapshot(database, callback);
+      } finally {
+        readStorageStamp = null;
+      }
+    }, { changesCatalog: false });
   }
 
   function invalidate() {
+    summaryStaticCache = null;
+    closeDb();
+  }
+
+  function closeDb() {
     if (!db) return;
     try {
       db.close();
@@ -54,11 +102,41 @@ export function createNovelStore(options = {}) {
   }
 
   function summary() {
-    return withReadDb((database) => summaryFromDb(database));
+    return withReadDb((database) => summaryFromDb(database), { cacheSummary: true });
   }
 
   function summaryFromDb(database) {
     const sourceRealm = sourceRealmFromDb(database);
+    const summaryStatic = staticSummaryFromDb(database, sourceRealm);
+    const recent = database
+      .prepare(
+        `
+        SELECT b.*, ${PROGRESS_COLUMNS}
+        FROM novel_reading_state s
+        JOIN novel_books b ON b.id = s.book_id
+        WHERE b.status = 'ok'
+        ORDER BY s.updated_at DESC
+        LIMIT 6
+      `
+      )
+      .all()
+      .map((row) => publicBook(row, sourceRealm));
+    return {
+      ...summaryStatic,
+      totals: { ...summaryStatic.totals },
+      categories: summaryStatic.categories.map((item) => ({ ...item })),
+      roots: summaryStatic.roots.map((item) => ({ ...item })),
+      recent
+    };
+  }
+
+  function staticSummaryFromDb(database, sourceRealm) {
+    const scannedAt = metaValue(database, "scanned_at");
+    const dataVersion = database.prepare("PRAGMA data_version").get().data_version;
+    const schemaVersion = metaValue(database, "schema_version");
+    const stamp = `${readStorageStamp}:${dataVersion}:${sourceRealm}:${schemaVersion}:${scannedAt}`;
+    const storageUnchanged = readStorageStamp !== null && storageStamp() === readStorageStamp;
+    if (storageUnchanged && summaryStaticCache?.stamp === stamp) return summaryStaticCache.value;
     const totals =
       database
         .prepare(
@@ -96,23 +174,10 @@ export function createNovelStore(options = {}) {
       `
       )
       .all();
-    const recent = database
-      .prepare(
-        `
-        SELECT b.*, ${PROGRESS_COLUMNS}
-        FROM novel_reading_state s
-        JOIN novel_books b ON b.id = s.book_id
-        WHERE b.status = 'ok'
-        ORDER BY s.updated_at DESC
-        LIMIT 6
-      `
-      )
-      .all()
-      .map((row) => publicBook(row, sourceRealm));
-    return {
+    const value = {
       sourceRealm,
       dbPath,
-      scannedAt: metaValue(database, "scanned_at"),
+      scannedAt,
       roots,
       totals: {
         books: Number(totals.books || 0),
@@ -122,13 +187,18 @@ export function createNovelStore(options = {}) {
         bytes: Number(totals.bytes || 0),
         updatedAt: totals.updated_at || ""
       },
-      categories: categories.map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) })),
-      recent
+      categories: categories.map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) }))
     };
+    summaryStaticCache = storageUnchanged && storageStamp() === readStorageStamp
+      ? { stamp, value }
+      : null;
+    return value;
   }
 
   function listBooks(url, existingDatabase = null) {
-    const run = existingDatabase ? callback => callback(existingDatabase) : withReadDb;
+    const run = existingDatabase
+      ? callback => callback(existingDatabase)
+      : callback => withReadDb(callback, { cacheSummary: true });
     return run((database) => {
       const sourceRealm = sourceRealmFromDb(database);
       const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
@@ -176,31 +246,22 @@ export function createNovelStore(options = {}) {
         `
         )
         .all(...params, limit, offset);
-      const facets = database
-        .prepare(
-          `
-          SELECT COALESCE(category, '全部') AS name, COUNT(*) AS count
-          FROM novel_books
-          WHERE status = 'ok'
-          GROUP BY COALESCE(category, '全部')
-          ORDER BY count DESC, name COLLATE NOCASE
-        `
-        )
-        .all()
-        .map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) }));
+      const summary = summaryFromDb(database);
       return {
         sourceRealm,
+        listRevision: listRevision(sourceRealm),
         books: rows.map((row) => publicBook(row, sourceRealm)),
         total: Number(countRow?.count || 0),
         limit,
         offset,
+        nextOffset: offset + rows.length,
         query,
         category,
         author,
         readingOnly,
         sort,
-        facets,
-        summary: summaryFromDb(database)
+        facets: summary.categories,
+        summary
       };
     });
   }
@@ -295,7 +356,7 @@ export function createNovelStore(options = {}) {
         : null;
       if (!profile) return null;
       return { ...page, author: profile };
-    });
+    }, { cacheSummary: true });
   }
 
   function bookDetail(bookId) {
@@ -306,7 +367,7 @@ export function createNovelStore(options = {}) {
     return withReadDb((database) => {
       const book = bookRecordFromDb(database, bookId);
       return book
-        ? { sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision, book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
+        ? { serverClockMs: progressServerClock(database), sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision, book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
         : null;
     });
   }
@@ -321,7 +382,7 @@ export function createNovelStore(options = {}) {
       const summary = Object.hasOwn(body, "summary") ? String(body.summary || "").trim().slice(0, 2000) : current.summary;
       if (!title) throw httpError(400, "书名不能为空");
       const updatedAt = new Date().toISOString();
-      database.exec("BEGIN IMMEDIATE");
+      const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
       try {
         database
           .prepare(
@@ -340,10 +401,10 @@ export function createNovelStore(options = {}) {
         database
           .prepare("UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ?, updated_at = ? WHERE id = ?")
           .run(title, author, category, summary, updatedAt, bookId);
-        database.exec("COMMIT");
+        commitTransaction(database, transaction);
       } catch (error) {
         try {
-          database.exec("ROLLBACK");
+          rollbackTransaction(database, transaction);
         } catch {}
         throw error;
       }
@@ -361,7 +422,7 @@ export function createNovelStore(options = {}) {
         .get(bookId);
       if (!book) return null;
       const deletedAt = new Date().toISOString();
-      database.exec("BEGIN IMMEDIATE");
+      const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
       try {
         database
           .prepare(
@@ -379,10 +440,10 @@ export function createNovelStore(options = {}) {
         database.prepare("DELETE FROM novel_reading_state WHERE book_id = ?").run(book.id);
         database.prepare("DELETE FROM novel_book_overrides WHERE book_id = ?").run(book.id);
         database.prepare("DELETE FROM novel_books WHERE id = ?").run(book.id);
-        database.exec("COMMIT");
+        commitTransaction(database, transaction);
       } catch (error) {
         try {
-          database.exec("ROLLBACK");
+          rollbackTransaction(database, transaction);
         } catch {}
         throw error;
       }
@@ -458,6 +519,7 @@ export function createNovelStore(options = {}) {
         )
         .get(bookId, chapter.chapter_index);
       return {
+        serverClockMs: progressServerClock(database),
         sourceRealm: book.sourceRealm,
         catalogRevision: book.catalogRevision,
         book,
@@ -536,13 +598,15 @@ export function createNovelStore(options = {}) {
 
   function saveProgress(bookId, body = {}) {
     return withDb((database) => inTransaction(database, "BEGIN IMMEDIATE", () => {
+      const session = progressSession(body);
       if (body.sourceRealm !== undefined && body.sourceRealm !== sourceRealmFromDb(database)) {
         throw httpError(409, "小说库来源已变化，请重新打开这本书后再保存进度");
       }
       const book = database.prepare("SELECT catalog_revision, legacy_write_allowed FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
       if (!book) return null;
       const saved = database.prepare("SELECT status FROM novel_reading_state WHERE book_id = ?").get(bookId);
-      const modern = body.catalogRevision !== undefined || body.chapterId !== undefined || !book.legacy_write_allowed || (saved && saved.status !== "resolved");
+      if (session && body.sourceRealm !== sourceRealmFromDb(database)) throw httpError(409, "小说库来源已变化，请重新打开后再保存进度");
+      const modern = Boolean(session) || body.catalogRevision !== undefined || body.chapterId !== undefined || !book.legacy_write_allowed || (saved && saved.status !== "resolved");
       let chapter;
       if (modern) {
         if (body.catalogRevision !== book.catalog_revision || typeof body.chapterId !== "string" || !body.chapterId) {
@@ -563,6 +627,11 @@ export function createNovelStore(options = {}) {
         throw httpError(400, "阅读位置无效");
       }
       const ratio = Math.max(0, Math.min(1, Number(suppliedRatio) || 0));
+      if (session && !acceptProgressSequence(database, bookId, book.catalog_revision, session)) {
+        const current = database.prepare("SELECT * FROM novel_reading_state WHERE book_id = ?").get(bookId);
+        return { bookId, status: current.status, chapterId: current.chapter_id, chapterIndex: current.chapter_index,
+          scrollRatio: current.scroll_ratio, updatedAt: current.updated_at, catalogRevision: current.catalog_revision, applied: false };
+      }
       const updatedAt = new Date().toISOString();
       database
         .prepare(
@@ -578,8 +647,9 @@ export function createNovelStore(options = {}) {
         `
         )
         .run(bookId, chapter.id, Number(chapter.chapter_index), ratio, updatedAt, book.catalog_revision);
-      return { bookId, status: "resolved", chapterId: chapter.id, chapterIndex: Number(chapter.chapter_index), scrollRatio: ratio, updatedAt, catalogRevision: book.catalog_revision };
-    }));
+      return { bookId, status: "resolved", chapterId: chapter.id, chapterIndex: Number(chapter.chapter_index), scrollRatio: ratio, updatedAt, catalogRevision: book.catalog_revision,
+        ...(session ? { applied: true } : {}) };
+    }), { changesCatalog: false });
   }
 
   function openDownload(bookId) {
@@ -659,6 +729,128 @@ export function createNovelStore(options = {}) {
     });
   }
 
+  function writeIdentity() {
+    return withReadDb(sourceRealmFromDb);
+  }
+
+  function reimportLocalBook(bookId, descriptor, prepared) {
+    const record = prepared || loadLocalReimportArtifact(descriptor, options.reimportArtifactRoot);
+    return withDb((database) => {
+      reimportLocalBookIntoDb(database, bookId, descriptor, record);
+      return inReadSnapshot(database, () => bookDetailFromDb(database, bookId));
+    });
+  }
+
+  function writeIdentityRecord() {
+    const before = databaseFileIdentity(dbPath);
+    return withReadDb((database) => ({ sourceRealm: sourceRealmFromDb(database), databaseIdentity: stableDatabaseIdentity(before, databaseFileIdentity(dbPath)) }));
+  }
+
+  function executeWriteOperation(operation) {
+    const methods = { saveProgress, updateBookMetadata, uploadBook, reimportBook, importCollectedBook, deleteBook, reimportLocalBook };
+    const { operationId, method, args = [] } = operation || {};
+    if (typeof operationId !== "string" || !operationId || operationId.length > 180 || !NOVEL_WRITE_METHODS.includes(method) || !Array.isArray(args)) {
+      throw Object.assign(httpError(400, "小说写入请求无效"), { outcome: "not_committed" });
+    }
+    const requestHash = novelWriteOperationHash(method, args);
+    const before = databaseFileIdentity(dbPath);
+    const database = getDb();
+    let transaction;
+    let begun = false;
+    try {
+      // Materialize the large export before acquiring a SQLite write lock.
+      // A known receipt needs no artifact, including after successful cleanup.
+      const hasReceipts = method === "reimportLocalBook" && database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='novel_write_receipts'").get();
+      const previousReceipt = hasReceipts && database.prepare("SELECT 1 FROM novel_write_receipts WHERE source_realm=? AND operation_id=?").get(sourceRealmFromDb(database), operationId);
+      const prepared = method === "reimportLocalBook" && !previousReceipt ? loadLocalReimportArtifact(args[1], options.reimportArtifactRoot) : null;
+      transaction = beginTransaction(database, "BEGIN IMMEDIATE");
+      begun = true;
+      writeOperationActive = true;
+      const sourceRealm = sourceRealmFromDb(database);
+      const databaseIdentity = stableDatabaseIdentity(before, databaseFileIdentity(dbPath));
+      if (operation.sourceRealm !== undefined && operation.sourceRealm !== sourceRealm) throw httpError(409, "小说库来源已变化，不能重放原写入");
+      options.onWriteOperationStart?.({ operationId, sourceRealm, databaseIdentity });
+      // This additive table leaves the scanner's v5 schema contract unchanged.
+      // The response and all book changes commit together, so a lost Worker
+      // reply can be recovered without repeating an upload or chapter rewrite.
+      ensureWriteReceiptSchema(database);
+      const acknowledgedReceipts = deleteAcknowledgedReceipts(database, operation.acknowledgedReceipts, sourceRealm, databaseIdentity);
+      const receipt = database.prepare("SELECT request_hash, response_json FROM novel_write_receipts WHERE source_realm = ? AND operation_id = ?").get(sourceRealm, operationId);
+      let result;
+      if (receipt) {
+        if (receipt.request_hash !== requestHash) throw httpError(409, "小说写入标识已用于不同请求");
+        result = JSON.parse(receipt.response_json);
+        if (operation.retainReceipt) database.prepare("UPDATE novel_write_receipts SET retain_receipt = 1 WHERE source_realm = ? AND operation_id = ?").run(sourceRealm, operationId);
+      } else {
+        result = method === "reimportLocalBook" ? reimportLocalBook(args[0], args[1], prepared) : methods[method](...args);
+        database.prepare("INSERT INTO novel_write_receipts (source_realm, operation_id, request_hash, response_json, completed_at, retain_receipt) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(sourceRealm, operationId, requestHash, JSON.stringify(result), new Date().toISOString(), Number(Boolean(operation.retainReceipt)));
+      }
+      commitTransaction(database, transaction);
+      begun = false;
+      return { result, sourceRealm, requestHash, databaseIdentity, acknowledgedReceipts };
+    } catch (error) {
+      if (begun) {
+        try {
+          rollbackTransaction(database, transaction);
+          Object.assign(error, { rollbackConfirmed: true, outcome: "not_committed" });
+        } catch (rollbackError) {
+          throw Object.assign(new Error("小说写入回滚无法确认", { cause: new AggregateError([error, rollbackError]) }), {
+            code: "NOVEL_WRITE_OUTCOME_UNKNOWN", statusCode: 503, outcome: "unknown", operationId
+          });
+        }
+      } else if (!error.outcome) Object.assign(error, { outcome: "not_committed" });
+      throw error;
+    } finally {
+      writeOperationActive = false;
+      summaryStaticCache = null;
+      closeDb();
+    }
+  }
+
+  function readWriteReceipt({ operationId, requestHash, sourceRealm, databaseIdentity, acknowledgedReceipts = [] }) {
+    const before = databaseFileIdentity(dbPath);
+    const database = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      database.exec("PRAGMA busy_timeout = 5000");
+      return inReadSnapshot(database, () => {
+        validateExistingLibraryMetadata(database);
+        const currentRealm = sourceRealmFromDb(database);
+        const currentIdentity = stableDatabaseIdentity(before, databaseFileIdentity(dbPath));
+        if (sourceRealm !== currentRealm) return { status: "realm_changed", sourceRealm: currentRealm };
+        const exists = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'novel_write_receipts'").get();
+        const receipt = exists && database.prepare("SELECT request_hash, response_json FROM novel_write_receipts WHERE source_realm = ? AND operation_id = ?").get(sourceRealm, operationId);
+        // An external restore can retain the realm and even the same inode
+        // while losing a committed receipt. Absence never proves rollback.
+        if (!receipt) return { status: databaseIdentity && databaseIdentity === currentIdentity ? "receipt_missing" : "database_changed", sourceRealm: currentRealm };
+        if (receipt.request_hash !== requestHash) return { status: "conflict", sourceRealm: currentRealm };
+        return { status: "committed", sourceRealm: currentRealm, databaseIdentity: currentIdentity, requestHash, result: JSON.parse(receipt.response_json), acknowledgedReceipts: acknowledgedReceipts.filter((token) => token.sourceRealm === currentRealm && token.databaseIdentity && token.databaseIdentity === currentIdentity) };
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  function releaseWriteReceipts(receipts) {
+    const before = databaseFileIdentity(dbPath);
+    if (!before) return [];
+    // SQLite's URI mode=rw forbids CREATE, including a replacement race after
+    // stat. Cleanup has no authority to initialize or migrate a novel library.
+    const location = pathToFileURL(path.resolve(dbPath));
+    location.searchParams.set("mode", "rw");
+    const database = new DatabaseSync(location.href);
+    try {
+      database.exec("PRAGMA busy_timeout = 5000");
+      return inTransaction(database, "BEGIN IMMEDIATE", () => {
+        validateExistingLibraryMetadata(database);
+        const sourceRealm = sourceRealmFromDb(database);
+        const databaseIdentity = stableDatabaseIdentity(before, databaseFileIdentity(dbPath));
+        const exists = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'novel_write_receipts'").get();
+        return exists ? deleteAcknowledgedReceipts(database, receipts, sourceRealm, databaseIdentity) : [];
+      });
+    } finally { database.close(); }
+  }
+
   return {
     authorDetail,
     bookDetail,
@@ -667,13 +859,19 @@ export function createNovelStore(options = {}) {
     chapterDetail,
     deleteBook,
     dbPath,
+    executeWriteOperation,
     importCollectedBook,
     openDownload,
     invalidate,
     listAuthors,
     listBooks,
     reimportBook,
+    reimportLocalBook,
+    readWriteReceipt,
+    releaseWriteReceipts,
     saveProgress,
+    writeIdentity,
+    writeIdentityRecord,
     summary,
     updateBookMetadata,
     uploadBook
@@ -792,14 +990,123 @@ function sourceRealmFromDb(db) {
   return `server:${identity.value}`;
 }
 
+function progressServerClock(database) {
+  const floor = Number(metaValue(database, "progress_clock_ms") || 0);
+  if (!Number.isSafeInteger(floor) || floor < 0) throw new Error("阅读进度时钟无效");
+  return Math.max(Date.now(), floor);
+}
+
+function progressSession(body) {
+  const fields = ["progressSessionId", "progressSessionStartedAt", "progressSequence"];
+  if (!fields.some(field => Object.hasOwn(body, field))) return null;
+  if (!fields.every(field => Object.hasOwn(body, field))
+      || typeof body.progressSessionId !== "string" || !LIBRARY_ID_PATTERN.test(body.progressSessionId)
+      || !Number.isSafeInteger(body.progressSessionStartedAt) || body.progressSessionStartedAt < 0
+      || !Number.isSafeInteger(body.progressSequence) || body.progressSequence < 1) {
+    throw httpError(400, "阅读进度顺序标识无效");
+  }
+  return { id: body.progressSessionId, startedAt: body.progressSessionStartedAt, sequence: body.progressSequence };
+}
+
+// Lazy additive schema: current v5 read connections need neither DDL nor a
+// writer lock. Sequence, cursor and operation receipt share the write transaction.
+function acceptProgressSequence(database, bookId, revision, session) {
+  const now = progressServerClock(database);
+  if (session.startedAt > now) throw httpError(400, "阅读进度会话时间无效，请重新打开这本书");
+  if (session.startedAt <= now - PROGRESS_SESSION_TTL_MS) throw Object.assign(httpError(409, "阅读进度会话已过期，请重新打开这本书"), { code: "NOVEL_PROGRESS_SESSION_EXPIRED" });
+  database.exec(`CREATE TABLE IF NOT EXISTS novel_progress_sessions (
+    book_id TEXT NOT NULL, catalog_revision TEXT NOT NULL, session_id TEXT NOT NULL,
+    started_at INTEGER NOT NULL, max_sequence INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+    PRIMARY KEY (book_id, catalog_revision, session_id)
+  ); CREATE INDEX IF NOT EXISTS idx_novel_progress_sessions_expiry ON novel_progress_sessions(expires_at)`);
+  database.prepare("INSERT INTO novel_meta(key, value) VALUES ('progress_clock_ms', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(now));
+  // Never evict a valid high-water mark: an evicted session could otherwise
+  // return as a new writer and resurrect a delayed packet.
+  database.prepare(`DELETE FROM novel_progress_sessions WHERE expires_at <= ? OR NOT EXISTS (
+    SELECT 1 FROM novel_books b WHERE b.id=novel_progress_sessions.book_id
+      AND b.catalog_revision=novel_progress_sessions.catalog_revision AND b.status='ok'
+  )`).run(now);
+  const previous = database.prepare("SELECT started_at, max_sequence FROM novel_progress_sessions WHERE book_id=? AND catalog_revision=? AND session_id=?")
+    .get(bookId, revision, session.id);
+  if (previous && previous.started_at !== session.startedAt) throw httpError(409, "阅读进度会话标识已用于其他时间");
+  if (previous && session.sequence <= previous.max_sequence) return false;
+  if (!previous) {
+    const total = database.prepare("SELECT COUNT(*) AS count FROM novel_progress_sessions").get().count;
+    const bookTotal = database.prepare("SELECT COUNT(*) AS count FROM novel_progress_sessions WHERE book_id=?").get(bookId).count;
+    if (total >= PROGRESS_SESSION_LIMIT || bookTotal >= PROGRESS_BOOK_SESSION_LIMIT) {
+      throw Object.assign(httpError(503, "阅读进度保存繁忙，请稍后重试"), { code: "NOVEL_PROGRESS_BUSY" });
+    }
+  }
+  database.prepare(`INSERT INTO novel_progress_sessions(book_id, catalog_revision, session_id, started_at, max_sequence, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(book_id, catalog_revision, session_id) DO UPDATE SET max_sequence=excluded.max_sequence`)
+    .run(bookId, revision, session.id, session.startedAt, session.sequence, session.startedAt + PROGRESS_SESSION_TTL_MS);
+  return true;
+}
+
+export function novelWriteOperationHash(method, args) {
+  return crypto.createHash("sha256").update(JSON.stringify([method, args])).digest("hex");
+}
+
+function ensureWriteReceiptSchema(database) {
+  database.exec(`CREATE TABLE IF NOT EXISTS novel_write_receipts (
+    source_realm TEXT NOT NULL, operation_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL, response_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL, retain_receipt INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (source_realm, operation_id)
+  )`);
+  if (!database.prepare("PRAGMA table_info(novel_write_receipts)").all().some((column) => column.name === "retain_receipt")) {
+    database.exec("ALTER TABLE novel_write_receipts ADD COLUMN retain_receipt INTEGER NOT NULL DEFAULT 1");
+  }
+}
+
+function deleteAcknowledgedReceipts(database, receipts = [], sourceRealm, databaseIdentity) {
+  if (!Array.isArray(receipts) || !receipts.length || !databaseIdentity) return [];
+  const remove = database.prepare("DELETE FROM novel_write_receipts WHERE source_realm = ? AND operation_id = ? AND request_hash = ? AND retain_receipt = 0");
+  const acknowledged = receipts.filter((receipt) => receipt.sourceRealm === sourceRealm && receipt.databaseIdentity === databaseIdentity);
+  for (const receipt of acknowledged) remove.run(receipt.sourceRealm, receipt.operationId, receipt.requestHash);
+  return acknowledged;
+}
+
+function databaseFileIdentity(filePath) {
+  try {
+    const stat = fs.statSync(filePath, { bigint: true });
+    return stat.ino ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` : "";
+  } catch (error) { if (error.code === "ENOENT") return ""; throw error; }
+}
+function stableDatabaseIdentity(before, after) {
+  return before && before !== after ? "" : after;
+}
+
+let savepointSequence = 0;
+function beginTransaction(database, begin) {
+  if (!database.isTransaction) {
+    database.exec(begin);
+    return null;
+  }
+  const savepoint = `novel_operation_${++savepointSequence}`;
+  database.exec(`SAVEPOINT ${savepoint}`);
+  return savepoint;
+}
+
+function commitTransaction(database, savepoint) {
+  database.exec(savepoint ? `RELEASE SAVEPOINT ${savepoint}` : "COMMIT");
+}
+
+function rollbackTransaction(database, savepoint) {
+  if (savepoint) {
+    database.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    database.exec(`RELEASE SAVEPOINT ${savepoint}`);
+  } else database.exec("ROLLBACK");
+}
+
 function inTransaction(database, begin, callback) {
-  database.exec(begin);
+  const transaction = beginTransaction(database, begin);
   try {
     const result = callback(database);
-    database.exec("COMMIT");
+    commitTransaction(database, transaction);
     return result;
   } catch (error) {
-    try { database.exec("ROLLBACK"); } catch {}
+    try { rollbackTransaction(database, transaction); } catch {}
     throw error;
   }
 }
@@ -885,7 +1192,7 @@ function uploadBookIntoDb(database, body = {}) {
   const sizeBytes = clampInteger(body.sizeBytes ?? body.size_bytes, Buffer.byteLength(text, "utf8"), 0, Number.MAX_SAFE_INTEGER);
   const tags = [category, UPLOAD_SOURCE_ROOT].filter(Boolean);
 
-  database.exec("BEGIN IMMEDIATE");
+  const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
   try {
     const replacement = prepareChapterReplacement(database, bookId, chapters);
     chapters = replacement.chapters;
@@ -936,15 +1243,48 @@ function uploadBookIntoDb(database, body = {}) {
     finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_uploaded_at', ?)").run(now);
-    database.exec("COMMIT");
+    commitTransaction(database, transaction);
   } catch (error) {
     try {
-      database.exec("ROLLBACK");
+      rollbackTransaction(database, transaction);
     } catch {}
     throw error;
   }
 
   return bookId;
+}
+
+function reimportLocalBookIntoDb(database, bookId, descriptor, record) {
+  const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
+  try {
+    if (descriptor.bookId !== bookId || descriptor.sourceRealm !== sourceRealmFromDb(database)) throw httpError(409, "小说库来源已变化，请重新打开后再导入");
+    const current = database.prepare("SELECT * FROM novel_books WHERE id=? AND status='ok'").get(bookId);
+    if (!current || current.catalog_revision !== descriptor.catalogRevision) throw httpError(409, "书籍已删除或目录已更新，请重新打开后再导入");
+    try {
+      if (!samePath(fs.realpathSync(current.source_path), descriptor.sourcePath) || !samePath(fs.realpathSync(current.source_root), descriptor.sourceRoot)) throw new Error("changed");
+    } catch { throw httpError(409, "书籍来源路径已变化，请重新打开后再导入"); }
+    assertSourceSnapshot(descriptor);
+    const replacement = prepareChapterReplacement(database, bookId, record.chapters);
+    const chapters = replacement.chapters;
+    database.prepare("DELETE FROM novel_chapters WHERE book_id=?").run(bookId);
+    database.prepare("DELETE FROM novel_book_deletions WHERE book_id=?").run(bookId);
+    const columns = ["title", "author", "category", "source_root", "source_path", "relative_path", "file_name", "size_bytes", "mtime_ms", "encoding", "char_count", "chapter_count", "summary", "tags_json", "status", "error", "updated_at"];
+    database.prepare(`UPDATE novel_books SET ${columns.map((key) => `${key}=?`).join(",")}, first_chapter_id=?, latest_chapter_id=?, latest_chapter_title=? WHERE id=?`)
+      .run(...columns.map((key) => record[key]), chapters[0].id, chapters.at(-1).id, chapters.at(-1).title, bookId);
+    const insert = database.prepare("INSERT INTO novel_chapters (id,book_id,chapter_index,title,content,char_count,updated_at) VALUES (?,?,?,?,?,?,?)");
+    for (const chapter of chapters) {
+      const chars = chapter.content.length - (chapter.content.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length || 0);
+      insert.run(chapter.id, bookId, chapter.index, chapter.title, chapter.content, chars, record.updated_at);
+    }
+    const override = database.prepare("SELECT title,author,category,summary FROM novel_book_overrides WHERE book_id=?").get(bookId);
+    if (override) database.prepare("UPDATE novel_books SET title=?,author=?,category=?,summary=? WHERE id=?")
+      .run(override.title || record.title, override.author || "", override.category || record.category, override.summary || "", bookId);
+    finishChapterReplacement(database, bookId, replacement);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key,value) VALUES ('scanned_at',?)").run(record.updated_at);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key,value) VALUES ('last_reimported_at',?)").run(record.updated_at);
+    assertSourceSnapshot(descriptor);
+    commitTransaction(database, transaction);
+  } catch (error) { try { rollbackTransaction(database, transaction); } catch {} throw error; }
 }
 
 function reimportBookIntoDb(database, bookId, body = {}) {
@@ -991,7 +1331,7 @@ function reimportBookIntoDb(database, bookId, body = {}) {
     .get(bookId);
   const now = new Date().toISOString();
 
-  database.exec("BEGIN IMMEDIATE");
+  const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
   try {
     const lockedBook = database.prepare("SELECT catalog_revision FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
     if (!lockedBook || lockedBook.catalog_revision !== current.catalog_revision) throw httpError(409, "书籍已删除或目录已更新，请重新打开后再导入");
@@ -1061,10 +1401,10 @@ function reimportBookIntoDb(database, bookId, body = {}) {
     finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_reimported_at', ?)").run(now);
-    database.exec("COMMIT");
+    commitTransaction(database, transaction);
   } catch (error) {
     try {
-      database.exec("ROLLBACK");
+      rollbackTransaction(database, transaction);
     } catch {}
     throw error;
   }
@@ -1095,7 +1435,7 @@ function importCollectedBookIntoDb(database, body = {}) {
     .prepare("SELECT title, author, category, summary FROM novel_book_overrides WHERE book_id = ?")
     .get(bookId);
 
-  database.exec("BEGIN IMMEDIATE");
+  const transaction = beginTransaction(database, "BEGIN IMMEDIATE");
   try {
     const replacement = prepareChapterReplacement(database, bookId, chapters);
     chapters = replacement.chapters;
@@ -1185,10 +1525,10 @@ function importCollectedBookIntoDb(database, body = {}) {
     finishChapterReplacement(database, bookId, replacement);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_collected_at', ?)").run(now);
-    database.exec("COMMIT");
+    commitTransaction(database, transaction);
   } catch (error) {
     try {
-      database.exec("ROLLBACK");
+      rollbackTransaction(database, transaction);
     } catch {}
     throw error;
   }

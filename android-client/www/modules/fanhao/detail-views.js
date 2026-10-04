@@ -1,18 +1,18 @@
-import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-0f97d6765d71";
-import { cacheAgeText } from "../../js/cache.js?v=assets-0f97d6765d71";
+import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-07b744082137";
+import { cacheAgeText } from "../../js/cache.js?v=assets-07b744082137";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-0f97d6765d71";
-import { getWorkSource } from "../../js/work-source.js?v=assets-0f97d6765d71";
-import { personDetailPath } from "./features/people/detail-request.js?v=assets-0f97d6765d71";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-0f97d6765d71";
-import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-0f97d6765d71";
-import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-0f97d6765d71";
-import { createWorkActions } from "./features/works/actions.js?v=assets-0f97d6765d71";
-import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-0f97d6765d71";
-import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-0f97d6765d71";
-import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-0f97d6765d71";
+import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-07b744082137";
+import { getWorkSource } from "../../js/work-source.js?v=assets-07b744082137";
+import { personDetailPath } from "./features/people/detail-request.js?v=assets-07b744082137";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-07b744082137";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-07b744082137";
+import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-07b744082137";
+import { createWorkActions } from "./features/works/actions.js?v=assets-07b744082137";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-07b744082137";
+import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-07b744082137";
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-07b744082137";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 export function createDetailViews(context) {

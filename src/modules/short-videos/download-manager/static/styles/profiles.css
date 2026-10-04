@@ -46,18 +46,19 @@
 }
 
 .profile-manager-list {
-  max-height: calc(100vh - 300px);
   min-height: 360px;
-  overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
 }
 
 .profile-manager-row {
-  min-width: 1120px;
+  /* Keep every profile searchable while skipping offscreen layout and paint. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+  min-width: 0;
   display: grid;
-  grid-template-columns: minmax(260px, 1.6fr) repeat(3, 88px) 108px 158px max-content;
+  grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(64px, .5fr)) 100px 158px minmax(260px, 1.5fr);
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -89,6 +90,11 @@
   gap: 10px;
 }
 
+.profile-manager-identity > div:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .profile-manager-avatar {
   width: 46px;
   height: 46px;
@@ -102,7 +108,9 @@
   overflow: hidden;
   font-weight: 800;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
 }
 
 .profile-manager-history {
@@ -199,6 +207,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+  flex-wrap: wrap;
   white-space: nowrap;
 }
 
@@ -245,9 +254,31 @@
 }
 
 .profile-manager-load-more {
-  min-width: 1120px;
+  min-width: 0;
   padding: 12px;
   text-align: center;
+}
+
+@media (max-width: 1100px) {
+  .profile-manager-row {
+    contain-intrinsic-block-size: auto 240px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .profile-manager-identity,
+  .profile-manager-row-actions {
+    grid-column: 1 / -1;
+  }
+  .profile-manager-row-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .profile-manager-row {
+    contain-intrinsic-block-size: auto 320px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .extract-actions {

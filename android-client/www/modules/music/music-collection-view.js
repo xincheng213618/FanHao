@@ -339,6 +339,7 @@ export function createMusicCollectionView(deps) {
     renderBrowserHeader,
     renderBrowserToolbar,
     renderDetailHero,
-    renderDetailListHeader
+    renderDetailListHeader,
+    renderLanguages
   };
 }

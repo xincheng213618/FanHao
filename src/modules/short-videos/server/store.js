@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { localImageDiskIdentity } from "../../../platform/server/local-image-read-queue.js";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
 import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory, searchAuthorFacet } from "./author-facets.js";
 import { createShortVideoAuthorCleanupService } from "./author-cleanup-service.js";
@@ -2620,6 +2621,84 @@ function summary() {
     return file;
   }
 
+  function captureImageSource(database, readSource) {
+    const source = readSource();
+    if (!source) return null;
+    const identity = JSON.stringify(source);
+    return {
+      source,
+      isCurrentSource() {
+        if (db !== database) return false;
+        try {
+          return JSON.stringify(readSource()) === identity;
+        } catch {
+          return false;
+        }
+      }
+    };
+  }
+
+  async function imageFileFromSource(owner, { signal } = {}) {
+    if (!owner || signal?.aborted || !owner.isCurrentSource()) return null;
+    const source = owner.source;
+    if (!source.path) return null;
+    const filePath = path.resolve(source.path);
+    let stat;
+    try {
+      stat = await fs.promises.stat(filePath);
+    } catch (error) {
+      if (signal?.aborted || !owner.isCurrentSource()) return null;
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    }
+    if (signal?.aborted || !owner.isCurrentSource() || !stat.isFile()
+      || (source.type === "image" && stat.size <= 0)) return null;
+    const modifiedAt = stat.mtime.toISOString();
+    return {
+      id: source.fileId,
+      path: filePath,
+      type: source.type,
+      ext: path.extname(filePath).toLowerCase(),
+      size: stat.size,
+      modifiedAt,
+      cacheMtime: JSON.stringify([modifiedAt, Number(stat.mtimeMs ?? stat.mtime.getTime()), String(stat.dev ?? ""), String(stat.ino ?? "")]),
+      cacheVersion: shortVideoMediaVersion(source.cacheVersionMtimeMs || stat.mtimeMs),
+      diskIdentity: localImageDiskIdentity(filePath, stat),
+      isCurrentSource: owner.isCurrentSource
+    };
+  }
+
+  async function galleryFileAsync(id, index = 0, options = {}) {
+    if (options.signal?.aborted) return null;
+    const database = databaseOrOpen();
+    const normalizedIndex = clampInt(index, 0, 0, 9999);
+    const owner = captureImageSource(database, () => {
+      const row = videoCatalogRowByAnyId(database, id,
+        "id, source_path, cover_path, mtime_ms, updated_at");
+      if (!row) return null;
+      const asset = database.prepare(`
+        SELECT id, asset_type, local_path, mtime_ms, size_bytes, updated_at
+        FROM short_video_assets
+        WHERE video_id = ?
+          AND asset_type IN (?, ?)
+        LIMIT 1
+      `).get(row.id, galleryAssetType(normalizedIndex, "image"), galleryAssetType(normalizedIndex, "video"));
+      const fallbackPath = normalizedIndex === 0 ? (row.cover_path || row.source_path || "") : "";
+      const localPath = asset?.local_path || fallbackPath;
+      const type = String(asset?.asset_type || "").startsWith("gallery_video:")
+        || VIDEO_EXTS.has(path.extname(localPath).toLowerCase()) ? "video" : "image";
+      return {
+        row,
+        asset: asset || null,
+        path: localPath,
+        type,
+        cacheVersionMtimeMs: asset?.mtime_ms || 0,
+        fileId: `${row.id}:gallery:${normalizedIndex}`
+      };
+    });
+    return imageFileFromSource(owner, options);
+  }
+
   function coverFile(id) {
     const database = databaseOrOpen();
     const row = videoCatalogRowByAnyId(database, id, "id, cover_path, cover_source, mtime_ms");
@@ -2640,6 +2719,34 @@ function summary() {
     }
     if (!row.cover_path) return null;
     return safeStoredFile(row.cover_path, "image");
+  }
+
+  async function coverFileAsync(id, options = {}) {
+    if (options.signal?.aborted) return null;
+    const database = databaseOrOpen();
+    const owner = captureImageSource(database, () => {
+      const row = videoCatalogRowByAnyId(database, id,
+        "id, source_path, cover_path, cover_source, mtime_ms, updated_at");
+      return row ? { row, path: row.cover_path, type: "image", fileId: `${row.id}:cover` } : null;
+    });
+    if (!owner) return null;
+    const row = owner.source.row;
+    if (row.cover_source === SQLITE_SHORT_VIDEO_COVER_SOURCE) {
+      const stored = coverBlobDatabase.get(row.id);
+      if (!stored || options.signal?.aborted || !owner.isCurrentSource()) return null;
+      return {
+        id: row.id,
+        type: "image",
+        ext: ".jpg",
+        mimeType: stored.mimeType,
+        buffer: stored.imageBuffer,
+        size: stored.byteLength,
+        modifiedAt: stored.updatedAt,
+        cacheVersion: `${stored.sourceFingerprint || row.mtime_ms || ""}-${stored.generationVersion}`,
+        isCurrentSource: owner.isCurrentSource
+      };
+    }
+    return imageFileFromSource(owner, options);
   }
 
   function coverBackfillStatus(sampleLimit = 8) {
@@ -3341,6 +3448,7 @@ function summary() {
     coverBackfillStatus,
     coverDbPath,
     coverFile,
+    coverFileAsync,
     coverStorageStatus,
     dbPath,
     deleteVideo,
@@ -3351,6 +3459,7 @@ function summary() {
     downloadManagerSourceStateKey,
     facets,
     galleryFile,
+    galleryFileAsync,
     importDownloadManagerDb,
     importRemoteComments,
     listAuthors,

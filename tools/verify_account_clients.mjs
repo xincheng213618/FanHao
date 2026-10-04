@@ -130,7 +130,9 @@ try {
     "revoked Android session must not silently revert to anonymous LAN access");
   await signIn(android, "android-user");
   const settingsPage = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true }); observe(settingsPage);
-  await settingsPage.goto(base + "/android-settings-fixture"); await settingsPage.getByRole("button", { name: "注册", exact: true }).waitFor(); await ready(settingsPage);
+  await settingsPage.goto(base + "/android-settings-fixture");
+  await settingsPage.locator(".settings-account-group > summary").click();
+  await settingsPage.getByRole("button", { name: "注册", exact: true }).waitFor(); await ready(settingsPage);
   await settingsPage.locator(".settings-account-group").scrollIntoViewIfNeeded();
   await settingsPage.screenshot({ path: path.join(output, "android-settings.png") });
   assert(await settingsPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));

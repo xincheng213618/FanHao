@@ -25,27 +25,50 @@ import {
   MUSIC_ARTIST_PAGE_LIMIT,
   MUSIC_ALBUM_PAGE_LIMIT
 } from "./constants.js";
-import { createMusicProgressWriter } from "./music-progress-writer.js";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=20261004-music-progress-01";
+import { createMusicProgressSession, createMusicPlayedReport, musicProgressBody } from "./progress-session.js?v=20261004-music-progress-01";
+import { captureWebAccount } from "../../platform/accounts/session-context.js";
 
 export function createMusicActions({ state, api, player, view, router, showError }) {
   let musicLoadGeneration = 0;
   let musicLoadController = null;
+  let musicLoadRequest = null;
   let trackOpenGeneration = 0;
   let trackOpenController = null;
+  let trackOpenRestoreOwner = null;
+  let navigationGeneration = 0;
+  let foregroundGeneration = 0;
+  let requestStatusOwner = null;
+  const sideListRequests = { playlists: null, smartPlaylists: null };
+  const sideListGenerations = { playlists: 0, smartPlaylists: 0 };
   let restoreAttemptKey = "";
   let playReportSession = 0;
   let lastProgressSavedAt = 0;
+  let progressSession = null;
+  let playedReport = null;
+  let progressClockRequest = null;
+  let progressHidden = false;
   let playlistDialogReturnFocus = null;
 
   const music = () => state.music;
   const progressWriter = createMusicProgressWriter({
     async send(record, played) {
-      await api.setProgress(record.trackId, {
-        positionMs: record.positionMs,
-        durationMs: record.durationMs,
-        ...(played ? { played: true } : {})
-      });
+      checkProgressAccount(record);
+      const result = await api.setProgress(record.trackId, musicProgressBody(record, played));
       lastProgressSavedAt = Date.now();
+      return result;
+    },
+    sendKeepalive(record, played) {
+      checkProgressAccount(record);
+      return api.setProgressKeepalive?.(record.trackId, musicProgressBody(record, played));
+    },
+    onError(error, record) {
+      if (error?.code === "MUSIC_PROGRESS_SESSION_EXPIRED" && record?.trackId === music().current?.id
+          && record.progressSessionId === progressSession?.id) {
+        void refreshProgressClock();
+      } else if (["MUSIC_PROGRESS_QUEUE_FULL", "MUSIC_PLAYED_QUEUE_FULL", "MUSIC_PROGRESS_KEEPALIVE_FULL", "MUSIC_PROGRESS_CAPACITY"].includes(error?.code)) {
+        showError(error);
+      }
     },
     onPlayed(record) {
       if (record.session === playReportSession && music().current?.id === record.trackId) {
@@ -54,34 +77,157 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
   });
 
+  // Navigation owns pending reads only. Playback and progress writes keep their
+  // existing lifetime when the user leaves a reader or changes the route.
+  function cancelPendingRequests() {
+    view.cancelNavigationTimers?.();
+    navigationGeneration += 1;
+    foregroundGeneration += 1;
+    musicLoadGeneration += 1;
+    trackOpenGeneration += 1;
+    const hadList = Boolean(musicLoadController);
+    const hadTrack = Boolean(trackOpenController);
+    musicLoadController?.abort();
+    trackOpenController?.abort();
+    for (const kind of Object.keys(sideListRequests)) {
+      sideListGenerations[kind] += 1;
+      sideListRequests[kind]?.controller.abort();
+      sideListRequests[kind] = null;
+    }
+    musicLoadController = null;
+    musicLoadRequest = null;
+    trackOpenController = null;
+    if (trackOpenRestoreOwner) restoreAttemptKey = "";
+    trackOpenRestoreOwner = null;
+    if (state.music) {
+      if (hadList) {
+        music().loading = false;
+        music().loadingMore = false;
+        view.setMusicListLoadingState(false);
+      }
+      if (hadTrack) {
+        music().openingTrackId = "";
+        view.setTrackOpeningState("");
+      }
+      if (requestStatusOwner && music().status === requestStatusOwner.status) music().status = "";
+    }
+    requestStatusOwner = null;
+    return navigationGeneration;
+  }
+
+  function beginNavigation() {
+    return cancelPendingRequests();
+  }
+
+  function isNavigationCurrent(token) {
+    return token === navigationGeneration;
+  }
+
+  function setRequestStatus(owner, status) {
+    owner.status = status;
+    requestStatusOwner = owner;
+    music().status = status;
+  }
+
+  function settleRequestStatus(owner, status) {
+    if (requestStatusOwner !== owner || music().status !== owner.status) return;
+    music().status = status;
+    requestStatusOwner = null;
+  }
+
+  function listSelectionKey() {
+    return JSON.stringify([
+      music().mode, musicListParams().toString(), music().artistSort,
+      music().albumSort, music().letter, music().activePlaylistId, music().activeSmartPlaylistId
+    ]);
+  }
+
+  function listOffset(artistMode, albumMode) {
+    return artistMode ? music().data?.artists?.length || 0
+      : albumMode ? music().data?.albums?.length || 0
+        : music().data?.rawLoaded ?? music().data?.tracks?.length ?? 0;
+  }
+
+  function ownsMusicLoad(request) {
+    return musicLoadRequest === request && request.generation === musicLoadGeneration
+      && request.navigation === navigationGeneration && !request.controller.signal.aborted;
+  }
+
+  function isMusicLoadCurrent(request) {
+    return ownsMusicLoad(request) && request.selection === listSelectionKey()
+      && (!request.append || request.offset === listOffset(request.artistMode, request.albumMode));
+  }
+
+  function isForegroundCurrent(request) {
+    return request.navigation === navigationGeneration && request.foreground === foregroundGeneration;
+  }
+
+  function cancelTrackRequest() {
+    trackOpenGeneration += 1;
+    if (trackOpenRestoreOwner) restoreAttemptKey = "";
+    trackOpenRestoreOwner = null;
+    if (!trackOpenController) return;
+    trackOpenController.abort();
+    trackOpenController = null;
+    music().openingTrackId = "";
+    view.setTrackOpeningState("");
+    if (requestStatusOwner?.kind === "track") settleRequestStatus(requestStatusOwner, "");
+  }
+
   // ---------- 列表加载 ----------
-  async function loadMusic(options = {}) {
+  function loadMusic(options = {}) {
     ensureMusicState(state);
     const artistMode = music().mode === "artists";
     const albumMode = music().mode === "albums";
     const append = Boolean(options.append && (music().mode === "library" || artistMode || albumMode));
+    const selection = listSelectionKey();
+    const offset = append ? listOffset(artistMode, albumMode) : 0;
+    if (append && musicLoadRequest?.append && isMusicLoadCurrent(musicLoadRequest)
+      && musicLoadRequest.selection === selection && musicLoadRequest.offset === offset) {
+      return musicLoadRequest.promise;
+    }
+    if (!options.keepCurrent && !options.background && !append) {
+      foregroundGeneration += 1;
+      cancelTrackRequest();
+    }
     const appendScrollTop = append ? Math.max(0, Number(document.querySelector(".music-track-panel")?.scrollTop || 0)) : 0;
     const generation = ++musicLoadGeneration;
+    if (trackOpenRestoreOwner && trackOpenRestoreOwner === musicLoadRequest) cancelTrackRequest();
     musicLoadController?.abort();
     const controller = new AbortController();
     musicLoadController = controller;
+    const request = {
+      controller, generation, selection, offset, append, artistMode, albumMode,
+      background: Boolean(options.background),
+      navigation: navigationGeneration, foreground: foregroundGeneration
+    };
+    musicLoadRequest = request;
+    request.promise = performMusicLoad(request, options, appendScrollTop);
+    return request.promise;
+  }
+
+  async function performMusicLoad(request, options, appendScrollTop) {
+    const { controller, append, artistMode, albumMode, background } = request;
     const signal = controller.signal;
-    music().loading = !append;
-    music().loadingMore = append;
-    music().status = append ? "正在加载更多" : "正在读取音乐库";
-    view.setMusicListLoadingState(true, { append });
+    if (background) {
+      const hadLoading = music().loading || music().loadingMore;
+      music().loading = false;
+      music().loadingMore = false;
+      if (hadLoading) view.setMusicListLoadingState(false);
+    } else {
+      music().loading = !append;
+      music().loadingMore = append;
+      if (!trackOpenController) setRequestStatus(request, append ? "正在加载更多" : "正在读取音乐库");
+      view.setMusicListLoadingState(true, { append });
+    }
     const listsPromise = append ? Promise.resolve() : Promise.all([
-      sideListCacheFresh(music().playlistsLoadedAt) ? Promise.resolve() : loadPlaylists(signal),
-      sideListCacheFresh(music().smartPlaylistsLoadedAt) ? Promise.resolve() : loadSmartPlaylists(signal)
+      sideListCacheFresh(music().playlistsLoadedAt) ? Promise.resolve() : loadPlaylists(signal, request),
+      sideListCacheFresh(music().smartPlaylistsLoadedAt) ? Promise.resolve() : loadSmartPlaylists(signal, request)
     ]);
     const params = musicListParams();
     params.set("limit", String(artistMode ? MUSIC_ARTIST_PAGE_LIMIT : albumMode ? MUSIC_ALBUM_PAGE_LIMIT : MUSIC_PAGE_LIMIT));
     if (append) {
-      params.set("offset", String(
-        artistMode ? music().data?.artists?.length || 0
-          : albumMode ? music().data?.albums?.length || 0
-            : music().data?.rawLoaded ?? music().data?.tracks?.length ?? 0
-      ));
+      params.set("offset", String(request.offset));
     }
     let data;
     try {
@@ -122,16 +268,21 @@ export function createMusicActions({ state, api, player, view, router, showError
       }
       await listsPromise;
     } catch (error) {
-      if (controller.signal.aborted || generation !== musicLoadGeneration) return;
+      if (!isMusicLoadCurrent(request) || !isForegroundCurrent(request) || requestStatusOwner !== request) {
+        finishMusicLoad(request);
+        return;
+      }
       music().loading = false;
       music().loadingMore = false;
-      music().status = error?.message || "音乐列表读取失败";
-      musicLoadController = null;
-      view.setMusicListLoadingState(false);
+      settleRequestStatus(request, error?.message || "音乐列表读取失败");
+      finishMusicLoad(request);
       view.refresh();
       throw error;
     }
-    if (controller.signal.aborted || generation !== musicLoadGeneration) return;
+    if (!isMusicLoadCurrent(request)) {
+      finishMusicLoad(request);
+      return;
+    }
     const incomingTracks = data.tracks || [];
     const previousRawTracks = append ? music().data?.rawTracks || music().data?.tracks || [] : [];
     const mergedRawTracks = append ? [...previousRawTracks, ...incomingTracks] : incomingTracks;
@@ -154,25 +305,30 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().languages = data.languages || data.summary?.languages || music().languages || [];
     music().activePlaylist = data.playlist || null;
     music().activeSmartPlaylist = data.smartPlaylist || null;
-    if (!artistMode && !albumMode && !music().current) music().queue = mergedTracks;
+    if (!background && !artistMode && !albumMode && !music().current && !trackOpenController && isForegroundCurrent(request)) music().queue = mergedTracks;
     music().loading = false;
     music().loadingMore = false;
     music().hasMore = Boolean(data.hasMore);
-    music().status = artistMode
+    settleRequestStatus(request, artistMode
       ? (data.total ? "" : "没有匹配的歌手")
       : albumMode
         ? (data.total ? "" : "没有匹配的专辑")
-        : emptyMusicMessage(music(), data.total || music().queue.length);
-    const appendedInPlace = append && (
+        : emptyMusicMessage(data.total || music().queue.length));
+    const appendedInPlace = !background && append && isForegroundCurrent(request) && (
       artistMode
         ? view.appendArtistPage(data.artists || [], previousArtists.length)
         : albumMode
           ? view.appendAlbumPage(data.albums || [], previousAlbums.length)
-          : Boolean(music().current) && view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length)
+          : !music().query && Boolean(music().current) && view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length)
     );
-    if (!artistMode && !albumMode && options.restoreLast !== false) await restoreLastTrack();
-    musicLoadController = null;
-    view.setMusicListLoadingState(false);
+    const restoreAllowed = !background && (options.restoreLast === true || (!options.keepCurrent && options.restoreLast !== false));
+    if (!artistMode && !albumMode && restoreAllowed && isForegroundCurrent(request)) await restoreLastTrack(request);
+    if (!ownsMusicLoad(request) || request.selection !== listSelectionKey()) {
+      finishMusicLoad(request);
+      return;
+    }
+    finishMusicLoad(request);
+    if (background || !isForegroundCurrent(request)) return;
     view.renderStats();
     if (!appendedInPlace && !view.refreshMusicLibraryContent()) view.refresh();
     if (append && !appendedInPlace) view.restoreMusicPanelScroll(appendScrollTop);
@@ -182,23 +338,50 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
   }
 
-  async function loadPlaylists(signal) {
-    try {
-      const data = await api.getPlaylists(signal);
-      music().playlists = data.playlists || [];
-      music().playlistsLoadedAt = Date.now();
-    } catch {
-      music().playlists = music().playlists || [];
-    }
+  function finishMusicLoad(request) {
+    if (!ownsMusicLoad(request)) return;
+    musicLoadController = null;
+    musicLoadRequest = null;
+    request.controller.abort();
+    music().loading = false;
+    music().loadingMore = false;
+    settleRequestStatus(request, "");
+    if (!request.background) view.setMusicListLoadingState(false);
   }
 
-  async function loadSmartPlaylists(signal) {
+  function loadPlaylists(signal, owner) {
+    return loadSideList("playlists", "playlistsLoadedAt", "getPlaylists", signal, owner);
+  }
+
+  function loadSmartPlaylists(signal, owner) {
+    return loadSideList("smartPlaylists", "smartPlaylistsLoadedAt", "getSmartPlaylists", signal, owner);
+  }
+
+  async function loadSideList(kind, loadedAt, method, signal, owner) {
+    ensureMusicState(state);
+    sideListRequests[kind]?.controller.abort();
+    const controller = new AbortController();
+    const request = { controller, generation: ++sideListGenerations[kind], navigation: navigationGeneration };
+    sideListRequests[kind] = request;
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    const isCurrent = () => !controller.signal.aborted && request.navigation === navigationGeneration
+      && request.generation === sideListGenerations[kind] && sideListRequests[kind] === request
+      && (!owner || ownsMusicLoad(owner));
     try {
-      const data = await api.getSmartPlaylists(signal);
-      music().smartPlaylists = data.smartPlaylists || [];
-      music().smartPlaylistsLoadedAt = Date.now();
+      const data = await api[method](controller.signal);
+      if (!isCurrent()) return false;
+      music()[kind] = data[kind] || [];
+      music()[loadedAt] = Date.now();
+      return true;
     } catch {
-      music().smartPlaylists = music().smartPlaylists || [];
+      if (!isCurrent()) return false;
+      music()[kind] = music()[kind] || [];
+      return true;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (sideListRequests[kind] === request) sideListRequests[kind] = null;
     }
   }
 
@@ -210,16 +393,19 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function openTrack(trackId, options = {}) {
     ensureMusicState(state);
     if (!trackId) return null;
+    const restoreOwner = options.restoreOwner;
+    const restoring = Boolean(restoreOwner || options.restoreGuard);
+    const restoreIsCurrent = () => (!restoreOwner || (isMusicLoadCurrent(restoreOwner) && isForegroundCurrent(restoreOwner)))
+      && (!options.restoreGuard || options.restoreGuard());
+    if (restoring && !restoreIsCurrent()) return null;
+    if (!restoring) {
+      foregroundGeneration += 1;
+      view.cancelNavigationTimers?.();
+    }
+    cancelTrackRequest();
+    const request = { kind: "track", navigation: navigationGeneration, foreground: foregroundGeneration };
     const previousTrackId = music().current?.id || "";
     if (music().current?.id === trackId && player.getAudio().src && !options.forceReload) {
-      if (trackOpenController) {
-        trackOpenGeneration += 1;
-        trackOpenController.abort();
-        trackOpenController = null;
-        music().openingTrackId = "";
-        music().status = "";
-        view.setTrackOpeningState("");
-      }
       if (options.openPage) {
         music().trackPageOpen = true;
         music().playerStageOpen = false;
@@ -236,26 +422,48 @@ export function createMusicActions({ state, api, player, view, router, showError
     trackOpenController?.abort();
     const controller = new AbortController();
     trackOpenController = controller;
+    trackOpenRestoreOwner = restoring ? restoreOwner || request : null;
+    const isCurrent = () => {
+      if (controller.signal.aborted || generation !== trackOpenGeneration) return false;
+      return isForegroundCurrent(request) && restoreIsCurrent();
+    };
+    const discardStaleRequest = () => {
+      if (trackOpenController !== controller || generation !== trackOpenGeneration) return;
+      if (trackOpenRestoreOwner) restoreAttemptKey = "";
+      trackOpenController = null;
+      trackOpenRestoreOwner = null;
+      music().openingTrackId = "";
+      settleRequestStatus(request, "");
+      view.setTrackOpeningState("");
+    };
     music().openingTrackId = trackId;
-    music().status = "正在打开歌曲";
+    setRequestStatus(request, "正在打开歌曲");
     view.setTrackOpeningState(trackId);
     let data;
     try {
       data = await api.getTrack(trackId, musicListParams(), controller.signal);
     } catch (error) {
-      if (controller.signal.aborted || generation !== trackOpenGeneration) return null;
+      if (!isCurrent()) {
+        discardStaleRequest();
+        return null;
+      }
       music().openingTrackId = "";
-      music().status = error?.message || "歌曲打开失败";
+      settleRequestStatus(request, error?.message || "歌曲打开失败");
       trackOpenController = null;
+      trackOpenRestoreOwner = null;
       view.setTrackOpeningState("");
       if (state.activeView === "music") view.refresh();
       throw error;
     }
-    if (controller.signal.aborted || generation !== trackOpenGeneration) return null;
+    if (!isCurrent()) {
+      discardStaleRequest();
+      return null;
+    }
     if (!data?.track?.id) {
       music().openingTrackId = "";
-      music().status = "歌曲资料不完整";
+      settleRequestStatus(request, "歌曲资料不完整");
       trackOpenController = null;
+      trackOpenRestoreOwner = null;
       view.setTrackOpeningState("");
       if (state.activeView === "music") view.refresh();
       throw new Error(music().status);
@@ -265,8 +473,11 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().prevId = data.prevId || "";
     music().nextId = data.nextId || "";
     music().openingTrackId = "";
-    music().status = "";
+    settleRequestStatus(request, "");
     playReportSession += 1;
+    cancelProgressClock();
+    progressSession = createMusicProgressSession(data.track.id, "", data.serverClockMs);
+    playedReport = null;
     music().playReportedTrackId = "";
     music().lyricFollowPaused = false;
     music().libraryDrawerOpen = false;
@@ -280,6 +491,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     rememberLastTrack(data.track);
     player.load(data.track, options.autoplay !== false);
     trackOpenController = null;
+    trackOpenRestoreOwner = null;
     view.setTrackOpeningState("");
     if (state.activeView === "music") {
       if (shouldOpenPage || !view.refreshCurrentTrackSurfaces(previousTrackId)) view.refresh();
@@ -556,6 +768,7 @@ export function createMusicActions({ state, api, player, view, router, showError
   // ---------- 模式切换 ----------
   function selectMusicMode(mode, options = {}) {
     ensureMusicState(state);
+    beginNavigation();
     view.clearMusicSuggestions();
     music().mode = mode;
     music().activePlaylistId = mode === "playlist" ? options.playlistId || "" : "";
@@ -583,6 +796,7 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   function selectGenre(genre) {
     ensureMusicState(state);
+    beginNavigation();
     view.clearMusicSuggestions();
     music().mode = "library";
     music().favorite = false;
@@ -600,8 +814,11 @@ export function createMusicActions({ state, api, player, view, router, showError
       selectMusicMode("smart", { smartId: smart.id });
       return;
     }
+    const navigation = beginNavigation();
+    const foreground = foregroundGeneration;
     loadSmartPlaylists()
-      .then(() => {
+      .then((loadedCurrent) => {
+        if (!loadedCurrent || !isNavigationCurrent(navigation) || foreground !== foregroundGeneration) return;
         const loaded = (music().smartPlaylists || []).find((item) => item?.id);
         if (loaded) selectMusicMode("smart", { smartId: loaded.id });
         else view.refresh();
@@ -617,8 +834,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().playlistDialogName = "";
     if (state.activeView === "music" && !view.refreshPlaylistDialog()) view.refresh();
     const requestedTrackId = music().playlistDialogTrackId;
-    await loadPlaylists();
-    if (music().playlistDialogOpen && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
+    const navigation = navigationGeneration;
+    const loadedCurrent = await loadPlaylists();
+    if (loadedCurrent && isNavigationCurrent(navigation) && music().playlistDialogOpen
+      && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
   }
 
   function closePlaylistDialog() {
@@ -796,23 +1015,76 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   // ---------- 进度保存 ----------
   function reportPlayedOnce() {
+    // Every explicit play can reclaim ownership from another document. The
+    // original played receipt remains stable across pause/resume and retries.
+    void refreshProgressClock();
     const record = captureProgressRecord();
     const reportKey = record ? `${playReportSession}:${record.trackId}` : "";
     if (!record || music().playReportedTrackId === record.trackId) return;
-    progressWriter.reportPlayed({ ...record, reportKey, session: playReportSession });
+    playedReport ||= createMusicPlayedReport(progressSession);
+    progressWriter.reportPlayed({ ...record, ...playedReport, reportKey, session: playReportSession });
   }
 
   function captureProgressRecord(positionOverride = null) {
     const track = music().current;
     const audio = player.getAudio();
     if (!track || !audio) return null;
-    return {
+    const account = captureWebAccount();
+    const record = {
       trackId: track.id,
+      webAccountOwner: account.owner,
+      webAccountRevision: account.revision,
       positionMs: positionOverride === null
-        ? Math.round((audio.currentTime || 0) * 1000)
+        ? Math.round((Number.isFinite(audio.currentTime) ? audio.currentTime : 0) * 1000)
         : Number(positionOverride || 0),
-      durationMs: Math.round((audio.duration || 0) * 1000) || track.durationMs || 0
+      durationMs: Math.round((Number.isFinite(audio.duration) ? audio.duration : 0) * 1000) || track.durationMs || 0
     };
+    return progressSession?.trackId === track.id ? progressSession.capture(record) : record;
+  }
+
+  function cancelProgressClock() {
+    progressClockRequest?.controller.abort();
+    progressClockRequest = null;
+  }
+
+  function checkProgressAccount(record) {
+    const account = captureWebAccount();
+    if (account.owner !== record.webAccountOwner || account.revision !== record.webAccountRevision) {
+      throw Object.assign(new Error("账号已切换，请重新操作"), { code: "ACCOUNT_CHANGED", statusCode: 409 });
+    }
+  }
+
+  async function refreshProgressClock() {
+    const trackId = music().current?.id;
+    if (!trackId || progressHidden || typeof api.claimProgressSession !== "function") return;
+    if (progressClockRequest?.trackId === trackId && progressClockRequest.session === playReportSession) return;
+    cancelProgressClock();
+    const request = { trackId, session: playReportSession, controller: new AbortController() };
+    progressClockRequest = request;
+    try {
+      const data = await api.claimProgressSession(trackId, progressSession?.id, request.controller.signal);
+      if (progressClockRequest !== request || request.controller.signal.aborted || progressHidden
+          || request.session !== playReportSession || music().current?.id !== trackId) return;
+      const next = createMusicProgressSession(trackId, "", data?.progressSessionStartedAt, data?.progressSessionId);
+      if (!next) return;
+      if (next.id !== progressSession?.id) progressSession = next;
+      saveProgressSoon(null, { immediate: true });
+    } catch {
+      // Retain the captured owner; a failed refresh must not relabel old work.
+    } finally {
+      if (progressClockRequest === request) progressClockRequest = null;
+    }
+  }
+
+  function flushProgressKeepalive() {
+    progressHidden = true;
+    cancelProgressClock();
+    progressWriter.flushKeepalive(captureProgressRecord());
+  }
+
+  function resumeProgress() {
+    progressHidden = false;
+    progressWriter.resume();
   }
 
   function saveProgressSoon(positionOverride = null, { immediate = false } = {}) {
@@ -824,8 +1096,12 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   // ---------- 恢复上次播放 ----------
-  async function restoreLastTrack() {
-    if (!canRestoreLastTrack()) return;
+  async function restoreLastTrack(owner) {
+    const navigation = navigationGeneration;
+    const foreground = foregroundGeneration;
+    const isCurrent = () => navigation === navigationGeneration && foreground === foregroundGeneration
+      && (!owner || isMusicLoadCurrent(owner));
+    if (!isCurrent() || !canRestoreLastTrack()) return;
     const saved = readLastTrackPreference();
     const trackId = String(saved?.trackId || "").trim();
     if (!trackId) return;
@@ -836,17 +1112,18 @@ export function createMusicActions({ state, api, player, view, router, showError
       music().queue = [normalizeQueueTrack(saved.track), ...(music().queue || [])].filter(Boolean);
     }
     try {
-      await openTrack(trackId, { autoplay: false, skipRoute: true });
+      await openTrack(trackId, { autoplay: false, skipRoute: true, restoreGuard: isCurrent, ...(owner ? { restoreOwner: owner } : {}) });
     } catch {
+      if (!isCurrent()) return;
       music().queue = withoutQueueTrack(music().queue || [], trackId);
       music().loading = false;
-      music().status = emptyMusicMessage(music(), music().data?.total || music().queue.length);
+      music().status = emptyMusicMessage(music().data?.total || music().queue.length);
       writeLastTrackPreference({});
     }
   }
 
   function canRestoreLastTrack() {
-    if (music().current || music().loading) return false;
+    if (music().current || music().loading || music().openingTrackId) return false;
     if (music().mode !== "home") return false;
     return !music().query
       && music().artistId === "all"
@@ -979,6 +1256,9 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   return {
+    beginNavigation,
+    cancelPendingRequests,
+    isNavigationCurrent,
     loadMusic,
     loadPlaylists,
     loadSmartPlaylists,
@@ -1020,6 +1300,9 @@ export function createMusicActions({ state, api, player, view, router, showError
     persistPlaylistQueueOrder,
     reportPlayedOnce,
     saveProgressSoon,
+    flushProgressKeepalive,
+    resumeProgress,
+    claimProgressOwner: refreshProgressClock,
     // 文本 / 路由辅助（供视图层 import）
     currentMusicTitle,
     currentMusicMeta,

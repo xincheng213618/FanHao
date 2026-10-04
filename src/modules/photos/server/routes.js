@@ -13,13 +13,13 @@ export async function routePhotosApi(req, res, url, deps) {
   } = deps;
 
   if (url.pathname === "/api/image-reader/cache" && req.method === "GET") {
-    sendJson(res, 200, { cache: imageReaderCacheStatus(), config: publicAppConfig() });
+    sendJson(res, 200, { cache: await imageReaderCacheStatus(), config: publicAppConfig() });
     return true;
   }
 
   if (url.pathname === "/api/image-reader/cache/cleanup" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, cleanupImageReaderCache({ force: Boolean(url.searchParams.get("force")) }));
+    sendJson(res, 200, await cleanupImageReaderCache({ force: Boolean(url.searchParams.get("force")) }));
     return true;
   }
 
@@ -29,7 +29,7 @@ export async function routePhotosApi(req, res, url, deps) {
       root: status.root,
       exists: status.exists,
       database: mangaService.databaseStatus(),
-      cache: imageReaderCacheStatus(),
+      cache: await imageReaderCacheStatus(),
       comics: mangaService.cacheDirs().map(mangaService.publicSummary)
     });
     return true;
@@ -167,7 +167,7 @@ export async function routePhotosApi(req, res, url, deps) {
     sendJson(res, 200, {
       comic: mangaService.publicDetail(cacheDir),
       update: mangaService.updateStatus(mangaId),
-      cache: imageReaderCacheStatus()
+      cache: await imageReaderCacheStatus()
     });
     return true;
   }
@@ -180,7 +180,7 @@ export async function routePhotosApi(req, res, url, deps) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: imageReaderCacheStatus() });
+    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: await imageReaderCacheStatus() });
     return true;
   }
 
@@ -206,17 +206,19 @@ export async function routePhotosApi(req, res, url, deps) {
       notFound(res);
       return true;
     }
+    const controller = new AbortController(), disconnect = () => { if (!res.writableEnded) controller.abort(); };
+    res.once?.("close",disconnect);
     try {
       const rawLimit = String(url.searchParams.get("imageLimit") || url.searchParams.get("imagesLimit") || "").trim().toLowerCase();
       const imageLimit = rawLimit && rawLimit !== "all" ? Number(rawLimit) : 0;
       const imageOffset = Number(url.searchParams.get("imageOffset") || url.searchParams.get("imagesOffset") || 0);
-      sendJson(res, 200, {
-        album: await photoSetService.publicDetail(album, { imageLimit, imageOffset }),
-        cache: imageReaderCacheStatus()
-      });
+      const detail = await photoSetService.publicDetail(album, { imageLimit, imageOffset, signal:controller.signal });
+      if (controller.signal.aborted || res.destroyed || res.writableEnded) return true;
+      const cache = await imageReaderCacheStatus();
+      if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) sendJson(res,200,{album:detail,cache});
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "套图读取失败" });
-    }
+      if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) sendJson(res, error.statusCode || 500, { error: error.message || "套图读取失败" });
+    } finally { res.removeListener?.("close",disconnect); }
     return true;
   }
 

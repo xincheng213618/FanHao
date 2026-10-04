@@ -5,6 +5,41 @@ import {
   shortVideoMediaWhere
 } from "./query-contract.js";
 
+export function indexedAuthorVideoScope(authorValue) {
+  const author = String(authorValue || "").trim();
+  if (!author || author === "all" || author.startsWith("name:")) return null;
+  return {
+    queryPrefix: `WITH author_video_ids AS (
+      SELECT id
+      FROM short_videos INDEXED BY idx_short_videos_author_published
+      WHERE author_sec_uid = ?
+      UNION ALL
+      SELECT video.id
+      FROM short_video_users author
+      CROSS JOIN short_videos video INDEXED BY idx_short_videos_owner
+        ON video.owner_user_id = author.id
+      WHERE author.platform = 'douyin'
+        AND author.sec_uid = ?
+        AND author.sec_uid <> ''
+        AND COALESCE(video.author_sec_uid, '') <> ?
+    )`,
+    args: [author, author, author]
+  };
+}
+
+export function shortQueryVideoPageEligible(filter, sort) {
+  return filter.source === "all"
+    && Boolean(filter.q)
+    && !shortVideoFtsMatchQuery(filter.q)
+    && !filter.topic
+    && !filter.soundKey
+    && !filter.author
+    && filter.media === "all"
+    && filter.quality === "all"
+    && filter.deleted === "all"
+    && ["published", "publishedAsc"].includes(sort);
+}
+
 export function createShortVideoListPageQueries({ listVideoColumns }) {
   if (!String(listVideoColumns || "").trim()) {
     throw new Error("short-video list page queries require listVideoColumns");
@@ -30,7 +65,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     const where = whereParts.join(" AND ");
@@ -57,17 +93,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
   }
 
   function fastShortQueryVideoPage(database, filter, sort, limit, offset) {
-    const eligible = filter.source === "all"
-      && Boolean(filter.q)
-      && !shortVideoFtsMatchQuery(filter.q)
-      && !filter.topic
-      && !filter.soundKey
-      && !filter.author
-      && filter.media === "all"
-      && filter.quality === "all"
-      && filter.deleted === "all"
-      && ["published", "publishedAsc"].includes(sort);
-    if (!eligible) return null;
+    if (!shortQueryVideoPageEligible(filter, sort)) return null;
 
     const like = `%${escapeLike(filter.q)}%`;
     const searchWhere = `${filter.includePending ? "" : "visibility = 'local_only' AND "}(
@@ -178,7 +204,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     if (qualityWhere) {
       if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
       whereParts.push(qualityWhere);
-    } else if (filter.media !== "all") {
+    }
+    if (filter.media !== "all") {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     if (filter.source === "liked") {
@@ -362,28 +389,6 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       CROSS JOIN short_videos video ON video.id = author_match.id
       WHERE video.visibility = 'local_only'
     `).get(...authorScope.args)?.count || 0);
-  }
-
-  function indexedAuthorVideoScope(authorValue) {
-    const author = String(authorValue || "").trim();
-    if (!author || author === "all" || author.startsWith("name:")) return null;
-    return {
-      queryPrefix: `WITH author_video_ids AS (
-        SELECT id
-        FROM short_videos INDEXED BY idx_short_videos_author_published
-        WHERE author_sec_uid = ?
-        UNION ALL
-        SELECT video.id
-        FROM short_video_users author
-        CROSS JOIN short_videos video INDEXED BY idx_short_videos_owner
-          ON video.owner_user_id = author.id
-        WHERE author.platform = 'douyin'
-          AND author.sec_uid = ?
-          AND author.sec_uid <> ''
-          AND COALESCE(video.author_sec_uid, '') <> ?
-      )`,
-      args: [author, author, author]
-    };
   }
 
   function fastSourceTotalCacheKey(filter = {}) {

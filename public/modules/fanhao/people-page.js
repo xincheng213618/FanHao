@@ -1,4 +1,5 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-requests-01";
 
 const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
 const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
@@ -12,6 +13,7 @@ export function createPeoplePage(deps) {
   const {
     api,
     appendEmpty,
+    appendLoadedWorkPage,
     cancelScheduledWorkRendering,
     clearWorkFilter,
     clearWorkSearch,
@@ -23,6 +25,7 @@ export function createPeoplePage(deps) {
     formatNumber,
     getWorkFilterMode,
     hidePersonProfile,
+    onNavigationStarted,
     preparePersonProfile,
     renderPersonProfile,
     renderPersonWorkStats,
@@ -34,6 +37,7 @@ export function createPeoplePage(deps) {
     state,
     syncNavigationState,
     syncRouteAfterNavigation,
+    toastInline,
     workCoverUrl
   } = deps;
 
@@ -42,16 +46,23 @@ export function createPeoplePage(deps) {
   let personDetailHoverTimer = null;
   let personDetailHoverTarget = "";
   const personIndexRecords = new WeakMap();
-  const personDetailPrefetches = new Map();
+  const personDetailPrefetches = createPrefetchCache({ limit: PERSON_DETAIL_PREFETCH_LIMIT, ttlMs: PERSON_DETAIL_PREFETCH_TTL_MS });
   const personDetailRequests = createLatestRequestGate();
-  const cancelPendingSelection = personDetailRequests.cancel;
   bindPeopleIndexInteractions();
+
+function cancelPendingSelection() {
+  personDetailRequests.cancel();
+  state.personWorksLoadingMore = false;
+  cancelPersonDetailPrefetch();
+  personDetailPrefetches.clear();
+}
 
 function filteredPeople() {
   return state.people.filter((person) => person?.actorProfile?.gender !== "male");
 }
 
 function showPeopleIndex(options = {}) {
+  onNavigationStarted?.(options);
   cancelPendingSelection();
   state.activeView = "people";
   state.selectedPersonId = null;
@@ -271,7 +282,9 @@ function personIndexCard(root, target) {
 }
 
 async function selectPerson(personId, options = {}) {
+  onNavigationStarted?.(options);
   const request = personDetailRequests.begin();
+  state.personWorksLoadingMore = false;
   if (options.reusePrefetch === false) invalidatePersonDetailPrefetches(personId);
   preparePersonProfile?.();
   disconnectPeopleIndexAutoload();
@@ -325,6 +338,45 @@ async function selectPerson(personId, options = {}) {
   }
 }
 
+async function loadMoreWorks(button) {
+  if (state.personWorksLoadingMore || state.activeView !== "people" || !state.selectedPersonId) return;
+  if (state.works.length >= state.personWorksTotal) return;
+  const personId = state.selectedPersonId;
+  const query = personDetailRequestUrl(personId, 0);
+  const request = personDetailRequests.begin();
+  state.personWorksLoadingMore = true;
+  const originalText = button?.textContent || "";
+  let restoreText = true;
+  if (button) { button.disabled = true; button.textContent = "正在加载"; }
+  try {
+    const data = await fetchPersonWorksPage(personId, state.works.length, { signal: request.signal });
+    if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId
+      || personDetailRequestUrl(personId, 0) !== query) return;
+    const seen = new Set(state.works.map((work) => work.id));
+    state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+    state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
+    state.selectedPerson = data.person || state.selectedPerson;
+    state.personWorksTotal = data.total ?? state.personWorksTotal ?? state.works.length;
+    state.personWorksFacets = data.facets || state.personWorksFacets || null;
+    renderPersonProfile(state.selectedPerson);
+    renderPersonWorkStats();
+    appendLoadedWorkPage();
+  } catch (error) {
+    if (!request.isCurrent()) return;
+    toastInline(button, error.message || "加载失败", originalText);
+    restoreText = false;
+  } finally {
+    if (request.isCurrent()) {
+      state.personWorksLoadingMore = false;
+      if (button?.isConnected) {
+        button.disabled = false;
+        if (restoreText) button.textContent = originalText || button.textContent;
+      }
+    }
+    request.finish();
+  }
+}
+
 function mergeIndexedPerson(indexedPerson, detailPerson, works = []) {
   const fallbackAvatarUrl = detailPerson?.avatarUrl
     || indexedPerson?.avatarUrl
@@ -350,10 +402,12 @@ function personWorkPageSize() {
 async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
   const requestUrl = personDetailRequestUrl(personId, offset);
   if (options.reusePrefetch && offset === 0) {
-    const cached = reusablePersonDetailPrefetch(requestUrl);
+    const cached = personDetailPrefetches.consume(requestUrl, options.signal);
     if (cached) {
-      personDetailPrefetches.delete(requestUrl);
-      return cached.promise;
+      const result = await cached;
+      if (options.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+      if (result.error) throw result.error;
+      if (result.data !== null) return result.data;
     }
   }
   return api(requestUrl, options.signal ? { signal: options.signal } : {});
@@ -391,41 +445,15 @@ function cancelPersonDetailPrefetch(personId = "") {
 
 function prefetchPersonDetails(personId) {
   cancelPersonDetailPrefetch();
+  if (globalThis.navigator?.connection?.saveData) return Promise.resolve(null);
   const requestUrl = personDetailRequestUrl(personId, 0);
-  const cached = reusablePersonDetailPrefetch(requestUrl);
-  if (cached) return cached.promise;
-
-  const entry = {
-    createdAt: Date.now(),
-    promise: api(requestUrl)
-  };
-  entry.promise.catch(() => {
-    if (personDetailPrefetches.get(requestUrl) === entry) personDetailPrefetches.delete(requestUrl);
-  });
-  personDetailPrefetches.set(requestUrl, entry);
-  while (personDetailPrefetches.size > PERSON_DETAIL_PREFETCH_LIMIT) {
-    personDetailPrefetches.delete(personDetailPrefetches.keys().next().value);
-  }
-  return entry.promise;
-}
-
-function reusablePersonDetailPrefetch(requestUrl) {
-  const entry = personDetailPrefetches.get(requestUrl);
-  if (!entry) return null;
-  if (Date.now() - entry.createdAt > PERSON_DETAIL_PREFETCH_TTL_MS) {
-    personDetailPrefetches.delete(requestUrl);
-    return null;
-  }
-  personDetailPrefetches.delete(requestUrl);
-  personDetailPrefetches.set(requestUrl, entry);
-  return entry;
+  return personDetailPrefetches.prefetch(requestUrl, (signal) => api(requestUrl, { signal }))
+    .then((result) => result.data);
 }
 
 function invalidatePersonDetailPrefetches(personId) {
   const prefix = `/api/people/${encodeURIComponent(personId)}?`;
-  for (const requestUrl of personDetailPrefetches.keys()) {
-    if (requestUrl.startsWith(prefix)) personDetailPrefetches.delete(requestUrl);
-  }
+  personDetailPrefetches.clear((requestUrl) => requestUrl.startsWith(prefix));
 }
 
 async function goToPerson(personId) {
@@ -449,6 +477,7 @@ function personIndexPageSize() {
     disconnectIndexAutoload: disconnectPeopleIndexAutoload,
     fetchPersonWorksPage,
     goToPerson,
+    loadMoreWorks,
     personIndexPageSize,
     personWorkPageSize,
     renderIndex: renderPeopleIndex,

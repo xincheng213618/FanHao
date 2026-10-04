@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -242,8 +247,16 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         "last_refresh_asc": "COALESCE(profiles.last_extracted_at, '') ASC, profiles.id ASC",
     }
     order_sql = order_map.get(sort_mode, order_map["last_extracted_desc"])
-    stats_sql = PROFILE_LINK_STATS_SQL
-    with db() as conn:
+    # Count, page and refresh eligibility share one request-local aggregate.
+    # Closing the connection also discards the temporary table; no stale cache
+    # survives a download, deletion or profile update.
+    stats_sql = "SELECT * FROM manager_profile_stats"
+    with closing(db()) as conn, conn:
+        # The temporary aggregate does not start a lasting read transaction.
+        # Keep it, the profile page and refresh settings on one WAL snapshot.
+        conn.execute("BEGIN")
+        conn.execute(f"CREATE TEMP TABLE manager_profile_stats AS {PROFILE_LINK_STATS_SQL}")
+        conn.execute("CREATE UNIQUE INDEX temp.idx_manager_profile_stats ON manager_profile_stats(profile_id)")
         total = int(
             conn.execute(
                 f"SELECT COUNT(*) c FROM profiles LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id {where_sql}",
@@ -383,7 +396,17 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     }
 
 
-def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
+DOWNLOAD_TIME_SQL = "COALESCE(links.downloaded_at, links.last_started_at, links.last_seen_at, links.discovered_at)"
+MANAGER_LINK_COLUMNS = """
+    links.id, links.profile_id, links.aweme_id, links.kind, links.url,
+    links.author_uid, links.author_sec_uid, links.author_nickname, links.desc,
+    links.cover_url, links.create_time, links.media_type, links.status, links.attempts,
+    links.discovered_at, links.last_seen_at, links.last_started_at, links.downloaded_at,
+    links.failed_at, links.last_error, links.actual_probe_error, links.download_intent
+"""
+
+
+def _link_query(query: dict[str, list[str]]) -> dict[str, Any]:
     status = (query.get("status") or [""])[0]
     search = (query.get("q") or [""])[0]
     scope = (query.get("scope") or ["global"])[0].strip().lower()
@@ -396,8 +419,6 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
     }
     if view not in {"full", "manager"}:
         raise ValueError("链接视图只能是 full/manager")
-    limit = normalize_int((query.get("limit") or ["100"])[0], 100, 1, 500)
-    offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
     profile_id = normalize_int((query.get("profile_id") or ["0"])[0], 0, 0, 1000000)
     if profile_id <= 0 and scope in {"current", "profile"}:
         profile_id = current_profile_id(create=False) or 0
@@ -419,81 +440,202 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
     if status:
         where.append("links.status=?")
         params.append(status)
-    base_where_sql = f"WHERE {' AND '.join(base_where)}" if base_where else ""
-    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    fingerprint = hashlib.sha256(json.dumps(
+        [status, search, profile_id, view], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    return {"status": status, "view": view, "include_summary": include_summary,
+            "base_where": base_where, "base_params": base_params, "where": where,
+            "params": params, "fingerprint": fingerprint}
+
+
+def _where_sql(parts: list[str]) -> str:
+    return f"WHERE {' AND '.join(parts)}" if parts else ""
+
+
+def _link_cursor(raw: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        if len(raw) > 2048:
+            raise ValueError()
+        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True)
+        cursor = json.loads(decoded)
+        if not isinstance(cursor, dict) or set(cursor) != {"v", "q", "bound", "head", "after"}:
+            raise ValueError()
+        if type(cursor["v"]) is not int or cursor["v"] != 1 or cursor["q"] != context["fingerprint"]:
+            raise ValueError()
+        bound = cursor["bound"]
+        if type(bound) is not int or not 0 <= bound <= 9223372036854775807:
+            raise ValueError()
+        for key in ("head", "after"):
+            value = cursor[key]
+            if (not isinstance(value, list) or len(value) != 2 or not isinstance(value[0], str)
+                    or len(value[0]) > 128 or type(value[1]) is not int or not 0 <= value[1] <= bound):
+                raise ValueError()
+            if context["status"] != "downloaded" and value[0] != "":
+                raise ValueError()
+        if tuple(cursor["after"]) > tuple(cursor["head"]):
+            raise ValueError()
+        return cursor
+    except (ValueError, TypeError, KeyError, RecursionError, UnicodeDecodeError, binascii.Error):
+        raise ValueError("链接游标无效或与当前查询不匹配") from None
+
+
+def _encode_link_cursor(cursor: dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(cursor, ensure_ascii=False, separators=(",", ":"))
+                                   .encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _cursor_where(context: dict[str, Any], cursor: dict[str, Any] | None,
+                  *, continuation: bool = False) -> tuple[list[str], list[Any]]:
+    where, params = list(context["where"]), list(context["params"])
+    if cursor is not None:
+        where.append("links.id<=?")
+        params.append(cursor["bound"])
+        if context["status"] == "downloaded":
+            # Match the existing downloaded ordering and expression index exactly.
+            where.append(f"({DOWNLOAD_TIME_SQL}, links.id)<= (?, ?)")
+            params.extend(cursor["head"])
+            if continuation:
+                where.append(f"({DOWNLOAD_TIME_SQL}, links.id)< (?, ?)")
+                params.extend(cursor["after"])
+        elif continuation:
+            where.append("links.id<?")
+            params.append(cursor["after"][1])
+    return where, params
+
+
+def _link_summary(conn: Any, context: dict[str, Any]) -> dict[str, int] | None:
+    if not context["include_summary"]:
+        return None
+    summary = dict.fromkeys(("all", "pending", "downloading", "downloaded", "failed"), 0)
+    for row in conn.execute(
+        f"SELECT links.status, COUNT(*) c FROM links {_where_sql(context['base_where'])} GROUP BY links.status",
+        context["base_params"],
+    ):
+        count = int(row["c"] or 0)
+        summary["all"] += count
+        if str(row["status"] or "") in summary:
+            summary[str(row["status"])] = count
+    return summary
+
+
+def _select_links(conn: Any, context: dict[str, Any], where: list[str], params: list[Any],
+                  suffix: str, *, cursor_time: bool = False,
+                  downloaded_index: bool = False) -> list[dict[str, Any]]:
+    columns = MANAGER_LINK_COLUMNS if context["view"] == "manager" else "links.*"
+    if cursor_time:
+        columns += f", {DOWNLOAD_TIME_SQL} AS _cursor_time"
+    index_sql = "INDEXED BY idx_links_downloaded_order" if downloaded_index else ""
+    if downloaded_index:
+        # The partial index predicate must be explicit at SQL preparation time.
+        where = [*where, "links.status='downloaded'"]
+    return [dict(row) for row in conn.execute(f"""
+        SELECT {columns}, profiles.url profile_url, profiles.nickname profile_nickname,
+          profiles.title profile_title, profiles.tab profile_tab
+        FROM links {index_sql} LEFT JOIN profiles ON profiles.id=links.profile_id
+        {_where_sql(where)} {suffix}
+    """, params).fetchall()]
+
+
+def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
+    context = _link_query(query)
+    limit = normalize_int((query.get("limit") or ["100"])[0], 100, 1, 500)
+    offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
+    paging = (query.get("paging") or ["offset"])[0]
+    raw_cursor = (query.get("cursor") or [""])[0]
+    if paging not in {"offset", "cursor"}:
+        raise ValueError("链接分页方式只能是 offset/cursor")
+    cursor_mode = paging == "cursor" or bool(raw_cursor)
+    if cursor_mode and offset:
+        raise ValueError("游标分页不能同时使用非零 offset")
+    cursor = _link_cursor(raw_cursor, context)
+    downloaded = context["status"] == "downloaded"
+    order_sql = f"ORDER BY {DOWNLOAD_TIME_SQL} DESC, links.id DESC" if downloaded else "ORDER BY links.id DESC"
     with db() as conn:
+        # SELECT alone does not begin a transaction in Python's SQLite driver.
+        # Keep the count, status summary and page on one short WAL read snapshot.
+        conn.execute("BEGIN")
+        if cursor_mode and cursor is None:
+            bound = int(conn.execute("SELECT COALESCE(MAX(id),0) FROM links").fetchone()[0])
+            cursor = {"v": 1, "q": context["fingerprint"], "bound": bound,
+                      "head": ["", bound], "after": ["", bound]}
+            if downloaded:
+                head_where = [*context["where"], "links.id<=?", "links.status='downloaded'"]
+                head = conn.execute(f"SELECT {DOWNLOAD_TIME_SQL}, links.id FROM links INDEXED BY idx_links_downloaded_order "
+                                    f"{_where_sql(head_where)} {order_sql} LIMIT 1",
+                                    [*context["params"], bound]).fetchone()
+                cursor["head"] = [str(head[0]), int(head[1])] if head else ["", 0]
+                cursor["after"] = list(cursor["head"])
+        where, params = _cursor_where(context, cursor)
         total = conn.execute(
-            f"SELECT COUNT(*) c FROM links {where_sql}",
+            f"SELECT COUNT(*) c FROM links {_where_sql(where)}",
             params,
         ).fetchone()["c"]
-        summary = None
-        if include_summary:
-            summary = {
-                "all": 0,
-                "pending": 0,
-                "downloading": 0,
-                "downloaded": 0,
-                "failed": 0,
-            }
-            summary_rows = conn.execute(
-                f"SELECT links.status, COUNT(*) c FROM links {base_where_sql} GROUP BY links.status",
-                base_params,
-            ).fetchall()
-            for summary_row in summary_rows:
-                count = int(summary_row["c"] or 0)
-                summary["all"] += count
-                summary_status = str(summary_row["status"] or "")
-                if summary_status in summary:
-                    summary[summary_status] = count
-        order_sql = "ORDER BY links.id DESC"
-        if status == "downloaded":
-            order_sql = (
-                "ORDER BY COALESCE(links.downloaded_at, links.last_started_at, "
-                "links.last_seen_at, links.discovered_at) DESC, links.id DESC"
-            )
-        link_columns = "links.*"
-        if view == "manager":
-            link_columns = """
-              links.id,
-              links.profile_id,
-              links.aweme_id,
-              links.kind,
-              links.url,
-              links.author_uid,
-              links.author_sec_uid,
-              links.author_nickname,
-              links.desc,
-              links.cover_url,
-              links.create_time,
-              links.media_type,
-              links.status,
-              links.attempts,
-              links.discovered_at,
-              links.last_seen_at,
-              links.last_started_at,
-              links.downloaded_at,
-              links.failed_at,
-              links.last_error,
-              links.actual_probe_error,
-              links.download_intent
-            """
-        rows = conn.execute(
-            f"""
-            SELECT
-              {link_columns},
-              profiles.url profile_url,
-              profiles.nickname profile_nickname,
-              profiles.title profile_title,
-              profiles.tab profile_tab
-            FROM links
-            LEFT JOIN profiles ON profiles.id=links.profile_id
-            {where_sql}
-            {order_sql}
-            LIMIT ? OFFSET ?
-            """,
-            [*params, limit, offset],
-        ).fetchall()
-    result = {"total": total, "view": view, "links": [dict(row) for row in rows]}
+        summary = _link_summary(conn, context)
+        if cursor_mode and downloaded and raw_cursor:
+            # SQLite cannot seek an expression-index tuple inequality. Split
+            # ties and earlier times into two disjoint seeks, retaining exactly
+            # the existing (COALESCE time DESC, id DESC) order.
+            page_where = [*context["where"], "links.id<=?"]
+            page_params = [*context["params"], cursor["bound"]]
+            after_time, after_id = cursor["after"]
+            rows = _select_links(conn, context,
+                                 [*page_where, f"{DOWNLOAD_TIME_SQL}=?", "links.id<?"],
+                                 [*page_params, after_time, after_id, limit + 1],
+                                 "ORDER BY links.id DESC LIMIT ?", cursor_time=True, downloaded_index=True)
+            remaining = limit + 1 - len(rows)
+            if remaining > 0:
+                rows.extend(_select_links(conn, context, [*page_where, f"{DOWNLOAD_TIME_SQL}<?"],
+                                          [*page_params, after_time, remaining],
+                                          f"{order_sql} LIMIT ?", cursor_time=True, downloaded_index=True))
+        else:
+            page_where, page_params = _cursor_where(context, cursor, continuation=bool(raw_cursor))
+            pagination = "LIMIT ?" if cursor_mode else "LIMIT ? OFFSET ?"
+            page_params.extend([limit + 1] if cursor_mode else [limit, offset])
+            rows = _select_links(conn, context, page_where, page_params,
+                                 f"{order_sql} {pagination}", cursor_time=cursor_mode and downloaded,
+                                 downloaded_index=cursor_mode and downloaded)
+    result = {"total": total, "view": context["view"], "links": rows}
+    if cursor_mode:
+        has_more = len(rows) > limit
+        del rows[limit:]
+        if rows:
+            cursor["after"] = [str(rows[-1].get("_cursor_time", "")), int(rows[-1]["id"])]
+        for row in rows:
+            row.pop("_cursor_time", None)
+        encoded = _encode_link_cursor(cursor)
+        result.update(paging="cursor", has_more=has_more, page_cursor=encoded,
+                      next_cursor=encoded if has_more else None)
+    if summary is not None:
+        result["summary"] = summary
+    return result
+
+
+def refresh_links(query: dict[str, list[str]]) -> dict[str, Any]:
+    """Refresh bounded loaded IDs and counts without replacing a live traversal."""
+    context = _link_query(query)
+    raw_ids = (query.get("ids") or [""])[0]
+    try:
+        parts = raw_ids.split(",") if raw_ids else []
+        if len(parts) > 100 or len(raw_ids) > 2100 or any(not part.isascii() or not part.isdecimal() for part in parts):
+            raise ValueError()
+        ids = list(dict.fromkeys(int(part) for part in parts))
+        if any(not 0 < link_id <= 9223372036854775807 for link_id in ids):
+            raise ValueError()
+    except ValueError:
+        raise ValueError("链接刷新最多接受 100 个有效 ID") from None
+    cursor = _link_cursor((query.get("cursor") or [""])[0], context)
+    where, params = _cursor_where(context, cursor)
+    with db() as conn:
+        conn.execute("BEGIN")
+        total = conn.execute(f"SELECT COUNT(*) c FROM links {_where_sql(where)}", params).fetchone()["c"]
+        summary = _link_summary(conn, context)
+        rows = _select_links(conn, context, [*where, f"links.id IN ({','.join('?' for _ in ids)})"],
+                             [*params, *ids], "") if ids else []
+    present = {row["id"] for row in rows}
+    result = {"total": total, "view": context["view"], "links": rows,
+              "missing_ids": [link_id for link_id in ids if link_id not in present]}
     if summary is not None:
         result["summary"] = summary
     return result

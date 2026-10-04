@@ -78,7 +78,7 @@ try {
   verifyImageSchemaInitializationRetry(tempDir);
   verifyCoreDbInitializationRetry(tempDir);
   verifyManualAvatarRollback(tempDir);
-  verifyActorProfileAtomicity();
+  await verifyActorProfileAtomicity();
   verifyDestructiveImageMigrations();
   console.log("core image store verification passed");
 } finally {
@@ -146,7 +146,7 @@ function verifyCoreDbInitializationRetry(directory) {
     CREATE TABLE person_external_refs (id INTEGER PRIMARY KEY);
     CREATE TABLE work_external_refs (id INTEGER PRIMARY KEY);
     CREATE TABLE person_aliases (id INTEGER PRIMARY KEY);
-    CREATE TABLE people (id INTEGER PRIMARY KEY, updated_at TEXT);
+    CREATE TABLE people (id INTEGER PRIMARY KEY, folder_path TEXT, updated_at TEXT);
     CREATE TABLE idx_local_files_path (id INTEGER PRIMARY KEY);
   `);
   fixture.close();

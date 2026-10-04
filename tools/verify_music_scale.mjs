@@ -141,7 +141,7 @@ try {
     notFound: () => assert.fail("ranged music fixture should exist"),
     safeStat: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })
   });
-  fileServer.serveRangedFile(
+  await fileServer.serveRangedFile(
     { method: "HEAD", headers: { range: "bytes=0-" } },
     {
       writeHead(status, headers) {
@@ -703,7 +703,9 @@ try {
   assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\)[\s\S]*?readPlaybackQueuePreference\(\)[\s\S]*?state\.queue = queue[\s\S]*?openTrack\(trackId, \{ autoplay: false, renderGuard \}\)/, "Android music should restore the saved queue and selected track without autoplay");
   assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\) \{\s*if \(!state\.resumeQueue \|\| state\.current \|\| state\.loading\) return false;/, "Android queue restoration should work from any restored music browse or search route");
   assert.match(androidClient, /function rememberPlaybackQueue\(\)[\s\S]*?writePlaybackQueuePreference\(\{[\s\S]*?currentTrackId:[\s\S]*?queue:/, "Android music should persist the current track and a bounded playback queue");
-  assert.match(androidMusicViewSource, /const progressWriter = createMusicProgressWriter\(\{[\s\S]*?encodeURIComponent\(record\.trackId\)[\s\S]*?progressWriter\.save\(record, \{ delayMs: 800 \}\)/, "Android playback progress must call its shared per-track writer");
+  assert.match(androidMusicViewSource, /const progressWriter = createMusicProgressWriter\(\{[\s\S]*?sendMusicProgress\(record, played\)[\s\S]*?progressWriter\.save\(record, \{ delayMs: 800 \}\)/, "Android playback progress must call its shared writer and captured transport");
+  const androidProgressTransport = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "progress-transport.js"), "utf8");
+  assert.match(androidProgressTransport, /fetchJson\(record\.activeUrl,[\s\S]*?encodeURIComponent\(record\.trackId\)[\s\S]*?accountScope/, "Android progress transport must preserve server and account ownership");
   assert.match(androidMusicProgressWriterSource, /playedQueue\.push\([\s\S]*?pendingProgressVersion[\s\S]*?function nextAction\([\s\S]*?isRetryableWriteBusy\(error\)/, "Android progress writer must serialize ordered played tokens with coalesced progress");
   assert.equal(androidMusicProgressWriterSource, webProgressWriterSource, "Web and Android progress ordering/retry semantics must remain identical");
   assert.match(androidClient, /function renderSettingsVolumeControl\(\)[\s\S]*?type = "range"[\s\S]*?setVolume/, "Android music settings should provide a persistent in-app volume control");

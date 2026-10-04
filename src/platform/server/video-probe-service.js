@@ -1,5 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createVideoProbeTaskPool } from "./video-probe-task-pool.js";
 
 export const DEFAULT_VIDEO_PROBE_WAIT_MS = 80;
 const DIRECT_STREAM_VERSION = "20260815-range-chunks-01";
@@ -12,21 +13,83 @@ export function createVideoProbeService({
   safeStat,
   execFileFn = execFile,
   persistentCache = null,
+  asyncConcurrency = 2,
+  asyncCapacity = 48,
+  statTimeoutMs = 2000,
+  statCapacity = 8,
+  processTimeoutMs = 8000,
+  stopTimeoutMs = 2000,
   probeWaitMs = DEFAULT_VIDEO_PROBE_WAIT_MS,
   statFile = (filePath) => fs.promises.stat(filePath),
   spawnSyncFn = spawnSync
 }) {
   const cache = new Map();
   const resolvedProbeByFile = new Map();
+  const sourceOwners = new Map();
   const asyncInflight = new Map();
+  const inflightTasks = new Map();
+  const taskPool = createVideoProbeTaskPool({ concurrency: asyncConcurrency, capacity: asyncCapacity });
+  const physicalStats = new Set();
+  const children = new Set();
   const prewarmQueue = [];
   const prewarmQueuedKeys = new Set();
   let prewarmActive = 0;
   let prewarmConcurrency = 2;
   let cacheGeneration = 0;
+  let lifecycleRevision = 0;
+  let stopping = false;
+  let stopPromise = null;
+
+  function transientError(code) {
+    return Object.assign(new Error(code), { code });
+  }
+
+  async function trackedStat(filePath, signal) {
+    if (signal.aborted) throw transientError("PROBE_ABORTED");
+    if (physicalStats.size >= Math.max(1, Math.min(32, Number(statCapacity) || 8))) throw transientError("PROBE_BUSY");
+    let operation;
+    try { operation = Promise.resolve(statFile(filePath)); }
+    catch (error) { operation = Promise.reject(error); }
+    physicalStats.add(operation);
+    // Logical cancellation cannot cancel an OS filesystem request. Retain its
+    // physical slot until settlement so repeated clears cannot grow that work.
+    operation.then(() => physicalStats.delete(operation), () => physicalStats.delete(operation));
+    let timer, onAbort;
+    const unavailable = new Promise((_, reject) => {
+      onAbort = () => reject(transientError("PROBE_ABORTED"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => reject(transientError("PROBE_STAT_TIMEOUT")), Math.max(1, Number(statTimeoutMs) || 2000));
+      if (signal.aborted) onAbort();
+    });
+    try { return await Promise.race([operation, unavailable]); }
+    finally { clearTimeout(timer); signal.removeEventListener("abort", onAbort); }
+  }
 
   function inflightKey(file) {
-    return `${file.id}:${file.path}`;
+    const signature = libraryFileSignature(file);
+    return JSON.stringify([file.id, file.path, signature?.size ?? file.size ?? null, signature?.cacheMtime ?? null]);
+  }
+
+  function sourceKey(file) {
+    return JSON.stringify([file.id, file.path]);
+  }
+
+  function cacheValue(target, key, value) {
+    target.delete(key);
+    target.set(key, value);
+    while (target.size > Math.max(1, cacheLimit)) target.delete(target.keys().next().value);
+  }
+
+  function claimSource(file) {
+    sourceOwners.get(sourceKey(file))?.task?.cancel();
+    const owner = {};
+    sourceOwners.set(sourceKey(file), owner);
+    return owner;
+  }
+
+  function releaseSource(file, owner) {
+    const key = sourceKey(file);
+    if (sourceOwners.get(key) === owner) sourceOwners.delete(key);
   }
 
   function parseProbeOutput(stdout) {
@@ -43,6 +106,7 @@ export function createVideoProbeService({
   }
 
   function probe(file) {
+    if (stopping) return null;
     try {
       const result = spawnSyncFn(
         ffprobePath,
@@ -57,109 +121,196 @@ export function createVideoProbeService({
   }
 
   function probeCached(file) {
-    const fileSignature = libraryFileSignature(file);
-    const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
-    if (fileCacheKey && cache.has(fileCacheKey)) return touchCached(fileCacheKey);
-    const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
-    if (persistedFromLibrary.hit) {
-      cache.set(fileCacheKey, persistedFromLibrary.value);
-      resolvedProbeByFile.set(inflightKey(file), persistedFromLibrary.value);
-      return persistedFromLibrary.value;
-    }
+    if (stopping) return null;
+    const owner = claimSource(file);
+    try {
+      const fileSignature = libraryFileSignature(file);
+      const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
+      if (fileCacheKey && cache.has(fileCacheKey)) return touchCached(fileCacheKey);
+      const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
+      if (persistedFromLibrary.hit) {
+        cacheValue(cache, fileCacheKey, persistedFromLibrary.value);
+        cacheValue(resolvedProbeByFile, inflightKey(file), persistedFromLibrary.value);
+        return persistedFromLibrary.value;
+      }
 
-    const stat = safeStat(file.path);
-    const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
-    if (cache.has(cacheKey)) return touchCached(cacheKey);
+      const stat = safeStat(file.path);
+      const cacheKey = diskCacheKey(file, stat);
+      if (cache.has(cacheKey)) return touchCached(cacheKey);
 
-    const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
-    const result = persisted.hit ? persisted.value : stat ? probe(file) : null;
-    if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
-    cache.set(fileCacheKey || cacheKey, result);
-    resolvedProbeByFile.set(inflightKey(file), result);
-    if (cache.size > cacheLimit) {
-      cache.delete(cache.keys().next().value);
+      const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
+      const result = persisted.hit ? persisted.value : stat ? probe(file) : null;
+      if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
+      cacheValue(cache, fileCacheKey || cacheKey, result);
+      cacheValue(resolvedProbeByFile, inflightKey(file), result);
+      return result;
+    } finally {
+      releaseSource(file, owner);
     }
-    return result;
   }
 
-  function probeAsync(file) {
-    return new Promise((resolve) => {
+  function runProbeAsync(file, signal) {
+    return new Promise((resolve, reject) => {
+      let child, returned = false, tracked = false, closed = false, callbackSeen = false;
+      let value = null, invalid = false, timer;
+      const finish = () => {
+        if (!returned || (tracked && !closed) || (!tracked && !callbackSeen && !invalid)) return;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        if (child) children.delete(child);
+        if (signal.aborted) reject(transientError("PROBE_ABORTED"));
+        else resolve(invalid ? null : value);
+      };
+      const terminate = () => {
+        invalid = true;
+        if (tracked && !closed) { try { child.kill("SIGKILL"); } catch {} }
+        finish();
+      };
+      const onAbort = () => terminate();
+      if (signal.aborted) { reject(transientError("PROBE_ABORTED")); return; }
+      signal.addEventListener("abort", onAbort, { once: true });
       try {
-        execFileFn(
+        child = execFileFn(
           ffprobePath,
           ["-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", file.path],
-          { encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 2 * 1024 * 1024 },
+          { encoding: "utf8", windowsHide: true, timeout: Math.max(1, Number(processTimeoutMs) || 8000), killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 },
           (error, stdout) => {
-            if (error || !stdout) {
-              resolve(null);
-              return;
-            }
-            try {
-              resolve(parseProbeOutput(stdout));
-            } catch {
-              resolve(null);
-            }
+            callbackSeen = true;
+            if (error || !stdout) invalid = true;
+            else { try { value = parseProbeOutput(stdout); } catch { invalid = true; } }
+            if (error) terminate(); else finish();
           }
         );
+        tracked = Boolean(child?.once && child?.kill);
+        returned = true;
+        if (tracked) {
+          children.add(child);
+          child.once("close", () => { closed = true; finish(); });
+          child.once("error", terminate);
+          child.stdout?.once("error", terminate);
+          child.stderr?.once("error", terminate);
+          timer = setTimeout(terminate, Math.max(1, Number(processTimeoutMs) || 8000));
+          if (invalid || signal.aborted) terminate();
+        }
+        finish();
       } catch {
-        resolve(null);
+        returned = true;
+        invalid = true;
+        finish();
       }
     });
   }
 
-  function probeCachedAsync(file) {
-    const key = inflightKey(file);
-    if (resolvedProbeByFile.has(key)) return Promise.resolve(resolvedProbeByFile.get(key));
-    const active = asyncInflight.get(key);
-    if (active) return active;
+  function probeAsync(file) {
+    if (stopping) return Promise.reject(transientError("PROBE_STOPPED"));
+    file = { ...file };
+    try { return taskPool.submit((signal) => runProbeAsync(file, signal)).promise; }
+    catch (error) { return Promise.reject(error); }
+  }
 
-    const task = loadProbeAsync(file, key);
+  function probeCachedAsync(file, { background = false } = {}) {
+    if (stopping) return Promise.reject(transientError("PROBE_STOPPED"));
+    file = { ...file };
+    const key = inflightKey(file);
+    if (libraryFileSignature(file) && resolvedProbeByFile.has(key)) {
+      const owner = claimSource(file);
+      const value = resolvedProbeByFile.get(key);
+      cacheValue(resolvedProbeByFile, key, value);
+      releaseSource(file, owner);
+      return Promise.resolve(value);
+    }
+    const active = asyncInflight.get(key);
+    if (active) {
+      if (!background) inflightTasks.get(key)?.promote();
+      return active;
+    }
+
+    // Library signatures retain the zero-stat warm path even under load.
+    const signature = libraryFileSignature(file);
+    const libraryKey = signature ? cacheKeyForSignature(file, signature) : "";
+    const persisted = signature ? readPersistentProbe(file, signature) : { hit: false };
+    if ((libraryKey && cache.has(libraryKey)) || persisted.hit) {
+      const owner = claimSource(file);
+      const value = cache.has(libraryKey) ? touchCached(libraryKey) : persisted.value;
+      cacheValue(cache, libraryKey, value);
+      cacheValue(resolvedProbeByFile, key, value);
+      releaseSource(file, owner);
+      return Promise.resolve(value);
+    }
+    if (!taskPool.hasCapacity()) return Promise.reject(transientError("PROBE_BUSY"));
+
+    const owner = claimSource(file);
+    const generation = cacheGeneration;
+    const operation = taskPool.submit((signal) => loadProbeAsync(file, key, owner, generation, signal), { background });
+    owner.task = operation;
+    const task = operation.promise;
     asyncInflight.set(key, task);
-    task.then(
-      () => asyncInflight.delete(key),
-      () => asyncInflight.delete(key)
-    );
+    inflightTasks.set(key, operation);
+    const settled = () => {
+      releaseSource(file, owner);
+      if (asyncInflight.get(key) === task) asyncInflight.delete(key);
+      if (inflightTasks.get(key) === operation) inflightTasks.delete(key);
+    };
+    task.then(settled, settled);
     return task;
   }
 
-  async function loadProbeAsync(file, fileKey) {
-    const generation = cacheGeneration;
+  async function loadProbeAsync(file, fileKey, owner, generation, signal) {
+    const current = () => !signal.aborted && !stopping && generation === cacheGeneration && sourceOwners.get(sourceKey(file)) === owner;
+    try {
+      return await loadProbeForSource(file, fileKey, current, signal);
+    } catch (error) {
+      if (!current()) return null;
+      throw error;
+    }
+  }
+
+  async function loadProbeForSource(file, fileKey, current, signal) {
+    if (!current()) return null;
     const fileSignature = libraryFileSignature(file);
     const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
     if (fileCacheKey && cache.has(fileCacheKey)) {
       const cached = touchCached(fileCacheKey);
-      if (generation === cacheGeneration) resolvedProbeByFile.set(fileKey, cached);
+      if (current()) cacheValue(resolvedProbeByFile, fileKey, cached);
       return cached;
     }
     const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
     if (persistedFromLibrary.hit) {
-      if (generation === cacheGeneration) {
-        cache.set(fileCacheKey, persistedFromLibrary.value);
-        resolvedProbeByFile.set(fileKey, persistedFromLibrary.value);
+      if (current()) {
+        cacheValue(cache, fileCacheKey, persistedFromLibrary.value);
+        cacheValue(resolvedProbeByFile, fileKey, persistedFromLibrary.value);
       }
       return persistedFromLibrary.value;
     }
 
     let stat = null;
     try {
-      stat = await statFile(file.path);
-    } catch {
+      stat = await trackedStat(file.path, signal);
+    } catch (error) {
+      if (String(error.code || "").startsWith("PROBE_")) throw error;
       stat = null;
     }
-    const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
+    if (!current()) return null;
+    const cacheKey = diskCacheKey(file, stat);
     if (cache.has(cacheKey)) {
       const cached = touchCached(cacheKey);
-      if (generation === cacheGeneration) resolvedProbeByFile.set(fileKey, cached);
+      if (current()) cacheValue(resolvedProbeByFile, fileKey, cached);
       return cached;
     }
 
     const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
-    const result = persisted.hit ? persisted.value : stat ? await probeAsync(file) : null;
-    if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
-    if (generation === cacheGeneration) {
-      cache.set(fileCacheKey || cacheKey, result);
-      resolvedProbeByFile.set(fileKey, result);
-      if (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
+    const result = persisted.hit ? persisted.value : stat ? await runProbeAsync(file, signal) : null;
+    if (!current()) return null;
+    if (stat && !persisted.hit) {
+      let after;
+      try { after = await trackedStat(file.path, signal); }
+      catch (error) { if (String(error.code || "").startsWith("PROBE_")) throw error; return null; }
+      if (!current() || diskSignature(after) !== diskSignature(stat)) return null;
+    }
+    if (stat && (!persisted.hit || fileSignature) && current()) writePersistentProbe(file, fileSignature || stat, result);
+    if (current()) {
+      cacheValue(cache, fileCacheKey || cacheKey, result);
+      cacheValue(resolvedProbeByFile, fileKey, result);
     }
     return result;
   }
@@ -172,7 +323,15 @@ export function createVideoProbeService({
   }
 
   function cacheKeyForSignature(file, signature) {
-    return `${file.id}:${file.path}:${signature.size}:${signature.cacheMtime}`;
+    return JSON.stringify([file.id, file.path, signature.size, signature.cacheMtime]);
+  }
+
+  function diskCacheKey(file, stat) {
+    return JSON.stringify([file.id, file.path, stat ? diskSignature(stat) : "missing"]);
+  }
+
+  function diskSignature(stat) {
+    return JSON.stringify([Number(stat?.size), Number(stat?.mtimeMs), String(stat?.dev ?? ""), String(stat?.ino ?? "")]);
   }
 
   function touchCached(cacheKey) {
@@ -202,6 +361,7 @@ export function createVideoProbeService({
   }
 
   function prewarm(files = [], options = {}) {
+    if (stopping) return { queued: 0, active: prewarmActive, pending: 0 };
     const limit = Math.max(0, Math.min(48, Number(options.limit) || 12));
     const queueLimit = Math.max(limit, Math.min(96, Number(options.queueLimit) || 48));
     prewarmConcurrency = Math.max(1, Math.min(4, Number(options.concurrency) || 2));
@@ -214,9 +374,9 @@ export function createVideoProbeService({
       if (queued >= limit || prewarmQueue.length + prewarmActive >= queueLimit) break;
       if (!file?.id || !file?.path) continue;
       const key = inflightKey(file);
-      if (resolvedProbeByFile.has(key) || prewarmQueuedKeys.has(key) || asyncInflight.has(key)) continue;
+      if ((libraryFileSignature(file) && resolvedProbeByFile.has(key)) || prewarmQueuedKeys.has(key) || asyncInflight.has(key)) continue;
       prewarmQueuedKeys.add(key);
-      prewarmQueue.push({ file, key });
+      prewarmQueue.push({ file: { ...file }, key });
       queued += 1;
     }
     drainPrewarmQueue();
@@ -228,7 +388,7 @@ export function createVideoProbeService({
       const { file, key } = prewarmQueue.shift();
       prewarmQueuedKeys.delete(key);
       prewarmActive += 1;
-      probeCachedAsync(file)
+      probeCachedAsync(file, { background: true })
         .catch(() => null)
         .finally(() => {
           prewarmActive -= 1;
@@ -241,14 +401,51 @@ export function createVideoProbeService({
     cacheGeneration += 1;
     cache.clear();
     resolvedProbeByFile.clear();
+    sourceOwners.clear();
+    asyncInflight.clear();
+    inflightTasks.clear();
     prewarmQueue.length = 0;
     prewarmQueuedKeys.clear();
+    taskPool.cancelAll();
+  }
+
+  function beginStop() {
+    stopping = true;
+    lifecycleRevision++;
+    clearCache();
+  }
+
+  function stop() {
+    beginStop();
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      let timer;
+      try {
+        await Promise.race([
+          taskPool.drain(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(transientError("PROBE_CLOSE_TIMEOUT")), Math.max(1, Number(stopTimeoutMs) || 2000)); })
+        ]);
+      } finally { clearTimeout(timer); }
+    })();
+    return stopPromise;
+  }
+
+  async function start() {
+    const revision = lifecycleRevision;
+    if (stopPromise) {
+      try { await stopPromise; }
+      catch (error) { if (taskPool.diagnostics().active || children.size) throw error; }
+    }
+    if (revision !== lifecycleRevision) throw transientError("PROBE_STOPPED");
+    if (taskPool.diagnostics().active || children.size) throw transientError("PROBE_CLOSE_TIMEOUT");
+    stopping = false;
+    stopPromise = null;
   }
 
   async function boundedProbe(file) {
     const task = probeCachedAsync(file);
     const waitMs = Math.max(0, Number(probeWaitMs) || 0);
-    if (!waitMs) return { mediaProbe: await task, pending: false };
+    if (!waitMs) return { mediaProbe: await task.catch(() => null), pending: false };
 
     let timer = null;
     const settled = task.then(
@@ -324,6 +521,9 @@ export function createVideoProbeService({
   }
 
   return {
+    start,
+    beginStop,
+    stop,
     clearCache,
     playInfoForFile,
     playInfoForFileAsync,
@@ -331,6 +531,8 @@ export function createVideoProbeService({
     probeAsync,
     probeCachedAsync,
     probeCached,
-    prewarm
+    prewarm,
+    diagnostics: () => ({ cached: cache.size, resolved: resolvedProbeByFile.size, owners: sourceOwners.size, inflight: asyncInflight.size }),
+    asyncDiagnostics: () => ({ ...taskPool.diagnostics(), children: children.size, physicalStats: physicalStats.size, stopping })
   };
 }

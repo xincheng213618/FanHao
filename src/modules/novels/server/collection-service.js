@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createNovelCollectionStore } from "./collection-store.js";
 
@@ -34,13 +35,13 @@ export function createNovelCollectionService({
     error: "尚未检查"
   };
 
-  function start() {
+  async function start() {
     if (started) return;
     started = true;
     stopping = false;
     fs.mkdirSync(taskOutputRoot, { recursive: true });
     store.recoverInterruptedTasks();
-    runtimeProbe = probeRuntime();
+    runtimeProbe = await probeRuntime();
     schedulePump();
   }
 
@@ -51,15 +52,14 @@ export function createNovelCollectionService({
     }
     stopping = true;
     const running = active;
-    if (running?.child) {
+    if (running) {
       running.stopRequested = true;
       try {
-        running.child.kill();
+        running.child?.kill();
       } catch {}
-      await Promise.race([
-        running.done,
-        new Promise((resolve) => setTimeout(resolve, 3000))
-      ]);
+      // A closed collector can still be awaiting a dispatched book import.
+      // Wait for its definite outcome before releasing collection resources.
+      await running.done;
     }
     active = null;
     started = false;
@@ -119,6 +119,7 @@ export function createNovelCollectionService({
   function createTask(body = {}) {
     const existing = store.findReusableTask(body);
     if (existing) {
+      assertKnownImport(existing);
       if (["queued", "running", "cancelling"].includes(existing.status)) {
         return { ok: true, task: existing, reused: true, resumed: false, alreadyActive: true };
       }
@@ -153,6 +154,7 @@ export function createNovelCollectionService({
   function runTask(id) {
     const current = store.getTask(id);
     if (!current) throw httpError(404, "采集任务不存在");
+    assertKnownImport(current);
     if (current.status === "queued") {
       schedulePump();
       return { ok: true, task: current, reused: true, resumed: false, alreadyActive: true };
@@ -210,9 +212,16 @@ export function createNovelCollectionService({
     pumpScheduled = true;
     queueMicrotask(() => {
       pumpScheduled = false;
-      pump().catch((error) => {
-        console.error("[novel-collection] queue failed", error);
-      });
+      try {
+        pump().catch((error) => {
+          console.error("[novel-collection] queue failed", error);
+        });
+      } finally {
+        // pump reads/marks/spawns synchronously before awaiting the collector.
+        // Release this DB turn even when there is no queued task or its child
+        // stays silent, rather than retaining a handle until the next RPC.
+        store.close();
+      }
     });
   }
 
@@ -296,7 +305,7 @@ export function createNovelCollectionService({
     stdout.on("line", (line) => handleOutputLine(line, false));
     stderr.on("line", (line) => handleOutputLine(line, true));
     child.once("error", (error) => finishFailure(error));
-    child.once("close", (code, signal) => finishProcess(code, signal));
+    child.once("close", (code, signal) => { void finishProcess(code, signal).catch(finishFailure); });
     return done;
 
     function handleOutputLine(rawLine, isError) {
@@ -363,7 +372,7 @@ export function createNovelCollectionService({
       } catch {}
     }
 
-    function finishProcess(code, signal) {
+    async function finishProcess(code, signal) {
       if (settled) return;
       if (execution.cancelRequested) {
         finishCancelled();
@@ -390,12 +399,16 @@ export function createNovelCollectionService({
             logTail: logLines.join("\n")
           });
         } else {
-          const imported = novelStore.importCollectedBook({
+          const operationId = crypto.randomUUID();
+          // Commit the intent before dispatching to the one receipt-aware
+          // writer. A crash or failed completion keeps this replay guard.
+          store.markImportPending(task.id, { operationId });
+          const imported = await novelStore.importCollectedBook({
             ...result.book,
             adapterId: task.adapterId,
             adapterName: task.adapterName,
             collectedAt: new Date().toISOString()
-          });
+          }, { operationId });
           store.completeTask(task.id, {
             bookId: imported.book.id,
             result: { ...summary, bookId: imported.book.id },
@@ -443,13 +456,13 @@ export function createNovelCollectionService({
     }
   }
 
-  function probeRuntime() {
+  async function probeRuntime() {
     const checkedAt = new Date().toISOString();
     if (!fs.existsSync(runnerPath)) {
       return { ready: false, checkedAt, error: "统一采集器脚本不存在" };
     }
     try {
-      const result = probeProcess(
+      const result = await probeProcess(
         pythonPath,
         ["-c", "import requests, bs4; print('ok')"],
         {
@@ -510,6 +523,15 @@ export function createNovelCollectionService({
         fs.rmSync(path.join(taskDir, filename), { force: true });
       } catch {}
     }
+  }
+
+  function assertKnownImport(task) {
+    if (task?.result?.outcome !== "unknown") return;
+    throw Object.assign(httpError(409, "上次导入结果无法确认，请先核对书库；确认后移除旧任务再创建"), {
+      code: task.result.code || "NOVEL_WRITE_OUTCOME_UNKNOWN",
+      outcome: "unknown",
+      operationId: task.result.operationId
+    });
   }
 
   return {

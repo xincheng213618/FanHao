@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=assets-0f97d6765d71";
+import { CLIENT_VERSION } from "./config.js?v=assets-07b744082137";
 import { accountPayloadOwner, captureAccountOwner, confirmAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload } from "./account-owner.js";
 
 const DB_NAME = "fanhao-android-cache";

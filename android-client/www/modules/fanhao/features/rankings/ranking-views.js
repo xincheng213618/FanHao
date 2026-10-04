@@ -1,7 +1,7 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-0f97d6765d71";
-import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-0f97d6765d71";
+import { fetchJson } from "../../../../js/api.js?v=assets-07b744082137";
+import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-07b744082137";
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-0f97d6765d71";
+import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-07b744082137";
 
 const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";

@@ -4,9 +4,9 @@
 // 所有业务逻辑、HTTP、audio 控制都在其它模块，这里不再重复实现。
 
 import { ensureMusicState } from "./state.js";
-import { createMusicApi } from "./api.js";
-import { createMusicPlayer } from "./player/engine.js";
-import { createMusicActions } from "./actions.js";
+import { createMusicApi } from "./api.js?v=20261004-music-progress-01";
+import { createMusicPlayer } from "./player/engine.js?v=20261004-music-progress-01";
+import { createMusicActions } from "./actions.js?v=20261004-music-list-02";
 import { createComponents } from "./views/components.js";
 import { createMusicHome } from "./views/home.js";
 import { formatSeconds, collapseDuplicateTracks } from "./format.js";
@@ -66,6 +66,7 @@ export function createMusicPage(deps) {
   let currentLyricIndex = -1;
   let visibilityInstalled = false;
   let keyboardShortcutsInstalled = false;
+  let progressLifecycleInstalled = false;
   let trackReturnContext = null;
 
   // ---- 播放引擎（拥有 audio / 可视化 / MediaSession / 睡眠定时）----
@@ -101,7 +102,7 @@ export function createMusicPage(deps) {
         updatePlaybackUi();
       },
       onSleepTimerChange: () => updateSleepTimerUi(),
-      onSaveProgress: () => actions.saveProgressSoon(null, { immediate: true }),
+      onSaveProgress: () => document.hidden ? actions.flushProgressKeepalive() : actions.saveProgressSoon(null, { immediate: true }),
       onLyricFollowResume: () => {
         setLyricFollowButtonsVisible(false);
         updateLyricHighlight(true);
@@ -116,13 +117,14 @@ export function createMusicPage(deps) {
       },
       onMediaPrev: () => actions.playAdjacent(-1, { autoplay: true }).catch(showError),
       onMediaNext: () => actions.playAdjacent(1, { autoplay: true, wrap: state.music.repeat === "all" }).catch(showError),
-      onMediaSeekBackward: (offset) => player.seekRelative(-offset),
-      onMediaSeekForward: (offset) => player.seekRelative(offset),
+      onMediaSeekBackward: (offset) => { player.seekRelative(-offset); void actions.claimProgressOwner(); },
+      onMediaSeekForward: (offset) => { player.seekRelative(offset); void actions.claimProgressOwner(); },
       onMediaSeekTo: (time) => {
         player.seek(time);
         updatePlaybackUi();
         updateLyricHighlight(true);
         actions.saveProgressSoon();
+        void actions.claimProgressOwner();
       }
     }
   });
@@ -130,6 +132,12 @@ export function createMusicPage(deps) {
   function ensureState() {
     ensureMusicState(state);
     player.ensureAudio();
+    if (!progressLifecycleInstalled) {
+      window.addEventListener("pagehide", () => actions.flushProgressKeepalive());
+      window.addEventListener("pageshow", () => actions.resumeProgress());
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) actions.resumeProgress(); });
+      progressLifecycleInstalled = true;
+    }
     if (!visibilityInstalled) {
       player.installVisibilityHandler();
       visibilityInstalled = true;
@@ -144,6 +152,7 @@ export function createMusicPage(deps) {
   // ---- 视图更新接口（交给 actions）----
   const view = {
     refresh: () => renderView(),
+    cancelNavigationTimers,
     setMusicListLoadingState,
     setTrackOpeningState,
     refreshQueueSurface,
@@ -208,7 +217,7 @@ export function createMusicPage(deps) {
       return;
     }
     if (!state.music.data || options.reload) {
-      actions.loadMusic({ skipRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ skipRoute: true, keepCurrent: true, restoreLast: !state.music.current }).catch(showError);
     } else {
       renderView();
     }
@@ -217,6 +226,7 @@ export function createMusicPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    resetReader();
     trackReturnContext = null;
     state.music.libraryDrawerOpen = false;
     state.music.trackPageOpen = Boolean(route.musicTrackId);
@@ -237,14 +247,31 @@ export function createMusicPage(deps) {
 
   async function openRouteTarget(route = {}) {
     ensureState();
+    const navigation = resetReader();
     if (route.musicTrackId) {
-      await actions.openTrack(route.musicTrackId, { skipRoute: true, autoplay: false, openPage: true });
-      if (!state.music.data) actions.loadMusic({ skipRoute: true, keepCurrent: true }).catch(showError);
+      const track = await actions.openTrack(route.musicTrackId, { skipRoute: true, autoplay: false, openPage: true });
+      if (!track || !actions.isNavigationCurrent(navigation) || state.music.openingTrackId || track.id !== state.music.current?.id) return;
+      if (!state.music.data) actions.loadMusic({ skipRoute: true, background: true, keepCurrent: true, restoreLast: false }).catch(showError);
       return;
     }
-    state.music.current = null;
-    state.music.lyrics = { raw: "", lines: [] };
-    await actions.loadMusic({ skipRoute: true, keepCurrent: true });
+    await actions.loadMusic({ skipRoute: true, keepCurrent: true, restoreLast: !state.music.current });
+  }
+
+  function cancelNavigationTimers() {
+    window.clearTimeout(searchTimer);
+    searchTimer = null;
+    clearMusicSuggestions();
+  }
+
+  function resetReader() {
+    ensureMusicState(state);
+    cancelNavigationTimers();
+    return actions.beginNavigation();
+  }
+
+  function loadMusic(options = {}) {
+    if (!options.append && !options.background) resetReader();
+    return actions.loadMusic(options);
   }
 
   // ================= 渲染骨架 =================
@@ -506,7 +533,7 @@ export function createMusicPage(deps) {
       state.music.language = "all";
       state.music.artistId = "all";
       state.music.albumId = "all";
-      actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     }));
     for (const language of state.music.languages || []) {
       languageList.append(h.filterButton(language.id || language.name, language.name, language.trackCount, state.music.language === language.name, () => {
@@ -515,7 +542,7 @@ export function createMusicPage(deps) {
         state.music.artistId = "all";
         state.music.albumId = "all";
         state.music.genre = "all";
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       }));
     }
 
@@ -536,7 +563,7 @@ export function createMusicPage(deps) {
         state.music.artistId = artist.id;
         state.music.albumId = "all";
         state.music.genre = "all";
-        actions.loadMusic({ replaceRoute: true }).catch(showError);
+        loadMusic({ replaceRoute: true }).catch(showError);
       }));
     }
     artistList.append(h.sidebarBrowseButton("查看全部歌手", `${formatNumber(state.music.summary?.totals?.artists || 0)} 位`, () => actions.selectMusicMode("artists")));
@@ -564,7 +591,7 @@ export function createMusicPage(deps) {
         state.music.artistId = album.artistId || state.music.artistId || "all";
         state.music.albumId = album.id;
         state.music.genre = "all";
-        actions.loadMusic({ replaceRoute: true }).catch(showError);
+        loadMusic({ replaceRoute: true }).catch(showError);
       });
       albums.append(button);
     }
@@ -640,9 +667,10 @@ export function createMusicPage(deps) {
     search.placeholder = "搜索歌手";
     search.setAttribute("aria-label", "搜索歌手");
     search.addEventListener("input", () => {
+      resetReader();
       state.music.query = search.value.trim();
       window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(() => actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), MUSIC_CATALOG_SEARCH_DEBOUNCE_MS);
+      searchTimer = window.setTimeout(() => loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), MUSIC_CATALOG_SEARCH_DEBOUNCE_MS);
     });
     const sort = document.createElement("select");
     sort.setAttribute("aria-label", "歌手排序");
@@ -655,7 +683,7 @@ export function createMusicPage(deps) {
     }
     sort.addEventListener("change", () => {
       state.music.artistSort = sort.value === "name" ? "name" : "count";
-      actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
     controls.append(search, sort);
     const alphaIndex = h.renderAlphaIndex(state.music.letter);
@@ -669,7 +697,7 @@ export function createMusicPage(deps) {
       button.textContent = `${language.label} ${formatNumber(language.artistCount || 0)}`;
       button.addEventListener("click", () => {
         state.music.language = language.name;
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
       languages.append(button);
     }
@@ -707,9 +735,10 @@ export function createMusicPage(deps) {
     search.placeholder = "搜索专辑或歌手";
     search.setAttribute("aria-label", "搜索专辑");
     search.addEventListener("input", () => {
+      resetReader();
       state.music.query = search.value.trim();
       window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(() => actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), MUSIC_CATALOG_SEARCH_DEBOUNCE_MS);
+      searchTimer = window.setTimeout(() => loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), MUSIC_CATALOG_SEARCH_DEBOUNCE_MS);
     });
     const sort = document.createElement("select");
     sort.setAttribute("aria-label", "专辑排序");
@@ -722,7 +751,7 @@ export function createMusicPage(deps) {
     }
     sort.addEventListener("change", () => {
       state.music.albumSort = ["updated", "title", "year", "tracks"].includes(sort.value) ? sort.value : "updated";
-      actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
     controls.append(search, sort);
     const alphaIndex = h.renderAlphaIndex(state.music.letter);
@@ -736,7 +765,7 @@ export function createMusicPage(deps) {
       button.textContent = `${language.label} ${formatNumber(language.albumCount || 0)}`;
       button.addEventListener("click", () => {
         state.music.language = language.name;
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
       languages.append(button);
     }
@@ -792,7 +821,7 @@ export function createMusicPage(deps) {
     more.className = "music-load-more";
     more.textContent = state.music.loadingMore ? "正在加载…" : `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - artistCount)))} 位`;
     more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => actions.loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
+    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
   }
 
@@ -815,7 +844,7 @@ export function createMusicPage(deps) {
     more.className = "music-load-more";
     more.textContent = state.music.loadingMore ? "正在加载…" : `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - albumCount)))} 张`;
     more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => actions.loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
+    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
   }
 
@@ -891,10 +920,11 @@ export function createMusicPage(deps) {
     input.value = state.music.query || "";
     input.disabled = state.music.mode !== "library";
     input.addEventListener("input", () => {
+      resetReader();
       state.music.query = input.value.trim();
       queueMusicSuggest(state.music.query);
       window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(() => actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), state.music.query ? MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS : MUSIC_LIBRARY_CLEAR_DEBOUNCE_MS);
+      searchTimer = window.setTimeout(() => loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), state.music.query ? MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS : MUSIC_LIBRARY_CLEAR_DEBOUNCE_MS);
     });
     input.addEventListener("focus", () => {
       if (suggestionBox) renderMusicSuggestions(suggestionBox);
@@ -905,7 +935,7 @@ export function createMusicPage(deps) {
         event.preventDefault();
         window.clearTimeout(searchTimer);
         clearMusicSuggestions();
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       }
     });
     const suggestions = document.createElement("div");
@@ -920,7 +950,7 @@ export function createMusicPage(deps) {
     favorite.disabled = state.music.mode !== "library";
     favorite.addEventListener("click", () => {
       state.music.favorite = !state.music.favorite;
-      actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
     const sort = document.createElement("select");
     sort.className = "music-sort";
@@ -942,7 +972,7 @@ export function createMusicPage(deps) {
     sort.disabled = state.music.mode !== "library";
     sort.addEventListener("change", () => {
       state.music.sort = sort.value;
-      actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
     controls.append(search, favorite, sort);
     const table = document.createElement("div");
@@ -967,7 +997,7 @@ export function createMusicPage(deps) {
       ? "正在加载…"
       : `再加载 ${formatNumber(Math.min(120, Math.max(0, Number(state.music.data?.total || 0) - trackCount)))} 首`;
     more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => actions.loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
+    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
   }
 
@@ -1171,7 +1201,7 @@ export function createMusicPage(deps) {
         state.music.artistId = "all";
         state.music.albumId = "all";
         state.music.genre = "all";
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       })
     );
     addGroup("专辑", (suggestions.albums || []).slice(0, 4), (album) =>
@@ -1184,7 +1214,7 @@ export function createMusicPage(deps) {
         state.music.artistId = "all";
         state.music.albumId = "all";
         state.music.genre = "all";
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       })
     );
     if (!count) {
@@ -1510,6 +1540,7 @@ export function createMusicPage(deps) {
       if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
       audio.currentTime = (Number(progress.value || 0) / 1000) * audio.duration;
       updatePlaybackUi();
+      void actions.claimProgressOwner();
     });
     const total = document.createElement("span");
     total.textContent = track ? formatClockLocal(track.durationMs || 0) : "0:00";
@@ -1668,7 +1699,10 @@ export function createMusicPage(deps) {
         button.dataset.index = String(index);
         button.dataset.timeMs = String(line.timeMs || 0);
         button.textContent = line.text || "";
-        button.addEventListener("click", () => player.seekToLyricLine(line.timeMs || 0));
+        button.addEventListener("click", () => {
+          player.seekToLyricLine(line.timeMs || 0);
+          void actions.claimProgressOwner();
+        });
         lyricLineEls.push(button);
         lines.append(button);
       });
@@ -1720,6 +1754,7 @@ export function createMusicPage(deps) {
       if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
       audio.currentTime = (Number(progress.value || 0) / 1000) * audio.duration;
       updatePlaybackUi();
+      void actions.claimProgressOwner();
     });
     const total = document.createElement("span");
     total.textContent = track ? formatClockLocal(track.durationMs || 0) : "0:00";
@@ -2132,10 +2167,14 @@ export function createMusicPage(deps) {
 
   // ================= 播放页 / 路由 =================
   async function openPlayerStage() {
+    const navigation = resetReader();
+    let openedTrack = null;
     if (!state.music.current && state.music.queue[0]?.id) {
-      await actions.openTrack(state.music.queue[0].id, { autoplay: false, skipRoute: true });
+      openedTrack = await actions.openTrack(state.music.queue[0].id, { autoplay: false, skipRoute: true });
+      if (!openedTrack) return;
     }
-    if (!state.music.current) return;
+    if (!actions.isNavigationCurrent(navigation) || !state.music.current || state.music.openingTrackId) return;
+    if (openedTrack && openedTrack.id !== state.music.current.id) return;
     trackReturnContext = {
       route: router.overrides(),
       scroll: captureLibraryScroll()
@@ -2154,12 +2193,14 @@ export function createMusicPage(deps) {
 
   function closeTrackPage() {
     const returnContext = trackReturnContext;
+    const navigation = resetReader();
     trackReturnContext = null;
     state.music.trackPageOpen = false;
     state.music.playerStageOpen = false;
     replaceRoute({ ...(returnContext?.route || router.overrides()), musicTrackId: "" });
     renderView();
-    restoreLibraryScroll(returnContext?.scroll);
+    restoreLibraryScroll(returnContext?.scroll, navigation);
+    if (!state.music.data) actions.loadMusic({ skipRoute: true, keepCurrent: true, restoreLast: false }).catch(showError);
   }
 
   function captureLibraryScroll() {
@@ -2171,12 +2212,13 @@ export function createMusicPage(deps) {
     };
   }
 
-  function restoreLibraryScroll(scroll) {
+  function restoreLibraryScroll(scroll, navigation) {
     if (!scroll) {
       window.scrollTo({ top: 0, behavior: "instant" });
       return;
     }
     window.requestAnimationFrame(() => {
+      if (!actions.isNavigationCurrent(navigation) || state.activeView !== "music" || state.music.trackPageOpen) return;
       window.scrollTo({ top: scroll.windowY || 0, behavior: "instant" });
       const targets = [
         [".music-sidebar.embedded", scroll.sidebar],
@@ -2197,7 +2239,7 @@ export function createMusicPage(deps) {
   function handleKeyboardShortcut(event) {
     if (event.defaultPrevented || state.activeView !== "music" || state.music.playlistDialogOpen) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
-    if (event.key === "Escape" && state.music.trackPageOpen) {
+    if (event.key === "Escape" && (state.music.trackPageOpen || state.music.openingTrackId)) {
       event.preventDefault();
       closeTrackPage();
       return;
@@ -2223,6 +2265,7 @@ export function createMusicPage(deps) {
       event.preventDefault();
       const step = event.shiftKey ? MUSIC_KEYBOARD_FAST_SEEK_SECONDS : MUSIC_KEYBOARD_SEEK_SECONDS;
       player.seekRelative(event.key === "ArrowLeft" ? -step : step);
+      void actions.claimProgressOwner();
     }
   }
 
@@ -2258,10 +2301,11 @@ export function createMusicPage(deps) {
   return {
     applyRouteState,
     enter,
-    loadMusic: (options) => actions.loadMusic(options),
+    loadMusic,
     openRouteTarget,
     openTrack: (id, options) => actions.openTrack(id, options),
     renderStats,
-    renderView
+    renderView,
+    resetReader
   };
 }

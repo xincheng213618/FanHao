@@ -1,9 +1,18 @@
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
-import { comparePopularityMetadata, compareRatingCountMetadata } from "./work-sort-metadata.js";
+import { createWorkSorter } from "./work-sorter.js";
+import { createWeightedCacheBudget, normalizeWorkSortMode } from "./work-cache-budget.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
 const WORK_PAYLOAD_CACHE_LIMIT = 4096;
+const FILTER_SOURCE_CACHE_LIMIT = 96;
+const SORTED_SOURCE_CACHE_LIMIT = 64;
+// Reference counts bound copied source/filter/order arrays without retaining
+// their source identities. Normal 48/64-row response pages retain their usual
+// count limits; large API pages can still be returned without being cached.
+const DERIVED_WORK_REFERENCE_BUDGET = 4_000_000;
+const LIST_PAGE_WORK_BUDGET = 8192;
+const SEARCH_PAGE_WORK_BUDGET = 12288;
 const PREWARM_PAGE_SIZES = [48, 64];
 const LEGACY_MOBILE_PROGRESS_LIMIT = 720;
 const LEGACY_MOBILE_PREWARM_BATCH_SIZE = 48;
@@ -89,7 +98,15 @@ export function createWorkQueryService({
   let staticFacetCache = new WeakMap();
   let dynamicFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
-  const workCodeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  let derivedCacheStamp = "";
+  const derivedBudget = createWeightedCacheBudget(DERIVED_WORK_REFERENCE_BUDGET);
+  const listPageBudget = createWeightedCacheBudget(LIST_PAGE_WORK_BUDGET);
+  const searchPageBudget = createWeightedCacheBudget(SEARCH_PAGE_WORK_BUDGET);
+  const sharedWorkSorter = createWorkSorter({
+    displayWorkTitle,
+    metadataForWork: workSortMetadata,
+    progressForWork: (work) => playbackProgressService.getWorkProgress(work)
+  });
   const currentActorMovieInfoStamp = actorMovieInfoStamp || actorMovieStamp;
 
   function measure(label, callback) {
@@ -158,96 +175,18 @@ export function createWorkQueryService({
   }
 
   function sortWorkList(works, sort, options = {}) {
+    ensureDerivedCacheStamp();
+    sort = normalizeWorkSortMode(sort);
     const stamp = sort === "progress" ? `${currentStamp()}:${userStateStamp()}` : currentStamp();
     const cacheKey = `${sort}:${options.lightweightInfo ? "light" : "full"}`;
     const cachedBySort = sortedWorksCache.get(works);
-    const cached = cachedBySort?.get(cacheKey);
+    const cached = cachedBySort ? derivedBudget.read(cachedBySort, cacheKey) : null;
     if (cached?.stamp === stamp) return cached.works;
 
     const sortStarted = recordPerformanceSpan ? performance.now() : 0;
-    const list = [...works];
-    const usesMetadata = [
-      "releaseDesc",
-      "releaseAsc",
-      "ratingAsc",
-      "ratingDesc",
-      "ratingCountDesc",
-      "popularityDesc",
-      "duration",
-      "durationDesc",
-      "durationAsc",
-      "codeAsc",
-      "codeDesc"
-    ].includes(sort);
-    const metadataByWork = usesMetadata
-      ? new Map(list.map((work) => [work, workSortMetadata(work, options)]))
-      : null;
-    const progressByWork = sort === "progress"
-      ? new Map(list.map((work) => [work, String(playbackProgressService.getWorkProgress(work)?.updatedAt || "")]))
-      : null;
-    list.sort((a, b) => {
-      const aMetadata = metadataByWork?.get(a);
-      const bMetadata = metadataByWork?.get(b);
-      const titleResult = workCodeCollator.compare(displayWorkTitle(a.title || a.directoryName), displayWorkTitle(b.title || b.directoryName));
-      if (sort === "title") return titleResult;
-      if (sort === "progress") {
-        const progressResult = progressByWork.get(b).localeCompare(progressByWork.get(a));
-        return progressResult || titleResult;
-      }
-      if (sort === "videos") {
-        return Number(b.videoCount || 0) - Number(a.videoCount || 0) || titleResult;
-      }
-      if (sort === "releaseDesc" || sort === "releaseAsc") {
-        const aDate = aMetadata.releaseDate;
-        const bDate = bMetadata.releaseDate;
-        const aHas = Boolean(aDate);
-        const bHas = Boolean(bDate);
-        if (aHas !== bHas) return aHas ? -1 : 1;
-        if (aDate !== bDate) return sort === "releaseAsc" ? aDate.localeCompare(bDate) : bDate.localeCompare(aDate);
-      }
-
-      if (sort === "ratingAsc" || sort === "ratingDesc") {
-        const aRating = aMetadata.rating;
-        const bRating = bMetadata.rating;
-        const aHas = aRating !== null;
-        const bHas = bRating !== null;
-        if (aHas !== bHas) return aHas ? -1 : 1;
-        if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
-        const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
-        if (countDiff) return countDiff;
-      }
-
-      if (sort === "ratingCountDesc") {
-        const result = compareRatingCountMetadata(aMetadata, bMetadata);
-        if (result) return result;
-      }
-
-      if (sort === "popularityDesc") {
-        const result = comparePopularityMetadata(aMetadata, bMetadata);
-        if (result) return result;
-      }
-
-      if (sort === "size" || sort === "sizeDesc" || sort === "sizeAsc") {
-        const aSize = (a.videos || []).reduce((sum, video) => sum + Number(video.size || 0), 0);
-        const bSize = (b.videos || []).reduce((sum, video) => sum + Number(video.size || 0), 0);
-        if (aSize !== bSize) return sort === "sizeAsc" ? aSize - bSize : bSize - aSize;
-      }
-
-      if (sort === "duration" || sort === "durationDesc" || sort === "durationAsc") {
-        const aDuration = aMetadata.duration;
-        const bDuration = bMetadata.duration;
-        if (aDuration !== bDuration) return sort === "durationAsc" ? aDuration - bDuration : bDuration - aDuration;
-      }
-
-      if (sort === "codeAsc" || sort === "codeDesc") {
-        const result = workCodeCollator.compare(aMetadata.code, bMetadata.code);
-        if (result) return sort === "codeDesc" ? -result : result;
-      }
-
-      return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")) || titleResult;
-    });
+    const list = sharedWorkSorter(works, sort, options);
     const nextCachedBySort = cachedBySort || new Map();
-    nextCachedBySort.set(cacheKey, { stamp, works: list });
+    derivedBudget.write(nextCachedBySort, cacheKey, { stamp, works: list }, list.length, SORTED_SOURCE_CACHE_LIMIT);
     if (!cachedBySort) sortedWorksCache.set(works, nextCachedBySort);
     if (recordPerformanceSpan) recordPerformanceSpan("sort", performance.now() - sortStarted);
     return list;
@@ -370,8 +309,7 @@ export function createWorkQueryService({
 
     for (const work of works) {
       const missingLocal = Boolean(work.missingLocal);
-      const ratingValue = Number(work.infoSummary?.rating);
-      const rating = Number.isFinite(ratingValue) ? ratingValue : null;
+      const rating = numericSummaryRating(work);
       if (Number(work.playableCount || 0) > 0) facets.playable += 1;
       if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
       if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
@@ -521,19 +459,12 @@ export function createWorkQueryService({
 
   function readListPage(cacheKey) {
     ensureListResponseCache();
-    if (!listPageCache.has(cacheKey)) return null;
-    const cached = listPageCache.get(cacheKey);
-    listPageCache.delete(cacheKey);
-    listPageCache.set(cacheKey, cached);
-    return cached;
+    return listPageBudget.read(listPageCache, cacheKey);
   }
 
   function cacheListPage(cacheKey, payload) {
     ensureListResponseCache();
-    listPageCache.set(cacheKey, payload);
-    while (listPageCache.size > LIST_PAGE_CACHE_LIMIT) {
-      listPageCache.delete(listPageCache.keys().next().value);
-    }
+    listPageBudget.write(listPageCache, cacheKey, payload, payload.count, LIST_PAGE_CACHE_LIMIT);
     return payload;
   }
 
@@ -542,6 +473,7 @@ export function createWorkQueryService({
     const stamp = listResponseStamp();
     if (listPageCacheStamp === stamp) return;
     listPageCacheStamp = stamp;
+    listPageBudget.clear(listPageCache);
     listPageCache = new Map();
     dynamicFacetCache = new WeakMap();
   }
@@ -554,26 +486,27 @@ export function createWorkQueryService({
   }
 
   function cachedListSource(scope, filter, stamp = currentStamp(), requestedCategory = "all") {
+    ensureDerivedCacheStamp();
     const category = normalizeWorkCategory(requestedCategory);
     const filters = requestedFilters(filter);
     const filterKey = filters.length ? filters.join(",") : "all";
     const cacheKey = `${scope}:${category}:${filterKey}`;
-    const cached = listSourceCache.get(cacheKey);
+    const cached = readFilterCache(listSourceCache, cacheKey);
     const filterStamp = filters.some((item) => userStateFilters.has(item)) ? `${stamp}:${userStateStamp()}` : stamp;
     let filtered = cached?.stamp === filterStamp ? cached.works : null;
 
     if (!filtered) {
       const scopedCacheKey = `${scope}:${category}:all`;
-      const scopedCached = listSourceCache.get(scopedCacheKey);
+      const scopedCached = readFilterCache(listSourceCache, scopedCacheKey);
       const scopedWorks = scopedCached?.stamp === stamp
         ? scopedCached.works
         : worksForScopeAndCategory(scope, category, stamp);
-      listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
+      writeFilterCache(listSourceCache, scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filters.length
         ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item))))
         : scopedWorks;
       if (filters.every((item) => cacheableFilters.has(item))) {
-        listSourceCache.set(cacheKey, { stamp: filterStamp, works: filtered });
+        writeFilterCache(listSourceCache, cacheKey, { stamp: filterStamp, works: filtered });
       }
     }
     return filtered;
@@ -725,19 +658,12 @@ export function createWorkQueryService({
 
   function readSearchPage(cacheKey) {
     ensureSearchResponseCache();
-    if (!searchPageCache.has(cacheKey)) return null;
-    const cached = searchPageCache.get(cacheKey);
-    searchPageCache.delete(cacheKey);
-    searchPageCache.set(cacheKey, cached);
-    return cached;
+    return searchPageBudget.read(searchPageCache, cacheKey);
   }
 
   function cacheSearchPage(cacheKey, payload) {
     ensureSearchResponseCache();
-    searchPageCache.set(cacheKey, payload);
-    while (searchPageCache.size > SEARCH_PAGE_CACHE_LIMIT) {
-      searchPageCache.delete(searchPageCache.keys().next().value);
-    }
+    searchPageBudget.write(searchPageCache, cacheKey, payload, payload.count, SEARCH_PAGE_CACHE_LIMIT);
     return payload;
   }
 
@@ -745,22 +671,22 @@ export function createWorkQueryService({
     const stamp = listResponseStamp();
     if (searchPageCacheStamp === stamp) return;
     searchPageCacheStamp = stamp;
+    searchPageBudget.clear(searchPageCache);
     searchPageCache = new Map();
   }
 
   function cachedSearchSource(rawQuery, timings = {}, mark = () => {}) {
+    ensureDerivedCacheStamp();
     const stamp = `${currentStamp()}:${peoplePayloadStamp()}`;
     mark("sourceStamp");
     if (searchSourceCacheStamp !== stamp) {
       searchSourceCacheStamp = stamp;
-      searchSourceCache.clear();
+      derivedBudget.clear(searchSourceCache);
     }
 
     const cacheKey = String(rawQuery || "").toLowerCase();
     if (searchSourceCache.has(cacheKey)) {
-      const cached = searchSourceCache.get(cacheKey);
-      searchSourceCache.delete(cacheKey);
-      searchSourceCache.set(cacheKey, cached);
+      const cached = derivedBudget.read(searchSourceCache, cacheKey);
       timings.sourceCacheHit = true;
       return cached;
     }
@@ -850,17 +776,16 @@ export function createWorkQueryService({
       works: matchedWorks
     };
     mark("publicPeople");
-    searchSourceCache.set(cacheKey, source);
-    while (searchSourceCache.size > 48) searchSourceCache.delete(searchSourceCache.keys().next().value);
+    derivedBudget.write(searchSourceCache, cacheKey, source, source.works.length, 48);
     return source;
   }
 
   function cachedSearchCategory(source, category) {
     if (category === "all") return source.works;
-    if (!source.categoryWorks.has(category)) {
-      source.categoryWorks.set(category, source.works.filter((work) => workCategory(work) === category));
-    }
-    return source.categoryWorks.get(category);
+    const cached = derivedBudget.read(source.categoryWorks, category);
+    if (cached) return cached;
+    const filtered = source.works.filter((work) => workCategory(work) === category);
+    return derivedBudget.write(source.categoryWorks, category, filtered, filtered.length);
   }
 
   function cachedSearchFacets(source, category, categoryWorks) {
@@ -884,12 +809,32 @@ export function createWorkQueryService({
     const stamp = userStateStamp();
     if (source.filteredByModeStamp !== stamp) {
       source.filteredByModeStamp = stamp;
-      source.filteredByMode.clear();
+      derivedBudget.clear(source.filteredByMode);
     }
-    if (!source.filteredByMode.has(filterKey)) {
-      source.filteredByMode.set(filterKey, categoryWorks.filter(matchesFilters));
-    }
-    return source.filteredByMode.get(filterKey);
+    const cached = readFilterCache(source.filteredByMode, filterKey);
+    if (cached) return cached;
+    const filtered = measure("filter", () => categoryWorks.filter(matchesFilters));
+    writeFilterCache(source.filteredByMode, filterKey, filtered);
+    return filtered;
+  }
+
+  function readFilterCache(cache, key) {
+    return derivedBudget.read(cache, key);
+  }
+
+  function writeFilterCache(cache, key, value) {
+    return derivedBudget.write(cache, key, value, (value.works || value).length, FILTER_SOURCE_CACHE_LIMIT);
+  }
+
+  function ensureDerivedCacheStamp() {
+    const stamp = currentStamp();
+    if (derivedCacheStamp === stamp) return;
+    derivedCacheStamp = stamp;
+    derivedBudget.clear();
+    sortedWorksCache = new WeakMap();
+    listSourceCache.clear();
+    searchSourceCache.clear();
+    searchSourceCacheStamp = "";
   }
 
   function findExactLocalWork(codeKey) {
@@ -924,5 +869,5 @@ function requestedFilters(value) {
   return [...new Set(String(value || "all")
     .split(",")
     .map((item) => item.trim())
-    .filter((item) => item && item !== "all"))];
+    .filter((item) => item && item !== "all"))].sort();
 }

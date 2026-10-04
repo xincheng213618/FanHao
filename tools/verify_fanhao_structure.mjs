@@ -170,11 +170,11 @@ assert(!adminPageSource.startsWith("import ") && adminPageSource.includes('impor
 assert(!adminHtmlSource.includes('/modules/system/access-analytics.css') && adminPageSource.includes('loadStylesheet("/modules/system/access-analytics.css?v=20260815-admin-lazy-load-01")'), "section-specific admin styles must load with their owning section");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260919-browse-04'), "FanHao shell changes must refresh the browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20261004-request-lifecycle-02'), "FanHao shell changes must refresh the browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260919-browse-04'), "FanHao shell changes must refresh the app module");
+assert(fanhaoEntry.includes('app.js?v=20261004-request-lifecycle-02'), "FanHao shell changes must refresh the app module");
 assert(webApp.includes('await bootApp().catch') && webApp.includes('classList.remove("app-module-loading")'), "FanHao must reveal the page only after its initial route is rendered");
-assert(webApp.includes('index.js?v=20260919-browse-02'), "browse changes must refresh the FanHao module barrel");
+assert(webApp.includes('index.js?v=20261004-request-lifecycle-02'), "browse changes must refresh the FanHao module barrel");
 assert.deepEqual(nextBrowseFilters(["localOnly", "favorite"], "missingLocal"), ["favorite", "missingLocal"], "changing availability must replace a contradictory scope while retaining personal filters");
 assert.deepEqual(nextBrowseFilters(["missingLocal", "vr"], "playable"), ["vr", "playable"], "playable and missing scopes must never accumulate");
 assert.deepEqual(nextBrowseFilters(["playable", "favorite"], "all"), ["favorite"], "all availability must preserve the separately selected conditions");
@@ -182,11 +182,14 @@ assert.deepEqual(nextBrowseFilters(["localOnly", "favorite"], "favorite"), ["loc
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
-const standaloneInitialRouteIndex = standaloneHost.indexOf("await host.applyRoute(initialRoute)");
+const standaloneInitialRouteIndex = standaloneHost.indexOf("host.applyRoute(startupRoute)");
+const standaloneRouteWaitIndex = standaloneHost.indexOf("await host.waitForRoute()");
 const standaloneRevealIndex = standaloneHost.indexOf('classList.remove("app-module-loading")');
-assert(standaloneInitialRouteIndex >= 0 && standaloneRevealIndex > standaloneInitialRouteIndex, "standalone routes must remain hidden until their complete initial route is ready");
+assert(standaloneInitialRouteIndex >= 0 && standaloneRouteWaitIndex > standaloneInitialRouteIndex && standaloneRevealIndex > standaloneRouteWaitIndex, "standalone routes must remain hidden until the latest complete initial route is ready");
+assert(standaloneHost.includes("const startupRoute = normalizeRoute(routeFromUrl())") && standaloneHost.includes("if (pending === routeApplication) return"), "startup must recheck the URL after loading the module and wait for the current route owner");
 assert(!standaloneHost.includes("window.requestAnimationFrame(resolve)"), "standalone startup must not reveal an intermediate loading DOM after one animation frame");
-assert(standaloneHost.includes("routeApplication.catch(() => {}).then(() => applyRouteNow(next))"), "standalone history restores must be serialized");
+assert(standaloneHost.includes('["gallery", "manga", "music", "novels"].includes(state.activeView)') && standaloneHost.includes("? applyRouteNow(next, owner)") && standaloneHost.includes("routeWork.catch(() => {}).then(() => applyRouteNow(next, owner))"), "reader history restores must supersede obsolete I/O while other routes remain serialized");
+assert(standaloneHost.includes("routeOwner?.supersede()") && standaloneHost.includes("Promise.race([applied, superseded])") && standaloneHost.includes("if (routeOwner !== owner) return"), "superseded route work must release startup waits and retain its stale owner guard");
 for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page", "tools/tools-page"]) {
   assert(standaloneHost.includes(`modules/${modulePath}.js`), `standalone host must route ${modulePath}`);
   assert(!webApp.includes(`modules/${modulePath}`), `FanHao runtime must not load ${modulePath}`);
@@ -259,17 +262,18 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260919-browse-02'), "people browse changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20261004-request-lifecycle-02'), "people browse changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('code-prefix-page.js?v=20261004-request-lifecycle-02') && fanhaoModuleIndexSource.includes('search-request-service.js?v=20261004-request-lifecycle-02'), "prefix and search request changes must use fresh browser module URLs");
 assert(fanhaoModuleIndexSource.includes('work-page-appender.js?v=20260724-work-pagination-02'), "in-place work pagination must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260726-work-sort-01') && fanhaoModuleIndexSource.includes('query.js?v=20260726-work-sort-01'), "work sorting changes must refresh ranking and shared query modules");
 assert(webApp.includes('["ratingCountDesc", "评价人数最多"]') && webApp.includes('["popularityDesc", "热度最高"]') && !webApp.includes("评分最低"), "Web work sorting must expose audience and popularity sorts without the lowest-rating option");
 assert(rankingPageSource.includes('["ratingCountDesc", "评价人数最多"]') && rankingPageSource.includes('["popularityDesc", "热度最高"]'), "ranking work sorting must expose audience and popularity sorts");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260724-work-pagination-01'), "collection pagination changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260724-work-pagination-01'), "studio pagination changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20261004-request-lifecycle-02'), "studio pagination changes must use a fresh browser module URL");
 assert(collectionPageSource.includes("const collectionPrefetches = new Map()") && collectionPageSource.includes("warmHistoryRanges()"), "Web history ranges must reuse prefetched pages while the collection view remains active");
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
-assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: options.reusePrefetch !== false"), "person interactions must reuse prepared detail requests unless a local rescan explicitly invalidates them");
+assert(peoplePageSource.includes("const personDetailPrefetches = createPrefetchCache(") && peoplePageSource.includes("reusePrefetch: options.reusePrefetch !== false"), "person interactions must reuse bounded prepared detail requests unless a local rescan explicitly invalidates them");
 assert(peoplePageSource.includes("schedulePersonDetailPrefetch(person.id)") && peoplePageSource.includes("preparePersonDetailFromIntent(root, event.target)"), "delegated person cards must prepare details before desktop and touch clicks");
 assert(peoplePageSource.includes("detailPending: true") && personProfileSource.includes("正在加载详情"), "Web person navigation must paint the indexed profile before the detail API returns");
 assert(personProfileSource.includes("data-person-local-refresh") && personProfileSource.includes('textContent = "刷新本地"') && personProfileSource.includes("/api/admin/rescan-person"), "person details must expose a direct local refresh action");
@@ -284,7 +288,7 @@ assert(webApp.includes("if (view !== \"people\") peoplePage.cancelPendingSelecti
 assert(webApp.includes("const searchRequests = createSearchRequestService({"), "FanHao search must retain a cancellable active request");
 assert(searchRequestSource.includes("const request = requests.begin()"), "search and load-more requests must replace stale work");
 assert(searchRequestSource.includes("return request.isCurrent() ? data : null"), "stale search responses must not overwrite current navigation");
-assert(searchRequestSource.includes("const prefetched = new Map()") && searchRequestSource.includes("consumePrefetch(target.key)"), "Web search submit must consume input-time request warmups");
+assert(searchRequestSource.includes("const prefetchCache = createPrefetchCache(") && searchRequestSource.includes("consumePrefetch(target.key, request.signal)"), "Web search submit must consume cancellable input-time request warmups");
 assert(webApp.includes("searchRequests.prefetch(query)"), "Web search input must prepare the likely first page before Enter");
 let resolveSearchPrefetch;
 const searchRequestPaths = [];
@@ -316,7 +320,7 @@ assert(webApp.includes('if (view !== "rankings") rankingPage.cancelPendingReques
 assert(studioPageSource.includes("const studioRequests = createLatestRequestGate()"), "studio navigation must own a cancellable latest request");
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
 assert(webApp.includes('if (view !== "studios") studioPage.cancelPendingRequests()'), "leaving studios must cancel pending requests");
-assert(studioPageSource.includes("const studioPrefetches = new Map()") && studioPageSource.includes("return result.data;"), "studio activation must reuse its prepared detail request");
+assert(studioPageSource.includes("const studioPrefetches = createPrefetchCache(") && studioPageSource.includes("return result.data;"), "studio activation must reuse its bounded prepared detail request");
 assert(studioPageSource.includes('bindStudioIntentSurface(els.workGrid, ".studio-card"') && studioPageSource.includes('root.addEventListener("pointerover", prefetch'), "studio cards must delegate desktop and touch detail preparation");
 assert(!studioPageSource.includes('button.addEventListener("pointerenter", prefetch'), "studio cards must not allocate intent listeners per index item");
 assert(studioPageSource.includes("const STUDIO_INDEX_INITIAL_COUNT = 64") && studioPageSource.includes("appendIndexBatch(state.studios, 0, studioIndexRenderSeq)"), "studio indexes must paint a bounded first batch");
@@ -1456,14 +1460,14 @@ assert(personDetailServiceSource.includes("lightweightInfo: true") && personDeta
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
 assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
-assert(studioService.indexOf("cachedFilteredStudioWorks(workSet, filter)") < studioService.indexOf("sortWorkList(filteredWorkSet.works, sort)"), "studio filters must run before sorting and pagination");
+assert(studioService.indexOf("cachedFilteredStudioWorks(workSet, filter, url)") >= 0 && studioService.indexOf("cachedFilteredStudioWorks(workSet, filter, url)") < studioService.indexOf("cachedSortedStudioWorks(filteredWorkSet, sort)"), "studio filters must run before sorting and pagination");
 assert(studioService.includes("detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url)"), "studio page caches must distinguish active server filters");
 assert(workFilterServiceSource.includes("requested.every((item) => matches(work, item))"), "shared server work filtering must support combined-filter semantics");
 advisories.check(lines("src/modules/fanhao/server/works/work-filter-service.js") <= 100, "server work-filter service is over 100 lines; review its responsibilities");
 assert(workClassificationServiceSource.includes("function isCompilation(work)") && workClassificationServiceSource.includes("function filterForRequest(works, url, filter"), "compilation classification and visibility must live on the server");
 assert(personDetailServiceSource.includes('url.searchParams.get("includeMissingLocal")') && personDetailServiceSource.includes('url.searchParams.get("includeCompilation")'), "person page caches must distinguish server visibility options");
 assert(webApp.includes('if (state.activeView === "people" && state.selectedPersonId) return state.works;'), "person cards must render the server page without client-side visibility filtering or sorting");
-assert(webApp.includes("state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);"), "person continuation must expose each server page immediately instead of adding a second client paging layer");
+assert(peoplePageSource.includes("state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);") && webApp.includes("return peoplePage.loadMoreWorks(button);"), "person continuation must expose each server page immediately instead of adding a second client paging layer");
 const workAutoloadSource = /function setupWorkLoadMoreAutoload\([\s\S]*?\r?\n}\r?\n\r?\nfunction renderEmpty/.exec(webApp)?.[0] || "";
 assert(workAutoloadSource.includes("new IntersectionObserver"), "work continuation must use viewport observation for automatic loading");
 assert(!workAutoloadSource.includes('window.addEventListener("wheel"') && !workAutoloadSource.includes("userScrollIntentUntil"), "work continuation must not depend on short-lived wheel intent timing");
@@ -1616,8 +1620,9 @@ assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"),
 assert(mediaResponseServiceSource.includes("work.cachedCover?.coverUrl, work.remoteCoverUrl"), "SQL cover metadata must still prewarm remote image blobs that are not cached yet");
 assert(mediaResponseServiceSource.includes("await cachedMediaBlobRow"), "database-backed images must leave synchronous request handling");
 assert(mediaResponseServiceSource.includes("mediaBlobCacheMaxBytes = 512 * 1024 * 1024"), "database-backed images must reuse a bounded memory hot cache");
-assert(mediaResponseServiceSource.includes("remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit"), "remote-image prewarming must keep its backlog bounded");
-assert(mediaResponseServiceSource.includes("for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl)"), "newly visible remote images must discard stale queued downloads");
+const remoteImageWarmQueueSource = read("src/platform/server/remote-image-warm-queue.js");
+assert(mediaResponseServiceSource.includes("pending.queued + pending.active >= queueLimit") && remoteImageWarmQueueSource.includes("keys.size >= maxTasks"), "both visible-page prewarming and direct remote-image requests must keep their backlog bounded");
+assert(mediaResponseServiceSource.includes("remoteImageWarmer.replaceQueued()") && remoteImageWarmQueueSource.includes("for (const key of queued.splice(0)) keys.delete(key)"), "newly visible remote images must discard stale queued downloads");
 assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
 assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND url IN"), "remote-image warming must use the URL covering index instead of opening cached blobs");
 assert(mediaResponseServiceSource.includes("SELECT 1 AS ready") && mediaResponseServiceSource.includes("prewarmLocalImages"), "local-cover warming must check cache freshness without selecting image blobs");
@@ -1629,7 +1634,7 @@ const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
 for (const source of [server, workQueryServiceSource]) {
-  assert(source.includes("displayWorkTitle(a.title || a.directoryName)") && source.includes('if (sort === "title") return titleResult;') && source.includes('if (sort === "progress")') && source.includes('if (sort === "videos")'), "server work sorting must cover every Android collection sort mode using displayed titles");
+  assert(source.includes("createWorkSorter({") && source.includes("sharedWorkSorter(works, sort"), "both server adapters must use the shared work ordering verified by verify_work_sorting.mjs");
 }
 assert(workQueryServiceSource.includes('sort === "progress" ? `${currentStamp()}:${userStateStamp()}`'), "progress-sorted work caches must follow playback state changes");
 assert(workFilterServiceSource.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
@@ -2923,19 +2928,22 @@ const testLocalImage = {
   size: 3,
   modifiedAt: "2026-07-17T00:00:00.000Z"
 };
+let fixtureLocalImageDb;
 const mediaResponseService = createMediaResponseService({
   coreImageRow: () => null,
   corePersonAvatarRow: () => null,
-  getCoreDb: () => ({
+  getCoreDb: () => (fixtureLocalImageDb ||= {
     prepare(sql) {
       return {
-        get: (fileId, sourceSize, sourceMtime) => {
+        get: (fileId, filePath, sourceSize, sourceMtime) => {
           const row = cachedLocalImageRows.get(fileId);
-          return row?.source_size === sourceSize && row?.source_mtime === sourceMtime ? row : null;
+          if (sql.includes("SELECT file_path, source_size")) return row || null;
+          return row?.file_path === filePath && row?.source_size === sourceSize && row?.source_mtime === sourceMtime ? row : null;
         },
         run(...args) {
           if (sql.includes("image_blob") && Buffer.isBuffer(args[4])) {
             cachedLocalImageRows.set(args[0], {
+              file_path: args[1],
               content_type: args[3],
               image_blob: args[4],
               byte_length: args[5],
@@ -3018,7 +3026,7 @@ for (let attempt = 0; attempt < 10 && localImageReadCount < 2; attempt += 1) {
   await new Promise((resolve) => setImmediate(resolve));
 }
 assert(cachedLocalImageRows.has(testLocalImage.id), "completed slow-cover reads must populate the local image cache");
-assert.equal(localImageStatCount, 2, "the local-cover queue must continue after an active read completes");
+assert.equal(localImageStatCount, 4, "each completed queued cover must validate disk identity before and after reading");
 assert.equal(localImageReadCount, 2, "the local-cover queue must eventually read queued covers");
 const cachedImageResponse = testImageResponse();
 await mediaResponseService.servePreparedImage(cachedImageResponse, testLocalImage);
@@ -3039,6 +3047,7 @@ const cachedPrewarmResult = await mediaResponseService.prewarmLocalImages([
 assert.deepEqual(cachedPrewarmResult, { requested: 2, cached: 2, warmed: 0, failed: 0 }, "local-cover warming must skip current cache rows without loading their blobs");
 assert.equal(localImageReadCount, prewarmReadCountBefore + 2, "current prewarmed covers must not return to disk");
 cachedLocalImageRows.set("rounded-prewarm", {
+  file_path: "G:/rounded.jpg",
   content_type: "image/jpeg",
   image_blob: Buffer.from([1, 2, 3]),
   byte_length: 3,

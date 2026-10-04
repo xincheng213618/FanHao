@@ -104,8 +104,8 @@ try {
     safeStat: fileStat
   });
   reserve.run("person-avatar:1", "pending-import");
-  assert.throws(() => actorAvatar.importCandidate(avatarRoot, "1", "Content/Actors/Alice.jpg"), reserved);
-  assert.throws(() => actorAvatar.importFromFiletree(avatarRoot, { replace: true }), reserved);
+  await assert.rejects(() => actorAvatar.importCandidate(avatarRoot, "1", "Content/Actors/Alice.jpg"), reserved);
+  await assert.rejects(() => actorAvatar.importFromFiletree(avatarRoot, { replace: true }), reserved);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM fanhao_images.images").get().count, 0);
   assert.equal(db.prepare("SELECT updated_at FROM people WHERE id = 1").get().updated_at, "old");
   clear();

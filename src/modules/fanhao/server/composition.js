@@ -118,7 +118,7 @@ export function createFanhaoDependencies(deps) {
       "workLocalMutationService",
       "workMoveJobService",
       "workQueryStamp"
-    ]), scheduleBackground: deps.scheduleBackground }
+    ]), cancelCoverGeneration: deps.cancelCoverGeneration, scheduleBackground: deps.scheduleBackground }
   };
 }
 

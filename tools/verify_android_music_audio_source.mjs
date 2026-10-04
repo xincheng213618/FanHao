@@ -90,8 +90,8 @@ test("the source store cancels stale loads and revokes replaced or retired URLs"
 const views = fs.readFileSync(new URL("../android-client/www/modules/music/music-views.js", import.meta.url), "utf8");
 assert.match(views, /await audioSourceStore\.load\("current", targetAudio, target,[\s\S]*?clearBefore: true/,
   "the current Android music track must use the authenticated Blob source");
-assert.match(views, /function scheduleGaplessPreload\(\)[\s\S]*?audioSourceStore\.load\("gapless", target, absoluteUrl\(getActiveUrl\(\), candidate\.streamUrl\)/,
-  "gapless preload must use the same authenticated Blob source path");
+assert.match(views, /function scheduleGaplessPreload\(\)[\s\S]*?gaplessPreloadActiveUrl = currentPlaybackUrl \|\| getActiveUrl\(\);[\s\S]*?audioSourceStore\.load\("gapless", target, absoluteUrl\(gaplessPreloadActiveUrl, candidate\.streamUrl\)/,
+  "gapless preload must use the captured playback server and authenticated Blob source path");
 assert.doesNotMatch(views, /audio\.src\s*=\s*target/,
   "the main player must not stream the cross-origin authenticated URL directly through WebView");
 assert.doesNotMatch(views, /gaplessPreloadAudio\.src\s*=\s*absoluteUrl/,

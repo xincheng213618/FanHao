@@ -1,11 +1,12 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-requests-01";
 
 const PREFETCH_TTL_MS = 60 * 1000;
 const PREFETCH_LIMIT = 8;
 
 export function createSearchRequestService({ api, filter, pageSize, sort }) {
   const requests = createLatestRequestGate();
-  const prefetched = new Map();
+  const prefetchCache = createPrefetchCache({ limit: PREFETCH_LIMIT, ttlMs: PREFETCH_TTL_MS });
 
   function requestFor(query, offset = 0) {
     const params = new URLSearchParams({
@@ -23,36 +24,22 @@ export function createSearchRequestService({ api, filter, pageSize, sort }) {
     const normalized = String(query || "").trim();
     if (!normalized) return Promise.resolve(null);
     const request = requestFor(normalized, 0);
-    const cached = prefetched.get(request.key);
-    if (cached?.expiresAt > Date.now()) return cached.promise;
-    if (cached) prefetched.delete(request.key);
-
-    const entry = {
-      expiresAt: Date.now() + PREFETCH_TTL_MS,
-      promise: null
-    };
-    entry.promise = api(request.path).catch(() => null).then((data) => {
-      if (data === null && prefetched.get(request.key) === entry) prefetched.delete(request.key);
-      return data;
-    });
-    prefetched.set(request.key, entry);
-    while (prefetched.size > PREFETCH_LIMIT) prefetched.delete(prefetched.keys().next().value);
-    return entry.promise;
+    return prefetchCache.prefetch(request.key, (signal) => api(request.path, { signal }))
+      .then((result) => result.data);
   }
 
-  function consumePrefetch(key) {
-    const cached = prefetched.get(key);
-    if (!cached) return null;
-    prefetched.delete(key);
-    return cached.expiresAt > Date.now() ? cached.promise : null;
+  function consumePrefetch(key, signal) {
+    return prefetchCache.consume(key, signal);
   }
 
   async function fetchPage(query, offset = 0) {
     const request = requests.begin();
     const target = requestFor(query, offset);
     try {
-      const warmed = Number(offset || 0) === 0 ? consumePrefetch(target.key) : null;
-      const warmedData = warmed ? await warmed : null;
+      const warmed = Number(offset || 0) === 0 ? consumePrefetch(target.key, request.signal) : null;
+      prefetchCache.clear();
+      const warmedData = warmed ? (await warmed).data : null;
+      if (!request.isCurrent()) return null;
       const data = warmedData ?? await api(target.path, { signal: request.signal });
       return request.isCurrent() ? data : null;
     } catch (error) {
@@ -63,5 +50,10 @@ export function createSearchRequestService({ api, filter, pageSize, sort }) {
     }
   }
 
-  return { cancel: requests.cancel, fetchPage, prefetch };
+  function cancel() {
+    requests.cancel();
+    prefetchCache.clear();
+  }
+
+  return { cancel, fetchPage, prefetch };
 }

@@ -16,6 +16,7 @@ assert(!serviceSource.includes("collections: photoCollectionGroups(items)"), "pr
 assert(serviceSource.includes("function preparedPhotoCollectionCategories(catalog)"), "collection categories must remain lazy");
 assert(serviceSource.includes("const archiveDate = normalizedMode === \"photo\" ? photoArchiveDate(photoTitle) : \"\";"), "photo archive dates must be parsed once per list item");
 assert(serviceSource.includes("archiveMonth: archiveDate.slice(0, 7)"), "photo archive month must derive from the parsed date");
+assert(serviceSource.includes("!deferPhotoSubject || !albumNumber") && serviceSource.includes("albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle)"), "numbered album subjects must hydrate only the returned page while unnumbered facets remain eager");
 assert(!serviceSource.includes("catalog.collections"), "no photo catalog consumer may read the removed collection list");
 assert(!functionSource(serviceSource, "preparedPhotoCatalog", "preparedPhotoCollectionCategories").includes("photoCollectionCategoryGroups"), "album catalog construction must not build collection categories");
 assert(functionSource(serviceSource, "preparedPhotoCollectionCategories", "preparedPhotoSortedItems").includes("photoCollectionCategoryGroups(catalog.items)"), "collection categories must build only when the collections view asks for them");
@@ -27,6 +28,8 @@ assert(webGalleryPage.includes('const summaryEndpoint = isImageLibraryMode() ? "
 
 verifyPhotoPersonFacetBoundaries(createTestableImageLibraryService);
 verifyPreparedPhotoSortCache(createTestableImageLibraryService);
+await verifyImageSortBoundaries(createTestableImageLibraryService);
+verifyImageCollationWork();
 
 const optimizedService = createService(createImageLibraryService, index);
 const summaryCold = measure(() => optimizedService.summaryPayload({ includeCache: false }));
@@ -52,7 +55,7 @@ const optimizedResponses = matrix.map(([name, run]) => [name, run(optimizedServi
 const legacyService = createService(createLegacyImageLibraryService, index);
 for (const [name, run] of matrix) {
   const legacyResponse = run(legacyService);
-  const optimizedResponse = optimizedResponses.find(([candidate]) => candidate === name)[1];
+  const optimizedResponse = legacyListResponse(optimizedResponses.find(([candidate]) => candidate === name)[1]);
   assert.deepStrictEqual(legacyResponse, optimizedResponse, `${name} must remain structurally equivalent to the legacy full facet sort`);
   assert.equal(JSON.stringify(legacyResponse), JSON.stringify(optimizedResponse), `${name} must preserve serialized response bytes`);
 }
@@ -64,6 +67,16 @@ console.log("image-library-performance: ok");
 
 function legacyServiceModuleUrl(source) {
   let legacySource = source;
+  legacySource = replaceOnce(legacySource, '    const sourceStampBefore = listSourceStamp(index, mode);\n    let mangaSourceRevision = "";\n', "", "restore list reads before revision probes");
+  legacySource = replaceOnce(legacySource, '      nextOffset: offset + items.length,\n      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),\n', "", "restore response before additive pagination fields");
+  legacySource = replaceOnce(legacySource, `      const mangaSourceHash = createHash("sha256");
+      source = mangaService.cacheDirs().map((cacheDir) => {
+        const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
+        mangaSourceHash.update(JSON.stringify(item)).update("\\0");
+        return item;
+      });
+      mangaSourceRevision = mangaSourceHash.digest("hex");`, '      source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));', "restore manga source before incremental revision hashing");
+  legacySource = replaceOnce(legacySource, 'return imageNameCollator.compare(left, right);', 'return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });', "restore per-comparison locale construction");
   legacySource = replaceOnce(legacySource, "    let sourceIsSorted = false;\n", "", "remove cached-sort state");
   legacySource = replaceOnce(legacySource, `      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
       const filteredPhotoSets = defaultPhotoFilters && !collection
@@ -102,8 +115,14 @@ function legacyServiceModuleUrl(source) {
   function photoAlbumNumber(value) {`, "restore archive month parser");
   legacySource = replaceOnce(legacySource, `    const archiveDate = normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "";
     const albumNumber = normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "";
-    const albumSubject = normalizedMode === "photo" ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
+    // Unnumbered subjects participate in the person facet guard. Numbered
+    // subjects are display-only and can be derived for the returned page.
+    const albumSubject = normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
 `, "", "restore inline photo list parsing");
+  legacySource = replaceOnce(legacySource, `      if (item.type === "photo" && item.albumNumber) {
+        item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
+      }
+`, "", "restore eager album subject response projection");
   legacySource = replaceOnce(legacySource, `      archiveDate,
       archiveMonth: archiveDate.slice(0, 7),
       albumNumber,
@@ -146,7 +165,7 @@ function legacyServiceModuleUrl(source) {
       .map((item) => ({ item, updatedAt: new Date(item.updatedAt || 0).getTime() }))
       .sort((a, b) => {
         const timeDiff = b.updatedAt - a.updatedAt;
-        return timeDiff || a.item.title.localeCompare(b.item.title, undefined, { numeric: true, sensitivity: "base" });
+        return timeDiff || compareImageNames(a.item.title, b.item.title);
       })
       .map(({ item }) => item);
 `, `    return list.sort((a, b) => {
@@ -157,12 +176,63 @@ function legacyServiceModuleUrl(source) {
   return `data:text/javascript;base64,${Buffer.from(legacySource).toString("base64")}`;
 }
 
+function legacyListResponse(response) {
+  const { listRevision, nextOffset, ...legacy } = response;
+  return legacy;
+}
+
 function testableServiceModuleUrl(source) {
   const testableSource = replaceOnce(source, "  return {\n    itemsPayload,", `  return {
     __testPhotoCatalogState: () => ({ index: cachedPhotoCatalog?.index || null, sortedKeys: [...(cachedPhotoCatalog?.sortedItems?.keys() || [])] }),
     __testPhotoPersonFacets: photoPersonFacets,
+    __testSortImageItems: sortImageLibraryItems,
     itemsPayload,`, "expose photo catalog state to the verifier only");
   return `data:text/javascript;base64,${Buffer.from(testableSource).toString("base64")}`;
+}
+
+function verifyImageSortBoundaries(factory) {
+  const legacySource = Buffer.from(legacyServiceModuleUrl(serviceSource).split(",")[1], "base64").toString("utf8");
+  return import(testableServiceModuleUrl(legacySource)).then(({ createImageLibraryService: legacyFactory }) => {
+    const current = createService(factory, { photoSets: [], mediaItems: [] });
+    const previous = createService(legacyFactory, { photoSets: [], mediaItems: [] });
+    const titles = ["中文 10", "中文 2", "作品 02", "作品 2", "Title 10", "Title 2", "TITLE 02", "éclair", "e\u0301clair", "Eclair", "Ångström", "ångström", "ＡＢＣ", "ABC", "", "😀 2", "😀 10", "[作品]", "作品！"];
+    for (const sort of ["title", "updated", "count", "size", "rating", "year"]) {
+      const items = titles.map((title, index) => ({ id: `sort-${index}`, title, updatedAt: "2026-10-05", size: 1, albumCount: 1, rating: 8, year: "2026" }));
+      const actual = current.__testSortImageItems(items, sort);
+      const expected = previous.__testSortImageItems(items, sort);
+      assert.equal(JSON.stringify(actual), JSON.stringify(expected), `${sort} preserves default-locale CJK/numeric/case/accent/width/empty/punctuation ordering and stable ties`);
+      for (const [left, right] of [["作品 02", "作品 2"], ["Title 2", "TITLE 02"], ["éclair", "e\u0301clair"], ["Ångström", "ångström"]]) {
+        assert.equal(left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }), 0);
+        assert.ok(actual.findIndex(item => item.title === left) < actual.findIndex(item => item.title === right), `${sort} retains insertion order for collation-equivalent values`);
+      }
+    }
+  });
+}
+
+function verifyImageCollationWork() {
+  const privateIndex = { scannedAt: "synthetic-collation", photoSets: [], mediaItems: Array.from({ length: 2048 }, (_, index) => {
+    const value = index * 7919 % 2048;
+    return { id: `collation-${value}`, mediaKind: "tv", title: `中文 Title ${value}`, seriesName: `系列 ${value}`, personName: `系列 ${value}`,
+      category: "合成分类", rootLabel: "synthetic", size: 1, updatedAt: "2026-10-05", playable: true };
+  }) };
+  const originalCompare = String.prototype.localeCompare;
+  const measured = service => {
+    let calls = 0;
+    String.prototype.localeCompare = function (other, locale, options) {
+      if (locale === undefined && options?.numeric === true && options.sensitivity === "base") calls += 1;
+      return originalCompare.call(this, other, locale, options);
+    };
+    const started = performance.now();
+    try {
+      return { response: service.itemsPayload(request({ mode: "tv", tvView: "episodes", sort: "title", limit: "48" })), calls, elapsed: performance.now() - started };
+    } finally { String.prototype.localeCompare = originalCompare; }
+  };
+  const current = measured(createService(createImageLibraryService, privateIndex));
+  const previous = measured(createService(createLegacyImageLibraryService, privateIndex));
+  assert.equal(JSON.stringify(legacyListResponse(current.response)), JSON.stringify(previous.response), "the old per-comparison locale implementation preserves complete TV response bytes");
+  assert.equal(current.calls, 0, "numeric/base comparisons reuse the bound collator instead of calling localeCompare with options");
+  assert.ok(previous.calls > privateIndex.mediaItems.length, "the restored old implementation must violate the new bounded collation work guarantee");
+  console.log(`image-collation: private 2048 TV records; old numeric/base localeCompare calls=${previous.calls}, current=${current.calls}; ${previous.elapsed.toFixed(1)}ms/${current.elapsed.toFixed(1)}ms diagnostic, byte-equivalent response`);
 }
 
 function verifyPhotoPersonFacetBoundaries(factory) {
@@ -220,8 +290,8 @@ function verifyPhotoPersonFacetBoundary(factory, { name, limit, prefix, ties, su
   const legacyResponse = limit === 12
     ? legacyService.summaryPayload({ includeCache: false })
     : legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", limit: "48" }));
-  assert.deepStrictEqual(optimizedResponse, legacyResponse, `${name} service response must match the restored legacy implementation`);
-  assert.equal(JSON.stringify(optimizedResponse), JSON.stringify(legacyResponse), `${name} serialized response must match the restored legacy implementation`);
+  assert.deepStrictEqual(legacyListResponse(optimizedResponse), legacyResponse, `${name} service response must match the restored legacy implementation`);
+  assert.equal(JSON.stringify(legacyListResponse(optimizedResponse)), JSON.stringify(legacyResponse), `${name} serialized response must match the restored legacy implementation`);
 }
 
 function verifyPreparedPhotoSortCache(factory) {
@@ -234,8 +304,8 @@ function verifyPreparedPhotoSortCache(factory) {
     const rawSort = `unknown-sort-${index}`;
     const actual = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: rawSort, limit: "24" }));
     const expected = { ...legacyUpdated, sort: rawSort };
-    assert.deepStrictEqual(actual, expected, `unknown sort ${index} must preserve legacy updated behavior and its raw payload value`);
-    assert.equal(JSON.stringify(actual), JSON.stringify(expected), `unknown sort ${index} must preserve legacy updated response bytes`);
+    assert.deepStrictEqual(legacyListResponse(actual), expected, `unknown sort ${index} must preserve legacy updated behavior and its raw payload value`);
+    assert.equal(JSON.stringify(legacyListResponse(actual)), JSON.stringify(expected), `unknown sort ${index} must preserve legacy updated response bytes`);
     if (index === 99) {
       assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, ["updated"], "100 unknown sorts must share one canonical updated cache entry");
     }
@@ -246,17 +316,17 @@ function verifyPreparedPhotoSortCache(factory) {
   for (const sort of branchSorts) {
     const actual = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort, limit: "24" }));
     const expected = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort, limit: "24" }));
-    assert.deepStrictEqual(actual, expected, `${sort} must preserve the legacy sort branch`);
+    assert.deepStrictEqual(legacyListResponse(actual), expected, `${sort} must preserve the legacy sort branch`);
     service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: ` ${sort} `, limit: "24" }));
   }
   assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, ["updated", ...branchSorts], "every concrete sort branch must occupy exactly one cache entry");
 
   const relevanceWithoutQuery = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "relevance", limit: "24" }));
-  assert.deepStrictEqual(relevanceWithoutQuery, { ...legacyUpdated, sort: "relevance" }, "relevance without search terms must preserve legacy updated ordering and raw sort payload");
+  assert.deepStrictEqual(legacyListResponse(relevanceWithoutQuery), { ...legacyUpdated, sort: "relevance" }, "relevance without search terms must preserve legacy updated ordering and raw sort payload");
   const keysBeforeSearch = service.__testPhotoCatalogState().sortedKeys;
   const relevanceWithQuery = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "count", q: "缓存作品", limit: "24" }));
   const legacyRelevanceWithQuery = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "count", q: "缓存作品", limit: "24" }));
-  assert.deepStrictEqual(relevanceWithQuery, legacyRelevanceWithQuery, "search relevance must stay outside the prepared sort cache and preserve legacy results");
+  assert.deepStrictEqual(legacyListResponse(relevanceWithQuery), legacyRelevanceWithQuery, "search relevance must stay outside the prepared sort cache and preserve legacy results");
   assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, keysBeforeSearch, "search relevance must not add a prepared sort cache entry");
 
   const firstIndex = currentIndex;
@@ -268,7 +338,7 @@ function verifyPreparedPhotoSortCache(factory) {
   assert.strictEqual(switchedState.index, currentIndex, "a new index identity must replace the prepared catalog");
   assert.notStrictEqual(switchedState.index, firstIndex, "the old prepared catalog identity must be discarded");
   assert.deepStrictEqual(switchedState.sortedKeys, ["updated"], "a new index identity must start with a fresh sort cache");
-  assert.deepStrictEqual(switchedResponse, legacySwitchedResponse, "index identity switching must preserve the legacy response");
+  assert.deepStrictEqual(legacyListResponse(switchedResponse), legacySwitchedResponse, "index identity switching must preserve the legacy response");
 }
 
 function createSortCacheIndex(label) {

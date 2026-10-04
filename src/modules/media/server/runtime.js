@@ -23,7 +23,13 @@ export function createMediaRuntime(deps) {
 
     const galleryMediaCoverMatch = /^\/media\/gallery-media-cover\/([^/]+)$/.exec(url.pathname);
     if (galleryMediaCoverMatch && req.method === "GET") {
-      deps.galleryMediaService.serveCover(res, galleryMediaCoverMatch[1]);
+      const controller = new AbortController();
+      const abort = () => { if (!res.writableEnded) controller.abort(); };
+      req.once?.("aborted", abort);
+      res.once?.("close", abort);
+      if (req.aborted || res.destroyed) controller.abort();
+      try { await deps.galleryMediaService.serveCover(res, galleryMediaCoverMatch[1], { signal: controller.signal }); }
+      finally { req.off?.("aborted", abort); res.off?.("close", abort); }
       return true;
     }
 
@@ -40,12 +46,17 @@ export function createMediaRuntime(deps) {
 
     const galleryVideoMatch = /^\/media\/gallery-video\/([^/]+)$/.exec(url.pathname);
     if (galleryVideoMatch && req.method === "GET") {
-      deps.galleryMediaService.serveMedia(req, res, galleryVideoMatch[1]);
+      await deps.galleryMediaService.serveMedia(req, res, galleryVideoMatch[1]);
       return true;
     }
 
     return false;
   }
 
-  return { routeApi, routeMedia, settings };
+  return {
+    routeApi, routeMedia, settings,
+    start: () => deps.galleryMediaService?.start?.(),
+    beginStop: () => deps.galleryMediaService?.beginStop?.(),
+    stop: () => deps.galleryMediaService?.stop?.()
+  };
 }

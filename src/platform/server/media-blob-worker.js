@@ -136,7 +136,20 @@ parentPort?.on("message", (message) => {
   if (!id || !action) return;
 
   try {
-    parentPort.postMessage({ id, ok: true, value: runAction(action, message) });
+    const value = runAction(action, message);
+    const row = value?.row || value;
+    const transfers = [];
+    for (const field of ["image_blob", "cover_blob"]) {
+      if (!(row?.[field] instanceof Uint8Array)) continue;
+      // SQLite owns the returned bytes. An isolated view avoids transferring a
+      // shared slab if the runtime changes the allocation used by get().
+      const blob = row[field];
+      const owned = blob.byteOffset === 0 && blob.byteLength === blob.buffer.byteLength
+        ? blob : Uint8Array.from(blob);
+      row[field] = owned;
+      transfers.push(owned.buffer);
+    }
+    parentPort.postMessage({ id, ok: true, value }, transfers);
   } catch (error) {
     parentPort.postMessage({
       id,

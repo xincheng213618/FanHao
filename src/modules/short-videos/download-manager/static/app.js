@@ -4,9 +4,9 @@ import { createSingleFlightPoller } from "./core/poller.js";
 import { createActivityFeature } from "./features/activity.js?v=20260902-extract-reset-01";
 import { createAuthFeature } from "./features/auth.js";
 import { createDownloadsFeature } from "./features/downloads.js?v=20260917-api-probe-02";
-import { createLibraryFeature } from "./features/library.js?v=20260812-latest-request-01";
-import { createLinksFeature } from "./features/links.js?v=20260925-download-progress-01";
-import { createProfilesFeature } from "./features/profiles.js?v=20260928-profile-auto-collect-01";
+import { createLibraryFeature } from "./features/library.js?v=20261002-manager-performance-01";
+import { createLinksFeature } from "./features/links.js?v=20261002-workspace-01";
+import { createProfilesFeature } from "./features/profiles.js?v=20261002-workspace-01";
 import { createSettingsFeature } from "./features/settings.js?v=20260823-auto-collection-01";
 
 let statePoller = null;
@@ -15,9 +15,36 @@ let linksFeature = null;
 let linksPoller = null;
 let activityPoller = null;
 let activePage = "home";
-let statusEndpointAvailable = true;
-let activityEndpointAvailable = true;
-let lightweightEndpointConfirmed = false;
+const statusEndpoint = createLightweightEndpoint("/api/status");
+const activityEndpoint = createLightweightEndpoint("/api/activity");
+
+function createLightweightEndpoint(path) {
+  let unsupported = false;
+  let confirmed = false;
+  let failures = 0;
+  let retryAt = 0;
+  return {
+    get confirmed() { return confirmed; },
+    async read() {
+      if (unsupported || Date.now() < retryAt) return null;
+      try {
+        const state = await api(path);
+        confirmed = true;
+        failures = 0;
+        retryAt = 0;
+        return state;
+      } catch (error) {
+        if ([404, 405, 501].includes(error.status) || error.code === "ENDPOINT_NOT_SUPPORTED") {
+          unsupported = true;
+        } else {
+          failures = Math.min(failures + 1, 5);
+          retryAt = Date.now() + Math.min(5000 * 2 ** (failures - 1), 60000);
+        }
+        return null;
+      }
+    },
+  };
+}
 
 function refreshState() {
   const tasks = [statusPoller ? statusPoller.run() : Promise.resolve()];
@@ -37,6 +64,16 @@ function setActivePage(page) {
   const buttons = Array.from(document.querySelectorAll("[data-page-target]"));
   const exists = panels.some((panel) => panel.dataset.pagePanel === target);
   const resolvedPage = exists ? target : "home";
+  const pageCopy = {
+    home: ["OVERVIEW", "下载概览", "从采集到归档，在这里管理你的媒体。"],
+    library: ["LIBRARY", "已下载作品", "已保存的作品，随时回看。"],
+    profiles: ["AUTHORS", "主页管理", "关注每一位作者，让作品有序归档。"],
+    settings: ["PREFERENCES", "配置", "按你的习惯设置采集、下载与存储。"],
+    activity: ["ACTIVITY", "任务列表", "查看采集进度与后台运行记录。"],
+  }[resolvedPage];
+  document.getElementById("workspaceEyebrow").textContent = `WORKSPACE / ${pageCopy[0]}`;
+  document.getElementById("workspaceTitle").textContent = pageCopy[1];
+  document.getElementById("workspaceDescription").textContent = pageCopy[2];
   panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.pagePanel === resolvedPage));
   buttons.forEach((button) => {
     const active = button.dataset.pageTarget === resolvedPage;
@@ -47,6 +84,7 @@ function setActivePage(page) {
   if (location.hash !== `#${resolvedPage}`) {
     history.replaceState(null, "", `#${resolvedPage}`);
   }
+  window.scrollTo({ top: 0, behavior: "instant" });
   return resolvedPage;
 }
 
@@ -57,9 +95,12 @@ const downloadsFeature = createDownloadsFeature({ settings: settingsFeature, ref
 linksFeature = createLinksFeature({
   settings: settingsFeature,
   refreshState,
-  supportsLinkRetry: () => lightweightEndpointConfirmed,
+  supportsLinkRetry: () => statusEndpoint.confirmed,
 });
-const libraryFeature = createLibraryFeature({ showPage: () => setActivePage("library") });
+const libraryFeature = createLibraryFeature({ showPage: () => {
+  activePage = setActivePage("library");
+  syncPagePollers();
+} });
 const activityFeature = createActivityFeature({ refreshState });
 
 const features = [
@@ -86,32 +127,15 @@ async function fetchAndRenderHomeState() {
 }
 
 async function fetchAndRenderStatus() {
-  let state = null;
-  if (statusEndpointAvailable) {
-    try {
-      state = await api("/api/status");
-      lightweightEndpointConfirmed = true;
-    } catch (_err) {
-      statusEndpointAvailable = false;
-      lightweightEndpointConfirmed = false;
-    }
-  }
-  if (!state) state = await api("/api/state?compact=1");
+  const state = await statusEndpoint.read() || await api("/api/state?compact=1");
   profilesFeature.renderStatus(state);
   downloadsFeature.renderStatus(state);
   linksFeature.renderRuntime(state);
 }
 
 async function fetchAndRenderActivity() {
-  let state = null;
-  if (activityEndpointAvailable) {
-    try {
-      state = await api("/api/activity");
-    } catch (_err) {
-      activityEndpointAvailable = false;
-    }
-  }
-  activityFeature.render(state || await api("/api/state?compact=1"));
+  const state = await activityEndpoint.read() || await api("/api/state?compact=1");
+  activityFeature.render(state);
 }
 
 statePoller = createSingleFlightPoller(fetchAndRenderHomeState, 15000);
@@ -150,6 +174,26 @@ function activatePage(page, refreshHome = true) {
 }
 
 function bindNavigation() {
+  if ("ResizeObserver" in window) {
+    const toolbarSizes = new ResizeObserver((entries) => {
+      entries.forEach(({ target }) => {
+        const property = target.matches(".profile-manager-controls") ? "--profile-toolbar-height" : "--links-toolbar-height";
+        target.parentElement.style.setProperty(property, `${target.getBoundingClientRect().height}px`);
+      });
+    });
+    document.querySelectorAll(".profile-manager-controls, .links-head").forEach((toolbar) => toolbarSizes.observe(toolbar));
+  }
+  const backToTop = document.getElementById("backToTop");
+  let scrollFramePending = false;
+  window.addEventListener("scroll", () => {
+    if (scrollFramePending) return;
+    scrollFramePending = true;
+    window.requestAnimationFrame(() => {
+      backToTop.hidden = window.scrollY < 600;
+      scrollFramePending = false;
+    });
+  }, { passive: true });
+  backToTop.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "instant" }));
   document.querySelectorAll("[data-page-target]").forEach((button) => {
     button.addEventListener("click", () => {
       const page = setActivePage(button.dataset.pageTarget || "home");

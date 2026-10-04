@@ -265,14 +265,14 @@
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
         try {
-          await import("/standalone-app.js?v=20260908-novel-library-01");
+          await import("/standalone-app.js?v=20261004-reader-navigation-owner-06");
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }
       } else {
         await window.__fanhaoStylesReady;
         try {
-          await import("/fanhao-app.js?v=20260919-browse-04");
+          await import("/fanhao-app.js?v=20261004-request-lifecycle-02");
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }

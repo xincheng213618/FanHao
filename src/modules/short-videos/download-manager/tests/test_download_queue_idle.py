@@ -21,6 +21,7 @@ from manager_core.queue import (
     wait_for_download_queue_changed,
 )
 from manager_core import download_supervisor, profiles_links, server
+from manager_core.http_api import Handler
 
 
 class DownloadQueueIdleTests(unittest.TestCase):
@@ -76,6 +77,36 @@ class DownloadQueueIdleTests(unittest.TestCase):
         notify_download_queue_changed()
 
         repair.assert_called_once_with()
+
+    def test_online_stop_wakes_waiter_without_calling_runtime_repair(self) -> None:
+        manager = download_supervisor.SidecarDownloadManager()
+        manager.active = True
+        repair_calls = []
+
+        def repair() -> None:
+            # This is the same non-reentrant lock path as ensure_automatic_downloads.
+            repair_calls.append(manager.snapshot())
+
+        set_download_queue_change_handler(repair)
+        handler = object.__new__(Handler)
+        handler.path = "/api/download/stop"
+        handler.read_json = MagicMock(return_value={})
+        handler.send_json = MagicMock()
+        with (
+            patch("manager_core.http_api.download_manager", manager),
+            patch.object(manager, "_reset_active_jobs"),
+            patch.object(download_supervisor, "add_event"),
+        ):
+            thread = threading.Thread(target=handler.do_POST, daemon=True)
+            thread.start()
+            thread.join(0.5)
+            self.assertFalse(thread.is_alive(), "online stop reacquired its own manager lock")
+            handler.send_json.assert_called_once_with({"ok": True})
+        self.assertTrue(manager.stop_event.is_set())
+        self.assertTrue(wait_for_download_queue_changed(0))
+        self.assertEqual(repair_calls, [], "stop must not restart an inactive watcher")
+        notify_download_queue_changed()
+        self.assertEqual(len(repair_calls), 1, "committed producers must still repair the watcher")
 
     def test_newly_inserted_link_notifies_the_idle_watcher(self) -> None:
         connection = MagicMock()

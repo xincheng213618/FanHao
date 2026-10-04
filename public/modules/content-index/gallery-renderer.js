@@ -60,12 +60,14 @@ export function createGalleryRenderer(deps) {
   } = deps;
 
   let galleryCoverObserver = null;
+  let galleryListRegistration = null;
   let galleryReaderObserver = null;
   let galleryReaderScrollCleanup = null;
   let galleryReaderImageQueue = [];
   let activeGalleryReaderImageLoads = 0;
   let galleryReaderImageGeneration = 0;
   let galleryReaderStartupFigure = null;
+  let galleryReaderRegistration = null;
   let galleryMoreScrollCleanup = null;
   let galleryMoreGestureConsumed = false;
   let galleryMoreGestureReleaseTimer = 0;
@@ -303,6 +305,12 @@ function createPhotoCategoryStrip() {
   return strip;
 }
 
+function galleryBrowseDescription() {
+  return state.gallery.mode === "photo"
+    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期套图，按合集与分类浏览` : "按合集与分类浏览套图"
+    : "电影、电视剧与动漫";
+}
+
 function createGalleryBrowseHeader() {
   const isPhoto = state.gallery.mode === "photo";
   const header = document.createElement("header");
@@ -314,9 +322,7 @@ function createGalleryBrowseHeader() {
   const title = document.createElement("h1");
   title.textContent = isPhoto ? "套图图库" : "影视资料库";
   const description = document.createElement("p");
-  description.textContent = isPhoto
-    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期套图，按合集与分类浏览` : "按合集与分类浏览套图"
-    : "电影、电视剧与动漫";
+  description.textContent = galleryBrowseDescription();
   copy.append(eyebrow, title, description);
   const nav = document.createElement("nav");
   nav.className = "gallery-browse-nav";
@@ -714,6 +720,7 @@ function activeGallerySearchValue() {
 }
 
 function resetGalleryRenderedState() {
+  galleryListRegistration = null;
   disconnectPeopleIndexAutoload();
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
@@ -721,6 +728,7 @@ function resetGalleryRenderedState() {
   galleryReaderImageQueue = [];
   activeGalleryReaderImageLoads = 0;
   galleryReaderStartupFigure = null;
+  galleryReaderRegistration = null;
   if (galleryCoverObserver) {
     galleryCoverObserver.disconnect();
     galleryCoverObserver = null;
@@ -1079,17 +1087,7 @@ function filteredTvItemsForGroups() {
 function tvSeriesGroups() {
   const list = currentImageLibraryList();
   if (list && state.gallery.mode === "tv" && state.gallery.person === "all") {
-    return (list.items || []).map((item) => ({
-      value: item.seriesKey || item.id,
-      title: item.seriesName || item.title,
-      category: item.category || "",
-      count: Number(item.episodeCount || item.chapterCount || 0),
-      size: Number(item.size || 0),
-      updatedAt: item.updatedAt || "",
-      samples: [],
-      coverUrl: item.coverUrl || "",
-      tvSeries: item.tvSeries || null
-    }));
+    return (list.items || []).map(tvSeriesListGroup);
   }
   const groups = new Map();
   for (const item of filteredTvItemsForGroups()) {
@@ -1126,6 +1124,20 @@ function tvSeriesGroups() {
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
     return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
   });
+}
+
+function tvSeriesListGroup(item) {
+  return {
+    value: item.seriesKey || item.id,
+    title: item.seriesName || item.title,
+    category: item.category || "",
+    count: Number(item.episodeCount || item.chapterCount || 0),
+    size: Number(item.size || 0),
+    updatedAt: item.updatedAt || "",
+    samples: [],
+    coverUrl: item.coverUrl || "",
+    tvSeries: item.tvSeries || null
+  };
 }
 
 function hasSelectedTvSeries() {
@@ -1398,44 +1410,59 @@ function renderTvSeriesBar(container, total) {
   container.append(bar);
 }
 
+function createTvSeriesCard(group) {
+  const card = createGalleryCard(
+    { title: tvSeriesDisplayTitle(group.title, group.tvSeries), coverUrl: group.coverUrl || "" },
+    {
+      meta: [
+        group.category,
+        group.tvSeries?.episodeCount ? `${formatNumber(group.tvSeries.episodeCount)} 集` : `${formatNumber(group.count)} 集`,
+        group.tvSeries?.pubdate ? `首播 ${group.tvSeries.pubdate}` : ""
+      ].filter(Boolean).join(" · "),
+      extra: [
+        tvSeriesRatingText(group.tvSeries),
+        formatBytes(group.size),
+        group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")
+      ].filter(Boolean).join(" · "),
+      badges: group.tvSeries?.rating ? [`豆瓣 ${Number(group.tvSeries.rating).toFixed(1)}`] : [],
+      placeholder: "待补海报",
+      onOpen: () => {
+        state.gallery.category = group.category || state.gallery.category;
+        state.gallery.person = group.title || "all";
+        state.gallery.seriesKey = group.value || "";
+        state.gallery.visibleLimit = 80;
+        renderGalleryView();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        syncGalleryRoute();
+      }
+    }
+  );
+  card.classList.add("gallery-tv-series-card");
+  return card;
+}
+
 function renderTvSeriesShelf(container) {
   const groups = tvSeriesGroups();
   const visible = groups.slice(0, state.gallery.visibleLimit);
-  const total = Number(currentImageLibraryList()?.total ?? groups.length);
+  const list = currentImageLibraryList();
+  const total = Number(list?.total ?? groups.length);
   const grid = document.createElement("div");
   grid.className = "gallery-grid media-grid gallery-tv-series-grid";
-  for (const group of visible) {
-    const card = createGalleryCard(
-      { title: tvSeriesDisplayTitle(group.title, group.tvSeries), coverUrl: group.coverUrl || "" },
-      {
-        meta: [
-          group.category,
-          group.tvSeries?.episodeCount ? `${formatNumber(group.tvSeries.episodeCount)} 集` : `${formatNumber(group.count)} 集`,
-          group.tvSeries?.pubdate ? `首播 ${group.tvSeries.pubdate}` : ""
-        ].filter(Boolean).join(" · "),
-        extra: [
-          tvSeriesRatingText(group.tvSeries),
-          formatBytes(group.size),
-          group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")
-        ].filter(Boolean).join(" · "),
-        badges: group.tvSeries?.rating ? [`豆瓣 ${Number(group.tvSeries.rating).toFixed(1)}`] : [],
-        placeholder: "待补海报",
-        onOpen: () => {
-          state.gallery.category = group.category || state.gallery.category;
-          state.gallery.person = group.title || "all";
-          state.gallery.seriesKey = group.value || "";
-          state.gallery.visibleLimit = 80;
-          renderGalleryView();
-          window.scrollTo({ top: 0, behavior: "smooth" });
-          syncGalleryRoute();
-        }
-      }
-    );
-    card.classList.add("gallery-tv-series-card");
-    grid.append(card);
-  }
+  for (const group of visible) grid.append(createTvSeriesCard(group));
   container.append(grid);
   activateGalleryLazyImages(grid);
+
+  if (list) {
+    registerGalleryList(grid, list, item => createTvSeriesCard(tvSeriesListGroup(item)), {
+      items: (list.items || []).slice(0, state.gallery.visibleLimit),
+      visible: next => (next.items || []).slice(0, state.gallery.visibleLimit),
+      label: "作品", moreParent: container
+    });
+    if (galleryListRegistration?.grid === grid) {
+      updateGalleryListMore();
+      return;
+    }
+  }
 
   if (!groups.length) {
     const empty = document.createElement("div");
@@ -1564,8 +1591,8 @@ function renderWesternPersonShelf(container) {
   }
 }
 
-function activateGalleryLazyImages(root) {
-  if (galleryCoverObserver) {
+function activateGalleryLazyImages(root, options = {}) {
+  if (galleryCoverObserver && !options.append) {
     galleryCoverObserver.disconnect();
     galleryCoverObserver = null;
   }
@@ -1578,7 +1605,7 @@ function activateGalleryLazyImages(root) {
     }
     return;
   }
-  galleryCoverObserver = new IntersectionObserver(
+  if (!galleryCoverObserver) galleryCoverObserver = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
@@ -1591,6 +1618,143 @@ function activateGalleryLazyImages(root) {
     { rootMargin: "600px 0px" }
   );
   for (const image of images) galleryCoverObserver.observe(image);
+}
+
+function galleryListItemKey(item) {
+  const id = String(item?.id || item?.collectionId || item?.routePath || "");
+  return id ? `${String(item?.type || "")}:${id}` : "";
+}
+
+function registerGalleryList(grid, list, createItem, options = {}) {
+  const items = options.items || list.items || [];
+  const keys = items.map(galleryListItemKey);
+  if (!keys.length || keys.some(key => !key) || new Set(keys).size !== keys.length || grid.children.length !== keys.length) return;
+  galleryListRegistration = {
+    key: list.key, grid, list, createItem, options,
+    entries: new Map(keys.map((key, index) => [key, { item: items[index], node: grid.children[index] }]))
+  };
+}
+
+function refreshGalleryControls() {
+  const description = els.workGrid.querySelector(".gallery-browse-header p");
+  if (description) description.textContent = galleryBrowseDescription();
+  const controls = els.workGrid.querySelector(".gallery-shell > .gallery-controls");
+  if (!controls) return;
+  const active = document.activeElement;
+  const search = controls.querySelector(".gallery-search");
+  const selection = active === search ? [search.selectionStart, search.selectionEnd] : null;
+  const replacement = renderGalleryControls({ searchValue: search?.value });
+  // The whole search field retains its own input and submit-button closures.
+  const oldField = search?.closest(".gallery-search-field, .gallery-media-search-field");
+  const newField = replacement.querySelector(".gallery-search")?.closest(".gallery-search-field, .gallery-media-search-field");
+  if (oldField && newField) newField.replaceWith(oldField);
+  const selects = [...controls.querySelectorAll("select.gallery-select")];
+  for (const [index, next] of [...replacement.querySelectorAll("select.gallery-select")].entries()) {
+    const previous = selects[index];
+    if (!previous) continue;
+    const value = next.value;
+    previous.replaceChildren(...next.childNodes);
+    previous.value = value;
+    previous.disabled = next.disabled;
+    next.replaceWith(previous);
+  }
+  controls.replaceWith(replacement);
+  if (active?.isConnected) {
+    active.focus?.({ preventScroll: true });
+    if (selection) search.setSelectionRange(...selection);
+  }
+}
+
+function galleryListMoreState(list) {
+  const shown = list.items?.length || 0;
+  return { shown, total: Number(list.total || shown), hasMore: list.hasMore !== false && Number(list.rawLoaded ?? shown) < Number(list.total || shown) };
+}
+
+function updateGalleryListMore() {
+  const registration = galleryListRegistration;
+  if (!registration) return;
+  const list = currentImageLibraryList(), page = getGalleryPage();
+  if (!list) return;
+  const { shown, total, hasMore } = galleryListMoreState(list);
+  const parent = registration.options.moreParent;
+  let button = parent?.querySelector(":scope > .gallery-more");
+  if (!hasMore) {
+    button?.remove();
+    if (galleryMoreScrollCleanup) { galleryMoreScrollCleanup(); galleryMoreScrollCleanup = null; }
+    return;
+  }
+  if (!button && parent) {
+    button = document.createElement("button");
+    button.type = "button"; button.className = "text-button gallery-more";
+    button.addEventListener("click", () => showMoreGalleryList(registration.options.label));
+    parent.append(button); setupGalleryMoreAutoload(button);
+  }
+  if (!button) return;
+  const loading = page.isImageLibraryListLoading?.();
+  const error = state.gallery.listErrorKey === registration.key && state.gallery.listError;
+  button.disabled = Boolean(loading);
+  button.setAttribute("aria-busy", String(Boolean(loading)));
+  button.textContent = `${loading ? "正在加载" : error ? "重试 · 显示更多" : "显示更多"}${registration.options.label || ""} ${formatNumber(shown)} / ${formatNumber(total)}`;
+  if (!loading) delete button.dataset.autoloading;
+}
+
+function showMoreGalleryList(label = "") {
+  const page = getGalleryPage();
+  if (page.isImageLibraryListLoading?.()) return;
+  const list = currentImageLibraryList();
+  if (!list) return;
+  const { shown, total, hasMore } = galleryListMoreState(list);
+  if (!hasMore) return;
+  if (state.gallery.listErrorKey !== list.key || !state.gallery.listError) {
+    state.gallery.visibleLimit = Math.min(total, Math.max(shown, Number(state.gallery.visibleLimit || 80)) + 80);
+  }
+  if (!refreshGalleryList({ loading: true })) {
+    if (["photo", "manga"].includes(state.gallery.mode)) renderGalleryResults({ preserveScroll: true });
+    else renderGalleryView({ preserveScroll: true });
+  }
+  if (page.imageLibraryListNeedsLoad?.()) void page.loadImageLibraryItems?.({ renderStart: false });
+  else refreshGalleryList({ listChanged: true });
+}
+
+function refreshGalleryList(options = {}) {
+  if (state.activeView !== "gallery" || state.gallery.album || state.gallery.comic || state.gallery.media) return false;
+  const registration = galleryListRegistration, list = currentImageLibraryList();
+  if (!registration?.grid.isConnected || !list || registration.key !== list.key) return false;
+  if (options.loading !== undefined) { updateGalleryListMore(); return true; }
+  const visible = registration.options.visible ? registration.options.visible(list) : list.items || [];
+  const keys = visible.map(galleryListItemKey);
+  const previousKeys = [...registration.entries.keys()];
+  // A changed ordering/removal requires the existing complete render contract.
+  if (keys.some(key => !key) || new Set(keys).size !== keys.length || previousKeys.some((key, index) => keys[index] !== key)) return false;
+  const scroll = captureGalleryScrollPosition();
+  for (const [index, item] of visible.entries()) {
+    const key = keys[index], previous = registration.entries.get(key);
+    if (previous && (previous.item === item || JSON.stringify(previous.item) === JSON.stringify(item))) { previous.item = item; continue; }
+    const node = registration.createItem(item, index);
+    if (previous) {
+      const focused = previous.node.contains(document.activeElement);
+      for (const image of previous.node.querySelectorAll("img")) galleryCoverObserver?.unobserve(image);
+      previous.node.replaceWith(node);
+      if (focused) node.focus({ preventScroll: true });
+    } else registration.grid.append(node);
+    registration.entries.set(key, { item, node });
+    activateGalleryLazyImages(node, { append: true });
+  }
+  registration.list = list;
+  if (options.listChanged) {
+    registration.options.refreshMetadata?.(list);
+    const summary = els.workGrid.querySelector(".gallery-content .gallery-search-summary");
+    if (summary) {
+      const replacement = document.createElement("div");
+      renderPagedImageLibrarySearchSummary(replacement, list);
+      if (replacement.firstElementChild) summary.replaceWith(replacement.firstElementChild);
+    }
+    refreshGalleryControls();
+  } else refreshGalleryControls();
+  updateGalleryListMore();
+  // Existing rows retain geometry; avoid a full-tree synchronous scrollHeight read.
+  if (window.scrollX !== scroll.left || window.scrollY !== scroll.top) window.scrollTo({ left: scroll.left, top: scroll.top, behavior: "auto" });
+  return true;
 }
 
 function setupGalleryMoreAutoload(button) {
@@ -1717,6 +1881,16 @@ function activateGalleryReaderImages(root) {
     progressTicking = true;
     window.requestAnimationFrame(reportProgress);
   };
+  let checkNewFigures = null;
+  galleryReaderRegistration = {
+    root,
+    register(newFigures) {
+      figures.push(...newFigures);
+      if (galleryReaderObserver) for (const figure of newFigures) galleryReaderObserver.observe(figure);
+      else checkNewFigures?.();
+      requestProgress();
+    }
+  };
   window.addEventListener("scroll", requestProgress, { passive: true });
   window.addEventListener("resize", requestProgress);
   galleryReaderScrollCleanup = () => {
@@ -1758,6 +1932,7 @@ function activateGalleryReaderImages(root) {
     ticking = true;
     window.requestAnimationFrame(loadNearViewport);
   };
+  checkNewFigures = requestCheck;
   window.addEventListener("scroll", requestCheck, { passive: true });
   window.addEventListener("resize", requestCheck);
   const cleanupProgress = galleryReaderScrollCleanup;
@@ -2066,7 +2241,8 @@ function appendPhotoCatalogMore(container, shown, total) {
 
 function renderPagedPhotoShelf(container, list) {
   const items = Array.isArray(list.items) ? list.items : [];
-  if (!state.gallery.query) container.append(createGalleryResultsHeader("全部套图", `${formatNumber(list.total || 0)} 期`));
+  const header = !state.gallery.query ? createGalleryResultsHeader("全部套图", `${formatNumber(list.total || 0)} 期`) : null;
+  if (header) container.append(header);
   renderPhotoPersonBar(container, Number(list.total || items.length));
   const grid = renderPagedPhotoCards(items);
   grid.classList.add("gallery-photo-catalog-grid", "gallery-photo-albums-grid");
@@ -2074,6 +2250,11 @@ function renderPagedPhotoShelf(container, list) {
   activateGalleryLazyImages(grid);
   if (!items.length) renderPagedImageLibraryMessage(container, "没有匹配的套图");
   appendPagedGalleryMore(container, list, "套图");
+  // A person-specific bar contains aggregate metadata; preserve its full fallback.
+  if (state.gallery.person === "all") registerGalleryList(grid, list, createPagedPhotoCard, {
+    label: "套图", moreParent: container,
+    refreshMetadata: next => { if (header) header.querySelector("span").textContent = `${formatNumber(next.total || 0)} 期`; }
+  });
 }
 
 function renderPagedPhotoCollectionPage(container, list) {
@@ -2239,20 +2420,35 @@ function renderPagedPhotoCards(items, options = {}) {
   const grid = document.createElement("div");
   grid.className = "gallery-grid";
   for (const [index, item] of items.entries()) {
-    const collectionView = Boolean(options.collection);
-    const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
-    const card = createGalleryCard(collectionView ? { ...item, title: photoAlbumDisplayTitle(item) } : item, {
-      badges: Number(item.imageCount || 0) ? [`${formatNumber(item.imageCount)} 张`] : [],
-      meta: collectionView ? collectionPerson : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
-      extra: [gallerySearchMatchText(item), collectionView ? item.archiveDate : "", formatBytes(item.size), collectionView ? "" : formatDateTime(item.updatedAt)].filter(Boolean).join(" · "),
-      placeholder: "套图",
-      onOpen: () => openPhotoSet(item.id)
-    });
-    card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
-    activateEagerGalleryCardImage(card, index);
-    grid.append(card);
+    grid.append(createPagedPhotoCard(item, index, options));
   }
   return grid;
+}
+
+function createPagedPhotoCard(item, index, options = {}) {
+  const collectionView = Boolean(options.collection);
+  const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
+  const card = createGalleryCard(collectionView ? { ...item, title: photoAlbumDisplayTitle(item) } : item, {
+    badges: Number(item.imageCount || 0) ? [`${formatNumber(item.imageCount)} 张`] : [],
+    meta: collectionView ? collectionPerson : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
+    extra: [gallerySearchMatchText(item), collectionView ? item.archiveDate : "", formatBytes(item.size), collectionView ? "" : formatDateTime(item.updatedAt)].filter(Boolean).join(" · "),
+    placeholder: "套图",
+    onOpen: () => openPhotoSet(item.id)
+  });
+  card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
+  activateEagerGalleryCardImage(card, index);
+  return card;
+}
+
+function createPagedMangaCard(item, index) {
+  const card = createGalleryCard(item, {
+    meta: `${item.category || "韩漫"} · ${formatNumber(item.chapterCount || 0)} 话`,
+    extra: `${formatNumber(item.imageCount || 0)} 张 · ${formatDateTime(item.updatedAt)}`,
+    placeholder: "韩漫",
+    onOpen: () => openMangaComic(item.id)
+  });
+  activateEagerGalleryCardImage(card, index);
+  return card;
 }
 
 function renderPagedMangaShelf(container, list) {
@@ -2260,19 +2456,13 @@ function renderPagedMangaShelf(container, list) {
   const grid = document.createElement("div");
   grid.className = "gallery-grid manga-grid";
   for (const [index, item] of items.entries()) {
-    const card = createGalleryCard(item, {
-      meta: `${item.category || "韩漫"} · ${formatNumber(item.chapterCount || 0)} 话`,
-      extra: `${formatNumber(item.imageCount || 0)} 张 · ${formatDateTime(item.updatedAt)}`,
-      placeholder: "韩漫",
-      onOpen: () => openMangaComic(item.id)
-    });
-    activateEagerGalleryCardImage(card, index);
-    grid.append(card);
+    grid.append(createPagedMangaCard(item, index));
   }
   container.append(grid);
   activateGalleryLazyImages(grid);
   if (!items.length) renderPagedImageLibraryMessage(container, "没有匹配的韩漫");
   appendPagedGalleryMore(container, list, "韩漫");
+  registerGalleryList(grid, list, createPagedMangaCard, { label: "韩漫", moreParent: container });
 }
 
 function activateEagerGalleryCardImage(card, index) {
@@ -2285,18 +2475,12 @@ function activateEagerGalleryCardImage(card, index) {
 function appendPagedGalleryMore(container, list, label) {
   const shown = Array.isArray(list.items) ? list.items.length : 0;
   const total = Number(list.total || 0);
-  if (shown >= total) return;
+  if (shown >= total || list.hasMore === false) return;
   const more = document.createElement("button");
   more.type = "button";
   more.className = "text-button gallery-more";
   more.textContent = `显示更多${label} ${formatNumber(shown)} / ${formatNumber(total)}`;
-  more.addEventListener("click", () => {
-    state.gallery.visibleLimit = Math.min(total, Math.max(shown, Number(state.gallery.visibleLimit || 80)) + 80);
-    renderGalleryResults({ preserveScroll: true });
-    if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
-      void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
-    }
-  });
+  more.addEventListener("click", () => showMoreGalleryList(label));
   container.append(more);
   setupGalleryMoreAutoload(more);
 }
@@ -2496,18 +2680,12 @@ function renderMovieShelf(container) {
 
   if (!items.length) {
     renderPagedImageLibraryMessage(main, "没有找到匹配的作品，试试更短的片名，或清除筛选后重新浏览。");
-  } else if (visible.length < total) {
+  } else if (visible.length < total && currentImageLibraryList()?.hasMore !== false) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
     more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
-    more.addEventListener("click", () => {
-      state.gallery.visibleLimit += 80;
-      renderGalleryView({ preserveScroll: true });
-      if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
-        void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
-      }
-    });
+    more.addEventListener("click", () => showMoreGalleryList());
     setupGalleryMoreAutoload(more);
     main.append(more);
   }
@@ -2515,6 +2693,16 @@ function renderMovieShelf(container) {
   shell.append(main);
   container.append(shell);
   activateGalleryLazyImages(list);
+  registerGalleryList(list, currentImageLibraryList(), createMovieExploreItem, {
+    items: visible, moreParent: main,
+    visible: next => (next.items || []).slice(0, state.gallery.visibleLimit),
+    refreshMetadata: next => {
+      header.querySelector("[role=status]").textContent = [
+        `${formatNumber(next.total || 0)} 部作品`, next.stats?.ratedCount ? `${formatNumber(next.stats.ratedCount)} 部有评分` : "",
+        next.stats?.totalBytes ? formatBytes(next.stats.totalBytes) : ""
+      ].filter(Boolean).join(" · ");
+    }
+  });
 }
 
 function tvEpisodeNumber(item = {}) {
@@ -2672,60 +2860,10 @@ async function openGalleryMedia(mediaId, options = {}) {
   await getGalleryPage().openGalleryMedia(mediaId, options);
 }
 
-function photoSetDetailPath(albumId, options = {}) {
-  const params = new URLSearchParams();
-  if (options.imageLimit === "all") {
-    params.set("imageLimit", "all");
-  } else if (Number.isFinite(Number(options.imageLimit)) && Number(options.imageLimit) > 0) {
-    params.set("imageLimit", String(Math.floor(Number(options.imageLimit))));
-  }
-  if (Number.isFinite(Number(options.imageOffset)) && Number(options.imageOffset) > 0) {
-    params.set("imageOffset", String(Math.floor(Number(options.imageOffset))));
-  }
-  const query = params.toString();
-  return `/api/photo-sets/${encodeURIComponent(String(albumId || ""))}${query ? `?${query}` : ""}`;
-}
-
 async function loadPhotoReaderImages(limit) {
-  const album = state.gallery.album;
-  if (!album?.id) return null;
-  const currentImages = Array.isArray(album.images) ? album.images : [];
-  const totalCount = Math.max(Number(album.imageCount || 0), currentImages.length);
-  if (currentImages.length >= totalCount) return album;
-  const batchSize = photoReaderBatchSize();
-  const requestedTotal = Math.max(currentImages.length + batchSize, Math.floor(Number(limit || 0)) || 0);
-  const nextLimit = Math.min(totalCount - currentImages.length, requestedTotal - currentImages.length);
-  const scrollAnchor = captureGalleryReaderScrollAnchor();
-  setGalleryStatus("正在继续读取图片");
-  try {
-    const data = await api(photoSetDetailPath(album.id, { imageLimit: nextLimit, imageOffset: currentImages.length }));
-    const nextAlbum = data.album || {};
-    const images = mergePhotoReaderImages(currentImages, nextAlbum.images || []);
-    state.gallery.album = {
-      ...album,
-      ...nextAlbum,
-      images,
-      imageOffset: 0,
-      imageLimit: images.length,
-      imagesTruncated: images.length < Math.max(Number(nextAlbum.imageCount || 0), totalCount),
-      ...(album.fullImages ? { fullImages: album.fullImages } : {})
-    };
-    state.gallery.cache = data.cache || state.gallery.cache;
-    renderGalleryView();
-    restoreGalleryReaderScrollAnchor(scrollAnchor);
-    return state.gallery.album;
-  } finally {
-    setGalleryStatus("");
-  }
-}
-
-function mergePhotoReaderImages(existing, incoming) {
-  const merged = new Map();
-  for (const image of [...(existing || []), ...(incoming || [])]) {
-    const key = Number(image?.index || 0) > 0 ? `index:${Number(image.index)}` : `url:${String(image?.url || image?.name || "")}`;
-    if (key !== "url:") merged.set(key, image);
-  }
-  return [...merged.values()].sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
+  const album = await getGalleryPage().loadPhotoReaderImages(limit);
+  if (album && state.gallery.album === album) appendPhotoReaderImages(album);
+  return album;
 }
 
 function captureGalleryReaderScrollAnchor() {
@@ -2758,16 +2896,7 @@ function photoReaderBatchSize() {
 }
 
 async function fullPhotoReaderImages(album = state.gallery.album) {
-  if (!album?.id) return Array.isArray(album?.images) ? album.images : [];
-  const images = Array.isArray(album.images) ? album.images : [];
-  const total = Number(album.imageCount || images.length || 0);
-  if (images.length >= total) return images;
-  if (Array.isArray(album.fullImages) && album.fullImages.length >= total) return album.fullImages;
-
-  const data = await api(photoSetDetailPath(album.id, { imageLimit: "all" }));
-  const fullImages = Array.isArray(data.album?.images) ? data.album.images : images;
-  album.fullImages = fullImages;
-  return fullImages;
+  return getGalleryPage().fullPhotoReaderImages(album);
 }
 
 function readerToolbar(title, meta, onBack, options = {}) {
@@ -2778,6 +2907,7 @@ function readerToolbar(title, meta, onBack, options = {}) {
   back.className = "text-button gallery-reader-back";
   back.textContent = "返回";
   back.addEventListener("click", () => {
+    resetGalleryReader();
     onBack?.();
     renderGalleryView();
     syncGalleryRoute("replace");
@@ -3023,10 +3153,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     rangeScrubbing = false;
     goTo(Number(range.value) - 1);
   };
-  const update = () => {
+  const update = ({ preserveView = false } = {}) => {
     const item = list[currentIndex] || {};
-    zoomLevel = 1;
-    imageNode.src = item.url;
+    if (!preserveView) zoomLevel = 1;
+    if (imageNode.getAttribute("src") !== item.url) imageNode.src = item.url;
     imageNode.alt = item.name || title || "";
     counter.textContent = `第 ${formatNumber(currentIndex + 1)} / ${formatNumber(list.length)} 张`;
     range.max = String(list.length);
@@ -3034,7 +3164,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     prev.disabled = currentIndex <= 0;
     next.disabled = currentIndex >= list.length - 1;
     sub.textContent = [meta, item.name].filter(Boolean).join(" · ");
-    applyZoom(1);
+    applyZoom(zoomLevel, { preserveScroll: preserveView });
     renderThumbnails();
     updateThumbnails();
     preloadNeighbor(currentIndex - 1);
@@ -3064,10 +3194,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       : matchedIndex >= 0
         ? matchedIndex
         : Math.min(currentIndex, nextList.length - 1);
+    const preserveView = nextList[currentIndex]?.url === current.url;
     list = nextList;
-    renderThumbnails();
     rangeScrubbing = false;
-    update();
+    update({ preserveView });
     return true;
   };
 
@@ -3189,85 +3319,95 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   };
 }
 
+function createGalleryReaderFigure(image, index, list, options = {}) {
+  const totalCount = Math.max(Number(options.totalCount || 0), list.length);
+  const fallbackImages = options.albumId ? null : list;
+  const figure = document.createElement("figure");
+  figure.className = "gallery-reader-figure";
+  figure.dataset.gallerySrc = image.url;
+  figure.dataset.imageIndex = String(image.index || index + 1);
+  const previewUrl = index === 0 ? String(options.previewUrl || "").trim() : "";
+  if (previewUrl) {
+    figure.dataset.galleryPreview = "1";
+    figure.style.backgroundImage = `url(${JSON.stringify(previewUrl)})`;
+    figure.style.backgroundPosition = "center";
+    figure.style.backgroundRepeat = "no-repeat";
+    figure.style.backgroundSize = "contain";
+  }
+  figure.tabIndex = 0;
+  figure.setAttribute("role", "button");
+  const figureLabel = `打开第 ${formatNumber(image.index || index + 1)} 张`;
+  figure.dataset.galleryAriaLabel = figureLabel;
+  figure.setAttribute("aria-label", figureLabel);
+  const openImage = () => {
+    if (figure.classList.contains("failed")) {
+      enqueueGalleryReaderFigure(figure);
+      return;
+    }
+    const sourceKey = options.sourceKey || "";
+    const fallbackIndex = Math.max(0, Number(image.index || index + 1) - 1);
+    const currentList = options.albumId
+      ? state.gallery.album?.id === options.albumId ? state.gallery.album.images : []
+      : fallbackImages;
+    if (!currentList?.length) return;
+    const pager = openGalleryImagePager(
+      currentList,
+      Math.min(currentList.length - 1, fallbackIndex),
+      options.title || "",
+      options.meta || "",
+      { sourceKey }
+    );
+    if (typeof options.fullImages === "function") {
+      options.fullImages()
+        .then((pagerImages) => {
+          pager?.updateImages?.(pagerImages, { sourceKey });
+        })
+        .catch(() => {});
+    }
+  };
+  figure.addEventListener("click", openImage);
+  figure.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openImage();
+  });
+  const img = document.createElement("img");
+  img.alt = image.name || "";
+  img.loading = "lazy";
+  img.decoding = "async";
+  if ("fetchPriority" in img) img.fetchPriority = index < GALLERY_READER_EAGER_IMAGES ? "high" : "low";
+  const caption = document.createElement("figcaption");
+  caption.textContent = `${formatNumber(image.index || index + 1)} / ${formatNumber(totalCount || list.length)}`;
+  const retry = document.createElement("span");
+  retry.className = "gallery-reader-retry";
+  retry.textContent = "加载失败，点按重试";
+  retry.hidden = true;
+  figure.append(img, caption, retry);
+  return figure;
+}
+
 function renderReaderImages(container, images, options = {}) {
   const list = Array.isArray(images) ? images : [];
-  const totalCount = Math.max(Number(options.totalCount || 0), list.length);
   const viewer = document.createElement("div");
   viewer.className = `gallery-reader-images${state.gallery.fitWidth ? " fit-width" : " natural-width"}`;
-  viewer.dataset.totalCount = String(totalCount);
+  viewer.dataset.totalCount = String(Math.max(Number(options.totalCount || 0), list.length));
+  viewer.dataset.loadedCount = String(list.length);
+  if (options.albumId) viewer.dataset.photoAlbumId = options.albumId;
   for (const [index, image] of list.entries()) {
-    const figure = document.createElement("figure");
-    figure.className = "gallery-reader-figure";
-    figure.dataset.gallerySrc = image.url;
-    figure.dataset.imageIndex = String(image.index || index + 1);
-    const previewUrl = index === 0 ? String(options.previewUrl || "").trim() : "";
-    if (previewUrl) {
-      figure.dataset.galleryPreview = "1";
-      figure.style.backgroundImage = `url(${JSON.stringify(previewUrl)})`;
-      figure.style.backgroundPosition = "center";
-      figure.style.backgroundRepeat = "no-repeat";
-      figure.style.backgroundSize = "contain";
-    }
-    figure.tabIndex = 0;
-    figure.setAttribute("role", "button");
-    const figureLabel = `打开第 ${formatNumber(image.index || index + 1)} 张`;
-    figure.dataset.galleryAriaLabel = figureLabel;
-    figure.setAttribute("aria-label", figureLabel);
-    const openImage = () => {
-      if (figure.classList.contains("failed")) {
-        enqueueGalleryReaderFigure(figure);
-        return;
-      }
-      const sourceKey = options.sourceKey || "";
-      const fallbackIndex = Math.max(0, Number(image.index || index + 1) - 1);
-      const pager = openGalleryImagePager(
-        list,
-        Math.min(list.length - 1, fallbackIndex),
-        options.title || "",
-        options.meta || "",
-        { sourceKey }
-      );
-      if (typeof options.fullImages === "function") {
-        options.fullImages()
-          .then((pagerImages) => {
-            const nextIndex = Math.max(0, Number(image.index || index + 1) - 1);
-            pager?.updateImages?.(pagerImages, { sourceKey, index: nextIndex });
-          })
-          .catch(() => {});
-      }
-    };
-    figure.addEventListener("click", openImage);
-    figure.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      openImage();
-    });
-    const img = document.createElement("img");
-    img.alt = image.name || "";
-    img.loading = "lazy";
-    img.decoding = "async";
-    if ("fetchPriority" in img) img.fetchPriority = index < GALLERY_READER_EAGER_IMAGES ? "high" : "low";
-    const caption = document.createElement("figcaption");
-    caption.textContent = `${formatNumber(image.index || index + 1)} / ${formatNumber(totalCount || list.length)}`;
-    const retry = document.createElement("span");
-    retry.className = "gallery-reader-retry";
-    retry.textContent = "加载失败，点按重试";
-    retry.hidden = true;
-    figure.append(img, caption, retry);
-    viewer.append(figure);
+    viewer.append(createGalleryReaderFigure(image, index, list, options));
   }
   container.append(viewer);
   window.requestAnimationFrame(() => {
+    if (galleryReaderRegistration?.root === viewer) return;
     if (viewer.isConnected) activateGalleryReaderImages(viewer);
   });
 }
 
-function renderPhotoReader(container) {
-  const album = state.gallery.album;
+function photoReaderMeta(album) {
   const images = Array.isArray(album.images) ? album.images : [];
   const totalCount = Number(album.imageCount || images.length || 0);
   const visibleCount = images.length;
-  const meta = [
+  return [
     album.category,
     album.subCategory,
     album.personName,
@@ -3275,11 +3415,44 @@ function renderPhotoReader(container) {
       ? `已显示 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)} 张`
       : `${formatNumber(totalCount)} 张`
   ].filter(Boolean).join(" · ");
+}
+
+function photoReaderOptions(album) {
+  const albumId = album.id;
+  return { albumId, title: album.title, meta: photoReaderMeta(album), totalCount: Number(album.imageCount || album.images?.length || 0),
+    sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }) };
+}
+
+function appendPhotoReaderImages(album) {
+  const viewer = els.workGrid.querySelector(".gallery-reader-images[data-photo-album-id]");
+  if (!viewer || viewer.dataset.photoAlbumId !== album.id) return;
+  const images = Array.isArray(album.images) ? album.images : [];
+  const loaded = Number(viewer.dataset.loadedCount || 0);
+  const options = photoReaderOptions(album);
+  const figures = images.slice(loaded).map((image, offset) => createGalleryReaderFigure(image, loaded + offset, images, options));
+  const fragment = document.createDocumentFragment();
+  for (const figure of figures) fragment.append(figure);
+  viewer.append(fragment);
+  viewer.dataset.loadedCount = String(images.length);
+  viewer.dataset.totalCount = String(Math.max(Number(album.imageCount || 0), images.length));
+  if (galleryReaderRegistration?.root === viewer) galleryReaderRegistration.register(figures);
+  else if (viewer.isConnected) activateGalleryReaderImages(viewer);
+  const copy = viewer.parentElement.querySelector(".gallery-reader-title span");
+  if (copy) copy.textContent = photoReaderMeta(album);
+  renderPhotoReaderMore(viewer.parentElement, album);
+}
+
+function renderPhotoReader(container) {
+  const album = state.gallery.album;
+  const images = Array.isArray(album.images) ? album.images : [];
+  const totalCount = Number(album.imageCount || images.length || 0);
+  const meta = photoReaderMeta(album);
   const sourceKey = album.id ? `photo:${album.id}` : "";
   const openPager = (startIndex = 0) => {
-    const pager = openGalleryImagePager(images, startIndex, album.title, meta, { sourceKey });
+    const currentImages = state.gallery.album?.id === album.id ? state.gallery.album.images : images;
+    const pager = openGalleryImagePager(currentImages, startIndex, album.title, meta, { sourceKey });
     fullPhotoReaderImages(album)
-      .then((pagerImages) => pager?.updateImages?.(pagerImages, { sourceKey, index: startIndex }))
+      .then((pagerImages) => pager?.updateImages?.(pagerImages, { sourceKey }))
       .catch(() => {});
   };
   container.append(readerToolbar(album.title, meta, () => {
@@ -3288,27 +3461,43 @@ function renderPhotoReader(container) {
     totalCount,
     onOpen: openPager
   }));
-  renderReaderImages(container, images, {
-    title: album.title,
-    meta,
-    totalCount,
-    sourceKey,
-    previewUrl: album.coverUrl,
-    fullImages: () => fullPhotoReaderImages(album)
-  });
+  renderReaderImages(container, images, photoReaderOptions(album));
+  renderPhotoReaderMore(container, album);
+}
+
+function renderPhotoReaderMore(container, album) {
+  const visibleCount = album.images?.length || 0;
+  const totalCount = Number(album.imageCount || visibleCount);
+  const current = container.querySelector(".gallery-more");
+  if (visibleCount >= totalCount) {
+    if (current) { current.remove(); galleryMoreScrollCleanup?.(); galleryMoreScrollCleanup = null; }
+    return;
+  }
+  if (current) {
+    delete current.dataset.autoloading;
+    current.textContent = `向下滑动继续显示 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)}`;
+    return;
+  }
   if (visibleCount < totalCount) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
     more.textContent = `向下滑动继续显示 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)}`;
     more.addEventListener("click", async () => {
+      if (!more.isConnected || more.disabled || state.gallery.album?.id !== album.id) return;
       more.disabled = true;
       more.textContent = "正在继续读取图片";
       try {
-        await loadPhotoReaderImages(visibleCount + photoReaderBatchSize());
+        await loadPhotoReaderImages((state.gallery.album.images?.length || 0) + photoReaderBatchSize());
       } catch (error) {
+        if (!more.isConnected || state.gallery.album?.id !== album.id) return;
         more.disabled = false;
         more.textContent = error.message || "读取失败，点一下重试";
+      } finally {
+        if (more.isConnected && state.gallery.album?.id === album.id) {
+          more.disabled = false;
+          delete more.dataset.autoloading;
+        }
       }
     });
     setupGalleryMoreAutoload(more);
@@ -3372,7 +3561,7 @@ function createGalleryMediaPlayer(media, metadata = null) {
   back.className = "player-chrome-button player-chrome-back";
   back.textContent = "返回";
   back.addEventListener("click", () => {
-    state.gallery.media = null;
+    resetGalleryReader();
     renderGalleryView();
     syncGalleryRoute("replace");
   }, listenerOptions);
@@ -3818,6 +4007,7 @@ function renderMediaReader(container) {
 }
 
 function renderGalleryView(options = {}) {
+  getGalleryPage().setListRefreshHandler?.(refreshGalleryList);
   const scrollAnchor = options.preserveScroll ? captureGalleryScrollPosition() : null;
   if (!scrollAnchor) galleryScrollRestoreGeneration += 1;
   const searchValueToRestore = activeGallerySearchValue();

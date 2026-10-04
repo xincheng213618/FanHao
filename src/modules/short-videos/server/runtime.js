@@ -205,6 +205,8 @@ export function createShortVideosRuntime({
   let shortVideoWatchCacheGeneration = initialWatchCacheState.generation;
   const shortVideoWatchOverlays = new Map(initialWatchCacheState.entries.map((entry) => [entry.id, entry]));
   let shortVideoWatchCachePersistTimer = null;
+  const imageRequests = new Set(), imageQueue = [];
+  let imageActive = 0, imageAccepting = true, imageGeneration = 0;
 
   async function routeApi(req, res, url) {
     if (await routeShortVideoLocalActionApi(req, res, url, {
@@ -537,33 +539,34 @@ export function createShortVideosRuntime({
           kind: "background"
         });
       }
-      mediaStreamService.serveVideo(req, res, file);
+      await mediaStreamService.serveVideo(req, res, file);
       return true;
     }
 
     const galleryMatch = /^\/media\/short-video-gallery\/([^/]+)\/(\d+)$/.exec(url.pathname);
     if (galleryMatch && (req.method === "GET" || req.method === "HEAD")) {
-      const file = store.galleryFile(decodeURIComponent(galleryMatch[1]), Number(galleryMatch[2] || 0));
-      if (!file || !["image", "video"].includes(file.type)) {
-        notFound(res);
-        return true;
-      }
-      if (file.type === "video") {
-        const requestedVersion = String(url.searchParams.get("v") || "").trim();
-        const currentVersion = String(file.cacheVersion || "").trim();
-        file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
-          ? "private, max-age=31536000, immutable"
-          : "private, max-age=0, must-revalidate";
-        file.maxRangeBytes = isInitialVideoRange(req.headers?.range)
-          ? SHORT_VIDEO_INITIAL_STREAM_CHUNK_BYTES
-          : SHORT_VIDEO_STREAM_CHUNK_BYTES;
-        mediaStreamService.serveVideo(req, res, file);
-      } else if (req.method === "HEAD") {
-        res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": safeStat(file.path)?.size || 0 });
-        res.end();
-      } else {
-        mediaResponseService.serveImage(res, file);
-      }
+      await serveImageRequest(req, res, signal => store.galleryFileAsync(decodeURIComponent(galleryMatch[1]), Number(galleryMatch[2] || 0), { signal }), async (file, signal) => {
+        if (!file || !["image", "video"].includes(file.type)) {
+          notFound(res);
+          return;
+        }
+        if (file.type === "video") {
+          const requestedVersion = String(url.searchParams.get("v") || "").trim();
+          const currentVersion = String(file.cacheVersion || "").trim();
+          file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
+            ? "private, max-age=31536000, immutable"
+            : "private, max-age=0, must-revalidate";
+          file.maxRangeBytes = isInitialVideoRange(req.headers?.range)
+            ? SHORT_VIDEO_INITIAL_STREAM_CHUNK_BYTES
+            : SHORT_VIDEO_STREAM_CHUNK_BYTES;
+          await mediaStreamService.serveVideo(req, res, file, { signal });
+        } else if (req.method === "HEAD") {
+          res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": file.size || 0 });
+          res.end();
+        } else {
+          await mediaResponseService.serveImageAsync(res, file, { signal, requireCurrentSource: true });
+        }
+      });
       return true;
     }
 
@@ -574,19 +577,20 @@ export function createShortVideosRuntime({
         notFound(res);
         return true;
       }
-      mediaStreamService.serveVideo(req, res, file);
+      await mediaStreamService.serveVideo(req, res, file);
       return true;
     }
 
     const coverMatch = /^\/media\/short-video-cover\/([^/]+)$/.exec(url.pathname);
     if (coverMatch && req.method === "GET") {
-      const file = store.coverFile(decodeURIComponent(coverMatch[1]));
-      if (!file || file.type !== "image") {
-        notFound(res);
-        return true;
-      }
-      if (file.buffer) serveShortVideoCoverBlob(res, file);
-      else mediaResponseService.serveImage(res, file);
+      await serveImageRequest(req, res, signal => store.coverFileAsync(decodeURIComponent(coverMatch[1]), { signal }), async (file, signal) => {
+        if (!file || file.type !== "image") {
+          notFound(res);
+          return;
+        }
+        if (file.buffer) serveShortVideoCoverBlob(res, file);
+        else await mediaResponseService.serveImageAsync(res, file, { signal, requireCurrentSource: true });
+      });
       return true;
     }
 
@@ -601,10 +605,12 @@ export function createShortVideosRuntime({
             throw error;
           }
           const originalFile = localActions.sourceFile(id);
-          serveDownloadFile(req, res, originalFile, originalFile.fileName || path.basename(originalFile.path));
+          await serveDownloadFile(req, res, originalFile, originalFile.fileName || path.basename(originalFile.path));
         } catch (error) {
-          if (Number(error?.statusCode || 0) === 404) notFound(res);
-          else sendShortVideoPublicError(res, sendJson, error, "短视频原文件下载失败");
+          if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+            if (Number(error?.statusCode || 0) === 404) notFound(res);
+            else sendShortVideoPublicError(res, sendJson, error, "短视频原文件下载失败");
+          }
         }
         return true;
       }
@@ -632,11 +638,74 @@ export function createShortVideosRuntime({
       file.responseHeaders = {
         "X-FanHao-Media-Cache": file.cachedStartup ? "startup" : "source"
       };
-      mediaStreamService.serveVideo(req, res, file);
+      await mediaStreamService.serveVideo(req, res, file);
       return true;
     }
 
     return false;
+  }
+
+  function serveImageRequest(req, res, loadFile, serveFile) {
+    if (req.aborted || res.destroyed || res.writableEnded) return Promise.resolve();
+    if (!imageAccepting || imageRequests.size >= 128) {
+      sendJson(res, 503, { error: "短视频图片服务繁忙或正在停止" });
+      return Promise.resolve();
+    }
+    let resolve;
+    const promise = new Promise(yes => { resolve = yes; });
+    const task = { req, res, loadFile, serveFile, resolve, promise, controller: new AbortController(), generation: imageGeneration, phase: "queued" };
+    task.abort = () => {
+      task.controller.abort();
+      if (task.phase === "queued") {
+        const index = imageQueue.indexOf(task);
+        if (index >= 0) imageQueue.splice(index, 1);
+        finishImageRequest(task);
+      }
+    };
+    req.once?.("aborted", task.abort);
+    res.once?.("close", task.abort);
+    imageRequests.add(task); imageQueue.push(task);
+    drainImageRequests();
+    return promise;
+  }
+
+  function finishImageRequest(task) {
+    task.phase = "settled";
+    imageRequests.delete(task);
+    task.req.off?.("aborted", task.abort);
+    task.res.off?.("close", task.abort);
+    task.resolve();
+  }
+
+  function drainImageRequests() {
+    while (imageAccepting && imageActive < 4 && imageQueue.length) {
+      const task = imageQueue.shift(); task.phase = "active"; imageActive++;
+      const current = () => !task.controller.signal.aborted && task.generation === imageGeneration && !task.res.destroyed && !task.res.writableEnded;
+      (async () => {
+        try {
+          const file = await task.loadFile(task.controller.signal);
+          if (current()) await task.serveFile(file?.isCurrentSource && !file.isCurrentSource() ? null : file, task.controller.signal);
+        } catch (error) {
+          if (current()) {
+            if (error.code === "ENOENT" || error.statusCode === 404) notFound(task.res);
+            else sendJson(task.res, error.statusCode || 500, { error: "短视频图片读取失败" });
+          }
+        } finally {
+          // Cancelled metadata and image reads retain their admission slot
+          // until the OS/consumer promise has actually settled.
+          imageActive--; finishImageRequest(task); drainImageRequests();
+        }
+      })();
+    }
+  }
+
+  function beginStopImageRequests() {
+    imageAccepting = false; imageGeneration++;
+    for (const task of imageRequests) {
+      if (task.phase === "queued" && !task.res.destroyed && !task.res.writableEnded) sendJson(task.res, 503, { error: "短视频图片服务正在停止" });
+      task.abort();
+    }
+    return Promise.all([...imageRequests].map(task => task.promise));
   }
 
   function listCachePath(url) {
@@ -1154,6 +1223,7 @@ export function createShortVideosRuntime({
       if (!runtimeStartStillCurrent(generation)) return false;
       downloadManagerSync.start();
       if (!runtimeStartStillCurrent(generation)) return false;
+      imageAccepting = true;
       runtimeStarted = true;
       runtimeTestHooks.onRuntimeStartedChange?.(true);
       if (!runtimeStartStillCurrent(generation)) return false;
@@ -1180,6 +1250,7 @@ export function createShortVideosRuntime({
       runtimeLifecycleGeneration += 1;
     }
     if (runtimeStopPromise) return runtimeStopPromise;
+    const imageDrain = beginStopImageRequests();
     const startToDrain = runtimeStartPromise;
     const deleteDrain = store.beginClose();
     runtimeStarted = false;
@@ -1194,6 +1265,8 @@ export function createShortVideosRuntime({
       } catch (error) {
         stopError = error;
       }
+      // A failed background stop must not bypass an outstanding OS stat/read.
+      await imageDrain;
       try {
         await deleteDrain;
       } catch (error) {
@@ -2214,9 +2287,11 @@ export function createShortVideosRuntime({
   return {
     catalogWorkerDiagnostics: catalogWorker.diagnostics,
     clearListCache: clearShortVideoListCache,
+    imageReaderDiagnostics: () => ({ accepting: imageAccepting, active: imageActive, pending: imageQueue.length, tasks: imageRequests.size }),
     routeApi,
     routeMedia,
     smoothWarmupWorkerDiagnostics: smoothWarmupWorker.diagnostics,
+    beginStop: stopDownloadManagerSync,
     start: startDownloadManagerSync,
     stop: stopDownloadManagerSync,
     store,
@@ -2225,7 +2300,7 @@ export function createShortVideosRuntime({
 }
 
 function serveShortVideoCoverBlob(res, file) {
-  const buffer = Buffer.from(file.buffer || []);
+  const buffer = Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer || []);
   const version = String(file.cacheVersion || "").replace(/[^a-z0-9._-]+/gi, "-");
   res.writeHead(200, {
     "Content-Type": file.mimeType || "image/jpeg",
