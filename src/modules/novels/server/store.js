@@ -28,6 +28,7 @@ export function createNovelStore(options = {}) {
   let db = null;
   let summaryStaticCache = null;
   let readStorageStamp = null;
+  let readStorageStampOptional = false;
   let writeOperationActive = false;
 
   function storageStamp() {
@@ -41,7 +42,13 @@ export function createNovelStore(options = {}) {
         throw error;
       }
     };
-    return `${stamp(dbPath)}|${stamp(`${dbPath}-wal`, true)}`;
+    try {
+      const value = `${stamp(dbPath)}|${stamp(`${dbPath}-wal`, true)}`;
+      return readStorageStampOptional && value === "|" ? null : value;
+    } catch (error) {
+      if (readStorageStampOptional) return null;
+      throw error;
+    }
   }
 
   function listRevision(sourceRealm) {
@@ -79,11 +86,13 @@ export function createNovelStore(options = {}) {
     return withDb((database) => {
       // Capture before BEGIN's first read. A writer can commit while this
       // snapshot is open; never associate its newer file stamp with old rows.
-      readStorageStamp = cacheSummary ? storageStamp() : null;
+      readStorageStampOptional = cacheSummary === "optional";
       try {
+        readStorageStamp = cacheSummary ? storageStamp() : null;
         return inReadSnapshot(database, callback);
       } finally {
         readStorageStamp = null;
+        readStorageStampOptional = false;
       }
     }, { changesCatalog: false });
   }
@@ -233,14 +242,17 @@ export function createNovelStore(options = {}) {
       }
       const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
       const order = bookOrderSql(sort);
-      const countRow = database.prepare(`SELECT COUNT(*) AS count FROM novel_books b ${where}`).get(...params);
+      const countFrom = readingOnly
+        ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
+        : "novel_books b";
+      const countRow = database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...params);
       const rows = database
         .prepare(
           `
           SELECT b.*, ${PROGRESS_COLUMNS}
           FROM novel_books b
           LEFT JOIN novel_reading_state s ON s.book_id = b.id
-          ${where}
+          ${where}${Number(countRow?.count || 0) === 0 ? " AND 0" : ""}
           ${order}
           LIMIT ? OFFSET ?
         `
@@ -293,7 +305,7 @@ export function createNovelStore(options = {}) {
             COALESCE(SUM(size_bytes), 0) AS size_bytes,
             COALESCE(MAX(updated_at), '') AS updated_at
           FROM novel_books
-          ${where}
+          ${where}${Number(total?.count || 0) === 0 ? " AND 0" : ""}
           GROUP BY TRIM(author)
           ${order}
           LIMIT ? OFFSET ?
@@ -318,7 +330,7 @@ export function createNovelStore(options = {}) {
         offset,
         summary: summaryFromDb(database)
       };
-    });
+    }, { cacheSummary: "optional" });
   }
 
   function authorDetail(authorName, url) {
@@ -557,6 +569,7 @@ export function createNovelStore(options = {}) {
       const filteredTotal = Number(
         database.prepare(`SELECT COUNT(*) AS count FROM novel_chapters WHERE ${where.join(" AND ")}`).get(...params)?.count || 0
       );
+      if (filteredTotal === 0) where.push("0");
       const limit = all ? Math.max(1, filteredTotal) : requestedLimit;
       let offset = all ? 0 : requestedOffset;
       if (!all && !query && anchor > 0 && filteredTotal > 0) {

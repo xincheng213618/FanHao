@@ -12,6 +12,7 @@ function closeDatabase(state) {
   state.db = null;
   state.path = "";
   state.fileStamp = "";
+  state.firstImageStatements = null;
 }
 
 function databaseFileStat(dbPath) {
@@ -29,7 +30,7 @@ function fileStamp(stat) {
 
 export function createMangaDatabaseReader({ dbPath } = {}) {
   const configuredPath = String(dbPath || "").trim();
-  const state = { db: null, path: "", fileStamp: "", generation: 0 };
+  const state = { db: null, path: "", fileStamp: "", generation: 0, firstImageStatements: null };
 
   function open() {
     if (!configuredPath) return null;
@@ -160,15 +161,19 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     const database = open();
     if (!database) return null;
     try {
+      const statements = state.firstImageStatements ||= {};
       if (chapterIndex == null) {
-        return database.prepare(
+        statements.comic ||= database.prepare(
           "SELECT * FROM manga_images WHERE cache_key = ? AND local_path IS NOT NULL AND local_path <> '' ORDER BY chapter_index, image_index LIMIT 1"
-        ).get(String(cacheKey || "")) || null;
+        );
+        return statements.comic.get(String(cacheKey || "")) || null;
       }
-      return database.prepare(
+      statements.chapter ||= database.prepare(
         "SELECT * FROM manga_images WHERE cache_key = ? AND chapter_index = ? AND local_path IS NOT NULL AND local_path <> '' ORDER BY image_index LIMIT 1"
-      ).get(String(cacheKey || ""), Number(chapterIndex)) || null;
+      );
+      return statements.chapter.get(String(cacheKey || ""), Number(chapterIndex)) || null;
     } catch {
+      state.firstImageStatements = null;
       return null;
     }
   }

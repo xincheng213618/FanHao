@@ -35,6 +35,9 @@ export function createNovelCollectionAdmin({
   isActive = () => state.novel?.mode === "manage"
 }) {
   let pollTimer = null;
+  let loadPromise = null;
+  let refreshRequested = false;
+  let renderRequested = false;
 
   function ensureState() {
     if (!state.novel) state.novel = {};
@@ -81,39 +84,59 @@ export function createNovelCollectionAdmin({
     return collection;
   }
 
-  async function load(options = {}) {
+  function load(options = {}) {
     const collection = ensureState();
-    if (collection.loading) return collection;
-    collection.loading = true;
-    if (!options.silent) rerender();
-    try {
-      const previous = new Map(collection.tasks.map((task) => [task.id, task]));
-      const data = await api("/api/novels/collection");
-      collection.adapters = Array.isArray(data.adapters) ? data.adapters : [];
-      collection.tasks = Array.isArray(data.tasks) ? data.tasks : [];
-      collection.summary = data.summary || {};
-      collection.credentials = data.credentials || {};
-      collection.runtime = data.runtime || {};
-      const currentTaskIds = new Set(collection.tasks.map((task) => String(task.id || "")));
-      for (const taskId of collection.expandedTaskIds) {
-        if (!currentTaskIds.has(taskId)) collection.expandedTaskIds.delete(taskId);
-      }
-      for (const taskId of collection.taskLogViews.keys()) {
-        if (!currentTaskIds.has(taskId)) collection.taskLogViews.delete(taskId);
-      }
-      collection.loaded = true;
-      collection.error = "";
-      if (collection.tasks.some((task) => task.bookId && previous.get(task.id)?.status !== "succeeded" && task.status === "succeeded")) {
-        await onLibraryChanged?.();
-      }
-    } catch (error) {
-      collection.error = error.message || "采集后台读取失败";
-    } finally {
-      collection.loading = false;
+    if (loadPromise) {
+      if (options.refresh) refreshRequested = true;
+      if (!options.silent) renderRequested = true;
+      return loadPromise;
     }
-    if (!options.silent) rerender();
-    schedulePoll();
-    return collection;
+    collection.loading = true;
+    renderRequested = !options.silent;
+    if (renderRequested && isActive()) rerender();
+    loadPromise = (async () => {
+      // Install loadPromise before a synchronous API failure can release it.
+      await Promise.resolve();
+      try {
+        do {
+          refreshRequested = false;
+          try {
+            const previous = new Map(collection.tasks.map((task) => [task.id, task]));
+            const data = await api("/api/novels/collection");
+            // A completed mutation needs a snapshot taken after that write.
+            if (refreshRequested) continue;
+            collection.adapters = Array.isArray(data.adapters) ? data.adapters : [];
+            collection.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+            collection.summary = data.summary || {};
+            collection.credentials = data.credentials || {};
+            collection.runtime = data.runtime || {};
+            const currentTaskIds = new Set(collection.tasks.map((task) => String(task.id || "")));
+            for (const taskId of collection.expandedTaskIds) {
+              if (!currentTaskIds.has(taskId)) collection.expandedTaskIds.delete(taskId);
+            }
+            for (const taskId of collection.taskLogViews.keys()) {
+              if (!currentTaskIds.has(taskId)) collection.taskLogViews.delete(taskId);
+            }
+            collection.loaded = true;
+            collection.error = "";
+            if (isActive() && collection.tasks.some((task) => task.bookId && previous.get(task.id)?.status !== "succeeded" && task.status === "succeeded")) {
+              await onLibraryChanged?.();
+            }
+          } catch (error) {
+            if (!refreshRequested) collection.error = error.message || "采集后台读取失败";
+          }
+        } while (refreshRequested);
+        return collection;
+      } finally {
+        collection.loading = false;
+        loadPromise = null;
+        const shouldRender = renderRequested;
+        renderRequested = false;
+        if (shouldRender && isActive()) rerender();
+        schedulePoll();
+      }
+    })();
+    return loadPromise;
   }
 
   function render(options = {}) {
@@ -938,7 +961,7 @@ export function createNovelCollectionAdmin({
       collection.draftName = "";
       collection.selectedTaskId = String(result?.task?.id || result?.id || collection.selectedTaskId || "");
       collection.workspaceView = "tasks";
-      await load({ silent: true });
+      await load({ silent: true, refresh: true });
     } catch (error) {
       collection.error = error.message || "采集任务创建失败";
     } finally {
@@ -954,7 +977,7 @@ export function createNovelCollectionAdmin({
     try {
       const result = await api(`/api/novels/collection/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST" });
       collection.notice = mutationNotice(result);
-      await load({ silent: true });
+      await load({ silent: true, refresh: true });
     } catch (error) {
       collection.error = error.message || "任务操作失败";
     }
@@ -967,7 +990,7 @@ export function createNovelCollectionAdmin({
     collection.notice = "";
     try {
       await api(`/api/novels/collection/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
-      await load({ silent: true });
+      await load({ silent: true, refresh: true });
     } catch (error) {
       collection.error = error.message || "任务记录删除失败";
     }
@@ -1067,7 +1090,7 @@ export function createNovelCollectionAdmin({
           : "/api/novels/collection/adapters";
         await api(endpoint, { method: adapter ? "PATCH" : "POST", body: payload });
         dialog.close();
-        await load();
+        await load({ refresh: true });
       } catch (error) {
         collection.error = error.message || "适配器保存失败";
         save.disabled = false;
@@ -1150,7 +1173,7 @@ export function createNovelCollectionAdmin({
             body: { payload: {} }
           });
           collection.notice = "已清除爱丽丝书屋 Cookie";
-          await load({ silent: true });
+          await load({ silent: true, refresh: true });
           dialog.close();
           rerender();
         } catch (error) {
@@ -1192,7 +1215,7 @@ export function createNovelCollectionAdmin({
           throw new Error(result.error || result.message || "Cookie 检测失败");
         }
         collection.notice = result.message || "爱丽丝书屋登录配置检测通过";
-        await load({ silent: true });
+        await load({ silent: true, refresh: true });
         dialog.close();
         if (retryTaskId) {
           await mutateTask(retryTaskId, "run");
@@ -1220,7 +1243,7 @@ export function createNovelCollectionAdmin({
     const collection = ensureState();
     try {
       await api(`/api/novels/collection/adapters/${encodeURIComponent(adapter.id)}`, { method: "DELETE" });
-      await load({ silent: true });
+      await load({ silent: true, refresh: true });
     } catch (error) {
       collection.error = error.message || "适配器删除失败";
     }

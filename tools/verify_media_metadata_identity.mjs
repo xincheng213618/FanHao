@@ -36,13 +36,20 @@ function fixture(factory = createGalleryMetadataService, row = rawRow()) {
     } finally { privateDb.close(); }
   };
   const db = { prepare(sql) {
-    const point = /^SELECT \* FROM (?:movie_metadata|tv_series_metadata) WHERE (?:media_id|series_key) = \?$/.test(sql);
+    const point = /^SELECT .+ FROM "?(?:movie_metadata|tv_series_metadata)"? WHERE "?(?:media_id|series_key)"? = \?$/.test(sql);
     const schema = sql === "PRAGMA schema_version" || /^PRAGMA table_info\("(?:movie_metadata|tv_series_metadata)"\)$/.test(sql);
     const bulk = /^SELECT .+ FROM "?(?:movie_metadata|tv_series_metadata)"?$/.test(sql);
     assert.ok(point || schema || bulk, "Publication boundary must remain read-only metadata/schema queries");
     reads.push(sql);
     return {
-      get: id => point ? (sql.includes("movie_metadata") ? rows.get(id) : row) : withSqlite(privateDb => privateDb.prepare(sql).get()),
+      get: id => {
+        if (!point) return withSqlite(privateDb => privateDb.prepare(sql).get());
+        const value = sql.includes("movie_metadata") ? rows.get(id) : row;
+        if (!value || sql.startsWith("SELECT *")) return value;
+        const published = { ...value, cover_blob: value.cover_blob ? 1 : null };
+        if (sql.includes("tv_series_metadata")) delete published.json_ld_json;
+        return published;
+      },
       all: () => withSqlite(privateDb => {
         if (bulk && sql.includes("movie_metadata")) {
           const insert = privateDb.prepare(`INSERT INTO movie_metadata(${columns.map(quote).join(",")}) VALUES(${columns.map(() => "?").join(",")})`);

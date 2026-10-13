@@ -24,12 +24,18 @@ export function createWorkPresenterService({
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true,
   workInfoDetailRow
 }) {
   const personFallbackAvatarCache = new Map();
   let personFallbackAvatarCacheStamp = "";
 
   function publicPersonFallbackAvatar(person) {
+    return withWorkInfoReadStatus(() => loadPersonFallbackAvatar(person)).value;
+  }
+
+  function loadPersonFallbackAvatar(person) {
     const library = getLibrary();
     const stamp = getPersonFallbackAvatarStamp();
     if (personFallbackAvatarCacheStamp !== stamp) {
@@ -50,11 +56,11 @@ export function createWorkPresenterService({
         const cover = publicWorkCoverAvatar(work, person.id);
         if (!cover) continue;
         const fallback = { ...cover, fallbackWorkId: String(work.id || "") };
-        if (cacheKey) personFallbackAvatarCache.set(cacheKey, fallback);
+        if (cacheKey && workInfoReadCacheable()) personFallbackAvatarCache.set(cacheKey, fallback);
         return fallback;
       }
     }
-    if (cacheKey) personFallbackAvatarCache.set(cacheKey, null);
+    if (cacheKey && workInfoReadCacheable()) personFallbackAvatarCache.set(cacheKey, null);
     return null;
   }
 
@@ -96,7 +102,7 @@ export function createWorkPresenterService({
       };
     }
 
-    const infoSummary = publicWorkInfoSummary(workInfoDetailRow(work.id), work.infoSummary);
+    const infoSummary = publicWorkInfoSummary(workInfoDetailRow(work.id, { includeMetadata: false }), work.infoSummary);
     const remoteUrl = proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || infoSummary?.imageUrl || "";
     if (!remoteUrl) return null;
     return {
@@ -227,7 +233,7 @@ export function createWorkPresenterService({
     const coreCover = options.lightweightInfo && !options.includeCoreCovers ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
     const cachedCover = manualCover ? null : coreCover;
-    const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id);
+    const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id, { includeMetadata: includeFiles });
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];
     const favorite = options.includeUserState === false ? null : favoriteStateService.publicFavoriteForWork(work.id);

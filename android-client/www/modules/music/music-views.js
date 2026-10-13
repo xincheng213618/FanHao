@@ -1,24 +1,24 @@
-import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-07b744082137";
-import { absoluteUrl } from "../../js/image.js?v=assets-07b744082137";
+import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-1443708f18b1";
+import { absoluteUrl } from "../../js/image.js?v=assets-1443708f18b1";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-07b744082137";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-07b744082137";
-import { createMusicSheets } from "./music-sheets.js?v=assets-07b744082137";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-07b744082137";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-07b744082137";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-07b744082137";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-07b744082137";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-07b744082137";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-07b744082137";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-07b744082137";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-07b744082137";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-07b744082137";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-07b744082137";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-07b744082137";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-07b744082137";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-07b744082137";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-07b744082137";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-07b744082137";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-1443708f18b1";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-1443708f18b1";
+import { createMusicSheets } from "./music-sheets.js?v=assets-1443708f18b1";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-1443708f18b1";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-1443708f18b1";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-1443708f18b1";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-1443708f18b1";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-1443708f18b1";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-1443708f18b1";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-1443708f18b1";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-1443708f18b1";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-1443708f18b1";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-1443708f18b1";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-1443708f18b1";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-1443708f18b1";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-1443708f18b1";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-1443708f18b1";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-1443708f18b1";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -77,9 +77,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-07b744082137";
+} from "./music-state.js?v=assets-1443708f18b1";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-07b744082137";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-1443708f18b1";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -602,19 +602,21 @@ export function createMusicViews(deps) {
       state.searchOverview = emptySearchOverview();
       return;
     }
+    const requestUrl = getActiveUrl();
+    const signal = options.signal || renderGuard?.signal;
     const artistParams = new URLSearchParams({ limit: "4", q: query, sort: "count" });
     const albumParams = new URLSearchParams({ limit: "6", q: query, sort: "updated" });
     const [artistResult, albumResult] = await Promise.allSettled([
-      fetchJson(getActiveUrl(), `/api/music/artists?${artistParams}`, {
+      fetchJson(requestUrl, `/api/music/artists?${artistParams}`, {
         timeoutMs: 12000,
-        signal: options.signal || renderGuard?.signal
+        signal
       }),
-      fetchJson(getActiveUrl(), `/api/music/albums?${albumParams}`, {
+      fetchJson(requestUrl, `/api/music/albums?${albumParams}`, {
         timeoutMs: 12000,
-        signal: options.signal || renderGuard?.signal
+        signal
       })
     ]);
-    if (renderGuard && !renderGuard()) return;
+    if (signal?.aborted || getActiveUrl() !== requestUrl || (renderGuard && !renderGuard())) return;
     if (state.mode !== "library" || state.query !== query) return;
     const artistData = artistResult.status === "fulfilled" ? artistResult.value : null;
     const albumData = albumResult.status === "fulfilled" ? albumResult.value : null;

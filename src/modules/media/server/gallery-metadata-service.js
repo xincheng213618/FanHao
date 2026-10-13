@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { types } from "node:util";
 import {
   GALLERY_METADATA_CLOCK_CONTRACT_SQL,
   GALLERY_METADATA_CLOCK_TABLE,
@@ -86,48 +88,67 @@ export function createGalleryMetadataService({
   const revisionRealm = randomUUID();
   let connectionSequence = 0;
   let unavailableSequence = 0;
+  const bulkFailureEpochs = { movie: 0, tv: 0 };
+
+  function readWithFinalizedRecovery(db, states, read) {
+    try {
+      return read();
+    } catch (error) {
+      // A reopened native connection keeps its object identity but finalizes
+      // prior statements. Ordinary errors, closed DBs and facades keep their
+      // existing fallback; a second failure propagates to the caller.
+      if (error.code !== "ERR_INVALID_STATE" || !(db instanceof DatabaseSync)
+        || types.isProxy(db) || db.isOpen !== true) throw error;
+      states.delete(db);
+      return read();
+    }
+  }
 
   function listRevision(mode = "media") {
     try {
       const db = getImageGalleryDb();
-      let state = listRevisions.get(db);
-      if (!state) {
-        state = {
-          identity: ++connectionSequence,
-          schemaChanges: db.prepare("PRAGMA schema_version"),
-          contract: db.prepare(GALLERY_METADATA_CLOCK_CONTRACT_SQL),
-          schemaVersion: null,
-          trustedKinds: new Set()
-        };
-        listRevisions.set(db, state);
-      }
-      const schemaVersion = state.schemaChanges.get().schema_version;
-      if (schemaVersion !== state.schemaVersion) {
-        // Schema changes can remove or replace a trigger under its original
-        // name. Trust its complete contract, rather than just its presence.
-        state.trustedKinds = trustedGalleryMetadataClockKinds(state.contract.all());
-        state.schemaVersion = schemaVersion;
-      }
-      const kinds = galleryMetadataClockKinds(mode);
-      if (kinds.every(kind => state.trustedKinds.has(kind))) {
-        state.clock ||= db.prepare(`SELECT epoch, revision FROM ${GALLERY_METADATA_CLOCK_TABLE} WHERE kind = ?`);
-        const clocks = kinds.map(kind => state.clock.get(kind));
-        if (clocks.every(validGalleryMetadataClock)) {
-          return JSON.stringify([revisionRealm, state.identity, schemaVersion, kinds, clocks]);
-        }
-      }
-      state.localChanges ||= db.prepare("SELECT total_changes() AS changes");
-      state.externalChanges ||= db.prepare("PRAGMA data_version");
-      return JSON.stringify([revisionRealm, state.identity, schemaVersion, "fallback",
-        state.localChanges.get().changes, state.externalChanges.get().data_version]);
+      return readWithFinalizedRecovery(db, listRevisions, () => readListRevision(db, mode));
     } catch {
       // A failed source probe must never authorize an append to an older page.
       return JSON.stringify([revisionRealm, "unavailable", ++unavailableSequence]);
     }
   }
 
-  function metadataRowsMap(table, key) {
-    const db = getImageGalleryDb();
+  function readListRevision(db, mode) {
+    let state = listRevisions.get(db);
+    if (!state) {
+      state = {
+        identity: ++connectionSequence,
+        schemaChanges: db.prepare("PRAGMA schema_version"),
+        contract: db.prepare(GALLERY_METADATA_CLOCK_CONTRACT_SQL),
+        schemaVersion: null,
+        trustedKinds: new Set()
+      };
+      listRevisions.set(db, state);
+    }
+    const schemaVersion = state.schemaChanges.get().schema_version;
+    if (schemaVersion !== state.schemaVersion) {
+      // Schema changes can remove or replace a trigger under its original
+      // name. Trust its complete contract, rather than just its presence.
+      state.trustedKinds = trustedGalleryMetadataClockKinds(state.contract.all());
+      state.schemaVersion = schemaVersion;
+    }
+    const kinds = galleryMetadataClockKinds(mode);
+    const failureEpochs = kinds.map(kind => bulkFailureEpochs[kind]);
+    if (kinds.every(kind => state.trustedKinds.has(kind))) {
+      state.clock ||= db.prepare(`SELECT epoch, revision FROM ${GALLERY_METADATA_CLOCK_TABLE} WHERE kind = ?`);
+      const clocks = kinds.map(kind => state.clock.get(kind));
+      if (clocks.every(validGalleryMetadataClock)) {
+        return JSON.stringify([revisionRealm, state.identity, schemaVersion, kinds, clocks, failureEpochs]);
+      }
+    }
+    state.localChanges ||= db.prepare("SELECT total_changes() AS changes");
+    state.externalChanges ||= db.prepare("PRAGMA data_version");
+    return JSON.stringify([revisionRealm, state.identity, schemaVersion, "fallback",
+      state.localChanges.get().changes, state.externalChanges.get().data_version, failureEpochs]);
+  }
+
+  function metadataStatement(table, forPublication = false, pointKey = "", db = getImageGalleryDb()) {
     let state = metadataProjections.get(db);
     if (!state) {
       state = { schemaVersion: db.prepare("PRAGMA schema_version"), version: null, tables: new Map() };
@@ -138,19 +159,47 @@ export function createGalleryMetadataService({
       state.tables.clear();
       state.version = version;
     }
-    let statement = state.tables.get(table);
-    if (!statement) {
-      const quote = name => `"${String(name).replaceAll('"', '""')}"`;
+    const quote = name => `"${String(name).replaceAll('"', '""')}"`;
+    let tableProjection = state.tables.get(table);
+    if (!tableProjection) {
       const columns = db.prepare(`PRAGMA table_info(${quote(table)})`).all().map(row => row.name);
-      const projection = columns.map(name => name === "cover_blob"
+      tableProjection = { columns, rows: null, publication: null };
+    }
+    const mode = forPublication && table === "tv_series_metadata" ? "publication" : "rows";
+    const statementKey = pointKey ? `${mode}ByKey` : mode;
+    let statement = tableProjection[statementKey];
+    if (!statement) {
+      // TV publication never consumes JSON-LD. Keep the raw bulk mode and
+      // movie identity validation complete, using the same discovered schema.
+      const projection = tableProjection.columns
+        .filter(name => mode !== "publication" || name !== "json_ld_json")
+        .map(name => name === "cover_blob"
         // node:sqlite reads TEXT through its first NUL; SQLite length() has
         // the same boundary. Empty BLOBs still become truthy Uint8Arrays.
         ? `CASE typeof("cover_blob") WHEN 'blob' THEN 1 WHEN 'text' THEN length("cover_blob") > 0 WHEN 'integer' THEN "cover_blob" != 0 WHEN 'real' THEN "cover_blob" != 0 ELSE NULL END AS "cover_blob"`
         : quote(name)).join(", ");
-      statement = db.prepare(`SELECT ${projection || "*"} FROM ${quote(table)}`);
-      state.tables.set(table, statement);
+      statement = db.prepare(`SELECT ${projection || "*"} FROM ${quote(table)}${pointKey ? ` WHERE ${quote(pointKey)} = ?` : ""}`);
+      tableProjection[statementKey] = statement;
+      state.tables.set(table, tableProjection);
     }
-    return new Map(statement.all().map(row => [row[key], row]));
+    return statement;
+  }
+
+  function metadataRowsMap(table, key, forPublication = false) {
+    const db = getImageGalleryDb();
+    return readWithFinalizedRecovery(db, metadataProjections,
+      () => new Map(metadataStatement(table, forPublication, "", db).all().map(row => [row[key], row])));
+  }
+
+  function metadataPublicationRow(db, table, key, value) {
+    try {
+      return metadataStatement(table, true, key, db).get(value) || null;
+    } catch (error) {
+      // Reopening the same native connection finalizes its cached statements.
+      if (error.code !== "ERR_INVALID_STATE" || db.isOpen !== true) throw error;
+      metadataProjections.delete(db);
+      return metadataStatement(table, true, key, db).get(value) || null;
+    }
   }
 
   function tvSeriesKey(category, seriesName) {
@@ -169,19 +218,23 @@ export function createGalleryMetadataService({
     return `/media/movie-cover/${encodeURIComponent(mediaId)}${suffix}`;
   }
 
-  function tvSeriesRowsMap() {
+  function tvSeriesRowsMap(options = {}) {
     try {
-      return metadataRowsMap("tv_series_metadata", "series_key");
+      return metadataRowsMap("tv_series_metadata", "series_key", options?.forPublication === true);
     } catch (error) {
+      bulkFailureEpochs.tv += 1;
       console.warn("[tv-series-metadata-db]", error.message || error);
       return new Map();
     }
   }
 
-  function tvSeriesRow(seriesKey) {
+  function tvSeriesRow(seriesKey, options = {}) {
     if (!seriesKey) return null;
     try {
-      return getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata WHERE series_key = ?").get(seriesKey) || null;
+      const db = getImageGalleryDb();
+      // Facades and native proxies may swap their backing connection.
+      if (options?.forPublication === true && !types.isProxy(db) && db instanceof DatabaseSync && db.isOpen) return metadataPublicationRow(db, "tv_series_metadata", "series_key", seriesKey);
+      return db.prepare("SELECT * FROM tv_series_metadata WHERE series_key = ?").get(seriesKey) || null;
     } catch (error) {
       console.warn("[tv-series-metadata-db]", error.message || error);
       return null;
@@ -192,15 +245,18 @@ export function createGalleryMetadataService({
     try {
       return metadataRowsMap("movie_metadata", "media_id");
     } catch (error) {
+      bulkFailureEpochs.movie += 1;
       console.warn("[movie-metadata-db]", error.message || error);
       return new Map();
     }
   }
 
-  function movieRow(mediaId) {
+  function movieRow(mediaId, options = {}) {
     if (!mediaId) return null;
     try {
-      return getImageGalleryDb().prepare("SELECT * FROM movie_metadata WHERE media_id = ?").get(mediaId) || null;
+      const db = getImageGalleryDb();
+      if (options?.forPublication === true && !types.isProxy(db) && db instanceof DatabaseSync && db.isOpen) return metadataPublicationRow(db, "movie_metadata", "media_id", mediaId);
+      return db.prepare("SELECT * FROM movie_metadata WHERE media_id = ?").get(mediaId) || null;
     } catch (error) {
       console.warn("[movie-metadata-db]", error.message || error);
       return null;

@@ -1,6 +1,37 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { isProxy } from "node:util/types";
 import { assertActorProfileMutationAllowed } from "./actor-profile-mutation-guard.js";
+
+const identityStatements = new WeakMap();
+
+function readIdentityStatement(db, sql, value) {
+  // Facades and proxies may switch backing connections; only native objects are
+  // stable cache keys. Closed connections retain their original prepare error.
+  if (isProxy(db) || !(db instanceof DatabaseSync) || !db.isOpen) {
+    identityStatements.delete(db);
+    return db.prepare(sql).get(value);
+  }
+  let statements = identityStatements.get(db);
+  let statement = statements?.get(sql);
+  const reused = Boolean(statement);
+  if (!statement) {
+    statement = db.prepare(sql);
+    if (!statements) identityStatements.set(db, statements = new Map());
+    statements.set(sql, statement);
+  }
+  try {
+    return statement.get(value);
+  } catch (error) {
+    // close/open on the same DatabaseSync finalizes its previous statements.
+    if (!reused || error.code !== "ERR_INVALID_STATE" || db.isOpen !== true) throw error;
+    identityStatements.delete(db);
+    statement = db.prepare(sql);
+    identityStatements.set(db, new Map([[sql, statement]]));
+    return statement.get(value);
+  }
+}
 
 export function identityError(message, code = "PERSON_IDENTITY_CONFLICT") {
   const error = new Error(message);
@@ -10,7 +41,7 @@ export function identityError(message, code = "PERSON_IDENTITY_CONFLICT") {
 }
 
 export function hasIdentityTable(db, name) {
-  return Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name));
+  return Boolean(readIdentityStatement(db, "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", name));
 }
 
 export function personPathKey(value) {
@@ -74,11 +105,10 @@ export function canonicalPersonId(db, personId) {
   if (!Number.isSafeInteger(id) || id <= 0) return "";
   if (!hasIdentityTable(db, "person_redirects")) return String(id);
   const seen = new Set();
-  const query = db.prepare("SELECT target_id FROM person_redirects WHERE source_id = ?");
   while (true) {
     if (seen.has(id)) throw identityError("人物合并关系存在循环", "PERSON_REDIRECT_CYCLE");
     seen.add(id);
-    const row = query.get(id);
+    const row = readIdentityStatement(db, "SELECT target_id FROM person_redirects WHERE source_id = ?", id);
     if (!row) return String(id);
     id = Number(row.target_id);
   }

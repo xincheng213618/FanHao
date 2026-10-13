@@ -96,6 +96,10 @@ export function createGalleryPage(deps) {
     if (node) node.textContent = state.gallery.status;
   }
 
+  function setLibraryStatus(message) {
+    if (state.activeView === "gallery" && !hasReaderIntent()) setStatus(message);
+  }
+
   function hasUnsubmittedGallerySearchDraft() {
     const active = document.activeElement;
     if (!active?.classList?.contains("gallery-search")) return false;
@@ -138,14 +142,15 @@ export function createGalleryPage(deps) {
   }
 
   async function loadImageLibrary(options = {}) {
+    if (state.activeView !== "gallery") return;
     if (state.gallery.loading) return;
     if (state.gallery.data && !options.refresh && !options.reload) {
-      state.gallery.status = state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status;
+      setLibraryStatus(state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status);
       refreshGalleryAfterLibraryChange({ preserveScroll: true });
       return;
     }
     state.gallery.loading = true;
-    setStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
+    setLibraryStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
     try {
       const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";
       const data = await api(options.refresh ? "/api/image-library/rescan" : summaryEndpoint, {
@@ -154,12 +159,12 @@ export function createGalleryPage(deps) {
       state.gallery.data = data;
       state.gallery.cache = data.cache || null;
       state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
-      state.gallery.status = data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : "";
+      setLibraryStatus(data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : "");
       state.gallery.loading = false;
       refreshGalleryAfterLibraryChange({ preserveScroll: true });
     } catch (error) {
       state.gallery.loading = false;
-      setStatus(error.message || "图像资料库读取失败");
+      setLibraryStatus(error.message || "图像资料库读取失败");
       refreshGalleryAfterLibraryChange({ preserveScroll: true });
     } finally {
       state.gallery.loading = false;

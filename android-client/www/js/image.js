@@ -1,4 +1,4 @@
-import { readCachedImage, writeCachedImage } from "./cache.js?v=assets-07b744082137";
+import { captureCachedImageFence, readCachedImage, writeCachedImage } from "./cache.js?v=assets-1443708f18b1";
 
 const IMAGE_PREPARE_RETRY_DELAYS_MS = Object.freeze([700, 900, 1200, 1600, 2200, 3000]);
 
@@ -25,6 +25,7 @@ export function imageUrlForWork(work) {
 }
 
 export async function loadPreviewImage(target, imageUrl, options = {}) {
+  const cacheOptions = { baseUrl: options.cacheBaseUrl, fence: captureCachedImageFence(imageUrl, { baseUrl: options.cacheBaseUrl }) };
   let currentNode = target;
   let renderedCache = false;
   let renderSequence = 0;
@@ -93,7 +94,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
   };
 
   try {
-    const cacheRead = readCachedImage(imageUrl, { baseUrl: options.cacheBaseUrl }).catch(() => null);
+    const cacheRead = readCachedImage(imageUrl, cacheOptions).catch(() => null);
     const cached = cacheReadTimeoutMs > 0
       ? await Promise.race([cacheRead, delay(cacheReadTimeoutMs, null)])
       : await cacheRead;
@@ -106,7 +107,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     const response = await fetchPreparedImage(imageUrl, { mode: "cors" });
     if (!response.ok) throw new Error(String(response.status));
     const blob = await response.blob();
-    writeCachedImage(imageUrl, blob, { baseUrl: options.cacheBaseUrl }).catch(() => {});
+    writeCachedImage(imageUrl, blob, cacheOptions).catch(() => {});
     renderBlob(blob);
   } catch {
     // Keep the text fallback, or the cached image if one already rendered.
@@ -175,9 +176,10 @@ function abortError() {
 }
 
 export async function precacheImage(imageUrl, options = {}) {
-  if (!imageUrl) return null;
-
-  const cached = await readCachedImage(imageUrl, { baseUrl: options.cacheBaseUrl }).catch(() => null);
+  if (!imageUrl || options.signal?.aborted) return null;
+  const cacheOptions = { baseUrl: options.cacheBaseUrl, fence: captureCachedImageFence(imageUrl, { baseUrl: options.cacheBaseUrl }) };
+  const cached = await readCachedImage(imageUrl, cacheOptions).catch(() => null);
+  if (options.signal?.aborted) return null;
   if (cached?.blob) return cached;
 
   const controller = new AbortController();
@@ -190,7 +192,8 @@ export async function precacheImage(imageUrl, options = {}) {
     const response = await fetchPreparedImage(imageUrl, { mode: "cors", signal: controller.signal });
     if (!response.ok) throw new Error(String(response.status));
     const blob = await response.blob();
-    return await writeCachedImage(imageUrl, blob, { baseUrl: options.cacheBaseUrl });
+    if (controller.signal.aborted) return null;
+    return await writeCachedImage(imageUrl, blob, cacheOptions);
   } catch {
     return null;
   } finally {

@@ -23,7 +23,7 @@ function fixture(t, { mode = "library", saved = null } = {}) {
   globalThis.document = { querySelector() { return null; }, activeElement: null };
   const requests = [];
   const api = {};
-  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists"]) {
+  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists", "createPlaylist", "importM3u"]) {
     api[method] = (...args) => new Promise((resolve, reject) => {
       const signal = args.find(arg => arg instanceof AbortSignal);
       requests.push({ method, args, signal, resolve, reject });
@@ -104,6 +104,23 @@ test("navigation cancels pending reads while keeping playback and progress write
   for (const callback of f.timers.values()) callback();
   await tick();
   assert(f.progress.some(([id, value]) => id === "playing" && value.positionMs === 12000));
+});
+
+test("current list errors propagate unchanged after cleanup and leave rendering to the caller", async t => {
+  const f = fixture(t);
+  const error = Object.assign(new Error("controlled list failure"), { code: "CONTROLLED_LIST_FAILURE" });
+  const failed = f.actions.loadMusic({ keepCurrent: true });
+  f.requests.find(request => request.method === "getTracks").reject(error);
+  await assert.rejects(failed, actual => actual === error);
+  assert.equal(f.state.music.loading, false);
+  assert.equal(f.state.music.loadingMore, false);
+  assert.equal(f.state.music.status, error.message);
+  assert.equal(f.events.filter(event => event.name === "refresh").length, 0, "the UI catch owns the single error render");
+  const retry = f.actions.loadMusic({ keepCurrent: true });
+  f.requests.filter(request => request.method === "getTracks").at(-1).resolve(listData("retry"));
+  await retry;
+  assert.equal(f.state.music.data.tracks[0].id, "retry");
+  assert.equal(f.state.music.loading, false);
 });
 
 test("old list errors and side responses cannot replace a new pending list", async t => {
@@ -386,3 +403,154 @@ test("selecting the already playing track revokes an older pending open", async 
   assert.equal(f.loads.length, 1);
   assert.deepEqual(f.routes, []);
 });
+
+const playlistActions = ["createPlaylistFromDialog", "saveQueueAsPlaylist", "importPlaylistM3uFromPrompt"];
+const createdPlaylist = { id: "created-playlist", name: "Fixture playlist" };
+
+function startPlaylistAction(f, method) {
+  f.state.music.queue = [track("queued")];
+  f.state.music.playlistDialogName = "Fixture playlist";
+  window.prompt = () => method === "importPlaylistM3uFromPrompt" ? "#EXTM3U\nsynthetic.mp3" : "Fixture playlist";
+  return f.actions[method]();
+}
+
+async function finishPlaylistAction(f, pending, write) {
+  write.resolve({ playlist: createdPlaylist });
+  await tick();
+  f.requests.findLast(request => request.method === "getPlaylists").resolve({ playlists: [createdPlaylist] });
+  await tick();
+  f.requests.findLast(request => request.method === "getPlaylist").resolve({ playlist: createdPlaylist, ...listData("queued") });
+  assert.equal(await pending, createdPlaylist);
+  assert.equal(f.state.music.mode, "playlist");
+  assert.equal(f.state.music.activePlaylistId, createdPlaylist.id);
+  assert(f.state.music.playlistsLoadedAt > 0);
+}
+
+for (const method of playlistActions) {
+  test(`${method} preserves navigation chosen while the write is pending`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    const write = f.requests[0];
+    assert.equal(write.signal, undefined, "navigation must not cancel an authorized playlist write");
+    f.actions.selectMusicMode("artists");
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    write.resolve({ playlist: createdPlaylist });
+    assert.equal(await pending, createdPlaylist, "a completed write must still return its successful result");
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.state.music.playlistsLoadedAt, 0, "a background success must invalidate the playlist cache");
+    assert.equal(f.events.length, events, "old completion must not refresh the newly chosen page");
+    assert.equal(f.routes.length, routes);
+    assert.deepEqual(f.requests.map(request => request.method), [write.method, "getArtists"], "old completion must not fetch unrelated playlists");
+  });
+
+  test(`${method} preserves navigation chosen during playlist refresh`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    f.requests[0].resolve({ playlist: createdPlaylist });
+    await tick();
+    const obsolete = f.requests.find(request => request.method === "getPlaylists");
+    f.actions.selectMusicMode("albums");
+    assert.equal(obsolete.signal.aborted, true);
+    f.requests.findLast(request => request.method === "getPlaylists").resolve({ playlists: [{ id: "current-list" }] });
+    f.requests.find(request => request.method === "getAlbums").resolve({ albums: [], total: 0 });
+    await tick();
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    obsolete.resolve({ playlists: [createdPlaylist] });
+    assert.equal(await pending, createdPlaylist);
+    assert.equal(f.state.music.mode, "albums");
+    assert.equal(f.state.music.status, status);
+    assert.deepEqual(f.state.music.playlists.map(playlist => playlist.id), ["current-list"]);
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, routes);
+    assert(!f.requests.some(request => request.method === "getPlaylist"));
+  });
+
+  test(`${method} invalidates a playlist snapshot started before its successful write`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    const write = f.requests[0];
+    f.state.music.playlistsLoadedAt = 0;
+    f.actions.selectMusicMode("artists");
+    const obsolete = f.requests.find(request => request.method === "getPlaylists");
+    write.resolve({ playlist: createdPlaylist });
+    assert.equal(await pending, createdPlaylist);
+    assert.equal(obsolete.signal.aborted, true);
+    obsolete.resolve({ playlists: [{ id: "before-write" }] });
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.playlistsLoadedAt, 0, "a pre-write snapshot must not restore cache freshness");
+    assert.deepEqual(f.state.music.playlists, []);
+    assert.equal(f.requests.filter(request => request.method === "getPlaylists").length, 1);
+    const reload = f.actions.loadMusic({ keepCurrent: true });
+    const current = f.requests.findLast(request => request.method === "getPlaylists");
+    assert.notEqual(current, obsolete, "the next page refresh must fetch the invalidated cache");
+    current.resolve({ playlists: [createdPlaylist] });
+    f.requests.findLast(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await reload;
+    assert.deepEqual(f.state.music.playlists, [createdPlaylist]);
+  });
+
+  test(`${method} preserves a track selected while the write is pending`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    const write = f.requests[0];
+    const opening = f.actions.openTrack("chosen", { openPage: true });
+    f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+    await opening;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    write.resolve({ playlist: createdPlaylist });
+    assert.equal(await pending, createdPlaylist);
+    assert.equal(f.state.music.current.id, "chosen");
+    assert.equal(f.state.music.trackPageOpen, true);
+    assert.equal(f.state.music.mode, "library");
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, routes);
+    assert(!f.requests.some(request => request.method === "getPlaylists"));
+  });
+
+  test(`${method} still opens its playlist when the action stays current`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    await finishPlaylistAction(f, pending, f.requests[0]);
+    assert.deepEqual(f.requests.map(request => request.method), [method === "importPlaylistM3uFromPrompt" ? "importM3u" : "createPlaylist", "getPlaylists", "getPlaylist"]);
+    assert.equal(f.routes.length, 1);
+    assert.equal(f.routes[0][1].musicPlaylistId, createdPlaylist.id);
+  });
+
+  test(`${method} exposes a current API failure and allows retry`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    f.requests[0].reject(new Error("playlist write failed"));
+    await assert.rejects(pending, /playlist write failed/);
+    assert(!f.requests.some(request => request.method === "getPlaylists"));
+    const retry = startPlaylistAction(f, method);
+    await finishPlaylistAction(f, retry, f.requests[1]);
+  });
+
+  test(`${method} ignores an obsolete API failure while a new page is loading`, async t => {
+    const f = fixture(t);
+    const pending = startPlaylistAction(f, method);
+    f.actions.selectMusicMode("artists");
+    const status = f.state.music.status;
+    const events = f.events.length;
+    f.requests[0].reject(new Error("obsolete playlist write failed"));
+    assert.equal(await pending, null);
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.loading, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, 0);
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+    assert.deepEqual(f.errors, []);
+  });
+}

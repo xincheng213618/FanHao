@@ -11,6 +11,7 @@ import { createActorProfileService } from "./src/modules/fanhao/server/people/ac
 import { createActorProfilePublicationLifecycleService } from "./src/modules/fanhao/server/people/actor-profile-publication-lifecycle-service.js";
 import { createEmptyPersonCleanupService } from "./src/modules/fanhao/server/people/empty-person-cleanup-service.js";
 import { createPersonFolderMutationService } from "./src/modules/fanhao/server/people/person-folder-mutation-service.js";
+import { createPersonOrganizationService } from "./src/modules/fanhao/server/people/person-organization-service.js";
 import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin/admin-actor-avatar-service.js";
 import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin/admin-core-mutation-service.js";
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
@@ -200,7 +201,7 @@ const fileServer = createFileServer({
   normalizeExt,
   notFound
 });
-const { serveDownloadFile, serveInlineFile, serveRangedFile } = fileServer;
+const { serveDownloadFile, serveInlineFile, serveRangedFile, serveWholeFile } = fileServer;
 const mangaService = withGallery ? createMangaService({
   databasePath: MANGA_DATABASE_PATH,
   projectRoot: PROJECT_ROOT,
@@ -210,7 +211,8 @@ const mangaService = withGallery ? createMangaService({
   normalizeExt,
   notFound,
   safeStat,
-  serveArchiveMemberImage
+  serveArchiveMemberImage,
+  serveWholeFile
 }) : null;
 const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
   archiveExts: ARCHIVE_EXTS,
@@ -336,6 +338,7 @@ archiveImageService = createArchiveImageService({
   warn: console.warn
 });
 const imageLibraryService = withGallery ? createImageLibraryService({
+  cachePreparedQueries: true,
   clampInteger,
   galleryMediaRootStatuses: imageLibraryIndexService.galleryMediaRootStatuses,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
@@ -442,7 +445,8 @@ const workCodeIndexService = createWorkCodeIndexService({
   getStamp: () => library.scannedAt || "",
   looseWorkCodeKey,
   storedWorkCodeKey,
-  workInfoRow
+  workInfoRow,
+  withWorkInfoReadStatus
 });
 const localLibraryScanService = createLocalLibraryScanService({
   compareNaturalName,
@@ -518,6 +522,8 @@ const manualCoverStateService = createManualCoverStateService({
   workInfoRow
 });
 const rankingService = createRankingService({
+  withWorkInfoReadStatus,
+  workInfoReadCacheable,
   clampInteger,
   createId,
   dbBoolOrNull,
@@ -538,6 +544,8 @@ const rankingService = createRankingService({
   userStateStamp: () => accountUserStateService.revision()
 });
 const actorMovieService = createActorMovieService({
+  withWorkInfoReadStatus,
+  workInfoReadCacheable,
   createId,
   dbBoolOrNull,
   getCoreDb,
@@ -565,6 +573,8 @@ const workFilterService = createWorkFilterService({
   workInfoFacetRow
 });
 const studioService = createStudioService({
+  withWorkInfoReadStatus,
+  workInfoReadCacheable,
   clampInteger,
   filterWorkList: workFilterService.filter,
   getCoreDb,
@@ -631,6 +641,10 @@ const missingCodeSearchService = createMissingCodeSearchService({
 });
 missingCodeSearchService.prewarm();
 const codePrefixService = createCodePrefixService({
+  withWorkInfoReadStatus,
+  workInfoReadCacheable,
+  withWorkSearchReadStatus,
+  workSearchReadCacheable,
   clampInteger,
   dedupeWorksForDisplay,
   defaultWorkLimit: DEFAULT_WORK_LIMIT,
@@ -753,6 +767,8 @@ const workCoverMutationService = createWorkCoverMutationService({
   workInfoService
 });
 const workPresenterService = createWorkPresenterService({
+  withWorkInfoReadStatus,
+  workInfoReadCacheable,
   actorProfileRow,
   dbBoolOrNull,
   displayPersonForWork,
@@ -805,7 +821,17 @@ const adminMaintenanceTaskService = createAdminMaintenanceTaskService({
   coverGenerationStatus: workCoverMutationService.generationStatus,
   cookieProfileDir: JAVDB_115_COOKIE_PROFILE_DIR,
   invalidateTableStamp,
+  linkedPersonIds: () => library.people
+    .filter((person) => actorProfileRow(person.id)?.javdb_url)
+    .map((person) => person.id),
   nodeCommand: process.execPath,
+  coreDbPath: CORE_DB_PATH,
+  coreImageDbPath: CORE_IMAGE_DB_PATH,
+  personOrganizationService: {
+    preview: (...args) => personOrganizationService.preview(...args),
+    read: (...args) => personOrganizationService.read(...args),
+    planPath: (...args) => personOrganizationService.planPath(...args)
+  },
   refreshLibrary,
   resolveLibraryPersonByPublicId,
   setActorMovieCache: (value) => {
@@ -817,6 +843,12 @@ const adminMaintenanceTaskService = createAdminMaintenanceTaskService({
   },
   setWorkInfoCache: (value) => {
     workInfoService.setRowsCache(value);
+  },
+  syncPersonLocal: (personId) => {
+    const person = resolveLibraryPersonByPublicId(personId);
+    if (person && !person.sourcePaths?.length && !person.relativePath
+      && !personLibraryService.sourceCandidates(person).some((candidate) => candidate.exists)) return null;
+    return personLibraryService.refreshPerson(personId, { failOnPersistenceError: true });
   }
 });
 const doubanCookieService = createDoubanCookieService({
@@ -929,6 +961,13 @@ const personLibraryService = createPersonLibraryService({
   scanPersonDirectory: localLibraryScanService.scanPersonDirectory,
   sourcePathToAbsolute
 });
+const personOrganizationService = createPersonOrganizationService({
+  getCoreDb,
+  resolvePerson: resolveLibraryPersonByPublicId,
+  sourcePathToAbsolute,
+  roots: LIBRARY_ROOTS,
+  stateDir: path.join(DATA_DIR, "person-organization")
+});
 const emptyPersonCleanupService = createEmptyPersonCleanupService({
   actorMovieRows,
   getCoreDb,
@@ -969,6 +1008,7 @@ const adminPersonService = createAdminPersonService({
   personFolderMutationService,
   personLibraryService,
   publicPerson,
+  personOrganizationService,
   resolveLibraryPersonByPublicId,
   sortWorkList
 });
@@ -999,6 +1039,7 @@ const moduleRegistry = await discoverFanHaoModules({
           readJsonFile,
           safeChildPath,
           sendJson,
+          serveWholeFile,
           updateDir: ANDROID_UPDATE_DIR
         },
         localOpen: {
@@ -1065,6 +1106,8 @@ const moduleRegistry = await discoverFanHaoModules({
         actorProfileRow,
         actorMissingSearchWorks,
         actorMissingSearchWorksForPeople,
+        actorMissingSearchResult: actorMovieService.missingSearchResult,
+        actorMissingSearchResultForPeople: actorMovieService.missingSearchResultForPeople,
         appConfigService,
         clampInteger,
         codePrefixService,
@@ -1075,6 +1118,7 @@ const moduleRegistry = await discoverFanHaoModules({
         dedupeWorksForDisplay,
         displayWorkTitle,
         enrichLocalWorksWithActorMovieIndex,
+        enrichLocalWorksWithActorMovieIndexResult: actorMovieService.enrichLocalWorksWithIndexResult,
         enrichLocalWorksWithActorMovieInfo,
         emptyPersonCleanupService,
         fastMissingCodeSearch: missingCodeSearchService.search,
@@ -1088,6 +1132,8 @@ const moduleRegistry = await discoverFanHaoModules({
         hydrateMissingSearchWorks: missingCodeSearchService.hydrate,
         isVrWork,
         createWorkSearchMatcher,
+        withWorkSearchReadStatus,
+        workSearchReadCacheable,
         localSearchWorkByCodeKey: workCodeIndexService.localSearchWorkByCodeKey,
         localWorksByCodePrefix: workCodeIndexService.localWorksByCodePrefix,
         maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
@@ -1096,9 +1142,11 @@ const moduleRegistry = await discoverFanHaoModules({
         mediaResponseService,
         mediaStreamService,
         mergedActorMovieRows,
+        mergedActorMovieRowsResult: actorMovieService.mergedRowsResult,
         mergedPersonMembers,
         mergedPersonRecord,
         missingActorWorksForPerson,
+        missingActorWorksResultForPerson: actorMovieService.missingWorksResultForPerson,
         notFound,
         peoplePayloadStamp: libraryPeopleStamp,
         peopleScopeService,
@@ -1115,6 +1163,7 @@ const moduleRegistry = await discoverFanHaoModules({
         publicPerson,
         publicWork,
         publicWorkAvailability,
+        rankingMissingSearchResult: rankingService.missingSearchResult,
         rankingMissingSearchWorks,
         rankingService,
         readJsonBody,
@@ -1141,6 +1190,8 @@ const moduleRegistry = await discoverFanHaoModules({
         workHasLocalMarker,
         workInfoFacetRow,
         workInfoRow,
+        withWorkInfoReadStatus,
+        workInfoReadCacheable,
         workClassificationService,
         workFacets,
         workLocalMutationService,
@@ -1495,8 +1546,13 @@ function searchPeople(rawQuery) {
     }
   }
 
+  const displayNames = new Map();
+  const displayNameForSort = (person) => {
+    if (!displayNames.has(person)) displayNames.set(person, actorProfileDisplayName(person));
+    return displayNames.get(person);
+  };
   const sortPeople = (people) =>
-    people.sort((a, b) => b.workCount - a.workCount || actorProfileDisplayName(a).localeCompare(actorProfileDisplayName(b), undefined, { numeric: true, sensitivity: "base" }));
+    people.sort((a, b) => b.workCount - a.workCount || displayNameForSort(a).localeCompare(displayNameForSort(b), undefined, { numeric: true, sensitivity: "base" }));
 
   sortPeople(exact);
   sortPeople(fuzzy);
@@ -1514,6 +1570,15 @@ function prewarmWorkSearch(works = []) {
 
 function createWorkSearchMatcher(query) {
   return workSearchIndexService.createMatcher(query);
+}
+
+function withWorkSearchReadStatus(callback) {
+  const result = workSearchIndexService.withReadStatus(() => missingCodeSearchService.withReadStatus(callback));
+  return { value: result.value.value, cacheable: result.cacheable !== false && result.value.cacheable !== false };
+}
+
+function workSearchReadCacheable() {
+  return workSearchIndexService.readCacheable() && missingCodeSearchService.readCacheable();
 }
 
 function ensureDataDir() {
@@ -1692,16 +1757,24 @@ function workInfoRow(workId) {
   return workInfoService.row(workId);
 }
 
+function withWorkInfoReadStatus(callback) {
+  return workInfoService.withReadStatus(callback);
+}
+
+function workInfoReadCacheable() {
+  return workInfoService.readCacheable();
+}
+
 function workInfoFacetRow(workId) {
   return workInfoService.facetRow(workId);
 }
 
-function workInfoDetailRow(workId) {
-  return workInfoService.detailRow(workId);
+function workInfoDetailRow(workId, options) {
+  return workInfoService.detailRow(workId, options);
 }
 
 function prewarmWorkInfoDetails(works) {
-  return workInfoService.prewarmDetailRows((Array.isArray(works) ? works : []).map((work) => work?.id));
+  return workInfoService.prewarmDetailRows((Array.isArray(works) ? works : []).map((work) => work?.id), { includeMetadata: false });
 }
 
 function studioCatalogStamp() {
@@ -2352,6 +2425,7 @@ const serverHost = createServerHost({
   },
   stop: async () => {
     const resourceStops = await Promise.allSettled([
+      () => imageLibraryService?.clearPreparedQueries(),
       () => videoProbeService.stop(), () => mediaResponseService.stop(), () => mediaStreamService.stop(),
       () => archiveImageService.stop(), () => imageReaderCacheService.stop(), () => workCoverMutationService.stop(),
       () => mediaBlobStore.close(), () => fileServer.stop(), () => staticFiles.stop()

@@ -175,12 +175,13 @@ export async function routePhotosApi(req, res, url, deps) {
   const mangaChapterMatch = /^\/api\/manga\/([^/]+)\/chapters\/([^/]+)$/.exec(url.pathname);
   if (mangaChapterMatch && req.method === "GET") {
     const cacheDir = mangaService.cacheById(decodeURIComponent(mangaChapterMatch[1]));
-    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;
+    const comic = cacheDir ? mangaService.publicSummary(cacheDir) : null;
+    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic) : null;
     if (!cacheDir || !chapter) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: await imageReaderCacheStatus() });
+    sendJson(res, 200, { comic, chapter, cache: await imageReaderCacheStatus() });
     return true;
   }
 

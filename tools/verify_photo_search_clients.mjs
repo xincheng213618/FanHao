@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
-import { createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { photoCatalogCollections } from "../public/modules/content-index/photo-catalog.js";
 import { photoCatalogCollections as androidPhotoCatalogCollections } from "../android-client/www/platform/content-index/photo-catalog.js";
 
@@ -154,7 +154,7 @@ const track = number => ({ type: "photo", id: `I${number}`, title: `Album ${numb
 function pagingHarness(source = androidViews) {
   const calls = [], renders = [], writes = [];
   let limit = 24, activeUrl = "https://synthetic-a.invalid", reply = () => assert.fail("Unexpected request"), cached = null;
-  const context = vm.createContext({ URLSearchParams, AbortController, Symbol,
+  const context = vm.createContext({ ...channelAccountBoundary, URLSearchParams, AbortController, Symbol,
     getChannelLimit: () => limit, getActiveUrl: () => activeUrl,
     normalizeChannelMode: value => value || "photo", channelConfig: () => ({ label: "相册" }),
     channelDataSignature: value => JSON.stringify(value), resetMangaReaderProgressTracker() {}, resetPreviewImageObserver() {},
@@ -311,7 +311,10 @@ await assert.rejects(verifyRawCursor(androidViews.replace('const offset = retryP
 }
 for (const obsolete of ["success", "error", "server", "deactivate"]) {
   const h = pagingHarness(), held = gate(); h.setReply(() => held.promise);
-  const old = h.render(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  const old = h.render();
+  // Actual account preparation adds an await before the controlled page read.
+  // Wait boundedly for that request, without assuming an exact microtask count.
+  for (let tick = 0; tick < 20 && h.calls.length === 0; tick++) await Promise.resolve();
   assert.equal(h.calls.length, 1);
   if (obsolete === "deactivate") h.cancel();
   else {

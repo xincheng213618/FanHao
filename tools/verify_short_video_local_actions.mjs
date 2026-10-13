@@ -14,7 +14,7 @@ import { createShortVideosRuntime } from "../src/modules/short-videos/server/run
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-local-actions-"));
 const libraryRoot = path.join(tempRoot, "ShortVideos");
 const authorRoot = path.join(libraryRoot, "MS4wLjAB-test-sec-uid");
-const workRoot = path.join(authorRoot, "2026-08-24_test_7677261409160852073");
+const workRoot = path.join(authorRoot, "2026-08-24_喵？ 测试_7677261409160852073");
 const sourcePath = path.join(workRoot, "7677261409160852073.mp4");
 const opened = [];
 
@@ -48,7 +48,7 @@ try {
   const reveal = actions.schedule("7677261409160852073", "reveal");
   assert.deepEqual(reveal, {
     action: "reveal",
-    path: "MS4wLjAB-test-sec-uid/2026-08-24_test_7677261409160852073/7677261409160852073.mp4",
+    path: "MS4wLjAB-test-sec-uid/2026-08-24_喵？ 测试_7677261409160852073/7677261409160852073.mp4",
     type: "file"
   });
   const author = actions.schedule("7677261409160852073", "open-author-folder");
@@ -64,21 +64,22 @@ try {
   ], "local actions must open only server-resolved targets");
 
   const launches = [];
+  const spawnProcess = (command, args, options) => {
+    const launch = { command, args, options, unref: false };
+    launches.push(launch);
+    return {
+      unref() {
+        launch.unref = true;
+      }
+    };
+  };
   openShortVideoLocalTarget({
     action: "open-author-folder",
     path: authorRoot,
     type: "folder"
   }, {
     platform: "win32",
-    spawnProcess(command, args, options) {
-      const launch = { command, args, options, unref: false };
-      launches.push(launch);
-      return {
-        unref() {
-          launch.unref = true;
-        }
-      };
-    }
+    spawnProcess
   });
   assert.deepEqual(launches, [{
     command: "explorer.exe",
@@ -90,6 +91,21 @@ try {
     },
     unref: true
   }], "Windows author-folder launches must stay visible and detach from the server");
+
+  openShortVideoLocalTarget({ action: "reveal", path: sourcePath, type: "file" }, {
+    platform: "win32",
+    spawnProcess
+  });
+  assert.deepEqual(launches.at(-1), {
+    command: "explorer.exe",
+    args: ["/select,", path.resolve(sourcePath)],
+    options: {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    },
+    unref: true
+  }, "Windows reveal must keep the switch separate from a Unicode path containing spaces");
 
   const routeDeps = {
     localActions: actions,

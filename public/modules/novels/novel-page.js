@@ -445,14 +445,14 @@ export function createNovelPage(deps) {
     state.novel.catalogFilteredTotal = state.novel.catalogTotal;
     state.novel.catalogOffset = 0;
     resetCatalogState(data.book, state.novel.chapters, data.book?.progress?.chapterIndex || 1);
-    await loadRemoteCatalogPage({ render: false, navigation });
-    if (!isCurrentNavigation(navigation)) return false;
     finishNavigation(navigation);
     state.novel.loading = false;
     state.novel.status = "";
     renderStats();
-    renderView();
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    // The detail is usable as soon as its metadata arrives. The catalog owns
+    // its own cancellable request and must not keep the standalone host hidden.
+    loadRemoteCatalogPage().catch(() => {});
     if (!options.skipRoute) pushRoute({ view: "novels", novelBookId: bookId, novelChapterIndex: "" });
     return true;
   }
@@ -589,6 +589,7 @@ export function createNovelPage(deps) {
     catalogRequestId += 1;
     catalogController?.abort();
     catalogController = null;
+    if (state.novel) state.novel.catalogLoading = false;
   }
 
   function cancelReaderScroll() {
@@ -1754,6 +1755,13 @@ export function createNovelPage(deps) {
     const shell = document.createElement("section");
     shell.className = "novel-detail";
     shell.append(renderNovelMenu(), renderBreadcrumbs([{ label: "小说书库", action: showHome }, { label: book.title }]));
+    if (state.novel.status) {
+      const status = document.createElement("div");
+      status.className = "novel-status-line";
+      status.setAttribute("role", "status");
+      status.textContent = state.novel.status;
+      shell.append(status);
+    }
 
     const hero = document.createElement("section");
     hero.className = "novel-detail-hero";
@@ -1913,11 +1921,16 @@ export function createNovelPage(deps) {
       loading.className = "novel-catalog-loading";
       loading.textContent = "正在读取章节目录…";
       grid.append(loading);
-    } else if (state.novel.catalogError) {
+    } else if (state.novel.catalogError || !hasCatalogForCurrentChapter()) {
       const error = document.createElement("div");
       error.className = "novel-catalog-loading error";
-      error.textContent = state.novel.catalogError;
-      grid.append(error);
+      error.textContent = state.novel.catalogError || "章节目录读取已中断，请重试";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "novel-secondary-button";
+      retry.textContent = "重试目录";
+      retry.addEventListener("click", () => loadRemoteCatalogPage().catch(() => {}));
+      grid.append(error, retry);
     } else {
       grid.append(createCatalogBrowser(chapters, {
         compact: false,
@@ -2703,11 +2716,15 @@ export function createNovelPage(deps) {
     if (state.novel.catalogOpen) {
       state.novel.settingsOpen = false;
     }
-    state.novel.pendingScrollRatio = ratio;
-    renderView();
-    restoreReaderScroll();
+    if (needsCatalog) {
+      // The catalog loader renders its loading state before the first await.
+      loadReaderCatalog().catch(() => {});
+    } else {
+      state.novel.pendingScrollRatio = ratio;
+      renderView();
+      restoreReaderScroll();
+    }
     focusReaderControl(opening ? state.novel.catalogLoading ? "catalog-close" : "catalog-search" : "toolbar-目录");
-    if (needsCatalog) loadReaderCatalog().catch(() => {});
   }
 
   function hasCatalogForCurrentChapter() {

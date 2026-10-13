@@ -118,8 +118,9 @@ export function openShortVideoLocalTarget(target = {}, {
     : platform === "darwin"
       ? "open"
       : "xdg-open";
+  // Quote only the path: Explorer cannot parse a quoted /select,path argument with spaces.
   const args = platform === "win32"
-    ? [reveal ? `/select,${targetPath}` : targetPath]
+    ? (reveal ? ["/select,", targetPath] : [targetPath])
     : platform === "darwin"
       ? (reveal ? ["-R", targetPath] : [targetPath])
       : [reveal ? path.dirname(targetPath) : targetPath];

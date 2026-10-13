@@ -109,9 +109,19 @@ export function createMediaResponseService({
     let row = null;
     if (version) {
       const key = `actor:${personId}:${version}`;
-      const authority = typeof blobStore.actorAvatarVersion === "function"
-        ? await blobStore.actorAvatarVersion(personId, version)
-        : await blobStore.actorAvatar(personId, version).then((value) => ({ status: value ? "available" : "missing", row: value }));
+      const cached = mediaBlobCache.get(key);
+      const supportsCachedAuthority = typeof blobStore.cachedActorAvatarVersion === "function";
+      let authority;
+      try {
+        authority = supportsCachedAuthority
+          ? await blobStore.cachedActorAvatarVersion(personId, version, cached?.cacheToken || "")
+          : typeof blobStore.actorAvatarVersion === "function"
+            ? await blobStore.actorAvatarVersion(personId, version)
+            : await blobStore.actorAvatar(personId, version).then((value) => ({ status: value ? "available" : "missing", row: value }));
+      } catch (error) {
+        forgetMediaBlobRow(key);
+        throw error;
+      }
       if (authority?.status === "revoked") {
         forgetMediaBlobRow(key);
         res.writeHead(410, {
@@ -121,7 +131,15 @@ export function createMediaResponseService({
         res.end();
         return;
       }
-      if (authority?.status !== "available" || !authority.row) {
+      // Capacity eviction during the await does not invalidate the captured
+      // row. A stop/restart does: its old bytes must not cross generations.
+      const cacheToken = supportsCachedAuthority ? String(authority?.cacheToken || "") : "";
+      const reuseCached = supportsCachedAuthority && authority?.status === "available" && !authority.row && cached?.cacheToken
+        && cacheToken === cached.cacheToken;
+      if (reuseCached && (generation !== mediaGeneration || !accepting)) {
+        throw Object.assign(new Error("媒体图片服务正在停止"), { statusCode: 503 });
+      }
+      if (authority?.status !== "available" || (!authority.row && !reuseCached)) {
         forgetMediaBlobRow(key);
         notFound(res);
         return;
@@ -129,8 +147,9 @@ export function createMediaResponseService({
       // The durable tombstone is checked before this process cache on every
       // versioned request. That keeps a pre-revoke cached BLOB from surviving
       // a logical revoke in the same server process.
-      row = mediaBlobCache.get(key)?.row || authority.row;
-      if (generation === mediaGeneration) rememberMediaBlobRow(key, authority.row);
+      row = supportsCachedAuthority
+        ? authority.row || cached.row : mediaBlobCache.get(key)?.row || authority.row;
+      if (generation === mediaGeneration) rememberMediaBlobRow(key, supportsCachedAuthority ? row : authority.row, cacheToken);
     } else {
       row = await blobStore.actorAvatar(personId, "");
     }
@@ -169,14 +188,15 @@ export function createMediaResponseService({
     return pending;
   }
 
-  function rememberMediaBlobRow(key, row) {
+  function rememberMediaBlobRow(key, row, cacheToken = "") {
     if (!accepting) return;
-    const bytes = mediaBlobRowBytes(row,key);
-    if (!bytes || bytes > cacheByteLimit || !cacheEntryLimit) return;
+    const rowBytes = mediaBlobRowBytes(row,key);
+    const bytes = rowBytes + cacheToken.length * 2;
+    if (!rowBytes || bytes > cacheByteLimit || !cacheEntryLimit) return;
     const previous = mediaBlobCache.get(key);
     if (previous) mediaBlobCacheBytes -= previous.bytes;
     mediaBlobCache.delete(key);
-    mediaBlobCache.set(key, { bytes, row });
+    mediaBlobCache.set(key, { bytes, row, cacheToken });
     mediaBlobCacheBytes += bytes;
     while (mediaBlobCacheBytes > cacheByteLimit || mediaBlobCache.size > cacheEntryLimit) {
       const oldestKey = mediaBlobCache.keys().next().value;

@@ -1,4 +1,4 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-07b744082137";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-1443708f18b1";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -86,6 +86,7 @@ export function createShortVideoListController(context = {}) {
       params.set("limit", String(DEFAULT_LIMIT));
       params.set("facets", "0");
       params.set("stats", "0");
+      params.set("users", "0");
       if (append) params.set("offset", String(listState.data?.videos?.length || 0));
     }
     if (append) {
@@ -106,15 +107,6 @@ export function createShortVideoListController(context = {}) {
       && requestScope === listScopeKey(getActiveUrl())
       && (!renderGuard || renderGuard());
     try {
-      const relatedAuthorsRequest = listState.searchPage
-        && listState.searchTab === "all"
-        && Boolean(listState.query)
-        && !append
-        ? api.fetchCached(requestUrl, `/api/short-videos/authors?${new URLSearchParams({ q: listState.query, limit: "6", offset: "0" })}`, {
-            timeoutMs: 10000,
-            cacheMaxAgeMs: 5 * 60 * 1000
-          }).catch(() => null)
-        : Promise.resolve(null);
       const primaryResult = api.fetchCachedRevalidated && !append
         ? await api.fetchCachedRevalidated(requestUrl, requestPath, {
             timeoutMs: 16000
@@ -141,6 +133,18 @@ export function createShortVideoListController(context = {}) {
       if (!isCurrentRequest()) return;
       applyLoadedListData(data, { append, authorIndex, appendedVideos });
       if (append) listAppendRevision += 1;
+      // Enqueue author hints after the video page: both queries share the
+      // catalogue worker, so starting authors first would delay the first page.
+      const relatedAuthorsRequest = listState.searchPage
+        && listState.searchTab === "all"
+        && Boolean(listState.query)
+        && !authorIndex
+        && !append
+        ? api.fetchCached(requestUrl, `/api/short-videos/authors?${new URLSearchParams({ q: listState.query, limit: "6", offset: "0" })}`, {
+            timeoutMs: 10000,
+            cacheMaxAgeMs: 5 * 60 * 1000
+          }).catch(() => null)
+        : Promise.resolve(null);
       relatedAuthorsRequest.then((relatedAuthors) => {
         if (!relatedAuthors || !isCurrentRequest()) return;
         const authors = Array.isArray(relatedAuthors.authors) ? relatedAuthors.authors : [];

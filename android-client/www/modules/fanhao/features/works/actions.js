@@ -1,8 +1,8 @@
-import { postJson } from "../../../../js/api.js?v=assets-07b744082137";
+import { postJson } from "../../../../js/api.js?v=assets-1443708f18b1";
 import { updateCachedWorkDetail } from "./detail-cache.js";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
-import { openFanhaoSheet } from "../../sheet.js?v=assets-07b744082137";
-import { syncFavoriteButton } from "./favorite-folders.js?v=assets-07b744082137";
+import { openFanhaoSheet } from "../../sheet.js?v=assets-1443708f18b1";
+import { syncFavoriteButton } from "./favorite-folders.js?v=assets-1443708f18b1";
 export function createWorkActions(deps) {
   const {
     detailErrorMessage,

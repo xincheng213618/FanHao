@@ -1,3 +1,5 @@
+import { openPersonOrganizationDialog } from "./person-organization.js";
+
 export function normalizeActorMappingInput(value) {
   return String(value || "").split(/\r?\n/u)
     .map((line) => line.trim().replace(/(\/actors\/[A-Za-z0-9]+\/?)[。．，；、.,;!！?？]+$/u, "$1"))
@@ -458,6 +460,7 @@ async function openActorMappingModal(person) {
     const data = await api(`/api/admin/person-mapping/${encodeURIComponent(modalPerson.id)}${query ? `?${query}` : ""}`);
     modalPerson = data.person || modalPerson;
     if (options.syncProfileFields) applyProfileFields(modalPerson.actorProfile || {});
+    renderCurrentCover();
     renderSourceCandidates(data.sourceCandidates || []);
     status.textContent = "映射已同步";
   }
@@ -711,7 +714,7 @@ async function openActorMappingModal(person) {
     const copy = document.createElement("div");
     copy.className = "mapping-cover-current-copy";
     const title = document.createElement("strong");
-    title.textContent = modalPerson.manualCoverWorkId ? "手动作品封面" : modalPerson.avatarImage?.source === "manual_upload" ? "手动上传封面" : "默认封面";
+    title.textContent = modalPerson.manualCoverWorkId ? "手动作品封面" : modalPerson.avatarImage?.source === "manual_upload" ? "手动上传封面" : modalPerson.avatarImage?.source === "actor_profiles" ? "JavDB 头像" : "默认封面";
     const source = document.createElement("span");
     source.textContent = modalPerson.manualCoverWorkId
       ? coverCandidateWorks.find((work) => work.id === modalPerson.manualCoverWorkId)?.title || modalPerson.manualCoverWorkId
@@ -891,7 +894,7 @@ async function openActorMappingModal(person) {
       modalPerson = data.person || modalPerson;
       await selectPerson(modalPerson.id, { resetFilter: false });
       await loadMapping({ syncProfileFields: true });
-      status.textContent = `本地已同步：${formatNumber(modalPerson.workCount)} 部`;
+      status.textContent = `本地已同步：${formatNumber(modalPerson.workCount)} 部${data.bindingWarnings?.length ? ` · ${data.bindingWarnings.length} 个目录关联待确认，已保留原记录` : ""}`;
     } catch (error) {
       status.textContent = error.message || "扫描失败";
     } finally {
@@ -921,7 +924,7 @@ async function openActorMappingModal(person) {
       await waitForAdminTask(data.task?.id, status);
       await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
-      status.textContent = "JavDB 片单已更新";
+      status.textContent = "JavDB 人物资料、片单和本地文件已同步";
     } catch (error) {
       status.textContent = error.message || "JavDB 更新失败";
     } finally {
@@ -951,7 +954,7 @@ async function openActorMappingModal(person) {
       await waitForAdminTask(data.task?.id, status);
       await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
-      status.textContent = "当前人物全量 JavDB 扫描已完成";
+      status.textContent = "当前人物全量 JavDB 扫描和本地文件同步已完成";
     } catch (error) {
       status.textContent = error.message || "当前人物全量扫描失败";
     } finally {
@@ -979,7 +982,10 @@ async function waitForAdminTask(taskId, status) {
     status.textContent = `JavDB ${task.status}${task.logs?.length ? ` · ${task.logs.at(-1)}` : ""}`;
     if (task.status === "done") return;
     if (task.status === "error" || task.status === "stopped") {
-      throw new Error(task.logs?.at(-1) || "JavDB 更新失败");
+      const detail = task.status === "error"
+        ? task.logs?.findLast((line) => /^(ERROR|BLOCKED|FATAL)\s/.test(line))
+        : "";
+      throw new Error(detail || task.logs?.at(-1) || "JavDB 更新失败");
     }
   }
   throw new Error("JavDB 更新还在运行，请稍后刷新查看");
@@ -1018,12 +1024,13 @@ async function refreshPersonLocal(person, button) {
     });
 
     const removedCount = Math.max(0, Number(data.removedWorkCount ?? data.removedLocalWorkCount ?? 0));
+    const warningCount = data.bindingWarnings?.length || 0;
     const nextButton = els.personProfile?.querySelector("[data-person-local-refresh]");
     if (!nextButton) return;
-    nextButton.textContent = removedCount
+    nextButton.textContent = warningCount ? `关联待确认 ${formatNumber(warningCount)}` : removedCount
       ? `已转未下载 ${formatNumber(removedCount)}`
       : "已刷新";
-    nextButton.title = removedCount
+    nextButton.title = warningCount ? data.bindingWarnings.map((warning) => warning.message).join("\n") : removedCount
       ? `已发现 ${formatNumber(removedCount)} 条本地记录失效，并标记为未下载`
       : "本地文件与人物记录一致";
     window.setTimeout(() => {
@@ -1117,6 +1124,19 @@ function createPersonProfileActions(person) {
     refreshButton.title = "重新扫描这个人物的本地文件，并把已经删除的作品标记为未下载";
     refreshButton.addEventListener("click", () => refreshPersonLocal(person, refreshButton));
     actions.append(refreshButton);
+    if (paths.length && !person.detailPending) {
+      const organize = document.createElement("button");
+      organize.type = "button";
+      organize.className = "folder-button";
+      organize.textContent = "重新整理";
+      organize.title = "按番号整理本地目录，重新下载封面并用数据库资料重写 info";
+      organize.addEventListener("click", () => openPersonOrganizationDialog({
+        person, button: organize, api,
+        isCurrent: () => String(state.selectedPerson?.id) === String(person.id),
+        refreshPerson: () => selectPerson(person.id, { resetFilter: false, replaceRoute: true, reusePrefetch: false })
+      }));
+      actions.append(organize);
+    }
   }
 
   if (canOfferEmptyPersonCleanup(person)) {

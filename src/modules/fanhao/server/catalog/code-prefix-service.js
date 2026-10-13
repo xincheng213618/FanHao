@@ -31,6 +31,10 @@ export function createCodePrefixService({
   userStateStamp = () => "",
   workClassificationService,
   workFacets,
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true,
+  withWorkSearchReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workSearchReadCacheable = () => true,
   workQueryStamp = getStamp
 }) {
   let catalogCache = null;
@@ -63,20 +67,23 @@ export function createCodePrefixService({
       groups.set(prefix, group);
     }
 
-    const makersByWork = localMakerRowsByWork();
+    const loadedMakers = localMakerRowsByWork();
+    const makersByWork = loadedMakers.rows;
     const items = [...groups.values()].map((group) => publicPrefixSummary(group, makersByWork));
     items.sort(compareByCount);
-    catalogCache = {
+    const catalog = {
       stamp,
       groups,
       items,
       localWorkCount: items.reduce((sum, item) => sum + item.localCount, 0),
-      mappedCount: items.filter((item) => Boolean(item.maker)).length
+      mappedCount: items.filter((item) => Boolean(item.maker)).length,
+      cacheable: loadedMakers.cacheable
     };
+    if (catalog.cacheable) catalogCache = catalog;
     detailBudget.clear();
     detailSourceStamp = stamp;
     detailResultStamp = "";
-    return catalogCache;
+    return catalog;
   }
 
   function summaries(url) {
@@ -100,6 +107,10 @@ export function createCodePrefixService({
   }
 
   function detailPayload(rawPrefix, url) {
+    return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => detailPayloadValue(rawPrefix, url)).value).value;
+  }
+
+  function detailPayloadValue(rawPrefix, url) {
     const prefix = normalizeRequestedCodePrefix(rawPrefix);
     if (!prefix) return null;
     const family = url.searchParams.get("family") === "1";
@@ -128,7 +139,9 @@ export function createCodePrefixService({
       // Results strongly retain their source, even after its source-cache entry
       // is evicted. Charge both arrays conservatively so this lifetime cannot
       // escape the shared budget (measured in work references, not heap bytes).
-      detailBudget.write(detailResultCache, cacheKey, result, result.works.length + result.source.works.length, DETAIL_RESULT_CACHE_LIMIT);
+      if (source.cacheable !== false && workInfoReadCacheable() && workSearchReadCacheable()) {
+        detailBudget.write(detailResultCache, cacheKey, result, result.works.length + result.source.works.length, DETAIL_RESULT_CACHE_LIMIT);
+      }
     }
     const sorted = result.works;
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
@@ -175,8 +188,10 @@ export function createCodePrefixService({
           missingCount: missingWorks.length,
           knownCount: works.length
         };
-    const source = { codePrefix, works };
-    detailBudget.write(detailSourceCache, cacheKey, source, works.length, DETAIL_SOURCE_CACHE_LIMIT);
+    const source = { codePrefix, works, cacheable: catalog.cacheable };
+    if (source.cacheable !== false && workSearchReadCacheable()) {
+      detailBudget.write(detailSourceCache, cacheKey, source, works.length, DETAIL_SOURCE_CACHE_LIMIT);
+    }
     return source;
   }
 
@@ -223,6 +238,7 @@ export function createCodePrefixService({
 
   function localMakerRowsByWork() {
     const rows = new Map();
+    let cacheable = true;
     try {
       const makerRows = getCoreDb().prepare(`
         SELECT DISTINCT
@@ -248,9 +264,10 @@ export function createCodePrefixService({
         rows.set(workId, makers);
       }
     } catch (error) {
+      cacheable = false;
       console.warn("[fanhao-code-prefix-makers]", error.message);
     }
-    return rows;
+    return { rows, cacheable };
   }
 
   function compareByCount(a, b) {

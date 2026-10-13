@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import { parentPort, workerData } from "node:worker_threads";
 import { attachCoreImageStore } from "./core-image-store.js";
 import { hasSqliteTables } from "./sqlite-schema.js";
@@ -21,8 +22,7 @@ const revokedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
   FROM actor_profile_image_revocations
   WHERE person_id = ? AND operation_id = ?
 `) : null;
-const completedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
-  SELECT stage.image_blob, stage.mime
+const completedActorAvatarVersionFrom = `
   FROM cross_store_intents intent
   JOIN cross_store_operation_state state
     ON state.op_id = intent.op_id AND state.status = 'completed'
@@ -47,7 +47,14 @@ const completedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
     AND stage.person_id = ?
     AND stage.operation_id = ?
     AND revocation.operation_id IS NULL
-`) : null;
+`;
+const completedActorAvatarVersionQuery = hasPublishedActorAvatars
+  ? db.prepare(`SELECT stage.image_blob, stage.mime ${completedActorAvatarVersionFrom}`) : null;
+const availableActorAvatarVersionQuery = hasPublishedActorAvatars
+  ? db.prepare(`SELECT 1 AS available ${completedActorAvatarVersionFrom}`) : null;
+const actorAvatarCacheOwner = randomUUID();
+const mainDataVersionQuery = db.prepare("PRAGMA main.data_version");
+const imageDataVersionQuery = db.prepare("PRAGMA fanhao_images.data_version");
 const currentActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
   WITH avatar_candidates AS (
     SELECT image.image_blob, image.mime, image.source, image.updated_at,
@@ -170,19 +177,43 @@ function runAction(action, message) {
       ? currentActorAvatarQuery.get(personId, personId) || null
       : currentActorAvatarQuery.get(personId) || null;
   }
-  if (action === "actorAvatarVersion") {
-    const personId = Number(message.personId);
-    const version = String(message.version || "");
-    if (!version) return { status: "missing", row: null };
-    if (revokedActorAvatarVersionQuery?.get(personId, version)) return { status: "revoked", row: null };
-    const row = completedActorAvatarVersionQuery?.get(personId, version) || null;
-    return { status: row ? "available" : "missing", row };
+  if (action === "actorAvatarVersion" || action === "cachedActorAvatarVersion") {
+    return readActorAvatarVersion(message, action === "cachedActorAvatarVersion");
   }
   if (action === "workCover") return workCoverQuery.get(Number(message.workId)) || null;
   if (action === "remoteImage") return remoteImageQuery.get(String(message.url || "")) || null;
   if (action === "cachedRemoteUrls") return cachedRemoteUrls(message.urls);
   if (action === "upsertRemote") return writeRemoteImage(message.record);
   throw new Error(`unknown media blob action: ${action}`);
+}
+
+function readActorAvatarVersion(message, cacheAware) {
+  // Pin authority and both data-version checks to one read transaction. A
+  // writer committing between token validation and the JOIN must not cause
+  // old cached bytes to be authorized against a newer publication snapshot.
+  if (cacheAware) db.exec("SAVEPOINT actor_avatar_read");
+  try {
+    const personId = Number(message.personId);
+    const version = String(message.version || "");
+    if (!version) return { status: "missing", row: null };
+    if (revokedActorAvatarVersionQuery?.get(personId, version)) return { status: "revoked", row: null };
+    // data_version detects commits by every other connection, including a
+    // legacy writer without staging immutability triggers. This Worker only
+    // writes remote-image cache rows itself, never actor publications/stages.
+    // Capture before the BLOB read, so a racing commit cannot bless old bytes
+    // with the new version. The owner prevents reuse across Worker restarts.
+    const cacheToken = cacheAware
+      ? `${actorAvatarCacheOwner}:${mainDataVersionQuery.get().data_version}:${imageDataVersionQuery.get().data_version}` : "";
+    if (cacheToken && message.cacheToken === cacheToken) {
+      const available = Boolean(availableActorAvatarVersionQuery?.get(personId, version));
+      return { status: available ? "available" : "missing", row: null, cacheToken };
+    }
+    const row = completedActorAvatarVersionQuery?.get(personId, version) || null;
+    if (cacheToken) return { status: row ? "available" : "missing", row, cacheToken };
+    return { status: row ? "available" : "missing", row };
+  } finally {
+    if (cacheAware) db.exec("RELEASE actor_avatar_read");
+  }
 }
 
 function cachedRemoteUrls(values) {

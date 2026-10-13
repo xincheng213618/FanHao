@@ -83,6 +83,7 @@ verifyNativeFeedContract();
 await verifyNativeCollectionFeedBridge();
 verifyAndroidAuthorAccountRoutes();
 await verifyAndroidAuthorAccountRequests();
+await verifyAndroidSearchHintRequests();
 
 function verifyAndroidShortVideoCacheIdentity() {
   const wwwDir = path.join(root, "android-client", "www");
@@ -143,6 +144,36 @@ function verifyAndroidAuthorAccountRoutes() {
     { source: "following", authorFilter: "unliked" },
     "Android following routes must never reuse the author account-status filter"
   );
+}
+
+async function verifyAndroidSearchHintRequests() {
+  const requests = [];
+  const waiting = [];
+  const state = { data: null, query: "", author: "all", source: "all", sort: "published", searchPage: true, searchTab: "all", searchAuthors: [], authorSort: "followed", authorFilter: "all", authorAccountStatus: "all" };
+  const controller = createShortVideoListController({
+    api: { fetchCached: async (_base, requestPath) => {
+      const url = new URL(requestPath, "http://fixture");
+      requests.push(url);
+      if (url.pathname.endsWith("/authors")) return new Promise((resolve) => waiting.push(resolve));
+      return { videos: [{ id: url.searchParams.get("q") }], total: 1, hasMore: false, source: "all" };
+    } },
+    getActiveUrl: () => "http://fixture", listState: state,
+    renderListShell() {}, showView() {}, shortVideoToast() {}
+  });
+  controller.applyListParams({ source: "all", query: "first", searchTab: "all" });
+  await controller.loadList();
+  assert.equal(state.data.videos[0].id, "first", "a pending author hint must not delay the video page");
+  assert.equal(requests[0].pathname, "/api/short-videos", "videos must enter the shared worker queue before author hints");
+  assert.equal(requests[0].searchParams.get("users"), "0", "Android must not duplicate the author aggregate inside the video request");
+  controller.applyListParams({ source: "all", query: "second", searchTab: "all" });
+  await controller.loadList();
+  waiting[0]({ authors: [{ secUid: "stale", name: "旧提示" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(state.searchAuthors, [], "a stale hint must not overwrite the newer search");
+  waiting[1]({ authors: [{ secUid: "current", name: "当前提示" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.searchAuthors[0].secUid, "current", "current hints must arrive independently");
+  assert.equal(state.data.videos[0].id, "second", "applying hints must preserve the current video results");
 }
 
 async function verifyAndroidAuthorAccountRequests() {
@@ -1351,7 +1382,11 @@ function verifyWebDedicatedEntry() {
     && shortVideoListWorkerSource.includes("storeOrOpen().likeDistribution({")
     && shortVideoStoreSource.includes("const readOnly = Boolean(options.readOnly)"), "like-distribution must stay on the shared catalog worker with an async manager stamp, request cancellation fence, coherent invalidation, and no main-thread aggregate fallback");
   assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("store.prepareSchema();") && shortVideoRuntimeSource.includes("initialStateKey: () => store.downloadManagerSourceStateKey()") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must run only the required writable schema preflight and must not prewarm the multi-gigabyte catalog or stats worker");
-  assert(downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()"), "download-manager sync state must still be read lazily when synchronization starts");
+  const lazyLegacySync = downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()");
+  const lazyJournalSync = downloadManagerSyncSource.includes("const operation = performSync(options, sourceStateKey)")
+    && downloadManagerSyncSource.includes("const result = await runWorker()")
+    && downloadManagerSyncSource.includes("if (result.advanced) onStateKey(sourceStateKey)");
+  assert(lazyLegacySync || lazyJournalSync, "download-manager source revisions must stay lazy, either through the legacy provider or the incremental sync worker");
   assert(shortVideoStoreSource.includes("trustExplicitInvalidation") && shortVideoStoreSource.includes("if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp") && shortVideoStoreSource.includes('explicitCatalogStamp = ""'), "the list worker must keep serving its coherent warm catalog snapshot until the runtime sends an explicit reset after downloader synchronization");
   assert(shortVideoStoreSource.includes("function prepareAuthorSearchIndex") && shortVideoStoreSource.includes('enumerable: false') && shortVideoStoreSource.includes("author._searchText.includes(normalizedQuery)"), "author search must reuse a non-public normalized search index instead of rebuilding locale-aware text for every author on every request");
   assert(shortVideoStoreSource.includes('params.get("users") !== "0"') && shortVideoStoreSource.includes("users: userPage?.authors || []") && playerSource.includes('params.set("users", "0")'), "aggregate search must return matching users with the initial work page and skip repeating them during work pagination");
@@ -1393,7 +1428,7 @@ function verifyWebDedicatedEntry() {
   assert(viewerSource.includes(".short-video-gallery-progress") && viewerSource.includes("bottom: max(48px"), "desktop gallery progress must follow Douyin's bottom-aligned segmented timeline");
   assert(galleryPlayerSource.includes("resolveGalleryIndex") && galleryPlayerSource.includes("SHORT_VIDEO_GALLERY_ADVANCE_MS"), "gallery navigation must loop continuously like Douyin's note viewer");
   assert(galleryPlayerSource.includes("let advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;"), "gallery images must use the shared Douyin-style auto-advance interval");
-  assert(galleryPlayerSource.includes("is-gallery-timing-paused") && viewerSource.includes("shortVideoGallerySegmentProgress"), "gallery progress must animate with playback time and pause with page visibility");
+  assert(galleryPlayerSource.includes("is-gallery-timing-paused") && viewerSource.includes("shortVideoGallerySegmentProgress"), "gallery progress must animate with playback time and respect explicit pauses");
   assert(playerSource.includes('const galleryKind = livePhoto ? "实况" : "图集"') && galleryPlayerSource.includes('wrap.classList.toggle("is-live-photo"') && galleryPlayerSource.includes("element.poster = images[index].posterUrl") && galleryPlayerSource.includes("const backdropUrl = current.posterUrl || current.url;"), "live-photo items must use their JPG as the poster/background while presenting only the MP4 as foreground media");
   assert(galleryPlayerSource.includes('const singleLivePhoto = livePhoto && images.length === 1;') && galleryPlayerSource.includes("if (!singleLivePhoto) {") && galleryPlayerSource.includes("wrap.append(progress, pager);"), "single live photos must omit the redundant 1/1 pager and single-segment progress strip while multi-item live galleries retain navigation");
   assert(playerSource.includes("function createAutoNextControl()") && (playerSource.match(/const autoNext = createAutoNextControl\(\);/g) || []).length >= 2 && playerSource.includes("bar.append(play, label, spacer, autoNext)"), "gallery and video playback bars must share the same continuous-play switch");
@@ -1519,9 +1554,9 @@ function verifyWebDedicatedEntry() {
   assert(galleryPlayerSource.includes("if (currentIndex === images.length - 1 && handleGalleryAutoNext?.(video)) return;") && galleryPlayerSource.includes("if (images.length > 1) move(1);"), "single-item gallery videos must navigate away only when continuous play is enabled");
   assert(galleryPlayerSource.includes("currentTime / duration") && galleryPlayerSource.includes("--short-video-gallery-media-progress"), "gallery live-video progress must follow actual media time instead of appearing complete immediately");
   assert(viewerSource.includes("scaleX(var(--short-video-gallery-media-progress, 0))"), "gallery live-video segments must render the synchronized media progress ratio");
-  assert(galleryPlayerSource.includes("advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt))"), "gallery image timing must preserve the remaining auto-advance delay while hidden");
+  assert(galleryPlayerSource.includes("advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt))"), "gallery image timing must preserve the remaining auto-advance delay while explicitly paused");
   assert(galleryPlayerSource.includes("wrap.shortVideoGalleryPause = pauseAutoAdvance"), "gallery players must expose lifecycle pause support");
-  assert(galleryPlayerSource.includes("wrap.shortVideoGalleryResume = resumeAutoAdvance") && playerSource.includes("gallery?.shortVideoGalleryResume?.()"), "gallery players must resume image timing and mixed-video playback after returning to the page");
+  assert(galleryPlayerSource.includes("wrap.shortVideoGalleryResume = resumeAutoAdvance") && playerSource.includes('gallery.shortVideoGalleryResume?.("modal")'), "gallery players must resume image timing and mixed-video playback after closing a modal");
   assert(galleryPlayerSource.includes('audio.className = "short-video-player short-video-gallery-audio"'), "gallery posts must play downloaded background music through the shared player lifecycle");
   assert(playerSource.includes("video.galleryItems"), "gallery rendering must accept ordered image and video items");
   assert(galleryPlayerSource.includes("scheduleLocalSoundPoll") && galleryPlayerSource.includes('metadata: "1"'), "open galleries must refresh rich metadata so newly downloaded background music becomes visible");
@@ -1536,10 +1571,10 @@ function verifyWebDedicatedEntry() {
   assert(viewerSource.includes(".short-video-control-volume::before") && viewerSource.includes("bottom: 30px;") && viewerSource.includes("bottom: -12px;"), "desktop volume controls must provide a continuous hover bridge between the mute button and vertical slider");
   assert(playerSource.includes("const wasPlaying = !player.paused && !player.ended;"), "short-video mute changes must preserve active playback intent");
   assert(playerSource.includes("if (wasPlaying) player.play?.().catch(() => {});"), "short-video volume changes must preserve active playback intent");
-  assert(playerSource.includes("let shortVideoVisibilitySnapshot = null;"), "short-video visibility changes must retain playback intent");
-  assert(playerSource.includes("wasPlaying: Boolean(current && !current.paused && !current.ended)"), "short-video visibility changes must record whether playback was active");
-  assert(playerSource.includes("if (!resume?.wasPlaying || resume.videoId !== currentVideoId)"), "short-video visibility restore must not autoplay paused or replaced videos");
-  assert(playerSource.includes("current.muted = Boolean(state.shortVideo.muted);"), "short-video visibility restore must retain the user's paused sound preference");
+  const visibilitySource = playerSource.slice(playerSource.indexOf("function handleShortVideoVisibilityChange()"), playerSource.indexOf("function activePlayer()"));
+  assert(visibilitySource.includes("flushActiveShortVideoWatch();") && visibilitySource.includes(".short-video-player.is-ghost"), "hidden short-video pages must still flush watch progress and release adjacent decoders");
+  assert(!visibilitySource.includes(".pause") && !visibilitySource.includes(".play") && !visibilitySource.includes(".muted") && !visibilitySource.includes("shortVideoGalleryPause") && !visibilitySource.includes("shortVideoGalleryResume"), "tab visibility must preserve current playback and sound, including manually paused media");
+  assert(!galleryPlayerSource.includes("document.hidden"), "gallery timing and mixed-video playback must continue in background tabs");
   assert(playerSource.includes("function markPlayerSoundBlocked(stage)"), "short-video autoplay fallback must expose a bounded sound hint");
   const restoreSoundSource = playerSource.slice(playerSource.indexOf("function restorePlayerSound"), playerSource.indexOf("function activeShortVideoStage"));
   assert(restoreSoundSource.includes("player.play?.().catch") && restoreSoundSource.includes("if (!player.paused)") && !restoreSoundSource.includes("if (!shouldResume) return"), "clicking a blocked-sound video must preserve audible playback and ignore rejected play promises when media is already running");

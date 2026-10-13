@@ -27,7 +27,9 @@ export function createStudioService({
   userStateStamp = () => "",
   workClassificationService = { filterForRequest: (works) => works, visibilityStamp: () => "" },
   workFacets,
-  workQueryStamp = () => ""
+  workQueryStamp = () => "",
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true
 }) {
   let studioHierarchyCache = null;
   let studioDetailCacheStamp = null;
@@ -227,6 +229,10 @@ export function createStudioService({
   }
 
   function prewarm() {
+    return withWorkInfoReadStatus(prewarmValue).value;
+  }
+
+  function prewarmValue() {
     const sync = ensureCatalog();
     const rows = cachedSummaryRows(sync.stamp);
     summaries(new URL("http://fanhao.local/api/studios?limit=500"));
@@ -255,12 +261,16 @@ export function createStudioService({
       const makerId = String(row.maker_id || "");
       if (!makerId) continue;
       for (const limit of [32, STUDIO_DETAIL_PREWARM_PAGE_SIZE]) {
-        detailPayload(makerId, new URL(`http://fanhao.local/api/studios/${makerId}?seriesId=all&sort=${DEFAULT_STUDIO_SORT}&limit=${limit}&offset=0`));
+        detailPayloadValue(makerId, new URL(`http://fanhao.local/api/studios/${makerId}?seriesId=all&sort=${DEFAULT_STUDIO_SORT}&limit=${limit}&offset=0`));
       }
     }
   }
 
   function detailPayload(makerId, url) {
+    return withWorkInfoReadStatus(() => detailPayloadValue(makerId, url)).value;
+  }
+
+  function detailPayloadValue(makerId, url) {
     const sync = ensureCatalog();
     ensurePageCache(sync.stamp);
     const db = getCoreDb();
@@ -282,7 +292,7 @@ export function createStudioService({
       selectedSeriesId,
       ...pagedWorksPayload(sorted, url, { filter, facets: cachedStudioFacets(workSet) })
     };
-    pageBudget.write(studioPageCache, pageCacheKey, payload, payload.works.length, STUDIO_PAGE_CACHE_LIMIT);
+    if (workInfoReadCacheable() !== false) pageBudget.write(studioPageCache, pageCacheKey, payload, payload.works.length, STUDIO_PAGE_CACHE_LIMIT);
     return payload;
   }
 
@@ -291,7 +301,9 @@ export function createStudioService({
     const cached = derivedBudget.read(workSet.sortedByMode, key);
     if (cached) return cached;
     const sorted = sortWorkList(workSet.works, key);
-    return derivedBudget.write(workSet.sortedByMode, key, sorted, sorted.length, STUDIO_SORT_CACHE_LIMIT);
+    return workInfoReadCacheable() !== false
+      ? derivedBudget.write(workSet.sortedByMode, key, sorted, sorted.length, STUDIO_SORT_CACHE_LIMIT)
+      : sorted;
   }
 
   function ensurePageCache(stamp) {
@@ -317,7 +329,7 @@ export function createStudioService({
     const stamp = queryStamp();
     if (workSet.facetsCache?.stamp === stamp) return workSet.facetsCache.facets;
     const facets = workFacets(workSet.works);
-    workSet.facetsCache = { stamp, facets };
+    if (workInfoReadCacheable() !== false) workSet.facetsCache = { stamp, facets };
     return facets;
   }
 
@@ -346,7 +358,7 @@ export function createStudioService({
         works: filterWorkList(visible, filter),
         sortedByMode: normalizedFilter === "all" && visible.length === workSet.works.length ? workSet.sortedByMode : new Map()
       };
-      derivedBudget.write(workSet.filteredByMode, key, filtered, filtered.works.length, STUDIO_FILTER_CACHE_LIMIT);
+      if (workInfoReadCacheable() !== false) derivedBudget.write(workSet.filteredByMode, key, filtered, filtered.works.length, STUDIO_FILTER_CACHE_LIMIT);
     }
     return filtered;
   }
@@ -405,7 +417,7 @@ export function createStudioService({
       filteredByMode: new Map(),
       sortedByMode: new Map()
     };
-    derivedBudget.write(studioWorksCache, cacheKey, detail, works.length, STUDIO_SOURCE_CACHE_LIMIT);
+    if (workInfoReadCacheable() !== false) derivedBudget.write(studioWorksCache, cacheKey, detail, works.length, STUDIO_SOURCE_CACHE_LIMIT);
     return detail;
   }
 

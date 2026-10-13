@@ -11,7 +11,7 @@ export async function routeAndroidUpdateApi(req, res, url, deps) {
 
   const androidUpdateApkMatch = /^\/api\/android\/update\/apk\/([^/]+)\/([^/]+)$/.exec(url.pathname);
   if (androidUpdateApkMatch && (req.method === "GET" || req.method === "HEAD")) {
-    androidUpdateService.serveApk(req, res, androidUpdateApkMatch[1], androidUpdateApkMatch[2]);
+    await androidUpdateService.serveApk(req, res, androidUpdateApkMatch[1], androidUpdateApkMatch[2]);
     return true;
   }
 

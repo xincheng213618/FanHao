@@ -202,7 +202,13 @@ export function createShortVideoCoverStorageService({
     };
   }
 
-  function reconcile(database) {
+  function reconcile(database, videoIds = null) {
+    if (Array.isArray(videoIds)) {
+      const linked = database.prepare("SELECT 1 FROM short_videos WHERE id=? AND cover_source=?");
+      const ids = [...new Set(videoIds)];
+      const orphanIds = ids.filter(id => !linked.get(id, SQLITE_SHORT_VIDEO_COVER_SOURCE));
+      return { linked: ids.length - orphanIds.length, pruned: coverDatabase.removeMany(orphanIds) };
+    }
     const linkedIds = new Set(database.prepare(`
       SELECT id
       FROM short_videos

@@ -107,12 +107,7 @@ export function createShortVideoCollectionsRepository({
       : clampInteger(params.get("offset"), 0, 0, COLLECTION_OFFSET_FALLBACK_MAX);
     return withDatabaseAccess((db) => readTransaction(db, () => {
       const collection = requireCollection(db, id);
-      const total = Number(db.prepare(`
-        SELECT COUNT(*) AS count
-        FROM short_video_collection_items item
-        JOIN short_video_catalog video ON video.id = item.video_id
-        WHERE item.collection_id = ?
-      `).get(id)?.count || 0);
+      const total = Number(collection.item_count || 0);
       testHooks.afterCollectionPageCount?.({ collectionId: id, cursor, total });
       const cursorSql = cursor
         ? "AND (item.added_at < ? OR (item.added_at = ? AND item.video_id < ?))"

@@ -42,6 +42,7 @@ __pycache__/
 *.log
 data/app-config.json
 data/admin-tasks.json
+data/person-organization/
 data/auth-secret.txt
 data/douban-cookie.txt
 data/library-index.json

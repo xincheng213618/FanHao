@@ -25,6 +25,7 @@ export function createAndroidUpdateService({
   port,
   readJsonFile,
   safeChildPath,
+  serveWholeFile,
   updateDir
 }) {
   function normalizeChannel(value) {
@@ -104,23 +105,17 @@ export function createAndroidUpdateService({
       return;
     }
     const apkPath = safeChildPath(channelDir(normalizedChannel), safeName);
-    if (!apkPath || !fs.existsSync(apkPath) || normalizeExt(apkPath) !== ".apk") {
+    if (!apkPath || normalizeExt(apkPath) !== ".apk") {
       notFound(res);
       return;
     }
 
-    const stat = fs.statSync(apkPath);
-    res.writeHead(200, {
+    return serveWholeFile(req, res, apkPath, stat => ({
       "Content-Type": "application/vnd.android.package-archive",
       "Content-Length": stat.size,
       "Content-Disposition": attachmentDisposition(safeName),
       "Cache-Control": "no-store"
-    });
-    if (req.method === "HEAD") {
-      res.end();
-      return;
-    }
-    fs.createReadStream(apkPath).pipe(res);
+    }));
   }
 
   return {

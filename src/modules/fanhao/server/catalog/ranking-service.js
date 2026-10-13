@@ -21,7 +21,9 @@ export function createRankingService({
   proxiedRemoteImageUrl,
   publicWork,
   storedWorkCodeKey,
-  userStateStamp = () => ""
+  userStateStamp = () => "",
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true
 }) {
   let rankingMissingSearchCache = null;
   let rankingRowsCache = new Map();
@@ -65,6 +67,10 @@ export function createRankingService({
   }
 
   function summaries() {
+    return withWorkInfoReadStatus(summariesWithReadStatus).value;
+  }
+
+  function summariesWithReadStatus() {
     const stamp = getSearchStamp();
     if (rankingSummariesCache?.stamp === stamp) return rankingSummariesCache.items;
     const localKeys = localWorkCodeKeys();
@@ -78,7 +84,6 @@ export function createRankingService({
             c.id AS collection_id,
             c.name AS list_label,
             c.source_key,
-            COUNT(DISTINCT ci.work_id) AS total,
             MAX(ci.updated_at) AS updated_at,
             MAX(c.source_url) AS page_url
           FROM collections c
@@ -92,18 +97,23 @@ export function createRankingService({
         )
         .all();
 
+      let listStatementDb = null;
+      let listStatement = null;
       for (const row of rows) {
         const { listType, listKey } = sourceParts(row.source_key);
-        const listRows = getCoreDb()
-          .prepare(
+        const db = getCoreDb();
+        if (!listStatement || listStatementDb !== db || db.isOpen === false) {
+          listStatement = db.prepare(
             `
             SELECT w.code_search AS code_key, w.id AS work_id, w.code
             FROM collection_items ci
             JOIN works w ON w.id = ci.work_id
             WHERE ci.collection_id = ?
             `
-          )
-          .all(row.collection_id);
+          );
+          listStatementDb = db;
+        }
+        const listRows = listStatement.all(row.collection_id);
         const uniqueRows = uniqueRankingRows(listRows);
         const total = uniqueRows.length;
         const localTotal = uniqueRows.filter((item) => localKeys.has(storedWorkCodeKey(item.code_key))).length;
@@ -122,16 +132,20 @@ export function createRankingService({
       succeeded = false;
       console.warn("[rankings]", error.message);
     }
-    if (succeeded) rankingSummariesCache = { stamp, items: result };
+    if (succeeded && workInfoReadCacheable() !== false) rankingSummariesCache = { stamp, items: result };
     return result;
   }
 
   function rows(listType = "top", listKey = "") {
+    return loadRankingRows(listType, listKey).rows;
+  }
+
+  function loadRankingRows(listType = "top", listKey = "") {
     const normalizedListKey = listKey || "";
     const stamp = getSearchStamp();
     const cacheKey = `${listType}:${normalizedListKey}`;
     const cached = rankingRowsCache.get(cacheKey);
-    if (cached?.stamp === stamp) return cached.rows;
+    if (cached?.stamp === stamp) return { rows: cached.rows, cacheable: true };
 
     try {
       const rankingRows = uniqueRankingRows(getCoreDb()
@@ -163,18 +177,21 @@ export function createRankingService({
           `
         )
         .all(listType, normalizedListKey, `${listType}:${normalizedListKey}`));
-      hydrateRankingCoverUrls(rankingRows);
-      rankingRowsCache.delete(cacheKey);
-      rankingRowsCache.set(cacheKey, { stamp, rows: rankingRows });
-      while (rankingRowsCache.size > 32) rankingRowsCache.delete(rankingRowsCache.keys().next().value);
-      return rankingRows;
+      const cacheable = hydrateRankingCoverUrls(rankingRows);
+      if (cacheable) {
+        rankingRowsCache.delete(cacheKey);
+        rankingRowsCache.set(cacheKey, { stamp, rows: rankingRows });
+        while (rankingRowsCache.size > 32) rankingRowsCache.delete(rankingRowsCache.keys().next().value);
+      }
+      return { rows: rankingRows, cacheable };
     } catch (error) {
       console.warn("[rankings]", error.message);
-      return [];
+      return { rows: [], cacheable: false };
     }
   }
 
   function hydrateRankingCoverUrls(rankingRows = []) {
+    let succeeded = true;
     const workIds = [...new Set((rankingRows || [])
       .map((row) => Number(row?.core_work_id))
       .filter((workId) => Number.isSafeInteger(workId) && workId > 0))];
@@ -202,6 +219,7 @@ export function createRankingService({
           }
         }
       } catch (error) {
+        succeeded = false;
         console.warn("[rankings-cover]", error.message);
       }
     }
@@ -209,7 +227,7 @@ export function createRankingService({
     for (const row of rankingRows || []) {
       row.image_url = coverUrlByWorkId.get(String(row.core_work_id || "")) || "";
     }
-    return rankingRows;
+    return succeeded;
   }
 
   function workFromRow(row, localByCode = localWorkByCodeKey()) {
@@ -273,25 +291,35 @@ export function createRankingService({
     const cached = rankingWorkSourcesCache.get(cacheKey);
     if (cached?.stamp === stamp) return cached.source;
 
-    const rankingRows = rows(listType, normalizedListKey);
+    const loaded = loadRankingRows(listType, normalizedListKey);
+    const rankingRows = loaded.rows;
     const localByCode = localWorkByCodeKey();
     const allWorks = rankingRows.map((row) => workFromRow(row, localByCode));
     const localWorks = allWorks.filter((work) => !work.missingLocal);
     const missingWorks = allWorks.filter((work) => work.missingLocal);
     const source = {
+      cacheable: loaded.cacheable && workInfoReadCacheable() !== false,
       allWorks,
       localTotal: localWorks.length,
       missingTotal: missingWorks.length,
       missingWorks,
       rankingRows
     };
-    rankingWorkSourcesCache.delete(cacheKey);
-    rankingWorkSourcesCache.set(cacheKey, { stamp, source });
-    while (rankingWorkSourcesCache.size > 32) rankingWorkSourcesCache.delete(rankingWorkSourcesCache.keys().next().value);
+    // A read fallback is useful for this response, but must not turn a
+    // temporary database/cover error into a same-stamp empty or partial cache.
+    if (source.cacheable) {
+      rankingWorkSourcesCache.delete(cacheKey);
+      rankingWorkSourcesCache.set(cacheKey, { stamp, source });
+      while (rankingWorkSourcesCache.size > 32) rankingWorkSourcesCache.delete(rankingWorkSourcesCache.keys().next().value);
+    }
     return source;
   }
 
   function worksPayload(url, listType = "top") {
+    return withWorkInfoReadStatus(() => worksPayloadValue(url, listType)).value;
+  }
+
+  function worksPayloadValue(url, listType = "top") {
     const listKey = url.searchParams.get("key") || "";
     const onlyMissing = ["1", "true", "yes"].includes(String(url.searchParams.get("missing") || "").toLowerCase());
     const limit = clampInteger(url.searchParams.get("limit"), maxWorkLimit, 1, maxWorkLimit);
@@ -328,7 +356,7 @@ export function createRankingService({
       pageUrl: rankingRows[0]?.page_url || "",
       works: page
     };
-    cachePage(pageCacheKey, payload);
+    if (source.cacheable && workInfoReadCacheable() !== false) cachePage(pageCacheKey, payload);
     return payload;
   }
 
@@ -357,6 +385,10 @@ export function createRankingService({
   }
 
   function prewarm() {
+    return withWorkInfoReadStatus(prewarmValue).value;
+  }
+
+  function prewarmValue() {
     const lists = summaries();
     const topLists = lists.filter((item) => item.type === "top");
     const preferred = topLists.find((item) => item.key === DEFAULT_RANKING_KEY) || topLists[0];
@@ -377,13 +409,22 @@ export function createRankingService({
   }
 
   function missingSearchWorks() {
+    return missingSearchResult().works;
+  }
+
+  function missingSearchResult() {
+    return withWorkInfoReadStatus(missingSearchResultValue).value;
+  }
+
+  function missingSearchResultValue() {
     const stamp = getSearchStamp();
-    if (rankingMissingSearchCache?.stamp === stamp) return rankingMissingSearchCache.works;
+    if (rankingMissingSearchCache?.stamp === stamp) return { works: rankingMissingSearchCache.works, cacheable: true };
 
     const localByCode = localWorkByCodeKey();
     const seen = new Set();
     const works = [];
     const missingRows = [];
+    let succeeded = true;
 
     try {
       const rankingRows = getCoreDb()
@@ -421,14 +462,16 @@ export function createRankingService({
         seen.add(codeKey);
         missingRows.push(row);
       }
-      hydrateRankingCoverUrls(missingRows);
+      succeeded = hydrateRankingCoverUrls(missingRows);
       for (const row of missingRows) works.push(workFromRow(row, localByCode));
     } catch (error) {
+      succeeded = false;
       console.warn("[rankings-search]", error.message);
     }
 
-    rankingMissingSearchCache = { stamp, works };
-    return works;
+    const cacheable = succeeded && workInfoReadCacheable() !== false;
+    if (cacheable) rankingMissingSearchCache = { stamp, works };
+    return { works, cacheable };
   }
 
   function invalidateSearch() {
@@ -443,6 +486,7 @@ export function createRankingService({
   return {
     invalidateSearch,
     listLabel,
+    missingSearchResult,
     missingSearchWorks,
     prewarm,
     rows,

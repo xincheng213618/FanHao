@@ -267,9 +267,14 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     const requestedRows = listCursor ? Math.min(limit, remaining) : limit;
     const queryLimit = listCursor ? requestedRows + 1 : requestedRows;
     const effectiveOffset = listCursor ? 0 : offset;
+    // Keep COUNT on its filtering index. The page can stop early on the
+    // published index instead of reading every visible row and sorting it.
+    const pageIndexHint = !indexHint && filter.source === "all" && sort === "published"
+      ? "INDEXED BY idx_short_videos_published"
+      : indexHint;
     const ids = database.prepare(`
       SELECT v.id
-      FROM short_videos v ${indexHint}
+      FROM short_videos v ${pageIndexHint}
       ${where}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?

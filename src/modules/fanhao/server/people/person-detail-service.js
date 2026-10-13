@@ -1,7 +1,9 @@
 import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } from "./person-work-year.js";
+import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
 
 const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
 const PERSON_DETAIL_PAGE_CACHE_LIMIT = 12;
+const PERSON_DETAIL_PAGE_WORK_BUDGET = 8192;
 const PENDING_ACTOR_PROFILE_STATUSES = new Set(["prepared", "applying", "retry_wait"]);
 
 function actorProfileTerminalError(operation, cause = null) {
@@ -67,9 +69,11 @@ export function createPersonDetailService({
   library,
   manualCoverStateService,
   maxActorAvatarBytes,
+  mergedActorMovieRowsResult = null,
   mergedActorMovieRows,
   mergedPersonMembers = (personId) => [{ id: personId }],
   mergedPersonRecord,
+  missingActorWorksResultForPerson = null,
   missingActorWorksForPerson,
   peoplePayloadStamp,
   peopleScopeService,
@@ -81,10 +85,14 @@ export function createPersonDetailService({
   workCodeKeySetForWorks,
   workQueryService,
   workQueryStamp,
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true,
   userStateStamp = () => "",
 }) {
   const coverBodyLimit = Math.ceil(maxActorAvatarBytes * 1.4) + 128 * 1024;
   const detailSourceCache = new Map();
+  const detailPageBudget = createWeightedCacheBudget(PERSON_DETAIL_PAGE_WORK_BUDGET,
+    PERSON_DETAIL_SOURCE_CACHE_LIMIT * PERSON_DETAIL_PAGE_CACHE_LIMIT);
   let detailSourceCacheStamp = "";
 
   function completedActorProfilePayload(person, profile = publicActorProfile(actorProfileRow(person.id))) {
@@ -186,7 +194,8 @@ export function createPersonDetailService({
     if (!source) return null;
     mark("source");
 
-    const pageCacheKey = detailPageCacheKey(url);
+    const requestKeys = detailPageCacheKey(url);
+    const pageCacheKey = requestKeys.page;
     let worksPayload = readCachedPage(source, pageCacheKey);
     if (worksPayload) {
       timings.pageCacheHit = true;
@@ -195,14 +204,18 @@ export function createPersonDetailService({
     } else {
       const filter = url.searchParams.get("filter") || "all";
       const year = normalizePersonWorkYear(url.searchParams.get("year"));
-      const yearWorks = worksForPersonYear(source.works, year);
+      const yearWorks = source.filterCache.get(requestKeys.filter)?.sourceWorks
+        || worksForPersonYear(source.works, year);
       const facets = workQueryService.lightweightFacets(yearWorks);
       mark("facets");
       worksPayload = workQueryService.listFromWorksPayload(yearWorks, url, {
         filter,
         facets
-      }, { lightweightInfo: true, includeCoreCovers: scope === "western" });
-      cachePage(source, pageCacheKey, worksPayload);
+      }, { lightweightInfo: true, includeCoreCovers: scope === "western" }, {
+        cache: source.filterCache,
+        key: requestKeys.filter
+      });
+      if (source.cacheable !== false) cachePage(source, pageCacheKey, worksPayload);
       mark("payload");
     }
     if (!source.person) source.person = publicPerson(source.personSource, source.personOptions);
@@ -222,9 +235,14 @@ export function createPersonDetailService({
   }
 
   function cachedDetailSource(personId, scope, timings, mark) {
+    return withWorkInfoReadStatus(() => loadDetailSource(personId, scope, timings, mark)).value;
+  }
+
+  function loadDetailSource(personId, scope, timings, mark) {
     const stamp = `${library.scannedAt || ""}:${peoplePayloadStamp(scope)}:${workQueryStamp()}`;
     if (detailSourceCacheStamp !== stamp) {
       detailSourceCacheStamp = stamp;
+      detailPageBudget.clear();
       detailSourceCache.clear();
     }
 
@@ -245,7 +263,10 @@ export function createPersonDetailService({
     }
     mark("person");
 
-    const actorRows = mergedActorMovieRows(person.id);
+    const actorRowsResult = mergedActorMovieRowsResult
+      ? mergedActorMovieRowsResult(person.id)
+      : { rows: mergedActorMovieRows(person.id), cacheable: true };
+    const actorRows = actorRowsResult.rows;
     mark("actorRows");
     const relatedPersonIds = [
       person.id,
@@ -265,9 +286,14 @@ export function createPersonDetailService({
     const coreMissingWorks = scope === "western" ? [] : coreMissingWorksForPerson(personSource, personLocalCodeKeys);
     mark("coreMissing");
     const coreMissingKeys = new Set(coreMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
+    const actorMissingResult = scope === "western"
+      ? { works: [], cacheable: true }
+      : missingActorWorksResultForPerson
+        ? missingActorWorksResultForPerson(personSource, actorRows, personLocalCodeKeys)
+        : { works: missingActorWorksForPerson(personSource, actorRows, personLocalCodeKeys), cacheable: true };
     const missingWorks = [
       ...coreMissingWorks,
-      ...(scope === "western" ? [] : missingActorWorksForPerson(personSource, actorRows, personLocalCodeKeys)).filter((work) => {
+      ...actorMissingResult.works.filter((work) => {
         const key = storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title);
         return !key || !coreMissingKeys.has(key);
       })
@@ -282,6 +308,8 @@ export function createPersonDetailService({
       skipFallbackAvatar: true
     };
     const source = {
+      cacheable: actorRowsResult.cacheable !== false && actorMissingResult.cacheable !== false && workInfoReadCacheable(),
+      filterCache: new Map(),
       pageCache: new Map(),
       person: null,
       personId: person.id,
@@ -290,12 +318,12 @@ export function createPersonDetailService({
       years: personWorkYearOptions(allPersonWorks),
       works: allPersonWorks
     };
-    cacheDetailSource(cacheKey, source);
+    if (source.cacheable !== false) cacheDetailSource(cacheKey, source);
     return source;
   }
 
   function detailPageCacheKey(url) {
-    return [
+    const parts = [
       userStateStamp(),
       workQueryService.visibilityStamp(),
       url.searchParams.get("filter") || "all",
@@ -305,28 +333,34 @@ export function createPersonDetailService({
       url.searchParams.get("sort") || "releaseDesc",
       url.searchParams.get("limit") || "",
       url.searchParams.get("offset") || "0"
-    ].join(":");
+    ];
+    return {
+      page: JSON.stringify(parts),
+      filter: JSON.stringify([
+        ...parts.slice(0, 4),
+        !url.searchParams.has("includeMissingLocal") || parts[4] === "1",
+        !url.searchParams.has("includeCompilation") || parts[5] === "1"
+      ])
+    };
   }
 
   function readCachedPage(source, cacheKey) {
-    if (!source.pageCache.has(cacheKey)) return null;
-    const cached = source.pageCache.get(cacheKey);
-    source.pageCache.delete(cacheKey);
-    source.pageCache.set(cacheKey, cached);
-    return cached;
+    return detailPageBudget.read(source.pageCache, cacheKey) || null;
   }
 
   function cachePage(source, cacheKey, payload) {
-    source.pageCache.set(cacheKey, payload);
-    while (source.pageCache.size > PERSON_DETAIL_PAGE_CACHE_LIMIT) {
-      source.pageCache.delete(source.pageCache.keys().next().value);
-    }
+    // Page DTOs outlive work-query's prepared-work LRU. Share a reference cap
+    // across every person, while returning oversized pages in full.
+    detailPageBudget.write(source.pageCache, cacheKey, payload, payload.count, PERSON_DETAIL_PAGE_CACHE_LIMIT);
   }
 
   function cacheDetailSource(cacheKey, source) {
     detailSourceCache.set(cacheKey, source);
     while (detailSourceCache.size > PERSON_DETAIL_SOURCE_CACHE_LIMIT) {
-      detailSourceCache.delete(detailSourceCache.keys().next().value);
+      const oldestKey = detailSourceCache.keys().next().value;
+      const oldestSource = detailSourceCache.get(oldestKey);
+      if (oldestSource) detailPageBudget.clear(oldestSource.pageCache);
+      detailSourceCache.delete(oldestKey);
     }
   }
 

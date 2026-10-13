@@ -471,7 +471,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
     };
     const startAdvance = (entry, options = {}) => {
-      if (!entry || ghost || !wrap.isConnected || galleryTimingPaused() || document.hidden) return;
+      if (!entry || ghost || !wrap.isConnected || galleryTimingPaused()) return;
       if (entry.mediaType === "video") {
         const clip = entry.image;
         if (options.restartVideo !== false) clip.currentTime = 0;
@@ -494,7 +494,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
       clearAdvance();
       if (!entry) return;
       advanceEntry = entry;
-      galleryVisibilityPaused = document.hidden;
       syncGalleryPlaybackState();
       restartProgressTiming();
       startAdvance(entry);

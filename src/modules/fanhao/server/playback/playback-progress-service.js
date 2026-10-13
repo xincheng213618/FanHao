@@ -67,7 +67,7 @@ export function createPlaybackProgressService({
     return Number.isFinite(timestamp) ? timestamp : 0;
   }
 
-  function progressWork(videoId, progress) {
+  function progressWork(videoId, progress, firstWorkForVideo) {
     const library = getLibrary();
     if (progress?.workId && library.worksById.has(progress.workId)) {
       return library.worksById.get(progress.workId);
@@ -75,10 +75,7 @@ export function createPlaybackProgressService({
 
     const file = library.filesById.get(videoId);
     if (!file || file.type !== "video") return null;
-    for (const work of library.worksById.values()) {
-      if ((work.videos || []).some((video) => video.id === videoId)) return work;
-    }
-    return null;
+    return firstWorkForVideo(videoId);
   }
 
   function historyEntries(options = {}) {
@@ -104,10 +101,61 @@ export function createPlaybackProgressService({
     }
 
     const byWorkId = new Map();
+    const progressVideoIds = new Set(Object.keys(progress));
+    const firstOwners = new Map();
+    let ownerIterator = null;
+    let ownerWork = null;
+    let ownerVideos = null;
+    let ownerVideoIndex = 0;
+    let ownerVideoLength = 0;
+    let ownerScanDone = false;
+    let legacyOwnerScan = false;
+
+    function legacyFirstWorkForVideo(videoId) {
+      for (const work of library.worksById.values()) {
+        if ((work.videos || []).some((video) => video.id === videoId)) return work;
+      }
+      return null;
+    }
+
+    // Share only the scanned prefix of this rebuild; a match still stops at
+    // the same video as the former per-entry search.
+    function firstWorkForVideo(videoId) {
+      if (legacyOwnerScan) return legacyFirstWorkForVideo(videoId);
+      if (firstOwners.has(videoId)) return firstOwners.get(videoId);
+      if (ownerScanDone) return null;
+      if (!ownerIterator) ownerIterator = library.worksById.values();
+
+      for (;;) {
+        if (!ownerVideos || ownerVideoIndex >= ownerVideoLength) {
+          const next = ownerIterator.next();
+          if (next.done) {
+            ownerScanDone = true;
+            return null;
+          }
+          ownerWork = next.value;
+          ownerVideos = ownerWork.videos || [];
+          if (!Array.isArray(ownerVideos) || ownerVideos.some !== Array.prototype.some) {
+            legacyOwnerScan = true;
+            return legacyFirstWorkForVideo(videoId);
+          }
+          ownerVideoIndex = 0;
+          ownerVideoLength = ownerVideos.length;
+        }
+
+        while (ownerVideoIndex < ownerVideoLength) {
+          const index = ownerVideoIndex++;
+          if (!(index in ownerVideos)) continue;
+          const id = ownerVideos[index].id;
+          if (progressVideoIds.has(id) && !firstOwners.has(id)) firstOwners.set(id, ownerWork);
+          if (id === videoId) return firstOwners.get(id);
+        }
+      }
+    }
 
     for (const [videoId, progressRow] of Object.entries(progress)) {
       const updatedTime = progressUpdatedTime(progressRow);
-      const work = progressWork(videoId, progressRow);
+      const work = progressWork(videoId, progressRow, firstWorkForVideo);
       if (!work) continue;
 
       const existing = byWorkId.get(work.id);

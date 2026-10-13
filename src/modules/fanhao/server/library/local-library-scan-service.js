@@ -197,7 +197,18 @@ export function createLocalLibraryScanService({
     };
   }
 
-  function scanSingleVideoWorks(personId, personDir) {
+  function linkWork(personId, work, options) {
+    if (options.linkWorks === false) return work;
+    try {
+      return linkScannedWork(personId, work);
+    } catch (error) {
+      if (error.code !== "AMBIGUOUS_LOCAL_WORK_BINDING" || !options.onBindingError) throw error;
+      options.onBindingError(error, work);
+      return null;
+    }
+  }
+
+  function scanSingleVideoWorks(personId, personDir, options = {}) {
     const files = walkFiles(personDir);
     const media = collectMediaFiles(files);
     const videoCountByDir = new Map();
@@ -226,12 +237,13 @@ export function createLocalLibraryScanService({
         return createWork(personId, video.name, videoDir, matchingFiles, video, { identityPath: video.path });
       })
       .filter(Boolean)
-      .map((work) => linkScannedWork(personId, work));
+      .map((work) => linkWork(personId, work, options))
+      .filter(Boolean);
   }
 
-  function scanPersonDirectory(personId, personDir) {
+  function scanPersonDirectory(personId, personDir, options = {}) {
     if (pathWithinAnyRoot(personDir, singleVideoRoots)) {
-      return scanSingleVideoWorks(personId, personDir);
+      return scanSingleVideoWorks(personId, personDir, options);
     }
 
     const works = [];
@@ -241,7 +253,8 @@ export function createLocalLibraryScanService({
       const childFiles = walkFiles(childDir);
       const work = createWork(personId, path.basename(childDir), childDir, childFiles);
       if (work) {
-        works.push(linkScannedWork(personId, work));
+        const linked = linkWork(personId, work, options);
+        if (linked) works.push(linked);
       }
     }
 
@@ -254,7 +267,8 @@ export function createLocalLibraryScanService({
       });
       const work = createWork(personId, video.name, personDir, matchingFiles, video);
       if (work) {
-        works.push(linkScannedWork(personId, work));
+        const linked = linkWork(personId, work, options);
+        if (linked) works.push(linked);
       }
     }
 

@@ -1,6 +1,16 @@
 import { workInfoDetailQuery } from "./work-info-detail-query.js";
 
 const DETAIL_BATCH_SIZE = 200;
+const DETAIL_CACHE_MAX_ENTRIES = 2048;
+const DETAIL_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+function detailRowWeight(row) {
+  // Bound retained payloads, including raw metadata text, with a conservative
+  // UTF-16 estimate plus fixed row/field overhead. This is not a heap census.
+  return 64 + Object.values(row || {}).reduce((bytes, value) =>
+    bytes + 16 + (typeof value === "string" ? value.length * 2
+      : ArrayBuffer.isView(value) || value instanceof ArrayBuffer ? value.byteLength : 8), 0);
+}
 
 export function createWorkInfoService({
   displayWorkTitle,
@@ -17,6 +27,50 @@ export function createWorkInfoService({
   let workInfoCache = null;
   let workInfoDetailCache = null;
   let workInfoFacetCache = null;
+  let detailBatch = null;
+  let detailBatchCleanupScheduled = false;
+  let readScope = null;
+
+  function withReadStatus(callback) {
+    // Synchronous consumers share failed index reads only for this operation.
+    // Each child tracks its own dependencies before propagating failures up.
+    const previous = readScope;
+    const scope = { cacheable: true, failures: previous?.failures || new Map() };
+    readScope = scope;
+    try {
+      const value = callback();
+      return { value, cacheable: scope.cacheable };
+    } catch (error) {
+      scope.cacheable = false;
+      throw error;
+    } finally {
+      readScope = previous;
+      if (previous && !scope.cacheable) previous.cacheable = false;
+    }
+  }
+
+  function readCacheable() {
+    return readScope?.cacheable !== false;
+  }
+
+  function markReadFailure() {
+    if (readScope) readScope.cacheable = false;
+  }
+
+  function indexFailure(reader, stamp, owner) {
+    const cached = readScope?.failures.get(reader)?.get(stamp)?.get(owner);
+    if (cached) markReadFailure();
+    return cached;
+  }
+
+  function rememberIndexFailure(reader, stamp, owner, rows) {
+    if (!readScope) return;
+    let stamps = readScope.failures.get(reader);
+    if (!stamps) readScope.failures.set(reader, stamps = new Map());
+    let owners = stamps.get(stamp);
+    if (!owners) stamps.set(stamp, owners = new Map());
+    owners.set(owner, { rows });
+  }
 
   function firstPresentValue(...values) {
     for (const value of values) {
@@ -47,7 +101,8 @@ export function createWorkInfoService({
   function ensureWorkInfoDetailCache() {
     const stamp = getStamp();
     if (workInfoDetailCache?.stamp !== stamp) {
-      workInfoDetailCache = { stamp, rows: new Map() };
+      workInfoDetailCache = { stamp, rows: new Map(), bytes: 0 };
+      detailBatch = null;
     }
     return workInfoDetailCache;
   }
@@ -57,35 +112,99 @@ export function createWorkInfoService({
     return Number.isSafeInteger(number) && number > 0 ? String(number) : "";
   }
 
-  function prewarmDetailRows(workIds = []) {
+  function rememberDetailRow(cache, workId, row, metadataComplete = true) {
+    const bytes = detailRowWeight(row);
+    // An oversized upgrade must not evict the useful summary of this row.
+    if (bytes > DETAIL_CACHE_MAX_BYTES) return;
+    const previous = cache.rows.get(workId);
+    if (previous) {
+      cache.bytes -= previous.bytes;
+      cache.rows.delete(workId);
+    }
+    cache.rows.set(workId, { row, bytes, metadataComplete });
+    cache.bytes += bytes;
+    while (cache.rows.size > DETAIL_CACHE_MAX_ENTRIES || cache.bytes > DETAIL_CACHE_MAX_BYTES) {
+      const oldest = cache.rows.keys().next().value;
+      cache.bytes -= cache.rows.get(oldest).bytes;
+      cache.rows.delete(oldest);
+    }
+  }
+
+  function prewarmDetailRows(workIds = [], { includeMetadata = true } = {}) {
     const cache = ensureWorkInfoDetailCache();
-    const pending = [...new Set((Array.isArray(workIds) ? workIds : [])
-      .map(normalizeDetailWorkId)
-      .filter((workId) => workId && !cache.rows.has(workId)))];
-    if (!pending.length) return cache.rows;
+    return loadDetailRows(workIds, cache, true, includeMetadata);
+  }
+
+  function cachedDetailEntry(cache, workId, includeMetadata) {
+    const cached = cache.rows.get(workId);
+    if (cached && (!includeMetadata || cached.metadataComplete)) return cached;
+    const batched = detailBatch?.cache === cache ? detailBatch.entries.get(workId) : null;
+    return batched && (!includeMetadata || batched.metadataComplete) ? batched : null;
+  }
+
+  function loadDetailRows(workIds, cache, keepBatch = false, includeMetadata = true) {
+    const requested = [...new Set((Array.isArray(workIds) ? workIds : [])
+      .map(normalizeDetailWorkId).filter(Boolean))];
+    // Keep this call's complete result even when a large batch exceeds the
+    // retention budget. Oversized rows must still reach their caller intact.
+    const result = new Map();
+    const entries = new Map();
+    const pending = [];
+    for (const workId of requested) {
+      const cached = cachedDetailEntry(cache, workId, includeMetadata);
+      if (!cached) { pending.push(workId); continue; }
+      rememberDetailRow(cache, workId, cached.row, cached.metadataComplete);
+      result.set(workId, cached.row);
+      entries.set(workId, cached);
+    }
 
     for (let offset = 0; offset < pending.length; offset += DETAIL_BATCH_SIZE) {
       const batch = pending.slice(offset, offset + DETAIL_BATCH_SIZE);
       try {
         const rows = getCoreDb()
-          .prepare(workInfoDetailQuery(batch.length))
+          .prepare(workInfoDetailQuery(batch.length, { includeMetadata }))
           .all(...batch.map(Number));
-        for (const row of rows) cache.rows.set(row.work_id, row);
+        for (const row of rows) result.set(row.work_id, row);
+        for (const workId of batch) {
+          const row = result.get(workId) || null;
+          // A confirmed absent row is equally absent for both projections.
+          const metadataComplete = includeMetadata || row === null;
+          result.set(workId, row);
+          entries.set(workId, { row, metadataComplete });
+          rememberDetailRow(cache, workId, row, metadataComplete);
+        }
       } catch (error) {
         console.warn("[core-work-info-detail]", error.message);
-      }
-      for (const workId of batch) {
-        if (!cache.rows.has(workId)) cache.rows.set(workId, null);
+        markReadFailure();
+        // A transient read failure is not evidence that these records are absent.
+        for (const workId of batch) { result.set(workId, null); entries.delete(workId); }
       }
     }
 
-    return cache.rows;
+    if (keepBatch) {
+      // Presentation immediately consumes a prewarmed page synchronously. Keep
+      // that page intact even if it exceeds the persistent LRU; otherwise the
+      // following row-by-row presentation would requery every evicted record.
+      // Only one cleanup is queued, so earlier pages are not held by closures.
+      detailBatch = { cache, entries };
+      if (!detailBatchCleanupScheduled) {
+        detailBatchCleanupScheduled = true;
+        queueMicrotask(() => { detailBatch = null; detailBatchCleanupScheduled = false; });
+      }
+    }
+    return result;
   }
 
-  function detailRow(workId) {
+  function detailRow(workId, { includeMetadata = true } = {}) {
     const normalizedId = normalizeDetailWorkId(workId);
     if (!normalizedId) return null;
-    return prewarmDetailRows([normalizedId]).get(normalizedId) || null;
+    const cache = ensureWorkInfoDetailCache();
+    const cached = cachedDetailEntry(cache, normalizedId, includeMetadata);
+    if (cached) {
+      rememberDetailRow(cache, normalizedId, cached.row, cached.metadataComplete);
+      return cached.row;
+    }
+    return loadDetailRows([normalizedId], cache, false, includeMetadata).get(normalizedId) || null;
   }
 
   function rowsById() {
@@ -93,8 +212,12 @@ export function createWorkInfoService({
     if (workInfoCache?.stamp === stamp) return workInfoCache.rows;
 
     const rows = new Map();
+    let owner;
     try {
-      for (const row of getCoreDb()
+      owner = getCoreDb();
+      const failed = indexFailure("rows", stamp, owner);
+      if (failed) return failed.rows;
+      for (const row of owner
         .prepare(
           `
           SELECT
@@ -127,7 +250,10 @@ export function createWorkInfoService({
       }
     } catch (error) {
       console.warn("[core-work-info-index]", error.message);
-      if (workInfoCache?.rows) return workInfoCache.rows;
+      markReadFailure();
+      const fallback = workInfoCache?.rows || rows;
+      rememberIndexFailure("rows", stamp, owner, fallback);
+      return fallback;
     }
 
     workInfoCache = { stamp, rows };
@@ -139,8 +265,12 @@ export function createWorkInfoService({
     if (workInfoFacetCache?.stamp === stamp) return workInfoFacetCache.rows;
 
     const rows = new Map();
+    let owner;
     try {
-      for (const row of getCoreDb()
+      owner = getCoreDb();
+      const failed = indexFailure("facets", stamp, owner);
+      if (failed) return failed.rows;
+      for (const row of owner
         .prepare(
           `
           SELECT
@@ -164,7 +294,10 @@ export function createWorkInfoService({
       }
     } catch (error) {
       console.warn("[core-work-info-facets]", error.message);
-      if (workInfoFacetCache?.rows) return workInfoFacetCache.rows;
+      markReadFailure();
+      const fallback = workInfoFacetCache?.rows || rows;
+      rememberIndexFailure("facets", stamp, owner, fallback);
+      return fallback;
     }
 
     workInfoFacetCache = { stamp, rows };
@@ -263,18 +396,24 @@ export function createWorkInfoService({
   }
 
   function invalidate() {
+    readScope?.failures.clear();
     workInfoCache = null;
     workInfoDetailCache = null;
     workInfoFacetCache = null;
+    detailBatch = null;
   }
 
   function setRowsCache(value) {
+    readScope?.failures.clear();
     workInfoCache = value;
     workInfoDetailCache = null;
     workInfoFacetCache = null;
+    detailBatch = null;
   }
 
   return {
+    withReadStatus,
+    readCacheable,
     entityLinks,
     firstPresentNumber,
     firstPresentText,

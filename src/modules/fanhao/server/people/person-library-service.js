@@ -1,4 +1,5 @@
 import path from "node:path";
+import { sameLocalVideo } from "../library/local-video-identity.js";
 
 function recalculateLibraryTotals(library) {
   library.scannedAt = new Date().toISOString();
@@ -176,19 +177,33 @@ export function createPersonLibraryService({
     };
 
     const declaredPaths = [...(person.sourcePaths || []), person.relativePath].filter(Boolean);
-    for (const name of declaredPaths.length ? [] : actorProfileSearchNames(person)) {
+    const missingPaths = [];
+    for (const sourcePath of declaredPaths) {
+      const absolutePath = sourcePathToAbsolute(sourcePath);
+      const stat = absolutePath ? safeStat(absolutePath) : null;
+      if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
+      else if (absolutePath) missingPaths.push(absolutePath);
+    }
+    const previousVideos = (person.works || [])
+      .map((workId) => getLibrary().worksById.get(String(workId)))
+      .filter(Boolean)
+      .filter((work) => missingPaths.some((missing) => {
+        const workPath = work.relativePath ? sourcePathToAbsolute(work.relativePath) : "";
+        return workPath && pathWithinRoot(workPath, missing);
+      }))
+      .flatMap((work) => work.videos || []);
+    for (const name of !declaredPaths.length || previousVideos.length ? actorProfileSearchNames(person) : []) {
       if (!name || /[\\/]/.test(name)) continue;
       for (const rootPath of libraryRoots) {
         const absolutePath = path.join(rootPath, name);
         const stat = safeStat(absolutePath);
-        if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
+        if (!stat?.isDirectory() || seen.has(normalizeSourcePath(relativeFromRoot(absolutePath)))) continue;
+        if (declaredPaths.length) {
+          const scanned = scanPersonDirectory(person.id, absolutePath, { linkWorks: false });
+          if (!scanned.some((work) => (work.videos || []).some((video) => previousVideos.some((stored) => sameLocalVideo(video, stored))))) continue;
+        }
+        addSourcePath(relativeFromRoot(absolutePath));
       }
-    }
-
-    for (const sourcePath of [...(person.sourcePaths || []), person.relativePath]) {
-      const absolutePath = sourcePathToAbsolute(sourcePath);
-      const stat = absolutePath ? safeStat(absolutePath) : null;
-      if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
     }
 
     return sourcePaths;
@@ -271,17 +286,40 @@ export function createPersonLibraryService({
     }
 
     const works = [];
-    if (hasExplicitSourcePaths) bindSourcePaths(person.id, selectedSourcePaths);
+    const bindingWarnings = [];
+    const preservedWorkIds = new Set();
+    const knownKeys = new Set(knownSourcePaths.map(normalizeSourcePath));
+    if (hasExplicitSourcePaths || selectedSourcePaths.some((sourcePath) => !knownKeys.has(normalizeSourcePath(sourcePath)))) {
+      bindSourcePaths(person.id, selectedSourcePaths);
+    }
     const existingSourcePaths = [];
     for (const sourcePath of selectedSourcePaths) {
       const absolutePath = sourcePathToAbsolute(sourcePath);
       const stat = safeStat(absolutePath);
       if (!stat?.isDirectory()) continue;
       existingSourcePaths.push(relativeFromRoot(absolutePath));
-      works.push(...scanPersonDirectory(person.id, absolutePath));
+      works.push(...scanPersonDirectory(person.id, absolutePath, {
+        onBindingError: (error, work) => {
+          const candidateWorkIds = error.candidateWorkIds || [];
+          for (const workId of candidateWorkIds) preservedWorkIds.add(String(workId));
+          bindingWarnings.push({
+            code: error.code, title: work.title, localPath: error.localPath,
+            candidateWorkIds, message: error.message
+          });
+        }
+      }));
+    }
+
+    for (const work of works) {
+      const previousWork = previousWorksById.get(String(work.id));
+      if (previousWork?.infoSummary) work.infoSummary = { ...previousWork.infoSummary };
+      // Automatic JavDB synchronization must fail before replacing the public
+      // library snapshot if a local-file write could not be persisted.
+      if (options.failOnPersistenceError) libraryIndexService.replaceLocalFilesForWork(work);
     }
 
     for (const oldWork of previousWorks) {
+      if (preservedWorkIds.has(String(oldWork.id))) continue;
       for (const file of [...(oldWork.videos || []), ...(oldWork.images || []), ...(oldWork.infos || [])]) {
         library.filesById.delete(file.id);
       }
@@ -289,21 +327,22 @@ export function createPersonLibraryService({
     }
 
     for (const work of works) {
-      const previousWork = previousWorksById.get(String(work.id));
-      if (previousWork?.infoSummary) {
-        work.infoSummary = { ...previousWork.infoSummary };
-      }
       libraryIndexService.registerWorkFiles(library, work);
       library.worksById.set(work.id, work);
+      if (options.failOnPersistenceError) continue;
       try {
         libraryIndexService.replaceLocalFilesForWork(work);
       } catch (error) {
         warn("[core-local-files]", error.message);
       }
     }
-    const reconciliation = libraryIndexService.reconcilePersonLocalWorks(previousWorks, works);
+    const scannedWorkIds = new Set(works.map((work) => String(work.id)));
+    const nextWorks = [...works, ...previousWorks.filter((work) =>
+      preservedWorkIds.has(String(work.id)) && !scannedWorkIds.has(String(work.id))
+    )];
+    const reconciliation = libraryIndexService.reconcilePersonLocalWorks(previousWorks, nextWorks);
 
-    const nextPerson = personRecordFromWorks(person, existingSourcePaths, works, compareNaturalTitle);
+    const nextPerson = personRecordFromWorks(person, existingSourcePaths, nextWorks, compareNaturalTitle);
     const personIndex = library.people.findIndex((item) => item.id === person.id);
     if (personIndex >= 0) library.people[personIndex] = nextPerson;
     library.peopleById.set(person.id, nextPerson);
@@ -312,6 +351,7 @@ export function createPersonLibraryService({
     libraryIndexService.invalidateDerivedCaches?.();
     return {
       person: nextPerson,
+      bindingWarnings,
       removedLocalWorkCount: reconciliation.deletedLocalWorkIds.length,
       removedWorkCount: reconciliation.deletedWorkIds.length,
       removedWorkIds: reconciliation.deletedWorkIds

@@ -5,6 +5,8 @@ import { escapeLike } from "./helpers.js";
 export const MUSIC_PHONETIC_INDEX_VERSION = "1";
 const SEARCH_MATCH_CACHE_LIMIT = 4096;
 const searchMatchPhoneticCache = new Map();
+const REQUEST_MATCH_CACHE_LIMIT = 256;
+const REQUEST_MATCH_CACHE_TEXT_LIMIT = 64 * 1024;
 
 export function musicSearchIndexKind(value) {
   if (canUsePhoneticSearch(value)) return "phonetic";
@@ -171,16 +173,39 @@ export function phoneticSearchDocument(value) {
 }
 
 
-export function musicSearchValueMatch(value, query) {
-  const source = String(value || "");
+export function createMusicSearchMatchContext(query) {
+  // This context belongs to one response. Repeated original field text can
+  // share pure match work while every caller receives its own highlight array.
   const needle = normalizeSearchText(query).toLocaleLowerCase();
-  if (!source || !needle) return { score: 0, highlights: [] };
-  const normalizedSource = normalizeSearchText(source).toLocaleLowerCase();
-  const directRanges = directSearchRanges(source, needle);
-  const sourcePhonetic = phoneticUnits(source);
   const queryPhonetic = phoneticUnits(needle);
+  return {
+    valueMatches: new Map(),
+    valueMatchUnits: 0,
+    needle,
+    queryPhonetic,
+    directTerms: [...new Set([needle, ...(needle.match(/[\p{L}\p{N}]+/gu) || [])].filter((item) => item.length >= 2))],
+    queryVariants: [...new Set([
+      compactPhoneticText(needle),
+      queryPhonetic.compact,
+      queryPhonetic.initials
+    ].filter((item) => item.length >= 2))]
+  };
+}
+
+
+export function musicSearchValueMatch(value, query, context = null) {
+  const source = String(value || "");
+  const needle = context ? context.needle : normalizeSearchText(query).toLocaleLowerCase();
+  if (!source || !needle) return { score: 0, highlights: [] };
+  const cache = context?.valueMatches;
+  const cached = cache?.get(source);
+  if (cached) return { score: cached.score, highlights: cached.highlights.slice() };
+  const normalizedSource = normalizeSearchText(source).toLocaleLowerCase();
+  const directRanges = directSearchRanges(source, needle, context?.directTerms);
+  const sourcePhonetic = phoneticUnits(source);
+  const queryPhonetic = context?.queryPhonetic || phoneticUnits(needle);
   const phoneticRanges = [];
-  const queryVariants = [...new Set([
+  const queryVariants = context?.queryVariants || [...new Set([
     compactPhoneticText(needle),
     queryPhonetic.compact,
     queryPhonetic.initials
@@ -199,10 +224,18 @@ export function musicSearchValueMatch(value, query) {
   else if (sourcePhonetic.initials.startsWith(queryPhonetic.compact)) score = 740;
   else if (directRanges.length) score = 680;
   else if (phoneticRanges.length) score = 620;
-  return {
+  const result = {
     score,
     highlights: ranges.map(([start, end]) => Array.from(source).slice(start, end).join("")).filter(Boolean)
   };
+  if (cache && cache.size < REQUEST_MATCH_CACHE_LIMIT) {
+    const units = source.length + result.highlights.reduce((sum, text) => sum + text.length, 0);
+    if (context.valueMatchUnits + units <= REQUEST_MATCH_CACHE_TEXT_LIMIT) {
+      cache.set(source, { score, highlights: result.highlights.slice() });
+      context.valueMatchUnits += units;
+    }
+  }
+  return result;
 }
 
 
@@ -383,10 +416,10 @@ function appendPhoneticVariant(target, tokens) {
 }
 
 
-function directSearchRanges(source, query) {
+function directSearchRanges(source, query, contextTerms) {
   const characters = Array.from(source);
   const lower = characters.map((character) => character.toLocaleLowerCase()).join("");
-  const terms = [...new Set([query, ...(query.match(/[\p{L}\p{N}]+/gu) || [])].filter((item) => item.length >= 2))];
+  const terms = contextTerms || [...new Set([query, ...(query.match(/[\p{L}\p{N}]+/gu) || [])].filter((item) => item.length >= 2))];
   const ranges = [];
   for (const term of terms) {
     let cursor = 0;

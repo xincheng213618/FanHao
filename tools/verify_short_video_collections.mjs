@@ -7,7 +7,14 @@ import { DatabaseSync } from "node:sqlite";
 
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
 import { ensureShortVideoCollectionSchema } from "../src/modules/short-videos/server/schema.js";
-import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
+import { createShortVideoStore as createCurrentShortVideoStore } from "../src/modules/short-videos/server/store.js";
+
+const args = process.argv.slice(2);
+assert(args.every((arg) => arg === "--legacy-page-total"), "known arguments");
+const createLegacyCountStore = await legacyCountStoreFactory();
+const createShortVideoStore = args.includes("--legacy-page-total")
+  ? createLegacyCountStore
+  : createCurrentShortVideoStore;
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-collections-"));
 const dbPath = path.join(tempRoot, "short-videos.sqlite");
@@ -62,6 +69,7 @@ function verifyStoreContract() {
     db.close();
   }
   verifyCollectionSummaryQueryEquivalence();
+  verifyCollectionPageCountReuse();
 
   assert.throws(() => store.createCollection({ name: "  " }), statusError(400));
   assert.throws(() => store.createCollection({ name: "x".repeat(41) }), statusError(400));
@@ -148,6 +156,139 @@ function verifyCollectionSummaryQueryEquivalence() {
   assertCollectionSummaryQueriesEquivalent("remove membership");
   store.deleteCollection(first.id);
   assertCollectionSummaryQueriesEquivalent("delete collection");
+}
+
+async function legacyCountStoreFactory() {
+  const root = new URL("../src/modules/short-videos/server/", import.meta.url);
+  const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+  const absoluteImports = (source) => source.replace(/from\s+"(\.{1,2}\/[^\"]+)"/g,
+    (_match, relative) => `from ${JSON.stringify(new URL(relative, root).href)}`);
+  const repository = fs.readFileSync(new URL("collections-repository.js", root), "utf8")
+    .replace("const total = Number(collection.item_count || 0);", `const total = Number(db.prepare(\`
+        SELECT COUNT(*) AS count
+        FROM short_video_collection_items item
+        JOIN short_video_catalog video ON video.id = item.video_id
+        WHERE item.collection_id = ?
+      \`).get(id)?.count || 0);`);
+  const repositoryUrl = dataUrl(absoluteImports(repository));
+  const source = absoluteImports(fs.readFileSync(new URL("store.js", root), "utf8"))
+    .replace(JSON.stringify(new URL("collections-repository.js", root).href), JSON.stringify(repositoryUrl));
+  return (await import(dataUrl(source))).createShortVideoStore;
+}
+
+function countedCollectionPage(work) {
+  const prepare = DatabaseSync.prototype.prepare;
+  let reads = 0;
+  DatabaseSync.prototype.prepare = function(sql) {
+    const statement = prepare.call(this, sql);
+    return new Proxy(statement, {
+      get(target, key) {
+        const member = target[key];
+        if ((key === "get" || key === "all") && typeof member === "function") {
+          return (...values) => {
+            reads += 1;
+            return member.apply(target, values);
+          };
+        }
+        return typeof member === "function" ? member.bind(target) : member;
+      }
+    });
+  };
+  try {
+    return { page: work(), reads };
+  } finally {
+    DatabaseSync.prototype.prepare = prepare;
+  }
+}
+
+function verifyCollectionPageCountReuse() {
+  const mixed = store.createCollection({ name: "计数混合清单" }).collection;
+  const empty = store.createCollection({ name: "计数空清单" }).collection;
+  const orphanOnly = store.createCollection({ name: "计数孤儿清单" }).collection;
+  const ids = Array.from({ length: 24 }, (_item, index) => `count-video-${String(index).padStart(2, "0")}`);
+  const db = openFixtureDatabase(dbPath);
+  const legacy = createLegacyCountStore({ dbPath, coverDbPath: path.join(tempRoot, "short-video-covers.sqlite"),
+    roots: [], skipStartupMaintenance: true, readOnly: true });
+  try {
+    const video = db.prepare(`
+      INSERT INTO short_videos (id, aweme_id, source_path, title, visibility, status, media_type, metadata_json)
+      VALUES (?, ?, '', ?, ?, ?, ?, ?)
+    `);
+    const membership = db.prepare(`
+      INSERT INTO short_video_collection_items (collection_id, video_id, added_at) VALUES (?, ?, ?)
+    `);
+    db.exec("BEGIN IMMEDIATE");
+    for (const [index, id] of ids.entries()) {
+      const gallery = index % 3 === 0;
+      video.run(id, id, `Count ${index}`, index % 2 ? "pending" : "local_only",
+        index % 4 ? "normal" : "missing", gallery ? "gallery" : "video",
+        gallery ? '{"fanhaoMedia":{"type":"gallery","galleryCount":1,"galleryItems":["image"]}}' : "{}");
+      membership.run(mixed.id, id, `2026-02-${String(index % 4 + 1).padStart(2, "0")}`);
+    }
+    db.prepare("INSERT INTO short_video_users (id, nickname) VALUES ('count-author', '计数作者')").run();
+    db.prepare("UPDATE short_videos SET owner_user_id = 'count-author' WHERE id = ?").run(ids[0]);
+    db.prepare("INSERT INTO short_video_stats (video_id, digg_count) VALUES (?, 123)").run(ids[0]);
+    for (const action of ["like", "collect", "dislike"]) {
+      db.prepare(`INSERT INTO short_video_user_actions (local_user_id, video_id, action_type)
+        VALUES ('local:self', ?, ?)`).run(ids[0], action);
+    }
+    db.prepare(`INSERT INTO short_video_watch_history (local_user_id, video_id, last_watched_at)
+      VALUES ('local:self', ?, '2026')`).run(ids[0]);
+    for (const type of ["video", "native_cover", "ffmpeg_cover", "cover", "music"]) {
+      db.prepare("INSERT INTO short_video_assets (id, video_id, asset_type) VALUES (?, ?, ?)")
+        .run(`count-asset-${type}`, ids[0], type);
+    }
+    db.prepare("INSERT OR REPLACE INTO short_video_sounds (video_id, sound_key) VALUES (?, 'count-sound')").run(ids[0]);
+    db.exec("COMMIT");
+    db.exec("PRAGMA foreign_keys = OFF");
+    membership.run(mixed.id, "count-orphan", "2099");
+    membership.run(orphanOnly.id, "count-orphan", "2099");
+    db.exec("PRAGMA foreign_keys = ON");
+
+    // Compare actual store responses with only the old total query restored.
+    // The page, mapper, cursor and transaction code are shared production code.
+    for (const collection of [mixed, empty, orphanOnly]) {
+      for (const limit of [1, 7, 120]) for (const offset of [0, 2, 22, 30]) {
+        const url = new URL(`http://fixture/collection?limit=${limit}&offset=${offset}`);
+        const expected = legacy.listCollectionVideos(collection.id, url);
+        const actual = store.listCollectionVideos(collection.id, url);
+        assert.deepEqual(actual, expected, "collection count reuse must preserve the full offset response");
+        assert.equal(JSON.stringify(actual), JSON.stringify(expected), "offset JSON order must remain unchanged");
+        assert.equal(actual.total, collection.id === mixed.id ? 24 : 0, "pending/gallery/missing records count; orphan memberships do not");
+        if (expected.nextCursor) {
+          const next = new URL("http://fixture/collection?offset=999999");
+          next.searchParams.set("limit", String(limit));
+          next.searchParams.set("cursor", expected.nextCursor);
+          const nextExpected = legacy.listCollectionVideos(collection.id, next);
+          const nextActual = store.listCollectionVideos(collection.id, next);
+          assert.deepEqual(nextActual, nextExpected, "collection count reuse must preserve cursor continuation");
+          assert.equal(JSON.stringify(nextActual), JSON.stringify(nextExpected), "cursor JSON order must remain unchanged");
+        }
+      }
+    }
+    const pageUrl = new URL("http://fixture/collection?limit=7");
+    legacy.listCollectionVideos(mixed.id, pageUrl);
+    const oldCount = countedCollectionPage(() => legacy.listCollectionVideos(mixed.id, pageUrl));
+    assert.equal(oldCount.reads, 4, "legacy page count control must perform four reads");
+    for (const collection of [mixed, empty, orphanOnly]) {
+      const actual = countedCollectionPage(() => store.listCollectionVideos(collection.id, pageUrl));
+      assert.equal(actual.reads, 3, "collection page must use three reads without a second total aggregate");
+    }
+  } finally {
+    legacy.close();
+    if (db.isTransaction) db.exec("ROLLBACK");
+    db.close();
+    for (const collection of [mixed, empty, orphanOnly]) store.deleteCollection(collection.id);
+    const cleanup = openFixtureDatabase(dbPath);
+    try {
+      const placeholders = ids.map(() => "?").join(", ");
+      for (const [table, key] of [["short_video_stats", "video_id"], ["short_video_user_actions", "video_id"],
+        ["short_video_watch_history", "video_id"], ["short_video_assets", "video_id"], ["short_video_sounds", "video_id"], ["short_videos", "id"]]) {
+        cleanup.prepare(`DELETE FROM ${table} WHERE ${key} IN (${placeholders})`).run(...ids);
+      }
+      cleanup.prepare("DELETE FROM short_video_users WHERE id = 'count-author'").run();
+    } finally { cleanup.close(); }
+  }
 }
 
 function assertCollectionSummaryQueriesEquivalent(stage) {

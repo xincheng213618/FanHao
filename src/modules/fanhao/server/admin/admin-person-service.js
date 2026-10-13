@@ -6,6 +6,7 @@ export function createAdminPersonService({
   pagedWorksPayload,
   personFolderMutationService,
   personLibraryService,
+  personOrganizationService,
   publicPerson,
   resolveLibraryPersonByPublicId,
   sortWorkList
@@ -25,8 +26,10 @@ export function createAdminPersonService({
     const person = resolveLibraryPersonByPublicId(body.personId);
     if (!person) return null;
 
+    personOrganizationService?.assertIdle(person.id);
     const refreshResult = personLibraryService.refreshPerson(person.id, {
-      sourcePaths: Array.isArray(body.sourcePaths) ? body.sourcePaths : []
+      sourcePaths: Array.isArray(body.sourcePaths) ? body.sourcePaths : [],
+      failOnPersistenceError: true
     });
     const nextPerson = refreshResult.person;
     const library = getLibrary();
@@ -43,12 +46,14 @@ export function createAdminPersonService({
       removedLocalWorkCount: refreshResult.removedLocalWorkCount,
       removedWorkCount: refreshResult.removedWorkCount,
       removedWorkIds: refreshResult.removedWorkIds,
+      bindingWarnings: refreshResult.bindingWarnings,
       person: publicPerson(nextPerson),
       ...pagedWorksPayload(works, url, {})
     };
   }
 
   function mutatePersonFolderPayload(body = {}, mode = "rename") {
+    personOrganizationService?.assertIdle(body.personId);
     const result = mode === "relink"
       ? personFolderMutationService.relinkPersonFolder(body)
       : personFolderMutationService.renamePersonFolder(body);

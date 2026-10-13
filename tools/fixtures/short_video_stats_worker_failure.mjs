@@ -16,7 +16,10 @@ parentPort?.on("message", (message) => {
       });
       return;
     }
-    parentPort?.postMessage({ ok: true, id: message.id, data: { stats: null, videos: [] } });
+    const revision = workerData.valueBuffer
+      ? { revision: Atomics.load(new Int32Array(workerData.valueBuffer), 0) }
+      : {};
+    parentPort?.postMessage({ ok: true, id: message.id, data: { ...revision, stats: null, videos: [] } });
     return;
   }
   if (message?.type !== "stats") return;

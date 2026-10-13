@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { parseCoreInfoCandidates, applyParsedInfoToCoreWork } from "../../../../../lib/core-info-metadata.js";
+import { storedVideosMatch } from "./local-video-identity.js";
 
 export function createCoreLibrarySyncService({
   fileBase,
@@ -56,6 +57,8 @@ export function createCoreLibrarySyncService({
       + `localPath=${localPath || "unknown"} candidateWorkIds=${candidateWorkIds || "none"}: ${reason}`
     );
     error.code = "AMBIGUOUS_LOCAL_WORK_BINDING";
+    error.candidateWorkIds = candidates.map((candidate) => candidate.workId);
+    error.localPath = localPath;
     return error;
   }
 
@@ -117,6 +120,16 @@ export function createCoreLibrarySyncService({
     }
 
     if (candidates.length === 1) return candidates[0].workId;
+
+    // Folder names and drive letters can change while the indexed videos retain
+    // their identity. Require every scanned video to match one unique candidate.
+    const storedVideos = db.prepare(
+      "SELECT name, size, modified_at FROM local_files WHERE work_id = ? AND file_type = 'video'"
+    );
+    const videoCandidates = candidates.filter((candidate) =>
+      storedVideosMatch(work.videos || [], storedVideos.all(Number(candidate.workId)))
+    );
+    if (videoCandidates.length === 1) return videoCandidates[0].workId;
 
     const missingPathCandidates = candidates.filter((candidate) =>
       candidate.localWorks.length === 1 && !localPathExists(candidate.localWorks[0].localPath)

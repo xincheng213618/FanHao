@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
-import { appFunction, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
@@ -46,7 +46,7 @@ function harness(input = source, { count = 12, limit = 36 } = {}) {
   };
   document.visibilityState = "visible";
   const plugin = { async play(value) { calls.bridge.push(plain(value)); return { opened: true }; } };
-  const context = vm.createContext({ document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
+  const context = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "channel", currentViewParams: { mode: "anime" }, viewRenderToken: 0, activeViewController: null,
     performance: { now: () => clock }, window: { addEventListener() {}, innerHeight: 844,
       setTimeout(fn, delay) { const id = ++timer; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },

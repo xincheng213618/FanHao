@@ -1,4 +1,4 @@
-export function workInfoDetailQuery(parameterCount = 1) {
+export function workInfoDetailQuery(parameterCount = 1, { includeMetadata = true } = {}) {
   const count = Math.max(1, Math.min(400, Math.trunc(Number(parameterCount) || 1)));
   const placeholders = Array.from({ length: count }, () => "?").join(", ");
   return `
@@ -55,8 +55,8 @@ export function workInfoDetailQuery(parameterCount = 1) {
       maker_ref.url AS maker_url,
       label_ref.url AS label_url,
       series_ref.url AS series_url,
-      w.fields_json,
-      w.raw_text,
+      ${includeMetadata ? "w.fields_json" : "NULL AS fields_json"},
+      ${includeMetadata ? "w.raw_text" : "NULL AS raw_text"},
       0 AS raw_truncated,
       w.status,
       w.error,

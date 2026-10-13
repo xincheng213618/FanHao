@@ -22,19 +22,23 @@ export function createShortVideoListStatsService({ store, catalogWorker, ensureC
       }
     }
 
+    ensureCatalogSchema?.();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const statsPromise = catalogWorker.queryStats(filter, {
         catalogStamp: store.catalogStamp(),
         signal: options.signal
       });
+      // List construction now also awaits a worker. Observe a stats rejection
+      // immediately while retaining it for the stale-generation retry below.
+      void statsPromise.catch(() => undefined);
       const listParams = new URLSearchParams(params);
       listParams.set("stats", "0");
       let data;
       try {
-        data = store.listVideos({ searchParams: listParams });
+        data = await catalogWorker.query(workerListUrl({ searchParams: listParams }), "list");
       } catch (error) {
         void statsPromise.catch(() => undefined);
-        throw error;
+        throw listWorkerError(error);
       }
       try {
         data.stats = await statsPromise;

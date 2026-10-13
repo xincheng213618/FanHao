@@ -2,7 +2,7 @@
 title: 数据与请求流
 description: 从客户端请求追踪到模块存储、worker、下载管理器和媒体响应。
 status: maintained
-verified_at: 2026-10-04
+verified_at: 2026-10-11
 sources:
   - src/modules/media/server/gallery-metadata-service.js
   - src/modules/short-videos/server/navigation-queries.js
@@ -29,6 +29,9 @@ sources:
   - src/modules/short-videos/server/query-contract.js
   - src/modules/short-videos/server/list-page-queries.js
   - src/modules/short-videos/server/download-manager-sync-service.js
+  - src/modules/short-videos/server/download-manager-change-journal.js
+  - src/modules/short-videos/download-manager/manager_core/library_sync.py
+  - tools/verify_short_video_incremental_sync.mjs
   - src/modules/short-videos/server/watch-write-service.js
   - src/modules/short-videos/server/watch-write-worker.js
   - src/modules/short-videos/download-manager/manager_core/database.py
@@ -159,7 +162,7 @@ module-registry.js：依次调用模块 API 路由
 
 短视频正数画质区间直接比较像素列，使快速列表的计数和分页使用索引范围查找；未知画质保留空值和非正值语义。画质与显式媒体类型独立相交，普通列表、观看历史和前后切换遵循相同筛选约束。前后切换和批量预取按列表各排序键的方向逐项比较，保留 ID 降序的并列规则，并沿用对应列表的空值和未知值规则；非空字段的发布时间倒序查询仍使用元组范围查找。
 
-`download-manager-sync-service.js` 根据来源数据库状态决定是否启动 `sync-worker.js`。同步改变展示目录后，运行时通过回调处理目录缓存失效；它不是让每次列表请求直接读取下载管理器 HTTP 接口。
+`download-manager-sync-service.js` 默认每分钟检查下载器的事务变更日志，每批处理最多 500 条，只查询受影响的作品、关系和作者；目标数据与持久游标一起提交。首次迁移分批对齐旧数据，无变化时只读日志头和游标；目录发生变化后由回调使缓存失效。迁移、删除和重试语义见[短视频增量同步](./short-video-sync.md)。
 
 下载管理器的作者列表在一个短 WAL 读事务内建立作品汇总、筛选、计数、分页并计算刷新候选，避免并发更新使昵称、作品数和刷新设置来自不同快照。请求完成或失败都会关闭连接；下一请求重新读取当前状态，翻页过程仍不冻结整个资料库。
 
@@ -176,7 +179,7 @@ module-registry.js：依次调用模块 API 路由
 
 短视频观看请求由运行时委托 `watch-write-service.js`，worker 执行存储写入或查询回执。请求排队、SQLite 忙等待、worker 超时和数据库提交不是同一状态；不得用延长一个超时掩盖所有失败。
 
-列表缓存和临时观看覆盖服务于响应速度，SQLite 状态仍需单独核实。对写入失败的验证应覆盖实际回执与重试结果，而不只是检查界面是否变色。
+列表缓存和临时观看覆盖服务于响应速度，SQLite 状态仍需单独核实。对写入失败的验证应覆盖实际回执与重试结果，而不只是检查界面是否变色。阅读列表、观看历史、搜索及观看统计的查询与计算复用见[列表、搜索与统计](./list-queries.md)。
 
 番号核心库的部分缓存采用表数据戳，依赖集合在 `cache-contracts.js` 声明。修改写入路径时，需要检查受影响表和缓存失效调用；重启进程后“恢复正常”并不能证明失效契约正确。
 
@@ -210,7 +213,7 @@ module-registry.js：依次调用模块 API 路由
 
 媒体 ID 查找随索引或数组替换重建映射。相册映射由扫描索引的所有者维护，加载新快照、重扫、失效或相册服务成功停止时释放；同 ID 保留首项，记录仍按每次请求构造响应。未注入查找能力的相册服务沿用数组扫描，保留自定义数组原位变更行为。两类查找均保留原记录引用，来源、路径、归档签名及封面数据库校验照常执行。
 
-Web 与 Android 图库的普通平铺列表及 Web 电视剧书架在同一筛选、布局和顺序下翻页时保留已有卡片、图片节点、封面 observer 和焦点，仅追加新 ID 或更新内容变化的卡片；Android 影视内联搜索按钮也保留焦点。加载和错误局部更新控件；重排、缺少稳定 ID、分组或 Android 瀑布流列数变化时仍重建列表。两端按原始偏移推进，并在列表版本变化后补齐已显示范围；影视版本按相关元数据表记录，独立视频封面缓存写入不触发补齐，旧库及契约损坏时回退保守检查。协议和失败边界见[图库列表与分页](./gallery-lists.md)。
+Web 与 Android 图库的普通平铺列表、Web 电视剧与西方人物书架在同一筛选、布局和顺序下翻页时保留已有卡片、图片节点、封面 observer 和焦点，仅追加新 ID 或更新内容变化的卡片；Android 影视内联搜索按钮也保留焦点。加载和错误局部更新控件；重排、缺少稳定 ID、分组或 Android 瀑布流列数变化时仍重建列表。两端按原始偏移推进，列表版本变化后补齐已显示范围；影视版本按相关元数据表记录，独立视频封面缓存写入不触发补齐，旧库及契约损坏时回退保守检查。服务端短期计算缓存和 Android 聚合账号归属见[图库列表与分页](./gallery-lists.md)。
 
 支持相应 CSS 的浏览器在影视海报模式下延后屏幕外文字区域的布局。文字区域沿用现有截断行数，固定为 91px，窄屏为 111.2px，避免同一节点切换屏宽时沿用旧高度；修改文字行数或字号时须同步核对占位。海报比例、封面加载、按钮焦点和列表模式保持原有行为；此优化减少布局开销，不减少 DOM 创建。
 
@@ -220,7 +223,7 @@ Web 阅读器的相册、漫画章节和媒体导航共用请求所有者；换�
 
 音乐列表与单曲各自核对请求归属；导航、筛选和关闭详情撤销旧请求与搜索定时器，但保留当前歌曲、歌词、播放队列和 Audio。旁栏的迟到歌单不能覆盖新结果；上次歌曲恢复仅在原始列表意图仍有效且没有新选歌时启动。单曲详情后的背景目录加载不恢复旧歌曲，旧请求的错误、结束及后续导航也不能重新打开详情页。
 
-Web 搜索分页以合并后的优先音频版本刷新列表，不直接追加原始记录；下一页仍使用原始记录数作为 offset。跨页发现同歌曲的更优格式时更新可见版本，同时保留滚动位置、当前播放来源、歌词和播放器节点。
+Web 搜索分页以合并后的优先音频版本刷新列表，不直接追加原始记录；下一页仍使用原始记录数作为 offset。跨页发现同歌曲的更优格式时更新可见版本，同时保留滚动位置、当前播放来源、歌词和播放器节点。联想的请求内关联去重与有效曲目的歌词分页见[音乐搜索](./music-search.md)。
 
 Android 音乐的普通书库与智能歌单翻页保留旧行和迷你播放器，只追加新曲目；同 ID 的返回记录更新已有行、列表和队列，原始记录数继续决定服务器 offset。分组搜索、艺人与专辑列表保持完整重绘。列表代次、当前曲目或播放状态变化时才更新歌曲行的播放标记，进度事件继续刷新时间和进度控件。
 

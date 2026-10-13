@@ -147,6 +147,7 @@ export function createMediaBlobWorkerClient({
   return {
     actorAvatar: (personId, version = "") => request("actorAvatar", { personId, version }),
     actorAvatarVersion: (personId, version) => request("actorAvatarVersion", { personId, version }),
+    cachedActorAvatarVersion: (personId, version, cacheToken = "") => request("cachedActorAvatarVersion", { personId, version, cacheToken }),
     cachedRemoteUrls: (urls) => request("cachedRemoteUrls", { urls }),
     start, beginStop, stop: close, close,
     diagnostics: () => ({ active: Number(Boolean(active)), queued: queue.length, payloadBytes, capacity: maxRequests, payloadMaxBytes: maxBytes, accepting, workerOwned: Boolean(owner), workerClosing: Boolean(owner?.closing) }),
@@ -172,7 +173,7 @@ function payloadSize(action, payload) {
     if (!Array.isArray(payload.urls)) throw new TypeError("media blob URLs must be an array");
     return payload.urls.reduce((sum, url) => sum + Buffer.byteLength(String(url || "")) + 16, 64);
   }
-  return 64 + Buffer.byteLength(String(payload.url || payload.version || ""));
+  return 64 + Buffer.byteLength(String(payload.url || payload.version || "")) + Buffer.byteLength(String(payload.cacheToken || ""));
 }
 function snapshotPayload(action, payload) {
   if (action === "upsertRemote") {
@@ -184,6 +185,7 @@ function snapshotPayload(action, payload) {
   if (action === "remoteImage") return { url: String(payload.url || "") };
   if (action === "coreImage") return { imageId: Number(payload.imageId) };
   if (action === "workCover") return { workId: Number(payload.workId) };
+  if (action === "cachedActorAvatarVersion") return { personId: Number(payload.personId), version: String(payload.version || ""), cacheToken: String(payload.cacheToken || "") };
   return { personId: Number(payload.personId), version: String(payload.version || "") };
 }
 function workerMessageError(message) {

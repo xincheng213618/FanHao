@@ -26,9 +26,23 @@ function readImageDimensions(filePath) {
   let dimensions = null;
   try {
     handle = fs.openSync(filePath, "r");
-    const buffer = Buffer.allocUnsafe(Math.min(stat.size, 64 * 1024));
-    const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
-    dimensions = parseImageDimensions(buffer.subarray(0, bytesRead));
+    const limit = Math.min(stat.size, 64 * 1024);
+    let buffer = Buffer.allocUnsafe(Math.min(limit, 4096));
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = fs.readSync(handle, buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (!count) break;
+      bytesRead += count;
+      if (bytesRead < buffer.length) continue;
+      dimensions = parseImageDimensions(buffer);
+      // Fixed headers and most JPEGs fit in the first block. Only JPEG can
+      // place its dimensions later; retain the existing 64 KiB upper bound.
+      if (dimensions || buffer.length === limit || buffer[0] !== 0xff || buffer[1] !== 0xd8) break;
+      const extended = Buffer.allocUnsafe(limit);
+      buffer.copy(extended);
+      buffer = extended;
+    }
+    if (!dimensions) dimensions = parseImageDimensions(buffer.subarray(0, bytesRead));
   } catch {
     dimensions = null;
   } finally {
@@ -237,7 +251,8 @@ export function createMangaService({
   normalizeExt,
   notFound,
   safeStat,
-  serveArchiveMemberImage
+  serveArchiveMemberImage,
+  serveWholeFile
 }) {
   const database = createMangaDatabaseReader({ dbPath: databasePath });
   const resolvedDatabasePath = path.resolve(databasePath || path.join(root, "manga.sqlite"));
@@ -1407,7 +1422,7 @@ export function createMangaService({
     };
   }
 
-  function findChapter(cacheDir, requestedIndex) {
+  function findChapter(cacheDir, requestedIndex, downloadContext = null) {
     const dbChapter = database.chapter(databaseKey(cacheDir), requestedIndex);
     if (dbChapter) {
       return {
@@ -1417,9 +1432,21 @@ export function createMangaService({
         fromDatabase: true
       };
     }
+    if (downloadContext?.chapters) return downloadContext.chapters.get(Number(requestedIndex)) || null;
     const detail = readJsonFile(path.join(cacheDir, "manifest.json"), {});
     const chapters = Array.isArray(detail.chapters) ? detail.chapters : [];
     const target = Number(requestedIndex);
+    if (downloadContext) {
+      downloadContext.chapters = new Map();
+      for (let index = 0; index < chapters.length; index += 1) {
+        const chapter = chapters[index];
+        const resolvedIndex = chapterIndex(chapter, index);
+        if (!downloadContext.chapters.has(resolvedIndex)) {
+          downloadContext.chapters.set(resolvedIndex, { chapter, arrayIndex: index, chapterIndex: resolvedIndex });
+        }
+      }
+      return downloadContext.chapters.get(target) || null;
+    }
     for (let index = 0; index < chapters.length; index += 1) {
       const chapter = chapters[index];
       if (chapterIndex(chapter, index) === target) {
@@ -1429,8 +1456,7 @@ export function createMangaService({
     return null;
   }
 
-  function publicChapter(cacheDir, requestedIndex) {
-    const manga = publicSummary(cacheDir);
+  function publicChapter(cacheDir, requestedIndex, manga = publicSummary(cacheDir)) {
     const found = findChapter(cacheDir, requestedIndex);
     if (!found) return null;
     const cacheKey = databaseKey(cacheDir);
@@ -1565,15 +1591,12 @@ export function createMangaService({
       notFound(res);
       return;
     }
-    const stat = safeStat(coverPath);
-    res.writeHead(200, {
+    await serveWholeFile(req, res, coverPath, (stat) => ({
       "Content-Type": mimeTypes[normalizeExt(coverPath)] || "application/octet-stream",
       "Content-Length": stat.size,
       "Cache-Control": "private, max-age=86400",
       "Content-Disposition": "inline"
-    });
-    if (req.method === "HEAD") return res.end();
-    fs.createReadStream(coverPath).pipe(res);
+    }));
   }
 
   function zipPathSegment(value, fallback = "chapter") {
@@ -1584,20 +1607,27 @@ export function createMangaService({
     return (cleaned || fallback).slice(0, 120);
   }
 
-  function chapterDownloadRecord(cacheDir, requestedIndex) {
-    const chapter = publicChapter(cacheDir, requestedIndex);
-    if (!chapter) return null;
-    const firstImagePath = String(chapter.images?.[0]?.localPath || "");
+  function chapterDownloadRecord(cacheDir, requestedIndex, downloadContext = null) {
+    const found = findChapter(cacheDir, requestedIndex, downloadContext);
+    if (!found) return null;
+    // Downloads need the stored image paths, not reader navigation, covers or
+    // image dimensions. Keep the manifest snapshot local to this download.
+    const chapter = publicChapterSummary("", found.chapter, found.arrayIndex);
+    const images = found.fromDatabase
+      ? database.images(databaseKey(cacheDir), found.chapterIndex).map(imageFromDatabase)
+      : Array.isArray(found.chapter.images) ? found.chapter.images : [];
+    const firstImagePath = String(images[0]?.local_path || "");
     const chapterDir = firstImagePath
       ? path.dirname(path.dirname(safeChildPath(cacheDir, firstImagePath) || ""))
       : "";
     const archivePath = chapterDir ? `${chapterDir}.zip` : "";
     const existingArchive = archivePath && safeStat(archivePath)?.isFile() ? archivePath : "";
-    const files = (Array.isArray(chapter.images) ? chapter.images : []).map((image, index) => {
-      const sourcePath = safeChildPath(cacheDir, image.localPath);
+    const files = images.map((image, index) => {
+      const sourcePath = safeChildPath(cacheDir, String(image?.local_path || ""));
       if (!sourcePath || !safeStat(sourcePath)?.isFile()) return null;
       const extension = path.extname(sourcePath).toLowerCase();
-      const imageIndex = Math.max(1, Number(image.index || index + 1));
+      const resolvedImageIndex = Number(image?.index || index + 1);
+      const imageIndex = Math.max(1, Number(resolvedImageIndex || index + 1));
       return {
         path: sourcePath,
         name: `${String(imageIndex).padStart(4, "0")}${extension}`
@@ -1621,17 +1651,21 @@ export function createMangaService({
     }
     const comic = publicSummary(cacheDir);
     const fileName = `${comic.title} - ${record.chapter.title || `第${record.chapter.index}话`}.zip`;
+    if (record.path) {
+      await serveWholeFile(req, res, record.path, (stat) => ({
+        "Content-Type": "application/zip",
+        "Content-Length": stat.size,
+        "Content-Disposition": attachmentDisposition(fileName),
+        "Cache-Control": "no-store"
+      }));
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": "application/zip",
-      ...(record.path ? { "Content-Length": safeStat(record.path).size } : {}),
       "Content-Disposition": attachmentDisposition(fileName),
       "Cache-Control": "no-store"
     });
     if (req.method === "HEAD") return res.end();
-    if (record.path) {
-      fs.createReadStream(record.path).pipe(res);
-      return;
-    }
     await streamStoredZip(res, record.files);
   }
 
@@ -1659,7 +1693,8 @@ export function createMangaService({
       res.end(payload);
       return;
     }
-    const chapterRecords = (comic.chapters || []).map((chapter) => chapterDownloadRecord(cacheDir, chapter.index));
+    const downloadContext = {};
+    const chapterRecords = (comic.chapters || []).map((chapter) => chapterDownloadRecord(cacheDir, chapter.index, downloadContext));
     const files = chapterRecords.flatMap((record) => {
       if (!record) return [];
       const chapterFolder = `${String(record.chapter.index).padStart(4, "0")}_${zipPathSegment(record.chapter.title, `第${record.chapter.index}话`)}`;

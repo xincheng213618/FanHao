@@ -11,6 +11,7 @@ import { videoFilter } from "../src/modules/short-videos/server/query-contract.j
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { normalizeShortVideoStatsFilter } from "../src/modules/short-videos/server/stats-query.js";
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
+import { authorFacet, searchAuthorFacet } from "../src/modules/short-videos/server/author-facets.js";
 
 const PRODUCTION_VIDEO_COUNT = 103_008;
 const expectedStatsKeys = ["likes", "comments", "collects", "shares", "plays", "bytes", "durationMs"];
@@ -28,6 +29,7 @@ async function runFixtureVerification() {
   let authorResolveColdMs = 0;
   let authorSearchColdMs = 0;
   try {
+    verifyAuthorFacetCoveringIndex(fixture.dbPath);
     await verifyStatsZeroUsesWorker();
     await verifyRouteErrorMapping();
     await verifyRecommendedFailureMapping();
@@ -238,14 +240,42 @@ function verifyStatsZeroUsesWorker() {
   return Promise.all([
     service.list({ searchParams: new URLSearchParams("stats=0") }),
     service.list({ searchParams: new URLSearchParams("source=recommended&stats=0") }),
-    service.list({ searchParams: new URLSearchParams("source=recommended") })
-  ]).then(([withoutStats, recommendedWithoutStats, recommended]) => {
-    assert.equal(workerQueries, 3, "every stats=0 list and every recommendation list must use the catalog worker");
-    assert.equal(storeQueries, 0, "stats=0 list construction must not block the HTTP thread");
+    service.list({ searchParams: new URLSearchParams("source=recommended") }),
+    service.list({ searchParams: new URLSearchParams("source=all") })
+  ]).then(([withoutStats, recommendedWithoutStats, recommended, withStats]) => {
+    assert.equal(workerQueries, 5, "list construction and heavy stats must both use the catalog worker");
+    assert.equal(storeQueries, 0, "list construction must never block the HTTP thread, including stats-enabled requests");
     assert.deepEqual(withoutStats, { stats: null, worker: true, videos: [] });
     assert.deepEqual(recommendedWithoutStats, { stats: null, worker: true, videos: [] });
     assert.deepEqual(recommended, { stats: null, worker: true, videos: [] });
+    assert.deepEqual(withStats, { stats: {}, worker: true, videos: [] });
   });
+}
+
+function verifyAuthorFacetCoveringIndex(dbPath) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    let plan = [];
+    const optimized = {
+      prepare(sql) {
+        plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail);
+        return db.prepare(sql);
+      }
+    };
+    const legacy = {
+      prepare: (sql) => db.prepare(sql.replace(/FROM short_videos v(?: INDEXED BY \w+)?/, "FROM short_videos v INDEXED BY idx_short_videos_author_facet"))
+    };
+    const expected = authorFacet(legacy);
+    const actual = authorFacet(optimized);
+    assert.deepEqual(actual, expected, "covering author aggregation must preserve every public field and ordering");
+    assert(plan.some((detail) => detail.includes("idx_short_videos_author_facet_covering")), `author aggregation must select the covering index: ${plan.join("; ")}`);
+    assert(!plan.some((detail) => detail.includes("GROUP BY")), "the author-key index must avoid a temporary grouping tree");
+    for (const query of ["测试作者 7", "FixtureAuthor", "%", "missing-author"]) {
+      assert.deepEqual(searchAuthorFacet(db, query), searchAuthorFacet(legacy, query), `author search must preserve escaped matching and counts: ${query}`);
+    }
+  } finally {
+    db.close();
+  }
 }
 
 async function verifyRouteErrorMapping() {
@@ -676,11 +706,13 @@ async function verifyInFlightInvalidation() {
   const store = {
     catalogStamp: () => `controlled-${revision}`,
     listVideos: () => {
-      pageCalls += 1;
-      return { revision, stats: null, videos: [] };
+      assert.fail("stats-enabled lists must not construct a page on the HTTP thread");
     }
   };
-  const service = createShortVideoListStatsService({ store, catalogWorker: client });
+  const service = createShortVideoListStatsService({ store, catalogWorker: {
+    query: (...args) => { pageCalls += 1; return client.query(...args); },
+    queryStats: (...args) => client.queryStats(...args)
+  } });
   try {
     const pending = service.list(new URL("http://fixture/api/short-videos?source=all"));
     while (client.diagnostics().statsDispatches < 1) await delay(1);

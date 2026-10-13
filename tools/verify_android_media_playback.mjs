@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
-import { createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { absoluteUrl } from "../android-client/www/js/image.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
@@ -124,7 +124,7 @@ function harness(input = source, options = {}) {
   document.visibilityState = "visible";
   document.hidden = false;
   const plugin = { async play(payload) { calls.bridge.push(plain(payload)); return { opened: true }; } };
-  const c = vm.createContext({ document, console, URL, URLSearchParams, AbortController, performance: { now: () => now },
+  const c = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, performance: { now: () => now },
     window: eventTarget({ Capacitor: { Plugins: { FanHaoPlayer: plugin } },
       setTimeout(callback, delay) { const id = ++clockId; timers.set(id, { callback, delay }); return id; }, clearTimeout(id) { timers.delete(id); } }),
     absoluteUrl, formatBytes, formatDate, formatNumber, formatTime, cacheAgeText: () => "合成缓存",

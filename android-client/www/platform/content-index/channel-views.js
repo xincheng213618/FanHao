@@ -1,6 +1,7 @@
-import { fetchJson } from "../../js/api.js?v=assets-07b744082137";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-07b744082137";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-07b744082137";
+import { fetchJson } from "../../js/api.js?v=assets-1443708f18b1";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-1443708f18b1";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-1443708f18b1";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
 import { absoluteUrl, loadPreviewImage } from "../../js/image.js";
@@ -502,7 +503,12 @@ export function createChannelViews(context) {
     const limit = getChannelLimit();
     const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort };
     const activeUrl = getActiveUrl();
-    const isCurrent = () => generation === channelRequestGeneration && !controller.signal.aborted && isActive() && getActiveUrl() === activeUrl;
+    const startedAccount = captureAccountOwner(activeUrl);
+    let accountScope = null;
+    let cacheFence = null;
+    let preparationScope = startedAccount;
+    const isCurrent = () => generation === channelRequestGeneration && !controller.signal.aborted && isActive() && getActiveUrl() === activeUrl
+      && (!accountScope || isAccountOwnerCurrent(accountScope));
     if (!isCurrent()) {
       isActive.signal?.removeEventListener("abort", cancel);
       if (channelRequestController === controller) channelRequestController = null;
@@ -536,7 +542,7 @@ export function createChannelViews(context) {
     if (pageComplete || loadingMore) {
       renderChannelData(normalizedMode, currentPage, null, pendingPaging);
       renderedCache = true;
-      renderedCacheSignature = channelDataSignature(currentPage);
+      if (!loadingMore) renderedCacheSignature = channelDataSignature(currentPage);
     } else {
       resetPreviewImageObserver();
       els.viewKicker.textContent = query ? "频道搜索" : "内容频道";
@@ -556,6 +562,30 @@ export function createChannelViews(context) {
     }, 2200) : 0;
 
     try {
+      try {
+        let prepared = await prepareAccountOwner(activeUrl, { signal: controller.signal });
+        const firstNativeAccount = startedAccount.owner === "guest" && !startedAccount.tokenKnown && startedAccount.revision === 0
+          && prepared.owner === "pending" && prepared.revision === startedAccount.revision + 1;
+        if (!isCurrent() || !isAccountOwnerCurrent(prepared) || !isAccountOwnerCurrent(startedAccount) && !firstNativeAccount) return;
+        preparationScope = prepared;
+        if (prepared.owner === "pending") {
+          const authentication = await fetchJson(activeUrl, "/api/auth/status", {
+            timeoutMs: 12000, signal: controller.signal, accountScope: prepared
+          });
+          if (!isCurrent()) return;
+          prepared = accountPayloadOwner(authentication);
+          if (!prepared || prepared.owner === "pending" || !isAccountOwnerCurrent(prepared)) throw new Error("请先确认登录账号");
+        }
+        accountScope = prepared;
+        // Capture once before cache/page awaits. Merged prefixes lose the API
+        // payload's WeakMap owner and must not adopt a later login or cache epoch.
+        cacheFence = captureCachedJsonFence(activeUrl, accountScope);
+      } catch (error) {
+        if (error?.code === "ACCOUNT_CHANGED" || !isCurrent() || !isAccountOwnerCurrent(preparationScope)) return;
+        if (preparationScope.owner !== "pending") accountScope = preparationScope;
+        // Keep the existing offline/cache fallback when session preparation fails;
+        // an unconfirmed operation cannot publish a complete aggregate cache.
+      }
       let cached = pageComplete && !loadingMore ? null : await readCachedJson(activeUrl, path).catch(() => null);
       if (!cached && offset === 0 && requestLimit > 5000 && !pageComplete && isCurrent()) {
         cached = await readCachedJson(activeUrl, channelItemsPath(normalizedMode, 5000, filters, 0)).catch(() => null);
@@ -567,17 +597,20 @@ export function createChannelViews(context) {
         channelPageState = { key: pageKey, data: mergedCache, ...(retryPage ? { retry: retryPage } : {}) };
         displayedData = mergedCache;
         displayedCache = cached;
-        renderedCacheSignature = channelDataSignature(mergedCache);
+        if (!loadingMore) renderedCacheSignature = channelDataSignature(mergedCache);
         renderChannelData(normalizedMode, mergedCache, cached, pendingPaging);
       }
 
       const mergedData = await loadConsistentChannelPage(normalizedMode, filters, {
         activeUrl, basePage, offset, requestLimit,
         targetRaw: offset > 0 ? offset + requestLimit : rangeReduced ? requestLimit : Math.max(rawLoaded, requestLimit),
-        signal: controller.signal, isCurrent
+        signal: controller.signal, isCurrent, accountScope, cacheFence
       });
       if (!isCurrent()) return;
-      if (offset === 0) writeCachedJson(activeUrl, path, mergedData).catch(() => {});
+      if (cacheFence && (offset === 0 || channelRevisionChanged(basePage, mergedData))) {
+        const aggregatePath = channelItemsPath(normalizedMode, limit, filters, 0);
+        writeCachedJson(activeUrl, aggregatePath, mergedData, { fence: cacheFence }).catch(() => {});
+      }
       channelPageState = { key: pageKey, data: mergedData };
       if (!loadingMore && renderedCache && channelDataSignature(mergedData) === renderedCacheSignature) {
         applyChannelHeader(normalizedMode, mergedData);
@@ -639,10 +672,11 @@ export function createChannelViews(context) {
     while (request.isCurrent()) {
       const path = channelItemsPath(mode, limit, filters, offset);
       const data = await fetchJson(request.activeUrl, path, {
-        timeoutMs: mode === "manga" ? 10000 : 12000, signal: request.signal
+        timeoutMs: mode === "manga" ? 10000 : 12000, signal: request.signal,
+        ...(request.accountScope ? { accountScope: request.accountScope } : {})
       });
       if (!request.isCurrent()) return null;
-      writeCachedJson(request.activeUrl, path, data).catch(() => {});
+      writeCachedJson(request.activeUrl, path, data, request.cacheFence ? { fence: request.cacheFence } : {}).catch(() => {});
       if (offset > 0 && channelRevisionChanged(base, data)) {
         if (++prefixAttempts > 3) throw new Error("目录正在更新，请重新加载");
         // Offset pages from different snapshots cannot reconstruct a prefix.
@@ -817,7 +851,7 @@ export function createChannelViews(context) {
         : [...list.children];
       mountedChannelList = { key: channelRenderingKey, mode, list, controls,
         layout: channelListLayout(mode, data), controlsSignature: channelControlsSignature(data),
-        rows: items.map((item, index) => ({ key: keys[index], signature: JSON.stringify(item), node: nodes[index] })) };
+        rows: items.map((item, index) => ({ key: keys[index], item, signature: JSON.stringify(item), node: nodes[index] })) };
     }
     renderChannelPaging(mode, data, paging, pendingCategoryGroups);
   }
@@ -859,9 +893,12 @@ export function createChannelViews(context) {
     const keys = items.map(channelItemKey);
     if (!keys.every(Boolean) || new Set(keys).size !== keys.length || mounted.rows.some((row, index) => row.key !== keys[index])) return false;
     for (let index = 0; index < items.length; index += 1) {
-      const signature = JSON.stringify(items[index]);
       const previous = mounted.rows[index];
-      if (previous?.signature === signature) continue;
+      // Private list DTOs are read-only in this factory. Stable page merges keep
+      // the same prefix objects; replacement payloads still compare their value.
+      if (previous?.item === items[index]) continue;
+      const signature = JSON.stringify(items[index]);
+      if (previous?.signature === signature) { previous.item = items[index]; continue; }
       const node = createChannelCard(mode, items[index], { index });
       if (previous) {
         const focused = previous.node === document.activeElement || previous.node.contains(document.activeElement);
@@ -872,7 +909,7 @@ export function createChannelViews(context) {
         if (focused) node.focus({ preventScroll: true });
       } else if (mode === "photo") mounted.list.children[index % mounted.list.children.length].append(node);
       else mounted.list.append(node);
-      mounted.rows[index] = { key: keys[index], signature, node };
+      mounted.rows[index] = { key: keys[index], item: items[index], signature, node };
     }
     const controlsSignature = channelControlsSignature(data);
     if (controlsSignature !== mounted.controlsSignature) {

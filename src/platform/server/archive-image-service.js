@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { types } from "node:util";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "./archive-task-pool.js";
 
 export const ARCHIVE_IMAGE_INDEXER_VERSION = 3;
@@ -42,7 +43,35 @@ export function createArchiveImageService(options) {
   function indexRow(database, source) {
     return databaseOperation(database, db => db.prepare("SELECT * FROM photo_set_image_indexes WHERE archive_path = ?").get(source.archivePath)) || null;
   }
-  function rowStamp(row) { return row ? JSON.stringify(row) : "missing"; }
+  function rowStamp(row) {
+    // Native rows contain plain data. Keep the original metadata key order,
+    // but compare the already immutable JSON text without escaping it again.
+    if (row && typeof row === "object" && !types.isProxy(row) && !types.isBoxedPrimitive(row)
+      && Object.getPrototypeOf(row) === null && !Object.hasOwn(row, "toJSON")) {
+      const descriptors = Object.getOwnPropertyDescriptors(row);
+      const images = descriptors.images_json;
+      if (images?.enumerable && typeof images.value === "string" && Reflect.ownKeys(descriptors).every(key => {
+        const descriptor = descriptors[key];
+        const valueType = typeof descriptor.value;
+        return typeof key === "string" && descriptor.enumerable && "value" in descriptor
+          && (descriptor.value === null || valueType === "string" || valueType === "number");
+      })) {
+        return { metadata: JSON.stringify(Object.assign(Object.create(null), row, { images_json: null })), images: images.value };
+      }
+    }
+    return row ? JSON.stringify(row) : "missing";
+  }
+  function rowStampsMatch(left, right) {
+    if (left && typeof left === "object") {
+      if (right && typeof right === "object") return left.metadata === right.metadata && left.images === right.images;
+      // Scalar native metadata has one actual images_json key. Restore its
+      // original JSON only when a provider changes between native and old rows.
+      left = left.metadata.replace('"images_json":null', () => '"images_json":' + JSON.stringify(left.images));
+    } else if (right && typeof right === "object") {
+      right = right.metadata.replace('"images_json":null', () => '"images_json":' + JSON.stringify(right.images));
+    }
+    return left === right;
+  }
   function indexAuthority(source) {
     let db;
     try { db = options.getImageGalleryDb(); return { db, stamp: rowStamp(indexRow(db, source)), valid: true }; }
@@ -50,7 +79,7 @@ export function createArchiveImageService(options) {
   }
   function authorityCurrent(source, authority, context) {
     if (!context.isCurrent() || !authority.valid) return false;
-    try { return options.getImageGalleryDb() === authority.db && rowStamp(indexRow(authority.db, source)) === authority.stamp; }
+    try { return options.getImageGalleryDb() === authority.db && rowStampsMatch(rowStamp(indexRow(authority.db, source)), authority.stamp); }
     catch { return false; }
   }
   function remember(key, source, payload, authority, context, persist = true) {

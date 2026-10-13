@@ -46,7 +46,7 @@ async function until(check) {
 }
 const error = name => Object.assign(new Error(name), { code: name });
 const flatten = failure => failure instanceof AggregateError ? failure.errors.flatMap(flatten) : [failure];
-const parallelResources = ["videoProbeService", "mediaResponseService", "mediaStreamService", "archiveImageService", "imageReaderCacheService", "workCoverMutationService", "mediaBlobStore", "fileServer", "staticFiles"];
+const parallelResources = ["imageLibraryService", "videoProbeService", "mediaResponseService", "mediaStreamService", "archiveImageService", "imageReaderCacheService", "workCoverMutationService", "mediaBlobStore", "fileServer", "staticFiles"];
 const orderedResources = ["accessAnalyticsService", "workMoveJobService", "actorProfilePublicationLifecycleService", "actorProfileOutboxService", "moduleRegistry", "accountUserStateService", "closeAccounts"];
 
 function mainFixture({ failures = {}, gates = {}, staticFiles = null, handler = () => {}, hostFactory = options => options } = {}) {
@@ -58,7 +58,7 @@ function mainFixture({ failures = {}, gates = {}, staticFiles = null, handler = 
       if (failures[name]) throw failures[name];
       return gates[name]?.promise;
     };
-    dependencies[name] = name === "closeAccounts" ? close : { stop: close, close, beginStop() { events.push(`begin:${name}`); } };
+    dependencies[name] = name === "closeAccounts" ? close : { stop: close, close, clearPreparedQueries: close, beginStop() { events.push(`begin:${name}`); } };
   }
   if (staticFiles) dependencies.staticFiles = staticFiles;
   const options = new Function(...Object.keys(dependencies), `${mainComposition}\nreturn serverHost;`)(...Object.values(dependencies));
@@ -109,7 +109,7 @@ add("main:sync-and-async-parallel-failures-preserve-all-other-cleanups", async (
   const pending = f.options.stop().catch(caught => { actual = caught; }).finally(() => { settled = true; });
   await until(() => f.events.length === parallelResources.length);
   assert.equal(settled, false); assert(!f.events.includes("closeAccounts"));
-  gates.fileServer.reject(failures[7]); await pending;
+  gates.fileServer.reject(failures[parallelResources.indexOf("fileServer")]); await pending;
   assert.deepEqual(flatten(actual), failures);
   assert.deepEqual(f.events, [...parallelResources, ...orderedResources]);
 });

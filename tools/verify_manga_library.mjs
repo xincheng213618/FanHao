@@ -183,10 +183,10 @@ assert.match(androidAppSource, /清空漫画回收站/);
 assert.doesNotMatch(androidAppSource, /window\.confirm/);
 assert.match(androidMangaSource, /renderMangaLibraryFailure/);
 assert.match(androidMangaSource, /韩漫书库暂时打不开/);
-assert.match(androidMangaSource, /if \(pageComplete \|\| loadingMore\) \{\s*renderChannelData\(normalizedMode, currentPage, null, pendingPaging\);\s*renderedCache = true;\s*renderedCacheSignature = channelDataSignature\(currentPage\);/s);
-assert.match(androidMangaSource, /const cached = pageComplete && !loadingMore \? null : await readCachedJson/);
+assert.match(androidMangaSource, /if \(pageComplete \|\| loadingMore\) \{\s*renderChannelData\(normalizedMode, currentPage, null, pendingPaging\);\s*renderedCache = true;\s*if \(!loadingMore\) renderedCacheSignature = channelDataSignature\(currentPage\);\s*\} else \{/s, "pending pages must remain rendered; only a full refresh needs the cached page signature");
+assert.match(androidMangaSource, /let cached = pageComplete && !loadingMore \? null : await readCachedJson\(activeUrl, path\)\.catch\(\(\) => null\);\s*if \(!cached && offset === 0 && requestLimit > 5000 && !pageComplete && isCurrent\(\)\) \{\s*cached = await readCachedJson\(activeUrl, channelItemsPath\(normalizedMode, 5000, filters, 0\)\)\.catch\(\(\) => null\);\s*\}\s*if \(!isCurrent\(\)\) return;/s, "complete pages must skip redundant cache reads; large cold ranges may use the same-source first page only while their request owner is current");
 assert.match(androidMangaSource, /当前书库来自手机缓存/);
-assert.match(androidMangaSource, /normalizedMode === "manga" \? 10000 : 12000/);
+assert.match(androidMangaSource, /const data = await fetchJson\(request\.activeUrl, path, \{\s*timeoutMs: mode === "manga" \? 10000 : 12000, signal: request\.signal,\s*\.\.\.\(request\.accountScope \? \{ accountScope: request\.accountScope \} : \{\}\)\s*\}\);\s*if \(!request\.isCurrent\(\)\) return null;/s, "consistent page reads must keep the manga timeout, cancellation signal and captured account scope, then reject stale replies");
 assert.match(androidAppSource, /currentView === "mangaDetail"/);
 assert.match(androidAppSource, /showView\("channel", \{ mode: "manga" \}/);
 
@@ -258,7 +258,7 @@ assert.deepEqual(photoScanProgress, {
 }, "Android photo maintenance must decode machine-readable background scan progress");
 assert.equal(photoIndexTaskProgress({ status: "done", logs: [] }).percent, 100, "completed photo scans must render a full progress state even for legacy task logs");
 assert.doesNotMatch(androidMangaSource, /createPhotoIndexManager|\/api\/admin\/tasks/, "photo browsing must not expose index maintenance or poll its background tasks");
-assert.match(androidMangaSource, /channelDataSignature\(mergedData\) === renderedCacheSignature[\s\S]*?applyChannelHeader\(normalizedMode, mergedData\)/, "unchanged photo responses must still refresh the content header");
+assert.match(androidMangaSource, /if \(!loadingMore && renderedCache && channelDataSignature\(mergedData\) === renderedCacheSignature\) \{\s*applyChannelHeader\(normalizedMode, mergedData\);\s*return;\s*\}/s, "unchanged full refresh responses must still refresh the content header; appends must render their new page");
 assert.doesNotMatch(androidMangaCssSource, /\.photo-index-manager|\.photo-index-progress-track/);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-zip-"));

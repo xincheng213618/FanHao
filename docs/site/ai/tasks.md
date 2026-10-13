@@ -10,6 +10,7 @@ sources:
   - src/modules/short-videos/server/delete-job-service.js
   - src/modules/short-videos/server/watch-write-service.js
   - src/modules/fanhao/server/works/work-move-job-service.js
+  - src/modules/fanhao/server/people/person-organization-service.js
   - src/platform/server/auth.js
   - android-client/package.json
 ---
@@ -34,6 +35,7 @@ sources:
 | 改短视频观看写入 | `src/modules/short-videos/server/watch-write-service.js` | `npm run verify:short-video-watch-write` |
 | 改短视频删除恢复 | `src/modules/short-videos/server/delete-job-service.js` | `npm run verify:short-video-delete-jobs` |
 | 改跨目录文件移动 | `src/modules/fanhao/server/works/work-move-job-service.js` | `npm run verify:work-move-jobs` |
+| 改人物目录整理或封面资料重写 | `src/modules/fanhao/server/people/person-organization-service.js`、`tools/organize_person_library.mjs`、`public/modules/fanhao/person-organization.js` | `npm run verify:person-organization` |
 | 改音乐扫描与分页 | `src/modules/music/server/` | `npm run verify:music-rescan-worker`、`npm run verify:music-scale` |
 | 改小说存储或采集 | `src/modules/novels/server/` | `npm run verify:novels` |
 | 改 Android WebView 或原生桥 | `android-client/www/`、`android-client/android/app/src/main/java/` | 首次准备运行 `npm run setup:android-verification`；用 `npm run verify:changed -- --plan` 按小说、音乐、媒体、图片或短视频域选择回归，共享壳或原生桥变更再运行 `npm run verify:android-full` |

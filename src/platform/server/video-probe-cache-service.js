@@ -6,9 +6,16 @@ export function createVideoProbeCacheService({
   warn = console.warn
 }) {
   let initialized = false;
+  let readStatement = null;
   let writeStatement = null;
   let cacheDatabase = null;
-  const rowsByFile = new Map();
+
+  function resetPreparedOwner() {
+    initialized = false;
+    readStatement = null;
+    writeStatement = null;
+    cacheDatabase = null;
+  }
 
   function withoutLockWait(db, callback) {
     const previous = Number(db.prepare("PRAGMA busy_timeout").get().timeout);
@@ -18,9 +25,12 @@ export function createVideoProbeCacheService({
   }
 
   function initialize() {
-    if (initialized) return true;
     try {
       const db = getDb();
+      if (initialized && db === cacheDatabase) return true;
+      // Prepared statements belong to this connection. A replacement must
+      // initialize independently, including after its first attempt fails.
+      resetPreparedOwner();
       withoutLockWait(db, () => initializeDatabase(db));
       cacheDatabase = db;
       initialized = true;
@@ -47,12 +57,11 @@ export function createVideoProbeCacheService({
         CREATE INDEX IF NOT EXISTS idx_video_probe_cache_updated_at
           ON video_probe_cache(updated_at);
     `);
-    const rows = db.prepare(`
+    readStatement = db.prepare(`
         SELECT file_id, file_path, source_size, source_mtime, schema_version, status, probe_json
         FROM video_probe_cache
-    `).all();
-    rowsByFile.clear();
-    for (const row of rows) rowsByFile.set(cacheKey(row.file_id, row.file_path), row);
+        WHERE file_id = ? AND file_path = ?
+    `);
     writeStatement = db.prepare(`
         INSERT INTO video_probe_cache (
           file_id, file_path, source_size, source_mtime,
@@ -71,7 +80,9 @@ export function createVideoProbeCacheService({
   function get(file, stat) {
     if (!file?.id || !file?.path || !stat || !initialize()) return { hit: false, value: null };
     try {
-      const row = rowsByFile.get(cacheKey(file.id, file.path));
+      // Parsed hot probes are bounded by the caller's cache. Keep cold reads
+      // authoritative without loading every persistent record into memory.
+      const row = withoutLockWait(cacheDatabase, () => readStatement.get(String(file.id), String(file.path)));
       if (!row || Number(row.schema_version) !== VIDEO_PROBE_CACHE_SCHEMA_VERSION) return { hit: false, value: null };
       if (Number(row.source_size) !== Number(stat.size) || String(row.source_mtime) !== sourceMtime(stat)) {
         return { hit: false, value: null };
@@ -80,6 +91,7 @@ export function createVideoProbeCacheService({
       const value = JSON.parse(String(row.probe_json || "null"));
       return value && typeof value === "object" ? { hit: true, value } : { hit: false, value: null };
     } catch (error) {
+      if (error?.code === "ERR_INVALID_STATE") resetPreparedOwner();
       warn("[video-probe-cache-read]", error?.message || error);
       return { hit: false, value: null };
     }
@@ -98,15 +110,9 @@ export function createVideoProbeCacheService({
         value ? JSON.stringify(value) : null,
         String(now())
       ));
-      rowsByFile.set(cacheKey(file.id, file.path), {
-        source_size: Number(stat.size) || 0,
-        source_mtime: sourceMtime(stat),
-        schema_version: VIDEO_PROBE_CACHE_SCHEMA_VERSION,
-        status: value ? "ok" : "unavailable",
-        probe_json: value ? JSON.stringify(value) : null
-      });
       return true;
     } catch (error) {
+      if (error?.code === "ERR_INVALID_STATE") resetPreparedOwner();
       warn("[video-probe-cache-write]", error?.message || error);
       return false;
     }
@@ -115,10 +121,6 @@ export function createVideoProbeCacheService({
   function sourceMtime(stat) {
     if (stat?.cacheMtime) return String(stat.cacheMtime);
     return JSON.stringify(["disk", Number(stat.mtimeMs) || 0, String(stat.dev ?? ""), String(stat.ino ?? "")]);
-  }
-
-  function cacheKey(fileId, filePath) {
-    return `${String(fileId || "")}\0${String(filePath || "")}`;
   }
 
   return { get, set, start: initialize };

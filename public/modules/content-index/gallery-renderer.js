@@ -1025,16 +1025,7 @@ function filteredWesternItemsForGroups() {
 function westernPersonGroups() {
   const list = currentImageLibraryList();
   if (list && state.gallery.mode === "western" && state.gallery.person === "all") {
-    return (list.items || []).map((item) => ({
-      personName: item.personName || item.title || "未归类",
-      count: Number(item.videoCount || 0),
-      playableCount: Number(item.playableCount || 0),
-      size: Number(item.size || 0),
-      updatedAt: item.updatedAt || "",
-      coverUrl: item.coverUrl || "",
-      categories: new Map((item.categories || []).map((entry) => [entry.value, entry.count])),
-      samples: item.samples || []
-    }));
+    return (list.items || []).map(westernPersonListGroup);
   }
   const groups = new Map();
   for (const item of filteredWesternItemsForGroups()) {
@@ -1074,6 +1065,19 @@ function westernPersonGroups() {
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
     return timeDiff || a.personName.localeCompare(b.personName, undefined, { numeric: true, sensitivity: "base" });
   });
+}
+
+function westernPersonListGroup(item) {
+  return {
+    personName: item.personName || item.title || "未归类",
+    count: Number(item.videoCount || 0),
+    playableCount: Number(item.playableCount || 0),
+    size: Number(item.size || 0),
+    updatedAt: item.updatedAt || "",
+    coverUrl: item.coverUrl || "",
+    categories: new Map((item.categories || []).map((entry) => [entry.value, entry.count])),
+    samples: item.samples || []
+  };
 }
 
 function filteredTvItemsForGroups() {
@@ -1535,46 +1539,61 @@ function renderWesternPersonBar(container, total) {
   container.append(bar);
 }
 
+function createWesternPersonCard(group) {
+  const categories = [...group.categories.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+    .slice(0, 3)
+    .map(([category, count]) => `${category} ${formatNumber(count)}`)
+    .join(" · ");
+  const card = createGalleryCard(
+    { title: photoPersonDisplayName(group.personName), coverUrl: group.coverUrl || "" },
+    {
+      meta: `${formatNumber(group.count)} 部 · ${formatBytes(group.size)}`,
+      extra: [categories, group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")].filter(Boolean).join(" · "),
+      badges: group.playableCount && group.playableCount !== group.count ? [`可播 ${formatNumber(group.playableCount)}`] : [],
+      placeholder: "人物",
+      onOpen: () => {
+        state.gallery.person = group.personName;
+        state.gallery.visibleLimit = 80;
+        renderGalleryView();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        syncGalleryRoute();
+      }
+    }
+  );
+  card.classList.add("gallery-western-person-card");
+  return card;
+}
+
 function renderWesternPersonShelf(container) {
   const groups = westernPersonGroups();
   const visible = groups.slice(0, state.gallery.visibleLimit);
-  const total = Number(currentImageLibraryList()?.total ?? groups.length);
+  const list = currentImageLibraryList();
+  const total = Number(list?.total ?? groups.length);
   const grid = document.createElement("div");
   grid.className = "gallery-grid media-grid gallery-western-person-grid";
-  for (const group of visible) {
-    const categories = [...group.categories.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
-      .slice(0, 3)
-      .map(([category, count]) => `${category} ${formatNumber(count)}`)
-      .join(" · ");
-    const card = createGalleryCard(
-      { title: photoPersonDisplayName(group.personName), coverUrl: group.coverUrl || "" },
-      {
-        meta: `${formatNumber(group.count)} 部 · ${formatBytes(group.size)}`,
-        extra: [categories, group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")].filter(Boolean).join(" · "),
-        badges: group.playableCount && group.playableCount !== group.count ? [`可播 ${formatNumber(group.playableCount)}`] : [],
-        placeholder: "人物",
-        onOpen: () => {
-          state.gallery.person = group.personName;
-          state.gallery.visibleLimit = 80;
-          renderGalleryView();
-          window.scrollTo({ top: 0, behavior: "smooth" });
-          syncGalleryRoute();
-        }
-      }
-    );
-    card.classList.add("gallery-western-person-card");
-    grid.append(card);
-  }
+  for (const group of visible) grid.append(createWesternPersonCard(group));
   container.append(grid);
   activateGalleryLazyImages(grid);
+
+  if (list && state.gallery.person === "all") {
+    registerGalleryList(grid, list, item => createWesternPersonCard(westernPersonListGroup(item)), {
+      items: (list.items || []).slice(0, state.gallery.visibleLimit),
+      visible: next => (next.items || []).slice(0, state.gallery.visibleLimit),
+      label: "人物", moreParent: container
+    });
+    if (galleryListRegistration?.grid === grid) {
+      updateGalleryListMore();
+      return;
+    }
+  }
 
   if (!groups.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = state.gallery.data ? "没有匹配的欧美人物" : "正在等待图像资料库索引";
     container.append(empty);
-  } else if (visible.length < total) {
+  } else if (visible.length < total && list?.hasMore !== false) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";

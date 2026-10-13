@@ -8,15 +8,34 @@ import { performance } from "node:perf_hooks";
 import { DatabaseSync, StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { createMangaService as currentFactory } from "../src/modules/photos/server/manga-service.js";
+import { createMangaDatabaseReader as currentReaderFactory } from "../src/modules/photos/server/manga-database.js";
 import { routePhotosApi } from "../src/modules/photos/server/routes.js";
 
 // The legacy revision was checked against both clean manga source files before
 // this optimization. It executes their actual code, not a rewritten baseline.
 // --legacy must fail the warm lookup gate; --legacy --diagnose prints all scales.
+const ORIGINAL_FIRST_IMAGE = String.raw`  function firstImage(cacheKey, chapterIndex = null) {
+    const database = open();
+    if (!database) return null;
+    try {
+      if (chapterIndex == null) {
+        return database.prepare(
+          "SELECT * FROM manga_images WHERE cache_key = ? AND local_path IS NOT NULL AND local_path <> '' ORDER BY chapter_index, image_index LIMIT 1"
+        ).get(String(cacheKey || "")) || null;
+      }
+      return database.prepare(
+        "SELECT * FROM manga_images WHERE cache_key = ? AND chapter_index = ? AND local_path IS NOT NULL AND local_path <> '' ORDER BY image_index LIMIT 1"
+      ).get(String(cacheKey || ""), Number(chapterIndex)) || null;
+    } catch {
+      return null;
+    }
+  }`;
+const forceUncachedFirstImages = process.argv.includes("--legacy-first-image-statements");
+const forceRepeatedChapterSummaries = process.argv.includes("--legacy-chapter-summaries");
 const legacy = process.argv.includes("--legacy");
 const diagnose = process.argv.includes("--diagnose");
 const legacyRef = "1f6ddf213f0fbab4d417fdf61636b957d1909338";
-const factory = legacy ? await legacyFactory() : currentFactory;
+const factory = legacy ? await legacyFactory() : forceUncachedFirstImages ? (await uncachedFirstImageModules()).factory : currentFactory;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-lookups-"));
 const collector = fs.readFileSync(path.resolve(import.meta.dirname, "manga_collector.py"), "utf8");
 const schema = /    schema = """([\s\S]*?)    """/.exec(collector)?.[1];
@@ -36,6 +55,7 @@ let checks = 0;
 let served = 0;
 DatabaseSync.prototype.prepare = function (statement, ...args) {
   handles.add(this);
+  if (measured && /\bSELECT\b/i.test(statement)) counts.prepares += 1;
   const prepared = originalPrepare.call(this, statement, ...args);
   statementSql.set(prepared, statement);
   return prepared;
@@ -49,8 +69,13 @@ for (const method of Object.keys(originalExecutions)) StatementSync.prototype[me
   return originalExecutions[method].call(this, ...args);
 };
 fs.readFileSync = function (file, ...args) {
-  if (measured && isOwned(file) && /^(catalog|manifest)\.json$/.test(path.basename(file))) counts.jsonReads += 1;
-  return originalRead.call(this, file, ...args);
+  const json = measured && isOwned(file) && /^(catalog|manifest)\.json$/.test(path.basename(file));
+  const html = measured && isOwned(file) && path.basename(file) === "catalog.html";
+  if (json) counts.jsonReads += 1;
+  if (html) counts.htmlReads += 1;
+  const value = originalRead.call(this, file, ...args);
+  if (json || html) counts.metadataBytes += Buffer.byteLength(value);
+  return value;
 };
 fs.statSync = function (file, ...args) { if (measured && isOwned(file)) counts.statCalls += 1; return originalStat.call(this, file, ...args); };
 fs.existsSync = function (file, ...args) { if (measured && isOwned(file)) counts.existsCalls += 1; return originalExists.call(this, file, ...args); };
@@ -112,6 +137,8 @@ try {
     verifyCrossRootIdentity();
     verifyDuplicateLegacySqlKey();
     verifyDatabaseReplacement();
+    if (!legacy) await verifyFirstImageStatements();
+    if (!legacy) await verifyChapterSummaryReuse();
   }
   console.log(`PASS manga lookup performance: ${checks} groups; actual service/collector SQLite, synthetic catalog and controlled image continuation${diagnose ? " (diagnostic mode: performance gates omitted)" : ""}`);
 } finally {
@@ -133,6 +160,241 @@ try {
     fs.rmdirSync(directory);
   }
   assert.equal(fs.existsSync(resolved), false);
+}
+
+async function uncachedFirstImageModules() {
+  const readerPath = path.resolve(import.meta.dirname, "../src/modules/photos/server/manga-database.js");
+  const sourcePath = path.resolve(import.meta.dirname, "../src/modules/photos/server/manga-service.js");
+  const reader = fs.readFileSync(readerPath, "utf8").replaceAll("\r\n", "\n");
+  const start = reader.indexOf("  function firstImage(");
+  const end = reader.indexOf("\n  return { chapter", start);
+  assert(start >= 0 && end > start, "locate the complete current firstImage method");
+  const actual = reader.slice(start, end).trimEnd();
+  const restored = reader.replace(actual, ORIGINAL_FIRST_IMAGE);
+  assert.equal(restored.replace(ORIGINAL_FIRST_IMAGE, actual), reader, "the old oracle changes only firstImage");
+  const readerUrl = "data:text/javascript;base64," + Buffer.from(restored).toString("base64");
+  const readerModule = await import(readerUrl);
+  const service = fs.readFileSync(sourcePath, "utf8").replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
+    "from " + JSON.stringify(relative === "./manga-database.js" ? readerUrl : pathToFileURL(path.resolve(path.dirname(sourcePath), relative)).href));
+  const serviceModule = await import("data:text/javascript;base64," + Buffer.from(service).toString("base64"));
+  return { factory: serviceModule.createMangaService, readerFactory: readerModule.createMangaDatabaseReader };
+}
+
+async function verifyFirstImageStatements() {
+  const fixture = fresh("chapter-statements", { wal: true });
+  const dir = addBook(fixture, 1);
+  fixture.db.exec("BEGIN IMMEDIATE");
+  try {
+    const chapter = fixture.db.prepare("INSERT INTO manga_chapters(cache_key,chapter_index,title,image_count,downloaded_count) VALUES (?,?,?,30,1)");
+    const image = fixture.db.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES (?,?,?,?)");
+    for (let chapterIndex = 2; chapterIndex <= 1000; chapterIndex++) {
+      chapter.run(dir, chapterIndex, "Synthetic chapter " + chapterIndex);
+      for (let imageIndex = 1; imageIndex <= 30; imageIndex++) image.run(dir, chapterIndex, imageIndex, imageIndex === 29 ? "synthetic.png" : null);
+    }
+    fixture.db.exec("COMMIT");
+  } catch (error) { fixture.db.exec("ROLLBACK"); throw error; }
+  const old = await uncachedFirstImageModules();
+  const previousService = old.factory({ root: fixture.root, databasePath: fixture.dbPath, mimeTypes: {}, normalizeExt: path.extname, safeStat: () => null });
+  let oracles = 0;
+  const compare = () => {
+    const previous = previousService.publicDetail(dir), current = fixture.service.publicDetail(dir);
+    assert.deepEqual(current, previous, "the complete chapter-directory response retains the former values");
+    assert.equal(JSON.stringify(current), JSON.stringify(previous), "the complete chapter-directory JSON retains field order");
+    oracles++;
+    return current;
+  };
+  const initial = compare();
+  assert.equal(initial.chapters.length, 1000);
+  assert(initial.chapters[28].coverUrl.endsWith("/29/29"));
+  const before = await measure("uncached-1000-chapter-detail", () => previousService.publicDetail(dir));
+  const after = await measure("reused-1000-chapter-detail", () => fixture.service.publicDetail(dir));
+  assert.equal(before.prepares, 1005, "the old reader compiles each cover query");
+  assert.equal(after.prepares, 4, "firstImage statement budget must leave only four unrelated SELECT compilations");
+  assert.equal(after.sqlReads, before.sqlReads, "prepared statements must not cache row results");
+  assert.equal(after.statCalls, before.statCalls, "prepared statements must retain every source-file check");
+
+  const previousReader = old.readerFactory({ dbPath: fixture.dbPath });
+  const reader = (forceUncachedFirstImages ? old.readerFactory : currentReaderFactory)({ dbPath: fixture.dbPath });
+  const compareImage = (key = dir, chapterIndex = null) => {
+    const expected = previousReader.firstImage(key, chapterIndex), result = reader.firstImage(key, chapterIndex);
+    assert.deepEqual(result, expected);
+    assert.equal(JSON.stringify(result), JSON.stringify(expected));
+    oracles++;
+    return result;
+  };
+  compareImage();
+  for (const chapterIndex of [1, "1", 29, 0, -1, 1001, NaN, Infinity]) compareImage(dir, chapterIndex);
+  const otherDir = addBook(fixture, 2);
+  compareImage(otherDir); compareImage(otherDir, 1); compareImage(dir, 29);
+  const first = compareImage(dir, 29), second = compareImage(dir, 29);
+  assert.notStrictEqual(first, second, "each execution returns an independent row object");
+  first.local_path = "private response mutation";
+  assert.equal(compareImage(dir, 29).local_path, "synthetic.png");
+  fixture.db.prepare("UPDATE manga_images SET local_path='changed.png' WHERE cache_key=? AND chapter_index=29 AND image_index=29").run(dir);
+  assert.equal(compareImage(dir, 29).local_path, "changed.png", "a WAL update remains visible through the prepared statement");
+  compare();
+  fixture.db.exec("ALTER TABLE manga_images ADD COLUMN fixture_added_column TEXT DEFAULT 'added'");
+  assert.equal(compareImage(dir, 29).fixture_added_column, "added", "external schema changes recompile SELECT * and expose new columns");
+  fixture.db.prepare("UPDATE manga_images SET local_path='' WHERE cache_key=? AND chapter_index=29").run(dir);
+  assert.equal(compareImage(dir, 29), null);
+  compare();
+  fixture.db.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES (?,29,0,'zero.png')").run(dir);
+  assert.equal(compareImage(dir, 29).image_index, 0);
+  compare();
+  fixture.db.exec("DROP TABLE manga_images");
+  assert.equal(compareImage(dir, 29), null, "read errors retain the null fallback");
+  const imagesTable = /CREATE TABLE IF NOT EXISTS manga_images \([\s\S]+?\n    \);/.exec(schema)?.[0];
+  assert(imagesTable);
+  fixture.db.exec(imagesTable);
+  fixture.db.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES (?,29,2,'restored.png')").run(dir);
+  assert.equal(compareImage(dir, 29).local_path, "restored.png", "a failed query is retried against the restored table");
+  compare();
+  console.log(JSON.stringify({ check: "manga-first-image-statements", chapters: 1000, completeResponseOracles: oracles, prepared: { previous: before.prepares, current: after.prepares }, uncachedReads: after.sqlReads, sourceChecksRetained: true, externalSchemaAndRows: true, failureRetry: true }));
+  checks++;
+}
+
+async function repeatedChapterSummaryModules() {
+  const servicePath = path.resolve(import.meta.dirname, "../src/modules/photos/server/manga-service.js");
+  const routesPath = path.resolve(import.meta.dirname, "../src/modules/photos/server/routes.js");
+  const service = fs.readFileSync(servicePath, "utf8").replaceAll("\r\n", "\n");
+  const currentChapter = "  function publicChapter(cacheDir, requestedIndex, manga = publicSummary(cacheDir)) {";
+  const oldChapter = "  function publicChapter(cacheDir, requestedIndex) {\n    const manga = publicSummary(cacheDir);";
+  assert.equal(service.split(currentChapter).length, 2);
+  const previousService = service.replace(currentChapter, oldChapter);
+  assert.equal(previousService.replace(oldChapter, currentChapter), service, "the service oracle restores only the former chapter signature and summary call");
+  const moduleSource = previousService.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
+    "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href));
+  const previousFactory = (await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"))).createMangaService;
+  const route = fs.readFileSync(routesPath, "utf8").replaceAll("\r\n", "\n");
+  const currentCall = "    const comic = cacheDir ? mangaService.publicSummary(cacheDir) : null;\n    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic) : null;";
+  const oldCall = "    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;";
+  const currentSend = "    sendJson(res, 200, { comic, chapter, cache: await imageReaderCacheStatus() });";
+  const oldSend = "    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: await imageReaderCacheStatus() });";
+  assert.equal(route.split(currentCall).length, 2); assert.equal(route.split(currentSend).length, 2);
+  const previousRoute = route.replace(currentCall, oldCall).replace(currentSend, oldSend);
+  assert.equal(previousRoute.replace(oldCall, currentCall).replace(oldSend, currentSend), route, "the route oracle restores only repeated summary work");
+  return { factory: previousFactory, route: (await import("data:text/javascript;base64," + Buffer.from(previousRoute).toString("base64"))).routePhotosApi };
+}
+
+async function verifyChapterSummaryReuse() {
+  const previous = await repeatedChapterSummaryModules();
+  const selectedRoute = forceRepeatedChapterSummaries ? previous.route : routePhotosApi;
+  let oracles = 0;
+  async function call(route, service, id, index) {
+    const response = {};
+    await route({ method: "GET" }, response, new URL(`http://fixture/api/manga/${encodeURIComponent(id)}/chapters/${encodeURIComponent(index)}`), {
+      mangaService: service, imageReaderCacheStatus: async () => ({ synthetic: true }),
+      notFound: res => Object.assign(res, { status: 404 }),
+      sendJson: (res, status, data) => Object.assign(res, { status, data })
+    });
+    return response;
+  }
+  async function outcome(run) {
+    try { return { result: await run() }; }
+    catch (error) { return { error: { name: error.name, message: error.message } }; }
+  }
+  async function compare(fixture, index, id = alias(fixture.dir)) {
+    const expected = await outcome(() => call(previous.route, fixture.previous, id, index));
+    const actual = await outcome(() => call(selectedRoute, fixture.service, id, index));
+    assert.deepEqual(actual, expected, "the complete chapter route retains status, response and error behavior");
+    assert.equal(JSON.stringify(actual), JSON.stringify(expected), "complete serialized chapter-route response retains field order");
+    const directBefore = await outcome(() => fixture.previous.publicChapter(fixture.dir, index));
+    const directAfter = await outcome(() => fixture.service.publicChapter(fixture.dir, index));
+    assert.deepEqual(directAfter, directBefore, "standalone publicChapter keeps its former default summary path");
+    assert.equal(JSON.stringify(directAfter), JSON.stringify(directBefore));
+    oracles++;
+    return actual;
+  }
+  async function sample(route, service, fixture) {
+    counts = freshCounts(); measured = true; const began = performance.now();
+    try {
+      const result = await call(route, service, fixture.id, fixture.chapters[Math.floor(fixture.total / 2)].index);
+      assert.equal(result.status, 200);
+      return { elapsedMs: performance.now() - began, ...counts };
+    } finally { measured = false; }
+  }
+  const median = samples => samples.map(item => item.elapsedMs).sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+  for (const source of ["sqlite", "json"]) for (const total of [100, 1000]) {
+    const fixture = fresh(`summary-${source}-${total}`, { wal: true });
+    fixture.total = total;
+    fixture.dir = addBook(fixture, 1, { jsonOnly: source === "json" });
+    fixture.chapters = Array.from({ length: total }, (_, offset) => {
+      const index = offset * 2 + 1;
+      return { index, title: `合成章节 ${index}`, slug: `chapter-${index}`, url: `https://synthetic.invalid/book/${index}.html`, status: "done",
+        images: Array.from({ length: 30 }, (_, image) => ({ index: image + 1, source_url: `https://synthetic.invalid/image/${index}/${image}`,
+          local_path: `missing-${index}-${image}.png`, bytes: 12345, status: "downloaded" })) };
+    });
+    const manifestPath = path.join(fixture.dir, "manifest.json"), catalogPath = path.join(fixture.dir, "catalog.json");
+    const manifest = JSON.stringify({ created_at: "2026-01-01", chapters: fixture.chapters });
+    const catalog = JSON.stringify({ title: "合成漫画", author: "合成作者", url: "https://synthetic.invalid/book/1",
+      chapters: fixture.chapters.map(chapter => ({ index: chapter.index, title: chapter.title, url: chapter.url })) });
+    write(manifestPath, manifest); write(catalogPath, catalog);
+    write(path.join(fixture.dir, "catalog.html"), '<div class="sp-book-tags"><a>韩漫</a><a>合成标签</a></div>' + "<!-- synthetic -->".repeat(4000));
+    if (source === "sqlite") {
+      fixture.db.exec("BEGIN");
+      try {
+        fixture.db.prepare("DELETE FROM manga_chapters WHERE cache_key=?").run(fixture.dir);
+        const chapterStatement = fixture.db.prepare("INSERT INTO manga_chapters(cache_key,chapter_index,title,slug,url,image_count,downloaded_count,status) VALUES (?,?,?,?,?,30,30,'done')");
+        const imageStatement = fixture.db.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path,bytes,status) VALUES (?,?,?,?,12345,'downloaded')");
+        for (const chapter of fixture.chapters) {
+          chapterStatement.run(fixture.dir, chapter.index, chapter.title, chapter.slug, chapter.url);
+          for (const image of chapter.images) imageStatement.run(fixture.dir, chapter.index, image.index, image.local_path);
+        }
+        fixture.db.prepare("UPDATE manga_comics SET chapter_count=?,done_chapter_count=?,image_count=?,downloaded_count=? WHERE cache_key=?").run(total, total, total * 30, total * 30, fixture.dir);
+        fixture.db.exec("COMMIT");
+      } catch (error) { fixture.db.exec("ROLLBACK"); throw error; }
+    }
+    const options = { root: fixture.root, databasePath: source === "sqlite" ? fixture.dbPath : "", mimeTypes: {}, normalizeExt: path.extname,
+      safeStat(file) { try { return fs.statSync(file); } catch { return null; } } };
+    fixture.service = currentFactory(options); fixture.previous = previous.factory(options);
+    fixture.id = fixture.previous.publicSummary(fixture.dir).id;
+    assert.equal(fixture.service.publicSummary(fixture.dir).id, fixture.id);
+    for (const index of [1, fixture.chapters[Math.floor(total / 2)].index, fixture.chapters.at(-1).index, 2, "invalid"]) await compare(fixture, index);
+    assert.equal((await compare(fixture, 1, "missing-directory-id")).result.status, 404);
+    fixture.previous.cacheById(fixture.id); fixture.service.cacheById(fixture.id);
+    for (let warm = 0; warm < 3; warm++) { await sample(previous.route, fixture.previous, fixture); await sample(selectedRoute, fixture.service, fixture); }
+    const beforeSamples = [], afterSamples = [];
+    for (let round = 0; round < 15; round++) {
+      if (round % 2) { afterSamples.push(await sample(selectedRoute, fixture.service, fixture)); beforeSamples.push(await sample(previous.route, fixture.previous, fixture)); }
+      else { beforeSamples.push(await sample(previous.route, fixture.previous, fixture)); afterSamples.push(await sample(selectedRoute, fixture.service, fixture)); }
+    }
+    const before = beforeSamples[0], after = afterSamples[0];
+    assert.equal(after.htmlReads, 1, "negative control: a chapter route must read catalog HTML only once");
+    assert.equal(before.htmlReads, 2, "the old oracle demonstrates the repeated summary");
+    assert.equal(after.jsonReads, before.jsonReads - (source === "sqlite" ? 1 : 4));
+    assert.equal(after.sqlReads, before.sqlReads - (source === "sqlite" ? 3 : 0));
+    assert(after.metadataBytes < before.metadataBytes);
+    console.log(JSON.stringify({ check: "manga-chapter-summary-reuse", source, chapters: total,
+      beforeMedianMs: +median(beforeSamples).toFixed(3), afterMedianMs: +median(afterSamples).toFixed(3),
+      before: { ...before, elapsedMs: +before.elapsedMs.toFixed(3) }, after: { ...after, elapsedMs: +after.elapsedMs.toFixed(3) } }));
+    const response = (await compare(fixture, 1)).result;
+    response.data.comic.title = "private response mutation";
+    await compare(fixture, 1);
+    write(catalogPath, JSON.stringify({ title: "当前文件修改", author: "修改作者", url: "https://synthetic.invalid/book/1" }));
+    if (source === "sqlite") fixture.db.prepare("UPDATE manga_chapters SET title='外部 WAL 修改' WHERE cache_key=? AND chapter_index=1").run(fixture.dir);
+    else { fixture.chapters[0].title = "当前 JSON 修改"; write(manifestPath, JSON.stringify({ chapters: fixture.chapters })); }
+    await compare(fixture, 1);
+    for (const value of ["null", "{", "[]", "17"]) { write(catalogPath, value); await compare(fixture, 1); }
+    fs.unlinkSync(catalogPath); await compare(fixture, 1); write(catalogPath, catalog);
+    for (const value of ["null", "{"]) { write(manifestPath, value); await compare(fixture, 1); }
+    fs.unlinkSync(manifestPath);
+    assert.equal((await compare(fixture, 1)).result.status, 404, "a missing manifest must keep the directory unavailable");
+    write(manifestPath, manifest); await compare(fixture, 1);
+  }
+  const events = [], summary = { id: "canonical-id" };
+  await routePhotosApi({ method: "GET" }, {}, new URL("http://fixture/api/manga/legacy-alias/chapters/7"), {
+    mangaService: {
+      cacheById(id) { assert.equal(id, "legacy-alias"); events.push("lookup"); return "private-directory"; },
+      publicSummary(directory) { assert.equal(directory, "private-directory"); events.push("summary"); return summary; },
+      publicChapter(directory, index, comic) { assert.equal(directory, "private-directory"); assert.equal(index, "7"); assert.strictEqual(comic, summary); events.push("chapter"); return { id: comic.id }; }
+    },
+    imageReaderCacheStatus: async () => { events.push("cache"); return {}; },
+    sendJson(_res, status, data) { assert.equal(status, 200); assert.strictEqual(data.comic, summary); assert.equal(data.chapter.id, summary.id); events.push("send"); }
+  });
+  assert.deepEqual(events, ["lookup", "summary", "chapter", "cache", "send"], "summary remains before chapter reads, using the same canonical identity within one request");
+  console.log(JSON.stringify({ check: "manga-chapter-summary-contract", completeResponseOracles: oracles, standaloneDefaults: true,
+    sparseAndMissingChapters: true, missingDirectoryAndManifest: true, malformedJson: true, externalWrites: true, responseIsolation: true, identityAndOrder: true, noPersistentCache: true }));
+  checks++;
 }
 
 function isOwned(file) { return typeof file === "string" && file.startsWith(temporary + path.sep); }
@@ -171,10 +433,13 @@ function addBook(fixture, index, { sourceUrl = `https://synthetic.invalid/book/$
   return dir;
 }
 async function measure(name, run) {
-  counts = { sqlReads: 0, librarySqlReads: 0, jsonReads: 0, statCalls: 0, existsCalls: 0, directoryScans: 0 };
+  counts = freshCounts();
   measured = true; const began = performance.now();
   try { await run(); const result = { name, elapsedMs: +(performance.now() - began).toFixed(2), ...counts }; console.log(JSON.stringify(result)); return result; }
   finally { measured = false; }
+}
+function freshCounts() {
+  return { prepares: 0, sqlReads: 0, librarySqlReads: 0, jsonReads: 0, htmlReads: 0, metadataBytes: 0, statCalls: 0, existsCalls: 0, directoryScans: 0 };
 }
 function warmGate(result, requests) {
   if (diagnose) return;
@@ -270,12 +535,15 @@ function verifyDatabaseReplacement() {
   assert.equal(fixture.service.cacheById(oldId), dir);
   const retainedReaders = [...handles].filter(database => !beforeReaders.has(database));
   assert.equal(retainedReaders.length, 1, "capture only this private service's actual read connection");
+  assert.ok(fixture.service.publicDetail(dir).coverUrl.endsWith("/1/1"), "prime both firstImage statements before replacing their connection");
   const before = fs.statSync(fixture.dbPath);
   const replacement = path.join(fixture.root, "replacement.sqlite");
   const next = new DatabaseSync(replacement); handles.add(next);
   next.exec(schema);
   next.prepare("INSERT INTO manga_comics(cache_key,dir_name,site,title,source_url) VALUES (?,?,'smtt6','replacement',?)")
     .run(dir, path.basename(dir), "https://synthetic.invalid/replacement");
+  next.prepare("INSERT INTO manga_chapters(cache_key,chapter_index,title) VALUES (?,77,'replacement chapter')").run(dir);
+  next.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES (?,77,9,'replacement.jpg')").run(dir);
   next.close();
   fs.utimesSync(replacement, before.atime, before.mtime);
   assert.equal(fs.statSync(replacement).mtimeMs, before.mtimeMs, "the replacement keeps exactly the old mtime, rather than a rounded approximation");
@@ -288,7 +556,10 @@ function verifyDatabaseReplacement() {
   fs.renameSync(fixture.dbPath, backup); fs.renameSync(replacement, fixture.dbPath);
   const newId = expectedId("https://synthetic.invalid/replacement", dir);
   assert.equal(fixture.service.cacheById(oldId), null, "same-mtime file replacement must not retain an old SQLite reader or index");
-  assert.equal(fixture.service.cacheById(newId), dir); assert.equal(fixture.service.publicSummary(dir).title, "replacement");
+  assert.equal(fixture.service.cacheById(newId), dir);
+  const replacedSummary = fixture.service.publicSummary(dir);
+  assert.equal(replacedSummary.title, "replacement");
+  assert.ok(replacedSummary.coverUrl.endsWith("/77/9"), "the first response after replacement must read the new cover through new statements");
   checks += 1;
 }
 async function legacyFactory() {

@@ -21,6 +21,8 @@ const LEGACY_MOBILE_PREWARM_DELAY_MS = 500;
 export function createWorkQueryService({
   actorMovieInfoStamp,
   actorMovieStamp,
+  actorMissingSearchResult = null,
+  actorMissingSearchResultForPeople = null,
   actorMissingSearchWorks,
   actorMissingSearchWorksForPeople = () => [],
   clampInteger,
@@ -30,6 +32,7 @@ export function createWorkQueryService({
   defaultWorkLimit,
   displayWorkTitle = (value) => String(value || ""),
   enrichLocalWorksWithActorMovieIndex,
+  enrichLocalWorksWithActorMovieIndexResult = null,
   enrichLocalWorksWithActorMovieInfo = (works) => works,
   fastMissingCodeSearch,
   favoriteStateService,
@@ -39,6 +42,7 @@ export function createWorkQueryService({
   localSearchWorkByCodeKey,
   localWorksByCodePrefix,
   maxWorkLimit,
+  mergedActorMovieRowsResult = null,
   mergedActorMovieRows = () => [],
   peoplePayloadStamp = () => "",
   peopleScopeService,
@@ -53,6 +57,7 @@ export function createWorkQueryService({
   publicPerson,
   publicWork,
   publicWorkAvailability,
+  rankingMissingSearchResult = null,
   rankingMissingSearchWorks,
   recordPerformanceSpan = null,
   scheduleBackground = (callback, delay = 0) => setTimeout(callback, delay),
@@ -62,6 +67,10 @@ export function createWorkQueryService({
   workHasCoreCover,
   workHasLocalMarker,
   workInfoFacetRow,
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true,
+  withWorkSearchReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workSearchReadCacheable = () => true,
   workQueryStamp,
   workClassificationService = {
     filterForRequest: (works) => works,
@@ -69,6 +78,7 @@ export function createWorkQueryService({
   },
 }) {
   let enrichedWorksCache = null;
+  let prewarmEnrichmentScope = null;
   let categorySourcesCache = null;
   const listSourceCache = new Map();
   let listPageCache = new Map();
@@ -109,6 +119,11 @@ export function createWorkQueryService({
   });
   const currentActorMovieInfoStamp = actorMovieInfoStamp || actorMovieStamp;
 
+  function scopedWorkInfoResult(callback) {
+    const result = withWorkInfoReadStatus(callback);
+    return { ...result.value, cacheable: result.value.cacheable !== false && result.cacheable !== false };
+  }
+
   function measure(label, callback) {
     if (!recordPerformanceSpan) return callback();
     const started = performance.now();
@@ -120,7 +135,7 @@ export function createWorkQueryService({
   }
 
   function currentStamp() {
-    return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}:${workClassificationService.visibilityStamp()}`;
+    return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}:${workClassificationService.visibilityStamp()}:${currentActorMovieInfoStamp()}`;
   }
 
   function listResponseStamp() {
@@ -132,11 +147,24 @@ export function createWorkQueryService({
   }
 
   function enrichedWorks() {
+    return enrichedWorksResult().works;
+  }
+
+  function enrichedWorksResult() {
+    return scopedWorkInfoResult(loadEnrichedWorksResult);
+  }
+
+  function loadEnrichedWorksResult() {
     const stamp = `${library.scannedAt || ""}:${library.worksById.size}:${currentActorMovieInfoStamp()}`;
-    if (enrichedWorksCache?.stamp === stamp) return enrichedWorksCache.works;
-    const works = measure("enrich", () => enrichLocalWorksWithActorMovieIndex(allWorks()));
-    enrichedWorksCache = { stamp, works };
-    return works;
+    if (enrichedWorksCache?.stamp === stamp) return { works: enrichedWorksCache.works, cacheable: true };
+    if (prewarmEnrichmentScope?.has(stamp)) return prewarmEnrichmentScope.get(stamp);
+    const loaded = measure("enrich", () => enrichLocalWorksWithActorMovieIndexResult
+      ? enrichLocalWorksWithActorMovieIndexResult(allWorks())
+      : { works: enrichLocalWorksWithActorMovieIndex(allWorks()), cacheable: true });
+    const result = { ...loaded, cacheable: loaded.cacheable !== false && workInfoReadCacheable() };
+    if (prewarmEnrichmentScope) prewarmEnrichmentScope.set(stamp, result);
+    if (result.cacheable !== false && workInfoReadCacheable()) enrichedWorksCache = { stamp, works: result.works };
+    return result;
   }
 
   function workMatchesFilter(work, filter) {
@@ -175,6 +203,10 @@ export function createWorkQueryService({
   }
 
   function sortWorkList(works, sort, options = {}) {
+    return withWorkInfoReadStatus(() => sortedWorkList(works, sort, options)).value;
+  }
+
+  function sortedWorkList(works, sort, options) {
     ensureDerivedCacheStamp();
     sort = normalizeWorkSortMode(sort);
     const stamp = sort === "progress" ? `${currentStamp()}:${userStateStamp()}` : currentStamp();
@@ -186,8 +218,10 @@ export function createWorkQueryService({
     const sortStarted = recordPerformanceSpan ? performance.now() : 0;
     const list = sharedWorkSorter(works, sort, options);
     const nextCachedBySort = cachedBySort || new Map();
-    derivedBudget.write(nextCachedBySort, cacheKey, { stamp, works: list }, list.length, SORTED_SOURCE_CACHE_LIMIT);
-    if (!cachedBySort) sortedWorksCache.set(works, nextCachedBySort);
+    if (workInfoReadCacheable() && workSearchReadCacheable()) {
+      derivedBudget.write(nextCachedBySort, cacheKey, { stamp, works: list }, list.length, SORTED_SOURCE_CACHE_LIMIT);
+      if (!cachedBySort) sortedWorksCache.set(works, nextCachedBySort);
+    }
     if (recordPerformanceSpan) recordPerformanceSpan("sort", performance.now() - sortStarted);
     return list;
   }
@@ -240,6 +274,10 @@ export function createWorkQueryService({
   }
 
   function staticWorkFacets(works) {
+    return withWorkInfoReadStatus(() => loadStaticWorkFacets(works)).value;
+  }
+
+  function loadStaticWorkFacets(works) {
     const stamp = currentStamp();
     const cached = staticFacetCache.get(works);
     if (cached?.stamp === stamp) return cached.facets;
@@ -273,12 +311,16 @@ export function createWorkQueryService({
       if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
     }
 
-    staticFacetCache.set(works, { stamp, facets });
+    if (workInfoReadCacheable()) staticFacetCache.set(works, { stamp, facets });
     if (recordPerformanceSpan) recordPerformanceSpan("facets", performance.now() - facetStarted);
     return facets;
   }
 
   function workFacets(works = allWorks()) {
+    return withWorkInfoReadStatus(() => loadWorkFacets(works)).value;
+  }
+
+  function loadWorkFacets(works) {
     const stamp = `${currentStamp()}:${userStateStamp()}`;
     const cached = dynamicFacetCache.get(works);
     if (cached?.stamp === stamp) return cached.facets;
@@ -287,7 +329,7 @@ export function createWorkQueryService({
       if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
       if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
     }
-    dynamicFacetCache.set(works, { stamp, facets });
+    if (workInfoReadCacheable()) dynamicFacetCache.set(works, { stamp, facets });
     return facets;
   }
 
@@ -327,6 +369,10 @@ export function createWorkQueryService({
   }
 
   function pagedWorksPayload(works, url, extra = {}, options = {}) {
+    return withWorkInfoReadStatus(() => loadPagedWorksPayload(works, url, extra, options)).value;
+  }
+
+  function loadPagedWorksPayload(works, url, extra, options) {
     const pageStarted = recordPerformanceSpan ? performance.now() : 0;
     ensureListResponseCache();
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
@@ -385,11 +431,15 @@ export function createWorkQueryService({
   }
 
   function preparedPublicWork(work, options = {}) {
+    return withWorkInfoReadStatus(() => loadPreparedPublicWork(work, options)).value;
+  }
+
+  function loadPreparedPublicWork(work, options) {
     const cached = readPreparedWork(work, options);
     if (cached) return cached;
     const payload = publicWork(work, false, options);
     const cacheKey = preparedWorkCacheKey(work, options);
-    if (!cacheKey) return payload;
+    if (!cacheKey || !workInfoReadCacheable() || !workSearchReadCacheable()) return payload;
     workPayloadCache.set(cacheKey, { work, payload, userStateStamp: userStateStamp() });
     while (workPayloadCache.size > WORK_PAYLOAD_CACHE_LIMIT) {
       workPayloadCache.delete(workPayloadCache.keys().next().value);
@@ -405,36 +455,59 @@ export function createWorkQueryService({
     return workId ? `${mode}:${workId}` : "";
   }
 
-  function listFromWorksPayload(sourceWorks, url, extra = {}, options = {}) {
+  function listFromWorksPayload(sourceWorks, url, extra = {}, options = {}, filterContext = null) {
+    return withWorkInfoReadStatus(() => loadListFromWorksPayload(sourceWorks, url, extra, options, filterContext)).value;
+  }
+
+  function loadListFromWorksPayload(sourceWorks, url, extra, options, filterContext) {
     const filter = extra.filter || url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const matchesFilter = options.lightweightInfo ? lightweightWorkMatchesFilter : workMatchesFilter;
-    const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
-    const filters = requestedFilters(filter);
-    const matchedWorks = filters.length
-      ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
-      : visibleWorks;
+    const cached = filterContext ? derivedBudget.read(filterContext.cache, filterContext.key) : null;
+    let matchedWorks = cached && cached.sourceWorks === sourceWorks ? cached.works : null;
+    let cacheable = false;
+    if (!matchedWorks) {
+      const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
+      const filters = requestedFilters(filter);
+      matchedWorks = filters.length
+        ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
+        : visibleWorks;
+      cacheable = Boolean(filterContext) && filters.every((item) => cacheableFilters.has(item));
+    }
     const works = sortWorkList(matchedWorks, sort, options);
-    return pagedWorksPayload(works, url, {
+    const payload = pagedWorksPayload(works, url, {
       ...extra,
       filter,
       facets: extra.facets || workFacets(sourceWorks)
     }, options);
+    if (filterContext && cacheable && workInfoReadCacheable()) {
+      // A person source keeps one successful selection. Count both the year
+      // and filtered arrays, so retaining their identity cannot bypass the
+      // shared reference budget or keep every filter/year combination alive.
+      derivedBudget.write(filterContext.cache, filterContext.key,
+        { sourceWorks, works: matchedWorks }, sourceWorks.length + matchedWorks.length, 1);
+    }
+    return payload;
   }
 
   function listPayload(url) {
+    return withWorkInfoReadStatus(() => loadListPayload(url)).value;
+  }
+
+  function loadListPayload(url) {
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`;
+    const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset]);
     const cachedPage = readListPage(pageCacheKey);
     if (cachedPage) return cachedPage;
 
     const stamp = currentStamp();
-    const filtered = cachedListSource(scope, filter, stamp, category);
+    const source = cachedListSourceResult(scope, filter, stamp, category);
+    const filtered = source.works;
     const works = sortWorkList(filtered, sort);
     const payload = pagedWorksPayload(works, url, {
       category,
@@ -442,7 +515,7 @@ export function createWorkQueryService({
       filter,
       facets: workFacets(filtered)
     });
-    return cacheListPage(pageCacheKey, payload);
+    return source.cacheable !== false && workInfoReadCacheable() ? cacheListPage(pageCacheKey, payload) : payload;
   }
 
   function categorySummaryPayload() {
@@ -486,6 +559,14 @@ export function createWorkQueryService({
   }
 
   function cachedListSource(scope, filter, stamp = currentStamp(), requestedCategory = "all") {
+    return cachedListSourceResult(scope, filter, stamp, requestedCategory).works;
+  }
+
+  function cachedListSourceResult(scope, filter, stamp = currentStamp(), requestedCategory = "all") {
+    return scopedWorkInfoResult(() => loadListSourceResult(scope, filter, stamp, requestedCategory));
+  }
+
+  function loadListSourceResult(scope, filter, stamp, requestedCategory) {
     ensureDerivedCacheStamp();
     const category = normalizeWorkCategory(requestedCategory);
     const filters = requestedFilters(filter);
@@ -494,46 +575,63 @@ export function createWorkQueryService({
     const cached = readFilterCache(listSourceCache, cacheKey);
     const filterStamp = filters.some((item) => userStateFilters.has(item)) ? `${stamp}:${userStateStamp()}` : stamp;
     let filtered = cached?.stamp === filterStamp ? cached.works : null;
+    let cacheable = true;
 
     if (!filtered) {
       const scopedCacheKey = `${scope}:${category}:all`;
       const scopedCached = readFilterCache(listSourceCache, scopedCacheKey);
-      const scopedWorks = scopedCached?.stamp === stamp
-        ? scopedCached.works
-        : worksForScopeAndCategory(scope, category, stamp);
-      writeFilterCache(listSourceCache, scopedCacheKey, { stamp, works: scopedWorks });
+      const scoped = scopedCached?.stamp === stamp
+        ? { works: scopedCached.works, cacheable: true }
+        : worksForScopeAndCategoryResult(scope, category, stamp);
+      const scopedWorks = scoped.works;
+      cacheable = scoped.cacheable !== false;
+      if (cacheable && workInfoReadCacheable()) writeFilterCache(listSourceCache, scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filters.length
         ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item))))
         : scopedWorks;
-      if (filters.every((item) => cacheableFilters.has(item))) {
+      if (cacheable && workInfoReadCacheable() && filters.every((item) => cacheableFilters.has(item))) {
         writeFilterCache(listSourceCache, cacheKey, { stamp: filterStamp, works: filtered });
       }
     }
-    return filtered;
+    return { works: filtered, cacheable };
   }
 
-  function worksForScopeAndCategory(scope, category, stamp) {
-    if (scope === "main" && category !== "all") return categorySources(stamp).get(category) || [];
-    if (scope === "western" && (category === "all" || category === "western")) {
-      return categorySources(stamp).get("western") || [];
+  function worksForScopeAndCategoryResult(scope, category, stamp) {
+    if (scope === "main" && category !== "all") {
+      const loaded = categorySourcesResult(stamp);
+      return { works: loaded.sources.get(category) || [], cacheable: loaded.cacheable };
     }
-    return enrichedWorks().filter((work) =>
+    if (scope === "western" && (category === "all" || category === "western")) {
+      const loaded = categorySourcesResult(stamp);
+      return { works: loaded.sources.get("western") || [], cacheable: loaded.cacheable };
+    }
+    const loaded = enrichedWorksResult();
+    return { works: loaded.works.filter((work) =>
       peopleScopeService.workMatches(work, scope)
-      && (category === "all" || workCategory(work) === category));
+      && (category === "all" || workCategory(work) === category)), cacheable: loaded.cacheable };
   }
 
   function categorySources(stamp = currentStamp()) {
-    if (categorySourcesCache?.stamp === stamp) return categorySourcesCache.sources;
+    return categorySourcesResult(stamp).sources;
+  }
+
+  function categorySourcesResult(stamp = currentStamp()) {
+    return scopedWorkInfoResult(() => loadCategorySourcesResult(stamp));
+  }
+
+  function loadCategorySourcesResult(stamp) {
+    if (categorySourcesCache?.stamp === stamp) return { sources: categorySourcesCache.sources, cacheable: true };
     const sources = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, []]));
+    const loaded = enrichedWorksResult();
     measure("category", () => {
-      for (const work of enrichedWorks()) {
+      for (const work of loaded.works) {
         if (!peopleScopeService.workMatches(work, "main")) continue;
         const category = workCategory(work);
         sources.get(category)?.push(work);
       }
     });
-    categorySourcesCache = { stamp, sources };
-    return sources;
+    if (loaded.cacheable !== false && workInfoReadCacheable()) categorySourcesCache = { stamp, sources };
+    return { sources, cacheable: loaded.cacheable };
   }
 
   function workCategory(work) {
@@ -549,6 +647,22 @@ export function createWorkQueryService({
   }
 
   function prewarm() {
+    return withWorkInfoReadStatus(prewarmWithEnrichmentScope).value;
+  }
+
+  function prewarmWithEnrichmentScope() {
+    const previousScope = prewarmEnrichmentScope;
+    prewarmEnrichmentScope = new Map();
+    try {
+      prewarmSources();
+    } finally {
+      // Failed fallback rows belong only to this synchronous operation. A
+      // nested prewarm restores its caller; timers and new requests retry.
+      prewarmEnrichmentScope = previousScope;
+    }
+  }
+
+  function prewarmSources() {
     enrichedWorks();
     prewarmLocalWorkCodeKeys();
     prewarmPersonMerge();
@@ -607,6 +721,10 @@ export function createWorkQueryService({
   }
 
   function searchPayload(url) {
+    return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => loadSearchPayload(url)).value).value;
+  }
+
+  function loadSearchPayload(url) {
     const startedAt = performance.now();
     const timings = {};
     const mark = (name) => {
@@ -644,7 +762,7 @@ export function createWorkQueryService({
       people: source.people
     }, { hydrateMissingSearchResults: true, lightweightInfo: true });
     mark("payload");
-    cacheSearchPage(pageCacheKey, payload);
+    if (source.cacheable !== false && workInfoReadCacheable() && workSearchReadCacheable()) cacheSearchPage(pageCacheKey, payload);
     return searchPayloadWithTimings(payload, url, rawQuery, timings, mark);
   }
 
@@ -676,6 +794,10 @@ export function createWorkQueryService({
   }
 
   function cachedSearchSource(rawQuery, timings = {}, mark = () => {}) {
+    return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => loadSearchSource(rawQuery, timings, mark)).value).value;
+  }
+
+  function loadSearchSource(rawQuery, timings, mark) {
     ensureDerivedCacheStamp();
     const stamp = `${currentStamp()}:${peoplePayloadStamp()}`;
     mark("sourceStamp");
@@ -712,25 +834,38 @@ export function createWorkQueryService({
       }
     }
     mark("localRelations");
+    const actorRowResults = exactPersonSearch
+      ? peopleSearch.exact.map((person) => mergedActorMovieRowsResult
+          ? mergedActorMovieRowsResult(person.id)
+          : { rows: mergedActorMovieRows(person.id), cacheable: true })
+      : [];
     const exactPersonLocalWorks = exactPersonSearch
       ? enrichLocalWorksWithActorMovieInfo(
           [...exactPersonLocalWorkIds].map((workId) => library.worksById.get(String(workId))).filter(Boolean),
-          peopleSearch.exact.flatMap((person) => mergedActorMovieRows(person.id))
+          actorRowResults.flatMap((result) => result.rows)
         )
       : [];
     mark("actorEnrich");
     const matchesExactPerson = (work) => exactPersonIds.has(work.personId)
       || exactPersonLocalWorkIds.has(String(work.id || ""));
     const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
-    const rankingMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery || exactPersonSearch ? [] : rankingMissingSearchWorks();
+    const rankingResult = localMarkerQuery || exactLocalWork || codePrefixQuery || exactPersonSearch
+      ? { works: [], cacheable: true }
+      : rankingMissingSearchResult ? rankingMissingSearchResult() : { works: rankingMissingSearchWorks(), cacheable: true };
+    const rankingMissingWorks = rankingResult.works;
     const rankingMissingKeys = new Set(rankingMissingWorks
       .map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title))
       .filter(Boolean));
-    const actorMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery
-      ? []
+    const actorResult = localMarkerQuery || exactLocalWork || codePrefixQuery
+      ? { works: [], cacheable: true }
       : exactPersonSearch
-        ? actorMissingSearchWorksForPeople([...exactPersonIds], rankingMissingKeys)
-        : actorMissingSearchWorks(rankingMissingKeys);
+        ? actorMissingSearchResultForPeople
+          ? actorMissingSearchResultForPeople([...exactPersonIds], rankingMissingKeys)
+          : { works: actorMissingSearchWorksForPeople([...exactPersonIds], rankingMissingKeys), cacheable: true }
+        : actorMissingSearchResult
+          ? actorMissingSearchResult(rankingMissingKeys)
+          : { works: actorMissingSearchWorks(rankingMissingKeys), cacheable: true };
+    const actorMissingWorks = actorResult.works;
     mark("missingWorks");
     const usesTextMatcher = !localMarkerQuery && !exactCodeKey && !codePrefixQuery && !exactPersonSearch;
     if (usesTextMatcher) prewarmWorkSearch([...rankingMissingWorks, ...actorMissingWorks]);
@@ -764,6 +899,8 @@ export function createWorkQueryService({
     ]).filter((work) => peopleScopeService.workMatches(work, "main"));
     mark("dedupe");
     const source = {
+      cacheable: rankingResult.cacheable !== false && actorResult.cacheable !== false
+        && actorRowResults.every((result) => result.cacheable !== false),
       categoryWorks: new Map(),
       facetsByCategory: new Map(),
       facetsStamp: userStateStamp(),
@@ -776,7 +913,8 @@ export function createWorkQueryService({
       works: matchedWorks
     };
     mark("publicPeople");
-    derivedBudget.write(searchSourceCache, cacheKey, source, source.works.length, 48);
+    source.cacheable = source.cacheable !== false && workInfoReadCacheable() && workSearchReadCacheable();
+    if (source.cacheable) derivedBudget.write(searchSourceCache, cacheKey, source, source.works.length, 48);
     return source;
   }
 

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createVerificationAdvisories } from "./verification_advisories.mjs";
+import { installFixtureSyncJournal } from "./fixtures/short-video-sync-journal.mjs";
 
 import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
@@ -190,6 +191,473 @@ if (process.argv.includes("--navigation-only")) {
   console.log("short-video-store: navigation-only ok");
   process.exit(0);
 }
+await verifySuggestionQueryBudget();
+await verifyFallbackCountQueries();
+
+async function verifySuggestionQueryBudget() {
+  const moduleUrl = new URL("../src/modules/short-videos/server/store.js", import.meta.url);
+  const normalizedSource = shortVideoStoreSource.replace(/\r\n/g, "\n");
+  const start = normalizedSource.indexOf("  function searchSuggestions(");
+  const end = normalizedSource.indexOf("\nfunction summary()", start);
+  assert(start >= 0 && end > start, "actual suggestion implementation must be discoverable");
+  const actualFunction = normalizedSource.slice(start, end);
+  const fallbackStart = actualFunction.indexOf("    const authorWhere = author ?");
+  assert(fallbackStart > 0, "restore only the LIKE fallback for the old response oracle");
+  const prefix = actualFunction.slice(0, fallbackStart);
+  let fallback = actualFunction.slice(fallbackStart);
+  const guard = "    if (suggestions.length >= limit) return { query, media, author, suggestions };\n";
+  assert.equal(fallback.split(guard).length, 3, "both deferred stages must be available for the old eager negative control");
+  const tagStart = fallback.indexOf("    const tagRows = database.prepare(");
+  const tagEnd = fallback.indexOf("    const tagCounts = new Map();", tagStart);
+  const titleStart = fallback.indexOf("    const titleRows = database.prepare(");
+  const titleEnd = fallback.indexOf("    for (const row of titleRows)", titleStart);
+  assert(tagStart >= 0 && tagEnd > tagStart && titleStart > tagEnd && titleEnd > titleStart);
+  const tagSql = fallback.slice(tagStart, tagEnd);
+  const titleSql = fallback.slice(titleStart, titleEnd);
+  fallback = fallback.replace(titleSql, "").replace(tagSql, "").replaceAll(guard, "");
+  fallback = fallback.replace("    const suggestions = [];", `${tagSql}${titleSql}    const suggestions = [];`);
+  const oldSource = normalizedSource.replace(actualFunction, prefix + fallback)
+    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) => `from ${JSON.stringify(new URL(relative, moduleUrl).href)}`);
+  const { createShortVideoStore: createOldStore } = await import(`data:text/javascript;base64,${Buffer.from(oldSource).toString("base64")}`);
+  const createTestedStore = process.argv.includes("--legacy-suggestion-eager") ? createOldStore : createShortVideoStore;
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  const originalParse = JSON.parse;
+  let capturedDatabase;
+  let observing = false;
+  let sqlReads = [];
+  let parses = 0;
+  DatabaseSync.prototype.prepare = function(sql) {
+    capturedDatabase = this;
+    const statement = originalPrepare.call(this, sql);
+    if (!observing) return statement;
+    const kind = sql.includes("short_video_search MATCH") ? "fts"
+      : sql.includes("SELECT tags_json") ? "tags"
+      : sql.includes("SELECT title, author_name") ? "titles"
+      : sql.includes("author_name AS label") ? "authors"
+      : sql.includes("SUM(video_count)") ? "indexedAuthors" : "other";
+    return new Proxy(statement, {
+      get(target, key) {
+        const value = target[key];
+        if (typeof value !== "function") return value;
+        return (...args) => {
+          const result = value.apply(target, args);
+          if (key === "all" || key === "get") sqlReads.push({ kind, rows: Array.isArray(result) ? result.length : result ? 1 : 0 });
+          return result;
+        };
+      }
+    });
+  };
+  JSON.parse = function(...args) {
+    if (observing) parses++;
+    return originalParse.apply(this, args);
+  };
+  const unopenedCoverPath = path.join(os.tmpdir(), `fanhao-suggestions-unopened-${process.pid}.sqlite`);
+  const options = { dbPath: ":memory:", coverDbPath: unopenedCoverPath, roots: [], skipStartupMaintenance: true, trustExplicitInvalidation: true, coverGenerateLimit: 0 };
+  let store;
+  let oldStore;
+  let checks = 0;
+  const count = 3000;
+  try {
+    assert(!fs.existsSync(unopenedCoverPath), "suggestion setup must never reuse an existing cover database");
+    store = createTestedStore(options);
+    store.prepareSchema();
+    const db = capturedDatabase;
+    oldStore = createOldStore(options);
+    oldStore.prepareSchema();
+    const oldDb = capturedDatabase;
+    const databases = [db, oldDb];
+    const insertSql = "INSERT INTO short_videos(id,aweme_id,owner_user_id,author_sec_uid,author_name,title,tags_json,tags_text,source_path,published_at,media_type,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)";
+    function insertVideo(database, { id, author = "privateAuthor", name = "Legacy Creator", title = `美食 标题 ${id}`, tags = [], media = "video", published = "zzzzzzz", visibility = "local_only" }) {
+      database.prepare(insertSql).run(id, `aw:${id}`, "private-user", author, name, title, JSON.stringify(tags), tags.join(" "), `synthetic-${id}.mp4`, published, media, visibility);
+    }
+    const tags = ["美食烹饪", "美食家常", "美食探店", "美食甜品", "美食烧烤", "美食面食", "美食素食", "美食汤饭"];
+    for (const database of databases) {
+      database.exec("BEGIN");
+      database.prepare("INSERT INTO short_video_users(id,sec_uid,nickname) VALUES('private-user','privateAuthor','Current Creator')").run();
+      for (let i = 0; i < count; i++) insertVideo(database, { id: `v${i}`, tags, media: i % 5 === 0 ? "gallery" : "video", published: String(i).padStart(6, "0") });
+      insertVideo(database, { id: "pending", tags, published: "zzzzzzzzz", visibility: "download_pending" });
+      database.exec("COMMIT");
+    }
+    function run(owner, params) {
+      sqlReads = [];
+      parses = 0;
+      observing = true;
+      try {
+        const response = owner.searchSuggestions({ searchParams: new URLSearchParams(params) });
+        return { response, json: JSON.stringify(response), reads: [...sqlReads], parses };
+      } finally { observing = false; }
+    }
+    function compare(params, budget) {
+      const old = run(oldStore, params);
+      const current = run(store, params);
+      assert.equal(current.json, old.json, `complete suggestion response must equal the old eager oracle: ${JSON.stringify(params)}`);
+      if (budget) {
+        assert.deepEqual(current.reads.map(row => [row.kind, row.rows]), budget.reads, `unused suggestion SQL budget: ${JSON.stringify(params)}`);
+        assert.equal(current.parses, budget.parses, `suggestion JSON parse budget: ${JSON.stringify(params)}`);
+      }
+      checks++;
+      return { old, current };
+    }
+    const normal = compare({ q: "美食", limit: "8" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160]], parses: 160 });
+    assert.equal(normal.old.reads.at(-1).kind, "titles");
+    assert.equal(normal.old.reads.at(-1).rows, 16);
+    assert.equal(normal.current.response.suggestions.length, 8);
+    assert(normal.current.response.suggestions.every(item => item.detail === "160 条相关作品"), "tag detail must retain the complete 160-row sample");
+    compare({ q: "食", limit: "1" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160]], parses: 160 });
+    compare({ q: "美食", limit: "8", author: "privateAuthor" }, { reads: [["authors", 0], ["tags", 160]], parses: 160 });
+    compare({ q: "美食", limit: "8", author: "privateAuthor", media: "gallery" }, { reads: [["authors", 0], ["tags", 160]], parses: 160 });
+    compare({ q: "美食", limit: "8", media: "gallery" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160]], parses: 160 });
+    compare({ q: "美食", limit: "8", media: "video" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160]], parses: 160 });
+    compare({ search: "美食", limit: "8", type: "gallery" });
+    const shortage = compare({ q: "美食", limit: "12" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160], ["titles", 24]], parses: 160 });
+    assert.equal(shortage.current.response.suggestions.length, 12);
+    compare({ q: "NoSuchNeedle", limit: "8" }, { reads: [["indexedAuthors", 0], ["fts", 0], ["authors", 0], ["tags", 0], ["titles", 0]], parses: 0 });
+    compare({ q: "   ", limit: "8" }, { reads: [], parses: 0 });
+    compare({ q: "美食烹饪", limit: "8" }, { reads: [["indexedAuthors", 0], ["fts", 160]], parses: 160 });
+    compare({ q: "美食烹饪", limit: "8", author: "privateAuthor", media: "gallery" }, { reads: [["fts", 160]], parses: 160 });
+    for (const database of databases) database.exec("UPDATE short_videos SET author_name='美食作者 ' || (CAST(substr(id,2) AS INTEGER)%8) WHERE id LIKE 'v%'");
+    const authorFilled = compare({ q: "美食", limit: "8" }, { reads: [["indexedAuthors", 0], ["authors", 8]], parses: 0 });
+    assert.equal(authorFilled.old.parses, 160);
+    assert.deepEqual(authorFilled.current.response.suggestions.map(item => item.kind), Array(8).fill("author"));
+    compare({ q: "美食", limit: "1", media: "gallery" }, { reads: [["indexedAuthors", 0], ["authors", 1]], parses: 0 });
+    compare({ q: "美食", limit: "12", author: "name:美食作者 0" }, { reads: [["authors", 1], ["tags", 160], ["titles", 24]], parses: 160 });
+    for (const database of databases) {
+      for (const [i, literal] of ["%", "_", "\\"].entries()) insertVideo(database, { id: `literal${i}`, author: "special-author", name: `Literal${literal}Author`, title: `Literal${literal}Title`, tags: [`Literal${literal}Tag`], media: i === 1 ? "gallery" : "video" });
+      insertVideo(database, { id: "long-title", title: `${"长".repeat(120)} trailing`, tags: [] });
+      insertVideo(database, { id: "long-author", author: "a".repeat(1000), title: "界面标题", tags: ["界面标签"] });
+    }
+    for (const q of ["%", "_", "\\"]) for (const media of ["all", "gallery"]) {
+      const literal = compare({ q, limit: "8", media });
+      const matches = media === "all" || q === "_";
+      assert.equal(literal.current.response.suggestions.length, matches ? 3 : 0, "LIKE escape must match only the literal row within its media scope");
+    }
+    const longQuery = compare({ q: `  ${"长".repeat(140)}  `, limit: "8" }, { reads: [["indexedAuthors", 0], ["fts", 1]], parses: 1 });
+    assert.equal(longQuery.current.response.query.length, 120);
+    assert.equal(longQuery.current.response.suggestions[0].label, `${"长".repeat(56)}…`);
+    const longAuthor = compare({ q: "界面", author: `  ${"a".repeat(1005)}  `, limit: "8" }, { reads: [["authors", 0], ["tags", 1], ["titles", 1]], parses: 1 });
+    assert.equal(longAuthor.current.response.author.length, 1000);
+    for (const database of databases) database.exec("UPDATE short_videos SET author_name=CASE WHEN CAST(substr(id,2) AS INTEGER)%2=0 THEN '美食Alias' ELSE '美食alias' END WHERE id LIKE 'v%'");
+    const duplicate = compare({ q: "美食", limit: "2" }, { reads: [["indexedAuthors", 0], ["authors", 2], ["tags", 160]], parses: 160 });
+    assert.deepEqual(duplicate.current.response.suggestions.map(item => item.kind), ["author", "tag"], "capacity must use appended unique suggestions, not author row count");
+    for (const database of databases) {
+      const update = database.prepare("UPDATE short_videos SET tags_json=?, tags_text=? WHERE id=?");
+      for (let i = count - 160; i < count; i++) {
+        const tag = i >= count - 10 ? "慢食先到" : "慢食后到";
+        update.run(JSON.stringify([tag]), tag, `v${i}`);
+      }
+    }
+    const lateTag = compare({ q: "慢食", limit: "1" }, { reads: [["indexedAuthors", 0], ["authors", 0], ["tags", 160]], parses: 160 });
+    assert.equal(lateTag.current.response.suggestions[0].label, "#慢食后到");
+    assert.equal(lateTag.current.response.suggestions[0].detail, "150 条相关作品", "rank and count must include later rows even when the first tag already fills the limit");
+    for (const database of databases) {
+      database.prepare("UPDATE short_video_users SET nickname='美食当前' WHERE id='private-user'").run();
+      database.prepare("INSERT INTO short_video_users(id,sec_uid,nickname) VALUES('private-user-2','privateAuthor2','美食当前')").run();
+      database.exec("UPDATE short_videos SET owner_user_id='private-user-2' WHERE id LIKE 'v%' AND CAST(substr(id,2) AS INTEGER)%2=0");
+    }
+    const indexed = compare({ q: "美食", limit: "8" }, { reads: [["indexedAuthors", 1]], parses: 0 });
+    assert.equal(indexed.current.response.suggestions.length, 1, "nonempty indexed-author results retain their existing early return even below the limit");
+    assert.equal(indexed.current.response.suggestions[0].detail, `${(count + 5).toLocaleString("zh-CN")} 条作品`);
+    assert(!fs.existsSync(unopenedCoverPath), "suggestion verification must never open a cover database");
+    console.log(`short-video-store: ${checks} suggestion response/query-budget cases ok (tags full: 4→3 SQL; author full: 4→2 SQL, 160→0 JSON parses)`);
+  } finally {
+    observing = false;
+    DatabaseSync.prototype.prepare = originalPrepare;
+    JSON.parse = originalParse;
+    oldStore?.close();
+    store?.close();
+  }
+}
+
+
+async function verifyFallbackCountQueries() {
+  const moduleUrl = new URL("../src/modules/short-videos/server/store.js", import.meta.url);
+  const normalizedSource = shortVideoStoreSource.replace(/\r\n/g, "\n");
+  const start = normalizedSource.indexOf("  function listVideos(");
+  const end = normalizedSource.indexOf("\n  function videoDetail(", start);
+  assert(start >= 0 && end > start, "the complete listVideos implementation must remain discoverable");
+  const currentFunction = normalizedSource.slice(start, end);
+  const countSource = '    const countSource = !filter.author && filter.deleted === "all" && filter.source !== "history"\n      ? "short_videos"\n      : "short_video_catalog";\n    // Preserve the catalog expression\'s affinity for legacy TEXT flags.\n    const countWhere = countSource === "short_videos" && filter.source === "following"\n      ? where.replace("author_following = 1", "COALESCE(author_following, 0) = 1")\n      : where;\n';
+  const currentCount = "SELECT COUNT(*) AS count FROM " + String.fromCharCode(36) + "{countSource} " + String.fromCharCode(36) + "{countWhere}";
+  const formerCount = "SELECT COUNT(*) AS count FROM short_video_catalog " + String.fromCharCode(36) + "{where}";
+  assert.equal(currentFunction.split(countSource).length, 2, "restore the precise count-source condition");
+  assert.equal(currentFunction.split(currentCount).length, 2, "restore the precise fallback COUNT");
+  const previousFunction = currentFunction.replace(countSource, "").replace(currentCount, formerCount);
+  const totalMarker = "    const total = recommendationIds\n";
+  assert.equal(previousFunction.replace(formerCount, currentCount).replace(totalMarker, countSource + totalMarker),
+    currentFunction, "the complete old list function differs only in this round's count source");
+  const previousSource = normalizedSource.replace(currentFunction, previousFunction);
+  assert.equal(previousSource.replace(previousFunction, currentFunction), normalizedSource,
+    "the old full-function oracle preserves every other store implementation");
+  const importableSource = previousSource.replace(/from "(\.\.?\/[^"\n]+)"/g,
+    (_match, relative) => "from " + JSON.stringify(new URL(relative, moduleUrl).href));
+  const { createShortVideoStore: createPreviousStore } = await import("data:text/javascript;base64," + Buffer.from(importableSource).toString("base64"));
+  const createTestedStore = process.argv.includes("--legacy-fallback-count") ? createPreviousStore : createShortVideoStore;
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  const originalParse = JSON.parse;
+  const unopenedCoverPath = path.join(os.tmpdir(), "fanhao-fallback-count-unopened-" + process.pid + ".sqlite");
+  const options = { dbPath: ":memory:", coverDbPath: unopenedCoverPath, roots: [],
+    skipStartupMaintenance: true, trustExplicitInvalidation: true, coverGenerateLimit: 0 };
+  const owners = [];
+  let capturedDatabase;
+  let observing = false;
+  let probing = false;
+  let injectedError = null;
+  let reads = [];
+  let parses = 0;
+  let lookupCounts = {};
+  let checks = 0;
+  const selectionEvidence = [];
+  const recommendationEvidence = [];
+  const quote = value => '"' + String(value).replaceAll('"', '""') + '"';
+  const countQuery = /^SELECT COUNT\(\*\) AS count FROM (short_video_catalog|short_videos)\b/;
+  const aliases = ["u", "s", "user_like", "user_collect", "user_dislike", "watch_history",
+    "video_asset", "native_cover_asset", "ffmpeg_cover_asset", "legacy_cover_asset", "music_asset", "sound_index"];
+  DatabaseSync.prototype.prepare = function(sql) {
+    capturedDatabase = this;
+    const count = countQuery.exec(sql);
+    if (observing && count && injectedError) throw injectedError;
+    const actualSql = observing && probing && count?.[1] === "short_video_catalog"
+      ? sql.replace("FROM short_video_catalog", "FROM short_video_catalog_count_probe") : sql;
+    const statement = originalPrepare.call(this, actualSql);
+    if (!observing) return statement;
+    return new Proxy(statement, {
+      get(target, key) {
+        const value = target[key];
+        if (typeof value !== "function") return value;
+        return (...args) => {
+          const startedAt = performance.now();
+          const result = value.apply(target, args);
+          if (key === "all" || key === "get") reads.push({ sql, actualSql, args,
+            elapsedMs: performance.now() - startedAt });
+          return result;
+        };
+      }
+    });
+  };
+  JSON.parse = function(...args) {
+    if (observing) parses++;
+    return originalParse.apply(this, args);
+  };
+
+  function createOwner(factory, { legacyNullable = false, followingType = "INTEGER" } = {}) {
+    const owner = factory(options);
+    owners.push(owner);
+    owner.prepareSchema();
+    const database = capturedDatabase;
+    // The read scenarios use actual tables, indexes and views. Ingestion
+    // triggers stay covered by the original disk fixture below this verifier.
+    const schema = originalPrepare.call(database, "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY rowid").all();
+    for (const item of schema.filter(row => row.type === "trigger")) database.exec("DROP TRIGGER " + quote(item.name));
+    if (legacyNullable) {
+      database.exec("PRAGMA foreign_keys = OFF");
+      for (const item of schema.filter(row => row.type === "view")) database.exec("DROP VIEW " + quote(item.name));
+      database.exec("DROP TABLE short_videos");
+      let tableSql = schema.find(row => row.type === "table" && row.name === "short_videos").sql;
+      for (const column of ["visibility", "media_type", "is_liked", "author_following", "owner_user_id", "published_at", "liked_at"]) {
+        tableSql = tableSql.replace(new RegExp("(" + column + " (?:TEXT|INTEGER)) NOT NULL"), "$1");
+      }
+      tableSql = tableSql.replace("author_following INTEGER", "author_following " + followingType);
+      database.exec(tableSql);
+      for (const item of schema.filter(row => row.type === "index" && /\bON short_videos\b/.test(row.sql))) database.exec(item.sql);
+      for (const item of schema.filter(row => row.type === "view")) database.exec(item.sql);
+      database.exec("PRAGMA foreign_keys = ON");
+    }
+    assert.equal(originalPrepare.call(database, "PRAGMA table_info(short_videos)").all()
+      .find(row => row.name === "author_following").type, followingType, "exercise the actual legacy flag affinity");
+    const baseSql = schema.find(row => row.type === "view" && row.name === "short_video_catalog_base").sql;
+    let markers = 0;
+    const probeSql = baseSql.replace("CREATE VIEW short_video_catalog_base", "CREATE VIEW short_video_catalog_base_count_probe")
+      .replace(/ON ([a-z_]+)\.(id|video_id) = v\.(id|owner_user_id)/g, (_match, alias, key, field) => {
+        markers++;
+        assert(aliases.includes(alias), "every native lookup probe must correspond to an actual catalog join");
+        return "ON " + alias + "." + key + " = fanhao_count_lookup('" + alias + "',v." + field + ")";
+      });
+    assert.equal(markers, aliases.length, "probe every actual catalog association");
+    database.function("fanhao_count_lookup", { deterministic: true }, (alias, value) => {
+      lookupCounts[alias] = (lookupCounts[alias] || 0) + 1;
+      return value;
+    });
+    database.exec(probeSql);
+    database.exec("CREATE VIEW short_video_catalog_count_probe AS SELECT short_video_catalog_base_count_probe.*, " +
+      "1 AS recommendation_author_rank, recommendation_score AS recommendation_order_score FROM short_video_catalog_base_count_probe");
+    return { owner, database };
+  }
+
+  function seed(database, count, { boundary = false, nullable = false, followingText = false } = {}) {
+    database.exec("BEGIN");
+    const user = database.prepare("INSERT INTO short_video_users(id,sec_uid,nickname) VALUES(?,?,?)");
+    for (let index = 0; index < 24; index++) user.run("user" + index, "sec" + index, "作者 " + index);
+    const video = database.prepare("INSERT INTO short_videos(id,aweme_id,owner_user_id,author_sec_uid,author_name,title,description,tags_json,tags_text,source_path,published_at,liked_at,media_type,visibility,is_liked,author_following,actual_pixels,digg_count,comment_count,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    const search = database.prepare("INSERT INTO short_video_search(video_id,title,description,author_name,aweme_id,tags_text,visibility) VALUES(?,?,?,?,?,?,?)");
+    const membership = database.prepare("INSERT INTO short_video_source_memberships(source_profile_id,source_type,aweme_id,is_missing_from_profile) VALUES(?,?,?,?)");
+    const stats = database.prepare("INSERT INTO short_video_stats(video_id,digg_count,comment_count) VALUES(?,?,?)");
+    const action = database.prepare("INSERT INTO short_video_user_actions(local_user_id,video_id,action_type,active) VALUES(?,?,?,?)");
+    const watch = database.prepare("INSERT INTO short_video_watch_history(local_user_id,video_id,progress_ms,last_watched_at) VALUES(?,?,?,?)");
+    const asset = database.prepare("INSERT INTO short_video_assets(id,video_id,asset_type,local_path,file_name,size_bytes) VALUES(?,?,?,?,?,?)");
+    const sound = database.prepare("INSERT INTO short_video_sounds(video_id,sound_key,title) VALUES(?,?,?)");
+    for (let index = 0; index < count; index++) {
+      const id = boundary && index < 2 ? null : "V" + String(index).padStart(6, "0");
+      const aweme = "A" + index;
+      const title = index % 4 === 0 ? "目标测试 " + index % 27 : "普通_测试%\\ " + index % 27;
+      const author = "作者 " + index % 24;
+      const media = nullable && index % 13 === 0 ? null : index % 3 === 0 ? "gallery" : "video";
+      const visibility = nullable && index % 11 === 0 ? null : index % 7 === 0 ? "download_pending" : "local_only";
+      const owner = nullable && index % 13 === 0 ? null : boundary && index % 9 === 0 ? "orphan" : "user" + index % 24;
+      const published = nullable && index % 10 === 0 ? null : index % 19 === 0 ? "" : String(index % 1000).padStart(6, "0");
+      const likedAt = nullable && index % 4 === 0 ? null : "same-liked";
+      const liked = nullable && index % 6 === 0 ? null : index % 2;
+      const followingValues = [1, 0, null, "1", "0", "1.0", "01", "not-number", 1.5];
+      const following = nullable ? followingValues[index % followingValues.length] : index % 3 ? 1 : 0;
+      const storedFollowing = followingText && following !== null ? String(following) : following;
+      const metadata = media === "gallery" ? '{"fanhaoMedia":{"type":"gallery","galleryCount":2,"galleryItems":["image","video"]}}' : "{}";
+      video.run(id, aweme, owner, "sec" + index % 24, author, title, "描_述%\\", boundary && index % 5 === 0 ? "invalid" : '["tag"]',
+        "tag", "", published, likedAt, media, visibility, liked, storedFollowing, index % 2 ? 8294400 : 0, index % 97, index % 3, metadata);
+      search.run(id, title, "描_述%\\", author, aweme, "tag", visibility);
+      if (index % 5 === 0) membership.run("private-profile", "post", aweme, index % 25 === 0 ? 1 : 0);
+      if (id === null) continue;
+      stats.run(id, index % 97, index % 3);
+      for (const type of ["like", "collect", "dislike"]) action.run("local:self", id, type, 0);
+      action.run("other-account", id, "like", 1);
+      watch.run("local:self", id, 100, boundary && index % 3 === 0 ? "" : "2026-10-04");
+      watch.run("other-account", id, 900, "2026-10-05");
+      for (const type of ["video", "native_cover", "ffmpeg_cover", "cover", "music"]) asset.run(id + type, id, type, "synthetic-not-read.mp4", "synthetic.mp4", 1);
+      sound.run(id, "private-key", "private sound");
+    }
+    if (boundary) {
+      stats.run(null, 999999, 0);
+      stats.run(null, 888888, 0);
+    }
+    database.exec("COMMIT");
+  }
+
+  function run(owner, params, { probe = false } = {}) {
+    reads = [];
+    parses = 0;
+    lookupCounts = {};
+    probing = probe;
+    observing = true;
+    const startedAt = performance.now();
+    try {
+      const response = owner.listVideos({ searchParams: new URLSearchParams({
+        source: "all", stats: "0", facets: "0", users: "0", limit: "48", ...params
+      }) });
+      return { response, reads: [...reads], parses, lookups: { ...lookupCounts }, elapsedMs: performance.now() - startedAt };
+    } finally { observing = false; probing = false; }
+  }
+
+  function compare(previous, current, params) {
+    const before = run(previous, params), after = run(current, params);
+    assert.deepEqual(after.response, before.response, "the complete former listVideos response remains unchanged");
+    assert.equal(JSON.stringify(after.response), JSON.stringify(before.response), "complete response bytes and field order remain unchanged");
+    const oldCount = before.reads.find(row => countQuery.test(row.sql));
+    if (oldCount) selectionEvidence.push({ params, previous: oldCount,
+      actual: after.reads.find(row => countQuery.test(row.sql)) });
+    if (params.source === "recommended") recommendationEvidence.push({ total: after.response.total,
+      countReads: [...before.reads, ...after.reads].filter(row => countQuery.test(row.sql)).length });
+    checks++;
+    return { before, after };
+  }
+
+  try {
+    assert(!fs.existsSync(unopenedCoverPath), "fallback COUNT setup must never reuse a cover database");
+    const previous = createOwner(createPreviousStore), current = createOwner(createTestedStore);
+    const count = 6000;
+    seed(previous.database, count);
+    seed(current.database, count);
+    const largeCases = [
+      { q: "目标测试", sort: "published" }, { q: "目标测试", sort: "likes" }, { q: "目标测试", sort: "publishedAsc" },
+      { q: "普通", sort: "likes" }, { q: "目标", sort: "likes", media: "gallery" },
+      { q: "目标", sort: "comments", source: "liked" }, { q: "目标测试", sort: "size", includePending: "1" },
+      { q: "目标测试", sort: "duration", quality: "4k" }, { q: "目标测试", sort: "likes", source: "posts" },
+      { q: "目标测试", sort: "likes", source: "local" }, { q: "NoSuchMatch", sort: "size" },
+      { q: "目标测试", sort: "likes", author: "sec0" }, { q: "目标测试", sort: "likes", author: "name:作者 0" },
+      { q: "目标测试", sort: "likes", deleted: "deleted" }, { q: "目标测试", sort: "likes", source: "history" },
+      { q: "目标测试", sort: "likes", source: "following" },
+      { q: "目标测试", sort: "likes", source: "recommended" },
+      { q: "NoSuchMatch", sort: "likes", source: "recommended" },
+      { q: "目标测试", sort: "likes", stats: "1", facets: "1", users: "1" }
+    ];
+    for (const params of largeCases) for (const offset of ["0", "48", "999999"]) {
+      compare(previous.owner, current.owner, { ...params, offset });
+    }
+    const boundaryCases = [
+      { source: "all", sort: "watched" }, { source: "liked", sort: "watched" },
+      { source: "following", sort: "watched" }, { source: "posts", sort: "watched" }, { source: "local", sort: "watched" },
+      { q: "目标测试", sort: "likes" }, { q: "_", sort: "likes" }, { q: "%", sort: "likes" }, { q: "\\", sort: "likes" },
+      { q: '"目标"', sort: "likes" }, { q: "目标测试", sort: "comments", media: "gallery" },
+      { q: "目标测试", sort: "size", quality: "4k" }, { q: "目标测试", sort: "likes", users: "1" },
+      { q: "目标测试", sort: "likes", author: "sec0" }, { q: "目标测试", sort: "likes", author: "name:作者 0" },
+      { q: "目标测试", sort: "likes", deleted: "deleted" }, { q: "目标测试", sort: "likes", source: "history" },
+      { q: "none", sort: "duration" }, { sort: "likes", topic: "tag" },
+      { sort: "likes", sound: Buffer.from("no-key").toString("base64url") }
+    ];
+    for (const [nullable, followingType] of [[false, "INTEGER"], [true, "INTEGER"], [true, "TEXT"]]) {
+      const oldBoundary = createOwner(createPreviousStore, { legacyNullable: nullable, followingType });
+      const newBoundary = createOwner(createTestedStore, { legacyNullable: nullable, followingType });
+      seed(oldBoundary.database, 84, { boundary: true, nullable, followingText: followingType === "TEXT" });
+      seed(newBoundary.database, 84, { boundary: true, nullable, followingText: followingType === "TEXT" });
+      for (const params of boundaryCases) for (const includePending of ["0", "1"]) for (const offset of ["0", "3", "999"]) {
+        compare(oldBoundary.owner, newBoundary.owner, { ...params, includePending, offset, limit: "7" });
+      }
+    }
+    const markerError = new Error("private fallback COUNT marker");
+    injectedError = markerError;
+    for (const owner of [previous.owner, current.owner]) assert.throws(() => run(owner, { q: "目标测试", sort: "likes" }),
+      error => error === markerError, "native prepare failures retain their original Error object");
+    injectedError = null;
+
+    // Every response oracle runs before the budget, including the old-code
+    // negative control. Instrument only native COUNT join keys, not the DTO.
+    const params = { q: "目标测试", sort: "likes" };
+    const raw = compare(previous.owner, current.owner, params);
+    const oldProbe = run(previous.owner, params, { probe: true });
+    const newProbe = run(current.owner, params, { probe: true });
+    assert.deepEqual(oldProbe.response, raw.before.response);
+    assert.deepEqual(newProbe.response, raw.after.response);
+    const rawCount = raw.before.reads.find(row => countQuery.test(row.sql));
+    const probeCount = oldProbe.reads.find(row => countQuery.test(row.sql));
+    const plan = (database, sql, args) => originalPrepare.call(database, "EXPLAIN QUERY PLAN " + sql).all(...args).map(row => row.detail);
+    assert.deepEqual(plan(previous.database, probeCount.actualSql, probeCount.args),
+      plan(previous.database, rawCount.sql, rawCount.args), "the native probe preserves the original COUNT query plan");
+    assert.equal(raw.before.response.total, 1285, "the synthetic visibility/search intersection stays fixed");
+    assert.equal(raw.after.parses, raw.before.parses, "COUNT optimization does not change public JSON parsing");
+    console.log("short-video-store: fallback COUNT response oracles passed (" + checks + " complete DTOs)");
+    assert.equal(Object.values(newProbe.lookups).reduce((sum, value) => sum + value, 0), 0,
+      "fallback COUNT must not read unrelated catalog joins");
+    for (const alias of aliases) assert.equal(oldProbe.lookups[alias], 1285, "the original COUNT exercises every native catalog join");
+    assert.equal(Object.values(oldProbe.lookups).reduce((sum, value) => sum + value, 0), 15420,
+      "the original COUNT exceeds the exact native lookup budget");
+    let bareCountQueries = 0, guardedCountQueries = 0;
+    for (const { params, previous: oldCount, actual } of selectionEvidence) {
+      const useBare = !params.author && params.deleted !== "deleted" && params.source !== "history";
+      assert(actual, "fallback count queries must stay observable");
+      assert(countQuery.exec(actual.sql)?.[1] === (useBare ? "short_videos" : "short_video_catalog"),
+        "author/deleted/history counts must retain their required catalog source");
+      let expectedSql = useBare ? oldCount.sql.replace("FROM short_video_catalog", "FROM short_videos") : oldCount.sql;
+      if (useBare && params.source === "following") expectedSql = expectedSql.replace("author_following = 1", "COALESCE(author_following, 0) = 1");
+      assert.equal(actual.sql, expectedSql, "only the COUNT source and following affinity expression may change");
+      assert.deepEqual(actual.args, oldCount.args, "the original filter arguments remain unchanged");
+      if (useBare) bareCountQueries++; else guardedCountQueries++;
+    }
+    assert(bareCountQueries > 0 && guardedCountQueries > 0, "both COUNT paths must be exercised");
+    assert.equal(recommendationEvidence.length, 6, "exercise nonempty and empty recommended arrays across paging");
+    assert(recommendationEvidence.some(row => row.total > 0) && recommendationEvidence.some(row => row.total === 0));
+    assert(recommendationEvidence.every(row => row.countReads === 0),
+      "recommended results, including an empty array, must never enter fallback COUNT");
+    assert(!fs.existsSync(unopenedCoverPath), "fallback COUNT verification must never open a cover database");
+    console.log("short-video-store: fallback COUNT native lookups 15420→0; guarded queries " + guardedCountQueries +
+      "; bare queries " + bareCountQueries + "; diagnostic list ms " +
+      raw.before.elapsedMs.toFixed(1) + "→" + raw.after.elapsedMs.toFixed(1));
+  } finally {
+    observing = false;
+    probing = false;
+    injectedError = null;
+    DatabaseSync.prototype.prepare = originalPrepare;
+    JSON.parse = originalParse;
+    for (const owner of owners.reverse()) owner.close();
+  }
+}
+
 
 async function verifyNavigationListOrder() {
   let module = navigationQueries;
@@ -330,6 +798,7 @@ let store;
 let explicitStore;
 
 async function runSyncWorker(workerData) {
+  installFixtureSyncJournal(workerData.sourceDbPath);
   const service = createDownloadManagerSyncService({
     sourceDbPath: workerData.sourceDbPath,
     intervalMs: 60_000,
@@ -338,7 +807,8 @@ async function runSyncWorker(workerData) {
     roots: workerData.roots
   });
   try {
-    const result = await service.sync({ force: true });
+    let result;
+    do { result = await service.sync({ force: true }); } while (result?.hasMore);
     return { ok: Boolean(result?.ok), result };
   } finally {
     service.stop();
@@ -1296,6 +1766,10 @@ try {
 
     let catalogChangeCalls = 0;
     let itemImportCalls = 0;
+    installFixtureSyncJournal(singleWriterSourceDbPath);
+    while (singleWriterStore.importDownloadManagerDb(singleWriterSourceDbPath, {
+      incremental: true, includePosts: true, skipSummary: true
+    }).hasMore) {}
     const observedSync = createDownloadManagerSyncService({
       sourceDbPath: singleWriterSourceDbPath,
       intervalMs: 60_000,
@@ -1311,7 +1785,7 @@ try {
     });
     try {
       const noOpSync = await observedSync.sync({ force: true });
-      assert.equal(noOpSync?.profilesSeen, 1);
+      assert.equal(noOpSync?.profilesSeen, 0, "an acknowledged journal must not read unchanged profiles");
       assert.equal(noOpSync?.profilesChanged, 0);
       assert.equal(noOpSync?.membershipsChanged, 0);
       assert.equal(noOpSync?.catalogChanges, 0);

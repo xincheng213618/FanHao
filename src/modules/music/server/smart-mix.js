@@ -2,6 +2,17 @@
 
 import { REDISCOVER_DAYS } from "./constants.js";
 
+const STATE_DRIVEN_SMART_MIXES = new Set(["recent", "topplayed", "favorites", "toprated", "rediscover"]);
+const METADATA_ONLY_SMART_MIXES = new Set(["newest", "hires", "lyrics", "longform"]);
+
+export function smartMixRequiresState(mix) {
+  return STATE_DRIVEN_SMART_MIXES.has(mix?.id);
+}
+
+export function isMetadataOnlySmartMix(mix) {
+  return METADATA_ONLY_SMART_MIXES.has(mix?.id);
+}
+
 export const SMART_MIXES = [
   {
     id: "recent",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
-import { appFunction, createGalleryHarness, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { appFunction, channelAccountBoundary, createGalleryHarness, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
@@ -51,7 +51,7 @@ function harness(input = sources, { mode = "movie", cached = null, limit = 40, s
   document.body.append(...Object.values(els));
   const calls = { openSearch: 0, navigation: [], network: [] };
   const queued = [];
-  const c = vm.createContext({ document, console, URL, URLSearchParams, AbortController, formatBytes, formatDate, formatNumber, formatTime, absoluteUrl,
+  const c = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, formatBytes, formatDate, formatNumber, formatTime, absoluteUrl,
     captureMediaTrail, mediaBackTarget, cacheAgeText: () => "合成缓存时间", window: { history: { back() {} } },
     isChannelFavorite: () => false, toggleChannelFavorite: () => ({ favorite: true, items: [] }),
     photoCatalogCollections: items => items, loadPreviewImage() {}, enhanceAutoLoadMore: button => button,

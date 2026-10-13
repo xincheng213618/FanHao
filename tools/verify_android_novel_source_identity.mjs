@@ -218,8 +218,8 @@ test("successful detail catalog's delayed scroll frame cannot scroll a different
   assert.equal(h.window.scrollY, 911, "an obsolete detail frame scrolled the newly opened view");
   assert.equal(h.els.viewContent.innerHTML, "OTHER VIEW");
 }, (text) => replaceOnce(
-  '          if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId\n            || bookId !== String(detailState.book?.id || "") || book.sourceRealm !== detailState.book?.sourceRealm) return;\n',
-  ""
+  '          window.requestAnimationFrame(() => {\n            if (!isCurrent()) return;\n',
+  '          window.requestAnimationFrame(() => {\n'
 )(text.replaceAll("\r\n", "\n")));
 test("remote progress POST carries its confirmed realm with the original source URL", async (h) => {
   h.setActiveUrl(URL_A);

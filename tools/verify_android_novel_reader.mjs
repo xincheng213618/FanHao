@@ -205,7 +205,13 @@ test("horizontal reading mode saves and restores its own content scroll", async 
   h.state.settings.readingMode = "page";
   await h.api.renderNovelReader("local:a", 1);
   h.runFrames();
-  assertNear(h.api.__test.captureReaderRatio(), 0.25, "horizontal restore");
+  const content = h.els.viewContent.querySelector(".novel-reader-content");
+  const maxX = content.scrollWidth - content.clientWidth;
+  const gap = Number.parseFloat(h.window.getComputedStyle?.(content).columnGap) || 0;
+  const pitch = content.clientWidth + gap;
+  assert(0.25 * maxX < pitch, "fixture's saved position is inside the first column");
+  assert.equal(content.scrollLeft, 0, "horizontal restore includes the containing column's opening text");
+  assertNear(h.api.__test.captureReaderRatio(), 0, "horizontal restore reports the actual aligned progress");
   h.setRatio(0.75);
   h.api.__test.saveReaderProgress();
   await settle();

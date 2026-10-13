@@ -6,8 +6,11 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import refresh_core_javdb_actor_movies as refresh_module
+import backfill_javdb_metadata as metadata_module
+import import_javdb_actor as actor_module
 from backfill_javdb_actor_page import actor_page_looks_ready
 from refresh_core_javdb_actor_movies import (
     PersonRefreshRollbackError,
@@ -33,6 +36,8 @@ def main() -> None:
             assert conn.execute("PRAGMA main.journal_mode").fetchone()[0] == "wal"
             assert conn.execute("PRAGMA fanhao_images.journal_mode").fetchone()[0] == "wal"
             create_schema(conn)
+            verify_browser_upgrade_uses_matching_driver(Path(temporary))
+            verify_actor_names_and_avatar_sync(conn)
             verify_security_challenge_is_not_an_actor_page()
             verify_failed_first_person_does_not_leak_into_second(conn)
             verify_reservation_and_publication_guards(conn)
@@ -41,6 +46,76 @@ def main() -> None:
         finally:
             conn.close()
     print("core JavDB actor per-person atomicity verification passed")
+
+
+def verify_browser_upgrade_uses_matching_driver(temporary: Path) -> None:
+    args = SimpleNamespace(
+        scraper_config_data={}, chrome_binary=temporary / "chrome.exe", profile_dir=temporary,
+        driver_path=None, proxy="", no_proxy=True, headless=True,
+    )
+    for module in (metadata_module, actor_module):
+        with patch.object(module, "latest_cached_chromedriver", return_value=temporary / "old-152.exe") as old_cache, \
+             patch("webdriver_manager.chrome.ChromeDriverManager") as manager, \
+             patch("selenium.webdriver.Chrome") as chrome, \
+             patch.object(metadata_module.JavDbClient, "inject_external_cookies"):
+            manager.return_value.install.side_effect = [str(temporary / "driver-154.exe"), str(temporary / "driver-155.exe")]
+            for expected_version in (154, 155):
+                if module is metadata_module:
+                    module.JavDbClient(args).get_driver()
+                else:
+                    module.get_driver(temporary, headless=True, chrome_binary=args.chrome_binary)
+                assert chrome.call_args.kwargs["service"].path == str(temporary / f"driver-{expected_version}.exe")
+            old_cache.assert_not_called()
+            assert manager.return_value.install.call_count == 2
+
+            explicit_driver = temporary / "explicit-driver.exe"
+            explicit_driver.touch()
+            args.driver_path = explicit_driver
+            if module is metadata_module:
+                module.JavDbClient(args).get_driver()
+            else:
+                module.get_driver(temporary, chrome_binary=args.chrome_binary, driver_path=explicit_driver)
+            assert chrome.call_args.kwargs["service"].path == str(explicit_driver)
+            assert manager.return_value.install.call_count == 2
+            args.driver_path = None
+
+
+def verify_actor_names_and_avatar_sync(conn: sqlite3.Connection) -> None:
+    html = """
+    <section class="actor-section">
+      <div class="actor-avatar"><div class="avatar" style="background-image: url('/avatars/example.jpg')"></div></div>
+      <h1 class="actor-section-name">愛花未滿, 愛花あゆみ</h1>
+      <div class="section-meta">赤崎理奈, 柏木あゆみ, 相田亜由美, 五日市芽依</div>
+      <div class="section-meta">344 部影片</div>
+    </section>
+    """
+    profile = actor_module.parse_actor_page(html, "https://javdb.test/actors/example")
+    expected_aliases = {"愛花あゆみ", "赤崎理奈", "柏木あゆみ", "相田亜由美", "五日市芽依"}
+    assert profile["display_name"] == "愛花未滿"
+    assert set(profile["aliases"]) == expected_aliases
+    assert profile["movie_count"] == 344
+    assert profile["avatar_url"] == "https://javdb.test/avatars/example.jpg"
+    conn.execute("CREATE UNIQUE INDEX fixture_person_alias_identity ON person_aliases(person_id, alias_search)")
+    conn.execute("INSERT INTO people VALUES (13, '愛花あゆみ', '愛花あゆみ', '愛花未滿', 0, 'ok', NULL, 'manual', 'old')")
+    conn.execute("INSERT INTO person_aliases(person_id, alias, alias_search, source) VALUES (13, '愛花あゆみ', '愛花あゆみ', 'manual')")
+    conn.commit()
+    job = {"id": 13, "name": "愛花未滿", "db_name": "愛花あゆみ", "actor_id": "example", "actor_url": "https://javdb.test/actors/example"}
+    client = SimpleNamespace(get_driver=lambda: object())
+    with patch.object(refresh_module, "download_avatar", return_value=(b"fixture-avatar", "image/jpeg")):
+        for _ in range(2):
+            result = save_person_refresh(conn, job, {"profile": profile, "movies": []}, client)
+            assert result["profile"]["avatar"]
+    assert {row[0] for row in conn.execute("SELECT alias FROM person_aliases WHERE person_id = 13")} == expected_aliases
+    assert conn.execute("SELECT source FROM person_aliases WHERE person_id = 13 AND alias = '愛花あゆみ'").fetchone()[0] == "manual"
+    assert conn.execute("SELECT movie_count FROM people WHERE id = 13").fetchone()[0] == 344
+    avatars = conn.execute("SELECT remote_url, image_blob FROM fanhao_images.images WHERE owner_id = 13 AND source = 'actor_profiles'").fetchall()
+    assert len(avatars) == 1
+    assert tuple(avatars[0]) == (profile["avatar_url"], b"fixture-avatar")
+    conn.execute("DELETE FROM person_aliases WHERE person_id = 13")
+    conn.execute("DELETE FROM person_external_refs WHERE person_id = 13")
+    conn.execute("DELETE FROM fanhao_images.images WHERE owner_id = 13")
+    conn.execute("DELETE FROM people WHERE id = 13")
+    conn.commit()
 
 
 def verify_security_challenge_is_not_an_actor_page() -> None:

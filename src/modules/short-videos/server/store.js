@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { localImageDiskIdentity } from "../../../platform/server/local-image-read-queue.js";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
 import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory, searchAuthorFacet } from "./author-facets.js";
+import { ensureAuthorFacetIndex } from "./author-facet-index.js";
 import { createShortVideoAuthorCleanupService } from "./author-cleanup-service.js";
 import { createShortVideoAuthorDeleteService } from "./author-delete-service.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
@@ -13,6 +14,10 @@ import { createShortVideoCollectionsRepository } from "./collections-repository.
 import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
 import { createShortVideoCoverStorageService } from "./cover-storage-service.js";
 import { createShortVideoDeleteJobService, SHORT_VIDEO_DELETE_QUARANTINE_DIR } from "./delete-job-service.js";
+import {
+  readDownloadManagerChangeBatch, installDownloadManagerBatchScope,
+  commitDownloadManagerChangeCursor, emptyDownloadManagerChangeResult
+} from "./download-manager-change-journal.js";
 import {
   syncDownloadManagerProfiles,
   syncDownloadManagerSourceMemberships
@@ -336,6 +341,7 @@ export function createShortVideoStore(options = {}) {
           CREATE INDEX IF NOT EXISTS idx_short_video_playback_issues_active_recent
             ON short_video_playback_issues(active, last_reported_at DESC, video_id);
         `);
+        if (!readOnly) ensureAuthorFacetIndex(opened);
         if (!skipStartupMaintenance) cleanupSupersededFfmpegCovers(opened, coverCacheDir);
         db = opened;
         if (!readOnly) deleteJobs.initialize(opened);
@@ -941,27 +947,6 @@ export function createShortVideoStore(options = {}) {
       ORDER BY count DESC, v.author_name ASC
       LIMIT ?
     `).all(like, ...filterArgs, limit);
-    const tagRows = database.prepare(`
-      SELECT tags_json
-      FROM short_video_search v
-      WHERE v.visibility = 'local_only'
-        AND v.tags_text LIKE ? ESCAPE '\\'
-        ${authorWhere}
-        ${mediaWhere}
-      ORDER BY v.published_at DESC, v.video_id DESC
-      LIMIT 160
-    `).all(like, ...filterArgs);
-    const titleRows = database.prepare(`
-      SELECT title, author_name
-      FROM short_video_search v
-      WHERE v.visibility = 'local_only'
-        AND COALESCE(v.title, '') <> ''
-        AND v.title LIKE ? ESCAPE '\\'
-        ${authorWhere}
-        ${mediaWhere}
-      ORDER BY v.published_at DESC, v.video_id DESC
-      LIMIT ?
-    `).all(like, ...filterArgs, limit * 2);
     const suggestions = [];
     const seen = new Set();
     const append = (item) => {
@@ -974,6 +959,17 @@ export function createShortVideoStore(options = {}) {
     for (const row of authorRows) {
       append({ kind: "author", label: row.label, query: row.label, detail: `${formatSuggestionCount(row.count)} 条作品` });
     }
+    if (suggestions.length >= limit) return { query, media, author, suggestions };
+    const tagRows = database.prepare(`
+      SELECT tags_json
+      FROM short_video_search v
+      WHERE v.visibility = 'local_only'
+        AND v.tags_text LIKE ? ESCAPE '\\'
+        ${authorWhere}
+        ${mediaWhere}
+      ORDER BY v.published_at DESC, v.video_id DESC
+      LIMIT 160
+    `).all(like, ...filterArgs);
     const tagCounts = new Map();
     const normalizedQuery = query.toLocaleLowerCase();
     for (const row of tagRows) {
@@ -986,6 +982,18 @@ export function createShortVideoStore(options = {}) {
     for (const [label, count] of [...tagCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))) {
       append({ kind: "tag", label: `#${label}`, query: label, detail: `${formatSuggestionCount(count)} 条相关作品` });
     }
+    if (suggestions.length >= limit) return { query, media, author, suggestions };
+    const titleRows = database.prepare(`
+      SELECT title, author_name
+      FROM short_video_search v
+      WHERE v.visibility = 'local_only'
+        AND COALESCE(v.title, '') <> ''
+        AND v.title LIKE ? ESCAPE '\\'
+        ${authorWhere}
+        ${mediaWhere}
+      ORDER BY v.published_at DESC, v.video_id DESC
+      LIMIT ?
+    `).all(like, ...filterArgs, limit * 2);
     for (const row of titleRows) {
       const title = String(row.title || "").trim();
       append({
@@ -1098,11 +1106,18 @@ function summary() {
     if (sourceTotalKey && fastPage && sourceTotalOverride === undefined) {
       catalogCache.sourceTotals.set(sourceTotalKey, Number(fastPage.total || 0));
     }
+    const countSource = !filter.author && filter.deleted === "all" && filter.source !== "history"
+      ? "short_videos"
+      : "short_video_catalog";
+    // Preserve the catalog expression's affinity for legacy TEXT flags.
+    const countWhere = countSource === "short_videos" && filter.source === "following"
+      ? where.replace("author_following = 1", "COALESCE(author_following, 0) = 1")
+      : where;
     const total = recommendationIds
       ? recommendationIds.length
       : fastPage
         ? fastPage.total
-        : database.prepare(`SELECT COUNT(*) AS count FROM short_video_catalog ${where}`).get(...filter.args)?.count || 0;
+        : database.prepare(`SELECT COUNT(*) AS count FROM ${countSource} ${countWhere}`).get(...filter.args)?.count || 0;
     const relationshipTotal = !filter.q && !filter.topic && !filter.soundKey
       && !filter.author && filter.media === "all"
       ? shortVideoRelationshipTotal(database, filter.source)
@@ -3038,14 +3053,54 @@ function summary() {
     const now = new Date().toISOString();
     const targetDb = databaseOrOpen();
     const sourceDb = new DatabaseSync(sourceDbPath, { readOnly: true });
+    let journalTransaction = false;
     try {
+      if (options.incremental) {
+        sourceDb.exec("PRAGMA busy_timeout=1000; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192; BEGIN");
+        targetDb.exec("BEGIN IMMEDIATE");
+        journalTransaction = true;
+        const batch = readDownloadManagerChangeBatch(sourceDb, targetDb, sourceDbPath, options);
+        if (batch) {
+          options.syncTestHooks?.afterSnapshot?.(batch);
+          if (!batch.advanced) return emptyDownloadManagerChangeResult(batch);
+          let result;
+          try {
+            installDownloadManagerBatchScope(sourceDb, targetDb, batch);
+            result = importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now,
+              options: { ...options, skipSummary: true, changeBatch: batch } });
+            options.syncTestHooks?.beforeCheckpoint?.(batch);
+            commitDownloadManagerChangeCursor(targetDb, batch);
+            targetDb.exec("COMMIT");
+            journalTransaction = false;
+          } catch (error) {
+            try { targetDb.exec("ROLLBACK"); } catch {}
+            throw error;
+          }
+          const coverIds = result.coverReconcileIds || [];
+          delete result.coverReconcileIds;
+          if (coverIds.length) {
+            try { coverStorage.reconcile(targetDb, coverIds); }
+            catch (error) { console.warn("[short-video-sync-cover-cleanup]", error.message || error); }
+          }
+          return { ...emptyDownloadManagerChangeResult(batch), ...result, changeJournal: true };
+        }
+        targetDb.exec("ROLLBACK");
+        journalTransaction = false;
+        sourceDb.exec("ROLLBACK");
+        if (options.requireChangeJournal) {
+          return { ok: false, requiresJournalUpgrade: true, hasMore: false,
+            message: "下载器尚未初始化增量日志，请升级并重启下载管理器" };
+        }
+      }
       return importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now, options });
     } finally {
+      if (journalTransaction) { try { targetDb.exec("ROLLBACK"); } catch {} }
       sourceDb.close();
     }
   }
 
   function importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now, options }) {
+    const scope = options.changeBatch || null;
     const upsert = shortVideoUpsertStatement(targetDb);
     const resolveExistingCanonical = canonicalShortVideoBySourcePathStatement(targetDb);
     const normalized = normalizedUpsertStatements(targetDb, coverCacheDir);
@@ -3059,7 +3114,7 @@ function summary() {
     const includePosts = Boolean(options.includePosts);
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
-    const membershipSync = syncDownloadManagerSourceMemberships(targetDb, sourceDb, now);
+    const membershipSync = syncDownloadManagerSourceMemberships(targetDb, sourceDb, now, scope);
     let profileSync = {
       profilesSeen: 0,
       profilesChanged: 0,
@@ -3069,7 +3124,7 @@ function summary() {
       profileHistoriesChanged: 0
     };
     const incremental = Boolean(options.incremental);
-    const backfillStatsLimit = incremental
+    const backfillStatsLimit = incremental && !scope
       ? clampInt(options.backfillStatsLimit, DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT, 0, 100000)
       : 0;
     const watermarkKey = "download_manager_downloaded_watermark";
@@ -3079,14 +3134,14 @@ function summary() {
     const previousWatermark = incremental ? metaValue(targetDb, watermarkKey) : "";
     const previousStatsBackfillWatermark = incremental ? metaValue(targetDb, statsBackfillWatermarkKey) : "";
     const previousStatsSeenWatermark = incremental ? metaValue(targetDb, statsSeenWatermarkKey) : "";
-    const needsGalleryBackfill = metaValue(targetDb, galleryImportVersionKey) !== DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION;
+    const needsGalleryBackfill = !scope && metaValue(targetDb, galleryImportVersionKey) !== DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION;
     const sourceSelect = `
       SELECT
         l.*,
         CASE
           WHEN EXISTS (
             SELECT 1
-            FROM links liked_link
+            FROM links liked_link${scope ? " INDEXED BY idx_links_aweme" : ""}
             JOIN profiles liked_profile ON liked_profile.id = liked_link.profile_id
             WHERE liked_link.aweme_id = l.aweme_id
               AND liked_link.status = 'downloaded'
@@ -3113,7 +3168,7 @@ function summary() {
         ${profileColumn("verification")},
         ${profileColumn("profile_collected_at")},
         ${profileColumn("profile_raw_json")}
-      FROM links l
+      FROM ${scope ? "temp.short_video_sync_work sync CROSS JOIN links l INDEXED BY idx_links_aweme ON l.aweme_id = sync.id" : "links l"}
       JOIN profiles p ON p.id = l.profile_id
     `;
     const sourceHasStatsWhere = `(
@@ -3134,7 +3189,7 @@ function summary() {
       COALESCE(l.downloaded_at, '') DESC,
       l.id DESC
     `;
-    const sourceMaxRow = sourceDb.prepare(`
+    const sourceMaxRow = scope ? null : sourceDb.prepare(`
       SELECT MAX(COALESCE(l.downloaded_at, '')) AS maxDownloadedAt
       FROM links l
       JOIN profiles p ON p.id = l.profile_id
@@ -3142,24 +3197,25 @@ function summary() {
         AND l.status = 'downloaded'
     `).get();
     const sourceMaxDownloadedAt = sourceMaxRow?.maxDownloadedAt || "";
-    const sourceMaxStatsSeenAt = sourceDb.prepare(`
+    const sourceMaxStatsSeenAt = scope ? "" : sourceDb.prepare(`
       SELECT MAX(${sourceStatsSeenSql}) AS maxStatsSeenAt
       FROM links l JOIN profiles p ON p.id = l.profile_id
       WHERE ${profileWhere} AND l.status = 'downloaded' AND ${sourceHasStatsWhere}
     `).get()?.maxStatsSeenAt || "";
     const sourceWhere = [profileWhere, "l.status = 'downloaded'"];
     const sourceArgs = [];
-    if (incremental && previousWatermark) {
+    if (scope) sourceWhere.push("l.aweme_id IN (SELECT id FROM temp.short_video_sync_work)");
+    if (incremental && previousWatermark && !scope) {
       sourceWhere.push("COALESCE(l.downloaded_at, '') > ?");
       sourceArgs.push(previousWatermark);
     }
-    let sourceRows = sourceDb.prepare(`
+    let sourceRows = scope && !scope.workIds.length ? [] : sourceDb.prepare(`
       ${sourceSelect}
       WHERE ${sourceWhere.join(" AND ")}
       ORDER BY ${sourceBestRowOrder}
     `).all(...sourceArgs);
     const incrementalRows = sourceRows.length;
-    let statsRefreshRows = 0; if (incremental && previousStatsSeenWatermark) {
+    let statsRefreshRows = 0; if (incremental && previousStatsSeenWatermark && !scope) {
       const knownAwemeIds = new Set(sourceRows.map((row) => String(row.aweme_id || "").trim()).filter(Boolean));
       const refreshedRows = sourceDb.prepare(`
         ${sourceSelect}
@@ -3241,9 +3297,10 @@ function summary() {
     let galleryBackfillRows = 0;
     const seenIds = new Set();
     const importedIds = new Set();
+    const coverReconcileIds = new Set();
 
     if (!sourceRows.length && !galleryBackfillIds.length) {
-      profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+      profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now, scope);
       const catalogChanges = Number(membershipSync.catalogChanges || 0) + Number(profileSync.profilesChanged || 0);
       if (catalogChanges > 0) {
         targetDb.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_imported_at', ?)").run(now);
@@ -3255,7 +3312,7 @@ function summary() {
         targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
       }
       if (sourceMaxStatsSeenAt) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsSeenWatermarkKey, sourceMaxStatsSeenAt);
-      targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
+      if (!scope) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
         galleryImportVersionKey,
         DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
       );
@@ -3309,6 +3366,14 @@ function summary() {
         return;
       }
       seenIds.add(item.id);
+      if (scope) {
+        // Importing a work can overwrite its normalized author with an older
+        // per-link profile. Reapply the best current profile for these authors,
+        // just as the full import does, without reading every other profile.
+        for (const secUid of new Set([item.author.secUid, row.profile_sec_uid].filter(Boolean))) {
+          for (const db of [sourceDb, targetDb]) db.prepare("INSERT OR IGNORE INTO temp.short_video_sync_author(id) VALUES(?)").run(secUid);
+        }
+      }
       deleteJobs.assertPathWritesAllowed(targetDb, shortVideoItemPaths(item), { videoId: item.id });
       const existed = targetDb.prepare("SELECT 1 FROM short_videos WHERE id = ? LIMIT 1").get(item.id);
       upsert.run(...videoRowValues(item, now));
@@ -3324,14 +3389,15 @@ function summary() {
         )
         VALUES (?, ?, ?, ?, ?)
       `).run(batchId, item.id, item.sourcePath || "", item.dataPath || "", now);
-      pruneSourcePathDuplicates(targetDb, item);
+      for (const id of pruneSourcePathDuplicates(targetDb, item)) coverReconcileIds.add(id);
       importedIds.add(item.id);
+      coverReconcileIds.add(item.id);
       if (existed) updated += 1;
       else imported += 1;
     };
 
     pathWriteTestHooks.beforeWriterLock?.({ kind: "download-manager-import", count: sourceRows.length });
-    targetDb.exec("BEGIN IMMEDIATE");
+    targetDb.exec(scope ? "SAVEPOINT manager_import_rows" : "BEGIN IMMEDIATE");
     try {
       targetDb.prepare(`
         INSERT INTO short_video_import_batches (
@@ -3359,26 +3425,29 @@ function summary() {
         }
       }
       if (sourceMaxStatsSeenAt) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsSeenWatermarkKey, sourceMaxStatsSeenAt);
-      targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
+      if (!scope) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
         galleryImportVersionKey,
         DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
       );
-      refreshShortVideoRelationshipFlags(targetDb);
-      targetDb.exec("COMMIT");
+      if (scope) {
+        for (const id of importedIds) refreshShortVideoRelationshipFlags(targetDb, id);
+      } else refreshShortVideoRelationshipFlags(targetDb);
+      targetDb.exec(scope ? "RELEASE manager_import_rows" : "COMMIT");
     } catch (error) {
       try {
-        targetDb.exec("ROLLBACK");
+        targetDb.exec(scope ? "ROLLBACK TO manager_import_rows; RELEASE manager_import_rows" : "ROLLBACK");
       } catch {}
       throw error;
     }
-    coverStorage.reconcile(targetDb);
-    profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+    if (!scope) coverStorage.reconcile(targetDb);
+    profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now, scope);
     const catalogChanges = imported + updated + Number(membershipSync.catalogChanges || 0) + Number(profileSync.profilesChanged || 0);
 
     return {
       ok: true,
       sourceDbPath,
       batchId,
+      ...(scope ? { coverReconcileIds: [...coverReconcileIds] } : {}),
       incremental,
       sourceWatermark: sourceMaxDownloadedAt,
       scanned: sourceRows.length + galleryBackfillRows,
@@ -3947,16 +4016,21 @@ function shouldPreferCanonicalAwemeId(existingAwemeId, incomingAwemeId) {
 }
 
 function pruneSourcePathDuplicates(db, item) {
-  if (!item?.sourcePath || !item?.id) return;
+  if (!item?.sourcePath || !item?.id) return [];
   const rows = db.prepare(`
     SELECT id, aweme_id, metadata_json
     FROM short_videos
     WHERE source_path = ?
       AND id <> ?
   `).all(item.sourcePath, item.id);
+  const mergedIds = [];
   for (const row of rows) {
-    if (isSafeSourcePathDuplicate(row, item)) mergeDuplicateShortVideoRow(db, row.id, item.id);
+    if (isSafeSourcePathDuplicate(row, item)) {
+      mergeDuplicateShortVideoRow(db, row.id, item.id);
+      mergedIds.push(row.id);
+    }
   }
+  return mergedIds;
 }
 
 function isSafeSourcePathDuplicate(row, item) {

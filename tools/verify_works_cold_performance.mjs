@@ -4,10 +4,22 @@ import { once } from "node:events";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
+import { readFileSync } from "node:fs";
 import { normalizeWorkCode, workCodeKey } from "../lib/code-parser.js";
 import { createActorMovieService } from "../src/modules/fanhao/server/people/actor-movie-service.js";
 import { prewarmLocalMetadataBeforeListen } from "../src/modules/fanhao/server/runtime.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
+import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
+import { createCollectionQueryService } from "../src/modules/fanhao/server/user-state/collection-query-service.js";
+import { createWorkPresenterService } from "../src/modules/fanhao/server/works/presenter-service.js";
+import { createWorkSorter } from "../src/modules/fanhao/server/works/work-sorter.js";
+import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
+import { createFavoriteStateService } from "../src/modules/fanhao/server/collections/favorite-state-service.js";
+import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
+import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
+import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
+import { createWeightedCacheBudget, normalizeWorkSortMode } from "../src/modules/fanhao/server/works/work-cache-budget.js";
+import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } from "../src/modules/fanhao/server/people/person-work-year.js";
 
 const LOCAL_WORK_COUNT = 20_000;
 const ACTOR_ROW_COUNT = 65_000;
@@ -791,6 +803,668 @@ async function verifyRealReadOnlyDatabase(coreDbPath, { skipPrewarm = false, rea
   }
 }
 
+
+async function legacyHistoryProgressFactory() {
+  const source = readFileSync(new URL("../src/modules/fanhao/server/playback/playback-progress-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const legacyScan = [
+    "    for (const work of library.worksById.values()) {",
+    "      if ((work.videos || []).some((video) => video.id === videoId)) return work;",
+    "    }",
+    "    return null;"
+  ].join("\n");
+  const legacySource = source
+    .replace("function progressWork(videoId, progress, firstWorkForVideo) {", "function progressWork(videoId, progress) {")
+    .replace("    return firstWorkForVideo(videoId);", legacyScan)
+    .replace(/    const progressVideoIds = new Set\(Object\.keys\(progress\)\);[\s\S]*?(?=\n    for \(const \[videoId, progressRow\])/, "")
+    .replace("progressWork(videoId, progressRow, firstWorkForVideo)", "progressWork(videoId, progressRow)");
+  assert.notEqual(legacySource, source, "history legacy oracle must restore the actual production scan");
+  assert(!legacySource.includes("firstWorkForVideo"), "history legacy oracle restoration hooks must match the current source");
+  return (await import("data:text/javascript;base64," + Buffer.from(legacySource).toString("base64"))).createPlaybackProgressService;
+}
+
+function createHistoryFixture(factory, { count = LOCAL_WORK_COUNT, fallback = 125, early = false, allDirect = false, boundaries = false } = {}) {
+  const visits = { works: 0, videos: 0 };
+  class CountedWorks extends Map {
+    *values() {
+      for (const work of super.values()) {
+        visits.works += 1;
+        yield work;
+      }
+    }
+  }
+  const countedVideos = (videos) => new Proxy(videos, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) visits.videos += 1;
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const worksById = new CountedWorks();
+  const filesById = new Map();
+  for (let index = 0; index < count; index += 1) {
+    const id = "work-" + index;
+    const videoId = "video-" + index;
+    const videos = countedVideos([
+      { id: videoId, type: "video", size: index + 1, playable: true },
+      { id: videoId + "-b", type: "video", size: 5 }
+    ]);
+    const work = {
+      id, title: "Film " + index, directoryName: "Film " + index, relativePath: "synthetic/" + index,
+      personId: "person", personName: "Person", videos, images: [], infos: [],
+      videoCount: 2, playableCount: 1, imageCount: 0, infoCount: 0, modifiedAt: "2026",
+      infoSummary: { rating: index % 5, ratingCount: index, durationMinutes: 90, code: "CODE-" + index, releaseDate: "2026" }
+    };
+    worksById.set(id, work);
+    for (const video of videos) filesById.set(video.id, { type: "video" });
+  }
+  let library = { worksById, filesById, peopleById: new Map(), scannedAt: "v1" };
+  let revision = 0;
+  let userState = { favorites: {}, favoriteFolders: { default: { name: "Default" } }, progress: {} };
+  for (let index = 0; index < fallback; index += 1) {
+    const workIndex = early ? index : count - 1 - index;
+    userState.progress["video-" + workIndex] = {
+      workId: allDirect ? "work-" + workIndex : index % 2 ? null : "missing-work",
+      position: 10 + index, duration: 200, updatedAt: index % 3 ? "2026-10-03T12:00:00Z" : "bad-date"
+    };
+  }
+  if (boundaries) {
+    const shared = { id: "shared", type: "video", size: 1 };
+    worksById.get("work-0").videos.push(shared);
+    worksById.get("work-1").videos.push(shared);
+    worksById.get("work-0").videos.push({ id: 123, type: "video", size: 1 });
+    for (const id of ["shared", "123", "orphan"]) filesById.set(id, { type: "video" });
+    filesById.set("image-only", { type: "image" });
+    userState.progress.shared = { position: 9, duration: 100, updatedAt: "2026-10-03T12:00:00Z" };
+    for (const id of ["123", "orphan", "image-only", "missing-file"]) {
+      userState.progress[id] = { position: 8, duration: 100, updatedAt: "2026" };
+    }
+    userState.progress["trusted-direct-without-file"] = { workId: "work-2", position: NaN, duration: 0, updatedAt: "2026" };
+  }
+  const stateService = {
+    save() { revision += 1; },
+    revision: () => revision,
+    normalizeFavoriteRecord: (value) => value,
+    normalizeFavoriteFolderId: (value) => value || "default",
+    cleanFavoriteFolderName: (value) => value || "",
+    defaultFavoriteFolders: () => ({ default: { name: "Default" } })
+  };
+  const favorites = createFavoriteStateService({
+    getLibrary: () => library, getUserState: () => userState, userStateService: stateService,
+    defaultFavoriteFolderId: "default", defaultFavoriteFolderName: "Default"
+  });
+  const progress = factory({
+    getLibrary: () => library, getUserState: () => userState, userStateService: stateService,
+    publicFavoriteFolders: favorites.publicFavoriteFolders, recentWatchedDays: 7
+  });
+  const presenter = createWorkPresenterService({
+    getLibrary: () => library, playbackProgressService: progress, favoriteStateService: favorites,
+    actorProfileRow: () => null, displayPersonForWork: () => null, displayWorkTitle: (value) => String(value || ""),
+    localWorkMarkers: () => [], manualCoverStateService: { manualCoverForWork: () => null },
+    preferredPersonDisplayName: (_row, name) => name, publicActorProfile: () => null,
+    publicCoreWorkCover: () => null, workInfoDetailRow: () => null,
+    publicWorkInfoSummary: (_row, summary) => summary || null, proxiedRemoteImageUrl: (value) => value || "",
+    uniqueTextArray: (values) => [...new Set(values.filter(Boolean).map(String))],
+    firstPresentValue: (...values) => values.find((value) => value !== null && value !== undefined) ?? null,
+    dbBoolOrNull: (value) => value == null ? null : Boolean(Number(value))
+  });
+  const filters = createWorkFilterService({
+    favoriteStateService: favorites, playbackProgressService: progress,
+    workInfoFacetRow: () => null, publicWorkAvailability: presenter.publicWorkAvailability
+  });
+  const sorter = createWorkSorter({
+    metadataForWork: (work) => ({ ...work.infoSummary, duration: work.infoSummary.durationMinutes }),
+    progressForWork: progress.getWorkProgress, displayWorkTitle: (value) => String(value || "")
+  });
+  const collection = createCollectionQueryService({
+    getLibrary: () => library, playbackProgressService: progress, favoriteStateService: favorites,
+    filterWorkList: filters.filter, sortWorkList: sorter, workFacets: filters.facets, publicWork: presenter.publicWork,
+    clampInteger: (value, fallback, min, max) => Number.isFinite(Number(value)) && value !== null && value !== ""
+      ? Math.min(max, Math.max(min, Math.floor(Number(value)))) : fallback,
+    maxWorkLimit: 5_000, recentWatchedDays: 7, userStateStamp: () => String(revision), workQueryStamp: () => library.scannedAt,
+    prewarmCoreWorkCovers: () => {}, prewarmRemoteImagesForWorks: () => {},
+    prewarmVideoProbesForWorks: () => {}, prewarmWorkInfoDetails: () => {}
+  });
+  return {
+    progress, collection, visits, library,
+    reset() { visits.works = 0; visits.videos = 0; },
+    replaceProgress() { userState = { ...userState, progress: { ...userState.progress } }; revision += 1; },
+    replaceLibrary() { library = { ...library, scannedAt: "v2" }; },
+    bumpRevision() {
+      userState.progress["video-0"] = { workId: null, position: 12, duration: 100, updatedAt: "2026-10-04T12:00:00.000Z" };
+      revision += 1;
+    },
+    directSave(id) { progress.saveVideoProgress(id, { position: 13, duration: 100 }); }
+  };
+}
+
+function createIsolatedHistoryFixture(factory, works, progressRows, files = new Map()) {
+  const visits = { works: 0 };
+  class CountedWorks extends Map {
+    *values() {
+      for (const work of super.values()) {
+        visits.works += 1;
+        yield work;
+      }
+    }
+  }
+  const library = { worksById: new CountedWorks(works.map((work) => [work.id, work])), filesById: files };
+  const service = factory({
+    getLibrary: () => library,
+    userState: { progress: progressRows, favorites: {} },
+    userStateService: { revision: () => 0 },
+    publicFavoriteFolders: () => []
+  });
+  return { service, library, visits };
+}
+
+function verifyHistoryLookupBoundaries(factory) {
+  const sparse = [];
+  sparse.length = 3;
+  sparse[2] = { id: "sparse" };
+  const work = { id: "sparse-owner", videos: sparse };
+  const test = createIsolatedHistoryFixture(factory, [work], { sparse: { updatedAt: "2026" } }, new Map([["sparse", { type: "video" }]]));
+  assert.equal(test.service.historyEntries()[0].work, work, "sparse-array lookup must return the original work reference");
+  const touched = test.visits.works;
+  assert.equal(test.service.historyEntries()[0].work, work);
+  assert.equal(test.visits.works, touched, "warm history must not enumerate owners again");
+
+  const sameError = new Error("history later-video getter");
+  const videos = [{ id: "first" }];
+  Object.defineProperty(videos, 1, { get() { throw sameError; } });
+  const firstOwner = { id: "first-owner", videos };
+  const early = createIsolatedHistoryFixture(factory, [firstOwner], { first: {} }, new Map([["first", { type: "video" }]]));
+  assert.equal(early.service.historyEntries()[0].work, firstOwner, "lookup must pause before a later video in the same array");
+  const throws = createIsolatedHistoryFixture(factory, [firstOwner], { first: {}, second: {} },
+    new Map([["first", { type: "video" }], ["second", { type: "video" }]]));
+  assert.throws(() => throws.service.historyEntries(), (error) => error === sameError, "a reached getter must retain its error object");
+  const laterWork = { id: "later", get videos() { throw sameError; } };
+  const prefix = createIsolatedHistoryFixture(factory, [firstOwner, laterWork], { first: {} }, new Map([["first", { type: "video" }]]));
+  assert.equal(prefix.service.historyEntries()[0].work, firstOwner, "lookup must not touch an unrelated later work");
+
+  const trusted = { id: "trusted", get videos() { throw sameError; } };
+  const direct = createIsolatedHistoryFixture(factory, [trusted], {
+    missing: { workId: "trusted" }, image: { workId: "trusted" }
+  }, new Map([["image", { type: "image" }]]));
+  assert.equal(direct.service.historyEntries()[0].work, trusted, "a valid work ID must win before file existence and type checks");
+  assert.equal(direct.visits.works, 0, "valid work IDs must not enumerate videos");
+  const gated = createIsolatedHistoryFixture(factory, [laterWork], { missing: {}, image: {} }, new Map([["image", { type: "image" }]]));
+  assert.deepEqual(gated.service.historyEntries(), []);
+  assert.equal(gated.visits.works, 0, "missing and non-video files must not start an owner scan");
+
+  const numeric = { id: "numeric", videos: [{ id: 123 }, { id: new String("boxed") }, { id: undefined }, { id: null }, { id: false }] };
+  const sharedFirst = { id: "shared-first", videos: [{ id: "shared" }] };
+  const sharedLast = { id: "shared-last", videos: [{ id: "shared" }] };
+  const rows = Object.fromEntries(["123", "boxed", "undefined", "null", "false", "orphan", "shared"].map((id) => [id, {}]));
+  const files = new Map(Object.keys(rows).map((id) => [id, { type: "video" }]));
+  const owners = createIsolatedHistoryFixture(factory, [numeric, sharedFirst, sharedLast], rows, files);
+  assert.deepEqual(owners.service.historyEntries().map((entry) => entry.work), [sharedFirst],
+    "string progress keys must use strict video ID equality, exclude orphans, and retain the first owner");
+
+  const tieOwner = { id: "tie-owner", videos: [{ id: "tie-a" }, { id: "tie-b" }] };
+  const invalidOwner = { id: "invalid-owner", videos: [{ id: "invalid" }] };
+  const ties = createIsolatedHistoryFixture(factory, [tieOwner, invalidOwner], {
+    "tie-a": { updatedAt: "2026-10-03T00:00:00Z" },
+    "tie-b": { updatedAt: "2026-10-03T00:00:00.000Z" },
+    invalid: { updatedAt: "bad-date" }
+  }, new Map([["tie-a", { type: "video" }], ["tie-b", { type: "video" }], ["invalid", { type: "video" }]]));
+  assert.equal(ties.service.historyEntries()[0].updatedAt, "2026-10-03T00:00:00Z", "equal parsed timestamps must keep the first progress row");
+  assert.equal(ties.service.historyEntries()[1].updatedTime, 0, "invalid dates must retain the zero-time fallback");
+
+  for (const videos of [{}, { length: NaN }]) {
+    const malformed = createIsolatedHistoryFixture(factory, [{ id: "malformed", videos }], { video: {} }, new Map([["video", { type: "video" }]]));
+    assert.throws(() => malformed.service.historyEntries(), TypeError, "non-array video collections must fail instead of stalling the scan");
+  }
+  const customError = new Error("history custom some failure");
+  const custom = createIsolatedHistoryFixture(factory, [{ id: "custom", videos: { some() { throw customError; } } }],
+    { video: {} }, new Map([["video", { type: "video" }]]));
+  assert.throws(() => custom.service.historyEntries(), (error) => error === customError, "custom some must retain the original error object");
+  const customOwner = { id: "custom-owner", videos: { some(predicate) { return predicate({ id: "later-custom" }); } } };
+  const standardOwner = { id: "standard-owner", videos: [{ id: "standard" }] };
+  const customMatch = createIsolatedHistoryFixture(factory, [customOwner, standardOwner], { standard: {}, "later-custom": {} },
+    new Map([["standard", { type: "video" }], ["later-custom", { type: "video" }]]));
+  assert.deepEqual(customMatch.service.historyEntries().map((entry) => entry.work), [standardOwner, customOwner],
+    "custom non-array some must preserve its matches for later progress keys");
+}
+
+async function verifyHistoryOwnerLookup() {
+  const oldFactory = await legacyHistoryProgressFactory();
+  const candidateFactory = process.argv.includes("--legacy-history-owner-scan") ? oldFactory : createPlaybackProgressService;
+  // Full response bytes include saveVideoProgress's timestamp; control the clock
+  // only for this synthetic scenario, and restore it before the HTTP budget tests.
+  const originalNow = Date.now;
+  const originalIso = Date.prototype.toISOString;
+  Date.now = () => Date.parse("2026-10-04T12:00:00Z");
+  Date.prototype.toISOString = () => "2026-10-04T12:00:00.000Z";
+  let oracles = 0;
+  let baselineVisits;
+  let candidateVisits;
+  try {
+    const configs = [
+      { count: LOCAL_WORK_COUNT, fallback: 125 },
+      { count: LOCAL_WORK_COUNT, fallback: 1, early: true },
+      { count: LOCAL_WORK_COUNT, fallback: 125, allDirect: true },
+      { count: 16, fallback: 4, boundaries: true }
+    ];
+    for (const config of configs) {
+      const before = createHistoryFixture(oldFactory, config);
+      const after = createHistoryFixture(candidateFactory, config);
+      const metrics = [];
+      for (const fixture of [before, after]) {
+        fixture.reset();
+        const entries = fixture.progress.historyEntries();
+        metrics.push({ ...fixture.visits, entries: entries.length });
+        for (const entry of entries) assert.equal(entry.work, fixture.library.worksById.get(entry.work.id), "history must retain library work references");
+        fixture.reset();
+        fixture.progress.historyEntries();
+        assert.equal(fixture.visits.works, 0, "warm history must reuse its completed owner lookup");
+        assert.equal(fixture.visits.videos, 0, "warm history must not read videos");
+      }
+      if (config.early) {
+        assert.equal(metrics[1].works, 1, "a first-video hit must visit only its first work");
+        assert.equal(metrics[1].videos, 1, "a first-video hit must read only its first video");
+      } else if (config.allDirect) {
+        assert.equal(metrics[1].works, 0, "valid work IDs must avoid owner enumeration");
+        assert.equal(metrics[1].videos, 0, "valid work IDs must avoid video reads");
+      } else if (config.count === LOCAL_WORK_COUNT) {
+        baselineVisits = metrics[0];
+        candidateVisits = metrics[1];
+        assert.equal(metrics[0].works, 2_492_250, "the actual legacy service must exhibit repeated late-owner scans");
+        assert.equal(metrics[0].videos, 4_984_375);
+        assert.equal(metrics[1].works, LOCAL_WORK_COUNT, "history fallback owner visits must stay within one directory pass");
+        assert.equal(metrics[1].videos, LOCAL_WORK_COUNT * 2 - 1, "history fallback must stop at the last needed video");
+      }
+      assert.equal(JSON.stringify(after.progress.historyEntries()), JSON.stringify(before.progress.historyEntries()), "cold history entries must preserve complete legacy JSON");
+      oracles += 1;
+      for (const sort of ["", "title", "progress", "ratingDesc"]) {
+        for (const filter of ["all", "progress", "highRating"]) {
+          for (const offset of [0, 3, 999]) {
+            const url = new URL("http://fixture/api/history?days=all&limit=7&offset=" + offset + "&sort=" + sort + "&filter=" + filter);
+            assert.equal(JSON.stringify(after.collection.historyPayload(url)), JSON.stringify(before.collection.historyPayload(url)),
+              "history payload must preserve complete legacy JSON for " + url.search);
+            oracles += 1;
+          }
+        }
+      }
+      for (const change of ["replaceProgress", "replaceLibrary", "bumpRevision", "directSave"]) {
+        if (change === "directSave") {
+          before.directSave("video-0");
+          after.directSave("video-0");
+          assert.equal(after.progress.getVideoProgress("video-0").workId, null, "saving without workId must keep the supported fallback path");
+        } else {
+          before[change]();
+          after[change]();
+        }
+        const url = new URL("http://fixture/api/history?days=7&sort=progress&limit=48");
+        assert.equal(JSON.stringify(after.collection.historyPayload(url)), JSON.stringify(before.collection.historyPayload(url)),
+          "history cache invalidation must preserve complete JSON after " + change);
+        oracles += 1;
+      }
+      if (config.boundaries) {
+        const entries = after.progress.historyEntries();
+        assert(entries.some((entry) => entry.work.id === "work-2"), "valid work IDs survive missing files and invalid playback values");
+        assert(entries.some((entry) => entry.work.id === "work-0"), "a shared video keeps its first owner");
+      }
+    }
+    verifyHistoryLookupBoundaries(oldFactory);
+    verifyHistoryLookupBoundaries(candidateFactory);
+  } finally {
+    Date.now = originalNow;
+    Date.prototype.toISOString = originalIso;
+  }
+  console.log("works-history-owner-lookup: complete-json-oracles=" + oracles
+    + ", legacy-work-visits=" + baselineVisits.works + ", current-work-visits=" + candidateVisits.works
+    + ", legacy-video-reads=" + baselineVisits.videos + ", current-video-reads=" + candidateVisits.videos);
+}
+
+// Restore the complete pre-optimization functions in the actual source factories.
+const LEGACY_PERSON_LIST_FROM_WORKS = String.raw`  function listFromWorksPayload(sourceWorks, url, extra = {}, options = {}) {
+    const filter = extra.filter || url.searchParams.get("filter") || "all";
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const matchesFilter = options.lightweightInfo ? lightweightWorkMatchesFilter : workMatchesFilter;
+    const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
+    const filters = requestedFilters(filter);
+    const matchedWorks = filters.length
+      ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
+      : visibleWorks;
+    const works = sortWorkList(matchedWorks, sort, options);
+    return pagedWorksPayload(works, url, {
+      ...extra,
+      filter,
+      facets: extra.facets || workFacets(sourceWorks)
+    }, options);
+  }
+`;
+const LEGACY_PERSON_DETAIL = String.raw`  function detailPayload(personId, url) {
+    const startedAt = performance.now();
+    const timings = {};
+    const mark = (name) => {
+      timings[name] = Math.round(performance.now() - startedAt);
+    };
+    const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
+    const source = cachedDetailSource(personId, scope, timings, mark);
+    if (!source) return null;
+    mark("source");
+
+    const pageCacheKey = detailPageCacheKey(url);
+    let worksPayload = readCachedPage(source, pageCacheKey);
+    if (worksPayload) {
+      timings.pageCacheHit = true;
+      mark("facets");
+      mark("payload");
+    } else {
+      const filter = url.searchParams.get("filter") || "all";
+      const year = normalizePersonWorkYear(url.searchParams.get("year"));
+      const yearWorks = worksForPersonYear(source.works, year);
+      const facets = workQueryService.lightweightFacets(yearWorks);
+      mark("facets");
+      worksPayload = workQueryService.listFromWorksPayload(yearWorks, url, {
+        filter,
+        facets
+      }, { lightweightInfo: true, includeCoreCovers: scope === "western" });
+      cachePage(source, pageCacheKey, worksPayload);
+      mark("payload");
+    }
+    if (!source.person) source.person = publicPerson(source.personSource, source.personOptions);
+    mark("publicPerson");
+    if (timings.payload >= 500) {
+      console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
+    }
+    const payload = {
+      person: source.person,
+      filmographyCount: source.works.length,
+      year: normalizePersonWorkYear(url.searchParams.get("year")),
+      years: source.years,
+      ...worksPayload
+    };
+    if (url.searchParams.get("timing") === "1") payload.timings = timings;
+    return payload;
+  }
+`;
+const LEGACY_PERSON_PAGE_KEY = String.raw`  function detailPageCacheKey(url) {
+    return [
+      userStateStamp(),
+      workQueryService.visibilityStamp(),
+      url.searchParams.get("filter") || "all",
+      normalizePersonWorkYear(url.searchParams.get("year")),
+      url.searchParams.get("includeMissingLocal") || "",
+      url.searchParams.get("includeCompilation") || "",
+      url.searchParams.get("sort") || "releaseDesc",
+      url.searchParams.get("limit") || "",
+      url.searchParams.get("offset") || "0"
+    ].join(":");
+  }
+`;
+
+
+function personSourceFactories(legacy = false, observeBudget = () => {}) {
+  function restore(source, name, next, body) {
+    const start = source.indexOf("  function " + name + "(");
+    const end = source.indexOf("\n  function " + next + "(", start);
+    assert(start >= 0 && end > start, "person source oracle must restore the complete " + name + " function");
+    return source.slice(0, start) + body + source.slice(end);
+  }
+  let querySource = readFileSync(new URL("../src/modules/fanhao/server/works/work-query-service.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  let personSource = readFileSync(new URL("../src/modules/fanhao/server/people/person-detail-service.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  if (legacy) {
+    querySource = restore(querySource, "listFromWorksPayload", "listPayload", LEGACY_PERSON_LIST_FROM_WORKS);
+    personSource = restore(personSource, "detailPayload", "cachedDetailSource", LEGACY_PERSON_DETAIL);
+    personSource = restore(personSource, "detailPageCacheKey", "readCachedPage", LEGACY_PERSON_PAGE_KEY);
+    personSource = personSource.replace("      filterCache: new Map(),\n", "");
+  }
+  const query = new Function("classifyWorkCategory", "normalizeWorkCategory", "summarizeWorkCategories", "WORK_CATEGORY_OPTIONS",
+    "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode",
+    querySource.replace(/^import .*;\n/gm, "").replace("export function createWorkQueryService", "function createWorkQueryService")
+      + "\nreturn createWorkQueryService;")(
+    classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS, createWorkSorter,
+    (...args) => {
+      const budget = createWeightedCacheBudget(...args);
+      if (args[0] === 4_000_000) observeBudget(budget);
+      return budget;
+    }, normalizeWorkSortMode);
+  const person = new Function("normalizePersonWorkYear", "personWorkYearOptions", "worksForPersonYear", "createWeightedCacheBudget",
+    personSource.replace(/^import .*;\n/gm, "").replace(/export function /g, "function ") + "\nreturn createPersonDetailService;")(
+    normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear, createWeightedCacheBudget);
+  return { query, person };
+}
+
+function createPersonSourceFixture(factories, { count = 120, missingCount = Math.floor(count / 10), imageOwner = false, ties = false } = {}) {
+  const reads = { classification: 0, sort: 0, title: 0, favorite: 0, progress: 0, publicWork: 0, prewarm: 0 };
+  const events = [];
+  const state = { user: "alice:1", revision: "work:1", visibility: 1, images: 1, held: null, fault: "", coverWrites: false, metadataWrite: false };
+  const works = Array.from({ length: count }, (_, index) => ({
+    id: String(index + 1), personId: "person-fixture", personName: "合成人物",
+    title: ties ? "Complete tie" : "Fixture " + String(index * 173 % Math.max(1, count)).padStart(5, "0"),
+    directoryName: "Fixture " + index, relativePath: "fixture/main/" + index,
+    modifiedAt: ties ? "" : "2026-01-" + String(index % 28 + 1).padStart(2, "0"),
+    videos: [{ id: "video-" + index, size: index % 100, relativePath: "fixture/main/video.mp4" }], images: [], infos: [],
+    videoCount: 1, playableCount: index % 3 ? 1 : 0, imageCount: 0, infoCount: index % 3, coverId: null,
+    infoSummary: {
+      code: index % 11 ? "ABC-" + index : "FC2-PPV-" + index,
+      releaseDate: ties || index % 9 === 0 ? "" : String(2020 + index % 5) + "-01-" + String(index % 28 + 1).padStart(2, "0"),
+      rating: ties ? null : [null, "", "bad", 0, "4.2", 5][index % 6],
+      ratingCount: ties ? 0 : index % 27, durationMinutes: ties ? 0 : index % 200, hasMagnet: Boolean(index % 2), javdbTags: []
+    }
+  }));
+  const missing = Array.from({ length: missingCount }, (_, index) => ({
+    ...works[index % works.length], id: "missing-" + index, personId: "person-fixture", personName: "合成人物",
+    title: "Missing " + index, directoryName: "COMP-" + index, relativePath: "", videos: [], images: [], infos: [],
+    videoCount: 0, playableCount: 0, imageCount: 0, infoCount: 0, coverId: null, missingLocal: true,
+    infoSummary: { code: index % 5 ? "ABC-" + index : "COMP-" + index, releaseDate: "2023-01-01", rating: 4.2, ratingCount: 2, hasMagnet: true }
+  }));
+  const record = { id: "person-fixture", name: "合成人物", works: works.map((work) => work.id), relativePath: "fixture/main", sourcePaths: [], sourceCount: 1 };
+  const library = { scannedAt: "synthetic-scan", worksById: new Map(works.map((work) => [work.id, work])), peopleById: new Map([[record.id, record]]) };
+  const favoriteStateService = {
+    isFavoriteWork(id) { reads.favorite++; return Number.parseInt(id, 10) % 7 === (state.user.startsWith("alice") ? 1 : 2); },
+    publicFavoriteForWork(id) {
+      return Number.parseInt(id, 10) % 7 === (state.user.startsWith("alice") ? 1 : 2) ? { folderId: "fixture", folderName: state.user } : null;
+    }
+  };
+  const playbackProgressService = {
+    getWorkProgress(work) {
+      reads.progress++;
+      return Number.parseInt(work.id, 10) % 11 === (state.user.startsWith("alice") ? 1 : 2) ? { updatedAt: "2026-10-01", positionMs: 123 } : null;
+    },
+    getVideoProgress: () => null
+  };
+  const classification = createWorkClassificationService({ appConfigService: { current: () => ({
+    compilationPrefixes: state.visibility % 2 ? ["COMP"] : ["ABC"], compilationKeywords: ["Anthology"]
+  }) } });
+  const classify = classification.filterForRequest;
+  classification.filterForRequest = (values, ...args) => {
+    events.push("classify"); reads.classification += values.length;
+    if (state.fault === "classify") throw state.held;
+    return classify(values, ...args);
+  };
+  let db = null, images = null;
+  if (imageOwner) {
+    db = new DatabaseSync(":memory:");
+    db.exec("ATTACH DATABASE ':memory:' AS fanhao_images; CREATE TABLE local_works(work_id INTEGER);"
+      + "CREATE TABLE fanhao_images.images(id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, kind TEXT, remote_url TEXT,"
+      + "local_path TEXT, source TEXT, updated_at TEXT, image_blob BLOB, sort_order INTEGER);");
+    const local = db.prepare("INSERT INTO local_works VALUES (?)");
+    const image = db.prepare("INSERT INTO fanhao_images.images VALUES (?, 'work', ?, 'cover', ?, NULL, 'fixture', '2026-01-01', NULL, 0)");
+    for (let index = 1; index <= count; index++) {
+      local.run(index); image.run(index, index, "https://fixture.invalid/cover/" + index + ".jpg");
+    }
+    images = createWorkImageService({
+      getCoreDb: () => db, getPersonById: (id) => library.peopleById.get(id), getWorkById: (id) => library.worksById.get(id),
+      getStamp: () => String(state.images), hasCoreDb: () => true, proxiedRemoteImageUrl: (value) => value || ""
+    });
+  }
+  const presenter = createWorkPresenterService({
+    getLibrary: () => library, actorProfileRow: () => null, displayPersonForWork: (id) => library.peopleById.get(id),
+    displayWorkTitle: (value) => String(value || ""), favoriteStateService, playbackProgressService,
+    firstPresentValue: (...values) => values.find((value) => value != null) ?? null,
+    dbBoolOrNull: (value) => value == null ? null : Boolean(value), localWorkMarkers: () => [],
+    manualCoverStateService: { manualCoverForWork: () => null }, publicActorProfile: () => null,
+    publicActorProfileSnapshot: () => ({ profile: null, avatar: null }), publicCoreWorkCover: images?.publicCoreWorkCover || (() => null),
+    publicWorkInfoSummary: (_row, summary) => summary, uniqueTextArray: (values) => [...new Set(values)],
+    isGPerson: () => false, isCompilationWork: classification.isCompilation, workInfoDetailRow: () => null,
+    proxiedRemoteImageUrl: (value) => value || ""
+  });
+  const deps = {
+    library, actorMovieStamp: () => "actor-fixture", workQueryStamp: () => state.revision,
+    peoplePayloadStamp: () => state.revision, userStateStamp: () => state.user,
+    clampInteger: (value, fallback, min, max) => value == null || String(value).trim() === "" ? fallback : Math.max(min, Math.min(max, Math.floor(Number(value) || 0))),
+    defaultWorkLimit: 48, maxWorkLimit: 16000, favoriteStateService, playbackProgressService,
+    peopleScopeService: { normalize: (value) => value === "western" ? "western" : "main", personMatches: () => true, workMatches: () => true },
+    workClassificationService: classification, isVrWork: (work) => Number(work.id) % 5 === 0,
+    workHasCoreCover: images?.workHasCoreCover || (() => false), workHasLocalMarker: (work) => Number(work.id) % 13 === 0,
+    workInfoFacetRow: () => null, publicWorkAvailability: presenter.publicWorkAvailability,
+    publicWork(...args) {
+      events.push("present"); reads.publicWork++;
+      if (state.fault === "present") throw state.held;
+      return presenter.publicWork(...args);
+    },
+    publicPerson: presenter.publicPerson, prewarmRemoteImagesForWorks: () => {},
+    displayWorkTitle(value) {
+      events.push("title"); reads.title++;
+      if (state.fault === "title") throw state.held;
+      return String(value || "");
+    },
+    prewarmCoreWorkCovers(batch) {
+      events.push("prewarm"); reads.prewarm += batch.length;
+      images?.prewarmCoreWorkCovers(batch);
+      if (state.coverWrites) for (const work of batch) work.cachedCover = { coverUrl: "https://fixture.invalid/cached/" + work.id };
+      if (state.metadataWrite && works[0]) {
+        Object.assign(works[0].infoSummary, { releaseDate: "2029-01-01", rating: 5, ratingCount: 10000 });
+        state.revision += ":metadata"; state.metadataWrite = false;
+      }
+      if (state.fault === "prewarm") throw state.held;
+    },
+    recordPerformanceSpan(label) { if (label === "sort") reads.sort++; }
+  };
+  const query = factories.query(deps);
+  const detail = factories.person({
+    ...deps, workQueryService: query, actorProfileMergeCandidates: () => [], adminCoreMutationService: {},
+    coreMissingWorksForPerson: () => missing, corePersonFallbackRecord: () => null,
+    dedupeWorksForDisplay: (values) => [...new Map(values.map((work) => [work.id, work])).values()],
+    enrichLocalWorksWithActorMovieInfo: (values) => values, manualCoverStateService: {}, maxActorAvatarBytes: 1024,
+    mergedActorMovieRows: () => [], mergedPersonRecord: (person) => person, missingActorWorksForPerson: () => [],
+    publicActorProfile: () => null, resolveLibraryPersonByPublicId: (id) => id === record.id ? record : null,
+    storedWorkCodeKey: (value) => String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase(),
+    workLocalMutationService: {}, workCodeKeySetForWorks: () => new Set()
+  });
+  return { query, detail, state, works, missing, reads, events, library, close: () => db?.close() };
+}
+
+function verifyPersonSourcePaging() {
+  const baselineFactories = personSourceFactories(true);
+  const selectedFactories = personSourceFactories(process.argv.includes("--legacy-person-source"));
+  let oracles = 0;
+  function compare(before, after, params = {}) {
+    const url = new URL("http://fixture.invalid/api/people/person-fixture?" + new URLSearchParams({ limit: "48", sort: "releaseDesc", ...params }));
+    const baseline = before.detail.detailPayload("person-fixture", url);
+    const current = after.detail.detailPayload("person-fixture", url);
+    assert.equal(JSON.stringify(current), JSON.stringify(baseline), "complete person response differs for " + url.search);
+    assert.equal(current?.timings, undefined, "the full oracle uses normal timing-off requests");
+    oracles++; return current;
+  }
+  for (const config of [{ count: 0 }, { count: 1 }, { count: 29, ties: true }, { count: 180 }]) {
+    const before = createPersonSourceFixture(baselineFactories, config), after = createPersonSourceFixture(selectedFactories, config);
+    try {
+      for (const year of ["all", "2023", "unknown", "invalid"])
+        for (const filter of ["all", "rated", "highRating,playable", "favorite", "progress", "missingLocal", "unexpected"])
+          for (const offset of ["0", "48"])
+            compare(before, after, { year, filter, offset, includeCompilation: "0", includeMissingLocal: "0" });
+      for (const sort of ["title", "videos", "progress", "ratingAsc", "ratingDesc", "size", "sizeAsc", "duration", "durationAsc", "codeAsc", "codeDesc", "unknown"])
+        compare(before, after, { sort, offset: "12" });
+      for (const user of ["bob:1", "alice:1"]) {
+        before.state.user = after.state.user = user;
+        for (const filter of ["all", "favorite", "progress"]) compare(before, after, { filter, offset: "12" });
+      }
+      for (const visibility of [2, 1]) {
+        before.state.visibility = after.state.visibility = visibility;
+        compare(before, after, { includeCompilation: "0", includeMissingLocal: "1", offset: "12" });
+      }
+      before.state.revision = after.state.revision = "work:2";
+      for (const fixture of [before, after]) if (fixture.works[0]) {
+        fixture.works[0].title = "Updated fixture";
+        fixture.works[0].infoSummary = { releaseDate: "2029-01-01", rating: 5, ratingCount: 10000, code: "UPD-1" };
+      }
+      compare(before, after, { sort: "ratingDesc" }); compare(before, after, { year: "2029" });
+      assert.equal(after.detail.detailPayload("unknown-person", new URL("http://fixture.invalid/")), null);
+      for (const params of [{}, { filter: "rated" }, { includeCompilation: "0" }, { sort: "progress" }, { sort: "unknown" }]) {
+        const url = new URL("http://fixture.invalid/?" + new URLSearchParams({ limit: "48", ...params }));
+        assert.equal(JSON.stringify(after.query.listFromWorksPayload(after.works, url)),
+          JSON.stringify(before.query.listFromWorksPayload(before.works, url)), "callers without a person context keep the complete old response");
+        oracles++;
+      }
+    } finally { before.close(); after.close(); }
+  }
+  // Missing flags default to true; an explicitly empty or non-1 value means
+  // false. Distinct offsets expose filter-source collisions without changing
+  // the pre-existing page-key behavior for otherwise identical requests.
+  for (const flag of ["includeMissingLocal", "includeCompilation"]) {
+    for (const values of [[null, "", "0", "true", "1", null], ["", null, "2", "1", "false", "unexpected"]]) {
+      const before = createPersonSourceFixture(baselineFactories, { count: 60, missingCount: 60 });
+      const after = createPersonSourceFixture(selectedFactories, { count: 60, missingCount: 60 });
+      for (const [index, value] of values.entries()) {
+        const params = { limit: "12", offset: String(index * 12) };
+        if (value !== null) params[flag] = value;
+        const result = compare(before, after, params);
+        assert.equal(result.total, value === null || value === "1" ? 120 : 60,
+          flag + " must preserve absent/empty/non-1 requestFlag semantics across offsets");
+      }
+    }
+  }
+  for (const config of [{ count: 75, missingCount: 0, imageOwner: true }, { count: 75, missingCount: 75 }]) {
+    const before = createPersonSourceFixture(baselineFactories, config), after = createPersonSourceFixture(selectedFactories, config);
+    try {
+      const rawBefore = JSON.stringify(before.works), rawAfter = JSON.stringify(after.works);
+      const params = { scope: config.imageOwner ? "western" : "main", limit: "12", year: "2023", offset: "0" };
+      compare(before, after, params); compare(before, after, { ...params, offset: "12" });
+      if (config.imageOwner) {
+        assert.equal(JSON.stringify(before.works), rawBefore, "actual image prewarming does not rewrite year/classification metadata");
+        assert.equal(JSON.stringify(after.works), rawAfter);
+      }
+      before.state.coverWrites = after.state.coverWrites = true;
+      compare(before, after, { ...params, year: "all", offset: "24" });
+      compare(before, after, { ...params, year: "all", offset: "36", includeCompilation: "0" });
+      before.state.metadataWrite = after.state.metadataWrite = true;
+      compare(before, after, { ...params, year: "all", offset: "48" });
+      compare(before, after, { ...params, year: "2029", offset: "0" });
+    } finally { before.close(); after.close(); }
+  }
+  for (const fault of ["classify", "title", "prewarm", "present"]) {
+    const before = createPersonSourceFixture(baselineFactories), after = createPersonSourceFixture(selectedFactories);
+    const held = new Error("person source fixture " + fault);
+    for (const fixture of [before, after]) { fixture.state.fault = fault; fixture.state.held = held; }
+    const url = new URL("http://fixture.invalid/?scope=western&sort=title&limit=12");
+    assert.throws(() => before.detail.detailPayload("person-fixture", url), (error) => error === held);
+    assert.throws(() => after.detail.detailPayload("person-fixture", url), (error) => error === held);
+    assert.deepEqual(after.events, before.events, "cold failures preserve classification/title/prewarm/presentation order");
+    const classifications = after.reads.classification;
+    before.state.fault = after.state.fault = "";
+    compare(before, after, { scope: "western", sort: "title", limit: "12" });
+    assert.equal(after.reads.classification - classifications, 120, "failed pages must not admit a person filter selection");
+
+    const plainBefore = createPersonSourceFixture(baselineFactories), plainAfter = createPersonSourceFixture(selectedFactories);
+    for (const fixture of [plainBefore, plainAfter]) { fixture.state.fault = fault; fixture.state.held = held; }
+    for (const fixture of [plainBefore, plainAfter]) {
+      assert.throws(() => fixture.query.listFromWorksPayload(fixture.works, url, { facets: {} },
+        { lightweightInfo: true, includeCoreCovers: true }), (error) => error === held);
+    }
+    assert.deepEqual(plainAfter.events, plainBefore.events, "callers without context retain cold error and lazy read order");
+  }
+  // Every semantic oracle runs before the stable work budget, so the negative
+  // control must preserve old DTOs and fail specifically on repeated work.
+  const before = createPersonSourceFixture(baselineFactories, { count: LOCAL_WORK_COUNT });
+  const after = createPersonSourceFixture(selectedFactories, { count: LOCAL_WORK_COUNT });
+  for (let page = 0; page < 16; page++) compare(before, after, { offset: String(page * 48) });
+  assert.equal(before.reads.classification, 22_000 * 16, "the complete old factory demonstrates one full classification per page");
+  assert.equal(before.reads.sort, 16);
+  assert.equal(before.reads.title, 22_000 * 16);
+  assert.equal(after.reads.favorite, before.reads.favorite, "dynamic favorite facets still read every source on each page");
+  assert.equal(after.reads.progress, before.reads.progress, "dynamic progress facets and presenter reads remain live");
+  assert.equal(after.reads.publicWork, before.reads.publicWork, "page presentation and prewarming remain page sized");
+  console.log("works-person-source: complete-json-oracles=" + oracles + ", legacy-classification=" + before.reads.classification
+    + ", selected-classification=" + after.reads.classification + ", legacy-sorts=" + before.reads.sort + ", selected-sorts=" + after.reads.sort
+    + ", legacy-title-reads=" + before.reads.title + ", selected-title-reads=" + after.reads.title);
+  assert.equal(after.reads.classification, 22_000, "person paging must reuse one successful bounded classification source");
+  assert.equal(after.reads.sort, 1, "person paging must reuse its existing sorted source identity");
+  assert.equal(after.reads.title, 22_000, "display title preparation stays within one complete source pass");
+}
+
 const realDbArgIndex = process.argv.indexOf("--real-core-db");
 if (realDbArgIndex >= 0) {
   const coreDbPath = process.argv[realDbArgIndex + 1];
@@ -800,6 +1474,8 @@ if (realDbArgIndex >= 0) {
     readinessOnly: process.argv.includes("--readiness-only")
   });
 } else {
+  verifyPersonSourcePaging();
+  await verifyHistoryOwnerLookup();
   verifySemanticEquivalence();
   verifyDirectAndLegacyCandidateCompetition();
   verifyInvalidationAndStaleFallback();

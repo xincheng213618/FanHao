@@ -191,6 +191,7 @@ export function createMusicPage(deps) {
     music: state.music,
     actions,
     formatNumber,
+    showError,
     registerMusicTrackElement,
     registerCurrentTrackIndicator,
     registerPlaybackButton
@@ -367,6 +368,8 @@ export function createMusicPage(deps) {
     setMusicListLoadingState(Boolean(state.music.loading || state.music.loadingMore), { append: state.music.loadingMore });
     restoreMusicInputFocus(nextPanel, inputFocus);
     const surfacedTrackId = state.music.current?.id || state.music.queue[0]?.id || "";
+    const emptyNowPanel = !surfacedTrackId && shell.querySelector(".music-now-empty");
+    if (emptyNowPanel) emptyNowPanel.textContent = state.music.status || "选择一首歌开始播放。";
     if (mountedTrackId !== surfacedTrackId && !refreshCurrentTrackSurfaces(mountedTrackId)) return false;
     return true;
   }
@@ -819,7 +822,8 @@ export function createMusicPage(deps) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "music-load-more";
-    more.textContent = state.music.loadingMore ? "正在加载…" : `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - artistCount)))} 位`;
+    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - artistCount)))} 位`;
+    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
     more.disabled = state.music.loadingMore;
     more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
@@ -842,7 +846,8 @@ export function createMusicPage(deps) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "music-load-more";
-    more.textContent = state.music.loadingMore ? "正在加载…" : `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - albumCount)))} 张`;
+    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - albumCount)))} 张`;
+    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
     more.disabled = state.music.loadingMore;
     more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
@@ -993,9 +998,8 @@ export function createMusicPage(deps) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "music-load-more";
-    more.textContent = state.music.loadingMore
-      ? "正在加载…"
-      : `再加载 ${formatNumber(Math.min(120, Math.max(0, Number(state.music.data?.total || 0) - trackCount)))} 首`;
+    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(120, Math.max(0, Number(state.music.data?.total || 0) - trackCount)))} 首`;
+    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
     more.disabled = state.music.loadingMore;
     more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
@@ -1043,6 +1047,9 @@ export function createMusicPage(deps) {
     if (more && loading && append) {
       more.disabled = true;
       more.textContent = "正在加载…";
+    } else if (more && !loading && more.dataset.musicIdleLabel !== undefined) {
+      more.disabled = false;
+      more.textContent = more.dataset.musicIdleLabel;
     }
   }
 

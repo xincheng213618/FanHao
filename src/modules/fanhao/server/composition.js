@@ -22,7 +22,7 @@ export function createFanhaoDependencies(deps) {
       "userStateSummary"
     ]),
     settings: pick(deps, ["appConfigService"]),
-    userState: pick(deps, [
+    userState: { ...pick(deps, [
       "clampInteger",
       "favoriteStateService",
       "filterWorkList",
@@ -43,7 +43,7 @@ export function createFanhaoDependencies(deps) {
       "userStateStamp",
       "workFacets",
       "workQueryStamp"
-    ]),
+    ]), withWorkInfoReadStatus: deps.withWorkInfoReadStatus, workInfoReadCacheable: deps.workInfoReadCacheable },
     works: { ...pick(deps, [
       "actorMovieInfoStamp",
       "adminCoreMutationService",
@@ -118,7 +118,17 @@ export function createFanhaoDependencies(deps) {
       "workLocalMutationService",
       "workMoveJobService",
       "workQueryStamp"
-    ]), cancelCoverGeneration: deps.cancelCoverGeneration, scheduleBackground: deps.scheduleBackground }
+    ]), cancelCoverGeneration: deps.cancelCoverGeneration, scheduleBackground: deps.scheduleBackground,
+      rankingMissingSearchResult: deps.rankingMissingSearchResult,
+      actorMissingSearchResult: deps.actorMissingSearchResult,
+      actorMissingSearchResultForPeople: deps.actorMissingSearchResultForPeople,
+      enrichLocalWorksWithActorMovieIndexResult: deps.enrichLocalWorksWithActorMovieIndexResult,
+      mergedActorMovieRowsResult: deps.mergedActorMovieRowsResult,
+      withWorkInfoReadStatus: deps.withWorkInfoReadStatus,
+      workInfoReadCacheable: deps.workInfoReadCacheable,
+      withWorkSearchReadStatus: deps.withWorkSearchReadStatus,
+      workSearchReadCacheable: deps.workSearchReadCacheable,
+      missingActorWorksResultForPerson: deps.missingActorWorksResultForPerson }
   };
 }
 

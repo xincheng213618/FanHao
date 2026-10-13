@@ -1,4 +1,7 @@
+import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
+
 const COLLECTION_PAGE_CACHE_LIMIT = 64;
+const COLLECTION_PAGE_WORK_BUDGET = 4096;
 const COLLECTION_WORK_CACHE_LIMIT = 4096;
 const COLLECTION_PREWARM_PAGE_SIZES = [8, 48, 64];
 
@@ -17,14 +20,25 @@ export function createCollectionQueryService({
   recentWatchedDays,
   sortWorkList = (works) => works,
   userStateStamp = () => "",
+  withWorkInfoReadStatus = null,
+  workInfoReadCacheable = () => true,
   workFacets = (works) => ({ all: works.length }),
   workQueryStamp = () => ""
 }) {
+  const pageBudget = createWeightedCacheBudget(COLLECTION_PAGE_WORK_BUDGET);
   let cacheStamp = "";
   let pageCache = new Map();
   let workPayloadCache = new Map();
 
   function favoritesPayload(url) {
+    return readWorkInfo(() => readFavoritesPayload(url)).value;
+  }
+
+  function readWorkInfo(callback) {
+    return withWorkInfoReadStatus ? withWorkInfoReadStatus(callback) : { value: callback(), cacheable: true };
+  }
+
+  function readFavoritesPayload(url) {
     const rawFolderId = url.searchParams.get("folder") || "";
     const selectedFolderId = rawFolderId ? favoriteStateService.normalizeFavoriteFolderId(rawFolderId) : "";
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
@@ -54,6 +68,10 @@ export function createCollectionQueryService({
   }
 
   function historyPayload(url) {
+    return readWorkInfo(() => readHistoryPayload(url)).value;
+  }
+
+  function readHistoryPayload(url) {
     const rawDays = String(url.searchParams.get("days") || "").trim().toLowerCase();
     const days = rawDays && rawDays !== "all" ? clampInteger(rawDays, 0, 1, 3650) : 0;
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
@@ -128,8 +146,9 @@ export function createCollectionQueryService({
       return cached;
     }
 
-    const payload = publicWork(work);
-    if (!key) return payload;
+    const result = readWorkInfo(() => publicWork(work));
+    const payload = result.value;
+    if (!key || result.cacheable === false) return payload;
     workPayloadCache.set(key, payload);
     while (workPayloadCache.size > COLLECTION_WORK_CACHE_LIMIT) {
       workPayloadCache.delete(workPayloadCache.keys().next().value);
@@ -139,20 +158,13 @@ export function createCollectionQueryService({
 
   function readPage(cacheKey) {
     ensureCache();
-    if (!pageCache.has(cacheKey)) return null;
-    const cached = pageCache.get(cacheKey);
-    pageCache.delete(cacheKey);
-    pageCache.set(cacheKey, cached);
-    return cached;
+    return pageBudget.read(pageCache, cacheKey) || null;
   }
 
   function cachePage(cacheKey, payload) {
+    if (workInfoReadCacheable() === false) return payload;
     ensureCache();
-    pageCache.set(cacheKey, payload);
-    while (pageCache.size > COLLECTION_PAGE_CACHE_LIMIT) {
-      pageCache.delete(pageCache.keys().next().value);
-    }
-    return payload;
+    return pageBudget.write(pageCache, cacheKey, payload, payload.works.length, COLLECTION_PAGE_CACHE_LIMIT);
   }
 
   function ensureCache() {
@@ -160,11 +172,16 @@ export function createCollectionQueryService({
     const nextStamp = `${library.scannedAt || ""}:${library.worksById?.size || 0}:${workQueryStamp()}:${userStateStamp()}`;
     if (cacheStamp === nextStamp) return;
     cacheStamp = nextStamp;
+    pageBudget.clear();
     pageCache = new Map();
     workPayloadCache = new Map();
   }
 
   function prewarm() {
+    return readWorkInfo(prewarmCollection).value;
+  }
+
+  function prewarmCollection() {
     const historyDays = [...new Set([0, 7, Number(recentWatchedDays || 0)].filter((days) => days >= 0))];
     for (const limit of COLLECTION_PREWARM_PAGE_SIZES) {
       favoritesPayload(new URL(`http://fanhao.local/api/favorites?limit=${limit}&offset=0`));

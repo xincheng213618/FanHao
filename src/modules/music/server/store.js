@@ -6,9 +6,10 @@ import { MUSIC_LANGUAGES, buildArtistLanguageConsensus, musicLanguageForArtist, 
 import { buildMusicIdentityKnowledge, isUnknownMusicArtist, resolveMusicTrackIdentity } from "./identity.js";
 
 import { DEFAULT_LIMIT, MAX_LIMIT, MAX_PAGE_LIMIT } from "./constants.js";
-import { SMART_MIXES, findSmartMix, smartMixCondition } from "./smart-mix.js";
+import { SMART_MIXES, findSmartMix, isMetadataOnlySmartMix, smartMixCondition, smartMixRequiresState } from "./smart-mix.js";
 import {
   canUseShortVocabularyCount,
+  createMusicSearchMatchContext,
   findPhoneticCorrection,
   musicSearchIndexCondition,
   musicSearchIndexJoin,
@@ -23,7 +24,7 @@ import {
 } from "./search.js";
 import { createM3uTrackMatcher, formatM3uPlaylist, parseM3u, playlistTrackIdsFromInput, readM3uInput, safePlaylistFileName } from "./m3u.js";
 import { adjacentTracks, lyricsForTrack, publicAlbum, publicArtist, publicPlaylist, publicReportArtist, publicSmartPlaylist, publicTrack, trackRow } from "./serializers.js";
-import { albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount } from "./facets.js";
+import { ARTIST_FACET_COLUMNS, prepareArtistFacet, ALBUM_FACET_COLUMNS, prepareAlbumFacet, albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount, smartMixListCounts } from "./facets.js";
 import { catalogFilter } from "./query.js";
 import { listLyricMatches } from "./lyrics-search.js";
 import { normalizeRoots, rootStatus, safeStoredFile, safeStoredFileAsync } from "./scan.js";
@@ -32,8 +33,27 @@ import { ensureSchema } from "./schema.js";
 import { isMusicDatabaseBusyError, musicSchemaBusyError, runMusicWriteTransaction } from "./write-transaction.js";
 import { acceptMusicProgress, musicProgressClock, musicProgressIdentity, musicProgressPreviousSession, reserveMusicProgressSession } from "./progress-receipts.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
+import { playedTrackPageIds } from "./played-track-page.js";
+import { TRACK_LIST_COLUMNS, prepareTrackList } from "./track-query.js";
 
 const artistNameCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+const ARTIST_BROWSER_COLUMNS = "id,name,language,album_count,track_count,duration_ms,size_bytes";
+
+function prepareArtistBrowserRows(database, conditions, query) {
+  const where = conditions.join(" AND ");
+  if (query) return prepareArtistFacet(database, `SELECT ${ARTIST_BROWSER_COLUMNS} FROM music_artists WHERE ${where}`);
+  try {
+    return database.prepare(`SELECT ${ARTIST_BROWSER_COLUMNS} FROM music_artists WHERE ${where}`);
+  } catch (error) {
+    // Older tables may omit optional DTO columns. Only a native missing
+    // column during preparation restores the former wide read.
+    if (error?.code === "ERR_SQLITE_ERROR" && error.errcode === 1
+      && /^no such column: (?:language|album_count|duration_ms|size_bytes)$/u.test(error.message)) {
+      return database.prepare(`SELECT * FROM music_artists WHERE ${where}`);
+    }
+    throw error;
+  }
+}
 
 export function createMusicStore(options = {}) {
   const dbPath = options.dbPath;
@@ -130,10 +150,9 @@ export function createMusicStore(options = {}) {
         `
         )
         .get() || {};
-    const recent = database
-      .prepare(
+    const recent = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
@@ -147,19 +166,24 @@ export function createMusicStore(options = {}) {
       )
       .all()
       .map(publicTrack);
-    const topPlayed = database
-      .prepare(
+    const topPlayed = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
-               s.play_count, s.last_played_at
-        FROM music_track_state s
-        CROSS JOIN music_tracks t ON t.id = s.track_id
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               ranked.favorite, ranked.rating, ranked.position_ms, ranked.state_duration_ms,
+               ranked.play_count, ranked.last_played_at
+        FROM (
+          SELECT s.track_id, s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
+                 s.play_count, s.last_played_at
+          FROM music_track_state s
+          CROSS JOIN music_tracks t ON t.id = s.track_id
+          WHERE COALESCE(s.play_count, 0) > 0
+          ORDER BY COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
+          LIMIT 8
+        ) ranked
+        CROSS JOIN music_tracks t ON t.id = ranked.track_id
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
-        WHERE COALESCE(s.play_count, 0) > 0
-        ORDER BY COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
-        LIMIT 8
+        ORDER BY COALESCE(ranked.play_count, 0) DESC, COALESCE(ranked.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
       `
       )
       .all()
@@ -232,11 +256,10 @@ export function createMusicStore(options = {}) {
       )
       .all()
       .map(publicReportArtist);
-    const topAlbums = database
-      .prepare(
+    const topAlbums = prepareAlbumFacet(database,
         `
         SELECT
-          al.*,
+          ${ALBUM_FACET_COLUMNS},
           a.name AS artist_name,
           COALESCE(SUM(s.play_count), 0) AS plays,
           MAX(COALESCE(s.last_played_at, '')) AS last_played_at
@@ -257,10 +280,9 @@ export function createMusicStore(options = {}) {
         plays: Number(row.plays || 0),
         lastPlayedAt: row.last_played_at || ""
       }));
-    const topTracks = database
-      .prepare(
+    const topTracks = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
@@ -337,10 +359,9 @@ export function createMusicStore(options = {}) {
         tracks = suggestTracks(database, query, searchKind, searchTerm);
       }
     }
-    const directArtists = database
-      .prepare(
+    const directArtists = prepareArtistFacet(database,
         `
-        SELECT *
+        SELECT ${ARTIST_FACET_COLUMNS}
         FROM music_artists
         WHERE track_count > 0 AND name LIKE ? ESCAPE '\\'
         ORDER BY track_count DESC, name COLLATE NOCASE
@@ -349,10 +370,9 @@ export function createMusicStore(options = {}) {
       )
       .all(like)
       .map(publicArtist);
-    const directAlbums = database
-      .prepare(
+    const directAlbums = prepareAlbumFacet(database,
         `
-        SELECT al.*, a.name AS artist_name
+        SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
         FROM music_albums al
         LEFT JOIN music_artists a ON a.id = al.artist_id
         WHERE al.track_count > 0 AND (
@@ -365,29 +385,31 @@ export function createMusicStore(options = {}) {
       )
       .all(like, like)
       .map(publicAlbum);
-    const artistLookup = database.prepare("SELECT * FROM music_artists WHERE id = ? AND track_count > 0");
-    const albumLookup = database.prepare(`
-      SELECT al.*, a.name AS artist_name
+    const artistLookup = prepareArtistFacet(database, `SELECT ${ARTIST_FACET_COLUMNS} FROM music_artists WHERE id = ? AND track_count > 0`);
+    const albumLookup = prepareAlbumFacet(database, `
+      SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
       FROM music_albums al
       LEFT JOIN music_artists a ON a.id = al.artist_id
       WHERE al.id = ? AND al.track_count > 0
     `);
     const artists = mergeSuggestionEntities(
-      tracks.map((track) => artistLookup.get(track.artistId)).filter(Boolean).map(publicArtist),
+      [...new Set(tracks.map((track) => track.artistId))].map((id) => artistLookup.get(id)).filter(Boolean).map(publicArtist),
       directArtists,
       5
     );
     const albums = mergeSuggestionEntities(
-      tracks.map((track) => albumLookup.get(track.albumId)).filter(Boolean).map(publicAlbum),
+      [...new Set(tracks.map((track) => track.albumId))].map((id) => albumLookup.get(id)).filter(Boolean).map(publicAlbum),
       directAlbums,
       5
     );
     const matchQuery = correctedQuery || searchTerm || query;
+    const matchContext = matchQuery && (tracks.length || artists.length || albums.length)
+      ? createMusicSearchMatchContext(matchQuery) : null;
     return {
       query,
-      tracks: tracks.map((track) => decorateTrackSearchMatch(track, matchQuery)),
-      artists: artists.map((artist) => decorateArtistSearchMatch(artist, matchQuery)),
-      albums: albums.map((album) => decorateAlbumSearchMatch(album, matchQuery)),
+      tracks: tracks.map((track) => decorateTrackSearchMatch(track, matchQuery, matchContext)),
+      artists: artists.map((artist) => decorateArtistSearchMatch(artist, matchQuery, matchContext)),
+      albums: albums.map((album) => decorateAlbumSearchMatch(album, matchQuery, matchContext)),
       searchMode: searchKind,
       correctedQuery
     };
@@ -401,10 +423,9 @@ export function createMusicStore(options = {}) {
       : `(t.title LIKE ? ESCAPE '\\' OR t.display_artist LIKE ? ESCAPE '\\' OR t.album_title LIKE ? ESCAPE '\\' OR t.file_name LIKE ? ESCAPE '\\')`;
     const trackArgs = indexed ? [musicSearchIndexTerm(searchKind, searchTerm)] : [like, like, like, like];
     const rank = indexed ? musicSearchIndexRank(searchKind, searchTerm) : searchRankSql(query);
-    return database
-      .prepare(
+    return prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
@@ -470,9 +491,17 @@ export function createMusicStore(options = {}) {
     let total;
     let rows;
     if (sort === "name") {
-      const buildSortedRows = () => database
-          .prepare(`SELECT * FROM music_artists WHERE ${conditions.join(" AND ")}`)
+      const buildSortedRows = () => prepareArtistBrowserRows(database, conditions, query)
           .all(...args)
+          .map(row => query ? row : {
+            id: row.id,
+            name: row.name,
+            language: row.language,
+            album_count: row.album_count,
+            track_count: row.track_count,
+            duration_ms: row.duration_ms,
+            size_bytes: row.size_bytes
+          })
           .map(row => ({ row, key: artistNameForSort(row.name) }))
           .sort((left, right) => artistNameCollator.compare(left.key, right.key))
           .map(entry => entry.row);
@@ -483,10 +512,9 @@ export function createMusicStore(options = {}) {
       rows = sortedRows.slice(offset, offset + limit);
     } else {
       total = Number(database.prepare(`SELECT COUNT(*) AS count FROM music_artists WHERE ${conditions.join(" AND ")}`).get(...args)?.count || 0);
-      rows = database
-        .prepare(
+      rows = prepareArtistFacet(database,
           `
-          SELECT * FROM music_artists
+          SELECT ${ARTIST_FACET_COLUMNS} FROM music_artists
           WHERE ${conditions.join(" AND ")}
           ORDER BY track_count DESC, name COLLATE NOCASE ASC
           LIMIT ? OFFSET ?
@@ -494,8 +522,9 @@ export function createMusicStore(options = {}) {
         )
         .all(...args, limit, offset);
     }
+    const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
     return {
-      artists: rows.map(publicArtist).map((artist) => decorateArtistSearchMatch(artist, matchQuery)),
+      artists: rows.map(publicArtist).map((artist) => decorateArtistSearchMatch(artist, matchQuery, matchContext)),
       total,
       limit,
       offset,
@@ -535,20 +564,24 @@ export function createMusicStore(options = {}) {
       updated: "al.updated_at DESC, al.title COLLATE NOCASE ASC"
     }[sort] || "al.updated_at DESC, al.title COLLATE NOCASE ASC";
     const database = dbOrOpen();
+    // Search can match the artist name, language belongs to the artist, and
+    // the 待 letter checks its name. Other album count filters only use al.
+    const countArtistJoin = filter.q || filter.language || letter === "待"
+      ? "LEFT JOIN music_artists a ON a.id = al.artist_id"
+      : "";
     const total = Number(database
       .prepare(
         `
         SELECT COUNT(*) AS count
         FROM music_albums al
-        LEFT JOIN music_artists a ON a.id = al.artist_id
+        ${countArtistJoin}
         ${where}
       `
       )
       .get(...albumArgs)?.count || 0);
-    const rows = database
-      .prepare(
-        `
-        SELECT al.*, a.name AS artist_name
+    const rows = prepareAlbumFacet(database,
+      `
+        SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
         FROM music_albums al
         LEFT JOIN music_artists a ON a.id = al.artist_id
         ${where}
@@ -557,8 +590,10 @@ export function createMusicStore(options = {}) {
       `
       )
       .all(...albumArgs, limit, offset);
+    const matchQuery = filter.searchTerm || filter.q;
+    const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
     return {
-      albums: rows.map(publicAlbum).map((album) => decorateAlbumSearchMatch(album, filter.searchTerm || filter.q)),
+      albums: rows.map(publicAlbum).map((album) => decorateAlbumSearchMatch(album, matchQuery, matchContext)),
       total,
       limit,
       offset,
@@ -592,10 +627,18 @@ export function createMusicStore(options = {}) {
     const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
     const searchJoin = musicSearchIndexJoin(filter.searchKind);
     const total = resolvedSearch.total;
-    const rows = database
-      .prepare(
+    const indexedPlayedPage = sort === "played" && !smartMix && !rank.sql;
+    // Pin ID selection and state hydration to the same WAL snapshot while a
+    // progress writer or scanner may be publishing on another connection.
+    if (indexedPlayedPage) database.exec("SAVEPOINT music_played_page");
+    let rows;
+    try {
+      const playedIds = indexedPlayedPage
+        ? playedTrackPageIds(database, filter, limit, offset)
+        : null;
+      rows = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
@@ -603,16 +646,25 @@ export function createMusicStore(options = {}) {
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
         LEFT JOIN music_track_state s ON s.track_id = t.id
-        ${where}
-        ORDER BY ${order}
+        ${playedIds ? `WHERE t.id IN (${playedIds.map(() => "?").join(", ")})` : where}
+        ${playedIds ? "" : `ORDER BY ${order}`}
         LIMIT ? OFFSET ?
       `
       )
-      .all(...filter.trackArgs, ...rank.args, limit, offset);
+      .all(...(playedIds || [...filter.trackArgs, ...rank.args]), limit, playedIds ? 0 : offset);
+      if (playedIds) {
+        const positions = new Map(playedIds.map((id, index) => [id, index]));
+        rows.sort((left, right) => positions.get(left.id) - positions.get(right.id));
+      }
+    } finally {
+      if (indexedPlayedPage) database.exec("RELEASE music_played_page");
+    }
+    const matchQuery = resolvedSearch.correctedQuery || filter.searchTerm || filter.q;
+    const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
     return {
       tracks: rows
         .map(publicTrack)
-        .map((track) => decorateTrackSearchMatch(track, resolvedSearch.correctedQuery || filter.searchTerm || filter.q)),
+        .map((track) => decorateTrackSearchMatch(track, matchQuery, matchContext)),
       total: Number(total || 0),
       limit,
       offset,
@@ -798,10 +850,9 @@ export function createMusicStore(options = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const limit = clampInt(params.get("limit"), 100, 1, MAX_LIMIT);
     const database = dbOrOpen();
-    const rows = database
-      .prepare(
+    const rows = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
@@ -855,7 +906,9 @@ export function createMusicStore(options = {}) {
 
   function listSmartPlaylists() {
     const database = dbOrOpen();
-    const smartPlaylists = SMART_MIXES.map((mix) => publicSmartPlaylist(mix, smartMixCount(database, mix)));
+    const counts = smartMixListCounts(database);
+    const smartPlaylists = SMART_MIXES.map((mix) => publicSmartPlaylist(mix,
+      counts.has(mix.id) ? counts.get(mix.id) : smartMixCount(database, mix)));
     return {
       smartPlaylists,
       total: smartPlaylists.length,
@@ -872,11 +925,15 @@ export function createMusicStore(options = {}) {
     const database = dbOrOpen();
     const condition = smartMixCondition(mix);
     const where = `WHERE t.status = 'ok' AND ${condition.where}`;
-    const total = database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id ${where}`).get(...condition.args)?.count || 0;
-    const rows = database
-      .prepare(
+    const countFrom = smartMixRequiresState(mix)
+      ? "music_track_state s CROSS JOIN music_tracks t ON t.id = s.track_id"
+      : isMetadataOnlySmartMix(mix)
+        ? "music_tracks t"
+        : "music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id";
+    const total = database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...condition.args)?.count || 0;
+    const rows = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
@@ -987,10 +1044,9 @@ export function createMusicStore(options = {}) {
     const database = dbOrOpen();
     const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
     if (!row) return null;
-    const tracks = database
-      .prepare(
+    const tracks = prepareTrackList(database,
         `
-        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+        SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at,
                i.sort_order, i.added_at
@@ -1211,7 +1267,7 @@ function mergeSuggestionEntities(primary = [], secondary = [], limit = 5) {
   return result;
 }
 
-function decorateTrackSearchMatch(track, query) {
+function decorateTrackSearchMatch(track, query, context) {
   if (!track || !query) return track;
   return {
     ...track,
@@ -1220,33 +1276,33 @@ function decorateTrackSearchMatch(track, query) {
       artist: track.artist,
       album: track.album,
       fileName: track.fileName
-    }, query)
+    }, query, context)
   };
 }
 
-function decorateArtistSearchMatch(artist, query) {
+function decorateArtistSearchMatch(artist, query, context) {
   if (!artist || !query) return artist;
   return {
     ...artist,
-    searchMatch: buildEntitySearchMatch({ name: artist.name }, query)
+    searchMatch: buildEntitySearchMatch({ name: artist.name }, query, context)
   };
 }
 
-function decorateAlbumSearchMatch(album, query) {
+function decorateAlbumSearchMatch(album, query, context) {
   if (!album || !query) return album;
   return {
     ...album,
-    searchMatch: buildEntitySearchMatch({ title: album.title, artist: album.artistName }, query)
+    searchMatch: buildEntitySearchMatch({ title: album.title, artist: album.artistName }, query, context)
   };
 }
 
-function buildEntitySearchMatch(fields, query) {
+function buildEntitySearchMatch(fields, query, context) {
   const scores = {};
   const highlights = {};
   let field = "";
   let score = 0;
   for (const [name, value] of Object.entries(fields || {})) {
-    const match = musicSearchValueMatch(value, query);
+    const match = musicSearchValueMatch(value, query, context);
     scores[name] = match.score;
     highlights[name] = match.highlights;
     if (match.score > score) {

@@ -67,7 +67,10 @@ export function createAccessAnalyticsService({
   let flushTimer = null;
   let flushPromise = Promise.resolve();
   let flushQueued = false;
+  let lastFlushFailure = null;
   let closed = false;
+  let geoClosed = false;
+  let closePromise = null;
   const serviceStartedAt = new Date().toISOString();
 
   initializeSchema(db);
@@ -177,6 +180,7 @@ export function createAccessAnalyticsService({
   }
 
   async function flushNow() {
+    lastFlushFailure = null;
     if (!pending.size || closed) return;
     const batch = pending;
     pending = new Map();
@@ -228,6 +232,7 @@ export function createAccessAnalyticsService({
         throw error;
       }
     } catch (error) {
+      lastFlushFailure = { error };
       for (const [key, entry] of batch) {
         const current = pending.get(key);
         if (current) mergeCounter(current, entry);
@@ -243,6 +248,7 @@ export function createAccessAnalyticsService({
     const filters = parseFilters(url);
     const { where, params } = buildWhere(filters);
     const source = `FROM access_daily d LEFT JOIN access_ip_geo g ON g.ip = d.ip ${where}`;
+    const aggregateSource = filters.province || filters.query ? source : `FROM access_daily d ${where}`;
     const summaryRow = db.prepare(`
       SELECT
         COUNT(DISTINCT d.ip) AS unique_ips,
@@ -256,14 +262,14 @@ export function createAccessAnalyticsService({
         COALESCE(SUM(CASE WHEN d.auth_reason IN ('app', 'app-cookie') THEN d.request_count ELSE 0 END), 0) AS injected_requests,
         MIN(d.first_seen) AS first_seen,
         MAX(d.last_seen) AS last_seen
-      ${source}
+      ${aggregateSource}
     `).get(...params) || {};
 
     const auth = db.prepare(`
       SELECT d.auth_reason AS reason, COUNT(DISTINCT d.ip) AS unique_ips,
         SUM(d.request_count) AS requests, SUM(d.page_view_count) AS page_views,
         SUM(d.denied_count) AS denied_requests
-      ${source}
+      ${aggregateSource}
       GROUP BY d.auth_reason
       ORDER BY requests DESC
     `).all(...params).map(publicAggregateRow);
@@ -282,13 +288,13 @@ export function createAccessAnalyticsService({
       SELECT d.day, COUNT(DISTINCT d.ip) AS unique_ips,
         SUM(d.request_count) AS requests, SUM(d.page_view_count) AS page_views,
         SUM(d.denied_count) AS denied_requests
-      ${source}
+      ${aggregateSource}
       GROUP BY d.day
       ORDER BY d.day
     `).all(...params).map(publicAggregateRow);
 
     const groupColumns = "d.ip, d.auth_reason, d.access_mode";
-    const total = publicNumber(db.prepare(`SELECT COUNT(*) AS count FROM (SELECT 1 ${source} GROUP BY ${groupColumns})`).get(...params)?.count);
+    const total = publicNumber(db.prepare(`SELECT COUNT(*) AS count FROM (SELECT 1 ${aggregateSource} GROUP BY ${groupColumns})`).get(...params)?.count);
     const visitors = db.prepare(`
       SELECT d.ip, d.auth_reason, d.access_mode,
         COALESCE(NULLIF(g.country, ''), '${UNKNOWN}') AS country,
@@ -333,8 +339,11 @@ export function createAccessAnalyticsService({
     const optionWhere = buildWhere(optionFilters);
     const provinceOptions = db.prepare(`
       SELECT DISTINCT COALESCE(NULLIF(g.province, ''), '${UNKNOWN}') AS province
-      FROM access_daily d LEFT JOIN access_ip_geo g ON g.ip = d.ip
-      ${optionWhere.where}
+      FROM (
+        SELECT DISTINCT d.ip COLLATE BINARY AS ip, typeof(d.ip) AS ip_type
+        FROM access_daily d ${optionWhere.where}
+      ) d
+      LEFT JOIN access_ip_geo g ON g.ip = d.ip
       ORDER BY province
     `).all(...optionWhere.params).map((row) => row.province);
 
@@ -365,14 +374,45 @@ export function createAccessAnalyticsService({
   }
 
   async function close() {
-    if (closed) return;
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = null;
-    await queueFlush();
-    closed = true;
-    ipRegionService.close?.();
-    db.close();
-    db = null;
+    if (closePromise) return closePromise;
+    if (closed && geoClosed && !db) return;
+    closePromise = (async () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = null;
+      do {
+        await queueFlush();
+        // Keep accepted records and the DB available for an explicit retry.
+        // An unsuccessful flush cannot finish shutdown or spin indefinitely.
+        if (lastFlushFailure) throw lastFlushFailure.error;
+      } while (pending.size);
+      closed = true;
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = null;
+      const failures = [];
+      if (!geoClosed) {
+        try {
+          ipRegionService.close?.();
+          geoClosed = true;
+        } catch (error) { failures.push(error); }
+      }
+      if (db) {
+        try {
+          db.close();
+          db = null;
+        } catch (error) {
+          if (db.isOpen === false) db = null;
+          failures.push(error);
+        }
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, "Access analytics resources failed to close");
+    })();
+    try {
+      await closePromise;
+    } catch (error) {
+      closePromise = null;
+      throw error;
+    }
   }
 
   return { attach, bootstrapFromAccessLogs, close, flush: queueFlush, record, statsPayload };

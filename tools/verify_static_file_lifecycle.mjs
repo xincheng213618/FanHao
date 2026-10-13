@@ -241,6 +241,69 @@ add("compression:gzip-and-brotli-preserve-payload-and-close-handles", async f =>
   assert(f.handles.every(value => value.closeCount === 1));
 });
 
+add("compression:negotiation-honors-quality-wildcards-and-identity", async f => {
+  const entry = f.add("asset.js", "const synthetic = 1;\n".repeat(200));
+  const preferences = [
+    ["br;q=0, gzip;q=1", "gzip"], ["br;q=0, gzip;q=0", ""],
+    [undefined, ""], ["", ""], ["zstd", ""],
+    ["br;q=0.1, gzip;q=1", "gzip"], ["br;q=0.8, gzip;q=0.2", "br"],
+    ["gzip;q=0.5, identity;q=1", ""], ["gzip;q=1, identity;q=0.5", "gzip"],
+    ["br;q=0, *;q=1", "gzip"], ["gzip;q=0, *;q=0.3", "br"],
+    ["br;q=0.1, *;q=0.8", "gzip"], ["*", "br"], ["*;q=0, identity;q=0.5", ""],
+    ["gzip;q=0.5, *;q=0", "gzip"], ["br, identity;q=0", "br"],
+    ["Br;Q=0.2, GZiP;Q=0.8", "gzip"], ["gzip, br", "br"],
+    ["br;q=0., gzip;q=1.000", "gzip"], ["gzip;q=0.001", "gzip"],
+    ["br;q=invalid, gzip", "gzip"], ["br;q=1.1, gzip", "gzip"],
+    ["br;q=0, br;q=1, gzip", "gzip"], ["br;q=1, br;q=0, gzip", "gzip"]
+  ];
+  for (const [accepted, encoding] of preferences) {
+    for (const method of ["GET", "HEAD"]) {
+      const headers = accepted === undefined ? {} : { "accept-encoding": accepted };
+      const res = await direct(f, request("/asset.js?v=bundle-abcdef123456", { method, headers }));
+      const label = `${method} Accept-Encoding: ${accepted}`;
+      assert.equal(res.statusCode, 200, label);
+      assert.equal(res.headers["Content-Encoding"] || "", encoding, label);
+      assert.equal(res.headers.Vary, "Accept-Encoding", label);
+      assert.equal(res.headers["Content-Length"], encoding ? undefined : entry.bytes.length, label);
+      const bytes = method === "HEAD" ? Buffer.alloc(0) : entry.bytes;
+      const decoded = method === "HEAD" || !encoding ? res.body
+        : encoding === "br" ? brotliDecompressSync(res.body) : gunzipSync(res.body);
+      assert.deepEqual(decoded, bytes, label); assert.equal(f.active(), 0, label);
+    }
+  }
+  assert(f.handles.every(value => value.closeCount === 1));
+});
+
+add("compression:unacceptable-representations-return-empty-406-and-close", async f => {
+  f.add("asset.js", "synthetic source\n".repeat(200));
+  f.add("small.js", "small"); f.add("asset.bin", "synthetic bytes\n".repeat(200)); f.add("empty.js", "");
+  for (const [route, accepted] of [
+    ["/asset.js", "br;q=0, gzip;q=0, identity;q=0"], ["/asset.js", "*;q=0"],
+    ["/asset.js", "zstd, identity;q=0"], ["/small.js", "gzip, identity;q=0"],
+    ["/asset.bin", "br, identity;q=0"], ["/empty.js", "identity;q=0"]
+  ]) {
+    for (const method of ["GET", "HEAD"]) {
+      const res = await direct(f, request(route, { method, headers: { "accept-encoding": accepted } }));
+      assert.equal(res.statusCode, 406, `${method} ${route}: ${accepted}`);
+      assert.equal(res.headers["Content-Encoding"], undefined); assert.equal(res.headers["Content-Length"], 0);
+      assert.equal(res.headers["Cache-Control"], "no-store"); assert.equal(res.headers.Vary, "Accept-Encoding");
+      assert.equal(res.body.length, 0); assert.equal(f.active(), 0);
+    }
+  }
+  assert(f.handles.every(value => value.closeCount === 1 && value.streamCalls === 0));
+});
+
+add("compression:negotiated-variants-preserve-existing-vary", async f => {
+  f.add("asset.js", "synthetic source\n".repeat(200));
+  for (const accepted of ["gzip", "identity", "*;q=0"]) {
+    for (const [existing, expected] of [["Origin", "Origin, Accept-Encoding"], ["Origin, accept-encoding", "Origin, accept-encoding"], ["*", "*"]]) {
+      const res = new ResponseSink(); res.setHeader("Vary", existing);
+      await direct(f, request("/asset.js", { headers: { "accept-encoding": accepted } }), res);
+      assert.equal(res.headers.Vary, expected); assert.equal(f.active(), 0);
+    }
+  }
+});
+
 add("mapping:app-standalone-cache-and-outside-root-contracts-remain", async f => {
   f.add("index.html", "app"); f.add("admin.html", "admin");
   f.add("modules/fanhao/disk-usage/index.html", "disk"); f.add("modules/system/computer-control/index.html", "control");

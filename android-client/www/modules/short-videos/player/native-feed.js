@@ -1,6 +1,6 @@
 import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-07b744082137";
-import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-07b744082137";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-1443708f18b1";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-1443708f18b1";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
 const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;

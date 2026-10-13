@@ -166,15 +166,158 @@ function verifyPersistentDiskIdentity() {
   } finally { db.close(); }
 }
 
+async function verifyPersistentPointReads() {
+  const source = fs.readFileSync(new URL("../src/platform/server/video-probe-cache-service.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const readBlock = source.match(/    readStatement = db\.prepare\(`[\s\S]*?    `\);/)?.[0];
+  assert(readBlock?.includes("WHERE file_id = ? AND file_path = ?"), "oracle must restore the old full-table snapshot");
+  let legacySource = source.replace("  let readStatement = null;", "  const rowsByFile = new Map();")
+    .replace("    readStatement = null;", "    rowsByFile.clear();")
+    .replace(readBlock, readBlock.replace("readStatement =", "const rows =").replace("        WHERE file_id = ? AND file_path = ?\n", "").replace("    `);", "    `).all();\n    rowsByFile.clear();\n    for (const row of rows) rowsByFile.set(cacheKey(row.file_id, row.file_path), row);"))
+    .replace("const row = withoutLockWait(cacheDatabase, () => readStatement.get(String(file.id), String(file.path)));", "const row = rowsByFile.get(cacheKey(file.id, file.path));")
+    .replace('      return true;\n    } catch (error) {\n      warn("[video-probe-cache-write]"', `      rowsByFile.set(cacheKey(file.id, file.path), {
+        source_size: Number(stat.size) || 0, source_mtime: sourceMtime(stat),
+        schema_version: VIDEO_PROBE_CACHE_SCHEMA_VERSION, status: value ? "ok" : "unavailable",
+        probe_json: value ? JSON.stringify(value) : null
+      });
+      return true;
+    } catch (error) {
+      warn("[video-probe-cache-write]"`)
+    .replace("  return { get, set, start: initialize };", '  function cacheKey(id, path) { return String(id || "") + "\\0" + String(path || ""); }\n  return { get, set, start: initialize };');
+  const legacyFactory = (await import("data:text/javascript;base64," + Buffer.from(legacySource).toString("base64"))).createVideoProbeCacheService;
+  const measuredFactory = process.argv.includes("--legacy-persistent-snapshot") ? legacyFactory : createVideoProbeCacheService;
+  const db = new DatabaseSync(":memory:"), owners = [];
+  const signature = { size: 1, cacheMtime: "library:version-1" };
+  try {
+    createVideoProbeCacheService({ getDb: () => db }).start();
+    const insert = db.prepare("INSERT INTO video_probe_cache VALUES(?,?,1,'library:version-1',1,?,?,'private')");
+    db.exec("BEGIN");
+    for (let index = 0; index < 10000; index++) {
+      const entry = file(`persisted-${index}`), value = { duration: index + 1, videoCodec: index % 3 ? "h264" : "vp9", audioCodec: "aac", width: 1920, height: 1080 };
+      insert.run(entry.id, entry.path, index % 5 ? "ok" : "unavailable", index % 5 ? JSON.stringify(value) : null);
+    }
+    db.exec("COMMIT");
+    function owner(factory) {
+      const counts = { fullRows: 0, reads: 0, prepares: 0 };
+      const controlledDb = { exec: sql => db.exec(sql), prepare: sql => {
+        const statement = db.prepare(sql);
+        if (!/SELECT[\s\S]*FROM video_probe_cache/.test(sql)) return statement;
+        counts.prepares++;
+        return { all: (...args) => { const rows = statement.all(...args); counts.fullRows += rows.length; return rows; },
+          get: (...args) => { counts.reads++; assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 0); return statement.get(...args); } };
+      } };
+      const persistentCache = factory({ getDb: () => controlledDb, warn: () => {} });
+      assert.equal(persistentCache.start(), true);
+      const service = fixture({ cacheLimit: 512, persistentCache,
+        safeStat: () => assert.fail("persisted identities need no stat"), statFile: async () => assert.fail("persisted identities need no stat"),
+        spawnSyncFn: () => assert.fail("persisted identities need no FFprobe"), execFileFn: () => assert.fail("persisted identities need no FFprobe") }).service;
+      const result = { persistentCache, service, counts }; owners.push(result); return result;
+    }
+    const previous = owner(legacyFactory), current = owner(measuredFactory);
+    assert.equal(previous.counts.fullRows, 10000);
+    assert.equal(current.counts.fullRows, 0, "startup must not materialize the persistent probe table");
+    for (let index = 0; index < 1000; index++) {
+      const entry = file(`persisted-${index}`), before = await previous.service.playInfoForFileAsync(entry), after = await current.service.playInfoForFileAsync(entry);
+      assert.deepEqual(after, before); assert.equal(JSON.stringify(after), JSON.stringify(before));
+    }
+    assert.equal(current.counts.reads, 1000, "each cold identity fetches one primary-key row");
+    assert.equal(current.counts.prepares, 1, "the initialized point statement is reused");
+    assert.equal(current.counts.fullRows, 0);
+    assert.deepEqual(current.service.diagnostics(), { cached: 512, resolved: 512, owners: 0, inflight: 0 });
+    for (let index = 900; index < 1000; index++) {
+      const entry = file(`persisted-${index}`);
+      assert.deepEqual(await current.service.playInfoForFileAsync(entry), await previous.service.playInfoForFileAsync(entry));
+      assert.deepEqual(current.service.playInfoForFile(entry), previous.service.playInfoForFile(entry));
+    }
+    assert.equal(current.counts.reads, 1000, "both async and sync hot playback add zero persistent reads");
+
+    const entry = file("persisted-2001"), changed = { duration: 987, videoCodec: "hevc", audioCodec: "aac" };
+    db.prepare("UPDATE video_probe_cache SET probe_json=? WHERE file_id=?").run(JSON.stringify(changed), entry.id);
+    assert.equal((await current.service.playInfoForFileAsync(entry)).duration, 987, "a cold item reads current durable authority");
+    assert.notEqual((await previous.service.playInfoForFileAsync(entry)).duration, 987, "the old process snapshot ignored this update");
+    db.prepare("UPDATE video_probe_cache SET probe_json=? WHERE file_id=?").run(JSON.stringify({ ...changed, duration: 988 }), entry.id);
+    const reads = current.counts.reads;
+    assert.equal((await current.service.playInfoForFileAsync(entry)).duration, 987, "the existing bounded hot-cache policy is unchanged");
+    assert.equal(current.counts.reads, reads);
+    current.service.clearCache();
+    assert.equal((await current.service.playInfoForFileAsync(entry)).duration, 988);
+    for (const [field, value, expected] of [["schema_version", 9, false], ["source_size", 2, false], ["source_mtime", "old", false],
+      ["status", "unavailable", true], ["probe_json", "invalid", false], ["probe_json", "null", false], ["probe_json", "42", false]]) {
+      db.prepare("UPDATE video_probe_cache SET schema_version=1,source_size=1,source_mtime='library:version-1',status='ok',probe_json=? WHERE file_id=?").run(JSON.stringify(changed), entry.id);
+      db.prepare(`UPDATE video_probe_cache SET ${field}=? WHERE file_id=?`).run(value, entry.id);
+      assert.deepEqual(current.persistentCache.get(entry, signature), { hit: expected, value: null }, `${field} validation`);
+    }
+    db.prepare("DELETE FROM video_probe_cache WHERE file_id=?").run(entry.id);
+    assert.deepEqual(current.persistentCache.get(entry, signature), { hit: false, value: null });
+    console.log(JSON.stringify({ persistentPointReads: 1000, playbackDtoOracles: 1200, startupRowsBefore: previous.counts.fullRows, startupRowsAfter: current.counts.fullRows }));
+  } finally { for (const owner of owners) await owner.service.stop(); db.close(); }
+}
+
+async function verifyPersistentFailures() {
+  const db = new DatabaseSync(":memory:"), signature = { size: 1, cacheMtime: "library:version-1" }, entry = file();
+  let failPrepare = true, failWritePrepare = false, failRead = false, failWrite = false, reads = 0;
+  const warnings = [];
+  const controlledDb = { exec: sql => db.exec(sql), prepare: sql => {
+    if (/SELECT[\s\S]*FROM video_probe_cache/.test(sql)) {
+      if (failPrepare) { failPrepare = false; throw new Error("controlled prepare failure"); }
+      const statement = db.prepare(sql);
+      return { get: (...args) => { reads++; if (failRead) { failRead = false; throw new Error("controlled read failure"); } return statement.get(...args); } };
+    }
+    if (sql.includes("INSERT INTO video_probe_cache") && failWritePrepare) { failWritePrepare = false; throw new Error("controlled second prepare failure"); }
+    const statement = db.prepare(sql);
+    if (!sql.includes("INSERT INTO video_probe_cache")) return statement;
+    return { run: (...args) => { if (failWrite) { failWrite = false; throw new Error("controlled write failure"); } return statement.run(...args); } };
+  } };
+  const cache = createVideoProbeCacheService({ getDb: () => controlledDb, warn: (...args) => warnings.push(args) });
+  let playback;
+  try {
+    db.exec("PRAGMA busy_timeout = 150");
+    assert.deepEqual(cache.get(entry, signature), { hit: false, value: null });
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150);
+    assert.equal(cache.start(), true, "partial prepare failure must permit complete reinitialization");
+    failWritePrepare = true;
+    const partial = createVideoProbeCacheService({ getDb: () => controlledDb, warn: () => {} });
+    assert.equal(partial.start(), false, "a read statement alone is not a completed initialization");
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150);
+    assert.equal(partial.start(), true, "failure of the second prepare also retries initialization");
+    assert.equal(cache.set(entry, signature, { duration: 5 }), true);
+    failRead = true;
+    assert.deepEqual(cache.get(entry, signature), { hit: false, value: null });
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150);
+    assert.equal(cache.get(entry, signature).value.duration, 5, "a transient read failure must not become a cached miss");
+    failWrite = true;
+    assert.equal(cache.set(entry, signature, { duration: 8 }), false);
+    assert.equal(cache.get(entry, signature).value.duration, 5);
+    assert.equal(cache.set(entry, signature, { duration: 8 }), true);
+    assert.equal(cache.get(entry, signature).value.duration, 8);
+    assert.equal(cache.set(entry, signature, null), true);
+    assert.deepEqual(cache.get(entry, signature), { hit: true, value: null }, "negative probe entries remain durable hits");
+    const beforeInvalid = reads;
+    for (const invalid of [null, {}, { id: entry.id }, { path: entry.path }]) assert.equal(cache.get(invalid, signature).hit, false);
+    assert.equal(cache.get(entry, null).hit, false); assert.equal(reads, beforeInvalid);
+    db.close();
+    assert.deepEqual(cache.get(entry, signature), { hit: false, value: null });
+    assert.equal(cache.set(entry, signature, { duration: 9 }), false);
+    playback = fixture({ persistentCache: cache, safeStat: () => null, statFile: async () => null,
+      execFileFn: () => assert.fail("closed-cache fallback must not launch a real probe") }).service;
+    const response = await playback.playInfoForFileAsync(entry);
+    assert.equal(response.mode, "direct"); assert.equal(response.duration, null);
+    assert(warnings.some(([label]) => label === "[video-probe-cache]") && warnings.some(([label]) => label === "[video-probe-cache-read]") && warnings.some(([label]) => label === "[video-probe-cache-write]"));
+  } finally { await playback?.stop(); if (db.isOpen) db.close(); }
+}
+
 function verifyPersistentLockFallback() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-probe-cache-lock-"));
   const databasePath = path.join(directory, "cache.sqlite");
-  const db = new DatabaseSync(databasePath), writer = new DatabaseSync(databasePath);
-  let observedWait = null;
+  const db = new DatabaseSync(databasePath);
+  let writer = new DatabaseSync(databasePath), observedWait = null, observedReadWait = null;
   const controlledDb = {
     exec: (sql) => db.exec(sql),
     prepare: (sql) => {
       const statement = db.prepare(sql);
+      if (/SELECT[\s\S]*FROM video_probe_cache/.test(sql)) return { get: (...args) => {
+        observedReadWait = db.prepare("PRAGMA busy_timeout").get().timeout;
+        return statement.get(...args);
+      } };
       if (!sql.includes("INSERT INTO video_probe_cache")) return statement;
       return { run: (...args) => {
         observedWait = db.prepare("PRAGMA busy_timeout").get().timeout;
@@ -205,7 +348,20 @@ function verifyPersistentLockFallback() {
     writer.exec("ROLLBACK");
     assert.equal(coldCache.start(), true, "failed initialization is retryable after lock release");
     assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150);
-    console.log(JSON.stringify({ lockedWriteMs: Number(lockedWriteMs.toFixed(1)), fixture: "private SQLite writer lock, cache wait policy = 0" }));
+    assert.equal(coldCache.set(file(), { size: 1, mtimeMs: 1 }, { duration: 42 }), true);
+    writer.close();
+    db.exec("PRAGMA journal_mode = DELETE");
+    writer = new DatabaseSync(databasePath);
+    writer.exec("BEGIN EXCLUSIVE");
+    const readStarted = performance.now();
+    assert.deepEqual(coldCache.get(file(), { size: 1, mtimeMs: 1 }), { hit: false, value: null }, "locked cold reads remain optional cache misses");
+    const lockedReadMs = performance.now() - readStarted;
+    assert.equal(observedReadWait, 0, "cold point reads never borrow the main database's lock wait policy");
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150, "read failure restores the original policy");
+    writer.exec("ROLLBACK");
+    assert.equal(coldCache.get(file(), { size: 1, mtimeMs: 1 }).value.duration, 42, "the next read retries after an exclusive lock is released");
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 150);
+    console.log(JSON.stringify({ lockedWriteMs: Number(lockedWriteMs.toFixed(1)), lockedReadMs: Number(lockedReadMs.toFixed(1)), fixture: "private SQLite writer/read locks, cache wait policy = 0" }));
   } finally {
     if (writer.isTransaction) writer.exec("ROLLBACK");
     writer.close(); db.close();
@@ -255,6 +411,8 @@ await verifySourceUpdates();
 await verifyDiskIdentities();
 await verifyClearAndRetention();
 verifyPersistentDiskIdentity();
+await verifyPersistentPointReads();
+await verifyPersistentFailures();
 verifyPersistentLockFallback();
 await verifyHttpResponsiveness();
 console.log("Video probe source identity, generation isolation, bounded retention and asynchronous HTTP checks passed.");

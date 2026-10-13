@@ -72,6 +72,18 @@ try {
       assert(catalog.modules.some((module) => module.id === "short-videos"));
       assert.equal((await fetch(`${base}/api/fanhao/file-workflows/config`)).status, 200);
       assert.equal((await fetch(`${base}/api/short-videos?limit=1`)).status, 200);
+      for (const mode of ["movie", "tv", "media"]) {
+        for (const offset of [0, 48]) {
+          const response = await fetch(`${base}/api/image-library/items?mode=${mode}&limit=48&offset=${offset}`);
+          assert.equal(response.status, 200, `private suite ${mode} page must use its actual query service`);
+          const page = await response.json();
+          assert(Array.isArray(page.items));
+          assert.equal(page.offset, offset);
+          assert.equal(page.nextOffset, offset + page.items.length);
+          assert.equal(typeof page.listRevision, "string");
+          assert(page.listRevision.length > 0);
+        }
+      }
     }
     if (product === "fanhao") {
       for (const route of ["/api/library?limit=1", "/api/works?limit=1"]) {

@@ -16,6 +16,9 @@ const measureOnly = process.argv.includes("--measure-legacy");
 const legacyContainment = process.argv.includes("--legacy-containment");
 const legacyCoverOrder = process.argv.includes("--legacy-cover-order");
 const legacyAuxiliary = process.argv.includes("--legacy-auxiliary");
+const legacySearchOverview = process.argv.includes("--legacy-search-overview");
+const legacySearchOverviewServer = process.argv.includes("--legacy-search-overview-server");
+const searchOverviewOnly = process.argv.includes("--search-overview-only") || legacySearchOverview || legacySearchOverviewServer;
 const containmentRule = /\/\* Flat rows: 51px content[^]*?\n}\r?\n/;
 const stylesSource = fs.readFileSync(path.join(www, "styles.css"), "utf8");
 assert.match(stylesSource, containmentRule, "the full Android entry must include the flat-row rule");
@@ -49,6 +52,13 @@ if (legacyAuxiliary) {
   assert.equal(viewsSource.split(callback).length, 2, "negative must replace the actual side-request refresh callback exactly once");
   viewsSource = viewsSource.replace(callback, "refreshMusicCatalogueUi: () => renderMusicUiPreservingSearch()");
 }
+if (legacySearchOverview || legacySearchOverviewServer) {
+  const guard = "    if (signal?.aborted || getActiveUrl() !== requestUrl || (renderGuard && !renderGuard())) return;";
+  assert.equal(viewsSource.split(guard).length, 2, "negative must replace the actual overview continuation guard exactly once");
+  viewsSource = viewsSource.replace(guard, legacySearchOverviewServer
+    ? "    if (signal?.aborted || (renderGuard && !renderGuard())) return;"
+    : "    if (renderGuard && !renderGuard()) return;");
+}
 viewsSource = viewsSource.replace("  function renderShell() {", `
   function renderShell() {
     const started = performance.now(), before = window.__created;
@@ -58,7 +68,7 @@ viewsSource = viewsSource.replace("  function renderShell() {", `
   function renderShellMeasured() {`);
 viewsSource = viewsSource.replace("  installLifecycle();", `
   window.__musicListFixture = {
-    state, audio: () => audio,
+    state, audio: () => audio, search: query => refreshMountedSearchResults(query),
     seed: (data, options = {}) => {
       state.data = { ...data, rawTracks: data.tracks, rawLoaded: data.tracks.length };
       state.summary = data.summary; state.queue = data.tracks; state.hasMore = data.hasMore;
@@ -130,7 +140,12 @@ const alternateBase = `http://127.0.0.1:${alternateServer.address().port}`;
 const run = async (name, task) => { await task(); checks++; console.log(`${measureOnly ? "MEASURE" : "PASS"} ${name}`); };
 try {
   browser = await chromium.launch({ executablePath, headless: true });
-  for (const count of [300, 1000]) await run(`flat library ${count}: loading and append preserve rows/player`, async () => {
+  if (searchOverviewOnly) {
+    await verifySearchOverviewOwnership();
+    assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
+    console.log(`PASS Android music search overview: ${checks} actual Chromium scenarios`);
+  }
+  for (const count of searchOverviewOnly ? [] : [300, 1000]) await run(`flat library ${count}: loading and append preserve rows/player`, async () => {
     const page = await newPage(), gate = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("offset") === String(count), data(80, count));
     try {
       await seed(page, count); await page.evaluate(() => {
@@ -168,7 +183,7 @@ try {
       console.log(JSON.stringify({ mode: legacy ? "legacy" : "current", count, loading, success, ticks }));
     } finally { gate.release(); await page.close(); }
   });
-  if (!measureOnly) {
+  if (!measureOnly && !searchOverviewOnly) {
     await run("failed page keeps rows and retries the same raw offset", async () => {
       const page = await newPage(); try {
         await seed(page, 300); const failed = hold(url => url.searchParams.get("offset") === "300", null, "controlled page error");
@@ -269,9 +284,10 @@ try {
     });
     await verifyContainedRows();
     await verifyStartupCatalogue();
+    await verifySearchOverviewOwnership();
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log(`PASS Android music list rendering: ${checks} actual Chromium scenarios`);
-  } else console.log("DIAGNOSTIC legacy rendering only; correctness assertions not run");
+  } else if (measureOnly) console.log("DIAGNOSTIC legacy rendering only; correctness assertions not run");
 } finally {
   for (const gate of gates) gate.release();
   await browser?.close(); await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => alternateServer.close(resolve))]);
@@ -608,5 +624,112 @@ async function verifyStartupCatalogue() {
       await page.evaluate(kind => { window.__latestRefresh = __musicListFixture.side(kind); }, kind); await requested(latest); latest.release(); await page.evaluate(() => __latestRefresh);
       old.release(); await page.evaluate(() => __oldRefresh); assert.deepEqual(await page.evaluate(field => __musicListFixture.state[field].map(item => item.id), field), ["latest"]);
     } finally { old.release(); latest.release(); await page.close(); }
+  });
+}
+
+async function searchOverviewSnapshot(page) {
+  return page.evaluate(() => ({
+    overview: __musicListFixture.state.searchOverview,
+    row: __overviewRow.isConnected,
+    input: __overviewInput.isConnected,
+    inputFocused: document.activeElement === __overviewInput,
+    mini: __overviewMini?.isConnected ?? null,
+    sameAudio: __overviewAudio === __musicListFixture.audio(),
+    current: __musicListFixture.state.current?.id,
+    queue: __musicListFixture.state.queue.map(item => item.id),
+    time: __overviewAudio.currentTime,
+    paused: __overviewAudio.paused,
+    rows: document.querySelectorAll('.music-mobile-list .music-mobile-track').length,
+    created: __created
+  }));
+}
+
+async function snapshotSearchOverview(page) {
+  await page.locator('.music-mobile-search-input').focus();
+  await page.evaluate(() => {
+    window.__overviewRow = document.querySelector('.music-mobile-list .music-mobile-track');
+    window.__overviewInput = document.querySelector('.music-mobile-search-input');
+    window.__overviewMini = document.querySelector('.music-mobile-mini-player');
+    window.__overviewAudio = __musicListFixture.audio();
+    __created = 0;
+  });
+  return searchOverviewSnapshot(page);
+}
+
+async function prepareSearchOverview(page, query) {
+  await page.evaluate(query => {
+    const f = __musicListFixture;
+    f.state.current = f.state.data.tracks[0]; f.state.searchScope = 'songs';
+    f.audio().paused = false; f.audio().currentTime = 37; f.render();
+    window.__oldOverviewSearch = f.search(query);
+  }, query);
+}
+
+async function verifySearchOverviewOwnership() {
+  const artists = name => ({ artists: [{ id: name, name, trackCount: 3, albumCount: 1 }], total: 1 });
+  const emptyAlbums = { albums: [], total: 0 };
+  for (const ignoreAbort of [false, true]) for (const error of ["", "obsolete overview error"]) await run(`same-query overview ignores ${ignoreAbort ? "ignored-abort" : "normal-abort"} old ${error ? "503" : "success"}`, async () => {
+    const page = await newPage({ ignoreAbort });
+    const matches = endpoint => url => url.pathname === endpoint && url.searchParams.get('q') === 'Repeat';
+    const oldArtist = hold(matches('/api/music/artists'), artists('Old Artist'), error);
+    const oldAlbum = hold(matches('/api/music/albums'), emptyAlbums, error);
+    let latestPrimary, latestArtist, latestAlbum;
+    try {
+      await prepareSearchOverview(page, 'Repeat');
+      await Promise.all([requested(oldArtist), requested(oldAlbum)]);
+      latestPrimary = hold(matches('/api/music/tracks'), data(80));
+      latestArtist = hold(matches('/api/music/artists'), artists('Latest Artist'));
+      latestAlbum = hold(matches('/api/music/albums'), emptyAlbums);
+      await page.evaluate(() => { window.__latestOverviewSearch = __musicListFixture.search('Repeat'); });
+      await requested(latestPrimary);
+      if (!ignoreAbort) {
+        // Normal abort rejects both old requests while the newer primary is held.
+        // Those rejections must not clear the newer overview's loading state.
+        await page.evaluate(() => __oldOverviewSearch);
+        assert.deepEqual(await page.evaluate(() => __musicListFixture.state.searchOverview), {
+          loading: true, artists: [], albums: [], artistTotal: 0, albumTotal: 0, error: ''
+        });
+      }
+      latestPrimary.release(); await Promise.all([requested(latestArtist), requested(latestAlbum)]);
+      latestArtist.release(); latestAlbum.release(); await page.evaluate(() => __latestOverviewSearch); await frames(page);
+      const before = await snapshotSearchOverview(page);
+      assert.equal(before.overview.artists[0]?.name, 'Latest Artist'); assert.equal(before.overview.error, '');
+      oldArtist.release(); oldAlbum.release(); await page.evaluate(() => __oldOverviewSearch); await frames(page);
+      assert.deepEqual(await searchOverviewSnapshot(page), before, "an old classification response must preserve the newer results, mounted rows, focus and player");
+    } finally {
+      for (const gate of [oldArtist, oldAlbum, latestPrimary, latestArtist, latestAlbum]) gate?.release();
+      await page.close();
+    }
+  });
+  for (const error of ["", "obsolete server overview error"]) await run(`old server overview ${error ? "503" : "success"} keeps the new server search mounted`, async () => {
+    const page = await newPage({ ignoreAbort: true });
+    const matches = endpoint => url => url.origin === base && url.pathname === endpoint && url.searchParams.get('q') === 'Server';
+    const oldArtist = hold(matches('/api/music/artists'), artists('Old Server Artist'), error);
+    const oldAlbum = hold(matches('/api/music/albums'), emptyAlbums, error);
+    try {
+      await prepareSearchOverview(page, 'Server'); await Promise.all([requested(oldArtist), requested(oldAlbum)]);
+      // The host changes its server URL and renders the same music module. Its
+      // route signal changes; the mounted search has a separate, un-aborted signal.
+      await page.evaluate(() => {
+        __fixtureActiveUrl = __fixtureAlternateUrl;
+        return __fixtureRoute({ mode: 'library', dashboard: '0', query: 'Server', searchScope: 'songs' });
+      }); await frames(page);
+      const before = await snapshotSearchOverview(page);
+      assert.deepEqual(before.overview.artists, []); assert.equal(before.overview.error, '');
+      oldArtist.release(); oldAlbum.release(); await page.evaluate(() => __oldOverviewSearch); await frames(page);
+      assert.deepEqual(await searchOverviewSnapshot(page), before, "the previous server's classification must not write into this search");
+    } finally { oldArtist.release(); oldAlbum.release(); await page.close(); }
+  });
+  await run("current overview retains its successful classification when the other endpoint fails", async () => {
+    const page = await newPage();
+    const artist = hold(url => url.pathname === '/api/music/artists' && url.searchParams.get('q') === 'Partial', artists('Available Artist'));
+    const album = hold(url => url.pathname === '/api/music/albums' && url.searchParams.get('q') === 'Partial', null, 'current album failure');
+    try {
+      await prepareSearchOverview(page, 'Partial'); await Promise.all([requested(artist), requested(album)]);
+      artist.release(); album.release(); await page.evaluate(() => __oldOverviewSearch);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.searchOverview), {
+        loading: false, artists: artists('Available Artist').artists, albums: [], artistTotal: 1, albumTotal: 0, error: ''
+      });
+    } finally { artist.release(); album.release(); await page.close(); }
   });
 }

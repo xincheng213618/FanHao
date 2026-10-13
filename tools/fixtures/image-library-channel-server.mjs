@@ -70,9 +70,11 @@ export function createMetadataChannelOracle({ mode = "movie", count = 1080, maxI
     : "INSERT INTO tv_series_metadata(series_key,series_name,douban_title,status,cover_blob,rating,updated_at) VALUES(?,?,?,?,?,?,?)");
   rows.forEach((row, index) => insert.run(mode === "movie" ? row.id : `fixture|${row.seriesName}`, mode === "movie" ? row.title : row.seriesName, row.title, "ok", Buffer.from("private synthetic JPEG"), 10 - index / (count + 1), row.updatedAt));
   const index = { scannedAt: "private-fixed-index", photoSets: [], mediaItems: rows };
+  let generation = 1;
   const service = createImageLibraryService({
+    cachePreparedQueries: true,
     clampInteger(value, fallback, min, max) { const parsed = Number.parseInt(String(value ?? ""), 10); return Math.min(max, Math.max(min, Number.isFinite(parsed) ? parsed : fallback)); },
-    getImageLibraryIndex: () => index, getImageLibraryRevision: () => 1,
+    getImageLibraryIndex: () => index, getImageLibraryRevision: () => generation,
     galleryMediaRootStatuses: () => [], photoSetRootStatuses: () => [], imageReaderCacheStatus: () => ({}),
     mangaService: { cacheDirs: () => [], publicSummary: value => value, rootStatus: () => ({ root: "", exists: false }) },
     metadataService: metadata, photoSetService: { coverUrl: () => "" }, photoCollectionRootValue: "synthetic", maxItemLimit
@@ -87,12 +89,16 @@ export function createMetadataChannelOracle({ mode = "movie", count = 1080, maxI
     if (rating !== null) db.prepare(`UPDATE ${table} SET rating = ? WHERE ${key} = ?`).run(rating, id);
   }
   return {
-    payload, ids: options => payload(options).items.map(row => row.id), close: () => database.close(), sql,
+    payload, ids: options => payload(options).items.map(row => row.id), close() {
+      service.clearPreparedQueries();
+      database.close();
+    }, sql,
     coverWrite(id = "O1") { db.prepare("INSERT INTO gallery_media_covers(media_id,source_path,cover_blob,status,generated_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(media_id) DO UPDATE SET cover_blob=excluded.cover_blob,updated_at=excluded.updated_at").run(id, "synthetic-not-read.mp4", Buffer.from("private cover"), "ok", "private-now", "private-now"); },
     updateMetadata, reorder: id => updateMetadata(id, { rating: 0.1 }),
     mergeSeries(fromId, intoId) {
       assert.equal(mode, 'tv'); const target = rows.find(row => row.id === intoId); assert(target);
       index.mediaItems = index.mediaItems.map(row => row.id === fromId ? { ...row, seriesName: target.seriesName, personName: target.personName } : row);
+      generation += 1;
     },
     otherKindWrite() {
       if (mode === "movie") db.prepare("INSERT INTO tv_series_metadata(series_key,series_name,status,updated_at) VALUES(?,?,?,?)").run("unrelated", "unrelated", "ok", "private-now");

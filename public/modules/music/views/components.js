@@ -6,7 +6,7 @@
 import { qualityLabel, ratingLabel, formatClock } from "../format.js";
 
 export function createComponents(deps) {
-  const { music, actions, formatNumber, registerMusicTrackElement, registerCurrentTrackIndicator, registerPlaybackButton } = deps;
+  const { music, actions, formatNumber, showError, registerMusicTrackElement, registerCurrentTrackIndicator, registerPlaybackButton } = deps;
 
   function filterButton(id, label, count, active, action) {
     const button = document.createElement("button");
@@ -209,7 +209,7 @@ export function createComponents(deps) {
       button.title = nextRating ? `设为 ${value} 星` : "清除评分";
       button.addEventListener("click", (event) => {
         event.stopPropagation();
-        actions.setTrackRating(track.id, nextRating).catch(() => {});
+        actions.setTrackRating(track.id, nextRating).catch(showError);
       });
       wrap.append(button);
     }
@@ -228,7 +228,7 @@ export function createComponents(deps) {
       button.textContent = item;
       button.addEventListener("click", () => {
         music.letter = music.letter === value ? "" : value;
-        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(() => {});
+        actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
       bar.append(button);
     }

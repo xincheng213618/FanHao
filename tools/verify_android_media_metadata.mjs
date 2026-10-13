@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
-import { createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
@@ -72,7 +72,7 @@ function harness(input = source, options = {}) {
   let clockId = 0, now = 0, active = true, mode = options.mode || "movie";
   const guard = () => active; guard.signal = controller.signal;
   const item = options.item || conflictItem(), detailItem = options.detailItem || conflictItem({ detail: true });
-  const c = vm.createContext({ document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
+  const c = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     performance: { now: () => now }, window: { history: { back() {} }, addEventListener() {}, removeEventListener() {},
       setTimeout(fn, delay) { const id = ++clockId; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },
       Capacitor: { Plugins: { FanHaoPlayer: { async play(payload) { calls.bridge.push(plain(payload)); return { opened: true }; } } } } },

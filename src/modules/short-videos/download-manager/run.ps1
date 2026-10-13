@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT) {
+  $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT = [Environment]::GetEnvironmentVariable("FANHAO_SHORT_VIDEO_STORAGE_ROOT", "User")
+}
+
 $ModuleDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ModuleDir "..\..\..\.."))
 $AppFile = Join-Path $ModuleDir "app.py"

@@ -425,6 +425,7 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
   }
 
   return {
+    serveWholeFile,
     serveDownloadFile,
     serveInlineFile,
     serveRangedFile,

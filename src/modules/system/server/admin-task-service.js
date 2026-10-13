@@ -151,7 +151,7 @@ export function createAdminTaskService({
     return tasks.some((task) => task.scriptId === scriptId && (task.status === "running" || task.status === "stopping"));
   }
 
-  function startProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone }) {
+  function startProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone, onStdout }) {
     const preparedProcess = prepareProcess({ command, args });
     command = preparedProcess.command;
     args = preparedProcess.args;
@@ -185,7 +185,10 @@ export function createAdminTaskService({
     task.child = child;
     task.pid = child.pid || null;
     if (task.pid) pushLog(task, `PID ${task.pid}`);
-    child.stdout.on("data", (chunk) => pushLog(task, chunk));
+    child.stdout.on("data", (chunk) => {
+      pushLog(task, chunk);
+      onStdout?.(task, String(chunk));
+    });
     child.stderr.on("data", (chunk) => pushLog(task, chunk));
     child.on("error", (error) => {
       task.status = "error";

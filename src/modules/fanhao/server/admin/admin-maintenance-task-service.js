@@ -16,14 +16,79 @@ export function createAdminMaintenanceTaskService({
   coverGenerationStatus,
   cookieProfileDir,
   invalidateTableStamp,
+  linkedPersonIds,
   nodeCommand,
+  coreDbPath,
+  coreImageDbPath,
+  personOrganizationService,
   refreshLibrary,
   resolveLibraryPersonByPublicId,
   setActorMovieCache,
   setLocalWorkCachesDirty,
-  setWorkInfoCache
+  setWorkInfoCache,
+  syncPersonLocal
 }) {
+  const currentTasks = () => adminTaskService.list?.() || [];
+  function organizePersonPayload(body = {}) {
+    const person = resolveLibraryPersonByPublicId(body.personId);
+    if (!person) throw httpError("人物不存在", 404);
+    const active = currentTasks().find((task) => task.type === "person-organize"
+      && String(task.personId) === String(person.id) && ["running", "stopping"].includes(task.status));
+    if (active) return { ok: true, task: adminTaskService.publicTask(active) };
+    if (currentTasks().some((task) => ["running", "stopping"].includes(task.status)
+      && ["actor-movies", "script"].includes(task.type))) throw httpError("还有资料扫描任务正在运行，请完成后再整理", 409);
+    if (body.preview || !body.planId) return { ok: true, plan: personOrganizationService.preview(person.id) };
+    const plan = personOrganizationService.read(body.planId);
+    if (String(plan.personId) !== String(person.id)) throw httpError("整理计划不属于当前人物", 409);
+    if (plan.status === "done") throw httpError("这次整理已经完成，请重新预览", 409);
+    if (!plan.groups.length) throw httpError("没有可以整理的本地作品", 400);
+    plan.refreshMetadata = body.refreshMetadata !== false;
+    // Mark before spawning so another request cannot generate a competing plan.
+    plan.status = "running";
+    const planFile = personOrganizationService.planPath(plan.id);
+    fs.writeFileSync(`${planFile}.tmp`, JSON.stringify(plan, null, 2));
+    fs.renameSync(`${planFile}.tmp`, planFile);
+    const args = [path.join("tools", "organize_person_library.mjs"), "--plan", planFile,
+      "--db", coreDbPath, "--image-db", coreImageDbPath];
+    let outputBuffer = "", pathsReloaded = false;
+    const task = adminTaskService.startProcessTask({
+      type: "person-organize", label: "重新整理人物目录", person, command: nodeCommand, args,
+      refreshHints: ["current-view"], invalidates: ["localWorks", "workInfo", "workCovers"],
+      onStdout: (currentTask, chunk) => {
+        outputBuffer += chunk;
+        const lines = outputBuffer.split(/\r?\n/);
+        outputBuffer = lines.pop().slice(-256);
+        if (pathsReloaded || !lines.includes("PERSON_ORGANIZATION_PATHS_SYNCED")) return;
+        pathsReloaded = true;
+        try {
+          setLocalWorkCachesDirty();
+          clearSearchSourceCaches();
+          if (!refreshLibrary()) throw new Error("重新加载失败");
+          currentTask.logs.push("文件路径已同步，可继续播放；正在更新封面和 info");
+        } catch (error) { currentTask.logs.push(`ERROR 文件路径重载失败：${error.message}`); }
+      },
+      onDone: (completedTask) => {
+        try {
+          setLocalWorkCachesDirty();
+          setWorkInfoCache(null);
+          clearSearchSourceCaches();
+          if (!refreshLibrary()) throw new Error("整理后重新加载索引失败");
+          const latest = personOrganizationService.read(plan.id);
+          if (latest.groups.some((group) => !group.done)) return;
+          const result = syncPersonLocal(person.id);
+          if (!result) throw new Error("人物本地目录未能同步");
+          if (result?.bindingWarnings?.length) throw new Error(result.bindingWarnings.map((w) => w.message).join("；"));
+          completedTask.logs.push(plan.refreshMetadata ? "目录、封面、info 与本地索引已同步" : "目录与本地索引已同步");
+        } catch (error) { completedTask.status = "error"; completedTask.logs.push(`ERROR 本地索引同步失败：${error.message}`); }
+      }
+    });
+    return { ok: true, task: adminTaskService.publicTask(task) };
+  }
+
   function refreshActorMoviesPayload(body = {}) {
+    if (currentTasks().some((task) => task.type === "person-organize" && ["running", "stopping"].includes(task.status))) {
+      throw httpError("人物目录正在整理，请完成后再扫描资料", 409);
+    }
     const fullScan = Boolean(body.fullScan || body.full || body.all);
     const person = fullScan ? null : resolveLibraryPersonByPublicId(body.personId);
     if (!fullScan && !person) {
@@ -76,12 +141,38 @@ export function createAdminMaintenanceTaskService({
       args,
       refreshHints: ["current-view"],
       invalidates: ["actorProfiles", "actorMovies", "workInfo", "workCovers"],
-      onDone: () => {
+      onDone: (completedTask) => {
         invalidateTableStamp("actor_movies");
         setActorMovieCache(null);
         setLocalWorkCachesDirty();
-        refreshLibrary?.();
+        const nextLibrary = refreshLibrary?.();
         clearSearchSourceCaches();
+        if (completedTask.status !== "done") return;
+        if (!nextLibrary) {
+          completedTask.status = "error";
+          completedTask.logs.push("ERROR JavDB 已更新，但本地资料库重新加载失败");
+          return;
+        }
+        const personIds = person ? [person.id] : linkedPersonIds();
+        for (const personId of new Set(personIds.map(String))) {
+          const currentPerson = resolveLibraryPersonByPublicId(personId);
+          const name = currentPerson?.name || personId;
+          try {
+            completedTask.logs.push(`正在同步本地文件：${name}`);
+            const result = syncPersonLocal(personId);
+            completedTask.logs.push(result
+              ? `本地已同步：${name} · ${result.person.workCount} 部 · ${result.person.videoCount} 个视频`
+              : `本地同步已跳过：${name} · 未配置本地来源`);
+            if (result?.bindingWarnings?.length) {
+              completedTask.status = "error";
+              completedTask.logs.push(`ERROR ${name} 其余作品已同步，但 ${result.bindingWarnings.length} 个目录关联待确认；已保留原有记录`);
+              for (const warning of result.bindingWarnings) completedTask.logs.push(warning.message);
+            }
+          } catch (error) {
+            completedTask.status = "error";
+            completedTask.logs.push(`ERROR JavDB 已更新，但 ${name} 本地同步失败：${error.message}`);
+          }
+        }
       }
     });
 
@@ -140,6 +231,7 @@ export function createAdminMaintenanceTaskService({
   }
 
   return {
+    organizePersonPayload,
     coverCacheStatusPayload,
     generateMissingCoversPayload,
     generateMissingShortVideoCoversPayload,

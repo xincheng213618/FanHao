@@ -21,18 +21,28 @@ export function createPersonListService({
     const cacheKey = `${normalizedScope}:${getStamp()}:${library.people?.length || 0}`;
     const cached = mainPeopleCache.get(cacheKey);
     if (cached) return cached;
-    const people = [];
+    const candidates = [];
     const seen = new Set();
     for (const person of library.people) {
       const merged = personMergeService.record(person);
       if (!merged || seen.has(merged.id)) continue;
       seen.add(merged.id);
       if (!peopleScopeService.personMatches(merged, normalizedScope)) continue;
-      if (shouldShowPersonInMainList(merged)) people.push(merged);
+      candidates.push({ person: merged, known: Number(merged.workCount || 0) > 0 || Boolean(actorProfileRow(merged.id)) });
     }
-    mainPeopleCache.set(cacheKey, people);
-    while (mainPeopleCache.size > 6) {
-      mainPeopleCache.delete(mainPeopleCache.keys().next().value);
+    const pending = candidates.filter(candidate => !candidate.known);
+    // One membership read per list also bounds retries while the DB is failing.
+    const membership = typeof actorMovieService.hasMergedRowsResultForPeople === "function"
+      ? actorMovieService.hasMergedRowsResultForPeople(pending.map(candidate => candidate.person.id))
+      : { matches: new Set(pending.filter(candidate => actorMovieService.hasMergedRows(candidate.person.id))
+          .map(candidate => String(candidate.person.id))), cacheable: true };
+    const people = candidates.filter(candidate => candidate.known || membership.matches.has(String(candidate.person.id)))
+      .map(candidate => candidate.person);
+    if (membership.cacheable !== false) {
+      mainPeopleCache.set(cacheKey, people);
+      while (mainPeopleCache.size > 6) {
+        mainPeopleCache.delete(mainPeopleCache.keys().next().value);
+      }
     }
     return people;
   }

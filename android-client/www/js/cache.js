@@ -1,10 +1,11 @@
-import { CLIENT_VERSION } from "./config.js?v=assets-07b744082137";
+import { CLIENT_VERSION } from "./config.js?v=assets-1443708f18b1";
 import { accountPayloadOwner, captureAccountOwner, confirmAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload } from "./account-owner.js";
 
 const DB_NAME = "fanhao-android-cache";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const RESPONSE_STORE = "responses";
 const IMAGE_STORE = "images";
+const CACHE_TRIM_INDEX = "trimMetadata";
 const RESPONSE_CACHE_VERSION = `responses:${CLIENT_VERSION}`;
 const MAX_CACHED_RESPONSE_BYTES = 30 * 1024 * 1024;
 const RESPONSE_CACHE_MAX_BYTES = 120 * 1024 * 1024;
@@ -19,6 +20,10 @@ let responseTrimPromise = null;
 let imageTrimPromise = null;
 let staleResponsePrunePromise = null;
 const responseInvalidationState = globalThis.__fanhaoResponseCacheInvalidationState ||= {
+  epoch: 0,
+  baseGenerations: new Map()
+};
+const imageInvalidationState = globalThis.__fanhaoImageCacheInvalidationState ||= {
   epoch: 0,
   baseGenerations: new Map()
 };
@@ -71,20 +76,25 @@ export async function writeCachedJson(baseUrl, path, payload, options = {}) {
 }
 
 export async function readCachedImage(url, options = {}) {
+  const fence = options.fence || captureCachedImageFence(url, options);
+  if (fence.baseUrl !== imageCacheBaseUrl(url, options) || !isCachedImageFenceCurrent(fence)) return null;
   const db = await openCacheDb();
   const entry = await requestToPromise(db.transaction(IMAGE_STORE, "readonly").objectStore(IMAGE_STORE).get(imageCacheKey(url)));
-  if (!entry || !entry.blob) return null;
-  touchCachedImage(entry, options).catch(() => {});
+  if (!isCachedImageFenceCurrent(fence) || !entry || !entry.blob) return null;
+  touchCachedImage(entry, options, fence).catch(() => {});
   return entry;
 }
 
 export async function writeCachedImage(url, blob, options = {}) {
   if (!blob || !blob.size || blob.size > MAX_CACHED_IMAGE_BYTES) return null;
-
+  const baseUrl = imageCacheBaseUrl(url, options);
+  const fence = options.fence || captureCachedImageFence(url, options);
+  if (fence.baseUrl !== baseUrl || !isCachedImageFenceCurrent(fence)) return null;
   const db = await openCacheDb();
+  if (!isCachedImageFenceCurrent(fence)) return null;
   const entry = {
     key: imageCacheKey(url),
-    baseUrl: normalizeBaseUrl(options.baseUrl) || imageBaseUrl(url),
+    baseUrl,
     url: normalizeImageUrl(url),
     blob,
     mime: blob.type || "image/jpeg",
@@ -92,18 +102,25 @@ export async function writeCachedImage(url, blob, options = {}) {
     accessedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
-  await requestToPromise(db.transaction(IMAGE_STORE, "readwrite").objectStore(IMAGE_STORE).put(entry));
+  await runCacheTransaction(db, IMAGE_STORE, "readwrite", (store) => requestToPromise(store.put(entry)));
   scheduleImageCacheTrim().catch(() => {});
   return entry;
 }
 
 export async function getCacheStats(baseUrl = "") {
   const db = await openCacheDb();
-  const entries = await requestToPromise(db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE).getAll());
-  const images = db.objectStoreNames.contains(IMAGE_STORE)
-    ? await requestToPromise(db.transaction(IMAGE_STORE, "readonly").objectStore(IMAGE_STORE).getAll())
-    : [];
   const normalizedBase = baseUrl ? normalizeBaseUrl(baseUrl) : "";
+  const responseStore = db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE);
+  const entries = await requestToPromise(normalizedBase
+    ? responseStore.index("baseUrl").getAll(normalizedBase)
+    : responseStore.getAll());
+  let images = [];
+  if (db.objectStoreNames.contains(IMAGE_STORE)) {
+    const imageStore = db.transaction(IMAGE_STORE, "readonly").objectStore(IMAGE_STORE);
+    images = await requestToPromise(normalizedBase
+      ? imageStore.index("baseUrl").getAll(normalizedBase)
+      : imageStore.getAll());
+  }
   const visibleEntries = normalizedBase
     ? entries.filter((entry) => entry.baseUrl === normalizedBase && isCurrentResponseCache(entry))
     : entries.filter(isCurrentResponseCache);
@@ -147,6 +164,12 @@ export async function clearCachedResponses(baseUrl = "") {
 
 export async function clearCachedImages(baseUrl = "") {
   const normalizedBase = baseUrl ? normalizeBaseUrl(baseUrl) : "";
+  if (!normalizedBase) {
+    imageInvalidationState.epoch += 1;
+    imageInvalidationState.baseGenerations.clear();
+  } else {
+    imageInvalidationState.baseGenerations.set(normalizedBase, (imageInvalidationState.baseGenerations.get(normalizedBase) || 0) + 1);
+  }
   const db = await openCacheDb();
   if (!db.objectStoreNames.contains(IMAGE_STORE)) return;
   if (!normalizedBase) {
@@ -213,6 +236,17 @@ export function isCachedJsonFenceCurrent(fence) {
     && Number(fence.generation) === (responseInvalidationState.baseGenerations.get(normalizedBase) || 0);
 }
 
+export function captureCachedImageFence(url, options = {}) {
+  const baseUrl = imageCacheBaseUrl(url, options);
+  return Object.freeze({ baseUrl, epoch: imageInvalidationState.epoch,
+    generation: imageInvalidationState.baseGenerations.get(baseUrl) || 0 });
+}
+
+function isCachedImageFenceCurrent(fence) {
+  return fence?.epoch === imageInvalidationState.epoch
+    && fence.generation === (imageInvalidationState.baseGenerations.get(fence.baseUrl) || 0);
+}
+
 function invalidateCachedJsonWrites(normalizedBase) {
   if (!normalizedBase) {
     responseInvalidationState.epoch += 1;
@@ -263,9 +297,21 @@ function openCacheDb() {
         store.createIndex("baseUrl", "baseUrl", { unique: false });
         store.createIndex("updatedAt", "updatedAt", { unique: false });
       }
+      // Existing entries are indexed without rewriting their payloads. Missing
+      // legacy fields remain on the full-read path rather than changing size.
+      for (const name of [RESPONSE_STORE, IMAGE_STORE]) {
+        const store = request.transaction.objectStore(name);
+        if (!store.indexNames.contains(CACHE_TRIM_INDEX)) {
+          store.createIndex(CACHE_TRIM_INDEX, ["key", "bytes", "accessedAt", "updatedAt"], { unique: false });
+        }
+      }
     };
     request.onsuccess = () => {
       finish(() => {
+        request.result.onversionchange = () => {
+          request.result.close();
+          dbPromise = null;
+        };
         scheduleStaleResponsePrune(request.result).catch(() => {});
         resolve(request.result);
       }) || request.result?.close?.();
@@ -308,6 +354,10 @@ function imageBaseUrl(url) {
   }
 }
 
+function imageCacheBaseUrl(url, options = {}) {
+  return normalizeBaseUrl(options.baseUrl) || imageBaseUrl(url);
+}
+
 async function deleteByBaseUrl(db, storeName, normalizedBase) {
   await runCacheTransaction(db, storeName, "readwrite", async (store) => {
     const entries = await requestToPromise(store.index("baseUrl").getAllKeys(normalizedBase));
@@ -341,15 +391,15 @@ function scheduleStaleResponsePrune(db) {
 
 async function pruneStaleResponseCache(db) {
   if (!db?.objectStoreNames?.contains(RESPONSE_STORE)) return;
-  const rows = await requestToPromise(db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE).getAll());
-  const staleKeys = rows
-    .filter((entry) => entry?.key && !isCurrentResponseCache(entry))
-    .map((entry) => entry.key);
-  if (!staleKeys.length) return;
-
-  const transaction = db.transaction(RESPONSE_STORE, "readwrite");
-  const store = transaction.objectStore(RESPONSE_STORE);
-  await Promise.all(staleKeys.map((key) => requestToPromise(store.delete(key))));
+  await runCacheTransaction(db, RESPONSE_STORE, "readwrite", async store => {
+    const keys = await requestToPromise(store.getAllKeys());
+    // Normal keys already identify the current version without cloning JSON.
+    // Older and unusual keys retain the original full-entry version check.
+    await Promise.all(keys.filter(key => key && !(typeof key === "string" && isCurrentResponseCache({ key }))).map(async key => {
+      const entry = await requestToPromise(store.get(key));
+      if (entry?.key && !isCurrentResponseCache(entry)) await requestToPromise(store.delete(entry.key));
+    }));
+  });
 }
 
 function scheduleResponseCacheTrim() {
@@ -362,40 +412,21 @@ function scheduleResponseCacheTrim() {
 
 async function trimResponseCache() {
   const db = await openCacheDb();
-  const rows = await requestToPromise(db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE).getAll());
-  const totalBytes = rows.reduce((sum, row) => sum + responseEntryBytes(row), 0);
-  if (rows.length <= RESPONSE_CACHE_MAX_ENTRIES && totalBytes <= RESPONSE_CACHE_MAX_BYTES) return;
-
-  const sorted = rows.sort((a, b) => String(b.accessedAt || b.updatedAt || "").localeCompare(String(a.accessedAt || a.updatedAt || "")));
-  let keptCount = 0;
-  let keptBytes = 0;
-  const deleteKeys = [];
-
-  for (const row of sorted) {
-    const bytes = responseEntryBytes(row);
-    keptCount += 1;
-    keptBytes += bytes;
-    if (keptCount > RESPONSE_CACHE_MAX_ENTRIES || keptBytes > RESPONSE_CACHE_MAX_BYTES) {
-      deleteKeys.push(row.key);
-    }
-  }
-
-  if (!deleteKeys.length) return;
-  const transaction = db.transaction(RESPONSE_STORE, "readwrite");
-  const store = transaction.objectStore(RESPONSE_STORE);
-  await Promise.all(deleteKeys.map((key) => requestToPromise(store.delete(key))));
+  await trimCacheStore(db, RESPONSE_STORE, RESPONSE_CACHE_MAX_ENTRIES, RESPONSE_CACHE_MAX_BYTES, responseEntryBytes);
 }
 
-async function touchCachedImage(entry, options = {}) {
+async function touchCachedImage(entry, options, fence) {
   if (!entry?.key) return;
   const db = await openCacheDb();
-  await requestToPromise(
-    db.transaction(IMAGE_STORE, "readwrite").objectStore(IMAGE_STORE).put({
-      ...entry,
-      baseUrl: normalizeBaseUrl(options.baseUrl) || entry.baseUrl || imageBaseUrl(entry.url || entry.key),
+  if (!isCachedImageFenceCurrent(fence)) return;
+  await runCacheTransaction(db, IMAGE_STORE, "readwrite", async (store) => {
+    const current = await requestToPromise(store.get(entry.key));
+    if (!current || !isCachedImageFenceCurrent(fence)) return;
+    await requestToPromise(store.put({ ...current,
+      baseUrl: normalizeBaseUrl(options.baseUrl) || current.baseUrl || imageBaseUrl(current.url || current.key),
       accessedAt: new Date().toISOString()
-    })
-  );
+    }));
+  });
 }
 
 function scheduleImageCacheTrim() {
@@ -409,29 +440,51 @@ function scheduleImageCacheTrim() {
 async function trimImageCache() {
   const db = await openCacheDb();
   if (!db.objectStoreNames.contains(IMAGE_STORE)) return;
+  await trimCacheStore(db, IMAGE_STORE, IMAGE_CACHE_MAX_ENTRIES, IMAGE_CACHE_MAX_BYTES, imageEntryBytes);
+}
 
-  const rows = await requestToPromise(db.transaction(IMAGE_STORE, "readonly").objectStore(IMAGE_STORE).getAll());
-  const totalBytes = rows.reduce((sum, row) => sum + imageEntryBytes(row), 0);
-  if (rows.length <= IMAGE_CACHE_MAX_ENTRIES && totalBytes <= IMAGE_CACHE_MAX_BYTES) return;
+async function readCacheTrimRows(store) {
+  if (!store.indexNames.contains(CACHE_TRIM_INDEX)) return requestToPromise(store.getAll());
+  const keys = store.index(CACHE_TRIM_INDEX).openKeyCursor();
+  const rows = new Promise((resolve, reject) => {
+    const result = [];
+    keys.onerror = () => reject(keys.error || new Error("本地缓存读写失败"));
+    keys.onsuccess = () => {
+      const cursor = keys.result;
+      if (!cursor) { resolve(result); return; }
+      // The first tuple member is the primary key, preserving getAll's input
+      // order for the stable localeCompare sort, including equal timestamps.
+      const [, bytes, accessedAt, updatedAt] = cursor.key;
+      result.push({ key: cursor.primaryKey, bytes, accessedAt, updatedAt });
+      cursor.continue();
+    };
+  });
+  const [projected, count] = await Promise.all([rows, requestToPromise(store.count())]);
+  // Falsy bytes use the historical full-entry size calculation. Index keys can
+  // convert binary values, so unusual legacy types also need the full entry.
+  if (projected.length !== count || projected.some(row => !row.bytes
+    || (typeof row.bytes !== "number" && typeof row.bytes !== "string")
+    || typeof row.accessedAt !== "string" || typeof row.updatedAt !== "string")) return requestToPromise(store.getAll());
+  return projected;
+}
 
-  const sorted = rows.sort((a, b) => String(b.accessedAt || b.updatedAt || "").localeCompare(String(a.accessedAt || a.updatedAt || "")));
-  let keptCount = 0;
-  let keptBytes = 0;
-  const deleteKeys = [];
-
-  for (const row of sorted) {
-    const bytes = imageEntryBytes(row);
-    keptCount += 1;
-    keptBytes += bytes;
-    if (keptCount > IMAGE_CACHE_MAX_ENTRIES || keptBytes > IMAGE_CACHE_MAX_BYTES) {
-      deleteKeys.push(row.key);
+async function trimCacheStore(db, storeName, maxEntries, maxBytes, entryBytes) {
+  // Reading and deleting in one transaction keeps another context's new put
+  // or touch from being removed according to an obsolete trim snapshot.
+  await runCacheTransaction(db, storeName, "readwrite", async store => {
+    const rows = await readCacheTrimRows(store);
+    const totalBytes = rows.reduce((sum, row) => sum + entryBytes(row), 0);
+    if (rows.length <= maxEntries && totalBytes <= maxBytes) return;
+    const sorted = rows.sort((a, b) => String(b.accessedAt || b.updatedAt || "").localeCompare(String(a.accessedAt || a.updatedAt || "")));
+    let keptCount = 0, keptBytes = 0;
+    const deletes = [];
+    for (const row of sorted) {
+      keptCount += 1;
+      keptBytes += entryBytes(row);
+      if (keptCount > maxEntries || keptBytes > maxBytes) deletes.push(requestToPromise(store.delete(row.key)));
     }
-  }
-
-  if (!deleteKeys.length) return;
-  const transaction = db.transaction(IMAGE_STORE, "readwrite");
-  const store = transaction.objectStore(IMAGE_STORE);
-  await Promise.all(deleteKeys.map((key) => requestToPromise(store.delete(key))));
+    await Promise.all(deletes);
+  });
 }
 
 function imageEntryBytes(entry) {

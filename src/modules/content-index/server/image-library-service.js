@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createImageQueryCache } from "./image-query-cache.js";
 
 const imageNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+const imageSearchFieldNames = ["title", "person", "collection", "category", "folder", "metadata"];
 
 function compareImageNames(left, right) {
   return imageNameCollator.compare(left, right);
 }
 
 export function createImageLibraryService({
+  cachePreparedQueries = false,
   clampInteger,
   galleryMediaRootStatuses,
   getImageLibraryIndex,
@@ -26,6 +29,7 @@ export function createImageLibraryService({
   const sourceIdentities = new WeakMap();
   let sourceSequence = 0;
   let unstableSequence = 0;
+  const preparedQueries = createImageQueryCache();
 
   function sourceIdentity(value) {
     if (!value || typeof value !== "object") return "";
@@ -92,16 +96,29 @@ export function createImageLibraryService({
     return metadataService.tvSeriesKey(category, item.seriesName || item.personName || item.subCategory || item.title || "");
   }
 
-  function trustedTvMetadataIdentity(tvSeries) {
+  function trustedTvMetadataIdentity(tvSeries, titlesCache = null) {
     const doubanId = String(tvSeries?.doubanId || "").trim();
     const title = String(tvSeries?.title || "").trim();
     if (!/^\d{5,12}$/u.test(doubanId) || !title) return "";
-    return `${doubanId}|${title.normalize("NFKC").toLocaleLowerCase()}`;
+    let normalizedTitle;
+    if (titlesCache?.has(title)) normalizedTitle = titlesCache.get(title);
+    else {
+      normalizedTitle = title.normalize("NFKC").toLocaleLowerCase();
+      titlesCache?.set(title, normalizedTitle);
+    }
+    return `${doubanId}|${normalizedTitle}`;
   }
 
-  function normalizedTvEpisodeSeriesName(value) {
-    const source = String(value || "")
-      .trim()
+  function normalizedTvEpisodeSeriesName(value, namesCache = null) {
+    const input = String(value || "").trim();
+    if (namesCache?.has(input)) return namesCache.get(input);
+    const result = normalizedTvEpisodeSeriesNameFromString(input);
+    namesCache?.set(input, result);
+    return result;
+  }
+
+  function normalizedTvEpisodeSeriesNameFromString(input) {
+    const source = input
       .replace(/\.(?:mp4|mkv|avi|mov|wmv|m4v|webm)$/iu, "")
       .replace(/[._]+/gu, " ")
       .replace(/\s+/gu, " ")
@@ -133,10 +150,10 @@ export function createImageLibraryService({
     return Array.from(normalized.replace(/\s+/gu, "")).length >= 2 ? normalized : "";
   }
 
-  function galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries) {
+  function galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries, derivationCaches = null) {
     if (!item || !isEpisodicMediaKind(item.mediaKind)) return "";
-    const trustedIdentity = trustedTvMetadataIdentity(tvSeries);
-    const localSeriesName = normalizedTvEpisodeSeriesName(item.seriesName || item.personName || item.subCategory || "");
+    const trustedIdentity = trustedTvMetadataIdentity(tvSeries, derivationCaches?.titles);
+    const localSeriesName = normalizedTvEpisodeSeriesName(item.seriesName || item.personName || item.subCategory || "", derivationCaches?.names);
     if (!trustedIdentity || !localSeriesName) return sourceSeriesKey;
     return metadataService.tvSeriesKey("trusted-tv", `${trustedIdentity}|${localSeriesName}`);
   }
@@ -147,18 +164,22 @@ export function createImageLibraryService({
     return `/media/gallery-media-cover/${encodeURIComponent(mediaId)}${suffix}`;
   }
 
-  function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null, publicTvSeriesByKey = null) {
+  function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null, publicTvSeriesByKey = null, derivationState = null) {
     const sourceSeriesKey = galleryMediaSourceSeriesKey(item);
     let tvSeries = null;
+    let derivationCaches = null;
     if (sourceSeriesKey) {
-      if (publicTvSeriesByKey?.has(sourceSeriesKey)) tvSeries = publicTvSeriesByKey.get(sourceSeriesKey);
+      if (publicTvSeriesByKey?.has(sourceSeriesKey)) {
+        tvSeries = publicTvSeriesByKey.get(sourceSeriesKey);
+        if (derivationState) derivationCaches = derivationState.caches ||= { titles: new Map(), names: new Map() };
+      }
       else {
-        tvSeries = metadataService.publicTvSeries(tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey));
+        tvSeries = metadataService.publicTvSeries(tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey, { forPublication: true }));
         publicTvSeriesByKey?.set(sourceSeriesKey, tvSeries);
       }
     }
-    const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries);
-    const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id)) : null;
+    const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries, derivationCaches);
+    const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id, { forPublication: true })) : null;
     const movieCoverUrl = movieMetadata?.coverUrl || "";
     const fallbackCoverUrl = item.mediaKind === "movie" || isEpisodicMediaKind(item.mediaKind) ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
     return {
@@ -187,7 +208,7 @@ export function createImageLibraryService({
       ...item,
       coverUrl: item.coverUrl || photoSetService.coverUrl(item.id, item.updatedAt || "")
     }));
-    const tvMetadataByKey = metadataService.tvSeriesRowsMap();
+    const tvMetadataByKey = metadataService.tvSeriesRowsMap({ forPublication: true });
     const movieMetadataById = metadataService.movieRowsMap();
     const publicTvSeriesByKey = new Map();
     const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey));
@@ -314,14 +335,31 @@ export function createImageLibraryService({
     const index = getImageLibraryIndex(options);
     const sourceStampBefore = listSourceStamp(index, mode);
     let mangaSourceRevision = "";
+    const cacheEligible = cachePreparedQueries && ["movie", "tv", "anime", "media"].includes(mode)
+      && typeof getImageLibraryRevision === "function" && typeof metadataService.listRevision === "function";
+    const queryCacheKey = JSON.stringify([mode, query, sort, photoView, tvView, category, mediaKind, subCategory, person, date, collection, seriesKey]);
+    if (options.refresh || !cacheEligible) preparedQueries.clear();
+    const prepared = cacheEligible && !options.refresh ? preparedQueries.get(queryCacheKey, sourceStampBefore) : null;
+    if (prepared) {
+      const cachedItems = prepared.items.slice(offset, offset + limit);
+      const response = structuredClone({ ...prepared.header, count: cachedItems.length, total: prepared.items.length,
+        limit, offset, nextOffset: offset + cachedItems.length, listRevision: "", items: cachedItems });
+      const sourceStampAfter = listSourceStamp(index, mode);
+      if (sourceStampBefore !== sourceStampAfter) preparedQueries.clear();
+      response.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, "");
+      return response;
+    }
     let mediaItems = [];
     if (!["photo", "manga"].includes(mode)) {
       const kinds = mode === "media" ? ["movie", "tv", "anime"] : [mode];
       const rawItems = mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], kinds);
-      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap() : new Map();
+      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
       const movieMetadataById = rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
       const publicTvSeriesByKey = new Map();
-      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey));
+      // Only pure string derivations are shared within this list read. Field
+      // conversion and metadata key generation still run for every item.
+      const derivationState = { caches: null };
+      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));
     }
 
     let source = [];
@@ -419,7 +457,7 @@ export function createImageLibraryService({
       }
       return match ? { ...item, matchFields: match.matchFields } : item;
     });
-    return {
+    const response = {
       schemaVersion: 1,
       mode,
       mediaKind: mode === "media" ? mediaKind : "all",
@@ -450,6 +488,16 @@ export function createImageLibraryService({
       scannedAt: mode === "manga" ? latestUpdatedAt(source, index.scannedAt || "") : index.scannedAt || "",
       items
     };
+    if (!cacheEligible) return response;
+    // Retain field insertion order when replacing the pagination values.
+    const { items: _items, ...header } = response;
+    if (!options.refresh) preparedQueries.set(queryCacheKey, sourceStampBefore, { header,
+      items: searchResultsByItem ? sorted.map(item => ({ ...item, matchFields: searchResultsByItem.get(item).matchFields })) : sorted });
+    const detached = structuredClone(response);
+    const sourceStampAfter = listSourceStamp(index, mode);
+    if (sourceStampBefore !== sourceStampAfter) preparedQueries.clear();
+    detached.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, mangaSourceRevision);
+    return detached;
   }
 
   function normalizePhotoLibraryView(value) {
@@ -940,7 +988,11 @@ export function createImageLibraryService({
     if (!subCategories) {
       const source = key === "all" ? catalog.items : catalog.items.filter((item) => item.category === key);
       subCategories = facetCounts(source, "subCategory").slice(0, 500);
-      catalog.subCategories.set(key, subCategories);
+      // Request values are unbounded; only source categories belong in the
+      // prepared catalog. Unknown categories still return their normal result.
+      if (key === "all" || catalog.categories.some((category) => category.value === key)) {
+        catalog.subCategories.set(key, subCategories);
+      }
     }
     return {
       categories: catalog.categories,
@@ -1027,11 +1079,10 @@ export function createImageLibraryService({
     const results = [];
     for (const item of items) {
       const document = imageSearchDocument(item);
-      const entries = Object.entries(document.compactFields);
-      if (!searchSpec.terms.every((term) => entries.some(([, value]) => value.includes(term)))) continue;
-
-      const matchFields = entries.filter(([, value]) => searchSpec.terms.some((term) => value.includes(term))).map(([field]) => field);
       const { compactFields } = document;
+      if (!searchSpec.terms.every((term) => imageSearchFieldNames.some((field) => compactFields[field].includes(term)))) continue;
+
+      const matchFields = imageSearchFieldNames.filter((field) => searchSpec.terms.some((term) => compactFields[field].includes(term)));
       let score = 0;
       if (compactFields.title === searchSpec.compact) score += 1800;
       else if (compactFields.title.startsWith(searchSpec.compact)) score += 900;
@@ -1056,7 +1107,11 @@ export function createImageLibraryService({
   function compareImageSearchResults(a, b) {
     const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
     if (scoreDiff) return scoreDiff;
-    const timeDiff = new Date(b.item?.updatedAt || 0).getTime() - new Date(a.item?.updatedAt || 0).getTime();
+    // Search results live for this request. NaN stays cached and still falls
+    // through to the existing title tie-breaker.
+    const aTime = a.updatedAt ?? (a.updatedAt = new Date(a.item?.updatedAt || 0).getTime());
+    const bTime = b.updatedAt ?? (b.updatedAt = new Date(b.item?.updatedAt || 0).getTime());
+    const timeDiff = bTime - aTime;
     return timeDiff || compareImageNames(String(a.item?.title || ""), String(b.item?.title || ""));
   }
 
@@ -1253,9 +1308,18 @@ export function createImageLibraryService({
       });
     }
     if (sort === "year") {
+      const years = new Map();
+      const yearOf = item => {
+        let year = years.get(item);
+        if (year === undefined) {
+          year = Number.parseInt(String(item?.year || item?.movieMetadata?.year || item?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
+          years.set(item, year);
+        }
+        return year;
+      };
       return list.sort((a, b) => {
-        const aYear = Number.parseInt(String(a?.year || a?.movieMetadata?.year || a?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
-        const bYear = Number.parseInt(String(b?.year || b?.movieMetadata?.year || b?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
+        const aYear = yearOf(a);
+        const bYear = yearOf(b);
         return bYear - aYear || compareImageNames(a.title, b.title);
       });
     }
@@ -1270,6 +1334,7 @@ export function createImageLibraryService({
 
   return {
     itemsPayload,
+    clearPreparedQueries: preparedQueries.clear,
     payload,
     publicGalleryMediaItem,
     summaryPayload

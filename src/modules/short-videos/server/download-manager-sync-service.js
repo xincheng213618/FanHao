@@ -17,13 +17,13 @@ export function createDownloadManagerSyncService({
   const resolvedIntervalMs = Number(intervalMs || 0);
   let initialTimer = null;
   let timer = null;
+  let continuationTimer = null;
   let running = false;
   let stopped = false;
   let activeWorker = null;
   let activeSyncPromise = null;
   let pendingForcedSync = null;
-  const initialStateKeyProvider = typeof initialStateKey === "function" ? initialStateKey : null;
-  let lastSourceStateKey = initialStateKeyProvider ? null : String(initialStateKey || "");
+  let journalUpgradeReported = false;
 
   function start() {
     stopped = false;
@@ -43,8 +43,10 @@ export function createDownloadManagerSyncService({
     stopped = true;
     if (initialTimer) clearTimeout(initialTimer);
     if (timer) clearInterval(timer);
+    if (continuationTimer) clearTimeout(continuationTimer);
     initialTimer = null;
     timer = null;
+    continuationTimer = null;
     const worker = activeWorker;
     activeWorker = null;
     return worker ? worker.terminate().catch(() => undefined) : Promise.resolve();
@@ -72,15 +74,8 @@ export function createDownloadManagerSyncService({
     if (running || stopped) return null;
     const sourceStateKey = sourceDbStateKey(resolvedSourceDbPath);
     if (!sourceStateKey) return null;
-    if (lastSourceStateKey === null) {
-      try {
-        lastSourceStateKey = String(await initialStateKeyProvider() || "");
-      } catch (error) {
-        lastSourceStateKey = "";
-        console.warn("[short-video-sync-state]", error?.message || error);
-      }
-    }
-    if (!options.force && sourceStateKey === lastSourceStateKey) return null;
+    // File mtimes (especially WAL/SHM) are not business revisions. Every poll
+    // checks the tiny journal head; unrelated jobs/settings writes cost no scan.
     running = true;
     const operation = performSync(options, sourceStateKey);
     activeSyncPromise = operation;
@@ -98,10 +93,25 @@ export function createDownloadManagerSyncService({
     try {
       const result = await runWorker();
       if (!result || stopped) return null;
-      lastSourceStateKey = sourceStateKey;
-      onStateKey(sourceStateKey);
+      if (result.requiresJournalUpgrade) {
+        if (!journalUpgradeReported) console.warn("[short-video-sync]", result.message);
+        journalUpgradeReported = true;
+        return result;
+      }
+      journalUpgradeReported = false;
+      if (result.advanced) onStateKey(sourceStateKey);
       if (result.catalogChanged || Number(result.catalogChanges || 0) > 0) onCatalogChanged(result, options);
       if (result.imported || result.updated) onItemsImported(result);
+      if (result.hasMore && !stopped) {
+        // Drain a bounded backlog without waiting a minute per page. Each
+        // worker commits at most 500 changes, releasing the SQLite writer lock.
+        if (continuationTimer) clearTimeout(continuationTimer);
+        continuationTimer = setTimeout(() => {
+          continuationTimer = null;
+          sync();
+        }, 100);
+        continuationTimer.unref?.();
+      }
       return result;
     } catch (error) {
       if (!stopped) console.warn("[short-video-sync]", error.message || error);
@@ -153,7 +163,7 @@ export function createDownloadManagerSyncService({
 }
 
 function sourceDbStateKey(sourceDbPath) {
-  const files = [sourceDbPath, `${sourceDbPath}-wal`, `${sourceDbPath}-shm`];
+  const files = [sourceDbPath, `${sourceDbPath}-wal`];
   const parts = [];
   for (const filePath of files) {
     const stat = safeStat(filePath);

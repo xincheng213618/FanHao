@@ -18,6 +18,8 @@ import { createServerHost } from "../src/platform/server/server-host.js";
 import { createFileServer } from "../src/platform/server/file-server.js";
 import http from "node:http";
 import crypto from "node:crypto";
+import { types } from "node:util";
+import { routePhotosApi } from "../src/modules/photos/server/routes.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-archive-lifecycle-"));
@@ -167,6 +169,417 @@ async function verifyOldSchemaAndZipIdentity() {
   await second.stop(); scenarios += 2;
 }
 
+
+async function verifyPhotoDetailPaging() {
+  const file = path.join(projectRoot, "src/modules/photos/server/photo-set-service.js");
+  const source = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  const currentRequest = "      // The archive cache already owns the full list; copy only the visible page.\n      limit: 0,";
+  const currentCount = "    const fallbackCount = imageLimit > 0 ? Math.min(images.length, imageOffset + imageLimit) : images.length;\n    const imageCount = Number(payload.imageCount || fallbackCount || 0);";
+  assert(source.includes(currentRequest) && source.includes(currentCount), "paging oracle restores both changed expressions");
+  const legacySource = source.replace(currentRequest, "      limit: imageLimit > 0 ? imageOffset + imageLimit : 0,")
+    .replace(currentCount, "    const imageCount = Number(payload.imageCount || images.length || 0);")
+    .replace(/from\s+(["'])(\.[^"']+)\1/g, (_match, _quote, relative) =>
+      "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(file), relative)).href));
+  const legacyFactory = (await import("data:text/javascript;base64," + Buffer.from(legacySource).toString("base64"))).createPhotoSetService;
+  const measuredFactory = process.argv.includes("--legacy-photo-detail-paging") ? legacyFactory : createPhotoSetService;
+  const album = { id: "synthetic-paging", sourceRoot: path.resolve("synthetic"), relativePath: "paging.zip", extra: "retained" };
+  const controller = new AbortController();
+  const options = { safeChildPath: (root, relative) => path.resolve(root, relative), getImageLibraryIndex: () => ({ photoSets: [album] }), photoSetById: () => album };
+  const smallImages = Array.from({ length: 7 }, (_, index) => ({ path: `folder/image-${index}.jpg`, name: index % 2 ? "" : `Image ${index}`, bytes: index % 2 ? String(index) : index }));
+  const pages = [{}, { imageLimit: 2 }, { imageOffset: 3, imageLimit: 2 }, { imageOffset: 99, imageLimit: 2 },
+    { imageOffset: 3, imageLimit: 0 }, { imageOffset: 3, imageLimit: -1 }, { imageOffset: -1, imageLimit: 3 },
+    { imageOffset: 2.9, imageLimit: 1.9 }, { imageOffset: 3, imageLimit: 0.5 },
+    { imageOffset: "bad", imageLimit: "bad" }, { imageOffset: Infinity, imageLimit: 2 }, { imageOffset: 2, imageLimit: Infinity }];
+  let oracles = 0;
+  for (const images of [smallImages, [], undefined, "invalid"]) for (const imageCount of [undefined, null, 0, NaN, false, "", "0", "bad", -1, 20, Infinity]) {
+    const provider = async (_archivePath, request) => {
+      assert.equal(request.signal, controller.signal, "detail forwards the caller's signal unchanged");
+      const limit = Math.max(0, Math.floor(Number(request.limit) || 0));
+      return { images: Array.isArray(images) && limit > 0 ? images.slice(0, limit) : images, imageCount };
+    };
+    const previous = legacyFactory({ ...options, archiveImagesPayload: provider }), current = measuredFactory({ ...options, archiveImagesPayload: provider });
+    for (const page of pages) {
+      const before = await previous.publicDetail(album, { ...page, signal: controller.signal });
+      const after = await current.publicDetail(album, { ...page, signal: controller.signal });
+      assert.deepEqual(after, before); assert.equal(JSON.stringify(after), JSON.stringify(before)); oracles++;
+    }
+  }
+  const failure = new Error("controlled archive failure");
+  for (const factory of [legacyFactory, measuredFactory]) {
+    const service = factory({ ...options, archiveImagesPayload: async (_archivePath, request) => { assert.equal(request.signal, controller.signal); throw failure; } });
+    await assert.rejects(service.publicDetail(album, { imageOffset: 3, imageLimit: 2, signal: controller.signal }), error => error === failure);
+  }
+
+  const images = Array.from({ length: 20000 }, (_, index) => ({ path: `_fixture_detail_/${index}.jpg`, name: `Image ${index}`, bytes: index }));
+  const db = galleryDb(), archivePath = path.resolve(album.sourceRoot, album.relativePath), disk = stat();
+  const signature = archiveDiskSignature(archivePath, disk);
+  db.prepare("INSERT INTO photo_set_image_indexes(archive_path,archive_size,archive_mtime_ms,archive_identity,image_count,images_json,indexer_version,indexed_at,updated_at) VALUES(?,?,?,?,?,?,3,'private','private')")
+    .run(archivePath, disk.size, disk.mtimeMs, signature.archiveIdentity, images.length, JSON.stringify(images));
+  let reads = 0, stats = 0;
+  const prepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    const statement = prepare(sql);
+    if (!sql.startsWith("SELECT * FROM photo_set_image_indexes")) return statement;
+    return new Proxy(statement, { get(target, key) {
+      if (key === "get") return (...args) => { reads++; return target.get(...args); };
+      const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
+    } });
+  };
+  const archive = archiveService({ getImageGalleryDb: () => db, statFile: async () => { stats++; return disk; }, spawnProcess: () => assert.fail("persisted paging must not spawn a helper") });
+  const previous = legacyFactory({ ...options, archiveImagesPayload: archive.archiveImagesPayload });
+  const current = measuredFactory({ ...options, archiveImagesPayload: archive.archiveImagesPayload });
+  await current.publicDetail(album, { imageLimit: 48 });
+  const slice = Array.prototype.slice, stringify = JSON.stringify, parse = JSON.parse;
+  async function measure(service) {
+    const metric = { copied: 0, copies: 0, serializations: 0, parses: 0 };
+    reads = 0; stats = 0;
+    Array.prototype.slice = function (...args) {
+      const result = slice.apply(this, args);
+      if (this[0]?.path?.startsWith("_fixture_detail_/")) { metric.copies++; metric.copied += result.length; }
+      return result;
+    };
+    JSON.stringify = (value, ...args) => { if (Array.isArray(value?.images)) metric.serializations++; return stringify(value, ...args); };
+    JSON.parse = (...args) => { metric.parses++; return parse(...args); };
+    try {
+      const response = await service.publicDetail(album, { imageOffset: 19952, imageLimit: 48, signal: controller.signal });
+      return { response, ...metric, reads, stats, cacheBytes: archive.diagnostics().listCacheBytes };
+    } finally { Array.prototype.slice = slice; JSON.stringify = stringify; JSON.parse = parse; }
+  }
+  const before = await measure(previous), after = await measure(current);
+  assert.deepEqual(after.response, before.response); assert.equal(stringify(after.response), stringify(before.response));
+  assert.equal(before.copied, 20048, "old deep page copies the full prefix and then the page");
+  assert.equal(after.copied, 48, "deep page only copies its 48 visible image references");
+  assert.equal(after.copies, 1);
+  for (const result of [before, after]) {
+    assert.equal(result.reads, 3, "all database authority fences remain");
+    assert.equal(result.stats, 2, "both source identity fences remain");
+    assert.equal(result.parses, 0, "warm paging retains parsed metadata");
+    assert.equal(result.serializations, 1, "mutable archive cache still refreshes its complete byte weight");
+  }
+  assert.equal(after.cacheBytes, before.cacheBytes);
+  after.response.images[0].name = "public DTO mutation";
+  assert.notEqual((await current.publicDetail(album, { imageOffset: 19952, imageLimit: 1 })).images[0].name, "public DTO mutation");
+  const exposed = await archive.listArchiveImages(archivePath);
+  exposed[19952].name = "shared archive mutation retained";
+  assert.equal((await current.publicDetail(album, { imageOffset: 19952, imageLimit: 1 })).images[0].name, "shared archive mutation retained");
+  console.log("archive-photo-detail-paging:", JSON.stringify({ oracles: oracles + 1, copiedBefore: before.copied, copiedAfter: after.copied, cacheBytes: after.cacheBytes }));
+  scenarios++;
+}
+
+async function verifyIndexStampWork() {
+  const file = path.join(projectRoot, "src/platform/server/archive-image-service.js");
+  const source = fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n");
+  const currentBlock = source.match(/  function rowStamp\([\s\S]*?(?=  function remember\()/)?.[0];
+  assert(currentBlock?.includes("function rowStampsMatch("), "whole index authority source hook must exist");
+  // Restore the whole previous stamp and authority comparison, preserving
+  // actual SQL, rows, owner checks, task pool, TTL and payload budget.
+  const previousBlock = [
+    "  function rowStamp(row) { return row ? JSON.stringify(row) : \"missing\"; }",
+    "  function indexAuthority(source) {",
+    "    let db;",
+    "    try { db = options.getImageGalleryDb(); return { db, stamp: rowStamp(indexRow(db, source)), valid: true }; }",
+    "    catch { return { db, valid: false }; }",
+    "  }",
+    "  function authorityCurrent(source, authority, context) {",
+    "    if (!context.isCurrent() || !authority.valid) return false;",
+    "    try { return options.getImageGalleryDb() === authority.db && rowStamp(indexRow(authority.db, source)) === authority.stamp; }",
+    "    catch { return false; }",
+    "  }",
+    ""
+  ].join("\n");
+  const previousSource = source.replace(currentBlock, previousBlock);
+  assert.notEqual(previousSource, source, "the negative restores the whole preceding index authority");
+  assert.equal(previousSource.replace(previousBlock, currentBlock), source, "only the authority source block changes");
+  const resolvedSource = previousSource.replace(/from\s+(["'])(\.[^"']+)\1/g, (_match, _quote, relative) =>
+    "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(file), relative)).href));
+  const legacyFactory = (await import("data:text/javascript;base64," + Buffer.from(resolvedSource).toString("base64"))).createArchiveImageService;
+  const measuredFactory = process.argv.includes("--legacy-index-json-stamp") ? legacyFactory : createArchiveImageService;
+  const stringify=JSON.stringify, parse=JSON.parse;
+  let metric = null;
+  const owners=[];
+  function owner(factory, images) {
+    const dbService=createImageGalleryDbService({dbPath:":memory:",ensureDataDir(){}}), db=dbService.getDb();
+    const state={db, statError:null,beforeStat:null,beforeRead:null,readError:null,rowTransform:null,stats:0,helpers:0,warnings:[]};
+    const originalPrepare=db.prepare.bind(db);
+    db.prepare=sql => {
+      const statement=originalPrepare(sql);
+      if (!sql.startsWith("SELECT * FROM photo_set_image_indexes")) return statement;
+      return new Proxy(statement,{get(target,property) {
+        if(property==="get") return (...args) => {
+          if (metric) metric.reads++;
+          state.beforeRead?.(state);
+          if(state.readError)throw state.readError;
+          const row=target.get(...args);
+          if(metric && typeof row?.images_json==="string") metric.readBytes+=Buffer.byteLength(row.images_json);
+          return state.rowTransform?.(row) ?? row;
+        };
+        const value=Reflect.get(target,property,target);return typeof value==="function"?value.bind(target):value;
+      }});
+    };
+    const archivePath=path.resolve("synthetic/archive.zip"),stat={size:7,mtimeMs:123.125,dev:1,ino:10,isFile:()=>true};
+    const signature=archiveDiskSignature(archivePath,stat);
+    db.prepare("INSERT INTO photo_set_image_indexes(archive_path,archive_size,archive_mtime_ms,archive_identity,image_count,images_json,indexer_version,indexed_at,updated_at) VALUES(?,?,?,?,?,?,3,'private','private')")
+    .run(archivePath,7,123.125,signature.archiveIdentity,images.length,stringify(images));
+    const archive=factory({
+      getImageGalleryDb:()=>state.db,
+      statFile:async()=>{state.stats++;if(metric)metric.stats++;if(state.statError)throw state.statError;state.beforeStat?.(state);return stat;},
+      pythonPath:"unused",helperPath:"unused",projectRoot:process.cwd(),
+      spawnProcess:()=>{state.helpers++;if(metric)metric.helpers++;const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>true;
+        queueMicrotask(()=>{child.stdout.write(stringify({ok:true,images:[{path:"controlled-helper.jpg",bytes:9}],imageCount:1}));child.emit("close",0);});return child;},
+      warn:(...args)=>state.warnings.push(args),archiveImageExts:new Set([".jpg"]),normalizeExt:value=>path.extname(String(value||"")).toLowerCase(),
+      mimeTypes:{".jpg":"image/jpeg"},imageReaderCacheService:{rootDir:"unused"},listCacheTtlMs:60000
+    });
+    const album={id:"album",sourceRoot:path.dirname(archivePath),relativePath:path.basename(archivePath),updatedAt:"private",extra:"retained"};
+    const photo=createPhotoSetService({archiveImagesPayload:archive.archiveImagesPayload,safeChildPath:(root,relative)=>path.resolve(root,relative),
+      getImageLibraryIndex:()=>({photoSets:[album]}),photoSetById:()=>album});
+    const item={db,dbService,state,archive,photo,album,archivePath,signature};owners.push(item);return item;
+  }
+  async function read(owner,options={}) {
+    metric={reads:0,readBytes:0,stats:0,helpers:0,stringifyCalls:0,stringifyOutputBytes:0,rowStringifyCalls:0,rowStringifyInputBytes:0,rowStringifyOutputBytes:0,parses:0};
+    JSON.stringify=(value,...args)=>{
+      const result=stringify(value,...args);metric.stringifyCalls++;metric.stringifyOutputBytes+=typeof result==="string"?Buffer.byteLength(result):0;
+      if(value && Object.hasOwn(value,"images_json")) {
+        metric.rowStringifyCalls++;metric.rowStringifyInputBytes+=typeof Object.getOwnPropertyDescriptor(value,"images_json")?.value==="string"?Buffer.byteLength(Object.getOwnPropertyDescriptor(value,"images_json").value):0;
+        metric.rowStringifyOutputBytes+=typeof result==="string"?Buffer.byteLength(result):0;
+      } return result;
+    };
+    JSON.parse=(...args)=>{metric.parses++;return parse(...args);};
+    const start=performance.now();
+    try{
+      const response=await owner.photo.publicDetail(owner.album,options);
+      return {response,ms:performance.now()-start,...metric,cache:owner.archive.diagnostics()};
+    }finally{JSON.stringify=stringify;JSON.parse=parse;metric=null;}
+  }
+  let oracles=0,errorOracles=0;
+  async function equal(left,right,options,label) {
+    const before=await read(left,options),after=await read(right,options);
+    assert.deepEqual(after.response,before.response,label);assert.equal(stringify(after.response),stringify(before.response),label+" JSON");
+    for(const name of ["reads","readBytes","stats","helpers","parses"])assert.equal(after[name],before[name],label+"/"+name);
+    assert.equal(after.cache.listEntries,before.cache.listEntries,label+"/entries");assert.equal(after.cache.listCacheBytes,before.cache.listCacheBytes,label+"/bytes");oracles++;
+    return {before,after};
+  }
+  const distributions=[];
+  let payloadBudget;
+  try{
+    for(const count of [0,1,48,1000,20000]){
+      const images=Array.from({length:count},(_,i)=>({path:"folder/相册_"+String(i).padStart(5,"0")+"_\n\"quoted\".jpg",name:"合成 "+i,bytes:i,extra:"extra"}));
+      const previous=owner(legacyFactory,images),current=owner(measuredFactory,images);
+      const cold=await equal(previous,current,{imageLimit:48},"cold "+count);
+      const warm=await equal(previous,current,{imageLimit:48,imageOffset:48},"warm "+count);
+      if(count===20000)payloadBudget=warm;
+      for(const opts of [{},{imageLimit:1},{imageLimit:0,imageOffset:3},{imageLimit:12.75,imageOffset:8.3},{imageLimit:-1,imageOffset:-1},{imageLimit:"bad",imageOffset:"bad"},{imageLimit:48,imageOffset:999999}])
+        await equal(previous,current,opts,"options "+count+"/"+stringify(opts));
+      for(let i=0;i<3;i++)await equal(previous,current,{imageLimit:48,imageOffset:i*48},"warmup "+count);
+      const oldTimes=[],newTimes=[];
+      for(let i=0;i<8;i++){
+        const pair=i%2?[current,previous]:[previous,current],results=[];
+        for(const target of pair)results.push([target,await read(target,{imageLimit:48,imageOffset:(i+2)*48})]);
+        const before=results.find(([target])=>target===previous)[1],after=results.find(([target])=>target===current)[1];
+        assert.deepEqual(after.response,before.response);assert.equal(stringify(after.response),stringify(before.response));oldTimes.push(before.ms);newTimes.push(after.ms);oracles++;
+      }
+      const median=values=>[...values].sort((a,b)=>a-b)[Math.floor(values.length/2)];
+      distributions.push({count,jsonBytes:Buffer.byteLength(stringify(images)),coldBefore:cold.before.ms,coldAfter:cold.after.ms,
+        warmBefore:warm.before.ms,warmAfter:warm.after.ms,oldMedian:median(oldTimes),median:median(newTimes),
+        reads:warm.after.reads,stats:warm.after.stats,parse:warm.after.parses,readBytes:warm.after.readBytes,
+        oldRowStringifyInputBytes:warm.before.rowStringifyInputBytes,rowStringifyInputBytes:warm.after.rowStringifyInputBytes,
+        oldRowStringifyOutputBytes:warm.before.rowStringifyOutputBytes,rowStringifyOutputBytes:warm.after.rowStringifyOutputBytes,
+        stringifyCalls:warm.after.stringifyCalls,oldAllStringifyOutputBytes:warm.before.stringifyOutputBytes,allStringifyOutputBytes:warm.after.stringifyOutputBytes,
+        cacheBytes:warm.after.cache.listCacheBytes});
+    }
+
+    const baseline=[{path:"first.jpg",name:"one",bytes:1},{path:"second.jpg",name:"two",bytes:2}];
+    const previous=owner(legacyFactory,baseline),current=owner(measuredFactory,baseline);
+    await equal(previous,current,{imageLimit:1},"boundary prewarm");
+    const mutate=(sql,...values)=>{for(const target of [previous,current])target.db.prepare(sql).run(...values);};
+    const metadataCases=[];
+    for(const [sql,values,label] of [
+      ["UPDATE photo_set_image_indexes SET updated_at=?",["fresh"],"timestamp"],
+      ["UPDATE photo_set_image_indexes SET image_count=?",[300],"count"],
+      ["UPDATE photo_set_image_indexes SET images_json=?",[stringify([{path:"changed.jpg",bytes:9}])],"images content"],
+      ["UPDATE photo_set_image_indexes SET images_json=?",[' [ { "path":"changed.jpg", "bytes":9 } ] '],"same parsed content/raw whitespace"],
+      ["UPDATE photo_set_image_indexes SET images_json=?",[stringify(baseline)],"restore images"]
+    ]){
+      mutate(sql,...values);const pair=await equal(previous,current,{imageLimit:1},label);
+      assert.equal(pair.after.parses,1,label+" invalidates memory");metadataCases.push(label);
+    }
+    for(const target of [previous,current])target.db.exec('ALTER TABLE photo_set_image_indexes ADD COLUMN extra_metadata;ALTER TABLE photo_set_image_indexes ADD COLUMN "0";');
+    for(const value of [null,"",0,2,2.5," x\0😀 ",new Uint8Array([]),new Uint8Array([1,2,255])]){
+      mutate("UPDATE photo_set_image_indexes SET extra_metadata=?,\"0\"=?",value,"ordered");
+      const pair=await equal(previous,current,{imageLimit:1},"native extra column "+String(value));assert.equal(pair.after.parses,1);metadataCases.push("extra");
+      if(value instanceof Uint8Array)assert.equal(pair.after.rowStringifyInputBytes,pair.before.rowStringifyInputBytes,"extra native BLOB retains whole legacy serialization");
+    }
+    // The entire original key order remains a fence, even when a reordered
+    // table has identical values and public image data.
+    for(const target of [previous,current]){
+      target.archive.clearListCache();
+      target.state.beforeStat=state=>{if(metric.stats!==2)return;state.beforeStat=null;
+        target.db.exec('ALTER TABLE photo_set_image_indexes RENAME TO old_private_index;CREATE TABLE photo_set_image_indexes AS SELECT images_json,"0",extra_metadata,archive_path,archive_identity,archive_size,archive_mtime_ms,image_count,indexer_version,indexed_at,updated_at FROM old_private_index;DROP TABLE old_private_index;');};
+    }
+    const reordered=await equal(previous,current,{imageLimit:1},"DDL/reordered fields during final source check");
+    assert.equal(reordered.after.cache.listEntries,0,"key-order change declines admission");
+    await equal(previous,current,{imageLimit:1},"after reordered fields");
+    for(const target of [previous,current])target.db.exec('ALTER TABLE photo_set_image_indexes ADD COLUMN another_metadata;');
+    const afterDdl=await equal(previous,current,{imageLimit:1},"extra column DDL on same owner");assert.equal(afterDdl.after.parses,1);
+    const held=new Error("held stat");held.code="PRIVATE_STAT_ERROR";
+    const transitionImages=[{path:"first $& $$ $' $` $1.jpg",name:"same",bytes:1}];
+    const transitionPrevious=owner(legacyFactory,transitionImages),transitionCurrent=owner(measuredFactory,transitionImages);
+    for(const direction of ["native-to-legacy","legacy-to-native"]){
+      for(const target of [transitionPrevious,transitionCurrent]){
+        target.archive.clearListCache();target.state.imageGets=0;target.state.throwImage=false;
+        target.state.legacyRow=row=>{const result={};Object.defineProperty(result,"images_json",{enumerable:true,get(){target.state.imageGets++;if(target.state.throwImage)throw held;return row.images_json;}});
+          result.toJSON=()=>row;return result;};
+        target.state.rowTransform=direction==="native-to-legacy"?null:target.state.legacyRow;
+      }
+      await equal(transitionPrevious,transitionCurrent,{imageLimit:1},direction+" first");
+      for(const target of [transitionPrevious,transitionCurrent]){target.state.imageGets=0;target.state.throwImage=true;
+        target.state.rowTransform=direction==="native-to-legacy"?target.state.legacyRow:null;}
+      const mixed=await equal(transitionPrevious,transitionCurrent,{imageLimit:1},direction+" warm");
+      assert.equal(mixed.after.parses,0);assert.equal(mixed.after.helpers,0);
+      assert.equal(transitionCurrent.state.imageGets,0,"an equivalent legacy toJSON must retain the warm hit without reading images_json");
+      assert.equal(transitionPrevious.state.imageGets,0);
+    }
+    const transformations=[
+      ["ordinary object",row=>({...row})],
+      ["images accessor",row=>{const result=Object.assign(Object.create(null),row),value=result.images_json;Object.defineProperty(result,"images_json",{enumerable:true,configurable:true,get:()=>value});return result;}],
+      ["extra accessor",row=>{const result=Object.assign(Object.create(null),row);Object.defineProperty(result,"extra_metadata",{enumerable:true,configurable:true,get:()=>42});return result;}],
+      ["nonenumerable image",row=>{const result=Object.assign(Object.create(null),row);Object.defineProperty(result,"images_json",{enumerable:false});return result;}],
+      ["own toJSON",row=>{const result=Object.assign(Object.create(null),row);result.toJSON=()=>({...row});return result;}],
+      ["proxy row",row=>new Proxy(row,{})],
+      ["symbol accessor",row=>{const result=Object.assign(Object.create(null),row);Object.defineProperty(result,Symbol("ignored"),{enumerable:true,get(){assert.fail("JSON must not read Symbol accessors");}});return result;}],
+      ["own toJSON undefined",row=>Object.assign(Object.create(null),row,{toJSON:()=>undefined})],
+      ["own toJSON null",row=>Object.assign(Object.create(null),row,{toJSON:()=>null})],
+      ["nonstring image NULL",row=>Object.assign(Object.create(null),row,{images_json:null})],
+      ["nonstring image empty BLOB",row=>Object.assign(Object.create(null),row,{images_json:new Uint8Array([])})],
+      ["nonstring image invalid number",row=>Object.assign(Object.create(null),row,{images_json:7})]
+    ];
+    for(const [label,transform]of transformations){
+      for(const target of [previous,current]){target.archive.clearListCache();target.state.rowTransform=transform;}
+      const pair=await equal(previous,current,{imageLimit:1},label);
+      assert.equal(pair.after.rowStringifyInputBytes,pair.before.rowStringifyInputBytes,label+" keeps whole legacy serialization");
+      assert.equal(pair.after.rowStringifyOutputBytes,pair.before.rowStringifyOutputBytes,label+" legacy bytes");
+      await equal(previous,current,{imageLimit:1},label+" next");
+    }
+    for(const target of [previous,current]){target.state.rowTransform=null;target.archive.clearListCache();}
+    for(const target of [previous,current]){target.state.statError=held;await assert.rejects(read(target,{imageLimit:1}),error=>error===held);target.state.statError=null;oracles++;errorOracles++;}
+    for(const stage of ["authority","cached"]){
+      await equal(previous,current,{imageLimit:1},"error warm");
+      for(const target of [previous,current]){
+        target.state.beforeRead=state=>{
+          if((stage==="authority"&&metric.reads===1)||(stage==="cached"&&metric.reads===2)){
+            state.beforeRead=null;throw held;
+          }
+        };
+      }
+      await equal(previous,current,{imageLimit:1},"swallowed native SELECT error "+stage);
+      assert.deepEqual(current.state.warnings,previous.state.warnings);
+    }
+
+    for(const target of [previous,current]){
+      target.archive.clearListCache();
+      target.db.exec('ALTER TABLE photo_set_image_indexes RENAME TO old_typed_index;CREATE TABLE photo_set_image_indexes(archive_path TEXT PRIMARY KEY,archive_size INTEGER,archive_mtime_ms REAL,archive_identity TEXT,image_count INTEGER,images_json,indexer_version INTEGER,indexed_at TEXT,updated_at TEXT);INSERT INTO photo_set_image_indexes SELECT archive_path,archive_size,archive_mtime_ms,archive_identity,image_count,images_json,indexer_version,indexed_at,updated_at FROM old_typed_index;DROP TABLE old_typed_index;');
+    }
+    let nativeImageTypes=0;
+    for(const value of [null,0,1,1.5,"","[]",stringify(baseline),new Uint8Array([]),new Uint8Array([91,93]),new Uint8Array([255])]){
+      for(const target of [previous,current]){
+        target.archive.clearListCache();
+        target.db.prepare("UPDATE photo_set_image_indexes SET images_json=?,image_count=2,indexer_version=3,archive_identity=?").run(value,target.signature.archiveIdentity);
+      }
+      const actualType=previous.db.prepare("SELECT typeof(images_json) AS storage FROM photo_set_image_indexes").get().storage;
+      await equal(previous,current,{imageLimit:1},"native images_json "+actualType+"/"+String(value));
+      await equal(previous,current,{imageLimit:1},"native images_json warm "+actualType+"/"+String(value));nativeImageTypes++;
+    }
+    async function route(target) {
+      const response=new EventEmitter();response.destroyed=false;response.writableEnded=false;const result={};
+      assert.equal(await routePhotosApi({method:"GET"},response,new URL("http://private.invalid/api/photo-sets/album?imageLimit=1"),{
+        photoSetService:target.photo,imageReaderCacheStatus:async()=>({synthetic:true}),
+        sendJson(_res,status,payload){result.status=status;result.payload=payload;response.writableEnded=true;},
+        notFound(){result.status=404;response.writableEnded=true;}
+      }),true);return result;
+    }
+    assert.equal(stringify(await route(current)),stringify(await route(previous)));oracles++;
+
+    const alternatePrevious=owner(legacyFactory,baseline),alternateCurrent=owner(measuredFactory,baseline);
+    previous.state.db=alternatePrevious.db;current.state.db=alternateCurrent.db;
+    const replaced=await equal(previous,current,{imageLimit:1},"native owner replacement");
+    assert.equal(replaced.after.parses,1);
+    previous.state.db=previous.db;current.state.db=current.db;
+    await equal(previous,current,{imageLimit:1},"native owner return");
+    // Pure rowStamp equivalence additionally covers string escaping, native
+    // scalar canonicalization, unusual providers, getters and key order.
+    const oldStampFunction=new Function(previousBlock+"\nreturn rowStamp;")();
+    const stampFunctions=new Function("types",currentBlock+"\nreturn {rowStamp,rowStampsMatch};")(types);
+    const row=(value,extra=1)=>Object.assign(Object.create(null),{archive_path:"private",images_json:value,extra});
+    const values=[null,undefined,0,1,NaN,Infinity,"","[]"," \0\n\"\\","😀","\ud800",new Uint8Array([]),new Uint8Array([1,2])];
+    let pureOracles=0;
+    for(const a of values)for(const b of values){
+      assert.equal(stampFunctions.rowStampsMatch(stampFunctions.rowStamp(row(a)),stampFunctions.rowStamp(row(b))),oldStampFunction(row(a))===oldStampFunction(row(b)));
+      pureOracles++;
+    }
+    const a=Object.assign(Object.create(null),{first:1,images_json:"[]",last:2}),b=Object.assign(Object.create(null),{last:2,images_json:"[]",first:1});
+    assert.equal(stampFunctions.rowStampsMatch(stampFunctions.rowStamp(a),stampFunctions.rowStamp(b)),false);pureOracles++;
+    const originalToJson=Object.getOwnPropertyDescriptor(Object.prototype,"toJSON");
+    try{
+      Object.defineProperty(Object.prototype,"toJSON",{configurable:true,value(){return "prototype pollution";}});
+      assert.equal(stampFunctions.rowStampsMatch(stampFunctions.rowStamp(row("[]")),stampFunctions.rowStamp(row(" [ ] "))),false);
+      assert.equal(stampFunctions.rowStamp(row("[]")).metadata,stringify(Object.assign(Object.create(null),row("[]"),{images_json:null})));pureOracles++;
+    }finally{if(originalToJson)Object.defineProperty(Object.prototype,"toJSON",originalToJson);else delete Object.prototype.toJSON;}
+
+    for(const label of ["images getter","extra getter","own toJSON"]){
+      const make=()=>{
+        const item=row("[]"),log=[];
+        if(label==="own toJSON") item.toJSON=()=>{log.push("toJSON");throw held;};
+        else Object.defineProperty(item,label==="images getter"?"images_json":"extra",{enumerable:true,configurable:true,get(){log.push(label);throw held;}});
+        return {item,log};
+      };
+      const before=make(),after=make();
+      assert.throws(()=>oldStampFunction(before.item),error=>error===held);
+      assert.throws(()=>stampFunctions.rowStamp(after.item),error=>error===held);
+      assert.deepEqual(after.log,before.log);pureOracles++;
+    }
+    for(const item of [Object(1),Object(true),Object(1n),Object(Symbol("private")),()=>{}]){
+      Object.setPrototypeOf(item,null);delete item.name;delete item.length;item.images_json="[]";
+      let before,after,oldError,nextError;
+      try{before=oldStampFunction(item);}catch(error){oldError=error;}
+      try{after=stampFunctions.rowStamp(item);}catch(error){nextError=error;}
+      if(oldError){assert(nextError);assert.equal(nextError.constructor,oldError.constructor);assert.equal(nextError.message,oldError.message);}
+      else{assert.equal(after,before,"non-native boxed or function rows retain original JSON semantics");}
+      pureOracles++;
+    }
+    for(const metadata of ['literal "images_json":null', 'escaped \\"images_json\\":null', "\n\0😀\ud800"]){
+      const native=row("[]",metadata),split=stampFunctions.rowStamp(native),whole=oldStampFunction(native);
+      assert.equal(stampFunctions.rowStampsMatch(split,whole),true);assert.equal(stampFunctions.rowStampsMatch(whole,split),true);pureOracles++;
+    }
+    for(const images of ["$&","$$","$'","$`","$1","normal"]){
+      const native=row(images),split=stampFunctions.rowStamp(native),whole=oldStampFunction(native);
+      assert.equal(stampFunctions.rowStampsMatch(split,whole),true);assert.equal(stampFunctions.rowStampsMatch(whole,split),true);pureOracles++;
+    }
+    const proxyLogs=[];
+    for(const fn of [oldStampFunction,stampFunctions.rowStamp]){
+      const log=[];const item=new Proxy(row("[]"),{get(target,key,receiver){log.push("get:"+String(key));return Reflect.get(target,key,receiver);},
+        ownKeys(target){log.push("ownKeys");return Reflect.ownKeys(target);},
+        getOwnPropertyDescriptor(target,key){log.push("descriptor:"+String(key));return Reflect.getOwnPropertyDescriptor(target,key);},
+        getPrototypeOf(target){log.push("prototype");return Reflect.getPrototypeOf(target);}});
+      fn(item);proxyLogs.push(log);
+    }
+    assert.deepEqual(proxyLogs[1],proxyLogs[0]);pureOracles++;
+
+    console.log(stringify({indexStampWork:{responseOracles:oracles-errorOracles,errorOracles,pureOracles,nativeImageTypes,metadataCases:metadataCases.length,
+      legacyProviderCases:transformations.length,owners:owners.length,distributions}}));
+    // Every complete response, legacy/native type, mutation, error and owner
+    // comparison precedes the whole former source's real serialization budget.
+    assert.equal(payloadBudget.before.rowStringifyInputBytes,3*distributions.find(item=>item.count===20000).jsonBytes);
+    assert.equal(payloadBudget.after.reads,3,"index authority retains every row read");
+    assert.equal(payloadBudget.after.stats,2,"index authority retains both physical source fences");
+    assert.equal(payloadBudget.after.parses,0,"a warm list still reuses parsed images");
+    assert.equal(payloadBudget.after.stringifyCalls,payloadBudget.before.stringifyCalls,"payload cache weight serialization remains");
+    assert.equal(payloadBudget.after.cache.listCacheBytes,payloadBudget.before.cache.listCacheBytes,"the existing 16 MiB cache budget is unchanged");
+    assert.equal(payloadBudget.after.rowStringifyInputBytes,0,"archive index authority images JSON serialization budget");
+    scenarios++;
+
+  }finally{JSON.stringify=stringify;JSON.parse=parse;for(const item of owners){await item.archive.stop();await item.photo.stop();item.dbService.close();}}
+
+}
+
 async function verifyPhotoAuthority() {
   for (const indexed of [false, true]) for (const mode of ["source", "database", "album", "album-in-place", "row", "stop", "success"]) {
     const dbA = galleryDb(), dbB = galleryDb(); let currentDb = dbA;
@@ -199,6 +612,321 @@ async function verifyPhotoAuthority() {
     assert.equal(lookupCalls>0,indexed,"cover authority must use the optional owner capability when provided");
     owner.invalidate();
   }
+}
+
+async function verifyPhotoAuthorityBytes() {
+  const file = path.join(projectRoot, "src/modules/photos/server/photo-set-service.js");
+  const source = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  const block = source.match(/  const rowStamp =[\s\S]*?(?=  function imageUrl\()/)?.[0];
+  assert(block?.includes("function authority("), "whole photo authority negative-control hook must exist");
+  const legacyBlock = [
+    '  const rowStamp = value => JSON.stringify(value && { ...value, cover_blob: value.cover_blob ? Buffer.from(value.cover_blob).toString("base64") : null });',
+    '  function authority(album, context) {',
+    '    const db = getImageGalleryDb(), stamp = rowStamp(coverRow(album, db));',
+    '    return { db, stamp, album: albumStamp(album), current: () => context.isCurrent() && getImageGalleryDb() === db && albumStamp(byId(album.id)) === albumStamp(album) && rowStamp(coverRow(album, db)) === stamp };',
+    '  }', ''
+  ].join("\n");
+  assert.notEqual(block, legacyBlock, "negative control must restore the previous authority");
+  const legacySource = source.replace(block, legacyBlock).replace(/from\s+(["'])(\.[^"']+)\1/g, (_match, _quote, relative) =>
+    "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(file), relative)).href));
+  const legacyFactory = (await import("data:text/javascript;base64," + Buffer.from(legacySource).toString("base64"))).createPhotoSetService;
+  const measuredFactory = process.argv.includes("--legacy-photo-authority") ? legacyFactory : createPhotoSetService;
+  const from = Buffer.from, toString = Buffer.prototype.toString, warn = console.warn, RealDate = Date;
+  let active = null, warnings = null;
+  Buffer.from = function(value, ...args) {
+    if (active && value instanceof Uint8Array && !args.length) active.copyBytes += value.byteLength;
+    return from.call(this, value, ...args);
+  };
+  Buffer.prototype.toString = function(encoding, ...args) {
+    const result = toString.call(this, encoding, ...args);
+    if (active && encoding === "base64") { active.base64Calls++; active.base64Bytes += this.length; active.base64Chars += result.length; }
+    return result;
+  };
+  console.warn = (...args) => { if (warnings) warnings.push(args.map(String)); else warn(...args); };
+
+  async function run(factory, options = {}) {
+    const { bytes = 64 * 1024, requests = 1, status = "ok", mode = "", indexed = true, generation = false, absent = false, alias = "", mutation } = options;
+    const owner = createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir() {} }), database = owner.getDb();
+    const otherOwner = mode === "database" ? createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir() {} }) : null;
+    database.exec("ALTER TABLE photo_set_covers ADD COLUMN extra_metadata TEXT");
+    const album = { id: "authority-bytes", sourceRoot: temporary, relativePath: "authority-bytes.zip", updatedAt: "before" };
+    const archivePath = path.join(album.sourceRoot, album.relativePath);
+    const data = Object.hasOwn(options, "blob") ? options.blob : from(bytes === 0 ? [] : new Uint8Array(bytes).fill(87));
+    if (!absent) database.prepare("INSERT INTO photo_set_covers(album_id,archive_path,archive_size,archive_mtime_ms,archive_identity,member_path,cover_mime,cover_blob,cover_bytes,source_bytes,generator_version,status,error,generated_at,updated_at,extra_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(album.id, archivePath, 7, 123.125, "identity", "cover.jpg", "image/jpeg", data, bytes, bytes, generation ? 1 : 2, status, status === "error" ? "cached error" : null, "before", "before", "original");
+    let shared = data;
+    if (alias === "buffer") shared = from(data);
+    if (alias === "offset-view") { const storage = new Uint8Array(data.length + 10); storage.set(data, 5); shared = storage.subarray(5, 5 + data.length); }
+    if (alias === "array-buffer") shared = Uint8Array.from(data).buffer;
+    const counters = { reads: 0, readBytes: 0, base64Calls: 0, base64Bytes: 0, base64Chars: 0, copyBytes: 0, signatures: 0, lookups: 0 };
+    const wrapped = {
+      exec: sql => database.exec(sql),
+      prepare(sql) {
+        const statement = database.prepare(sql);
+        if (sql !== "SELECT * FROM photo_set_covers WHERE album_id = ?") return statement;
+        return { get(...args) {
+          const row = statement.get(...args);
+          if (active) { counters.reads++; if (row?.cover_blob instanceof Uint8Array) counters.readBytes += row.cover_blob.byteLength; }
+          if (alias && row) row.cover_blob = shared;
+          return row;
+        } };
+      }
+    };
+    let currentDb = wrapped, calls = 0, service;
+    service = factory({
+      archiveImageExts: new Set([".jpg"]), coverGeneratorVersion: 2, coverHints: new Set(["cover"]), coverMaxBytes: 1024 * 1024,
+      mimeTypes: { ".jpg": "image/jpeg" }, getImageGalleryDb: () => currentDb, getImageLibraryIndex: () => ({ photoSets: [album] }),
+      photoSetById: indexed ? id => { counters.lookups++; return id === album.id ? album : null; } : undefined,
+      safeChildPath: (root, relative) => path.join(root, relative), normalizeExt: value => path.extname(value).toLowerCase(), fileBase: value => path.parse(value).name,
+      archiveImageSignature: async target => {
+        counters.signatures++;
+        if (++calls === 2) {
+          mutation?.(database, shared);
+          if (mode === "database") currentDb = otherOwner.getDb();
+          if (mode === "album") album.updatedAt = "after";
+          if (mode === "stop") service.beginStop();
+        }
+        return { archivePath: target, archiveSize: 7, archiveMtimeMs: 123.125, archiveIdentity: mode === "source" && calls === 2 ? "changed" : "identity" };
+      },
+      listArchiveImages: () => generation ? [{ path: "cover.jpg", bytes: 3 }] : absent ? [] : assert.fail("matching cached cover must not relist"),
+      extractArchiveMemberToCache: async (_archive, _member, target) => { fs.writeFileSync(target, "AAA"); },
+      compressImageFileToJpeg: () => assert.fail("small explicit synthetic cover must not compress"),
+      notFound: res => { res.writeHead(404); res.end("missing"); }
+    });
+    const results = [], logs = []; let row;
+    // Only publication timestamps are fixed; deadlines still use the real Date.now().
+    globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ["2026-10-04T00:00:00.000Z"])); } };
+    active = counters; warnings = logs;
+    try {
+      for (let index = 0; index < requests; index++) {
+        const res = response();
+        res.writeHead = (code, headers = {}) => { res.statusCode = code; res.headers = headers; };
+        await service.serveCover(res, album.id);
+        results.push({ status: res.statusCode, headers: res.headers, body: res.body });
+      }
+    } finally {
+      active = null; warnings = null; globalThis.Date = RealDate;
+      try { row = database.prepare("SELECT * FROM photo_set_covers").get(); await service.stop(); }
+      finally { owner.close(); otherOwner?.close(); }
+    }
+    return { results, row, logs, counters };
+  }
+
+  try {
+    const budgets = [];
+    let oracles = 0;
+    async function compare(name, options) {
+      const old = await run(legacyFactory, options), current = await run(measuredFactory, options);
+      assert.deepEqual(current.results, old.results, name + " complete headers/status/body");
+      assert.deepEqual(current.row, old.row, name + " complete cover row");
+      assert.deepEqual(current.logs, old.logs, name + " error behavior");
+      assert.equal(current.counters.reads, old.counters.reads, name + " authority read fences");
+      assert.equal(current.counters.signatures, old.counters.signatures, name + " source fences");
+      assert.equal(current.counters.lookups, old.counters.lookups, name + " album fences");
+      if (options.expected !== undefined) assert.equal(current.results[0].status, options.expected, name);
+      oracles++;
+      return { old, current };
+    }
+    // Synthetic 64 KiB and configured 1 MiB maximum: the budget measures work, not timing.
+    for (const bytes of [64 * 1024, 1024 * 1024]) budgets.push({ bytes, ...(await compare("warm-" + bytes, { bytes, requests: 64, expected: 200 })) });
+    const cases = [
+      ["stable", { expected: 200 }],
+      ["same-length-content", { mutation: db => db.prepare("UPDATE photo_set_covers SET cover_blob=?").run(from(new Uint8Array(64 * 1024).fill(88))), expected: 503 }],
+      ["different-length", { mutation: db => db.prepare("UPDATE photo_set_covers SET cover_blob=?").run(from("changed")), expected: 503 }],
+      ["delete-row", { mutation: db => db.exec("DELETE FROM photo_set_covers"), expected: 503 }],
+      ["empty-blob", { blob: from([]), expected: 200 }], ["null-blob", { blob: null, expected: 404 }],
+      ["text-blob", { blob: "unicode中文", expected: 200 }], ["empty-text", { blob: "", expected: 404 }],
+      ["zero", { blob: 0, expected: 404 }], ["invalid-integer", { blob: 1, expected: 404 }],
+      ["empty-to-null", { blob: from([]), mutation: db => db.exec("UPDATE photo_set_covers SET cover_blob=NULL"), expected: 503 }],
+      ["null-to-zero", { blob: null, mutation: db => db.exec("UPDATE photo_set_covers SET cover_blob=0"), expected: 404 }],
+      ["null-to-empty-text", { blob: null, mutation: db => db.exec("UPDATE photo_set_covers SET cover_blob=''"), expected: 404 }],
+      ["text-to-bytes", { blob: "AAA", mutation: db => db.prepare("UPDATE photo_set_covers SET cover_blob=?").run(from("AAA")), expected: 200 }],
+      ["error-row", { status: "error", expected: 404 }], ["absent-row", { absent: true, expected: 404 }]
+    ];
+    for (const mode of ["source", "database", "album", "stop"]) cases.push([mode, { mode, expected: 503 }]);
+    for (const alias of ["buffer", "offset-view", "array-buffer"]) cases.push([alias, { alias, mutation: (_db, shared) => { new Uint8Array(shared instanceof ArrayBuffer ? shared : shared.buffer, shared.byteOffset || 0, shared.byteLength)[0] = 88; }, expected: 503 }]);
+    for (const column of ["archive_path", "archive_size", "archive_mtime_ms", "archive_identity", "member_path", "cover_mime", "cover_bytes", "source_bytes", "generator_version", "status", "error", "generated_at", "updated_at", "extra_metadata"]) {
+      cases.push([column, { mutation: db => db.prepare("UPDATE photo_set_covers SET " + column + "=?").run(["archive_size", "archive_mtime_ms", "cover_bytes", "source_bytes", "generator_version"].includes(column) ? 999 : "changed"), expected: 503 }]);
+    }
+    cases.push(["generation", { generation: true, expected: 200 }],
+      ["generation-content", { generation: true, mutation: db => db.prepare("UPDATE photo_set_covers SET cover_blob=?").run(from(new Uint8Array(64 * 1024).fill(88))), expected: 503 }],
+      ["generation-extra-field", { generation: true, mutation: db => db.exec("UPDATE photo_set_covers SET extra_metadata='changed'"), expected: 503 }]);
+    for (const mode of ["source", "database", "album", "stop"]) cases.push(["generation-" + mode, { generation: true, mode, expected: 503 }]);
+    for (const indexed of [false, true]) for (const [name, options] of cases) await compare(name + "-" + indexed, { ...options, indexed });
+    console.log("photo-authority-bytes: " + oracles + " complete response/row/error oracles passed");
+    for (const { bytes, old, current } of budgets) {
+      assert.equal(old.counters.reads, 256); assert.equal(old.counters.readBytes, 256 * bytes);
+      assert.equal(old.counters.base64Calls, 192); assert.equal(old.counters.base64Bytes, 192 * bytes);
+      assert.equal(old.counters.copyBytes, 256 * bytes, "old source must exercise the previous byte-copy work");
+      assert.equal(current.counters.reads, 256); assert.equal(current.counters.readBytes, 256 * bytes);
+      assert.equal(current.counters.base64Calls, 0, "photo authority must not encode BLOBs as Base64");
+      assert.equal(current.counters.copyBytes, 128 * bytes, "only the independent baseline and response copies remain");
+    }
+    scenarios += oracles;
+  } finally { active = null; warnings = null; Buffer.from = from; Buffer.prototype.toString = toString; console.warn = warn; globalThis.Date = RealDate; }
+}
+
+async function verifyPhotoCoverSelection() {
+  const file = path.join(projectRoot, "src/modules/photos/server/photo-set-service.js");
+  const source = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf("  function selectCoverImage("), end = source.indexOf("  async function coverBlobFromFile(", start);
+  assert(start >= 0 && end > start, "whole cover selector control hook must exist");
+  const currentSelector = source.slice(start, end).trimEnd();
+  const oldSelector = `  function selectCoverImage(images = []) {
+    const candidates = images.filter((image) => image?.path);
+    if (!candidates.length) return null;
+
+    const explicit = candidates
+      .map((image, index) => {
+        const hintScore = coverHintScore(image);
+        const depth = archiveMemberDepth(image.path);
+        const ext = normalizeExt(image.path);
+        const tieScore = (depth <= 1 ? 40 : Math.max(0, 30 - depth * 5)) + ([".jpg", ".jpeg", ".webp", ".png"].includes(ext) ? 10 : 0);
+        return { image, index, score: hintScore + tieScore, hintScore };
+      })
+      .filter((item) => item.hintScore > 0)
+      .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+
+    if (explicit) return { image: explicit.image, isExplicitCover: true };
+    return { image: candidates[0], isExplicitCover: false };
+  }`;
+  assert.notEqual(currentSelector, oldSelector, "negative control must restore the prior selector");
+  async function factory(text, expose = false) {
+    if (expose) {
+      text = text.replace("    archivePath,\n    byId,", "    selectCoverImage,\n    archivePath,\n    byId,");
+      assert(text.includes("    selectCoverImage,\n    archivePath,"), "direct selector observation hook must exist");
+    }
+    text = text.replace(/from\s+(["'])(\.[^"']+)\1/g, (_match, _quote, relative) =>
+      "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(file), relative)).href));
+    return (await import("data:text/javascript;base64," + Buffer.from(text).toString("base64"))).createPhotoSetService;
+  }
+  const legacySource = source.replace(currentSelector, oldSelector);
+  const legacyFactory = await factory(legacySource);
+  const activeFactory = process.argv.includes("--legacy-photo-selection") ? legacyFactory : createPhotoSetService;
+  const directFactories = [await factory(legacySource, true), await factory(process.argv.includes("--legacy-photo-selection") ? legacySource : source, true)];
+  const hints = ["cover", "poster", "folder", "front", "fanart", "thumb", "thumbnail", "封面"];
+  const methods = { fileBase: value => path.basename(value, path.extname(value)), normalizeExt: value => path.extname(value).toLowerCase() };
+  const realMap = Array.prototype.map, realReduce = Array.prototype.reduce, realSort = Array.prototype.sort, RealDate = Date, warn = console.warn;
+  let measured = null;
+  Array.prototype.map = function(callback, thisArg) {
+    return realMap.call(this, function(value, index, array) {
+      const result = callback.call(this, value, index, array);
+      if (measured && result && Object.hasOwn(result, "score") && Object.hasOwn(result, "image")) measured.records++;
+      return result;
+    }, thisArg);
+  };
+  Array.prototype.reduce = function(callback, ...rest) {
+    return realReduce.call(this, (best, value, index, array) => {
+      const result = callback(best, value, index, array);
+      if (measured && result !== best && result && Object.hasOwn(result, "score") && Object.hasOwn(result, "image")) measured.records++;
+      return result;
+    }, ...rest);
+  };
+  Array.prototype.sort = function(callback) {
+    if (measured && this.length && Object.hasOwn(this[0], "score") && Object.hasOwn(this[0], "image")) {
+      const counters = measured; counters.sorts++;
+      return realSort.call(this, (a, b) => { counters.comparisons++; return callback(a, b); });
+    }
+    return realSort.call(this, callback);
+  };
+  globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ["2026-10-04T00:00:00.000Z"])); } };
+  const sparse = []; sparse.length = 8; sparse[2] = { path: "first.jpg" }; sparse[6] = { path: "cover.jpg" };
+  const shapes = [[], [null, undefined, {}, { path: "" }], [{ path: "first.jpg" }, { path: "later.png" }],
+    [{ path: "cover.jpg" }, { path: "cover.png" }], [{ path: "x/cover.jpg" }, { path: "cover.jpg" }],
+    [{ path: "part_cover.jpg" }, { path: "folder.jpg" }, { path: "x/cover.bmp" }],
+    [{ path: "封面.jpg" }, { path: "cover.jpg" }], [{ path: "p\\cover.PNG" }, { path: "cover.webp" }],
+    [{ path: "cover.bmp" }, { path: "cover.jpeg" }], [{ path: "a/b/c/d/e/f/cover.gif" }, { path: "poster.jpg" }], sparse];
+  let directOracles = 0, ownerOracles = 0;
+  async function owner(make, images, options = {}) {
+    const storage = createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir() {} }), database = storage.getDb();
+    const album = { id: "selection", sourceRoot: temporary, relativePath: "selection.zip", updatedAt: "fixed" };
+    const log = [], counters = { records: 0, sorts: 0, comparisons: 0 };
+    const calls = { fileBase: 0, normalizeExt: 0, signature: 0, extract: 0, compress: 0 };
+    let selected = null; const errors = [], error = new Error("controlled selector dependency failure");
+    const wrapper = (name, operation) => value => {
+      calls[name]++; log.push([name, value]);
+      if (options.fail === name && calls[name] === 3) throw error;
+      return operation(value);
+    };
+    const service = make({ archiveImageExts: new Set([".jpg", ".png", ".webp", ".bmp"]), coverGeneratorVersion: 2,
+      coverHints: new Set(hints), coverMaxBytes: 1024 * 1024, mimeTypes: { ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".bmp": "image/bmp" },
+      getImageGalleryDb: () => database, getImageLibraryIndex: () => ({ photoSets: [album] }), safeChildPath: (root, relative) => path.join(root, relative),
+      fileBase: wrapper("fileBase", methods.fileBase), normalizeExt: wrapper("normalizeExt", methods.normalizeExt),
+      archiveImageSignature: async target => { calls.signature++; return { archivePath: target, archiveSize: 7, archiveMtimeMs: 123.125, archiveIdentity: "fixed" }; },
+      listArchiveImages: async () => images,
+      extractArchiveMemberToCache: async (_archive, member, target) => { calls.extract++; selected = member; fs.writeFileSync(target, "RAW:" + member); },
+      compressImageFileToJpeg: async () => { calls.compress++; return Buffer.from("JPEG:" + selected); },
+      notFound: res => { res.writeHead(404); res.end("missing"); } });
+    const res = response(); res.writeHead = (status, headers = {}) => { res.statusCode = status; res.headers = headers; };
+    console.warn = (...args) => errors.push(args.map(String)); measured = options.measure ? counters : null;
+    let row;
+    try { await service.serveCover(res, album.id); }
+    finally {
+      measured = null; console.warn = warn;
+      try { row = database.prepare("SELECT * FROM photo_set_covers").get(); await service.stop(); }
+      finally { storage.close(); }
+    }
+    return { payload: { status: res.statusCode, headers: res.headers, body: res.body }, row, selected, errors, log, calls, counters };
+  }
+  try {
+    const direct = directFactories.map(make => make({ coverHints: new Set(hints), ...methods }));
+    try {
+      for (const images of shapes) {
+        const old = direct[0].selectCoverImage(images), current = direct[1].selectCoverImage(images);
+        assert.deepEqual(current, old); if (old) assert.strictEqual(current.image, old.image, "retain the selected input object");
+        directOracles++;
+      }
+    } finally { await Promise.all(direct.map(service => service.stop())); }
+    const heldError = new Error("held selector error");
+    for (const mode of ["getter", "changing-path", "has-error", "empty-stem", "invalid-path", "bad-stem"]) {
+      const values = [];
+      for (const make of directFactories) {
+        const log = [], images = ["cover.jpg", "later.jpg", "folder.png"].map((member, index) => { let reads = 0; return {
+          get path() { log.push(["path", index, ++reads]); return mode === "changing-path" && index === 0 && reads > 1 ? "" : mode === "invalid-path" && index === 1 ? 123 : member; },
+          get name() { log.push(["name", index]); return "poster.jpg"; }
+        }; });
+        const service = make({ coverHints: { has(value) { log.push(["has", value]); if (mode === "has-error") throw heldError; return hints.includes(value); } },
+          fileBase(value) { log.push(["fileBase", value]); return mode === "bad-stem" ? null : mode === "empty-stem" ? "" : methods.fileBase(value); },
+          normalizeExt(value) { log.push(["normalizeExt", value]); return methods.normalizeExt(value); } });
+        let result, error;
+        try { const value = service.selectCoverImage(images); result = value ? { index: images.indexOf(value.image), explicit: value.isExplicitCover } : null; }
+        catch (caught) { error = caught; }
+        if (mode === "has-error") assert.strictEqual(error, heldError);
+        values.push({ log, result, error: error ? { name: error.name, message: error.message } : null }); await service.stop();
+      }
+      assert.deepEqual(values[1], values[0], mode);
+      if (mode === "getter") assert.deepEqual(values[0].log.slice(0, 3), [["path", 0, 1], ["path", 1, 1], ["path", 2, 1]], "complete filtering precedes any scoring");
+      directOracles++;
+    }
+    async function compare(images, options = {}) {
+      const old = await owner(legacyFactory, images, options), current = await owner(activeFactory, images, options);
+      for (const key of ["payload", "row", "selected", "errors", "log", "calls"]) assert.deepEqual(current[key], old[key], "complete owner " + key);
+      if (options.fail) assert.equal(current.calls.extract, 0, "a later scoring error must still prevent extraction");
+      ownerOracles++; return { old, current };
+    }
+    for (const images of shapes) await compare(images);
+    for (const fail of ["fileBase", "normalizeExt"]) await compare([{ path: "cover.jpg" }, { path: "later.jpg" }, { path: "later2.png" }], { fail });
+    const budgets = [];
+    for (const kind of ["none", "one", "many"]) {
+      const images = Array.from({ length: 50_000 }, (_, index) => {
+        const stem = kind === "none" ? "image-" + index : kind === "one" ? (index === 49_999 ? "cover" : "image-" + index)
+          : ["cover", "part_cover_2", "bookcover2", "poster", "part_poster_2"][(index * 17) % 5];
+        const depth = (index * 29) % 8, ext = [".jpg", ".PNG", ".webp", ".bmp"][(index * 13) % 4];
+        return { path: Array.from({ length: depth }, (_, part) => "d" + part).join("/") + (depth ? "/" : "") + stem + "-" + (kind === "many" ? index : "") + ext };
+      });
+      budgets.push({ kind, ...(await compare(images, { measure: true })) });
+    }
+    console.log("photo-cover-selection: " + directOracles + " selector and " + ownerOracles + " complete owner oracles passed");
+    for (const { kind, old, current } of budgets) {
+      assert.equal(old.counters.records, 50_000, "old selector must create every score record");
+      assert.equal(current.calls.fileBase, 50_000); assert.equal(current.calls.normalizeExt, 50_003);
+      if (kind === "many") assert(old.counters.comparisons >= 49_999, "old mixed-hint source must perform real sorting");
+      assert(current.counters.records <= 64, "cover selector score-record allocation budget: observed " + current.counters.records);
+      assert.equal(current.counters.sorts, 0, "cover selector must not sort score records");
+      assert.equal(current.counters.comparisons, 0);
+    }
+    scenarios += directOracles + ownerOracles;
+  } finally { measured = null; Array.prototype.map = realMap; Array.prototype.reduce = realReduce; Array.prototype.sort = realSort; globalThis.Date = RealDate; console.warn = warn; }
 }
 
 async function verifyAsyncInventory() {
@@ -513,8 +1241,10 @@ function cleanupOwnedRoot() {
 
 try {
   if (!inlineCase) {
-    await verifyBoundedPool();await verifyChildCloseOwnership();await verifyIndexAuthority();await verifyOldSchemaAndZipIdentity();await verifyPhotoAuthority();await verifyAsyncInventory();await verifyCacheInterleavingAndLinks();await verifyWarmCoverIdentity();await verifyLateTargetJunction();await verifyHostDrain();
+    await verifyBoundedPool();await verifyChildCloseOwnership();await verifyIndexAuthority();await verifyOldSchemaAndZipIdentity();await verifyPhotoAuthority();await verifyPhotoAuthorityBytes();await verifyPhotoCoverSelection();await verifyAsyncInventory();await verifyCacheInterleavingAndLinks();await verifyWarmCoverIdentity();await verifyLateTargetJunction();await verifyHostDrain();
   }
+  if (!inlineCase) await verifyIndexStampWork();
+  if (!inlineCase || inlineCase === "photo-detail-paging") await verifyPhotoDetailPaging();
   await verifyAsyncInlineOwnership();
   assert(scenarios > 0, `No async inline scenario matched ${inlineCase}`);
   console.log(`archive-reader-lifecycle: ok (${scenarios} scenarios; controlled children/stat, synthetic ZIP, private SQLite)`);

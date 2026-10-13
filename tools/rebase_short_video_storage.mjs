@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import crypto from "node:crypto";
 import { backup, DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
@@ -22,13 +23,29 @@ if (apply && !args["offline-confirmed"]) {
   throw new Error("存储重定位必须先停止 FanHao/下载器写入，再显式传入 --offline-confirmed");
 }
 
-if (!fs.existsSync(destination)) throw new Error(`目标媒体库不存在：${destination}`);
+if (!fs.existsSync(destination) && (apply || !args["allow-missing-destination"])) throw new Error(`目标媒体库不存在：${destination}`);
 if (source.toLowerCase() === destination.toLowerCase()) throw new Error("新旧媒体库路径相同");
 
 const databases = [
   { kind: "manager", file: path.resolve(args["manager-db"] || defaults.managerDb) },
   { kind: "fanhao", file: path.resolve(args["fanhao-db"] || defaults.fanhaoDb) }
 ];
+
+// Validate all databases before the manager can be changed. Historical delete
+// receipts remain immutable; a completed tombstone may only gain a new alias.
+for (const target of databases) {
+  if (!fs.existsSync(target.file)) throw new Error(`数据库不存在：${target.file}`);
+  if (target.kind === "fanhao" && (apply || args["check-offline"])) {
+    const db = new DatabaseSync(target.file, { readOnly: true });
+    try { assertDeleteProtocolOfflineBoundary(db, source); } finally { db.close(); }
+  }
+}
+if (args["preflight-only"]) {
+  if (!args["check-offline"] || apply) throw new Error("--preflight-only 必须配合 --check-offline，且不能配合 --apply");
+  if (args["cover-db"] && !fs.existsSync(path.resolve(args["cover-db"]))) throw new Error("封面数据库不存在");
+  console.log("离线边界和数据库路径预检通过；未修改数据。");
+  process.exit(0);
+}
 
 let totalMatches = 0;
 let totalChanges = 0;
@@ -46,12 +63,24 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
   const db = new DatabaseSync(target.file, { readOnly: !shouldApply });
   db.exec("PRAGMA busy_timeout = 10000");
   if (shouldApply && target.kind === "fanhao") assertDeleteProtocolOfflineBoundary(db, from);
-  if (shouldApply) {
+  if (shouldApply && !args["no-backup"]) {
     const backupDir = path.join(path.dirname(target.file), "backups");
     fs.mkdirSync(backupDir, { recursive: true });
     const backupPath = path.join(backupDir, `${path.basename(target.file, ".sqlite")}-before-storage-migration-${timestampForFile()}.sqlite`);
     await backup(db, backupPath);
     console.log(`${target.kind}: 已备份 ${backupPath}`);
+  }
+  if (shouldApply && args["no-backup"]) console.log(`${target.kind}: 按要求跳过数据库备份`);
+  let coverRows = [];
+  if (shouldApply && target.kind === "fanhao" && args["cover-db"]) {
+    const coverPath = path.resolve(args["cover-db"]);
+    if (!fs.existsSync(coverPath)) throw new Error(`封面数据库不存在：${coverPath}`);
+    db.prepare("ATTACH DATABASE ? AS migration_covers").run(coverPath);
+    coverRows = db.prepare(`
+      SELECT v.id, v.source_path, v.size_bytes, v.mtime_ms, c.generation_version, c.source_fingerprint
+      FROM short_videos v JOIN migration_covers.short_video_covers c ON c.video_id = v.id
+      WHERE instr(v.source_path, ?) > 0
+    `).all(from);
   }
   const candidates = textColumns(db, {
     excludedTables: target.kind === "fanhao" ? shortVideoDeleteProtocolTables() : new Set()
@@ -65,6 +94,9 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
 
   if (shouldApply) db.exec("BEGIN IMMEDIATE");
   try {
+    if (shouldApply && target.kind === "fanhao" && args["preserve-completed-tombstones"]) {
+      preserveCompletedTombstoneAliases(db, from, to);
+    }
     for (const candidate of candidates) {
       const table = quoteIdentifier(candidate.table);
       const column = quoteIdentifier(candidate.column);
@@ -93,6 +125,15 @@ async function inspectOrRebase(target, from, to, managerStorageRoot, shouldApply
           }
         }
       }
+    }
+    if (shouldApply && coverRows.length) {
+      const update = db.prepare("UPDATE migration_covers.short_video_covers SET source_fingerprint = ? WHERE video_id = ? AND source_fingerprint = ?");
+      let preserved = 0;
+      for (const row of coverRows) {
+        if (coverFingerprint(row, row.source_path) !== row.source_fingerprint) continue;
+        preserved += Number(update.run(coverFingerprint(row, row.source_path.replaceAll(from, to)), row.id, row.source_fingerprint).changes);
+      }
+      console.log(`fanhao: 保留 ${preserved} 个已有封面，仅更新路径指纹`);
     }
     if (shouldApply && target.kind === "fanhao") assertShortVideoReferenceProjection(db);
     if (shouldApply) db.exec("COMMIT");
@@ -147,10 +188,58 @@ function assertDeleteProtocolOfflineBoundary(db, from) {
       SELECT COUNT(*) AS count FROM short_video_path_tombstones
       WHERE state = 'active' AND instr(original_path, ?) > 0
     `).get(from)?.count || 0);
-    if (tombstones) {
+    if (tombstones && !args["preserve-completed-tombstones"]) {
       throw new Error("旧存储根仍有短视频删除墓碑；必须先由受控恢复流程处理，不能批量改写内部安全表");
     }
+    if (tombstones) completedTombstoneRows(db, from);
   }
+}
+
+function completedTombstoneRows(db, from) {
+  const rows = db.prepare(`
+    SELECT tombstone.*, job.status AS job_status
+    FROM short_video_path_tombstones tombstone
+    LEFT JOIN short_video_delete_jobs job ON job.id = tombstone.job_id
+    WHERE tombstone.state = 'active' AND instr(tombstone.original_path, ?) > 0
+  `).all(from);
+  for (const row of rows) {
+    if (row.job_status !== "completed") throw new Error("删除墓碑不属于已完成作业，拒绝迁移");
+    if (fs.existsSync(row.original_path)) throw new Error("已删除路径仍有文件，拒绝迁移墓碑");
+  }
+  return rows;
+}
+
+function preserveCompletedTombstoneAliases(db, from, to) {
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+  if (!tables.has("short_video_path_tombstones")) return;
+  const rows = completedTombstoneRows(db, from);
+  const insert = db.prepare(`INSERT OR IGNORE INTO short_video_path_tombstones
+    (path_key, job_id, original_path, real_path_key, identity_key, state, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const read = db.prepare("SELECT * FROM short_video_path_tombstones WHERE path_key = ?");
+  const keyFrom = from.replaceAll("\\", "/").toLowerCase();
+  const keyTo = to.replaceAll("\\", "/").toLowerCase();
+  let added = 0;
+  for (const row of rows) {
+    const originalPath = row.original_path.replaceAll(from, to);
+    const key = row.path_key.replaceAll(keyFrom, keyTo);
+    if (fs.existsSync(originalPath)) throw new Error("目标目录出现已删除路径，拒绝切换");
+    const current = read.get(key);
+    if (current && (current.job_id !== row.job_id || current.state !== row.state || current.original_path !== originalPath)) {
+      throw new Error("目标目录删除墓碑冲突，拒绝切换");
+    }
+    added += Number(insert.run(key, row.job_id, originalPath,
+      row.real_path_key.replaceAll(keyFrom, keyTo), row.identity_key,
+      row.state, row.created_at, row.updated_at).changes);
+  }
+  console.log(`fanhao: 保留历史删除回执，新增 ${added} 个目标路径保护`);
+}
+
+function coverFingerprint(row, sourcePath) {
+  return crypto.createHash("sha1").update([
+    sourcePath, Math.max(0, Math.floor(Number(row.size_bytes || 0))),
+    Math.max(0, Math.floor(Number(row.mtime_ms || 0))), Number(row.generation_version || 1)
+  ].join(":"), "utf8").digest("hex");
 }
 
 function assertShortVideoReferenceProjection(db) {
@@ -197,7 +286,7 @@ function parseArgs(values) {
     const token = values[index];
     if (!token.startsWith("--")) throw new Error(`无法识别参数：${token}`);
     const key = token.slice(2);
-    if (["apply", "offline-confirmed"].includes(key)) {
+    if (["apply", "offline-confirmed", "no-backup", "allow-missing-destination", "check-offline", "preflight-only", "preserve-completed-tombstones"].includes(key)) {
       parsed[key] = true;
       continue;
     }

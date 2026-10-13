@@ -60,6 +60,221 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
     browser = await chromium.launch({ executablePath, headless: true });
     for (const ignoreAbort of [true, false]) {
       const transport = ignoreAbort ? "ignore-abort" : "normal";
+      await run(`detail metadata releases standalone host before catalog ${transport}`, async () => {
+        const catalog = hold(url => url.pathname === "/api/novels/A/catalog");
+        const page = await newPage({ real: true, ignoreAbort, route: "/novels/A", waitReady: false });
+        try {
+          await requested(catalog); await ready(page); await detailTitle(page, "Book A");
+          assert.equal(await page.locator(".novel-detail-title").isVisible(), true, "metadata must be visible while the catalog response is still held");
+          assert.equal(await page.evaluate(() => getComputedStyle(document.body).visibility), "visible", "the standalone host must release its body visibility gate");
+          assert.equal(await page.locator(".novel-catalog-loading").textContent(), "正在读取章节目录…");
+          assert.equal(await page.locator(".novel-detail-actions button").filter({ hasText: "开始阅读" }).isEnabled(), true);
+          assert.equal(new URL(page.url()).pathname, "/novels/A");
+          await page.setViewportSize({ width: 1280, height: 600 });
+          await page.evaluate(() => window.scrollTo(0, 180)); await tick(page);
+          const scroll = await page.evaluate(() => window.scrollY); assert(scroll > 0);
+          await settle(page, catalog);
+          assert.equal(await page.locator(".novel-catalog-grid button").count(), 3);
+          assert.equal(await page.evaluate(() => window.scrollY), scroll, "late catalog rendering preserves the user's detail scroll");
+        } finally { await page.close(); }
+      });
+
+      await run(`detail metadata switches books before new catalog ${transport}`, async () => {
+        const page = await newPage({ ignoreAbort });
+        try {
+          await page.evaluate(() => fixture.page.openBook("A")); await detailTitle(page, "Book A");
+          await page.waitForFunction(() => !fixture.state.novel.catalogLoading);
+          const catalog = hold(url => url.pathname === "/api/novels/B/catalog");
+          await page.evaluate(() => { fixture.pending.push(fixture.page.openBook("B")); }); await requested(catalog);
+          await detailTitle(page, "Book B");
+          assert.equal(await page.locator(".novel-detail-title").isVisible(), true);
+          assert.equal(await page.locator(".novel-catalog-loading").textContent(), "正在读取章节目录…");
+          assert.equal(await page.locator(".novel-catalog-grid button").count(), 0, "A's catalog cannot remain under B's metadata");
+          assert.equal(await page.evaluate(() => fixture.state.novel.loading), false);
+          assert.equal(new URL(page.url()).pathname, "/novels/B");
+          await settle(page, catalog);
+          assert((await page.locator(".novel-catalog-grid").textContent()).includes("B Chapter 1"));
+        } finally { await page.close(); }
+      });
+
+      for (const error of ["", "obsolete catalog error"]) for (const target of ["home", "book", "reader"]) {
+        await run(`detail metadata pending catalog yields to ${target} ${error ? "error" : "success"} ${transport}`, async () => {
+          const catalog = hold(url => url.pathname === "/api/novels/A/catalog", error);
+          const page = await newPage({ real: true, ignoreAbort, route: "/novels/A", waitReady: false });
+          try {
+            await requested(catalog); await ready(page); await detailTitle(page, "Book A");
+            if (target === "home") {
+              await page.locator(".novel-breadcrumbs button").filter({ hasText: "小说书库" }).click();
+              await page.locator(".novel-book-row").first().waitFor();
+            } else if (target === "book") {
+              await navigateRoute(page, "/novels/B"); await detailTitle(page, "Book B");
+              await page.waitForFunction(() => !document.querySelector(".novel-catalog-loading"));
+            } else {
+              await page.locator(".novel-detail-actions button").filter({ hasText: "开始阅读" }).click();
+              await readerTitle(page, "A", 1);
+            }
+            const selector = target === "home" ? ".novel-home" : target === "book" ? ".novel-detail" : ".novel-reader-page";
+            await page.evaluate(selector => { window.__currentDetailDestination = document.querySelector(selector); }, selector);
+            const route = new URL(page.url()).pathname;
+            await finishOld(page, catalog, ignoreAbort);
+            assert.equal(await page.evaluate(selector => window.__currentDetailDestination === document.querySelector(selector), selector), true, "obsolete catalog completion cannot rebuild the new destination");
+            assert.equal(new URL(page.url()).pathname, route);
+            assert(!(await page.locator("#workGrid").textContent()).includes("obsolete catalog error"));
+            assert(await page.evaluate(url => __transport.aborted.includes(url), catalog.url), "leaving early detail must abort its catalog read");
+          } finally { await page.close(); }
+        });
+      }
+
+      await run(`detail metadata catalog failure retries without rereading metadata ${transport}`, async () => {
+        const page = await newPage({ ignoreAbort });
+        try {
+          const metadataBefore = countRequests(url => url.pathname === "/api/novels/A");
+          const failed = hold(url => url.pathname === "/api/novels/A/catalog", "controlled catalog failure");
+          await page.evaluate(() => fixture.page.openBook("A")); await requested(failed); await detailTitle(page, "Book A");
+          await settle(page, failed);
+          assert.equal(await page.locator(".novel-catalog-loading.error").textContent(), "controlled catalog failure");
+          const retry = hold(url => url.pathname === "/api/novels/A/catalog");
+          await page.locator(".novel-catalog button").filter({ hasText: "重试目录" }).click(); await requested(retry);
+          assert.equal(await page.locator(".novel-catalog-loading").textContent(), "正在读取章节目录…");
+          assert.equal(await page.locator(".novel-detail-title").isVisible(), true);
+          await settle(page, retry);
+          assert.equal(await page.locator(".novel-catalog-grid button").count(), 3);
+          assert.equal(countRequests(url => url.pathname === "/api/novels/A"), metadataBefore + 1, "catalog retry cannot duplicate the metadata request");
+          await page.locator(".novel-detail-actions button").filter({ hasText: "开始阅读" }).click(); await readerTitle(page, "A", 1);
+        } finally { await page.close(); }
+      });
+
+      for (const catalogError of ["", "controlled catalog failure"]) await run(`detail metadata ${catalogError ? "failed" : "interrupted"} catalog remains retryable after chapter failure ${transport}`, async () => {
+        const page = await newPage({ ignoreAbort });
+        try {
+          const catalog = hold(url => url.pathname === "/api/novels/A/catalog", catalogError);
+          await page.evaluate(() => fixture.page.openBook("A")); await requested(catalog); await detailTitle(page, "Book A");
+          if (catalogError) await settle(page, catalog);
+          const chapterRead = hold(url => url.pathname === "/api/novels/A/chapters/1", "controlled chapter failure");
+          await page.locator(".novel-detail-actions button").filter({ hasText: "开始阅读" }).click(); await requested(chapterRead);
+          assert.equal(await page.locator(".novel-detail .novel-status-line").textContent(), "正在翻开章节");
+          if (!catalogError) await finishOld(page, catalog, ignoreAbort);
+          await settle(page, chapterRead);
+          assert.equal(await page.evaluate(() => fixture.state.novel.catalogLoading), false, "cancelling a catalog cannot leave an eternal loading indicator");
+          assert.equal(await page.locator(".novel-detail-title").textContent(), "Book A");
+          assert.equal(await page.locator(".novel-detail .novel-status-line").textContent(), "controlled chapter failure");
+          assert.equal(await page.locator(".novel-detail .novel-status-line").isVisible(), true);
+          assert.equal(await page.locator(".novel-catalog-loading.error").textContent(), catalogError || "章节目录读取已中断，请重试");
+          const retry = hold(url => url.pathname === "/api/novels/A/catalog");
+          await page.locator(".novel-catalog button").filter({ hasText: "重试目录" }).click(); await requested(retry); await settle(page, retry);
+          assert.equal(await page.locator(".novel-catalog-grid button").count(), 3);
+          await page.locator(".novel-breadcrumbs button").filter({ hasText: "小说书库" }).click();
+          await page.locator(".novel-book-row").first().waitFor(); assert.equal(await page.locator(".novel-detail").count(), 0);
+        } finally { await page.close(); }
+      });
+
+      await run(`reader catalog loading renders 1000 paragraphs once and reuses cached catalog ${transport}`, async () => {
+        const page = await newPage({ ignoreAbort });
+        try {
+          const reply = chapterResponse("A", 1);
+          reply.chapter.content = Array.from({ length: 1000 }, (_, index) => `Synthetic long paragraph ${index}. No real library content.`).join("\n\n");
+          const chapterRead = hold(url => url.pathname === "/api/novels/A/chapters/1", "", reply);
+          await launchChapter(page, "A", 1); await requested(chapterRead); await settle(page, chapterRead); await readerTitle(page, "A", 1);
+          const before = await rememberReader(page), catalog = hold(url => url.pathname === "/api/novels/A/catalog");
+          const reads = countRequests(catalog.match);
+          await page.locator('[data-reader-focus="toolbar-设置"]').click(); await tick(page);
+          assert.equal(await page.locator(".novel-settings-panel").count(), 1);
+          const measured = await measureReaderRender(page, async () => {
+            await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(catalog);
+          });
+          assert.equal(measured.roots, 1, "opening an uncached catalog must render its loading state once, without rebuilding the same text twice");
+          assert(measured.elements < 1100, `1000-paragraph catalog opening created ${measured.elements} elements`);
+          console.log(`MEASURE catalog loading: ${measured.roots} reader render, ${measured.elements} elements for 1000 paragraphs (${transport})`);
+          assert.equal(await page.locator(".novel-reader-content p").count(), 1000);
+          assert.equal(await page.locator(".novel-settings-panel").count(), 0);
+          assert.equal(await page.locator(".novel-catalog-loading").textContent(), "正在读取章节目录…");
+          assert.equal(await page.locator(".novel-catalog-loading").isVisible(), true);
+          await assertReaderPositionAndFocus(page, before, "catalog-close");
+          assert.equal(countRequests(catalog.match), reads + 1);
+          await settle(page, catalog);
+          assert.equal(await page.locator(".novel-reader-catalog-list button").count(), 3);
+          await assertReaderPositionAndFocus(page, before, "catalog-close");
+          const closed = await measureReaderRender(page, () => page.locator('[data-reader-focus="catalog-close"]').click());
+          assert.equal(closed.roots, 1); assert.equal(await page.locator(".novel-reader-drawer").count(), 0);
+          await assertReaderPositionAndFocus(page, before, "toolbar-目录");
+          const reopened = await measureReaderRender(page, () => page.locator('[data-reader-focus="toolbar-目录"]').click());
+          assert.equal(reopened.roots, 1); assert.equal(await page.locator(".novel-reader-catalog-list button").count(), 3);
+          await assertReaderPositionAndFocus(page, before, "catalog-search");
+          assert.equal(countRequests(catalog.match), reads + 1, "cached catalog open/close must not issue a second GET");
+          await page.locator('[data-reader-focus="catalog-search"]').fill("Chapter 3");
+          assert.equal(await page.locator(".novel-reader-catalog-list button").count(), 1);
+          await page.locator(".novel-reader-catalog-list button").click(); await readerTitle(page, "A", 3);
+        } finally { await page.close(); }
+      });
+
+      await run(`reader catalog loading failure can close and retry once ${transport}`, async () => {
+        const page = await newPage({ ignoreAbort });
+        try {
+          await openChapter(page, "A", 1); const before = await rememberReader(page);
+          const failed = hold(url => url.pathname === "/api/novels/A/catalog", "controlled reader catalog error"), reads = countRequests(failed.match);
+          const measured = await measureReaderRender(page, async () => {
+            await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(failed);
+          });
+          assert.equal(measured.roots, 1); await assertReaderPositionAndFocus(page, before, "catalog-close");
+          await settle(page, failed);
+          assert.equal(await page.locator(".novel-catalog-loading.error").textContent(), "controlled reader catalog error");
+          assert.equal(await page.evaluate(() => fixture.state.novel.catalogLoading), false);
+          await assertReaderPositionAndFocus(page, before, "catalog-close");
+          await page.locator('[data-reader-focus="catalog-close"]').click(); await tick(page);
+          await assertReaderPositionAndFocus(page, before, "toolbar-目录");
+          const retry = hold(failed.match);
+          const retried = await measureReaderRender(page, async () => {
+            await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(retry);
+          });
+          assert.equal(retried.roots, 1); assert.equal(await page.locator(".novel-catalog-loading").textContent(), "正在读取章节目录…");
+          await assertReaderPositionAndFocus(page, before, "catalog-close");
+          await settle(page, retry); assert.equal(await page.locator(".novel-reader-catalog-list button").count(), 3);
+          assert.equal(countRequests(failed.match), reads + 2); assert.equal(await page.evaluate(() => fixture.state.novel.catalogError), "");
+        } finally { await page.close(); }
+      });
+
+      for (const error of ["", "obsolete reader catalog error"]) {
+        await run(`reader catalog loading completion after close preserves reader ${error ? "error" : "success"} ${transport}`, async () => {
+          const page = await newPage({ ignoreAbort });
+          try {
+            await openChapter(page, "A", 1); await rememberReader(page);
+            const catalog = hold(url => url.pathname === "/api/novels/A/catalog", error);
+            await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(catalog);
+            await page.locator('[data-reader-focus="catalog-close"]').click(); const before = await rememberReader(page);
+            const completed = await measureReaderRender(page, () => settle(page, catalog));
+            assert.deepEqual(completed, { roots: 0, elements: 0 }, "a closed catalog completion cannot rebuild the reader");
+            await assertReaderPreserved(page, before); await assertReaderPositionAndFocus(page, before, "toolbar-目录");
+            assert.equal(await page.locator(".novel-reader-drawer").count(), 0);
+            assert.equal(await page.evaluate(() => fixture.state.novel.catalogLoading), false);
+          } finally { await page.close(); }
+        });
+
+        for (const target of ["book", "leave"]) await run(`reader catalog loading yields to ${target} ${error ? "error" : "success"} ${transport}`, async () => {
+          const page = await newPage({ ignoreAbort });
+          try {
+            await openChapter(page, "A", 1);
+            const catalog = hold(url => url.pathname === "/api/novels/A/catalog", error);
+            await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(catalog);
+            if (target === "book") {
+              await openChapter(page, "B", 2); await rememberReader(page);
+            } else {
+              await page.evaluate(() => { fixture.page.resetReader(); fixture.state.activeView = "gallery"; document.querySelector("#workGrid").replaceChildren(document.createElement("section")); });
+            }
+            const destination = await page.evaluate(() => {
+              fixture.catalogDestination = document.querySelector("#workGrid").firstElementChild;
+              return { scroll: window.scrollY, route: `${location.pathname}${location.search}` };
+            });
+            const completed = await measureReaderRender(page, () => finishOld(page, catalog, ignoreAbort));
+            assert.deepEqual(completed, { roots: 0, elements: 0 }, "obsolete catalog response cannot create elements in the new destination");
+            assert.equal(await page.evaluate(() => fixture.catalogDestination === document.querySelector("#workGrid").firstElementChild), true);
+            assert.deepEqual(await page.evaluate(() => ({ scroll: window.scrollY, route: `${location.pathname}${location.search}` })), destination);
+            assert(!(await page.locator("#workGrid").textContent()).includes("obsolete reader catalog error"));
+            assert(await page.evaluate(url => __transport.aborted.includes(url), catalog.url));
+            if (target === "book") assert.deepEqual(await snapshot(page), { book: "B", chapter: 2, loading: false, status: "" });
+          } finally { await page.close(); }
+        });
+      }
+
       await run(`library refresh preserves 1000 cards and newest filters ${transport}`, async () => {
         const page = await newPage({ ignoreAbort });
         try {
@@ -490,6 +705,26 @@ async function measureLibraryRefresh(page, action) {
   });
   try { await action(); }
   finally { await page.evaluate(() => { document.createElement = fixture.originalCreateElement; }); }
+}
+async function measureReaderRender(page, action) {
+  await page.evaluate(() => {
+    fixture.readerElements = 0; fixture.readerRenders = 0; fixture.readerCreateElement = document.createElement;
+    document.createElement = function (...args) { fixture.readerElements++; return fixture.readerCreateElement.apply(this, args); };
+    fixture.readerObserver = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) if (node.classList?.contains("novel-reader-page")) fixture.readerRenders++;
+    });
+    fixture.readerObserver.observe(document.querySelector("#workGrid"), { childList: true });
+  });
+  try {
+    await action(); await tick(page);
+    return await page.evaluate(() => ({ roots: fixture.readerRenders, elements: fixture.readerElements }));
+  } finally {
+    await page.evaluate(() => { document.createElement = fixture.readerCreateElement; fixture.readerObserver.disconnect(); });
+  }
+}
+async function assertReaderPositionAndFocus(page, before, focus) {
+  assert.deepEqual(await page.evaluate(() => ({ scroll: window.scrollY, route: `${location.pathname}${location.search}` })), before);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.readerFocus), focus);
 }
 async function preservedLibrary(page) { return page.evaluate(() => fixture.shell === document.querySelector(".novel-library") && fixture.cards.every((card, index) => card.isConnected && card === document.querySelectorAll(".novel-book-row")[index])); }
 function sendText(res, body, type, cache = "no-store") { if (res.destroyed) return; res.writeHead(200, { "Content-Type": type, "Cache-Control": cache }); res.end(body); }

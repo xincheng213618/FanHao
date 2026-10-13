@@ -34,7 +34,7 @@ export function createFavoriteStateService({
     const counts = new Map(Object.keys(userState.favoriteFolders || userStateService.defaultFavoriteFolders()).map((folderId) => [folderId, 0]));
     for (const [workId, favorite] of Object.entries(userState.favorites || {})) {
       if (!library.worksById.has(workId)) continue;
-      const folderId = userStateService.normalizeFavoriteFolderId(favorite?.folderId);
+      const folderId = userStateService.normalizeFavoriteFolderId(favorite?.folderId, userState.favoriteFolders);
       counts.set(folderId, (counts.get(folderId) || 0) + 1);
     }
     return counts;
@@ -201,7 +201,7 @@ export function createFavoriteStateService({
     return Object.entries(userState.favorites)
       .map(([workId, favorite]) => ({ work: library.worksById.get(workId), favorite: userStateService.normalizeFavoriteRecord(favorite, userState.favoriteFolders) }))
       .filter((item) => item.work)
-      .filter((item) => !selectedFolderId || userStateService.normalizeFavoriteFolderId(item.favorite.folderId) === selectedFolderId)
+      .filter((item) => !selectedFolderId || userStateService.normalizeFavoriteFolderId(item.favorite.folderId, userState.favoriteFolders) === selectedFolderId)
       .sort((a, b) => String(b.favorite.createdAt || "").localeCompare(String(a.favorite.createdAt || "")))
       .map((item) => item.work);
   }

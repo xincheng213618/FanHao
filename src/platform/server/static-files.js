@@ -137,11 +137,30 @@ export function createStaticFileServer({
     return true;
   }
   function acceptedCompression(req, ext, size) {
-    if (!COMPRESSIBLE_EXTENSIONS.has(ext) || size < STATIC_COMPRESSION_MIN_BYTES) return "";
-    const accepted = String(req.headers["accept-encoding"] || "").toLowerCase();
-    if (/(?:^|,)\s*br(?:\s*;|\s*,|$)/.test(accepted)) return "br";
-    if (/(?:^|,)\s*gzip(?:\s*;|\s*,|$)/.test(accepted)) return "gzip";
-    return "";
+    const accepted = String(req.headers["accept-encoding"] || "").trim().toLowerCase();
+    if (!accepted) return "";
+    const qualities = new Map();
+    for (const entry of accepted.split(",")) {
+      const [name, ...parameters] = entry.split(";");
+      const coding = name.trim();
+      if (!["br", "gzip", "identity", "*"].includes(coding)) continue;
+      const weight = /^q=(0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.exec(parameters.join(";").trim());
+      const quality = parameters.length ? (weight ? Number(weight[1]) : 0) : 1;
+      // Malformed or conflicting duplicate preferences must not undo q=0.
+      qualities.set(coding, Math.min(qualities.get(coding) ?? 1, quality));
+    }
+    let encoding = "", quality = 0;
+    if (COMPRESSIBLE_EXTENSIONS.has(ext) && size >= STATIC_COMPRESSION_MIN_BYTES) {
+      for (const coding of ["br", "gzip"]) {
+        const candidate = qualities.get(coding) ?? qualities.get("*") ?? 0;
+        if (candidate > quality) { encoding = coding; quality = candidate; }
+      }
+    }
+    // RFC 9110 section 12.5.3: implicit identity is the fallback; an explicit
+    // identity preference competes by weight, and *;q=0 also excludes it.
+    const identity = qualities.get("identity") ?? (qualities.get("*") === 0 ? 0 : 1);
+    if (quality > 0 && (!qualities.has("identity") || quality >= identity)) return encoding;
+    return identity > 0 ? "" : null;
   }
 
   function publicFilePath(urlPath) {
@@ -213,10 +232,18 @@ export function createStaticFileServer({
       }
       const ext = normalizeExt(target);
       const encoding = acceptedCompression(req, ext, stat.size);
+      const vary = String(res.getHeader?.("Vary") || "").split(",").map(value => value.trim()).filter(Boolean);
+      if (!vary.some(value => value === "*" || value.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
+      if (encoding === null) {
+        res.writeHead(406, { "Content-Type": "text/plain; charset=utf-8", "Content-Length": 0, "Cache-Control": "no-store", Vary: vary.join(", ") });
+        res.end();
+        return;
+      }
       const headers = {
         "Content-Type": mimeTypes[ext] || "application/octet-stream",
         "Cache-Control": staticCacheControl(req.url, ext),
-        ...(encoding ? { "Content-Encoding": encoding, Vary: "Accept-Encoding" } : { "Content-Length": stat.size })
+        Vary: vary.join(", "),
+        ...(encoding ? { "Content-Encoding": encoding } : { "Content-Length": stat.size })
       };
       if (req.method === "HEAD" || stat.size === 0) {
         res.writeHead(200, headers);

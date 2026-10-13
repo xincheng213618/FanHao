@@ -258,6 +258,9 @@ def init_db() -> None:
         from .queue import seed_download_queue
 
         seed_download_queue(conn)
+        from .library_sync import migrate_library_sync
+
+        migrate_library_sync(conn)
 
 
 def _same_path(left: str, right: str) -> bool:

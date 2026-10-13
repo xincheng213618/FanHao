@@ -4,7 +4,7 @@ import vm from "node:vm";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { appFunction, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { createSyntheticAnimeLibrary } from "./fixtures/android-anime-service.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
@@ -65,7 +65,7 @@ function harness(input, mode = "movie", frozen = null) {
     return node;
   };
   const plugin = { async play(payload) { calls.bridge.push(plain(payload)); return { opened: true }; } };
-  const context = vm.createContext({ document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
+  const context = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "mediaDetail", currentViewParams: { id, mode }, viewRenderToken: 0, activeViewController: null,
     performance: { now: () => clock }, window: events({ Capacitor: { Plugins: { FanHaoPlayer: plugin } }, innerHeight: 844,
       setTimeout(fn, delay) { const key = ++timerId; timers.set(key, { fn, delay }); return key; }, clearTimeout(key) { timers.delete(key); } }),

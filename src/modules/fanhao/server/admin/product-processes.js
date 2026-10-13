@@ -3,7 +3,7 @@ import path from "node:path";
 // Legacy scripts have different path defaults. Only explicitly bound commands
 // may run from the standalone product; the suite keeps its existing catalogue.
 export function createFanhaoProcessAdapter(config) {
-  const scripts = new Set(["full_scan_core_library.py", "refresh_core_javdb_actor_movies.py"]);
+  const scripts = new Set(["full_scan_core_library.py", "refresh_core_javdb_actor_movies.py", "organize_person_library.mjs"]);
   return ({ command, args }) => {
     const script = args.find((value) => /\.(?:py|mjs|js)$/i.test(value));
     const name = path.basename(script || "");
@@ -17,7 +17,8 @@ export function createFanhaoProcessAdapter(config) {
     if (name === "full_scan_core_library.py") {
       for (let i = result.length - 1; i >= 0; i--) if (result[i] === "--root") result.splice(i, 2);
       for (const root of config.LIBRARY_ROOTS) result.push("--root", root);
-    } else set("--profile-dir", path.join(config.DATA_DIR, "collector-browser"));
+    } else if (name === "organize_person_library.mjs") set("--image-db", config.CORE_IMAGE_DB_PATH);
+    else set("--profile-dir", path.join(config.DATA_DIR, "collector-browser"));
     return { command: name.endsWith(".py") ? config.PYTHON_PATH : command, args: result,
       env: { ...process.env, FANHAO_CORE_IMAGE_DB: config.CORE_IMAGE_DB_PATH } };
   };

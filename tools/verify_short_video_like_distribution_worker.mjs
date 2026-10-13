@@ -10,11 +10,66 @@ import { performance } from "node:perf_hooks";
 import { createShortVideoCatalogWorkerClient } from "../src/modules/short-videos/server/catalog-worker-client.js";
 import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
+import { shortVideoLibraryInsights } from "../src/modules/short-videos/server/library-insights.js";
 import { normalizeShortVideoStatsFilter } from "../src/modules/short-videos/server/stats-query.js";
 
 const PRODUCTION_VIDEO_COUNT = 100_000;
 const failureWorkerUrl = new URL("./fixtures/short_video_like_distribution_worker_failure.mjs", import.meta.url);
 const realDbPath = argumentValue("--real-db");
+
+const LEGACY_WATCH_INSIGHTS = String.raw`function watchInsights(libraryRows) {
+  const labels = new Map([
+    ["under_10", "少于 10 秒"],
+    ["10_20", "10–20 秒"],
+    ["20_30", "20–30 秒"],
+    ["30_60", "30–60 秒"],
+    ["60_plus", "60 秒以上"]
+  ]);
+  const order = [...labels.keys()];
+  const watchedRows = libraryRows.filter((row) => String(row.last_watched_at || "").trim());
+  const completedTotal = watchedRows.reduce((total, row) => total + (count(row.completed_count) > 0 ? 1 : 0), 0);
+  const progressRates = watchedRows
+    .filter((row) => count(row.duration_ms) > 0)
+    .map((row) => Math.min(1, count(row.progress_ms) / count(row.duration_ms)));
+  const watchedTimes = watchedRows.map((row) => String(row.last_watched_at || "")).filter(Boolean).sort();
+  const bandMap = new Map();
+  for (const row of watchedRows) {
+    const durationMs = count(row.duration_ms);
+    if (!durationMs) continue;
+    const id = durationMs < 10000 ? "under_10"
+      : durationMs < 20000 ? "10_20"
+        : durationMs < 30000 ? "20_30"
+          : durationMs < 60000 ? "30_60"
+            : "60_plus";
+    const band = bandMap.get(id) || { id, watched: 0, completed: 0 };
+    band.watched += 1;
+    if (count(row.completed_count) > 0) band.completed += 1;
+    bandMap.set(id, band);
+  }
+  const watchedTotal = watchedRows.length;
+  const libraryTotal = libraryRows.length;
+  return {
+    libraryTotal,
+    watchedTotal,
+    completedTotal,
+    completionRate: rate(completedTotal, watchedTotal),
+    coverageRate: rate(watchedTotal, libraryTotal),
+    averageProgressRate: progressRates.length ? progressRates.reduce((total, value) => total + value, 0) / progressRates.length : 0,
+    firstWatchedAt: watchedTimes[0] || "",
+    lastWatchedAt: watchedTimes.at(-1) || "",
+    durationBands: [...bandMap.values()].map((row) => {
+      const watched = row.watched;
+      const completed = row.completed;
+      return {
+        id: row.id,
+        label: labels.get(row.id) || row.id,
+        watched,
+        completed,
+        completionRate: rate(completed, watched)
+      };
+    }).sort((left, right) => order.indexOf(left.id) - order.indexOf(right.id))
+  };
+}`;
 
 if (process.argv.includes("--reserved-route-only")) await verifyReservedRouteGuardOnly();
 else if (process.argv.includes("--corrupt-route-only")) await verifyCorruptFailure();
@@ -22,8 +77,10 @@ else if (realDbPath) await runRealReadOnlyBenchmark(path.resolve(realDbPath));
 else await runFixtureVerification();
 
 async function runFixtureVerification() {
+  const watchRegression = await verifyWatchSinglePass();
   const fixture = createProductionShapeFixture(PRODUCTION_VIDEO_COUNT);
   try {
+    const watchLibraryWork = watchRegression.verifyLibrary(fixture.dbPath);
     const legacyStore = createShortVideoStore({
       dbPath: fixture.dbPath,
       coverDbPath: fixture.coverDbPath,
@@ -85,6 +142,7 @@ async function runFixtureVerification() {
     console.log(JSON.stringify({
       check: "short-video-like-distribution-worker",
       videos: PRODUCTION_VIDEO_COUNT,
+      watchWork: { ...watchRegression.metrics, actualLibrary: watchLibraryWork },
       legacyMainThreadMs: round(legacyMs),
       workerColdMs: round(workerColdMs),
       workerHotMs: round(workerHotMs),
@@ -98,6 +156,151 @@ async function runFixtureVerification() {
   } finally {
     removeFixture(fixture.root);
   }
+}
+
+function watchFunctionSource(source) {
+  const start = source.indexOf("function watchInsights(libraryRows) {");
+  const end = source.indexOf("\nfunction managerQualityAudit", start);
+  assert(start >= 0 && end > start, "actual watch insight implementation must exist");
+  return source.slice(start, end).trimEnd();
+}
+
+function measureWatchWork(task, rows) {
+  const trackedRows = new WeakSet([rows]);
+  const methods = ["filter", "map", "reduce", "sort"];
+  const original = Object.fromEntries(methods.map(name => [name, Array.prototype[name]]));
+  const originalIterator = Array.prototype[Symbol.iterator];
+  const work = { rowVisits: 0, arrayLengths: [], sortLengths: [], defaultSortLengths: [] };
+  for (const name of ["filter", "map", "reduce"]) {
+    Array.prototype[name] = function(callback, ...args) {
+      const tracked = trackedRows.has(this);
+      const measured = tracked ? function(...values) {
+        work.rowVisits += 1;
+        return callback.apply(this, values);
+      } : callback;
+      const result = original[name].call(this, measured, ...args);
+      if (Array.isArray(result)) {
+        work.arrayLengths.push(result.length);
+        if (tracked && name === "filter") trackedRows.add(result);
+      }
+      return result;
+    };
+  }
+  Array.prototype[Symbol.iterator] = function() {
+    const iterator = originalIterator.call(this);
+    if (!trackedRows.has(this)) return iterator;
+    return {
+      next() {
+        const result = iterator.next();
+        if (!result.done) work.rowVisits += 1;
+        return result;
+      },
+      [Symbol.iterator]() { return this; }
+    };
+  };
+  Array.prototype.sort = function(compare) {
+    work.sortLengths.push(this.length);
+    if (compare === undefined) work.defaultSortLengths.push(this.length);
+    return original.sort.call(this, compare);
+  };
+  try {
+    return { response: task(rows), work };
+  } finally {
+    for (const name of methods) Array.prototype[name] = original[name];
+    Array.prototype[Symbol.iterator] = originalIterator;
+  }
+}
+
+async function verifyWatchSinglePass() {
+  const moduleUrl = new URL("../src/modules/short-videos/server/library-insights.js", import.meta.url);
+  const source = fs.readFileSync(moduleUrl, "utf8").replaceAll("\r\n", "\n");
+  const actualWatch = watchFunctionSource(source);
+  const oldSource = source.replace(actualWatch, LEGACY_WATCH_INSIGHTS);
+  assert.equal(watchFunctionSource(oldSource), LEGACY_WATCH_INSIGHTS, "old oracle must restore the complete former watch function");
+  assert.equal(oldSource.replace(LEGACY_WATCH_INSIGHTS, actualWatch), source, "old oracle must leave every other insight phase and SQL unchanged");
+  const watchCall = "() => watchInsights(libraryRows)";
+  assert.equal(source.split(watchCall).length, 2, "private measurement wrapper must target only the watch phase");
+  async function importMeasured(text) {
+    // Export and observe the private function only in this in-memory module.
+    // The production function body and all other phases remain unchanged.
+    text = text.replace(watchCall, "() => options.measureWatch ? options.measureWatch(watchInsights, libraryRows) : watchInsights(libraryRows)")
+      + "\nexport { watchInsights };\n";
+    text = text.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) => "from " + JSON.stringify(new URL(relative, moduleUrl).href));
+    return import("data:text/javascript;base64," + Buffer.from(text).toString("base64"));
+  }
+  const oldModule = await importMeasured(oldSource);
+  const currentModule = await importMeasured(source);
+  const testedModule = process.argv.includes("--legacy-watch-insights") ? oldModule : currentModule;
+  const row = (timestamp, duration = 10000, progress = 3000, completed = 0) => ({
+    last_watched_at: timestamp, duration_ms: duration, progress_ms: progress, completed_count: completed
+  });
+  const cases = [
+    [],
+    [row(""), row("   "), row("\t\n"), row(null), row(undefined), row(0), row(NaN), row(false)],
+    [row("2026-01-02"), row("2026-01-01"), row("2026-01-02")],
+    [row(" 2026-01-01 "), row("2026-01-01"), row("invalid date"), row("2026-01-01 ")],
+    [row("\ue000"), row("\ud800"), row("\ud800\udc00"), row("\udc00"), row("Z"), row("é"), row("界")],
+    [row(Infinity), row(-Infinity), row(-9), row(3), row(true), row(9n), row(Symbol("date"))],
+    [row("bad1", NaN, NaN, NaN), row("bad2", "oops", "oops", "oops"), row("bad3", -5, -1, -1), row("bad4", 0, 0, 0)],
+    [row("a", Infinity, 100, Infinity), row("b", Infinity, Infinity, 1), row("c", 100, Infinity, 0)],
+    [row("a", 1, 0.1, 1), row("b", 1, 1e-300, 1), row("c", 3, 1, 1), row("d", 7, 1, 0)],
+    [row("a", 1, 1, 1), row("b", 1, 1e-16, 0), row("c", 1, 1e-16, 0)],
+    [9999, 10000, 19999, 20000, 29999, 30000, 59999, 60000].map((duration, i) => row("date" + i, duration, duration + 1, i % 2))
+  ];
+  const finiteOrder = cases.at(-2);
+  const finiteAverage = oldModule.watchInsights(finiteOrder).averageProgressRate;
+  assert(Number.isFinite(finiteAverage), "finite mixed-magnitude progress must not be masked by NaN");
+  assert.notEqual(oldModule.watchInsights([...finiteOrder].reverse()).averageProgressRate, finiteAverage,
+    "the finite progress oracle must detect a changed summation order");
+  for (const rows of cases) {
+    const old = oldModule.watchInsights(rows);
+    const current = testedModule.watchInsights(rows);
+    assert.deepEqual(current, old, "watch boundaries must preserve the complete old DTO including NaN and Infinity");
+    assert.equal(JSON.stringify(current), JSON.stringify(old), "watch boundary JSON must preserve the old response");
+  }
+  const sameError = new Error("watch numeric conversion");
+  const badNumber = { valueOf() { throw sameError; } };
+  for (const module of [oldModule, testedModule]) {
+    assert.throws(() => module.watchInsights([row("watched", badNumber)]), error => error === sameError);
+  }
+  const dense = Array.from({ length: PRODUCTION_VIDEO_COUNT }, (_, index) => row(
+    "time" + String(index * 7919 % PRODUCTION_VIDEO_COUNT).padStart(6, "0"),
+    [5000, 15000, 25000, 45000, 75000][index % 5], index % 100000, index % 7 === 0 ? 1 : 0
+  ));
+  const before = measureWatchWork(oldModule.watchInsights, dense);
+  const after = measureWatchWork(testedModule.watchInsights, dense);
+  assert.deepEqual(after.response, before.response, "100k watch rows retain all values and progress sum order");
+  assert.equal(JSON.stringify(after.response), JSON.stringify(before.response));
+  assert.equal(before.work.rowVisits, PRODUCTION_VIDEO_COUNT * 6, "the old watch function actually traverses every dense row six times");
+  assert.deepEqual(before.work.defaultSortLengths, [PRODUCTION_VIDEO_COUNT], "the old watch function actually sorts all watch strings");
+  assert.equal(before.work.arrayLengths.filter(length => length === PRODUCTION_VIDEO_COUNT).length, 5, "the old watch function actually creates five full-size temporary arrays");
+  assert.equal(after.work.rowVisits, PRODUCTION_VIDEO_COUNT, "watch row visit budget must be exactly one pass");
+  assert.deepEqual(after.work.defaultSortLengths, [], "watch timestamps must not need an all-row string sort");
+  assert.deepEqual(after.work.sortLengths, [5], "retain only the existing five-band presentation order");
+  assert.equal(after.work.arrayLengths.filter(length => length > 5).length, 0, "watch arrays must stay bounded to the duration bands");
+  return {
+    metrics: { boundaryCases: cases.length, rows: dense.length, old: before.work, current: after.work },
+    verifyLibrary(dbPath) {
+      const database = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        let oldWork, currentWork;
+        const former = oldModule.shortVideoLibraryInsights(database, {
+          measureWatch(task, rows) { const measured = measureWatchWork(task, rows); oldWork = measured.work; return measured.response; }
+        });
+        const current = testedModule.shortVideoLibraryInsights(database, {
+          measureWatch(task, rows) { const measured = measureWatchWork(task, rows); currentWork = measured.work; return measured.response; }
+        });
+        const actual = shortVideoLibraryInsights(database);
+        assert.equal(JSON.stringify(current), JSON.stringify(former), "private 100k actual-schema library insights retain the complete old personal and health response");
+        assert.equal(JSON.stringify(actual), JSON.stringify(current), "the measured current module must preserve the actual production response");
+        assert.equal(currentWork.rowVisits, current.personal.watch.libraryTotal, "actual SQLite rows must receive exactly one watch pass");
+        assert.deepEqual(currentWork.defaultSortLengths, []);
+        assert(oldWork.rowVisits > currentWork.rowVisits, "the actual catalog must exercise the removed repeated watch traversals");
+        assert(oldWork.defaultSortLengths[0] === former.personal.watch.watchedTotal && former.personal.watch.watchedTotal > 0);
+        return { rows: actual.personal.watch.libraryTotal, watchedRows: actual.personal.watch.watchedTotal, old: oldWork, current: currentWork };
+      } finally { database.close(); }
+    }
+  };
 }
 
 async function verifyRuntimeRouteAndInvalidation(fixture) {

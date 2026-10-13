@@ -14,6 +14,8 @@ export function createActorMovieService({
   proxiedRemoteImageUrl,
   publicRemoteUrl,
   storedWorkCodeKey,
+  withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
+  workInfoReadCacheable = () => true,
   workCodeKeys
 }) {
   const LOCAL_CODE_BATCH_SIZE = 900;
@@ -24,6 +26,11 @@ export function createActorMovieService({
   let actorMoviePersonIdCache = null;
   let actorMovieInfoByCodeKeyCache = null;
   const currentInfoStamp = typeof getInfoStamp === "function" ? getInfoStamp : getStamp;
+
+  function scopedWorkInfoResult(callback) {
+    const result = withWorkInfoReadStatus(callback);
+    return { ...result.value, cacheable: result.value.cacheable !== false && result.cacheable !== false };
+  }
 
   function normalizePersonIds(personIds = []) {
     return [...new Set((personIds || [])
@@ -106,8 +113,12 @@ export function createActorMovieService({
   }
 
   function rowsByPerson() {
+    return rowsByPersonResult().rows;
+  }
+
+  function rowsByPersonResult() {
     const stamp = getStamp();
-    if (actorMovieCache?.stamp === stamp) return actorMovieCache.rows;
+    if (actorMovieCache?.stamp === stamp) return { rows: actorMovieCache.rows, cacheable: true };
 
     let rowsByPersonMap = new Map();
     try {
@@ -115,27 +126,30 @@ export function createActorMovieService({
       rowsByPersonMap = groupRowsByPerson(db.prepare(actorMovieRowsSql()).all());
     } catch (error) {
       console.warn("[core-actor-movies]", error.message);
-      if (actorMovieCache?.rows) return actorMovieCache.rows;
+      return { rows: actorMovieCache?.rows || rowsByPersonMap, cacheable: false };
     }
 
     actorMovieCache = { stamp, rows: rowsByPersonMap };
     actorMoviePersonCache = { stamp, rows: new Map(rowsByPersonMap) };
     actorMoviePersonIdCache = { stamp, ids: new Set(rowsByPersonMap.keys()) };
-    return rowsByPersonMap;
+    return { rows: rowsByPersonMap, cacheable: true };
   }
 
   function rowsForPeople(personIds = []) {
+    return rowsForPeopleResult(personIds).rows;
+  }
+
+  function rowsForPeopleResult(personIds = []) {
     const ids = normalizePersonIds(personIds);
-    if (!ids.length) return new Map();
+    if (!ids.length) return { rows: new Map(), cacheable: true };
     const stamp = getStamp();
     if (actorMovieCache?.stamp === stamp) {
-      return new Map(ids.map((personId) => [personId, actorMovieCache.rows.get(personId) || []]));
+      return { rows: new Map(ids.map((personId) => [personId, actorMovieCache.rows.get(personId) || []])), cacheable: true };
     }
-    if (actorMoviePersonCache?.stamp !== stamp) {
-      actorMoviePersonCache = { stamp, rows: new Map() };
-    }
+    const cache = actorMoviePersonCache?.stamp === stamp ? actorMoviePersonCache : { stamp, rows: new Map() };
+    let cacheable = true;
 
-    const missingIds = ids.filter((personId) => !actorMoviePersonCache.rows.has(personId));
+    const missingIds = ids.filter((personId) => !cache.rows.has(personId));
     if (missingIds.length) {
       try {
         const loaded = groupRowsByPerson(
@@ -144,13 +158,15 @@ export function createActorMovieService({
             .all(...missingIds.map(Number))
         );
         for (const personId of missingIds) {
-          actorMoviePersonCache.rows.set(personId, loaded.get(personId) || []);
+          cache.rows.set(personId, loaded.get(personId) || []);
         }
+        actorMoviePersonCache = cache;
       } catch (error) {
         console.warn("[core-actor-movies-person]", error.message);
+        cacheable = false;
       }
     }
-    return new Map(ids.map((personId) => [personId, actorMoviePersonCache.rows.get(personId) || []]));
+    return { rows: new Map(ids.map((personId) => [personId, cache.rows.get(personId) || []])), cacheable };
   }
 
   function rows(personId) {
@@ -159,10 +175,15 @@ export function createActorMovieService({
   }
 
   function mergedRows(personId) {
+    return mergedRowsResult(personId).rows;
+  }
+
+  function mergedRowsResult(personId) {
     const result = [];
     const seen = new Set();
     const members = mergedPersonMembers(personId);
-    const memberRows = rowsForPeople(members.map((person) => person?.id));
+    const loaded = rowsForPeopleResult(members.map((person) => person?.id));
+    const memberRows = loaded.rows;
     for (const person of members) {
       for (const row of memberRows.get(String(person.id || "")) || []) {
         const key = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code) || row.detail_url || `${row.person_id}:${row.code}:${row.title}`;
@@ -171,15 +192,15 @@ export function createActorMovieService({
         result.push(row);
       }
     }
-    return result;
+    return { rows: result, cacheable: loaded.cacheable };
   }
 
-  function actorMoviePersonIds() {
+  function actorMoviePersonIdsResult() {
     const stamp = getStamp();
-    if (actorMoviePersonIdCache?.stamp === stamp) return actorMoviePersonIdCache.ids;
+    if (actorMoviePersonIdCache?.stamp === stamp) return { ids: actorMoviePersonIdCache.ids, cacheable: true };
     if (actorMovieCache?.stamp === stamp) {
       actorMoviePersonIdCache = { stamp, ids: new Set(actorMovieCache.rows.keys()) };
-      return actorMoviePersonIdCache.ids;
+      return { ids: actorMoviePersonIdCache.ids, cacheable: true };
     }
 
     let ids = new Set();
@@ -195,15 +216,29 @@ export function createActorMovieService({
         .filter(Boolean));
     } catch (error) {
       console.warn("[core-actor-movie-people]", error.message);
-      if (actorMoviePersonIdCache?.ids) return actorMoviePersonIdCache.ids;
+      return { ids: actorMoviePersonIdCache?.ids || ids, cacheable: false };
     }
     actorMoviePersonIdCache = { stamp, ids };
-    return ids;
+    return { ids, cacheable: true };
   }
 
   function hasMergedRows(personId) {
-    const ids = actorMoviePersonIds();
-    return mergedPersonMembers(personId).some((person) => ids.has(String(person?.id || "")));
+    return hasMergedRowsResultForPeople([personId]).matches.has(String(personId));
+  }
+
+  function hasMergedRowsResultForPeople(personIds = []) {
+    const requested = new Map();
+    for (const personId of personIds || []) {
+      const key = String(personId);
+      if (!requested.has(key)) requested.set(key, personId);
+    }
+    if (!requested.size) return { matches: new Set(), cacheable: true };
+    const loaded = actorMoviePersonIdsResult();
+    const matches = new Set();
+    for (const [key, personId] of requested) {
+      if (mergedPersonMembers(personId).some(person => loaded.ids.has(String(person?.id || "")))) matches.add(key);
+    }
+    return { matches, cacheable: loaded.cacheable };
   }
 
   function rowsByCodeKey() {
@@ -211,14 +246,15 @@ export function createActorMovieService({
     if (actorMovieByCodeKeyCache?.stamp === stamp) return actorMovieByCodeKeyCache.rows;
 
     const rowsByCode = new Map();
-    for (const personRows of rowsByPerson().values()) {
+    const loaded = rowsByPersonResult();
+    for (const personRows of loaded.rows.values()) {
       for (const row of personRows) {
         const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
         if (codeKey && !rowsByCode.has(codeKey)) rowsByCode.set(codeKey, row);
       }
     }
 
-    actorMovieByCodeKeyCache = { stamp, rows: rowsByCode };
+    if (loaded.cacheable) actorMovieByCodeKeyCache = { stamp, rows: rowsByCode };
     return rowsByCode;
   }
 
@@ -243,7 +279,7 @@ export function createActorMovieService({
   }
 
   function infoRowsForWorks(works = []) {
-    if (!works.length) return [];
+    if (!works.length) return { rows: [], cacheable: true };
     const stamp = currentInfoStamp();
     if (actorMovieInfoByCodeKeyCache?.stamp !== stamp) {
       const previousRows = actorMovieInfoByCodeKeyCache?.rows;
@@ -337,7 +373,7 @@ export function createActorMovieService({
       // across repeated stamp changes until a refresh succeeds.
       actorMovieInfoByCodeKeyCache.rows = new Map();
       if (staleRows && codeKeys.every((codeKey) => staleRows.has(codeKey))) {
-        return selectedInfoRowsForWorks(works, staleRows);
+        return { rows: selectedInfoRowsForWorks(works, staleRows), cacheable: false };
       }
       // An unavailable database is not proof that the requested metadata is
       // absent. Without a complete prior value, fail explicitly and let the
@@ -345,7 +381,7 @@ export function createActorMovieService({
       throw queryError || new Error("actor movie metadata query failed");
     }
 
-    return selectedInfoRowsForWorks(works, rowsByCodeKey);
+    return { rows: selectedInfoRowsForWorks(works, rowsByCodeKey), cacheable: true };
   }
 
   function compareActorMovieInfoRowOrder(left, right) {
@@ -477,7 +513,16 @@ export function createActorMovieService({
   }
 
   function enrichLocalWorksWithIndex(localWorks) {
-    return enrichLocalWorks(localWorks, infoRowsForWorks(localWorks));
+    return enrichLocalWorksWithIndexResult(localWorks).works;
+  }
+
+  function enrichLocalWorksWithIndexResult(localWorks) {
+    return scopedWorkInfoResult(() => loadEnrichedLocalWorks(localWorks));
+  }
+
+  function loadEnrichedLocalWorks(localWorks) {
+    const loaded = infoRowsForWorks(localWorks);
+    return { works: enrichLocalWorks(localWorks, loaded.rows), cacheable: loaded.cacheable };
   }
 
   function missingWorkFromRow(person, row, codeKey = "") {
@@ -530,6 +575,10 @@ export function createActorMovieService({
   }
 
   function localCodeKeysForRows(rows = [], extraKeys = new Set()) {
+    return localCodeKeysForRowsResult(rows, extraKeys).keys;
+  }
+
+  function localCodeKeysForRowsResult(rows = [], extraKeys = new Set()) {
     const candidates = [...new Set(rows
       .map((row) => storedWorkCodeKey(row?.code_key) || looseWorkCodeKey(row?.code))
       .filter(Boolean))];
@@ -557,10 +606,10 @@ export function createActorMovieService({
         }
       } catch (error) {
         console.warn("[core-actor-movies-local-codes]", error.message);
-        return combinedLocalCodeKeys(extraKeys);
+        return { keys: combinedLocalCodeKeys(extraKeys), cacheable: false };
       }
     }
-    return keys;
+    return { keys, cacheable: true };
   }
 
   function filterExcludedMissingWorks(works, excludedCodeKeys = new Set()) {
@@ -572,16 +621,25 @@ export function createActorMovieService({
   }
 
   function missingSearchWorks(excludedCodeKeys = new Set()) {
+    return missingSearchResult(excludedCodeKeys).works;
+  }
+
+  function missingSearchResult(excludedCodeKeys = new Set()) {
+    return scopedWorkInfoResult(() => loadMissingSearchResult(excludedCodeKeys));
+  }
+
+  function loadMissingSearchResult(excludedCodeKeys) {
     const stamp = getSearchStamp();
     if (actorMissingSearchCache?.stamp === stamp) {
-      return filterExcludedMissingWorks(actorMissingSearchCache.works, excludedCodeKeys);
+      return { works: filterExcludedMissingWorks(actorMissingSearchCache.works, excludedCodeKeys), cacheable: true };
     }
 
     const library = getLibrary();
     const localKeys = localWorkCodeKeys();
     const seen = new Set();
     const works = [];
-    const byPerson = rowsByPerson();
+    const loaded = rowsByPersonResult();
+    const byPerson = loaded.rows;
 
     for (const person of library.people) {
       const personRows = byPerson.get(person.id) || [];
@@ -593,20 +651,31 @@ export function createActorMovieService({
       }
     }
 
-    actorMissingSearchCache = { stamp, works };
-    return filterExcludedMissingWorks(works, excludedCodeKeys);
+    const cacheable = loaded.cacheable && workInfoReadCacheable();
+    if (cacheable) actorMissingSearchCache = { stamp, works };
+    return { works: filterExcludedMissingWorks(works, excludedCodeKeys), cacheable };
   }
 
   function missingSearchWorksForPeople(personIds = [], excludedCodeKeys = new Set()) {
+    return missingSearchResultForPeople(personIds, excludedCodeKeys).works;
+  }
+
+  function missingSearchResultForPeople(personIds = [], excludedCodeKeys = new Set()) {
+    return scopedWorkInfoResult(() => loadMissingSearchResultForPeople(personIds, excludedCodeKeys));
+  }
+
+  function loadMissingSearchResultForPeople(personIds, excludedCodeKeys) {
     const ids = normalizePersonIds(personIds);
-    if (!ids.length) return [];
+    if (!ids.length) return { works: [], cacheable: true };
     const library = getLibrary();
-    const byPerson = rowsForPeople(ids);
+    const loaded = rowsForPeopleResult(ids);
+    const byPerson = loaded.rows;
     const personRows = ids.flatMap((personId) => byPerson.get(personId) || []);
     // Exact-person searches only need to test the selected filmography's codes.
     // Query those codes through the compact works/local_works indexes instead of
     // synchronously building the full filesystem-derived code index.
-    const localKeys = localCodeKeysForRows(personRows);
+    const localResult = localCodeKeysForRowsResult(personRows);
+    const localKeys = localResult.keys;
     const seen = new Set();
     const works = [];
 
@@ -620,22 +689,34 @@ export function createActorMovieService({
         works.push(missingWorkFromRow(person, row, codeKey));
       }
     }
-    return filterExcludedMissingWorks(works, excludedCodeKeys);
+    return { works: filterExcludedMissingWorks(works, excludedCodeKeys), cacheable: loaded.cacheable && localResult.cacheable };
   }
 
-  function missingWorksForPerson(person, personRows = rows(person.id), excludedCodeKeys = new Set()) {
-    const localKeys = localCodeKeysForRows(personRows, excludedCodeKeys);
+  function missingWorksForPerson(person, personRows, excludedCodeKeys = new Set()) {
+    return missingWorksResultForPerson(person, personRows, excludedCodeKeys).works;
+  }
+
+  function missingWorksResultForPerson(person, personRows, excludedCodeKeys = new Set()) {
+    return scopedWorkInfoResult(() => loadMissingWorksResultForPerson(person, personRows, excludedCodeKeys));
+  }
+
+  function loadMissingWorksResultForPerson(person, personRows, excludedCodeKeys) {
+    const loaded = personRows === undefined ? rowsForPeopleResult([person.id]) : null;
+    const id = loaded ? normalizePersonIds([person.id])[0] : "";
+    const actualRows = loaded ? loaded.rows.get(id) || [] : personRows;
+    const localResult = localCodeKeysForRowsResult(actualRows, excludedCodeKeys);
+    const localKeys = localResult.keys;
     const seen = new Set();
     const missing = [];
 
-    for (const row of personRows) {
+    for (const row of actualRows) {
       const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
       if (!codeKey || seen.has(codeKey) || localKeys.has(codeKey)) continue;
       seen.add(codeKey);
       missing.push(missingWorkFromRow(person, row, codeKey));
     }
 
-    return missing;
+    return { works: missing, cacheable: (loaded?.cacheable ?? true) && localResult.cacheable };
   }
 
   function invalidate() {
@@ -663,15 +744,21 @@ export function createActorMovieService({
   return {
     enrichLocalWorks,
     enrichLocalWorksWithIndex,
+    enrichLocalWorksWithIndexResult,
     infoSummary,
     invalidate,
     invalidateSearch,
     missingSearchWorks,
     missingSearchWorksForPeople,
+    missingSearchResult,
+    missingSearchResultForPeople,
     missingWorkFromRow,
     missingWorksForPerson,
+    missingWorksResultForPerson,
     mergedRows,
+    mergedRowsResult,
     hasMergedRows,
+    hasMergedRowsResultForPeople,
     rows,
     rowsByCodeKey,
     rowsByPerson,

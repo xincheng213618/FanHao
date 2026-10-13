@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { captureCachedImageFence } from "../android-client/www/js/cache.js";
 import { channelConfig, tvSeriesCardNavigation } from "../android-client/www/platform/content-index/channel-views.js";
 import { formatBytes, formatDate, formatNumber } from "../android-client/www/js/format.js";
 import { appFunction, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
@@ -148,6 +149,7 @@ test("preview loading failures are distinct from missing covers and retain a suc
     const images = [], revoked = [], replacements = [];
     const target = { isConnected: true, textContent: "封面加载中", dataset: { imageErrorText: "封面加载失败" }, replaceWith: image => replacements.push(image) };
     const context = vm.createContext({
+      captureCachedImageFence,
       document: { createElement() { const handlers = new Map(); const image = { style: {}, dataset: {}, isConnected: true,
         addEventListener: (type, handler) => handlers.set(type, handler), fire: type => handlers.get(type)?.() }; images.push(image); return image; } },
       URL: { createObjectURL: () => "blob:synthetic", revokeObjectURL: value => revoked.push(value) },

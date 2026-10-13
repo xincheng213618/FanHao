@@ -198,10 +198,12 @@ def get_driver(profile_dir: Path, proxy: str = "", headless: bool = False, chrom
     if headless:
         options.add_argument("--headless=new")
 
-    resolved_driver = driver_path if driver_path and driver_path.exists() else latest_cached_chromedriver()
-    if resolved_driver:
-        return webdriver.Chrome(service=Service(str(resolved_driver)), options=options)
-    return webdriver.Chrome(options=options)
+    resolved_driver = driver_path if driver_path and driver_path.exists() else None
+    if resolved_driver is None:
+        from webdriver_manager.chrome import ChromeDriverManager
+
+        resolved_driver = ChromeDriverManager().install()
+    return webdriver.Chrome(service=Service(str(resolved_driver)), options=options)
 
 
 def parse_actor_page(html: str, url: str) -> dict:

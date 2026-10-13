@@ -42,10 +42,21 @@ export function createPhotoSetService({
     try { return operation(db); } finally { db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(previous || 0))}`); }
   }
   const albumStamp = value => JSON.stringify([value?.id, value?.sourceRoot, value?.relativePath, value?.updatedAt]);
-  const rowStamp = value => JSON.stringify(value && { ...value, cover_blob: value.cover_blob ? Buffer.from(value.cover_blob).toString("base64") : null });
+  const rowStamp = value => JSON.stringify(value && { ...value, cover_blob: null });
+  function rowSnapshot(value) {
+    let blob = value?.cover_blob ? Buffer.from(value.cover_blob) : null;
+    // ArrayBuffer conversion shares storage; the authority baseline must not.
+    if (blob && blob.buffer === value.cover_blob) blob = Buffer.from(blob);
+    return { stamp: rowStamp(value), blob };
+  }
+  function rowMatches(value, snapshot) {
+    const raw = value?.cover_blob;
+    const blob = raw ? (raw instanceof Uint8Array ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength) : Buffer.from(raw)) : null;
+    return rowStamp(value) === snapshot.stamp && (blob ? !!snapshot.blob && blob.equals(snapshot.blob) : snapshot.blob === null);
+  }
   function authority(album, context) {
-    const db = getImageGalleryDb(), stamp = rowStamp(coverRow(album, db));
-    return { db, stamp, album: albumStamp(album), current: () => context.isCurrent() && getImageGalleryDb() === db && albumStamp(byId(album.id)) === albumStamp(album) && rowStamp(coverRow(album, db)) === stamp };
+    const db = getImageGalleryDb(), snapshot = rowSnapshot(coverRow(album, db));
+    return { db, stamp: snapshot.stamp, album: albumStamp(album), current: () => context.isCurrent() && getImageGalleryDb() === db && albumStamp(byId(album.id)) === albumStamp(album) && rowMatches(coverRow(album, db), snapshot) };
   }
   function imageUrl(albumId, imageIndex) {
     return `/media/gallery/${encodeURIComponent(albumId)}/${encodeURIComponent(String(imageIndex))}`;
@@ -109,16 +120,14 @@ export function createPhotoSetService({
     const candidates = images.filter((image) => image?.path);
     if (!candidates.length) return null;
 
-    const explicit = candidates
-      .map((image, index) => {
-        const hintScore = coverHintScore(image);
-        const depth = archiveMemberDepth(image.path);
-        const ext = normalizeExt(image.path);
-        const tieScore = (depth <= 1 ? 40 : Math.max(0, 30 - depth * 5)) + ([".jpg", ".jpeg", ".webp", ".png"].includes(ext) ? 10 : 0);
-        return { image, index, score: hintScore + tieScore, hintScore };
-      })
-      .filter((item) => item.hintScore > 0)
-      .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+    const explicit = candidates.reduce((best, image) => {
+      const hintScore = coverHintScore(image);
+      const depth = archiveMemberDepth(image.path);
+      const ext = normalizeExt(image.path);
+      const tieScore = (depth <= 1 ? 40 : Math.max(0, 30 - depth * 5)) + ([".jpg", ".jpeg", ".webp", ".png"].includes(ext) ? 10 : 0);
+      const score = hintScore + tieScore;
+      return hintScore > 0 && (!best || score > best.score) ? { image, score } : best;
+    }, null);
 
     if (explicit) return { image: explicit.image, isExplicitCover: true };
     return { image: candidates[0], isExplicitCover: false };
@@ -344,11 +353,13 @@ export function createPhotoSetService({
       ? Math.floor(Number(rawImageLimit))
       : 0;
     const payload = await archiveImagesPayload(targetArchivePath, {
-      limit: imageLimit > 0 ? imageOffset + imageLimit : 0,
+      // The archive cache already owns the full list; copy only the visible page.
+      limit: 0,
       signal: options.signal
     });
     const images = Array.isArray(payload.images) ? payload.images : [];
-    const imageCount = Number(payload.imageCount || images.length || 0);
+    const fallbackCount = imageLimit > 0 ? Math.min(images.length, imageOffset + imageLimit) : images.length;
+    const imageCount = Number(payload.imageCount || fallbackCount || 0);
     const visibleImages = imageLimit > 0
       ? images.slice(imageOffset, imageOffset + imageLimit)
       : images;

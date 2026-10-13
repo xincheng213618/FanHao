@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { createServer } from "node:http";
 import { createAndroidUpdateService } from "../../src/modules/system/server/android-update/service.js";
+import { createFileServer } from "../../src/platform/server/file-server.js";
 
 const scriptProjectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const projectDir = process.env.FANHAO_ANDROID_SECURITY_PROJECT_DIR
@@ -303,7 +305,7 @@ assert(
 verifyJavaPolicy();
 verifyGradleVersionPolicy();
 verifyPowerShellPublishPolicy();
-verifyAndroidUpdateServing();
+await verifyAndroidUpdateServing();
 console.log("android-security: origin compatibility, trusted-network boundary, native bridge, and update policy verified");
 
 function read(relativePath) {
@@ -433,8 +435,10 @@ function prepareDisposableAndroidProject(disposableProjectDir) {
   run(process.execPath, [capacitorCli, "sync", "android"], { cwd: disposableProjectDir });
 }
 
-function verifyAndroidUpdateServing() {
+async function verifyAndroidUpdateServing() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-android-serving-"));
+  let files, server;
+  const handlers = [], handlerErrors = [];
   try {
     const updateDir = path.join(tempDir, "android-update");
     const debugDir = path.join(updateDir, "debug");
@@ -448,16 +452,17 @@ function verifyAndroidUpdateServing() {
       JSON.stringify({ channel: "debug", apkFile: authorizedName, versionCode: 26081191 })
     );
 
+    const notFound = res => { res.writeHead(404, {}); res.end(); };
+    const normalizeExt = value => path.extname(value).toLowerCase();
+    files = createFileServer({ mimeTypes: {}, normalizeExt, notFound });
     const service = createAndroidUpdateService({
       clampInteger(value, fallback, minimum, maximum) {
         const number = Number(value);
         return Number.isFinite(number) ? Math.max(minimum, Math.min(maximum, Math.trunc(number))) : fallback;
       },
-      normalizeExt: (value) => path.extname(value).toLowerCase(),
-      notFound(res) {
-        res.writeHead(404, {});
-        res.end();
-      },
+      normalizeExt,
+      notFound,
+      serveWholeFile: files.serveWholeFile,
       port: 29998,
       readJsonFile(filePath, fallback) {
         try {
@@ -473,35 +478,41 @@ function verifyAndroidUpdateServing() {
       },
       updateDir
     });
-    const request = { method: "HEAD", headers: { host: "127.0.0.1:29998" }, socket: { encrypted: false } };
+    server = createServer((req, res) => {
+      const task = Promise.resolve().then(() => service.serveApk(req, res, "debug", req.url.slice(1))).catch(error => {
+        handlerErrors.push(error);
+        if (!res.headersSent) { res.writeHead(500); res.end(); }
+        else res.destroy();
+      });
+      handlers.push(task);
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const authorized = await fetch(`${baseUrl}/${encodeURIComponent(authorizedName)}`, { method: "HEAD" });
+    assert.equal(authorized.status, 200, "latest.json must authorize its exact APK");
+    assert.equal(authorized.headers.get("content-length"), "10");
+    assert.equal(authorized.headers.get("content-type"), "application/vnd.android.package-archive");
+    assert.equal(authorized.headers.get("cache-control"), "no-store");
+    assert.equal(await authorized.text(), "");
 
-    const authorized = responseRecorder();
-    service.serveApk(request, authorized, "debug", encodeURIComponent(authorizedName));
-    assert.equal(authorized.statusCode, 200, "latest.json must authorize its exact APK");
-
-    const orphan = responseRecorder();
-    service.serveApk(request, orphan, "debug", encodeURIComponent(orphanName));
-    assert.equal(orphan.statusCode, 404, "an orphan APK must not be downloadable before latest.json commits");
+    const downloaded = await fetch(`${baseUrl}/${encodeURIComponent(authorizedName)}`);
+    assert.equal(downloaded.status, 200);
+    assert.equal(await downloaded.text(), "authorized", "the actual shared file service must deliver the authorized bytes");
+    const orphan = await fetch(`${baseUrl}/${encodeURIComponent(orphanName)}`, { method: "HEAD" });
+    assert.equal(orphan.status, 404, "an orphan APK must not be downloadable before latest.json commits");
 
     fs.writeFileSync(path.join(debugDir, "latest.json"), "{}");
-    const invalidManifest = responseRecorder();
-    service.serveApk(request, invalidManifest, "debug", encodeURIComponent(authorizedName));
-    assert.equal(invalidManifest.statusCode, 404, "an invalid manifest must authorize no APK downloads");
+    const invalidManifest = await fetch(`${baseUrl}/${encodeURIComponent(authorizedName)}`, { method: "HEAD" });
+    assert.equal(invalidManifest.status, 404, "an invalid manifest must authorize no APK downloads");
+    await Promise.all(handlers);
+    assert.deepEqual(handlerErrors, []);
+    assert.equal(files.diagnostics().active, 0, "serving assertions await physical file closure");
+    console.log("android-update-serving: exact manifest authorization, GET bytes, HEAD headers and awaited file closure passed");
   } finally {
+    await files?.stop();
+    if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
     removeVerifiedTempDir(tempDir);
   }
-}
-
-function responseRecorder() {
-  return {
-    statusCode: 0,
-    headers: null,
-    writeHead(statusCode, headers) {
-      this.statusCode = statusCode;
-      this.headers = headers;
-    },
-    end() {}
-  };
 }
 
 function removeVerifiedTempDir(tempDir) {

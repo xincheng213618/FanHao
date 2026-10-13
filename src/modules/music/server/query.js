@@ -1,6 +1,6 @@
 import { escapeLike } from "./helpers.js";
 import { normalizeMusicLanguage } from "./language.js";
-import { findSmartMix, smartMixCondition } from "./smart-mix.js";
+import { findSmartMix, isMetadataOnlySmartMix, smartMixCondition } from "./smart-mix.js";
 import { musicSearchIndexCondition, musicSearchIndexKind, musicSearchIndexTerm, phoneticEntityCondition } from "./search.js";
 
 export function catalogFilter(params = new URLSearchParams(), options = {}) {
@@ -92,7 +92,7 @@ export function catalogFilter(params = new URLSearchParams(), options = {}) {
     lyrics,
     minRating,
     quality,
-    needsState: favorite || minRating > 0 || Boolean(smartMix),
+    needsState: favorite || minRating > 0 || Boolean(smartMix && !isMetadataOnlySmartMix(smartMix)),
     searchKind,
     searchTerm,
     trackWhere: trackWhere.join(" AND "),

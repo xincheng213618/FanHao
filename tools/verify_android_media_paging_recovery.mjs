@@ -308,10 +308,15 @@ const mutations = [
   { name: "retry increases target again", target: "movie: miss/error", from: "retry: () => isCurrent() ? renderCurrentViewPreservingScroll() : undefined", to: "retry: () => isCurrent() ? (increaseChannelLimit(48), renderCurrentViewPreservingScroll()) : undefined" },
   { name: "cached target completion discards outstanding request", target: "movie: cached append", from: "const retryPage = currentPage && channelPageState.retry?.targetLimit === limit ? channelPageState.retry : null;", to: "const retryPage = null;" },
   { name: "retry merges cached stale tail rather than original base", target: "fresh retry replaces cached tail", from: "const basePage = retryPage ? retryPage.base : currentPage;", to: "const basePage = currentPage;" },
-  { name: "same-signature shortcut leaves loading footer", target: "movie: cached append", from: "if (!loadingMore && renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)", to: "if (renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)" },
+  { name: "same-signature shortcut leaves loading footer", target: "movie: cached append", prepare: source => {
+    // Recreate the old append shortcut with its now-gated signature producers.
+    const marker = "if (!loadingMore) renderedCacheSignature =";
+    assert.equal(source.split(marker).length - 1, 2);
+    return source.replaceAll(marker, "renderedCacheSignature =");
+  }, from: "if (!loadingMore && renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)", to: "if (renderedCache && channelDataSignature(mergedData) === renderedCacheSignature)" },
   { name: "cached complete hides retry footer", target: "cached tail considered complete", from: 'else if (paging.status === "error")', to: 'else if (paging.status === "error" && items.length < total)' },
   { name: "retry ignores changed target limit", target: "same-route explicit reopening", from: "currentPage && channelPageState.retry?.targetLimit === limit ? channelPageState.retry : null", to: "currentPage && channelPageState.retry ? channelPageState.retry : null" },
-  { name: "source-only change loses request fence", target: "source-only change", from: " && getActiveUrl() === activeUrl;", to: ";" },
+  { name: "source-only change loses request fence", target: "source-only change", from: / && getActiveUrl\(\) === activeUrl(?=\r?\n\s+&& \(!accountScope)/, to: "" },
   { name: "successful fresh response retains stale retry metadata", target: "movie: cached append", from: "channelPageState = { key: pageKey, data: mergedData };", to: "channelPageState = { key: pageKey, data: mergedData, ...(retryPage ? { retry: retryPage } : {}) };" }
 ];
 let passed = 0, failed = 0, oldRejected = 0, mutantRejected = 0;
@@ -326,7 +331,8 @@ for (const name of ["movie: pending append", "tv: pending append", "media: pendi
 }
 if (!failed) for (const mutation of mutations) {
   try {
-    const channel = sources.channel.replace(mutation.from, mutation.to); assert.notEqual(channel, sources.channel, `Mutant changes source: ${mutation.name}`);
+    const prepared = mutation.prepare ? mutation.prepare(sources.channel) : sources.channel;
+    const channel = prepared.replace(mutation.from, mutation.to); assert.notEqual(channel, prepared, `Mutant changes source: ${mutation.name}`);
     const selected = tests.find(test => test.name.startsWith(mutation.target)); assert(selected); let failure;
     try { await selected.run({ ...sources, channel }); } catch (error) { failure = error; }
     assert(failure instanceof assert.AssertionError, `Mutant must fail a behavior assertion: ${mutation.name}\n${failure?.stack || "unexpected pass"}`);

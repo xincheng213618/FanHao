@@ -1,3 +1,9 @@
+import { createWeightedCacheBudget } from "./work-cache-budget.js";
+
+const MISSING_PREFIX_CACHE_LIMIT = 128;
+const MISSING_PREFIX_WORK_BUDGET = 50_000;
+const MISSING_PREFIX_MAX_KEY_LENGTH = 128;
+
 export function createMissingCodeSearchService({
   dbBoolOrNull,
   getCoverStamp = () => "",
@@ -10,15 +16,49 @@ export function createMissingCodeSearchService({
   storedWorkCodeKey,
   warn = console.warn
 }) {
+  // These buckets own missing-work DTOs, rather than references to the local
+  // library. Limit both their record count and request-derived metadata.
+  const prefixBudget = createWeightedCacheBudget(MISSING_PREFIX_WORK_BUDGET, MISSING_PREFIX_CACHE_LIMIT);
   let coverWorkIdsCache = null;
   let missingWorkIndexCache = { stamp: "", prefixes: new Map() };
+  let readScope = null;
+
+  function withReadStatus(callback) {
+    const previous = readScope;
+    const scope = { cacheable: true, failures: previous?.failures || new Map() };
+    readScope = scope;
+    try {
+      return { value: callback(), cacheable: scope.cacheable };
+    } catch (error) {
+      scope.cacheable = false;
+      throw error;
+    } finally {
+      readScope = previous;
+      if (previous && !scope.cacheable) previous.cacheable = false;
+    }
+  }
+
+  function readCacheable() {
+    return readScope?.cacheable !== false;
+  }
+
+  function markReadFailure() {
+    if (readScope) readScope.cacheable = false;
+  }
 
   function coverWorkIds() {
     const stamp = String(getCoverStamp() || "");
-    if (coverWorkIdsCache?.stamp === stamp) return coverWorkIdsCache.ids;
+    if (coverWorkIdsCache?.stamp === stamp) return { ids: coverWorkIdsCache.ids, cacheable: true };
 
+    let db;
     try {
-      const rows = getCoreDb().prepare(`
+      db = getCoreDb();
+      const failed = readScope?.failures.get(stamp)?.get(db);
+      if (failed) {
+        markReadFailure();
+        return failed;
+      }
+      const rows = db.prepare(`
         SELECT image.owner_id
         FROM fanhao_images.images image
         WHERE image.owner_type = 'work'
@@ -27,14 +67,25 @@ export function createMissingCodeSearchService({
       `).all();
       const ids = new Set(rows.map((row) => String(row.owner_id)));
       coverWorkIdsCache = { stamp, ids };
-      return ids;
+      return { ids, cacheable: true };
     } catch (error) {
       warn("[fast-code-search-covers]", error?.message || error);
-      return coverWorkIdsCache?.ids || new Set();
+      markReadFailure();
+      const failed = { ids: coverWorkIdsCache?.ids || new Set(), cacheable: false };
+      if (readScope) {
+        let owners = readScope.failures.get(stamp);
+        if (!owners) readScope.failures.set(stamp, owners = new Map());
+        owners.set(db, failed);
+      }
+      return failed;
     }
   }
 
   function search(rawQuery) {
+    return withReadStatus(() => loadSearch(rawQuery)).value;
+  }
+
+  function loadSearch(rawQuery) {
     const prefix = storedWorkCodeKey(rawQuery);
     if (!prefix) return [];
 
@@ -48,6 +99,7 @@ export function createMissingCodeSearchService({
       return works;
     } catch (error) {
       warn("[fast-code-search]", error?.message || error);
+      markReadFailure();
       return [];
     }
   }
@@ -55,14 +107,15 @@ export function createMissingCodeSearchService({
   function missingWorkPrefix(prefix) {
     const stamp = `${getSourceStamp()}:${getCoverStamp()}`;
     if (missingWorkIndexCache.stamp !== stamp) {
+      prefixBudget.clear();
       missingWorkIndexCache = { stamp, prefixes: new Map() };
     }
-    for (let length = prefix.length; length > 0; length -= 1) {
-      const cached = missingWorkIndexCache.prefixes.get(prefix.slice(0, length));
+    for (let length = Math.min(prefix.length, MISSING_PREFIX_MAX_KEY_LENGTH); length > 0; length -= 1) {
+      const cached = prefixBudget.read(missingWorkIndexCache.prefixes, prefix.slice(0, length));
       if (cached) return cached;
     }
 
-    const coverIds = coverWorkIds();
+    const covers = coverWorkIds();
     const rows = getCoreDb().prepare(`
         SELECT
           CAST(w.id AS TEXT) AS work_id,
@@ -90,9 +143,11 @@ export function createMissingCodeSearchService({
       `).all(`${prefix}%`);
     const entries = rows.map((row) => ({
       key: String(row.code_key || ""),
-      work: lightweightMissingWork(row, coverIds.has(String(row.work_id)))
+      work: lightweightMissingWork(row, covers.ids.has(String(row.work_id)))
     }));
-    missingWorkIndexCache.prefixes.set(prefix, entries);
+    if (covers.cacheable && prefix.length <= MISSING_PREFIX_MAX_KEY_LENGTH) {
+      prefixBudget.write(missingWorkIndexCache.prefixes, prefix, entries, entries.length);
+    }
     return entries;
   }
 
@@ -108,6 +163,10 @@ export function createMissingCodeSearchService({
   }
 
   function hydrate(works = []) {
+    return withReadStatus(() => loadHydrate(works)).value;
+  }
+
+  function loadHydrate(works) {
     const pending = (Array.isArray(works) ? works : []).filter((work) => work?.missingCodeSearchPending && /^\d+$/.test(String(work.id || "")));
     if (!pending.length) return works;
 
@@ -154,6 +213,7 @@ export function createMissingCodeSearchService({
       for (const work of pending) hydrateWork(work, detailsById.get(String(work.id)) || null);
     } catch (error) {
       warn("[fast-code-search-hydrate]", error?.message || error);
+      markReadFailure();
     }
     return works;
   }
@@ -211,8 +271,8 @@ export function createMissingCodeSearchService({
   }
 
   function prewarm() {
-    coverWorkIds();
+    withReadStatus(coverWorkIds);
   }
 
-  return { hydrate, prewarm, search };
+  return { hydrate, prewarm, search, withReadStatus, readCacheable };
 }

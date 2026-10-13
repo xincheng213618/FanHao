@@ -3,6 +3,7 @@ export function createWorkCodeIndexService({
   getStamp,
   looseWorkCodeKey,
   storedWorkCodeKey,
+  withWorkInfoReadStatus = null,
   workInfoRow
 }) {
   let localWorkCodeIndexCache = null;
@@ -22,6 +23,16 @@ export function createWorkCodeIndexService({
     const cache = currentWorkCodeKeysCache();
     const cached = cache.get(work);
     if (cached) return cached;
+    const result = readWorkInfo(() => buildWorkCodeKeys(work));
+    if (result.cacheable !== false) cache.set(work, result.value);
+    return result.value;
+  }
+
+  function readWorkInfo(callback) {
+    return withWorkInfoReadStatus ? withWorkInfoReadStatus(callback) : { value: callback(), cacheable: true };
+  }
+
+  function buildWorkCodeKeys(work) {
     const info = work.infoSummary?.code ? null : workInfoRow(work.id);
     const values = [
       info?.code,
@@ -42,11 +53,14 @@ export function createWorkCodeIndexService({
       seen.add(key);
       keys.push(key);
     }
-    cache.set(work, keys);
     return keys;
   }
 
   function keySetForWorks(works = []) {
+    return readWorkInfo(() => buildKeySetForWorks(works)).value;
+  }
+
+  function buildKeySetForWorks(works) {
     const keys = new Set();
     for (const work of works || []) {
       for (const codeKey of workCodeKeys(work)) keys.add(codeKey);
@@ -58,7 +72,12 @@ export function createWorkCodeIndexService({
     const library = getLibrary();
     const stamp = getStamp();
     if (localWorkCodeIndexCache?.stamp === stamp) return localWorkCodeIndexCache;
+    const result = readWorkInfo(() => buildLocalWorkCodeIndex(library, stamp));
+    if (result.cacheable !== false) localWorkCodeIndexCache = result.value;
+    return result.value;
+  }
 
+  function buildLocalWorkCodeIndex(library, stamp) {
     const keys = new Set();
     const rows = new Map();
     const searchRows = new Map();
@@ -77,8 +96,7 @@ export function createWorkCodeIndexService({
       }
     }
     prefixRows.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-    localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows };
-    return localWorkCodeIndexCache;
+    return { stamp, keys, rows, searchRows, prefixRows };
   }
 
   function localCodeKeys() {

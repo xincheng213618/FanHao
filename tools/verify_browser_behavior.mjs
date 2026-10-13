@@ -32,6 +32,9 @@ try {
   try {
     if (process.argv.includes("--android-person-first")) {
       await verifyAndroidPersonFirstLibraries(browser);
+    } else if (process.argv.includes("--short-video-search")) {
+      await verifyShortVideoSearchHints(browser);
+      await verifyAndroidRestartActionConvergence(browser);
     } else {
     await verifyFanhaoRequestLifecycle(browser);
     if (!process.argv.includes("--fanhao-requests")) {
@@ -76,6 +79,48 @@ try {
   console.log("Executable browser behavior checks passed.");
 } finally {
   if (ownedServer) await stopServer(ownedServer);
+}
+
+async function verifyShortVideoSearchHints(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = [];
+  const requests = [];
+  page.on("pageerror", (error) => errors.push(String(error)));
+  let release;
+  let arrived;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const requested = new Promise((resolve) => { arrived = resolve; });
+  try {
+    await page.route((url) => url.pathname === "/api/short-videos", async (route) => {
+      const url = new URL(route.request().url());
+      requests.push(url);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        videos: [fixtureVideo("search-hints-video")], total: 1, hasMore: false,
+        source: "all", query: url.searchParams.get("q"), users: [], usersTotal: 0
+      }) });
+    });
+    await page.route((url) => url.pathname === "/api/short-videos/authors", async (route) => {
+      arrived();
+      await pending;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        authors: [{ secUid: "search-hint-author", name: "延迟用户提示", count: 1 }], total: 1, hasMore: false
+      }) });
+    });
+    await page.goto(`${baseUrl}/short-videos?source=all&q=search-hints`, { waitUntil: "domcontentloaded" });
+    await requested;
+    await page.locator(".short-video-grid").waitFor({ state: "visible", timeout: 5000 });
+    assert(requests.length > 0 && requests.every((url) => url.searchParams.get("users") === "0"), "video requests must skip the embedded author aggregate");
+    await page.evaluate(() => { globalThis.__searchHintsGrid = document.querySelector(".short-video-grid"); });
+    assert((await page.locator(".short-video-aggregate-results").textContent()).includes("正在读取用户"), "pending hints must have their own loading state while video results are visible");
+    release();
+    await page.locator(".short-video-search-user-card", { hasText: "延迟用户提示" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await page.evaluate(() => globalThis.__searchHintsGrid === document.querySelector(".short-video-grid")), true, "author hints must keep the video grid mounted");
+    assert.deepEqual(errors, [], "the deferred hint lifecycle must not cause browser errors");
+    console.log("short-video-search: video-first rendering, deferred hints and stable video DOM passed");
+  } finally {
+    release();
+    await page.close();
+  }
 }
 
 async function verifyFanhaoRequestLifecycle(browser) {
@@ -2548,7 +2593,8 @@ async function verifyAndroidRestartActionConvergence(browser) {
         sort: "published",
         limit: "12",
         facets: "0",
-        stats: "0"
+        stats: "0",
+        users: "0"
       })}`;
       const video = (id, liked, collected = liked) => ({
         id,
@@ -2890,7 +2936,7 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.match(metrics.freshState.aria, /已点赞，11 个赞/u);
     assert.equal(metrics.targetedStable, true, "action-only convergence must retain the mounted card instead of rebuilding the list");
     assert.equal(metrics.afterRelatedAuthorsState.liked, true, "a delayed related-author response must render from the current fresh video state instead of restoring the stale cached video object");
-    assert.match(metrics.exactSearch, /^\/api\/short-videos\?q=restart-action&source=all&sort=published&limit=12&facets=0&stats=0&refresh=1$/u,
+    assert.match(metrics.exactSearch, /^\/api\/short-videos\?q=restart-action&source=all&sort=published&limit=12&facets=0&stats=0&users=0&refresh=1$/u,
       "restart convergence transport must force-refresh the exact active search endpoint");
     assert.deepEqual(metrics.canonicalRestartCacheActions, { collected: true, liked: true },
       "authoritative transport data must still be stored under the canonical exact-list key");

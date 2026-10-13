@@ -213,15 +213,26 @@ function watchInsights(libraryRows) {
     ["60_plus", "60 秒以上"]
   ]);
   const order = [...labels.keys()];
-  const watchedRows = libraryRows.filter((row) => String(row.last_watched_at || "").trim());
-  const completedTotal = watchedRows.reduce((total, row) => total + (count(row.completed_count) > 0 ? 1 : 0), 0);
-  const progressRates = watchedRows
-    .filter((row) => count(row.duration_ms) > 0)
-    .map((row) => Math.min(1, count(row.progress_ms) / count(row.duration_ms)));
-  const watchedTimes = watchedRows.map((row) => String(row.last_watched_at || "")).filter(Boolean).sort();
   const bandMap = new Map();
-  for (const row of watchedRows) {
+  let watchedTotal = 0;
+  let completedTotal = 0;
+  let progressTotal = 0;
+  let progressCount = 0;
+  let firstWatchedAt = null;
+  let lastWatchedAt = null;
+  for (const row of libraryRows) {
+    const watchedAt = String(row.last_watched_at || "");
+    if (!watchedAt.trim()) continue;
+    watchedTotal += 1;
+    if (firstWatchedAt === null || watchedAt < firstWatchedAt) firstWatchedAt = watchedAt;
+    if (lastWatchedAt === null || watchedAt > lastWatchedAt) lastWatchedAt = watchedAt;
+    const completed = count(row.completed_count) > 0;
+    if (completed) completedTotal += 1;
     const durationMs = count(row.duration_ms);
+    if (durationMs > 0) {
+      progressTotal += Math.min(1, count(row.progress_ms) / durationMs);
+      progressCount += 1;
+    }
     if (!durationMs) continue;
     const id = durationMs < 10000 ? "under_10"
       : durationMs < 20000 ? "10_20"
@@ -230,10 +241,9 @@ function watchInsights(libraryRows) {
             : "60_plus";
     const band = bandMap.get(id) || { id, watched: 0, completed: 0 };
     band.watched += 1;
-    if (count(row.completed_count) > 0) band.completed += 1;
+    if (completed) band.completed += 1;
     bandMap.set(id, band);
   }
-  const watchedTotal = watchedRows.length;
   const libraryTotal = libraryRows.length;
   return {
     libraryTotal,
@@ -241,9 +251,9 @@ function watchInsights(libraryRows) {
     completedTotal,
     completionRate: rate(completedTotal, watchedTotal),
     coverageRate: rate(watchedTotal, libraryTotal),
-    averageProgressRate: progressRates.length ? progressRates.reduce((total, value) => total + value, 0) / progressRates.length : 0,
-    firstWatchedAt: watchedTimes[0] || "",
-    lastWatchedAt: watchedTimes.at(-1) || "",
+    averageProgressRate: progressCount ? progressTotal / progressCount : 0,
+    firstWatchedAt: firstWatchedAt || "",
+    lastWatchedAt: lastWatchedAt || "",
     durationBands: [...bandMap.values()].map((row) => {
       const watched = row.watched;
       const completed = row.completed;

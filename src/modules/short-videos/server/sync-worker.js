@@ -12,6 +12,7 @@ let message;
 try {
   const result = store.importDownloadManagerDb(workerData.sourceDbPath, {
     incremental: true,
+    requireChangeJournal: true,
     includePosts: true,
     skipSummary: true
   });

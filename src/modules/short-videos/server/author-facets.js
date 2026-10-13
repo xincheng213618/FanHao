@@ -1,5 +1,6 @@
 import { LOCAL_SHORT_VIDEO_USER_ID } from "./constants.js";
 import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
+import { authorFacetIndexHint } from "./author-facet-index.js";
 
 export function followingAuthorFacet(db) {
   return db.prepare(`
@@ -112,7 +113,7 @@ function queryAuthorFacet(db, options = {}) {
         MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.id ELSE '' END) AS coverId,
         MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.mtime_ms ELSE 0 END) AS coverMtimeMs,
         COUNT(*) AS count
-      FROM short_videos v INDEXED BY idx_short_videos_author_facet
+      FROM short_videos v ${authorFacetIndexHint(db)}
       WHERE v.visibility = 'local_only'
         AND (NULLIF(v.author_sec_uid, '') IS NOT NULL OR NULLIF(v.author_name, '') IS NOT NULL)
         ${candidateWhere ? `AND (${candidateWhere})` : ""}

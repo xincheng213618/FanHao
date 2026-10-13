@@ -1,11 +1,27 @@
 // Music store sub-module: facets
-import { findSmartMix, smartMixCondition } from "./smart-mix.js";
+import { findSmartMix, smartMixCondition, smartMixRequiresState } from "./smart-mix.js";
 import { cachedMusicFacet } from "./facet-cache.js";
 import { publicAlbum, publicArtist, publicGenre } from "./serializers.js";
 import { metaValue, parseJsonObject } from "./helpers.js";
 import { normalizeMusicLanguage } from "./language.js";
 
 export { cachedMusicFacet } from "./facet-cache.js";
+
+export const ARTIST_FACET_COLUMNS = "id,name,language,album_count,track_count,duration_ms,size_bytes";
+
+export function prepareArtistFacet(db, sql) {
+  try {
+    return db.prepare(sql);
+  } catch (error) {
+    // Preserve old artist tables that lack optional public DTO columns.
+    // Other prepare/read failures retain their original error and retry path.
+    if (error?.code === "ERR_SQLITE_ERROR" && error.errcode === 1
+      && /^no such column: (?:language|album_count|duration_ms|size_bytes)$/u.test(error.message)) {
+      return db.prepare(sql.replace(ARTIST_FACET_COLUMNS, "*"));
+    }
+    throw error;
+  }
+}
 
 export function artistFacet(db, language = "", selectedArtistId = "") {
   const normalizedLanguage = normalizeMusicLanguage(language);
@@ -22,10 +38,26 @@ export function artistFacet(db, language = "", selectedArtistId = "") {
     .all(...(normalizedLanguage ? [normalizedLanguage] : []))
     .map(publicArtist));
   if (!selectedArtistId || selectedArtistId === "all" || rows.some((artist) => artist.id === selectedArtistId)) return rows;
-  const selected = db.prepare("SELECT * FROM music_artists WHERE id = ? AND track_count > 0").get(selectedArtistId);
+  const selected = prepareArtistFacet(db, `SELECT ${ARTIST_FACET_COLUMNS} FROM music_artists WHERE id = ? AND track_count > 0`).get(selectedArtistId);
   return selected ? [publicArtist(selected), ...rows.slice(0, 47)] : rows;
 }
 
+
+export const ALBUM_FACET_COLUMNS = "al.id,al.artist_id,al.title,al.year,al.cover_path,al.track_count,al.duration_ms,al.size_bytes,al.updated_at";
+
+export function prepareAlbumFacet(db, sql) {
+  try {
+    return db.prepare(sql);
+  } catch (error) {
+    // Older album tables can lack optional DTO columns. Only a native
+    // prepare-time missing column falls back to the original wide query.
+    if (error?.code === "ERR_SQLITE_ERROR" && error.errcode === 1
+      && /^no such column: al\.(?:year|cover_path|duration_ms|size_bytes|updated_at)$/u.test(error.message)) {
+      return db.prepare(sql.replace(ALBUM_FACET_COLUMNS, "al.*"));
+    }
+    throw error;
+  }
+}
 
 export function albumFacet(db, artistId = "", genre = "", language = "", selectedAlbumId = "") {
   const args = [];
@@ -44,10 +76,9 @@ export function albumFacet(db, artistId = "", genre = "", language = "", selecte
     args.push(normalizedLanguage);
   }
   const cacheKey = JSON.stringify(["albums", artistId && artistId !== "all" ? artistId : "", genre && genre !== "all" ? genre : "", normalizedLanguage]);
-  const rows = cachedMusicFacet(db, cacheKey, () => db
-    .prepare(
+  const rows = cachedMusicFacet(db, cacheKey, () => prepareAlbumFacet(db,
       `
-      SELECT al.*, a.name AS artist_name
+      SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
       FROM music_albums al
       LEFT JOIN music_artists a ON a.id = al.artist_id
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -58,8 +89,8 @@ export function albumFacet(db, artistId = "", genre = "", language = "", selecte
     .all(...args)
     .map(publicAlbum));
   if (!selectedAlbumId || selectedAlbumId === "all" || rows.some((album) => album.id === selectedAlbumId)) return rows;
-  const selected = db
-    .prepare("SELECT al.*,a.name AS artist_name FROM music_albums al LEFT JOIN music_artists a ON a.id=al.artist_id WHERE al.id=? AND al.track_count>0")
+  const selected = prepareAlbumFacet(db,
+    `SELECT ${ALBUM_FACET_COLUMNS},a.name AS artist_name FROM music_albums al LEFT JOIN music_artists a ON a.id=al.artist_id WHERE al.id=? AND al.track_count>0`)
     .get(selectedAlbumId);
   return selected ? [publicAlbum(selected), ...rows.slice(0, 59)] : rows;
 }
@@ -122,6 +153,33 @@ export function languageFacet(db) {
 }
 
 
+export function smartMixListCounts(db) {
+  const conditions = ["recent", "topplayed", "favorites", "toprated"]
+    .map(id => ({ id, ...smartMixCondition(id) }));
+  conditions.push(
+    { id: "played", where: "(COALESCE(s.play_count, 0)>0 OR COALESCE(s.last_played_at, '')<>'')", args: [] },
+    { id: "rated", where: "COALESCE(s.rating, 0)>0", args: [] }
+  );
+  const select = conditions.map(({ id, where }) => `COUNT(CASE WHEN ${where} THEN 1 END) AS ${id}`).join(", ");
+  const eligible = conditions.map(({ where }) => `(${where})`).join(" OR ");
+  const args = conditions.flatMap(condition => condition.args);
+  const row = db.prepare(`
+    SELECT ${select}
+    FROM music_track_state s
+    CROSS JOIN music_tracks t ON t.id=s.track_id
+    WHERE t.status='ok' AND (${eligible})
+  `).get(...args, ...args);
+  const total = Number(db.prepare("SELECT COALESCE(SUM(track_count), 0) AS count FROM music_artists WHERE status = 'ok'").get()?.count || 0);
+  // Rediscover retains its lazy cutoff at the original list position. Static
+  // metadata and callers reading a single mix still use smartMixCount below.
+  return new Map([
+    ...conditions.slice(0, 4).map(({ id }) => [id, Number(row?.[id] || 0)]),
+    ["unplayed", Math.max(0, total - Number(row?.played || 0))],
+    ["unrated", Math.max(0, total - Number(row?.rated || 0))]
+  ]);
+}
+
+
 export function smartMixCount(db, mix) {
   const condition = smartMixCondition(mix);
   if (["newest", "hires", "lyrics", "longform"].includes(mix.id)) {
@@ -142,8 +200,7 @@ export function smartMixCount(db, mix) {
       WHERE t.status='ok' AND COALESCE(s.rating, 0)>0`).get()?.count || 0);
     return Math.max(0, total - rated);
   }
-  const stateDriven = new Set(["recent", "topplayed", "favorites", "toprated", "rediscover"]);
-  const from = stateDriven.has(mix.id)
+  const from = smartMixRequiresState(mix)
     ? "music_track_state s CROSS JOIN music_tracks t ON t.id = s.track_id"
     : "music_tracks t";
   return Number(

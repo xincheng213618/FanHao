@@ -276,7 +276,8 @@ export function createMusicActions({ state, api, player, view, router, showError
       music().loadingMore = false;
       settleRequestStatus(request, error?.message || "音乐列表读取失败");
       finishMusicLoad(request);
-      view.refresh();
+      // UI callers present the rejection through showError; rendering here
+      // would rebuild the entire music view a second time in their catch.
       throw error;
     }
     if (!isMusicLoadCurrent(request)) {
@@ -314,7 +315,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       : albumMode
         ? (data.total ? "" : "没有匹配的专辑")
         : emptyMusicMessage(data.total || music().queue.length));
-    const appendedInPlace = !background && append && isForegroundCurrent(request) && (
+    const appendedInPlace = !background && append && (
       artistMode
         ? view.appendArtistPage(data.artists || [], previousArtists.length)
         : albumMode
@@ -328,7 +329,15 @@ export function createMusicActions({ state, api, player, view, router, showError
       return;
     }
     finishMusicLoad(request);
-    if (background || !isForegroundCurrent(request)) return;
+    if (background) return;
+    if (!isForegroundCurrent(request)) {
+      // Picking a song changes playback ownership, but this request still owns
+      // the selected list. Update only a mounted library panel, never its route
+      // or player page. Appends retain their previous scroll position.
+      const refreshedInPlace = !appendedInPlace && view.refreshMusicLibraryContent();
+      if (append && refreshedInPlace) view.restoreMusicPanelScroll(appendScrollTop);
+      return;
+    }
     view.renderStats();
     if (!appendedInPlace && !view.refreshMusicLibraryContent()) view.refresh();
     if (append && !appendedInPlace) view.restoreMusicPanelScroll(appendScrollTop);
@@ -851,14 +860,31 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   // ---------- 歌单 ----------
+  function invalidatePlaylistCache() {
+    music().playlistsLoadedAt = 0;
+    sideListGenerations.playlists += 1;
+    sideListRequests.playlists?.controller.abort();
+    sideListRequests.playlists = null;
+  }
+
   async function createPlaylistFromDialog() {
     const name = String(music().playlistDialogName || "").trim();
     if (!name) return null;
     const trackId = music().playlistDialogTrackId || "";
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     closePlaylistDialog();
     music().status = "正在创建歌单";
-    const data = await api.createPlaylist({ name, ...(trackId ? { trackIds: [trackId] } : {}) });
-    await loadPlaylists();
+    let data;
+    try {
+      data = await api.createPlaylist({ name, ...(trackId ? { trackIds: [trackId] } : {}) });
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return null;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return data.playlist || null;
+    const loadedCurrent = await loadPlaylists();
+    if (!loadedCurrent || !isForegroundCurrent(request)) return data.playlist || null;
     if (data.playlist?.id) {
       music().mode = "playlist";
       music().activePlaylistId = data.playlist.id;
@@ -881,14 +907,24 @@ export function createMusicActions({ state, api, player, view, router, showError
     const name = window.prompt("歌单名称", defaultQueuePlaylistName());
     const clean = String(name || "").trim();
     if (!clean) return null;
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     music().status = "正在保存播放队列";
     view.refresh();
-    const data = await api.createPlaylist({
-      name: clean,
-      description: "从播放队列保存",
-      trackIds
-    });
-    await loadPlaylists();
+    let data;
+    try {
+      data = await api.createPlaylist({
+        name: clean,
+        description: "从播放队列保存",
+        trackIds
+      });
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return null;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return data.playlist || null;
+    const loadedCurrent = await loadPlaylists();
+    if (!loadedCurrent || !isForegroundCurrent(request)) return data.playlist || null;
     if (data.playlist?.id) {
       music().mode = "playlist";
       music().activePlaylistId = data.playlist.id;
@@ -909,13 +945,23 @@ export function createMusicActions({ state, api, player, view, router, showError
     const value = window.prompt("输入 .m3u/.m3u8 文件路径，或粘贴 #EXTM3U 内容", "");
     const source = String(value || "").trim();
     if (!source) return null;
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     music().status = "正在导入 M3U 歌单";
     view.refresh();
     const body = source.includes("\n") || source.toUpperCase().startsWith("#EXTM3U")
       ? { content: source }
       : { path: source };
-    const data = await api.importM3u(body);
-    await loadPlaylists();
+    let data;
+    try {
+      data = await api.importM3u(body);
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return null;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return data.playlist || null;
+    const loadedCurrent = await loadPlaylists();
+    if (!loadedCurrent || !isForegroundCurrent(request)) return data.playlist || null;
     if (data.playlist?.id) {
       const summary = data.importSummary || {};
       music().status = `已导入歌单：匹配 ${formatNumberSafe(summary.matched || 0)} 首，缺失 ${formatNumberSafe(summary.missing || 0)} 项`;

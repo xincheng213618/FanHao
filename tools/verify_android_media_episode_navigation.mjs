@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
-import { appFunction, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
@@ -66,7 +66,7 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
     return node;
   };
   document.addEventListener = () => {}; document.visibilityState = "visible";
-  const context = vm.createContext({ console, document, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
+  const context = vm.createContext({ ...channelAccountBoundary, console, document, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "mediaDetail", currentViewParams: {}, viewRenderToken: 0, activeViewController: null,
     performance: { now: () => 0 }, window: { addEventListener() {}, setTimeout() { return 1; }, clearTimeout() {},
       Capacitor: { Plugins: { FanHaoPlayer: { async play(value) { calls.bridge.push(plain(value)); return { opened: true }; } } } } },

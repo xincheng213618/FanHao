@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import * as mediaNavigationState from "../../android-client/www/js/media-navigation-state.js";
 import { createChannelHistoryState } from "../../android-client/www/js/channel-history-state.js";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../android-client/www/js/account-owner.js";
+import { captureCachedJsonFence } from "../../android-client/www/js/cache.js";
+
+export const channelAccountBoundary = Object.freeze({
+  accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, captureCachedJsonFence
+});
 
 // Deterministic DOM/event/clock boundaries only. Production constructs the menu,
 // navigation buttons and media route adapter; no browser, network or device runs.
@@ -120,6 +126,7 @@ export function createGalleryHarness(sources, { storage = new Map(), fallback = 
   const no = () => {};
   const context = {
     ...mediaNavigationState,
+    ...channelAccountBoundary,
     document, console, URL, URLSearchParams, Date, Set, Map,
     currentView: initialView, currentViewParams: initialParams, viewStack: [], searchSurfaceExpanded: false,
     // Limit reset/rendering remains an unrelated boundary in menu-only tests.

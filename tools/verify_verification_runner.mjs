@@ -12,6 +12,61 @@ const commands = expandCommands(
 );
 assert.deepEqual(commands, ['node one.mjs', 'node shared.mjs', 'node two.mjs']);
 
+for (const [file, script] of [
+  ['android-client/scripts/verify-android-security.mjs', 'verify:android-security'],
+  ['tools/verify_manga_download_metadata.mjs', 'verify:manga-download'],
+  ['tools/verify_manga_image_dimensions.mjs', 'verify:manga-image-dimensions'],
+  ['tools/verify_music_metadata_smart_counts.mjs', 'verify:music-smart-counts'],
+  ['tools/verify_person_identity_statement_reuse.mjs', 'verify:person-identity-statements'],
+  ['tools/verify_novel_empty_pages.mjs', 'verify:novel-empty-pages'],
+  ['tools/verify_media_detail_projection.mjs', 'verify:media-detail-projection'],
+  ['tools/verify_work_info_detail_cache.mjs', 'verify:work-info-cache'],
+  ['tools/verify_work_info_summary_projection.mjs', 'verify:work-info-cache'],
+  ['tools/verify_work_info_cache_recovery.mjs', 'verify:work-info-recovery'],
+  ['tools/verify_work_info_derived_cache_recovery.mjs', 'verify:work-info-recovery'],
+  ['tools/verify_work_info_catalog_cache_recovery.mjs', 'verify:work-info-recovery'],
+  ['tools/verify_work_info_prefix_cache_recovery.mjs', 'verify:work-info-recovery'],
+  ['tools/fixtures/work-info-cache-recovery.mjs', 'verify:work-info-recovery'],
+  ['tools/verify_work_search_cache_recovery.mjs', 'verify:work-search-cache'],
+  ['tools/fixtures/work-search-cache-recovery.mjs', 'verify:work-search-cache'],
+  ['tools/fixtures/work-search-cache-legacy.txt', 'verify:work-search-cache'],
+  ['tools/fixtures/missing-code-search-cache-legacy.txt', 'verify:work-search-cache'],
+  ['tools/verify_android_novel_style_reuse.mjs', 'verify:android-novel-styles'],
+  ['tools/verify_android_novel_mobile_ui.mjs', 'verify:android-novel-ui'],
+  ['tools/verify_android_novel_source_identity.mjs', 'verify:android-novels'],
+  ['tools/verify_android_novel_paging_alignment.mjs', 'verify:android-novel-paging'],
+  ['tools/verify_music_artist_projection.mjs', 'verify:music-artist-projection'],
+  ['tools/verify_music_track_projection.mjs', 'verify:music-track-projection'],
+  ['tools/fixtures/music-track-projection-store-legacy.txt', 'verify:music-track-projection'],
+  ['tools/fixtures/music-track-projection-lyrics-legacy.txt', 'verify:music-track-projection'],
+  ['tools/verify_music_report_projection.mjs', 'verify:music-report-projection'],
+  ['tools/verify_video_probe_cache_recovery.mjs', 'verify:video-probe-cache-recovery'],
+  ['tools/verify_work_search_index_retention.mjs', 'verify:work-search-retention'],
+  ['tools/fixtures/work-search-index-retention-legacy.txt', 'verify:work-search-retention'],
+  ['tools/verify_work_search_postings.mjs', 'verify:work-search-postings'],
+  ['tools/fixtures/work-search-postings-legacy.txt', 'verify:work-search-postings'],
+  ['tools/verify_code_prefix_cache_recovery.mjs', 'verify:code-prefix-cache-recovery'],
+  ['tools/verify_person_page_cache_keys.mjs', 'verify:person-page-cache'],
+  ['tools/verify_person_page_cache_budget.mjs', 'verify:person-page-cache'],
+  ['tools/verify_work_page_cache_keys.mjs', 'verify:work-page-cache'],
+  ['tools/verify_ranking_cache_recovery.mjs', 'verify:ranking-cache'],
+  ['tools/verify_actor_movie_cache_recovery.mjs', 'verify:actor-movie-cache'],
+  ['tools/verify_actor_movie_info_cache_recovery.mjs', 'verify:actor-movie-info-cache'],
+  ['tools/verify_access_analytics_close.mjs', 'verify:access-analytics-close'],
+  ['tools/verify_work_detail_cache.mjs', 'verify:work-detail-cache'],
+  ['tools/verify_manga_file_streams.mjs', 'verify:manga-streams'],
+  ['tools/verify_stored_zip_stream_lifecycle.mjs', 'verify:manga-streams'],
+  ['src/modules/photos/server/stored-zip-stream.js', 'verify:manga-streams'],
+  ['tools/verify_android_update_streams.mjs', 'verify:android-update-streams'],
+  ['tools/verify_novel_collection_refresh.mjs', 'verify:novel-collection-refresh'],
+  ['public/modules/novels/collection-admin.js', 'verify:novel-collection-refresh'],
+]) {
+  const plan = selectScripts([file]);
+  assert(plan.scripts.includes(script), `${file} must select ${script}`);
+  assert.equal(plan.unknownSourceFiles.length, 0);
+}
+assert(FULL_SCRIPTS.includes('verify:novel-collection-refresh'));
+
 const lifecycleCommands = expandCommands(
   ['verify:android-one', 'verify:android-two'],
   {
@@ -88,6 +143,7 @@ assert(selectScripts(['public/games/jump/integration.js']).scripts.includes('ver
 
 const androidUpdate = selectScripts(['src/modules/system/server/android-update/service.js']);
 assert(androidUpdate.scripts.includes('verify:android-release-workflow'));
+assert(androidUpdate.scripts.includes('verify:android-update-streams'));
 assert(androidUpdate.scripts.includes('verify:android-security'));
 
 const sharedPublicShell = selectScripts(['public/app.js']);
@@ -95,6 +151,9 @@ assert(sharedPublicShell.scripts.includes('verify:startup'));
 assert.deepEqual(sharedPublicShell.unknownSourceFiles, ['public/app.js']);
 
 const downloader = selectScripts(['src/modules/short-videos/download-manager/manager_core/read_models.py']);
+assert(selectScripts(['src/modules/short-videos/download-manager/manager_core/library_sync.py']).scripts.includes('verify:short-video-sync'));
+assert(selectScripts(['src/modules/short-videos/server/store.js']).scripts.includes('verify:short-video-sync'));
+assert(selectScripts(['tools/verify_short_video_incremental_sync.mjs']).scripts.includes('verify:short-video-sync'));
 assert.deepEqual(downloader.scripts, ['verify:douyin-manager', 'verify:imports'], "independent downloader changes must not run unrelated short-video/Android suites");
 assert.deepEqual(selectScripts(['tools/verify_douyin_manager_latest_requests.mjs']).scripts, downloader.scripts);
 assert.deepEqual(selectScripts(['src/modules/short-videos/download-manager/tests/test_manager_profile_snapshot.py']).scripts, downloader.scripts);
@@ -123,6 +182,7 @@ assert.deepEqual(selectScripts(['lib/cover-frame.js']).scripts, ['verify:work-co
 assert.deepEqual(selectScripts(['tools/verify_gallery_cover_async.mjs']).scripts, ['verify:gallery-cover-async', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/verify_image_query_correctness.mjs']).scripts, ['verify:image-query', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/diagnose_image_query_cpu.mjs']).scripts, ['verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tools/verify_image_query_cache.mjs']).scripts, ['verify:image-query-cache', 'verify:image-query', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/verify_video_probe_cache.mjs']).scripts, ['verify:video-probe-cache', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/verify_video_probe_lifecycle.mjs']).scripts, ['verify:video-probe-cache', 'verify:imports']);
 assert(selectScripts(['src/platform/server/video-probe-task-pool.js']).scripts.includes('verify:video-probe-cache'));
@@ -145,10 +205,14 @@ for (const file of ['public/modules/content-index/gallery-page.js', 'public/modu
 }
 assert.deepEqual(selectScripts(['tools/verify_gallery_list_rendering.mjs']).scripts, ['verify:gallery-rendering', 'verify:photo-reader-browser', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/verify_android_channel_rendering.mjs']).scripts, ['verify:android-channel-rendering', 'verify:photo-search', 'verify:imports']);
-assert.deepEqual(selectScripts(['tools/fixtures/image-library-channel-server.mjs']).scripts, ['verify:image-query', 'verify:gallery-rendering', 'verify:android-channel-rendering', 'verify:imports']);
+for (const name of ['image_cache', 'cache_stats']) {
+  assert.deepEqual(selectScripts([`tools/verify_android_${name}.mjs`]).scripts, ['verify:android-cache', 'verify:imports']);
+}
+assert.deepEqual(selectScripts(['tools/fixtures/image-library-channel-server.mjs']).scripts, ['verify:image-query', 'verify:image-query-cache', 'verify:gallery-rendering', 'verify:android-channel-rendering', 'verify:imports']);
+assert.deepEqual(selectScripts(['tools/fixtures/android-gallery-navigation-harness.mjs']).scripts, ['verify:android-media', 'verify:photo-search', 'verify:imports']);
 const channelScripts = selectScripts(['android-client/www/platform/content-index/channel-views.js']).scripts;
 for (const script of ['verify:android-media', 'verify:android-photos', 'verify:android-channel-rendering', 'verify:photo-search', 'verify:browser-behavior']) assert(channelScripts.includes(script));
-for (const file of ['src/modules/content-index/server/image-library-service.js', 'src/modules/content-index/server/image-library-index-service.js', 'src/modules/content-index/server/image-gallery-db-service.js', 'lib/gallery-metadata-revision.js', 'src/modules/media/server/gallery-metadata-service.js', 'server.js']) {
+for (const file of ['src/modules/content-index/server/image-library-service.js', 'src/modules/content-index/server/image-library-index-service.js', 'src/modules/content-index/server/image-query-cache.js', 'src/modules/content-index/server/image-gallery-db-service.js', 'lib/gallery-metadata-revision.js', 'src/modules/media/server/gallery-metadata-service.js', 'server.js']) {
   for (const script of ['verify:image-library', 'verify:gallery-rendering', 'verify:android-channel-rendering']) assert(selectScripts([file]).scripts.includes(script));
 }
 for (const file of ['public/modules/content-index/catalog.css', 'public/modules/content-index/styles.css']) {
@@ -176,16 +240,40 @@ for (const file of ['tools/verify_module_lifecycle.mjs', 'tools/verify_server_sh
 for (const file of ['src/fanhao/module-registry.js', 'src/platform/server/server-host.js']) {
   assert.deepEqual(selectScripts([file]).scripts, ['verify:modules', 'verify:shutdown', 'verify:products', 'verify:startup', 'verify:imports']);
 }
-for (const script of ['verify:shutdown', 'verify:static-files']) assert(selectScripts(['server.js']).scripts.includes(script));
+for (const script of ['verify:shutdown', 'verify:static-files', 'verify:android-update-streams', 'verify:manga-streams']) assert(selectScripts(['server.js']).scripts.includes(script));
 const actualScripts = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).scripts;
 for (const file of ['file_stream_lifecycle', 'file_server_async']) {
   assert.deepEqual(selectScripts([`tools/verify_${file}.mjs`]).scripts, ['verify:file-streams', 'verify:imports']);
 }
 const sharedFileScripts = selectScripts(['src/platform/server/file-server.js']).scripts;
-for (const script of ['verify:archive-images', 'verify:short-video-actions', 'verify:products']) {
+for (const script of ['verify:archive-images', 'verify:short-video-actions', 'verify:products', 'verify:android-update-streams', 'verify:manga-streams']) {
   assert(sharedFileScripts.includes(script), `shared file server changes must cover ${script}`);
 }
 const fullCommands = expandCommands(FULL_SCRIPTS, actualScripts);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_work_search_cache_recovery.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_android_novel_style_reuse.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_android_novel_paging_alignment.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_work_search_index_retention.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_work_search_postings.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_music_track_projection.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_music_artist_projection.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_music_report_projection.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_video_probe_cache_recovery.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_code_prefix_cache_recovery.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_actor_movie_cache_recovery.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_actor_movie_info_cache_recovery.mjs').length, 1);
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_access_analytics_close.mjs').length, 1);
+for (const file of ['cache_recovery', 'derived_cache_recovery', 'catalog_cache_recovery', 'prefix_cache_recovery']) {
+  assert.equal(fullCommands.filter(command => command === `node tools/verify_work_info_${file}.mjs`).length, 1);
+}
+for (const file of ['verify_android_update_streams', 'verify_manga_file_streams', 'verify_stored_zip_stream_lifecycle', 'verify_manga_image_dimensions', 'verify_music_metadata_smart_counts', 'verify_person_identity_statement_reuse', 'verify_novel_empty_pages', 'verify_media_detail_projection', 'verify_work_info_detail_cache', 'verify_work_info_summary_projection', 'verify_person_page_cache_keys', 'verify_person_page_cache_budget', 'verify_work_page_cache_keys', 'verify_work_detail_cache', 'verify_ranking_cache_recovery']) {
+  assert.equal(fullCommands.filter(command => command === `node tools/${file}.mjs`).length, 1);
+}
+for (const command of ['node tools/verify_android_image_cache.mjs', 'node tools/verify_android_cache_stats.mjs']) {
+  assert.equal(fullCommands.filter((entry) => entry === command).length, 1, 'Android cache checks must run once in full verification');
+  const sharedCacheCommands = expandCommands(selectScripts(['android-client/www/js/cache.js']).scripts, actualScripts);
+  assert.equal(sharedCacheCommands.filter((entry) => entry === command).length, 1, 'shared cache changes must include cache behavior');
+}
 for (const file of ['verify_static_file_lifecycle', 'verify_module_lifecycle', 'verify_server_shutdown_lifecycle', 'verify_gallery_list_rendering', 'verify_android_channel_rendering', 'verify_short_video_quality_queries', 'verify_short_video_image_sources', 'verify_short_video_image_lifecycle', 'verify_actor_avatar_import', 'verify_file_server_async', 'verify_short_video_product_lifecycle']) {
   assert.equal(fullCommands.filter((command) => command === `node tools/${file}.mjs`).length, 1, `${file} must run once in full verification`);
 }
@@ -199,6 +287,12 @@ for (const file of ['src/modules/photos/server/manga-service.js', 'src/modules/p
   assert.deepEqual(selectScripts([file]).scripts, ['verify:manga', 'verify:manga-lookup', 'verify:image-library', 'verify:gallery-rendering', 'verify:android-channel-rendering', 'verify:imports']);
 }
 assert.deepEqual(selectScripts(['tools/verify_music_facet_cache.mjs']).scripts, ['verify:music-facet-cache', 'verify:music-scale', 'verify:imports']);
+assert.deepEqual(selectScripts(['tools/verify_music_lyric_search.mjs']).scripts, ['verify:music-lyric-search', 'verify:imports']);
+for (const file of ['store', 'lyrics-search']) {
+  const selected = expandCommands(selectScripts([`src/modules/music/server/${file}.js`]).scripts, actualScripts);
+  assert.equal(selected.filter(command => command === 'node tools/verify_music_lyric_search.mjs').length, 1, 'music search changes must include focused behavior');
+}
+assert.equal(fullCommands.filter(command => command === 'node tools/verify_music_lyric_search.mjs').length, 1, 'music search must run once in full verification');
 for (const file of ['tools/verify_music_summary_reuse.mjs', 'tools/verify_music_active_catalogue.mjs']) {
   assert.deepEqual(selectScripts([file]).scripts, ['verify:music-summary-cache', 'verify:music-scale', 'verify:imports']);
 }
@@ -218,6 +312,7 @@ for (const name of ['facet-cache', 'facets', 'constants', 'store', 'scan']) {
 assert.deepEqual(selectScripts(['tools/verify_music_playback_lifecycle.mjs']).scripts, ['verify:music-playback', 'verify:imports']);
 assert.deepEqual(selectScripts(['public/modules/music/player/engine.js']).scripts, ['verify:music-playback', 'verify:music-reader-browser', 'verify:music-progress', 'verify:music-progress-browser', 'verify:browser-behavior', 'verify:imports']);
 assert.deepEqual(selectScripts(['public/modules/music/music-page.js']).scripts, ['verify:music-reader-browser', 'verify:music-requests', 'verify:music-playback', 'verify:music-progress', 'verify:music-progress-browser', 'verify:browser-behavior', 'verify:imports']);
+assert.deepEqual(selectScripts(['public/modules/music/views/components.js']).scripts, ['verify:music-reader-browser', 'verify:music-requests', 'verify:music-playback', 'verify:music-progress', 'verify:music-progress-browser', 'verify:browser-behavior', 'verify:imports']);
 assert.deepEqual(selectScripts(['public/modules/music/actions.js']).scripts, ['verify:music-requests', 'verify:music-reader-browser', 'verify:music-playback', 'verify:music-progress', 'verify:music-progress-browser', 'verify:browser-behavior', 'verify:imports']);
 for (const name of ['music-progress-writer', 'progress-session', 'api']) {
   assert.deepEqual(selectScripts([`public/modules/music/${name}.js`]).scripts, ['verify:music-progress', 'verify:music-progress-browser', 'verify:music-rescan-worker', 'verify:music-scale', 'verify:imports']);
@@ -237,7 +332,7 @@ assert.deepEqual(selectScripts(['tools/verify_music_reader_requests.mjs']).scrip
 assert.deepEqual(selectScripts(['tools/verify_novel_reader_requests.mjs']).scripts, ['verify:novel-reader-browser', 'verify:novel-reader', 'verify:imports']);
 assert.deepEqual(selectScripts(['tools/verify_web_novel_chapter_identity.mjs']).scripts, ['verify:novel-reader', 'verify:imports']);
 for (const file of ['public/modules/novels/novel-page.js', 'public/modules/novels/collection-admin.js']) {
-  assert.deepEqual(selectScripts([file]).scripts, ['verify:novel-reader-browser', 'verify:novel-reader', 'verify:novel-progress', 'verify:novel-progress-browser', 'verify:browser-behavior', 'verify:imports']);
+  assert.deepEqual(selectScripts([file]).scripts, ['verify:novel-collection-refresh', 'verify:novel-reader-browser', 'verify:novel-reader', 'verify:novel-progress', 'verify:novel-progress-browser', 'verify:browser-behavior', 'verify:imports']);
 }
 for (const file of ['tools/verify_novel_progress_writer.mjs', 'tools/verify_novel_progress_order.mjs']) {
   assert.deepEqual(selectScripts([file]).scripts, ['verify:novel-progress', 'verify:imports']);

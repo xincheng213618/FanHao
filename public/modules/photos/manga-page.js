@@ -683,7 +683,9 @@ export function createMangaPage(deps) {
     page.querySelector('[data-action="fit"]').addEventListener("click", () => {
       state.manga.fitWidth = !state.manga.fitWidth;
       writeStoredFlag("fanhao.manga.fitWidth", state.manga.fitWidth);
-      renderView();
+      page.classList.toggle("fit-width", state.manga.fitWidth);
+      page.classList.toggle("original-width", !state.manga.fitWidth);
+      page.querySelector('[data-action="fit"]').textContent = state.manga.fitWidth ? "原始宽度" : "适应宽度";
     });
     return page;
   }

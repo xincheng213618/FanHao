@@ -224,6 +224,15 @@ export async function routeAdminApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/admin/organize-person" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const payload = adminMaintenanceTaskService.organizePersonPayload(await readJsonBody(req));
+      sendJson(res, payload.task ? 202 : 200, payload);
+    } catch (error) { sendJson(res, error.statusCode || 500, { error: error.message || "人物整理失败" }); }
+    return true;
+  }
+
   if (url.pathname === "/api/admin/refresh-actor-movies" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {

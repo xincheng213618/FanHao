@@ -1,8 +1,8 @@
-import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-07b744082137";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-07b744082137";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-1443708f18b1";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-1443708f18b1";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-07b744082137";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-07b744082137";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-1443708f18b1";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-1443708f18b1";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";
@@ -66,6 +66,7 @@ export function createNovelViews(context) {
   const catalogState = {
     bookId: "",
     query: "",
+    loadedQuery: "",
     page: 0,
     descending: false,
     remotePaged: false,
@@ -73,6 +74,8 @@ export function createNovelViews(context) {
     filteredTotal: 0,
     offset: 0
   };
+  const catalogBrowserUpdates = new WeakMap();
+  const detailCatalogBooks = new WeakMap();
   let catalogSearchTimer = null;
   let catalogRequestId = 0;
   let detailCatalogRequestId = 0;
@@ -91,6 +94,8 @@ export function createNovelViews(context) {
     active: false,
     session: null,
     screen: null,
+    pagingCleanup: null,
+    pagingRatioChanged: null,
     restoreFrame: null,
     restoreEpoch: 0,
     restoreRatio: null,
@@ -1911,6 +1916,7 @@ export function createNovelViews(context) {
     await loadRemoteDetailCatalogPage({
       anchor: book.progress?.chapterIndex || 1,
       isActive,
+      replaceDetail: true,
       render: true
     });
   }
@@ -1982,21 +1988,47 @@ export function createNovelViews(context) {
     meta.textContent = `${formatNumber(book.chapterCount || chapters.length || 0)} 章`;
     head.append(title, meta);
     catalog.append(head);
-    if (options.catalogError) {
-      const error = document.createElement("div");
-      error.className = "novel-reader-catalog-loading error";
-      error.textContent = options.catalogError;
-      catalog.append(error);
-    } else {
-      catalog.append(createCatalogBrowser(book, chapters, {
-        meta,
-        serverPaged: remotePaged,
-        loadPage: loadRemoteDetailCatalogPage,
-        anchorIndex: book.progress?.chapterIndex || 1
-      }));
-    }
+    detailCatalogBooks.set(catalog, book);
+    const browser = createCatalogBrowser(book, chapters, {
+      meta,
+      serverPaged: remotePaged,
+      loadPage: loadRemoteDetailCatalogPage,
+      anchorIndex: book.progress?.chapterIndex || 1,
+      ownAction: createDetailCatalogActionOwner(catalog)
+    });
+    catalog.append(browser);
+    if (options.catalogError) catalogBrowserUpdates.get(browser)(chapters, { book, serverPaged: remotePaged, error: options.catalogError });
     els.viewContent.append(catalog);
     renderLocalLibraryErrorCard();
+  }
+
+  function createDetailCatalogActionOwner(catalog) {
+    const page = novelPage;
+    const book = detailState.book;
+    return (handler) => (...args) => {
+      if ((page && (novelPage !== page || !page.isActive())) || book !== detailState.book || !els.viewContent.contains(catalog)) return;
+      return handler(...args);
+    };
+  }
+
+  function updateDetailCatalog(options = {}) {
+    const catalog = els.viewContent.querySelector("#novelDetailCatalog");
+    const browser = catalog?.querySelector(".novel-mobile-catalog-browser");
+    const update = browser && catalogBrowserUpdates.get(browser);
+    if (!update || detailCatalogBooks.get(catalog) !== detailState.book) return false;
+    const book = detailState.book || {};
+    const progressIndex = Number((book.localProgress || book.progress)?.chapterIndex || 0);
+    const progressChapter = progressIndex ? detailState.chapters.find(chapter => Number(chapter.index) === progressIndex) : null;
+    if (progressChapter?.title) {
+      detailState.progressChapterTitle = progressChapter.title;
+      const shortcut = [...els.viewContent.querySelectorAll(".novel-mobile-chapter-shortcut")]
+        .find(button => button.querySelector("span")?.textContent === "上次读到");
+      const title = shortcut?.querySelector("strong");
+      if (title) title.textContent = `${formatNumber(progressChapter.index)} · ${progressChapter.title}`;
+    }
+    update(detailState.chapters, { book, serverPaged: options.remotePaged ?? catalogState.remotePaged,
+      loading: options.loading, error: options.catalogError });
+    return true;
   }
 
   function createDetailHero(book, chapters) {
@@ -2148,12 +2180,15 @@ export function createNovelViews(context) {
     return Boolean((book.cachedLocal && !book.local) || isRemoteCacheBook(book));
   }
 
-  function createChapterButton(book, chapter = {}) {
+  function createChapterButton(book, chapter = {}, ownAction = handler => handler) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-mobile-chapter";
     if (book.progress?.chapterIndex === chapter.index) button.classList.add("active");
-    button.addEventListener("click", () => openReader(book, chapter.index || 1, { exactChapter: true, chapter }));
+    button.addEventListener("click", ownAction(() => {
+      if (!button.isConnected) return;
+      openReader(book, chapter.index || 1, { exactChapter: true, chapter });
+    }));
     const title = document.createElement("strong");
     title.textContent = chapter.title || `第 ${chapter.index || ""} 章`.trim();
     const meta = document.createElement("span");
@@ -2166,6 +2201,7 @@ export function createNovelViews(context) {
     if (catalogState.bookId === String(book?.id || "")) return;
     catalogState.bookId = String(book?.id || "");
     catalogState.query = "";
+    catalogState.loadedQuery = "";
     catalogState.descending = false;
     catalogState.page = catalogPageForChapter(chapters, chapterIndex, false);
     catalogState.remotePaged = false;
@@ -2175,8 +2211,10 @@ export function createNovelViews(context) {
   }
 
   function createCatalogBrowser(book, chapters, options = {}) {
-    const source = Array.isArray(chapters) ? chapters : [];
-    const serverPaged = Boolean(options.serverPaged);
+    let source = Array.isArray(chapters) ? chapters : [];
+    const ownAction = options.ownAction || (handler => handler);
+    let serverPaged = Boolean(options.serverPaged);
+    let loading = false, error = "";
     const loadPage = options.loadPage || loadRemoteReaderCatalogPage;
     prepareCatalogState(book, source, book?.progress?.chapterIndex || readerState.chapter?.index || 1);
     const shell = document.createElement("div");
@@ -2188,7 +2226,7 @@ export function createNovelViews(context) {
     search.placeholder = "搜索章节名或章数";
     search.setAttribute("aria-label", "搜索章节");
     search.value = catalogState.query;
-    const order = actionButton(catalogState.descending ? "倒序" : "正序", () => {
+    const order = actionButton(catalogState.descending ? "倒序" : "正序", ownAction(() => {
       catalogState.descending = !catalogState.descending;
       catalogState.page = 0;
       if (serverPaged) {
@@ -2196,32 +2234,43 @@ export function createNovelViews(context) {
       } else {
         refresh();
       }
-    });
+    }));
     order.className = "novel-mobile-catalog-order";
-    const previous = actionButton("上一段", () => {
+    const previous = actionButton("上一段", ownAction(() => {
       const page = Math.max(0, catalogState.page - 1);
       if (serverPaged) loadPage({ page }).catch(() => {});
       else {
         catalogState.page = page;
         refresh();
       }
-    });
+    }));
     const range = document.createElement("select");
     range.setAttribute("aria-label", "目录分段");
-    const next = actionButton("下一段", () => {
+    const next = actionButton("下一段", ownAction(() => {
       const page = catalogState.page + 1;
       if (serverPaged) loadPage({ page }).catch(() => {});
       else {
         catalogState.page = page;
         refresh();
       }
-    });
+    }));
     const status = document.createElement("span");
     status.className = "novel-mobile-catalog-status";
     const list = document.createElement("div");
     list.className = "novel-mobile-catalog-list";
 
     function refresh() {
+      order.textContent = catalogState.descending ? "倒序" : "正序";
+      if (loading || error) {
+        previous.disabled = next.disabled = range.disabled = true;
+        status.textContent = loading ? "读取中" : "读取失败";
+        list.innerHTML = "";
+        const message = document.createElement("div");
+        message.className = `novel-reader-catalog-loading${loading ? "" : " error"}`;
+        message.textContent = loading ? "正在读取章节目录…" : error;
+        list.append(message);
+        return;
+      }
       const query = String(catalogState.query || "").trim().toLocaleLowerCase("zh-Hans-CN");
       let filtered = source;
       let visible = source;
@@ -2263,7 +2312,7 @@ export function createNovelViews(context) {
       }
       list.innerHTML = "";
       for (const chapter of visible) {
-        const button = createChapterButton(book, chapter);
+        const button = createChapterButton(book, chapter, ownAction);
         if (Number(chapter.index) === Number(readerState.chapter?.index)) button.classList.add("active");
         list.append(button);
       }
@@ -2275,7 +2324,7 @@ export function createNovelViews(context) {
       }
     }
 
-    search.addEventListener("input", () => {
+    search.addEventListener("input", ownAction(() => {
       catalogState.query = search.value;
       catalogState.page = 0;
       if (!serverPaged) {
@@ -2283,24 +2332,35 @@ export function createNovelViews(context) {
         return;
       }
       window.clearTimeout(catalogSearchTimer);
-      catalogSearchTimer = window.setTimeout(() => {
+      loading = true; error = "";
+      refresh();
+      catalogSearchTimer = window.setTimeout(ownAction(() => {
+        catalogSearchTimer = null;
         loadPage({ page: 0, query: search.value }).catch(() => {});
-      }, 260);
-    });
-    range.addEventListener("change", () => {
+      }), 260);
+    }));
+    range.addEventListener("change", ownAction(() => {
       const page = Math.max(0, Number(range.value || 0));
       if (serverPaged) loadPage({ page }).catch(() => {});
       else {
         catalogState.page = page;
         refresh();
       }
-    });
+    }));
 
     const pagination = document.createElement("div");
     pagination.className = "novel-mobile-catalog-pagination";
     pagination.append(previous, range, next);
     tools.append(search, order, pagination, status);
     shell.append(tools, list);
+    catalogBrowserUpdates.set(shell, (nextChapters, state) => {
+      source = Array.isArray(nextChapters) ? nextChapters : [];
+      book = state.book || book;
+      serverPaged = Boolean(state.serverPaged);
+      loading = Boolean(state.loading);
+      error = String(state.error || "");
+      refresh();
+    });
     refresh();
     return shell;
   }
@@ -2521,6 +2581,7 @@ export function createNovelViews(context) {
     els.viewKicker.textContent = book.title || "小说阅读";
     els.viewTitle.textContent = chapter.title || "章节";
     els.viewMeta.textContent = `${book.author || "未知作者"} · ${formatNumber(chapter.charCount || 0)} 字${suffix}`;
+    readerState.pagingCleanup?.();
     els.viewContent.innerHTML = "";
 
     const screen = document.createElement("article");
@@ -2538,11 +2599,12 @@ export function createNovelViews(context) {
     screen.style.setProperty("--novel-reader-line", String(settings.lineHeight));
     screen.style.setProperty("--novel-reader-dim", readerBrightnessDim(settings));
     applyReaderBrightness(settings);
-    screen.addEventListener("click", (event) => {
+    const ownAction = createReaderActionOwner(screen);
+    screen.addEventListener("click", ownAction((event) => {
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest("button, input, select, a, .novel-reader-toolbar, .novel-reader-settings-panel, .novel-reader-catalog-drawer")) return;
       toggleReaderMenu();
-    });
+    }));
 
     const dimmer = document.createElement("div");
     dimmer.className = "novel-reader-dimmer";
@@ -2550,7 +2612,7 @@ export function createNovelViews(context) {
 
     const topBar = document.createElement("div");
     topBar.className = "novel-reader-topbar";
-    const back = actionButton("返回", () => goBack());
+    const back = actionButton("返回", ownAction(() => goBack()));
     back.className = "novel-reader-back";
     const topTitle = document.createElement("div");
     topTitle.className = "novel-reader-top-title";
@@ -2569,7 +2631,8 @@ export function createNovelViews(context) {
 
     const content = document.createElement("div");
     content.className = "novel-reader-content";
-    content.addEventListener("scroll", scheduleReaderProgress, { passive: true });
+    content.tabIndex = 0;
+    content.addEventListener("scroll", ownAction(scheduleReaderProgress), { passive: true });
     for (const paragraph of paragraphsFromContent(chapter.content)) {
       const p = document.createElement("p");
       p.textContent = paragraph;
@@ -2584,6 +2647,7 @@ export function createNovelViews(context) {
     screen.append(dimmer, topBar, title, meta, content, toolbar);
     if (readerState.settingsOpen) screen.append(createReaderSettingsPanel());
     els.viewContent.append(screen);
+    installReaderPaging(content);
     if (readerState.catalogOpen) els.viewContent.append(createCatalogDrawer());
     renderLocalLibraryErrorCard();
     applyReaderImmersiveState();
@@ -2594,13 +2658,14 @@ export function createNovelViews(context) {
 
   function createCatalogDrawer() {
     const drawer = document.createElement("aside");
+    const ownAction = createReaderActionOwner(drawer);
     drawer.className = "novel-reader-catalog-drawer";
     drawer.classList.toggle("night", Boolean(readerState.settings.night));
     drawer.setAttribute("aria-label", "章节目录");
     const head = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = `目录 · ${formatNumber(readerState.book?.chapterCount || readerState.chapters?.length || 0)} 章`;
-    const close = actionButton("关闭", () => toggleCatalog(false));
+    const close = actionButton("关闭", ownAction(() => toggleCatalog(false)));
     head.append(title, close);
     drawer.append(head);
     if (readerState.catalogLoading) {
@@ -2616,15 +2681,74 @@ export function createNovelViews(context) {
     } else {
       drawer.append(createCatalogBrowser(readerState.book, readerState.chapters || [], {
         drawer: true,
-        serverPaged: catalogState.remotePaged
+        serverPaged: catalogState.remotePaged,
+        ownAction
       }));
     }
     return drawer;
   }
 
+  function updateCatalogDrawer(drawer) {
+    const browser = drawer.querySelector(".novel-mobile-catalog-browser");
+    const update = browser && catalogBrowserUpdates.get(browser);
+    if (update) {
+      update(readerState.chapters, { book: readerState.book, serverPaged: catalogState.remotePaged,
+        loading: readerState.catalogLoading, error: readerState.catalogError });
+      return;
+    }
+    // The first load has no browser yet. Keep the drawer header and create
+    // its browser once; later loads retain the actual search/caret controls.
+    while (drawer.children.length > 1) drawer.children[1].remove();
+    if (readerState.catalogLoading || readerState.catalogError) {
+      const message = document.createElement("div");
+      message.className = `novel-reader-catalog-loading${readerState.catalogLoading ? "" : " error"}`;
+      message.textContent = readerState.catalogLoading ? "正在读取章节目录…" : readerState.catalogError;
+      drawer.append(message);
+    } else {
+      drawer.append(createCatalogBrowser(readerState.book, readerState.chapters || [], {
+        drawer: true, serverPaged: catalogState.remotePaged, ownAction: createReaderActionOwner(drawer)
+      }));
+    }
+  }
+
+  function updateReaderOverlays(ratio, options = {}) {
+    if (!isCurrentReaderSession(readerState.session) || !isReaderScreenMounted()) return false;
+    const screen = readerState.screen;
+    screen.classList.toggle("menu-open", readerState.menuOpen);
+    screen.classList.toggle("settings-open", readerState.settingsOpen);
+    const panel = screen.querySelector(".novel-reader-settings-panel");
+    if (readerState.settingsOpen) {
+      if (!panel) screen.append(createReaderSettingsPanel());
+    } else panel?.remove();
+    const drawer = els.viewContent.querySelector(".novel-reader-catalog-drawer");
+    if (!readerState.catalogOpen) drawer?.remove();
+    else if (!drawer) els.viewContent.append(createCatalogDrawer());
+    else if (options.catalog) updateCatalogDrawer(drawer);
+    if (!readerState.catalogOpen) {
+      window.clearTimeout(catalogSearchTimer);
+      catalogSearchTimer = null;
+    }
+    applyReaderImmersiveState();
+    scheduleReaderMenuAutoHide();
+    restoreReaderScroll(ratio);
+    return true;
+  }
+
+  function createReaderActionOwner(element = null) {
+    const session = readerState.session;
+    const screen = readerState.screen;
+    return (handler) => (...args) => {
+      if (!isCurrentReaderSession(session) || readerState.screen !== screen || !isReaderScreenMounted()) return;
+      if (element && !element.isConnected) return;
+      return handler(...args);
+    };
+  }
+
   function createReaderSettingsPanel() {
     const settings = readerState.settings;
     const panel = document.createElement("div");
+    const ownAction = createReaderActionOwner(panel);
+    const update = ownAction((patch, options) => updateSettings(patch, options));
     panel.className = "novel-reader-settings-panel";
     panel.setAttribute("role", "region");
     panel.setAttribute("aria-label", "阅读设置");
@@ -2632,65 +2756,67 @@ export function createNovelViews(context) {
     head.className = "novel-reader-panel-head";
     const title = document.createElement("strong");
     title.textContent = "阅读设置";
-    head.append(title, actionButton("完成", () => toggleSettingsPanel()));
+    head.append(title, actionButton("完成", ownAction(() => toggleSettingsPanel())));
     panel.append(head);
 
     panel.append(
       createSwitchRow("跟随系统", settings.brightnessMode === "system", (enabled) => {
-        updateSettings({ brightnessMode: enabled ? "system" : "custom" });
-      }),
+        update({ brightnessMode: enabled ? "system" : "custom" });
+      }, "brightnessMode"),
       createSliderRow("亮度", settings.brightnessMode === "system" ? "系统" : `${settings.brightness}%`, {
+        setting: "brightness",
         min: 35,
         max: 100,
         step: 5,
         value: settings.brightness,
         formatValue: (value) => `${Math.round(value)}%`,
-        onInput: (value, context) => {
+        onInput: ownAction((value, context) => {
           context.value.textContent = `${Math.round(value)}%`;
           syncBrightnessSystemButton(context.input, false);
-          updateSettings({ brightness: value, brightnessMode: "custom" }, { live: true });
-        },
-        onChange: (value, context) => {
+          update({ brightness: value, brightnessMode: "custom" }, { live: true });
+        }),
+        onChange: ownAction((value, context) => {
           context.value.textContent = `${Math.round(value)}%`;
           syncBrightnessSystemButton(context.input, false);
-          updateSettings({ brightness: value, brightnessMode: "custom" }, { live: true, persist: true });
-        }
+          update({ brightness: value, brightnessMode: "custom" }, { live: true, persist: true });
+        })
       }),
       createStepperRow("字号", `${settings.fontSize}px`, [
-        { label: "A-", onClick: () => updateSettings({ fontSize: settings.fontSize - 1 }) },
-        { label: "A+", onClick: () => updateSettings({ fontSize: settings.fontSize + 1 }) }
-      ]),
+        { label: "A-", onClick: () => update({ fontSize: readerState.settings.fontSize - 1 }) },
+        { label: "A+", onClick: () => update({ fontSize: readerState.settings.fontSize + 1 }) }
+      ], "fontSize"),
       createStepperRow("行距", settings.lineHeight.toFixed(2), [
-        { label: "紧", onClick: () => updateSettings({ lineHeight: settings.lineHeight - 0.08 }) },
-        { label: "松", onClick: () => updateSettings({ lineHeight: settings.lineHeight + 0.08 }) }
-      ]),
+        { label: "紧", onClick: () => update({ lineHeight: readerState.settings.lineHeight - 0.08 }) },
+        { label: "松", onClick: () => update({ lineHeight: readerState.settings.lineHeight + 0.08 }) }
+      ], "lineHeight"),
       createOptionRow("背景", [
         { value: "paper", label: "纸页" },
         { value: "white", label: "白底" },
         { value: "green", label: "护眼底" },
         { value: "rose", label: "暖粉" }
-      ], settings.theme, (theme) => updateSettings({ theme, night: false })),
+      ], settings.theme, (theme) => update({ theme, night: false }), "theme"),
       createOptionRow("阅读方式", [
         { value: "scroll", label: "滚动" },
         { value: "page", label: "翻页" }
-      ], settings.readingMode, (readingMode) => updateSettings({ readingMode })),
-      createSwitchRow("护眼模式", settings.eyeCare, (eyeCare) => updateSettings({ eyeCare, night: false })),
-      createSwitchRow("夜间模式", settings.night, (night) => updateSettings({ night, eyeCare: night ? false : settings.eyeCare }))
+      ], settings.readingMode, (readingMode) => update({ readingMode }), "readingMode"),
+      createSwitchRow("护眼模式", settings.eyeCare, (eyeCare) => update({ eyeCare, night: false }), "eyeCare"),
+      createSwitchRow("夜间模式", settings.night, (night) => update({ night, eyeCare: night ? false : readerState.settings.eyeCare }), "night")
     );
     return panel;
   }
 
   function createReaderToolbar(ratio = 0) {
+    const ownAction = createReaderActionOwner();
     const toolbar = document.createElement("nav");
     toolbar.className = "novel-reader-toolbar";
-    toolbar.addEventListener("pointerdown", keepReaderMenuVisible, { passive: true });
-    toolbar.addEventListener("focusin", keepReaderMenuVisible);
+    toolbar.addEventListener("pointerdown", ownAction(keepReaderMenuVisible), { passive: true });
+    toolbar.addEventListener("focusin", ownAction(keepReaderMenuVisible));
 
     const progressRow = document.createElement("div");
     progressRow.className = "novel-reader-progress-row";
-    const prev = actionButton("上一章", () => openAdjacent(-1), !readerState.prev);
+    const prev = actionButton("上一章", ownAction(() => openAdjacent(-1)), !readerState.prev);
     prev.className = "novel-reader-page-button";
-    const next = actionButton("下一章", () => openAdjacent(1), !readerState.next);
+    const next = actionButton("下一章", ownAction(() => openAdjacent(1)), !readerState.next);
     next.className = "novel-reader-page-button";
     const slider = document.createElement("input");
     slider.type = "range";
@@ -2700,22 +2826,27 @@ export function createNovelViews(context) {
     slider.value = String(Math.round(ratio * 100));
     slider.dataset.novelChapterSlider = "";
     slider.setAttribute("aria-label", "阅读进度");
-    slider.addEventListener("input", () => {
+    slider.addEventListener("input", ownAction(() => {
       keepReaderMenuVisible();
+      cancelReaderRestore();
       const nextRatio = Number(slider.value) / 100;
       scrollReaderToRatio(nextRatio);
-      updateReaderProgressUi(nextRatio);
-    });
-    slider.addEventListener("change", scheduleReaderProgress);
+    }));
+    slider.addEventListener("change", ownAction(() => {
+      slider.value = String(Math.round(captureReaderRatio() * 100));
+      scheduleReaderProgress();
+    }));
     progressRow.append(prev, slider, next);
 
     const actionRow = document.createElement("div");
     actionRow.className = "novel-reader-action-row";
+    const night = readerToolButton(readerState.settings.night ? "日间" : "夜间", ownAction(() => updateSettings({ night: !readerState.settings.night, eyeCare: false })));
+    night.dataset.novelNightToggle = "";
     actionRow.append(
-      readerToolButton("目录", () => toggleCatalog()),
-      readerToolButton("书库", () => openNovelLibrary()),
-      readerToolButton(readerState.settings.night ? "日间" : "夜间", () => updateSettings({ night: !readerState.settings.night, eyeCare: false })),
-      readerToolButton("设置", () => toggleSettingsPanel())
+      readerToolButton("目录", ownAction(() => toggleCatalog())),
+      readerToolButton("书库", ownAction(() => openNovelLibrary())),
+      night,
+      readerToolButton("设置", ownAction(() => toggleSettingsPanel()))
     );
 
     toolbar.append(progressRow, actionRow);
@@ -2725,6 +2856,7 @@ export function createNovelViews(context) {
   function createSliderRow(label, valueText, options = {}) {
     const row = document.createElement("label");
     row.className = "novel-reader-setting-row novel-reader-slider-row";
+    if (options.setting) row.dataset.novelSetting = options.setting;
     const title = document.createElement("span");
     title.textContent = label;
     const value = document.createElement("strong");
@@ -2749,9 +2881,10 @@ export function createNovelViews(context) {
     return row;
   }
 
-  function createStepperRow(label, valueText, actions = []) {
+  function createStepperRow(label, valueText, actions = [], setting = "") {
     const row = document.createElement("div");
     row.className = "novel-reader-setting-row novel-reader-stepper-row";
+    if (setting) row.dataset.novelSetting = setting;
     const title = document.createElement("span");
     title.textContent = label;
     const value = document.createElement("strong");
@@ -2762,14 +2895,16 @@ export function createNovelViews(context) {
     return row;
   }
 
-  function createOptionRow(label, options, activeValue, onSelect) {
+  function createOptionRow(label, options, activeValue, onSelect, setting = "") {
     const row = document.createElement("div");
     row.className = "novel-reader-setting-row novel-reader-option-row";
+    if (setting) row.dataset.novelSetting = setting;
     const title = document.createElement("span");
     title.textContent = label;
     const buttons = document.createElement("div");
     for (const option of options) {
       const button = actionButton(option.label, () => onSelect(option.value));
+      button.dataset.novelSettingValue = option.value;
       button.classList.toggle("active", option.value === activeValue);
       buttons.append(button);
     }
@@ -2777,12 +2912,13 @@ export function createNovelViews(context) {
     return row;
   }
 
-  function createSwitchRow(label, checked, onToggle) {
+  function createSwitchRow(label, checked, onToggle, setting = "") {
     const row = document.createElement("div");
     row.className = "novel-reader-setting-row novel-reader-switch-row";
+    if (setting) row.dataset.novelSetting = setting;
     const title = document.createElement("span");
     title.textContent = label;
-    const button = actionButton(checked ? "开启" : "关闭", () => onToggle(!checked));
+    const button = actionButton(checked ? "开启" : "关闭", () => onToggle(!button.classList.contains("active")));
     button.classList.toggle("active", checked);
     row.append(title, button);
     return row;
@@ -2812,7 +2948,7 @@ export function createNovelViews(context) {
   }
 
   function toggleCatalog(force) {
-    const ratio = captureReaderRatio();
+    const ratio = captureReaderPositionRatio();
     prepareCatalogState(readerState.book, readerState.chapters || [], readerState.chapter?.index || 1);
     readerState.catalogOpen = force === undefined ? !readerState.catalogOpen : Boolean(force);
     const needsCatalog = readerState.catalogOpen && !hasReaderCatalogForCurrentChapter();
@@ -2827,17 +2963,22 @@ export function createNovelViews(context) {
         catalogState.page = catalogPageForChapter(readerState.chapters, readerState.chapter?.index, catalogState.descending);
       }
     }
-    renderNovelReaderData({
-      book: readerState.book,
-      chapter: readerState.chapter,
-      chapters: readerState.chapters,
-      prev: readerState.prev,
-      next: readerState.next
-    }, null, { restoreRatio: ratio });
+    // The remote catalog loader creates its loading screen before awaiting IO.
+    if (!needsCatalog || isLocalBookId(readerState.book?.id)) {
+      if (!updateReaderOverlays(ratio, { catalog: true })) renderNovelReaderData({
+        book: readerState.book,
+        chapter: readerState.chapter,
+        chapters: readerState.chapters,
+        prev: readerState.prev,
+        next: readerState.next
+      }, null, { restoreRatio: ratio });
+    }
     if (needsCatalog) loadReaderCatalog().catch(() => {});
   }
 
   function hasReaderCatalogForCurrentChapter() {
+    if (catalogState.remotePaged && catalogState.bookId === String(readerState.book?.id || "")
+      && catalogState.query !== catalogState.loadedQuery) return false;
     const total = Number(readerState.book?.chapterCount || 0);
     if (total > 0 && Number(readerState.chapters?.length || 0) >= total) return true;
     if (!catalogState.remotePaged || catalogState.bookId !== String(readerState.book?.id || "")) return false;
@@ -2885,8 +3026,8 @@ export function createNovelViews(context) {
       if (!isCurrent()) return;
       readerState.catalogLoading = false;
       if (readerState.catalogOpen) {
-        const ratio = captureReaderRatio();
-        renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+        const ratio = captureReaderPositionRatio();
+        if (!updateReaderOverlays(ratio, { catalog: true })) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
       }
     }
   }
@@ -2897,9 +3038,10 @@ export function createNovelViews(context) {
     const bookId = String(readerState.book?.id || "");
     if (!bookId) return;
     const requestId = ++catalogRequestId;
-    const isCurrent = () => isCurrentReaderSession(session) && requestId === catalogRequestId
-      && bookId === String(readerState.book?.id || "");
     const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
+    const isCurrent = () => isCurrentReaderSession(session) && requestId === catalogRequestId
+      && bookId === String(readerState.book?.id || "")
+      && query === String(catalogState.query || "").replace(/\s+/g, " ").trim();
     catalogState.query = query;
     const params = new URLSearchParams({
       limit: String(NOVEL_CATALOG_PAGE_SIZE),
@@ -2909,10 +3051,10 @@ export function createNovelViews(context) {
     if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
     else params.set("offset", String(Math.max(0, Number(options.page ?? catalogState.page ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
     addCatalogPreconditions(params, book);
-    const ratio = captureReaderRatio();
+    const ratio = captureReaderPositionRatio();
     readerState.catalogLoading = true;
     readerState.catalogError = "";
-    if (readerState.catalogOpen) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+    if (readerState.catalogOpen && !updateReaderOverlays(ratio, { catalog: true })) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
     try {
       const data = await fetchJson(session.sourceUrl, novelCatalogPath(bookId, params), { timeoutMs: 16000, signal: session.routeGuard.signal });
       if (!isCurrent()) return;
@@ -2920,6 +3062,7 @@ export function createNovelViews(context) {
         || !matchesRemotePayload(data, bookId, session.sourceRealm || "", undefined, chapterAnchor(book))) throw new Error("目录所属书库、书籍或内容版本已变化，请重新打开详情");
       readerState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
       catalogState.remotePaged = true;
+      catalogState.loadedQuery = query;
       catalogState.bookId = bookId;
       catalogState.total = Number(data.total || readerState.book?.chapterCount || 0);
       catalogState.filteredTotal = Number(data.filteredTotal || 0);
@@ -2933,8 +3076,8 @@ export function createNovelViews(context) {
       if (!isCurrent()) return;
       readerState.catalogLoading = false;
       if (readerState.catalogOpen) {
-        const nextRatio = captureReaderRatio();
-        renderNovelReaderData(currentReaderData(), null, { restoreRatio: nextRatio });
+        const nextRatio = captureReaderPositionRatio();
+        if (!updateReaderOverlays(nextRatio, { catalog: true })) renderNovelReaderData(currentReaderData(), null, { restoreRatio: nextRatio });
       }
     }
   }
@@ -2947,6 +3090,9 @@ export function createNovelViews(context) {
     const requestId = ++detailCatalogRequestId;
     const isActive = options.isActive || (() => true);
     const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
+    const isCurrent = () => isActive() && operation.isActive() && requestId === detailCatalogRequestId
+      && bookId === String(detailState.book?.id || "") && book.sourceRealm === detailState.book?.sourceRealm
+      && query === String(catalogState.query ?? "").replace(/\s+/g, " ").trim();
     catalogState.query = query;
     const params = new URLSearchParams({
       limit: String(NOVEL_CATALOG_PAGE_SIZE),
@@ -2958,6 +3104,7 @@ export function createNovelViews(context) {
     addCatalogPreconditions(params, book);
     const path = novelCatalogPath(bookId, params);
     const scrollY = window.scrollY;
+    if (options.render !== false && !options.replaceDetail) updateDetailCatalog({ remotePaged: true, loading: true });
     try {
       let data;
       try {
@@ -2975,59 +3122,63 @@ export function createNovelViews(context) {
           || !matchesRemotePayload(cached.payload, bookId, operation.sourceRealm, undefined, chapterAnchor(book))) throw error;
         data = cached.payload;
       }
-      if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")
-        || book.sourceRealm !== detailState.book?.sourceRealm) return;
+      if (!isCurrent()) return;
       detailState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
       catalogState.remotePaged = true;
+      catalogState.loadedQuery = query;
       catalogState.bookId = bookId;
       catalogState.total = Number(data.total || book.chapterCount || 0);
       catalogState.filteredTotal = Number(data.filteredTotal || 0);
       catalogState.offset = Number(data.offset || 0);
       catalogState.page = Math.floor(catalogState.offset / NOVEL_CATALOG_PAGE_SIZE);
       if (options.render !== false) {
-        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, {
-          remotePaged: true,
-          catalog: data
-        });
-        window.requestAnimationFrame(() => {
-          if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId
-            || bookId !== String(detailState.book?.id || "") || book.sourceRealm !== detailState.book?.sourceRealm) return;
-          window.scrollTo({ top: scrollY, behavior: "auto" });
-        });
+        const renderOptions = { remotePaged: true, catalog: data };
+        if (options.replaceDetail || !updateDetailCatalog(renderOptions)) {
+          renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, renderOptions);
+          window.requestAnimationFrame(() => {
+            if (!isCurrent()) return;
+            window.scrollTo({ top: scrollY, behavior: "auto" });
+          });
+        }
       }
     } catch (error) {
-      if (!isActive() || !operation.isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")
-        || book.sourceRealm !== detailState.book?.sourceRealm) return;
+      if (!isCurrent()) return;
       if (detailState.chapters.length >= Number(book.chapterCount || 0)) {
-        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry);
+        catalogState.remotePaged = false;
+        if (options.replaceDetail || !updateDetailCatalog({ remotePaged: false })) renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry);
         renderMessage("目录服务暂时不可用，当前显示完整缓存目录。", "quiet", false);
       } else {
-        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, {
-          remotePaged: true,
-          catalogError: error.message || "章节目录读取失败"
-        });
+        const renderOptions = { remotePaged: true, catalogError: error.message || "章节目录读取失败" };
+        if (options.replaceDetail || !updateDetailCatalog(renderOptions)) renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, renderOptions);
       }
     }
   }
 
   function toggleReaderMenu(force) {
-    const ratio = captureReaderRatio();
+    const hadOverlay = readerState.settingsOpen || readerState.catalogOpen;
+    const ratio = captureReaderPositionRatio();
     readerState.menuOpen = force === undefined ? !readerState.menuOpen : Boolean(force);
     if (!readerState.menuOpen) {
       readerState.settingsOpen = false;
       readerState.catalogOpen = false;
     }
+    if (!hadOverlay && isCurrentReaderSession(readerState.session) && isReaderScreenMounted()) {
+      readerState.screen.classList.toggle("menu-open", readerState.menuOpen);
+      scheduleReaderMenuAutoHide();
+      return;
+    }
+    if (hadOverlay && updateReaderOverlays(ratio)) return;
     renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
   }
 
   function toggleSettingsPanel() {
-    const ratio = captureReaderRatio();
+    const ratio = captureReaderPositionRatio();
     readerState.menuOpen = true;
     readerState.settingsOpen = !readerState.settingsOpen;
     if (readerState.settingsOpen) {
       readerState.catalogOpen = false;
     }
-    renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+    if (!updateReaderOverlays(ratio)) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
   }
 
   function openAdjacent(direction) {
@@ -4035,9 +4186,12 @@ export function createNovelViews(context) {
     });
     for (const type of ["pointerdown", "touchstart", "wheel", "keydown"]) {
       window.addEventListener(type, (event) => {
+        if ((type === "pointerdown" || type === "touchstart")
+          && event.target?.closest?.(".novel-reader-settings-panel, .novel-reader-toolbar button")) return;
         if (type === "keydown") {
           if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
           if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+          if (event.key === " " && event.target?.closest?.(".novel-reader-settings-panel button, .novel-reader-toolbar button")) return;
           if (event.target?.closest?.("input, textarea, select, [contenteditable]")) return;
         }
         cancelReaderRestore();
@@ -4049,6 +4203,8 @@ export function createNovelViews(context) {
     if (!readerState.active && !readerState.session) return;
     flushReaderProgress();
     cancelReaderRestore();
+    readerState.pagingCleanup?.();
+    readerState.pagingCleanup = null;
     catalogRequestId += 1;
     window.clearTimeout(catalogSearchTimer);
     catalogSearchTimer = null;
@@ -4116,6 +4272,51 @@ export function createNovelViews(context) {
     applyReaderBrightness(settings);
   }
 
+  function applyReaderStyleSettings(settings) {
+    if (!isReaderScreenMounted()) return false;
+    const screen = readerState.screen;
+    for (const theme of ["paper", "white", "green", "rose"]) {
+      screen.classList.toggle(`theme-${theme}`, settings.theme === theme);
+    }
+    for (const mode of ["scroll", "page"]) {
+      screen.classList.toggle(`mode-${mode}`, settings.readingMode === mode);
+    }
+    screen.classList.toggle("night", settings.night);
+    screen.classList.toggle("eye-care", settings.eyeCare);
+    screen.style.setProperty("--novel-reader-font", `${settings.fontSize}px`);
+    screen.style.setProperty("--novel-reader-line", String(settings.lineHeight));
+    applyReaderSettingsLive(settings);
+    syncReaderSettingsControls(settings);
+    const night = screen.querySelector("[data-novel-night-toggle]");
+    if (night) night.textContent = settings.night ? "日间" : "夜间";
+    const drawer = els.viewContent.querySelector(".novel-reader-catalog-drawer");
+    if (drawer) drawer.classList.toggle("night", settings.night);
+    return true;
+  }
+
+  function syncReaderSettingsControls(settings) {
+    const panel = readerState.screen?.querySelector(".novel-reader-settings-panel");
+    if (!panel) return;
+    for (const row of panel.querySelectorAll("[data-novel-setting]")) {
+      const key = row.dataset.novelSetting;
+      if (row.classList.contains("novel-reader-switch-row")) {
+        const enabled = key === "brightnessMode" ? settings.brightnessMode === "system" : settings[key];
+        const button = row.querySelector("button");
+        button.textContent = enabled ? "开启" : "关闭";
+        button.classList.toggle("active", enabled);
+      } else if (row.classList.contains("novel-reader-option-row")) {
+        for (const button of row.querySelectorAll("[data-novel-setting-value]")) {
+          button.classList.toggle("active", button.dataset.novelSettingValue === settings[key]);
+        }
+      } else if (key === "brightness") {
+        row.querySelector("input").value = String(settings.brightness);
+        row.querySelector("strong").textContent = settings.brightnessMode === "system" ? "系统" : `${settings.brightness}%`;
+      } else {
+        row.querySelector("strong").textContent = key === "fontSize" ? `${settings.fontSize}px` : settings.lineHeight.toFixed(2);
+      }
+    }
+  }
+
   function applyReaderImmersiveState() {
     const immersive = readerState.active && !readerState.settingsOpen;
     applyNativeReaderImmersive(immersive);
@@ -4139,9 +4340,7 @@ export function createNovelViews(context) {
     if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen) return;
     readerState.menuAutoHideTimer = window.setTimeout(() => {
       if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen) return;
-      const ratio = captureReaderRatio();
-      readerState.menuOpen = false;
-      renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+      toggleReaderMenu(false);
     }, 3600);
   }
 
@@ -4219,11 +4418,24 @@ export function createNovelViews(context) {
   }
 
   function updateSettings(patch = {}, options = {}) {
-    const ratio = options.live ? null : captureReaderRatio();
+    if (!isCurrentReaderSession(readerState.session) || !isReaderScreenMounted()) return;
+    const previous = readerState.settings;
+    // A second click can arrive before the previous layout's restore frame.
+    const ratio = options.live ? null : captureReaderPositionRatio();
     readerState.settings = normalizeSettings({ ...readerState.settings, ...patch });
     writeSettings(readerState.settings);
     if (options.live) {
       applyReaderSettingsLive(readerState.settings);
+      syncReaderSettingsControls(readerState.settings);
+      return;
+    }
+    if (applyReaderStyleSettings(readerState.settings)) {
+      if (previous.fontSize !== readerState.settings.fontSize
+        || previous.lineHeight !== readerState.settings.lineHeight
+        || previous.readingMode !== readerState.settings.readingMode) {
+        restoreReaderScroll(ratio);
+      }
+      scheduleReaderMenuAutoHide();
       return;
     }
     renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio, restore: !options.live });
@@ -4275,22 +4487,26 @@ export function createNovelViews(context) {
   }
 
   function scheduleReaderProgress() {
-    if (!isReaderScreenMounted() || !readerState.book?.id || !readerState.chapter?.index) return;
+    if (!isCurrentReaderSession(readerState.session) || !isReaderScreenMounted() || !readerState.book?.id || !readerState.chapter?.index) return;
     const session = readerState.session;
     const screen = readerState.screen;
     if (readerState.progressFrame === null) {
-      readerState.progressFrame = window.requestAnimationFrame(() => {
-        if (readerState.session !== session || readerState.screen !== screen) return;
+      const frameId = window.requestAnimationFrame(() => {
+        if (readerState.progressFrame !== frameId) return;
         readerState.progressFrame = null;
+        if (!isCurrentReaderSession(session) || readerState.screen !== screen) return;
         updateReaderProgressUi();
       });
+      readerState.progressFrame = frameId;
     }
     window.clearTimeout(readerState.progressTimer);
-    readerState.progressTimer = window.setTimeout(() => {
-      if (readerState.session !== session || readerState.screen !== screen) return;
+    const timerId = window.setTimeout(() => {
+      if (readerState.progressTimer !== timerId) return;
       readerState.progressTimer = null;
+      if (!isCurrentReaderSession(session) || readerState.screen !== screen) return;
       saveReaderProgress();
     }, 600);
+    readerState.progressTimer = timerId;
   }
 
   function updateReaderProgressUi(inputRatio = captureReaderRatio()) {
@@ -4420,10 +4636,82 @@ export function createNovelViews(context) {
     return Math.max(0, Math.min(1, (window.scrollY - top) / readable));
   }
 
+  function readerPageLayout(content) {
+    // CSS column-width is a preference; the actual single column fills this
+    // viewport even when the containing reader has extra horizontal padding.
+    const gap = Number.parseFloat(window.getComputedStyle?.(content).columnGap) || 0;
+    return { pitch: Math.max(1, content.clientWidth + gap),
+      max: Math.max(0, content.scrollWidth - content.clientWidth),
+      width: content.clientWidth, height: content.clientHeight };
+  }
+
+  function installReaderPaging(content) {
+    const ownAction = createReaderActionOwner();
+    let layout = readerPageLayout(content);
+    let ratio = captureReaderPositionRatio();
+    const updateRatio = ownAction(value => { ratio = value; });
+    readerState.pagingRatioChanged = updateRatio;
+    let timer = null;
+    const align = ownAction(() => {
+      if (readerState.settings.readingMode !== "page" || readerState.restoreFrame !== null) return;
+      layout = readerPageLayout(content);
+      const left = Math.min(layout.max, Math.round(content.scrollLeft / layout.pitch) * layout.pitch);
+      if (Math.abs(content.scrollLeft - left) > 0.5) content.scrollLeft = left;
+      ratio = layout.max ? left / layout.max : 0;
+      updateReaderProgressUi(ratio);
+    });
+    content.addEventListener("scroll", ownAction(() => {
+      if (readerState.settings.readingMode !== "page") return;
+      const next = readerPageLayout(content);
+      if (next.width === layout.width && next.height === layout.height) {
+        layout = next;
+        ratio = layout.max ? content.scrollLeft / layout.max : 0;
+      }
+      window.clearTimeout(timer);
+      timer = window.setTimeout(align, 120);
+    }), { passive: true });
+    content.addEventListener("keydown", ownAction((event) => {
+      if (readerState.settings.readingMode !== "page" || event.defaultPrevented
+        || event.ctrlKey || event.metaKey || event.altKey) return;
+      const direction = event.key === " " && event.shiftKey ? -1
+        : ["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key) ? 1
+        : ["ArrowLeft", "ArrowUp", "PageUp"].includes(event.key) ? -1 : 0;
+      if (!direction && !["Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const pendingRatio = readerState.restoreFrame !== null ? captureReaderPositionRatio() : null;
+      cancelReaderRestore();
+      const next = readerPageLayout(content);
+      const currentLeft = pendingRatio === null ? content.scrollLeft
+        : Math.floor((next.max * pendingRatio + 0.5) / next.pitch) * next.pitch;
+      const left = event.key === "Home" ? 0 : event.key === "End" ? next.max
+        : Math.max(0, Math.min(next.max, (Math.round(currentLeft / next.pitch) + direction) * next.pitch));
+      scrollReaderToRatio(next.max ? left / next.max : 0);
+    }));
+    const observer = window.ResizeObserver ? new window.ResizeObserver(ownAction(() => {
+      const next = readerPageLayout(content);
+      const resized = next.width !== layout.width || next.height !== layout.height;
+      layout = next;
+      if (resized && readerState.settings.readingMode === "page" && readerState.restoreFrame === null) {
+        restoreReaderScroll(ratio);
+      }
+    })) : null;
+    observer?.observe(content);
+    readerState.pagingCleanup = () => {
+      window.clearTimeout(timer); observer?.disconnect();
+      if (readerState.pagingRatioChanged === updateRatio) readerState.pagingRatioChanged = null;
+    };
+  }
+
+  function captureReaderPositionRatio() {
+    return readerState.restoreFrame !== null && readerState.restoreRatio !== null
+      ? readerState.restoreRatio : captureReaderRatio();
+  }
+
   function restoreReaderScroll(forcedRatio) {
     cancelReaderRestore();
     const ratio = Math.max(0, Math.min(1, Number(forcedRatio ?? readerState.pendingScrollRatio ?? 0)));
     readerState.restoreRatio = ratio;
+    readerState.pagingRatioChanged?.(ratio);
     readerState.pendingScrollRatio = 0;
     const session = readerState.session;
     const screen = readerState.screen;
@@ -4446,12 +4734,16 @@ export function createNovelViews(context) {
     const ratio = Math.max(0, Math.min(1, Number(inputRatio || 0)));
     const screen = els.viewContent.querySelector(".novel-reader-screen");
     if (!screen) return;
+    readerState.pagingRatioChanged?.(ratio);
     const content = screen.querySelector(".novel-reader-content");
     if (readerState.settings.readingMode === "page" && content) {
-      const readableX = Math.max(0, content.scrollWidth - content.clientWidth);
-      content.scrollLeft = readableX * ratio;
+      const layout = readerPageLayout(content);
+      // Saved ratios remain compatible with continuous scroll positions. Start
+      // at the containing column so resuming never skips its opening text.
+      const left = ratio >= 1 ? layout.max : Math.floor((layout.max * ratio + 0.5) / layout.pitch) * layout.pitch;
+      content.scrollLeft = left;
       window.scrollTo({ top: screen.getBoundingClientRect().top + window.scrollY, behavior: "auto" });
-      updateReaderProgressUi(ratio);
+      updateReaderProgressUi(captureReaderRatio());
       return;
     }
     const top = screen.getBoundingClientRect().top + window.scrollY;

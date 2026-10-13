@@ -12,6 +12,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Pick up a storage migration even when this launcher inherits an older desktop environment.
+if (-not $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT) {
+  $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT = [Environment]::GetEnvironmentVariable("FANHAO_SHORT_VIDEO_STORAGE_ROOT", "User")
+}
+
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ServerFile = Join-Path $ProjectDir "server.js"
 $ShortVideoBuildScript = Join-Path $ProjectDir "tools\build_short_video_web.mjs"

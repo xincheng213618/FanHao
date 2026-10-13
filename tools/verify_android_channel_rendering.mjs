@@ -15,6 +15,9 @@ assert(executablePath, "Chrome or Edge required for the private Android fixture"
 const caseFilter = process.argv.find(value => value.startsWith("--case="))?.slice(7) || "";
 const legacyRender = process.argv.includes("--legacy-list-refresh"), legacyOffset = process.argv.includes("--legacy-offset");
 const legacySearch = process.argv.includes("--legacy-search-header");
+const legacyAggregate = process.argv.includes("--legacy-aggregate-cache"), legacyRebaseCache = process.argv.includes("--legacy-rebase-cache");
+const legacyPreparation = process.argv.includes("--legacy-account-preparation");
+const legacyFingerprints = process.argv.includes("--legacy-item-fingerprints");
 let source = fs.readFileSync(path.join(androidRoot, "platform/content-index/channel-views.js"), "utf8");
 const returnMarker = "    deactivate: () => { cancelChannelRequest();";
 assert.equal(source.split(returnMarker).length, 2);
@@ -31,6 +34,39 @@ if (legacySearch) {
   const marker = "if (mediaMode && openMediaSearch && header?.mode === mode && header.handler === openMediaSearch";
   assert.equal(source.split(marker).length, 2); source = source.replace(marker, "if (false && mediaMode && openMediaSearch && header?.mode === mode && header.handler === openMediaSearch");
 }
+if (legacyAggregate) {
+  const marker = "writeCachedJson(activeUrl, aggregatePath, mergedData, { fence: cacheFence })";
+  assert.equal(source.split(marker).length, 2); source = source.replace(marker, "writeCachedJson(activeUrl, aggregatePath, mergedData)");
+}
+if (legacyRebaseCache) {
+  const marker = "cacheFence && (offset === 0 || channelRevisionChanged(basePage, mergedData))";
+  assert.equal(source.split(marker).length, 2); source = source.replace(marker, "cacheFence && offset === 0");
+}
+if (legacyPreparation) {
+  const marker = "!isAccountOwnerCurrent(startedAccount) && !firstNativeAccount";
+  assert.equal(source.split(marker).length, 2); source = source.replace(marker, "false");
+}
+if (legacyFingerprints) {
+  // Restore actual repeated work, while keeping all current DOM/ownership gates.
+  const marker = "      if (previous?.item === items[index]) continue;";
+  assert.equal(source.split(marker).length, 2);
+  source = source.replace(marker, "      if (false) continue;");
+  for (const value of ["currentPage", "mergedCache"]) {
+    const guard = `if (!loadingMore) renderedCacheSignature = channelDataSignature(${value});`;
+    assert.equal(source.split(guard).length, 2);
+    source = source.replace(guard, `renderedCacheSignature = channelDataSignature(${value});`);
+  }
+}
+const fingerprintMarker = "      const signature = JSON.stringify(items[index]);";
+assert.equal(source.split(fingerprintMarker).length, 2);
+source = source.replace(fingerprintMarker, `${fingerprintMarker}
+      window.__listWork.fingerprintCalls++;
+      window.__listWork.fingerprintChars += signature.length;`);
+const signatureMarker = "function channelDataSignature(data = {}) {";
+assert.equal(source.split(signatureMarker).length, 2);
+source = source.replace(signatureMarker, `${signatureMarker}
+  window.__listWork.signatureCalls++;
+  window.__listWork.signatureItems += (data.items || []).length;`);
 const renderMarker = "  function renderChannelData(mode, data = {}, cacheEntry = null, paging = {}) {";
 assert.equal(source.split(renderMarker).length, 2);
 source = source.replace(renderMarker, `${renderMarker}
@@ -51,7 +87,8 @@ const server = createServer(async (req, res) => {
     if (gate) { gate.used = true; gate.url = key; gate.requestedResolve(); await gate.promise; if (res.destroyed) return; if (gate.error) return json(res, { error: gate.error }, 503); if (gate.body) return json(res, gate.body); }
     if (url.pathname === "/probe") return send(res, harness(url), "text/html");
     const apiPath = url.pathname.replace(/^\/source-(?:one|two)/, "");
-    if (apiPath === "/api/image-library/items") return json(res, oracle ? oracle.payload(url) : body(Number(url.searchParams.get("limit") || 24), Number(url.searchParams.get("offset") || 0), url.searchParams.get("mode") || "photo", { query: url.searchParams.get("q") || "", photoView: url.searchParams.get("photoView") || "albums", tvView: url.searchParams.get("tvView") || "series", sort: url.searchParams.get("sort") || "updated" }));
+    if (apiPath === "/api/auth/status") return json(res, { authenticated: true, user: { id: "fixture-one" } });
+    if (apiPath === "/api/image-library/items") { if (req.headers.authorization === 'Bearer usr.private-fixture-token') res.setHeader('X-FanHao-Account-Owner', 'account:fixture-one'); return json(res, oracle ? oracle.payload(url) : body(Number(url.searchParams.get("limit") || 24), Number(url.searchParams.get("offset") || 0), url.searchParams.get("mode") || "photo", { query: url.searchParams.get("q") || "", photoView: url.searchParams.get("photoView") || "albums", tvView: url.searchParams.get("tvView") || "series", sort: url.searchParams.get("sort") || "updated" })); }
     if (apiPath === "/api/manga/tasks") return json(res, { jobs: [] });
     if (apiPath.startsWith("/synthetic/") || /^\/media\/(?:movie-cover|tv-series-cover|gallery-media-cover)\//.test(apiPath)) return send(res, '<svg xmlns="http://www.w3.org/2000/svg" width="250" height="350"><rect width="250" height="350" fill="#719284"/></svg>', "image/svg+xml");
     if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
@@ -66,6 +103,118 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const run = async (name, task) => { if (caseFilter && !name.includes(caseFilter)) return; await task(); checks++; console.log(`PASS ${name}`); };
 try {
   browser = await chromium.launch({ executablePath, headless: true });
+  for (const ownerState of ['account', 'guest-changed', 'pending', 'unknown']) await run(`aggregate cache ${ownerState}: capped complete prefix survives cold offline with its owner`, async () => {
+    oracle = createChannelOracle({ count: 6100, maxItemLimit: 5000 });
+    const tail = holdOffset(5000, null), start = requests.length;
+    let page, offline;
+    const aggregate = '/api/image-library/items?mode=photo&limit=6000&offset=0&sort=updated';
+    try {
+      page = await newPage({ count: 6000, ownerState, waitLoaded: false }); await requested(tail);
+      assert.equal(await page.evaluate(() => fixture.data()?.items?.length || 0), 0, 'partial prefix cannot publish');
+      assert.equal(await page.evaluate(async path => !!(await fixture.readCache(fixture.initialSource, path)), aggregate), false);
+      tail.release(); await page.waitForFunction(() => !fixture.pending && fixture.data()?.rawLoaded === 6000);
+      await page.waitForFunction(async () => (await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=1000&offset=5000&sort=updated'))?.payload?.items?.length === 1000); await frames(page);
+      const cached = await page.evaluate(async path => { const entry = await fixture.readCache(fixture.initialSource, path); return entry ? { rows: entry.payload.items.length, raw: entry.payload.rawLoaded, owner: entry.accountOwner, bytes: entry.bytes } : null; }, aggregate);
+      if (legacyAggregate) console.log(JSON.stringify({ kind: 'legacy-aggregate-cache', ownerState, cached }));
+      assert.equal(cached?.rows, 6000, 'confirmed-owner complete prefix must have its original aggregate cache key'); assert.equal(cached.raw, 6000);
+      assert.equal(cached.owner, ownerState === 'guest-changed' ? 'guest' : 'account:fixture-one');
+      const authRequests = requests.slice(start).filter(value => value.includes('/api/auth/status'));
+      assert.equal(authRequests.length, ['pending', 'unknown'].includes(ownerState) ? 1 : 0, 'known owners need no additional status request');
+      offline = holdOffset(0, null, 'controlled cold offline owner'); await page.evaluate(() => fixture.restart()); await requested(offline);
+      await page.waitForFunction(() => fixture.data()?.rawLoaded === 6000); offline.release(); await page.waitForFunction(() => !fixture.pending);
+      assert.equal(await page.locator('.channel-card').count(), 6000);
+      console.log(JSON.stringify({ kind: 'owned-aggregate-cache', ownerState, cached, coldRows: 6000, authRequests: authRequests.length }));
+    } finally { tail.release(); offline?.release(); oracle = null; await page?.close(); }
+  });
+  for (const ownerState of ['guest', 'account', 'guest-changed']) await run(`aggregate rebase ${ownerState}: complete canonical prefix and raw tail keep separate cold cache keys`, async () => {
+    oracle = createChannelOracle({ count: 6100, maxItemLimit: 5000 }); let page, offline;
+    const aggregate = '/api/image-library/items?mode=photo&limit=6048&offset=0&sort=updated';
+    try {
+      page = await newPage({ count: 6000, ownerState }); oracle.reorder('O24');
+      await page.evaluate(() => document.querySelector('.channel-more').click()); await page.waitForFunction(() => !fixture.pending && fixture.data()?.rawLoaded === 6048);
+      await page.waitForFunction(async () => (await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=1048&offset=5000&sort=updated'))?.payload?.items?.length === 1048); await frames(page);
+      const cached = await page.evaluate(async path => { const aggregate = await fixture.readCache(fixture.initialSource, path), raw = await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=48&offset=6000&sort=updated'); return { aggregate: aggregate?.payload?.items?.map(value => value.id) || null, rawRows: raw?.payload?.items?.length, revision: aggregate?.payload?.listRevision }; }, aggregate);
+      if (legacyRebaseCache) console.log(JSON.stringify({ kind: 'legacy-rebase-cache', ownerState, cached }));
+      assert.equal(cached.aggregate?.length, 6048, 'successful rebase must publish a complete canonical offset-zero cache'); assert.equal(cached.rawRows, 48, 'append cache key must retain only its raw page');
+      const currentIds = await page.evaluate(() => fixture.data().items.map(value => value.id)); assert.deepEqual(cached.aggregate, currentIds);
+      offline = holdOffset(0, null, 'controlled offline rebase'); await page.evaluate(() => fixture.restart()); await requested(offline);
+      await page.waitForFunction(() => fixture.data()?.rawLoaded === 6048); offline.release(); await page.waitForFunction(() => !fixture.pending);
+      assert.deepEqual(await page.evaluate(() => fixture.data().items.map(value => value.id)), currentIds); assert.equal(await page.locator('.channel-card').count(), 6048);
+    } finally { offline?.release(); oracle = null; await page?.close(); }
+  });
+  for (const ownerState of ['account', 'guest-changed']) await run(`aggregate failure ${ownerState}: failed capped tail keeps only its readable owner prefix`, async () => {
+    oracle = createChannelOracle({ count: 6000, maxItemLimit: 5000 }); const tail = holdOffset(5000, null, 'controlled incomplete prefix'); let page, offline;
+    const aggregate = '/api/image-library/items?mode=photo&limit=6000&offset=0&sort=updated';
+    try {
+      page = await newPage({ count: 6000, ownerState, waitLoaded: false }); await requested(tail); tail.release(); await page.waitForFunction(() => !fixture.pending);
+      assert.equal(await page.evaluate(async path => !!(await fixture.readCache(fixture.initialSource, path)), aggregate), false, 'failed prefix must never publish an aggregate');
+      offline = holdOffset(0, null, 'controlled owner offline'); await page.evaluate(() => fixture.restart()); await requested(offline);
+      await page.waitForFunction(() => fixture.data()?.rawLoaded === 5000); offline.release(); await page.waitForFunction(() => !fixture.pending);
+      assert.equal(await page.locator('.channel-card').count(), 5000); assert(await page.locator('.channel-more').count() > 0);
+    } finally { tail.release(); offline?.release(); oracle = null; await page?.close(); }
+  });
+  for (const action of ['cache-clear', 'account-switch', 'source', 'reader']) await run(`aggregate late ${action}: held complete-prefix work cannot publish under a later owner`, async () => {
+    oracle = createChannelOracle({ count: 6000, maxItemLimit: 5000 }); const tail = holdOffset(5000, null); let page;
+    const aggregate = '/api/image-library/items?mode=photo&limit=6000&offset=0&sort=updated', rawTail = '/api/image-library/items?mode=photo&limit=1000&offset=5000&sort=updated';
+    try {
+      page = await newPage({ count: 6000, ownerState: 'account', waitLoaded: false }); await requested(tail);
+      if (action === 'cache-clear') await page.evaluate(() => fixture.clearCache());
+      else if (action === 'account-switch') await page.evaluate(() => fixture.setOwner('account:fixture-two'));
+      else if (action === 'source') await page.evaluate(() => fixture.navigate({}, 'two'));
+      else await page.evaluate(() => fixture.leave());
+      tail.release(); await page.waitForFunction(() => !fixture.pending); await frames(page);
+      assert.equal(await page.evaluate(async path => !!(await fixture.readCache(fixture.initialSource, path)), aggregate), false);
+      assert.equal(await page.evaluate(async path => !!(await fixture.readCache(fixture.initialSource, path)), rawTail), false);
+      if (action === 'cache-clear') assert.equal(await page.locator('.channel-card').count(), 6000, 'clearing disk cache keeps the readable result');
+      if (action === 'reader') assert.equal(await page.locator('#viewContent').innerText(), 'Private reader');
+      if (action === 'source') { assert.equal(await page.locator('.channel-card').count(), 6000); assert.equal(await page.evaluate(async path => (await fixture.readCache(location.origin + '/source-two', path))?.payload?.items?.length, aggregate), 6000); }
+      if (action === 'account-switch') {
+        await page.evaluate(() => fixture.restart()); await page.waitForFunction(() => !fixture.pending && fixture.data()?.rawLoaded === 6000);
+        await page.waitForFunction(async path => (await fixture.readCache(fixture.initialSource, path))?.accountOwner === 'account:fixture-two', aggregate);
+      }
+    } finally { tail.release(); oracle = null; await page?.close(); }
+  });
+  for (const ownerState of ['account', 'pending-known', 'pending-held', 'unknown-held']) await run(`aggregate preparation ${ownerState}: account change during preparation cannot adopt the later owner`, async () => {
+    let page;
+    try {
+      const heldNative = ownerState.endsWith('-held');
+      page = await newPage({ ownerState: heldNative ? ownerState : ownerState === 'pending-known' ? 'pending' : 'account', waitLoaded: !heldNative });
+      if (heldNative) await page.waitForFunction(() => typeof window.__nativeSessionResolve === 'function');
+      else {
+        await page.evaluate(ownerState => {
+          if (ownerState === 'pending-known') fixture.setOwner('pending');
+          fixture.setResolver(() => new Promise(resolve => { window.__prepareResolve = resolve; }));
+          void fixture.reload();
+        }, ownerState);
+        await page.waitForFunction(() => typeof window.__prepareResolve === 'function');
+      }
+      const start = requests.length; await page.evaluate(heldNative => { fixture.setOwner('account:fixture-two'); if (heldNative) __nativeSessionResolve({ token: 'usr.private-fixture-token' }); else __prepareResolve(); }, heldNative);
+      await page.waitForFunction(() => !fixture.pending); await frames(page);
+      const lateRequests = requests.slice(start).filter(value => value.includes('/api/image-library/items') || value.includes('/api/auth/status'));
+      if (legacyPreparation) console.log(JSON.stringify({ kind: 'legacy-account-preparation', ownerState, lateRequests }));
+      assert.equal(lateRequests.length, 0, 'obsolete preparation cannot start a range or account-status request');
+      await page.evaluate(() => fixture.setResolver(null));
+      assert.equal(await page.evaluate(async () => !!(await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=24&offset=0&sort=updated'))), false, 'new owner cannot inherit a discarded operation cache');
+    } finally { await page?.close(); }
+  });
+  await run('aggregate preparation failure preserves the existing readable page and offline fallback', async () => {
+    const page = await newPage({ ownerState: 'account' }), offline = holdOffset(0, null, 'controlled offline fallback');
+    try {
+      await snapshot(page); await page.evaluate(() => { fixture.setResolver(() => { throw new Error('controlled unavailable native session'); }); window.__fallback = fixture.reload(); }); await requested(offline); offline.release(); await page.evaluate(() => __fallback); await frames(page);
+      assert((await read(page)).row); assert.equal(await page.locator('.channel-card').count(), 24); assert.match(await page.locator('#viewMeta').innerText(), /离线/);
+    } finally { offline.release(); await page.close(); }
+  });
+  for (const ownerState of ['unknown', 'pending']) await run(`aggregate bootstrap failure ${ownerState}: status failure preserves network fallback without an untrusted aggregate`, async () => {
+    oracle = createChannelOracle({ count: 6000, maxItemLimit: 5000 });
+    const status = hold(url => url.pathname.endsWith('/api/auth/status'), null, 'controlled account status unavailable'); let page;
+    try {
+      page = await newPage({ count: 6000, ownerState, waitLoaded: false }); await requested(status); status.release();
+      await page.waitForFunction(() => !fixture.pending && fixture.data()?.rawLoaded === 6000); await frames(page);
+      assert.equal(await page.locator('.channel-card').count(), 6000); assert.equal(await page.evaluate(() => fixture.owner().owner), 'account:fixture-one');
+      assert.equal(await page.evaluate(async () => !!(await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=6000&offset=0&sort=updated'))), false);
+      assert.equal(await page.evaluate(async () => (await fixture.readCache(fixture.initialSource, '/api/image-library/items?mode=photo&limit=5000&offset=0&sort=updated'))?.payload?.items?.length), 5000, 'original API provenance can still cache its owned raw page');
+    } finally { status.release(); oracle = null; await page?.close(); }
+  });
   for (const mode of ['movie', 'tv']) for (const mutation of ['cover', 'other-kind', 'metadata']) await run(`actual metadata ${mode} 1000: ${mutation} write owns only its query revision`, async () => {
     const owner = createMetadataChannelOracle({ mode, sort: 'rating' }); oracle = owner; let page;
     try {
@@ -101,11 +250,59 @@ try {
     try {
       await snapshot(page); await page.evaluate(() => { document.querySelector('.channel-more').click(); document.querySelector('.channel-more').dispatchEvent(new MouseEvent('click')); }); await requested(gate);
       const pending = await read(page); if (legacyRender) console.log(JSON.stringify({ kind: 'legacy-android-list-loading', mode, count, pending })); assert(pending.row, "pending must retain mounted card"); assert(pending.image); assert(pending.focus); assert(pending.observer); assert(pending.renders.every(value => value.created < 10), "pending rendering must be independent of mounted rows"); assert(pending.created < 50, "asynchronous initial cover completions remain bounded");
+      if (legacyFingerprints) console.log(JSON.stringify({ kind: "legacy-item-fingerprints", mode, count, pending }));
+      assert.equal(pending.listWork.fingerprintCalls, 0, "pending must not serialize the unchanged private prefix");
+      assert.equal(pending.listWork.signatureItems, 0, "append must not calculate an unused full-page signature");
       assert.equal(await page.evaluate(url => __transport.started.filter(value => value === url).length, gate.url), 1); assert(await page.locator('.channel-more').isDisabled());
       gate.release(); await page.waitForFunction(count => fixture.data()?.rawLoaded === count + 48, count); await frames(page);
       const success = await read(page); assert(success.row); assert(success.image); assert(success.focus); assert(success.observer); assert.equal(success.rows, count + 48); assert(success.created < 1300); assert.equal(success.scroll, pending.scroll);
+      assert.equal(success.listWork.fingerprintCalls, 48, "stable append serializes only its new page");
+      assert.equal(success.listWork.signatureItems, 0);
       assert(await page.evaluate(() => __coverObservers.every(observer => [...observer.counts.values()].every(value => value === 1))));
       console.log(JSON.stringify({ kind: "android-incremental", mode, count, pending, success }));
+    } finally { gate.release(); await page.close(); }
+  });
+  await run("movie clone-equal cached and fresh overlap adopt references without replacing cards", async () => {
+    const count = 1000, page = await newPage({ mode: 'movie', count }), path = `/api/image-library/items?mode=movie&limit=48&offset=${count}&sort=updated`;
+    const clone = await page.evaluate(() => structuredClone(fixture.data().items[7]));
+    const payload = body(48, count, 'movie', { items: [clone, ...Array.from({ length: 47 }, (_, index) => item(count + index + 1, 'movie'))] });
+    const gate = holdOffset(count, payload);
+    try {
+      await page.evaluate(async ({ path, payload }) => fixture.writeCache(fixture.initialSource, path, payload), { path, payload });
+      await snapshot(page); await page.evaluate(() => document.querySelector('.channel-more').click()); await requested(gate);
+      await page.waitForFunction(count => fixture.data()?.rawLoaded === count + 48, count); await frames(page);
+      const cached = await read(page); assert(cached.row && cached.image && cached.focus && cached.observer);
+      assert.equal(cached.rows, count + 47); assert.equal(cached.listWork.fingerprintCalls, 48); assert.equal(cached.listWork.signatureItems, 0);
+      assert(await page.evaluate(() => fixture.views.diagnostics().mounted.rows[7].item === fixture.data().items[7]), 'same-value cache replacement must adopt its new DTO reference');
+      gate.release(); await page.waitForFunction(() => !fixture.pending); await frames(page);
+      const fresh = await read(page); assert(fresh.row && fresh.image && fresh.focus && fresh.observer);
+      assert.equal(fresh.listWork.fingerprintCalls, 96, 'cache and fresh replies each compare only their 48 incoming references'); assert.equal(fresh.listWork.signatureItems, 0);
+      assert(await page.evaluate(() => fixture.views.diagnostics().mounted.rows[7].item === fixture.data().items[7]), 'same-value fresh replacement must adopt its new DTO reference');
+      const next = holdOffset(count + 48, body(48, count + 48, 'movie'));
+      try {
+        await snapshot(page); await page.evaluate(() => document.querySelector('.channel-more').click()); await requested(next);
+        const pending = await read(page); assert(pending.row && pending.image && pending.focus && pending.observer); assert.equal(pending.listWork.fingerprintCalls, 0, 'adopted equal references must skip the next pending refresh'); assert.equal(pending.listWork.signatureItems, 0);
+        next.release(); await page.waitForFunction(() => !fixture.pending); await frames(page);
+        const success = await read(page); assert(success.row && success.image && success.focus && success.observer); assert.equal(success.listWork.fingerprintCalls, 48);
+      } finally { next.release(); }
+    } finally { gate.release(); await page.close(); }
+  });
+  await run("movie cloned nested metadata replaces only its changed focused card", async () => {
+    const count = 80, page = await newPage({ mode: 'movie', count });
+    const clone = await page.evaluate(() => structuredClone(fixture.data().items[7]));
+    const changed = { ...clone, coverUrl: '/synthetic/changed.svg', movieMetadata: { title: 'Updated movie caption', year: '2025', rating: 8.6, genres: ['Suspense'] } };
+    const gate = holdOffset(count, body(48, count, 'movie', { items: [changed, ...Array.from({ length: 47 }, (_, index) => item(count + index + 1, 'movie'))] }));
+    try {
+      await snapshot(page); await page.evaluate(() => { window.__untouched = document.querySelectorAll('.channel-card')[6]; window.__untouchedImage = __untouched.querySelector('img'); document.querySelector('.channel-more').click(); }); await requested(gate);
+      assert.equal((await read(page)).listWork.fingerprintCalls, 0); gate.release(); await page.waitForFunction(() => !fixture.pending); await page.waitForFunction(() => fixture.views.diagnostics().mounted.rows[7].node.querySelector('img')?.naturalWidth > 0); await frames(page);
+      const actual = await page.evaluate(() => {
+        const mounted = fixture.views.diagnostics().mounted, card = mounted.rows[7].node;
+        return { old: __row.isConnected, oldImage: __image.isConnected, untouched: __untouched.isConnected && mounted.rows[6].node === __untouched, untouchedImage: __untouchedImage.isConnected, focus: document.activeElement === card, title: card.querySelector('strong').textContent, meta: card.querySelector('.media-card-meta').textContent, rating: card.querySelector('.media-poster-rating').textContent, cover: mounted.rows[7].item.coverUrl, coverRequested: __transport.started.some(value => value.endsWith('/synthetic/changed.svg')), adopted: mounted.rows[7].item === fixture.data().items[7], observer: __observer === __coverObservers.at(-1) && !__observer.off, work: { ...__listWork }, rows: mounted.rows.length };
+      });
+      assert.equal(actual.old, false); assert.equal(actual.oldImage, false); assert(actual.untouched && actual.untouchedImage && actual.focus && actual.adopted && actual.observer);
+      assert.equal(actual.title, 'Updated movie caption'); assert.equal(actual.meta, '2025 · Suspense'); assert.equal(actual.rating, '8.6'); assert.equal(actual.cover, '/synthetic/changed.svg'); assert(actual.coverRequested, 'new cover must reach the actual image loader');
+      assert.equal(actual.work.fingerprintCalls, 48); assert.equal(actual.work.signatureItems, 0); assert.equal(actual.rows, count + 47);
+      await page.evaluate(() => fixture.views.diagnostics().mounted.rows[7].node.click()); assert.equal(await page.evaluate(() => fixture.clicks.at(-1)?.id), 'I8');
     } finally { gate.release(); await page.close(); }
   });
   await run("raw duplicate metadata updates advance server cursor and finish EOF", async () => {
@@ -249,26 +446,28 @@ function hold(match, response, error = '') { let release, requestedResolve; cons
 function holdOffset(offset, response, error = '') { return hold(url => url.pathname.endsWith('/api/image-library/items') && Number(url.searchParams.get('offset') || 0) === offset, response, error); }
 async function requested(gate) { let timer; try { await Promise.race([gate.requested, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('expected private request not seen')), 5000); })]); } finally { clearTimeout(timer); } }
 async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
-async function newPage({ mode = 'photo', count = 24, sort = 'updated', tvView = 'series', ignoreAbort = true, waitLoaded = true } = {}) {
+async function newPage({ mode = 'photo', count = 24, sort = 'updated', tvView = 'series', ownerState = 'guest', ignoreAbort = true, waitLoaded = true } = {}) {
   const page = await browser.newPage({ viewport: { width: 390, height: 900 } }); page.on('pageerror', error => faults.push(error.message)); await restrictPrivateNetwork(page, base, unexpected);
   await page.addInitScript(({ ignoreAbort }) => {
     window.__created = 0; window.__renders = []; window.__coverObservers = []; window.__transport = { started: [], settled: [] };
+    window.__listWork = { fingerprintCalls: 0, fingerprintChars: 0, signatureCalls: 0, signatureItems: 0 };
     const create = document.createElement.bind(document); document.createElement = (...args) => { window.__created++; return create(...args); };
     const Original = IntersectionObserver; window.IntersectionObserver = class extends Original { constructor(callback, options = {}) { super(callback, options); this.counts = new Map(); this.off = false; if (String(options.rootMargin || '').includes('900px') || String(options.rootMargin || '').includes('420px')) __coverObservers.push(this); } observe(node) { this.counts.set(node, (this.counts.get(node) || 0) + 1); return super.observe(node); } disconnect() { this.off = true; return super.disconnect(); } };
     const nativeFetch = fetch; window.fetch = async (url, options = {}) => { const key = new URL(url, location.href).pathname + new URL(url, location.href).search; __transport.started.push(key); const response = await nativeFetch(url, { ...options, ...(ignoreAbort ? { signal: undefined } : {}) }); const json = response.json.bind(response); response.json = async () => { const value = await json(); __transport.settled.push(key); return value; }; return response; };
   }, { ignoreAbort });
-  await page.goto(`${base}/probe?${new URLSearchParams({ mode, count, sort, tvView })}`); await page.waitForFunction(() => Boolean(window.fixture));
+  await page.goto(`${base}/probe?${new URLSearchParams({ mode, count, sort, tvView, ownerState })}`); await page.waitForFunction(() => Boolean(window.fixture));
   if (waitLoaded) { await page.waitForFunction(() => !fixture.pending && fixture.data()?.items.length > 0); await page.waitForFunction(() => document.querySelector('.channel-card img')?.naturalWidth > 0); } await frames(page); return page;
 }
-async function snapshot(page) { await page.evaluate(() => { window.__row = document.querySelectorAll('.channel-card')[7] || document.querySelector('.channel-card'); window.__image = __row.querySelector('img') || document.querySelector('.channel-card img'); window.__observer = __coverObservers.at(-1); __row.focus({ preventScroll: true }); scrollTo(0, 100); __created = 0; __renders = []; }); await frames(page); }
-async function read(page) { return page.evaluate(() => ({ row: __row.isConnected, image: __image?.isConnected === true, focus: document.activeElement === __row, observer: __observer === __coverObservers.at(-1) && !__observer?.off, rows: document.querySelectorAll('.channel-card').length, nodes: document.getElementsByTagName('*').length, images: document.querySelectorAll('.channel-card img').length, coverObservers: __coverObservers.length, created: __created, renders: __renders, scroll: scrollY })); }
+async function snapshot(page) { await page.evaluate(() => { window.__row = document.querySelectorAll('.channel-card')[7] || document.querySelector('.channel-card'); window.__image = __row.querySelector('img') || document.querySelector('.channel-card img'); window.__observer = __coverObservers.at(-1); __row.focus({ preventScroll: true }); scrollTo(0, 100); __created = 0; __renders = []; __listWork = { fingerprintCalls: 0, fingerprintChars: 0, signatureCalls: 0, signatureItems: 0 }; }); await frames(page); }
+async function read(page) { return page.evaluate(() => ({ row: __row.isConnected, image: __image?.isConnected === true, focus: document.activeElement === __row, observer: __observer === __coverObservers.at(-1) && !__observer?.off, rows: document.querySelectorAll('.channel-card').length, nodes: document.getElementsByTagName('*').length, images: document.querySelectorAll('.channel-card img').length, coverObservers: __coverObservers.length, created: __created, renders: __renders, listWork: { ...__listWork }, scroll: scrollY })); }
 function harness(url) {
   return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=stylesheet href=/android/styles.css><body class="standalone-module-view"><main class=content-panel id=contentPanel><div id=viewKicker></div><h1 id=viewTitle></h1><div id=viewMeta></div><div id=viewContent></div></main><script type=module>
-import{createChannelViews}from'/android/platform/content-index/channel-views.js';import{readCachedJson,writeCachedJson}from'/android/js/cache.js';
+import{createChannelViews}from'/android/platform/content-index/channel-views.js';import{clearCachedResponses,readCachedJson,writeCachedJson}from'/android/js/cache.js';import{captureAccountOwner,registerAccountSessionResolver,setAccountOwner}from'/android/js/account-owner.js';import{installServerAuthentication}from'/android/js/server-auth.js';
 const els=Object.fromEntries(['viewContent','viewTitle','viewKicker','viewMeta','contentPanel'].map(key=>[key,document.getElementById(key)]));
 let source=location.origin+'/source-one',limit=${Number(url.searchParams.get('count') || 24)},params=${JSON.stringify({ mode: url.searchParams.get('mode') || 'photo', photoView: 'albums', sort: url.searchParams.get('sort') || 'updated', tvView: url.searchParams.get('tvView') || 'series' })},controller=new AbortController(),navigation=0,pending=0;const clicks=[];
+const ownerState=${JSON.stringify(url.searchParams.get('ownerState') || 'guest')};if(ownerState==='account')setAccountOwner(source,'account:fixture-one');if(ownerState==='guest-changed'){setAccountOwner(source,'account:fixture-one');setAccountOwner(source,'guest');}if(ownerState.startsWith('pending')||ownerState.startsWith('unknown')){if(ownerState.startsWith('pending'))setAccountOwner(source,'pending');window.Capacitor={Plugins:{FanHaoAuth:{getSession:()=>ownerState.endsWith('-held')?new Promise(resolve=>{window.__nativeSessionResolve=resolve;}):Promise.resolve({token:'usr.private-fixture-token'})}}};installServerAuthentication(()=>source);}
 const render=()=>{const owned=navigation,active=()=>owned===navigation;active.signal=controller.signal;pending++;return views.renderChannel(params,active).finally(()=>pending--);};
 const createViews=()=>createChannelViews({els,getActiveUrl:()=>source,getChannelLimit:()=>limit,increaseChannelLimit:value=>limit+=value,openInLibrary:(mode,id)=>clicks.push({mode,id}),showPhotoDetail:id=>clicks.push({mode:'photo',id}),showMediaDetail:id=>clicks.push({mode:'media',id}),openMediaSearch:()=>clicks.push({mode:'search'}),setActiveBottom:()=>{},renderCurrentView:render});let views=createViews();
-window.fixture={get views(){return views},clicks,initialSource:source,readCache:readCachedJson,writeCache:writeCachedJson,data:()=>views.diagnostics().state?.data,reload:render,get pending(){return pending>0},restart(){controller.abort();controller=new AbortController();navigation++;views.deactivate();views=createViews();void render();},navigate(next={},nextSource='one'){controller.abort();controller=new AbortController();navigation++;limit=${Number(url.searchParams.get('count') || 24)};source=location.origin+'/source-'+nextSource;params={...params,...next};void render();},leave(){controller.abort();navigation++;views.deactivate();els.viewContent.textContent='Private reader';}};void render();
+window.fixture={get views(){return views},clicks,initialSource:source,readCache:readCachedJson,writeCache:writeCachedJson,clearCache:()=>clearCachedResponses(source),owner:()=>captureAccountOwner(source),setOwner:owner=>setAccountOwner(source,owner),setResolver:registerAccountSessionResolver,data:()=>views.diagnostics().state?.data,reload:render,get pending(){return pending>0},restart(){controller.abort();controller=new AbortController();navigation++;views.deactivate();views=createViews();void render();},navigate(next={},nextSource='one'){controller.abort();controller=new AbortController();navigation++;limit=${Number(url.searchParams.get('count') || 24)};source=location.origin+'/source-'+nextSource;params={...params,...next};void render();},leave(){controller.abort();navigation++;views.deactivate();els.viewContent.textContent='Private reader';}};void render();
 </script>`;
 }

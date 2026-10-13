@@ -14,6 +14,7 @@ const publicRoot = path.join(root, "public");
 const legacy = process.argv.includes("--legacy-list-refresh");
 const legacyVisibility = process.argv.includes("--legacy-content-visibility");
 const legacyOffset = process.argv.includes("--legacy-offset");
+const legacyWestern = process.argv.includes("--legacy-western-shelf");
 const caseFilter = process.argv.find(value => value.startsWith("--case="))?.slice(7) || "";
 const executablePath = [process.env.CHROME_PATH, "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"].filter(Boolean).find(value => fs.existsSync(value));
 assert(executablePath, "Chrome or Edge required for the private gallery fixture");
@@ -44,6 +45,13 @@ if (legacy) {
   assert.equal(rendererSource.split(marker).length, 2);
   rendererSource = rendererSource.replace(marker, `${marker}\n  return false;`);
 }
+if (legacyWestern) {
+  // The former Western shelf always used the preserved complete-render/more
+  // branch. Disable only its new registration, so real DOM/range checks fail.
+  const marker = '  if (list && state.gallery.person === "all") {';
+  assert.equal(rendererSource.split(marker).length, 2);
+  rendererSource = rendererSource.replace(marker, '  if (false && list && state.gallery.person === "all") {');
+}
 for (const name of ["renderGalleryView", "renderGalleryResults"]) {
   const marker = `function ${name}(options = {}) {`;
   assert.equal(rendererSource.split(marker).length, 2);
@@ -61,6 +69,14 @@ const item = (index, mode = "photo", extra = {}) => ({
   ...(mode === "media" || mode === "movie" ? { movieMetadata: { title: `Synthetic ${index}`, year: 2026, genres: ["Drama"], rating: 8.1, ratingCount: 1000 } } : {}), ...extra
 });
 const body = (count, offset = 0, mode = "photo", extra = {}) => ({ items: Array.from({ length: count }, (_, index) => item(offset + index + 1, mode)), total: 5000, facets: {}, stats: {}, ...extra });
+const westernBody = (count, offset = 0, extra = {}) => ({
+  ...body(count, offset, "western"), listRevision: "private-western-stable",
+  items: Array.from({ length: count }, (_, index) => {
+    const number = offset + index + 1, person = `Synthetic person ${number}`;
+    return { ...item(number), id: person, type: "westernPerson", mediaKind: "western", title: person, personName: person,
+      videoCount: 3, playableCount: 2, categories: [{ value: "fixture", count: 3 }], samples: [`Synthetic episode ${number}`] };
+  }), ...extra
+});
 const held = new Set(), requests = [], faults = [], unexpected = [];
 let browser, checks = 0, oracle = null;
 const server = createServer(async (req, res) => {
@@ -76,7 +92,13 @@ const server = createServer(async (req, res) => {
       if (gate.body) { json(res, gate.body); return; }
     }
     if (url.pathname === "/probe") { send(res, harness(url), "text/html"); return; }
-    if (url.pathname === "/api/image-library/items") { json(res, oracle ? oracle.payload(url) : body(Number(url.searchParams.get("limit") || 80), Number(url.searchParams.get("offset") || 0), url.searchParams.get("mode") || "photo")); return; }
+    if (url.pathname === "/api/image-library/items") {
+      const mode = url.searchParams.get("mode") || "photo", count = Number(url.searchParams.get("limit") || 80), offset = Number(url.searchParams.get("offset") || 0);
+      const person = url.searchParams.get("person");
+      json(res, oracle ? oracle.payload(url) : mode === "western" && !person ? westernBody(count, offset)
+        : mode === "western" ? body(count, offset, "media", { items: body(count, offset).items.map(value => ({ ...value, mediaKind: "western", personName: person })) }) : body(count, offset, mode));
+      return;
+    }
     if (url.pathname === "/api/image-library/summary") { json(res, { totals: { photoSets: 12345, manga: 5000, movie: 5000 }, facets: { categories: [{ value: "late", count: 777 }], media: { categories: [{ value: "late", count: 777 }] } }, scannedAt: "2026-10-04" }); return; }
     const album = /^\/api\/photo-sets\/(.+)$/.exec(url.pathname);
     if (album) { json(res, { album: { ...item(Number(album[1].slice(1))), title: `Reader ${album[1]}`, images: [1, 2].map(index => ({ index, url: `/synthetic/reader-${index}.svg`, name: `Page ${index}` })), imageCount: 2 } }); return; }
@@ -93,9 +115,89 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 const run = async (name, task) => { if (caseFilter && !name.includes(caseFilter)) return; await task(); checks++; console.log(`PASS ${name}`); };
-const cardSelector = ".gallery-photo-album-card, .manga-grid > .gallery-card, .gallery-movie-list-item, .gallery-tv-series-card";
+const cardSelector = ".gallery-photo-album-card, .manga-grid > .gallery-card, .gallery-movie-list-item, .gallery-tv-series-card, .gallery-western-person-card";
 try {
   browser = await chromium.launch({ executablePath, headless: true });
+  for (const count of [80, 1000]) await run(`Western ${count}: loading and append retain person cards/images/focus/observer`, async () => {
+    const page = await newPage({ mode: "western", count }), gate = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === String(count), westernBody(80, count));
+    try {
+      const cdp = await page.context().newCDPSession(page); await cdp.send("Performance.enable");
+      await snapshot(page); const before = await metrics(cdp);
+      await page.evaluate(() => { document.querySelector('.gallery-more').click(); document.querySelector('.gallery-more').dispatchEvent(new MouseEvent('click')); }); await requested(gate);
+      const pending = await read(page), middle = await metrics(cdp);
+      if (legacyWestern) console.log(JSON.stringify({ kind: "legacy-western-shelf", count, pending }));
+      assert(pending.row && pending.image && pending.focused && pending.observer, "Western loading must preserve mounted person resources");
+      assert.equal(pending.created, 0); assert.equal(pending.renders.length, 0); assert(await page.locator('.gallery-more').isDisabled());
+      assert.equal(await page.evaluate(() => fixture.state.gallery.visibleLimit), count + 80); assert.equal(await page.evaluate(url => __transport.started[url], gate.url), 1);
+      gate.release(); await settled(page, gate);
+      const success = await read(page), after = await metrics(cdp);
+      assert(success.row && success.image && success.focused && success.observer); assert.equal(success.rows, count + 80); assert.equal(success.renders.length, 0);
+      assert(success.created < 1000, "Western creation must follow the 80 incoming groups, not all mounted groups"); assert.equal(success.scroll, pending.scroll);
+      assert(await page.evaluate(() => [...__coverObservers].every(observer => [...observer.counts.values()].every(value => value === 1))));
+      console.log(JSON.stringify({ kind: "incremental-western-shelf", count, pending, success, loadingCpu: delta(before, middle), responseCpu: delta(middle, after) }));
+    } finally { gate.release(); await page.close(); }
+  });
+  await run("Western failed page retries the original raw range without rebuilding", async () => {
+    const page = await newPage({ mode: "western", count: 1000 }), failed = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "1000", null, "private Western page error");
+    try {
+      await snapshot(page); await page.evaluate(() => document.querySelector('.gallery-more').click()); await requested(failed); failed.release(); await settled(page, failed);
+      assert((await read(page)).row && (await read(page)).focused); assert.match(await page.locator('.gallery-more').innerText(), /重试/);
+      const retry = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "1000", westernBody(80, 1000));
+      try {
+        await page.evaluate(() => document.querySelector('.gallery-more').click()); await requested(retry);
+        assert.equal(retry.url, failed.url, "retry cannot enlarge the original raw range"); assert.equal(await page.evaluate(() => fixture.state.gallery.visibleLimit), 1080);
+        retry.release(); await settled(page, retry); assert.equal((await read(page)).rows, 1080); assert((await read(page)).row && (await read(page)).focused);
+      } finally { retry.release(); }
+    } finally { failed.release(); await page.close(); }
+  });
+  await run("Western overlapping raw page updates only its person card and preserves navigation", async () => {
+    const page = await newPage({ mode: "western" }), changed = { ...westernBody(1, 7).items[0], videoCount: 999, playableCount: 998, size: 123456789, categories: [{ value: "updated category", count: 999 }], coverUrl: "/synthetic/updated-western.svg" };
+    const gate = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "80", westernBody(2, 80, { items: [changed, westernBody(1, 80).items[0]], total: 83, nextOffset: 82 }));
+    try {
+      await snapshot(page); await page.evaluate(() => { window.__unchanged = document.querySelector('.gallery-western-person-card'); document.querySelector('.gallery-more').click(); }); await requested(gate); gate.release(); await settled(page, gate);
+      assert(await page.evaluate(() => __unchanged.isConnected && !__row.isConnected && document.activeElement.textContent.includes('999')));
+      assert.equal(await page.locator('.gallery-western-person-card').count(), 81); assert.equal(await page.evaluate(() => fixture.state.gallery.list.rawLoaded), 82);
+      const tail = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "82", westernBody(1, 82, { total: 83, nextOffset: 83 }));
+      try { await page.evaluate(() => document.querySelector('.gallery-more').click()); await requested(tail); tail.release(); await settled(page, tail); assert.equal(await page.locator('.gallery-more').count(), 0); }
+      finally { tail.release(); }
+      await page.locator('.gallery-western-person-card').filter({ has: page.getByText('Synthetic person 8', { exact: true }) }).click();
+      assert.deepEqual(await page.evaluate(() => ({ person: fixture.state.gallery.person, limit: fixture.state.gallery.visibleLimit, mode: fixture.state.gallery.mode })), { person: "Synthetic person 8", limit: 80, mode: "western" });
+      await page.waitForFunction(() => !fixture.page.isImageLibraryListLoading()); assert.equal(await page.locator('.gallery-western-person-grid').count(), 0);
+      assert.match(requests.findLast(value => value.startsWith('/api/image-library/items')), /mode=western.*person=Synthetic\+person\+8/);
+    } finally { gate.release(); await page.close(); }
+  });
+  await run("Western reordered groups use the original complete-render fallback", async () => {
+    const page = await newPage({ mode: "western" }), gate = hold(url => url.pathname === "/api/image-library/items", westernBody(80, 0, { items: westernBody(80).items.reverse() }));
+    try {
+      await snapshot(page); await page.evaluate(() => { window.__task = fixture.page.loadImageLibraryItems({ force: true }); }); await requested(gate); gate.release(); await page.evaluate(() => __task); await frames(page);
+      assert.equal((await read(page)).row, false); assert.match(await page.locator('.gallery-western-person-card').first().innerText(), /Synthetic person 80/);
+      assert.equal(await page.locator('.gallery-western-person-card').count(), 80);
+    } finally { gate.release(); await page.close(); }
+  });
+  for (const malformed of ["missing ID", "duplicate ID"]) await run(`Western ${malformed} keeps safe full fallback and raw EOF`, async () => {
+    const page = await newPage({ mode: "western" });
+    try {
+      const seed = westernBody(2, 0, { total: 3 });
+      if (malformed === "missing ID") seed.items[0] = { ...seed.items[0], id: "", routePath: "" };
+      else seed.items[1] = { ...seed.items[0], videoCount: 777 };
+      await page.evaluate(data => fixture.seed(data, { visibleLimit: 2 }), seed); await frames(page); await snapshot(page);
+      const gate = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "2", westernBody(1, 2, { total: 3, nextOffset: 3 }));
+      try {
+        await page.evaluate(() => document.querySelector('.gallery-more').click()); await requested(gate); assert.equal((await read(page)).row, false);
+        gate.release(); await settled(page, gate);
+        assert.equal(await page.evaluate(() => fixture.state.gallery.list.rawLoaded), 3); assert.equal(await page.locator('.gallery-more').count(), 0);
+        assert.equal(await page.locator('.gallery-western-person-card').count(), malformed === "missing ID" ? 3 : 2);
+        assert.match(await page.locator('.gallery-western-person-card').first().innerText(), malformed === "missing ID" ? /Synthetic person 1/ : /777/);
+      } finally { gate.release(); }
+    } finally { await page.close(); }
+  });
+  await run("Western empty result retains its original empty message", async () => {
+    const page = await newPage({ mode: "western" });
+    try {
+      await page.evaluate(data => fixture.seed(data), westernBody(0, 0, { total: 0, hasMore: false })); await frames(page);
+      assert.equal(await page.locator('.gallery-western-person-card').count(), 0); assert.equal(await page.locator('.gallery-more').count(), 0); assert.match(await page.locator('.empty-state').innerText(), /没有匹配的欧美人物/);
+    } finally { await page.close(); }
+  });
   for (const mode of ['movie', 'tv']) for (const mutation of ['cover', 'other-kind', 'metadata']) await run(`actual metadata ${mode} 1000: ${mutation} write owns only its query revision`, async () => {
     const owner = createMetadataChannelOracle({ mode, sort: 'rating' }); oracle = owner; let page;
     try {
@@ -566,7 +668,7 @@ async function comparePosterPaint(current, reference, width) {
 }
 function harness(url) {
   const mode = url.searchParams.get("mode") || "photo", count = Number(url.searchParams.get("count") || 80);
-  const seedData = url.searchParams.has('empty') ? body(0, 0, mode, { total: 6000 }) : url.searchParams.has('oracle') ? oracle.payload({ limit: String(count), ...(mode === 'tv' ? { tvView: 'series' } : {}) }) : body(count, 0, mode);
+  const seedData = url.searchParams.has('empty') ? body(0, 0, mode, { total: 6000 }) : url.searchParams.has('oracle') ? oracle.payload({ limit: String(count), ...(mode === 'tv' ? { tvView: 'series' } : {}) }) : mode === 'western' ? westernBody(count) : body(count, 0, mode);
   return `<!doctype html><meta charset=utf-8>${galleryStyles.map(href => `<link rel=stylesheet href="${href}${url.searchParams.get("unsupported") === "1" && href.includes("/catalog.css") ? "&unsupported=1" : ""}">`).join("")}<body class="gallery-view ${["photo", "manga"].includes(mode) ? "gallery-photo-view" : "gallery-media-view"}"><main class=app-shell><div id=statsRow></div><section id=workGrid></section></main><script type=module>
 import{createGalleryPage}from'/modules/content-index/gallery-page.js';import{createGalleryRenderer}from'/modules/content-index/gallery-renderer.js';
 const formatter=new Intl.NumberFormat('zh-CN');${formatters}

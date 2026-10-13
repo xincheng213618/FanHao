@@ -15,9 +15,12 @@ import { createMangaService } from "../src/modules/photos/server/manga-service.j
 
 // Current production code versus the previous eager/N+1/grouping algorithms,
 // restored in memory. All rows and SQLite state are private synthetic doubles.
-const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n")
+  .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href));
 export function previousQuerySource(current) {
-  let previous = current;
+  let previous = current
+    .replaceAll("metadataService.tvSeriesRow(sourceSeriesKey, { forPublication: true })", "metadataService.tvSeriesRow(sourceSeriesKey)")
+    .replaceAll("metadataService.movieRow(item.id, { forPublication: true })", "metadataService.movieRow(item.id)");
   const replace = (from, to) => { assert.ok(previous.includes(from), "previous query marker must exist"); previous = previous.replace(from, to); };
   replace('    const sourceStampBefore = listSourceStamp(index, mode);\n    let mangaSourceRevision = "";\n', "");
   replace('      nextOffset: offset + items.length,\n      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),\n', "");
@@ -29,22 +32,30 @@ export function previousQuerySource(current) {
       });
       mangaSourceRevision = mangaSourceHash.digest("hex");`, '      source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));');
   replace(`    let tvSeries = null;
+    let derivationCaches = null;
     if (sourceSeriesKey) {
-      if (publicTvSeriesByKey?.has(sourceSeriesKey)) tvSeries = publicTvSeriesByKey.get(sourceSeriesKey);
+      if (publicTvSeriesByKey?.has(sourceSeriesKey)) {
+        tvSeries = publicTvSeriesByKey.get(sourceSeriesKey);
+        if (derivationState) derivationCaches = derivationState.caches ||= { titles: new Map(), names: new Map() };
+      }
       else {
         tvSeries = metadataService.publicTvSeries(tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey));
         publicTvSeriesByKey?.set(sourceSeriesKey, tvSeries);
       }
     }`, '    const tvSeries = sourceSeriesKey ? metadataService.publicTvSeries(tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey)) : null;');
+  replace('    const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries, derivationCaches);', '    const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries);');
   replace('return imageNameCollator.compare(left, right);', 'return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });');
   replace('tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey)', 'tvMetadataByKey?.get(sourceSeriesKey) || metadataService.tvSeriesRow(sourceSeriesKey)');
   replace('movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id)', 'movieMetadataById?.get(item.id) || metadataService.movieRow(item.id)');
   replace(`      const kinds = mode === "media" ? ["movie", "tv", "anime"] : [mode];
       const rawItems = mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], kinds);
-      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap() : new Map();
+      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
       const movieMetadataById = rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
       const publicTvSeriesByKey = new Map();
-      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey));`, `      const tvMetadataByKey = metadataService.tvSeriesRowsMap();
+      // Only pure string derivations are shared within this list read. Field
+      // conversion and metadata key generation still run for every item.
+      const derivationState = { caches: null };
+      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));`, `      const tvMetadataByKey = metadataService.tvSeriesRowsMap();
       const movieMetadataById = metadataService.movieRowsMap();
       mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));`);
   previous = previous.replaceAll('movieMetadataById, publicTvSeriesByKey)', 'movieMetadataById)');
@@ -61,6 +72,29 @@ export function previousQuerySource(current) {
 `, "");
   replace('normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) ? photoAlbumSubject', 'normalizedMode === "photo" ? photoAlbumSubject');
   replace('publicImageLibraryListItem(item, "photo", { deferPhotoSubject: true })', 'publicImageLibraryListItem(item, "photo")');
+  return previousSearchSource(previous);
+}
+
+export function previousSearchSource(current) {
+  let previous = current;
+  const replace = (from, to) => {
+    assert.ok(previous.includes(from), "previous search marker must exist");
+    assert.equal(previous.indexOf(from), previous.lastIndexOf(from), "previous search marker must be unique");
+    previous = previous.replace(from, to);
+  };
+  replace(`      const { compactFields } = document;
+      if (!searchSpec.terms.every((term) => imageSearchFieldNames.some((field) => compactFields[field].includes(term)))) continue;
+
+      const matchFields = imageSearchFieldNames.filter((field) => searchSpec.terms.some((term) => compactFields[field].includes(term)));`, `      const entries = Object.entries(document.compactFields);
+      if (!searchSpec.terms.every((term) => entries.some(([, value]) => value.includes(term)))) continue;
+
+      const matchFields = entries.filter(([, value]) => searchSpec.terms.some((term) => value.includes(term))).map(([field]) => field);
+      const { compactFields } = document;`);
+  replace(`    // Search results live for this request. NaN stays cached and still falls
+    // through to the existing title tie-breaker.
+    const aTime = a.updatedAt ?? (a.updatedAt = new Date(a.item?.updatedAt || 0).getTime());
+    const bTime = b.updatedAt ?? (b.updatedAt = new Date(b.item?.updatedAt || 0).getTime());
+    const timeDiff = bTime - aTime;`, `    const timeDiff = new Date(b.item?.updatedAt || 0).getTime() - new Date(a.item?.updatedAt || 0).getTime();`);
   return previous;
 }
 
@@ -145,6 +179,7 @@ assert.ok(current.itemsPayload(url("mode=movie&q=新标题")).items.some((item) 
 currentIndex = { ...index, scannedAt: "synthetic-next", photoSets: [{ ...index.photoSets[1], title: "VOL.42 新相册主题" }] };
 assert.equal(JSON.stringify(legacyListResponse(current.itemsPayload(url("mode=photo")))), JSON.stringify(previous.itemsPayload(url("mode=photo"))), "new photo source invalidates projection and search/sort caches");
 db.close();
+verifySearchResponseBoundaries();
 verifyTvPublicationSnapshots();
 verifyImagePaginationContract();
 
@@ -168,11 +203,55 @@ if (process.argv.includes("--legacy-metadata-blob")) {
   oldMetadata = oldMetadata.replace('"../../../../lib/gallery-metadata-revision.js"',
     JSON.stringify(new URL("../lib/gallery-metadata-revision.js", import.meta.url).href));
   for (const [table, key, method] of [["movie_metadata", "media_id", "movieRowsMap"], ["tv_series_metadata", "series_key", "tvSeriesRowsMap"]]) {
-    const marker = `return metadataRowsMap("${table}", "${key}");`;
+    const marker = table === "tv_series_metadata"
+      ? `return metadataRowsMap("${table}", "${key}", options?.forPublication === true);`
+      : `return metadataRowsMap("${table}", "${key}");`;
     assert.ok(oldMetadata.includes(marker), `${method} bulk replacement exists`);
     oldMetadata = oldMetadata.replace(marker, `const rows = getImageGalleryDb().prepare("SELECT * FROM ${table}").all(); return new Map(rows.map(row => [row.${key}, row]));`);
   }
   ({ createGalleryMetadataService: metadataFactory } = await import(`data:text/javascript;base64,${Buffer.from(oldMetadata).toString("base64")}`));
+}
+
+function verifySearchResponseBoundaries() {
+  const records = [
+    ["主题", "invalid"], ["主题 Extended", ""], ["É 2", "2026-01-01"], ["e 02", "2026-01-01"],
+    ["中 2", "2026-01-02"], ["中 10", "2026-01-02"], ["１２", "2026-02-01"], ["12", "2026-02-01"],
+    ["Alpha 2", "2026-03-01"], ["ALPHA 2", "2026-03-01"]
+  ];
+  const photos = records.map(([title, updatedAt], i) => ({ id: `search-photo-${i}`, title, updatedAt,
+    category: "边界分类", subCategory: "Folder", personName: "主题", relativePath: `合集/album-${i}.zip`,
+    rootLabel: "Synthetic", size: i, year: "2026", rating: i % 3 }));
+  let active = { scannedAt: "search-edges", photoSets: photos,
+    mediaItems: ["movie", "tv", "anime", "western"].flatMap(mediaKind => photos.map(item => ({ ...item,
+      id: `${mediaKind}-${item.id}`, mediaKind, seriesName: "主题", playable: true }))) };
+  const boundaryDeps = { ...deps, getImageLibraryIndex: () => active,
+    metadataService: { movieRowsMap: () => new Map(), tvSeriesRowsMap: () => new Map(),
+      movieRow: () => null, tvSeriesRow: () => null, publicMovie: () => null, publicTvSeries: () => null,
+      tvSeriesKey: (category, name) => `${category}|${name}` },
+    mangaService: { ...deps.mangaService, cacheDirs: () => active.photoSets } };
+  const optimized = createImageLibraryService(boundaryDeps), old = previousFactory(boundaryDeps);
+  let oracles = 0;
+  for (const mode of ["photo", "manga", "movie", "tv", "media", "western", "anime"]) {
+    for (const q of ["主题", "分类", "2", "１２", "e", "中", "主题 Folder", "___", ""]) {
+      for (const sort of ["updated", "title", "size", "rating", "year", "count"]) {
+        for (const offset of [0, 3, 20]) {
+          const query = new URL("http://fixture/api/image-library/items");
+          for (const [key, value] of Object.entries({ mode, q, sort, offset, limit: 3, tvView: "episodes" })) query.searchParams.set(key, value);
+          assert.equal(JSON.stringify(legacyListResponse(optimized.itemsPayload(query))), JSON.stringify(old.itemsPayload(query)),
+            `${mode} search preserves all response bytes for ${q}/${sort}/${offset}`);
+          oracles += 1;
+        }
+      }
+    }
+  }
+  const before = optimized.itemsPayload(url("mode=photo&q=主题&limit=20"));
+  active = { ...active, scannedAt: "search-replacement", photoSets: [{ ...photos[0], id: "new-photo", title: "替换主题", updatedAt: "2027-01-01" }] };
+  const after = optimized.itemsPayload(url("mode=photo&q=替换主题&limit=20"));
+  assert.notEqual(after.listRevision, before.listRevision);
+  assert.deepEqual(after.items.map(item => item.id), ["new-photo"]);
+  assert.equal(JSON.stringify(legacyListResponse(after)), JSON.stringify(old.itemsPayload(url("mode=photo&q=替换主题&limit=20"))),
+    "replacement source drops previous search documents and request-local date keys");
+  console.log(`image-search-response: ${oracles + 1} byte oracles passed for CJK/English/accent/numeric text, invalid dates, score/tie ordering, all sorts, EOF and source replacement`);
 }
 
 function metadataFor(getDb, factory = metadataFactory) {
@@ -326,7 +405,251 @@ try {
   });
 } finally { if (smallDb.isOpen) smallDb.close(); }
 
+await verifyTvJsonLdProjection();
 console.log(`image-query-correctness: ok (${compared} byte-equivalent queries, ${metadataGroups} metadata projection groups/12 SQLite cover types, numbered/unnumbered subjects/facets/search, metadata freshness/SQL bounds, raw ID lookup and source replacement)`);
+
+async function verifyTvJsonLdProjection() {
+  const read = value => fs.readFileSync(new URL("../" + value, import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const uri = value => new URL("../" + value, import.meta.url).href;
+  const metadataPath="src/modules/media/server/gallery-metadata-service.js";
+  const metadataSource=read(metadataPath).replace('"../../../../lib/gallery-metadata-revision.js"',JSON.stringify(uri("lib/gallery-metadata-revision.js")))
+   .replace("const revisionRealm = randomUUID();",'const revisionRealm = "private-tv-jsonld-audit";');
+  const legacyWide = process.argv.includes("--legacy-wide-tv-json-ld");
+  const restore = (text, start, end, former) => {
+    const first = text.indexOf(start), last = text.indexOf(end, first);
+    assert(first >= 0 && last > first && first === text.lastIndexOf(start), "whole previous TV projection marker");
+    return text.slice(0, first) + former + text.slice(last);
+  };
+  const formerRows = `  function metadataRowsMap(table, key) {
+    const db = getImageGalleryDb();
+    let state = metadataProjections.get(db);
+    if (!state) {
+      state = { schemaVersion: db.prepare("PRAGMA schema_version"), version: null, tables: new Map() };
+      metadataProjections.set(db, state);
+    }
+    const version = state.schemaVersion.get().schema_version;
+    if (version !== state.version) {
+      state.tables.clear();
+      state.version = version;
+    }
+    let statement = state.tables.get(table);
+    if (!statement) {
+      const quote = name => \`"\${String(name).replaceAll('"', '""')}"\`;
+      const columns = db.prepare(\`PRAGMA table_info(\${quote(table)})\`).all().map(row => row.name);
+      const projection = columns.map(name => name === "cover_blob"
+        // node:sqlite reads TEXT through its first NUL; SQLite length() has
+        // the same boundary. Empty BLOBs still become truthy Uint8Arrays.
+        ? \`CASE typeof("cover_blob") WHEN 'blob' THEN 1 WHEN 'text' THEN length("cover_blob") > 0 WHEN 'integer' THEN "cover_blob" != 0 WHEN 'real' THEN "cover_blob" != 0 ELSE NULL END AS "cover_blob"\`
+        : quote(name)).join(", ");
+      statement = db.prepare(\`SELECT \${projection || "*"} FROM \${quote(table)}\`);
+      state.tables.set(table, statement);
+    }
+    return new Map(statement.all().map(row => [row[key], row]));
+  }
+
+`;
+  const formerTv = `  function tvSeriesRowsMap() {
+    try {
+      return metadataRowsMap("tv_series_metadata", "series_key");
+    } catch (error) {
+      bulkFailureEpochs.tv += 1;
+      console.warn("[tv-series-metadata-db]", error.message || error);
+      return new Map();
+    }
+  }
+
+`;
+  let previousMetadataSource = restore(metadataSource, "  function metadataRowsMap(", "  function tvSeriesKey(", formerRows);
+  previousMetadataSource = restore(previousMetadataSource, "  function tvSeriesRowsMap(", "  function tvSeriesRow(", formerTv);
+  // Keep this older bulk-projection oracle on its original raw point path.
+  // Its former statement cache does not use the newer publication query slots.
+  for (const [table, key, value] of [["tv_series_metadata", "series_key", "seriesKey"], ["movie_metadata", "media_id", "mediaId"]]) {
+    const pointPublication = `      if (options?.forPublication === true && !types.isProxy(db) && db instanceof DatabaseSync && db.isOpen) return metadataPublicationRow(db, "${table}", "${key}", ${value});`;
+    assert(previousMetadataSource.includes(pointPublication));
+    previousMetadataSource = previousMetadataSource.replace(pointPublication, "");
+  }
+  assert.notEqual(previousMetadataSource, metadataSource, "negative control restores both complete former bulk functions");
+  const load=async(source,name)=> (await import("data:text/javascript;base64,"+Buffer.from(source+"\n//"+name).toString("base64")));
+  const oldFactory=(await load(previousMetadataSource,"old")).createGalleryMetadataService;
+  const thinFactory=(await load(legacyWide ? previousMetadataSource : metadataSource,"thin")).createGalleryMetadataService;
+  const librarySource=read("src/modules/content-index/server/image-library-service.js")
+   .replace('"./image-query-cache.js"',JSON.stringify(uri("src/modules/content-index/server/image-query-cache.js")))
+   .replace("const listRealm = randomUUID();",'const listRealm = "private-tv-jsonld-audit";');
+  const publicationCall = "metadataService.tvSeriesRowsMap({ forPublication: true })";
+  assert.equal(librarySource.split(publicationCall).length - 1, 2, "only payload and cold items opt into TV publication");
+  const previousLibrarySource = librarySource.replaceAll(publicationCall, "metadataService.tvSeriesRowsMap()");
+  const libraryFactory = (await load(previousLibrarySource, "oldlibrary")).createImageLibraryService;
+  const thinLibraryFactory = (await load(legacyWide ? previousLibrarySource : librarySource, "thinlibrary")).createImageLibraryService;
+
+  let mode="", counts={}, allOracles=0, errors=0, logs=[];
+  const fresh=()=>({schemaGet:0, columns:0, prepares:0, bulk:0, point:0, jsonLdBytes:0, statements:[]});
+  const owners=[];
+  const {createImageGalleryDbService}=await import(uri("src/modules/content-index/server/image-gallery-db-service.js"));
+  const {createGalleryMediaService}=await import(uri("src/modules/media/server/gallery-media-service.js"));
+  function open(missing=false){
+   const db=missing ? new DatabaseSync(":memory:") : createImageGalleryDbService({dbPath:":memory:",ensureDataDir:()=>{}}).getDb();
+   if(missing) db.exec('CREATE TABLE tv_series_metadata(series_key TEXT PRIMARY KEY,status TEXT,douban_title TEXT,"extra""field" TEXT); CREATE TABLE movie_metadata(media_id TEXT PRIMARY KEY,status TEXT,douban_title TEXT,json_ld_json TEXT);');
+
+   let rowFault=null, bulkFault=null, prepareFault=null;
+   const connection={ prepare(sql) {
+    if(mode) { counts.prepares++; counts.statements.push(sql); }
+    if(prepareFault && /^SELECT .* FROM "(?:tv_series_metadata|movie_metadata)"$/u.test(sql)) {const held=prepareFault;prepareFault=null;throw held;}
+    const statement=db.prepare(sql);
+    return {
+     get(...args) {
+      if(mode) { if(sql==="PRAGMA schema_version")counts.schemaGet++; else if(/^SELECT \* FROM/u.test(sql))counts.point++; }
+      return statement.get(...args);
+     },
+     all(...args) {
+      if(mode && /^PRAGMA table_info/u.test(sql))counts.columns++;
+      const bulk=/^SELECT .* FROM "(?:tv_series_metadata|movie_metadata)"$/u.test(sql);
+      if(bulk && bulkFault) { const held=bulkFault; bulkFault=null; throw held; }
+      const rows=statement.all(...args);
+      if(bulk && mode) {counts.bulk++; for(const row of rows) {
+        const raw=row.json_ld_json;
+        counts.jsonLdBytes += typeof raw==="string" ? Buffer.byteLength(raw) : raw instanceof Uint8Array ? raw.byteLength : 0;
+      } }
+      if(bulk && rowFault && sql.includes('"tv_series_metadata"') && rows[0]) {
+        for(const row of rows) Object.defineProperty(row,"rating",{get(){throw rowFault;},enumerable:true});
+      }
+      return rows;
+     }
+    };
+   }};
+   let activeConnection=connection;
+   const dependencies={createId:(prefix,value)=>prefix+"_"+Buffer.from(value).toString("base64url"),getImageGalleryDb:()=>activeConnection,notFound:r=>{r.status=404;}};
+   const previous=oldFactory(dependencies), current=thinFactory(dependencies);
+   let index={scannedAt:"private",photoSets:[],mediaItems:[]}, revision=1;
+   const libraryDeps=metadataService=>({
+    cachePreparedQueries:true,
+    clampInteger:(value,fallback,min,max)=>{const n=Number.parseInt(value,10);return Math.min(max,Math.max(min,Number.isFinite(n)?n:fallback));},
+    galleryMediaRootStatuses:()=>[],getImageLibraryIndex:()=>index,getImageLibraryRevision:()=>revision,imageReaderCacheStatus:()=>({}),
+    mangaService:{cacheDirs:()=>[],rootStatus:()=>({root:"",exists:false}),publicSummary:x=>x},
+    maxItemLimit:12000,metadataService,photoCollectionRootValue:"private",photoSetRootStatuses:()=>[],photoSetService:{coverUrl:()=>""}
+   });
+   const oldLibrary=libraryFactory(libraryDeps(previous)), thinLibrary=thinLibraryFactory(libraryDeps(current));
+   const owner={db,connection,previous,current,oldLibrary,thinLibrary,setIndex:v=>{index=v;revision++;},
+     setRowFault:v=>rowFault=v,setBulkFault:v=>bulkFault=v,setPrepareFault:v=>prepareFault=v,setConnection:v=>activeConnection=v};
+   owners.push(owner); return owner;
+  }
+  function equal(a,b,label){assert.deepEqual(a,b,label);assert.equal(JSON.stringify(a),JSON.stringify(b),label+" JSON");allOracles++;}
+  function compare(owner,parameters={}) {
+   const url=new URL("http://private.invalid/api/image-library/items?"+new URLSearchParams({mode:"tv",limit:"48",...parameters}));
+   const before=owner.oldLibrary.itemsPayload(url,{refresh:true}),after=owner.thinLibrary.itemsPayload(url,{refresh:true});
+   equal(after,before,JSON.stringify(parameters)); return after;
+  }
+  function seed(owner,count=1000,bytes=8192) {
+   owner.db.exec("DELETE FROM tv_series_metadata; DELETE FROM movie_metadata;");
+   const insert=owner.db.prepare("INSERT INTO tv_series_metadata(series_key,series_name,category,douban_title,douban_id,status,json_ld_json,info_json,genres_json,cover_blob,updated_at,rating,year) VALUES(?,?,?,?,?,'ok',?,'{}','[]',?,'2026',8,'2026')");
+   const index={scannedAt:"synthetic",photoSets:[],mediaItems:[]};
+   const raw=bytes===0?"":JSON.stringify({"@type":"TVSeries",description:"x".repeat(Math.max(0,bytes-37))});
+   for(let i=0;i<count;i++){
+    const category="Category "+i%4, name="Private Show "+i+" S01E01", key=owner.current.tvSeriesKey(category,name);
+    insert.run(key,name,category,"Private Metadata "+i,String(100000+i),raw,Buffer.from([0,1,2]));
+    for(let episode=0;episode<4;episode++) index.mediaItems.push({id:"tv"+i+"e"+episode,mediaKind:"tv",title:name+" "+episode,category,seriesName:name,personName:name,subCategory:name,size:i+episode+1,updatedAt:"2026"});
+   }
+   const movie=owner.db.prepare("INSERT INTO movie_metadata(media_id,movie_title,status,info_json,json_ld_json,updated_at) VALUES(?,'Movie','ok','{}',?,'2026')");
+   movie.run("movie-ok",'{"@type":"Movie"}');movie.run("movie-tv",'{"@type":"TVSeries"}');
+   index.mediaItems.push(...["movie-ok","movie-tv"].map(id=>({id,mediaKind:"movie",title:id,category:"Movie",size:1,updatedAt:"2026"})));
+   owner.setIndex(index);return {raw,index};
+  }
+  function measured(operation){mode="measure";counts=fresh();try{const result=operation();return {...counts,result};}finally{mode="";}}
+  const warn=console.warn;console.warn=(...args)=>logs.push(args);
+  try {
+   const o=open();const data=seed(o);
+   assert(!o.current.listRevision("tv").includes('"fallback"'),"actual initialized schema uses trusted metadata clock");
+   for(const parameters of [{},{tvView:"episodes",offset:"7"},{mode:"anime"},{mode:"media"},{sort:"rating"},{sort:"year"},{category:"Category 1"},{q:"Metadata"},{mode:"movie"}])compare(o,parameters);
+   equal(o.thinLibrary.payload(),o.oldLibrary.payload(),"full payload");
+   equal(o.thinLibrary.summaryPayload(),o.oldLibrary.summaryPayload(),"summary");
+   equal(o.thinLibrary.publicGalleryMediaItem(data.index.mediaItems[4]),o.oldLibrary.publicGalleryMediaItem(data.index.mediaItems[4]),"standalone point detail");
+  const gallery=library=>createGalleryMediaService({getImageLibraryIndex:()=>data.index,publicGalleryMediaItem:library.publicGalleryMediaItem,playbackProgressService:{getVideoProgress:()=>({positionMs:12})},safeChildPath:()=>"synthetic.mkv",safeStat:()=>({isFile:()=>true,size:33,mtimeMs:0}),normalizeExt:()=>".mkv"});
+  equal(gallery(o.thinLibrary).publicDetail(data.index.mediaItems[4]),gallery(o.oldLibrary).publicDetail(data.index.mediaItems[4]),"actual gallery detail DTO");
+  const response=()=>({status:0,headers:null,body:null,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}});
+  for(const key of [o.current.tvSeriesKey("Category 1","Private Show 1 S01E01"),"missing"]){const a=response(),b=response();o.current.serveTvSeriesCover(a,key);o.previous.serveTvSeriesCover(b,key);equal({status:a.status,headers:a.headers,body:a.body},{status:b.status,headers:b.headers,body:b.body},"cover status/header/body");}
+   const rawBefore=o.previous.tvSeriesRowsMap(), rawAfter=o.current.tvSeriesRowsMap();
+   equal(rawAfter,rawBefore,"default raw map contract");
+   assert.equal(rawAfter.size,1000); assert(rawAfter.values().next().value.json_ld_json);
+   const thin=o.current.tvSeriesRowsMap({forPublication:true});
+   equal(o.current.publicTvSeries(thin.values().next().value),o.previous.publicTvSeries(rawBefore.values().next().value),"publication/raw complete DTO");
+   for(const value of [null,Buffer.alloc(0),Buffer.from([7,8]),"","text","\u0000tail","head\u0000tail",0,5,-5,0.5,-0.5]){
+    o.db.prepare("UPDATE tv_series_metadata SET json_ld_json=?,cover_blob=?").run(value,value);
+    compare(o,{mode:"tv",tvView:"episodes"});equal(o.current.tvSeriesRowsMap(),o.previous.tvSeriesRowsMap(),"raw SQLite JSONLD/cover type "+String(value));
+   }
+   o.db.exec('ALTER TABLE tv_series_metadata ADD COLUMN "extra""field" TEXT; UPDATE tv_series_metadata SET "extra""field"=\'kept\',douban_title=\'Fresh\';');
+   equal(o.current.tvSeriesRowsMap(),o.previous.tvSeriesRowsMap(),"DDL extra raw shape");compare(o);
+   assert.equal(o.current.tvSeriesRowsMap({forPublication:true}).values().next().value['extra"field'],"kept");
+   const oldRevisionBefore=o.previous.listRevision("tv"),thinRevisionBefore=o.current.listRevision("tv");
+  o.db.exec("UPDATE tv_series_metadata SET year='2042',json_ld_json='changed unconsumed'");
+  assert.notEqual(o.previous.listRevision("tv"),oldRevisionBefore);assert.notEqual(o.current.listRevision("tv"),thinRevisionBefore);
+  assert.equal(o.current.listRevision("tv"),o.previous.listRevision("tv"));compare(o,{sort:"year"});
+   const small=open(true);const smallKey = small.current.tvSeriesKey("", "x");
+   small.db.prepare("INSERT INTO tv_series_metadata VALUES(?,?,?,?)").run(smallKey,"ok","Small","extra");
+   small.setIndex({scannedAt:"small",photoSets:[],mediaItems:[{id:"small",mediaKind:"tv",category:"",seriesName:"x",title:"Small"}]});
+   compare(small); equal(small.current.tvSeriesRowsMap(),small.previous.tvSeriesRowsMap(),"old schema no jsonLD");assert.equal(small.current.tvSeriesRowsMap({forPublication:true}).values().next().value['extra"field'],"extra");
+   small.db.exec("ALTER TABLE tv_series_metadata ADD COLUMN json_ld_json BLOB; UPDATE tv_series_metadata SET json_ld_json=x'4142';");
+   compare(small);equal(small.current.tvSeriesRowsMap(),small.previous.tvSeriesRowsMap(),"old schema adds BLOB JSONLD");
+   const replacement=open(); const replacementData=seed(replacement,4,128);
+  o.setConnection(replacement.connection);o.setIndex(replacementData.index);compare(o);
+  equal(o.current.tvSeriesRowsMap(),o.previous.tvSeriesRowsMap(),"owner connection replacement");
+  o.setConnection(o.connection);o.setIndex(data.index);compare(o);
+  small.db.exec("DROP TABLE tv_series_metadata; CREATE TABLE tv_series_metadata(series_key TEXT PRIMARY KEY,status TEXT,douban_title TEXT,replacement TEXT)");
+   small.db.prepare("INSERT INTO tv_series_metadata VALUES(?,?,?,?)").run(smallKey,"ok","Recreated","new field");
+  compare(small);equal(small.current.tvSeriesRowsMap(),small.previous.tvSeriesRowsMap(),"drop/recreate removes obsolete columns");
+
+  const prepareHeld=new Error("private prepare failure");
+  small.db.exec("ALTER TABLE tv_series_metadata ADD COLUMN later TEXT");
+  small.setPrepareFault(prepareHeld);const prepareBefore=small.oldLibrary.itemsPayload(new URL("http://private.invalid/?mode=tv"),{refresh:true});
+  small.setPrepareFault(prepareHeld);const prepareAfter=small.thinLibrary.itemsPayload(new URL("http://private.invalid/?mode=tv"),{refresh:true});
+  equal(prepareAfter,prepareBefore,"native prepare failure response/epoch");compare(small);
+  const cold=open();seed(cold,1,8192);
+  const coldModes=measured(()=>{cold.current.tvSeriesRowsMap({forPublication:true});cold.current.tvSeriesRowsMap();});
+  assert.equal(coldModes.columns,1,"both statement modes share existing per-table column discovery");
+  assert.equal(coldModes.schemaGet,2);assert.equal(coldModes.bulk,2);
+  const movieResponse=compare(o,{mode:"movie"});
+  assert.equal(movieResponse.items.find(item=>item.id==="movie-tv").movieMetadata,null,"movie JSONLD identity fence retained");
+  assert(movieResponse.items.find(item=>item.id==="movie-ok").movieMetadata);
+  const held=Object.assign(new Error("private publication failure"),{statusCode:503});o.setRowFault(held);
+   for(const library of [o.oldLibrary,o.thinLibrary]){let caught;try{library.itemsPayload(new URL("http://private.invalid/?mode=tv"),{refresh:true});}catch(error){caught=error;}assert.strictEqual(caught,held);errors++;}
+   o.setRowFault(null);
+   const fault=new Error("private bulk failure");
+   o.setBulkFault(fault);const failureBefore=o.oldLibrary.itemsPayload(new URL("http://private.invalid/?mode=tv"),{refresh:true});
+   o.setBulkFault(fault);const failureAfter=o.thinLibrary.itemsPayload(new URL("http://private.invalid/?mode=tv"),{refresh:true});
+   equal(failureAfter,failureBefore,"negative bulk failure response/epoch revision");compare(o);
+   seed(o,1000,8192);
+   // Both projection modes already prepared. Counting retains full owner pipeline.
+   const url=new URL("http://private.invalid/?mode=tv&limit=48");
+   const before=measured(()=>o.oldLibrary.itemsPayload(url,{refresh:true}));
+   const after=measured(()=>o.thinLibrary.itemsPayload(url,{refresh:true}));
+   equal(after.result,before.result,"8192 byte wide cold");
+   assert.equal(before.bulk,after.bulk);assert.equal(before.schemaGet,after.schemaGet);
+   const modernColumns=measured(()=>{o.current.tvSeriesRowsMap();o.current.tvSeriesRowsMap({forPublication:true});});
+   assert.equal(modernColumns.columns,0);
+   function request(lib){return JSON.stringify(lib.itemsPayload(url,{refresh:true}));}
+   const timing=[];
+   for(const bytes of [0,8192,65536]){
+    const seeded=seed(o,1000,bytes);compare(o);
+    const oldWork=measured(()=>request(o.oldLibrary)),thinWork=measured(()=>request(o.thinLibrary));
+    assert.equal(oldWork.result,thinWork.result);
+    for(let w=0;w<3;w++){request(o.oldLibrary);request(o.thinLibrary);}
+    const oldTimes=[],thinTimes=[];
+    for(let round=0;round<8;round++)for(const [lib,times] of round%2?[[o.thinLibrary,thinTimes],[o.oldLibrary,oldTimes]]:[[o.oldLibrary,oldTimes],[o.thinLibrary,thinTimes]]){
+     const start=performance.now();const body=request(lib);times.push(performance.now()-start);assert.equal(body,oldWork.result,"timed full owner byte equality");
+    }
+    const median=a=>a.sort((a,b)=>a-b)[Math.floor(a.length/2)];
+    timing.push({series:1000,episodes:4000,jsonLdFieldBytes:Buffer.byteLength(seeded.raw),oldRawBytes:oldWork.jsonLdBytes,newRawBytes:thinWork.jsonLdBytes,
+      oldMedianMs:median(oldTimes),newMedianMs:median(thinTimes),oldSql:oldWork.bulk,newSql:thinWork.bulk,oldSchemaGets:oldWork.schemaGet,newSchemaGets:thinWork.schemaGet,
+      oldTimes,thinTimes});
+   }
+   console.log(JSON.stringify({tvJsonLdProjection:{allOracles,errors,series:1000,episodes:4000,formerJsonLdBytes:before.jsonLdBytes,jsonLdBytes:after.jsonLdBytes,
+    bulkReads:after.bulk,pointReads:after.point,schemaGets:after.schemaGet,columnReads:after.columns,prepares:after.prepares,coldModeColumnReads:coldModes.columns,logs:logs.length,
+    timing:timing.map(({oldTimes,thinTimes,...entry})=>entry)}}));
+  // All complete DTOs, raw/cover contracts and error/revision oracles precede
+  // this actual materialization budget, also under the whole old factory.
+  assert.equal(before.jsonLdBytes, 1000 * 8192, "the former owner actually reads every synthetic TV JSON-LD");
+  assert.equal(after.jsonLdBytes, 0, "TV JSON-LD publication bytes budget");
+  for (const sample of timing) assert.equal(sample.newRawBytes, 0, "all full-request TV JSON-LD byte budgets");
+  } finally {console.warn=warn;for(const owner of owners)owner.db.close();}
+}
 
 function verifyTvPublicationSnapshots() {
   const privateDbService = createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir: () => {} });

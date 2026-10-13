@@ -10,7 +10,8 @@ import { createGalleryMediaService } from "../src/modules/media/server/gallery-m
 const fixture = fs.readFileSync(new URL("./verify_image_library_performance.mjs", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 const fixtureHelpers = fixture.slice(fixture.indexOf("function createProductionShapeIndex()"));
 const { createProductionShapeIndex, createService, request } = await import(`data:text/javascript;base64,${Buffer.from(`${fixtureHelpers}\nexport { createProductionShapeIndex, createService, request };`).toString("base64")}`);
-const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n")
+  .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href));
 const names = ["preparedPhotoCatalog", "publicImageLibraryListItem", "photoAlbumSubject", "photoArchiveDate", "photoPersonFacets", "sortImageLibraryItems", "publicGalleryMediaItem", "tvSeriesGroups", "mediaLibraryFacets", "facetCounts"];
 const metrics = {};
 let measured = source;

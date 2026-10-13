@@ -151,11 +151,11 @@ export function createShortVideoPage(deps) {
   let authorPanelTileMap = null;
   let shortVideoAdjacentRequestId = 0;
   let shortVideoListRequestId = 0;
+  let searchUsersGeneration = 0;
   let shortVideoOpenRequestId = 0;
   let shortVideoOpeningId = "";
   let shortVideoOpenError = "";
   let shortVideoNavigationPrefetchTimer = 0;
-  let shortVideoVisibilitySnapshot = null;
   let shortVideoAdjacentWarmDirection = 1;
   let shortVideoAdjacentWarmScheduleId = 0;
   let shortVideoLastNavigationAt = 0;
@@ -573,6 +573,7 @@ export function createShortVideoPage(deps) {
     ensureState();
     syncAuthorCollectorRouteLifecycle(state.shortVideo.current ? "" : state.shortVideo.authorPage);
     const append = Boolean(options.append);
+    if (!append) searchUsersGeneration += 1;
     const preserveHomeDuringLoad = preserveShortVideoHomeDuringLoad(append);
     if (!append && !shortVideoListCards) {
       ensureShortVideoListCards().catch((error) => console.warn(error));
@@ -694,7 +695,7 @@ export function createShortVideoPage(deps) {
       : "";
     if (appendCursor) params.set("cursor", appendCursor);
     else if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
-    if (append) params.set("users", "0");
+    params.set("users", "0");
     // Quality-filtered pages are cheap indexed reads and must not mix a cached
     // pre-probe page with newly measured append pages.
     if (state.shortVideo.quality !== "all") params.set("refresh", "1");
@@ -747,12 +748,17 @@ export function createShortVideoPage(deps) {
         users: previousUsers,
         usersTotal: previousUsersTotal,
         usersHasMore: previousUsersHasMore,
+        usersLoading: Boolean(state.shortVideo.data.usersLoading),
+        usersError: String(state.shortVideo.data.usersError || ""),
         videos: merged,
         offset: 0,
         limit: merged.length
       };
     } else {
-      state.shortVideo.data = data;
+      state.shortVideo.data = {
+        ...data,
+        usersLoading: Boolean(state.shortVideo.query && !isShortVideoAuthorDetailPage())
+      };
     }
     if (!isShortVideoAuthorDetailPage()) {
       state.shortVideo.source = normalizeShortVideoSource(data.source || state.shortVideo.source);
@@ -816,7 +822,36 @@ export function createShortVideoPage(deps) {
         shortVideoSort: state.shortVideo.sort || "published"
       });
     }
-    if (!append) loadShortVideoSummary().catch(handleSummaryLoadError);
+    if (!append) {
+      loadShortVideoSummary().catch(handleSummaryLoadError);
+      if (state.shortVideo.data?.usersLoading) loadSearchUsers(state.shortVideo.query);
+    }
+  }
+
+  async function loadSearchUsers(query) {
+    const generation = ++searchUsersGeneration;
+    const current = () => generation === searchUsersGeneration
+      && state.activeView === "shortVideos"
+      && state.shortVideo.query === query
+      && !state.shortVideo.authorPage;
+    try {
+      const params = new URLSearchParams({ q: query, limit: "6", offset: "0" });
+      const result = await api(`/api/short-videos/authors?${params}`);
+      if (!current()) return;
+      Object.assign(state.shortVideo.data, {
+        users: result.authors || [],
+        usersTotal: Number(result.total || 0),
+        usersHasMore: Boolean(result.hasMore),
+        usersLoading: false,
+        usersError: ""
+      });
+    } catch {
+      if (!current()) return;
+      Object.assign(state.shortVideo.data, { usersLoading: false, usersError: "用户读取失败" });
+    }
+    // Keep video cards, player nodes and scroll position mounted.
+    els.workGrid?.querySelector?.(".short-video-aggregate-results")
+      ?.replaceWith(renderAggregateSearchResults(state.shortVideo.data));
   }
 
   async function loadShortVideoSummary() {
@@ -1279,9 +1314,9 @@ export function createShortVideoPage(deps) {
     userTitle.textContent = "用户";
     const userCount = document.createElement("span");
     const usersTotal = Math.max(0, Number(data.usersTotal || 0));
-    userCount.textContent = usersTotal
+    userCount.textContent = data.usersLoading ? "正在读取用户" : data.usersError || (usersTotal
       ? `${formatNumber(usersTotal)} 位匹配用户${data.usersHasMore ? "，展示前 6 位" : ""}`
-      : "没有匹配用户";
+      : "没有匹配用户");
     userHeader.append(userTitle, userCount);
 
     const users = document.createElement("div");
@@ -1293,7 +1328,7 @@ export function createShortVideoPage(deps) {
     if (!users.childElementCount) {
       const empty = document.createElement("p");
       empty.className = "short-video-search-users-empty";
-      empty.textContent = "本地用户库里暂时没有匹配项。";
+      empty.textContent = data.usersLoading ? "正在读取用户…" : data.usersError || "本地用户库里暂时没有匹配项。";
       users.append(empty);
     }
 
@@ -4839,7 +4874,6 @@ export function createShortVideoPage(deps) {
   }
 
   function showHome() {
-    shortVideoVisibilitySnapshot = null;
     shortVideoOpenRequestId += 1;
     shortVideoOpeningId = "";
     shortVideoOpenError = "";
@@ -5245,47 +5279,15 @@ export function createShortVideoPage(deps) {
 
   function handleShortVideoVisibilityChange() {
     if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-    const gallery = activeGalleryPlayer();
-    const players = els.workGrid?.querySelectorAll?.(
-      ".short-video-player, .short-video-gallery-image[data-gallery-media-type='video']"
-    ) || [];
     if (document.hidden) {
-      gallery?.shortVideoGalleryPause?.();
-      const current = activePlayer();
-      shortVideoVisibilitySnapshot = {
-        videoId: current?.closest?.(".short-video-reel-panel")?.dataset?.videoId || "",
-        wasPlaying: Boolean(current && !current.paused && !current.ended)
-      };
+      // Keep the active video and gallery playing when another tab is selected.
       flushActiveShortVideoWatch();
-      players.forEach((player) => {
-        player.muted = true;
-        player.pause?.();
-      });
       els.workGrid?.querySelectorAll?.(".short-video-player.is-ghost")?.forEach?.((player) => {
         releaseOffscreenVideoDecoder(player, "document-hidden");
       });
       return;
     }
-    gallery?.shortVideoGalleryResume?.();
-    const resume = shortVideoVisibilitySnapshot;
-    shortVideoVisibilitySnapshot = null;
-    const current = activePlayer();
-    if (!current) return;
-    const currentVideoId = current.closest?.(".short-video-reel-panel")?.dataset?.videoId || "";
-    if (!resume?.wasPlaying || resume.videoId !== currentVideoId) {
-      current.muted = Boolean(state.shortVideo.muted);
-      current.volume = currentShortVideoVolume();
-      syncActiveControlBar();
-      warmVisibleAdjacentVideoPlayers();
-      return;
-    }
-    if (state.shortVideo.muted) {
-      current.muted = true;
-      current.play?.().catch(() => {});
-      warmVisibleAdjacentVideoPlayers();
-      return;
-    }
-    resumeActiveSound();
+    syncActiveControlBar();
     warmVisibleAdjacentVideoPlayers();
   }
 

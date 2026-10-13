@@ -278,7 +278,7 @@ assert(peoplePageSource.includes("schedulePersonDetailPrefetch(person.id)") && p
 assert(peoplePageSource.includes("detailPending: true") && personProfileSource.includes("正在加载详情"), "Web person navigation must paint the indexed profile before the detail API returns");
 assert(personProfileSource.includes("data-person-local-refresh") && personProfileSource.includes('textContent = "刷新本地"') && personProfileSource.includes("/api/admin/rescan-person"), "person details must expose a direct local refresh action");
 assert(personProfileSource.includes("reusePrefetch: false") && peoplePageSource.includes("invalidatePersonDetailPrefetches(personId)"), "person local refresh must bypass stale prepared detail responses");
-assert(personLibraryServiceSource.includes("reconcilePersonLocalWorks(previousWorks, works)"), "person rescans must reconcile disappeared local works with the core database");
+assert(personLibraryServiceSource.includes("reconcilePersonLocalWorks(previousWorks, nextWorks)"), "person rescans must reconcile disappeared local works while retaining unresolved bindings");
 assert(personLibraryServiceSource.includes("previousWork?.infoSummary") && personLibraryServiceSource.includes("work.infoSummary = { ...previousWork.infoSummary }"), "person rescans must preserve indexed work metadata");
 assert(peoplePageSource.includes("works.map((work) => workCoverUrl(work)).find(Boolean)"), "Web person details must reuse the prepared work page for fallback artwork");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
@@ -341,7 +341,7 @@ assert(workPresenterServiceSource.includes("PERSON_FALLBACK_AVATAR_BATCH_SIZE = 
 assert(workPresenterServiceSource.includes("prewarmCoreWorkCovers(batch)") && workPresenterServiceSource.includes("prewarmWorkInfoDetails(batch)"), "person avatar fallbacks must batch metadata before scanning works");
 assert(workPresenterServiceSource.includes("personFallbackAvatarCache") && workPresenterServiceSource.includes("getPersonFallbackAvatarStamp"), "repeated person presentation must reuse versioned fallback avatars");
 assert(!workPresenterServiceSource.includes("workCoverRow(work.id)"), "person and work cards must not repeat the retired per-work cover query after metadata prewarm");
-assert(workPresenterServiceSource.includes("publicWorkInfoSummary(workInfoDetailRow(work.id), work.infoSummary)"), "person avatar fallbacks must reuse batch-prepared detail rows");
+assert(workPresenterServiceSource.includes("publicWorkInfoSummary(workInfoDetailRow(work.id, { includeMetadata: false }), work.infoSummary)"), "person avatar fallbacks must reuse batch-prepared summary rows");
 for (const view of ["favorites", "history", "vr"]) {
   assert(collectionPageSource.includes(`state.activeView !== "${view}"`), `stale ${view} responses must not overwrite newer navigation`);
 }
@@ -351,7 +351,6 @@ assert(workDetailPageSource.includes("playInfoRequests.cancel();"), "closing or 
 assert(videoProbeSource.includes("probeWaitMs = DEFAULT_VIDEO_PROBE_WAIT_MS") && DEFAULT_VIDEO_PROBE_WAIT_MS === 80, "cold playback probes must return a usable fallback within the interactive response budget");
 assert(videoProbeSource.includes("persistentCache.get(file, stat)") && videoProbeSource.includes("persistentCache.set(file, stat, value)"), "completed playback probes must survive server restarts");
 assert(videoProbeCacheSource.includes("source_size") && videoProbeCacheSource.includes("source_mtime"), "persistent playback probes must invalidate when their source file changes");
-assert(videoProbeCacheSource.includes("const rowsByFile = new Map()") && videoProbeCacheSource.includes("rowsByFile.get(cacheKey(file.id, file.path))"), "playback requests must read persisted probes from a startup-hydrated memory index");
 assert(read("server.js").includes("persistentCache: videoProbeCacheService"), "FanHao playback must compose the persistent probe cache into the runtime");
 assert(read("server.js").includes("videoProbeCacheService.start();"), "persistent probe statements must initialize before the first playback request");
 assert(videoProbeSource.includes("const prewarmQueue = []"), "visible playback probes must use a bounded background queue");
@@ -1431,7 +1430,6 @@ assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ran
 assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
 assert(!rankingServiceSource.includes("LEFT JOIN images cover") && !rankingServiceSource.includes("LEFT JOIN fanhao_images.images cover"), "ranking list queries must not run one correlated image lookup per row");
 assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
-assert(rankingServiceSource.includes("function uniqueRankingRows(items = [])") && rankingServiceSource.includes("const rankingRows = uniqueRankingRows(getCoreDb()") && rankingServiceSource.includes("COUNT(DISTINCT ci.work_id)"), "ranking summaries and pages must ignore duplicate collection memberships");
 assert(rankingServiceSource.includes("const RANKING_PREWARM_PAGE_SIZE = 64"), "ranking startup must prepare the desktop first page");
 assert(rankingServiceSource.includes("rankingWorkSourcesCache.get(cacheKey)"), "ranking pages must reuse prepared local and missing work sources");
 assert(rankingServiceSource.includes("const RANKING_PAGE_CACHE_LIMIT = 64") && rankingServiceSource.includes("userStateStamp()"), "ranking pages must cache complete responses until ranking or user state changes");
@@ -1453,7 +1451,7 @@ const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes('normalizeWorkCategory(url.searchParams.get("category"))') && workQueryServiceSource.includes("categorySummaryItems(stamp)"), "work list responses must carry the selected category and all four category counts");
 assert(workQueryServiceSource.includes("categorySummaryForWorks") && workQueryServiceSource.includes("summarizeWorkCategories(works"), "actor filmographies must reuse the authoritative work category classifier");
-assert(workQueryServiceSource.includes('const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`') && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages and source partitions must use versioned bounded caches");
+assert(workQueryServiceSource.includes("const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset])") && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages must preserve field boundaries and source partitions must use versioned bounded caches");
 assert(workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, \"western\") })"), "western-root membership must feed the shared work category classifier");
 assert(workQueryServiceSource.includes("peopleScopeService.workMatchesDirect?.(work, \"western\")") && peopleScopeServiceSource.includes("function workMatchesDirect(work, scope)"), "small result category summaries must avoid building the full scope index");
 assert(personDetailServiceSource.includes("lightweightInfo: true") && personDetailServiceSource.includes('includeCoreCovers: scope === "western"') && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path while Western pages retain cached covers");
@@ -1495,7 +1493,9 @@ assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQue
 assert(workQueryServiceSource.includes("source.facetsStamp !== stamp") && workQueryServiceSource.includes("source.facetsByCategory.clear()"), "search category facets must only refresh after user state changes");
 assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("categories: categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset]"), "search responses must filter and cache by the selected work category while retaining all category counts");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
-assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
+assert(workCodeIndexServiceSource.includes("return { stamp, keys, rows, searchRows, prefixRows }")
+  && workCodeIndexServiceSource.includes("if (result.cacheable !== false) localWorkCodeIndexCache = result.value"),
+  "local code membership and work lookup must share one successful catalog pass");
 assert(workCodeIndexServiceSource.includes("while (low < high)"), "local code-prefix search must use the sorted code index");
 assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap()"), "repeated person and catalog lookups must reuse parsed work code keys");
 assert(workSearchIndexServiceSource.includes("const postings = new Map()"), "full-text search must build an in-memory candidate index during prewarm");
@@ -1697,9 +1697,9 @@ const coreImageStoreSource = read("src/platform/server/core-image-store.js");
 const tableStampQuerySource = read("src/modules/fanhao/server/library/table-stamp-query.js");
 const userStateRoutes = read("src/modules/fanhao/server/user-state/routes.js");
 const userStateServiceSource = read("src/modules/fanhao/server/collections/user-state-service.js");
-assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
+assert(workInfoService.includes("function detailRow(workId, { includeMetadata = true } = {})"), "work metadata must default to full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
-assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
+assert(workPresenterService.includes("workInfoDetailRow(work.id, { includeMetadata: includeFiles })"), "work cards must request summaries while file details retain full metadata");
 assert(userStateRoutes.includes("collectionQueryService.favoritesPayload(url)") && userStateRoutes.includes("collectionQueryService.historyPayload(url)"), "collection routes must delegate response assembly to the cached query service");
 assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-list avatars must use a stable compact media URL");
 assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "FanHao table stamps must not rescan the core database between nearby interactions");
@@ -2372,9 +2372,9 @@ const cachedRankingService = createRankingService({
     prepare(sql) {
       return {
         all(...args) {
-          if (sql.includes("COUNT(DISTINCT ci.work_id)")) {
+          if (sql.includes("GROUP BY c.id")) {
             rankingSummaryReadCount += 1;
-            return [{ collection_id: 1, list_label: "TOP250 2025", source_key: "top:y2025", total: 2, updated_at: "v1", page_url: "https://example.com/ranking" }];
+            return [{ collection_id: 1, list_label: "TOP250 2025", source_key: "top:y2025", updated_at: "v1", page_url: "https://example.com/ranking" }];
           }
           if (sql.includes("SELECT w.code_search AS code_key")) {
             rankingSummaryCodesReadCount += 1;

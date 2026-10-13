@@ -112,6 +112,85 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.evaluate(() => fixture.state.gallery.album.id), "B"); await until(() => old.closed, "aborted transport must close"); old.release();
       } finally { await page.close(); }
     });
+    for (const summaryError of ["", "obsolete summary failure"]) for (const readerState of ["pending", "failed", "loaded"]) {
+      await run(`late summary ${summaryError ? "failure" : "success"} preserves ${readerState} reader status`, async () => {
+        const page = await newPage();
+        const summary = hold(url => url.pathname === "/api/image-library/summary", summaryError);
+        const current = hold(url => url.pathname === "/api/photo-sets/B", readerState === "failed" ? "current reader failure" : "");
+        try {
+          await page.evaluate(() => { fixture.summaryTask = fixture.page.loadImageLibrary({ reload: true }); });
+          await requested(summary);
+          await page.evaluate(() => { fixture.readerTask = fixture.page.openPhotoSet("B"); });
+          await requested(current);
+          if (readerState !== "pending") { await settle(page, current); await page.evaluate(() => fixture.readerTask); }
+          const expectedStatus = readerState === "pending" ? "正在读取套图" : readerState === "failed" ? "current reader failure" : "";
+          assert.equal(await page.evaluate(() => fixture.state.gallery.status), expectedStatus);
+          await settle(page, summary); await page.evaluate(() => fixture.summaryTask);
+          assert.equal(await page.evaluate(() => fixture.state.gallery.status), expectedStatus, "summary completion cannot own a newer reader's status");
+          if (readerState !== "loaded") assert.equal(await page.locator(".gallery-status").textContent(), expectedStatus);
+          assert.equal(await page.evaluate(() => fixture.state.gallery.loading), false);
+          if (!summaryError) assert.equal(await page.evaluate(() => fixture.state.gallery.data.scannedAt), "synthetic", "reader ownership must not discard fresh library metadata");
+          await page.evaluate(() => fixture.page.loadImageLibrary());
+          assert.equal(await page.evaluate(() => fixture.state.gallery.status), expectedStatus, "cached library metadata must also preserve reader status");
+          if (readerState === "pending") { await settle(page, current); await page.evaluate(() => fixture.readerTask); }
+          if (readerState !== "failed") assert.equal(await page.evaluate(() => fixture.state.gallery.album.id), "B");
+        } finally { summary.release(); current.release(); await page.close(); }
+      });
+    }
+    await run("library summary still owns list status and all gallery modes", async () => {
+      const page = await newPage();
+      try {
+        for (const mode of ["photo", "manga", "western", "media", "movie", "tv"]) {
+          await page.evaluate(value => { fixture.page.resetReader(); fixture.state.gallery.mode = value; return fixture.page.loadImageLibrary({ reload: true }); }, mode);
+          assert.equal(await page.evaluate(() => fixture.state.gallery.status), "索引 synthetic");
+        }
+        const summary = hold(url => url.pathname === "/api/image-library/summary", "current summary failure");
+        await page.evaluate(() => { fixture.summaryTask = fixture.page.loadImageLibrary({ reload: true }); });
+        await requested(summary); await settle(page, summary); await page.evaluate(() => fixture.summaryTask);
+        assert.equal(await page.evaluate(() => fixture.state.gallery.status), "current summary failure");
+      } finally { await page.close(); }
+    });
+    await run("summary started during a pending reader preserves its status", async () => {
+      const page = await newPage();
+      const current = hold(url => url.pathname === "/api/photo-sets/B");
+      const summary = hold(url => url.pathname === "/api/image-library/summary");
+      try {
+        await page.evaluate(() => { fixture.readerTask = fixture.page.openPhotoSet("B"); });
+        await requested(current);
+        await page.evaluate(() => { fixture.summaryTask = fixture.page.loadImageLibrary({ reload: true }); });
+        await requested(summary);
+        assert.equal(await page.locator(".gallery-status").textContent(), "正在读取套图", "starting a background summary must not take the reader's loading surface");
+        await settle(page, summary); await page.evaluate(() => fixture.summaryTask);
+        assert.equal(await page.locator(".gallery-status").textContent(), "正在读取套图");
+        await settle(page, current); await page.evaluate(() => fixture.readerTask);
+        assert.equal(await page.evaluate(() => fixture.state.gallery.album.id), "B");
+      } finally { current.release(); summary.release(); await page.close(); }
+    });
+    await run("inactive gallery ignores its delayed summary callback", async () => {
+      const page = await newPage();
+      try {
+        const before = countRequests(url => url.pathname === "/api/image-library/summary");
+        await page.evaluate(async () => {
+          const original = window.setTimeout;
+          let delayed;
+          window.setTimeout = (callback, delay, ...args) => delay === 1000 ? (delayed = callback, 0) : original(callback, delay, ...args);
+          try {
+            fixture.state.gallery.data = null;
+            fixture.state.gallery.mode = "media";
+            fixture.page.enter({ skipRoute: true });
+            if (!delayed) throw new Error("expected delayed media summary");
+            // Controller lifecycle double: actual cross-product navigation
+            // unloads the document and is outside this callback-level check.
+            fixture.state.activeView = "novels";
+            fixture.page.resetReader();
+            delayed();
+            await fixture.page.loadImageLibrary({ reload: true });
+          } finally { window.setTimeout = original; }
+        });
+        await tick(page);
+        assert.equal(countRequests(url => url.pathname === "/api/image-library/summary"), before);
+      } finally { await page.close(); }
+    });
     await run("same album reopened generation", async () => {
       const page = await newPage();
       try {

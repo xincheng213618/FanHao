@@ -634,11 +634,13 @@ class JavDbClient:
         if self.args.headless:
             options.add_argument("--headless=new")
 
-        driver_path = self.args.driver_path if self.args.driver_path and self.args.driver_path.exists() else latest_cached_chromedriver()
-        if driver_path:
-            self.driver = webdriver.Chrome(service=Service(str(driver_path)), options=options)
-        else:
-            self.driver = webdriver.Chrome(options=options)
+        driver_path = self.args.driver_path if self.args.driver_path and self.args.driver_path.exists() else None
+        if driver_path is None:
+            from webdriver_manager.chrome import ChromeDriverManager
+
+            # Resolve against the installed browser, rather than the newest old cache entry.
+            driver_path = ChromeDriverManager().install()
+        self.driver = webdriver.Chrome(service=Service(str(driver_path)), options=options)
 
         try:
             from selenium_stealth import stealth

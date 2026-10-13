@@ -162,7 +162,7 @@ const codePrefixPage = createCodePrefixPage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260920-empty-person-01");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261009-path-relink-02");
     return createPersonProfile({
       api,
       coverUrl,
