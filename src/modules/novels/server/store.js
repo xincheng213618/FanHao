@@ -252,7 +252,7 @@ export function createNovelStore(options = {}) {
           SELECT b.*, ${PROGRESS_COLUMNS}
           FROM novel_books b
           LEFT JOIN novel_reading_state s ON s.book_id = b.id
-          ${where}${Number(countRow?.count || 0) === 0 ? " AND 0" : ""}
+          ${where}${Number(countRow?.count || 0) <= offset ? " AND 0" : ""}
           ${order}
           LIMIT ? OFFSET ?
         `
@@ -305,7 +305,7 @@ export function createNovelStore(options = {}) {
             COALESCE(SUM(size_bytes), 0) AS size_bytes,
             COALESCE(MAX(updated_at), '') AS updated_at
           FROM novel_books
-          ${where}${Number(total?.count || 0) === 0 ? " AND 0" : ""}
+          ${where}${Number(total?.count || 0) <= offset ? " AND 0" : ""}
           GROUP BY TRIM(author)
           ${order}
           LIMIT ? OFFSET ?

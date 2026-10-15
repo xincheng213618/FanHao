@@ -6,22 +6,27 @@ import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
 
-// Two store implementations read the same private SQLite file. Restore only
-// the empty-page guards; all pre-existing cache/count/snapshot behavior stays.
+// Current, zero-total-only and unguarded stores read the same private SQLite
+// file. Restore only the guards; cache/count/snapshot behavior stays real.
 const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
 let source = fs.readFileSync(sourceUrl, "utf8");
+let zeroOnlySource = source;
 for (const variable of ["countRow", "total"]) {
-  const guard = '${where}${Number(' + variable + '?.count || 0) === 0 ? " AND 0" : ""}';
+  const guard = '${where}${Number(' + variable + '?.count || 0) <= offset ? " AND 0" : ""}';
   assert.equal(source.split(guard).length, 2);
   source = source.replace(guard, "${where}");
+  zeroOnlySource = zeroOnlySource.replace(guard, guard.replace("<= offset", "=== 0"));
 }
-source = source.replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, sourceUrl).href)}`);
-const { createNovelStore: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
-assert.ok(process.argv.slice(2).every(value => value === "--legacy"));
-const factory = process.argv.includes("--legacy") ? previousFactory : createNovelStore;
+async function factoryFromSource(text) {
+  text = text.replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, sourceUrl).href)}`);
+  return (await import(`data:text/javascript;base64,${Buffer.from(text).toString("base64")}`)).createNovelStore;
+}
+const previousFactory = await factoryFromSource(source), zeroOnlyFactory = await factoryFromSource(zeroOnlySource);
+assert.ok(process.argv.slice(2).every(value => ["--legacy", "--legacy-zero-only"].includes(value)));
+const factory = process.argv.includes("--legacy") ? previousFactory : process.argv.includes("--legacy-zero-only") ? zeroOnlyFactory : createNovelStore;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-novel-empty-pages-"));
 const dbPath = path.join(temporary, "private.sqlite");
-const current = factory({ dbPath }), previous = previousFactory({ dbPath });
+const current = factory({ dbPath }), previous = previousFactory({ dbPath }), zeroOnly = zeroOnlyFactory({ dbPath });
 const originalPrepare = DatabaseSync.prototype.prepare;
 const originalUuid = crypto.randomUUID;
 let writer = null, work = null, beforePage = null, fault = null;
@@ -50,6 +55,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
       if (page && key === "all") {
         if (work) { work.executed++; work.pageArgs = parameters; }
         if (fault === "execute") throw Object.assign(new Error("controlled page execution failure"), { code: "SQLITE_BUSY" });
+        if (fault === "bind") parameters[parameters.length - 1] = Symbol("invalid fixture offset");
       }
       return value.apply(target, parameters);
     };
@@ -82,11 +88,17 @@ try {
   for (const method of ["listBooks", "listAuthors"]) {
     const match = compare(method, { q: "Literal", limit: "30" });
     assert.ok(match.total > 0 && (match.books || match.authors).length > 0, "nonempty controls really return rows");
-    for (const kind of ["compile", "execute"]) {
+    for (const offset of [match.total - 1, match.total, match.total + 1, Number.MAX_SAFE_INTEGER]) {
+      const response = compare(method, { q: "Literal", limit: "1", offset: String(offset) });
+      assert.equal((response.books || response.authors).length, offset < match.total ? 1 : 0, "nonzero totals retain their last row and empty boundary pages");
+    }
+    for (const kind of ["compile", "bind", "execute"]) for (const params of [
+      { q: "NoSuchNovel" }, { q: "Literal", offset: String(match.total) }, { q: "Literal", offset: String(match.total + 1) }
+    ]) {
       fault = kind;
-      assert.deepEqual(errorFrom(() => call(current, method, { q: "NoSuchNovel" })), errorFrom(() => call(previous, method, { q: "NoSuchNovel" })));
+      assert.deepEqual(errorFrom(() => call(current, method, params)), errorFrom(() => call(previous, method, params)));
       errorOracles++;
-      fault = null; compare(method, { q: "NoSuchNovel" });
+      fault = null; compare(method, params);
     }
   }
   writer.exec("ALTER TABLE novel_reading_state RENAME COLUMN chapter_id TO fixture_hidden_chapter_id");
@@ -116,6 +128,29 @@ try {
     assert.equal(compare(method, { q: "Interleaved Match" }).total, 0);
   }
 
+  // A nonzero count also belongs to the pinned snapshot: inserting a matching
+  // row before page preparation must not make the already-out-of-range page
+  // visible until the next request.
+  for (const method of ["listBooks", "listAuthors"]) {
+    insertBook("offset-base", "Offset Snapshot Base", "Offset Snapshot Base", 1);
+    crypto.randomUUID = () => "11111111-1111-4111-8111-111111111111";
+    const responses = [];
+    for (const target of [current, previous]) {
+      writer.prepare("DELETE FROM novel_books WHERE id='offset-added'").run();
+      beforePage = () => insertBook("offset-added", "Offset Snapshot New", "Offset Snapshot New", 2);
+      responses.push(call(target, method, { q: "Offset Snapshot", offset: "1", limit: "1" }));
+      assert.equal(beforePage, null, "nonzero out-of-range pages still compile their SQL");
+      assert.equal(responses.at(-1).total, 1);
+      assert.equal((responses.at(-1).books || responses.at(-1).authors).length, 0);
+    }
+    assert.deepEqual(responses[0], responses[1]); responseOracles++;
+    crypto.randomUUID = originalUuid;
+    const visible = compare(method, { q: "Offset Snapshot", offset: "1", limit: "1" });
+    assert.equal(visible.total, 2);
+    assert.equal((visible.books || visible.authors).length, 1);
+    writer.prepare("DELETE FROM novel_books WHERE id IN ('offset-base','offset-added')").run();
+  }
+
   seed(50000);
   for (const [method, params] of [
     ["listBooks", { q: "NoSuchNovel", limit: "30" }],
@@ -133,11 +168,39 @@ try {
     assert.equal(next.visits, 0, `${method}/${params.reading || "all"}: no repeated empty-page scan`);
     metrics.push({ method, reading: params.reading || "0", previousVisits: old.visits, currentVisits: next.visits });
   }
+  for (const [method, params] of [
+    ["listBooks", { q: "Literal", sort: "title", limit: "30" }],
+    ["listBooks", { reading: "1", sort: "progress", limit: "30" }],
+    ["listAuthors", { q: "Author", sort: "books", limit: "30" }]
+  ]) {
+    const total = compare(method, params).total;
+    assert.ok(total > 0, "offset budgets require a nonzero count");
+    for (const offset of [total, total + 1, Number.MAX_SAFE_INTEGER]) {
+      const request = { ...params, offset: String(offset) };
+      const next = measure(current, method, request), old = measure(zeroOnly, method, request);
+      assert.deepEqual(next.result, old.result); responseOracles++;
+      assert.equal((next.result.books || next.result.authors).length, 0);
+      assert.equal(next.counts, 1); assert.equal(old.counts, 1);
+      assert.equal(next.prepared, 1); assert.equal(next.executed, 1);
+      assert.deepEqual(next.pageArgs, old.pageArgs, "out-of-range pages retain every original binding");
+      assert.equal(next.pageSql.replace(" AND 0", ""), old.pageSql);
+      assert.ok(old.visits > 10000, "zero-total-only guard still scans nonzero out-of-range pages");
+      assert.equal(next.visits, 0, `${method}/${params.reading || "all"}: nonzero out-of-range page scan budget`);
+      metrics.push({ method, reading: params.reading || "0", total, offset, previousZeroOnlyVisits: old.visits, currentVisits: next.visits });
+    }
+    const lastRequest = { ...params, offset: String(total - 1) };
+    const next = measure(current, method, lastRequest), old = measure(zeroOnly, method, lastRequest);
+    assert.deepEqual(next.result, old.result); responseOracles++;
+    assert.equal((next.result.books || next.result.authors).length, 1);
+    assert.equal(next.pageSql, old.pageSql, "the last nonempty page must keep its original SQL");
+    assert.deepEqual(next.pageArgs, old.pageArgs);
+    assert.equal(next.visits, old.visits, "nonempty pages must retain their original SQLite work");
+  }
   console.log(JSON.stringify({ ok: true, responseOracles, errorOracles, books: 50000, metrics }, null, 2));
 } finally {
   work = null; beforePage = null; fault = null;
   DatabaseSync.prototype.prepare = originalPrepare; crypto.randomUUID = originalUuid;
-  current.invalidate(); previous.invalidate(); writer?.close();
+  current.invalidate(); previous.invalidate(); zeroOnly.invalidate(); writer?.close();
   // Delete only known fixture-owned files, then the empty directory; never
   // recursively remove an inferred path or touch an application database.
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -163,7 +226,7 @@ function seed(count) {
   }
   progress.run("orphan", "missing", "unresolved", null, null);
   writer.exec("COMMIT");
-  current.summary(); previous.summary();
+  current.summary(); previous.summary(); zeroOnly.summary();
 }
 function call(target, method, params) {
   const url = new URL(`http://fixture.invalid/?${new URLSearchParams(params)}`);
