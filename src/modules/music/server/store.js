@@ -1142,17 +1142,20 @@ export function createMusicStore(options = {}) {
       if (!playlist) return false;
       const requested = playlistTrackIdsFromInput(input);
       if (!requested.length) throw httpError(400, "缺少歌曲排序");
-      const existing = database
+      const existingRows = database
         .prepare(
           `
-          SELECT track_id
+          SELECT track_id,
+                 CASE WHEN typeof(sort_order) = 'integer' AND sort_order BETWEEN 1 AND 9007199254740991
+                      THEN sort_order END AS current_order
           FROM music_playlist_items
           WHERE playlist_id = ?
           ORDER BY sort_order ASC, added_at ASC
         `
         )
-        .all(playlistId)
-        .map((row) => row.track_id);
+        .all(playlistId);
+      const existing = existingRows.map((row) => row.track_id);
+      const currentOrder = new Map(existingRows.map((row) => [row.track_id, row.current_order]));
       const existingSet = new Set(existing);
       const ordered = requested.filter((trackId) => existingSet.has(trackId));
       if (!ordered.length) throw httpError(400, "没有可排序的歌曲");
@@ -1160,7 +1163,11 @@ export function createMusicStore(options = {}) {
       const nextOrder = [...ordered, ...existing.filter((trackId) => !orderedSet.has(trackId))];
       const now = new Date().toISOString();
       const updateItem = database.prepare("UPDATE music_playlist_items SET sort_order = ? WHERE playlist_id = ? AND track_id = ?");
-      nextOrder.forEach((trackId, index) => updateItem.run(index + 1, playlistId, trackId));
+      // Read and update under the same write transaction. Invalid legacy order
+      // values still normalize, without decoding unsafe SQLite integers in JS.
+      nextOrder.forEach((trackId, index) => {
+        if (currentOrder.get(trackId) !== index + 1) updateItem.run(index + 1, playlistId, trackId);
+      });
       database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
       return playlistDetail(playlistId);
     });

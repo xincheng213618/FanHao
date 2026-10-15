@@ -985,12 +985,22 @@ export function createMusicActions({ state, api, player, view, router, showError
     if (!cleanName) return null;
     const description = window.prompt("歌单说明", playlist.description || "");
     if (description === null) return null;
-    const data = await api.updatePlaylist(playlist.id, {
-      name: cleanName,
-      description: String(description || "").trim()
-    });
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
+    let data;
+    try {
+      data = await api.updatePlaylist(playlist.id, {
+        name: cleanName,
+        description: String(description || "").trim()
+      });
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return null;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return data.playlist || null;
     music().activePlaylist = data.playlist || music().activePlaylist;
-    await loadPlaylists();
+    const loadedCurrent = await loadPlaylists();
+    if (!loadedCurrent || !isForegroundCurrent(request)) return data.playlist || null;
     await loadMusic({ replaceRoute: true, keepCurrent: true });
     return data.playlist || null;
   }
@@ -999,11 +1009,20 @@ export function createMusicActions({ state, api, player, view, router, showError
     const trackId = music().playlistDialogTrackId;
     const playlist = (music().playlists || []).find((item) => item.id === playlistId);
     if (!trackId || !playlist?.id) return;
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     closePlaylistDialog();
     music().status = `正在加入「${playlist.name}」`;
-    await api.addTrackToPlaylist(playlist.id, { trackId });
+    try {
+      await api.addTrackToPlaylist(playlist.id, { trackId });
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return;
     music().status = `已加入「${playlist.name}」`;
-    await loadPlaylists();
+    const loadedCurrent = await loadPlaylists();
+    if (!loadedCurrent || !isForegroundCurrent(request)) return;
     if (music().mode === "playlist" && music().activePlaylistId === playlist.id) {
       await loadMusic({ replaceRoute: true, keepCurrent: true });
     } else {
@@ -1012,8 +1031,17 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   async function removeTrackFromActivePlaylist(trackId) {
-    if (!music().activePlaylistId) return;
-    await api.removeTrackFromPlaylist(music().activePlaylistId, trackId);
+    const playlistId = music().activePlaylistId;
+    if (!playlistId) return;
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
+    try {
+      await api.removeTrackFromPlaylist(playlistId, trackId);
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return;
     music().status = "已移出歌单";
     await loadMusic({ replaceRoute: true, keepCurrent: true });
   }
@@ -1022,7 +1050,15 @@ export function createMusicActions({ state, api, player, view, router, showError
     const playlist = music().activePlaylist;
     if (!playlist?.id) return;
     if (!window.confirm(`删除歌单「${playlist.name}」？歌曲文件不会被删除。`)) return;
-    await api.deletePlaylist(playlist.id);
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
+    try {
+      await api.deletePlaylist(playlist.id);
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return;
+    }
+    invalidatePlaylistCache();
+    if (!isForegroundCurrent(request)) return;
     music().mode = "library";
     music().activePlaylistId = "";
     music().activePlaylist = null;
@@ -1031,12 +1067,20 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   async function clearHistory() {
     if (!window.confirm("清空最近播放记录？播放进度和收藏会保留。")) return;
-    await api.clearHistory();
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
+    try {
+      await api.clearHistory();
+    } catch (error) {
+      if (isForegroundCurrent(request)) throw error;
+      return;
+    }
+    if (!isForegroundCurrent(request)) return;
     await loadMusic({ replaceRoute: true, keepCurrent: true });
   }
 
   async function startMusicRescan() {
     ensureMusicState(state);
+    const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     const rootText = (music().summary?.roots || music().data?.summary?.roots || [])
       .map((root) => root.path)
       .filter(Boolean)
@@ -1049,13 +1093,14 @@ export function createMusicActions({ state, api, player, view, router, showError
         scriptId: "music-library-rescan",
         options: { roots: rootText, limit: 0, dryRun: false }
       });
+      if (!isForegroundCurrent(request)) return;
       music().status = "音乐库刷新已启动，后台作业完成后会自动更新。";
       router.openAdminScript("music-library-rescan");
     } catch (error) {
-      music().status = error?.message || "音乐库刷新启动失败";
+      if (isForegroundCurrent(request)) music().status = error?.message || "音乐库刷新启动失败";
     } finally {
       music().rescanning = false;
-      view.refresh();
+      if (isForegroundCurrent(request)) view.refresh();
     }
   }
 

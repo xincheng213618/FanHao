@@ -16,6 +16,7 @@ function fixture(t, { mode = "library", saved = null } = {}) {
   const preferences = new Map(saved ? [["fanhao.music.lastTrack", JSON.stringify(saved)]] : []);
   const timers = new Map();
   globalThis.window = {
+    confirm: () => true,
     localStorage: { getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value) },
     setTimeout(callback) { const id = timers.size + 1; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); }
@@ -23,7 +24,7 @@ function fixture(t, { mode = "library", saved = null } = {}) {
   globalThis.document = { querySelector() { return null; }, activeElement: null };
   const requests = [];
   const api = {};
-  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists", "createPlaylist", "importM3u"]) {
+  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists", "createPlaylist", "importM3u", "deletePlaylist", "updatePlaylist", "addTrackToPlaylist", "removeTrackFromPlaylist", "runScript", "clearHistory"]) {
     api[method] = (...args) => new Promise((resolve, reject) => {
       const signal = args.find(arg => arg instanceof AbortSignal);
       requests.push({ method, args, signal, resolve, reject });
@@ -44,16 +45,547 @@ function fixture(t, { mode = "library", saved = null } = {}) {
   const events = [];
   const view = new Proxy({}, { get: (_target, name) => (...args) => { events.push({ name, args }); return false; } });
   const routes = [];
-  const router = { push: route => routes.push(["push", route]), replace: route => routes.push(["replace", route]), overrides: () => actions.musicRouteOverrides() };
+  const adminRoutes = [];
+  const router = { push: route => routes.push(["push", route]), replace: route => routes.push(["replace", route]), overrides: () => actions.musicRouteOverrides(), openAdminScript: id => adminRoutes.push(id) };
   const errors = [];
   const actions = createMusicActions({ state, api, player, view, router, showError: error => errors.push(error) });
-  return { actions, state, requests, loads, routes, events, audio, preferences, timers, progress, errors, get plays() { return plays; } };
+  return { actions, state, requests, loads, routes, adminRoutes, events, audio, preferences, timers, progress, errors, get plays() { return plays; } };
 }
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const track = id => ({ id, title: id, streamUrl: `/fixture/${id}`, durationMs: 180000 });
 const trackData = id => ({ track: track(id), lyrics: { lines: [{ text: id }] } });
 const listData = (...ids) => ({ tracks: ids.map(track), total: ids.length, hasMore: false });
+
+for (const outcome of ["success", "failure"]) {
+  test(`clearHistory late ${outcome} cannot cancel or overwrite a newer page load`, async t => {
+    const f = fixture(t, { mode: "history" });
+    const pending = f.actions.clearHistory();
+    const write = f.requests[0];
+    f.actions.selectMusicMode("artists");
+    const fresh = f.requests.find(request => request.method === "getArtists");
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const reads = f.requests.length;
+    assert.equal(write.method, "clearHistory");
+    assert.equal(write.signal, undefined, "navigation must not cancel a history mutation already sent");
+    if (outcome === "success") write.resolve({ ok: true });
+    else write.reject(new Error("obsolete history clear failure"));
+    const settled = pending.then(() => null, error => error);
+    await tick();
+    assert.equal(fresh.signal.aborted, false, "the old write cannot cancel the user's newer page load");
+    assert.equal(f.requests.length, reads, "the old write cannot start replacement reads or retry");
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.loading, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events);
+    assert.deepEqual(f.routes, []);
+    assert.equal(await settled, null, "an obsolete failure must not reach the current UI error handler");
+    fresh.resolve({ artists: [], total: 0 });
+    await tick();
+  });
+
+  test(`clearHistory late ${outcome} preserves a newer foreground track`, async t => {
+    const f = fixture(t, { mode: "history" });
+    const pending = f.actions.clearHistory();
+    const opening = f.actions.openTrack("chosen", { openPage: true });
+    f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+    await opening;
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    const reads = f.requests.length;
+    if (outcome === "success") f.requests[0].resolve({ ok: true });
+    else f.requests[0].reject(new Error("obsolete foreground history failure"));
+    const settled = pending.then(() => null, error => error);
+    await tick();
+    assert.equal(f.requests.length, reads);
+    assert.equal(f.state.music.current.id, "chosen");
+    assert.equal(f.state.music.trackPageOpen, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, routes);
+    assert.equal(await settled, null, "an obsolete failure must not reach the new track's error handler");
+  });
+}
+
+test("clearHistory current success refreshes history while preserving playback and queue", async t => {
+  const f = fixture(t, { mode: "history" });
+  const current = track("playing"), queue = [current];
+  f.state.music.current = current;
+  f.state.music.queue = queue;
+  f.state.music.data = listData("old-history");
+  f.audio.src = current.streamUrl;
+  f.audio.paused = false;
+  const pending = f.actions.clearHistory();
+  assert.deepEqual(f.requests[0].args, []);
+  f.requests[0].resolve({ ok: true });
+  await tick();
+  assert.deepEqual(f.requests.map(request => request.method), ["clearHistory", "getHistory"]);
+  f.requests[1].resolve(listData());
+  await pending;
+  assert.deepEqual(f.state.music.data.tracks, []);
+  assert.equal(f.state.music.current, current);
+  assert.equal(f.state.music.queue, queue);
+  assert.equal(f.audio.src, current.streamUrl);
+  assert.equal(f.audio.paused, false);
+  assert.equal(f.state.music.loading, false);
+  assert.equal(f.routes.length, 1);
+  assert.equal(f.routes[0][0], "replace");
+  assert.equal(f.routes[0][1].musicMode, "history");
+});
+
+test("clearHistory current failure rejects unchanged without clearing local history", async t => {
+  const f = fixture(t, { mode: "history" });
+  const data = listData("old-history");
+  f.state.music.data = data;
+  const pending = f.actions.clearHistory();
+  const error = new Error("current history clear failure");
+  f.requests[0].reject(error);
+  await assert.rejects(pending, actual => actual === error);
+  assert.equal(f.state.music.data, data);
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(f.routes, []);
+});
+
+test("clearHistory does nothing when its confirmation is cancelled", async t => {
+  const f = fixture(t, { mode: "history" });
+  window.confirm = () => false;
+  await f.actions.clearHistory();
+  assert.deepEqual(f.requests, []);
+  assert.deepEqual(f.events, []);
+  assert.deepEqual(f.routes, []);
+});
+
+test("clearHistory refresh yields to navigation after the write has already completed", async t => {
+  const f = fixture(t, { mode: "history" });
+  const pending = f.actions.clearHistory();
+  f.requests[0].resolve({ ok: true });
+  await tick();
+  const history = f.requests.find(request => request.method === "getHistory");
+  f.actions.beginNavigation();
+  f.state.activeView = "novels";
+  const events = f.events.length;
+  assert.equal(history.signal.aborted, true);
+  history.resolve(listData());
+  await pending;
+  assert.equal(f.state.music.data, null);
+  assert.equal(f.events.length, events);
+  assert.deepEqual(f.routes, []);
+});
+
+for (const outcome of ["success", "failure"]) {
+  test(`startMusicRescan late ${outcome} preserves a newer loading page and releases its busy state`, async t => {
+    const f = fixture(t);
+    const pending = f.actions.startMusicRescan();
+    const write = f.requests[0];
+    assert.equal(write.method, "runScript");
+    f.actions.selectMusicMode("artists");
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const reads = f.requests.length;
+    assert.equal(f.state.music.rescanning, true, "navigation must not claim that the write has completed");
+    assert.equal(write.signal, undefined, "navigation cancellation must not abort the script write");
+    if (outcome === "success") write.resolve({ job: { id: "synthetic-rescan" } });
+    else write.reject(new Error("obsolete rescan failure"));
+    await pending;
+    assert.equal(f.state.music.rescanning, false);
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.loading, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events);
+    assert.equal(f.requests.length, reads, "a settled write must not retry or trigger reads");
+    assert.deepEqual(f.adminRoutes, []);
+    assert.deepEqual(f.routes, []);
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+  });
+
+  test(`startMusicRescan late ${outcome} preserves a newer foreground track`, async t => {
+    const f = fixture(t);
+    const pending = f.actions.startMusicRescan();
+    const opening = f.actions.openTrack("chosen", { openPage: true });
+    f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+    await opening;
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    assert.equal(f.state.music.rescanning, true);
+    if (outcome === "success") f.requests[0].resolve({ job: { id: "synthetic-rescan" } });
+    else f.requests[0].reject(new Error("obsolete foreground rescan failure"));
+    await pending;
+    assert.equal(f.state.music.rescanning, false);
+    assert.equal(f.state.music.current.id, "chosen");
+    assert.equal(f.state.music.trackPageOpen, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, routes);
+    assert.deepEqual(f.adminRoutes, [], "an obsolete rescan must not redirect the chosen track to administration");
+    assert.equal(f.requests.filter(request => request.method === "runScript").length, 1);
+  });
+}
+
+test("startMusicRescan current success opens administration and clears its busy state", async t => {
+  const f = fixture(t);
+  f.state.music.summary = { roots: [{ path: "C:\\fixture\\music" }, { path: "C:\\fixture\\second" }] };
+  const pending = f.actions.startMusicRescan();
+  assert.equal(f.state.music.rescanning, true);
+  assert.equal(f.state.music.status, "正在启动音乐库刷新");
+  assert.deepEqual(f.requests[0].args, [{
+    scriptId: "music-library-rescan",
+    options: { roots: "C:\\fixture\\music\nC:\\fixture\\second", limit: 0, dryRun: false }
+  }]);
+  f.requests[0].resolve({ job: { id: "synthetic-rescan" } });
+  await pending;
+  assert.equal(f.state.music.rescanning, false);
+  assert.equal(f.state.music.status, "音乐库刷新已启动，后台作业完成后会自动更新。");
+  assert.deepEqual(f.adminRoutes, ["music-library-rescan"]);
+  assert.equal(f.events.filter(event => event.name === "refresh").length, 2);
+  assert.equal(f.requests.length, 1);
+});
+
+test("startMusicRescan current failure keeps its error visible and clears its busy state", async t => {
+  const f = fixture(t);
+  const pending = f.actions.startMusicRescan();
+  f.requests[0].reject(new Error("current rescan failure"));
+  await assert.doesNotReject(pending);
+  assert.equal(f.state.music.rescanning, false);
+  assert.equal(f.state.music.status, "current rescan failure");
+  assert.deepEqual(f.adminRoutes, []);
+  assert.equal(f.events.filter(event => event.name === "refresh").length, 2);
+  assert.equal(f.requests.length, 1);
+});
+
+const existingPlaylistWrites = {
+  editActivePlaylist: "updatePlaylist",
+  addTrackToPlaylistTarget: "addTrackToPlaylist",
+  removeTrackFromActivePlaylist: "removeTrackFromPlaylist"
+};
+const updatedPlaylist = { id: "target", name: "Updated playlist", description: "Updated description", trackCount: 2 };
+
+function startExistingPlaylistWrite(f, method, { activeTarget = true } = {}) {
+  f.state.music.mode = activeTarget ? "playlist" : "library";
+  f.state.music.activePlaylistId = activeTarget ? "target" : "";
+  f.state.music.activePlaylist = activeTarget ? { ...updatedPlaylist, name: "Old playlist", trackCount: 1 } : null;
+  f.state.music.playlists = [{ ...updatedPlaylist, name: "Old playlist", trackCount: 1 }];
+  f.state.music.data = listData("original-song");
+  if (method === "editActivePlaylist") {
+    const prompts = [updatedPlaylist.name, updatedPlaylist.description];
+    window.prompt = () => prompts.shift();
+    return f.actions.editActivePlaylist();
+  }
+  if (method === "addTrackToPlaylistTarget") {
+    f.state.music.playlistDialogOpen = true;
+    f.state.music.playlistDialogTrackId = "changed-song";
+    return f.actions.addTrackToPlaylistTarget("target");
+  }
+  return f.actions.removeTrackFromActivePlaylist("changed-song");
+}
+
+for (const [method, apiMethod] of Object.entries(existingPlaylistWrites)) {
+  test(`${method} preserves navigation while invalidating a completed write`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    assert.equal(f.requests[0].method, apiMethod);
+    f.actions.selectMusicMode("artists");
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const reads = f.requests.length;
+    f.requests[0].resolve({ playlist: updatedPlaylist });
+    await tick();
+    assert.equal(f.state.music.mode, "artists");
+    assert.equal(f.state.music.activePlaylist, null, "the old playlist cannot replace a new destination's selection");
+    assert.equal(f.state.music.loading, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.state.music.playlistsLoadedAt, 0);
+    assert.equal(f.requests.length, reads, "an obsolete write cannot initiate more reads");
+    assert.equal(f.events.length, events);
+    assert.deepEqual(f.routes, []);
+    await pending;
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+  });
+
+  test(`${method} ignores an obsolete failure without disturbing a newer page`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    const loadedAt = f.state.music.playlistsLoadedAt;
+    f.actions.selectMusicMode("artists");
+    const status = f.state.music.status;
+    const events = f.events.length;
+    f.requests[0].reject(new Error("obsolete playlist mutation failure"));
+    await assert.doesNotReject(pending);
+    assert.equal(f.state.music.loading, true);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.state.music.playlistsLoadedAt, loadedAt);
+    assert.equal(f.events.length, events);
+    assert.deepEqual(f.routes, []);
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+    assert.deepEqual(f.errors, []);
+  });
+
+  test(`${method} preserves a foreground track selected during its write`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    const opening = f.actions.openTrack("chosen", { openPage: true });
+    f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+    await opening;
+    const data = f.state.music.data;
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const routes = f.routes.length;
+    const reads = f.requests.length;
+    f.requests[0].resolve({ playlist: updatedPlaylist });
+    await tick();
+    assert.equal(f.state.music.current.id, "chosen");
+    assert.equal(f.state.music.trackPageOpen, true);
+    assert.equal(f.state.music.data, data);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.state.music.playlistsLoadedAt, 0);
+    assert.equal(f.requests.length, reads);
+    assert.equal(f.events.length, events);
+    assert.equal(f.routes.length, routes);
+    await pending;
+  });
+
+  test(`${method} cannot resume foreground work after navigation during sidebar refresh`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    f.requests[0].resolve({ playlist: updatedPlaylist });
+    await tick();
+    const sidebar = f.requests.find(request => request.method === "getPlaylists");
+    assert(sidebar, "successful writes must refresh the sidebar cache");
+    const detail = f.requests.find(request => request.method === "getPlaylist");
+    f.actions.beginNavigation();
+    f.state.activeView = "novels";
+    const status = f.state.music.status;
+    const events = f.events.length;
+    const reads = f.requests.length;
+    assert.equal(sidebar.signal.aborted, true);
+    sidebar.resolve({ playlists: [updatedPlaylist] });
+    detail?.resolve({ ...listData("updated-song"), playlist: updatedPlaylist });
+    await tick();
+    assert.equal(f.requests.length, reads, "finishing an obsolete sidebar read must not start a new page load");
+    assert.equal(f.events.length, events);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.state.music.playlistsLoadedAt, 0);
+    assert.deepEqual(f.routes, []);
+    await pending;
+  });
+
+  test(`${method} invalidates an in-flight pre-write sidebar snapshot after leaving the page`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    f.state.music.playlistsLoadedAt = 0;
+    f.actions.selectMusicMode("artists");
+    const sidebar = f.requests.find(request => request.method === "getPlaylists");
+    const reads = f.requests.length;
+    f.requests[0].resolve({ playlist: updatedPlaylist });
+    await tick();
+    assert.equal(sidebar.signal.aborted, true);
+    assert.equal(f.requests.length, reads, "the old mutation may invalidate caches but cannot refresh the new page");
+    sidebar.resolve({ playlists: [{ id: "obsolete-snapshot" }] });
+    f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+    await tick();
+    assert.equal(f.state.music.playlistsLoadedAt, 0);
+    assert(!f.state.music.playlists.some(item => item.id === "obsolete-snapshot"));
+    await pending;
+  });
+
+  test(`${method} refreshes the active playlist and sidebar after a current success`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    const write = f.requests[0];
+    assert.equal(write.method, apiMethod);
+    assert.equal(write.args[0], "target");
+    if (method === "editActivePlaylist") assert.deepEqual(write.args[1], { name: updatedPlaylist.name, description: updatedPlaylist.description });
+    else if (method === "addTrackToPlaylistTarget") assert.deepEqual(write.args[1], { trackId: "changed-song" });
+    else assert.equal(write.args[1], "changed-song");
+    write.resolve({ playlist: updatedPlaylist });
+    await tick();
+    const sidebar = f.requests.find(request => request.method === "getPlaylists");
+    assert(sidebar, "current success must not reuse the old sidebar name or track count");
+    sidebar.resolve({ playlists: [updatedPlaylist] });
+    await tick();
+    f.requests.find(request => request.method === "getPlaylist").resolve({ ...listData("updated-song"), playlist: updatedPlaylist });
+    const result = await pending;
+    if (method === "editActivePlaylist") assert.equal(result, updatedPlaylist);
+    assert.equal(f.state.music.activePlaylist, updatedPlaylist);
+    assert.equal(f.state.music.data.tracks[0].id, "updated-song");
+    assert.deepEqual(f.state.music.playlists, [updatedPlaylist]);
+    assert(f.state.music.playlistsLoadedAt > 0);
+    assert.equal(f.state.music.loading, false);
+    assert.equal(f.routes.length, 1);
+    assert.equal(f.routes[0][1].musicPlaylistId, "target");
+  });
+
+  test(`${method} preserves current failure identity and leaves the cache intact`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    const playlist = f.state.music.activePlaylist;
+    const loadedAt = f.state.music.playlistsLoadedAt;
+    const error = new Error("current playlist mutation failure");
+    f.requests[0].reject(error);
+    await assert.rejects(pending, actual => actual === error);
+    assert.equal(f.state.music.activePlaylist, playlist);
+    assert.equal(f.state.music.activePlaylistId, "target");
+    assert.equal(f.state.music.playlistsLoadedAt, loadedAt);
+    assert.deepEqual(f.requests.map(request => request.method), [apiMethod]);
+    assert.deepEqual(f.routes, []);
+  });
+
+  if (method !== "removeTrackFromActivePlaylist") test(`${method} yields when a newer sidebar request supersedes its refresh`, async t => {
+    const f = fixture(t);
+    const pending = startExistingPlaylistWrite(f, method);
+    f.requests[0].resolve({ playlist: updatedPlaylist });
+    await tick();
+    const obsolete = f.requests.find(request => request.method === "getPlaylists");
+    const fresh = f.actions.loadPlaylists();
+    const latest = f.requests.at(-1);
+    assert.equal(obsolete.signal.aborted, true);
+    latest.resolve({ playlists: [{ id: "newer-sidebar" }] });
+    await fresh;
+    const events = f.events.length;
+    const reads = f.requests.length;
+    obsolete.resolve({ playlists: [updatedPlaylist] });
+    await tick();
+    assert.equal(f.requests.length, reads);
+    assert.equal(f.events.length, events);
+    assert.deepEqual(f.state.music.playlists.map(item => item.id), ["newer-sidebar"]);
+    assert.deepEqual(f.routes, []);
+    await pending;
+  });
+}
+
+test("addTrackToPlaylistTarget refreshes only the sidebar when its target is not the current list", async t => {
+  const f = fixture(t);
+  const pending = startExistingPlaylistWrite(f, "addTrackToPlaylistTarget", { activeTarget: false });
+  const data = f.state.music.data;
+  f.requests[0].resolve({ ok: true });
+  await tick();
+  f.requests.find(request => request.method === "getPlaylists").resolve({ playlists: [updatedPlaylist] });
+  await pending;
+  assert.equal(f.state.music.mode, "library");
+  assert.equal(f.state.music.data, data);
+  assert.deepEqual(f.state.music.playlists, [updatedPlaylist]);
+  assert.deepEqual(f.requests.map(request => request.method), ["addTrackToPlaylist", "getPlaylists"]);
+  assert(f.events.some(event => event.name === "refreshLibrarySidebars"));
+  assert.deepEqual(f.routes, []);
+});
+
+function startPlaylistDelete(f) {
+  f.state.music.mode = "playlist";
+  f.state.music.activePlaylistId = "delete-me";
+  f.state.music.activePlaylist = { id: "delete-me", name: "Delete me" };
+  f.state.music.playlists = [f.state.music.activePlaylist, { id: "keep-me", name: "Keep me" }];
+  return f.actions.deleteActivePlaylist();
+}
+
+test("a delayed playlist deletion preserves a newer playlist and invalidates its sidebar cache", async t => {
+  const f = fixture(t);
+  const pending = startPlaylistDelete(f);
+  const write = f.requests[0];
+  assert.equal(write.args[0], "delete-me");
+  f.actions.selectMusicMode("playlist", { playlistId: "keep-me" });
+  f.requests.find(request => request.method === "getPlaylist").resolve({
+    ...listData("kept-song"), playlist: { id: "keep-me", name: "Keep me" }
+  });
+  await tick();
+  const data = f.state.music.data;
+  const playlist = f.state.music.activePlaylist;
+  const events = f.events.length;
+  const routes = f.routes.length;
+  const reads = f.requests.length;
+  write.resolve({ ok: true });
+  await tick();
+  assert.equal(f.state.music.mode, "playlist");
+  assert.equal(f.state.music.activePlaylistId, "keep-me");
+  assert.equal(f.state.music.activePlaylist, playlist);
+  assert.equal(f.state.music.data, data);
+  assert.equal(f.state.music.playlistsLoadedAt, 0, "the next load must refresh the successfully changed playlist list");
+  assert.equal(f.requests.length, reads, "an obsolete write cannot start a new foreground read");
+  assert.equal(f.events.length, events);
+  assert.equal(f.routes.length, routes);
+  await pending;
+});
+
+test("an obsolete playlist deletion failure cannot interrupt a newer loading page", async t => {
+  const f = fixture(t);
+  const pending = startPlaylistDelete(f);
+  const loadedAt = f.state.music.playlistsLoadedAt;
+  f.actions.selectMusicMode("artists");
+  const status = f.state.music.status;
+  const events = f.events.length;
+  f.requests[0].reject(new Error("obsolete delete failure"));
+  await assert.doesNotReject(pending);
+  assert.equal(f.state.music.mode, "artists");
+  assert.equal(f.state.music.loading, true);
+  assert.equal(f.state.music.status, status);
+  assert.equal(f.state.music.playlistsLoadedAt, loadedAt, "a failed delete must not invalidate the playlist cache");
+  assert.equal(f.events.length, events);
+  assert.deepEqual(f.routes, []);
+  f.requests.find(request => request.method === "getArtists").resolve({ artists: [], total: 0 });
+  await tick();
+  assert.deepEqual(f.errors, []);
+});
+
+test("a delayed playlist deletion preserves a newer foreground track", async t => {
+  const f = fixture(t);
+  const pending = startPlaylistDelete(f);
+  const opening = f.actions.openTrack("chosen", { openPage: true });
+  f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+  await opening;
+  const events = f.events.length;
+  const routes = f.routes.length;
+  f.requests[0].resolve({ ok: true });
+  await tick();
+  assert.equal(f.state.music.mode, "playlist");
+  assert.equal(f.state.music.current.id, "chosen");
+  assert.equal(f.state.music.trackPageOpen, true);
+  assert.equal(f.events.length, events);
+  assert.equal(f.routes.length, routes);
+  assert.equal(f.state.music.playlistsLoadedAt, 0);
+  assert(!f.requests.some(request => request.method === "getTracks"));
+  await pending;
+});
+
+test("a current playlist deletion refreshes the library and sidebar after success", async t => {
+  const f = fixture(t);
+  const pending = startPlaylistDelete(f);
+  f.requests[0].resolve({ ok: true });
+  await tick();
+  assert.equal(f.state.music.mode, "library");
+  assert.equal(f.state.music.activePlaylistId, "");
+  assert.equal(f.state.music.activePlaylist, null);
+  assert.equal(f.state.music.loading, true);
+  const side = f.requests.find(request => request.method === "getPlaylists");
+  assert(side, "successful deletion must bypass the otherwise fresh sidebar cache");
+  side.resolve({ playlists: [{ id: "keep-me", name: "Keep me" }] });
+  f.requests.find(request => request.method === "getTracks").resolve(listData("library-song"));
+  await pending;
+  assert.deepEqual(f.state.music.playlists.map(item => item.id), ["keep-me"]);
+  assert.equal(f.state.music.data.tracks[0].id, "library-song");
+  assert.equal(f.state.music.loading, false);
+  assert.equal(f.routes.length, 1);
+  assert.equal(f.routes[0][1].musicMode, "library");
+});
+
+test("a current playlist deletion failure preserves the playlist and rejects unchanged", async t => {
+  const f = fixture(t);
+  const pending = startPlaylistDelete(f);
+  const playlist = f.state.music.activePlaylist;
+  const loadedAt = f.state.music.playlistsLoadedAt;
+  const error = new Error("current delete failure");
+  f.requests[0].reject(error);
+  await assert.rejects(pending, actual => actual === error);
+  assert.equal(f.state.music.mode, "playlist");
+  assert.equal(f.state.music.activePlaylistId, "delete-me");
+  assert.equal(f.state.music.activePlaylist, playlist);
+  assert.equal(f.state.music.playlistsLoadedAt, loadedAt);
+  assert.deepEqual(f.requests.map(request => request.method), ["deletePlaylist"]);
+  assert.deepEqual(f.routes, []);
+});
 
 test("a delayed home load cannot restore the saved track over a newer selection", async t => {
   const f = fixture(t, { mode: "home", saved: { trackId: "saved", track: track("saved") } });

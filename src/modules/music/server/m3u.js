@@ -112,7 +112,12 @@ export function decodeM3uPath(value) {
   const raw = String(value || "").trim();
   if (/^file:\/\//iu.test(raw)) {
     try {
-      return decodeURIComponent(new URL(raw).pathname).replace(/^\/([A-Za-z]:\/)/u, "$1");
+      const url = new URL(raw);
+      const pathname = decodeURIComponent(url.pathname);
+      // Keep the UNC host so an absolute network path cannot match a local
+      // drive's same-named file before the relative-name fallback runs.
+      if (url.hostname) return `//${url.hostname}${pathname}`;
+      return pathname.replace(/^\/([A-Za-z]:\/)/u, "$1");
     } catch {
       return raw.replace(/^file:\/+/iu, "");
     }
