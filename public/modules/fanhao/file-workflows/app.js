@@ -8,6 +8,10 @@ let selected = null, timer = null, busy = false, revision = 0;
 const size = (bytes) => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1073741824 ? `${(bytes / 1048576).toFixed(1)} MB` : `${(bytes / 1073741824).toFixed(2)} GB`;
 function node(tag, text, className = "") { const n = document.createElement(tag); n.textContent = text; n.className = className; return n; }
 function notice(text, error = false) { $("notice").textContent = text; $("notice").classList.toggle("error", error); }
+function schedulePoll(id, delay) {
+  const generation = revision;
+  timer = setTimeout(() => { if (generation === revision && selected?.id === id) return loadJob(id, true); }, delay);
+}
 function render(job) {
   const wasActive = selected?.id === job.id && ["running", "stopping"].includes(selected.status);
   selected = job;
@@ -32,13 +36,14 @@ function render(job) {
   $("files").replaceChildren(fragment);
   notice(job.error || (job.status === "preview" ? `预览已生成。将处理 ${job.totalFiles} 个文件，${job.skippedFiles} 项保留原位。` : job.status === "completed" ? "计划已完成。已入库作品请使用作品迁移流程维护数据库。" : "文件执行进度会自动更新。"), Boolean(job.error));
   clearTimeout(timer);
-  if (active) timer = setTimeout(() => loadJob(job.id, true), 1500);
+  if (active) schedulePoll(job.id, 1500);
   else if (wasActive) loadHistory();
 }
 async function loadJob(id, quiet = false) {
+  clearTimeout(timer);
   const generation = ++revision;
   try { const { job } = await api(`${prefix}/${id}`); if (generation === revision) render(job); }
-  catch (error) { if (generation !== revision) return; notice(error.message, true); if (quiet) timer = setTimeout(() => loadJob(id, true), 3000); }
+  catch (error) { if (generation !== revision) return; notice(error.message, true); if (quiet) schedulePoll(id, 3000); }
 }
 async function loadHistory() {
   try {
@@ -56,13 +61,16 @@ async function loadHistory() {
 }
 $("planForm").addEventListener("submit", async (event) => {
   event.preventDefault(); if (busy) return;
-  busy = true; revision++; clearTimeout(timer); $("preview").disabled = true; $("execute").disabled = true; selected = null;
+  const generation = ++revision;
+  busy = true; clearTimeout(timer); $("preview").disabled = true; $("execute").disabled = true; selected = null;
   notice("正在扫描目录并检查冲突…");
   try {
     const body = Object.fromEntries(new FormData(event.currentTarget));
-    const { job } = await api(`${prefix}/preview`, { method: "POST", body }); busy = false; render(job); await loadHistory();
-  } catch (error) { notice(error.message, true); }
-  finally { busy = false; $("preview").disabled = false; }
+    const { job } = await api(`${prefix}/preview`, { method: "POST", body });
+    if (generation !== revision) return;
+    busy = false; render(job); loadHistory();
+  } catch (error) { if (generation === revision) notice(error.message, true); }
+  finally { busy = false; if (generation === revision) $("preview").disabled = false; }
 });
 $("execute").addEventListener("click", () => {
   if (!selected || busy) return;
@@ -72,20 +80,25 @@ $("execute").addEventListener("click", () => {
 });
 $("confirm").addEventListener("close", async () => {
   if ($("confirm").returnValue !== "run" || busy) return;
-  const id = $("confirm").dataset.jobId; busy = true; $("execute").disabled = true;
-  try { const { job } = await api(`${prefix}/${id}/run`, { method: "POST" }); busy = false; revision++; render(job); await loadHistory(); }
-  catch (error) { notice(error.message, true); }
+  const id = $("confirm").dataset.jobId, generation = ++revision;
+  busy = true; clearTimeout(timer); $("execute").disabled = true;
+  try {
+    const { job } = await api(`${prefix}/${id}/run`, { method: "POST" });
+    if (generation !== revision) return;
+    busy = false; render(job); loadHistory();
+  } catch (error) { if (generation === revision) notice(error.message, true); }
   finally {
     busy = false;
-    if (selected) $("execute").disabled = ["running", "stopping", "completed"].includes(selected.status) || !selected.totalFiles;
+    if (generation === revision && selected) $("execute").disabled = ["running", "stopping", "completed"].includes(selected.status) || !selected.totalFiles;
   }
 });
 $("stop").addEventListener("click", async () => {
   if (!selected) return;
-  try { const { job } = await api(`${prefix}/${selected.id}/stop`, { method: "POST" }); render(job); }
-  catch (error) { notice(error.message, true); }
+  const id = selected.id, generation = revision;
+  try { const { job } = await api(`${prefix}/${id}/stop`, { method: "POST" }); if (generation === revision && selected?.id === id) render(job); }
+  catch (error) { if (generation === revision && selected?.id === id) notice(error.message, true); }
 });
-$("refresh").addEventListener("click", () => { loadHistory(); if (selected) loadJob(selected.id); });
+$("refresh").addEventListener("click", () => { if (busy) return; loadHistory(); if (selected) loadJob(selected.id); });
 window.addEventListener("pagehide", () => { clearTimeout(timer); revision++; });
 try {
   const config = await api(`${prefix}/config`);

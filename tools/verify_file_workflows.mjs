@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -75,12 +76,72 @@ try {
   await assert.rejects(service.preview({ kind: "migrate", source: {}, target }), /完整路径/);
   for (const phase of ["copying", "copied", "published", "source-removed", "done"]) await verifyRecovery(phase);
   await verifyStopAndLocks();
+  for (const phase of ["stat", "scan", "stat-error"]) await verifyPreviewShutdown(phase);
   await verifyLinkedPaths();
   verifyCliIndexedGuard();
-  console.log("file-workflows: preview, verified move, conflict, drift, indexed guard, authorization, crash recovery, pause/resume and lock exclusion passed");
+  console.log("file-workflows: preview, verified move, conflict, drift, indexed guard, authorization, crash recovery, pause/resume, lock exclusion and preview shutdown passed");
 } finally {
   await service.close();
   temporary.cleanup();
+}
+
+async function verifyPreviewShutdown(phase) {
+  const fixture = path.join(root, `preview-close-${phase}`), incoming = path.join(fixture, "incoming"), destination = path.join(fixture, "destination"), dataDir = path.join(fixture, "state");
+  const nested = path.join(incoming, "nested"), file = path.join(nested, "fixture.txt");
+  fs.mkdirSync(nested, { recursive: true }); fs.mkdirSync(destination);
+  fs.writeFileSync(file, "preview-shutdown-fixture");
+  let indexReads = 0;
+  const owner = createFileWorkflowService({ dataDir, roots: [incoming, destination], indexedPaths() { indexReads += 1; return []; } });
+  const operation = phase === "scan" ? "lstat" : "stat", blockedPath = phase === "scan" ? file : incoming;
+  const ioError = Object.assign(new Error("controlled preview stat failure"), { code: "EIO" });
+  const original = fsp[operation];
+  let entered, release;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  fsp[operation] = async (...args) => {
+    const result = await original(...args);
+    if (args[0] === blockedPath) {
+      entered(); await gate;
+      if (phase === "stat-error") throw ioError;
+    }
+    return result;
+  };
+  let outcome;
+  const closing = [];
+  try {
+    outcome = owner.preview({ kind: "migrate", source: incoming, target: destination })
+      .then(value => ({ value }), error => ({ error }));
+    await blocked;
+    const readsAtStop = indexReads;
+    let closed = 0;
+    closing.push(owner.close().then(() => { closed += 1; }));
+    closing.push(owner.close().then(() => { closed += 1; }));
+    // Flush queued completions without timing-dependent sleeps. Neither close
+    // may resolve while the existing filesystem operation still owns its gate.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, 0, `${phase}: close must wait for the active preview`);
+    await assert.rejects(owner.preview({ kind: "migrate", source: incoming, target: destination }), /已有任务/);
+    release();
+    const result = await outcome;
+    if (phase === "stat-error") assert.equal(result.error, ioError, "the preview caller must retain the original I/O failure");
+    else {
+      assert.equal(result.error?.statusCode, 503, `${phase}: the preview caller must receive cancellation`);
+      assert.match(result.error.message, /预览已取消/);
+    }
+    await Promise.all(closing);
+    assert.equal(closed, 2, "repeated close calls must drain the same preview");
+    assert.equal(indexReads, readsAtStop, "shutdown must not call indexedPaths again");
+    assert.equal(fs.existsSync(path.join(dataDir, "file-workflows")), false, "a cancelled preview must not write a journal");
+    assert.equal(fs.readFileSync(file, "utf8"), "preview-shutdown-fixture");
+    assert.deepEqual(fs.readdirSync(destination), [], "preview shutdown must not move media");
+    await owner.close();
+  } finally {
+    release();
+    fsp[operation] = original;
+    await outcome;
+    await Promise.allSettled(closing);
+    await owner.close();
+  }
 }
 
 async function verifyLinkedPaths() {
@@ -102,7 +163,7 @@ function verifyCliIndexedGuard() {
   const file = path.join(incoming, "ABC-123.mp4"); fs.writeFileSync(file, "indexed-cli-fixture");
   const database = path.join(fixture, "core.sqlite"), db = new DatabaseSync(database);
   db.exec("CREATE TABLE local_files(file_path TEXT)"); db.prepare("INSERT INTO local_files VALUES (?)").run(file); db.close();
-  const cli = fileURLToPath(new URL("./fanhao_file_workflows.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../tools/fanhao_file_workflows.mjs", import.meta.url));
   const output = execFileSync(process.execPath, [cli, "--data-dir", data, "--core-db", database, "--root", incoming, "--root", destination, "--source", incoming, "--target", destination], { encoding: "utf8", windowsHide: true });
   assert.equal(JSON.parse(output).totalFiles, 0); assert(fs.existsSync(file));
 }

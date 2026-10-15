@@ -19,7 +19,7 @@ export function createFileWorkflowService({ dataDir, roots, indexedPaths = () =>
   let active = null;
   let closing = false;
   let running = null;
-  let previewing = false;
+  let previewing = null;
   const lockPath = path.join(stateDir, "execution.lock");
 
   function validate(file) {
@@ -88,6 +88,10 @@ export function createFileWorkflowService({ dataDir, roots, indexedPaths = () =>
     try { return keys.has(fs.realpathSync.native(file).toLowerCase()); } catch (error) { if (error.code !== "ENOENT") throw error; return false; }
   }
 
+  function checkPreviewOpen() {
+    if (closing) throw fail("服务正在停止，文件预览已取消", 503);
+  }
+
   async function preview(input) {
     let { kind, source, target } = input || {};
     if (closing || active || previewing) throw fail("已有任务正在运行或生成预览，请稍后再试");
@@ -95,19 +99,31 @@ export function createFileWorkflowService({ dataDir, roots, indexedPaths = () =>
     if (typeof source !== "string" || typeof target !== "string" || !path.isAbsolute(source) || !path.isAbsolute(target)) throw fail("源目录和目标目录必须是完整路径", 400);
     source = validate(source); target = validate(target);
     if (within(source, target) || within(target, source)) throw fail("源目录与目标目录不能相同或互相包含", 400);
-    previewing = true;
+    let finishPreview;
+    // The caller owns preview errors; shutdown owns the physical I/O drain.
+    previewing = new Promise(resolve => { finishPreview = resolve; });
     try {
-      if (!(await fsp.stat(source)).isDirectory() || !(await fsp.stat(target)).isDirectory()) throw fail("请先创建源目录和目标目录", 400);
-      const sourceReal = await fsp.realpath(source), targetReal = await fsp.realpath(target);
+      const sourceStat = await fsp.stat(source);
+      checkPreviewOpen();
+      if (!sourceStat.isDirectory()) throw fail("请先创建源目录和目标目录", 400);
+      const targetStat = await fsp.stat(target);
+      checkPreviewOpen();
+      if (!targetStat.isDirectory()) throw fail("请先创建源目录和目标目录", 400);
+      const sourceReal = await fsp.realpath(source);
+      checkPreviewOpen();
+      const targetReal = await fsp.realpath(target);
+      checkPreviewOpen();
       if (within(sourceReal, targetReal) || within(targetReal, sourceReal)) throw fail("源目录与目标目录实际指向重叠位置", 400);
       const indexed = indexedFileKeys();
       const items = [], targets = new Set();
       const entries = await fsp.readdir(source, { withFileTypes: true });
+      checkPreviewOpen();
       for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
         if (EXCLUDED.test(entry.name)) continue;
         const base = path.join(source, entry.name);
         const group = [];
         await collect(base, group);
+        checkPreviewOpen();
         const unfinished = group.some((file) => INCOMPLETE.test(file.file));
         const codes = extractWorkCodes(entry.name);
         const code = codes.length === 1 ? codes[0] : "";
@@ -132,19 +148,24 @@ export function createFileWorkflowService({ dataDir, roots, indexedPaths = () =>
       }
       const job = { version: 1, id: crypto.randomUUID(), kind, source, target, sourceReal, targetReal,
         status: "preview", createdAt: new Date().toISOString(), items };
+      checkPreviewOpen();
       save(job);
       return summary(job);
-    } finally { previewing = false; }
+    } finally { previewing = null; finishPreview(); }
   }
 
   async function collect(file, result) {
+    checkPreviewOpen();
     if (result.length >= maxFiles) throw fail("目录过大，请缩小扫描范围", 400);
     const stat = await fsp.lstat(file);
+    checkPreviewOpen();
     if (stat.isSymbolicLink()) { result.push({ file, reason: "跳过链接或联接目录" }); return; }
     if (stat.isFile()) { result.push({ file, stat }); return; }
     if (!stat.isDirectory()) return;
     validate(file);
-    for (const entry of await fsp.readdir(file, { withFileTypes: true })) {
+    const entries = await fsp.readdir(file, { withFileTypes: true });
+    checkPreviewOpen();
+    for (const entry of entries) {
       if (!EXCLUDED.test(entry.name)) await collect(path.join(file, entry.name), result);
     }
   }
@@ -283,7 +304,7 @@ export function createFileWorkflowService({ dataDir, roots, indexedPaths = () =>
       return summary(job);
     },
     beginStop,
-    async close() { beginStop(); await running; }
+    async close() { beginStop(); await Promise.all([running, previewing]); }
   };
 }
 
