@@ -49,6 +49,7 @@ FanHao/
 │   └── system/            # 不展示的系统模块
 ├── src/platform/          # 与业务形态无关的 HTTP、鉴权、文件和媒体基础设施
 ├── tools/                 # 批量 / 维护脚本（Python + Node）
+├── tests/                 # 验证、诊断、测试服务和样本
 ├── public/modules/        # Web 端按模块归档的页面控制器
 ├── android-client/www/modules/ # Android WebView 端按模块归档的页面控制器与样式
 ├── data/                  # 本地状态：SQLite、JSON、日志、缓存

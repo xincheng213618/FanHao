@@ -76,7 +76,7 @@ npm run verify:browser-behavior     # 完整 Web/Android 壳交互回归
 
 本地进度在同一个 IndexedDB 读写事务内读取最新书籍并更新，保留重新导入的正文和元数据；已删除的书籍不会被迟到进度写入复活。进度保存不重复申请持久存储，持久存储请求仍在书籍导入/保存入口执行。书籍保存、进度和删除均以事务提交完成为成功条件，提交前中止会返回失败。
 
-`tools/verify_android_novel_reader.mjs` 与 `tools/verify_android_local_novel_storage.mjs` 已纳入 `verify:android-client`，覆盖会话切换、迟到结果、滚动恢复、进度队列与事务回滚。`node tools/serve_android_novel_reader_fixture.mjs` 提供实际阅读器代码的浏览器隔离夹具，使用独立来源的合成书籍和可延迟操作；测试控制面板可收起以操作底部阅读菜单。桌面浏览器与模拟依赖验证不替代 Android WebView 和真机生命周期验证。
+`tests/verify_android_novel_reader.mjs` 与 `tests/verify_android_local_novel_storage.mjs` 已纳入 `verify:android-client`，覆盖会话切换、迟到结果、滚动恢复、进度队列与事务回滚。`node tests/serve_android_novel_reader_fixture.mjs` 提供实际阅读器代码的浏览器隔离夹具，使用独立来源的合成书籍和可延迟操作；测试控制面板可收起以操作底部阅读菜单。桌面浏览器与模拟依赖验证不替代 Android WebView 和真机生命周期验证。
 
 ## 原生视觉探索的生命周期
 
@@ -90,7 +90,7 @@ npm run verify:browser-behavior     # 完整 Web/Android 壳交互回归
 
 存档复核的删除确认、分享窗口和导出错误互斥，并与当前记录绑定。暂停或销毁会使旧弹窗回调失效；重建只能重现未决确认，不自动删除或再次分享。确认删除先消费本次操作，再检查目录确实消失，失败不会报告删除成功。导出只授予所选照片的临时只读访问；分享窗口返回只解除操作等待，不表示接收应用已保存备份。请确认副本保存后再删除原记录。
 
-`node tools/verify_vision_lifecycle.mjs` 使用隔离 JVM 夹具执行生产生命周期代码、资源释放及关键 Activity 回调；`node tools/verify_vision_visibility.mjs` 编译完整暂停状态 helper；`node tools/verify_native_vision_review.mjs` 执行复核操作的生产方法及旧行为对照。`node tools/verify_vision_exploration.mjs` 保留结构、私有存储及免责声明检查。JVM 中的 Android/CameraX/分享边界由替身提供，部分 Android 入口接线仅由静态守卫检查，不等同于真实相机、OCR/MLKit、分享目标或系统重建测试。该功能仍仅用于本地演示，不代表真实身份认证通过。
+`node tests/verify_vision_lifecycle.mjs` 使用隔离 JVM 夹具执行生产生命周期代码、资源释放及关键 Activity 回调；`node tests/verify_vision_visibility.mjs` 编译完整暂停状态 helper；`node tests/verify_native_vision_review.mjs` 执行复核操作的生产方法及旧行为对照。`node tests/verify_vision_exploration.mjs` 保留结构、私有存储及免责声明检查。JVM 中的 Android/CameraX/分享边界由替身提供，部分 Android 入口接线仅由静态守卫检查，不等同于真实相机、OCR/MLKit、分享目标或系统重建测试。该功能仍仅用于本地演示，不代表真实身份认证通过。
 
 生命周期依据：[Android Activity 生命周期](https://developer.android.com/guide/components/activities/activity-lifecycle) 区分结束与配置重建；[Google Task 回调文档](https://developers.google.com/android/reference/com/google/android/gms/tasks/Task) 说明执行器和完成监听约定。项目测试另外执行本机实际依赖中的任务完成行为，不仅依赖文档推断。
 
@@ -98,15 +98,15 @@ npm run verify:browser-behavior     # 完整 Web/Android 壳交互回归
 
 证卡预览的解码、质量检查和识别启动失败会清理自己的临时输出并恢复当前拍摄；当前识别任务取消后也允许重新对齐拍摄。提交给 OCR 的图片不会在任务尚未结束时强制回收。若提交后注册监听失败，已注册的完成监听继续负责释放，旧业务回调失效；若完成监听根本未能注册，图片随识别任务的引用交由 GC 回收，不尝试猜测结束时间。
 
-`node tools/verify_vision_preview.mjs` 编译完整生产解码器，用非对称合成像素检查八方向、尺寸和分配预算、重试及释放，同时保留旧源码失败对照。`verify_vision_lifecycle.mjs` 另外执行真实证卡确认、质量检查与 OCR 交接方法。位图、矩阵、EXIF 和编解码边界由可观测替身提供，不替代 Android 原生解码器、实际内存和屏幕显示测试。实现参考 [Android 大图采样指南](https://developer.android.com/topic/performance/graphics/load-bitmap) 及 [Matrix 变换顺序](https://developer.android.com/reference/android/graphics/Matrix#postScale(float,float))。
+`node tests/verify_vision_preview.mjs` 编译完整生产解码器，用非对称合成像素检查八方向、尺寸和分配预算、重试及释放，同时保留旧源码失败对照。`verify_vision_lifecycle.mjs` 另外执行真实证卡确认、质量检查与 OCR 交接方法。位图、矩阵、EXIF 和编解码边界由可观测替身提供，不替代 Android 原生解码器、实际内存和屏幕显示测试。实现参考 [Android 大图采样指南](https://developer.android.com/topic/performance/graphics/load-bitmap) 及 [Matrix 变换顺序](https://developer.android.com/reference/android/graphics/Matrix#postScale(float,float))。
 
 人脸动作仅累计同一 tracking ID 的连续有效、居中单人检测帧，保持原有自然表情／正面 7 帧、动作 4 帧、回正 7 帧。无人、多人、丢失跟踪、离框、非法边界或必需姿态／概率不可用会重置动作；动作阶段的框外笑脸不计数。检测失败或取消也从定位重新开始，不保留此前动作完成进度。这是本地动作演示，不是真实身份或活体认证。
 
 相机帧和检测串行门各有一次性释放所有权。正常检测保持异步；只有拿到检测 Task 后监听器注册失败，才在已有 CameraX 分析线程中每 50ms 等待 `isComplete()`，待成功、失败或取消后明确关闭 ImageProxy，再恢复扫描。等待不依赖主线程、不持锁、不创建额外线程；中断标记会恢复。ML Kit 保持默认独立执行器，不得与该分析线程共用。不会因暂停、销毁或超时而提前关闭仍在推理的帧；若底层任务永不完成，不能承诺一定释放，也不会把超时当作完成。
 
-`node tools/verify_vision_face_tracking.mjs` 用合成人脸结果执行生产动作方法，保留旧序列误推进对照；生命周期回归另外验证异步帧交接、部分注册失败与迟到回调。依据 [ML Kit 人脸处理／帧关闭要求](https://developers.google.com/ml-kit/vision/face-detection/android)、[CameraX 图像分析](https://developer.android.com/media/camera/camerax/analyze) 及 [ML Kit 默认执行器约定](https://developers.google.com/android/reference/com/google/mlkit/vision/face/FaceDetectorOptions.Builder#setExecutor(java.util.concurrent.Executor))。这些宿主验证不替代实际相机帧、模型行为或设备性能验证。
+`node tests/verify_vision_face_tracking.mjs` 用合成人脸结果执行生产动作方法，保留旧序列误推进对照；生命周期回归另外验证异步帧交接、部分注册失败与迟到回调。依据 [ML Kit 人脸处理／帧关闭要求](https://developers.google.com/ml-kit/vision/face-detection/android)、[CameraX 图像分析](https://developer.android.com/media/camera/camerax/analyze) 及 [ML Kit 默认执行器约定](https://developers.google.com/android/reference/com/google/mlkit/vision/face/FaceDetectorOptions.Builder#setExecutor(java.util.concurrent.Executor))。这些宿主验证不替代实际相机帧、模型行为或设备性能验证。
 
-最后拍照的初始化失败会解除当前拍照标记并重新开始动作，保存阶段不提前显示“已完成”。每次拍照只接受首次成功或失败结果；启动失败后的迟到成功只清理该次临时输出，已交给成功处理方的文件不会被重复错误回调删除。`node tools/verify_vision_capture_callbacks.mjs` 用真实拍照方法和合成 CameraX／UI 边界验证这些状态，不调用设备或真实存档。
+最后拍照的初始化失败会解除当前拍照标记并重新开始动作，保存阶段不提前显示“已完成”。每次拍照只接受首次成功或失败结果；启动失败后的迟到成功只清理该次临时输出，已交给成功处理方的文件不会被重复错误回调删除。`node tests/verify_vision_capture_callbacks.mjs` 用真实拍照方法和合成 CameraX／UI 边界验证这些状态，不调用设备或真实存档。
 
 ## 本机 TXT 导入与重复导入
 
@@ -134,7 +134,7 @@ WebView 的 HTTP(S) 文件下载（例如远程小说 TXT、音乐下载）交�
 
 新建和恢复的下载请求均验证 HTTP(S)、主机及无内嵌凭据约束；文件名保留响应头、查询参数、URL 推断的优先级，并清理路径分隔符、控制字符和 `.` / `..`。系统服务不可用、目录不可用、权限变化或提交异常都会提示失败；只有系统返回正数任务 ID 才显示“已加入下载队列”，这不代表文件已下载完成。不保证任意进程崩溃与系统下载服务之间的持久事务或断网自动恢复。
 
-`node tools/verify_native_web_downloads.mjs` 编译真实下载实现与 MainActivity，使用隔离 Android/AndroidX 替身验证版本分流、权限/说明回调、重建、错误反馈、请求校验和启动参数隔离；已纳入 `verify:android-client`。系统权限界面、DownloadManager 实际落盘和设备厂商差异仍需真机验证。
+`node tests/verify_native_web_downloads.mjs` 编译真实下载实现与 MainActivity，使用隔离 Android/AndroidX 替身验证版本分流、权限/说明回调、重建、错误反馈、请求校验和启动参数隔离；已纳入 `verify:android-client`。系统权限界面、DownloadManager 实际落盘和设备厂商差异仍需真机验证。
 
 ## 前置条件
 

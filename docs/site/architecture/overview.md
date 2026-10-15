@@ -17,7 +17,7 @@ sources:
   - android-client/package.json
   - android-client/www/js/android-module-registry.js
   - public/js/standalone-host.js
-  - tools/verify_module_structure.mjs
+  - tests/verify_module_structure.mjs
 ---
 
 # 架构总览
@@ -36,7 +36,8 @@ FanHao 是以本地资料库为中心的 Web 与 Android 应用。服务端负�
 | Web 客户端 | `public/` | 主服务提供的静态页面与浏览器模块 |
 | Android 客户端 | `android-client/` | Capacitor WebView 与原生 Android 工程；通过 API 连接主服务 |
 | 下载管理器 | `src/modules/short-videos/download-manager/` | 独立的采集与下载服务；主服务默认连接本机 `8765` |
-| 工具与作业 | `tools/` | 扫描、导入、迁移、构建与验证；部分由后台作业调用 |
+| 工具与作业 | `tools/` | 扫描、导入、迁移、修复与构建；部分由后台作业调用 |
+| 验证与诊断 | `tests/` | 回归脚本、测试服务、故障注入与样本；由现有 npm 验证入口调用 |
 
 主服务与下载管理器有独立的运行状态和数据。主服务能访问，不等于下载管理器健康；反之亦然。静态文档站可部署到 GitHub Pages，但 Pages 不会运行这些服务或托管本地媒体库。
 
@@ -101,7 +102,7 @@ Web 与 Android 可共享 API 契约，但各有页面控制器和原生能力�
 
 **开发约束：** 通用 HTTP、鉴权、文件与媒体能力归 `src/platform/server/`；单个业务的查询、状态和规则归所属模块。平台不得反向依赖业务模块，可见业务模块之间应避免直接导入对方内部文件。
 
-`tools/verify_module_structure.mjs` 对导入方向、旧目录、客户端入口和宿主结构设置护栏。规则变动时，应一起修改实现、相应验证和文档，不能只更新文字。
+`tests/verify_module_structure.mjs` 对导入方向、旧目录、客户端入口和宿主结构设置护栏。规则变动时，应一起修改实现、相应验证和文档，不能只更新文字。
 
 ## AI 的最小阅读顺序
 

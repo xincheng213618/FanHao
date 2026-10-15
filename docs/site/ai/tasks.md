@@ -5,7 +5,7 @@ status: maintained
 verified_at: 2026-09-19
 sources:
   - package.json
-  - tools/run_verification.mjs
+  - tests/run_verification.mjs
   - src/fanhao/module-registry.js
   - src/modules/short-videos/server/delete-job-service.js
   - src/modules/short-videos/server/watch-write-service.js

@@ -10,13 +10,13 @@ sources:
   - public/platform/accounts/account-ui.js
   - android-client/www/js/account-settings.js
   - android-client/www/js/server-auth.js
-  - tools/verify_accounts.mjs
-  - tools/verify_account_sessions.mjs
-  - tools/verify_account_clients.mjs
-  - tools/verify_account_recovery.mjs
-  - tools/verify_account_recovery_clients.mjs
-  - tools/verify_account_invitations.mjs
-  - tools/verify_account_invitation_clients.mjs
+  - tests/verify_accounts.mjs
+  - tests/verify_account_sessions.mjs
+  - tests/verify_account_clients.mjs
+  - tests/verify_account_recovery.mjs
+  - tests/verify_account_recovery_clients.mjs
+  - tests/verify_account_invitations.mjs
+  - tests/verify_account_invitation_clients.mjs
 ---
 
 # 用户账号与登录设备

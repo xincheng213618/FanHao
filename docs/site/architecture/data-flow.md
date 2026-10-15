@@ -31,7 +31,7 @@ sources:
   - src/modules/short-videos/server/download-manager-sync-service.js
   - src/modules/short-videos/server/download-manager-change-journal.js
   - src/modules/short-videos/download-manager/manager_core/library_sync.py
-  - tools/verify_short_video_incremental_sync.mjs
+  - tests/verify_short_video_incremental_sync.mjs
   - src/modules/short-videos/server/watch-write-service.js
   - src/modules/short-videos/server/watch-write-worker.js
   - src/modules/short-videos/download-manager/manager_core/database.py
@@ -77,7 +77,7 @@ sources:
   - public/modules/content-index/gallery-renderer.js
   - public/modules/content-index/catalog.css
   - public/modules/content-index/styles.css
-  - tools/verify_gallery_list_rendering.mjs
+  - tests/verify_gallery_list_rendering.mjs
   - public/js/standalone-host.js
   - public/modules/photos/manga-page.js
   - public/modules/music/player/engine.js

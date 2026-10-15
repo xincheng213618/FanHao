@@ -11,7 +11,7 @@ sources:
   - src/modules/short-videos/server/download-manager-sync-service.js
   - src/modules/short-videos/server/sync-worker.js
   - src/modules/short-videos/server/store.js
-  - tools/verify_short_video_incremental_sync.mjs
+  - tests/verify_short_video_incremental_sync.mjs
   - src/modules/short-videos/download-manager/tests/test_manager_library_sync.py
 ---
 

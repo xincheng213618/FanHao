@@ -136,8 +136,8 @@ Android 官方离线优先指南强调由数据层协调本地与网络来源、
 本轮独立验证入口（不加入生产验证门禁）：
 
 ```powershell
-node tools/verify_novel_identity_progress.mjs
-node tools/verify_novel_storage_model.mjs
+node tests/verify_novel_identity_progress.mjs
+node tests/verify_novel_storage_model.mjs
 ```
 
 前者验证身份、章匹配和进度映射，并用冻结的现行 clamp 函数及小型 fakeDB 做负面对照；后者使用临时 SQLite 与合成 JSON，验证拆分、事务和访问隔离。两者都不是对真实书库执行的迁移脚本。具体验证结果和未覆盖项由运行输出报告。
@@ -176,7 +176,7 @@ IndexedDB 版本现为 2，保留 legacy `books`，新增以下 object stores：
 - 原生浏览器 IndexedDB：17 场景、148 项检查。每次运行固定源码快照，仅替换 DB 名，使用随机 UUID 的合成数据库，全部清理成功。涵盖升级原子性、unknown 字段、正文访问隔离、单章定位、save/progress/delete 中止、旧 generation、blocked/超时的迟到 upgrade、失效连接 owner。
 - 阅读器：38 当前场景、16 历史负控和 4 分层存储变异负控；导入：73 当前场景、46 历史负控。旧 v1 单存储的 16 场景移到冻结 fixture，不能算作新 v2 证据。
 
-入口：`node tools/verify_android_local_novel_storage.mjs`，以及 `node tools/serve_android_novel_storage_v2_fixture.mjs` 后在输出的隔离页面点击“运行隔离测试”。浏览器夹具不是生产数据库工具，也不提供实际书库迁移命令。
+入口：`node tests/verify_android_local_novel_storage.mjs`，以及 `node tests/serve_android_novel_storage_v2_fixture.mjs` 后在输出的隔离页面点击“运行隔离测试”。浏览器夹具不是生产数据库工具，也不提供实际书库迁移命令。
 
 仍需完成：真实 Android WebView 及设备存储不足/系统杀进程验证、实际大库迁移内存和额外空间评估；稳定 work/edition/chapter 身份、来源域碰撞、独立 shelf、按章任务和可靠同步仍属于后续阶段。面向用户的失败重试及只读正文取回入口见下一节。保留旧副本会占额外空间，升级后直接恢复旧副本会丢失新版进度等写入；不得把事务前回滚或旧行保存解释为上线后的无损降级。测试没有安装 App，也没有迁移用户的真实 IndexedDB。
 
@@ -211,7 +211,7 @@ IndexedDB 版本现为 2，保留 legacy `books`，新增以下 object stores：
 
 目录准备、详情分页和逐章缓存固定操作开始时的来源及地址，每个正文响应校验 realm、书 ID、章序号及正文完整性；来源/页面失效后不保存混合整本或重绘旧页。提交已启动的本机事务可能在离页后完成，但只写捕获的来源键，不会写入新书库。预取键包含 realm；阅读进度请求及远端删除携带可选 realm 前置条件，服务端遇到不匹配返回 409，旧客户端不带字段的共享语义不变。
 
-验证入口：`tools/verify_android_novel_source_identity.mjs` 执行完整页面源码的合成网络/存储场景；`tools/verify_novel_library_identity.mjs` 执行真实临时 SQLite、实际 Python 扫描器和错误实现负控。旧 reader/recovery 中用于测试“已绑定正常缓存”的样本同步改成明确的 realm/来源回执，保留原异步断言；旧未绑定副本的行为由新专项独立覆盖。两项已分别加入安卓与小说回归命令。实际结果以本轮运行记录为准，不把脚本存在视作验证通过。
+验证入口：`tests/verify_android_novel_source_identity.mjs` 执行完整页面源码的合成网络/存储场景；`tests/verify_novel_library_identity.mjs` 执行真实临时 SQLite、实际 Python 扫描器和错误实现负控。旧 reader/recovery 中用于测试“已绑定正常缓存”的样本同步改成明确的 realm/来源回执，保留原异步断言；旧未绑定副本的行为由新专项独立覆盖。两项已分别加入安卓与小说回归命令。实际结果以本轮运行记录为准，不把脚本存在视作验证通过。
 
 仍未完成：稳定作品/版本/章节身份、目录/正文修订校验、独立书架、跨端冲突同步、真实 Android WebView 切库与升级验证。本阶段没有迁移真实小说库、安装手机或发布；此前恢复阶段 APK 不包含本节新实现。
 
@@ -232,6 +232,6 @@ Node、Python 扫描器和安卓本地协调器执行同一组共享合成用例
 
 安卓详情保留旧位置并提示确认。普通“继续”进入确认详情，候选或目录的明确选择才允许建立新位置。主宿主导航、模块路由、读章请求、预取、目录分页和进度写入都传递所打开版本的锚点。整本缓存要求各响应 realm、书 ID、章节 ID、catalogRevision 一致；更新缓存优先协调本机旧进度，首次缓存才按 sourceChapterId/sourceCatalogRevision 精确映射服务端进度。
 
-验证入口：`tools/verify_novel_chapter_identity.mjs`（真实临时 SQLite、Node/Python 协调、实际 routes）、`tools/verify_android_local_novel_chapter_identity.mjs`（生产存储与事务仿真）、`tools/verify_android_novel_chapter_identity.mjs`（完整页面模块及实际导航接线）；这些不是实际 Android WebView。另有 `tools/serve_android_novel_chapter_fixture.mjs`：浏览器原生 IndexedDB、随机合成库、冻结完整存储及纯协调模块，只替换 DB 名，不打开真实书库。具体运行次数、源码哈希与结论以交付报告为准。
+验证入口：`tests/verify_novel_chapter_identity.mjs`（真实临时 SQLite、Node/Python 协调、实际 routes）、`tests/verify_android_local_novel_chapter_identity.mjs`（生产存储与事务仿真）、`tests/verify_android_novel_chapter_identity.mjs`（完整页面模块及实际导航接线）；这些不是实际 Android WebView。另有 `tests/serve_android_novel_chapter_fixture.mjs`：浏览器原生 IndexedDB、随机合成库、冻结完整存储及纯协调模块，只替换 DB 名，不打开真实书库。具体运行次数、源码哈希与结论以交付报告为准。
 
 仍待完成：独立书架和缓存生命周期、跨文件/来源作品及版本关系、多设备进度冲突合并、Android 真机存储压力/中断恢复与大库性能。本文不把这一章身份改造称为完整领域模型已完成。

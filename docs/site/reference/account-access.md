@@ -13,9 +13,9 @@ sources:
   - android-client/www/app.js
   - android-client/www/js/account-access.js
   - android-client/www/js/server-auth.js
-  - tools/verify_account_access_policy.mjs
-  - tools/verify_account_access_clients.mjs
-  - tools/verify_android_account_access.mjs
+  - tests/verify_account_access_policy.mjs
+  - tests/verify_account_access_clients.mjs
+  - tests/verify_android_account_access.mjs
 ---
 
 # 账号访问策略

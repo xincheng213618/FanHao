@@ -2,95 +2,102 @@
 title: 验证矩阵
 description: 按变更范围选择真实 package 脚本，明确依赖、临时写入和运行验收的区别。
 status: maintained
-verified_at: 2026-10-11
+verified_at: 2026-10-15
 sources:
   - package.json
-  - tools/run_verification.mjs
-  - tools/verify_verification_runner.mjs
+  - tests/run_verification.mjs
+  - tests/verify_verification_runner.mjs
   - android-client/package.json
-  - tools/verify_fanhao_startup.mjs
-  - tools/verify_fanhao_startup.ps1
-  - tools/verify_browser_behavior.mjs
-  - tools/verify_short_video_watch_write.mjs
-  - tools/verify_short_video_store.mjs
-  - tools/verify_short_video_incremental_sync.mjs
+  - tests/verify_fanhao_startup.mjs
+  - tests/verify_fanhao_startup.ps1
+  - tests/verify_browser_behavior.mjs
+  - tests/verify_short_video_watch_write.mjs
+  - tests/verify_short_video_store.mjs
+  - tests/verify_short_video_incremental_sync.mjs
   - src/modules/short-videos/download-manager/tests/test_manager_library_sync.py
-  - tools/verify_short_video_delete_jobs.mjs
-  - tools/verify_work_move_jobs.mjs
-  - tools/verify_person_organization.mjs
-  - tools/verify_person_organization_metadata.py
-  - tools/verify_person_organization_ui.mjs
-  - tools/verify_native_short_video_actions.mjs
-  - tools/verify_native_short_video_paging.mjs
+  - tests/verify_short_video_delete_jobs.mjs
+  - tests/verify_work_move_jobs.mjs
+  - tests/verify_file_workflows.mjs
+  - tests/verify_file_workflows_ui.mjs
+  - tests/verify_json_responses.mjs
+  - src/platform/server/responses.js
+  - tests/verify_person_organization.mjs
+  - tests/verify_person_organization_metadata.py
+  - tests/verify_person_organization_ui.mjs
+  - tests/verify_native_short_video_actions.mjs
+  - tests/verify_native_short_video_paging.mjs
   - tools/build_short_video_web.mjs
-  - tools/verify_fanhao_requests.mjs
-  - tools/verify_work_sorting.mjs
-  - tools/verify_work_facets.mjs
-  - tools/verify_work_cache_budget.mjs
-  - tools/verify_code_prefix_cache_budget.mjs
-  - tools/diagnose_work_cache_heap.mjs
-  - tools/verify_file_stream_lifecycle.mjs
-  - tools/verify_file_server_async.mjs
-  - tools/verify_static_file_lifecycle.mjs
-  - tools/verify_module_lifecycle.mjs
-  - tools/verify_server_shutdown_lifecycle.mjs
-  - tools/verify_short_video_quality_queries.mjs
-  - tools/verify_short_video_image_sources.mjs
-  - tools/verify_short_video_image_lifecycle.mjs
-  - tools/verify_short_video_product_lifecycle.mjs
-  - tools/verify_actor_avatar_import.mjs
-  - tools/verify_gallery_list_rendering.mjs
-  - tools/verify_android_channel_rendering.mjs
-  - tools/verify_android_image_cache.mjs
-  - tools/verify_android_cache_stats.mjs
-  - tools/fixtures/image-library-channel-server.mjs
-  - tools/verify_music_cover_async.mjs
-  - tools/verify_work_cover_async.mjs
-  - tools/verify_gallery_cover_async.mjs
-  - tools/verify_image_query_correctness.mjs
-  - tools/diagnose_image_query_cpu.mjs
-  - tools/verify_video_probe_cache.mjs
-  - tools/verify_video_probe_lifecycle.mjs
-  - tools/verify_media_blob_worker.mjs
-  - tools/verify_remote_image_lifecycle.mjs
-  - tools/verify_media_stream_lifecycle.mjs
-  - tools/verify_web_gallery_requests.mjs
-  - tools/verify_manga_reader_requests.mjs
-  - tools/verify_manga_lookup_performance.mjs
-  - tools/verify_music_facet_cache.mjs
-  - tools/verify_music_lyric_search.mjs
-  - tools/verify_music_summary_reuse.mjs
-  - tools/verify_music_active_catalogue.mjs
-  - tools/verify_studio_cache_dependencies.mjs
-  - tools/verify_android_music_list_rendering.mjs
-  - tools/verify_android_music_catalogue_requests.mjs
-  - tools/verify_android_music_playback_requests.mjs
-  - tools/verify_android_music_transition_requests.mjs
-  - tools/verify_vision_lifecycle.mjs
-  - tools/verify_music_playback_lifecycle.mjs
-  - tools/verify_music_request_ownership.mjs
-  - tools/verify_music_reader_requests.mjs
-  - tools/verify_music_progress_writer.mjs
-  - tools/verify_music_progress_clients.mjs
-  - tools/verify_music_progress_order.mjs
-  - tools/verify_music_progress_requests.mjs
-  - tools/verify_novel_reader_requests.mjs
-  - tools/verify_novel_progress_writer.mjs
-  - tools/verify_novel_progress_order.mjs
-  - tools/verify_novel_progress_requests.mjs
-  - tools/verify_web_novel_chapter_identity.mjs
-  - tools/diagnose_web_gallery_navigation.mjs
-  - tools/verify_archive_reader_lifecycle.mjs
-  - tools/verify_rescan_image_library.mjs
-  - tools/verify_image_library_performance.mjs
-  - tools/verify_media_metadata_identity.mjs
-  - tools/fixtures/archive_image_helper_fixture.mjs
-  - tools/verify_novel_summary_cache.mjs
-  - tools/verify_novel_write_worker.mjs
-  - tools/verify_novel_credentials_async.mjs
-  - tools/verify_novel_collection_worker.mjs
-  - tools/verify_novel_reimport_async.mjs
-  - tools/verify_douyin_manager_latest_requests.mjs
+  - tests/verify_fanhao_requests.mjs
+  - tests/verify_work_sorting.mjs
+  - tests/verify_work_facets.mjs
+  - tests/verify_work_cache_budget.mjs
+  - tests/verify_code_prefix_cache_budget.mjs
+  - tests/diagnose_work_cache_heap.mjs
+  - tests/verify_file_stream_lifecycle.mjs
+  - tests/verify_file_server_async.mjs
+  - tests/verify_static_file_lifecycle.mjs
+  - tests/verify_module_lifecycle.mjs
+  - tests/verify_server_shutdown_lifecycle.mjs
+  - tests/verify_short_video_quality_queries.mjs
+  - tests/verify_short_video_image_sources.mjs
+  - tests/verify_short_video_image_lifecycle.mjs
+  - tests/verify_short_video_product_lifecycle.mjs
+  - tests/verify_actor_avatar_import.mjs
+  - tests/verify_gallery_list_rendering.mjs
+  - tests/verify_android_channel_rendering.mjs
+  - tests/verify_android_image_cache.mjs
+  - tests/verify_android_cache_stats.mjs
+  - tests/fixtures/image-library-channel-server.mjs
+  - tests/verify_music_cover_async.mjs
+  - tests/verify_work_cover_async.mjs
+  - tests/verify_gallery_cover_async.mjs
+  - tests/verify_image_query_correctness.mjs
+  - tests/diagnose_image_query_cpu.mjs
+  - tests/verify_video_probe_cache.mjs
+  - tests/verify_video_probe_lifecycle.mjs
+  - tests/verify_media_blob_worker.mjs
+  - tests/verify_remote_image_lifecycle.mjs
+  - tests/verify_media_stream_lifecycle.mjs
+  - tests/verify_web_gallery_requests.mjs
+  - tests/verify_manga_reader_requests.mjs
+  - tests/verify_manga_lookup_performance.mjs
+  - tests/verify_music_facet_cache.mjs
+  - tests/verify_music_lyric_search.mjs
+  - tests/verify_music_m3u.mjs
+  - tests/verify_music_playlist_order.mjs
+  - tests/verify_music_summary_reuse.mjs
+  - tests/verify_music_active_catalogue.mjs
+  - tests/verify_studio_cache_dependencies.mjs
+  - tests/verify_android_music_list_rendering.mjs
+  - tests/verify_android_music_catalogue_requests.mjs
+  - tests/verify_android_music_playback_requests.mjs
+  - tests/verify_android_music_transition_requests.mjs
+  - tests/verify_vision_lifecycle.mjs
+  - tests/verify_music_playback_lifecycle.mjs
+  - tests/verify_music_request_ownership.mjs
+  - tests/verify_music_reader_requests.mjs
+  - tests/verify_music_progress_writer.mjs
+  - tests/verify_music_progress_clients.mjs
+  - tests/verify_music_progress_order.mjs
+  - tests/verify_music_progress_requests.mjs
+  - tests/verify_novel_reader_requests.mjs
+  - tests/verify_novel_progress_writer.mjs
+  - tests/verify_novel_progress_order.mjs
+  - tests/verify_novel_progress_requests.mjs
+  - tests/verify_web_novel_chapter_identity.mjs
+  - tests/diagnose_web_gallery_navigation.mjs
+  - tests/verify_archive_reader_lifecycle.mjs
+  - tests/verify_rescan_image_library.mjs
+  - tests/verify_image_library_performance.mjs
+  - tests/verify_media_metadata_identity.mjs
+  - tests/fixtures/archive_image_helper_fixture.mjs
+  - tests/verify_novel_summary_cache.mjs
+  - tests/verify_novel_empty_pages.mjs
+  - tests/verify_novel_write_worker.mjs
+  - tests/verify_novel_credentials_async.mjs
+  - tests/verify_novel_collection_worker.mjs
+  - tests/verify_novel_reimport_async.mjs
+  - tests/verify_douyin_manager_latest_requests.mjs
   - src/modules/short-videos/download-manager/tests/test_manager_link_cursor.py
   - src/modules/short-videos/download-manager/tests/test_manager_profile_snapshot.py
   - .github/workflows/application-checks.yml
@@ -132,7 +139,7 @@ npm --prefix docs run build
 npm run verify
 ```
 
-它检查仓库卫生、鉴权、写接口权限、模块结构、相对导入、验证 runner/cache-version 自测，以及番号请求生命周期与公共排序，不代表全模块回归已经执行。
+它检查仓库卫生、鉴权、写接口权限、JSON 响应协商、模块结构、相对导入、验证 runner/cache-version 自测，以及番号请求生命周期与公共排序，不代表全模块回归已经执行。
 按当前 Git staged、unstaged 和 untracked 文件选择相关检查，可先只看计划：
 
 ```powershell
@@ -152,11 +159,9 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 
 | 命令 | 检查内容 | 执行边界 |
 | --- | --- | --- |
-| `npm run verify:repo-hygiene` | Git 跟踪文件中的禁止产物、运行状态与文本异常。 | 读取 Git 清单和源码，不是秘密扫描器。 |
-| `npm run verify:modules` | 模块结构与职责约束。 | 结构检查，不能替代真实调用验证。 |
-| `npm run verify:imports` | 相对导入引用。 | 源码引用检查，不启动应用。 |
+| `npm run verify:repo-hygiene`、`npm run verify:modules`、`npm run verify:imports` | Git 跟踪文件中的禁止产物、运行状态与文本异常，模块结构与职责约束，以及相对导入引用。 | 读取 Git 清单和源码，不启动应用；不是秘密扫描器，也不能替代真实调用验证。 |
 | `npm run verify:auth` | 来源识别、登录与会话等鉴权规则。 | 使用临时鉴权状态文件，并清理临时目录。 |
-| `npm run verify:mutation-auth` | 写接口权限与 API 错误边界。 | 同时调用 mutation 与 error-boundary 检查。 |
+| `npm run verify:mutation-auth`、`npm run verify:json-responses` | 写接口权限与 API 错误边界；JSON 编码权重、明文拒绝、Vary 合并、压缩失败回退和断开后回调。 | 前者调用 mutation 与 error-boundary 检查；后者使用动态 loopback HTTP、实际压缩/解压及门控压缩故障，不启动正式服务。 |
 | `npm run verify:settings` | 模块和应用设置契约。 | 会生成并清理临时模块 fixture。 |
 | `npm run verify:short-video-build` | bundle 字节与 HTML 版本引用是否一致。 | esbuild 内存构建并比较；`--check` 不写产物。 |
 | `npm run verify:short-video-client` | Web/原生短视频结构、分页、请求与动作契约；具体子检查以 package 脚本为准。 | 包含源码检查及 `javac` 编译、`java` 执行的 fixture；会写入并清理临时类文件，另需下述 JDK/Android 依赖。 |
@@ -166,6 +171,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:short-video-store` | 导入、列表与状态契约；回退总数省去无关视图关联的完整旧响应与查找门槛、旧列空值及比较规则；相邻播放、预取与列表在并列值、空值、正反方向和过滤条件下保持相同顺序。 | 临时合成媒体和 SQLite；计数与相邻顺序专项使用内存数据库，不读取真实资料；同步 fixture 使用下载器 Python 安装增量日志。 |
 | `npm run verify:short-video-sync` | 增量日志、分页初始化、无变化与单条更新的查询和逻辑 I/O 预算、删除与改名、回滚、并发提交、重启游标和来源代际变化。 | 临时 SQLite 和合成媒体；Python 运行实际迁移。Windows 用进程读取计数比较逻辑 I/O，不代表物理磁盘吞吐；不启动正式服务。下载器初始化另用 `tests.test_manager_library_sync` 和 `tests.test_manager_database_lifecycle` 验证。 |
 | `npm run verify:work-move-jobs`、`npm run verify:person-organization` | 作品移动作业与 UI；人物整理另查预览、分段、冲突、路径同步、目录发布日期、重试、使用已有资料与封面地址、无备份替换、旧封面与遗留文件清理、权限和焦点。 | 临时合成文件及 SQLite、Worker/任务子进程、可控图片下载和动态 HTTP/无头浏览器；不整理真实媒体，不访问外部封面站点。 |
+| `npm run verify:file-workflows`、`npm run verify:file-workflows-ui` | 后端预览、校验后移动、路径与已入库保护、冲突、源文件变化、权限、恢复、暂停/继续及互斥；浏览器预览、取消/确认执行、持久历史与窄屏布局，另查切换计划、轮询/重试、停止响应、页面离开及连续写入的归属。 | 当前服务、路由与 CLI，临时合成文件及 SQLite；UI 另用动态 loopback HTTP 与无头 Chrome/Edge，实际复制、移动临时文件，竞态使用门控 API/计时器，并在 `.codex-artifacts/` 保存截图，不操作真实媒体。 |
 | `npm run verify:music-rescan-worker` | 音乐扫描 Worker、锁竞争与停止流程。 | 临时音乐文件、数据库、假探测器与子进程。 |
 | `npm run verify:browser-behavior` | 浏览器中的页面行为、导航与异步状态。 | 默认本机临时 HTTP fixture，并启动无头 Chrome/Edge。 |
 | `npm run verify:startup` | 启动器健康、超时、占用与失败边界。 | 临时启动器/假服务与动态端口，要求 PowerShell 运行时。 |
@@ -196,12 +202,13 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:manga-lookup` | 热态图片/章节请求的固定查询次数、详情封面语句复用的编译次数与完整旧响应；连续请求、同源去重、旧 ID、JSON 回退、WAL/schema 更新、失败重试及语句预热后的数据库文件替换。 | 实际采集器 schema、临时 SQLite 与合成目录、受控图片响应；计时限于进入图片服务前的查找，不证明实际图片解码或网络耗时。 |
 | `npm run verify:music-facet-cache` | 等价字母复用、歌手排序键与缓存字段、分页读取门槛；专辑计数关联、普通分页及筛选投影、默认与最大页、完整旧响应与查询计划、旧列迁移及缺列回退、详情简介；原容量、权重淘汰、LRU、键碰撞、超大回退及弱引用释放。 | 私有 SQLite、合成音乐元数据及 GC 子进程；恢复旧歌手宽记录应超出分页预算，恢复旧专辑分页或筛选完整字段均应超出简介字节预算；不读取音频文件，缓存预算为估算 JSON 大小。 |
 | `npm run verify:music-lyric-search` | 联想关联去重、专辑字段投影与旧库回退、完整响应及 SQL 参数/查询计划、错误及下一请求更新；原短词/FTS 有效总数与分页、歌词上下文和高亮。 | 当前 store、私有 SQLite 与合成歌词；旧联想宽字段应超过简介字节预算，原点查负控继续触发读取次数断言；纳入 `verify:music-scale`，详见[音乐搜索](../architecture/music-search.md)。 |
+| `npm run verify:music-m3u`、`npm run verify:music-playlist-order` | M3U 网络主机与本地路径身份、编码路径、同名歧义及解析顺序；歌单排序的完整旧响应、旧类型规范化、未变位置零写入、元数据时间戳与事务回滚。 | 当前匹配器/store、合成路径与内存 SQLite，不打开音频或启动扫描；排序以歌曲行 UPDATE 次数验证，旧全量写入负控应超预算；两项均纳入 `verify:music-scale`。 |
 | `npm run verify:music-summary-cache` | 会话及未应用进度的汇总复用、写入与回滚、有效期及扫描失效；播放最多的完整旧响应、并列与关联查找次数；有效目录的未听与待评分、智能歌单索引的合并计数、稀疏及密集状态、旧列类型、静态回退及时间边界。 | 当前 store、实际扫描发布和私有 SQLite、完整旧响应及 SQL/关联计数；旧索引计数负控应超过查询预算；只使用合成元数据，不扫描音频或操作实际历史记录。 |
 | `npm run verify:android-music` | 音频 Blob 生命周期、翻页与后台歌单请求归属；单曲详情、音频和播放 Promise 乱序，以及首屏恢复、自动衔接与最新选歌的交错。 | 实际客户端模块或未改写逻辑的函数体、受控 API 与 Audio；不访问真实音乐或数据库，不证明真实音频解码。 |
 | `npm run verify:android-music-rendering` | 普通歌曲翻页保留 DOM、失败重试、取消与筛选切换、重复 ID、分组回退和播放标记更新；完整样式下的屏幕外布局、行高、变宽、滚动定位、焦点、点击和封面懒加载；后台歌单局部更新、弹窗及首屏恢复与新选歌的归属。 | 当前 Android 音乐页与完整 CSS、私有 Chromium、合成 API 和受控 Audio；同步生成缓存引用，计时区分脚本与布局，仅作诊断，不证明真机播放。 |
 | `npm run verify:music-playback` | 旧播放 Promise 的成功/拒绝、换源与同源重载、当前拒绝与重试、暂停、睡眠定时和迟到媒体事件。 | 实际音乐页/播放器源码与受控 Audio、DOM 和时钟；不读取音频文件，不证明真实解码或音频设备播放。 |
-| `npm run verify:music-requests` | 列表、单曲和旁栏的乱序完成与取消，上次歌曲恢复和新选歌交错，以及旧错误、路由和 loading 归属。 | 实际音乐 actions 源码、受控 API、播放器、状态和存储；不使用真实数据库或媒体。 |
-| `npm run verify:music-reader-browser` | 独立音乐馆的深链接、历史导航、列表切换、关闭详情、搜索定时器、跨页优先版本合并、原始 offset 和持续播放状态。 | 当前宿主与音乐页、私有 Chromium、合成 API 和受控 Audio；不证明真实音频解码或设备播放。 |
+| `npm run verify:music-requests` | 列表、单曲、旁栏与上次歌曲恢复的请求归属；清空历史、启动扫描及歌单创建/导入/编辑/增删的写入和后续刷新与新导航、选歌交错；缓存失效、当前/过期错误及忙碌状态。 | 实际音乐 actions 源码、受控 API、播放器、状态和存储；导航取消读取但保留已发写入，不使用真实数据库、扫描或媒体。 |
+| `npm run verify:music-reader-browser` | 独立音乐馆的深链接、历史导航、列表切换、关闭详情、搜索定时器、跨页优先版本合并、原始 offset 和持续播放；实际点击编辑、加入/移出及删除歌单，核对当前成功与写入/旁栏刷新等待期间的新导航；清空历史的当前成功、导航后迟到成功/失败与播放保持。 | 当前宿主与音乐页、私有 Chromium、按请求方法门控的合成 API 和受控 Audio；歌单与历史写入仅修改 fixture 状态，不证明真实持久化、音频解码或设备播放。 |
 | `npm run verify:music-progress` | 两端写入合并、普通及退出容量、账号归属和实际回执；服务端持久顺序、播放去重、预留复用、过期、回拨、竞争及迁移。 | 当前 Web/Android 写入与传输源码、实际 store/routes 和临时 SQLite；显式跳转及无缝切歌使用受控音频与请求，不证明 Android 真机播放。 |
 | `npm run verify:music-progress-browser` | 迟到进度与最新 keepalive、播放去重、真实文档离开、会话续期、固定时钟双页面及当前归属复用。 | 当前入口与音乐页、私有 Chromium、动态 loopback 和临时 SQLite；受控 Audio 不解码，不证明断网卸载送达或正式服务已部署。 |
 | `npm run verify:novel-reader` | Web 小说章节身份、版本变化、阅读进度恢复确认和聚焦控件下的键盘操作。 | 当前完整阅读模块与受控 API、DOM、帧和计时器；包含行为负控制，不使用真实数据库。 |
@@ -209,7 +216,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:novel-progress` | 高频保存合并与容量、显式确认回执、keepalive；持久序号、合法回读、多会话、过期和时钟回拨、容量背压及 Worker 重启。 | 当前写入器、实际 store/routes/Worker 和临时 SQLite；只使用合成文本，不操作真实书库。 |
 | `npm run verify:novel-progress-browser` | 迟到普通请求与最新 keepalive、真实文档离开、高频保存、跨书位置、恢复确认及会话续期时的新滚动和导航。 | 当前入口与阅读页、私有 Chromium、动态 loopback 及实际临时 SQLite；不证明真实网络卸载送达、排队恢复确认在退出后完成或正式服务已部署。 |
 | `npm run verify:archive-images` | 压缩包列表/抽取合并、helper 和响应流的容量及关闭、发送前来源与路径检查；索引查找的来源/记录/数据库/停机竞态、身份替换、迟到写入、旧库迁移及异步巡检；封面评分、字节转换/复制及清单序列化门槛，核对完整旧响应、字段顺序、旧类型与记录格式切换。 | 受控 helper/文件流、私有 Node/Python 子进程、合成 ZIP 和临时 SQLite/缓存目录；旧封面选择与整行序列化分别超过评分记录与清单原文字节预算；不操作真实压缩包或缓存。 |
-| `npm run verify:novel-summary-cache` | 小说汇总及作者页静态聚合复用、可选探测回退与严格契约恢复；阅读计数和目录空页的完整旧响应、原 SQL/绑定/执行错误与访问门槛；原分页版本、进度重排、Worker/外部提交、快照竞态及替库。 | 实际 store/写入 Worker、临时 SQLite 与合成 TXT；每请求关闭连接，保留外部文件替换；探测失败不登记作者缓存；旧作者与目录负控分别超过聚合与空页标题访问预算。 |
+| `npm run verify:novel-summary-cache`、`npm run verify:novel-empty-pages` | 小说汇总及作者页静态聚合复用、可选探测回退；阅读计数、零总数及非零总数越界页、最后非空页的完整旧响应、SQL 编译/绑定/执行错误与访问门槛；分页版本、进度重排、Worker/外部提交、快照竞态及替库。 | 实际 store/写入 Worker、临时 SQLite 与合成 TXT；每请求关闭连接，核对快照边界、外部替库及探测失败回退；旧聚合与仅判断零总数的负控应超过对应访问预算；空页专项已纳入汇总入口。 |
 | `npm run verify:novel-write-worker` | 小说写入锁竞争、六类 API、提交/回滚异常、回执恢复/清理、换库与来源、排队容量和停机。 | 临时 SQLite、真实/受控 Worker、HTTP doubles 和仅扫描合成 TXT 的 Python；不访问真实资料库。 |
 | `npm run verify:novel-credentials-async` | 登录凭据检测的主线程响应、取消、超时、输出限制、来源变化与停机。 | 临时假凭据、受控子进程及本机 Node 子进程/动态 HTTP；不启动 Python 检测器或访问外站。 |
 | `npm run verify:novel-collection-worker` | 小说采集后台的锁等待、RPC 容量、子进程所有权、入库标识持久化、不确定任务的重试/历史清理保护与停机。 | 临时 SQLite、真实/受控 Worker、本机受控子进程和动态 HTTP；不运行真实采集或访问外站。 |

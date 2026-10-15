@@ -34,6 +34,7 @@ src/modules/short-videos/download-manager/downloader/*.db.*
 src/modules/short-videos/download-manager/downloader/*.sqlite*
 src/modules/short-videos/download-manager/downloader/*.pid
 __pycache__/
+.ruff_cache/
 *.pyc
 *.sqlite
 *.sqlite.backup*
@@ -90,6 +91,7 @@ nul
 /fanhao-author-before-cover.png
 /follow-*.png
 /lifecycle-*.png
+/player-toolbar-qa.png
 /search-*.png
 /fanhao_mobile_audit_*/
 

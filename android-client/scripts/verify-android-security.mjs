@@ -197,8 +197,8 @@ assert(webApp.includes("size: Number(androidUpdateInfo.size || 0)"), "the WebVie
 const rootPackage = JSON.parse(readRepo("package.json"));
 assert(rootPackage.scripts?.["verify:android-security"], "the root verifier must expose the Android security gate");
 assert(rootPackage.scripts?.["setup:android-verification"], "Android verification dependencies must have an explicit setup command");
-assert.equal(rootPackage.scripts?.["verify:full"], "node tools/run_verification.mjs full", "the full verification chain must use the explicit full plan");
-assert(readRepo("tools/run_verification.mjs").includes("'verify:android-security'"), "the full verification plan must include the Android security gate");
+assert.equal(rootPackage.scripts?.["verify:full"], "node tests/run_verification.mjs full", "the full verification chain must use the explicit full plan");
+assert(readRepo("tests/run_verification.mjs").includes("'verify:android-security'"), "the full verification plan must include the Android security gate");
 
 const buildDebug = read("build-debug.ps1");
 assert(buildDebug.includes("JDK 21 is required"), "the Android build must fail closed when JDK 21 is unavailable");

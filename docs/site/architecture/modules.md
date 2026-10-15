@@ -18,15 +18,15 @@ sources:
   - src/modules/content-index/server/routes.js
   - android-client/www/js/android-module-registry.js
   - public/js/module-navigation.js
-  - tools/verify_module_structure.mjs
-  - tools/verify_module_lifecycle.mjs
+  - tests/verify_module_structure.mjs
+  - tests/verify_module_lifecycle.mjs
 ---
 
 # 模块清单与协议
 
 核对日期时，注册器发现 **10 个模块：8 个可见模块、2 个隐藏模块**。其中 7 个可见模块声明了 Android 入口；行情目前只声明 Web 入口。
 
-清单来自 `discoverFanHaoModuleDefinitions()` 对 `src/modules/*/module.js` 的实际发现结果。`tools/verify_module_structure.mjs` 中的 `requiredModules` 是必须保留的最低集合，不能用它推断全部模块数量。
+清单来自 `discoverFanHaoModuleDefinitions()` 对 `src/modules/*/module.js` 的实际发现结果。`tests/verify_module_structure.mjs` 中的 `requiredModules` 是必须保留的最低集合，不能用它推断全部模块数量。
 
 ## 当前模块
 

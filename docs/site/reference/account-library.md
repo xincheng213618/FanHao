@@ -19,13 +19,13 @@ sources:
   - android-client/www/js/cache.js
   - public/platform/accounts/session-context.js
   - android-client/android/app/src/main/java/local/fanhao/library/NativePlaybackProgress.java
-  - tools/verify_account_personal_state.mjs
-  - tools/verify_account_personal_library.mjs
-  - tools/verify_account_personal_clients.mjs
-  - tools/verify_web_account_folders.mjs
-  - tools/verify_web_folder_navigation.mjs
-  - tools/verify_android_account_folders.mjs
-  - tools/verify_android_ranking_cache_fence.mjs
+  - tests/verify_account_personal_state.mjs
+  - tests/verify_account_personal_library.mjs
+  - tests/verify_account_personal_clients.mjs
+  - tests/verify_web_account_folders.mjs
+  - tests/verify_web_folder_navigation.mjs
+  - tests/verify_android_account_folders.mjs
+  - tests/verify_android_ranking_cache_fence.mjs
 ---
 
 # 个人收藏与观看记录

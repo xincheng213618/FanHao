@@ -33,6 +33,8 @@ npm start
 
 ## 维护与验证
 
+目录按用途分开：`src/`、`lib/` 是服务端源码，`public/` 是 Web 资源，`android-client/` 是手机端，[`tools/`](tools/README.md) 是实际业务工具，[`tests/`](tests/README.md) 是验证与测试样本，`docs/` 是文档。运行数据放在 `data/`，服务日志放在 `logs/`。
+
 批量扫描、资料补全、封面生成和缓存清理统一从 `/admin` 的后台作业中心运行，详见 [维护说明](docs/maintenance.md)。
 
 提交前运行：
@@ -41,7 +43,7 @@ npm start
 npm run verify
 ```
 
-该命令覆盖代码结构、服务端契约、数据库、Android 客户端以及关键页面回归。
+这是日常门禁，检查仓库结构、导入和公共契约。完整模块与客户端回归使用 `npm run verify:full`，各检查的环境要求见[验证矩阵](docs/site/reference/verification.md)。
 
 抖音下载管理器支持标签自动发布和 Actions 页面安全试跑，详见
 [发布流程](docs/douyin-manager-release.md)。

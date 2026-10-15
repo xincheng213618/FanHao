@@ -14,9 +14,9 @@ sources:
   - src/modules/fanhao/server/admin/product-processes.js
   - src/modules/fanhao/server/workflows/file-workflow-service.js
   - tools/fanhao_file_workflows.mjs
-  - tools/verify_product_boundaries.mjs
-  - tools/verify_file_workflows.mjs
-  - tools/verify_file_workflows_ui.mjs
+  - tests/verify_product_boundaries.mjs
+  - tests/verify_file_workflows.mjs
+  - tests/verify_file_workflows_ui.mjs
 ---
 
 # 独立产品与文件工作流
@@ -107,7 +107,7 @@ CLI `tools/fanhao_file_workflows.mjs` 与网页使用同一个计划协议。必
 
 ```powershell
 npm run verify:products
-node tools/verify_product_boundaries.mjs --browser
+node tests/verify_product_boundaries.mjs --browser
 npm run verify:file-workflows
 npm run verify:file-workflows-ui
 ```

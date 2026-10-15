@@ -11,10 +11,10 @@ sources:
   - src/modules/music/server/constants.js
   - src/modules/music/server/smart-mix.js
   - src/modules/music/server/serializers.js
-  - tools/verify_music_lyric_search.mjs
-  - tools/verify_music_active_catalogue.mjs
-  - tools/verify_music_facet_cache.mjs
-  - tools/verify_music_summary_reuse.mjs
+  - tests/verify_music_lyric_search.mjs
+  - tests/verify_music_active_catalogue.mjs
+  - tests/verify_music_facet_cache.mjs
+  - tests/verify_music_summary_reuse.mjs
   - package.json
 ---
 

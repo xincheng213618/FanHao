@@ -20,19 +20,19 @@ sources:
   - android-client/www/js/cache.js
   - android-client/www/js/image.js
   - android-client/www/js/account-owner.js
-  - tools/verify_image_query_correctness.mjs
-  - tools/verify_image_query_cache.mjs
-  - tools/verify_image_library_performance.mjs
-  - tools/verify_image_gallery_db.mjs
-  - tools/verify_android_media_header.mjs
-  - tools/verify_photo_search_clients.mjs
-  - tools/verify_gallery_list_rendering.mjs
-  - tools/verify_android_channel_rendering.mjs
-  - tools/verify_android_image_cache.mjs
-  - tools/verify_android_cache_stats.mjs
-  - tools/verify_manga_lookup_performance.mjs
-  - tools/verify_archive_reader_lifecycle.mjs
-  - tools/fixtures/image-library-channel-server.mjs
+  - tests/verify_image_query_correctness.mjs
+  - tests/verify_image_query_cache.mjs
+  - tests/verify_image_library_performance.mjs
+  - tests/verify_image_gallery_db.mjs
+  - tests/verify_android_media_header.mjs
+  - tests/verify_photo_search_clients.mjs
+  - tests/verify_gallery_list_rendering.mjs
+  - tests/verify_android_channel_rendering.mjs
+  - tests/verify_android_image_cache.mjs
+  - tests/verify_android_cache_stats.mjs
+  - tests/verify_manga_lookup_performance.mjs
+  - tests/verify_archive_reader_lifecycle.mjs
+  - tests/fixtures/image-library-channel-server.mjs
   - package.json
 ---
 

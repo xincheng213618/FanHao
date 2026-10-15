@@ -23,17 +23,17 @@ sources:
   - src/modules/short-videos/server/schema.js
   - src/modules/short-videos/server/library-insights.js
   - src/modules/system/server/access-analytics-service.js
-  - tools/verify_novel_summary_cache.mjs
-  - tools/verify_short_video_collections.mjs
-  - tools/verify_person_identity.mjs
-  - tools/verify_works_cold_performance.mjs
-  - tools/verify_work_cache_budget.mjs
-  - tools/verify_fanhao_structure.mjs
-  - tools/verify_account_personal_state.mjs
-  - tools/verify_account_personal_library.mjs
-  - tools/verify_short_video_store.mjs
-  - tools/verify_short_video_like_distribution_worker.mjs
-  - tools/verify_access_analytics.mjs
+  - tests/verify_novel_summary_cache.mjs
+  - tests/verify_short_video_collections.mjs
+  - tests/verify_person_identity.mjs
+  - tests/verify_works_cold_performance.mjs
+  - tests/verify_work_cache_budget.mjs
+  - tests/verify_fanhao_structure.mjs
+  - tests/verify_account_personal_state.mjs
+  - tests/verify_account_personal_library.mjs
+  - tests/verify_short_video_store.mjs
+  - tests/verify_short_video_like_distribution_worker.mjs
+  - tests/verify_access_analytics.mjs
   - package.json
 ---
 

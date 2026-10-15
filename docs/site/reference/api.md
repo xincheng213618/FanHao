@@ -23,7 +23,7 @@ sources:
 2. `src/platform/server/auth.js`：确认请求来源、会话与变更授权。
 3. `src/modules/<id>/server/routes.js` 或运行时的路由入口：找到实际处理器。
 4. 服务/Store/Worker：确认最终数据行为与错误传播。
-5. 对应 `tools/verify_*.mjs`：核对已覆盖的输入、拒绝路径与恢复行为。
+5. 对应 `tests/verify_*.mjs`：核对已覆盖的输入、拒绝路径与恢复行为。
 
 共享入口不意味着每个接口有相同鉴权、返回结构或副作用。逐项核对调用链。
 

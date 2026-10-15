@@ -2,7 +2,7 @@
 title: 仓库地图
 description: 按任务定位 FanHao 的源码、客户端、工具和运行数据边界。
 status: maintained
-verified_at: 2026-08-30
+verified_at: 2026-10-14
 sources:
   - server.js
   - package.json
@@ -14,8 +14,9 @@ sources:
   - public/
   - android-client/
   - tools/
+  - tests/
   - tools/build_short_video_web.mjs
-  - tools/verify_module_structure.mjs
+  - tests/verify_module_structure.mjs
   - android-client/scripts/sync-shared-assets.mjs
   - .gitignore
 ---
@@ -37,7 +38,8 @@ sources:
 | `public/` | Web | 页面入口、模块控制器、共享 UI、静态资源和游戏 |
 | `android-client/www/` | Android WebView | 模块页面、客户端宿主与平台适配 |
 | `android-client/android/` | 原生 Android | Gradle 工程和原生桥接能力 |
-| `tools/` | 离线工具与验证 | 命令可能扫描、写库或移动文件，执行前先读参数 |
+| `tools/` | 离线业务工具 | 扫描、采集、整理、迁移、修复和构建；命令可能写库或移动文件，执行前先读参数 |
+| `tests/` | 验证与测试样本 | 验证脚本、诊断工具和 `fixtures/`；使用现有 npm 检查入口 |
 | `docs/site/` | 持续维护的文档站 | 面向人和 AI 的导航、契约与操作入口 |
 | `docs/` 其他文件 | 原有专题资料 | 提供深度背景；与源码冲突时先核实，不当作实时清单 |
 

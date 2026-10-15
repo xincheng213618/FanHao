@@ -87,17 +87,17 @@ WebView 文件下载继续保存到系统公共“下载”目录。Android 7–
 
 远端离线缓存现在按 `(sourceRealm, sourceBookId)` 关联。电脑端在 `novel_meta.library_id` 保存一次生成的 UUID，并通过小说响应提供 `sourceRealm`；改地址不会改变身份，独立书库不会仅因书籍 ID 相同而共用缓存。旧 `local:remote:<id>` 副本不猜测来源，继续从本地书库阅读、导出或明确删除；旧电脑端没有身份字段时仍可在线阅读，但需更新电脑端才能新建整本缓存。
 
-安卓只将服务器上次声明的来源保存为可丢弃的地址关联回执，不把地址当身份。离线时不能探测同一地址是否换过书库；回执随响应缓存清理或应用缓存版本变更而失效后，需联网重新确认才能自动关联，所有本地副本仍可直接打开。目录和逐章缓存固定操作开始时的地址、来源与目录版本，逐响应校验，页面或书库切换后不混合保存、也不重绘旧页。专项回归为 `node tools/verify_android_novel_source_identity.mjs` 与 `node tools/verify_novel_library_identity.mjs`。
+安卓只将服务器上次声明的来源保存为可丢弃的地址关联回执，不把地址当身份。离线时不能探测同一地址是否换过书库；回执随响应缓存清理或应用缓存版本变更而失效后，需联网重新确认才能自动关联，所有本地副本仍可直接打开。目录和逐章缓存固定操作开始时的地址、来源与目录版本，逐响应校验，页面或书库切换后不混合保存、也不重绘旧页。专项回归为 `node tests/verify_android_novel_source_identity.mjs` 与 `node tests/verify_novel_library_identity.mjs`。
 
 同一本书重导时，仅双方完整快照中唯一且完全相同的非空正文保留章节 ID 和比例；插章、调序因此不再依赖旧序号。同标题但正文改动只提供从章首查看的候选；删章、重复正文或旧版本无法验证时保留旧锚点，显示“续读位置待确认”，不自动跳读。存量无版本进度升级后也须确认一次。明确选择章节并保存后才清除待确认状态。
 
 新版服务端 schema 为 5，书籍提供 `catalogRevision`；新版客户端保存进度携带实际打开时的章节 ID、目录版本及来源。旧服务仍可读，但没有内容版本时不能新增整本缓存。服务端重导后的旧 index-only 写入会被拒绝，避免旧会话覆盖新位置。目录版本覆盖整本目录与正文快照，不是多设备进度冲突版本，也没有自动关联不同文件或不同来源的同名作品。
 
-章节专项：`node tools/verify_android_local_novel_chapter_identity.mjs`、`node tools/verify_android_novel_chapter_identity.mjs`、`node tools/verify_novel_chapter_identity.mjs`。原生浏览器隔离入口：`node tools/serve_android_novel_chapter_fixture.mjs`；仅使用随机命名合成数据库，不能替代真机验证。
+章节专项：`node tests/verify_android_local_novel_chapter_identity.mjs`、`node tests/verify_android_novel_chapter_identity.mjs`、`node tests/verify_novel_chapter_identity.mjs`。原生浏览器隔离入口：`node tests/serve_android_novel_chapter_fixture.mjs`；仅使用随机命名合成数据库，不能替代真机验证。
 
 升级或读取失败时，列表、详情和阅读页会保留明确的错误状态，提供重试及“只读取回旧库正文”入口，不将失败当成空库或已删书。取回入口只读分页列出旧 `books`，由用户逐本选择导出 TXT；部分损坏会说明遗漏章节并再次确认。它不修复数据库，不自动上传，也不是完整备份。v2/v3 的旧副本可能不含升级后的新增或修改内容；导出还受单本 80 MiB UTF-8 大小限制。
 
-专项回归入口为 `node tools/verify_android_novel_recovery_storage.mjs` 和 `node tools/verify_android_novel_recovery.mjs`，已纳入根目录 `npm run verify:android-client`。隔离交互夹具为 `node tools/serve_android_novel_recovery_fixture.mjs`，使用合成数据库与模拟文件保存；不能替代 Android WebView／系统文件选择器实机验证。
+专项回归入口为 `node tests/verify_android_novel_recovery_storage.mjs` 和 `node tests/verify_android_novel_recovery.mjs`，已纳入根目录 `npm run verify:android-client`。隔离交互夹具为 `node tests/serve_android_novel_recovery_fixture.mjs`，使用合成数据库与模拟文件保存；不能替代 Android WebView／系统文件选择器实机验证。
 
 ## Gradle 网络代理
 
@@ -121,7 +121,7 @@ Android 客户端支持显式密码登录：原生端只保存绑定服务 origi
 
 底部保留五个主入口。“套图 / 韩漫”所在入口现可选择 **套图、韩漫、电影、电视剧**：长按直接选择，再次点击已激活入口按这四项顺序切换；从其他入口返回时恢复最近选择。电影、电视剧的列表与详情也高亮这个入口，影视模块仍独立运行，不与图库数据混合。
 
-导航回归：`node tools/verify_android_gallery_navigation.mjs`；电影和电视剧列表/分组契约：`node tools/verify_media_channel_clients.mjs`。浏览器隔离夹具只使用合成内容，不能替代手机安装后的验收。
+导航回归：`node tests/verify_android_gallery_navigation.mjs`；电影和电视剧列表/分组契约：`node tests/verify_media_channel_clients.mjs`。浏览器隔离夹具只使用合成内容，不能替代手机安装后的验收。
 
 ## 模块加载结构
 

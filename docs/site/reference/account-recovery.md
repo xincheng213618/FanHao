@@ -9,8 +9,8 @@ sources:
   - src/platform/server/accounts/audit.js
   - public/platform/accounts/account-ui.js
   - android-client/www/js/account-settings.js
-  - tools/verify_account_recovery.mjs
-  - tools/verify_account_recovery_clients.mjs
+  - tests/verify_account_recovery.mjs
+  - tests/verify_account_recovery_clients.mjs
 ---
 
 # 密码找回与操作记录
