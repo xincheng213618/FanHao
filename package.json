@@ -32,6 +32,7 @@
     "verify:android-full": "node tools/run_verification.mjs android",
     "verify:auth": "node tools/verify_auth_policy.mjs && node tools/verify_android_server_auth.mjs",
     "verify:mutation-auth": "node tools/verify_mutation_auth_policy.mjs && node tools/verify_api_error_boundary.mjs",
+    "verify:json-responses": "node tools/verify_json_responses.mjs",
     "verify:api-error-boundary": "node tools/verify_api_error_boundary.mjs",
     "preverify:android-security": "npm --prefix android-client run sync:cache",
     "verify:android-security": "npm --prefix android-client run verify:security",

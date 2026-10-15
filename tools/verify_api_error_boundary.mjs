@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import http from "node:http";
 import { Readable } from "node:stream";
 
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
 import { shortVideoPublicError } from "../src/modules/short-videos/server/public-errors.js";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { readJsonBody, RequestBodyError } from "../src/platform/server/request-io.js";
+import { sendJson, sendText } from "../src/platform/server/responses.js";
 
 assert.deepEqual(await readJsonBody(requestWithBody("")), {}, "an empty JSON body must preserve the existing empty-object contract");
 await assert.rejects(
@@ -191,8 +194,207 @@ const startedResult = await invokeRequestHandler({
 });
 assert.equal(duplicateWriteAttempts, 0, "a started response must not attempt a second header write");
 assert.equal(startedResult.logs.length, 1, "a post-header failure must still be logged");
+assert.equal(startedResult.res.destroyCalls, 1, "a failed partial response must be closed instead of leaving the client waiting");
+for (const responseState of [{ headersSent: true, writableEnded: true }, { destroyed: true }]) {
+  const completedResult = await invokeRequestHandler({
+    responseState,
+    routeApi: async () => { throw new Error("failure after response completion"); },
+    sendJson() { assert.fail("an ended or disconnected response must not be rewritten"); }
+  });
+  assert.equal(completedResult.res.destroyCalls, 0, "ended and disconnected responses must not be destroyed again");
+  assert.equal(completedResult.logs.length, 1);
+}
+
+await verifyHttpPreludeBoundary();
+await verifyHttpPartialResponseBoundary();
 
 console.log("API error boundary verification passed.");
+
+async function verifyHttpPreludeBoundary() {
+  const logs = [];
+  let authCalls = 0;
+  let routeCalls = 0;
+  const allowedOrigin = "http://localhost";
+  const corsError = new Error("private CORS failure at C:\\secret\\cors.bin");
+  const handler = createRequestHandler({
+    attachAccessAnalytics() {},
+    attachAccessLogger() {},
+    requestCorsOrigin(req) {
+      if (req.headers["x-fixture-cors-error"]) throw corsError;
+      return req.headers.origin === allowedOrigin ? allowedOrigin : "";
+    },
+    requestAuthState() { authCalls += 1; return { allowed: true }; },
+    routeAuth: async () => false,
+    sendLoginRequired() { assert.fail("the HTTP fixture must be authorized"); },
+    routeApi: async (_req, res, url) => {
+      routeCalls += 1;
+      if (url.pathname === "/api/internal-url-error") new URL("http://[");
+      sendJson(res, 200, { ok: true });
+      return true;
+    },
+    routeMedia: async () => false,
+    renderAndroidUpdatePage: () => "",
+    serveStatic() { assert.fail("the HTTP fixture must not reach static files"); },
+    sendHtml() {},
+    sendJson,
+    sendText,
+    logError(...args) { logs.push(args); }
+  });
+  // Mount the async handler directly, just like server-host. An escaping
+  // rejection must fail this fixture instead of being hidden by a test wrapper.
+  const server = http.createServer(handler);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const request = (options = {}) => requestHttpFixture(server.address().port, options);
+  try {
+    for (const options of [
+      { headers: { Host: "[" } },
+      { path: "http://[" }
+    ]) {
+      const beforeAuth = authCalls;
+      const beforeRoutes = routeCalls;
+      const response = await request(options);
+      assert.equal(response.status, 400, "malformed Host and request targets must return 400");
+      assert.deepEqual(JSON.parse(response.body), { error: "Invalid request URL" });
+      assert.equal(authCalls, beforeAuth, "invalid URLs must fail before authentication");
+      assert.equal(routeCalls, beforeRoutes, "invalid URLs must not execute application routes");
+      const healthy = await request();
+      assert.equal(healthy.status, 200, "the HTTP server must survive a malformed request");
+      assert.deepEqual(JSON.parse(healthy.body), { ok: true });
+    }
+
+    const beforeCorsAuth = authCalls;
+    const corsFailure = await request({ headers: { "X-Fixture-Cors-Error": "1" } });
+    assert.equal(corsFailure.status, 500, "CORS setup failures must stay inside the error boundary");
+    assert.deepEqual(JSON.parse(corsFailure.body), { error: "Internal server error" });
+    assert.equal(authCalls, beforeCorsAuth);
+    assert.equal(logs.at(-1)?.[1], corsError, "the original CORS failure must remain in server diagnostics");
+
+    const internalUrlFailure = await request({ path: "/api/internal-url-error" });
+    assert.equal(internalUrlFailure.status, 500, "URL errors within application routes must remain server errors");
+    assert.deepEqual(JSON.parse(internalUrlFailure.body), { error: "Internal server error" });
+
+    const beforeOptionsAuth = authCalls;
+    const preflight = await request({ method: "OPTIONS", headers: { Origin: allowedOrigin } });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.body, "");
+    assert.equal(preflight.headers["access-control-allow-origin"], allowedOrigin);
+    assert.equal(preflight.headers.vary, "Origin");
+    assert.equal(authCalls, beforeOptionsAuth, "preflight must preserve its early response");
+    for (const method of ["GET", "OPTIONS"]) {
+      const denied = await request({ method, headers: { Origin: "https://denied.invalid" } });
+      assert.equal(denied.status, 403, "disallowed origins must remain forbidden");
+      assert.equal(denied.headers["access-control-allow-origin"], undefined);
+      assert.equal(authCalls, beforeOptionsAuth);
+    }
+    const healthy = await request({ headers: { Origin: allowedOrigin } });
+    assert.equal(healthy.status, 200, "later valid requests must still complete");
+    assert.equal(healthy.headers["access-control-allow-origin"], allowedOrigin);
+    assert.equal(healthy.headers.vary, "Origin, Accept-Encoding", "JSON negotiation must preserve the CORS selection header");
+    assert.deepEqual(JSON.parse(healthy.body), { ok: true });
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
+function requestHttpFixture(port, { method = "GET", path = "/api/health", headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, method, path, headers, agent: false }, res => {
+      const chunks = [];
+      res.on("data", chunk => chunks.push(chunk));
+      res.once("error", reject);
+      res.once("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.setTimeout(2000, () => req.destroy(new Error("HTTP error-boundary fixture timed out")));
+    req.once("error", reject);
+    req.end();
+  });
+}
+
+async function verifyHttpPartialResponseBoundary() {
+  const logs = [];
+  const failure = new Error("private stream failure at C:\\secret\\stream.bin");
+  let releaseFailure;
+  let failureGate;
+  let failedResponse;
+  const failPartialResponse = async (req, res, url, stage) => {
+    if (url.pathname !== `/fixture/${stage}`) return false;
+    failedResponse = res;
+    res.writeHead(200, {
+      "Content-Type": "text/plain",
+      ...(url.searchParams.has("length") ? { "Content-Length": 1000 } : {})
+    });
+    res.write("partial fixture bytes");
+    // The client releases this gate only after receiving the first chunk.
+    // No delay or timing threshold determines when the injected failure runs.
+    await failureGate;
+    throw failure;
+  };
+  const handler = createRequestHandler({
+    attachAccessAnalytics() {}, attachAccessLogger() {},
+    requestCorsOrigin: () => "", requestAuthState: () => ({ allowed: true }),
+    routeAuth: async () => false,
+    sendLoginRequired() { assert.fail("the streaming fixture must be authorized"); },
+    async routeApi(req, res, url) {
+      if (url.pathname === "/api/health") { sendJson(res, 200, { ok: true }); return true; }
+      if (url.pathname === "/api/completed") {
+        sendJson(res, 200, { ok: true });
+        throw failure;
+      }
+      return failPartialResponse(req, res, url, "api");
+    },
+    routeMedia: (req, res, url) => failPartialResponse(req, res, url, "media"),
+    serveStatic: (req, res, pathname) => failPartialResponse(req, res, new URL(req.url, "http://fixture"), "static"),
+    renderAndroidUpdatePage: () => "", sendHtml() {}, sendJson, sendText,
+    logError(...args) { logs.push(args); }
+  });
+  const server = http.createServer(handler);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = server.address().port;
+  try {
+    for (const stage of ["api", "media", "static"]) {
+      for (const length of [false, true]) {
+        failureGate = new Promise(resolve => { releaseFailure = resolve; });
+        const beforeLogs = logs.length;
+        const result = await new Promise((resolve, reject) => {
+          const req = http.get({ host: "127.0.0.1", port, path: `/fixture/${stage}${length ? "?length" : ""}`, agent: false }, res => {
+            const chunks = [];
+            let ended = false;
+            let streamError;
+            res.on("data", chunk => { chunks.push(chunk); releaseFailure(); });
+            res.once("end", () => { ended = true; });
+            res.once("error", error => { streamError = error; });
+            res.once("close", () => resolve({
+              status: res.statusCode, complete: res.complete, ended, streamError,
+              body: Buffer.concat(chunks).toString("utf8")
+            }));
+          });
+          req.once("error", reject);
+          // Deadlock guard only; success requires a server-side reset, never a timeout.
+          req.setTimeout(2000, () => req.destroy(new Error("partial response fixture timed out")));
+        });
+        assert.equal(result.status, 200, "already-sent headers cannot be replaced by an error status");
+        assert.equal(result.complete, false, "a truncated response must not appear complete");
+        assert.equal(result.ended, false, "failed streaming output must not emit a successful end");
+        assert.equal(result.streamError?.code, "ECONNRESET");
+        assert.equal(result.body, "partial fixture bytes", "the error body and private diagnostics must not be appended");
+        assert.equal(failedResponse.destroyed, true);
+        assert.equal(logs.length, beforeLogs + 1);
+        assert.equal(logs.at(-1)?.[1], failure);
+        assert.deepEqual(JSON.parse((await requestHttpFixture(port)).body), { ok: true }, "later requests must still complete");
+      }
+    }
+    const completed = await requestHttpFixture(port, { path: "/api/completed" });
+    assert.equal(completed.status, 200);
+    assert.deepEqual(JSON.parse(completed.body), { ok: true }, "a late error must not truncate a response already ended");
+  } finally {
+    releaseFailure?.();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
 
 async function invokeShortVideoDelete(bodyText, { storeError } = {}) {
   let storeCalls = 0;
@@ -289,9 +491,11 @@ function fakeResponse(state = {}) {
   const headers = new Map();
   return {
     destroyed: false,
+    destroyCalls: 0,
     headersSent: false,
     writableEnded: false,
     ...state,
+    destroy() { this.destroyCalls += 1; this.destroyed = true; },
     getHeader(name) { return headers.get(String(name).toLowerCase()); },
     setHeader(name, value) { headers.set(String(name).toLowerCase(), value); }
   };

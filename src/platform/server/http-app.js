@@ -17,32 +17,31 @@ export function createRequestHandler({
 }) {
   return async function requestHandler(req, res) {
     const startedAt = Date.now();
-    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    const origin = String(req.headers.origin || "").trim();
-    const allowedCorsOrigin = requestCorsOrigin(req) || publicAndroidUpdateCorsOrigin(req, url);
-    if (origin) appendVaryHeader(res, "Origin");
-    if (allowedCorsOrigin) {
-      res.setHeader("Access-Control-Allow-Origin", allowedCorsOrigin);
-      res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Authorization,Range,If-Range,X-FanHao-Client,X-FanHao-Media-Cache,X-FanHao-Account-Owner");
-      res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,ETag,Last-Modified,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms,X-FanHao-Account-Owner");
-    }
+    try {
+      const url = parseRequestUrl(req);
+      const origin = String(req.headers.origin || "").trim();
+      const allowedCorsOrigin = requestCorsOrigin(req) || publicAndroidUpdateCorsOrigin(req, url);
+      if (origin) appendVaryHeader(res, "Origin");
+      if (allowedCorsOrigin) {
+        res.setHeader("Access-Control-Allow-Origin", allowedCorsOrigin);
+        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Authorization,Range,If-Range,X-FanHao-Client,X-FanHao-Media-Cache,X-FanHao-Account-Owner");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,ETag,Last-Modified,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms,X-FanHao-Account-Owner");
+      }
 
-    if (req.method === "OPTIONS") {
+      if (req.method === "OPTIONS") {
+        if (origin && !allowedCorsOrigin) {
+          sendJson(res, 403, { error: "不允许该跨源访问" });
+          return;
+        }
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (origin && !allowedCorsOrigin) {
         sendJson(res, 403, { error: "不允许该跨源访问" });
         return;
       }
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-    if (origin && !allowedCorsOrigin) {
-      sendJson(res, 403, { error: "不允许该跨源访问" });
-      return;
-    }
-
-    try {
       const authState = requestAuthState(req, url);
       attachAccessAnalytics(req, res, url, authState, startedAt);
       attachAccessLogger(req, res, url, authState, startedAt);
@@ -91,7 +90,12 @@ export function createRequestHandler({
       });
     } catch (error) {
       logError("[request]", error);
-      if (res.headersSent || res.writableEnded || res.destroyed) return;
+      if (res.writableEnded || res.destroyed) return;
+      if (res.headersSent) {
+        // An incomplete response cannot be replaced with JSON or left open.
+        res.destroy();
+        return;
+      }
       const statusCode = publicErrorStatus(error);
       sendJson(res, statusCode, {
         error: statusCode < 500 && error?.message
@@ -100,6 +104,16 @@ export function createRequestHandler({
       });
     }
   };
+}
+
+function parseRequestUrl(req) {
+  try {
+    return new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch {
+    // Malformed request targets and Host values are client errors. Keep their
+    // parsing inside the handler boundary and avoid reflecting untrusted input.
+    throw Object.assign(new Error("Invalid request URL"), { statusCode: 400 });
+  }
 }
 
 function isPublicAndroidUpdateRequest(req, url) {
