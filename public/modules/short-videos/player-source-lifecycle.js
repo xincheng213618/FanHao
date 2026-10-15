@@ -69,6 +69,9 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
 
 export function disposeShortVideoMedia(root, options = {}) {
   const release = options.release !== false;
+  if (release) root?.querySelectorAll?.(".short-video-gallery-player")?.forEach?.((gallery) => {
+    gallery.shortVideoGalleryDispose?.();
+  });
   root?.querySelectorAll?.("video, audio")?.forEach?.((player) => {
     try {
       player.muted = true;

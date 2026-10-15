@@ -12,7 +12,7 @@ import { readLikeDistributionCache } from "./like-distribution-cache.js?v=202608
 import { createLikeDistributionLoader } from "./like-distribution-loader.js?v=20260825-author-cleanup-02";
 import { renderLikeDistributionPageShell } from "./like-distribution-page-shell.js?v=20260825-author-efficiency-01";
 import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20260720-observed-playback-issues-01";
-import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
+import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20261016-gallery-handoff-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
 import { mergeShortVideoWatchPayload } from "./watch-write-payload.js?v=20260813-watch-write-pending-01";
@@ -2247,7 +2247,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoGalleryPlayer() {
     if (shortVideoGalleryPlayerPromise) return shortVideoGalleryPlayerPromise;
     markShortVideoPerformance("gallery-player-module-start");
-    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260727-live-photo-15";
+    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20261016-gallery-handoff-02";
     shortVideoGalleryPlayerPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoGalleryPlayer !== "function") {
         throw new Error("图文播放器模块加载失败");
@@ -2303,37 +2303,60 @@ export function createShortVideoPage(deps) {
     placeholder.dataset.galleryRequestedIndex = "0";
     placeholder.dataset.galleryCount = "0";
 
-    if (ghost) return placeholder;
-
     const status = document.createElement("div");
     status.className = "short-video-gallery-load-status is-visible";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     status.textContent = "正在载入图文播放器…";
-    placeholder.append(status);
-    stage?.setAttribute("aria-busy", "true");
-    const startedAt = Date.now();
-
-    ensureShortVideoGalleryPlayer().then((render) => {
-      if (!placeholder.isConnected) return;
-      const player = render(video, options);
-      placeholder.replaceWith(player);
-      stage?.setAttribute("aria-busy", "false");
-      markShortVideoPerformance("gallery-player-mounted", {
-        videoId: String(video?.id || ""),
-        durationMs: Date.now() - startedAt
+    if (!ghost) {
+      placeholder.append(status);
+      stage?.setAttribute("aria-busy", "true");
+    }
+    let mountPromise = null;
+    const mount = () => {
+      if (mountPromise) return mountPromise;
+      if (!placeholder.isConnected) return Promise.resolve(null);
+      const startedAt = Date.now();
+      mountPromise = ensureShortVideoGalleryPlayer().then((render) => {
+        if (!placeholder.isConnected) return null;
+        const player = render(video, options);
+        placeholder.replaceWith(player);
+        stage?.setAttribute("aria-busy", "false");
+        markShortVideoPerformance("gallery-player-mounted", {
+          videoId: String(video?.id || ""),
+          durationMs: Date.now() - startedAt,
+          ghost
+        });
+        if (isCurrentShortVideo(video)) syncActiveControlBar();
+        return player;
+      }).catch((error) => {
+        mountPromise = null;
+        if (!placeholder.isConnected) return null;
+        placeholder.classList.remove("is-loading");
+        placeholder.classList.add("is-error");
+        placeholder.setAttribute("aria-busy", "false");
+        stage?.setAttribute("aria-busy", "false");
+        status.classList.add("is-error");
+        status.textContent = error?.message || "图文播放器加载失败";
+        if (!ghost) showBrowserToast(status.textContent);
+        return null;
       });
-      if (isCurrentShortVideo(video)) syncActiveControlBar();
-    }).catch((error) => {
-      if (!placeholder.isConnected) return;
-      placeholder.classList.remove("is-loading");
-      placeholder.classList.add("is-error");
-      placeholder.setAttribute("aria-busy", "false");
-      stage?.setAttribute("aria-busy", "false");
-      status.classList.add("is-error");
-      status.textContent = error?.message || "图文播放器加载失败";
-      showBrowserToast(status.textContent);
-    });
+      return mountPromise;
+    };
+    placeholder.shortVideoGalleryPrepare = () => mount().then((player) => player?.shortVideoGalleryPrepare?.());
+    if (ghost) {
+      // Adjacent galleries prepare only their first item, after the visible
+      // video has painted. Navigation can request the same preparation sooner.
+      window.requestAnimationFrame(() => {
+        const current = activePlayer();
+        const ready = current?.tagName === "VIDEO"
+          ? waitForVideoFirstFrame(current, SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS)
+          : Promise.resolve();
+        ready.then(mount);
+      });
+      return placeholder;
+    }
+    window.requestAnimationFrame(mount);
 
     return placeholder;
   }
@@ -3971,6 +3994,10 @@ export function createShortVideoPage(deps) {
     wheelIgnoreUntil = Date.now() + 180;
     window.clearTimeout(wheelResetTimer);
     try {
+      if (hasCachedAdjacent && isGalleryPost(cachedVideo)) await prepareAdjacentGallery(direction);
+      const incomingPanel = activeReelStack()?.querySelector(direction > 0 ? ".short-video-reel-panel.is-next" : ".short-video-reel-panel.is-prev");
+      const canPromotePanel = hasCachedAdjacent && incomingPanel && (!isGalleryPost(cachedVideo)
+        || Boolean(incomingPanel.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive));
       const animationPromise = animateActiveStack(direction, {
         ...(options.motion || {}),
         prewarmed: incomingPlayer?.dataset.shortVideoFrameReady === "1" && incomingPlayer.readyState >= 2
@@ -3988,9 +4015,10 @@ export function createShortVideoPage(deps) {
           readyState: Number(incomingPlayer.readyState || 0)
         });
       }
-      if (canPromoteVideoPanel) {
-        promoteAdjacentPanelDom(direction, cachedVideo);
+      if (canPromotePanel) {
+        const rebasePromise = promoteAdjacentPanelDom(direction, cachedVideo);
         await promoteAdjacentMedia(cachedVideo, direction);
+        await rebasePromise;
       } else if (hasCachedAdjacent) {
         await promoteAdjacentMedia(cachedVideo, direction, { renderCurrent: true });
       } else {
@@ -4000,7 +4028,7 @@ export function createShortVideoPage(deps) {
         videoId: String(state.shortVideo.current?.id || id),
         direction: Number(direction || 0),
         durationMs: Date.now() - navigationStartedAt,
-        promoted: canPromoteVideoPanel,
+        promoted: Boolean(canPromotePanel),
         cached: hasCachedAdjacent
       });
       markShortVideoCacheState();
@@ -4009,6 +4037,21 @@ export function createShortVideoPage(deps) {
       wheelLocked = false;
       scheduleWheelGestureRelease();
       flushQueuedAdjacent();
+    }
+  }
+
+  async function prepareAdjacentGallery(direction) {
+    const panel = activeReelStack()?.querySelector(direction > 0 ? ".short-video-reel-panel.is-next" : ".short-video-reel-panel.is-prev");
+    const gallery = panel?.querySelector(".short-video-gallery-player");
+    if (!gallery) return;
+    let timer;
+    try {
+      await Promise.race([
+        gallery.shortVideoGalleryPrepare?.() || gallery.shortVideoGalleryReady,
+        new Promise((resolve) => { timer = window.setTimeout(resolve, SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS); })
+      ]);
+    } finally {
+      window.clearTimeout(timer);
     }
   }
 
@@ -4052,8 +4095,8 @@ export function createShortVideoPage(deps) {
 
   function adjacentPlayer(direction) {
     const selector = direction > 0
-      ? ".short-video-reel-panel.is-next .short-video-player"
-      : ".short-video-reel-panel.is-prev .short-video-player";
+      ? ".short-video-reel-panel.is-next .short-video-player:not(.short-video-gallery-audio)"
+      : ".short-video-reel-panel.is-prev .short-video-player:not(.short-video-gallery-audio)";
     return els.workGrid?.querySelector?.(selector) || null;
   }
 
@@ -4206,18 +4249,22 @@ export function createShortVideoPage(deps) {
     stack.querySelectorAll(".short-video-reel-panel.is-ghost-panel").forEach((panel) => {
       if (panel !== outgoing) disposeReelPanel(panel);
     });
-    window.requestAnimationFrame(() => {
+    const rebasePromise = new Promise((resolve) => {
       window.requestAnimationFrame(() => {
-        stack.classList.remove("is-rebasing");
-        stack.style.removeProperty("transition");
-        incoming.shortVideoSyncCaptionOverflow?.();
+        window.requestAnimationFrame(() => {
+          stack.classList.remove("is-rebasing");
+          stack.style.removeProperty("transition");
+          incoming.shortVideoSyncCaptionOverflow?.();
+          resolve();
+        });
       });
     });
 
     // Silence the outgoing reel before restoring sound on the incoming one.
     // The adjacent player may already be running muted for first-frame warmup,
     // so unmuting it first would briefly leave two audible players alive.
-    const previousPlayer = outgoing.querySelector(".short-video-player");
+    outgoing.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive?.(false);
+    const previousPlayer = outgoing.querySelector(".short-video-player:not(.short-video-gallery-audio)");
     if (previousPlayer) {
       previousPlayer.classList.add("is-ghost");
       previousPlayer.dataset.shortVideoSlot = direction > 0 ? "prev" : "next";
@@ -4228,7 +4275,7 @@ export function createShortVideoPage(deps) {
         previousPlayer.currentTime = 0;
       } catch {}
     }
-    const player = incoming.querySelector(".short-video-player");
+    const player = incoming.querySelector(".short-video-player:not(.short-video-gallery-audio)");
     const stage = incoming.querySelector(".short-video-stage");
     if (player && stage) {
       // Promotion invalidates every timer scheduled for the old ghost role.
@@ -4279,7 +4326,7 @@ export function createShortVideoPage(deps) {
         readyState: Number(player.readyState || 0)
       });
     }
-
+    return rebasePromise;
   }
 
   function promoteAdjacentMedia(video, direction, options = {}) {
@@ -4299,6 +4346,12 @@ export function createShortVideoPage(deps) {
     state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(state.shortVideo.nextId)
       || (previousCurrent?.id === state.shortVideo.nextId ? previousCurrent : null);
     replaceRoute({ view: "shortVideos", shortVideoId: video.id });
+    if (!options.renderCurrent && (isGalleryPost(previousCurrent) || isGalleryPost(video))) {
+      const previousBar = els.workGrid?.querySelector(".short-video-control-bar");
+      previousBar?.shortVideoDispose?.();
+      previousBar?.replaceWith(isGalleryPost(video) ? renderGalleryControlBar(video) : renderControlBar());
+    }
+    if (!options.renderCurrent) activeGalleryPlayer()?.shortVideoGallerySetActive?.(true);
     syncActiveControlBar();
     if (options.renderCurrent) {
       renderStats();
@@ -4393,7 +4446,8 @@ export function createShortVideoPage(deps) {
         panel.classList.remove("is-current", "is-prev", "is-next");
         panel.classList.add(`is-${slot}`, "is-ghost-panel");
         setReelPanelInteractionState(panel, false);
-        const player = panel.querySelector(".short-video-player");
+        panel.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive?.(false);
+        const player = panel.querySelector(".short-video-player:not(.short-video-gallery-audio)");
         if (player) {
           player.classList.add("is-ghost");
           player.dataset.shortVideoSlot = slot;
@@ -4417,12 +4471,7 @@ export function createShortVideoPage(deps) {
 
   function disposeReelPanel(panel) {
     if (!panel) return;
-    panel.querySelectorAll?.("video")?.forEach?.((player) => {
-      player.muted = true;
-      player.pause?.();
-      player.removeAttribute("src");
-      player.load?.();
-    });
+    disposeShortVideoMedia(panel);
     panel.remove();
   }
 
@@ -4861,6 +4910,10 @@ export function createShortVideoPage(deps) {
   function resumeActiveSound() {
     if (state.shortVideo.muted) return;
     window.requestAnimationFrame(() => {
+      if (isGalleryPost(state.shortVideo.current)) {
+        activeGalleryPlayer()?.shortVideoGalleryPlaySound?.();
+        return;
+      }
       const player = activePlayer();
       if (!player) return;
       player.muted = false;
@@ -5917,7 +5970,7 @@ export function createShortVideoPage(deps) {
         resolve();
       };
       const handleTransitionEnd = (event) => {
-        if (event.propertyName !== "transform") return;
+        if (event.target !== stack || event.propertyName !== "transform") return;
         finish();
       };
       stack.addEventListener("transitionend", handleTransitionEnd);

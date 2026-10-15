@@ -32,7 +32,8 @@ export function createShortVideoGalleryPlayer(dependencies) {
     const images = galleryImageEntries(video);
     const livePhoto = video.galleryPresentation === "live-photo";
     const singleLivePhoto = livePhoto && images.length === 1;
-    const ghost = Boolean(options.ghost);
+    let ghost = Boolean(options.ghost);
+    let disposed = false;
     const stage = options.stage;
     const wrap = document.createElement("div");
     wrap.className = `short-video-gallery-player${ghost ? " is-ghost" : ""}`;
@@ -453,9 +454,9 @@ export function createShortVideoGalleryPlayer(dependencies) {
         advanceEntry = null;
       }
     };
-    const galleryTimingPaused = () => galleryVisibilityPaused || galleryUserPaused;
+    const galleryTimingPaused = () => ghost || disposed || galleryVisibilityPaused || galleryUserPaused;
     const advanceFromEntry = (entry) => {
-      if (!entry || !wrap.isConnected || currentIndex !== entry.index) return;
+      if (!entry || !wrap.isConnected || galleryTimingPaused() || currentIndex !== entry.index) return;
       if (currentIndex === images.length - 1 && handleGalleryAutoNext?.(video)) return;
       if (images.length > 1) move(1);
     };
@@ -525,13 +526,18 @@ export function createShortVideoGalleryPlayer(dependencies) {
       if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
     };
     const playGallerySound = async () => {
-      if (!backgroundAudio || galleryTimingPaused()) return false;
+      if (!backgroundAudio || !wrap.isConnected || galleryTimingPaused()) return false;
       try {
         await backgroundAudio.play?.();
+        if (galleryTimingPaused() || !wrap.isConnected) {
+          backgroundAudio.pause?.();
+          return false;
+        }
         delete wrap.dataset.gallerySoundError;
         syncGallerySoundState();
         return !backgroundAudio.paused;
       } catch (error) {
+        if (galleryTimingPaused() || !wrap.isConnected) return false;
         wrap.dataset.gallerySoundError = `${String(error?.name || "PlaybackError")}: ${String(error?.message || error || "unknown")}`;
         if (!state.shortVideo.muted) markPlayerSoundBlocked(stage);
         backgroundAudio.muted = true;
@@ -624,7 +630,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       const token = ++requestToken;
       if (nextIndex === currentIndex && currentReady) {
         hideLoadStatus();
-        preloadAround(currentIndex, resolvedDirection);
+        if (!ghost) preloadAround(currentIndex, resolvedDirection);
         return true;
       }
       showLoadStatus(nextIndex);
@@ -815,12 +821,10 @@ export function createShortVideoGalleryPlayer(dependencies) {
     next.addEventListener("pointerdown", (event) => event.stopPropagation());
     edgePrevious.addEventListener("pointerdown", (event) => event.stopPropagation());
     edgeNext.addEventListener("pointerdown", (event) => event.stopPropagation());
-    if (!ghost) {
+    {
       wrap.addEventListener("pointerdown", dismissGalleryGestureHint, { passive: true });
-      window.requestAnimationFrame(() => {
-        persistShortVideoWatch(video, null, { force: true, completed: true });
-      });
       stage?.addEventListener("dblclick", (event) => {
+        if (ghost || disposed) return;
         window.clearTimeout(galleryClickTimer);
         galleryClickTimer = 0;
         if (wasClearScreenJustRevealed(stage) || isShortVideoGestureClickBlocked(stage)) {
@@ -832,6 +836,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
         showHeartBurst(stage, event);
       });
       wrap.addEventListener("click", (event) => {
+        if (ghost || disposed) return;
         if (isShortVideoKeyboardControl(event.target)) return;
         if (revealShortVideoClearScreen(wrap) || wasClearScreenJustRevealed(wrap)) return;
         if (isShortVideoGestureClickBlocked(wrap)) return;
@@ -869,7 +874,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
     if (!singleLivePhoto && images.length > 1) wrap.append(edgePrevious, edgeNext);
     wrap.append(centerPlay, loadStatus, gestureHint);
     const attachLocalBackgroundSound = (sound = video.sound) => {
-      const localSoundUrl = !ghost && sound?.localAvailable ? String(sound.previewUrl || "").trim() : "";
+      const localSoundUrl = !ghost && !disposed && sound?.localAvailable ? String(sound.previewUrl || "").trim() : "";
       if (!localSoundUrl || backgroundAudio) return false;
       const audio = document.createElement("audio");
       audio.className = "short-video-player short-video-gallery-audio";
@@ -930,10 +935,10 @@ export function createShortVideoGalleryPlayer(dependencies) {
     };
     const scheduleLocalSoundPoll = (delayMs = 15000) => {
       window.clearTimeout(localSoundPollTimer);
-      if (ghost || backgroundAudio || !video.sound?.previewUrl || localSoundPollAttempts >= 48) return;
+      if (ghost || disposed || backgroundAudio || !video.sound?.previewUrl || localSoundPollAttempts >= 48) return;
       localSoundPollTimer = window.setTimeout(async () => {
         localSoundPollTimer = 0;
-        if (!wrap.isConnected || backgroundAudio) return;
+        if (ghost || disposed || !wrap.isConnected || backgroundAudio) return;
         try {
           if (await refreshLocalBackgroundSound()) return;
         } catch {
@@ -953,7 +958,66 @@ export function createShortVideoGalleryPlayer(dependencies) {
       scheduleLocalSoundPoll();
       return false;
     };
-    if (!attachLocalBackgroundSound(video.sound)) scheduleLocalSoundPoll(0);
+    const recordWatch = () => window.requestAnimationFrame(() => {
+      if (!ghost && !disposed && wrap.isConnected) {
+        persistShortVideoWatch(video, null, { force: true, completed: true });
+      }
+    });
+    wrap.shortVideoGalleryPrepare = () => {
+      if (disposed) return Promise.resolve(false);
+      if (image?.tagName === "VIDEO" && image.preload !== "auto") {
+        image.preload = "auto";
+        image.load?.();
+      }
+      return wrap.shortVideoGalleryReady;
+    };
+    wrap.shortVideoGallerySetActive = (active) => {
+      if (disposed || ghost === !active) return;
+      ghost = !active;
+      wrap.classList.toggle("is-ghost", ghost);
+      if (ghost) {
+        clearAdvance();
+        window.clearTimeout(localSoundPollTimer);
+        window.clearTimeout(galleryClickTimer);
+        dismissGalleryGestureHint();
+        image?.pause?.();
+        if (backgroundAudio) {
+          backgroundAudio.muted = true;
+          backgroundAudio.pause?.();
+        }
+      } else {
+        wrap.shortVideoGalleryPrepare();
+        recordWatch();
+        if (backgroundAudio) {
+          backgroundAudio.muted = Boolean(state.shortVideo.muted);
+          backgroundAudio.volume = currentShortVideoVolume();
+          els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoEnableGallerySound?.(video.sound);
+          playGallerySound();
+        } else if (!attachLocalBackgroundSound(video.sound)) scheduleLocalSoundPoll(0);
+        if (currentReady) {
+          preloadAround(currentIndex);
+          scheduleAdvance(imageCache.get(currentIndex));
+          maybeShowGalleryGestureHint();
+        }
+      }
+      syncGalleryPlaybackState();
+    };
+    wrap.shortVideoGalleryDispose = () => {
+      if (disposed) return;
+      wrap.shortVideoGallerySetActive(false);
+      disposed = true;
+      requestToken += 1;
+      dragPreviewToken += 1;
+      [animationTimer, boundaryTimer, loadStatusTimer, loadStatusHideTimer, dragSettleTimer, counterMotionTimer]
+        .forEach((timer) => window.clearTimeout(timer));
+      image = null;
+      [...imageCache.values()].forEach(releaseEntry);
+    };
+    wrap.shortVideoGalleryReady = initialEntry.promise.then((entry) => Boolean(entry && !disposed));
+    if (!ghost) {
+      recordWatch();
+      if (!attachLocalBackgroundSound(video.sound)) scheduleLocalSoundPoll(0);
+    }
     syncCommittedUi();
     syncRequestedUi();
     show(0);
