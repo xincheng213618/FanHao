@@ -33,6 +33,7 @@ async def test_downloader_factory_routes_supported_types(tmp_path):
 
     try:
         assert isinstance(DownloaderFactory.create("video", **common), VideoDownloader)
+        assert isinstance(DownloaderFactory.create("article", **common), VideoDownloader)
         assert isinstance(DownloaderFactory.create("gallery", **common), VideoDownloader)
         assert isinstance(DownloaderFactory.create("user", **common), UserDownloader)
         assert isinstance(DownloaderFactory.create("collection", **common), MixDownloader)

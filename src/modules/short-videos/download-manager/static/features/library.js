@@ -23,15 +23,15 @@ export function createLibraryFeature(options) {
   function libraryCard(item) {
     const cover = item.cover_url
       ? `<img src="${safeUrl(item.cover_url)}" alt="" loading="lazy" />`
-      : `<div class="library-placeholder"><span>${item.media_type === "gallery" ? "▦" : "▶"}</span></div>`;
-    const typeLabel = item.media_type === "gallery" ? `${item.asset_count} 张/段` : "视频";
+      : `<div class="library-placeholder"><span>${item.media_type === "article" ? "文" : item.media_type === "gallery" ? "▦" : "▶"}</span></div>`;
+    const typeLabel = item.media_type === "article" ? "文章" : item.media_type === "gallery" ? `${item.asset_count} 张/段` : "视频";
     const timestamp = item.create_time ? new Date(Number(item.create_time) * 1000).toLocaleDateString() : "";
     return `
       <article class="library-card" data-library-open="${escapeHtml(item.id || "")}" tabindex="0">
         <div class="library-cover">
           ${cover}
           <span class="library-type">${escapeHtml(typeLabel)}</span>
-          <span class="library-play">${item.media_type === "gallery" ? "查看" : "播放"}</span>
+          <span class="library-play">${item.media_type === "article" ? "阅读" : item.media_type === "gallery" ? "查看" : "播放"}</span>
         </div>
         <div class="library-card-body">
           <strong title="${escapeHtml(item.title || "")}">${escapeHtml(item.title || item.aweme_id)}</strong>
@@ -97,6 +97,10 @@ export function createLibraryFeature(options) {
 
   function openPlayer(item) {
     if (!item?.id) return;
+    if (item.media_type === "article") {
+      window.open(`/api/library/media?id=${encodeURIComponent(item.id)}`, "_blank", "noopener,noreferrer");
+      return;
+    }
     window.location.assign(`/short-videos/${encodeURIComponent(item.id)}`);
   }
 

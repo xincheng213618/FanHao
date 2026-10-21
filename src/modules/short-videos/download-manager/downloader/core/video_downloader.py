@@ -101,6 +101,8 @@ class VideoDownloader(BaseDownloader):
 
         asset_started = time.monotonic()
         self._progress_update_step("准备下载资源", str(aweme_id))
+        if parsed_url.get("type") == "article":
+            aweme_data = {**aweme_data, "media_type": "article"}
         success = await self._download_aweme(aweme_data)
         timing_event(
             "video_assets_done",

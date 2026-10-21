@@ -24,6 +24,7 @@ try {
     await verifyProfilesDerivedPendingCount(browser);
     await verifyProfilesQueueStatus(browser);
     await verifyLibraryLatestFailure(browser);
+    await verifyArticlePresentation(browser);
     await verifyLinksUnavailablePresentation(browser);
     await verifyLinksDownloadProgress(browser);
     await verifyLinksRefreshPreservesInteraction(browser);
@@ -657,6 +658,48 @@ async function verifyLinksResetSupersedesAppend(browser) {
     assert.equal(result.allCount, "1");
     assert.equal(result.failedCount, "1");
     assert.equal(result.toast, "", "the superseded append must not raise an error prompt");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyArticlePresentation(browser) {
+  const page = await openFixture(browser);
+  try {
+    await page.evaluate(async () => {
+      const { createLibraryFeature } = await import("/manager/features/library.js?article-fixture=1");
+      const feature = createLibraryFeature({ showPage() {} });
+      feature.bind();
+      window.articleLibraryLoad = feature.activate();
+      window.articleOpened = [];
+      window.open = (...args) => { window.articleOpened.push(args); };
+    });
+    await waitForRequests(page, 1);
+    await settleRequest(page, 0, {
+      total: 1, next_offset: 1, has_more: false,
+      items: [{ id: 42, aweme_id: "fixture-article", title: "离线文章", author: "作者",
+        media_type: "article", asset_count: 1 }],
+    });
+    await page.evaluate(() => window.articleLibraryLoad);
+    assert.match(await page.locator("#libraryGrid").innerText(), /文章/);
+    await page.locator('[data-library-open="42"]').click();
+    assert.deepEqual(await page.evaluate(() => window.articleOpened), [
+      ["/api/library/media?id=42", "_blank", "noopener,noreferrer"],
+    ]);
+    await page.evaluate(async () => {
+      const { createLinksFeature } = await import("/manager/features/links.js?article-fixture=1");
+      const feature = createLinksFeature({ settings: { save: async () => {} }, refreshState: async () => {} });
+      window.articleLinksLoad = feature.refresh();
+    });
+    await waitForRequests(page, 2);
+    await settleRequest(page, 1, {
+      links: [{ ...linkFixture(42, "离线文章", "downloaded"), kind: "article", media_type: "article" }],
+      total: 1, summary: { all: 1, downloaded: 1 },
+    });
+    await page.evaluate(() => window.articleLinksLoad);
+    assert.equal(await page.getByRole("link", { name: "阅读", exact: true }).getAttribute("href"),
+      "/api/library/media?id=42");
+    assert.match(await page.locator("#linksBody").innerText(), /文章/);
   } finally {
     await page.close();
   }

@@ -111,7 +111,8 @@ export function createLinksFeature(options) {
     const authorName = String(link.author_nickname || "").trim();
     const rawTitle = String(link.desc || "").trim();
     const title = !rawTitle || rawTitle === "no_title" ? "未命名作品" : rawTitle;
-    const kindLabel = link.media_type === "gallery" || link.kind === "note" ? "图集" : "视频";
+    const kindLabel = link.media_type === "article" || link.kind === "article" ? "文章"
+      : link.media_type === "gallery" || link.kind === "note" ? "图集" : "视频";
     const createDate = link.create_time ? new Date(Number(link.create_time) * 1000).toLocaleDateString() : "日期未知";
     const rawIssue = String(link.last_error || link.actual_probe_error || "").trim();
     const runtimeProgress = runtimeProgressByAweme.get(String(link.aweme_id || ""));
@@ -164,6 +165,8 @@ export function createLinksFeature(options) {
         </details>
       </td>
       <td class="link-actions-cell">
+        ${status === "downloaded" && link.media_type === "article"
+          ? `<a class="link-open-button" href="/api/library/media?id=${encodeURIComponent(link.id)}" target="_blank" rel="noreferrer">阅读</a>` : ""}
         <a class="link-open-button" href="${href}" target="_blank" rel="noreferrer">打开</a>
         <details class="row-actions-menu">
           <summary>更多</summary>

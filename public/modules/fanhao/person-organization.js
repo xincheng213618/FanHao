@@ -36,7 +36,7 @@ export async function openPersonOrganizationDialog({ person, button, api, isCurr
     const metadata = document.createElement("input");
     metadata.type = "checkbox";
     metadata.checked = true;
-    label.append(metadata, document.createTextNode(" 重新下载封面、用数据库资料重写 info（下载失败保留旧封面，不备份）"));
+    label.append(metadata, document.createTextNode(" 从 JavDB 更新全部作品列表、本地作品资料与封面，重写 info（失败保留原资料与封面，不备份）"));
     content.append(label);
     const details = document.createElement("details");
     details.append(make("summary", "查看本次目录与跳过原因"));
@@ -86,7 +86,7 @@ export async function openPersonOrganizationDialog({ person, button, api, isCurr
       }
       if (closed) return;
       if (isCurrent()) await refreshPerson();
-      status.textContent = task.status === "done" ? "整理完成，封面、info 和本地索引已同步。"
+      status.textContent = task.status === "done" ? (metadata.checked ? "整理完成，封面、info 和本地索引已同步。" : "整理完成，目录和本地索引已同步。")
         : task.logs?.findLast((line) => /^ERROR\s/.test(line)) || "任务已中断，可再次点击重新整理继续。";
       const logs = make("pre", (task.logs || []).filter((line) => /WARN|ERROR|整理结果|清理/.test(line)).join("\n"));
       logs.style.whiteSpace = "pre-wrap";

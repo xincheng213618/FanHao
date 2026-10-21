@@ -108,9 +108,9 @@ function workFromHref(href) {
   if (!href) return null;
   try {
     const url = new URL(href, "https://www.douyin.com");
-    const pathMatch = url.pathname.match(/^\/(video|note|gallery|slides)\/(\d{16,22})$/);
+    const pathMatch = url.pathname.match(/^\/(video|note|gallery|slides|article)\/(\d{16,22})\/?$/);
     if (pathMatch) {
-      const kind = pathMatch[1] === "video" ? "video" : "note";
+      const kind = ["video", "article"].includes(pathMatch[1]) ? pathMatch[1] : "note";
       const awemeId = pathMatch[2];
       return {
         aweme_id: awemeId,
@@ -127,9 +127,9 @@ function workFromHref(href) {
       };
     }
   } catch {
-    const rawMatch = String(href).match(/\/(video|note|gallery|slides)\/(\d{16,22})(?:\D|$)/);
+    const rawMatch = String(href).match(/\/(video|note|gallery|slides|article)\/(\d{16,22})(?:\D|$)/);
     if (rawMatch) {
-      const kind = rawMatch[1] === "video" ? "video" : "note";
+      const kind = ["video", "article"].includes(rawMatch[1]) ? rawMatch[1] : "note";
       const awemeId = rawMatch[2];
       return {
         aweme_id: awemeId,
@@ -442,6 +442,7 @@ function extractAuthor(value) {
 
 function extractPreview(value, kind) {
   const video = value.video || {};
+  const article = value.article_info || value.articleInfo || {};
   const stats = value.statistics || value.stats || value.stat || {};
   const images =
     value.images ||
@@ -452,7 +453,7 @@ function extractPreview(value, kind) {
     value.imageList ||
     [];
   return {
-    desc: firstString(value.desc, value.title, value.caption, value.text, value.content),
+    desc: firstString(article.article_title, article.articleTitle, value.desc, value.title, value.caption, value.text, value.content),
     cover_url: firstUrlAny(
       video.cover,
       video.origin_cover,
@@ -469,7 +470,7 @@ function extractPreview(value, kind) {
     comment_count: firstNumber(stats.comment_count, stats.commentCount, value.comment_count),
     share_count: firstNumber(stats.share_count, stats.shareCount, value.share_count),
     collect_count: firstNumber(stats.collect_count, stats.collectCount, value.collect_count),
-    media_type: kind === "note" ? "gallery" : "video",
+    media_type: kind === "note" ? "gallery" : kind,
   };
 }
 
@@ -484,7 +485,8 @@ function workFromObject(value) {
     Array.isArray(value.imageInfos) ||
     Array.isArray(value.images_info) ||
     Array.isArray(value.animated_cover);
-  const kind = hasImages ? "note" : "video";
+  const kind = value.article_info || value.articleInfo || value.media_type === "article"
+    ? "article" : hasImages ? "note" : "video";
   return {
     aweme_id: awemeId,
     kind,
@@ -522,6 +524,10 @@ function addWork(works, pending, work, max = 0) {
   if (works.has(work.aweme_id)) {
     const existing = works.get(work.aweme_id);
     let changed = false;
+    if (work.kind === "article" && existing.kind !== "article") {
+      Object.assign(existing, { kind: "article", media_type: "article", url: work.url });
+      changed = true;
+    }
     for (const key of [
       "author_uid",
       "author_sec_uid",
@@ -579,7 +585,7 @@ async function collectCardLinks(page, works, pending, max) {
   const rows = await page.evaluate(() => {
     const anchors = Array.from(
       document.querySelectorAll(
-        'a[href*="/video/"], a[href*="/note/"], a[href*="/gallery/"], a[href*="/slides/"], a[href*="modal_id="], a[href*="vid="]'
+        'a[href*="/video/"], a[href*="/note/"], a[href*="/gallery/"], a[href*="/slides/"], a[href*="/article/"], a[href*="modal_id="], a[href*="vid="]'
       )
     );
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;

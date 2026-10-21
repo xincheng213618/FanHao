@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { workCodeKey, extractWorkCodes } from "../../../../../lib/code-parser.js";
 import { parseInfoMetadata, renderInfoMetadataText } from "../../../../../lib/info-metadata.js";
+import { applyParsedInfoToCoreWork } from "../../../../../lib/core-info-metadata.js";
 import { ensureRealPathWithinRoots } from "../../../../platform/server/library-path-safety.js";
 import { sameLocalVideo } from "../library/local-video-identity.js";
 
@@ -63,7 +64,11 @@ export function reserveOrganizationPaths(db, plan) {
       const id = `person-organization:${plan.id}:${index}`;
       const existing = db.prepare(`SELECT released_at FROM ${schema}.work_move_path_reservations WHERE job_id = ?`).get(id);
       if (existing && !existing.released_at) continue;
-      if (existing) throw fail("整理路径预留已经释放，请重新预览");
+      if (existing) {
+        db.prepare(`UPDATE ${schema}.work_move_path_reservations SET released_at = '', terminal_status = '',
+          mutation_mode = '', updated_at = ? WHERE job_id = ? AND owner_id = ?`).run(stamp(), id, plan.id);
+        continue;
+      }
       db.prepare(`INSERT INTO ${schema}.work_move_path_reservations
         (job_id, work_id, local_work_id, old_path, old_path_key, new_path, new_path_key, owner_id, lease_until, created_at, updated_at)
         VALUES (?, ?, -1, ?, ?, ?, ?, ?, '', ?, ?)`)
@@ -107,7 +112,7 @@ export function createPersonOrganizationService({ getCoreDb, resolvePerson, sour
     const person = resolvePerson(personId);
     if (!person) throw Object.assign(new Error("人物不存在"), { statusCode: 404 });
     const unfinished = pending(person.id);
-    if (unfinished) return publicPlan(unfinished);
+    if (unfinished && (unfinished.status === "running" || unfinished.groups.some((group) => !group.done))) return publicPlan(unfinished);
     const sources = [...new Set([...(person.sourcePaths || []), person.relativePath].filter(Boolean).map(sourcePathToAbsolute))]
       .map((source) => ensureRealPathWithinRoots(source, roots, "人物目录"));
     if (!sources.length || sources.some((p) => !fs.existsSync(p) || !fs.statSync(p).isDirectory())) throw fail("人物目录已失联，请先重新关联");
@@ -120,8 +125,13 @@ export function createPersonOrganizationService({ getCoreDb, resolvePerson, sour
       (SELECT url FROM work_external_refs r WHERE r.work_id = w.id AND r.provider = 'javdb-video' LIMIT 1) AS detailUrl
       FROM local_works lw JOIN works w ON w.id = lw.work_id
       JOIN work_people wp ON wp.work_id = w.id WHERE wp.person_id = ? ORDER BY lw.id`).all(Number(person.id));
-    const groups = [], skipped = [], targets = new Set();
+    // Keep completed path work and failed metadata retries, but include local
+    // records discovered after the original preview (including the final rescan).
+    const groups = unfinished ? [...unfinished.groups] : [], skipped = [];
+    const knownLocalWorks = new Set(groups.map((group) => Number(group.localWorkId)));
+    const targets = new Set(groups.map((group) => key(group.target)));
     for (const row of rows) {
+      if (knownLocalWorks.has(Number(row.id))) continue;
       const source = sources.find((p) => within(row.local_path, p));
       if (!source) continue;
       try {
@@ -200,7 +210,9 @@ export function createPersonOrganizationService({ getCoreDb, resolvePerson, sour
     const obsolete = sources.flatMap((source) => ["cover.jpg", "info.txt", "javdb-info.txt"].map((name) => path.join(source, name)))
       .filter((file) => fs.existsSync(file) && fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink())
       .map((file) => ({ file, root: sources.find((source) => within(file, source)), signature: signature(fs.statSync(file)) }));
-    const plan = { id: crypto.randomUUID(), version: 1, personId: person.id, personName: person.name, createdAt: stamp(), status: "preview", groups, skipped, obsolete };
+    const plan = unfinished ? { ...unfinished, groups, skipped, obsolete: [...new Map(
+      [...(unfinished.obsolete || []), ...obsolete].map((item) => [key(item.file), item])).values()] }
+      : { id: crypto.randomUUID(), version: 1, personId: person.id, personName: person.name, createdAt: stamp(), status: "preview", groups, skipped, obsolete };
     fs.mkdirSync(stateDir, { recursive: true });
     saveOrganizationPlan(planPath(plan.id), plan);
     return publicPlan(plan);
@@ -318,6 +330,91 @@ export function writeOrganizationSidecar(group, file, bytes) {
   fs.writeFileSync(temporary, bytes, { flag: "wx" });
   validateGroup(group);
   fs.renameSync(temporary, file);
+}
+
+export function refreshOrganizationCatalogueSnapshot(db, plan) {
+  for (const group of plan.groups) {
+    const row = db.prepare(`SELECT w.*, wp.updated_at AS associationUpdatedAt,
+      (SELECT url FROM work_external_refs r WHERE r.work_id=w.id AND provider='javdb-video' LIMIT 1) AS detailUrl,
+      (SELECT remote_url FROM fanhao_images.images i WHERE owner_type='work' AND owner_id=w.id
+        AND kind='cover' AND remote_url<>'' ORDER BY updated_at DESC, id DESC LIMIT 1) AS coverUrl
+      FROM works w JOIN work_people wp ON wp.work_id=w.id
+      WHERE w.id=? AND wp.person_id=? AND wp.source='actor_movies' LIMIT 1`).get(group.workId, Number(plan.personId));
+    group.catalogueRefreshed = Boolean(plan.actorRefreshDone && row
+      && Date.parse(row.associationUpdatedAt) >= Date.parse(plan.actorRefreshStartedAt || plan.createdAt));
+    if (!group.catalogueRefreshed) continue;
+    const parsed = parseInfoMetadata(row.raw_text || group.metadata.rawText);
+    Object.assign(parsed, { code: row.code, title: row.title,
+      releaseDate: row.release_date || parsed.releaseDate, durationMinutes: row.duration_minutes ?? parsed.durationMinutes,
+      rating: row.rating ?? parsed.rating, ratingCount: row.rating_count ?? parsed.ratingCount,
+      director: row.director || parsed.director, javdbUrl: row.detailUrl || parsed.javdbUrl,
+      imageUrl: row.coverUrl || parsed.imageUrl });
+    group.detailUrl = parsed.javdbUrl || "";
+    group.metadata = { rawText: `${renderInfoMetadataText(parsed)}${parsed.imageUrl ? `\n封面: ${parsed.imageUrl}` : ""}`,
+      imageUrl: parsed.imageUrl || "" };
+  }
+}
+
+export function syncOrganizationMetadata(db, group, plan, meta, coverBytes = null) {
+  validateGroup(group);
+  const incoming = !meta.metadataError ? parseInfoMetadata(meta.rawText || "") : null;
+  const existing = db.prepare("SELECT * FROM works WHERE id = ?").get(group.workId);
+  if (!existing || workCodeKey(existing.code) !== workCodeKey(group.code)
+    || (incoming && workCodeKey(incoming.code) !== workCodeKey(group.code))) throw fail("作品番号发生变化，已保留原资料");
+  const merged = parseInfoMetadata(existing.raw_text || group.metadata?.rawText || "");
+  Object.assign(merged, { code: existing.code, title: existing.title,
+    releaseDate: existing.release_date || merged.releaseDate, durationMinutes: existing.duration_minutes ?? merged.durationMinutes,
+    rating: existing.rating ?? merged.rating, ratingCount: existing.rating_count ?? merged.ratingCount,
+    director: existing.director || merged.director, description: existing.description || merged.description });
+  if (incoming) for (const [name, value] of Object.entries(incoming)) {
+    if (["fields", "rawText", "rawTextTruncated"].includes(name)) continue;
+    if (value !== "" && value != null && (!Array.isArray(value) || value.length)) merged[name] = value;
+  }
+  merged.imageUrl = meta.imageUrl || merged.imageUrl;
+  merged.javdbUrl = meta.detailUrl || merged.javdbUrl;
+  const rawText = `${renderInfoMetadataText(merged)}${merged.imageUrl ? `\n封面: ${merged.imageUrl}` : ""}`;
+  const parsed = incoming ? parseInfoMetadata(rawText) : null;
+  let detailKey = "";
+  if (parsed?.javdbUrl) {
+    const url = new URL(parsed.javdbUrl);
+    if (url.protocol !== "https:" || url.hostname !== "javdb.com" || !/^\/v\/[a-z0-9]+$/i.test(url.pathname)) throw fail("作品详情地址无效");
+    detailKey = url.pathname.split("/").at(-1);
+    const owner = db.prepare("SELECT work_id FROM work_external_refs WHERE provider = 'javdb-video' AND external_key = ?").get(detailKey);
+    if (owner && Number(owner.work_id) !== Number(group.workId)) throw fail("JavDB 详情已关联其他作品，已保留原资料");
+  }
+  if (parsed) writeOrganizationSidecar(group, path.join(group.target, "info.txt"), `${rawText}\n`);
+  if (coverBytes) writeOrganizationSidecar(group, path.join(group.target, "cover.jpg"), coverBytes);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    organizationMutationMode(db, plan, "organize");
+    const now = stamp();
+    if (parsed) {
+      applyParsedInfoToCoreWork(db, group.workId, parsed, { replaceExisting: true, now });
+      if (detailKey) db.prepare(`INSERT INTO work_external_refs(work_id, provider, external_key, url, source, created_at, updated_at)
+        VALUES (?, 'javdb-video', ?, ?, 'person-organization', ?, ?)
+        ON CONFLICT(provider, external_key) DO UPDATE SET url = excluded.url, updated_at = excluded.updated_at`)
+        .run(group.workId, detailKey, parsed.javdbUrl, now, now);
+    }
+    if (coverBytes) {
+      db.prepare(`UPDATE fanhao_images.images SET image_blob = ?, mime = 'image/jpeg', byte_size = ?,
+        status = 'ok', error = NULL, updated_at = ? WHERE owner_type = 'work' AND owner_id = ? AND kind = 'cover'`)
+        .run(coverBytes, coverBytes.length, now, group.workId);
+      // A missing cover has no row to UPDATE. Register the new canonical asset too.
+      db.prepare(`INSERT INTO fanhao_images.images(owner_type, owner_id, kind, source_type, local_path,
+        remote_url, image_blob, mime, byte_size, status, source, created_at, updated_at)
+        VALUES ('work', ?, 'cover', 'local', ?, '', ?, 'image/jpeg', ?, 'ok', 'person-organization', ?, ?)
+        ON CONFLICT DO UPDATE SET image_blob = excluded.image_blob, mime = excluded.mime,
+          byte_size = excluded.byte_size, status = 'ok', error = NULL, updated_at = excluded.updated_at`)
+        .run(group.workId, path.join(group.target, "cover.jpg"), coverBytes, coverBytes.length, now, now);
+    }
+    organizationMutationMode(db, plan, "");
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  if (parsed) {
+    group.metadata = { rawText, imageUrl: merged.imageUrl || "" };
+    group.detailUrl = parsed.javdbUrl || group.detailUrl;
+    group.releaseDate = parsed.releaseDate || group.releaseDate;
+  }
 }
 
 export function setOrganizationFolderReleaseDate(group) {

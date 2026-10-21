@@ -4,8 +4,8 @@ import { createSingleFlightPoller } from "./core/poller.js";
 import { createActivityFeature } from "./features/activity.js?v=20260902-extract-reset-01";
 import { createAuthFeature } from "./features/auth.js";
 import { createDownloadsFeature } from "./features/downloads.js?v=20260917-api-probe-02";
-import { createLibraryFeature } from "./features/library.js?v=20261002-manager-performance-01";
-import { createLinksFeature } from "./features/links.js?v=20261002-workspace-01";
+import { createLibraryFeature } from "./features/library.js?v=20261020-articles-01";
+import { createLinksFeature } from "./features/links.js?v=20261020-articles-01";
 import { createProfilesFeature } from "./features/profiles.js?v=20261002-workspace-01";
 import { createSettingsFeature } from "./features/settings.js?v=20260823-auto-collection-01";
 

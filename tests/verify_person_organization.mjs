@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 import { createWorkMoveReservationService } from "../src/modules/fanhao/server/works/work-move-reservation-service.js";
 import { createPersonOrganizationService, organizeGroup, reserveOrganizationPaths, releaseOrganizationPaths,
-  organizationFolderName, publicPlan, saveOrganizationPlan, writeOrganizationSidecar, cleanupOrganizationSidecars, cleanupOrganizationWorkCovers, setOrganizationFolderReleaseDate } from "../src/modules/fanhao/server/people/person-organization-service.js";
+  organizationFolderName, publicPlan, saveOrganizationPlan, writeOrganizationSidecar, refreshOrganizationCatalogueSnapshot, syncOrganizationMetadata, cleanupOrganizationSidecars, cleanupOrganizationWorkCovers, setOrganizationFolderReleaseDate } from "../src/modules/fanhao/server/people/person-organization-service.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 import { createAdminMaintenanceTaskService } from "../src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
 
@@ -19,9 +19,11 @@ const stateDir = path.join(root, "state");
 fs.mkdirSync(source);
 const db = new DatabaseSync(dbPath);
 db.exec(`CREATE TABLE works(id INTEGER PRIMARY KEY,code TEXT,title TEXT,updated_at TEXT,
-  raw_text TEXT,fields_json TEXT,release_date TEXT,duration_minutes INTEGER,rating REAL,rating_count INTEGER,director TEXT);
-  CREATE TABLE work_people(work_id INTEGER,person_id INTEGER);
-  CREATE TABLE work_external_refs(work_id INTEGER,provider TEXT,url TEXT);
+  raw_text TEXT,fields_json TEXT,release_date TEXT,duration_minutes INTEGER,rating REAL,rating_count INTEGER,director TEXT,
+  code_search TEXT,description TEXT,javdb_tags_json TEXT,source TEXT,status TEXT,error TEXT);
+  CREATE TABLE work_people(work_id INTEGER,person_id INTEGER,source TEXT,updated_at TEXT);
+  CREATE TABLE work_external_refs(work_id INTEGER,provider TEXT,url TEXT,external_key TEXT,source TEXT,created_at TEXT,updated_at TEXT,
+    UNIQUE(provider,external_key));
   CREATE TABLE local_works(id INTEGER PRIMARY KEY,work_id INTEGER,local_path TEXT,source_info_path TEXT,updated_at TEXT);
   CREATE TABLE local_files(id INTEGER PRIMARY KEY,local_work_id INTEGER,work_id INTEGER,file_path TEXT,file_type TEXT,relative_path TEXT,updated_at TEXT,name TEXT,size INTEGER,modified_at TEXT);
   CREATE TABLE video_probe_cache(file_path TEXT,updated_at TEXT);
@@ -37,7 +39,7 @@ function seed(id, code, title, directory, names) {
   fs.mkdirSync(directory, { recursive: true });
   db.prepare("INSERT INTO works(id,code,title,updated_at,raw_text) VALUES(?,?,?,'',?)")
     .run(id, code, title, `番号: ${code}\n标题: ${title}\n封面: https://c0.jdbstatic.com/covers/synthetic.jpg`);
-  db.prepare("INSERT INTO work_people VALUES(?,1)").run(id);
+  db.prepare("INSERT INTO work_people(work_id,person_id) VALUES(?,1)").run(id);
   db.prepare("INSERT INTO local_works VALUES(?,?,?,'','')").run(id, id, directory);
   for (const name of names) {
     const file = path.join(directory, name);
@@ -61,7 +63,7 @@ try {
     ["ABC-555 Synthetic.mp4", "h_1681abc555pl.jpg"]);
   seed(8, "TDEF-556", "TDEF-556 Ordinary", path.join(source, "TDEF-556 Ordinary"), ["DEF-556.mp4"]);
   db.prepare("INSERT INTO works(id,code,title,updated_at,release_date) VALUES(9,'ABC-555','ABC-555 Synthetic','','2023-12-28')").run();
-  db.prepare("INSERT INTO work_people VALUES(9,1)").run();
+  db.prepare("INSERT INTO work_people(work_id,person_id) VALUES(9,1)").run();
   db.prepare("UPDATE works SET release_date = '2024-01-05' WHERE id = 7").run();
   seed(10, "UVW-555", "[A].UVW-555 Marked VR", path.join(source, "UVW-555 [A].UVW-555 Marked VR"), ["UVW-555-1.mp4", "UVW-555-2.mp4", "cover.jpg", "info.txt"]);
   seed(11, "WXY-556", "WXY-556 Plain title", path.join(source, "[A].WXY-556 Legacy"), ["WXY-556.mp4"]);
@@ -194,6 +196,9 @@ try {
   assert.equal(db.prepare("SELECT count(*) n FROM works WHERE id IN (7,9)").get().n, 2, "ordinary and bonus catalogue entries remain separate");
   assert.equal(fs.statSync(editionGroup.target).mtimeMs, new Date("2024-01-05T00:00:00").getTime(), "the bound edition's release date is used");
   assert.equal(db.prepare("SELECT count(*) n FROM work_move_path_reservations WHERE released_at = ''").get().n, 0);
+  reserveOrganizationPaths(db, cliPlan);
+  assert.throws(() => db.prepare("UPDATE local_works SET updated_at='other' WHERE id=1").run(), /reserved/, "metadata-only retries reacquire the path reservation");
+  releaseOrganizationPaths(db, cliPlan);
   // The real completion hook must contain reload/read failures and refuse false success.
   let captured, reloads = 0, syncs = 0, readFailure = false;
   const maintenance = createAdminMaintenanceTaskService({
@@ -217,5 +222,82 @@ try {
   assert.doesNotThrow(() => captured.onDone(completed));
   assert.equal(completed.status, "error");
   assert(completed.logs.some((line) => line.includes("fixture read failure")));
+  readFailure = false;
+  const failedPlan = service.read(cliPlan.id);
+  failedPlan.status = "error";
+  failedPlan.refreshMetadata = true;
+  failedPlan.groups[0].metadataDone = false;
+  saveOrganizationPlan(service.planPath(failedPlan.id), failedPlan);
+  const partial = { status: "error", logs: [] };
+  captured.onDone(partial);
+  assert.equal(partial.status, "error");
+  assert(!partial.logs.includes("目录、封面、info 与本地索引已同步"), "metadata failures cannot announce full success");
+
+  const freshGroup = failedPlan.groups[0];
+  const freshMeta = { rawText: `番号: ${freshGroup.code}\n标题: ${freshGroup.code} Fresh title\n日期: 2026-10-16\n评分: 4.8分, 由123人评价`,
+    detailUrl: "https://javdb.com/v/fixture123", imageUrl: "https://c0.jdbstatic.com/covers/fresh.jpg", metadataError: "", coverError: "" };
+  db.prepare("DELETE FROM fanhao_images.images WHERE owner_type='work' AND owner_id=?").run(freshGroup.workId);
+  db.prepare("UPDATE works SET source='actor_movies',rating=3,description='Keep local notes' WHERE id=?").run(freshGroup.workId);
+  syncOrganizationMetadata(db, freshGroup, failedPlan, freshMeta, Buffer.from("fresh-fixture-cover"));
+  syncOrganizationMetadata(db, freshGroup, failedPlan, freshMeta, Buffer.from("fresh-fixture-cover"));
+  const refreshed = db.prepare("SELECT * FROM works WHERE id=?").get(freshGroup.workId);
+  assert.equal(refreshed.title, `${freshGroup.code} Fresh title`, "explicit refresh replaces existing external metadata");
+  assert.equal(refreshed.rating, 4.8);
+  assert.equal(refreshed.rating_count, 123);
+  assert.equal(refreshed.description, "Keep local notes", "missing fetched fields preserve existing values");
+  assert.equal(freshGroup.releaseDate, "2026-10-16");
+  assert.equal(db.prepare("SELECT count(*) n FROM fanhao_images.images WHERE owner_type='work' AND owner_id=?").get(freshGroup.workId).n, 1, "first missing cover is registered and replay is idempotent");
+  assert.equal(db.prepare("SELECT work_id FROM work_external_refs WHERE external_key='fixture123'").get().work_id, freshGroup.workId);
+  const infoBeforeFailure = fs.readFileSync(path.join(freshGroup.target, "info.txt"), "utf8");
+  syncOrganizationMetadata(db, freshGroup, failedPlan, { ...freshMeta, rawText: "bad response", metadataError: "network failed" });
+  assert.equal(fs.readFileSync(path.join(freshGroup.target, "info.txt"), "utf8"), infoBeforeFailure);
+  assert.throws(() => syncOrganizationMetadata(db, freshGroup, failedPlan, { ...freshMeta, rawText: "番号: ZZZ-999\n标题: Wrong" }), /番号/);
+  db.prepare("INSERT INTO work_external_refs(work_id,provider,external_key) VALUES(9,'javdb-video','otherWork')").run();
+  assert.throws(() => syncOrganizationMetadata(db, freshGroup, failedPlan, { ...freshMeta, detailUrl: "https://javdb.com/v/otherWork" }), /其他作品/);
+  failedPlan.actorRefreshDone = true;
+  failedPlan.actorRefreshStartedAt = "2026-10-17T10:00:00Z";
+  db.prepare("UPDATE work_people SET source='actor_movies',updated_at='2026-10-17T18:00:01+08:00' WHERE work_id=?").run(freshGroup.workId);
+  db.prepare("UPDATE works SET rating=4.9 WHERE id=?").run(freshGroup.workId);
+  refreshOrganizationCatalogueSnapshot(db, failedPlan);
+  assert.equal(freshGroup.catalogueRefreshed, true, "actor-card freshness compares timestamps across timezone formats");
+  assert(freshGroup.metadata.rawText.includes("4.9"), "fresh DB facts replace a preview snapshot before sidecars are written");
+  assert(failedPlan.groups.some((group) => !group.catalogueRefreshed), "unrefreshed works still require an exact lookup");
+  assert.equal(db.prepare("SELECT work_id FROM favorites").get().work_id, 1);
+  assert.equal(db.prepare("SELECT position FROM progress").get().position, 123);
+  // A final rescan may discover a local record after the original plan was made.
+  failedPlan.groups[1].metadataDone = true;
+  saveOrganizationPlan(service.planPath(failedPlan.id), failedPlan);
+  const savedGroup = JSON.stringify(failedPlan.groups[1]);
+  const discoveredFolder = path.join(source, "NMSL-033 Synthetic tapestry set");
+  seed(13, "NMSL-033", "NMSL-033 Synthetic tapestry set", discoveredFolder,
+    ["NMSL-033.restored.mp4", "info.txt", "synthetic-cover.jpg"]);
+  const resumed = service.preview("1");
+  assert.equal(resumed.id, failedPlan.id, "metadata retry retains its existing plan identity");
+  const resumedPlan = service.read(resumed.id);
+  assert.equal(resumedPlan.groups.length, failedPlan.groups.length + 1);
+  assert.equal(resumedPlan.groups.find((group) => group.code === "NMSL-033").items.filter((item) => item.source.endsWith(".mp4")).length, 1,
+    "a restored video in a newly indexed directory participates in the retry");
+  assert.equal(JSON.stringify(resumedPlan.groups[1]), savedGroup, "already completed work and metadata checkpoints are preserved");
+  assert(fs.existsSync(path.join(discoveredFolder, "NMSL-033.restored.mp4")), "preview only registers the proposal");
+  assert.equal(service.preview("1").groups.filter((group) => group.code === "NMSL-033").length, 1, "reopening preview does not append a duplicate");
+  seed(14, "NEW-014", "NEW-014 Synthetic", path.join(source, "NEW-014 Synthetic"), ["NEW-014.mp4"]);
+  assert(!service.preview("1").groups.some((group) => group.code === "NEW-014"), "an unfinished path plan is resumed intact before another rescan");
+
+  const order = [];
+  let pendingPaths = null;
+  const previewMaintenance = createAdminMaintenanceTaskService({
+    resolveLibraryPersonByPublicId: () => person,
+    adminTaskService: { list: () => [] },
+    personOrganizationService: { pending: () => pendingPaths, preview: () => { order.push("preview"); return {}; } },
+    syncPersonLocal: () => { order.push("scan"); return {}; }
+  });
+  previewMaintenance.organizePersonPayload({ personId: "1", preview: true });
+  assert.deepEqual(order.splice(0), ["scan", "preview"], "persist the local scan before creating a plan");
+  pendingPaths = { status: "error", groups: [{ done: true }] };
+  previewMaintenance.organizePersonPayload({ personId: "1", preview: true });
+  assert.deepEqual(order.splice(0), ["scan", "preview"], "metadata-only retries can discover newly indexed works");
+  pendingPaths.groups[0].done = false;
+  previewMaintenance.organizePersonPayload({ personId: "1", preview: true });
+  assert.deepEqual(order, ["preview"], "do not rescan while interrupted path work remains");
   console.log("person-organization: preview, multipart, nested folders, conflicts, incomplete downloads, mixed codes, path reservations, replay, drift, no-backup replacement, safe obsolete cleanup, identities and real task executable passed (synthetic files only)");
 } finally { db.close(); temporary.cleanup(); }

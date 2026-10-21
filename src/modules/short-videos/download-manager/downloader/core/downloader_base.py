@@ -12,6 +12,7 @@ from auth import CookieManager
 from config import ConfigLoader
 from control import QueueManager, RateLimiter, RetryHandler
 from core.api_client import DouyinAPIClient
+from core.article import article_markdown, article_title, is_article, save_article
 from core.metadata import extract_author_sec_uid
 from core.transcript_manager import TranscriptManager
 from storage import Database, FileManager, MetadataHandler
@@ -96,6 +97,7 @@ class BaseDownloader(ABC):
         self._local_aweme_ids: Optional[set[str]] = None
         self._aweme_id_pattern = re.compile(r"(?<!\d)(\d{15,20})(?!\d)")
         self._local_media_suffixes = {
+            ".html",
             ".mp4",
             ".jpg",
             ".jpeg",
@@ -239,6 +241,8 @@ class BaseDownloader(ABC):
                     continue
                 if path.suffix.lower() not in self._local_media_suffixes:
                     continue
+                if re.search(r"_article_\d+\.", path.name):
+                    continue
                 try:
                     if path.stat().st_size <= 0:
                         continue
@@ -321,7 +325,8 @@ class BaseDownloader(ABC):
             logger.error("Missing aweme_id in aweme data")
             return None
 
-        desc = (aweme_data.get("desc", "no_title") or "").strip() or "no_title"
+        desc = (article_title(aweme_data) if is_article(aweme_data)
+                else aweme_data.get("desc", "no_title") or "").strip() or "no_title"
         publish_ts, publish_date = self._resolve_publish_time(aweme_data.get("create_time"))
         if not publish_date:
             publish_date = datetime.now().strftime("%Y-%m-%d")
@@ -468,6 +473,12 @@ class BaseDownloader(ABC):
         collection_dir: Optional[str] = None,
     ) -> bool:
         started = time.monotonic()
+        if is_article(aweme_data) and not article_markdown(aweme_data):
+            # Profile feeds can contain only an article title/cover. Fetch full detail.
+            await self.rate_limiter.acquire()
+            detail = await self.api_client.get_video_detail(str(aweme_data.get("aweme_id") or ""))
+            if detail:
+                aweme_data = {**aweme_data, **detail, "media_type": "article"}
         file_context = self._build_aweme_file_context(
             aweme_data,
             author_name,
@@ -508,7 +519,16 @@ class BaseDownloader(ABC):
         # 串行等待每个附件（尤其是慢镜像）时占住全局下载并发槽。
         optional_assets: List[Tuple[Path, Any]] = []
 
-        if media_type == "video":
+        if media_type == "article":
+            self._progress_update_step("保存文章", desc)
+            try:
+                downloaded_files.extend(
+                    await save_article(self, aweme_data, save_dir, file_stem, session)
+                )
+            except (OSError, ValueError) as exc:
+                logger.error("Failed saving article %s: %s", aweme_id, exc)
+                return False
+        elif media_type == "video":
             video_info = self._build_no_watermark_url(aweme_data)
             if not video_info:
                 logger.error("No playable video URL found for aweme %s", aweme_id)
@@ -1001,6 +1021,8 @@ class BaseDownloader(ABC):
     )
 
     def _detect_media_type(self, aweme_data: Dict[str, Any]) -> str:
+        if is_article(aweme_data):
+            return "article"
         if self._iter_gallery_items(aweme_data):
             return "gallery"
         aweme_type = aweme_data.get("aweme_type")

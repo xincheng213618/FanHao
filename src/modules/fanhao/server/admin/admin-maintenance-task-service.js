@@ -37,12 +37,20 @@ export function createAdminMaintenanceTaskService({
     if (active) return { ok: true, task: adminTaskService.publicTask(active) };
     if (currentTasks().some((task) => ["running", "stopping"].includes(task.status)
       && ["actor-movies", "script"].includes(task.type))) throw httpError("还有资料扫描任务正在运行，请完成后再整理", 409);
-    if (body.preview || !body.planId) return { ok: true, plan: personOrganizationService.preview(person.id) };
+    if (body.preview || !body.planId) {
+      const pending = personOrganizationService.pending?.(person.id);
+      // A path operation interrupted halfway must finish before any rescan.
+      if (!pending || pending.groups.every((group) => group.done)) {
+        if (!syncPersonLocal(person.id)) throw httpError("人物本地目录未能同步，请先检查来源目录", 409);
+      }
+      return { ok: true, plan: personOrganizationService.preview(person.id) };
+    }
     const plan = personOrganizationService.read(body.planId);
     if (String(plan.personId) !== String(person.id)) throw httpError("整理计划不属于当前人物", 409);
     if (plan.status === "done") throw httpError("这次整理已经完成，请重新预览", 409);
     if (!plan.groups.length) throw httpError("没有可以整理的本地作品", 400);
     plan.refreshMetadata = body.refreshMetadata !== false;
+    plan.refreshActorMovies = plan.refreshMetadata && Boolean(actorProfileRow?.(person.id)?.javdb_url);
     // Mark before spawning so another request cannot generate a competing plan.
     plan.status = "running";
     const planFile = personOrganizationService.planPath(plan.id);
@@ -53,7 +61,7 @@ export function createAdminMaintenanceTaskService({
     let outputBuffer = "", pathsReloaded = false;
     const task = adminTaskService.startProcessTask({
       type: "person-organize", label: "重新整理人物目录", person, command: nodeCommand, args,
-      refreshHints: ["current-view"], invalidates: ["localWorks", "workInfo", "workCovers"],
+      refreshHints: ["current-view"], invalidates: ["localWorks", "actorProfiles", "actorMovies", "workInfo", "workCovers"],
       onStdout: (currentTask, chunk) => {
         outputBuffer += chunk;
         const lines = outputBuffer.split(/\r?\n/);
@@ -69,6 +77,10 @@ export function createAdminMaintenanceTaskService({
       },
       onDone: (completedTask) => {
         try {
+          if (plan.refreshActorMovies) {
+            invalidateTableStamp("actor_movies");
+            setActorMovieCache(null);
+          }
           setLocalWorkCachesDirty();
           setWorkInfoCache(null);
           clearSearchSourceCaches();
@@ -78,7 +90,11 @@ export function createAdminMaintenanceTaskService({
           const result = syncPersonLocal(person.id);
           if (!result) throw new Error("人物本地目录未能同步");
           if (result?.bindingWarnings?.length) throw new Error(result.bindingWarnings.map((w) => w.message).join("；"));
-          completedTask.logs.push(plan.refreshMetadata ? "目录、封面、info 与本地索引已同步" : "目录与本地索引已同步");
+          const metadataComplete = latest.status === "done" && (!plan.refreshMetadata || latest.groups.every((group) => group.metadataDone));
+          if (completedTask.status !== "done" || !metadataComplete) {
+            completedTask.status = "error";
+            completedTask.logs.push("ERROR 目录与本地索引已同步，部分作品资料或封面未更新，请重新整理继续失败项");
+          } else completedTask.logs.push(plan.refreshMetadata ? "目录、作品资料、封面、info 与本地索引已同步" : "目录与本地索引已同步");
         } catch (error) { completedTask.status = "error"; completedTask.logs.push(`ERROR 本地索引同步失败：${error.message}`); }
       }
     });

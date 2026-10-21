@@ -46,7 +46,7 @@ class DownloaderFactory:
             "job_id": job_id,
         }
 
-        if url_type == "video":
+        if url_type in {"video", "article"}:
             return VideoDownloader(**common_args)
         elif url_type == "user":
             return UserDownloader(**common_args)

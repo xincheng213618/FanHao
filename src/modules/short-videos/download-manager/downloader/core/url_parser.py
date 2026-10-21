@@ -21,7 +21,11 @@ class URLParser:
             "type": url_type,
         }
 
-        if url_type == "video":
+        if url_type == "article":
+            match = re.search(r"/article/(\d+)", url)
+            if match:
+                result["aweme_id"] = match.group(1)
+        elif url_type == "video":
             aweme_id = URLParser._extract_video_id(url)
             if aweme_id:
                 result["aweme_id"] = aweme_id

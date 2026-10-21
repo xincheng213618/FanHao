@@ -8,8 +8,9 @@ import { routeAdminApi } from "../src/modules/system/server/admin/routes.js";
 
 const preview = { id: "synthetic-plan", workCount: 2, moveCount: 1, skipped: [{ code: "BAD-123", reason: "目标目录已存在" }],
   groups: [{ code: "ABC-123", target: `R:/synthetic/${"long".repeat(70)}` }], obsolete: ["R:/synthetic/cover.jpg", "R:/synthetic/javdb-info.txt"] };
-let starts = 0, polls = 0, active = false, deny = false, bodyReads = 0, lastBody;
-const task = () => ({ id: "synthetic-task", status: polls > 0 ? "done" : "running", logs: ["整理结果：2 部"] });
+let starts = 0, polls = 0, active = false, deny = false, bodyReads = 0, lastBody, failTask = false;
+const task = () => ({ id: "synthetic-task", status: polls > 0 ? (failTask ? "error" : "done") : "running",
+  logs: failTask ? ["ERROR 部分作品资料或封面未更新，请重新整理继续失败项"] : ["整理结果：2 部"] });
 const html = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/modules/fanhao/styles.css">
 <main><div id="profile"></div><p id="refreshes">0</p></main><script type="module">
 import { createPersonProfile } from '/modules/fanhao/person-profile.js';
@@ -53,6 +54,7 @@ try {
   const dialog = page.getByRole("dialog", {name:"重新整理人物目录"});
   await dialog.waitFor();
   assert.equal(await dialog.getByRole("checkbox").isChecked(), true);
+  assert((await dialog.textContent()).includes("从 JavDB 更新全部作品列表、本地作品资料与封面"));
   assert((await dialog.textContent()).includes("不备份"));
   assert.equal(await page.evaluate(()=>document.activeElement.textContent), "关闭");
   await page.keyboard.press("Shift+Tab");
@@ -70,6 +72,13 @@ try {
   assert.equal(starts,1);assert.equal(lastBody.refreshMetadata,true);
   assert.equal(await page.locator("#refreshes").textContent(),"1");
   await dialog.getByRole("button",{name:"关闭",exact:true}).click();
+  active=false;polls=0;
+  await page.getByRole("button", {name:"重新整理",exact:true}).click();
+  await dialog.getByRole("checkbox").uncheck();
+  await dialog.getByRole("button",{name:"开始整理"}).click();
+  await dialog.getByText("整理完成，目录和本地索引已同步。").waitFor();
+  assert.equal(lastBody.refreshMetadata,false);
+  await dialog.getByRole("button",{name:"关闭",exact:true}).click();
   // An existing task is monitored without another start; a route switch must not navigate back.
   polls=0;
   await page.getByRole("button", {name:"重新整理",exact:true}).click();
@@ -77,7 +86,14 @@ try {
   await page.evaluate(()=>{window.fixtureState.selectedPerson={id:'2'};});
   await dialog.getByRole("button",{name:"查看运行进度"}).click();
   await dialog.getByText("整理完成，封面、info 和本地索引已同步。").waitFor();
-  assert.equal(starts,1);assert.equal(await page.locator("#refreshes").textContent(),"1");
+  assert.equal(starts,2);assert.equal(await page.locator("#refreshes").textContent(),"2");
+  await dialog.getByRole("button",{name:"关闭",exact:true}).click();
+  active=false;polls=0;failTask=true;
+  await page.evaluate(()=>{window.fixtureState.selectedPerson={id:'1'};});
+  await page.getByRole("button", {name:"重新整理",exact:true}).click();
+  await dialog.getByRole("button",{name:"开始整理"}).click();
+  await dialog.locator('[role="status"]').filter({hasText:"ERROR 部分作品资料或封面未更新"}).waitFor();
+  assert(!(await dialog.locator('[role="status"]').textContent()).includes("整理完成"));
   deny=true;const reads=bodyReads;
   const denied = await fetch(`${base}/api/admin/organize-person`, {method:"POST",body:'{"personId":"1"}'});
   assert.equal(denied.status,403);assert.equal(bodyReads,reads);

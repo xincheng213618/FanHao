@@ -285,7 +285,7 @@ const downloaderApacheLicense = fs.readFileSync(
 );
 assert.match(downloaderApacheLicense, /Apache License\s+Version 2\.0, January 2004/i);
 
-const config = createServerConfig({ projectRoot });
+const config = createServerConfig({ projectRoot, env: {} });
 assert.equal(config.SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH, expectedDbPath);
 assert.equal(config.SHORT_VIDEO_DOWNLOAD_MANAGER_URL, "http://127.0.0.1:8765");
 assert.deepEqual(config.SHORT_VIDEO_ROOTS, ["D:\\Media\\ShortVideos"]);
@@ -443,8 +443,8 @@ assert.match(linksFeatureSource, /profile_tab === "like"/);
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
 assert.match(managerAppSource, /features\/downloads\.js\?v=20260917-api-probe-02/);
 assert.match(managerAppSource, /features\/activity\.js\?v=20260902-extract-reset-01/);
-assert.match(managerAppSource, /features\/library\.js\?v=20261002-manager-performance-01/);
-assert.match(managerAppSource, /features\/links\.js\?v=20261002-workspace-01/);
+assert.match(managerAppSource, /features\/library\.js\?v=20261020-articles-01/);
+assert.match(managerAppSource, /features\/links\.js\?v=20261020-articles-01/);
 assert.match(managerAppSource, /features\/profiles\.js\?v=20261002-workspace-01/);
 assert.match(managerAppSource, /features\/settings\.js\?v=20260823-auto-collection-01/);
 

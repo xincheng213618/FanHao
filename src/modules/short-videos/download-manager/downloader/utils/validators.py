@@ -102,6 +102,8 @@ def parse_url_type(url: str) -> Optional[str]:
 
     if not _is_douyin_web_host(host):
         return None
+    if re.fullmatch(r"/article/\d+/?", path):
+        return "article"
 
     # modal_id 参数表示在任意页面（用户主页、发现页、搜索页等）弹窗查看单个作品，
     # 应优先识别为单作品下载，而非该页面本身的类型。

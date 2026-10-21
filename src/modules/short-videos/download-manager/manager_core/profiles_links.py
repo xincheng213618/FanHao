@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from .common import clean_profile_nickname, first_int, first_text, int_or_none, json_text, now_iso, parse_profile_url
+from .common import clean_profile_nickname, first_int, first_text, int_or_none, json_text, now_iso, parse_profile_url, work_kind
 from .config import TEST_PROFILE_URL
 from .database import db, merge_profile_history_value, parse_profile_history, setting
 from .domain_manifest import author_sec_uid_from_manifest, douyin_user_url, kind_from_manifest, manifest_cover_path, manifest_music_metadata, manifest_preview_path, sync_manifest_files
@@ -39,7 +39,7 @@ def manifest_import_row(record: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "aweme_id": aweme_id,
         "kind": kind,
-        "url": f"https://www.douyin.com/{'note' if kind == 'note' else 'video'}/{aweme_id}",
+        "url": f"https://www.douyin.com/{kind}/{aweme_id}",
         "author_nickname": first_text(record.get("author_name")),
         "author_sec_uid": author_sec_uid_from_manifest(record),
         "author_avatar_url": first_text(record.get("author_avatar_url")),
@@ -47,7 +47,7 @@ def manifest_import_row(record: dict[str, Any]) -> dict[str, Any] | None:
         "desc": first_text(record.get("desc")),
         "cover_url": first_text(record.get("cover_url"), record.get("cover")),
         "create_time": int_or_none(record.get("publish_timestamp") or record.get("create_time")),
-        "media_type": first_text(record.get("media_type"), "gallery" if kind == "note" else "video"),
+        "media_type": first_text(record.get("media_type"), "gallery" if kind == "note" else kind),
         "local_file_names": json_text(record.get("file_names")),
         "local_file_paths": json_text(record.get("file_paths")),
         "local_cover_path": manifest_cover_path(record),
@@ -657,7 +657,7 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
         for work in works:
             aweme_id = str(work.get("aweme_id") or "")
             url = str(work.get("url") or "")
-            kind = str(work.get("kind") or "video")
+            kind = work_kind(url, str(work.get("kind") or ""), first_text(work.get("media_type"), work.get("mediaType")))
             author_uid = str(work.get("author_uid") or work.get("authorUid") or "")
             author_sec_uid = str(work.get("author_sec_uid") or work.get("authorSecUid") or "")
             author_nickname = str(work.get("author_nickname") or work.get("authorNickname") or "")
@@ -675,7 +675,7 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
             comment_count = first_int(work.get("comment_count"), work.get("commentCount"))
             share_count = first_int(work.get("share_count"), work.get("shareCount"))
             collect_count = first_int(work.get("collect_count"), work.get("collectCount"))
-            media_type = first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video")
+            media_type = "article" if kind == "article" else first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video")
             local_file_names = json_text(work.get("local_file_names") or work.get("localFileNames"))
             local_file_paths = json_text(work.get("local_file_paths") or work.get("localFilePaths"))
             preview_path = first_text(work.get("preview_path"), work.get("previewPath"))
@@ -702,8 +702,8 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
                 )
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 ON CONFLICT(profile_id, aweme_id) DO UPDATE SET
-                  kind=excluded.kind,
-                  url=excluded.url,
+                  kind=CASE WHEN links.media_type='article' THEN 'article' ELSE excluded.kind END,
+                  url=CASE WHEN links.media_type='article' THEN links.url ELSE excluded.url END,
                   author_uid=COALESCE(NULLIF(excluded.author_uid, ''), links.author_uid),
                   author_sec_uid=COALESCE(NULLIF(excluded.author_sec_uid, ''), links.author_sec_uid),
                   author_nickname=COALESCE(NULLIF(excluded.author_nickname, ''), links.author_nickname),
@@ -717,7 +717,8 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
                   comment_count=COALESCE(excluded.comment_count, links.comment_count),
                   share_count=COALESCE(excluded.share_count, links.share_count),
                   collect_count=COALESCE(excluded.collect_count, links.collect_count),
-                  media_type=COALESCE(NULLIF(excluded.media_type, ''), links.media_type),
+                  media_type=CASE WHEN links.media_type='article' THEN 'article'
+                    ELSE COALESCE(NULLIF(excluded.media_type, ''), links.media_type) END,
                   local_file_names=COALESCE(NULLIF(excluded.local_file_names, ''), links.local_file_names),
                   local_file_paths=COALESCE(NULLIF(excluded.local_file_paths, ''), links.local_file_paths),
                   preview_path=COALESCE(NULLIF(excluded.preview_path, ''), links.preview_path),

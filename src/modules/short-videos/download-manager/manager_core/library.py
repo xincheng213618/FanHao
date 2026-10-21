@@ -31,12 +31,13 @@ def library_files_for_link(link: sqlite3.Row) -> dict[str, Any] | None:
             return None
         output_dir, record = resolved
     media_type = first_text(row_text(link, "media_type"), record.get("media_type")).lower()
+    is_article = media_type == "article" or record.get("media_type") == "article" or row_text(link, "kind").lower() == "article"
     is_gallery = media_type in {"gallery", "note", "image", "images"} or row_text(link, "kind").lower() == "note"
     file_rows = manifest_file_rows(record, output_dir)
     files: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in file_rows:
-        if not row.get("exists_on_disk") or row.get("kind") not in {"video", "image", "audio"}:
+        if not row.get("exists_on_disk") or row.get("kind") not in {"video", "image", "audio", "article"}:
             continue
         path = Path(str(row.get("absolute_path") or ""))
         try:
@@ -62,7 +63,9 @@ def library_files_for_link(link: sqlite3.Row) -> dict[str, Any] | None:
         cover_row = next((row for row in files if row.get("role") == "cover" and row.get("kind") == "image"), None)
         cover = cover_row["path"] if cover_row else None
 
-    if is_gallery:
+    if is_article:
+        assets = [row for row in files if row.get("kind") == "article"]
+    elif is_gallery:
         assets = [row for row in files if row.get("kind") in {"image", "video"} and row.get("role") != "cover"]
         if not assets and cover is not None:
             assets = [{"kind": "image", "role": "image", "path": cover}]
@@ -79,6 +82,7 @@ def library_files_for_link(link: sqlite3.Row) -> dict[str, Any] | None:
         "output_dir": output_dir,
         "record": record,
         "is_gallery": is_gallery,
+        "is_article": is_article,
         "assets": assets[:80],
         "cover": cover,
         "music": music_row["path"] if music_row else None,
@@ -108,7 +112,7 @@ def library_item_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
         "author_id": first_text(row_text(row, "author_sec_uid"), row_text(row, "author_uid")),
         "downloaded_at": row_text(row, "downloaded_at"),
         "create_time": row_int(row, "create_time"),
-        "media_type": "gallery" if media["is_gallery"] else "video",
+        "media_type": "article" if media["is_article"] else "gallery" if media["is_gallery"] else "video",
         "cover_url": cover_url,
         "assets": assets,
         "asset_count": len(assets),
@@ -165,7 +169,7 @@ def list_library(query: dict[str, list[str]]) -> dict[str, Any]:
 
 def shared_player_video_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
     item = library_item_from_row(row)
-    if not item:
+    if not item or item["media_type"] == "article":
         return None
     media = item.pop("_media")
     record = media.get("record") if isinstance(media.get("record"), dict) else {}
@@ -299,7 +303,7 @@ def shared_player_neighbor(row: sqlite3.Row, direction: int) -> dict[str, Any] |
         order = "COALESCE(downloaded_at, last_started_at, last_seen_at, '') DESC, id DESC"
     with db() as conn:
         candidates = conn.execute(
-            f"SELECT * FROM links WHERE status='downloaded' AND {comparison} ORDER BY {order} LIMIT 32",
+            f"SELECT * FROM links WHERE status='downloaded' AND COALESCE(media_type, '') <> 'article' AND COALESCE(kind, '') <> 'article' AND {comparison} ORDER BY {order} LIMIT 32",
             (current_order, current_order, current_id),
         ).fetchall()
     for candidate in candidates:
@@ -335,7 +339,7 @@ def shared_player_list(query: dict[str, list[str]]) -> dict[str, Any]:
     media_filter = (query.get("media") or ["all"])[0].strip().lower()
     limit = normalize_int((query.get("limit") or ["48"])[0], 48, 1, 120)
     offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
-    where = ["status='downloaded'"]
+    where = ["status='downloaded'", "COALESCE(media_type, '') <> 'article'", "COALESCE(kind, '') <> 'article'"]
     params: list[Any] = []
     if search:
         like = f"%{search}%"
@@ -391,7 +395,7 @@ def shared_player_summary() -> dict[str, Any]:
                    COUNT(DISTINCT COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_uid, ''), NULLIF(author_nickname, ''))) authors,
                    COALESCE(SUM(duration_ms), 0) duration_ms
             FROM links
-            WHERE status='downloaded'
+            WHERE status='downloaded' AND COALESCE(media_type, '') <> 'article' AND COALESCE(kind, '') <> 'article'
             """
         ).fetchone()
     return {

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
-import { organizeGroup, saveOrganizationPlan, writeOrganizationSidecar, reserveOrganizationPaths, releaseOrganizationPaths, organizationMutationMode, cleanupOrganizationSidecars, cleanupOrganizationWorkCovers, setOrganizationFolderReleaseDate } from "../src/modules/fanhao/server/people/person-organization-service.js";
+import { organizeGroup, saveOrganizationPlan, refreshOrganizationCatalogueSnapshot, syncOrganizationMetadata, reserveOrganizationPaths, releaseOrganizationPaths, cleanupOrganizationSidecars, cleanupOrganizationWorkCovers, setOrganizationFolderReleaseDate } from "../src/modules/fanhao/server/people/person-organization-service.js";
 
 const { values } = parseArgs({ options: { plan: { type: "string" }, db: { type: "string" }, "image-db": { type: "string" } } });
 const planFile = path.resolve(values.plan);
@@ -23,18 +23,41 @@ db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
 attachCoreImageStore(db, { dbPath: values["image-db"] });
 const taskDir = planFile.slice(0, -5);
 
-function runMetadata() {
-  fs.mkdirSync(taskDir, { recursive: true });
-  const args = ["-u", "tools/fetch_person_organization_metadata.py", "--plan", planFile, "--output", taskDir];
+function runPython(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn("python", args, { windowsHide: true, stdio: ["ignore", "inherit", "inherit"], env: { ...process.env, PYTHONUTF8: "1" } });
+    const child = spawn("python", ["-u", ...args], { windowsHide: true, stdio: ["ignore", "inherit", "inherit"],
+      env: { ...process.env, PYTHONUTF8: "1", FANHAO_CORE_IMAGE_DB: values["image-db"] } });
     child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`资料下载进程退出：${code}`)));
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`资料更新进程退出：${code}`)));
   });
 }
 
+function runMetadata() {
+  fs.mkdirSync(taskDir, { recursive: true });
+  return runPython(["tools/fetch_person_organization_metadata.py", "--plan", planFile, "--output", taskDir]);
+}
+
 try {
-  if (plan.groups.some((group) => !group.done)) reserveOrganizationPaths(db, plan);
+  const warnings = [];
+  if (plan.refreshMetadata && plan.refreshActorMovies && !plan.actorRefreshDone) {
+    console.log("正在更新人物全部作品列表（包含后续分页）");
+    plan.actorRefreshStartedAt = new Date().toISOString();
+    saveOrganizationPlan(planFile, plan);
+    try {
+      await runPython(["tools/refresh_core_javdb_actor_movies.py", "--db", values.db, "--person-id", String(plan.personId),
+        "--profile-dir", path.resolve("data/selenium-person-organization-profile", String(plan.personId)), "--write", "--max-pages", "0",
+        "--actor-wait-seconds", "45", "--fast", "--headless", "--sleep", "1", "--jitter", "0"]);
+      plan.actorRefreshDone = true;
+      saveOrganizationPlan(planFile, plan);
+    } catch (error) { warnings.push(`人物作品列表更新失败 · ${error.message}`); }
+  }
+  // Upgrade old retry plans: their completed groups only used stored URLs.
+  if (plan.refreshMetadata && plan.metadataVersion !== 2) {
+    for (const group of plan.groups) group.metadataDone = false;
+    plan.metadataVersion = 2;
+    saveOrganizationPlan(planFile, plan);
+  }
+  if (plan.groups.some((group) => !group.done || (plan.refreshMetadata && !group.metadataDone))) reserveOrganizationPaths(db, plan);
   plan.status = "running";
   saveOrganizationPlan(planFile, plan);
   for (const group of plan.groups) {
@@ -42,37 +65,31 @@ try {
     console.log(`目录已整理：${group.code}`);
   }
   console.log("PERSON_ORGANIZATION_PATHS_SYNCED");
-  const warnings = [];
   if (plan.refreshMetadata) {
+    if (plan.refreshActorMovies) {
+      refreshOrganizationCatalogueSnapshot(db, plan);
+      saveOrganizationPlan(planFile, plan);
+    }
     await runMetadata();
     for (const group of plan.groups) {
       if (group.metadataDone) continue;
       const meta = JSON.parse(fs.readFileSync(path.join(taskDir, `${group.localWorkId}.json`), "utf8"));
       if (meta.error) { warnings.push(`${group.code}: ${meta.error}`); continue; }
-      writeOrganizationSidecar(group, path.join(group.target, "info.txt"), `${meta.rawText}\n`);
+      if (meta.metadataError) warnings.push(`${group.code}: 作品资料更新失败 · ${meta.metadataError}`);
+      const coverFile = path.join(taskDir, `${group.localWorkId}.jpg`);
+      const bytes = !meta.coverError && fs.existsSync(coverFile) ? fs.readFileSync(coverFile) : null;
+      syncOrganizationMetadata(db, group, plan, meta, bytes);
       // Remove the duplicate only after the canonical info.txt has been written.
       const javdbInfo = path.join(group.target, "javdb-info.txt");
-      if (fs.existsSync(javdbInfo) && fs.lstatSync(javdbInfo).isFile() && !fs.lstatSync(javdbInfo).isSymbolicLink()) fs.unlinkSync(javdbInfo);
-      const coverFile = path.join(taskDir, `${group.localWorkId}.jpg`);
-      if (!meta.coverError && fs.existsSync(coverFile)) {
-        const bytes = fs.readFileSync(coverFile);
-        writeOrganizationSidecar(group, path.join(group.target, "cover.jpg"), bytes);
-        // Refresh cached covers too: the UI may prefer an existing SQLite blob.
-        db.exec("BEGIN IMMEDIATE");
-        organizationMutationMode(db, plan, "organize");
-        db.prepare(`UPDATE fanhao_images.images SET image_blob = ?, mime = 'image/jpeg', byte_size = ?,
-          status = 'ok', updated_at = ? WHERE owner_type = 'work' AND owner_id = ? AND kind = 'cover'`)
-          .run(bytes, bytes.length, new Date().toISOString(), group.workId);
-        organizationMutationMode(db, plan, "");
-        db.exec("COMMIT");
-      } else warnings.push(`${group.code}: 封面下载失败 · ${meta.coverError}`);
-      group.metadataDone = !meta.coverError;
+      if (!meta.metadataError && fs.existsSync(javdbInfo) && fs.lstatSync(javdbInfo).isFile() && !fs.lstatSync(javdbInfo).isSymbolicLink()) fs.unlinkSync(javdbInfo);
+      if (!bytes) warnings.push(`${group.code}: 封面下载失败 · ${meta.coverError || "未生成有效封面文件"}`);
+      group.metadataDone = !meta.metadataError && Boolean(bytes);
       saveOrganizationPlan(planFile, plan);
       if (group.metadataDone) {
         if (fs.existsSync(coverFile)) fs.unlinkSync(coverFile);
         fs.unlinkSync(path.join(taskDir, `${group.localWorkId}.json`));
       }
-      console.log(`资料已写入：${group.code}`);
+      console.log(`${group.metadataDone ? "资料已更新" : "资料部分更新，失败项待重试"}：${group.code}`);
     }
   }
   plan.warnings = warnings;

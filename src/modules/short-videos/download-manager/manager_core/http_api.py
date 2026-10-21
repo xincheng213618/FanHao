@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .auth import clear_cookie_auth, cookie_auth_status, import_cookie_text, open_cookie_folder, start_cookie_login
-from .common import first_int, first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url
+from .common import first_int, first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url, work_kind
 from .collection_scheduler import (
     AUTOMATIC_COLLECTION_ENABLED_SETTING,
     AUTOMATIC_COLLECTION_INTERVAL_SETTING,
@@ -481,9 +481,9 @@ class Handler(SimpleHTTPRequestHandler):
                 aweme_id = str(work.get("aweme_id") or work.get("awemeId") or work_id_from_url(url) or "")
                 if not aweme_id:
                     continue
-                kind = str(work.get("kind") or ("note" if "/note/" in url or "/gallery/" in url or "/slides/" in url else "video"))
+                kind = work_kind(url, str(work.get("kind") or ""), first_text(work.get("media_type"), work.get("mediaType")))
                 if not url:
-                    url = f"https://www.douyin.com/{'note' if kind == 'note' else 'video'}/{aweme_id}"
+                    url = f"https://www.douyin.com/{kind}/{aweme_id}"
                 works.append(
                     {
                         "aweme_id": aweme_id,
@@ -502,7 +502,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "comment_count": first_int(work.get("comment_count"), work.get("commentCount")),
                         "share_count": first_int(work.get("share_count"), work.get("shareCount")),
                         "collect_count": first_int(work.get("collect_count"), work.get("collectCount")),
-                        "media_type": first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video"),
+                        "media_type": "article" if kind == "article" else first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video"),
                     }
                 )
         else:
@@ -514,7 +514,7 @@ class Handler(SimpleHTTPRequestHandler):
                 aweme_id = work_id_from_url(url)
                 if not aweme_id:
                     continue
-                kind = "note" if "/note/" in url or "/gallery/" in url or "/slides/" in url else "video"
+                kind = work_kind(url)
                 works.append({"aweme_id": aweme_id, "kind": kind, "url": url})
         inserted, updated = upsert_links(profile_id, works)
         add_event("info", f"手动导入 {len(works)} 条，新 {inserted}，已存在 {updated}")
@@ -597,8 +597,13 @@ class Handler(SimpleHTTPRequestHandler):
                     status = HTTPStatus.PARTIAL_CONTENT
             content_length = max(0, end - start + 1)
             content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+            if content_type.startswith("text/"):
+                content_type += "; charset=utf-8"
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            if resolved.suffix.lower() == ".html":
+                self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("Content-Length", str(content_length))

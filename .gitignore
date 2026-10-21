@@ -67,6 +67,7 @@ data/javdb-rankings-categories-*.jsonl
 data/javdb-rankings-run-*.jsonl
 data/selenium-profile-runs/
 data/selenium-core-actor-refresh*/
+data/selenium-person-organization-profile/
 data/core-javdb-actor-refresh-*.jsonl
 data/javdb-115-cookie-cache.json
 data/move-*.manifest.txt

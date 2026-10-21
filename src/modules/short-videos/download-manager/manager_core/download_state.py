@@ -281,6 +281,11 @@ class DownloadManager:
                     link["id"],
                 ),
             )
+            if metadata.get("media_type") == "article":
+                conn.execute(
+                    "UPDATE links SET kind='article', url=? WHERE id=?",
+                    (f"https://www.douyin.com/article/{link['aweme_id']}", link["id"]),
+                )
             if download_intent == QUALITY_UPGRADE_INTENT:
                 conn.execute(
                     """

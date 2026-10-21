@@ -93,6 +93,7 @@ export function createShortVideoImportItemMapper(dependencies = {}) {
     if (!dataName) return null;
     const dataPath = path.join(dir, dataName);
     const data = readVideoJson(dataPath);
+    if (data?.article_info || data?.articleInfo || data?.media_type === "article") return null;
     const metadataImages = Array.isArray(data?.images) ? data.images : [];
     const isGalleryMetadata = Number(data?.aweme_type || 0) === 68 || metadataImages.length > 0;
     if (!isGalleryMetadata) return null;
@@ -170,6 +171,7 @@ export function createShortVideoImportItemMapper(dependencies = {}) {
   }
 
   function downloadManagerRowToItem(row) {
+    if (row.media_type === "article" || row.kind === "article") return null;
     const outputDir = String(row.output_dir || "").trim() ? path.resolve(String(row.output_dir).trim()) : "";
     const localPaths = parseDownloadManagerPaths(row.local_file_paths)
       .map((filePath) => resolveDownloadManagerPath(outputDir, filePath));

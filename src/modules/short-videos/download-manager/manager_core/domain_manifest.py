@@ -491,6 +491,8 @@ def manifest_preview_path(record: dict[str, Any]) -> str:
     if not isinstance(paths, list):
         return ""
     media_type = str(record.get("media_type") or "")
+    if media_type == "article":
+        return next((str(path) for path in paths if str(path).lower().endswith(".html")), "")
     suffix_groups = (
         (".mp4", ".mov", ".webm", ".m4v"),
         (".jpg", ".jpeg", ".png", ".webp", ".gif"),
@@ -528,6 +530,8 @@ def file_kind(path: str) -> str:
         return "audio"
     if ext == ".json":
         return "json"
+    if ext == ".html":
+        return "article"
     return "file"
 
 
@@ -801,6 +805,8 @@ def douyin_user_url(sec_uid: Any) -> str:
 
 def kind_from_manifest(record: dict[str, Any]) -> str:
     media_type = str(record.get("media_type") or "").lower()
+    if media_type == "article":
+        return "article"
     return "note" if media_type in {"gallery", "note", "image"} else "video"
 
 

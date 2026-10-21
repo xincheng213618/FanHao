@@ -143,6 +143,14 @@ def validate_downloaded_video_quality(
 ) -> tuple[bool, str, str, dict[str, Any] | None]:
     if not record:
         return True, "", "", None
+    if str(record.get("media_type") or "").lower() == "article":
+        document = first_existing_manifest_file(output_dir, flatten_strings(record.get("file_paths")), {"article"})
+        try:
+            if document and Path(document).stat().st_size > 0:
+                return True, "", "", None
+        except OSError:
+            pass
+        return False, "文章保存校验失败：找不到完整的离线正文", "", None
     media_type = first_text(row_text(link, "media_type"), record.get("media_type")).lower()
     if media_type in {"gallery", "note", "image", "images"} or row_text(link, "kind").lower() == "note":
         return True, "", "", None

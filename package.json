@@ -166,7 +166,7 @@
     "verify:android-novel-ui": "node tests/verify_android_novel_mobile_ui.mjs && npm run verify:android-novel-styles && npm run verify:android-novel-paging",
     "verify:android-novel-styles": "node tests/verify_android_novel_style_reuse.mjs",
     "verify:android-novel-paging": "node tests/verify_android_novel_paging_alignment.mjs",
-    "verify:douyin-manager": "node tests/verify_douyin_download_manager_integration.mjs && node tests/verify_douyin_manager_latest_requests.mjs",
+    "verify:douyin-manager": "node tests/verify_douyin_articles.mjs && node tests/verify_douyin_download_manager_integration.mjs && node tests/verify_douyin_manager_latest_requests.mjs",
     "verify:settings": "node tests/verify_module_settings.mjs",
     "verify:system-control": "node tests/verify_system_control.mjs",
     "verify:market-dashboard": "node tests/verify_market_dashboard.mjs",

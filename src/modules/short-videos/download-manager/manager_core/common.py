@@ -95,8 +95,16 @@ def tab_label(tab: str) -> str:
 
 
 def work_id_from_url(url: str) -> str | None:
-    match = re.search(r"/(?:video|note|gallery|slides)/(\d{16,22})(?:\D|$)", url or "")
+    match = re.search(r"/(?:video|note|gallery|slides|article)/(\d{16,22})(?:\D|$)", url or "")
     return match.group(1) if match else None
+
+
+def work_kind(url: str = "", kind: str = "", media_type: str = "") -> str:
+    if "article" in {kind, media_type} or "/article/" in urlparse(url).path:
+        return "article"
+    if kind == "note" or media_type == "gallery" or re.search(r"/(?:note|gallery|slides)/", urlparse(url).path):
+        return "note"
+    return "video"
 
 
 def safe_path_segment(value: str) -> str:
