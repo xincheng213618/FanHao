@@ -85,6 +85,20 @@ try {
         }
       }
     }
+    if (product !== "short-videos") {
+      const tasteResponse = await fetch(`${base}/api/fanhao/taste`);
+      const duplicatesResponse = await fetch(`${base}/api/fanhao/duplicates?limit=2`);
+      assert.equal(duplicatesResponse.status, 200, `duplicate comparison must use the ${product} core database\n${output}`);
+      assert(Array.isArray((await duplicatesResponse.json()).groups));
+      assert((await (await fetch(`${base}/fanhao/duplicates`)).text()).includes("重复文件比对"));
+      assert.equal(tasteResponse.status, 200, `taste must use the ${product} core database\n${output}`);
+      const taste = await tasteResponse.json();
+      assert(Number.isInteger(taste.summary.total));
+      assert.equal(tasteResponse.headers.get("cache-control"), "no-store");
+      assert((await (await fetch(`${base}/fanhao/taste`)).text()).includes("从特别喜欢的作品"));
+    } else {
+      assert.equal((await fetch(`${base}/api/fanhao/taste`)).status, 404);
+    }
     if (product === "fanhao") {
       for (const route of ["/api/library?limit=1", "/api/works?limit=1"]) {
         const response = await fetch(`${base}${route}`);

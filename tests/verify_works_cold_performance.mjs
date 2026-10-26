@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { readFileSync } from "node:fs";
 import { normalizeWorkCode, workCodeKey } from "../lib/code-parser.js";
+import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
 import { createActorMovieService } from "../src/modules/fanhao/server/people/actor-movie-service.js";
 import { prewarmLocalMetadataBeforeListen } from "../src/modules/fanhao/server/runtime.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
@@ -1212,6 +1213,7 @@ function personSourceFactories(legacy = false, observeBudget = () => {}) {
   }
   const query = new Function("classifyWorkCategory", "normalizeWorkCategory", "summarizeWorkCategories", "WORK_CATEGORY_OPTIONS",
     "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode",
+    "deriveWorkTraits", "matchesWorkTraitFilter", "summarizeWorkTraits",
     querySource.replace(/^import .*;\n/gm, "").replace("export function createWorkQueryService", "function createWorkQueryService")
       + "\nreturn createWorkQueryService;")(
     classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS, createWorkSorter,
@@ -1219,7 +1221,7 @@ function personSourceFactories(legacy = false, observeBudget = () => {}) {
       const budget = createWeightedCacheBudget(...args);
       if (args[0] === 4_000_000) observeBudget(budget);
       return budget;
-    }, normalizeWorkSortMode);
+    }, normalizeWorkSortMode, deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits);
   const person = new Function("normalizePersonWorkYear", "personWorkYearOptions", "worksForPersonYear", "createWeightedCacheBudget",
     personSource.replace(/^import .*;\n/gm, "").replace(/export function /g, "function ") + "\nreturn createPersonDetailService;")(
     normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear, createWeightedCacheBudget);

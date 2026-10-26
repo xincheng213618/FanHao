@@ -17,10 +17,16 @@ export const DAILY_SCRIPTS = [
   'verify:fanhao-requests',
   'verify:work-sorting',
   'verify:work-facets',
+  'verify:work-traits',
   'verify:work-cache-budget',
 ];
 
 export const FULL_SCRIPTS = [
+  'verify:subtitle-cleanup',
+  'verify:subtitles',
+  'verify:work-traits', 'verify:studio-marks',
+  'verify:taste',
+  'verify:duplicates',
   'verify:repo-hygiene', 'verify:auth', 'verify:accounts', 'verify:mutation-auth', 'verify:json-responses',
   'verify:android-security', 'verify:android-gradle-config', 'verify:android-client',
   'verify:android-system-control', 'verify:codes', 'verify:metadata',
@@ -29,6 +35,7 @@ export const FULL_SCRIPTS = [
   'verify:archive-images', 'verify:photo-search', 'verify:music-rescan-worker',
   'verify:music-scale', 'verify:video-playback', 'verify:person-work-associations',
   'verify:person-identity',
+  'verify:movefile',
   'verify:person-organization',
   'verify:file-workflows',
   'verify:file-workflows-ui',
@@ -72,6 +79,13 @@ export const ANDROID_SCRIPTS = [
 const ANDROID_DOMAIN_BASE = ['verify:android-security', 'verify:auth', 'verify:mutation-auth', 'verify:imports'];
 
 const RULES = [
+  [/^(?:src\/modules\/fanhao\/server\/duplicates\/|public\/modules\/fanhao\/duplicates\/|tests\/verify_duplicate(?:_model|_identity|s|s_browser)\.mjs$)/, ['verify:duplicates', 'verify:imports']],
+  [/^(?:tools\/clean\.py|tests\/verify_subtitle_cleanup\.py)$/, ['verify:subtitle-cleanup', 'verify:imports']],
+  [/^(?:lib\/subtitle-batch-policy\.js|tools\/(?:subtitles_batch|check_subtitle_batch)\.mjs|tests\/verify_subtitle_(?:sidecars|batch|batch_policy)\.mjs)$/, ['verify:subtitles', 'verify:imports']],
+  [/^(?:tools\/(?:movefile\.py|movefile_plan\.py|import_movefile_plan\.py|execute_movefile_plan\.ps1|relink_movefile_plan\.mjs)|tests\/verify_movefile_(?:identity|plan|import)\.py)$/, ['verify:movefile', 'verify:imports']],
+  [/^(?:lib\/subtitles\.js|src\/modules\/fanhao\/server\/playback\/|public\/modules\/fanhao\/subtitle-controls\.js|tests\/verify_subtitle(?:s|cat_provider|_service|s_browser)\.mjs$)/, ['verify:subtitles', 'verify:mutation-auth', 'verify:imports']],
+  [/^(?:public\/js\/player-page\.js|public\/player\.html|public\/modules\/fanhao\/work-detail-page\.js)$/, ['verify:subtitles', 'verify:video-playback', 'verify:fanhao-requests', 'verify:imports']],
+  [/^(?:src\/modules\/fanhao\/server\/taste\/|public\/modules\/fanhao\/taste\/|tools\/analyze_taste\.mjs$|tests\/verify_taste(?:_browser)?\.mjs$|tests\/fixtures\/taste-library\.mjs$)/, ['verify:taste', 'verify:imports']],
   [/^android-client\/scripts\/verify-android-security\.mjs$/, ['verify:android-security', 'verify:android-update-streams', 'verify:imports']],
   [/^tests\/verify_access_analytics_close\.mjs$/, ['verify:access-analytics-close', 'verify:imports']],
   [/^tests\/verify_api_error_boundary\.mjs$/, ['verify:mutation-auth', 'verify:imports']],
@@ -185,6 +199,8 @@ const RULES = [
   [/^tools\/rescan_novel_library\.py$/, ['verify:novels', 'verify:novel-summary-cache', 'verify:imports']],
   [/^src\/modules\/novels\/server\/(?:store|routes)\.js$/, ['verify:novels', 'verify:novel-progress', 'verify:novel-progress-browser', 'verify:novel-summary-cache', 'verify:imports']],
   [/^tests\/verify_work_facets\.mjs$/, ['verify:work-facets', 'verify:imports']],
+  [/^(?:lib\/work-traits\.js|public\/modules\/fanhao\/browse-traits\.js|tests\/verify_(?:work_traits|work_trait_projection|work_browse_traits|browse_traits_browser)\.mjs)$/, ['verify:work-traits', 'verify:fanhao', 'verify:imports']],
+  [/^(?:lib\/studio-marks\.js|public\/assets\/studio-marks\/|tests\/verify_studio_marks\.mjs)/, ['verify:studio-marks', 'verify:studio-cache', 'verify:imports']],
   [/^tests\/(verify_work_cache_budget|diagnose_work_cache_heap)\.mjs$/, ['verify:work-cache-budget', 'verify:work-facets', 'verify:code-prefixes', 'verify:imports']],
   [/^tests\/verify_(?:file_stream_lifecycle|file_server_async)\.mjs$/, ['verify:file-streams', 'verify:imports']],
   [/^tests\/verify_short_video_quality_queries\.mjs$/, ['verify:short-video-quality', 'verify:short-video-store', 'verify:imports']],

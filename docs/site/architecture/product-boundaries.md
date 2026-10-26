@@ -2,7 +2,7 @@
 title: 独立产品与文件工作流
 description: 番号、短视频与聚合应用的启动、数据所有权及整理迁移界面。
 status: maintained
-verified_at: 2026-09-20
+verified_at: 2026-10-23
 sources:
   - server.js
   - server-fanhao.js
@@ -17,6 +17,12 @@ sources:
   - tests/verify_product_boundaries.mjs
   - tests/verify_file_workflows.mjs
   - tests/verify_file_workflows_ui.mjs
+  - src/modules/fanhao/server/taste/source.js
+  - src/modules/fanhao/server/taste/profile.js
+  - src/modules/fanhao/server/taste/service.js
+  - public/modules/fanhao/taste/app.js
+  - tests/verify_taste.mjs
+  - tests/verify_taste_browser.mjs
 ---
 
 # 独立产品与文件工作流
@@ -103,6 +109,16 @@ npm run start:short-videos
 
 CLI `tools/fanhao_file_workflows.mjs` 与网页使用同一个计划协议。必须显式传入 `--data-dir`、`--root` 和 `--core-db`，核心库只读打开以保护已入库文件；`--help` 显示预览与按计划 ID 执行的参数。独立番号的旧作业入口仅保留已绑定本产品数据库和根目录的脚本。
 
+## 馆藏口味分析
+
+番号侧栏的“口味分析”打开 `/fanhao/taste`。`GET /api/fanhao/taste` 沿用本机或局域网同源管理权限，响应禁止缓存到共享代理。分析由独立 Worker 只读打开本产品核心库；请求合并、短期缓存、超时和停机纳入模块生命周期。不扫描真实磁盘，不采集浏览器历史，不写入馆藏评分。
+
+统计只包含已登记本地视频的作品，按规范番号去重。作品目录前缀 `[A]` 表示特别喜欢，其他馆藏提供基础偏好；祖先存储目录的同名标记不等同于作品评分。人物按收藏目录身份或唯一同名目录归属分析，作品的全部出演名单不直接当作收藏人物。内容标签、厂牌、系列、番号前缀各自统计，资源状态和技术标签不参与内容偏好。
+
+每个维度显示馆藏和 `[A]` 的资料覆盖率，仅用有该类资料的作品计算基准。突出偏好至少要求同一特征有三部 `[A]` 样本，并以二十个基准样本平滑小样本。页面可切换突出程度和标记次数，查看样本、导出当前 JSON，并探索符合已有偏好的未标记馆藏。排序不表示喜欢概率，资料缺失与特征共现的影响保留在页面说明中。
+
+命令行 `tools/analyze_taste.mjs --db <数据库> --output <新建的 JSON 文件>` 使用相同分析入口，数据库只读打开，输出拒绝覆盖已有文件。真实馆藏分析结果属于私有数据，不加入公开文档站。
+
 ## 验证与下一步
 
 ```powershell
@@ -110,6 +126,7 @@ npm run verify:products
 node tests/verify_product_boundaries.mjs --browser
 npm run verify:file-workflows
 npm run verify:file-workflows-ui
+npm run verify:taste
 ```
 
 产品验证在临时源码副本、临时 SQLite 和随机端口测试独立启动、聚合启动、模块隔离与停机。文件任务验证覆盖冲突、源文件变化、已入库拦截、中断恢复和锁；浏览器验证使用合成小文件，涵盖预览、取消、确认、记录恢复及窄屏布局。它们不代表真实媒体、大文件、NAS 文件系统或远程部署验收。

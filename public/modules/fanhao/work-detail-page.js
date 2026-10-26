@@ -1,6 +1,7 @@
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 import { createWorkActions } from "./features/works/work-actions.js?v=20260717-fanhao-work-actions-01";
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+import { createSubtitleControls } from "./subtitle-controls.js?v=20261023-subtitles-04";
 
 export function createWorkDetailPage(deps) {
   const {
@@ -25,6 +26,7 @@ export function createWorkDetailPage(deps) {
   } = deps;
   const workDetailRequests = createLatestRequestGate();
   const playInfoRequests = createLatestRequestGate();
+  const subtitleControls = createSubtitleControls({ api });
   const {
     moveFavoriteToFolder,
     toggleFavorite,
@@ -54,6 +56,7 @@ export function createWorkDetailPage(deps) {
   });
 
   async function openWork(workId, videoId = null, options = {}) {
+    subtitleControls.reset();
     workDetailRequests.cancel();
     playInfoRequests.cancel();
     const cachedWork = state.works.find((work) => work.id === workId);
@@ -155,6 +158,7 @@ export function createWorkDetailPage(deps) {
   }
 
   function closeDrawer(options = {}) {
+    subtitleControls.reset();
     workDetailRequests.cancel();
     playInfoRequests.cancel();
     reportCurrentProgress();
@@ -239,6 +243,7 @@ export function createWorkDetailPage(deps) {
   }
 
   async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false, playInfoOverride = null) {
+    subtitleControls.detachMedia();
     playInfoRequests.cancel();
     stopProgressReporting();
     stopTimelineSync();
@@ -246,6 +251,7 @@ export function createWorkDetailPage(deps) {
 
     const streamableVideos = work.videos.filter(canTryWebPlay);
     if (!streamableVideos.length) {
+      subtitleControls.reset();
       const unsupported = document.createElement("div");
       unsupported.className = "unsupported";
       unsupported.innerHTML = "<strong>这个作品的文件格式暂不支持网页播放。</strong><span>可以用本地播放器打开原文件。</span>";
@@ -262,6 +268,7 @@ export function createWorkDetailPage(deps) {
     state.currentVideo = selected;
     state.currentPlayInfo = null;
     state.currentStreamOffset = 0;
+    subtitleControls.setContext({ workId: work.id, videoId: selected.id, video: null, query: work.infoSummary?.code || work.code || "" });
 
     let loading = null;
     let playInfo = playInfoOverride;
@@ -301,7 +308,7 @@ export function createWorkDetailPage(deps) {
     const resumePosition = Number.isFinite(requestedStart) ? requestedStart : savedProgress?.position > 5 ? savedProgress.position : 0;
     let streamUrl = playInfo.streamUrl;
     if (isSegmentedStream && resumePosition > 0) {
-      state.currentStreamOffset = resumePosition;
+      state.currentStreamOffset = Math.floor(resumePosition);
       streamUrl = addQueryParam(streamUrl, "t", Math.floor(resumePosition));
     }
     video.src = streamUrl;
@@ -341,6 +348,10 @@ export function createWorkDetailPage(deps) {
     playerShell.className = "web-player-shell";
     playerShell.append(video, createPlayerChrome(video, playInfo, work, selected, { isSegmentedStream, shell: playerShell }));
     els.playerArea.append(playerShell);
+    const subtitleHost = document.createElement("div");
+    playerShell.append(subtitleHost);
+    subtitleControls.mount(subtitleHost);
+    subtitleControls.setMedia(video, state.currentStreamOffset);
     startProgressReporting();
   }
 
@@ -728,6 +739,11 @@ export function createWorkDetailPage(deps) {
 
   function entityKey(value) {
     return String(value || "").trim().toLowerCase();
+  }
+
+  function cleanRemoteUrl(value) {
+    const text = String(value || "").trim();
+    return /^https?:\/\//i.test(text) ? text : "";
   }
 
   function sameText(a, b) {

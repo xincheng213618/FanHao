@@ -171,9 +171,23 @@ function renderPersonProfile(person) {
     nameRow.append(link);
   }
 
-  const summary = createProfileSummary(person, profile);
-
-  copy.append(nameRow, summary);
+  copy.append(nameRow);
+  const seenNames = new Set([normalizePersonNameValue(displayName)]);
+  const aliases = [person.name, profile?.personName, ...(profile?.aliases || [])]
+    .map((name) => String(name || "").trim())
+    .filter((name) => {
+      const key = normalizePersonNameValue(name);
+      if (!key || seenNames.has(key)) return false;
+      seenNames.add(key);
+      return true;
+    });
+  if (aliases.length) {
+    const aliasRow = document.createElement("p");
+    aliasRow.className = "person-profile-aliases";
+    aliasRow.textContent = `别名：${aliases.join("、")}`;
+    copy.append(aliasRow);
+  }
+  copy.append(createProfileSummary(person, profile));
   const actions = createPersonProfileActions(person);
   if (actions) copy.append(actions);
   els.personProfile.append(avatar, copy);

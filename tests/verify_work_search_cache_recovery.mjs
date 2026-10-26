@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createWorkSearchCacheFixture, searchUrl } from "./fixtures/work-search-cache-recovery.mjs";
+import { deriveWorkTraits } from "../lib/work-traits.js";
 
 assert.ok(process.argv.slice(2).every(value => ["--legacy-poison", "--legacy-consumers-only"].includes(value)));
 const legacy = process.argv.includes("--legacy-poison");
@@ -71,6 +72,89 @@ try {
   if (legacyConsumersOnly) {
     verifyConsumerNegativeControl();
   } else {
+  // Compact prefix records carry labels before detail hydration. Full-source
+  // facets and tag filters must include later pages without reading details.
+  const lateTraits = fixture();
+  const localPage = lateTraits.query.searchPayload(searchUrl("AA", "all", "codeAsc", 1, 4));
+  assert.equal(localPage.works[0].id, "1");
+  assert.equal(localPage.traitFacets.tags.find(tag => tag.name === "fixture")?.count, 6);
+  assert.equal(lateTraits.state.counts.hydrate, 0, "off-page category counts do not hydrate missing detail rows");
+  const filteredLocalPage = lateTraits.query.searchPayload(searchUrl("AA", "tag:fixture", "codeAsc", 1, 4));
+  assert.equal(filteredLocalPage.total, 6, "tag filters include unhydrated later-page missing works");
+  assert.equal(filteredLocalPage.traitFacets.tags.find(tag => tag.name === "fixture")?.count, 6);
+  assert.equal(lateTraits.state.counts.hydrate, 0, "filtering the complete label projection does not load off-page details");
+  const hydratedPage = lateTraits.query.searchPayload(searchUrl("AA", "all", "codeAsc", 1, 0));
+  assert.equal(hydratedPage.works[0].id, "3");
+  assert.deepEqual(hydratedPage.works[0].infoSummary.javdbTags, ["fixture"]);
+  assert.deepEqual(hydratedPage.works[0].traits.tags, ["fixture"], "pending-to-hydrated DTO recomputes traits without a stamp change");
+  assert.equal(hydratedPage.traitFacets.tags.find(tag => tag.name === "fixture")?.count, 6,
+    "full-source facet counts remain stable after same-stamp detail hydration");
+  assert.equal(localPage.traitFacets.tags.find(tag => tag.name === "fixture")?.count, 6,
+    "later hydration does not mutate a previously returned response object");
+  for (const phase of ["prepare", "all"]) {
+    const retryTraits = fixture();
+    retryTraits.query.searchPayload(searchUrl("AA", "all", "codeAsc", 1, 4));
+    fault(retryTraits, "hydrate", phase);
+    const url = searchUrl("AA", "all", "codeAsc", 1, 0);
+    const failedTraits = retryTraits.adapters.withWorkSearchReadStatus(() => retryTraits.query.searchPayload(url));
+    if (!legacy) assert.equal(failedTraits.cacheable, false);
+    assert.deepEqual(failedTraits.value.works[0].traits.tags, ["fixture"], "detail failure retains independently complete compact labels");
+    retryTraits.state.failure = null;
+    const recoveredTraits = retryTraits.query.searchPayload(url);
+    assert.deepEqual(recoveredTraits.works[0].traits.tags, ["fixture"], "failed hydration does not cache incomplete traits at the same stamp");
+    assert.equal(recoveredTraits.traitFacets.tags.find(tag => tag.name === "fixture")?.count, 6,
+      "failed hydration does not freeze incomplete trait facet counts");
+  }
+
+  const completeTags = fixture({ count: 50 });
+  const wideDescription = "private synopsis ".repeat(5000);
+  const tagFields = [
+    { label: "類別", value: "單體作品 / 眼鏡" },
+    { name: " Ge_n.re:S ", value: ["美少女電影", "戀愛"] },
+    { key: "カテゴリ", value: "OL、秘書" },
+    { label: "", name: "tags", value: "制服" },
+    { label: "简介", value: wideDescription }
+  ];
+  const updateTags = completeTags.state.db.prepare("UPDATE works SET fields_json=? WHERE id=?");
+  for (const id of [1, 3]) updateTags.run(JSON.stringify(tagFields), id);
+  for (const id of [10, 20, 30, 40, 50]) updateTags.run('[{"label":"类别","value":"后页标签"}]', id);
+  updateTags.run("not JSON", 4); updateTags.run("42", 5);
+  updateTags.run('[null,7,"not JSON",{"label":"not-category","value":"ignored"}]', 6);
+  const manyTags = Array.from({ length: 200 }, (_, index) => `bounded-tag-${index}`);
+  completeTags.state.db.prepare("UPDATE works SET javdb_tags_json=? WHERE id=7").run(JSON.stringify(["x".repeat(81), ...manyTags]));
+  const unhydratedFilteredPage = completeTags.query.searchPayload(searchUrl("AA", `tag:${encodeURIComponent("后页标签")}`, "codeAsc", 2, 5));
+  assert.equal(unhydratedFilteredPage.total, 5, "filter matches five later-page rows before any detail hydration");
+  assert.equal(unhydratedFilteredPage.count, 0);
+  assert.equal(unhydratedFilteredPage.traitFacets.tags.find(tag => tag.name === "后页标签")?.count, 5);
+  assert.equal(completeTags.state.counts.hydrate, 0);
+  const fullTagSource = completeTags.query.searchPayload(searchUrl("AA", "all", "codeAsc", 2, 48));
+  assert.equal(fullTagSource.total, 50);
+  assert.equal(fullTagSource.traitFacets.tags.find(tag => tag.name === "眼镜")?.count, 2);
+  assert.equal(fullTagSource.traitFacets.tags.find(tag => tag.name === "后页标签")?.count, 5);
+  assert.equal(completeTags.state.counts.hydrate, 0, "full-source tags do not prewarm off-page details or covers");
+  const compactMissing = completeTags.missing.search("AA");
+  const remoteThree = compactMissing.find(work => work.id === "3");
+  assert.deepEqual(deriveWorkTraits(remoteThree).tags, fullTagSource.works.find(work => work.id === "1").traits.tags,
+    "prefix and local metadata reuse all current category aliases and list syntax");
+  assert.equal(JSON.stringify(compactMissing).includes(wideDescription), false, "prefix cache never retains the complete metadata fields payload");
+  assert.equal(compactMissing.find(work => work.id === "7").infoSummary.javdbTags.length, 128);
+  assert.ok(compactMissing.find(work => work.id === "7").infoSummary.javdbTags.every(tag => tag.length <= 80));
+  const visibleTags = completeTags.query.searchPayload(searchUrl("AA", `tag:${encodeURIComponent("后页标签")}`, "codeAsc", 2, 0));
+  assert.equal(visibleTags.total, 5);
+  assert.equal(visibleTags.count, 2);
+  assert.ok(visibleTags.works.every(work => work.traits.tags.includes("后页标签")));
+  assert.equal(visibleTags.traitFacets.tags.find(tag => tag.name === "后页标签")?.count, 5);
+
+  const oldColumns = fixture();
+  oldColumns.state.db.exec("ALTER TABLE works DROP COLUMN fields_json; ALTER TABLE works DROP COLUMN javdb_tags_json");
+  const absentTags = oldColumns.missing.withReadStatus(() => oldColumns.missing.search("AA"));
+  assert.equal(absentTags.cacheable, true, "only confirmed absent optional columns permit a complete empty-label downgrade");
+  assert.equal(absentTags.value.length, 4);
+  assert.ok(absentTags.value.every(work => work.infoSummary.tags.length === 0 && work.infoSummary.javdbTags.length === 0));
+  const absenceReads = { ...oldColumns.state.counts };
+  oldColumns.missing.search("AA");
+  assert.deepEqual(oldColumns.state.counts, absenceReads, "confirmed absent optional columns retain successful prefix caching");
+
   for (const phase of ["prepare", "all"]) for (const reader of ["text", "actors", "makers", "series"]) {
     const actual = fixture(), old = previous(), healthy = expected();
     for (const target of [actual, old]) fault(target, reader, phase);

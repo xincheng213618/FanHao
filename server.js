@@ -792,7 +792,8 @@ const workPresenterService = createWorkPresenterService({
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
-  workInfoDetailRow
+  workInfoDetailRow,
+  workInfoFacetRow
 });
 const adminScriptService = createAdminScriptService({
   definitions: product.id === "fanhao" ? ADMIN_SCRIPT_DEFINITIONS.filter((script) => script.id === "core-local-scan") : ADMIN_SCRIPT_DEFINITIONS,
@@ -1064,6 +1065,14 @@ const moduleRegistry = await discoverFanHaoModules({
         }
       },
       fanhao: createFanhaoDependencies({
+        taste: { dbPath: CORE_DB_PATH, requireLocalAdmin, sendJson },
+        duplicates: { dbPath: CORE_DB_PATH, roots: [...LIBRARY_ROOTS, ...WESTERN_LIBRARY_ROOTS],
+          resolveWork: resolveLibraryWorkByPublicId, resolveVideo: resolveVideoFileByPublicId,
+          getCoreDb, onIndexChanged: refreshLibrary,
+          videoProbeService, requireLocalAdmin, readJsonBody, sendJson },
+        subtitles: { cacheDir: path.join(DATA_DIR, "subtitles"), roots: [...LIBRARY_ROOTS, ...WESTERN_LIBRARY_ROOTS],
+          resolveWork: resolveLibraryWorkByPublicId, resolveVideo: resolveVideoFileByPublicId,
+          requireLocalAdmin, readJsonBody, sendJson },
         workflows: {
           dataDir: DATA_DIR, roots: SERVER_CONFIG.FILE_WORKFLOW_ROOTS,
           indexedPaths: () => getCoreDb().prepare("SELECT file_path FROM local_files").all().map((row) => row.file_path),
@@ -2341,7 +2350,7 @@ function pagedWorksPayload(works, url, extra = {}) {
   prewarmWorkInfoDetails(pageSource);
   const page = pageSource.map((work) => publicWork(work));
   prewarmRemoteImagesForWorks(page);
-  return { ...extra, count: page.length, total, limit, offset, sort, works: page };
+  return { ...extra, count: page.length, total, limit, offset, sort, traitFacets: workFilterService.traitFacets(works), works: page };
 }
 
 function requireTrustedNetworkPage(req, res, errorMessage) {

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { createCodePrefixService } from "../src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
+import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkInfoCacheFixture, createWorkInfoDatabase, codeKey, parseJson, clampInteger }
   from "./fixtures/work-info-cache-recovery.mjs";
 
@@ -161,9 +162,9 @@ function fixture({ old = legacy, status = true } = {}) {
     code("withWorkSearchReadStatus") + "\n" + code("workSearchReadCacheable")
     + "\nreturn {withWorkSearchReadStatus,workSearchReadCacheable};")(text, missing);
   const deps = owner.dependencies;
-  const page = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks",
+  const page = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks", "workFilterService",
     code("pagedWorksPayload") + "\nreturn pagedWorksPayload;")(
-    clampInteger, 48, 1000, () => {}, deps.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {});
+    clampInteger, 48, 1000, () => {}, deps.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {}, createWorkFilterService(deps));
   owner.prefix = (old ? previousFactory : createCodePrefixService)({
     ...(status ? { ...adapters, withWorkInfoReadStatus: owner.info.withReadStatus, workInfoReadCacheable: owner.info.readCacheable } : {}),
     clampInteger, dedupeWorksForDisplay: rows => rows, defaultWorkLimit: 48, maxWorkLimit: 1000,

@@ -1,3 +1,5 @@
+import { deriveWorkTraits } from "../../../../../lib/work-traits.js";
+
 const PERSON_FALLBACK_AVATAR_BATCH_SIZE = 48;
 
 export function createWorkPresenterService({
@@ -26,6 +28,7 @@ export function createWorkPresenterService({
   uniqueTextArray,
   withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
   workInfoReadCacheable = () => true,
+  workInfoFacetRow = () => null,
   workInfoDetailRow
 }) {
   const personFallbackAvatarCache = new Map();
@@ -207,6 +210,7 @@ export function createWorkPresenterService({
         canGenerateCover: false,
         modifiedAt: work.modifiedAt || "",
         infoSummary,
+        traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: workInfoFacetRow(work.id)?.trait_tags || [] }),
         availability: publicWorkAvailability(work, infoSummary),
         favorite: false,
         progress: null,
@@ -261,6 +265,7 @@ export function createWorkPresenterService({
       canGenerateCover: !manualCover && !work.coverId && !cachedCover && videos.length > 0,
       modifiedAt: work.modifiedAt,
       infoSummary,
+      traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: workInfoFacetRow(work.id)?.trait_tags || [] }),
       availability: publicWorkAvailability(work, infoSummary),
       favorite: Boolean(favorite),
       favoriteFolderId: favorite?.folderId || "",

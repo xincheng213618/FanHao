@@ -765,6 +765,7 @@
             </button>
           </header>
           <div class="player-notice" id="playerNotice">正在读取作品</div>
+          <div id="playerSubtitles" hidden></div>
           <video id="playerVideo" playsinline preload="metadata" autoplay hidden></video>
           <button class="player-stream-start" id="playerStreamStart" type="button" aria-label="开始播放" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
@@ -815,7 +816,7 @@
     <script src="/vendor/plyr/plyr.min.js"></script>
     <script type="module">
       try {
-        await import("/js/player-page.js?v=20260816-vr-target-01");
+        await import("/js/player-page.js?v=20261023-subtitles-04");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

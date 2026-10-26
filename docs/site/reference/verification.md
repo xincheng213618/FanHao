@@ -2,7 +2,7 @@
 title: 验证矩阵
 description: 按变更范围选择真实 package 脚本，明确依赖、临时写入和运行验收的区别。
 status: maintained
-verified_at: 2026-10-15
+verified_at: 2026-10-24
 sources:
   - package.json
   - tests/run_verification.mjs
@@ -19,6 +19,12 @@ sources:
   - tests/verify_work_move_jobs.mjs
   - tests/verify_file_workflows.mjs
   - tests/verify_file_workflows_ui.mjs
+  - tests/verify_taste.mjs
+  - tests/verify_taste_browser.mjs
+  - tests/verify_duplicate_model.mjs
+  - tests/verify_duplicates.mjs
+  - tests/verify_duplicate_identity.mjs
+  - tests/verify_duplicates_browser.mjs
   - tests/verify_json_responses.mjs
   - src/platform/server/responses.js
   - tests/verify_person_organization.mjs
@@ -116,9 +122,7 @@ npm ci
 npm run
 ```
 
-安装会访问包源并写入 `node_modules/`；锁文件与 Node 版本应与仓库要求一致。
-测试常会创建并清理临时 SQLite、媒体 fixture、Worker 或本机监听端口；“验证”不等于所有步骤只读。
-首次运行陌生脚本前检查其入口、环境变量与清理范围，尤其不要把 fixture 的路径替换为真实媒体目录。
+安装会访问包源并写入 `node_modules/`；锁文件与 Node 版本应与仓库要求一致。测试常会创建并清理临时 SQLite、媒体 fixture、Worker 或本机监听端口；“验证”不等于所有步骤只读。首次运行陌生脚本前检查其入口、环境变量与清理范围，尤其不要把 fixture 的路径替换为真实媒体目录。
 
 ## 文档门禁
 
@@ -128,8 +132,7 @@ npm --prefix docs run check
 npm --prefix docs run build
 ```
 
-文档依赖独立安装。检查页面约束与站点构建不需要启动 `server.js`、下载器、Android 或任何采集作业。
-写作约束见[文档规范](../contributing/documentation.md)。
+文档依赖独立安装。检查页面约束与站点构建不需要启动 `server.js`、下载器、Android 或任何采集作业。写作约束见[文档规范](../contributing/documentation.md)。
 
 ## 按改动选择应用检查
 
@@ -172,6 +175,8 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:short-video-sync` | 增量日志、分页初始化、无变化与单条更新的查询和逻辑 I/O 预算、删除与改名、回滚、并发提交、重启游标和来源代际变化。 | 临时 SQLite 和合成媒体；Python 运行实际迁移。Windows 用进程读取计数比较逻辑 I/O，不代表物理磁盘吞吐；不启动正式服务。下载器初始化另用 `tests.test_manager_library_sync` 和 `tests.test_manager_database_lifecycle` 验证。 |
 | `npm run verify:work-move-jobs`、`npm run verify:person-organization` | 作品移动作业与 UI；人物整理另查预览、分段、冲突、路径同步、目录发布日期、重试、使用已有资料与封面地址、无备份替换、旧封面与遗留文件清理、权限和焦点。 | 临时合成文件及 SQLite、Worker/任务子进程、可控图片下载和动态 HTTP/无头浏览器；不整理真实媒体，不访问外部封面站点。 |
 | `npm run verify:file-workflows`、`npm run verify:file-workflows-ui` | 后端预览、校验后移动、路径与已入库保护、冲突、源文件变化、权限、恢复、暂停/继续及互斥；浏览器预览、取消/确认执行、持久历史与窄屏布局，另查切换计划、轮询/重试、停止响应、页面离开及连续写入的归属。 | 当前服务、路由与 CLI，临时合成文件及 SQLite；UI 另用动态 loopback HTTP 与无头 Chrome/Edge，实际复制、移动临时文件，竞态使用门控 API/计时器，并在 `.codex-artifacts/` 保存截图，不操作真实媒体。 |
+| `npm run verify:taste` | 按番号去重、目录标记、收藏人物归属、资料覆盖分母、小样本平滑、匹配理由、只读查询、Worker 缓存与停止、权限；页面切换、样本链接、导出、窄屏布局和失败重试。 | 临时 SQLite、独立 Worker、动态 loopback HTTP 与无头 Chrome/Edge；合成馆藏样本，不读取真实媒体或浏览器历史。 |
+| `npm run verify:duplicates` | 番号与分卷候选、只读列表及候选路径可用性、完整 SHA256、网络文件身份碰撞、别名变化、子集比较、取消与停机、权限、搜索分页、播放与文件夹入口、保留和忽略、手动删除后的文件复核、失效索引事务清理与重启、收藏和观看记录保留、离线及链接保护、移动预留冲突与回滚、清理失败重试和窄屏布局。 | 临时 SQLite、合成文件、虚拟网络文件系统、独立 Worker、动态 loopback HTTP 与无头 Chrome/Edge；仅清理临时索引，不读取真实媒体，不执行媒体删除或打开真实文件夹。 |
 | `npm run verify:music-rescan-worker` | 音乐扫描 Worker、锁竞争与停止流程。 | 临时音乐文件、数据库、假探测器与子进程。 |
 | `npm run verify:browser-behavior` | 浏览器中的页面行为、导航与异步状态。 | 默认本机临时 HTTP fixture，并启动无头 Chrome/Edge。 |
 | `npm run verify:startup` | 启动器健康、超时、占用与失败边界。 | 临时启动器/假服务与动态端口，要求 PowerShell 运行时。 |
@@ -263,8 +268,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 
 `verify:android-security`、`verify:android-client` 和 `verify:short-video-client` 会先运行幂等的 `sync:cache`，同步 Android Web 缓存版本引用；这会改写需要更新的生成引用，但不会重装依赖。`verify:android-client` 继续作为客户端行为聚合入口使用，也不能替代真机验收。
 
-不要把 `install:debug`、`publish:debug` 等发布/安装脚本混进普通检查。
-它们的写入对象与授权要求不同，见[开发流程](../guide/development.md)。
+不要把 `install:debug`、`publish:debug` 等发布/安装脚本混进普通检查。它们的写入对象与授权要求不同，见[开发流程](../guide/development.md)。
 
 ## 完整应用门禁
 

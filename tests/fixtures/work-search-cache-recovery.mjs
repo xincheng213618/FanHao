@@ -5,6 +5,7 @@ import { createWorkSearchIndexService } from "../../src/modules/fanhao/server/wo
 import { createMissingCodeSearchService } from "../../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWeightedCacheBudget } from "../../src/modules/fanhao/server/works/work-cache-budget.js";
 import { createWorkQueryService } from "../../src/modules/fanhao/server/works/work-query-service.js";
+import { createWorkFilterService } from "../../src/modules/fanhao/server/works/work-filter-service.js";
 import { createCodePrefixService } from "../../src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { createFanhaoDependencies } from "../../src/modules/fanhao/server/composition.js";
 import { createWorkInfoCacheFixture, codeKey, parseJson, clampInteger } from "./work-info-cache-recovery.mjs";
@@ -84,11 +85,37 @@ export function createWorkSearchCacheFixture({ legacy = false, connectConsumers 
   const text = statusAdapter((legacy ? legacyText : createWorkSearchIndexService)({ getCoreDb,
     getLibrary: () => base.library, getSourceStamp: () => state.stamp, getWorkInfoStamp: () => state.stamp,
     normalizeSearchValue: codeKey, parseJsonArray: parseJson, parseJsonTextArray: parseJson }));
-  const missing = statusAdapter((legacy ? legacyMissing : createMissingCodeSearchService)({ getCoreDb,
+  const missingOptions = { getCoreDb,
     getCoverStamp: () => state.stamp, getSourceStamp: () => state.stamp, normalizeWorkCode: String,
     parseJsonTextArray: parseJson, storedWorkCodeKey: codeKey, publicRemoteUrl: value => value || "",
     proxiedRemoteImageUrl: value => value || "", dbBoolOrNull: value => value == null ? null : Boolean(Number(value)),
-    warn: (...args) => state.warnings.push(args) }));
+    warn: (...args) => state.warnings.push(args) };
+  const missing = statusAdapter((legacy ? legacyMissing : createMissingCodeSearchService)(missingOptions));
+  if (legacy) {
+    // The captured negative control keeps its original cache/read/hydration
+    // algorithms. Share only the newly introduced compact label projection so
+    // DTO comparisons continue to isolate cache recovery, not feature fields.
+    const labels = createMissingCodeSearchService({ ...missingOptions, getCoreDb: () => state.db, warn: () => {} });
+    const legacySearch = missing.search;
+    missing.search = (query) => {
+      const works = legacySearch(query);
+      const projected = new Map(labels.search(query).map((work) => [work.id, work]));
+      for (const work of works) {
+        const labelWork = projected.get(work.id);
+        if (!labelWork || work.missingCodeSearchTraitsReady) continue;
+        const ordered = {};
+        for (const [key, value] of Object.entries(work)) {
+          ordered[key] = value;
+          if (key === "missingCodeSearchPending") ordered.missingCodeSearchTraitsReady = labelWork.missingCodeSearchTraitsReady;
+        }
+        const { javdbTags: _oldTags, ...summary } = work.infoSummary;
+        ordered.infoSummary = { ...summary, tags: labelWork.infoSummary.tags, javdbTags: labelWork.infoSummary.javdbTags };
+        for (const key of Object.keys(work)) delete work[key];
+        Object.assign(work, ordered);
+      }
+      return works;
+    };
+  }
   const adapters = new Function("workSearchIndexService", "missingCodeSearchService",
     serverFunction("withWorkSearchReadStatus") + "\n" + serverFunction("workSearchReadCacheable")
     + "\nreturn { withWorkSearchReadStatus, workSearchReadCacheable };")(text, missing);
@@ -104,13 +131,14 @@ export function createWorkSearchCacheFixture({ legacy = false, connectConsumers 
   const query = createWorkQueryService({ ...grouped.works, library: base.library });
   assert.equal(grouped.works.withWorkSearchReadStatus, consumerStatus.withWorkSearchReadStatus, "actual composition forwards the optional status adapter");
   assert.equal(grouped.works.workSearchReadCacheable, consumerStatus.workSearchReadCacheable, "actual composition forwards the optional getter");
-  const pageAdapter = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks",
+  const workFilterService = createWorkFilterService(dependencies);
+  const pageAdapter = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks", "workFilterService",
     serverFunction("pagedWorksPayload") + "\nreturn pagedWorksPayload;")(
-    clampInteger, 48, 1000, () => {}, dependencies.prewarmWorkInfoDetails, base.presenter.publicWork, () => {});
+    clampInteger, 48, 1000, () => {}, dependencies.prewarmWorkInfoDetails, base.presenter.publicWork, () => {}, workFilterService);
   const prefixDependencies = {
     createCodePrefixService, ...consumerStatus, withWorkInfoReadStatus: base.info.withReadStatus, workInfoReadCacheable: base.info.readCacheable,
     clampInteger, dedupeWorksForDisplay: rows => rows, DEFAULT_WORK_LIMIT: 48, MAX_WORK_LIMIT: 1000,
-    missingCodeSearchService: missing, workFilterService: { filter: dependencies.filterWorkList },
+    missingCodeSearchService: missing, workFilterService,
     getCoreDb: () => state.db, library: base.library, studioCatalogStamp: () => state.stamp,
     pagedWorksPayload: pageAdapter, sortWorkList: dependencies.sortWorkList,
     accountUserStateService: { revision: () => "private user" }, workClassificationService: dependencies.workClassificationService,

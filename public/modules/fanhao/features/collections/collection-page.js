@@ -41,6 +41,8 @@ export function createCollectionPage(deps) {
 
   function favoritesPath(offset = 0) {
     const params = new URLSearchParams();
+    params.set("filter", state.filterMode || "all");
+    params.set("sort", state.sortMode || "releaseDesc");
     if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") params.set("folder", state.selectedFavoriteFolderId);
     params.set("limit", String(collectionPageSize()));
     params.set("offset", String(offset || 0));
@@ -49,6 +51,8 @@ export function createCollectionPage(deps) {
 
   function historyPath(offset = 0, range = state.selectedHistoryRange) {
     const params = new URLSearchParams();
+    params.set("filter", state.filterMode || "all");
+    params.set("sort", state.sortMode || "progress");
     if (range && range !== "all") params.set("days", range);
     params.set("limit", String(collectionPageSize()));
     params.set("offset", String(offset || 0));
@@ -57,7 +61,7 @@ export function createCollectionPage(deps) {
 
   function vrPath(offset = 0) {
     const params = new URLSearchParams({
-      filter: "vr",
+      filter: [...new Set(["vr", ...String(state.filterMode || "all").split(",").filter((value) => value && value !== "all")])].join(","),
       sort: vrSortMode(),
       limit: String(collectionPageSize()),
       offset: String(offset || 0)
@@ -148,6 +152,7 @@ export function createCollectionPage(deps) {
       resetSelection();
       applyCollectionWorks(data.works || [], append);
       state.collectionTotal = data.total ?? data.count ?? state.works.length;
+      state.collectionTraitFacets = data.traitFacets || null;
       state.favoriteFolders = data.folders || [];
       state.selectedFavoriteFolderId = data.selectedFolderId || state.selectedFavoriteFolderId || "all";
       if (!append) resetWorkPaging();
@@ -220,6 +225,7 @@ export function createCollectionPage(deps) {
       resetSelection();
       applyCollectionWorks(data.works || [], append);
       state.collectionTotal = data.total ?? data.count ?? state.works.length;
+      state.collectionTraitFacets = data.traitFacets || null;
       if (!append) resetWorkPaging();
       const rangeLabel = historyLabel(state.selectedHistoryRange);
       const total = data.total ?? data.count ?? state.works.length;
@@ -294,6 +300,7 @@ export function createCollectionPage(deps) {
       state.selectedStudioSeriesId = "all";
       applyCollectionWorks(data.works || [], append);
       state.vrTotal = data.total ?? data.count ?? state.works.length;
+      state.vrTraitFacets = data.traitFacets || null;
       if (!append) resetWorkPaging();
       setMainHeader("VR", `全库 VR 作品 · ${formatNumber(state.vrTotal)} 部`);
       renderStatsForWorks(state.works);
@@ -334,6 +341,8 @@ export function createCollectionPage(deps) {
     state.searchPeople = [];
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
+    state.collectionTraitFacets = null;
+    state.vrTraitFacets = null;
     state.collectionTotal = 0;
     state.vrTotal = 0;
     hidePersonProfile();

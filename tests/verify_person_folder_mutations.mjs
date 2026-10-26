@@ -393,4 +393,23 @@ function cleanup(fixture) {
   assert(profileSource.includes("重命名本地文件夹") && profileSource.includes("重新关联已有文件夹"));
 }
 
+{
+  const fixture = createFixture("consolidated-location", { createSource: false, createTarget: true });
+  try {
+    fixture.db.prepare("INSERT INTO person_library_locations VALUES(2,1,?,?, 'target-provenance')")
+      .run(fixture.target, fixture.target.replaceAll("\\", "/").toLowerCase());
+    const result = fixture.service.relinkPersonFolder({ personId: "1", sourcePath: fixture.source, targetPath: fixture.target });
+    assert.equal(result.ok, true);
+    const locations = fixture.db.prepare("SELECT id,path,updated_at FROM person_library_locations WHERE person_id=1").all();
+    assert.equal(locations.length, 1, "one person must not retain duplicate registrations after consolidation");
+    assert.equal(locations[0].id, 2, "retain the existing target location and its provenance");
+    assert.equal(locations[0].path, fixture.target);
+    assert.equal(locations[0].updated_at, "target-provenance");
+    assert.equal(fixture.db.prepare("SELECT file_path FROM local_files WHERE id=21").get().file_path,
+      path.join(fixture.target, "WORK-001", "video.mp4"));
+    assert.equal(fixture.db.prepare("SELECT local_path FROM local_works WHERE id=11").get().local_path,
+      path.join(fixture.target, "WORK-001"));
+  } finally { cleanup(fixture); }
+}
+
 console.log("Person folder mutation verification passed.");

@@ -12,6 +12,8 @@ import { DatabaseSync } from "node:sqlite";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
 import { createWorkSorter } from "../src/modules/fanhao/server/works/work-sorter.js";
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
+import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
+import { parseInfoMetadata } from "../lib/info-metadata.js";
 const clampInteger = (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback)));
 const legacyMissingPrefixCache = process.argv.includes("--legacy-missing-prefix-cache");
 const legacyCollectionPageCache = process.argv.includes("--legacy-collection-page-cache");
@@ -35,7 +37,7 @@ if (!global.gc) {
 async function verifyMissingPrefixCache() {
   const source = readFileSync(new URL("../src/modules/fanhao/server/works/missing-code-search-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   const changes = [
-    ['import { createWeightedCacheBudget } ' + 'from ' + '"./work-cache-budget.js";\n\nconst MISSING_PREFIX_CACHE_LIMIT = 128;\nconst MISSING_PREFIX_WORK_BUDGET = 50_000;\nconst MISSING_PREFIX_MAX_KEY_LENGTH = 128;\n\nexport function', 'export function'],
+    ['import { createWeightedCacheBudget } ' + 'from ' + '"./work-cache-budget.js";\nimport { parseInfoMetadata } ' + 'from ' + '"../../../../../lib/info-metadata.js";\n\nconst MISSING_PREFIX_CACHE_LIMIT = 128;\nconst MISSING_PREFIX_WORK_BUDGET = 50_000;\nconst MISSING_PREFIX_MAX_KEY_LENGTH = 128;\n\nexport function', 'import { parseInfoMetadata } ' + 'from ' + '"../../../../../lib/info-metadata.js";\n\nexport function'],
     ['  // These buckets own missing-work DTOs, rather than references to the local\n  // library. Limit both their record count and request-derived metadata.\n  const prefixBudget = createWeightedCacheBudget(MISSING_PREFIX_WORK_BUDGET, MISSING_PREFIX_CACHE_LIMIT);\n  let coverWorkIdsCache', '  let coverWorkIdsCache'],
     ['    if (missingWorkIndexCache.stamp !== stamp) {\n      prefixBudget.clear();', '    if (missingWorkIndexCache.stamp !== stamp) {'],
     ['for (let length = Math.min(prefix.length, MISSING_PREFIX_MAX_KEY_LENGTH);', 'for (let length = prefix.length;'],
@@ -67,12 +69,12 @@ async function verifyMissingPrefixCache() {
     assert.equal(text.split(slot).length, 2);
     // Private test-only read access; no production API or mock database.
     let capturedBudget;
-    const create = new Function("createWeightedCacheBudget", text.replace(/^import .*;\n/mu, "")
+    const create = new Function("createWeightedCacheBudget", "parseInfoMetadata", text.replace(/^import .*;\n/gmu, "")
       .replace("export function createMissingCodeSearchService", "function createMissingCodeSearchService")
       .replace(slot, "  return { hydrate, prewarm, search, cacheState: () => missingWorkIndexCache };")
       + "\nreturn createMissingCodeSearchService;")((...args) => {
         capturedBudget = createWeightedCacheBudget(...args); return capturedBudget;
-      });
+      }, parseInfoMetadata);
     return dependencies => {
       capturedBudget = null;
       const service = create(dependencies), budget = capturedBudget;
@@ -112,7 +114,7 @@ async function verifyMissingPrefixCache() {
     const state = { source: "s1", cover: "c1", counts: { cover: 0, prefix: 0, hydrate: 0 }, warnings: [], failure: null, before: null };
     const prepare = db.prepare.bind(db);
     db.prepare = sql => {
-      const kind = sql.includes("w.javdb_tags_json") ? "hydrate" : sql.includes("w.code_search LIKE") ? "prefix"
+      const kind = sql.includes("w.code_search LIKE") ? "prefix" : sql.includes("w.javdb_tags_json") ? "hydrate"
         : sql.includes("SELECT image.owner_id") ? "cover" : null;
       if (kind && state.failure?.kind === kind && state.failure.stage === "prepare") throw state.failure.error;
       const statement = prepare(sql);
@@ -262,7 +264,7 @@ async function verifyCollectionPages() {
   // Restore the complete preceding page read/write mechanism. DTO assembly,
   // source reads, prewarming, work-payload LRU and stamp checks stay actual.
   const changes = [
-    ['import { createWeightedCacheBudget } from ' + JSON.stringify("../works/work-cache-budget.js") + ';\n\n', ""],
+    ['import { createWeightedCacheBudget } from ' + JSON.stringify("../works/work-cache-budget.js") + ';\n', ""],
     ["const COLLECTION_PAGE_WORK_BUDGET = 4096;\n", ""],
     ["  const pageBudget = createWeightedCacheBudget(COLLECTION_PAGE_WORK_BUDGET);\n", ""],
     [
@@ -291,13 +293,13 @@ async function verifyCollectionPages() {
   const slot = "    favoritesPayload,\n    historyPayload,\n    prewarm";
   function factory(text) {
     let budget;
-    const create = new Function("createWeightedCacheBudget", text.replace(/^import .*;\n/gmu, "")
+    const create = new Function("createWeightedCacheBudget", "deriveWorkTraits", "summarizeWorkTraits", text.replace(/^import .*;\n/gmu, "")
       .replaceAll("export function ", "function ")
       .replace(slot, slot + ",\n    cacheState: () => ({ pageCache, workPayloadCache })")
       + "\nreturn createCollectionQueryService;")((...args) => {
       budget = createWeightedCacheBudget(...args);
       return budget;
-    });
+    }, deriveWorkTraits, summarizeWorkTraits);
     return deps => {
       budget = null;
       const service = create(deps);
@@ -468,13 +470,14 @@ function personContextQuery() {
     .replace(/^import .*;\r?\n/gm, "").replace("export function createWorkQueryService", "function createWorkQueryService");
   let sharedBudget;
   const factory = new Function("classifyWorkCategory", "normalizeWorkCategory", "summarizeWorkCategories", "WORK_CATEGORY_OPTIONS",
-    "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode", source + "\nreturn createWorkQueryService;")(
+    "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode",
+    "deriveWorkTraits", "matchesWorkTraitFilter", "summarizeWorkTraits", source + "\nreturn createWorkQueryService;")(
     classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS, createWorkSorter,
     (...args) => {
       const value = createWeightedCacheBudget(...args);
       if (args[0] === 4_000_000) sharedBudget = value;
       return value;
-    }, normalizeWorkSortMode);
+    }, normalizeWorkSortMode, deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits);
   let classifications = 0;
   const classification = createWorkClassificationService({ appConfigService: { current: () => ({}) } });
   const filter = classification.filterForRequest;

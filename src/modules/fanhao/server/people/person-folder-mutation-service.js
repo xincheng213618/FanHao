@@ -305,8 +305,20 @@ export function createPersonFolderMutationService({
     const timestamp = now();
     for (const location of personLocations(db, operation.person_id)) {
       const nextPath = rewrittenPath(location.path, operation.source_path, operation.target_path);
-      if (nextPath !== location.path) db.prepare("UPDATE person_library_locations SET path = ?, path_key = ?, updated_at = ? WHERE id = ?")
-        .run(nextPath, personPathKey(nextPath), timestamp, location.id);
+      if (nextPath !== location.path) {
+        const owner = db.prepare("SELECT id, person_id FROM person_library_locations WHERE path_key = ?").get(personPathKey(nextPath));
+        if (owner && Number(owner.person_id) !== Number(operation.person_id)) {
+          throw serviceError("目标目录属于其他人物", 409, "PERSON_FOLDER_TARGET_OWNED");
+        }
+        if (owner && owner.id !== location.id) {
+          // A consolidated source and target may both already be registered
+          // to this person. Keep the target registration and its provenance.
+          db.prepare("DELETE FROM person_library_locations WHERE id = ?").run(location.id);
+        } else {
+          db.prepare("UPDATE person_library_locations SET path = ?, path_key = ?, updated_at = ? WHERE id = ?")
+            .run(nextPath, personPathKey(nextPath), timestamp, location.id);
+        }
+      }
     }
     const counts = {
       people: updateTablePaths(db, {

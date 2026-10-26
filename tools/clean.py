@@ -46,9 +46,13 @@ SITE_PART_PATTERN = re.compile(r'@\w+_(\d+)_\d+[kp]\.mp4$', re.IGNORECASE)
 # 系统/特殊目录，跳过不扫描
 SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information", ".git", "node_modules", "__pycache__"}
 
-# 元数据文件，不参与重复检测和关键字匹配
+# 元数据与字幕不参与重复检测和关键字匹配。
 PRESERVE_FILENAMES = {"info.txt", "info.nfo", "movie.nfo"}
-PRESERVE_EXTENSIONS = {".nfo"}
+SUBTITLE_EXTENSIONS = {
+    ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".smi", ".sami",
+    ".ttml", ".dfxp", ".sbv", ".scc", ".stl", ".lrc",
+}
+PRESERVE_EXTENSIONS = {".nfo"} | SUBTITLE_EXTENSIONS
 
 # 快速哈希：读取首尾各多少字节做预筛
 QUICK_HASH_SIZE = 4096
@@ -225,7 +229,7 @@ def _should_skip_dir(dir_name: str) -> bool:
 
 
 def _is_preserve_file(file_path: str) -> bool:
-    """判断文件是否为元数据文件（不参与重复检测和关键字匹配）。"""
+    """元数据与字幕从清理及内容去重候选中豁免。"""
     basename = os.path.basename(file_path).lower()
     if basename in PRESERVE_FILENAMES:
         return True
@@ -484,7 +488,7 @@ def _clean_video_code_folder(
     config: CleanConfig,
     stats: CleanStats,
 ) -> None:
-    """清理一个番号文件夹：只保留主视频 + 封面图，删除其余。"""
+    """清理番号目录，保留主视频、封面、元数据与字幕。"""
     all_files: List[str] = []
     all_dirs: List[str] = []
 
@@ -519,8 +523,8 @@ def _clean_video_code_folder(
                 other_files.append(f)
             else:
                 cover_files.append(f)  # 非广告图片默认当作封面
-        elif basename_lower in ('info.txt', 'info.nfo', 'movie.nfo') or ext == '.nfo':
-            cover_files.append(f)  # 元数据文件，保留
+        elif _is_preserve_file(f):
+            cover_files.append(f)  # 元数据与字幕保留，不按内容相同或名称判为广告。
         else:
             other_files.append(f)
 

@@ -1,4 +1,5 @@
 import { workInfoDetailQuery } from "./work-info-detail-query.js";
+import { parseInfoMetadata } from "../../../../../lib/info-metadata.js";
 
 const DETAIL_BATCH_SIZE = 200;
 const DETAIL_CACHE_MAX_ENTRIES = 2048;
@@ -270,16 +271,23 @@ export function createWorkInfoService({
       owner = getCoreDb();
       const failed = indexFailure("facets", stamp, owner);
       if (failed) return failed.rows;
-      for (const row of owner
-        .prepare(
-          `
+      // Older catalogs and isolated consumers may omit these optional metadata
+      // columns. Only a confirmed missing-column error permits a projection
+      // downgrade; busy, closed or missing-table failures still reach read status.
+      const metadataColumns = new Set(["fields_json", "javdb_tags_json"]);
+      let statement;
+      while (!statement) {
+        try {
+          statement = owner.prepare(`
           SELECT
             CAST(w.id AS TEXT) AS work_id,
             w.code,
             w.release_date,
             w.duration_minutes,
             w.rating,
-            w.rating_count
+            w.rating_count,
+            ${metadataColumns.has("fields_json") ? "w.fields_json" : "NULL AS fields_json"},
+            ${metadataColumns.has("javdb_tags_json") ? "w.javdb_tags_json" : "NULL AS javdb_tags_json"}
           FROM works w
           WHERE w.status = 'ok'
             AND EXISTS (
@@ -287,10 +295,27 @@ export function createWorkInfoService({
               FROM local_works lw
               WHERE lw.work_id = w.id
             )
-          `
-        )
-        .all()) {
-        rows.set(row.work_id, row);
+          `);
+        } catch (error) {
+          const missing = /no such column:\s+(?:w\.)?(fields_json|javdb_tags_json)\b/i.exec(String(error?.message || ""))?.[1];
+          if (!missing || !metadataColumns.delete(missing)) throw error;
+        }
+      }
+      for (const row of statement.all()) {
+        const { fields_json, javdb_tags_json, ...compact } = row;
+        const fields = Object.create(null);
+        for (const field of parseJsonArray(fields_json)) {
+          const key = String(field?.label || field?.name || field?.key || "").trim();
+          if (!key || field?.value === null || field?.value === undefined) continue;
+          fields[key] = Object.hasOwn(fields, key) ? [fields[key], field.value].flat() : field.value;
+        }
+        // Reuse the sidecar parser's field aliases and list syntax. Retain just
+        // the small tag array, never the complete fields payload or raw text.
+        compact.trait_tags = uniqueTextArray([
+          ...parseInfoMetadata(JSON.stringify(fields)).tags,
+          ...parseJsonTextArray(javdb_tags_json)
+        ], { maxLength: 80, maxItems: 128 });
+        rows.set(compact.work_id, compact);
       }
     } catch (error) {
       console.warn("[core-work-info-facets]", error.message);

@@ -71,6 +71,7 @@ function showPeopleIndex(options = {}) {
   state.works = [];
   state.personWorksTotal = 0;
   state.personWorksFacets = null;
+  state.personWorksTraitFacets = null;
   syncNavigationState("people");
   hidePersonProfile();
   setMainHeader(
@@ -301,6 +302,7 @@ async function selectPerson(personId, options = {}) {
   const indexedPerson = state.people.find((person) => String(person.id) === String(personId)) || null;
   state.works = [];
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
+  state.personWorksTraitFacets = null;
   if (indexedPerson) {
     state.selectedPerson = { ...indexedPerson, detailPending: true };
     setMainHeader(
@@ -322,6 +324,7 @@ async function selectPerson(personId, options = {}) {
     state.works = data.works || [];
     state.personWorksTotal = data.total || state.works.length;
     state.personWorksFacets = data.facets || null;
+    state.personWorksTraitFacets = data.traitFacets || null;
     resetWorkPaging();
     setMainHeader(state.selectedPerson.name, formatLibraryPaths(state.selectedPerson.sourcePaths || [state.selectedPerson.relativePath]));
     renderPersonProfile(state.selectedPerson);
@@ -358,6 +361,7 @@ async function loadMoreWorks(button) {
     state.selectedPerson = data.person || state.selectedPerson;
     state.personWorksTotal = data.total ?? state.personWorksTotal ?? state.works.length;
     state.personWorksFacets = data.facets || state.personWorksFacets || null;
+    state.personWorksTraitFacets = data.traitFacets || state.personWorksTraitFacets || null;
     renderPersonProfile(state.selectedPerson);
     renderPersonWorkStats();
     appendLoadedWorkPage();

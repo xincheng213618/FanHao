@@ -4,6 +4,9 @@ export function createFanhaoDependencies(deps) {
   }
   return {
     workflows: deps.workflows,
+    taste: deps.taste,
+    subtitles: deps.subtitles,
+    duplicates: deps.duplicates,
     diskUsage: deps.diskUsage,
     catalog: pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]),
     library: pick(deps, [
@@ -42,6 +45,7 @@ export function createFanhaoDependencies(deps) {
       "sortWorkList",
       "userStateStamp",
       "workFacets",
+      "workInfoFacetRow",
       "workQueryStamp"
     ]), withWorkInfoReadStatus: deps.withWorkInfoReadStatus, workInfoReadCacheable: deps.workInfoReadCacheable },
     works: { ...pick(deps, [

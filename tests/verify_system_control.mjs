@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createComputerControlRuntime } from "../src/modules/system/server/computer-control/runtime.js";
 import { commandForAction, createComputerControlService } from "../src/modules/system/server/computer-control/service.js";
@@ -40,6 +41,64 @@ assert.equal(launched.length, 0, "control commands must be deferred until after 
 assert.equal(scheduled[0].delayMs, 250);
 scheduled[0].callback();
 assert.deepEqual(launched, [{ file: "shutdown.exe", args: ["/s", "/t", "60"] }]);
+
+const sleepCommand = commandForAction("sleep", "win32");
+assert.equal(sleepCommand.file, "powershell.exe", "sleep must use a typed power API instead of the incompatible rundll32 entry point");
+assert.deepEqual(sleepCommand.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]);
+const sleepScript = sleepCommand.args.at(-1);
+assert.doesNotMatch(sleepScript, /rundll32|shutdown\.exe|Stop-Process|taskkill|ExitWindows|Stop-Service/i,
+  "sleep must not log off, shut down, or terminate applications");
+
+service.dispatch("sleep");
+assert.equal(launched.length, 1, "sleep must also wait until after the HTTP response");
+scheduled[1].callback();
+assert.deepEqual(launched[1], sleepCommand);
+assert.equal(service.status().lastDispatch.action, "sleep");
+
+if (process.platform === "win32") {
+  // Execute the exact production PowerShell body against a private fake type.
+  // Add-Type is shadowed before the body runs, so no real power API is loaded.
+  const powerFixture = `
+Add-Type -TypeDefinition @'
+namespace System.Windows.Forms {
+  public enum PowerState { Suspend = 0, Hibernate = 1 }
+  public static class Application {
+    public static bool Result = true;
+    public static int Calls;
+    public static PowerState State;
+    public static bool Force;
+    public static bool DisableWakeEvent;
+    public static bool SetSuspendState(PowerState state, bool force, bool disableWakeEvent) {
+      Calls++; State = state; Force = force; DisableWakeEvent = disableWakeEvent;
+      return Result;
+    }
+  }
+}
+'@
+$script:loadedAssembly = $null
+function Add-Type {
+  param([string]$AssemblyName)
+  $script:loadedAssembly = $AssemblyName
+}
+`;
+  const fixture = spawnSync(sleepCommand.file, ["-NoProfile", "-NonInteractive", "-Command", `${powerFixture}
+& { ${sleepScript} }
+if ($script:loadedAssembly -ne 'System.Windows.Forms') { throw 'Missing power API assembly' }
+if ([System.Windows.Forms.Application]::Calls -ne 1) { throw 'Expected exactly one power request' }
+if ([System.Windows.Forms.Application]::State -ne [System.Windows.Forms.PowerState]::Hibernate) { throw 'Expected hibernation to preserve the session overnight' }
+if ([System.Windows.Forms.Application]::Force -or [System.Windows.Forms.Application]::DisableWakeEvent) { throw 'Power request must not force or disable wake events' }
+[System.Windows.Forms.Application]::Result = $false
+$failed = $false
+try { & { ${sleepScript} } } catch { $failed = $true }
+if (-not $failed) { throw 'A rejected power request must report failure' }
+if ([System.Windows.Forms.Application]::Calls -ne 2) { throw 'A rejected power request must not retry or fall back to shutdown' }
+Write-Output 'mocked-power-api: ok'
+`], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+  assert.ifError(fixture.error);
+  assert.equal(fixture.status, 0, `PowerShell power fixture failed: ${fixture.stderr || fixture.stdout}`);
+  assert.match(fixture.stdout, /mocked-power-api: ok/);
+}
+
 assert.throws(() => service.dispatch("format-disk"), (error) => error.statusCode === 400);
 
 let response = null;

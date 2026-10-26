@@ -1,4 +1,5 @@
 import { createWeightedCacheBudget } from "./work-cache-budget.js";
+import { parseInfoMetadata } from "../../../../../lib/info-metadata.js";
 
 const MISSING_PREFIX_CACHE_LIMIT = 128;
 const MISSING_PREFIX_WORK_BUDGET = 50_000;
@@ -116,7 +117,12 @@ export function createMissingCodeSearchService({
     }
 
     const covers = coverWorkIds();
-    const rows = getCoreDb().prepare(`
+    const owner = getCoreDb();
+    const metadataColumns = new Set(["fields_json", "javdb_tags_json"]);
+    let statement;
+    while (!statement) {
+      try {
+        statement = owner.prepare(`
         SELECT
           CAST(w.id AS TEXT) AS work_id,
           w.code_search AS code_key,
@@ -129,7 +135,9 @@ export function createMissingCodeSearchService({
           w.has_magnet,
           w.is_streamable,
           w.has_subtitles,
-          w.updated_at
+          w.updated_at,
+          ${metadataColumns.has("javdb_tags_json") ? "w.javdb_tags_json" : "NULL AS javdb_tags_json"},
+          ${metadataColumns.has("fields_json") ? compactTagFieldsSql() : "NULL"} AS trait_fields_json
         FROM works w
         WHERE w.status = 'ok'
           AND w.code_search LIKE ?
@@ -140,7 +148,13 @@ export function createMissingCodeSearchService({
             WHERE local_code.code_search = w.code_search
         )
         ORDER BY w.code_search, w.id
-      `).all(`${prefix}%`);
+      `);
+      } catch (error) {
+        const missing = /no such column:\s+(?:w\.)?(fields_json|javdb_tags_json)\b/i.exec(String(error?.message || ""))?.[1];
+        if (!missing || !metadataColumns.delete(missing)) throw error;
+      }
+    }
+    const rows = statement.all(`${prefix}%`);
     const entries = rows.map((row) => ({
       key: String(row.code_key || ""),
       work: lightweightMissingWork(row, covers.ids.has(String(row.work_id)))
@@ -220,6 +234,17 @@ export function createMissingCodeSearchService({
 
   function lightweightMissingWork(row, hasCover) {
     const code = normalizeWorkCode(row.code) || row.code || "";
+    const fields = Object.create(null);
+    let tagFields = [];
+    try { tagFields = JSON.parse(row.trait_fields_json || "[]"); } catch { /* A confirmed absent optional field carries no tags. */ }
+    for (const field of Array.isArray(tagFields) ? tagFields : []) {
+      const key = String(field?.label || field?.name || field?.key || "").trim();
+      if (!key || field?.value === null || field?.value === undefined) continue;
+      fields[key] = Object.hasOwn(fields, key) ? [fields[key], field.value].flat() : field.value;
+    }
+    const tags = compactLabels(parseInfoMetadata(JSON.stringify(fields)).tags);
+    const javdbTags = compactLabels(parseJsonTextArray(row.javdb_tags_json, { maxLength: 80, maxItems: 128 }));
+    const retained = new Set(compactLabels([...tags, ...javdbTags]).map((tag) => tag.toLowerCase()));
     return {
       id: row.work_id,
       personId: "",
@@ -239,6 +264,7 @@ export function createMissingCodeSearchService({
       modifiedAt: row.updated_at || "",
       missingLocal: true,
       missingCodeSearchPending: true,
+      missingCodeSearchTraitsReady: true,
       searchHasCover: hasCover,
       javdbUrl: "",
       actorUrl: "",
@@ -253,7 +279,8 @@ export function createMissingCodeSearchService({
         hasMagnet: dbBoolOrNull(row.has_magnet),
         isStreamable: dbBoolOrNull(row.is_streamable),
         hasSubtitles: dbBoolOrNull(row.has_subtitles),
-        javdbTags: []
+        tags,
+        javdbTags: javdbTags.filter((tag) => retained.has(tag.toLowerCase()))
       }
     };
   }
@@ -267,7 +294,9 @@ export function createMissingCodeSearchService({
     work.remoteCoverUrl = proxiedRemoteImageUrl(row.image_url);
     work.javdbUrl = detailUrl;
     work.infoSummary.javdbUrl = detailUrl;
-    work.infoSummary.javdbTags = parseJsonTextArray(row.javdb_tags_json);
+    if (!work.missingCodeSearchTraitsReady) {
+      work.infoSummary.javdbTags = compactLabels(parseJsonTextArray(row.javdb_tags_json, { maxLength: 80, maxItems: 128 }));
+    }
   }
 
   function prewarm() {
@@ -275,4 +304,32 @@ export function createMissingCodeSearchService({
   }
 
   return { hydrate, prewarm, search, withReadStatus, readCacheable };
+}
+
+function compactLabels(values) {
+  const labels = [], seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    if (typeof value !== "string") continue;
+    const label = value.replace(/\s+/g, " ").trim();
+    const key = label.toLowerCase();
+    if (!label || label.length > 80 || seen.has(key)) continue;
+    seen.add(key);
+    labels.push(label);
+    if (labels.length === 128) break;
+  }
+  return labels;
+}
+
+function compactTagFieldsSql() {
+  // Project only category fields in SQLite: no synopsis/raw metadata is copied
+  // into every prefix DTO. The sidecar parser still owns value/list syntax.
+  const field = "CASE WHEN trait_field.type = 'object' THEN trait_field.value ELSE '{}' END";
+  const keys = ["label", "name", "key"].map((key) => `NULLIF(NULLIF(json_extract(${field}, '$.${key}'), ''), 0)`);
+  let label = `lower(COALESCE(${keys.join(", ")}, ''))`;
+  for (const character of ". _-:：/\\()[]【】（）\t\r\n") label = `replace(${label}, '${character}', '')`;
+  return `(SELECT json_group_array(json(${field}))
+    FROM json_each(CASE WHEN json_valid(w.fields_json)
+      THEN CASE WHEN json_type(w.fields_json) = 'array' THEN w.fields_json ELSE '[]' END
+      ELSE '[]' END) AS trait_field
+    WHERE ${label} IN ('tags','genres','genre','category','categories','类别','類別','分类','分類','カテゴリ'))`;
 }

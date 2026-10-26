@@ -6,9 +6,15 @@ import { createUserStateRuntime } from "./user-state/runtime.js";
 import { createWorksRuntime } from "./works/runtime.js";
 import { createFileWorkflowService } from "./workflows/file-workflow-service.js";
 import { routeFileWorkflows } from "./workflows/routes.js";
+import { createTasteRuntime } from "./taste/runtime.js";
+import { createSubtitleRuntime } from "./playback/subtitle-runtime.js";
+import { createDuplicateRuntime } from "./duplicates/runtime.js";
 
 export function createFanhaoRuntime(deps) {
   const workflows = deps.workflows ? createFileWorkflowService(deps.workflows) : null;
+  const taste = deps.taste ? createTasteRuntime(deps.taste) : null;
+  const subtitles = deps.subtitles ? createSubtitleRuntime(deps.subtitles) : null;
+  const duplicates = deps.duplicates ? createDuplicateRuntime(deps.duplicates) : null;
   const catalog = createCatalogRuntime(deps.catalog);
   const diskUsage = createDiskUsageRuntime(deps.diskUsage);
   const library = createLibraryRuntime(deps.library);
@@ -17,6 +23,9 @@ export function createFanhaoRuntime(deps) {
   const works = createWorksRuntime(deps.works);
 
   async function routeApi(req, res, url) {
+    if (duplicates && await duplicates.routeApi(req, res, url)) return true;
+    if (subtitles && await subtitles.routeApi(req, res, url)) return true;
+    if (taste && await taste.routeApi(req, res, url)) return true;
     if (workflows && await routeFileWorkflows(req, res, url, { ...deps.workflows, service: workflows })) return true;
     if (await diskUsage.routeApi(req, res, url)) return true;
     if (await library.routeReadApi(req, res, url)) return true;
@@ -47,13 +56,19 @@ export function createFanhaoRuntime(deps) {
   }
 
   function beginStop() {
+    duplicates?.beginStop();
+    subtitles?.beginStop();
+    taste?.beginStop();
     workflows?.beginStop();
     diskUsage.beginStop();
   }
 
   async function stop() {
-    await workflows?.close();
-    await diskUsage.stop();
+    const results = await Promise.allSettled([
+      () => duplicates?.stop(), () => subtitles?.stop(), () => taste?.stop(), () => workflows?.close(), () => diskUsage.stop()
+    ].map((close) => Promise.resolve().then(close)));
+    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (errors.length) throw new AggregateError(errors, "FanHao 服务未能完全停止");
   }
 
   async function routeMedia(req, res, url) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createCodePrefixService } from "../src/modules/fanhao/server/catalog/code-prefix-service.js";
+import { deriveWorkTraits, summarizeWorkTraits } from "../lib/work-traits.js";
 import { createWorkInfoCacheFixture, clampInteger } from "./fixtures/work-info-cache-recovery.mjs";
 
 // Native private SQLite and the real prefix service, provider, filters, sorter,
@@ -163,9 +164,10 @@ function fixture({ status = !legacy } = {}) {
   for (const work of owner.works) { work.code = `AA-${work.id.padStart(3, "0")}`; work.directoryName = work.code; }
   owner.state.db.exec("UPDATE works SET code='AA-002',code_search='aa002' WHERE id=2");
   owner.prefixCounts = { sorts: 0, catalog: 0 };
-  const adapter = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks",
+  const adapter = new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks", "workFilterService",
     server.slice(pageStart, pageEnd) + "\nreturn pagedWorksPayload;")(
-    clampInteger, 48, 1000, () => {}, owner.dependencies.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {});
+    clampInteger, 48, 1000, () => {}, owner.dependencies.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {},
+    { traitFacets: works => summarizeWorkTraits(works, work => deriveWorkTraits(work, owner.info.facetRow(work.id))) });
   const dependencies = {
     createCodePrefixService, withWorkInfoReadStatus: status ? owner.info.withReadStatus : undefined,
     workInfoReadCacheable: status ? owner.info.readCacheable : undefined,

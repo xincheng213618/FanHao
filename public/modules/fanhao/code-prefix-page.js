@@ -88,6 +88,7 @@ export function createCodePrefixPage(deps) {
     state.selectedCodePrefixMeta = null;
     state.codePrefixTotal = 0;
     state.codePrefixFacets = null;
+    state.codePrefixTraitFacets = null;
     state.codePrefixLoadingMore = false;
     state.searchPeople = [];
     state.works = [];
@@ -347,6 +348,7 @@ export function createCodePrefixPage(deps) {
     state.works = [];
     state.codePrefixTotal = 0;
     state.codePrefixFacets = null;
+    state.codePrefixTraitFacets = null;
     state.codePrefixLoadingMore = false;
     if (options.resetFilter !== false) clearWorkFilter();
     const query = detailPath(normalizedPrefix, 0, state.selectedCodePrefixFamily);
@@ -473,6 +475,7 @@ export function createCodePrefixPage(deps) {
     state.selectedCodePrefixMeta = data.codePrefix || state.selectedCodePrefixMeta;
     state.codePrefixTotal = data.total ?? state.works.length;
     state.codePrefixFacets = data.facets || state.codePrefixFacets || null;
+    state.codePrefixTraitFacets = data.traitFacets || (append ? state.codePrefixTraitFacets : null) || null;
   }
 
   function renderPrefixHeader() {

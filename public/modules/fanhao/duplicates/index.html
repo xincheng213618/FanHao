@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1f7a62" />
+    <title>重复文件比对 · FanHao</title>
+    <link rel="stylesheet" href="/modules/fanhao/duplicates/styles.css?v=20261024-duplicates-06" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <a href="/fanhao" class="back">← 返回馆藏</a>
+          <p class="eyebrow">FANHAO · 文件比较</p>
+          <h1>重复文件比对</h1>
+          <p class="intro">比较普通影片的版本与媒体参数，再决定哪些值得保留。VR 作品不参与比对和统计。</p>
+        </div>
+        <div class="group-actions"><button id="refresh" type="button">重新读取索引</button><button id="cleanup" type="button">清理失效索引</button></div>
+      </header>
+      <section class="scope-note" aria-label="比较范围与校验说明">
+        <strong>同番号、同分卷仅作候选，不能据此确认重复。</strong>
+        <p>内容校验会读取完整文件；大小不同无需计算完整哈希。只有完整 SHA256 相同，才显示“本次校验内容一致”。潜在额外体积并非确认可回收空间。</p>
+        <p>每条记录上方可以“忽略本组”，收起这一整组并排到列表最后，也可恢复；文件上的“保留”可选多份。选择保存在本浏览器。手动删除后点“检查文件是否还在”更新本组。</p>
+        <p>列表会检查候选路径，确认不存在的文件和目录会自动排除。点“检查文件是否还在”可同步清理本组旧索引；“清理失效索引”处理当前搜索范围内的重复候选。仅移除失效的本地文件和目录记录，保留作品资料、收藏及观看记录；磁盘离线或无权访问时保留为待确认。</p>
+        <p>每条记录上方的“打开文件夹”会打开本组所在目录；分布在多个目录时可选择。目录在运行 FanHao 的电脑上打开。离开页面后校验继续，可返回查看或取消。</p>
+      </section>
+      <section id="summary" class="summary" aria-label="索引概况" hidden></section>
+      <section class="browse-panel">
+        <form id="searchForm" class="search-form" role="search">
+          <label for="query">搜索候选</label>
+          <div class="search-row"><input id="query" type="search" placeholder="番号、文件名或路径" autocomplete="off" /><button id="search" type="submit">搜索</button><button id="clear" type="button">清空</button></div>
+        </form>
+        <div class="result-toolbar"><p id="resultCount">正在读取候选…</p><span>每页 20 组</span></div>
+      </section>
+      <div id="status" class="notice" role="status" aria-live="polite"></div>
+      <button id="retry" type="button" hidden>重新读取候选</button>
+      <section id="groups" class="groups" aria-label="疑似重复文件组"></section>
+      <nav class="pagination" aria-label="候选组分页"><button id="previous" type="button" disabled>上一页</button><span id="pageLabel"></span><button id="next" type="button" disabled>下一页</button></nav>
+    </main>
+    <script type="module" src="/modules/fanhao/duplicates/app.js?v=20261024-duplicates-06"></script>
+  </body>
+</html>

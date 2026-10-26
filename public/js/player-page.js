@@ -5,6 +5,7 @@ import {
   workMoveCleanupRetryRequired
 } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-02";
 import { createCompletedWorkMoveReloader } from "../modules/fanhao/work-move-completion.js?v=20260811-work-move-ops-01";
+import { createSubtitleControls } from "../modules/fanhao/subtitle-controls.js?v=20261023-subtitles-04";
 import {
   isVrWorkForMove,
   personMoveDisplayName,
@@ -51,6 +52,7 @@ const els = {
   deleteLocal: document.querySelector("#deleteLocalButton"),
   javdb: document.querySelector("#javdbLink")
 };
+const subtitleControls = createSubtitleControls({ api, container: document.querySelector("#playerSubtitles") });
 
 let currentWork = null;
 let currentVideo = null;
@@ -184,9 +186,10 @@ window.addEventListener("beforeunload", () => {
 });
 window.addEventListener("pagehide", () => {
   movePollController?.abort();
+  subtitleControls.reset();
 });
 window.addEventListener("pageshow", (event) => {
-  if (event.persisted) restoreMoveJobEntry();
+  if (event.persisted) { restoreMoveJobEntry(); updateSubtitleContext(); }
 });
 
 mobileStreamControlsQuery.addEventListener?.("change", () => {
@@ -474,6 +477,8 @@ async function playVideo(video, options = {}) {
   reportProgress();
   stopProgressTimer();
   currentVideo = video;
+  subtitleControls.detachMedia();
+  updateSubtitleContext(null);
   renderFiles(currentWork);
   updateOpenFileButton();
   updateDeleteLocalButton();
@@ -519,7 +524,7 @@ function setVideoSourceAt(position, options = {}) {
   updateVideoAspect();
   configurePlyrForCurrentMode();
   els.video.preload = mode === "direct" ? "auto" : "none";
-  playbackOffset = mode === "direct" ? 0 : target;
+  playbackOffset = mode === "direct" ? 0 : Math.floor(target);
   streamNeedsActivation = deferGeneratedStream;
   setStreamPending(deferGeneratedStream);
   if (customControls && !deferGeneratedStream) {
@@ -535,6 +540,7 @@ function setVideoSourceAt(position, options = {}) {
 
   els.video.pause();
   els.video.src = streamUrl;
+  updateSubtitleContext();
   els.video.hidden = false;
   els.notice.hidden = true;
 
@@ -576,6 +582,16 @@ function setVideoSourceAt(position, options = {}) {
     requestVideoPlayback({ allowMutedFallback: true });
   }
   updateSeekControl(target);
+}
+
+function updateSubtitleContext(media = els.video) {
+  subtitleControls.setContext({
+    workId: !mediaId && !diskDrive ? currentWork?.id : "",
+    videoId: currentVideo?.id,
+    video: media,
+    offsetSeconds: playbackOffset,
+    query: currentWork?.infoSummary?.code || currentWork?.code || ""
+  });
 }
 
 function requestVideoPlayback(options = {}) {
@@ -2050,6 +2066,7 @@ async function deleteCurrentLocalFiles() {
 }
 
 function stopCurrentPlayback() {
+  subtitleControls.reset();
   stopProgressTimer();
   currentVideo = null;
   currentPlayInfo = null;

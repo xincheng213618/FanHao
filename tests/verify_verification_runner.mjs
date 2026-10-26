@@ -13,6 +13,20 @@ const commands = expandCommands(
 assert.deepEqual(commands, ['node one.mjs', 'node shared.mjs', 'node two.mjs']);
 
 for (const [file, script] of [
+  ['src/modules/fanhao/server/duplicates/service.js', 'verify:duplicates'],
+  ['public/modules/fanhao/duplicates/app.js', 'verify:duplicates'],
+  ['tests/verify_duplicate_model.mjs', 'verify:duplicates'],
+  ['tests/verify_duplicate_identity.mjs', 'verify:duplicates'],
+  ['tools/subtitles_batch.mjs', 'verify:subtitles'],
+  ['lib/subtitle-batch-policy.js', 'verify:subtitles'],
+  ['tests/verify_subtitle_batch.mjs', 'verify:subtitles'],
+  ['tools/clean.py', 'verify:subtitle-cleanup'],
+  ['lib/subtitles.js', 'verify:subtitles'],
+  ['src/modules/fanhao/server/playback/subtitle-runtime.js', 'verify:subtitles'],
+  ['tests/verify_subtitle_service.mjs', 'verify:subtitles'],
+  ['tests/verify_subtitlecat_provider.mjs', 'verify:subtitles'],
+  ['tests/verify_subtitles_browser.mjs', 'verify:subtitles'],
+  ['public/js/player-page.js', 'verify:subtitles'],
   ['android-client/scripts/verify-android-security.mjs', 'verify:android-security'],
   ['tests/verify_manga_download_metadata.mjs', 'verify:manga-download'],
   ['tests/verify_manga_image_dimensions.mjs', 'verify:manga-image-dimensions'],

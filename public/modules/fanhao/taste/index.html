@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1f7a62" />
+    <title>口味分析 · FanHao</title>
+    <link rel="stylesheet" href="/css/foundation.css" />
+    <link rel="stylesheet" href="/modules/fanhao/taste/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <a class="back" href="/fanhao">← 返回馆藏</a>
+          <p class="eyebrow">FANHAO · 我的馆藏</p>
+          <h1>从特别喜欢的作品，看看你的口味</h1>
+          <p class="intro">整个馆藏是基础偏好，作品目录的 <strong>[A]</strong> 是特别喜欢。未标记不代表不喜欢。</p>
+        </div>
+        <div class="actions">
+          <button id="refresh" type="button">重新读取</button>
+          <button id="export" type="button" disabled>导出本次分析</button>
+        </div>
+      </header>
+      <p id="status" class="notice" role="status" aria-live="polite">正在读取馆藏索引…</p>
+      <div id="content" hidden>
+        <section id="summary" class="summary" aria-label="分析范围"></section>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">偏好画像</p><h2>哪些特征更容易出现在 [A] 作品里</h2></div>
+            <label class="sort">查看方式 <select id="sort"><option value="distinctive">相对馆藏更突出</option><option value="favorites">[A] 中出现最多</option></select></label>
+          </div>
+          <div id="dimensions" class="dimensions" role="group" aria-label="偏好维度"></div>
+          <p id="coverage" class="coverage"></p>
+          <p class="legend"><span class="legend-a">绿色：[A] 中的占比</span><span class="legend-all">灰色：有资料馆藏中的占比</span>各特征可重叠，占比不相加。</p>
+          <div class="table-scroll"><table>
+            <thead><tr><th scope="col">特征与分布</th><th scope="col">[A] / 馆藏</th><th scope="col">倾向倍数</th><th scope="col">[A] 样本</th></tr></thead>
+            <tbody id="features"></tbody>
+          </table></div>
+          <p class="caption">倾向倍数比较该特征的标记率与本维度整体标记率，并用 20 个基础样本平滑。相对突出至少需要 3 部 [A] 样本，偶然出现不会直接成为推荐依据。</p>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">馆藏探索</p><h2>这些未标记作品与你的 [A] 偏好接近</h2></div></div>
+          <p class="caption">从已下载的作品中找共同特征，供你重新发现。排序表示特征匹配，不代表喜欢概率。</p>
+          <div id="recommendations" class="recommendations"></div>
+        </section>
+        <section class="panel method"><h2>这份画像怎样计算</h2><ul id="method"></ul>
+          <p class="caption">人物按收藏目录归属统计；作品资料中的同场出演者不会自动算作你偏好的人物。技术与资源状态标签不参与内容偏好。数据只在本机处理。</p>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="/modules/fanhao/taste/app.js"></script>
+  </body>
+</html>

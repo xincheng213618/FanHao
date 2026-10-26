@@ -15,6 +15,9 @@ export function createStudioPage(deps) {
   const studioPrefetches = createPrefetchCache({ limit: STUDIO_PREFETCH_LIMIT, ttlMs: STUDIO_PREFETCH_TTL_MS });
   let studioIndexRenderTimer = null;
   let studioIndexRenderSeq = 0;
+  let studioIndexQuery = "";
+  let studioIndexSort = "count";
+  let studioIndexSummary = null;
   let studioPageOwner = null;
   bindStudioIntentSurface(els.workGrid, ".studio-card", (studioId) => {
     globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
@@ -85,6 +88,7 @@ export function createStudioPage(deps) {
       state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
       applyStudioWorks(data.works || [], append);
       state.studioWorksTotal = data.total ?? data.count ?? state.works.length;
+      state.studioWorksTraitFacets = data.traitFacets || (append ? state.studioWorksTraitFacets : null) || null;
       if (!append) resetWorkPaging();
       const studio = state.selectedStudio;
       const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
@@ -176,6 +180,7 @@ export function createStudioPage(deps) {
     state.selectedStudio = null;
     state.selectedStudioSeriesId = "all";
     state.studioWorksTotal = 0;
+    state.studioWorksTraitFacets = null;
     state.works = [];
     state.searchPeople = [];
     state.personWorksTotal = 0;
@@ -187,11 +192,61 @@ export function createStudioPage(deps) {
     cancelIndexRendering();
     els.statsRow.innerHTML = "";
     els.workGrid.innerHTML = "";
+    const controls = document.createElement("div");
+    controls.className = "studio-index-controls";
+    const searchLabel = document.createElement("label");
+    searchLabel.className = "studio-index-search";
+    const searchCaption = document.createElement("span");
+    searchCaption.textContent = "搜索片商";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "输入片商名称";
+    search.value = studioIndexQuery;
+    search.setAttribute("aria-label", "搜索已加载的片商");
+    search.addEventListener("input", () => {
+      studioIndexQuery = search.value;
+      renderIndexMatches();
+    });
+    searchLabel.append(searchCaption, search);
+    const sortLabel = document.createElement("label");
+    sortLabel.className = "studio-index-sort";
+    sortLabel.textContent = "排序";
+    const sort = document.createElement("select");
+    sort.setAttribute("aria-label", "片商排序");
+    sort.append(new Option("馆藏数量", "count"), new Option("名称", "name"));
+    sort.value = studioIndexSort;
+    sort.addEventListener("change", () => {
+      studioIndexSort = sort.value === "name" ? "name" : "count";
+      renderIndexMatches();
+    });
+    sortLabel.append(sort);
+    studioIndexSummary = document.createElement("span");
+    studioIndexSummary.className = "studio-index-summary";
+    studioIndexSummary.setAttribute("role", "status");
+    controls.append(searchLabel, sortLabel, studioIndexSummary);
+    els.statsRow.append(controls);
+    renderIndexMatches();
+  }
+
+  function renderIndexMatches() {
+    cancelIndexRendering();
+    els.workGrid.innerHTML = "";
+    const query = studioIndexQuery.trim().toLocaleLowerCase();
+    const studios = state.studios.filter((studio) => String(studio.name || "").toLocaleLowerCase().includes(query));
+    studios.sort((a, b) => {
+      const name = String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans", { numeric: true, sensitivity: "base" });
+      return studioIndexSort === "name" ? name : localStudioCount(b) - localStudioCount(a) || name;
+    });
+    if (studioIndexSummary) studioIndexSummary.textContent = `${formatNumber(studios.length)} / ${formatNumber(state.studios.length)} 家片商`;
     if (!state.studios.length) {
       appendEmpty("还没有片商数据。");
       return;
     }
-    appendIndexBatch(state.studios, 0, studioIndexRenderSeq);
+    if (!studios.length) {
+      appendEmpty("没有匹配的片商，试试其他名称。");
+      return;
+    }
+    appendIndexBatch(studios, 0, studioIndexRenderSeq);
   }
 
   function appendIndexBatch(studios, start, renderSeq) {
@@ -219,12 +274,46 @@ export function createStudioPage(deps) {
     button.type = "button";
     button.className = "studio-card";
     button.dataset.studioId = studio.id;
+    const countValue = localStudioCount(studio);
+    button.setAttribute("aria-label", `${studio.name || "未命名片商"}，${formatNumber(countValue)} 部本地作品`);
+    const visual = document.createElement("span");
+    visual.className = "studio-card-visual";
+    const placeholder = document.createElement("span");
+    placeholder.className = "studio-card-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.textContent = String(studio.name || "片商").slice(0, 4);
+    visual.append(placeholder);
+    const logoUrl = safeLogoUrl(studio.logoUrl);
+    if (logoUrl) {
+      const logo = document.createElement("img");
+      logo.alt = "";
+      logo.loading = "lazy";
+      logo.decoding = "async";
+      logo.addEventListener("load", () => { placeholder.hidden = true; });
+      logo.addEventListener("error", () => { logo.remove(); placeholder.hidden = false; });
+      logo.src = logoUrl;
+      visual.append(logo);
+    }
     const name = document.createElement("strong");
     name.textContent = studio.name || "未命名片商";
+    name.title = studio.name || "未命名片商";
     const count = document.createElement("span");
-    count.textContent = `(${formatNumber(studio.localWorkCount || studio.workCount || 0)})`;
-    button.append(name, count);
+    count.className = "studio-card-count";
+    count.textContent = `${formatNumber(countValue)} 部本地作品`;
+    button.append(visual, name, count);
     return button;
+  }
+
+  function localStudioCount(studio) {
+    return Math.max(0, Number(studio.localWorkCount ?? studio.workCount) || 0);
+  }
+
+  function safeLogoUrl(value) {
+    if (!value || typeof value !== "string") return "";
+    try {
+      const url = new URL(value, globalThis.location?.origin || "http://fanhao.local");
+      return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+    } catch { return ""; }
   }
 
   function renderSeriesControls(studio) {

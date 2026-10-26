@@ -114,7 +114,20 @@ export function commandForAction(actionId, platform = process.platform) {
 
 const PLATFORM_COMMANDS = Object.freeze({
   win32: Object.freeze({
-    sleep: command("rundll32.exe", ["powrprof.dll,SetSuspendState", "0,1,0"]),
+    // SetSuspendState is not a rundll32 entry point; its arguments must be typed.
+    // Hibernate preserves the session overnight, with normal wake events enabled.
+    sleep: command("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-WindowStyle",
+      "Hidden",
+      "-Command",
+      [
+        "$ErrorActionPreference = 'Stop'",
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "if (-not [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Hibernate, $false, $false)) { throw 'Windows hibernation request failed' }"
+      ].join("; ")
+    ]),
     lock: command("rundll32.exe", ["user32.dll,LockWorkStation"]),
     mute: command("powershell.exe", [
       "-NoProfile",

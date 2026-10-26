@@ -74,7 +74,9 @@ try {
     const previous = actual.query.listPayload(variants()[0]);
     update(actual); update(expected);
     actual.state.failure = { phase: "all", kind };
-    equal(actual.query.prewarmLocalMetadata(), previous.works, "failed metadata prewarm keeps its old public array result", true);
+    // Prewarm returns source work entries; paged DTOs additionally project traits.
+    const previousSourceWorks = previous.works.map(({ traits, ...work }) => work);
+    equal(actual.query.prewarmLocalMetadata(), previousSourceWorks, "failed metadata prewarm keeps its complete old source array result", true);
     actual.query.prewarm(); // The injected scheduler records no real timers or services.
     actual.state.failure = null;
     for (const request of variants()) equal(actual.query.listPayload(request), expected.query.listPayload(request),

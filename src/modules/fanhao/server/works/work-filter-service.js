@@ -1,3 +1,5 @@
+import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
+
 export function createWorkFilterService({
   favoriteStateService = { isFavoriteWork: () => false },
   isVrWork = () => false,
@@ -12,6 +14,9 @@ export function createWorkFilterService({
   }
 
   function matches(work, filter) {
+    if (String(filter).startsWith("tag:") || ["uncensored", "uncensoredAi", "subtitled", "quality4k"].includes(filter)) {
+      return matchesWorkTraitFilter(traits(work), filter) === true;
+    }
     switch (filter) {
       case "localOnly": return !work.missingLocal;
       case "missingLocal": return Boolean(work.missingLocal);
@@ -23,7 +28,7 @@ export function createWorkFilterService({
       case "highRating": return (ratingFor(work) ?? -Infinity) >= 4;
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
-      case "hasMagnet": return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
+      case "hasMagnet": return publicWorkAvailability(work).hasMagnet === true;
       case "missingCover": return !work.missingLocal && !work.coverId && !workHasCoreCover(work.id);
       case "all":
       default: return true;
@@ -61,13 +66,21 @@ export function createWorkFilterService({
       if (rating !== null) counts.rated += 1;
       if (rating !== null && rating >= 4) counts.highRating += 1;
       if (isVrWork(work)) counts.vr += 1;
-      if (missingLocal && publicWorkAvailability(work).hasMagnet) counts.hasMagnet += 1;
+      if (publicWorkAvailability(work).hasMagnet === true) counts.hasMagnet += 1;
       if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) counts.missingCover += 1;
     }
     return counts;
   }
 
-  return { facets, filter, filters, matches };
+  function traits(work) {
+    return deriveWorkTraits(work, workInfoFacetRow(work.id) || {});
+  }
+
+  function traitFacets(works) {
+    return summarizeWorkTraits(works, traits);
+  }
+
+  return { facets, filter, filters, matches, traits, traitFacets };
 }
 
 function optionalNumber(...values) {

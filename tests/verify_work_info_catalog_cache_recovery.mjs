@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
+import { deriveWorkTraits, summarizeWorkTraits } from "../lib/work-traits.js";
 import { createWorkInfoCacheFixture, clampInteger, codeKey, looseCodeKey, parseJson } from "./fixtures/work-info-cache-recovery.mjs";
 
 // The real provider, presenter, code index and catalog SQL over private native
@@ -277,9 +278,10 @@ function serverPageAdapter(owner, max) {
   const source = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   const begin = source.indexOf("function pagedWorksPayload("), end = source.indexOf("\nfunction ", begin + 10);
   assert(begin > 0 && end > begin);
-  return new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks",
+  return new Function("clampInteger", "DEFAULT_WORK_LIMIT", "MAX_WORK_LIMIT", "prewarmCoreWorkCovers", "prewarmWorkInfoDetails", "publicWork", "prewarmRemoteImagesForWorks", "workFilterService",
     source.slice(begin, end) + "\nreturn pagedWorksPayload;")(
-    clampInteger, 48, max, () => {}, owner.dependencies.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {});
+    clampInteger, 48, max, () => {}, owner.dependencies.prewarmWorkInfoDetails, owner.presenter.publicWork, () => {},
+    { traitFacets: works => summarizeWorkTraits(works, work => deriveWorkTraits(work, owner.info.facetRow(work.id))) });
 }
 
 function request(options = {}) {

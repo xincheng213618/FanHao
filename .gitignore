@@ -57,6 +57,8 @@ data/user-state.json
 data/short-video-list-cache-generation.json
 data/short-video-list-watch-overlays.json
 data/remote-image-cache/
+data/subtitles/
+data/subtitle-batches/
 data/actor-profile-batch-*.jsonl
 data/*.sqlite
 data/*.sqlite.bak*
@@ -103,3 +105,4 @@ nul
 /data/design-audits/
 /data/disk-usage/
 /data/short-video-cache/
+/data

@@ -46,11 +46,11 @@
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01",
-          "/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01",
+          "/modules/fanhao/work-cards.css?v=20261023-traits-01",
           "/modules/system/admin.css?v=20260727-hidden-overlays-01",
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02",
-          "/modules/fanhao/browse-refinements.css?v=20260919-browse-03"
+          "/modules/fanhao/browse-refinements.css?v=20261023-person-aliases-01"
         ];
         const galleryStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
@@ -180,10 +180,12 @@
             <h3 id="fanhaoPersonalLabel">我的</h3>
             <a class="view-tab" href="/fanhao/favorites" data-view="favorites">收藏</a>
             <a class="view-tab" href="/fanhao/history" data-view="history">历史</a>
+            <a class="view-tab fanhao-side-link" href="/fanhao/taste">口味分析</a>
           </div>
           <div class="fanhao-nav-group fanhao-nav-management" role="group" aria-labelledby="fanhaoManagementLabel">
             <h3 id="fanhaoManagementLabel">管理</h3>
             <a class="view-tab fanhao-side-link" href="/disk-usage">存储空间</a>
+            <a class="view-tab fanhao-side-link" href="/fanhao/duplicates">重复文件比对</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows">整理与迁移</a>
           </div>
         </nav>
@@ -272,7 +274,7 @@
       } else {
         await window.__fanhaoStylesReady;
         try {
-          await import("/fanhao-app.js?v=20261004-request-lifecycle-02");
+          await import("/fanhao-app.js?v=20261023-person-aliases-01");
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }

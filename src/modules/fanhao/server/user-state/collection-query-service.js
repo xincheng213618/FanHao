@@ -1,4 +1,5 @@
 import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
+import { deriveWorkTraits, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
 
 const COLLECTION_PAGE_CACHE_LIMIT = 64;
 const COLLECTION_PAGE_WORK_BUDGET = 4096;
@@ -23,6 +24,7 @@ export function createCollectionQueryService({
   withWorkInfoReadStatus = null,
   workInfoReadCacheable = () => true,
   workFacets = (works) => ({ all: works.length }),
+  workInfoFacetRow = () => null,
   workQueryStamp = () => ""
 }) {
   const pageBudget = createWeightedCacheBudget(COLLECTION_PAGE_WORK_BUDGET);
@@ -61,6 +63,7 @@ export function createCollectionQueryService({
       filter,
       sort,
       works,
+      traitFacets: queried.traitFacets,
       facets: queried.facets,
       folders: favoriteStateService.publicFavoriteFolders(),
       selectedFolderId: selectedFolderId || "all"
@@ -96,6 +99,7 @@ export function createCollectionQueryService({
       sort,
       recentWatchedDays,
       works,
+      traitFacets: queried.traitFacets,
       facets: queried.facets
     });
   }
@@ -105,6 +109,7 @@ export function createCollectionQueryService({
     const filtered = filterWorkList(source, filter);
     return {
       works: sort ? sortWorkList(filtered, sort) : filtered,
+      traitFacets: summarizeWorkTraits(filtered, (work) => deriveWorkTraits(work, workInfoFacetRow(work.id) || {})),
       facets: workFacets(source)
     };
   }

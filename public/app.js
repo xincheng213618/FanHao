@@ -15,9 +15,10 @@ import {
   createWorkActions,
   selectVisibleWorks,
   workServerMoreState
-} from "./modules/fanhao/index.js?v=20261004-request-lifecycle-02";
+} from "./modules/fanhao/index.js?v=20261023-traits-01";
 import { createBrowseNavigation } from "./modules/fanhao/browse-navigation.js?v=20260919-browse-01";
-import { createBrowseFilterControls, nextBrowseFilters } from "./modules/fanhao/browse-filters.js?v=20260919-browse-01";
+import { createBrowseFilterControls, nextBrowseFilters } from "./modules/fanhao/browse-filters.js?v=20261023-inline-filters-03";
+import { createBrowseTraitControls, createWorkEditionBadges, createWorkTagButtons, loadedTraitFacets, traitFilterLabel, workMatchesTraitFilter } from "./modules/fanhao/browse-traits.js?v=20261023-traits-wrap-02";
 import { createLatestRequestGate } from "./modules/fanhao/latest-request.js?v=20260717-fanhao-latest-request-01";
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
@@ -28,6 +29,12 @@ prepareClientShell();
 
 const state = {
   ...createFanhaoState({ readStoredFlag }),
+  personWorksTraitFacets: null,
+  searchTraitFacets: null,
+  codePrefixTraitFacets: null,
+  studioWorksTraitFacets: null,
+  collectionTraitFacets: null,
+  vrTraitFacets: null,
   uiConfig: defaultUiConfig(),
   routeReady: false,
   restoringRoute: false
@@ -61,6 +68,7 @@ const formatter = new Intl.NumberFormat("zh-CN");
 const libraryRequests = createLatestRequestGate();
 let navigationSequence = 0;
 let searchLoadMoreOwner = null;
+let pendingWorkFilterFocus = null;
 const browseNavigation = createBrowseNavigation();
 let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
@@ -162,7 +170,7 @@ const codePrefixPage = createCodePrefixPage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261009-path-relink-02");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261023-person-aliases-01");
     return createPersonProfile({
       api,
       coverUrl,
@@ -230,6 +238,7 @@ const rankingPage = createRankingPage({
     state.selectedPerson = null;
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
+    state.personWorksTraitFacets = null;
   },
   clearWorkFilter,
   els,
@@ -720,6 +729,7 @@ function setActiveView(view, options = {}) {
     state.searchPeople = [];
     state.searchQuery = "";
     state.searchFacets = null;
+    state.searchTraitFacets = null;
     state.searchTotal = 0;
   }
   syncNavigationState(view);
@@ -950,6 +960,14 @@ function handleSortModeChange(event) {
     collectionPage.loadVrWorks();
     return;
   }
+  if (state.activeView === "favorites") {
+    collectionPage.loadFavorites();
+    return;
+  }
+  if (state.activeView === "history") {
+    collectionPage.loadHistory();
+    return;
+  }
   if (state.activeView === "studios" && state.selectedStudio) {
     studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
     return;
@@ -972,8 +990,22 @@ function handleFilterModeChange() {
     studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
     return;
   }
+  if (state.activeView === "favorites") {
+    collectionPage.loadFavorites();
+    return;
+  }
+  if (state.activeView === "history") {
+    collectionPage.loadHistory();
+    return;
+  }
+  if (state.activeView === "vr") {
+    collectionPage.loadVrWorks();
+    return;
+  }
   if (state.activeView === "rankings") {
     renderRankingStats();
+  } else {
+    refreshLoadedWorkControls();
   }
   renderWorks();
 }
@@ -1050,7 +1082,35 @@ function renderPersonWorkStats() {
   summary.textContent = `当前结果 ${formatNumber(state.personWorksTotal)} 部`;
   els.statsRow.append(summary);
   appendWorkControls(state.works);
-  if (focusedFilter) els.filterList?.querySelector(`[data-work-filter="${focusedFilter}"]`)?.focus({ preventScroll: true });
+  if (focusedFilter) focusWorkFilter(focusedFilter);
+}
+
+function focusWorkFilter(value) {
+  [...els.statsRow.querySelectorAll("[data-work-filter]")]
+    .find((button) => button.dataset.workFilter === value)?.focus({ preventScroll: true });
+}
+
+function currentTraitFacets(works) {
+  let facets = null;
+  if (state.activeView === "people" && state.selectedPersonId) facets = state.personWorksTraitFacets;
+  if (state.activeView === "search") facets = state.searchTraitFacets;
+  if (state.activeView === "codes" && state.selectedCodePrefix) facets = state.codePrefixTraitFacets;
+  if (state.activeView === "studios" && state.selectedStudio) facets = state.studioWorksTraitFacets;
+  if (["favorites", "history"].includes(state.activeView)) facets = state.collectionTraitFacets;
+  if (state.activeView === "vr") facets = state.vrTraitFacets;
+  return facets ? { facets, loadedOnly: false } : { facets: loadedTraitFacets(works), loadedOnly: true };
+}
+
+function refreshLoadedWorkControls() {
+  const previous = els.filterList;
+  const wrap = previous?.closest(".stat-quick-filters");
+  if (!wrap) return;
+  previous.replaceWith(createWorkFilterControls());
+  wrap.querySelector(".browse-traits")?.remove();
+  const traits = createBrowseTraitControls({ ...currentTraitFacets(state.works), filters: selectedWorkFilters(), toggle: toggleWorkFilter });
+  if (traits) wrap.append(traits);
+  if (pendingWorkFilterFocus) focusWorkFilter(pendingWorkFilterFocus);
+  pendingWorkFilterFocus = null;
 }
 
 function appendWorkControls(works) {
@@ -1067,7 +1127,13 @@ function appendWorkControls(works) {
   }
   appendPersonBulkDeleteControls(works, wrap);
   appendMetadataQuickFilters(works, wrap);
+  const traits = createBrowseTraitControls({ ...currentTraitFacets(works), filters: selectedWorkFilters(), toggle: toggleWorkFilter });
+  if (traits) wrap.append(traits);
   els.statsRow.append(wrap);
+  if (pendingWorkFilterFocus) {
+    focusWorkFilter(pendingWorkFilterFocus);
+    pendingWorkFilterFocus = null;
+  }
 }
 
 function isPersonBulkDeleteAvailable() {
@@ -1227,7 +1293,7 @@ function appendMetadataQuickFilters(works, wrap) {
 }
 
 function workFilterLabel(filter) {
-  return {
+  return traitFilterLabel(filter) || {
     all: "全部",
     playable: "可播放",
     favorite: "已收藏",
@@ -1238,7 +1304,7 @@ function workFilterLabel(filter) {
     highRating: "高分",
     vr: "VR",
     hasMagnet: "有磁链",
-    localMarkedA: "显示A",
+    localMarkedA: "A 标记",
     missingLocal: "未下载",
     missingCover: "无封面"
   }[filter] || "当前";
@@ -1264,6 +1330,7 @@ function workFilterIsActive(value) {
 }
 
 function setWorkFilters(filters) {
+  pendingWorkFilterFocus = document.activeElement?.dataset.workFilter || null;
   const normalized = normalizeWorkFilters(filters);
   state.filterMode = normalized.length ? normalized.join(",") : "all";
   handleFilterModeChange();
@@ -1319,6 +1386,8 @@ function visibleWorks() {
 }
 
 function clientWorkMatchesFilter(work, filter) {
+  const traitMatch = workMatchesTraitFilter(work, filter);
+  if (traitMatch !== null) return traitMatch;
   if (filter === "playable") return work.playableCount > 0;
   if (filter === "favorite") return work.favorite;
   if (filter === "progress") return Boolean(work.progress);
@@ -1330,7 +1399,7 @@ function clientWorkMatchesFilter(work, filter) {
     return rating !== null && rating >= 4;
   }
   if (filter === "vr") return isVrWork(work);
-  if (filter === "hasMagnet") return Boolean(work.missingLocal && work.availability?.hasMagnet);
+  if (filter === "hasMagnet") return work.availability?.hasMagnet === true;
   if (filter === "localMarkedA") return (work.localMarkers || []).includes("A");
   if (filter === "missingLocal") return Boolean(work.missingLocal);
   if (filter === "missingCover") return !workCoverUrl(work);
@@ -1443,6 +1512,7 @@ async function loadSearchResults(query, options = {}) {
   state.searchQuery = normalizedQuery;
   state.searchTotal = 0;
   state.searchFacets = null;
+  state.searchTraitFacets = null;
   state.searchLoadingMore = false;
 
   try {
@@ -1455,6 +1525,7 @@ async function loadSearchResults(query, options = {}) {
     state.works = data.works || [];
     state.searchTotal = data.total || state.works.length;
     state.searchFacets = data.facets || null;
+    state.searchTraitFacets = data.traitFacets || null;
     resetWorkPaging();
     renderSearchStats();
     renderWorks(`没有搜到「${normalizedQuery}」。`);
@@ -1490,6 +1561,7 @@ async function loadMoreSearchResults(button) {
     state.works.push(...nextWorks);
     state.searchTotal = data.total || state.searchTotal || state.works.length;
     state.searchFacets = data.facets || state.searchFacets || null;
+    state.searchTraitFacets = data.traitFacets || state.searchTraitFacets || null;
     if (!state.searchPeople.length) state.searchPeople = data.people || [];
     state.workVisibleLimit += state.workPageSize;
     renderSearchStats();
@@ -2134,6 +2206,10 @@ function createWorkCard(work, index = 0) {
   }
 
   body.append(title);
+  const editions = createWorkEditionBadges(work);
+  if (editions) body.append(editions);
+  const tags = createWorkTagButtons(work, { filters: selectedWorkFilters(), toggle: toggleWorkFilter });
+  if (tags) body.append(tags);
   body.append(facts);
   if (flags.childElementCount) body.append(flags);
   if (work.missingLocal) {
@@ -2378,8 +2454,10 @@ function createInfoChip(text, variant = "") {
 
 function createAvailabilityChips(work) {
   const availability = work.availability || {};
-  if (work.missingLocal && availability.hasMagnet === true) {
-    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "含磁链", "magnet")];
+  if (availability.hasMagnet === true) {
+    const chip = createInfoChip(availability.hasSubtitles ? "中字磁链" : "含磁链", "magnet");
+    chip.title = "资料来源标记有磁链，未验证当前下载可用性。中字磁链仅表示资源资料线索，不代表本地文件有字幕。";
+    return [chip];
   }
   return [];
 }

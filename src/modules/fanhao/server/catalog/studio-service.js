@@ -1,4 +1,5 @@
 import { createWeightedCacheBudget, normalizeWorkSortMode } from "../works/work-cache-budget.js";
+import { studioMarkFields } from "../../../../../lib/studio-marks.js";
 
 const DEFAULT_STUDIO_SORT = "releaseDesc";
 const STUDIO_DETAIL_PREWARM_PAGE_SIZE = 48;
@@ -140,6 +141,7 @@ export function createStudioService({
     return {
       id: row.maker_id,
       name: row.name || "",
+      ...studioMarkFields(row.name),
       url: publicRemoteUrl(row.javdb_url),
       source: row.source || "",
       workCount: row.work_count || 0,
@@ -163,6 +165,7 @@ export function createStudioService({
     return {
       id: row.maker_id,
       name: row.name || "",
+      ...studioMarkFields(row.name),
       url: publicRemoteUrl(row.javdb_url),
       source: row.source || "",
       workCount: row.work_count || 0,

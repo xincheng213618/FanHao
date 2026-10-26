@@ -236,6 +236,6 @@ async function factory(input) {
         const row = entry && Object.hasOwn(entry, "row") ? entry.row : entry;
         return bytes + Object.values(row || {}).reduce((size, value) => size + (ArrayBuffer.isView(value) ? value.byteLength : 0), 0);
       }, 0) };
-    },`).replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from "${new URL(relative, serviceUrl).href}"`);
+    },`).replace(/from "(\.\.?\/[^"]+)"/gu, (_, relative) => `from "${new URL(relative, serviceUrl).href}"`);
   return (await import(`data:text/javascript;base64,${Buffer.from(instrumented).toString("base64")}`)).createWorkInfoService;
 }

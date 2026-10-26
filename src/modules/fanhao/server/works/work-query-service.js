@@ -1,6 +1,7 @@
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
 import { createWorkSorter } from "./work-sorter.js";
 import { createWeightedCacheBudget, normalizeWorkSortMode } from "./work-cache-budget.js";
+import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
@@ -56,7 +57,7 @@ export function createWorkQueryService({
   prewarmVideoProbesForWorks = () => {},
   publicPerson,
   publicWork,
-  publicWorkAvailability,
+  publicWorkAvailability = () => ({}),
   rankingMissingSearchResult = null,
   rankingMissingSearchWorks,
   recordPerformanceSpan = null,
@@ -66,7 +67,7 @@ export function createWorkQueryService({
   userStateStamp = () => "",
   workHasCoreCover,
   workHasLocalMarker,
-  workInfoFacetRow,
+  workInfoFacetRow = () => null,
   withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
   workInfoReadCacheable = () => true,
   withWorkSearchReadStatus = (callback) => ({ value: callback(), cacheable: true }),
@@ -109,6 +110,9 @@ export function createWorkQueryService({
   let dynamicFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
   let derivedCacheStamp = "";
+  let traitCache = new WeakMap();
+  let traitFacetCache = new WeakMap();
+  let compactFacetCache = new WeakMap();
   const derivedBudget = createWeightedCacheBudget(DERIVED_WORK_REFERENCE_BUDGET);
   const listPageBudget = createWeightedCacheBudget(LIST_PAGE_WORK_BUDGET);
   const searchPageBudget = createWeightedCacheBudget(SEARCH_PAGE_WORK_BUDGET);
@@ -168,6 +172,7 @@ export function createWorkQueryService({
   }
 
   function workMatchesFilter(work, filter) {
+    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work), filter) === true;
     switch (filter) {
       case "localOnly":
         return !work.missingLocal;
@@ -192,7 +197,7 @@ export function createWorkQueryService({
       case "localMarkedA":
         return workHasLocalMarker(work, "A");
       case "hasMagnet":
-        return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
+        return publicWorkAvailability(work).hasMagnet === true;
       case "missingCover":
         if (work.missingLocal) return false;
         return !work.coverId && !workHasCoreCover(work.id);
@@ -240,11 +245,11 @@ export function createWorkQueryService({
   }
 
   function workListRating(work) {
-    return optionalNumber(workInfoFacetRow(work.id)?.rating, work.infoSummary?.rating);
+    return optionalNumber(compactFacetRow(work)?.rating, work.infoSummary?.rating);
   }
 
   function workSortMetadata(work, options = {}) {
-    const infoRow = options.lightweightInfo ? null : workInfoFacetRow(work.id);
+    const infoRow = options.lightweightInfo ? null : compactFacetRow(work);
     return {
       releaseDate: String(infoRow?.release_date || work.infoSummary?.releaseDate || ""),
       rating: optionalNumber(infoRow?.rating, work.infoSummary?.rating),
@@ -255,6 +260,7 @@ export function createWorkQueryService({
   }
 
   function lightweightWorkMatchesFilter(work, filter) {
+    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work), filter) === true;
     switch (filter) {
       case "localOnly": return !work.missingLocal;
       case "missingLocal": return Boolean(work.missingLocal);
@@ -266,7 +272,7 @@ export function createWorkQueryService({
       case "highRating": return (numericSummaryRating(work) ?? -Infinity) >= 4;
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
-      case "hasMagnet": return Boolean(work.missingLocal && work.infoSummary?.hasMagnet);
+      case "hasMagnet": return work.infoSummary?.hasMagnet === true;
       case "missingCover": return !work.missingLocal && !work.coverId && !workHasCoreCover(work.id);
       case "all":
       default: return true;
@@ -298,7 +304,7 @@ export function createWorkQueryService({
 
     for (const work of works) {
       const missingLocal = Boolean(work.missingLocal);
-      const infoRow = workInfoFacetRow(work.id);
+      const infoRow = compactFacetRow(work);
       const rating = optionalNumber(infoRow?.rating, work.infoSummary?.rating);
       if (Number(work.playableCount || 0) > 0) facets.playable += 1;
       if (infoRow || Number(work.infoCount || 0) > 0) facets.info += 1;
@@ -307,7 +313,7 @@ export function createWorkQueryService({
       if (rating !== null) facets.rated += 1;
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
-      if (missingLocal && publicWorkAvailability(work).hasMagnet) facets.hasMagnet += 1;
+      if (publicWorkAvailability(work).hasMagnet === true) facets.hasMagnet += 1;
       if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
     }
 
@@ -361,7 +367,7 @@ export function createWorkQueryService({
       if (rating !== null) facets.rated += 1;
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
-      if (missingLocal && work.infoSummary?.hasMagnet) facets.hasMagnet += 1;
+      if (work.infoSummary?.hasMagnet === true) facets.hasMagnet += 1;
       if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
     }
 
@@ -394,7 +400,7 @@ export function createWorkQueryService({
     }
     const page = pageSource.map((work) => preparedPublicWork(work, options));
     prewarmRemoteImagesForWorks(page);
-    const payload = { ...extra, count: page.length, total, limit, offset, sort, works: page };
+    const payload = { ...extra, count: page.length, total, limit, offset, sort, traitFacets: workTraitFacets(works), works: page };
     if (recordPerformanceSpan) recordPerformanceSpan("page-hydrate", performance.now() - pageStarted);
     return payload;
   }
@@ -437,7 +443,7 @@ export function createWorkQueryService({
   function loadPreparedPublicWork(work, options) {
     const cached = readPreparedWork(work, options);
     if (cached) return cached;
-    const payload = publicWork(work, false, options);
+    const payload = { ...publicWork(work, false, options), traits: traitsForWork(work) };
     const cacheKey = preparedWorkCacheKey(work, options);
     if (!cacheKey || !workInfoReadCacheable() || !workSearchReadCacheable()) return payload;
     workPayloadCache.set(cacheKey, { work, payload, userStateStamp: userStateStamp() });
@@ -472,7 +478,7 @@ export function createWorkQueryService({
       matchedWorks = filters.length
         ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
         : visibleWorks;
-      cacheable = Boolean(filterContext) && filters.every((item) => cacheableFilters.has(item));
+      cacheable = Boolean(filterContext) && filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item));
     }
     const works = sortWorkList(matchedWorks, sort, options);
     const payload = pagedWorksPayload(works, url, {
@@ -589,7 +595,7 @@ export function createWorkQueryService({
       filtered = filters.length
         ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item))))
         : scopedWorks;
-      if (cacheable && workInfoReadCacheable() && filters.every((item) => cacheableFilters.has(item))) {
+      if (cacheable && workInfoReadCacheable() && filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item))) {
         writeFilterCache(listSourceCache, cacheKey, { stamp: filterStamp, works: filtered });
       }
     }
@@ -943,7 +949,7 @@ export function createWorkQueryService({
     if (!filters.length) return categoryWorks;
     const filterKey = `${category}:${filters.join(",")}`;
     const matchesFilters = (work) => filters.every((item) => lightweightWorkMatchesFilter(work, item));
-    if (!filters.every((item) => cacheableFilters.has(item))) return categoryWorks.filter(matchesFilters);
+    if (!filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item))) return categoryWorks.filter(matchesFilters);
     const stamp = userStateStamp();
     if (source.filteredByModeStamp !== stamp) {
       source.filteredByModeStamp = stamp;
@@ -952,7 +958,7 @@ export function createWorkQueryService({
     const cached = readFilterCache(source.filteredByMode, filterKey);
     if (cached) return cached;
     const filtered = measure("filter", () => categoryWorks.filter(matchesFilters));
-    writeFilterCache(source.filteredByMode, filterKey, filtered);
+    if (workInfoReadCacheable() && workSearchReadCacheable()) writeFilterCache(source.filteredByMode, filterKey, filtered);
     return filtered;
   }
 
@@ -968,11 +974,47 @@ export function createWorkQueryService({
     const stamp = currentStamp();
     if (derivedCacheStamp === stamp) return;
     derivedCacheStamp = stamp;
+    traitCache = new WeakMap();
+    traitFacetCache = new WeakMap();
+    compactFacetCache = new WeakMap();
     derivedBudget.clear();
     sortedWorksCache = new WeakMap();
     listSourceCache.clear();
     searchSourceCache.clear();
     searchSourceCacheStamp = "";
+  }
+
+  function traitsForWork(work) {
+    const stamp = currentStamp();
+    const cached = traitCache.get(work);
+    if (cached?.stamp === stamp) return cached.traits;
+    const traits = deriveWorkTraits(work, compactFacetRow(work) || {});
+    // Compact prefix DTOs carry complete labels before their detail hydration.
+    // Other pending providers must not freeze an incomplete label snapshot.
+    if ((!work.missingCodeSearchPending || work.missingCodeSearchTraitsReady)
+      && workInfoReadCacheable() && workSearchReadCacheable()) {
+      traitCache.set(work, { stamp, traits });
+    }
+    return traits;
+  }
+
+  function workTraitFacets(works) {
+    const stamp = currentStamp();
+    const cached = traitFacetCache.get(works);
+    if (cached?.stamp === stamp) return cached.facets;
+    const facets = summarizeWorkTraits(works, traitsForWork);
+    if (workInfoReadCacheable() && workSearchReadCacheable()
+      && !works.some((work) => work.missingCodeSearchPending && !work.missingCodeSearchTraitsReady)) traitFacetCache.set(works, { stamp, facets });
+    return facets;
+  }
+
+  function compactFacetRow(work) {
+    const stamp = currentStamp();
+    const cached = compactFacetCache.get(work);
+    if (cached?.stamp === stamp) return cached.row;
+    const row = workInfoFacetRow(work.id);
+    if (workInfoReadCacheable() && workSearchReadCacheable()) compactFacetCache.set(work, { stamp, row });
+    return row;
   }
 
   function findExactLocalWork(codeKey) {
@@ -1008,4 +1050,8 @@ function requestedFilters(value) {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item && item !== "all"))].sort();
+}
+
+function isTraitFilter(value) {
+  return String(value).startsWith("tag:") || ["uncensored", "uncensoredAi", "subtitled", "quality4k"].includes(value);
 }

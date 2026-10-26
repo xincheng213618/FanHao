@@ -10,6 +10,8 @@ assert.ok(process.argv.slice(2).every(value => value === "--legacy-projection"))
 const legacy = process.argv.includes("--legacy-projection");
 const presenterUrl = new URL("../src/modules/fanhao/server/works/presenter-service.js", import.meta.url);
 let previousPresenterSource = fs.readFileSync(presenterUrl, "utf8");
+previousPresenterSource = previousPresenterSource.replace('"../../../../../lib/work-traits.js"',
+  JSON.stringify(new URL("../lib/work-traits.js", import.meta.url).href));
 for (const text of ["{ includeMetadata: false }", "{ includeMetadata: includeFiles }"]) {
   const call = `workInfoDetailRow(work.id, ${text})`;
   assert.equal(previousPresenterSource.split(call).length, 2);
