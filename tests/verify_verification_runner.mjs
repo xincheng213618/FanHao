@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { DAILY_SCRIPTS, FULL_SCRIPTS, expandCommands, isGeneratedCacheOnlyChange, parseNullTerminatedPaths, selectScripts } from './run_verification.mjs';
+import { DAILY_SCRIPTS, FULL_SCRIPTS, ANDROID_SCRIPTS, expandCommands, isGeneratedCacheOnlyChange, parseNullTerminatedPaths, selectScripts } from './run_verification.mjs';
 import { readFileSync } from 'node:fs';
 
 const commands = expandCommands(
@@ -361,7 +361,7 @@ for (const file of ['tests/verify_music_summary_reuse.mjs', 'tests/verify_music_
 }
 assert.deepEqual(selectScripts(['tests/verify_studio_cache_dependencies.mjs']).scripts, ['verify:studio-cache', 'verify:fanhao', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_android_music_list_rendering.mjs']).scripts, ['verify:android-music-rendering', 'verify:android-music', 'verify:imports']);
-for (const name of ['catalogue', 'playback', 'transition']) {
+for (const name of ['catalogue', 'playback', 'transition', 'history', 'playlist']) {
   assert.deepEqual(selectScripts([`tests/verify_android_music_${name}_requests.mjs`]).scripts, ['verify:android-music', 'verify:android-music-rendering', 'verify:imports']);
 }
 for (const file of ['src/modules/fanhao/server/library/cache-contracts.js', 'src/modules/fanhao/server/library/table-stamp-query.js', 'src/modules/fanhao/server/catalog/studio-service.js', 'src/modules/fanhao/server/catalog/code-prefix-service.js']) {
@@ -392,7 +392,7 @@ for (const name of ['progress-receipts', 'routes', 'store']) {
   assert(selectScripts([`src/modules/music/server/${name}.js`]).scripts.includes('verify:music-progress'));
 }
 for (const name of ['music-views', 'music-progress-writer', 'progress-session', 'progress-transport', 'music-catalogue-requests', 'music-catalogue-refresh']) {
-  assert.deepEqual(selectScripts([`android-client/www/modules/music/${name}.js`]).scripts, ['verify:android-security', 'verify:auth', 'verify:mutation-auth', 'verify:imports', 'verify:android-music', 'verify:music-progress', 'verify:android-music-rendering']);
+  assert.deepEqual(selectScripts([`android-client/www/modules/music/${name}.js`]).scripts, ['verify:android-security', 'verify:auth', 'verify:mutation-auth', 'verify:imports', 'verify:android-music', 'verify:music-progress', 'verify:android-music-rendering', 'verify:android-bottom-layout']);
 }
 assert.deepEqual(selectScripts(['tests/verify_music_request_ownership.mjs']).scripts, ['verify:music-requests', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_music_reader_requests.mjs']).scripts, ['verify:music-reader-browser', 'verify:music-requests', 'verify:imports']);
@@ -433,3 +433,91 @@ assert(unknown.scripts.includes('verify:startup'));
 assert.deepEqual(unknown.unknownSourceFiles, ['tools/new_unclassified_source.mjs']);
 
 console.log('Verification runner fixtures passed.');
+
+// Android release projection: retain HEAD Web mappings and add only mobile gates.
+for (const [file, script] of [
+  ['android-client/www/modules/novels/android-module.js', 'verify:android-novel-layout'],
+  ['android-client/www/modules/novels/novel-views.js', 'verify:android-novel-layout'],
+  ['android-client/www/modules/novels/styles.css', 'verify:android-novel-layout'],
+  ['tests/verify_android_novel_mobile_layout.mjs', 'verify:android-novel-layout'],
+  ['tests/serve_android_gallery_navigation_fixture.mjs', 'verify:android-novel-layout'],
+  ['tests/fixtures/android-gallery-navigation-browser.mjs', 'verify:android-novel-layout'],
+  ['tests/fixtures/android-gallery-navigation-browser.html', 'verify:android-novel-layout'],
+  ['android-client/www/platform/content-index/channel-views.js', 'verify:android-manga-layout'],
+  ['android-client/www/modules/photos/styles.css', 'verify:android-manga-layout'],
+  ['tests/verify_android_manga_mobile_layout.mjs', 'verify:android-manga-layout'],
+  ['tests/serve_android_gallery_navigation_fixture.mjs', 'verify:android-manga-layout'],
+  ['android-client/www/modules/media/styles.css', 'verify:android-gallery-layout'],
+  ['android-client/www/modules/photos/styles.css', 'verify:android-gallery-layout'],
+  ['tests/verify_android_gallery_mobile_layout.mjs', 'verify:android-gallery-layout'],
+  ['tests/serve_android_gallery_navigation_fixture.mjs', 'verify:android-gallery-layout'],
+  ['tests/fixtures/android-gallery-navigation-browser.mjs', 'verify:android-gallery-layout'],
+  ['tests/fixtures/android-gallery-navigation-browser.html', 'verify:android-gallery-layout'],
+  ['android-client/www/js/bottom-layout.js', 'verify:android-bottom-layout'],
+  ['android-client/www/css/settings-nav.css', 'verify:android-bottom-layout'],
+  ['android-client/www/modules/music/home.css', 'verify:android-bottom-layout'],
+  ['android-client/www/modules/short-videos/styles/list.css', 'verify:android-bottom-layout'],
+  ['tests/verify_android_bottom_layout.mjs', 'verify:android-bottom-layout'],
+  ['tests/verify_android_bottom_layout_metrics.mjs', 'verify:android-bottom-layout'],
+  ['android-client/scripts/verify-android-security.mjs', 'verify:android-security'],
+  ['tests/verify_native_short_video_first_frame.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_recovery.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_manual_retry.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_player_callbacks.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_continuation.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_playback_requests.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_readiness.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_recovery.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_image_recovery.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_sound.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_interruption_advance.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_rebind.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gallery_segment_rebind.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_seek_rendering.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_checkpoint.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_session.mjs', 'verify:short-video-client'],
+  ['tests/fixtures/NativeShortVideoCheckpointHarness.java', 'verify:short-video-client'],
+  ['tests/fixtures/NativeShortVideoSessionHarness.java', 'verify:short-video-client'],
+  ['tests/fixtures/NativeShortVideoPlaybackHarness.java', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_screen_awake.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_gestures.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_overlay_playback.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_cover_ownership.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_frame_loading.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_bitmap_decode.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_author_requests.mjs', 'verify:short-video-client'],
+  ['tests/verify_android_short_video_list_lifecycle.mjs', 'verify:short-video-client'],
+  ['tests/verify_android_short_video_back.mjs', 'verify:short-video-client'],
+  ['tests/verify_android_short_video_suggestions.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_audio.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_audio_focus.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_prefetch.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_cache_startup.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_interaction.mjs', 'verify:short-video-client'],
+  ['tests/verify_native_short_video_request_lifecycle.mjs', 'verify:short-video-client'],
+  ['tests/verify_android_mobile_action_sheet.mjs', 'verify:android-mobile-sheets'],
+  ['tests/verify_android_settings_focus.mjs', 'verify:android-mobile-sheets'],
+  ['tests/verify_android_music_back.mjs', 'verify:android-music'],
+  ['tests/verify_android_fanhao_player_requests.mjs', 'verify:android-fanhao-player'],
+  ['tests/verify_android_fanhao_player_lifecycle.mjs', 'verify:android-fanhao-player'],
+  ['tests/verify_android_novel_style_reuse.mjs', 'verify:android-novel-styles'],
+  ['tests/verify_android_novel_mobile_ui.mjs', 'verify:android-novel-ui'],
+  ['tests/verify_android_novel_source_identity.mjs', 'verify:android-novels'],
+  ['tests/verify_android_novel_paging_alignment.mjs', 'verify:android-novel-paging'],
+  ['tests/verify_android_update_streams.mjs', 'verify:android-update-streams'],
+]) {
+  const selected = selectScripts([file]);
+  assert(selected.scripts.includes(script), file + ' must retain its Android gate ' + script);
+  assert.deepEqual(selected.unknownSourceFiles, [], file + ' must have an explicit Android scope');
+}
+const androidProjectionPackage = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).scripts;
+const androidProjectionCommands = expandCommands(ANDROID_SCRIPTS, androidProjectionPackage);
+assert.equal(androidProjectionCommands.length, 123, 'Android release retains all 123 unique commands');
+for (const script of ["verify:android-bottom-layout","verify:android-gallery-layout","verify:android-manga-layout","verify:android-novel-layout"]) {
+  assert(ANDROID_SCRIPTS.includes(script));
+  assert(FULL_SCRIPTS.includes(script));
+  for (const command of expandCommands([script], androidProjectionPackage).filter(command => command.startsWith('node tests/'))) {
+    assert.equal(androidProjectionCommands.filter(value => value === command).length, 1, command + ' must execute once');
+  }
+}
+console.log('Android release projection gates passed (HEAD Web mappings preserved, 123 Android commands).');

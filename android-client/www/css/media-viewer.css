@@ -95,6 +95,44 @@ body.media-viewer-open .bottom-nav {
   box-shadow: none;
 }
 
+.media-viewer-stage[data-image-state="loading"] img,
+.media-viewer-stage[data-image-state="error"] img {
+  visibility: hidden;
+}
+
+.media-viewer-feedback {
+  position: absolute;
+  max-width: calc(100% - 112px);
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(20, 25, 32, 0.92);
+  color: #fff;
+  text-align: center;
+}
+
+.media-viewer-status {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.media-viewer-retry {
+  min-width: 104px;
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font: inherit;
+}
+
+.media-viewer-retry:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
 .media-viewer-nav {
   position: absolute;
   top: 50%;
@@ -112,6 +150,11 @@ body.media-viewer-open .bottom-nav {
   line-height: 1;
   opacity: 1;
   transition: opacity 0.18s ease;
+}
+
+/* Keep the centered hit target in place during the shared button press effect. */
+.media-viewer-nav:active {
+  transform: translateY(-50%);
 }
 
 .media-viewer-nav.prev {

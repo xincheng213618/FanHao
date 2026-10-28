@@ -17,6 +17,7 @@
 
 .novel-chrome-tabs button {
   flex: 0 0 auto;
+  max-width: 100%;
   min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -25,6 +26,7 @@
   padding: 0 12px;
   font-size: 12px;
   line-height: 1;
+  text-align: start;
 }
 
 .novel-chrome-tabs button.active {
@@ -77,11 +79,15 @@ body.novel-search-page-view .bottom-nav {
 }
 
 .novel-mobile-search-page-content {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 0;
   padding: 0 0 calc(24px + env(safe-area-inset-bottom));
 }
 
 .novel-mobile-search-page-head {
+  min-width: 0;
+  max-width: 100%;
   position: sticky;
   top: 0;
   z-index: 18;
@@ -93,6 +99,8 @@ body.novel-search-page-view .bottom-nav {
 
 .novel-mobile-search-page-form {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   grid-template-columns: 44px minmax(0, 1fr) 56px;
   align-items: center;
   gap: 6px;
@@ -119,10 +127,10 @@ body.novel-search-page-view .bottom-nav {
 
 .novel-mobile-search-page-field {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 38px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   min-width: 0;
-  height: 44px;
+  height: 46px;
   border: 1px solid transparent;
   border-radius: 12px;
   background: var(--field);
@@ -143,7 +151,7 @@ body.novel-search-page-view .bottom-nav {
 .novel-mobile-search-page-field input {
   width: 100%;
   min-width: 0;
-  height: 42px;
+  height: 44px;
   border: 0;
   outline: 0;
   background: transparent;
@@ -162,8 +170,10 @@ body.novel-search-page-view .bottom-nav {
 }
 
 .novel-mobile-search-page-clear {
-  min-width: 38px;
-  min-height: 38px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
   color: var(--muted);
   padding: 0;
   font-size: 24px;
@@ -178,7 +188,10 @@ body.novel-search-page-view .bottom-nav {
 
 .novel-mobile-search-prompt {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   min-height: 180px;
+  overflow-wrap: anywhere;
   place-items: center;
   color: var(--muted);
   padding: 24px 18px;

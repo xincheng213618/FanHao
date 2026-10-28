@@ -1,22 +1,33 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-1443708f18b1";
-import { fetchJson } from "./js/api.js?v=assets-1443708f18b1";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-22080e82f167";
+import { fetchJson } from "./js/api.js?v=assets-22080e82f167";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-1443708f18b1";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-1443708f18b1";
-import { getElements } from "./js/dom.js?v=assets-1443708f18b1";
+import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-22080e82f167";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-22080e82f167";
+import { getElements } from "./js/dom.js?v=assets-22080e82f167";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-22080e82f167";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-22080e82f167";
+import { captureAccountOwner, isAccountOwnerCurrent } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-1443708f18b1";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-1443708f18b1";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-1443708f18b1";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-1443708f18b1";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-22080e82f167";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-22080e82f167";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-22080e82f167";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-22080e82f167";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-1443708f18b1";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-1443708f18b1";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-1443708f18b1";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-22080e82f167";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-22080e82f167";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-22080e82f167";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-22080e82f167";
 
 const els = getElements();
+const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
+const settingsDialogFocus = createSettingsDialogFocus({
+  overlay: els.settingsOverlay, panel: els.settingsPanel, closeButton: els.settingsCloseButton,
+  confirmationOverlay: els.appConfirmOverlay,
+  getOwner: captureSettingsFocusOwner, isOwnerCurrent: isSettingsFocusOwnerCurrent,
+  isBlocked: () => document.body.classList.contains("media-viewer-open")
+});
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
 installServerAuthentication(() => activeUrl);
 let accountReloadPending = false;
@@ -27,6 +38,7 @@ window.addEventListener("fanhaoAccountOwnerConfirmed", (event) => {
 });
 window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
   if (event.detail?.current?.origin !== new URL(activeUrl).origin) return;
+  closeMobileActionSheet(false);
   accountChangeNeedsReload ||= Boolean(accountPageOwner || library);
   invalidateViewRender();
   ++libraryLoadGeneration;
@@ -63,6 +75,9 @@ let accountSettingsServer = "";
 let readerCacheSnapshot = null;
 let mangaStorageSnapshot = null;
 let pendingAppConfirmation = null;
+let appConfirmationGeneration = 0;
+let closingSettingsSession = null;
+let settingsSourceRevision = 0;
 const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelSearch", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "people";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
@@ -135,6 +150,14 @@ let mediaViewer = createMediaViewer();
 let searchHistory = null;
 let renderedSearchController = null;
 let viewRenderToken = 0;
+let activeModePickerSession = null;
+let bottomNavLongPressTimer = 0;
+let bottomNavTouchX = 0;
+let bottomNavTouchY = 0;
+let bottomNavLongPressButton = null;
+let bottomNavPress = null;
+let suppressedBottomNavButton = null;
+let dismissModePickerClick = false;
 let activeViewController = null;
 let pendingScrollRestore = null;
 let scrollRestoreIntent = 0;
@@ -508,6 +531,7 @@ function mangaImageLimitStep(fallback = 12) {
 }
 
 function invalidateViewRender() {
+  retireModePickerSession();
   viewRenderToken += 1;
   activeViewController?.abort();
   activeViewController = null;
@@ -648,6 +672,11 @@ async function updateMangaStorageStatus(options = {}) {
   }
 }
 
+function formatStorageMetricBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
+  return value === 0 ? "0 B" : formatBytes(value);
+}
+
 function renderMangaStorageMetrics(storage) {
   const available = Boolean(storage?.exists);
   const trash = storage?.trash || {};
@@ -673,7 +702,7 @@ function renderMangaStorageMetrics(storage) {
         : "电脑端原图";
     }
   }
-  if (els.mangaStorageBytes) els.mangaStorageBytes.textContent = available ? formatBytes(storage.bytes || 0) : "-";
+  if (els.mangaStorageBytes) els.mangaStorageBytes.textContent = available ? formatStorageMetricBytes(storage.bytes) : "-";
   if (els.mangaStorageComics) els.mangaStorageComics.textContent = available ? `${formatNumber(storage.comicCount || 0)} 本` : "-";
   if (els.mangaStorageChapters) els.mangaStorageChapters.textContent = available ? `${formatNumber(storage.chapterCount || 0)} 话` : "-";
   if (els.mangaStorageImages) els.mangaStorageImages.textContent = available ? `${formatNumber(imageTotal)} 张` : "-";
@@ -785,8 +814,8 @@ function renderReaderCacheMetrics(cache) {
         : `已使用 ${percent < 0.1 && currentBytes > 0 ? "<0.1" : percent.toFixed(1)}%`;
     }
   }
-  if (els.readerCacheBytes) els.readerCacheBytes.textContent = available ? formatBytes(currentBytes) : "-";
-  if (els.readerCacheLimit) els.readerCacheLimit.textContent = available ? formatBytes(maxBytes) : "-";
+  if (els.readerCacheBytes) els.readerCacheBytes.textContent = available ? formatStorageMetricBytes(cache.currentBytes) : "-";
+  if (els.readerCacheLimit) els.readerCacheLimit.textContent = available ? formatStorageMetricBytes(cache.maxBytes) : "-";
   if (els.readerCacheFiles) els.readerCacheFiles.textContent = available ? formatNumber(cache.fileCount || 0) : "-";
   if (els.readerCacheCleanup) {
     const minutes = Math.max(1, Math.round(Number(cache?.cleanupIntervalMs || 0) / 60000));
@@ -1402,6 +1431,10 @@ function applyTheme(value) {
 function updateServer(url) {
   const previousUrl = activeUrl;
   activeUrl = normalizeUrl(url);
+  if (previousUrl !== activeUrl) {
+    settingsSourceRevision += 1;
+    retireModePickerSession();
+  }
   localStorage.setItem(STORAGE_KEY, activeUrl);
   els.serverUrl.value = activeUrl;
   els.serverLabel.textContent = activeUrl;
@@ -1904,13 +1937,37 @@ function showHome(options = {}) {
   queueScrollRestore(options.restoreScrollY ?? 0);
 }
 
+function captureSettingsFocusOwner() {
+  return {
+    sourceUrl: activeUrl, sourceRevision: settingsSourceRevision, accountOwner: captureAccountOwner(activeUrl), token: viewRenderToken,
+    view: currentView, params: { ...currentViewParams }
+  };
+}
+
+function isSettingsFocusOwnerCurrent(owner) {
+  return Boolean(owner) && owner.sourceUrl === activeUrl && owner.sourceRevision === settingsSourceRevision
+    && isAccountOwnerCurrent(owner.accountOwner)
+    && owner.token === viewRenderToken && owner.view === currentView && sameViewParams(owner.params, currentViewParams);
+}
+
 function showSettings(options = {}) {
   if (!els.settingsOverlay) return;
   const accountGroup = els.settingsPanel?.querySelector(".settings-account-group");
   if (accountGroup && (els.settingsOverlay.hidden || options.section === "account")) accountGroup.open = options.section === "account";
   if (!els.settingsOverlay.hidden) return;
+  closingSettingsSession = null;
   els.settingsOverlay.hidden = false;
   document.body.classList.add("settings-open");
+  settingsDialogFocus.open({ trigger: options.trigger || document.activeElement, focusTarget: () => {
+    const target = options.section === "storage" ? els.settingsPanel?.querySelector(".storage-settings-group")
+      : options.section === "account" ? els.settingsPanel?.querySelector(".settings-account-group") : null;
+    if (!target) return els.settingsCloseButton;
+    target.scrollIntoView({ block: "start" });
+    if (els.settingsPanel) els.settingsPanel.scrollTop = Math.max(0, els.settingsPanel.scrollTop - 66);
+    const heading = target.querySelector(".settings-group-title");
+    heading?.setAttribute("tabindex", "-1");
+    return heading || els.settingsCloseButton;
+  } });
   refreshAccountSettings();
   els.profileSettingsButton?.setAttribute("aria-expanded", "true");
   updateStorageStatus();
@@ -1923,26 +1980,17 @@ function showSettings(options = {}) {
       settingsOpen: true
     }, "", viewRouteHash(currentView, currentViewParams));
   }
-  window.requestAnimationFrame(() => {
-    const target = options.section === "storage" ? els.settingsPanel?.querySelector(".storage-settings-group")
-      : options.section === "account" ? els.settingsPanel?.querySelector(".settings-account-group") : null;
-    if (target) {
-      target.scrollIntoView({ block: "start" });
-      if (els.settingsPanel) els.settingsPanel.scrollTop = Math.max(0, els.settingsPanel.scrollTop - 66);
-      const heading = target.querySelector(".settings-group-title");
-      heading?.setAttribute("tabindex", "-1");
-      heading?.focus({ preventScroll: true });
-      return;
-    }
-    els.settingsCloseButton?.focus({ preventScroll: true });
-  });
 }
 
-function hideSettingsSurface() {
-  if (!els.settingsOverlay || els.settingsOverlay.hidden) return;
+function hideSettingsSurface(options = {}) {
+  if (!options.preserveSession) closingSettingsSession = null;
+  if (!els.settingsOverlay || els.settingsOverlay.hidden) return null;
+  if (pendingAppConfirmation) settleAppConfirmation(false);
+  const session = settingsDialogFocus.hide();
   els.settingsOverlay.hidden = true;
   document.body.classList.remove("settings-open");
   els.profileSettingsButton?.setAttribute("aria-expanded", "false");
+  return session;
 }
 
 function closeSettings(options = {}) {
@@ -1950,13 +1998,18 @@ function closeSettings(options = {}) {
   const shouldRestoreHistory = !options.skipHistory && Boolean(window.history.state?.settingsOpen);
   // Hide immediately so Android Back and the close button never leave the
   // settings sheet visible while WebView history dispatches asynchronously.
-  hideSettingsSurface();
+  const session = hideSettingsSurface({ preserveSession: true });
   if (shouldRestoreHistory) {
+    closingSettingsSession = session;
     window.history.back();
+  } else {
+    closingSettingsSession = null;
+    settingsDialogFocus.restore(session);
   }
 }
 
 function showView(view, params = {}, navigation = {}) {
+  hideSettingsSurface();
   if (view === "channel" && normalizeChannelMode(params.mode) === "western") {
     view = "people";
     params = { scope: "western" };
@@ -2147,7 +2200,9 @@ function restoreFromHistoryState(historyState) {
     showSettings({ skipHistory: true });
     return;
   }
-  hideSettingsSurface();
+  const settingsSession = settingsDialogFocus.current() || closingSettingsSession;
+  hideSettingsSurface({ preserveSession: true });
+  closingSettingsSession = null;
   if ((!historyState || historyState.marker !== HISTORY_MARKER) && !hashState) {
     showView(DEFAULT_VIEW, {}, { skipHistory: true });
     return;
@@ -2156,6 +2211,11 @@ function restoreFromHistoryState(historyState) {
   const view = hashState?.view || (historyState.view === "settings" || RESTORABLE_VIEWS.has(historyState.view) ? historyState.view : DEFAULT_VIEW);
   const params = hashState?.params || sanitizeViewParams(view, historyState.params || {});
   const restoreScrollY = Number(hashState ? 0 : historyState.scrollY || 0);
+  if (settingsDialogFocus.owns(settingsSession) && settingsSession.owner.view === view
+    && sameViewParams(settingsSession.owner.params, params)) {
+    settingsDialogFocus.restore(settingsSession);
+    return;
+  }
   viewStack = [];
 
   if (view === "home") {
@@ -2172,6 +2232,12 @@ function renderCurrentView(options = {}) {
     options.preserveShortVideoHome
     && currentView === "shortVideos"
     && els.viewContent?.querySelector(".short-video-mobile-list")
+  );
+  const preserveMangaLibraryActions = Boolean(
+    options.preserveMangaLibraryActions === true
+    && currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "manga"
+    && els.contentPanel?.dataset.view === "channel" && els.contentPanel.dataset.channelMode === "manga"
+    && els.viewContent?.querySelector(".manga-library-actions")?.isConnected
   );
   const restoreAfterRender = (task, renderGuard) => {
     if (restoreScrollY === null || restoreScrollY === 0) return task;
@@ -2202,12 +2268,12 @@ function renderCurrentView(options = {}) {
   els.contentPanel.hidden = false;
   syncContentPanelMode();
   els.viewBack.hidden = isRootNavigationView(currentView);
-  if (!preserveShortVideoHome) {
+  if (!preserveShortVideoHome && !preserveMangaLibraryActions) {
     els.viewContent.innerHTML = "";
     els.viewContent.className = "content-list";
   }
   syncSearchSurface();
-  if (!preserveShortVideoHome) renderRouteLoadingState();
+  if (!preserveShortVideoHome && !preserveMangaLibraryActions) renderRouteLoadingState();
   setActiveBottom();
   const renderGuard = beginViewRender(currentView, currentViewParams);
   finishAppStartup();
@@ -2250,10 +2316,11 @@ function finishAppStartup() {
   if (els.appStartup) els.appStartup.hidden = true;
   if (els.appShell) els.appShell.hidden = false;
   document.body.classList.remove("app-starting");
+  bottomLayout.refresh();
 }
 
-function renderCurrentViewPreservingScroll() {
-  return renderCurrentView({ restoreScrollY: currentScrollY() });
+function renderCurrentViewPreservingScroll(options = {}) {
+  return renderCurrentView({ restoreScrollY: currentScrollY(), preserveMangaLibraryActions: options.preserveMangaLibraryActions === true });
 }
 
 function renderRouteLoadingState() {
@@ -2400,9 +2467,24 @@ function requestAppConfirmation(options = {}) {
   document.body.classList.add("app-confirm-open");
   els.appConfirmOverlay.hidden = false;
   return new Promise((resolve) => {
-    pendingAppConfirmation = { resolve, previousFocus, backgroundState };
-    window.requestAnimationFrame(() => els.appConfirmCancelButton?.focus({ preventScroll: true }));
+    const state = {
+      resolve, previousFocus, backgroundState, generation: ++appConfirmationGeneration,
+      owner: captureSettingsFocusOwner(), settingsSession: settingsDialogFocus.current()
+    };
+    pendingAppConfirmation = state;
+    window.requestAnimationFrame(() => {
+      if (pendingAppConfirmation === state && isAppConfirmationFocusCurrent(state)
+        && settingsDialogFocus.available(els.appConfirmCancelButton)) {
+        els.appConfirmCancelButton.focus({ preventScroll: true });
+      }
+    });
   });
+}
+
+function isAppConfirmationFocusCurrent(state) {
+  return state.generation === appConfirmationGeneration && isSettingsFocusOwnerCurrent(state.owner)
+    && !document.body.classList.contains("media-viewer-open")
+    && (!state.settingsSession || settingsDialogFocus.isMounted(state.settingsSession));
 }
 
 function settleAppConfirmation(accepted) {
@@ -2414,7 +2496,9 @@ function settleAppConfirmation(accepted) {
   restoreAppConfirmationBackground(state.backgroundState);
   state.resolve(Boolean(accepted));
   window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-    if (!pendingAppConfirmation && state.previousFocus?.isConnected) {
+    const active = document.activeElement;
+    if (!pendingAppConfirmation && isAppConfirmationFocusCurrent(state) && settingsDialogFocus.available(state.previousFocus)
+      && (!active || active === document.body || active === state.previousFocus || els.appConfirmSheet?.contains(active))) {
       state.previousFocus.focus?.({ preventScroll: true });
     }
   }));
@@ -2672,6 +2756,91 @@ function homeNavigationButton() {
   return els.bottomNavBar?.querySelector("button[data-home-switcher]") || null;
 }
 
+function captureModePickerScope() {
+  return { token: viewRenderToken, sourceUrl: activeUrl, view: currentView, params: { ...currentViewParams } };
+}
+
+function modePickerScopeCurrent(scope) {
+  return Boolean(scope) && scope.token === viewRenderToken && scope.sourceUrl === activeUrl
+    && scope.view === currentView && sameViewParams(scope.params, currentViewParams);
+}
+
+function modePickerTrigger(kind) {
+  if (kind === "home") return homeNavigationButton();
+  if (kind === "gallery") return galleryNavigationButton();
+  return readingNavigationButton();
+}
+
+function modePickerElementAvailable(node) {
+  return Boolean(node?.isConnected) && !node.disabled && !node.closest("[hidden], [inert]")
+    && (!node.getClientRects || node.getClientRects().length > 0);
+}
+
+function modePickerSessionMounted(session) {
+  return Boolean(session) && activeModePickerSession === session && session.picker.isConnected
+    && !session.picker.hidden && els.bottomNavBar?.contains(session.picker)
+    && session.trigger === modePickerTrigger(session.kind) && modePickerElementAvailable(session.trigger)
+    && els.bottomNavBar.querySelector(`.bottom-nav-${session.kind}-picker`) === session.picker;
+}
+
+function modePickerChoices(session) {
+  return Array.from(session.picker.querySelectorAll('[role="menuitemradio"]'))
+    .filter(choice => !choice.disabled && !choice.hidden);
+}
+
+function focusModePickerChoice(session, choice) {
+  if (!modePickerSessionMounted(session) || !modePickerScopeCurrent(session.scope)
+    || !choice || choice.disabled || !session.picker.contains(choice)) return;
+  for (const item of modePickerChoices(session)) item.tabIndex = item === choice ? 0 : -1;
+  choice.focus({ preventScroll: true });
+  const picker = session.picker;
+  if (!picker.clientHeight) return;
+  const top = choice.offsetTop, bottom = top + choice.offsetHeight;
+  if (top < picker.scrollTop) picker.scrollTop = top;
+  else if (bottom > picker.scrollTop + picker.clientHeight) picker.scrollTop = bottom - picker.clientHeight;
+}
+
+function openModePickerSession(kind, picker, trigger) {
+  if (!picker?.isConnected || !modePickerElementAvailable(trigger)) return;
+  picker.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  document.body.classList.add(`${kind}-mode-picker-open`);
+  const session = { kind, picker, trigger, scope: captureModePickerScope() };
+  activeModePickerSession = session;
+  const choices = modePickerChoices(session);
+  focusModePickerChoice(session, choices.find(choice => choice.getAttribute("aria-checked") === "true") || choices[0]);
+}
+
+function closeModePicker(kind, restoreFocus = false) {
+  const picker = els.bottomNavBar?.querySelector(`.bottom-nav-${kind}-picker`);
+  const session = activeModePickerSession?.kind === kind ? activeModePickerSession : null;
+  const open = Boolean(picker && !picker.hidden);
+  const restore = restoreFocus && modePickerSessionMounted(session) && modePickerScopeCurrent(session.scope)
+    && session.trigger === modePickerTrigger(kind) && modePickerElementAvailable(session.trigger);
+  if (picker) picker.hidden = true;
+  modePickerTrigger(kind)?.setAttribute("aria-expanded", "false");
+  document.body.classList.remove(`${kind}-mode-picker-open`);
+  if (session) activeModePickerSession = null;
+  if (restore) session.trigger.focus({ preventScroll: true });
+  return open;
+}
+
+function closeActiveModePicker(restoreFocus = true) {
+  cancelBottomNavPress();
+  return activeModePickerSession ? closeModePicker(activeModePickerSession.kind, restoreFocus) : false;
+}
+
+function cancelBottomNavPress() {
+  window.clearTimeout(bottomNavLongPressTimer);
+  bottomNavLongPressTimer = 0;
+  bottomNavLongPressButton = null;
+  bottomNavPress = null;
+}
+
+function retireModePickerSession() {
+  closeActiveModePicker(false);
+}
+
 function ensureHomeModePicker() {
   if (!els.bottomNavBar) return null;
   let picker = els.bottomNavBar.querySelector(".bottom-nav-home-picker");
@@ -2748,16 +2917,11 @@ function openHomeModePicker() {
   closeGalleryModePicker();
   closeReadingModePicker();
   syncHomeModeNavigation();
-  picker.hidden = false;
-  homeButton.setAttribute("aria-expanded", "true");
-  document.body.classList.add("home-mode-picker-open");
+  openModePickerSession("home", picker, homeButton);
 }
 
-function closeHomeModePicker() {
-  const picker = els.bottomNavBar?.querySelector(".bottom-nav-home-picker");
-  if (picker) picker.hidden = true;
-  homeNavigationButton()?.setAttribute("aria-expanded", "false");
-  document.body.classList.remove("home-mode-picker-open");
+function closeHomeModePicker(restoreFocus = false) {
+  return closeModePicker("home", restoreFocus);
 }
 
 function galleryNavigationButton() {
@@ -2838,16 +3002,11 @@ function openGalleryModePicker() {
   closeHomeModePicker();
   closeReadingModePicker();
   syncGalleryModeNavigation();
-  picker.hidden = false;
-  galleryButton.setAttribute("aria-expanded", "true");
-  document.body.classList.add("gallery-mode-picker-open");
+  openModePickerSession("gallery", picker, galleryButton);
 }
 
-function closeGalleryModePicker() {
-  const picker = els.bottomNavBar?.querySelector(".bottom-nav-gallery-picker");
-  if (picker) picker.hidden = true;
-  galleryNavigationButton()?.setAttribute("aria-expanded", "false");
-  document.body.classList.remove("gallery-mode-picker-open");
+function closeGalleryModePicker(restoreFocus = false) {
+  return closeModePicker("gallery", restoreFocus);
 }
 
 function readingNavigationButton() {
@@ -2930,16 +3089,11 @@ function openReadingModePicker() {
   closeHomeModePicker();
   closeGalleryModePicker();
   syncReadingModeNavigation();
-  picker.hidden = false;
-  readingButton.setAttribute("aria-expanded", "true");
-  document.body.classList.add("reading-mode-picker-open");
+  openModePickerSession("reading", picker, readingButton);
 }
 
-function closeReadingModePicker() {
-  const picker = els.bottomNavBar?.querySelector(".bottom-nav-reading-picker");
-  if (picker) picker.hidden = true;
-  readingNavigationButton()?.setAttribute("aria-expanded", "false");
-  document.body.classList.remove("reading-mode-picker-open");
+function closeReadingModePicker(restoreFocus = false) {
+  return closeModePicker("reading", restoreFocus);
 }
 
 function syncSearchSurface() {
@@ -3139,6 +3293,8 @@ window.fanhaoHandleNativeBack = () => {
     closeSettings();
     return true;
   }
+  if (closeMobileActionSheet()) return true;
+  if (closeActiveModePicker(true)) return true;
   if (searchSurfaceExpanded && (currentView === "mediaDetail" || (currentView === "channel" && ["media", "movie", "tv", "anime"].includes(normalizeChannelMode(currentViewParams.mode))))) {
     closeSearchSurface();
     return true;
@@ -3167,7 +3323,7 @@ els.moduleModeSelect?.addEventListener("change", () => {
   else if (dataset.group === "photo") navigateToGalleryMode(value);
   else if (dataset.group === "novels") navigateToReadingMode(value);
 });
-els.profileSettingsButton?.addEventListener("click", () => toggleSettings(true));
+els.profileSettingsButton?.addEventListener("click", (event) => showSettings({ trigger: event.currentTarget }));
 function refreshAccountSettings() {
   const root = document.getElementById("accountSettingsRoot");
   if (!root) return;
@@ -3183,14 +3339,21 @@ function refreshAccountSettings() {
 els.serverUrl?.addEventListener("change", refreshAccountSettings);
 els.settingsCloseButton?.addEventListener("click", () => closeSettings());
 els.settingsBackdrop?.addEventListener("click", () => closeSettings());
+els.settingsOverlay?.addEventListener("keydown", settingsDialogFocus.trap);
 els.appConfirmBackdrop?.addEventListener("click", () => settleAppConfirmation(false));
 els.appConfirmCancelButton?.addEventListener("click", () => settleAppConfirmation(false));
 els.appConfirmAcceptButton?.addEventListener("click", () => settleAppConfirmation(true));
 els.appConfirmOverlay?.addEventListener("keydown", trapAppConfirmationFocus);
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  if (!els.appConfirmOverlay?.hidden) settleAppConfirmation(false);
+  cancelBottomNavPress();
+  if (event.defaultPrevented || event.key !== "Escape") return;
+  if (mediaViewer?.close()) {
+    // The viewer is above every shell menu.
+  } else if (!els.appConfirmOverlay?.hidden) settleAppConfirmation(false);
   else if (!els.settingsOverlay?.hidden) closeSettings();
+  else if (!closeMobileActionSheet() && !closeActiveModePicker(true)) return;
+  event.preventDefault();
+  event.stopPropagation();
 });
 els.searchCloseButton?.addEventListener("click", closeSearchSurface);
 els.viewBack.addEventListener("click", goBack);
@@ -3398,15 +3561,45 @@ for (const button of els.openTargets) {
   });
 }
 
-let bottomNavLongPressTimer = 0;
-let bottomNavTouchX = 0;
-let bottomNavTouchY = 0;
-let bottomNavLongPressButton = null;
-let suppressedBottomNavButton = null;
-
 els.bottomNavBar?.addEventListener("selectstart", (event) => event.preventDefault());
+window.addEventListener("fanhaoViewWillRender", retireModePickerSession);
+window.addEventListener("pagehide", retireModePickerSession);
+
+els.bottomNavBar?.addEventListener("keydown", event => {
+  cancelBottomNavPress();
+  if (event.defaultPrevented) return;
+  const session = activeModePickerSession;
+  if (modePickerSessionMounted(session) && session.picker.contains(event.target)) {
+    if (event.key === "Tab") {
+      closeActiveModePicker(true);
+      return; // Native Tab continues from the restored trigger.
+    }
+    if (!modePickerScopeCurrent(session.scope)) return;
+    const choices = modePickerChoices(session);
+    const index = choices.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "ArrowDown") next = choices[(index + 1) % choices.length];
+    else if (event.key === "ArrowUp") next = choices[(index - 1 + choices.length) % choices.length];
+    else if (event.key === "Home") next = choices[0];
+    else if (event.key === "End") next = choices[choices.length - 1];
+    else return; // Escape is handled with the other document-level overlays.
+    event.preventDefault();
+    event.stopPropagation();
+    focusModePickerChoice(session, next);
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const button = event.target.closest("button[data-home-switcher], button[data-gallery-switcher], button[data-reading-switcher]");
+  if (!modePickerElementAvailable(button) || !els.bottomNavBar.contains(button)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (button.dataset.homeSwitcher !== undefined) openHomeModePicker();
+  else if (button.dataset.gallerySwitcher !== undefined) openGalleryModePicker();
+  else openReadingModePicker();
+});
 
 els.bottomNavBar?.addEventListener("touchstart", (event) => {
+  cancelBottomNavPress();
   const button = event.target.closest("button");
   if (!button || !els.bottomNavBar.contains(button) || event.touches.length !== 1) return;
   const homeLongPress = button.dataset.homeSwitcher !== undefined;
@@ -3417,36 +3610,41 @@ els.bottomNavBar?.addEventListener("touchstart", (event) => {
   bottomNavTouchX = event.touches[0].clientX;
   bottomNavTouchY = event.touches[0].clientY;
   bottomNavLongPressButton = button;
-  window.clearTimeout(bottomNavLongPressTimer);
+  const press = { button, scope: captureModePickerScope() };
+  bottomNavPress = press;
   bottomNavLongPressTimer = window.setTimeout(() => {
+    if (bottomNavPress !== press || bottomNavLongPressButton !== button
+      || !modePickerScopeCurrent(press.scope) || !modePickerElementAvailable(button)
+      || !els.bottomNavBar.contains(button)) return;
+    bottomNavLongPressTimer = 0;
     suppressedBottomNavButton = button;
     navigator.vibrate?.(18);
     if (homeLongPress) openHomeModePicker();
     else if (galleryLongPress) openGalleryModePicker();
     else if (readingLongPress) openReadingModePicker();
-    else toggleSettings(true);
+    else showSettings({ trigger: button });
   }, 520);
 }, { passive: true });
 
 els.bottomNavBar?.addEventListener("touchmove", (event) => {
   if (!bottomNavLongPressButton) return;
+  if (event.touches.length !== 1) { cancelBottomNavPress(); return; }
   const touch = event.touches[0];
   if (!touch || Math.hypot(touch.clientX - bottomNavTouchX, touch.clientY - bottomNavTouchY) <= 12) return;
-  window.clearTimeout(bottomNavLongPressTimer);
-  bottomNavLongPressButton = null;
+  cancelBottomNavPress();
 }, { passive: true });
 
 for (const eventName of ["touchend", "touchcancel"]) {
   els.bottomNavBar?.addEventListener(eventName, () => {
-    window.clearTimeout(bottomNavLongPressTimer);
-    bottomNavLongPressButton = null;
+    cancelBottomNavPress();
   }, { passive: true });
 }
 
 els.bottomNavBar?.addEventListener("contextmenu", (event) => {
   const button = event.target.closest("button[data-home-switcher], button[data-gallery-switcher], button[data-reading-switcher]");
-  if (!button || !els.bottomNavBar.contains(button)) return;
+  if (!modePickerElementAvailable(button) || !els.bottomNavBar.contains(button)) return;
   event.preventDefault();
+  cancelBottomNavPress();
   suppressedBottomNavButton = button;
   navigator.vibrate?.(18);
   if (button.dataset.homeSwitcher !== undefined) openHomeModePicker();
@@ -3454,14 +3652,15 @@ els.bottomNavBar?.addEventListener("contextmenu", (event) => {
   else openReadingModePicker();
 });
 
-let dismissModePickerClick = false;
 document.addEventListener("click", (event) => {
   if (!dismissModePickerClick) return;
   dismissModePickerClick = false;
+  if (event.detail === 0) return;
   event.preventDefault();
   event.stopPropagation();
 }, true);
 document.addEventListener("pointerdown", (event) => {
+  cancelBottomNavPress();
   // A new physical gesture must not inherit suppression from a long press that
   // produced no synthetic click (as on some Android WebViews).
   suppressedBottomNavButton = null;
@@ -3479,9 +3678,15 @@ document.addEventListener("pointerdown", (event) => {
 els.bottomNavBar?.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button || !els.bottomNavBar.contains(button)) return;
-  if (suppressedBottomNavButton === button) {
+  if (suppressedBottomNavButton === button && event.detail !== 0) {
     suppressedBottomNavButton = null;
     event.preventDefault();
+    const session = activeModePickerSession;
+    if (modePickerSessionMounted(session) && modePickerScopeCurrent(session.scope) && session.trigger === button) {
+      const choices = modePickerChoices(session);
+      focusModePickerChoice(session, choices.find(choice => choice.tabIndex === 0)
+        || choices.find(choice => choice.getAttribute("aria-checked") === "true") || choices[0]);
+    }
     return;
   }
   suppressedBottomNavButton = null;
@@ -3493,14 +3698,20 @@ els.bottomNavBar?.addEventListener("click", (event) => {
     return;
   }
   if (button.dataset.homeModeChoice) {
+    if (!modePickerSessionMounted(activeModePickerSession) || !modePickerScopeCurrent(activeModePickerSession.scope)
+      || !activeModePickerSession.picker.contains(button) || button.disabled) return;
     navigateToHomeMode(button.dataset.homeModeChoice);
     return;
   }
   if (button.dataset.galleryModeChoice) {
+    if (!modePickerSessionMounted(activeModePickerSession) || !modePickerScopeCurrent(activeModePickerSession.scope)
+      || !activeModePickerSession.picker.contains(button) || button.disabled) return;
     navigateToGalleryMode(button.dataset.galleryModeChoice);
     return;
   }
   if (button.dataset.readingModeChoice) {
+    if (!modePickerSessionMounted(activeModePickerSession) || !modePickerScopeCurrent(activeModePickerSession.scope)
+      || !activeModePickerSession.picker.contains(button) || button.disabled) return;
     navigateToReadingMode(button.dataset.readingModeChoice);
     return;
   }
@@ -3553,6 +3764,7 @@ async function bootApp() {
     : androidModuleFallbackCatalog();
   await initializeAndroidModules(modules);
   els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
+  bottomLayout.refresh();
   void loadDashboard();
   renderCurrentView();
   void refreshModuleCatalog(activeUrl);

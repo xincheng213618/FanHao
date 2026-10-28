@@ -1,12 +1,33 @@
-import { fetchJson } from "./api.js?v=assets-1443708f18b1";
+import { fetchJson } from "./api.js?v=assets-22080e82f167";
+import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
 import { formatBytes, formatNumber } from "./format.js";
-import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
+import { createDetailSectionTitle } from "./detail-ui.js";
 
 export function createInfoPreviewSection(context) {
   const { getActiveUrl } = context;
+  const requests = new WeakMap();
+  const pendingRequests = new Set();
+  let viewGeneration = 0;
+  const retire = () => {
+    viewGeneration += 1;
+    for (const request of pendingRequests) request.controller.abort();
+    pendingRequests.clear();
+  };
+  globalThis.window?.addEventListener?.("fanhaoViewWillRender", retire);
+  globalThis.window?.addEventListener?.("pagehide", retire);
+  globalThis.window?.addEventListener?.("fanhaoAccountOwnerChanged", () => {
+    for (const request of pendingRequests) if (!isAccountOwnerCurrent(request.accountScope)) request.controller.abort();
+  });
+
+  function panelGuard(section) {
+    const activeUrl = getActiveUrl(), accountScope = captureAccountOwner(activeUrl), generation = viewGeneration;
+    return () => section.isConnected && generation === viewGeneration
+      && activeUrl === getActiveUrl() && isAccountOwnerCurrent(accountScope);
+  }
 
   function createFileInfoPanel(work) {
     const section = document.createElement("div");
+    const ownsPanel = panelGuard(section);
     section.className = "detail-block";
     section.append(createDetailSectionTitle("作品资料", formatNumber(work.infos?.length || 0)));
 
@@ -27,7 +48,7 @@ export function createInfoPreviewSection(context) {
       const view = document.createElement("button");
       view.type = "button";
       view.textContent = "查看";
-      view.addEventListener("click", () => renderInfoPreview(preview, file));
+      view.addEventListener("click", () => { if (ownsPanel()) renderInfoPreview(preview, file); });
       row.append(info, view);
       list.append(row);
     }
@@ -77,10 +98,31 @@ export function createInfoPreviewSection(context) {
 
   async function renderInfoPreview(mount, file, options = {}) {
     const activeUrl = getActiveUrl();
+    requests.get(mount)?.controller.abort();
+    const request = { controller: new AbortController(), accountScope: captureAccountOwner(activeUrl), generation: viewGeneration };
+    requests.set(mount, request);
+    pendingRequests.add(request);
+    const isCurrent = () => requests.get(mount) === request && !request.controller.signal.aborted
+      && mount.isConnected && request.generation === viewGeneration && activeUrl === getActiveUrl()
+      && isAccountOwnerCurrent(request.accountScope);
+    const reveal = () => {
+      if (options.reveal !== false) window.requestAnimationFrame(() => {
+        if (isCurrent()) mount.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    };
+    const close = (panel) => {
+      if (!isCurrent() || !mount.contains(panel)) return;
+      request.controller.abort();
+      requests.delete(mount);
+      mount.innerHTML = "";
+    };
     mount.innerHTML = `<div class="loading-row">正在读取作品资料</div>`;
-    if (options.reveal !== false) revealDetailBlock(mount);
+    reveal();
     try {
-      const data = await fetchJson(activeUrl, `/api/info/${encodeURIComponent(file.id)}`);
+      const data = await fetchJson(activeUrl, `/api/info/${encodeURIComponent(file.id)}`, {
+        signal: request.controller.signal, accountScope: request.accountScope
+      });
+      if (!isCurrent()) return;
       mount.innerHTML = "";
       if (data.displayable === false) {
         const box = document.createElement("div");
@@ -93,7 +135,8 @@ export function createInfoPreviewSection(context) {
       if (hasStructuredInfo(data.metadata)) {
         renderStructuredInfo(mount, data.metadata, {
           showHeader: options.showHeader !== false,
-          headerTitle: data.name || file.name
+          headerTitle: data.name || file.name,
+          close
         });
         return;
       }
@@ -105,27 +148,28 @@ export function createInfoPreviewSection(context) {
         head.className = "info-preview-head";
         const title = document.createElement("strong");
         title.textContent = data.name || file.name;
-        const close = document.createElement("button");
-        close.type = "button";
-        close.textContent = "收起";
-        close.addEventListener("click", () => {
-          mount.innerHTML = "";
-        });
-        head.append(title, close);
+        const closeButton = document.createElement("button");
+        closeButton.type = "button";
+        closeButton.textContent = "收起";
+        closeButton.addEventListener("click", () => close(panel));
+        head.append(title, closeButton);
         panel.append(head);
       }
       const content = document.createElement("pre");
       content.textContent = data.content || "这个作品没有可显示内容。";
       panel.append(content);
       mount.append(panel);
-      if (options.reveal !== false) revealDetailBlock(mount);
+      reveal();
     } catch (error) {
+      if (!isCurrent() || error?.name === "AbortError") return;
       mount.innerHTML = "";
       const box = document.createElement("div");
       box.className = "message-box error";
       box.textContent = error.message;
       mount.append(box);
-      if (options.reveal !== false) revealDetailBlock(mount);
+      reveal();
+    } finally {
+      pendingRequests.delete(request);
     }
   }
 
@@ -147,7 +191,7 @@ export function createInfoPreviewSection(context) {
       close.type = "button";
       close.textContent = "收起";
       close.addEventListener("click", () => {
-        mount.innerHTML = "";
+        options.close?.(panel);
       });
       head.append(title, close);
       panel.append(head);

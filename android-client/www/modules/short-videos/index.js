@@ -1,11 +1,11 @@
-import { createShortVideoApi } from "./api.js?v=assets-1443708f18b1";
-import { createShortVideoListController } from "./list/controller.js?v=assets-1443708f18b1";
-import { createShortVideoListView } from "./list/view.js?v=assets-1443708f18b1";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=assets-1443708f18b1";
-import { createShortVideoSearch } from "./search.js?v=assets-1443708f18b1";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=assets-1443708f18b1";
-import { createShortVideoIcons } from "./ui/icons.js?v=assets-1443708f18b1";
-import { createShortVideoInteractions } from "./ui/interactions.js?v=assets-1443708f18b1";
+import { createShortVideoApi } from "./api.js?v=assets-22080e82f167";
+import { createShortVideoListController } from "./list/controller.js?v=assets-22080e82f167";
+import { createShortVideoListView } from "./list/view.js?v=assets-22080e82f167";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=assets-22080e82f167";
+import { createShortVideoSearch } from "./search.js?v=assets-22080e82f167";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=assets-22080e82f167";
+import { createShortVideoIcons } from "./ui/icons.js?v=assets-22080e82f167";
+import { createShortVideoInteractions } from "./ui/interactions.js?v=assets-22080e82f167";
 
 export function createShortVideoViews(deps) {
   const { els, getActiveUrl, setActiveBottom } = deps;
@@ -70,6 +70,9 @@ export function createShortVideoViews(deps) {
   }
 
   function deactivateTransientUi() {
+    context.cancelSearchSuggestions();
+    context.cancelShortVideoListRequests();
+    context.cancelShortVideoNativeOpen();
     document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
   }

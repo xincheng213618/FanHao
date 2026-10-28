@@ -189,7 +189,7 @@ viewsSource = viewsSource.replace(readerProgress, `
       bookId: readerState.book?.id, chapterIndex: readerState.chapter?.index,
       settings: JSON.stringify(readerState.settings), ratio: captureReaderRatio(),
       progress: readerState.book?.progress ? { ...readerState.book.progress } : null,
-      progressPending: readerState.progressTimer !== null || readerState.progressFrame !== null
+      progressPending: readerState.restoreFrame !== null || readerState.progressTimer !== null || readerState.progressFrame !== null
         || remoteProgressWrites.size > 0 || localProgressWriteIds.size > 0,
       immersive: document.body.classList.contains("novel-reader-immersive"),
       catalog: { query: catalogState.query, loadedQuery: catalogState.loadedQuery,
@@ -1326,7 +1326,14 @@ async function verifyDetailCatalogReuse() {
 async function verifyReaderEventOwnership() {
   let checks = 0;
   const pass = name => { checks++; console.log(`PASS ${name}`); };
-  const settle = page => page.waitForFunction(() => !__novelMenuProbe.snapshot().progressPending);
+  const settle = async page => {
+    // A rerender first restores its scroll in RAF, then schedules its own save.
+    // Drain that current-reader work before comparing obsolete event delivery.
+    await catalogFrames(page);
+    await page.waitForFunction(() => !__novelMenuProbe.snapshot().progressPending, null, { timeout: 10000 });
+    await catalogFrames(page);
+    await page.waitForFunction(() => !__novelMenuProbe.snapshot().progressPending, null, { timeout: 10000 });
+  };
   const capture = page => page.evaluate(() => ({ state: __novelMenuProbe.snapshot(), html: document.querySelector('#viewContent').innerHTML,
     view: document.querySelector('#contentPanel').dataset.view, scroll: scrollY, native: __novelNativeCalls.slice(),
     slider: document.querySelector('[data-novel-chapter-slider]')?.value,

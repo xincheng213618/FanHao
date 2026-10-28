@@ -48,6 +48,8 @@ function harness(input = source, { count = 12, limit = 36 } = {}) {
   const plugin = { async play(value) { calls.bridge.push(plain(value)); return { opened: true }; } };
   const context = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "channel", currentViewParams: { mode: "anime" }, viewRenderToken: 0, activeViewController: null,
+    // No shell menus here; their actual lifecycle is covered by the gallery gate.
+    retireModePickerSession() {},
     performance: { now: () => clock }, window: { addEventListener() {}, innerHeight: 844,
       setTimeout(fn, delay) { const id = ++timer; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },
       Capacitor: { Plugins: { FanHaoPlayer: plugin } } },

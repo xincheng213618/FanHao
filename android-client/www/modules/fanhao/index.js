@@ -1,3 +1,3 @@
-export { createDetailViews } from "./detail-views.js?v=assets-1443708f18b1";
-export { createPeopleViews } from "./people-views.js?v=assets-1443708f18b1";
-export { createWorkViews } from "./work-views.js?v=assets-1443708f18b1";
+export { createDetailViews } from "./detail-views.js?v=assets-22080e82f167";
+export { createPeopleViews } from "./people-views.js?v=assets-22080e82f167";
+export { createWorkViews } from "./work-views.js?v=assets-22080e82f167";

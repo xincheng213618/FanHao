@@ -5,11 +5,17 @@
   const scriptUrl = new URL(document.currentScript.src);
   const runId = scriptUrl.searchParams.get("run");
   if (!runId) {
-    document.querySelector("#startRun").addEventListener("click", async (event) => {
-      event.currentTarget.disabled = true;
+    const buttons = [...document.querySelectorAll("[data-fixture-scenario]")];
+    for (const button of buttons) button.addEventListener("click", async (event) => {
+      const scenario = event.currentTarget.dataset.fixtureScenario;
+      const profile = event.currentTarget.dataset.fixtureProfile;
+      for (const action of buttons) action.disabled = true;
       const status = document.querySelector("#status");
+      status.textContent = "正在创建隔离运行…";
       try {
-        const response = await fetch("/fixture/new-run", { method: "POST" });
+        const endpoint = (scenario === "default" ? "/fixture/new-run" : `/fixture/new-run?scenario=${encodeURIComponent(scenario)}`)
+          + (profile ? `&profile=${encodeURIComponent(profile)}` : "");
+        const response = await fetch(endpoint, { method: "POST" });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "无法创建运行");
         const target = new URL(result.url, location.origin);
@@ -17,12 +23,19 @@
         location.assign(target.href);
       } catch (error) {
         status.textContent = error.message;
-        event.currentTarget.disabled = false;
+        for (const action of buttons) action.disabled = false;
       }
     });
     return;
   }
   if (!/^[a-f0-9-]{36}$/.test(runId)) throw new Error("Invalid fixture run ID");
+  if (scriptUrl.searchParams.get("scenario") === "music-bottom-layout") {
+    const pressure = document.createElement("style");
+    pressure.id = "fixture-bottom-layout-pressure";
+    pressure.textContent = ":root{--fixture-safe-area-bottom:24px}.bottom-nav .bottom-nav-label{font-size:32px!important;line-height:1.1!important}";
+    document.head.append(pressure);
+    document.documentElement.dataset.fixturePressure = "32px-nav-label-and-24px-css-safe-area-simulation";
+  }
   const prefix = `gallery-navigation-fixture:${runId}:`;
   const storageKeys = (storage) => Array.from({ length: storage.length }, (_, index) => storage.key(index))
     .filter((key) => key?.startsWith(prefix));

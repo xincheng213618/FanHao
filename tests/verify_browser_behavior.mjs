@@ -30,7 +30,11 @@ try {
   await waitForHealth(baseUrl);
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
-    if (process.argv.includes("--android-person-first")) {
+    if (process.argv.includes("--android-manga")) {
+      await verifyAndroidMangaAddLifecycle(browser);
+      await verifyAndroidMangaTaskNotices(browser);
+      await verifyAndroidMangaReadingProgress(browser);
+    } else if (process.argv.includes("--android-person-first")) {
       await verifyAndroidPersonFirstLibraries(browser);
     } else if (process.argv.includes("--short-video-search")) {
       await verifyShortVideoSearchHints(browser);
@@ -76,7 +80,9 @@ try {
   } finally {
     await browser.close();
   }
-  console.log("Executable browser behavior checks passed.");
+  console.log(process.argv.includes("--android-manga")
+    ? "Android manga browser behavior checks passed (9 add, 9 task-notice, 13 reading-progress profiles)."
+    : "Executable browser behavior checks passed.");
 } finally {
   if (ownedServer) await stopServer(ownedServer);
 }
@@ -2990,7 +2996,8 @@ async function verifyAndroidColdRestartBootstrapConvergence(browser) {
     sort: "published",
     limit: "12",
     facets: "0",
-    stats: "0"
+    stats: "0",
+    users: "0"
   })}`;
   const transportRequests = [];
   let serverActions = { liked: false, collected: false };

@@ -177,11 +177,21 @@ async function verifyLatestSameVideoSemantics() {
         completed: false,
         acceptedAt: new Date(Date.parse(persisted.last_watched_at) + 1000).toISOString()
       });
+      assert.equal(readWatchDetail(fixture.dbPath, "video-a").progress_ms, 50, "a newer position may legitimately rewind");
+      const zeroAt = new Date(Date.parse(persisted.last_watched_at) + 2000).toISOString();
+      direct.recordWatch("video-a", { progressMs: 0, completed: false, acceptedAt: zeroAt });
+      const staleReceipt = direct.recordWatch("video-a", {
+        progressMs: 999,
+        completed: false,
+        acceptedAt: new Date(Date.parse(persisted.last_watched_at) + 1000).toISOString()
+      });
+      assert.equal(staleReceipt.watch.progressMs, 0, "an older retry must return the committed zero, not its rejected requested position");
+      assert.equal(staleReceipt.watch.lastWatchedAt, zeroAt, "the receipt position and timestamp must describe the same stored version");
     } finally {
       direct.close();
     }
     const rewound = readWatchDetail(fixture.dbPath, "video-a");
-    assert.equal(rewound.progress_ms, 50, "latest position is ordered by accepted time and may legitimately rewind");
+    assert.equal(rewound.progress_ms, 0, "the latest zero position must remain ordered ahead of an older nonzero retry");
     assert.equal(rewound.completed_count, 1, "completion remains idempotently sticky");
   } finally {
     unlockDatabase(locker);

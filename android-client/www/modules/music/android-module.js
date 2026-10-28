@@ -1,4 +1,4 @@
-import { createMusicViews } from "./music-views.js?v=assets-1443708f18b1";
+import { createMusicViews } from "./music-views.js?v=assets-22080e82f167";
 
 export function createAndroidModule({ host }) {
   const musicViews = createMusicViews({
@@ -15,7 +15,7 @@ export function createAndroidModule({ host }) {
       { view: "music", render: (params, guard) => musicViews.renderMusicList(params, guard) }
     ],
     deactivate: () => musicViews.deactivate(),
-    handleBack: () => musicViews.closeFullscreen?.(),
+    handleBack: () => musicViews.handleBack?.(),
     api: { musicViews }
   };
 }

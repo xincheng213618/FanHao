@@ -142,6 +142,10 @@ final class NativeShortVideoFeedSearchController {
     }, 120);
   }
 
+  boolean isOpen() {
+    return overlay != null;
+  }
+
   boolean dismiss(boolean restorePlayback) {
     if (overlay == null) return false;
     View closingOverlay = overlay;

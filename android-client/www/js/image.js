@@ -1,4 +1,4 @@
-import { captureCachedImageFence, readCachedImage, writeCachedImage } from "./cache.js?v=assets-1443708f18b1";
+import { captureCachedImageFence, readCachedImage, writeCachedImage } from "./cache.js?v=assets-22080e82f167";
 
 const IMAGE_PREPARE_RETRY_DELAYS_MS = Object.freeze([700, 900, 1200, 1600, 2200, 3000]);
 

@@ -1,6 +1,6 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-1443708f18b1";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-22080e82f167";
 import { PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS } from "../../platform/content-index/photo-catalog.js";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-1443708f18b1";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-22080e82f167";
 
 const DEFAULT_CATEGORY = "我喜欢的";
 const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];
@@ -38,7 +38,10 @@ export function createAndroidModule({ host }) {
       { view: "mangaChapter", render: (params, guard) => channelViews.renderMangaChapter(params.id, params.chapterIndex, guard) }
     ],
     search,
-    deactivate: channelViews.deactivate,
+    deactivate() {
+      chrome.deactivate();
+      channelViews.deactivate();
+    },
     renderChrome: chrome.render,
     api: { channelViews }
   };
@@ -88,7 +91,15 @@ function createPhotoChrome(host) {
   let latestCategory = DEFAULT_CATEGORY;
   let latestCategories = [];
   let categoryScrollLeft = 0;
+  let chromeGeneration = 0;
+  let stopWatchingWidth = () => {};
+  const deactivate = () => {
+    chromeGeneration++;
+    stopWatchingWidth();
+    stopWatchingWidth = () => {};
+  };
   return {
+    deactivate,
     update(kind, options = {}) {
       if (kind === "photo") {
         latestCategory = String(options.category || latestCategory || DEFAULT_CATEGORY);
@@ -97,7 +108,9 @@ function createPhotoChrome(host) {
       host.ui.refreshChrome();
     },
     render({ container, view, params }) {
+      deactivate();
       if (view !== "channel" || host.normalizeChannelMode(params.mode) !== "photo") return false;
+      const generation = chromeGeneration;
       const activeCategory = String(params.category || latestCategory || DEFAULT_CATEGORY);
       container.dataset.module = "photos";
       const row = document.createElement("header");
@@ -107,49 +120,110 @@ function createPhotoChrome(host) {
       nav.setAttribute("aria-label", "图库分类");
       const categories = [...new Set([...CATEGORY_PRIORITY, ...latestCategories.map((item) => item.value).filter(Boolean)])];
       if (activeCategory && !categories.includes(activeCategory)) categories.push(activeCategory);
+      const isCurrent = () => generation === chromeGeneration && container.contains(row);
+      const selectCategory = (category) => {
+        if (!isCurrent()) return;
+        categoryScrollLeft = nav.scrollLeft;
+        if (category === activeCategory && !params.collection && !params.query && params.photoView !== "albums") {
+          host.ui.scrollToTop();
+          return;
+        }
+        host.navigation.showView("channel", {
+          ...params,
+          mode: "photo",
+          photoView: "collections",
+          collection: "",
+          category,
+          person: "",
+          sort: "count",
+          query: ""
+        }, { skipHistory: true, replaceHistory: true });
+        host.ui.scrollToTop();
+      };
       for (const category of categories) {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = CATEGORY_LABELS.get(category) || category.replace(/^\[[^\]]+\]\s*/, "") || category;
+        button.textContent = photoCategoryLabel(category);
+        button.setAttribute("aria-label", photoCategoryLabel(category));
         button.classList.toggle("active", category === activeCategory);
         if (category === activeCategory) button.setAttribute("aria-current", "page");
-        button.addEventListener("click", () => {
-          categoryScrollLeft = nav.scrollLeft;
-          if (category === activeCategory && !params.collection && !params.query && params.photoView !== "albums") {
-            host.ui.scrollToTop();
-            return;
-          }
-          host.navigation.showView("channel", {
-            ...params,
-            mode: "photo",
-            photoView: "collections",
-            collection: "",
-            category,
-            person: "",
-            sort: "count",
-            query: ""
-          }, { skipHistory: true, replaceHistory: true });
-          host.ui.scrollToTop();
-        });
+        button.addEventListener("click", () => selectCategory(category));
         nav.append(button);
       }
       const actions = document.createElement("div");
       actions.className = "fanhao-feed-appbar-actions";
-      actions.append(createPhotoSortButton(host, params), createPhotoSearchButton(host));
+      actions.append(createPhotoCategoryButton(categories, activeCategory, selectCategory, () => {
+        if (!isCurrent()) return false;
+        categoryScrollLeft = nav.scrollLeft;
+        return true;
+      }), createPhotoSortButton(host, params), createPhotoSearchButton(host));
       row.append(nav, actions);
       container.append(row);
       nav.scrollLeft = categoryScrollLeft;
-      const selected = nav.querySelector("[aria-current='page']");
-      if (selected) {
+      const revealSelectedCategory = () => {
+        if (!isCurrent() || nav.clientWidth <= 0) return;
+        const selected = nav.querySelector("[aria-current='page']");
+        if (!selected) return;
         if (selected.offsetLeft < nav.scrollLeft) nav.scrollLeft = selected.offsetLeft;
         else if (selected.offsetLeft + selected.offsetWidth > nav.scrollLeft + nav.clientWidth) {
           nav.scrollLeft = selected.offsetLeft + selected.offsetWidth - nav.clientWidth;
         }
+        categoryScrollLeft = nav.scrollLeft;
+      };
+      revealSelectedCategory();
+      let categoryWidth = nav.clientWidth;
+      const revealAfterResize = () => {
+        if (!isCurrent() || nav.clientWidth <= 0 || nav.clientWidth === categoryWidth) return;
+        categoryWidth = nav.clientWidth;
+        revealSelectedCategory();
+      };
+      if (typeof window.ResizeObserver === "function") {
+        const observer = new window.ResizeObserver(revealAfterResize);
+        observer.observe(nav);
+        stopWatchingWidth = () => observer.disconnect();
+      } else {
+        window.addEventListener("resize", revealAfterResize, { passive: true });
+        stopWatchingWidth = () => window.removeEventListener("resize", revealAfterResize);
       }
-      nav.addEventListener("scroll", () => { categoryScrollLeft = nav.scrollLeft; }, { passive: true });
+      nav.addEventListener("scroll", () => {
+        if (isCurrent()) categoryScrollLeft = nav.scrollLeft;
+      }, { passive: true });
       return true;
     }
   };
+}
+
+function photoCategoryLabel(category) {
+  return CATEGORY_LABELS.get(category) || category.replace(/^\[[^\]]+\]\s*/, "") || category;
+}
+
+function createPhotoCategoryButton(categories, activeCategory, selectCategory, canOpen) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "fanhao-feed-appbar-action photo-category-action";
+  button.textContent = "分类";
+  button.setAttribute("aria-label", `全部图库分类，当前${photoCategoryLabel(activeCategory)}`);
+  button.setAttribute("aria-haspopup", "dialog");
+  button.addEventListener("click", () => {
+    if (!canOpen()) return;
+    const sheet = openMobileActionSheet({
+      title: "全部图库分类", trigger: button, value: activeCategory,
+      options: categories.map((category) => ({
+        value: category, label: photoCategoryLabel(category), select: () => {
+          selectCategory(category);
+          if (document.body.contains(button)) button.focus?.({ preventScroll: true });
+        }
+      }))
+    });
+    sheet.panel.classList.add("photo-category-sheet");
+    sheet.header.classList.add("photo-category-sheet-head");
+    sheet.closeButton.classList.add("photo-category-close");
+    sheet.closeButton.setAttribute("aria-label", "关闭图库分类");
+    const selected = sheet.panel.querySelector(".active");
+    selected?.setAttribute("aria-current", "page");
+    selected?.scrollIntoView?.({ block: "nearest" });
+  });
+  return button;
 }
 
 function createPhotoSortButton(host, params) {

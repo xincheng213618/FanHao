@@ -256,6 +256,10 @@
 }
 
 .content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-title strong {
+  display: block;
+  overflow: visible;
+  white-space: normal;
+  -webkit-line-clamp: unset;
   font-size: 20px;
   font-weight: 700;
   line-height: 1.35;
@@ -422,6 +426,13 @@
   min-width: 0;
   gap: 10px;
   padding: 0 0 14px;
+}
+
+.content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-facts > span {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-path {

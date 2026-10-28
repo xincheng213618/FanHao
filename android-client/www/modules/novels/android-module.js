@@ -1,5 +1,5 @@
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-1443708f18b1";
-import { createNovelViews } from "./novel-views.js?v=assets-1443708f18b1";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-22080e82f167";
+import { createNovelViews } from "./novel-views.js?v=assets-22080e82f167";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
@@ -12,6 +12,11 @@ export function createAndroidModule({ host }) {
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
     setStatus: host.ui.setStatus
   });
+  let stopChrome = () => {};
+  const deactivateChrome = () => {
+    stopChrome();
+    stopChrome = () => {};
+  };
   window.addEventListener("fanhaoNovelSourceChanged", host.ui.refreshChrome);
   return {
     bottomKey: "novels",
@@ -22,7 +27,14 @@ export function createAndroidModule({ host }) {
       { view: "novelDetail", render: (params, guard) => novelViews.renderNovelDetail(params.id, guard) },
       { view: "novelReader", render: (params, guard) => novelViews.renderNovelReader(params.id, params.chapterIndex, guard, params) }
     ],
-    renderChrome: (context) => renderNovelChrome(context, host, novelViews),
+    renderChrome(context) {
+      deactivateChrome();
+      const nav = renderNovelChrome(context, host, novelViews);
+      if (!nav) return false;
+      stopChrome = watchNovelCategoryWidth(nav, context.container);
+      return true;
+    },
+    deactivate: deactivateChrome,
     handleBack(view, params) {
       if (view !== "novelReader" || host.navigation.hasBackStack()) return false;
       host.navigation.showView("novels", {}, { skipHistory: true, replaceHistory: true });
@@ -73,7 +85,49 @@ function renderNovelChrome({ container, view }, host, novelViews) {
     host.ui.scrollToTop();
   });
   container.append(nav, sort, search);
-  return true;
+  return nav;
+}
+
+function watchNovelCategoryWidth(nav, container) {
+  let active = true;
+  let frame = 0;
+  let lastWidth = null;
+  const isCurrent = () => active && nav.isConnected && nav.parentNode === container;
+  const reveal = () => {
+    frame = 0;
+    if (!isCurrent()) return;
+    const width = nav.clientWidth;
+    if (width <= 0) { lastWidth = 0; return; }
+    if (width === lastWidth) return;
+    lastWidth = width;
+    const selected = nav.querySelector('[aria-pressed="true"]');
+    if (!selected) return;
+    const bounds = nav.getBoundingClientRect();
+    const current = selected.getBoundingClientRect();
+    const left = bounds.left + nav.clientLeft;
+    const right = left + nav.clientWidth;
+    const delta = current.left < left ? current.left - left
+      : current.right > right ? current.right - right : 0;
+    if (delta) nav.scrollLeft += delta;
+  };
+  const scheduleReveal = () => {
+    if (!isCurrent()) return;
+    const width = nav.clientWidth;
+    if (width <= 0) { lastWidth = 0; return; }
+    if (width === lastWidth || frame) return;
+    frame = window.requestAnimationFrame(reveal);
+  };
+  const observer = typeof window.ResizeObserver === "function" ? new window.ResizeObserver(scheduleReveal) : null;
+  if (observer) observer.observe(nav);
+  else window.addEventListener("resize", scheduleReveal, { passive: true });
+  scheduleReveal();
+  return () => {
+    active = false;
+    observer?.disconnect();
+    if (!observer) window.removeEventListener("resize", scheduleReveal);
+    if (frame) window.cancelAnimationFrame(frame);
+    frame = 0;
+  };
 }
 
 function openNovelSortDialog(host, novelViews) {

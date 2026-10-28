@@ -25,11 +25,17 @@ final class NativeShortVideoFeedReader {
   }
 
   NativeShortVideoFeedPaging.ReadResult<FeedPage> read(String feedUrl) {
+    return read(feedUrl, null);
+  }
+
+  NativeShortVideoFeedPaging.ReadResult<FeedPage> read(String feedUrl, NativeShortVideoFeedTransport.Cancellation cancellation) {
+    if (cancelled(cancellation)) return NativeShortVideoFeedPaging.ReadResult.failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
     CachedFeedPage cached = cache.get(feedUrl);
     if (cached != null && SystemClock.elapsedRealtime() - cached.cachedAtMs <= cacheMaxAgeMs) {
       Log.i(TAG, "feed cache hit " + feedUrl);
       FeedPage page = cached.page.copy();
-      return NativeShortVideoFeedPaging.ReadResult.success(page, page.hasMore, page.nextCursor);
+      return cancelled(cancellation) ? NativeShortVideoFeedPaging.ReadResult.failure(NativeShortVideoFeedPaging.Failure.OFFLINE)
+        : NativeShortVideoFeedPaging.ReadResult.success(page, page.hasMore, page.nextCursor);
     }
     FeedPage page = new FeedPage();
     try {
@@ -38,6 +44,7 @@ final class NativeShortVideoFeedReader {
       page.limit = Math.max(1, Integer.parseInt(uri.getQueryParameter("limit") == null ? String.valueOf(defaultPageLimit) : uri.getQueryParameter("limit")));
     } catch (Exception ignored) {}
     return transport.read(feedUrl, body -> {
+      if (cancelled(cancellation)) throw new java.io.InterruptedIOException("feed read cancelled");
       JSONObject data = new JSONObject(body);
       page.offset = Math.max(0, data.optInt("offset", page.offset));
       page.limit = Math.max(1, data.optInt("limit", page.limit));
@@ -54,9 +61,18 @@ final class NativeShortVideoFeedReader {
       }
       if (page.total == 0) page.total = page.items.size();
       if (page.stats.isEmpty()) page.stats = FeedStats.fromItems(page.items);
-      if (!page.items.isEmpty()) cache.put(feedUrl, new CachedFeedPage(page.copy(), SystemClock.elapsedRealtime()));
+      if (cancelled(cancellation)) throw new java.io.InterruptedIOException("feed read cancelled");
+      if (!page.items.isEmpty()) {
+        Runnable publish = () -> cache.put(feedUrl, new CachedFeedPage(page.copy(), SystemClock.elapsedRealtime()));
+        if (cancellation == null) publish.run();
+        else if (!cancellation.publish(publish)) throw new java.io.InterruptedIOException("feed read cancelled");
+      }
       return new NativeShortVideoFeedTransport.Parsed<>(page, page.hasMore, page.nextCursor);
-    });
+    }, cancellation);
+  }
+
+  private boolean cancelled(NativeShortVideoFeedTransport.Cancellation cancellation) {
+    return cancellation != null && cancellation.isCancelled();
   }
 
   private String baseFromUrl(String value) {

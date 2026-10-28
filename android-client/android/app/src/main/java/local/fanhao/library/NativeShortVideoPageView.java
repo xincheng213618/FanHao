@@ -353,6 +353,7 @@ final class ShortVideoHolder extends RecyclerView.ViewHolder {
   boolean captionExpanded;
   boolean captionCanExpand;
   int galleryIndex;
+  NativeShortVideoGalleryImageReadiness galleryImageReadiness;
   int galleryDragDirection;
   int galleryDragTargetIndex = -1;
   float galleryDragVisualX;

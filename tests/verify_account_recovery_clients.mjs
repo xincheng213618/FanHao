@@ -33,7 +33,7 @@ async function openReset(page, username, code) {
 }
 async function generate(page, id) {
   await page.locator(`[data-reset-user="${id}"]`).click(); await ready(page);
-  await page.getByLabel("你的管理员密码").fill(password); await page.getByRole("button", { name: "生成一次性重置码" }).click();
+  await page.getByLabel("你的管理员密码", { exact: true }).fill(password); await page.getByRole("button", { name: "生成一次性重置码" }).click();
   await page.locator("[data-reset-code]").waitFor(); await ready(page); return page.locator("[data-reset-code]").inputValue();
 }
 try {
@@ -43,10 +43,10 @@ try {
   const admin = await pageAt("/account"); await signIn(admin, owner.user.username);
   await admin.getByRole("button", { name: "用户管理", exact: true }).click(); await admin.getByLabel("搜索用户").waitFor(); await ready(admin);
   await admin.locator(`[data-reset-user="${web.user.id}"]`).click(); await ready(admin);
-  await admin.getByLabel("你的管理员密码").fill("Incorrect-password"); await admin.getByRole("button", { name: "生成一次性重置码" }).click();
+  await admin.getByLabel("你的管理员密码", { exact: true }).fill("Incorrect-password"); await admin.getByRole("button", { name: "生成一次性重置码" }).click();
   await admin.getByText("管理员密码不正确", { exact: true }).waitFor(); await ready(admin);
   assert.equal(await admin.locator("[data-reset-code]").count(), 0);
-  await admin.getByLabel("你的管理员密码").fill(password); await admin.getByRole("button", { name: "生成一次性重置码" }).click();
+  await admin.getByLabel("你的管理员密码", { exact: true }).fill(password); await admin.getByRole("button", { name: "生成一次性重置码" }).click();
   await admin.locator("[data-reset-code]").waitFor(); await ready(admin);
   const discardedCode = await admin.locator("[data-reset-code]").inputValue();
   assert.equal(await admin.locator('input[type="password"]').count(), 0, "administrator password is removed after generation");

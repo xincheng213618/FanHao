@@ -17,13 +17,12 @@ body.music-mobile-view .music-mobile-auto-identity {
 }
 
 body.music-mobile-view .music-mobile-auto-identity strong {
-  overflow: hidden;
+  display: block;
   color: var(--ink);
   font-size: clamp(24px, 7vw, 30px);
   font-weight: 950;
   line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 body.music-mobile-view .music-mobile-auto-identity em,
@@ -45,8 +44,7 @@ body.music-mobile-view .music-mobile-auto-topbar-spacer {
   min-width: 52px;
 }
 
-body.music-mobile-view .music-mobile-auto-hero .music-mobile-playlist-back,
-body.music-mobile-view .music-mobile-auto-hero .music-mobile-playlist-management > summary {
+body.music-mobile-view .music-mobile-auto-hero .music-mobile-playlist-back {
   min-width: 44px;
   min-height: 44px;
 }

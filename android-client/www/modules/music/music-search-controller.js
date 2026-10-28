@@ -1,7 +1,7 @@
-import { fetchJson } from "../../js/api.js?v=assets-1443708f18b1";
+import { fetchJson } from "../../js/api.js?v=assets-22080e82f167";
 import { formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups } from "./track-versions.js?v=assets-1443708f18b1";
-import { writeSearchHistoryPreference } from "./music-state.js?v=assets-1443708f18b1";
+import { buildTrackVersionGroups } from "./track-versions.js?v=assets-22080e82f167";
+import { writeSearchHistoryPreference } from "./music-state.js?v=assets-22080e82f167";
 
 const SEARCH_DEBOUNCE_MS = 280;
 const SEARCH_SUGGESTION_DEBOUNCE_MS = 90;
@@ -55,6 +55,15 @@ export function createMusicSearchController(dependencies) {
     if (clear) clear.hidden = !query;
     scheduleSearchSuggestions(query);
     searchDebounceTimer = window.setTimeout(() => commitMusicSearch(query), SEARCH_DEBOUNCE_MS);
+  }
+
+  function pauseSearchForComposition() {
+    disposePendingWork();
+    abortMountedSearch();
+    state.searchSuggestions = [];
+    state.searchSuggestionIndex = -1;
+    state.searchSuggestionLoading = false;
+    refreshMountedSearchSuggestions();
   }
 
   function commitMusicSearch(value, options = {}) {
@@ -121,6 +130,7 @@ export function createMusicSearchController(dependencies) {
   }
 
   function handleSearchSuggestionKeydown(event, input) {
+    if (event.isComposing || event.keyCode === 229) return;
     const suggestions = state.searchSuggestions || [];
     if (["ArrowDown", "ArrowUp"].includes(event.key) && suggestions.length) {
       event.preventDefault();
@@ -353,6 +363,7 @@ export function createMusicSearchController(dependencies) {
     commitMusicSearch,
     disposePendingWork,
     handleSearchSuggestionKeydown,
+    pauseSearchForComposition,
     rememberSearchQuery,
     removeSearchHistoryQuery,
     scheduleLiveSearch,

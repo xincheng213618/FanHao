@@ -68,6 +68,8 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
   document.addEventListener = () => {}; document.visibilityState = "visible";
   const context = vm.createContext({ ...channelAccountBoundary, console, document, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "mediaDetail", currentViewParams: {}, viewRenderToken: 0, activeViewController: null,
+    // No shell menus here; their actual lifecycle is covered by the gallery gate.
+    retireModePickerSession() {},
     performance: { now: () => 0 }, window: { addEventListener() {}, setTimeout() { return 1; }, clearTimeout() {},
       Capacitor: { Plugins: { FanHaoPlayer: { async play(value) { calls.bridge.push(plain(value)); return { opened: true }; } } } } },
     formatBytes, formatDate, formatNumber, formatTime, absoluteUrl, cacheAgeText: () => "synthetic", photoCatalogCollections: value => value,

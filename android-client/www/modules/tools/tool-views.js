@@ -159,19 +159,19 @@ export function createToolViews(context) {
         icon: "account",
         title: "用户中心",
         detail: "登录注册、个人资料与邀请码管理",
-        onOpen: () => openSettings({ section: "account" })
+        onOpen: (trigger) => openSettings({ section: "account", trigger })
       }),
       createNativeRow({
         icon: "settings",
         title: "设置",
         detail: "服务地址、主题与应用更新",
-        onOpen: () => openSettings()
+        onOpen: (trigger) => openSettings({ trigger })
       }),
       createNativeRow({
         icon: "storage",
         title: "存储与缓存",
         detail: "手机缓存、漫画原图与阅读缓存",
-        onOpen: () => openSettings({ section: "storage" })
+        onOpen: (trigger) => openSettings({ section: "storage", trigger })
       })
     );
     section.append(list);
@@ -291,7 +291,7 @@ export function createToolViews(context) {
     button.className = "tool-native-row";
     button.setAttribute("aria-label", `打开${item.title}`);
     button.addEventListener("click", () => {
-      if (typeof item.onOpen === "function") item.onOpen();
+      if (typeof item.onOpen === "function") item.onOpen(button);
       else window.location.assign(item.url);
     });
 

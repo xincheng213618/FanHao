@@ -1,24 +1,27 @@
-import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=assets-1443708f18b1";
-import { absoluteUrl } from "../../js/image.js?v=assets-1443708f18b1";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-22080e82f167";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
+import { absoluteUrl } from "../../js/image.js?v=assets-22080e82f167";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-1443708f18b1";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-1443708f18b1";
-import { createMusicSheets } from "./music-sheets.js?v=assets-1443708f18b1";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-1443708f18b1";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-1443708f18b1";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-1443708f18b1";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-1443708f18b1";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-1443708f18b1";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-1443708f18b1";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-1443708f18b1";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-1443708f18b1";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-1443708f18b1";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-1443708f18b1";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-1443708f18b1";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-1443708f18b1";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-1443708f18b1";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-1443708f18b1";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-1443708f18b1";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-22080e82f167";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-22080e82f167";
+import { createMusicSheets } from "./music-sheets.js?v=assets-22080e82f167";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-22080e82f167";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-22080e82f167";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-22080e82f167";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-22080e82f167";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-22080e82f167";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-22080e82f167";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-22080e82f167";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-22080e82f167";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-22080e82f167";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-22080e82f167";
+import { createMusicControlFocus } from "./music-control-focus.js";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-22080e82f167";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-22080e82f167";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-22080e82f167";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-22080e82f167";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-22080e82f167";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-22080e82f167";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -26,7 +29,7 @@ import {
   PLAYBACK_SPEED_OPTIONS,
   emptySearchOverview,
   emptySearchRecovery,
-  collapseDuplicateTracks,
+  collapseDuplicateTracks as collapseMusicDuplicateTracks,
   selectTrackByVersionStrategy,
   shuffleTrackQueue,
   versionStrategyLabel,
@@ -77,9 +80,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-1443708f18b1";
+} from "./music-state.js?v=assets-22080e82f167";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-1443708f18b1";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-22080e82f167";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -233,8 +236,32 @@ export function createMusicViews(deps) {
   let gaplessHandoffPending = false;
   let moduleActive = false;
   let musicRenderGeneration = 0;
+  let playlistMutationGeneration = 0;
   let openTrackGeneration = 0;
   let pendingTrackSelection = 0;
+  const trackPreferenceBindings = new WeakMap();
+  let trackPreferenceUiIntent = 0;
+  let trackPreferenceError = null;
+  let playbackSettingsSession = null;
+  let miniFullscreenSession = null;
+  const trackPreferences = createMusicTrackPreferences({
+    send: (owner, id, field, value) => fetchMusicApiJson(owner.sourceUrl,
+      `/api/music/tracks/${encodeURIComponent(id)}/${field}`, {
+        method: "POST", body: { [field]: value }, timeoutMs: 0, accountScope: owner.accountScope
+      })
+  });
+  let routeControlFocus = null;
+  const controlFocus = createMusicControlFocus({
+    getActiveUrl,
+    getStateKey: () => JSON.stringify([
+      musicRouteParams(), state.searchOpen, state.searchScope,
+      state.searchFavorite, state.searchLyrics, state.searchMinRating, state.searchQuality,
+      state.libraryFiltersOpen, state.sortSheetOpen, state.fullscreen, state.playbackSheetOpen,
+      state.queueOpen, state.playlistSheetOpen, state.sleepSheetOpen
+    ]),
+    isActive: () => moduleActive,
+    resolveTarget: resolveMusicControlFocusTarget
+  });
   const { loadSmartPlaylists, loadPlaylists } = createMusicCatalogueRequests({
     fetchJson, getActiveUrl, isActive: () => moduleActive, state,
     selectedSmartPlaylist, selectedPlaylist,
@@ -257,6 +284,7 @@ export function createMusicViews(deps) {
     commitMusicSearch,
     disposePendingWork: disposeMusicSearchPendingWork,
     handleSearchSuggestionKeydown,
+    pauseSearchForComposition,
     rememberSearchQuery,
     removeSearchHistoryQuery,
     scheduleLiveSearch,
@@ -286,6 +314,7 @@ export function createMusicViews(deps) {
     renderTrackActionsBackdrop,
     renderTrackActionsSheet
   } = createMusicSheets({
+    bindTrackPreference,
     activateSearchResultQueue,
     addTrackToPlaylist,
     appendTrackToQueue,
@@ -326,7 +355,9 @@ export function createMusicViews(deps) {
     renderMusicSort
   } = createMusicLibrarySort({
     isFocusedLibraryView: () => focusedLibraryView?.isFocusedLibraryView?.() || false,
+    beginFocus: beginMusicControlFocus,
     renderShell,
+    restoreFocus: restoreLibraryControlFocus,
     setMusicSymbol,
     state,
     symbolButton,
@@ -406,6 +437,14 @@ export function createMusicViews(deps) {
     renderHistoryActionsSheet,
     renderHistoryManagement
   } = createMusicHistoryActionsView({
+    captureHistoryAction: () => {
+      const generation = musicRenderGeneration;
+      const sourceUrl = getActiveUrl();
+      const accountOwner = captureAccountOwner(sourceUrl);
+      return () => moduleActive && generation === musicRenderGeneration
+        && getActiveUrl() === sourceUrl && state.mode === "history"
+        && isAccountOwnerCurrent(accountOwner);
+    },
     deleteJson,
     getActiveUrl,
     loadSmartPlaylists,
@@ -444,39 +483,101 @@ export function createMusicViews(deps) {
 
   installLifecycle();
 
-  async function renderMusicList(params = {}, renderGuard = null) {
-    cancelMusicPagination();
-    moduleActive = true;
-    const generation = ++musicRenderGeneration;
-    const activeUrl = getActiveUrl();
-    const initialSelection = openTrackGeneration;
-    const initialPlaybackSession = playReportSession;
-    const isCurrent = () => moduleActive && generation === musicRenderGeneration
-      && getActiveUrl() === activeUrl && (!renderGuard || renderGuard());
-    isCurrent.signal = renderGuard?.signal;
-    const isListCurrent = () => isCurrent() && openTrackGeneration === initialSelection
-      && playReportSession === initialPlaybackSession;
-    isListCurrent.signal = renderGuard?.signal;
-    ensureAudio();
-    applyRouteParams(params);
-    setActiveBottom("music");
-    els.viewKicker.textContent = "本地音乐";
-    els.viewTitle.textContent = musicTitle();
-    els.viewMeta.textContent = state.status || "正在读取";
-    els.viewContent.className = "content-list music-mobile-content";
-    renderShell();
-    const openedTrackId = String(params.trackId || "").trim();
-    await Promise.all([loadSmartPlaylists(isCurrent), loadPlaylists(isCurrent), loadMusic(isListCurrent)]);
-    if (!isCurrent() || openTrackGeneration !== initialSelection || playReportSession !== initialPlaybackSession) return;
-    if (openedTrackId && state.current?.id !== openedTrackId) {
-      await openTrack(openedTrackId, { autoplay: false, renderGuard: isCurrent });
-      return;
+  async function musicJsonRequest(request, sourceUrl, path, options) {
+    const read = trackPreferences.startRead();
+    let handedOff = false;
+    try {
+      const data = await request(sourceUrl, path, options);
+      const owner = trackPreferences.owner(sourceUrl, accountPayloadOwner(data) || captureAccountOwner(sourceUrl));
+      trackPreferences.preparePayload(data, owner, read);
+      handedOff = true;
+      return data;
+    } finally {
+      // Hand the read lease through the caller's immediate await continuation,
+      // which installs the DTO or rejects its route. No pending read is retained.
+      if (handedOff) queueMicrotask(() => queueMicrotask(() => trackPreferences.finishRead(read)));
+      else trackPreferences.finishRead(read);
     }
-    const queueRestore = restorePlaybackQueue(isCurrent);
-    const restoringSelection = openTrackGeneration;
-    await queueRestore;
-    if (!isCurrent() || openTrackGeneration !== restoringSelection) return;
-    await restoreLastTrack(isCurrent);
+  }
+
+  function fetchJson(sourceUrl, path, options) {
+    return musicJsonRequest(fetchMusicApiJson, sourceUrl, path, options);
+  }
+
+  function postJson(sourceUrl, path, body) {
+    return musicJsonRequest(postMusicApiJson, sourceUrl, path, body);
+  }
+
+  function putJson(sourceUrl, path, body) {
+    return musicJsonRequest(putMusicApiJson, sourceUrl, path, body);
+  }
+
+  function deleteJson(sourceUrl, path) {
+    return musicJsonRequest(deleteMusicApiJson, sourceUrl, path);
+  }
+
+  function collapseDuplicateTracks(tracks) {
+    const sources = new Map((tracks || []).map(track => [track.id, track]));
+    return collapseMusicDuplicateTracks(tracks).map(track => trackPreferences.inherit(track, sources.get(track.id) || track));
+  }
+
+  function reconcileTrackPreferences() {
+    for (const track of [state.current, ...(state.queue || []), ...(state.data?.tracks || []),
+      ...(state.data?.rawTracks || [])]) if (track) trackPreferences.refresh(track);
+  }
+
+  function bindTrackPreference(track, node, update) {
+    node.dataset.musicPreferenceBinding = "1";
+    trackPreferenceBindings.set(node, { track, update });
+  }
+
+  async function renderMusicList(params = {}, renderGuard = null) {
+    const focusIntent = routeControlFocus;
+    routeControlFocus = null;
+    controlFocus.retain(focusIntent);
+    let routeCurrent = () => false;
+    try {
+      cancelMusicPagination();
+      moduleActive = true;
+      const generation = ++musicRenderGeneration;
+      const activeUrl = getActiveUrl();
+      const initialSelection = openTrackGeneration;
+      const initialPlaybackSession = playReportSession;
+      const isCurrent = () => moduleActive && generation === musicRenderGeneration
+        && getActiveUrl() === activeUrl && (!renderGuard || renderGuard());
+      isCurrent.signal = renderGuard?.signal;
+      const isListCurrent = () => isCurrent() && openTrackGeneration === initialSelection
+        && playReportSession === initialPlaybackSession;
+      isListCurrent.signal = renderGuard?.signal;
+      ensureAudio();
+      applyRouteParams(params);
+      routeCurrent = () => isCurrent() && !isCurrent.signal?.aborted;
+      controlFocus.bind(focusIntent, routeCurrent);
+      setActiveBottom("music");
+      els.viewKicker.textContent = "本地音乐";
+      els.viewTitle.textContent = musicTitle();
+      els.viewMeta.textContent = state.status || "正在读取";
+      els.viewContent.className = "content-list music-mobile-content";
+      renderShell();
+      const openedTrackId = String(params.trackId || "").trim();
+      await Promise.all([loadSmartPlaylists(isCurrent), loadPlaylists(isCurrent), loadMusic(isListCurrent)]);
+      if (!isCurrent() || openTrackGeneration !== initialSelection || playReportSession !== initialPlaybackSession) return;
+      if (openedTrackId && state.current?.id !== openedTrackId) {
+        await openTrack(openedTrackId, { autoplay: false, renderGuard: isCurrent });
+        return;
+      }
+      const queueRestore = restorePlaybackQueue(isCurrent);
+      const restoringSelection = openTrackGeneration;
+      await queueRestore;
+      if (!isCurrent() || openTrackGeneration !== restoringSelection) return;
+      await restoreLastTrack(isCurrent);
+    } catch (error) {
+      controlFocus.cancel(focusIntent);
+      throw error;
+    } finally {
+      if (routeCurrent()) controlFocus.finish(focusIntent);
+      else controlFocus.cancel(focusIntent);
+    }
   }
 
   function applyRouteParams(params = {}) {
@@ -724,103 +825,117 @@ export function createMusicViews(deps) {
     else renderShell();
   }
 
-  async function refreshMountedSearchResults(query) {
-    cancelMusicPagination();
-    const value = String(query || "").trim();
-    if (normalizeSearchComparison(state.query) !== normalizeSearchComparison(value)) {
-      state.searchCollapsedGroups = new Set();
-      state.searchExpandedVersionGroups = new Set();
-    }
-    mountedSearchController?.abort();
-    lyricSearchController?.abort();
-    const controller = new AbortController();
-    mountedSearchController = controller;
-    const token = ++mountedSearchToken;
-    state.query = value;
-    state.searchOpen = true;
-    state.searchOverview = state.mode === "library" && value
-      ? { ...emptySearchOverview(), loading: true }
-      : emptySearchOverview();
-    state.searchRecovery = emptySearchRecovery();
-    state.lyricSearch = state.mode === "library" && value && ["all", "lyrics"].includes(state.searchScope)
-      ? { ...emptyLyricSearch(), loading: true }
-      : emptyLyricSearch();
-    replaceViewParams?.("music", musicRouteParams(), { replaceHistory: true });
-    if (!value) {
-      state.loading = false;
-      state.status = "";
-      if (state.mode === "library") {
-        state.data = {
-          ...(state.data || {}),
-          query: "",
-          total: Number(state.summary?.totals?.tracks || state.data?.total || 0)
-        };
-      }
-      state.searchSuggestions = [];
-      state.searchSuggestionQuery = "";
-      state.searchSuggestionIndex = -1;
-      state.searchSuggestionLoading = false;
-      state.lyricSearch = emptyLyricSearch();
-      state.searchRecovery = emptySearchRecovery();
-      refreshMountedSearchUi();
-      return;
-    }
-
-    if (state.mode === "library" && state.searchScope === "lyrics") {
-      state.loading = false;
-      state.status = "";
-      state.searchOverview = emptySearchOverview();
-      state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
-      refreshMountedSearchUi();
-      await loadLyricSearchResults(null, { signal: controller.signal, mounted: true, limit: 40 });
-      if (!state.lyricSearch.matches.length) await loadSearchRecovery(value, controller.signal);
-      return;
-    }
-
-    if (state.mode === "library" && state.searchScope === "playlists") {
-      state.loading = false;
-      state.status = "";
-      state.searchOverview = emptySearchOverview();
-      state.lyricSearch = emptyLyricSearch();
-      state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
-      refreshMountedSearchUi();
-      if (!searchPlaylistMatches(value).length) await loadSearchRecovery(value, controller.signal);
-      return;
-    }
-
-    state.loading = true;
-    state.status = "正在搜索本地音乐";
-    clearPendingSearchData(value);
-    refreshMountedSearchUi();
+  async function refreshMountedSearchResults(query, focusIntent = null) {
+    controlFocus.retain(focusIntent);
+    let requestCurrent = () => false;
     try {
-      const data = await fetchJson(getActiveUrl(), musicListPath(), {
-        timeoutMs: 18000,
-        signal: controller.signal
-      });
-      if (controller.signal.aborted || token !== mountedSearchToken || state.query !== value) return;
-      applyLoadedMusicData(data);
-      if (!state.data?.tracks?.length) state.searchRecovery = { ...emptySearchRecovery(), loading: true, query: value };
-      els.viewTitle.textContent = musicTitle();
-      els.viewMeta.textContent = musicMeta(data);
+      cancelMusicPagination();
+      const value = String(query || "").trim();
+      if (normalizeSearchComparison(state.query) !== normalizeSearchComparison(value)) {
+        state.searchCollapsedGroups = new Set();
+        state.searchExpandedVersionGroups = new Set();
+      }
+      mountedSearchController?.abort();
+      lyricSearchController?.abort();
+      const controller = new AbortController();
+      mountedSearchController = controller;
+      const token = ++mountedSearchToken;
+      state.query = value;
+      state.searchOpen = true;
+      const generation = musicRenderGeneration;
+      requestCurrent = () => moduleActive && generation === musicRenderGeneration
+        && token === mountedSearchToken && mountedSearchController === controller && !controller.signal.aborted;
+      controlFocus.bind(focusIntent, requestCurrent);
+      state.searchOverview = state.mode === "library" && value
+        ? { ...emptySearchOverview(), loading: true }
+        : emptySearchOverview();
+      state.searchRecovery = emptySearchRecovery();
+      state.lyricSearch = state.mode === "library" && value && ["all", "lyrics"].includes(state.searchScope)
+        ? { ...emptyLyricSearch(), loading: true }
+        : emptyLyricSearch();
+      replaceViewParams?.("music", musicRouteParams(), { replaceHistory: true });
+      if (!value) {
+        state.loading = false;
+        state.status = "";
+        if (state.mode === "library") {
+          state.data = {
+            ...(state.data || {}),
+            query: "",
+            total: Number(state.summary?.totals?.tracks || state.data?.total || 0)
+          };
+        }
+        state.searchSuggestions = [];
+        state.searchSuggestionQuery = "";
+        state.searchSuggestionIndex = -1;
+        state.searchSuggestionLoading = false;
+        state.lyricSearch = emptyLyricSearch();
+        state.searchRecovery = emptySearchRecovery();
+        refreshMountedSearchUi();
+        return;
+      }
+
+      if (state.mode === "library" && state.searchScope === "lyrics") {
+        state.loading = false;
+        state.status = "";
+        state.searchOverview = emptySearchOverview();
+        state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
+        refreshMountedSearchUi();
+        await loadLyricSearchResults(null, { signal: controller.signal, mounted: true, limit: 40 });
+        if (!state.lyricSearch.matches.length) await loadSearchRecovery(value, controller.signal);
+        return;
+      }
+
+      if (state.mode === "library" && state.searchScope === "playlists") {
+        state.loading = false;
+        state.status = "";
+        state.searchOverview = emptySearchOverview();
+        state.lyricSearch = emptyLyricSearch();
+        state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
+        refreshMountedSearchUi();
+        if (!searchPlaylistMatches(value).length) await loadSearchRecovery(value, controller.signal);
+        return;
+      }
+
+      state.loading = true;
+      state.status = "正在搜索本地音乐";
+      clearPendingSearchData(value);
       refreshMountedSearchUi();
-      if (state.mode === "library") {
-        await Promise.all([
-          loadSearchOverview(null, { signal: controller.signal, mounted: true }),
-          ["all", "lyrics"].includes(state.searchScope)
-            ? loadLyricSearchResults(null, {
-              signal: controller.signal,
-              mounted: true,
-              limit: state.searchScope === "lyrics" ? 40 : 4
-            })
-            : Promise.resolve(),
-          !state.data?.tracks?.length ? loadSearchRecovery(value, controller.signal) : Promise.resolve()
-        ]);
+      try {
+        const data = await fetchJson(getActiveUrl(), musicListPath(), {
+          timeoutMs: 18000,
+          signal: controller.signal
+        });
+        if (controller.signal.aborted || token !== mountedSearchToken || state.query !== value) return;
+        applyLoadedMusicData(data);
+        if (!state.data?.tracks?.length) state.searchRecovery = { ...emptySearchRecovery(), loading: true, query: value };
+        els.viewTitle.textContent = musicTitle();
+        els.viewMeta.textContent = musicMeta(data);
+        refreshMountedSearchUi();
+        if (state.mode === "library") {
+          await Promise.all([
+            loadSearchOverview(null, { signal: controller.signal, mounted: true }),
+            ["all", "lyrics"].includes(state.searchScope)
+              ? loadLyricSearchResults(null, {
+                signal: controller.signal,
+                mounted: true,
+                limit: state.searchScope === "lyrics" ? 40 : 4
+              })
+              : Promise.resolve(),
+            !state.data?.tracks?.length ? loadSearchRecovery(value, controller.signal) : Promise.resolve()
+          ]);
+        }
+      } catch (error) {
+        if (controller.signal.aborted || token !== mountedSearchToken) return;
+        state.loading = false;
+        state.status = error?.message || "音乐搜索失败";
+        refreshMountedSearchUi();
       }
     } catch (error) {
-      if (controller.signal.aborted || token !== mountedSearchToken) return;
-      state.loading = false;
-      state.status = error?.message || "音乐搜索失败";
-      refreshMountedSearchUi();
+      controlFocus.cancel(focusIntent);
+      throw error;
+    } finally {
+      if (requestCurrent()) controlFocus.finish(focusIntent);
+      else controlFocus.cancel(focusIntent);
     }
   }
 
@@ -861,7 +976,7 @@ export function createMusicViews(deps) {
       gaplessHandoffPending = false;
       const hasRequestedSeek = Object.prototype.hasOwnProperty.call(options, "seekMs");
       const requestedSeekMs = Math.max(0, Number(options.seekMs || 0));
-      state.current = hasRequestedSeek ? { ...data.track, positionMs: requestedSeekMs } : data.track;
+      state.current = hasRequestedSeek ? trackPreferences.clone(data.track, { positionMs: requestedSeekMs }) : data.track;
       state.lyrics = data.lyrics || { lines: [], raw: "" };
       state.prevId = data.prevId || "";
       state.nextId = data.nextId || "";
@@ -906,7 +1021,8 @@ export function createMusicViews(deps) {
     const queue = Array.isArray(state.queue) ? state.queue : [];
     const index = queue.findIndex((item) => item.id === track.id);
     if (index >= 0) {
-      state.queue = queue.map((item) => (item.id === track.id ? { ...item, ...track } : item));
+      state.queue = queue.map((item) => (item.id === track.id
+        ? trackPreferences.inherit({ ...item, ...track }, track) : item));
       return;
     }
     state.queue = [track, ...queue];
@@ -994,9 +1110,11 @@ export function createMusicViews(deps) {
 
   function renderShell() {
     if (!moduleActive || !els.viewContent) return;
-    const capturedSearchFocus = captureMusicSearchFocus();
+    reconcileTrackPreferences();
+    const capturedSearchFocus = controlFocus.current() ? null : captureMusicSearchFocus();
     if (capturedSearchFocus) pendingSearchFocus = capturedSearchFocus;
     const searchFocus = pendingSearchFocus;
+    playbackSettingsSession = null;
     progressBindings = [];
     currentLyricIndex = -1;
     if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
@@ -1094,6 +1212,19 @@ export function createMusicViews(deps) {
     search.autocomplete = "off";
     search.placeholder = searchScopePlaceholder(state.searchScope);
     search.value = state.query;
+    let composing = false;
+    const isComposing = (event) => composing || event?.isComposing || event?.keyCode === 229;
+    const isCurrentInput = () => moduleActive && search.isConnected
+      && els.viewContent.querySelector(".music-mobile-search-input") === search;
+    search.addEventListener("compositionstart", () => {
+      if (!isCurrentInput()) return;
+      composing = true;
+      pauseSearchForComposition();
+    });
+    search.addEventListener("compositionend", () => {
+      composing = false;
+      if (isCurrentInput()) scheduleLiveSearch(search.value);
+    });
     search.addEventListener("pointerdown", (event) => {
       if (!search.value) return;
       const bounds = search.getBoundingClientRect();
@@ -1104,14 +1235,24 @@ export function createMusicViews(deps) {
       scheduleLiveSearch("");
       search.focus({ preventScroll: true });
     });
-    search.addEventListener("input", () => scheduleLiveSearch(search.value));
-    search.addEventListener("search", () => {
+    search.addEventListener("input", (event) => {
+      if (!isCurrentInput()) return;
+      if (isComposing(event)) {
+        pauseSearchForComposition();
+        return;
+      }
+      scheduleLiveSearch(search.value);
+    });
+    search.addEventListener("search", (event) => {
+      if (!isCurrentInput() || isComposing(event)) return;
       state.searchSuggestions = [];
       state.searchSuggestionIndex = -1;
       state.searchSuggestionLoading = false;
       commitMusicSearch(search.value, { remember: true });
     });
-    search.addEventListener("keydown", (event) => handleSearchSuggestionKeydown(event, search));
+    search.addEventListener("keydown", (event) => {
+      if (isCurrentInput() && !isComposing(event)) handleSearchSuggestionKeydown(event, search);
+    });
 
     bar.append(back, search);
     surface.append(bar, renderSearchSuggestionsRegion(), renderSearchSummaryRegion());
@@ -1155,6 +1296,9 @@ export function createMusicViews(deps) {
     if (!["lyrics", "playlists"].includes(state.searchScope)) actions.append(renderMusicSort());
     resultsHead.append(text, actions);
     region.append(renderSearchScopes());
+    if (state.mode === "library" && state.searchScope === "all" && hasActiveSearchFilters()) {
+      region.append(renderSearchFilterNotice());
+    }
     if (state.searchScope !== "all") {
       region.append(resultsHead);
       const hintText = shouldShowSearchSortHint() ? searchSortHint() : "";
@@ -1197,45 +1341,66 @@ export function createMusicViews(deps) {
     return action;
   }
 
-  function renderSearchQuickFilters() {
-    const filters = document.createElement("div");
-    filters.className = "music-mobile-search-quick-filters";
-    const items = [
+  function searchFilterItems() {
+    return [
       { key: "all", label: "全部", active: !hasActiveSearchFilters() },
       { key: "favorite", label: "已收藏", active: state.searchFavorite },
       { key: "lyrics", label: "有歌词", active: state.searchLyrics },
       { key: "rating", label: "4 分以上", active: state.searchMinRating >= 4 },
       { key: "quality", label: "无损", active: state.searchQuality === "lossless" }
     ];
-    for (const item of items) {
+  }
+
+  function renderSearchQuickFilters() {
+    const filters = document.createElement("div");
+    filters.className = "music-mobile-search-quick-filters";
+    for (const item of searchFilterItems()) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = item.active ? "active" : "";
       button.textContent = item.label;
       button.setAttribute("aria-pressed", item.active ? "true" : "false");
-      button.addEventListener("click", () => toggleSearchFilter(item.key));
+      button.addEventListener("click", () => toggleSearchFilter(item.key, button));
       filters.append(button);
     }
     return filters;
+  }
+
+  function renderSearchFilterNotice() {
+    const notice = document.createElement("div");
+    notice.className = "music-mobile-search-filter-notice";
+    const text = document.createElement("span");
+    const labels = searchFilterItems().filter(item => item.key !== "all" && item.active).map(item => item.label);
+    text.textContent = `歌曲筛选：${labels.join(" · ")}`;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "清除";
+    clear.setAttribute("aria-label", "清除歌曲筛选");
+    clear.addEventListener("click", () => toggleSearchFilter("all", clear));
+    notice.append(text, clear);
+    return notice;
   }
 
   function renderSearchFilterMenu() {
     const details = document.createElement("details");
     details.className = "music-mobile-search-filter-menu";
     const summary = document.createElement("summary");
-    const activeCount = [state.searchFavorite, state.searchLyrics, state.searchMinRating, state.searchQuality].filter(Boolean).length;
+    const activeCount = searchFilterItems().filter(item => item.key !== "all" && item.active).length;
     summary.textContent = activeCount ? `筛选 ${activeCount}` : "筛选";
     details.append(summary, renderSearchQuickFilters());
     return details;
   }
 
-  function toggleSearchFilter(key) {
+  function toggleSearchFilter(key, origin) {
+    const targetKind = state.mode === "library" && state.searchScope === "songs"
+      ? "search-filter" : "search-input";
+    const focusIntent = beginMusicControlFocus(targetKind, origin);
     if (key === "all") resetSearchFilters();
     else if (key === "favorite") state.searchFavorite = !state.searchFavorite;
     else if (key === "lyrics") state.searchLyrics = !state.searchLyrics;
     else if (key === "rating") state.searchMinRating = state.searchMinRating >= 4 ? 0 : 4;
     else if (key === "quality") state.searchQuality = state.searchQuality === "lossless" ? "" : "lossless";
-    refreshMountedSearchResults(state.query).catch(() => {});
+    refreshMountedSearchResults(state.query, focusIntent).catch(() => controlFocus.cancel(focusIntent));
   }
 
   function hasActiveSearchFilters() {
@@ -1393,6 +1558,7 @@ export function createMusicViews(deps) {
   }
 
   function refreshMountedSearchUi() {
+    reconcileTrackPreferences();
     const shell = els.viewContent?.querySelector(".music-mobile-shell.is-search-focused");
     const summary = shell?.querySelector(".music-mobile-search-summary-region");
     const content = shell?.querySelector(".music-mobile-search-content-region");
@@ -1710,7 +1876,7 @@ export function createMusicViews(deps) {
 
   function playSearchDiscoveryTrack(track, tracks) {
     if (!track?.id) return;
-    state.queue = (Array.isArray(tracks) ? tracks : []).map((item) => ({ ...item }));
+    state.queue = (Array.isArray(tracks) ? tracks : []).map((item) => trackPreferences.clone(item));
     openTrack(track.id, { autoplay: true }).catch(() => {});
   }
 
@@ -2084,10 +2250,10 @@ export function createMusicViews(deps) {
 
   function playSearchTrackVersion(track, tracks) {
     if (!track?.id) return;
-    const versions = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => ({ ...item }));
+    const versions = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => trackPreferences.clone(item));
     rememberTrackVersionChoice(track, versions);
     const searchQueue = preferredSearchQueue(state.data?.tracks, track);
-    state.queue = searchQueue.length ? searchQueue : versions.length ? versions : [{ ...track }];
+    state.queue = searchQueue.length ? searchQueue : versions.length ? versions : [trackPreferences.clone(track)];
     openTrack(track.id, { autoplay: true }).catch(() => {});
   }
 
@@ -2561,9 +2727,46 @@ export function createMusicViews(deps) {
 
   function closeFacetFilters() {
     if (!state.libraryFiltersOpen) return;
+    const focusIntent = beginMusicControlFocus("filter");
     state.libraryFiltersOpen = false;
     state.libraryFilterScrollTop = 0;
     renderShell();
+    restoreLibraryControlFocus(focusIntent);
+  }
+
+  function resolveMusicControlFocusTarget(kind) {
+    const selectors = {
+      sort: ".music-mobile-focused-library-sort",
+      "native-sort": "select.music-mobile-sort",
+      filter: ".music-mobile-focused-library-filter",
+      "search-filter": ".music-mobile-search-filter-menu > summary",
+      "search-input": ".music-mobile-search-input",
+      "playback-close": ".music-mobile-playback-settings-sheet .music-mobile-playback-settings-close",
+      "playback-trigger": ".music-mobile-full-player .music-mobile-full-settings",
+      "full-dismiss": ".music-mobile-full-player .music-mobile-full-dismiss",
+      "full-queue-close": ".music-mobile-full-player .music-mobile-queue-sheet .music-mobile-sheet-close",
+      "full-queue": ".music-mobile-full-player .music-mobile-full-queue",
+      "mini-open": ".music-mobile-mini-player .music-mobile-mini-open",
+      "mini-queue": ".music-mobile-mini-player .music-mobile-mini-queue"
+    };
+    return selectors[kind] ? els.viewContent?.querySelector(selectors[kind]) : null;
+  }
+
+  function beginMusicControlFocus(kind, origin = null) {
+    const focused = document.activeElement;
+    const source = origin || (els.viewContent?.contains(focused) ? focused : null)
+      || els.viewContent?.querySelector(kind === "filter"
+        ? ".music-mobile-library-filter-overlay" : ".music-mobile-library-sort-sheet");
+    if (!source || !els.viewContent?.contains(source)) return null;
+    const intent = controlFocus.begin(source, kind);
+    if (intent) pendingSearchFocus = null;
+    return intent;
+  }
+
+  function restoreLibraryControlFocus(intent) {
+    const generation = musicRenderGeneration;
+    controlFocus.bind(intent, () => moduleActive && generation === musicRenderGeneration);
+    controlFocus.finish(intent);
   }
 
   function renderFacetRow(label, items, activeId, onSelect) {
@@ -2700,6 +2903,7 @@ export function createMusicViews(deps) {
   }
 
   function appendMusicTrackPage({ mode, sourceData, data, incomingData }) {
+    reconcileTrackPreferences();
     // Search version groups require the merged result; keep their mounted-search renderer.
     if (!["library", "smart"].includes(mode) || state.query || state.searchOpen) return false;
     const list = els.viewContent?.querySelector(".music-mobile-shell > .music-mobile-list");
@@ -2789,16 +2993,21 @@ export function createMusicViews(deps) {
       titleLine.append(reason);
     }
     const meta = document.createElement("small");
-    [
-      { value: track.artist || "未知歌手", highlight: true },
-      { value: track.album || "未知专辑", highlight: true },
-      { value: ratingLabel(track.rating), highlight: false },
-      { value: versionCount > 1 ? [`${formatNumber(versionCount)} 个版本`, versionGroupPreferenceLabel(versionGroup)].filter(Boolean).join(" · ") : Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个来源` : "", highlight: false }
-    ].filter((item) => item.value).forEach((item, itemIndex) => {
-      if (itemIndex) meta.append(document.createTextNode(" · "));
-      if (item.highlight) appendSearchHighlightedText(meta, item.value, track, itemIndex === 0 ? "artist" : "album");
-      else meta.append(document.createTextNode(item.value));
-    });
+    const updateMetadata = () => {
+      meta.textContent = "";
+      [
+        { value: track.artist || "未知歌手", highlight: true },
+        { value: track.album || "未知专辑", highlight: true },
+        { value: ratingLabel(track.rating), highlight: false },
+        { value: versionCount > 1 ? [`${formatNumber(versionCount)} 个版本`, versionGroupPreferenceLabel(versionGroup)].filter(Boolean).join(" · ") : Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个来源` : "", highlight: false }
+      ].filter((item) => item.value).forEach((item, itemIndex) => {
+        if (itemIndex) meta.append(document.createTextNode(" · "));
+        if (item.highlight) appendSearchHighlightedText(meta, item.value, track, itemIndex === 0 ? "artist" : "album");
+        else meta.append(document.createTextNode(item.value));
+      });
+    };
+    updateMetadata();
+    bindTrackPreference(track, meta, updateMetadata);
     text.append(titleLine, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
@@ -2835,13 +3044,20 @@ export function createMusicViews(deps) {
     } else {
       const favorite = symbolButton(track.favorite ? "favorite-fill" : "favorite", (event) => {
         event.stopPropagation();
-        toggleFavorite(track.id).catch(() => {});
+        toggleFavorite(track).catch(() => {});
       }, false, `track-label track-favorite${track.favorite ? " active" : ""}`, track.favorite ? "取消收藏" : "收藏");
       inlineActions.append(favorite);
+      bindTrackPreference(track, favorite, () => {
+        setMusicSymbol(favorite, track.favorite ? "favorite-fill" : "favorite");
+        favorite.classList.toggle("active", Boolean(track.favorite));
+        const label = track.favorite ? "取消收藏" : "收藏";
+        favorite.setAttribute("aria-label", label);
+        favorite.title = label;
+      });
     }
     const more = symbolButton("more", (event) => {
       event.stopPropagation();
-      openTrackActions(track.id);
+      openTrackActions(track);
     }, false, "track-label track-more", `更多操作：${track.title || "歌曲"}`);
     inlineActions.append(more);
     const duration = document.createElement("small");
@@ -2858,6 +3074,7 @@ export function createMusicViews(deps) {
     };
     row.addEventListener("click", play);
     row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       play();
@@ -2895,7 +3112,7 @@ export function createMusicViews(deps) {
         ? selectedTrack
         : preferredTrackForVersionGroup(group, group.primary))
       .filter((track) => track?.id && !seen.has(track.id) && seen.add(track.id))
-      .map((track) => ({ ...track }));
+      .map((track) => trackPreferences.clone(track));
   }
 
   function renderMiniPlayer() {
@@ -2903,34 +3120,53 @@ export function createMusicViews(deps) {
     const player = document.createElement("section");
     player.className = `music-mobile-mini-player${state.current && !audio?.paused ? " is-playing" : ""}`;
     player.dataset.trackKey = miniPlayerTrackKey(track);
-    let swiped = false;
-    player.addEventListener("click", (event) => {
-      if (event.target?.closest?.("button,input,label")) return;
-      if (swiped) return;
-      openFullscreen();
+    const sourceUrl = getActiveUrl(), accountOwner = captureAccountOwner(sourceUrl);
+    const generation = musicRenderGeneration;
+    const isCurrentMini = () => moduleActive && !state.fullscreen && player.isConnected
+      && els.viewContent.querySelector(".music-mobile-mini-player") === player
+      && generation === musicRenderGeneration && sourceUrl === getActiveUrl() && isAccountOwnerCurrent(accountOwner);
+    let suppressOpenClick = false;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "music-mobile-mini-open";
+    open.disabled = !track;
+    open.setAttribute("aria-label", miniPlayerOpenLabel(track));
+    open.setAttribute("aria-haspopup", "dialog");
+    open.addEventListener("click", event => {
+      if (!isCurrentMini() || open.disabled) return;
+      if (suppressOpenClick && event.detail !== 0) { suppressOpenClick = false; return; }
+      openFullscreen(open);
     });
-    attachMiniPlayerSwipe(player, () => {
-      swiped = true;
-      window.setTimeout(() => {
-        swiped = false;
-      }, 260);
-    });
+    open.addEventListener("pointerdown", () => { suppressOpenClick = false; });
+    attachMiniPlayerSwipe(open, isCurrentMini,
+      () => { suppressOpenClick = true; }, () => { suppressOpenClick = false; });
 
-    player.append(renderCover(track || { title: "音乐" }, "bar"));
+    open.append(renderCover(track || { title: "音乐" }, "bar"));
     const text = document.createElement("span");
     text.className = "music-mobile-mini-text";
     const title = document.createElement("strong");
-    title.textContent = track?.title || "未播放";
+    title.textContent = track?.title || (track ? "未知歌曲" : "未播放");
     const meta = document.createElement("small");
-    meta.textContent = track ? trackMeta(track) : "从列表选择歌曲";
+    meta.textContent = track ? "打开播放器" : "从列表选择歌曲";
     text.append(title, meta);
+    open.append(text);
 
-    const play = symbolButton(state.current && !audio?.paused ? "pause" : "play", () => togglePlayback(), !track, "primary", playLabel(Boolean(state.current && !audio?.paused)));
-    const next = symbolButton("next", () => playAdjacent(1).catch(() => {}), !track, "", "下一首");
-    const queue = symbolButton("queue", openQueueFromMini, !track, "ghost", "播放队列");
-    const progress = renderProgress("mini", track, play);
-    player.append(text, play, next, queue, progress);
+    const play = symbolButton(state.current && !audio?.paused ? "pause" : "play", () => {
+      if (isCurrentMini()) togglePlayback();
+    }, !track, "primary", playLabel(Boolean(state.current && !audio?.paused)));
+    const next = symbolButton("next", () => {
+      if (isCurrentMini()) playAdjacent(1).catch(() => {});
+    }, !track, "", "下一首");
+    const queue = symbolButton("queue", () => {
+      if (isCurrentMini()) openQueueFromMini(queue);
+    }, !track, "ghost music-mobile-mini-queue", "播放队列");
+    const progress = renderProgress("mini", track, play, isCurrentMini);
+    player.append(open, play, next, queue, progress);
     return player;
+  }
+
+  function miniPlayerOpenLabel(track) {
+    return track ? `打开播放器：${track.title || "未知歌曲"}${track.artist ? `，${track.artist}` : ""}` : "打开播放器：未播放";
   }
 
   function miniPlayerTrackKey(track) {
@@ -2943,43 +3179,57 @@ export function createMusicViews(deps) {
     if (!player) return;
     const track = state.current || state.queue[0] || null;
     const nextKey = miniPlayerTrackKey(track);
+    const open = player.querySelector(".music-mobile-mini-open");
+    if (open) {
+      open.disabled = !track;
+      open.setAttribute("aria-label", miniPlayerOpenLabel(track));
+    }
     if (player.dataset.trackKey !== nextKey) {
-      player.querySelector(":scope > .music-mobile-cover")?.replaceWith(renderCover(track || { title: "音乐" }, "bar"));
+      open?.querySelector(".music-mobile-cover")?.replaceWith(renderCover(track || { title: "音乐" }, "bar"));
       player.dataset.trackKey = nextKey;
     }
     const text = player.querySelector(".music-mobile-mini-text");
     const title = text?.querySelector("strong");
     const meta = text?.querySelector("small");
-    if (title) title.textContent = track ? [track.title || "未知歌曲", track.artist || ""].filter(Boolean).join(" · ") : "未播放";
-    if (meta) meta.textContent = track ? trackMeta(track) : "从列表选择歌曲";
+    if (title) title.textContent = track?.title || (track ? "未知歌曲" : "未播放");
+    if (meta) meta.textContent = track ? "打开播放器" : "从列表选择歌曲";
   }
 
-  function attachMiniPlayerSwipe(player, markSwiped) {
-    let startX = 0;
-    let startY = 0;
-    let startedOnControl = false;
-    player.addEventListener("touchstart", (event) => {
-      const touch = event.touches?.[0];
-      if (!touch) return;
-      startedOnControl = Boolean(event.target?.closest?.("button,input,label"));
-      startX = touch.clientX;
-      startY = touch.clientY;
+  function attachMiniPlayerSwipe(open, isCurrent, suppressClick, resetClick) {
+    let gesture = null;
+    const cancel = () => { gesture = null; suppressClick(); };
+    open.addEventListener("touchstart", (event) => {
+      resetClick();
+      gesture = null;
+      if (!isCurrent() || open.disabled || event.touches?.length !== 1) { cancel(); return; }
+      const touch = event.touches[0];
+      if (!Number.isFinite(touch.identifier)) { cancel(); return; }
+      gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY };
     }, { passive: true });
-    player.addEventListener("touchend", (event) => {
-      if (startedOnControl) return;
-      const touch = event.changedTouches?.[0];
-      if (!touch) return;
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
+    open.addEventListener("touchmove", event => {
+      if (!gesture) return;
+      if (!isCurrent() || event.touches?.length !== 1 || event.touches[0].identifier !== gesture.id) cancel();
+    }, { passive: true });
+    open.addEventListener("touchcancel", cancel, { passive: true });
+    open.addEventListener("touchend", (event) => {
+      const start = gesture;
+      gesture = null;
+      if (!start || !isCurrent() || open.disabled) return;
+      if (event.touches?.length !== 0) { suppressClick(); return; }
+      const changed = Array.from(event.changedTouches || []);
+      if (changed.length !== 1 || changed[0].identifier !== start.id) { suppressClick(); return; }
+      const touch = changed[0];
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
       const horizontal = Math.abs(dx) >= 58 && Math.abs(dx) > Math.abs(dy) * 1.35;
       const upward = dy <= -48 && Math.abs(dy) > Math.abs(dx) * 1.2;
       if (!horizontal && !upward) return;
-      markSwiped();
+      suppressClick();
       if (horizontal) {
         playAdjacent(dx < 0 ? 1 : -1).catch(() => {});
         return;
       }
-      openFullscreen();
+      openFullscreen(open);
     }, { passive: true });
   }
 
@@ -2996,13 +3246,24 @@ export function createMusicViews(deps) {
 
     const top = document.createElement("div");
     top.className = "music-mobile-full-top";
-    const close = symbolButton("chevron-down", closeFullscreen, false, "ghost music-mobile-full-dismiss", "返回列表");
+    const isCurrentFullPlayer = () => moduleActive && state.fullscreen && full.isConnected
+      && els.viewContent.querySelector(".music-mobile-full-player") === full;
+    const close = symbolButton("chevron-down", () => {
+      if (isCurrentFullPlayer()) closeFullscreen();
+    }, false, "ghost music-mobile-full-dismiss", "返回列表");
     const topActions = document.createElement("span");
     topActions.className = "music-mobile-full-actions";
-    const more = symbolButton("more", () => openTrackActions(track.id), !track, "ghost music-mobile-full-more", "更多");
-    topActions.append(more);
+    const settings = iconButton("播放设置", () => {
+      if (isCurrentFullPlayer()) openPlaybackSettings(settings, track);
+    }, !track, "ghost music-mobile-full-settings", "播放设置");
+    settings.setAttribute("aria-haspopup", "dialog");
+    settings.setAttribute("aria-expanded", state.playbackSheetOpen ? "true" : "false");
+    const more = symbolButton("more", () => {
+      if (isCurrentFullPlayer()) openTrackActions(track);
+    }, !track, "ghost music-mobile-full-more", "更多");
+    topActions.append(settings, more);
     top.append(close, topActions);
-    attachFullscreenDismissSwipe(top);
+    attachFullscreenDismissSwipe(top, isCurrentFullPlayer);
 
     const switcher = renderFullPanelSwitch(track, panel);
     const stage = document.createElement("div");
@@ -3022,19 +3283,21 @@ export function createMusicViews(deps) {
       renderShell();
     }, false, state.repeat === "none" ? "ghost" : "active", repeatLabel(state.repeat));
     const queue = symbolButton("queue", () => {
+      if (state.queueOpen) { closeQueueSheet(queue); return; }
       state.queueOpen = !state.queueOpen;
       state.queueManageOpen = false;
       state.playlistSheetOpen = false;
       state.sleepSheetOpen = false;
       state.playbackSheetOpen = false;
       renderShell();
-    }, !state.queue.length, state.queueOpen ? "active" : "ghost", "播放队列");
+    }, !state.queue.length, `${state.queueOpen ? "active" : "ghost"} music-mobile-full-queue`, "播放队列");
     controls.append(repeat, prev, play, next, queue);
 
     const progress = renderProgress("full", track, play);
     full.append(top, switcher, stage, progress, controls);
+    const playbackSheet = state.playbackSheetOpen ? renderPlaybackSettingsSheet(track, full) : null;
     if (state.queueOpen || state.playlistSheetOpen || state.sleepSheetOpen || state.playbackSheetOpen) {
-      full.append(renderSheetBackdrop());
+      full.append(renderSheetBackdrop(playbackSheet ? playbackSettingsSession : null));
     }
     if (state.queueOpen) {
       full.append(renderQueueSheet());
@@ -3042,7 +3305,34 @@ export function createMusicViews(deps) {
     }
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (state.sleepSheetOpen) full.append(renderSleepTimerSheet());
-    if (state.playbackSheetOpen) full.append(renderPlaybackSettingsSheet(track));
+    if (playbackSheet) full.append(playbackSheet);
+    full.addEventListener("keydown", event => {
+      if (event.defaultPrevented || !isCurrentFullPlayer()) return;
+      const sheets = full.querySelectorAll(".music-mobile-queue-sheet");
+      const scope = sheets[sheets.length - 1] || full;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (scope !== full) closeOpenSheet();
+        else closeFullscreen();
+      } else if (event.key === "Tab") {
+        const controls = Array.from(scope.querySelectorAll("button, select, input, [tabindex]"))
+          .filter(node => {
+            if (node.disabled || node.hidden || node.tabIndex === -1 || node.closest("[hidden], [inert]")) return false;
+            if (node.getClientRects && !node.getClientRects().length) return false;
+            const style = window.getComputedStyle?.(node);
+            return !style || (style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0");
+          });
+        const first = controls[0], last = controls[controls.length - 1];
+        if (!first) return;
+        const focused = document.activeElement;
+        if ((event.shiftKey && (focused === first || !scope.contains(focused)))
+          || (!event.shiftKey && (focused === last || !scope.contains(focused)))) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        }
+      }
+    });
     if (hasLyrics()) window.requestAnimationFrame(() => updateLyricHighlight(true));
     return full;
   }
@@ -3060,12 +3350,17 @@ export function createMusicViews(deps) {
     return backdrop;
   }
 
-  function renderSheetBackdrop() {
+  function renderSheetBackdrop(playbackSession = null) {
     const backdrop = document.createElement("button");
     backdrop.type = "button";
     backdrop.className = "music-mobile-sheet-backdrop";
     backdrop.setAttribute("aria-label", "关闭弹层");
-    backdrop.addEventListener("click", () => closeOpenSheet());
+    backdrop.addEventListener("click", () => {
+      if (!moduleActive || !backdrop.isConnected
+        || els.viewContent.querySelector(".music-mobile-sheet-backdrop") !== backdrop) return;
+      if (playbackSession) closePlaybackSettings(playbackSession, backdrop);
+      else closeOpenSheet();
+    });
     return backdrop;
   }
 
@@ -3110,16 +3405,18 @@ export function createMusicViews(deps) {
     }, { passive: true });
   }
 
-  function attachFullscreenDismissSwipe(target) {
+  function attachFullscreenDismissSwipe(target, isCurrent = () => true) {
     let startX = 0;
     let startY = 0;
     target.addEventListener("touchstart", (event) => {
+      if (!isCurrent()) return;
       const touch = event.touches?.[0];
       if (!touch) return;
       startX = touch.clientX;
       startY = touch.clientY;
     }, { passive: true });
     target.addEventListener("touchend", (event) => {
+      if (!isCurrent()) return;
       const touch = event.changedTouches?.[0];
       if (!touch) return;
       const dx = touch.clientX - startX;
@@ -3129,30 +3426,32 @@ export function createMusicViews(deps) {
     }, { passive: true });
   }
 
-  function attachSheetDismissSwipe(target) {
+  function attachSheetDismissSwipe(target, isCurrent = () => true, dismiss = closeOpenSheet) {
     let startX = 0;
     let startY = 0;
     target.addEventListener("touchstart", (event) => {
+      if (!isCurrent()) return;
       const touch = event.touches?.[0];
       if (!touch) return;
       startX = touch.clientX;
       startY = touch.clientY;
     }, { passive: true });
     target.addEventListener("touchend", (event) => {
+      if (!isCurrent()) return;
       const touch = event.changedTouches?.[0];
       if (!touch) return;
       const dx = touch.clientX - startX;
       const dy = touch.clientY - startY;
       if (dy < 58 || Math.abs(dx) > dy * 0.85) return;
-      closeOpenSheet();
+      dismiss(target);
     }, { passive: true });
   }
 
-  function renderSheetHandle() {
+  function renderSheetHandle(isCurrent, dismiss) {
     const handle = document.createElement("div");
     handle.className = "music-mobile-sheet-handle";
     handle.setAttribute("aria-hidden", "true");
-    attachSheetDismissSwipe(handle);
+    attachSheetDismissSwipe(handle, isCurrent, dismiss);
     return handle;
   }
 
@@ -3192,7 +3491,13 @@ export function createMusicViews(deps) {
   function renderFullQuickActions(track) {
     const actions = document.createElement("div");
     actions.className = "music-mobile-full-quick-actions";
-    const favorite = fullActionButton(track?.favorite ? "favorite-fill" : "favorite", track?.favorite ? "取消收藏" : "收藏", () => toggleFavorite(track.id).catch(() => {}), { active: Boolean(track?.favorite), disabled: !track, kind: "favorite" });
+    const favorite = fullActionButton(track?.favorite ? "favorite-fill" : "favorite", track?.favorite ? "取消收藏" : "收藏", () => toggleFavorite(track).catch(() => {}), { active: Boolean(track?.favorite), disabled: !track, kind: "favorite" });
+    if (track) bindTrackPreference(track, favorite, () => {
+      setMusicSymbol(favorite, track.favorite ? "favorite-fill" : "favorite");
+      favorite.classList.toggle("active", Boolean(track.favorite));
+      favorite.setAttribute("aria-label", track.favorite ? "取消收藏" : "收藏");
+      favorite.title = track.favorite ? "取消收藏" : "收藏";
+    });
     const addToList = fullActionButton("playlist-add", "加入歌单", () => {
       state.playlistSheetOpen = !state.playlistSheetOpen;
       state.queueOpen = false;
@@ -3279,13 +3584,12 @@ export function createMusicViews(deps) {
     const meta = document.createElement("small");
     meta.textContent = `${formatNumber(state.queue.length || 0)} 首`;
     heading.append(title, meta);
-    const close = symbolButton("close", () => {
-      state.queueOpen = false;
-      state.queueManageOpen = false;
-      renderShell();
-    }, false, "ghost music-mobile-sheet-close", "关闭队列");
+    const isCurrent = () => moduleActive && state.fullscreen && state.queueOpen && sheet.isConnected
+      && els.viewContent.querySelector(".music-mobile-full-player .music-mobile-queue-sheet") === sheet;
+    const dismiss = origin => closeQueueSheet(origin, sheet);
+    const close = symbolButton("close", () => dismiss(close), false, "ghost music-mobile-sheet-close", "关闭队列");
     head.append(heading, close);
-    attachSheetDismissSwipe(head);
+    attachSheetDismissSwipe(head, isCurrent, dismiss);
 
     const toolbar = document.createElement("div");
     toolbar.className = "music-mobile-queue-toolbar";
@@ -3321,7 +3625,7 @@ export function createMusicViews(deps) {
       state.queue.forEach((track, index) => list.append(renderQueueItem(track, index)));
     }
 
-    sheet.append(renderSheetHandle(), head, toolbar, list);
+    sheet.append(renderSheetHandle(isCurrent, dismiss), head, toolbar, list);
     return sheet;
   }
 
@@ -3447,7 +3751,7 @@ export function createMusicViews(deps) {
     }, disabled, `music-mobile-queue-action${disabled ? " disabled" : ""}`, ariaLabel);
   }
 
-  function renderProgress(kind, track, playButton = null) {
+  function renderProgress(kind, track, playButton = null, isCurrent = () => true) {
     const progressWrap = document.createElement("label");
     progressWrap.className = `music-mobile-progress ${kind}`;
     progressWrap.setAttribute("aria-label", "播放进度");
@@ -3460,6 +3764,7 @@ export function createMusicViews(deps) {
     progress.value = "0";
     progress.disabled = !track;
     progress.addEventListener("input", () => {
+      if (!isCurrent()) return;
       if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
       audio.currentTime = (Number(progress.value || 0) / 1000) * audio.duration;
       updatePlaybackUi();
@@ -3472,7 +3777,7 @@ export function createMusicViews(deps) {
     return progressWrap;
   }
 
-  function renderVolumeControl(track) {
+  function renderVolumeControl(track, isCurrent = () => true) {
     const wrap = document.createElement("label");
     wrap.className = "music-mobile-volume";
     wrap.setAttribute("aria-label", "音量");
@@ -3484,10 +3789,13 @@ export function createMusicViews(deps) {
     slider.max = "100";
     slider.value = String(Math.round(state.volume * 100));
     slider.disabled = !track;
-    slider.addEventListener("input", () => setVolume(Number(slider.value || 0) / 100));
+    slider.addEventListener("input", () => {
+      if (isCurrent()) setVolume(Number(slider.value || 0) / 100);
+    });
     const value = document.createElement("em");
     value.textContent = `${Math.round(state.volume * 100)}%`;
     slider.addEventListener("input", () => {
+      if (!isCurrent()) return;
       value.textContent = `${Math.round(state.volume * 100)}%`;
       icon.textContent = state.volume <= 0 ? "静音" : "音量";
     });
@@ -3495,47 +3803,138 @@ export function createMusicViews(deps) {
     return wrap;
   }
 
-  function renderPlaybackSettingsSheet(track) {
+  function playbackSettingsOwnerCurrent(session) {
+    return Boolean(session) && moduleActive && state.fullscreen
+      && session.generation === musicRenderGeneration && session.hostUrl === getActiveUrl()
+      && isAccountOwnerCurrent(session.hostAccount) && isAccountOwnerCurrent(session.playbackAccount)
+      && session.playbackUrl === currentPlaybackUrl
+      && session.track === (state.current || state.queue[0] || null) && session.track?.id === session.trackId;
+  }
+
+  function isMountedPlaybackSettingsSession(session) {
+    return Boolean(session) && moduleActive && state.fullscreen
+      && playbackSettingsSession === session && state.playbackSheetOpen
+      && session.sheet.isConnected && session.full.isConnected
+      && els.viewContent.querySelector(".music-mobile-full-player") === session.full
+      && els.viewContent.querySelector(".music-mobile-playback-settings-sheet") === session.sheet;
+  }
+
+  function isCurrentPlaybackSettingsSession(session) {
+    return isMountedPlaybackSettingsSession(session) && playbackSettingsOwnerCurrent(session);
+  }
+
+  function finishPlaybackSettingsFocus(intent, session, opening) {
+    const full = els.viewContent.querySelector(".music-mobile-full-player");
+    const shell = els.viewContent.querySelector(".music-mobile-shell");
+    controlFocus.bind(intent, () => playbackSettingsOwnerCurrent(session)
+      && state.playbackSheetOpen === opening && full?.isConnected && shell?.isConnected
+      && els.viewContent.querySelector(".music-mobile-full-player") === full
+      && els.viewContent.querySelector(".music-mobile-shell") === shell
+      && (!opening || isCurrentPlaybackSettingsSession(session)));
+    controlFocus.finish(intent);
+  }
+
+  function openPlaybackSettings(trigger, track) {
+    if (!moduleActive || !state.fullscreen || !trigger?.isConnected
+      || els.viewContent.querySelector(".music-mobile-full-settings") !== trigger
+      || track !== (state.current || state.queue[0] || null)) return;
+    const intent = beginMusicControlFocus("playback-close", trigger);
+    state.queueOpen = false;
+    state.queueManageOpen = false;
+    state.playlistSheetOpen = false;
+    state.sleepSheetOpen = false;
+    state.playbackSheetOpen = true;
+    renderShell();
+    finishPlaybackSettingsFocus(intent, playbackSettingsSession, true);
+  }
+
+  function closePlaybackSettings(session = playbackSettingsSession, origin = null) {
+    if (!isMountedPlaybackSettingsSession(session)) return false;
+    const focused = document.activeElement;
+    const source = origin || (session.sheet.contains(focused) ? focused : session.sheet);
+    const intent = beginMusicControlFocus("playback-trigger", source);
+    state.playbackSheetOpen = false;
+    renderShell();
+    finishPlaybackSettingsFocus(intent, session, false);
+    return true;
+  }
+
+  function renderPlaybackSettingsSheet(track, full) {
     const wrap = document.createElement("section");
     wrap.className = "music-mobile-queue-sheet music-mobile-playback-settings-sheet";
     wrap.setAttribute("role", "dialog");
     wrap.setAttribute("aria-label", "播放设置");
+    wrap.setAttribute("aria-modal", "true");
+    const hostUrl = getActiveUrl();
+    const session = { sheet: wrap, full, track, trackId: track?.id, hostUrl,
+      hostAccount: captureAccountOwner(hostUrl), playbackUrl: currentPlaybackUrl,
+      playbackAccount: captureAccountOwner(currentPlaybackUrl || trackPreferences.ownerOf(track)?.sourceUrl || hostUrl),
+      generation: musicRenderGeneration };
+    playbackSettingsSession = session;
+    const isCurrent = () => isCurrentPlaybackSettingsSession(session);
+    const isMounted = () => isMountedPlaybackSettingsSession(session);
+    const dismiss = origin => closePlaybackSettings(session, origin);
     const head = document.createElement("div");
-    head.className = "music-mobile-queue-head";
+    head.className = "music-mobile-queue-head music-mobile-playback-settings-head";
     const title = document.createElement("strong");
     title.textContent = "播放设置";
-    const meta = document.createElement("small");
-    meta.textContent = `${playbackSpeedLabel(state.playbackSpeed)} · 音量 ${Math.round(state.volume * 100)}%`;
-    const close = iconButton("×", () => {
-      state.playbackSheetOpen = false;
-      renderShell();
-    }, false, "ghost", "关闭播放设置");
-    head.append(title, meta, close);
-    attachSheetDismissSwipe(head);
+    const close = iconButton("完成", () => dismiss(close), false,
+      "ghost music-mobile-playback-settings-close", "关闭播放设置");
+    head.append(title, close);
+    attachSheetDismissSwipe(head, isMounted, dismiss);
     const body = document.createElement("div");
     body.className = "music-mobile-playback-settings-body";
+    const song = document.createElement("p");
+    song.className = "music-mobile-playback-settings-track";
+    song.textContent = track?.title || "未选择歌曲";
     const shuffle = document.createElement("button");
     shuffle.type = "button";
     shuffle.className = `music-mobile-playback-shuffle${state.shuffle ? " active" : ""}`;
     shuffle.textContent = state.shuffle ? "随机播放 · 已开启" : "随机播放 · 已关闭";
+    shuffle.setAttribute("aria-pressed", String(state.shuffle));
     shuffle.addEventListener("click", () => {
+      if (!isCurrent()) return;
       state.shuffle = !state.shuffle;
       writeShufflePreference(state.shuffle);
       scheduleGaplessPreload();
       shuffle.classList.toggle("active", state.shuffle);
       shuffle.textContent = state.shuffle ? "随机播放 · 已开启" : "随机播放 · 已关闭";
+      shuffle.setAttribute("aria-pressed", String(state.shuffle));
     });
     const rating = document.createElement("div");
     rating.className = "music-mobile-playback-rating";
     const ratingLabel = document.createElement("span");
     ratingLabel.textContent = "歌曲评分";
-    rating.append(ratingLabel, renderRatingControl(track));
-    body.append(shuffle, rating, renderPlaybackSpeedControl(track), renderVolumeControl(track));
-    wrap.append(renderSheetHandle(), head, body);
+    const ratingHint = document.createElement("small");
+    ratingHint.className = "music-mobile-playback-rating-hint";
+    ratingHint.textContent = "再次点击当前评分的星星可清除评分";
+    rating.append(ratingLabel, renderRatingControl(track, isCurrent), ratingHint);
+    body.append(song, shuffle, rating, renderPlaybackSpeedControl(track, isCurrent), renderVolumeControl(track, isCurrent));
+    wrap.append(renderSheetHandle(isMounted, dismiss), head, body);
+    wrap.addEventListener("keydown", event => {
+      if (!isMounted()) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        dismiss(document.activeElement);
+      } else if (event.key === "Tab") {
+        const controls = Array.from(wrap.querySelectorAll("button, select, input, [tabindex]"))
+          .filter(node => !node.disabled && !node.hidden && node.tabIndex !== -1
+            && !node.closest("[hidden], [inert]"));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (!first) return;
+        const focused = document.activeElement;
+        if ((event.shiftKey && (focused === first || !wrap.contains(focused)))
+          || (!event.shiftKey && (focused === last || !wrap.contains(focused)))) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        }
+      }
+    });
     return wrap;
   }
 
-  function renderPlaybackSpeedControl(track) {
+  function renderPlaybackSpeedControl(track, isCurrent = () => true) {
     const wrap = document.createElement("label");
     wrap.className = "music-mobile-volume music-mobile-speed";
     wrap.setAttribute("aria-label", "播放速度");
@@ -3550,10 +3949,13 @@ export function createMusicViews(deps) {
       select.append(option);
     }
     select.value = String(normalizePlaybackSpeed(state.playbackSpeed));
-    select.addEventListener("change", () => setPlaybackSpeed(Number(select.value || 1)));
+    select.addEventListener("change", () => {
+      if (isCurrent()) setPlaybackSpeed(Number(select.value || 1));
+    });
     const value = document.createElement("em");
     value.textContent = playbackSpeedLabel(state.playbackSpeed);
     select.addEventListener("change", () => {
+      if (!isCurrent()) return;
       value.textContent = playbackSpeedLabel(state.playbackSpeed);
     });
     wrap.append(label, select, value);
@@ -3648,11 +4050,13 @@ export function createMusicViews(deps) {
     return button;
   }
 
-  function renderRatingControl(track) {
+  function renderRatingControl(track, isCurrent = () => true) {
     const rating = Math.max(0, Math.min(5, Number(track?.rating || 0)));
     const wrap = document.createElement("div");
     wrap.className = "music-mobile-rating";
+    wrap.setAttribute("role", "group");
     wrap.setAttribute("aria-label", track ? `评分：${rating || "未评分"}` : "评分");
+    const buttons = [];
     for (let value = 1; value <= 5; value += 1) {
       const button = document.createElement("button");
       button.type = "button";
@@ -3661,9 +4065,25 @@ export function createMusicViews(deps) {
       button.disabled = !track;
       const nextRating = value === rating ? 0 : value;
       button.setAttribute("aria-label", nextRating ? `设为 ${value} 星` : "清除评分");
-      button.addEventListener("click", () => setTrackRating(track.id, nextRating).catch(() => {}));
+      button.setAttribute("aria-pressed", String(value === rating));
+      button.addEventListener("click", () => {
+        if (!isCurrent()) return;
+        setTrackRating(track, value === Number(track?.rating || 0) ? 0 : value).catch(() => {});
+      });
       wrap.append(button);
+      buttons.push(button);
     }
+    if (track) bindTrackPreference(track, wrap, () => {
+      const current = Number(track.rating || 0);
+      wrap.setAttribute("aria-label", `评分：${current || "未评分"}`);
+      buttons.forEach((button, index) => {
+        const value = index + 1;
+        button.textContent = value <= current ? "★" : "☆";
+        button.classList.toggle("active", value <= current);
+        button.setAttribute("aria-label", value === current ? "清除评分" : `设为 ${value} 星`);
+        button.setAttribute("aria-pressed", String(value === current));
+      });
+    });
     return wrap;
   }
 
@@ -3755,14 +4175,54 @@ export function createMusicViews(deps) {
     return true;
   }
 
-  function openFullscreen() {
+  function miniFullscreenOwnerCurrent(session) {
+    return Boolean(session) && moduleActive && session.generation === musicRenderGeneration
+      && session.route === JSON.stringify(musicRouteParams()) && session.sourceUrl === getActiveUrl()
+      && isAccountOwnerCurrent(session.accountOwner);
+  }
+
+  function beginMiniFullscreen(origin, originKind, targetKind) {
+    miniFullscreenSession = null;
+    if (!origin?.isConnected || origin.disabled || state.fullscreen) return null;
+    const selector = originKind === "queue" ? ".music-mobile-mini-queue" : ".music-mobile-mini-open";
+    if (els.viewContent.querySelector(`.music-mobile-mini-player ${selector}`) !== origin) return null;
+    const sourceUrl = getActiveUrl();
+    const session = { originKind, sourceUrl, accountOwner: captureAccountOwner(sourceUrl),
+      generation: musicRenderGeneration, route: JSON.stringify(musicRouteParams()) };
+    miniFullscreenSession = session;
+    return { session, intent: beginMusicControlFocus(targetKind, origin) };
+  }
+
+  function finishMiniFullscreenFocus(intent, session, fullscreen) {
+    const shell = els.viewContent.querySelector(".music-mobile-shell");
+    const selector = fullscreen ? ".music-mobile-full-player" : ".music-mobile-mini-player";
+    const surface = els.viewContent.querySelector(selector);
+    const track = state.current || state.queue[0] || null;
+    const playbackUrl = currentPlaybackUrl;
+    const playbackAccount = captureAccountOwner(playbackUrl || trackPreferences.ownerOf(track)?.sourceUrl || getActiveUrl());
+    controlFocus.bind(intent, () => miniFullscreenOwnerCurrent(session)
+      && state.fullscreen === fullscreen && track === (state.current || state.queue[0] || null)
+      && playbackUrl === currentPlaybackUrl && isAccountOwnerCurrent(playbackAccount)
+      && shell?.isConnected && surface?.isConnected
+      && els.viewContent.querySelector(".music-mobile-shell") === shell
+      && els.viewContent.querySelector(selector) === surface
+      && (!fullscreen || (!state.settingsOpen && !state.trackActionId && !state.playlistActionTrackId)));
+    controlFocus.finish(intent);
+  }
+
+  function openFullscreen(origin = null) {
+    const focus = beginMiniFullscreen(origin, "open", "full-dismiss");
+    if (origin && !focus) return;
     state.fullPanel = "cover";
     state.lyricFollowPaused = false;
     state.fullscreen = true;
     renderShell();
+    if (focus) finishMiniFullscreenFocus(focus.intent, focus.session, true);
   }
 
-  function openQueueFromMini() {
+  function openQueueFromMini(origin = null) {
+    const focus = beginMiniFullscreen(origin, "queue", "full-queue-close");
+    if (origin && !focus) return;
     state.fullPanel = hasLyrics() ? state.fullPanel : "cover";
     state.lyricFollowPaused = false;
     state.fullscreen = true;
@@ -3772,6 +4232,22 @@ export function createMusicViews(deps) {
     state.sleepSheetOpen = false;
     state.playbackSheetOpen = false;
     renderShell();
+    if (focus) finishMiniFullscreenFocus(focus.intent, focus.session, true);
+  }
+
+  function closeQueueSheet(origin = null, expectedSheet = null) {
+    const sheet = els.viewContent.querySelector(".music-mobile-full-player .music-mobile-queue-sheet");
+    if (!moduleActive || !state.fullscreen || !state.queueOpen || !sheet?.isConnected
+      || (expectedSheet && expectedSheet !== sheet)) return false;
+    const session = miniFullscreenSession;
+    const focused = document.activeElement;
+    const source = origin || (sheet.contains(focused) ? focused : sheet);
+    const intent = miniFullscreenOwnerCurrent(session) ? beginMusicControlFocus("full-queue", source) : null;
+    state.queueOpen = false;
+    state.queueManageOpen = false;
+    renderShell();
+    if (intent) finishMiniFullscreenFocus(intent, session, true);
+    return true;
   }
 
   function locateCurrentTrack() {
@@ -3831,9 +4307,7 @@ export function createMusicViews(deps) {
       return true;
     }
     if (state.playbackSheetOpen) {
-      state.playbackSheetOpen = false;
-      renderShell();
-      return true;
+      return closePlaybackSettings();
     }
     if (state.playlistSheetOpen) {
       state.playlistSheetOpen = false;
@@ -3841,22 +4315,36 @@ export function createMusicViews(deps) {
       return true;
     }
     if (state.queueOpen) {
-      state.queueOpen = false;
-      state.queueManageOpen = false;
-      renderShell();
-      return true;
+      return closeQueueSheet();
     }
     if (!state.fullscreen) return false;
+    const session = miniFullscreenSession;
+    const full = els.viewContent.querySelector(".music-mobile-full-player");
+    const focused = document.activeElement;
+    const source = full?.contains(focused) ? focused : full;
+    const intent = miniFullscreenOwnerCurrent(session)
+      ? beginMusicControlFocus(session.originKind === "queue" ? "mini-queue" : "mini-open", source) : null;
     state.fullscreen = false;
     state.queueOpen = false;
     state.queueManageOpen = false;
     state.sleepSheetOpen = false;
     state.playbackSheetOpen = false;
+    miniFullscreenSession = null;
     renderShell();
+    if (intent) finishMiniFullscreenFocus(intent, session, false);
+    return true;
+  }
+
+  function handleBack() {
+    if (closeFullscreen()) return true;
+    if (!state.searchOpen && !state.query) return false;
+    closeSearch();
     return true;
   }
 
   function closeOpenSheet() {
+    if (state.playbackSheetOpen) return closePlaybackSettings();
+    if (state.queueOpen) return closeQueueSheet();
     if (!state.queueOpen && !state.playlistSheetOpen && !state.sleepSheetOpen && !state.playbackSheetOpen) return false;
     state.queueOpen = false;
     state.queueManageOpen = false;
@@ -4155,7 +4643,7 @@ export function createMusicViews(deps) {
     installAudioEvents(incoming);
     incoming.playbackRate = state.playbackSpeed;
     incoming.volume = crossfadeDurationMs > 0 ? 0 : state.volume;
-    state.current = { ...candidate, positionMs: 0 };
+    state.current = trackPreferences.clone(candidate, { positionMs: 0 });
     state.lyrics = { lines: [], raw: "" };
     playReportSession += 1;
     cancelProgressClock();
@@ -4257,7 +4745,7 @@ export function createMusicViews(deps) {
 
   function playVisibleCollection(shuffle = false) {
     const tracks = (Array.isArray(state.data?.tracks) ? state.data.tracks : []).filter((track) => track?.id);
-    const queue = shuffle ? shuffleTrackQueue(tracks) : tracks.map((track) => ({ ...track }));
+    const queue = shuffle ? shuffleTrackQueue(tracks) : tracks.map((track) => trackPreferences.clone(track));
     if (!queue.length) return;
     state.queue = queue;
     rememberPlaybackQueue();
@@ -4383,10 +4871,14 @@ export function createMusicViews(deps) {
     const saved = readLastTrackPreference();
     const trackId = String(saved?.trackId || "").trim();
     if (!trackId || saved.activeUrl !== getActiveUrl()) return;
+    if (saved.accountOwner && saved.accountOwner !== captureAccountOwner(saved.activeUrl).owner) return;
     const key = `${saved.activeUrl}|${trackId}`;
     if (state.restoreAttemptKey === key) return;
     state.restoreAttemptKey = key;
-    if (saved.track?.id === trackId) mergeTrackIntoQueue(saved.track);
+    if (saved.track?.id === trackId) {
+      adoptRestoredTrack(saved.track, saved);
+      mergeTrackIntoQueue(saved.track);
+    }
     await openTrack(trackId, { autoplay: false, renderGuard });
   }
 
@@ -4394,6 +4886,8 @@ export function createMusicViews(deps) {
     if (!state.resumeQueue || state.current || state.loading) return false;
     const saved = readPlaybackQueuePreference();
     if (!saved || saved.activeUrl !== getActiveUrl()) return false;
+    if (saved.accountOwner && saved.accountOwner !== captureAccountOwner(saved.activeUrl).owner) return false;
+    for (const track of Array.isArray(saved.queue) ? saved.queue : []) adoptRestoredTrack(track, saved);
     const queue = (Array.isArray(saved.queue) ? saved.queue : [])
       .map(normalizeQueueTrack)
       .filter(Boolean)
@@ -4411,10 +4905,21 @@ export function createMusicViews(deps) {
     return !state.query && !state.favorite && !state.artistId && !state.albumId && !state.genre && state.sort === DEFAULT_SORT;
   }
 
+  function adoptRestoredTrack(track, record) {
+    const scope = captureAccountOwner(record.activeUrl);
+    if (record.accountOwner === scope.owner && record.activeUrl === getActiveUrl()) {
+      trackPreferences.own(track, trackPreferences.owner(record.activeUrl, scope));
+    }
+  }
+
   function rememberLastTrack(track) {
     if (!track?.id) return;
+    const owner = trackPreferences.ownerOf(track);
+    if (!trackPreferences.current(owner)) return;
     writeLastTrackPreference({
-      activeUrl: getActiveUrl(),
+      activeUrl: owner.sourceUrl,
+      accountOwner: owner.accountScope.owner,
+      accountRevision: owner.accountScope.revision,
       trackId: track.id,
       track: compactTrack(track),
       updatedAt: new Date().toISOString()
@@ -4424,6 +4929,9 @@ export function createMusicViews(deps) {
 
   function rememberPlaybackQueue() {
     if (!state.resumeQueue || !state.current?.id) return;
+    const owner = trackPreferences.ownerOf(state.current);
+    if (!trackPreferences.current(owner)
+      || (state.queue || []).some(track => !trackPreferences.sameOwner(trackPreferences.ownerOf(track), owner))) return;
     const queue = [];
     const seen = new Set();
     for (const source of state.queue || []) {
@@ -4435,7 +4943,9 @@ export function createMusicViews(deps) {
     }
     if (!seen.has(state.current.id)) queue.unshift(compactTrack(state.current));
     writePlaybackQueuePreference({
-      activeUrl: getActiveUrl(),
+      activeUrl: owner.sourceUrl,
+      accountOwner: owner.accountScope.owner,
+      accountRevision: owner.accountScope.revision,
       currentTrackId: state.current.id,
       queue: queue.slice(0, 300),
       updatedAt: new Date().toISOString()
@@ -4600,42 +5110,67 @@ export function createMusicViews(deps) {
 
   function normalizeQueueTrack(track) {
     if (!track?.id) return null;
-    return {
-      ...track,
+    return trackPreferences.clone(track, {
       title: track.title || track.fileName || "未知歌曲",
       artist: track.artist || "未知歌手",
       album: track.album || "未知专辑"
-    };
+    });
   }
 
   function withoutQueueTrack(queue, trackId) {
     return (queue || []).filter((track) => track.id !== trackId);
   }
 
-  async function toggleFavorite(trackId) {
-    const id = String(trackId || "").trim();
-    if (!id) return;
-    const source = state.current?.id === id
-      ? state.current
-      : (state.queue || []).find((track) => track.id === id)
-        || (state.data?.tracks || []).find((track) => track.id === id);
-    const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/favorite`, {
-      favorite: !Boolean(source?.favorite)
-    });
-    const updated = data.track;
-    if (!updated) return;
-    applyTrackUpdate(updated);
-    renderShell();
+  function captureTrackPreferenceUi() {
+    return { sequence: ++trackPreferenceUiIntent, generation: musicRenderGeneration,
+      sourceUrl: getActiveUrl(), route: JSON.stringify(musicRouteParams()),
+      shell: els.viewContent?.querySelector(".music-mobile-shell") };
   }
 
-  async function setTrackRating(trackId, rating) {
-    const id = String(trackId || "").trim();
-    if (!id) return;
-    const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/rating`, { rating });
-    const updated = data.track;
-    if (!updated) return;
-    applyTrackUpdate(updated);
-    renderShell();
+  async function toggleFavorite(track) {
+    if (track === state.current && currentPlaybackUrl
+      && trackPreferences.ownerOf(track)?.sourceUrl !== currentPlaybackUrl.replace(/\/+$/u, "")) return;
+    const ui = captureTrackPreferenceUi();
+    const result = await trackPreferences.favorite(track);
+    publishTrackPreference(result, ui);
+  }
+
+  async function setTrackRating(track, rating) {
+    if (track === state.current && currentPlaybackUrl
+      && trackPreferences.ownerOf(track)?.sourceUrl !== currentPlaybackUrl.replace(/\/+$/u, "")) return;
+    const ui = captureTrackPreferenceUi();
+    const result = await trackPreferences.rating(track, rating);
+    publishTrackPreference(result, ui);
+  }
+
+  function beginPlaylistAddition({ requireSameQueue = false } = {}) {
+    const sourceUrl = getActiveUrl();
+    const accountOwner = captureAccountOwner(sourceUrl);
+    const surface = els.viewContent?.querySelector(".music-mobile-playlist-actions-sheet")
+      || els.viewContent?.querySelector(".music-mobile-playlist-sheet")
+      || els.viewContent?.querySelector(".music-mobile-queue-sheet")
+      || els.viewContent?.querySelector(".music-mobile-shell");
+    if (!moduleActive || accountOwner.owner === "pending" || !surface?.isConnected) return null;
+    const generation = musicRenderGeneration;
+    const mutation = ++playlistMutationGeneration;
+    const selection = openTrackGeneration;
+    const playbackSession = playReportSession;
+    const queue = state.queue;
+    const route = JSON.stringify(musicRouteParams());
+    const surfaceState = () => JSON.stringify([state.fullscreen, state.queueOpen, state.queueManageOpen,
+      state.playlistSheetOpen, state.playlistActionTrackId, state.trackActionId, state.settingsOpen,
+      state.sleepSheetOpen, state.playbackSheetOpen, state.searchOpen]);
+    const initialSurfaceState = surfaceState();
+    return {
+      sourceUrl,
+      isCurrent: () => moduleActive && generation === musicRenderGeneration
+        && mutation === playlistMutationGeneration && getActiveUrl() === sourceUrl
+        && isAccountOwnerCurrent(accountOwner) && openTrackGeneration === selection
+        && playReportSession === playbackSession && JSON.stringify(musicRouteParams()) === route
+        && surface.isConnected && els.viewContent?.contains(surface)
+        && surfaceState() === initialSurfaceState && (!requireSameQueue || state.queue === queue),
+      canReplaceQueue: () => state.queue === queue
+    };
   }
 
   async function createPlaylistFromPrompt(options = {}) {
@@ -4643,34 +5178,45 @@ export function createMusicViews(deps) {
     const clean = String(name || "").trim();
     if (!clean) return null;
     const addTrackId = String(options.addTrackId || (options.addCurrent ? state.current?.id : "") || "").trim();
-    const data = await postJson(getActiveUrl(), "/api/music/playlists", {
-      name: clean,
-      ...(addTrackId ? { trackIds: [addTrackId] } : {})
-    });
-    const playlist = data?.playlist || null;
-    await loadPlaylists();
-    if (playlist?.id && addTrackId) {
-      state.playlistSheetOpen = false;
-      state.playlistActionTrackId = "";
-      state.status = `已加入「${playlist.name || "歌单"}」`;
-      renderShell();
+    const operation = beginPlaylistAddition();
+    if (!operation) return null;
+    try {
+      const data = await postJson(operation.sourceUrl, "/api/music/playlists", {
+        name: clean,
+        ...(addTrackId ? { trackIds: [addTrackId] } : {})
+      });
+      if (!operation.isCurrent()) return null;
+      const playlist = data?.playlist || null;
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return null;
+      if (playlist?.id && addTrackId) {
+        state.playlistSheetOpen = false;
+        state.playlistActionTrackId = "";
+        state.status = `已加入「${playlist.name || "歌单"}」`;
+        renderShell();
+        return playlist;
+      }
+      if (playlist?.id && options.openAfterCreate) {
+        updateListParams({
+          mode: "playlist",
+          playlistId: playlist.id,
+          smartId: "",
+          favorite: false,
+          query: "",
+          artistId: "",
+          albumId: "",
+          genre: ""
+        }, { resetSearch: true });
+      } else {
+        renderShell();
+      }
       return playlist;
-    }
-    if (playlist?.id && options.openAfterCreate) {
-      updateListParams({
-        mode: "playlist",
-        playlistId: playlist.id,
-        smartId: "",
-        favorite: false,
-        query: "",
-        artistId: "",
-        albumId: "",
-        genre: ""
-      }, { resetSearch: true });
-    } else {
+    } catch (error) {
+      if (!operation.isCurrent()) return null;
+      state.status = error?.message || "创建歌单失败，请稍后重试";
       renderShell();
+      throw error;
     }
-    return playlist;
   }
 
   async function saveQueueAsPlaylist() {
@@ -4683,18 +5229,23 @@ export function createMusicViews(deps) {
     const name = window.prompt("歌单名称", defaultQueuePlaylistName());
     const clean = String(name || "").trim();
     if (!clean) return null;
+    const operation = beginPlaylistAddition({ requireSameQueue: true });
+    if (!operation) return null;
     state.status = "正在保存播放队列";
-    renderShell();
+    // Keep the originating queue sheet mounted while its write is pending.
+    if (els.viewMeta) els.viewMeta.textContent = state.status;
     try {
-      const data = await postJson(getActiveUrl(), "/api/music/playlists", {
+      const data = await postJson(operation.sourceUrl, "/api/music/playlists", {
         name: clean,
         description: "从播放队列保存",
         trackIds
       });
+      if (!operation.isCurrent()) return null;
       const playlist = data?.playlist || null;
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return null;
       state.queueOpen = false;
       state.queueManageOpen = false;
-      await loadPlaylists();
       if (playlist?.id) {
         updateListParams({
           mode: "playlist",
@@ -4712,6 +5263,7 @@ export function createMusicViews(deps) {
       }
       return playlist;
     } catch (error) {
+      if (!operation.isCurrent()) return null;
       state.status = error?.message || "播放队列保存失败，请稍后重试";
       renderShell();
       throw error;
@@ -4726,21 +5278,54 @@ export function createMusicViews(deps) {
     const id = String(playlistId || "").trim();
     const targetTrackId = String(trackId || "").trim();
     if (!id || !targetTrackId) return;
-    const data = await postJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(id)}/tracks`, {
-      trackId: targetTrackId
-    });
-    state.playlistSheetOpen = false;
-    state.playlistActionTrackId = "";
-    const playlistName = (state.playlists || []).find((item) => item.id === id)?.name || data.playlist?.name || "歌单";
-    state.status = `已加入「${playlistName}」`;
-    await loadPlaylists();
-    if (state.mode === "playlist" && state.playlistId === id) {
-      state.data = data;
-      state.playlist = data.playlist || selectedPlaylist();
-      state.queue = Array.isArray(data.tracks) ? data.tracks : state.queue;
-      rememberPlaybackQueue();
+    const operation = beginPlaylistAddition();
+    if (!operation) return;
+    try {
+      const data = await postJson(operation.sourceUrl, `/api/music/playlists/${encodeURIComponent(id)}/tracks`, {
+        trackId: targetTrackId
+      });
+      if (!operation.isCurrent()) return;
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return;
+      state.playlistSheetOpen = false;
+      state.playlistActionTrackId = "";
+      const playlistName = (state.playlists || []).find((item) => item.id === id)?.name || data.playlist?.name || "歌单";
+      state.status = `已加入「${playlistName}」`;
+      if (state.mode === "playlist" && state.playlistId === id) {
+        state.data = data;
+        state.playlist = data.playlist || selectedPlaylist();
+        if (operation.canReplaceQueue()) {
+          state.queue = Array.isArray(data.tracks) ? data.tracks : state.queue;
+          rememberPlaybackQueue();
+        }
+      }
+      renderShell();
+    } catch (error) {
+      if (!operation.isCurrent()) return;
+      state.status = error?.message || "加入歌单失败，请稍后重试";
+      renderShell();
+      throw error;
     }
-    renderShell();
+  }
+
+  function beginPlaylistMutation(playlistId) {
+    if (!moduleActive || state.mode !== "playlist" || state.playlistId !== playlistId) return null;
+    const sourceUrl = getActiveUrl();
+    const generation = musicRenderGeneration;
+    const mutation = ++playlistMutationGeneration;
+    const accountOwner = captureAccountOwner(sourceUrl);
+    const selection = openTrackGeneration;
+    const playbackSession = playReportSession;
+    const queue = state.queue;
+    return {
+      sourceUrl,
+      isCurrent: () => moduleActive && generation === musicRenderGeneration
+        && mutation === playlistMutationGeneration && getActiveUrl() === sourceUrl
+        && state.mode === "playlist" && state.playlistId === playlistId
+        && isAccountOwnerCurrent(accountOwner)
+        && openTrackGeneration === selection && playReportSession === playbackSession,
+      canReplaceQueue: () => state.queue === queue
+    };
   }
 
   async function removeTrackFromCurrentPlaylist(trackId) {
@@ -4751,14 +5336,27 @@ export function createMusicViews(deps) {
     const track = (state.queue || []).find((item) => item.id === id);
     const ok = window.confirm(`从「${playlistName}」移出${track?.title ? `《${track.title}》` : "这首歌"}？`);
     if (!ok) return;
-    const data = await deleteJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(id)}`);
-    state.data = data;
-    state.playlist = data.playlist || selectedPlaylist();
-    state.queue = Array.isArray(data.tracks) ? data.tracks : [];
-    rememberPlaybackQueue();
-    state.status = "已移出歌单";
-    await loadPlaylists();
-    renderShell();
+    const operation = beginPlaylistMutation(playlistId);
+    if (!operation) return;
+    try {
+      const data = await deleteJson(operation.sourceUrl, `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(id)}`);
+      if (!operation.isCurrent()) return;
+      state.data = data;
+      state.playlist = data.playlist || selectedPlaylist();
+      if (operation.canReplaceQueue()) {
+        state.queue = Array.isArray(data.tracks) ? data.tracks : [];
+        rememberPlaybackQueue();
+      }
+      state.status = "已移出歌单";
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return;
+      renderShell();
+    } catch (error) {
+      if (!operation.isCurrent()) return;
+      state.status = error?.message || "移出歌单失败";
+      renderShell();
+      throw error;
+    }
   }
 
   async function deleteCurrentPlaylist() {
@@ -4767,21 +5365,32 @@ export function createMusicViews(deps) {
     const playlistName = selectedPlaylist()?.name || state.playlist?.name || "当前歌单";
     const ok = window.confirm(`删除歌单「${playlistName}」？不会删除本地歌曲文件。`);
     if (!ok) return;
-    await deleteJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}`);
-    state.status = "歌单已删除";
-    state.playlistId = "";
-    state.playlist = null;
-    await loadPlaylists();
-    updateListParams({
-      mode: "library",
-      playlistId: "",
-      smartId: "",
-      favorite: false,
-      query: "",
-      artistId: "",
-      albumId: "",
-      genre: ""
-    }, { resetSearch: true });
+    const operation = beginPlaylistMutation(playlistId);
+    if (!operation) return;
+    try {
+      await deleteJson(operation.sourceUrl, `/api/music/playlists/${encodeURIComponent(playlistId)}`);
+      if (!operation.isCurrent()) return;
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return;
+      state.status = "歌单已删除";
+      state.playlistId = "";
+      state.playlist = null;
+      updateListParams({
+        mode: "library",
+        playlistId: "",
+        smartId: "",
+        favorite: false,
+        query: "",
+        artistId: "",
+        albumId: "",
+        genre: ""
+      }, { resetSearch: true });
+    } catch (error) {
+      if (!operation.isCurrent()) return;
+      state.status = error?.message || "歌单删除失败";
+      renderShell();
+      throw error;
+    }
   }
 
   async function editCurrentPlaylist() {
@@ -4794,16 +5403,27 @@ export function createMusicViews(deps) {
     if (!cleanName) return;
     const description = window.prompt("歌单说明", playlist?.description || "");
     if (description === null) return;
-    const data = await putJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}`, {
-      name: cleanName,
-      description: String(description || "").trim()
-    });
-    state.data = data;
-    state.playlist = data.playlist || selectedPlaylist();
-    state.queue = Array.isArray(data.tracks) ? data.tracks : state.queue;
-    state.status = "歌单已更新";
-    await loadPlaylists();
-    renderShell();
+    const operation = beginPlaylistMutation(playlistId);
+    if (!operation) return;
+    try {
+      const data = await putJson(operation.sourceUrl, `/api/music/playlists/${encodeURIComponent(playlistId)}`, {
+        name: cleanName,
+        description: String(description || "").trim()
+      });
+      if (!operation.isCurrent()) return;
+      state.data = data;
+      state.playlist = data.playlist || selectedPlaylist();
+      if (operation.canReplaceQueue()) state.queue = Array.isArray(data.tracks) ? data.tracks : state.queue;
+      state.status = "歌单已更新";
+      await loadPlaylists(operation.isCurrent);
+      if (!operation.isCurrent()) return;
+      renderShell();
+    } catch (error) {
+      if (!operation.isCurrent()) return;
+      state.status = error?.message || "歌单更新失败";
+      renderShell();
+      throw error;
+    }
   }
 
   function downloadTrack(track) {
@@ -4818,13 +5438,72 @@ export function createMusicViews(deps) {
     link.remove();
   }
 
-  function applyTrackUpdate(updated) {
-    if (state.current?.id === updated.id) state.current = { ...state.current, ...updated };
-    state.queue = (state.queue || []).map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
-    if (state.data?.tracks) {
-      state.data.tracks = state.data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
+  function patchTrackPreferenceRecords(result) {
+    const { owner, patch, field } = result;
+    const belongs = record => record?.activeUrl?.replace(/\/+$/u, "") === owner.sourceUrl
+      && record.accountOwner === owner.accountScope.owner && record.accountRevision === owner.accountScope.revision;
+    const saved = readLastTrackPreference();
+    if (belongs(saved) && saved.trackId === patch.id && saved.track?.id === patch.id
+      && saved.track[field] !== patch[field]) {
+      writeLastTrackPreference({ ...saved, track: { ...saved.track, [field]: patch[field] } });
     }
-    if (state.current?.id === updated.id) rememberLastTrack(state.current);
+    const queue = readPlaybackQueuePreference();
+    if (belongs(queue) && Array.isArray(queue.queue)
+      && queue.queue.some(track => track.id === patch.id && track[field] !== patch[field])) {
+      writePlaybackQueuePreference({ ...queue, queue: queue.queue.map(track => track.id === patch.id
+        ? { ...track, [field]: patch[field] } : track) });
+    }
+  }
+
+  function publishTrackPreference(result, ui) {
+    if (!result || !trackPreferences.current(result.owner)) return;
+    const { owner, patch, field, error } = result;
+    const belongs = track => track?.id === patch.id
+      && trackPreferences.sameOwner(trackPreferences.ownerOf(track), owner);
+    for (const track of new Set([state.current, ...(state.queue || []), ...(state.data?.tracks || []),
+      ...(state.data?.rawTracks || []), ...(state.summary?.recent || []), ...(state.summary?.topPlayed || [])])) {
+      if (belongs(track)) track[field] = patch[field];
+    }
+    patchTrackPreferenceRecords(result);
+    if (!moduleActive) return;
+    for (const node of els.viewContent.querySelectorAll("[data-music-preference-binding]")) {
+      const binding = trackPreferenceBindings.get(node);
+      if (!binding) continue;
+      if (belongs(binding.track)) {
+        binding.track[field] = patch[field];
+        binding.update();
+      }
+    }
+    const currentUi = ui.sequence === trackPreferenceUiIntent && ui.generation === musicRenderGeneration
+      && ui.sourceUrl === getActiveUrl() && ui.route === JSON.stringify(musicRouteParams())
+      && ui.shell?.isConnected && els.viewContent.querySelector(".music-mobile-shell") === ui.shell;
+    if (!currentUi) return;
+    if (error) {
+      const message = field === "favorite"
+        ? `未能确认收藏状态，当前保留${patch.favorite ? "收藏" : "未收藏"}状态，可重试：${error.message || "请求失败"}`
+        : `未能确认评分，当前保留${patch.rating ? ` ${patch.rating} 星` : "未评分"}，可重试：${error.message || "请求失败"}`;
+      trackPreferenceError?.node?.remove();
+      const node = document.createElement("div");
+      node.className = "status-text error";
+      node.setAttribute("role", "alert");
+      node.setAttribute("aria-live", "assertive");
+      node.textContent = message;
+      const playbackBody = field === "rating" && isCurrentPlaybackSettingsSession(playbackSettingsSession)
+        && belongs(playbackSettingsSession.track)
+        ? playbackSettingsSession.sheet.querySelector(".music-mobile-playback-settings-body") : null;
+      (playbackBody || ui.shell).prepend(node);
+      state.status = message;
+      els.viewMeta.textContent = message;
+      trackPreferenceError = { owner, id: patch.id, field, message, node };
+      throw new Error(message);
+    }
+    if (trackPreferenceError?.id === patch.id && trackPreferenceError.field === field
+      && trackPreferences.sameOwner(trackPreferenceError.owner, owner)) {
+      if (state.status === trackPreferenceError.message) state.status = "";
+      trackPreferenceError.node.remove();
+      trackPreferenceError = null;
+      els.viewMeta.textContent = state.status || musicMeta(state.data);
+    }
   }
 
   function reportPlayedOnce({ claim = true } = {}) {
@@ -4963,6 +5642,7 @@ export function createMusicViews(deps) {
   function restoreMusicSearchFocus(snapshot) {
     if (!snapshot) return;
     window.requestAnimationFrame(() => {
+      if (pendingSearchFocus !== snapshot || controlFocus.current()) return;
       const input = els.viewContent?.querySelector(".music-mobile-search-input");
       if (!input || input.disabled || (!state.searchOpen && !state.query)) {
         if (!state.searchOpen && !state.query && pendingSearchFocus === snapshot) pendingSearchFocus = null;
@@ -5133,9 +5813,11 @@ export function createMusicViews(deps) {
   }
 
   function updateListParams(patch = {}, options = {}) {
+    const focusIntent = options.controlFocus || null;
+    controlFocus.retain(focusIntent);
     cancelMusicPagination();
     mountedSearchController?.abort();
-    const searchFocus = captureMusicSearchFocus();
+    const searchFocus = controlFocus.current() ? null : captureMusicSearchFocus();
     if (searchFocus) pendingSearchFocus = searchFocus;
     if (Object.prototype.hasOwnProperty.call(patch, "mode")) state.mode = normalizeMode(patch.mode);
     if (Object.prototype.hasOwnProperty.call(patch, "dashboard")) state.dashboard = Boolean(patch.dashboard);
@@ -5188,11 +5870,19 @@ export function createMusicViews(deps) {
     if (options.resetSearch) state.searchOpen = false;
     const restoreScrollY = options.preserveScroll ? window.scrollY : 0;
     if (!options.preserveScroll) window.scrollTo(0, 0);
-    showView("music", musicRouteParams(), {
-      skipHistory: true,
-      replaceHistory: true,
-      restoreScrollY
-    });
+    routeControlFocus = focusIntent;
+    try {
+      showView("music", musicRouteParams(), {
+        skipHistory: true,
+        replaceHistory: true,
+        restoreScrollY
+      });
+    } finally {
+      if (routeControlFocus === focusIntent) {
+        routeControlFocus = null;
+        controlFocus.cancel(focusIntent);
+      }
+    }
     if (!options.preserveScroll) {
       window.requestAnimationFrame(() => window.scrollTo(0, 0));
       window.setTimeout(() => window.scrollTo(0, 0), 80);
@@ -5310,6 +6000,10 @@ export function createMusicViews(deps) {
   }
 
   function installLifecycle() {
+    window.addEventListener("fanhaoViewWillRender", () => {
+      if (!routeControlFocus) controlFocus.cancel();
+      pendingSearchFocus = null;
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         progressHidden = true;
@@ -5321,6 +6015,8 @@ export function createMusicViews(deps) {
       }
     });
     window.addEventListener("pagehide", () => {
+      miniFullscreenSession = null;
+      pendingSearchFocus = null;
       progressHidden = true;
       cancelProgressClock();
       progressWriter.flushKeepalive(currentProgressRecord());
@@ -5331,6 +6027,8 @@ export function createMusicViews(deps) {
     });
     window.addEventListener("fanhaoViewChanged", (event) => {
       if (event.detail?.view !== "music") {
+        miniFullscreenSession = null;
+        playbackSettingsSession = null;
         state.fullscreen = false;
         state.queueOpen = false;
         state.queueManageOpen = false;
@@ -5349,6 +6047,11 @@ export function createMusicViews(deps) {
   }
 
   function deactivate() {
+    controlFocus.cancel();
+    miniFullscreenSession = null;
+    playbackSettingsSession = null;
+    routeControlFocus = null;
+    pendingSearchFocus = null;
     cancelMusicPagination();
     moduleActive = false;
     disposeMusicSearchPendingWork();
@@ -5368,6 +6071,7 @@ export function createMusicViews(deps) {
 
   return {
     closeFullscreen,
+    handleBack,
     deactivate,
     renderMusicList
   };

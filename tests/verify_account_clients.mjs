@@ -17,11 +17,34 @@ const output = path.resolve(".codex-artifacts/accounts"); fs.mkdirSync(output, {
 const errors = [];
 function observe(page) { page.on("pageerror", (error) => errors.push(error.message)); }
 async function ready(page) { await page.waitForFunction(() => !document.querySelector('.account-ui')?.hasAttribute('aria-busy')); }
+async function verifyPasswordVisibility(page, label) {
+  const input = page.getByLabel(label, { exact: true });
+  const snapshot = () => input.evaluate(node => ({ value: node.value, name: node.name, required: node.required,
+    min: node.minLength, max: node.maxLength, autocomplete: node.autocomplete, form: [...new FormData(node.form)] }));
+  const before = await snapshot();
+  const status = await page.locator("[data-account-message]").textContent();
+  assert.equal(await input.getAttribute("type"), "password", "new forms start with concealed passwords");
+  await page.getByRole("button", { name: `显示${label}`, exact: true }).focus();
+  await page.keyboard.press("Space");
+  assert.equal(await input.getAttribute("type"), "text", "Space reveals the password without submitting");
+  const conceal = page.getByRole("button", { name: `隐藏${label}`, exact: true });
+  assert.equal(await conceal.evaluate(node => node === document.activeElement), true, "the keyboard action retains its focus");
+  await page.keyboard.press("Enter");
+  assert.equal(await input.getAttribute("type"), "password", "Enter conceals rather than submits the form");
+  await page.getByRole("button", { name: `显示${label}`, exact: true }).click();
+  assert.equal(await input.getAttribute("type"), "text");
+  assert.deepEqual(await snapshot(), before, "visibility leaves credentials, validation and form submission unchanged");
+  assert.equal(await page.locator("[data-account-message]").textContent(), status, "visibility does not start an account operation");
+  assert.equal(await page.locator(".account-ui").getAttribute("aria-busy"), null);
+}
 async function fillSignup(page, username) {
   await page.getByLabel("用户名", { exact: true }).fill(username);
   await page.getByLabel("昵称（选填）", { exact: true }).fill(username === "owner" ? "资料库管理员" : "测试用户");
   await page.getByLabel("密码", { exact: true }).fill("Fixture-password-123");
   await page.getByLabel("确认密码", { exact: true }).fill("Fixture-password-123");
+  await verifyPasswordVisibility(page, "密码");
+  assert.equal(await page.getByLabel("确认密码", { exact: true }).getAttribute("type"), "password", "each field controls its own visibility");
+  await verifyPasswordVisibility(page, "确认密码");
 }
 async function api(pathname, { token, body, method = body ? "POST" : "GET" } = {}) {
   const response = await fetch(base + pathname, { method, headers: { Accept: "application/json",
@@ -38,6 +61,11 @@ try {
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } }); observe(desktop);
   await desktop.goto(base + "/account"); await desktop.getByRole("button", { name: "本机初始化管理员 →" }).waitFor(); await ready(desktop);
   await desktop.screenshot({ path: path.join(output, "web-login.png"), fullPage: true });
+  await desktop.setViewportSize({ width: 320, height: 844 });
+  await verifyPasswordVisibility(desktop, "密码");
+  assert(await desktop.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "password controls fit a 320px page");
+  await desktop.screenshot({ path: path.join(output, "web-login-password-320.png"), fullPage: true });
+  await desktop.setViewportSize({ width: 1440, height: 1000 });
   await desktop.getByRole("button", { name: "本机初始化管理员 →" }).click(); await fillSignup(desktop, "owner");
   await desktop.getByRole("button", { name: "创建管理员", exact: true }).click();
   await desktop.getByRole("button", { name: "用户管理", exact: true }).waitFor(); await ready(desktop);
@@ -92,6 +120,7 @@ try {
   await mobile.getByLabel("当前密码", { exact: true }).fill("Fixture-password-123");
   await mobile.getByLabel("新密码", { exact: true }).fill("New-password-123");
   await mobile.getByLabel("确认新密码", { exact: true }).fill("New-password-123");
+  await verifyPasswordVisibility(mobile, "新密码");
   await mobile.getByRole("button", { name: "更新密码" }).click(); await mobile.getByText("密码已修改，请重新登录", { exact: true }).waitFor();
   assert(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile page must not overflow");
   await desktop.getByRole("button", { name: "用户管理", exact: true }).click(); await desktop.getByLabel("搜索用户").waitFor(); await ready(desktop);

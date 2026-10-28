@@ -9,6 +9,9 @@
 .account-ui h2{font-size:27px;letter-spacing:-.7px;line-height:1.4;margin:10px 0}.account-ui h3{font-size:18px;margin:24px 0 16px}.account-heading p,.account-hint{font-size:13px;color:var(--ac-muted);line-height:1.7;margin:8px 0 20px}
 .account-ui form{display:grid;gap:17px}.account-ui label{display:grid;gap:7px;font-weight:550;color:var(--ac-text);font-size:13px}
 .account-ui input:not([type=checkbox]),.account-ui textarea{width:100%;min-width:0;min-height:46px;border:1px solid var(--ac-border);border-radius:8px;padding:10px 12px;background:var(--ac-bg);color:var(--ac-text);font:inherit;font-weight:400}
+.account-password-field{position:relative}.account-ui .account-password-field input{padding-right:76px}
+.account-ui .account-password-field>button{position:absolute;right:1px;bottom:1px;min-height:44px;min-width:60px;padding:8px 12px;border:0;border-radius:7px;background:transparent;color:var(--ac-text);font-size:13px}
+.account-ui .account-password-field input::-ms-reveal{display:none}
 .account-ui textarea{resize:vertical;font-family:ui-monospace,monospace;font-size:12px}.account-ui input::placeholder{color:var(--ac-muted);opacity:.75}
 .account-ui button{border:1px solid var(--ac-border);border-radius:8px;min-height:42px;padding:9px 15px;background:var(--ac-soft);color:var(--ac-text);font:inherit;font-weight:550;cursor:pointer;transition:background .15s}
 .account-ui button:hover{filter:brightness(.97)}.account-ui button:disabled{opacity:.5;cursor:default}.account-ui button.account-primary{color:white;background:var(--ac-accent);border-color:var(--ac-accent)}

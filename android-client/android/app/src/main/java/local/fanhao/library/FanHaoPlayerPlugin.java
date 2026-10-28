@@ -10,6 +10,8 @@ import android.util.Log;
 
 import androidx.annotation.OptIn;
 import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.media3.common.util.UnstableApi;
 
 import com.getcapacitor.JSObject;
@@ -21,6 +23,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONArray;
 import java.lang.ref.WeakReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 @OptIn(markerClass = UnstableApi.class)
 @CapacitorPlugin(name = "FanHaoPlayer")
@@ -28,6 +31,52 @@ public class FanHaoPlayerPlugin extends Plugin {
   private static final String TAG = "FanHaoPlayer";
   private volatile ProgressCommitReceiver activeProgressReceiver;
   private volatile boolean destroyed;
+  private NativeShortVideoRecovery shortVideoRecovery;
+  private ActivityResultLauncher<Intent> shortVideoRecoveryLauncher;
+  private final AtomicLong shortFeedEpoch = new AtomicLong();
+  private volatile long pendingShortFeedPlay;
+
+  @Override
+  public void load() {
+    super.load();
+    try {
+      shortVideoRecoveryLauncher = getActivity().getActivityResultRegistry().register(
+        NativeShortVideoRecovery.LAUNCHER_KEY, getActivity(), new ActivityResultContracts.StartActivityForResult(),
+        result -> { if (shortVideoRecovery != null) shortVideoRecovery.result(result.getResultCode(), result.getData()); });
+      shortVideoRecovery = new NativeShortVideoRecovery(getActivity(), intent -> shortVideoRecoveryLauncher.launch(intent),
+        this::publishRestoredShortFeed, () -> pendingShortFeedPlay != 0L || destroyed);
+      shortVideoRecovery.restore(getActivity().getSavedStateRegistry().consumeRestoredStateForKey(NativeShortVideoRecovery.STATE_KEY));
+      getActivity().getSavedStateRegistry().registerSavedStateProvider(NativeShortVideoRecovery.STATE_KEY,
+        () -> shortVideoRecovery == null ? new Bundle() : shortVideoRecovery.save());
+    } catch (Exception unavailable) {
+      if (shortVideoRecovery != null) shortVideoRecovery.destroy();
+      shortVideoRecovery = null;
+      Log.w(TAG, "native task recovery unavailable", unavailable);
+    }
+  }
+
+  @Override protected void handleOnStart() { if (shortVideoRecovery != null) shortVideoRecovery.started(); }
+  @Override protected void handleOnResume() { if (shortVideoRecovery != null) shortVideoRecovery.resumed(); }
+  @Override protected void handleOnPause() { if (shortVideoRecovery != null) shortVideoRecovery.paused(); }
+  @Override protected void handleOnNewIntent(Intent intent) {
+    if (shortVideoRecovery != null && shortVideoRecovery.newIntent(intent)) { shortFeedEpoch.incrementAndGet(); pendingShortFeedPlay = 0L; }
+  }
+
+  private void publishRestoredShortFeed(String base, int code, Intent data) {
+    if (destroyed || code != Activity.RESULT_OK || data == null || pendingShortFeedPlay != 0L || shortVideoRecovery == null) return;
+    final long epoch = shortFeedEpoch.get();
+    final NativeShortVideoRecovery.ResultTicket ticket = shortVideoRecovery.ticket(data);
+    if (ticket == null) return;
+    final JSObject result = shortFeedResult(base, code, data);
+    try {
+      execute(() -> {
+        if (destroyed || pendingShortFeedPlay != 0L || epoch != shortFeedEpoch.get() || !ticket.isCurrent() || !ticket.consume()) return;
+        if (destroyed || pendingShortFeedPlay != 0L || epoch != shortFeedEpoch.get()) return;
+        try { notifyListeners("shortFeedRestored", result, true); }
+        catch (RuntimeException unavailable) { Log.w(TAG, "restored short-video listener unavailable", unavailable); }
+      });
+    } catch (RuntimeException unavailable) { Log.w(TAG, "restored short-video bridge unavailable", unavailable); }
+  }
 
   private static final class ProgressCommitReceiver extends ResultReceiver {
     private final WeakReference<FanHaoPlayerPlugin> owner;
@@ -81,7 +130,12 @@ public class FanHaoPlayerPlugin extends Plugin {
   @Override
   protected void handleOnDestroy() {
     destroyed = true;
+    shortFeedEpoch.incrementAndGet(); pendingShortFeedPlay = 0L;
     activeProgressReceiver = null;
+    if (shortVideoRecovery != null) shortVideoRecovery.destroy();
+    shortVideoRecovery = null;
+    if (shortVideoRecoveryLauncher != null) shortVideoRecoveryLauncher.unregister();
+    getActivity().getSavedStateRegistry().unregisterSavedStateProvider(NativeShortVideoRecovery.STATE_KEY);
     super.handleOnDestroy();
   }
 
@@ -163,12 +217,22 @@ public class FanHaoPlayerPlugin extends Plugin {
     intent.putExtra(NativeShortVideoActivity.EXTRA_HAS_MORE, call.getBoolean("hasMore", false));
     intent.putExtra(NativeShortVideoActivity.EXTRA_OPEN_AUTHOR_PANEL, call.getBoolean("openAuthorPanel", false));
     Log.i(TAG, "Opening native short video feed");
-    try {
-      startActivityForResult(call, intent, "playShortFeedResult");
-      getActivity().overridePendingTransition(0, 0);
-    } catch (Exception error) {
-      call.reject("无法打开原生短视频", error);
-    }
+    final long request = shortFeedEpoch.incrementAndGet(); pendingShortFeedPlay = request;
+    getActivity().runOnUiThread(() -> {
+      if (destroyed || request != shortFeedEpoch.get() || getActivity().isFinishing() || getActivity().isDestroyed()) {
+        if (pendingShortFeedPlay == request) pendingShortFeedPlay = 0L;
+        call.reject("播放器请求已更新或连接已关闭"); return;
+      }
+      if (shortVideoRecovery != null) shortVideoRecovery.fresh(intent);
+      try {
+        startActivityForResult(call, intent, "playShortFeedResult");
+        getActivity().overridePendingTransition(0, 0);
+      } catch (Exception error) {
+        if (shortVideoRecovery != null) shortVideoRecovery.failedOpen(intent);
+        call.reject("无法打开原生短视频", error);
+      }
+      finally { if (pendingShortFeedPlay == request) pendingShortFeedPlay = 0L; }
+    });
   }
 
   @ActivityCallback
@@ -176,7 +240,15 @@ public class FanHaoPlayerPlugin extends Plugin {
     if (call == null) return;
     String expectedBase = NativeShortVideoActionState.serverScope(call.getString("baseUrl"));
     Intent data = activityResult == null ? null : activityResult.getData();
-    boolean completed = activityResult != null && activityResult.getResultCode() == Activity.RESULT_OK && data != null;
+    JSObject result = shortFeedResult(expectedBase, activityResult == null ? Activity.RESULT_CANCELED : activityResult.getResultCode(), data);
+    if (PluginCall.CALLBACK_ID_DANGLING.equals(call.getCallbackId()) && shortVideoRecovery != null && shortVideoRecovery.acceptsSystemResult(data)) {
+      publishRestoredShortFeed(expectedBase, activityResult == null ? Activity.RESULT_CANCELED : activityResult.getResultCode(), data);
+    }
+    call.resolve(result);
+  }
+
+  private JSObject shortFeedResult(String expectedBase, int resultCode, Intent data) {
+    boolean completed = resultCode == Activity.RESULT_OK && data != null;
     String returnedBase = completed
       ? NativeShortVideoActionState.serverScope(data.getStringExtra(NativeShortVideoActionResult.EXTRA_SERVER_BASE))
       : "";
@@ -190,6 +262,6 @@ public class FanHaoPlayerPlugin extends Plugin {
     result.put("canceled", !completed);
     result.put("serverBase", expectedBase);
     result.put("snapshots", snapshots);
-    call.resolve(result);
+    return result;
   }
 }

@@ -527,6 +527,9 @@ async function verifyShellRoutes(text) {
     rememberHomeMode: noop, rememberGalleryMode: noop, rememberReadingMode: noop,
     closeHomeModePicker: noop, closeGalleryModePicker: noop, closeReadingModePicker: noop,
     resetViewLimitsForView: noop, queueScrollRestore: noop, hideSettingsSurface: noop, showSettings: noop,
+    // This chapter-routing fixture never opens settings; its lifecycle has a
+    // separate verifier running the real settings controller and shell.
+    settingsDialogFocus: { current: () => null, owns: () => false }, closingSettingsSession: null,
     mediaViewer: null,
     renderCurrentView() {
       renders.push({ view: context.currentView, params: clone(context.currentViewParams) });

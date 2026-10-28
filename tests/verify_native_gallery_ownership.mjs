@@ -5,7 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { buildGalleryOwnershipDoubles } from './fixtures/native-gallery-ownership-harness.mjs';
+import { buildGalleryOwnershipDoubles, extractPlaybackRequestMethods } from './fixtures/native-gallery-ownership-harness.mjs';
 
 // Execute real Activity gallery binding/play/timer/frame methods and complete
 // FeedPlayback, not a real RecyclerView, SurfaceFlinger or codec. No device/network.
@@ -16,9 +16,9 @@ const legacy=JSON.parse(fs.readFileSync(path.join(root,'tests/fixtures/native-ga
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'fanhao-gallery-ownership-'));
 const javaHome=process.env.JAVA_HOME||'C:/Program Files/Android/openjdk/jdk-21.0.8';
 const exe=name=>fs.existsSync(path.join(javaHome,'bin',`${name}.exe`))?path.join(javaHome,'bin',`${name}.exe`):name;
-const extract=source=>Object.fromEntries([...Object.keys(legacy.methods),'isBoundGallery'].map(name=>{
+const extract=source=>({...Object.fromEntries([...Object.keys(legacy.methods),'isBoundGallery','isGalleryImageReady','scheduleGalleryAutoAdvanceAfter'].map(name=>{
   const value=source.match(new RegExp(`  private (?:void|boolean) ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`))?.[0];assert(value,`missing production method: ${name}`);return [name,value];
-}));
+})),...extractPlaybackRequestMethods(source)});
 const firstFrame=activity.match(/      public void onRenderedFirstFrame\(\) \{\n        int liveIndex = playerIndex\(preparedPlayer\);[\s\S]*?\n      \}/)?.[0];
 assert(firstFrame,'actual first-frame callback missing');
 const verifyWiring=source=>{
@@ -48,11 +48,11 @@ try{
     ['playGallerySegment','if (!isBoundGallery(holder, item) || holder.index != currentIndex) return;','','offscreen_segment_preserves_owner'],
     ['isBoundGallery','attachedHolders.get(holder.index) == holder && ','','retired_holder_segment_rejected'],
     ['isBoundGallery',' && videos.get(holder.index) == item','','replaced_item_segment_rejected'],
-    ['bindGallery','if (currentGallery) cancelGalleryAutoAdvance();','cancelGalleryAutoAdvance();','offscreen_image_preserves_timer'],
-    ['bindGallery','if (currentGallery) feedPlayback.selectGalleryMedia(item.id, galleryIndex);','feedPlayback.selectGalleryMedia(item.id, galleryIndex);','offscreen_binding_preserves_restore_intent'],
-    ['scheduleGalleryAutoAdvance','if (galleryAutoAdvanceRunnable != this) return;','','old_timer_cannot_consume_new_timer'],
-    ['scheduleGalleryAutoAdvance','liveHolder != holder || ','','timer_cannot_advance_recycled_holder'],
-    ['scheduleGalleryAutoAdvance','!isBoundGallery(holder, item) || holder.index != currentIndex','holder == null || holder.index != currentIndex','retired_schedule_cannot_replace_timer'],
+    ['bindGallery','if (currentGallery && !sameImage) cancelGalleryAutoAdvance();','if (!sameImage) cancelGalleryAutoAdvance();','offscreen_image_preserves_timer'],
+    ['bindGallery','if (currentGallery) feedPlayback.selectGalleryMedia(item.id, galleryIndex,','feedPlayback.selectGalleryMedia(item.id, galleryIndex,','offscreen_binding_preserves_restore_intent'],
+    ['scheduleGalleryAutoAdvanceAfter','if (galleryAutoAdvanceRunnable != this) return;','','old_timer_cannot_consume_new_timer'],
+    ['scheduleGalleryAutoAdvanceAfter','if (liveHolder != holder || !isBoundGallery(liveHolder, item) || currentIndex != feedIndex || pager.getCurrentItem() != feedIndex || liveHolder.galleryIndex != liveMediaIndex\n          || galleryMediaAt(item, liveMediaIndex) != media || !isGalleryImageReady(liveHolder, item, liveMediaIndex)) {','if (false) {','timer_cannot_advance_recycled_holder'],
+    ['isGalleryImageReady','isBoundGallery(holder, item) && ','','retired_schedule_cannot_replace_timer'],
     ['showGalleryBitmap','!isBoundGallery(holder, item) || ','','retired_bitmap_does_not_paint']
   ];
   for(const [index,[method,from,to,oracle]] of mutations.entries()){

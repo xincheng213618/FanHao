@@ -4,6 +4,7 @@ import { createMusicAudioSourceStore } from "../android-client/www/modules/music
 import { createMusicProgressSession } from "../android-client/www/modules/music/progress-session.js";
 import { captureMusicProgressOwner } from "../android-client/www/modules/music/progress-transport.js";
 import { setAccountOwner } from "../android-client/www/js/account-owner.js";
+import { createMusicTrackPreferences } from "../android-client/www/modules/music/music-track-preferences.js";
 
 const sourcePath = new URL("../android-client/www/modules/music/music-views.js", import.meta.url);
 const currentSource = fs.readFileSync(sourcePath, "utf8");
@@ -43,7 +44,7 @@ function fixture() {
   setAccountOwner(BASE, "account:playback_fixture_a");
   setAccountOwner(OTHER_BASE, "account:playback_fixture_b");
   const deps = { reads, blobs, plays, renders, remembered, preloads, fades, sourceLoads, audioObjects, frames,
-    createMusicProgressSession, captureMusicProgressOwner, BASE, CLOCK };
+    createMusicProgressSession, captureMusicProgressOwner, createMusicTrackPreferences, BASE, CLOCK };
   const audioSourceStore = createMusicAudioSourceStore({
     fetchImpl(url, options) {
       const request = deferred();
@@ -58,7 +59,7 @@ function fixture() {
   deps.audioSourceStore = audioSourceStore;
   const setup = `
     const {reads,blobs,plays,renders,remembered,preloads,fades,sourceLoads,audioObjects,frames,
-      createMusicProgressSession,captureMusicProgressOwner,audioSourceStore,BASE,CLOCK}=deps;
+      createMusicProgressSession,captureMusicProgressOwner,createMusicTrackPreferences,audioSourceStore,BASE,CLOCK}=deps;
     const old={id:"P",title:"prior",streamUrl:"/media/P",durationMs:200000};
     const neighbour={id:"Q",title:"neighbour",streamUrl:"/media/Q"};
     const primaryData={tracks:[old,neighbour],total:2};
@@ -70,11 +71,15 @@ function fixture() {
       progressClaimRequired=false,playedReport={prior:true},currentLyricIndex=3,gaplessHandoffPending=false;
     let audioLoadHook=null;
     const getActiveUrl=()=>selectedUrl;
+    const trackPreferences=createMusicTrackPreferences({send(){throw new Error("Playback-request fixture never sends track preference writes");}});
+    trackPreferences.preparePayload({track:state.current,tracks:state.queue},trackPreferences.owner(BASE));
     const window={requestAnimationFrame(callback){frames.push(callback);}};
     const absoluteUrl=(url,path)=>new URL(path,url).href;
     const musicListQuery=()=>"sort=updated&favorite=0";
     const fetchJson=(url,path,options)=>{
-      const item=deps.deferred();reads.push(Object.assign(item,{url,path,options}));return item.promise;
+      const item=deps.deferred(),owner=trackPreferences.owner(url);
+      reads.push(Object.assign(item,{url,path,options}));
+      return item.promise.then(data=>trackPreferences.preparePayload(data,owner));
     };
     class Audio {
       constructor(){this.src="";this.paused=true;this.readyState=3;this.currentTime=0;this.duration=200;

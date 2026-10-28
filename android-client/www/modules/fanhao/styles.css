@@ -364,6 +364,10 @@
   z-index: 1;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: calc(100dvh - 12px - var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   gap: 8px;
   border-radius: 22px 22px 0 0;
   background: var(--surface-raised);
@@ -376,6 +380,49 @@
   padding: 0 2px 4px;
   font-size: 18px;
   font-weight: 950;
+}
+
+.mobile-action-sheet-panel {
+  padding-top: 0;
+  scroll-padding-top: 72px;
+  align-content: start;
+}
+
+.mobile-action-sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  grid-column: 1 / -1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 -16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  padding: 8px 16px;
+}
+
+.mobile-action-sheet-head > strong {
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.mobile-action-sheet-head .mobile-action-sheet-close {
+  flex: 0 0 auto;
+  min-width: 60px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .fanhao-sort-option {
@@ -433,7 +480,7 @@ body.fanhao-work-detail-view .bottom-nav {
 }
 
 .fanhao-search-result-toolbar {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .work-detail-toolbar {
@@ -570,7 +617,7 @@ body.fanhao-search-page-view .bottom-nav {
 
 .fanhao-search-page-field {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 38px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   min-width: 0;
   height: 44px;
@@ -612,8 +659,10 @@ body.fanhao-search-page-view .bottom-nav {
 }
 
 .fanhao-search-page-clear {
-  min-width: 38px;
-  min-height: 38px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
 }
 
 .fanhao-search-page-clear[hidden] {

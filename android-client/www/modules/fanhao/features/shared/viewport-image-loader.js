@@ -1,4 +1,4 @@
-import { absoluteUrl, loadPreviewImage } from "../../../../js/image.js?v=assets-1443708f18b1";
+import { absoluteUrl, loadPreviewImage } from "../../../../js/image.js?v=assets-22080e82f167";
 
 const DEFAULT_ROOT_MARGIN = "720px 0px";
 

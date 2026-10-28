@@ -2299,7 +2299,7 @@ function summary() {
       ok: true,
       videoId: currentVideo.id,
       watch: {
-        progressMs: Math.max(0, Number(savedWatch?.progress_ms || progressMs)),
+        progressMs: Math.max(0, Number(savedWatch?.progress_ms ?? progressMs)),
         completedCount,
         completed: completedCount > 0,
         lastWatchedAt: savedWatch?.last_watched_at || now

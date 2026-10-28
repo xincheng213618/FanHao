@@ -2,8 +2,12 @@ const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "
 const date = (value) => value ? new Date(value).toLocaleDateString("zh-CN") : "尚未登录";
 const dateTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无记录";
 const inviteStatuses = { all: "全部状态", available: "可使用", exhausted: "已用完", expired: "已过期", disabled: "已停用" };
-const field = (name, label, options = {}) => `<label>${label}<input name="${name}" type="${options.type || "text"}" ${options.required === false ? "" : "required"}
-  ${options.type === "password" ? `minlength="${options.minLength || 10}" maxlength="128"` : ""} ${options.attrs || ""} value="${escape(options.value || "")}" autocomplete="${options.autocomplete || "off"}"></label>`;
+const field = (name, label, options = {}) => {
+  const input = `<input name="${name}" type="${options.type || "text"}" ${options.required === false ? "" : "required"}
+    ${options.type === "password" ? `minlength="${options.minLength || 10}" maxlength="128"` : ""} ${options.attrs || ""} value="${escape(options.value || "")}" autocomplete="${options.autocomplete || "off"}">`;
+  const labeled = `<label>${label}${input}</label>`;
+  return options.type === "password" ? `<div class="account-password-field">${labeled}<button type="button" data-password-toggle="${escape(label)}" aria-label="显示${escape(label)}">显示</button></div>` : labeled;
+};
 
 export function mountAccountPanel(root, { request, authenticate = (mode, body) => request(`/api/accounts/${mode}`, { method: "POST", body }),
   clearSession = async () => {}, onSignedIn = async () => {}, onSignedOut = async () => {}, initialMode = "login", legacyLogin = null } = {}) {
@@ -255,6 +259,16 @@ export function mountAccountPanel(root, { request, authenticate = (mode, body) =
   async function click(event) {
     const button = event.target.closest("button");
     if (!button || !root.contains(button) || button.type === "submit") return;
+    if (button.hasAttribute("data-password-toggle")) {
+      if (busy || disposed || button.disabled) return;
+      const input = button.closest(".account-password-field")?.querySelector("input");
+      if (!input) return;
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      button.textContent = show ? "隐藏" : "显示";
+      button.setAttribute("aria-label", `${show ? "隐藏" : "显示"}${button.dataset.passwordToggle}`);
+      return;
+    }
     await run(async () => {
       if (button.dataset.mode) { mode = button.dataset.mode; await render(); }
       else if (button.dataset.tab) { tab = button.dataset.tab; resetTarget = resetCode = selectedInvite = null; await render(); }

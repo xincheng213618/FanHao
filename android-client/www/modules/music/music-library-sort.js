@@ -1,7 +1,9 @@
 export function createMusicLibrarySort(deps) {
   const {
+    beginFocus,
     isFocusedLibraryView,
     renderShell,
+    restoreFocus,
     setMusicSymbol,
     state,
     symbolButton,
@@ -34,13 +36,17 @@ export function createMusicLibrarySort(deps) {
       option.selected = selectedValue === value;
       sort.append(option);
     }
-    sort.addEventListener("change", () => updateListParams(
-      state.mode === "artists"
-        ? { artistSort: sort.value }
-        : state.mode === "albums"
-          ? { albumSort: sort.value }
-          : { sort: sort.value }
-    ));
+    sort.addEventListener("change", () => {
+      const focusIntent = beginFocus?.("native-sort", sort);
+      updateListParams(
+        state.mode === "artists"
+          ? { artistSort: sort.value }
+          : state.mode === "albums"
+            ? { albumSort: sort.value }
+            : { sort: sort.value },
+        { controlFocus: focusIntent }
+      );
+    });
     return sort;
   }
 
@@ -78,8 +84,10 @@ export function createMusicLibrarySort(deps) {
 
   function closeLibrarySort() {
     if (!state.sortSheetOpen) return;
+    const focusIntent = beginFocus?.("sort");
     state.sortSheetOpen = false;
     renderShell();
+    restoreFocus?.(focusIntent);
   }
 
   function renderLibrarySortBackdrop() {
@@ -125,12 +133,14 @@ export function createMusicLibrarySort(deps) {
       }
       choice.append(choiceLabel, stateLabel);
       choice.addEventListener("click", () => {
+        const focusIntent = beginFocus?.("sort", choice);
         state.sortSheetOpen = false;
         if (value === selectedValue) {
           renderShell();
+          restoreFocus?.(focusIntent);
           return;
         }
-        updateListParams({ sort: value });
+        updateListParams({ sort: value }, { controlFocus: focusIntent });
       });
       list.append(choice);
     }

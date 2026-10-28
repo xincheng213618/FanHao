@@ -24,6 +24,7 @@ const SHORT_VIDEO_STREAM_CHUNK_BYTES = 1 * 1024 * 1024;
 const SHORT_VIDEO_INITIAL_STREAM_CHUNK_BYTES = 2 * 1024 * 1024;
 const SHORT_VIDEO_STARTUP_CACHE_BYTES = 2 * 1024 * 1024;
 const SHORT_VIDEO_STARTUP_CACHE_CANDIDATES = 3;
+const SHORT_VIDEO_STARTUP_CACHE_PENDING_LIMIT = 6;
 const SHORT_VIDEO_STARTUP_CACHE_DELAY_MS = 240;
 const SHORT_VIDEO_SMOOTH_CACHE_CANDIDATES = 3;
 const SHORT_VIDEO_SMOOTH_CONCURRENCY = 2;
@@ -172,6 +173,11 @@ export function createShortVideosRuntime({
   const videoCacheJobs = new Map();
   let videoCacheTimer = null;
   let videoCacheActive = false;
+  let videoCacheActiveJob = null;
+  let videoCacheAccepting = true;
+  let videoCacheGeneration = 0;
+  let videoCacheSequence = 0;
+  const videoCacheExecutions = new Set();
   const smoothVideoQueue = [];
   const smoothVideoJobs = new Map();
   const smoothVideoCandidateBacklog = [];
@@ -185,6 +191,8 @@ export function createShortVideosRuntime({
   let smoothVideoWarmupGeneration = 0;
   let smoothVideoTimer = null;
   const smoothVideoActiveJobs = new Map();
+  const smoothVideoExecutions = new Set();
+  let smoothVideoJobGeneration = 0;
   const smoothVideoChildren = new Map();
   let smoothVideoPausedByUser = false;
   const smoothVideoRecentJobs = [];
@@ -207,6 +215,8 @@ export function createShortVideosRuntime({
   let shortVideoWatchCachePersistTimer = null;
   const imageRequests = new Set(), imageQueue = [];
   let imageActive = 0, imageAccepting = true, imageGeneration = 0;
+  const smoothPlaybackRequests = new Set();
+  let smoothPlaybackAccepting = true;
 
   async function routeApi(req, res, url) {
     if (await routeShortVideoLocalActionApi(req, res, url, {
@@ -438,7 +448,7 @@ export function createShortVideosRuntime({
       && detailPlaybackSegment?.ok
       && !SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(detailPlaybackSegment.value.toLowerCase())
     ) {
-      tryQueueStartupVideoCache(detailPlaybackSegment.value, { delayMs: 0 });
+      tryQueueStartupVideoCache(detailPlaybackSegment.value, { delayMs: 0, kind: "current" });
     }
 
     const routeController = new AbortController();
@@ -469,48 +479,79 @@ export function createShortVideosRuntime({
   async function routeMedia(req, res, url) {
     const smoothVideoMatch = /^\/media\/short-video-smooth\/([^/]+)$/.exec(url.pathname);
     if (smoothVideoMatch && (req.method === "GET" || req.method === "HEAD")) {
+      if (req.aborted || res.destroyed || res.writableEnded) return true;
+      if (!smoothPlaybackAccepting) {
+        sendSmoothPlaybackUnavailable(res, "stopped");
+        return true;
+      }
+      const request = beginSmoothPlaybackRequest(req, res);
+      try {
       const id = decodeURIComponent(smoothVideoMatch[1]);
       const sourceFile = store.videoFile(id, { allowMissing: true });
       if (!sourceFile || sourceFile.type !== "video") {
         notFound(res);
         return true;
       }
-      let smoothFile = cachedSmoothVideoFile(id, sourceFile);
-      let sourceCompatible = !smoothFile && isSmoothVideoSourceCompatible(id, sourceFile);
-      let playbackPrepare = smoothFile ? "cached" : (sourceCompatible ? "source-compatible" : "source");
-      let playbackWaitMs = 0;
-      const initialPlaybackRange = req.method === "GET" && isInitialVideoRange(req.headers?.range);
-      const androidPlayback = String(req.headers?.["x-fanhao-client"] || "").trim().toLowerCase() === "android";
-      const allowPlaybackWait = String(url.searchParams.get("wait") || "1").trim() !== "0";
-      if (!smoothFile && !sourceCompatible && initialPlaybackRange && allowPlaybackWait) {
-        const waitStartedAt = Date.now();
-        tryQueueSmoothVideoCache(id, { delayMs: 0, kind: "current" });
-        const prepared = await waitForSmoothVideoPlayback(id, sourceFile, SHORT_VIDEO_SMOOTH_ON_DEMAND_WAIT_MS);
-        playbackWaitMs = Date.now() - waitStartedAt;
-        smoothFile = cachedSmoothVideoFile(id, sourceFile);
-        sourceCompatible = !smoothFile && isSmoothVideoSourceCompatible(id, sourceFile);
-        playbackPrepare = smoothFile || sourceCompatible ? "waited" : "wait-timeout";
-      } else if (!smoothFile && !sourceCompatible && initialPlaybackRange) {
-        playbackPrepare = "source-no-wait";
-      }
-      const fallbackFile = !androidPlayback && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
-        ? cachedStartupVideoFile(id, sourceFile) || sourceFile
-        : sourceFile;
-      const file = smoothFile || fallbackFile;
-      if (!smoothFile && !sourceCompatible) {
-        tryQueueStartupVideoCache(id, { delayMs: 0 });
-        tryQueueSmoothVideoCache(id, playbackPrepare === "wait-timeout" || playbackPrepare === "source-no-wait" || !initialPlaybackRange
-          ? { delayMs: SHORT_VIDEO_SMOOTH_CACHE_DELAY_MS, kind: "background" }
-          : { delayMs: SHORT_VIDEO_SMOOTH_CURRENT_DELAY_MS, kind: "current" });
-      }
       const requestedVersion = String(url.searchParams.get("v") || "").trim();
       const currentVersion = String(sourceFile.cacheVersion || "").trim();
-      const stablePlaybackFile = Boolean(smoothFile || sourceCompatible);
-      file.cacheControl = stablePlaybackFile && requestedVersion && currentVersion && requestedVersion === currentVersion
+      if (requestedVersion && requestedVersion !== currentVersion) {
+        sendSmoothPlaybackSourceChanged(res);
+        return true;
+      }
+      const representation = String(url.searchParams.get("representation") || "preferred").trim().toLowerCase();
+      if (!["preferred", "legacy"].includes(representation)) {
+        res.writeHead(400, { "Content-Length": 0, "Cache-Control": "no-store" });
+        res.end();
+        return true;
+      }
+      let smoothFile = cachedSmoothVideoFile(id, sourceFile, { representation });
+      let playbackPrepare = smoothFile ? "cached" : "pending";
+      let playbackWaitMs = 0;
+      const initialPlaybackRange = req.method === "GET"
+        && (!String(req.headers?.range || "").trim() || isInitialVideoRange(req.headers?.range));
+      const androidPlayback = String(req.headers?.["x-fanhao-client"] || "").trim().toLowerCase() === "android";
+      const allowPlaybackWait = String(url.searchParams.get("wait") || "1").trim() !== "0";
+      if (!smoothFile && representation === "preferred" && req.method === "GET") {
+        // A compatibility URL always denotes the preferred H.264 file. Even
+        // a small source or an old source-ok marker must not defeat an
+        // explicit request made after a decoder failure.
+        const queued = tryQueueSmoothVideoCache(id, { delayMs: 0, kind: "current", forceCompatibility: true, sourceFile });
+        if (queued.state === "stale-source") {
+          sendSmoothPlaybackSourceChanged(res);
+          return true;
+        }
+      }
+      if (!smoothFile && representation === "preferred" && initialPlaybackRange && allowPlaybackWait && !smoothVideoPausedByUser) {
+        const waitStartedAt = Date.now();
+        await waitForSmoothVideoPlayback(id, sourceFile, SHORT_VIDEO_SMOOTH_ON_DEMAND_WAIT_MS, { signal: request.controller.signal });
+        if (!request.isCurrent()) return true;
+        playbackWaitMs = Date.now() - waitStartedAt;
+        const currentSource = store.videoFile(id, { allowMissing: true });
+        if (!currentSource || currentSource.type !== "video") {
+          notFound(res);
+          return true;
+        }
+        if (!sameSmoothPlaybackSource(sourceFile, currentSource)) {
+          sendSmoothPlaybackSourceChanged(res);
+          return true;
+        }
+        smoothFile = cachedSmoothVideoFile(id, sourceFile, { representation });
+        playbackPrepare = smoothFile ? "waited" : "wait-timeout";
+      }
+      if (!request.isCurrent()) return true;
+      if (!smoothFile) {
+        sendSmoothPlaybackUnavailable(res, smoothVideoPausedByUser ? "paused" : playbackPrepare, playbackWaitMs, representation);
+        return true;
+      }
+      const file = smoothFile;
+      file.isCurrentSource = () => {
+        if (!request.isCurrent()) return false;
+        try { return sameSmoothPlaybackSource(sourceFile, store.videoFile(id, { allowMissing: true })); }
+        catch { return false; }
+      };
+      file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
         ? "private, max-age=31536000, immutable"
-        : stablePlaybackFile
-          ? "private, max-age=0, must-revalidate"
-          : "no-store";
+        : "private, max-age=0, must-revalidate";
       file.maxRangeBytes = androidPlayback
         ? 0
         : initialPlaybackRange
@@ -518,28 +559,17 @@ export function createShortVideosRuntime({
           : SHORT_VIDEO_STREAM_CHUNK_BYTES;
       file.fullResponse = androidPlayback;
       file.responseHeaders = {
-        "X-FanHao-Media-Cache": smoothFile
-          ? "rendition"
-          : file.cachedStartup
-            ? "startup"
-            : "source",
-        "X-FanHao-Playback-Rendition": smoothFile
-          ? smoothFile.cachedSmoothLegacy
+        "X-FanHao-Media-Cache": "rendition",
+        "X-FanHao-Playback-Rendition": smoothFile.cachedSmoothLegacy
             ? "smooth-4k30-legacy"
-            : "smooth-2k30"
-          : sourceCompatible
-            ? "source-compatible"
-            : "source",
+            : "smooth-2k30",
         "X-FanHao-Playback-Prepare": playbackPrepare,
         "X-FanHao-Playback-Wait-Ms": String(playbackWaitMs)
       };
-      if (smoothFile?.cachedSmoothLegacy) {
-        tryQueueSmoothVideoCache(id, {
-          delayMs: SHORT_VIDEO_SMOOTH_CACHE_DELAY_MS,
-          kind: "background"
-        });
+      await mediaStreamService.serveVideo(req, res, file, { signal: request.controller.signal });
+      } finally {
+        request.finish();
       }
-      await mediaStreamService.serveVideo(req, res, file);
       return true;
     }
 
@@ -621,9 +651,10 @@ export function createShortVideosRuntime({
       }
       const mediaCacheRequest = String(req.headers["x-fanhao-media-cache"] || "").trim() === "1"
         || String(url.searchParams.get("fhcache") || "").trim() === "1";
-      const file = !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
+      const selectedFile = !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
+      const file = { ...selectedFile, entityMtimeResolutionMs: 1 };
       const requestedVersion = String(url.searchParams.get("v") || "").trim();
       const currentVersion = String(sourceFile.cacheVersion || "").trim();
       file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
@@ -643,6 +674,60 @@ export function createShortVideosRuntime({
     }
 
     return false;
+  }
+
+  function beginSmoothPlaybackRequest(req, res) {
+    const controller = new AbortController();
+    let release;
+    const request = { controller, done: new Promise(resolve => { release = resolve; }) };
+    request.isCurrent = () => smoothPlaybackAccepting && !controller.signal.aborted
+      && !req.aborted && !res.destroyed && !res.writableEnded;
+    request.cancel = () => {
+      controller.abort();
+      if (!res.destroyed && !res.writableEnded) res.destroy?.();
+    };
+    request.finish = () => {
+      req.off?.("aborted", request.cancel);
+      res.off?.("close", request.cancel);
+      smoothPlaybackRequests.delete(request);
+      release();
+    };
+    req.once?.("aborted", request.cancel);
+    res.once?.("close", request.cancel);
+    smoothPlaybackRequests.add(request);
+    return request;
+  }
+
+  function beginStopSmoothPlaybackRequests() {
+    smoothPlaybackAccepting = false;
+    const requests = [...smoothPlaybackRequests];
+    requests.forEach(request => request.cancel());
+    return Promise.all(requests.map(request => request.done));
+  }
+
+  function sendSmoothPlaybackUnavailable(res, prepare, waitMs = 0, representation = "preferred") {
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(503, {
+      "Content-Length": 0,
+      "Cache-Control": "no-store",
+      "Retry-After": "1",
+      "X-FanHao-Playback-Rendition": representation === "legacy" ? "smooth-4k30-legacy" : "smooth-2k30",
+      "X-FanHao-Playback-Prepare": prepare,
+      "X-FanHao-Playback-Wait-Ms": String(waitMs)
+    });
+    res.end();
+  }
+
+  function sameSmoothPlaybackSource(left, right) {
+    return right?.type === "video" && String(left?.path || "") === String(right.path || "")
+      && Number(left?.size || 0) === Number(right.size || 0)
+      && String(left?.cacheVersion || "") === String(right.cacheVersion || "");
+  }
+
+  function sendSmoothPlaybackSourceChanged(res) {
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(409, { "Content-Length": 0, "Cache-Control": "no-store", "X-FanHao-Playback-Prepare": "source-changed" });
+    res.end();
   }
 
   function serveImageRequest(req, res, loadFile, serveFile) {
@@ -1074,7 +1159,7 @@ export function createShortVideosRuntime({
       const ready = version && smoothVideoRenditionVersions.get(String(video.id || "")) === version;
       const mobileStreamUrl = ready
         ? appendPlaybackQuery(source.replace("/media/short-video/", "/media/short-video-smooth/"), {
-            rendition: "mobile-2560-h264-v3"
+            rendition: "mobile-2560-h264-v4-pinned"
           })
         : source;
       return { ...video, mobileStreamUrl };
@@ -1177,6 +1262,8 @@ export function createShortVideosRuntime({
     const stopping = runtimeStopPromise;
     const startWork = (async () => {
       if (stopping) await stopping;
+      await Promise.all([...videoCacheExecutions].map(execution => execution.done));
+      await Promise.all([...smoothVideoExecutions].map(execution => execution.done));
       if (!runtimeStartStillCurrent(generation)) return false;
       try {
         const recovery = await store.recoverDeleteJobs();
@@ -1224,6 +1311,8 @@ export function createShortVideosRuntime({
       downloadManagerSync.start();
       if (!runtimeStartStillCurrent(generation)) return false;
       imageAccepting = true;
+      smoothPlaybackAccepting = true;
+      videoCacheAccepting = true;
       runtimeStarted = true;
       runtimeTestHooks.onRuntimeStartedChange?.(true);
       if (!runtimeStartStillCurrent(generation)) return false;
@@ -1251,12 +1340,13 @@ export function createShortVideosRuntime({
     }
     if (runtimeStopPromise) return runtimeStopPromise;
     const imageDrain = beginStopImageRequests();
+    const smoothPlaybackDrain = beginStopSmoothPlaybackRequests();
     const startToDrain = runtimeStartPromise;
     const deleteDrain = store.beginClose();
     runtimeStarted = false;
     runtimeTestHooks.onRuntimeStartedChange?.(false);
-    stopVideoCacheQueue();
-    stopSmoothVideoQueue();
+    const startupDrain = stopVideoCacheQueue();
+    const smoothJobDrain = stopSmoothVideoQueue();
     const stopWork = (async () => {
       let stopError = null;
       try {
@@ -1266,7 +1356,7 @@ export function createShortVideosRuntime({
         stopError = error;
       }
       // A failed background stop must not bypass an outstanding OS stat/read.
-      await imageDrain;
+      await Promise.all([imageDrain, smoothPlaybackDrain, smoothJobDrain, startupDrain]);
       try {
         await deleteDrain;
       } catch (error) {
@@ -1427,6 +1517,7 @@ export function createShortVideosRuntime({
       type: "video",
       totalSize: descriptor.expectedSize,
       entityMtimeMs: descriptor.expectedMtimeMs,
+      entityMtimeResolutionMs: 1,
       cachedStartup: true
     };
   }
@@ -1469,18 +1560,12 @@ export function createShortVideosRuntime({
     };
   }
 
-  function cachedSmoothVideoFile(id, servedSourceFile) {
-    const originalFile = store.videoFile(id, { allowMissing: true }) || servedSourceFile;
+  function cachedSmoothVideoFile(id, servedSourceFile, { representation = "preferred" } = {}) {
+    const originalFile = servedSourceFile || store.videoFile(id, { allowMissing: true });
     const descriptor = smoothVideoCacheDescriptor(id, originalFile);
     if (!descriptor?.cachePath) return null;
-    const preferredStat = safeStat(descriptor.cachePath);
-    const legacyStat = preferredStat?.isFile() ? null : safeStat(descriptor.legacyCachePath);
-    const cachePath = preferredStat?.isFile()
-      ? descriptor.cachePath
-      : legacyStat?.isFile()
-        ? descriptor.legacyCachePath
-        : "";
-    const cachedStat = cachePath ? (preferredStat?.isFile() ? preferredStat : legacyStat) : null;
+    const cachePath = representation === "legacy" ? descriptor.legacyCachePath : descriptor.cachePath;
+    const cachedStat = safeStat(cachePath);
     if (!cachedStat?.isFile() || cachedStat.size <= 0) return null;
     const cachedSmoothLegacy = cachePath === descriptor.legacyCachePath;
     if (!cachedSmoothLegacy) rememberSmoothVideoResolved(id, descriptor, true);
@@ -1570,7 +1655,8 @@ export function createShortVideosRuntime({
       if (queued >= SHORT_VIDEO_STARTUP_CACHE_CANDIDATES) break;
       if (!video?.id || String(video.mediaType || "video").toLowerCase() !== "video") continue;
       const result = tryQueueStartupVideoCache(video.id, {
-        delayMs: SHORT_VIDEO_STARTUP_CACHE_DELAY_MS + queued * 80
+        delayMs: SHORT_VIDEO_STARTUP_CACHE_DELAY_MS + queued * 80,
+        kind: "background"
       });
       if (["queued", "copying"].includes(result?.state)) queued += 1;
     }
@@ -1731,31 +1817,31 @@ export function createShortVideosRuntime({
   }
 
   function queueSmoothVideoCache(id, options = {}) {
+    if (!smoothPlaybackAccepting) return { state: "stopped" };
     if (!sharedCache?.rootDir) return { state: "disabled" };
     const file = store.videoFile(id, { allowMissing: true });
+    if (options.sourceFile && !sameSmoothPlaybackSource(options.sourceFile, file)) return { state: "stale-source" };
     const descriptor = smoothVideoCacheDescriptor(id, file);
     if (!file?.path || !descriptor?.cachePath) return { state: "missing" };
-    if (smoothVideoMetadataNeedsRendition(file) === false) {
-      rememberSmoothVideoResolved(id, descriptor);
-      return { state: "source-ok" };
-    }
+    const forceCompatibility = options.forceCompatibility === true || options.kind !== "background";
     if (safeStat(descriptor.cachePath)?.size > 0) {
       rememberSmoothVideoResolved(id, descriptor, true);
       sharedCache.touch(descriptor.cachePath);
       return { state: "cached", path: descriptor.cachePath };
     }
-    if (safeStat(descriptor.skipPath)?.isFile()) {
-      rememberSmoothVideoResolved(id, descriptor);
-      return { state: "source-ok" };
-    }
     const key = descriptor.cachePath;
     const readyAt = Date.now() + Math.max(0, Number(options.delayMs || 0));
     const existing = smoothVideoJobs.get(key);
     if (existing) {
+      existing.forceCompatibility ||= forceCompatibility;
       existing.readyAt = Math.min(existing.readyAt, readyAt);
-      if (options.kind !== "background" && !existing.active) existing.kind = "current";
+      if (forceCompatibility) existing.kind = "current";
       sortAndScheduleSmoothVideoQueue();
       return { state: existing.active ? "transcoding" : "queued", path: descriptor.cachePath };
+    }
+    if (!forceCompatibility && (smoothVideoMetadataNeedsRendition(file) === false || safeStat(descriptor.skipPath)?.isFile())) {
+      rememberSmoothVideoResolved(id, descriptor);
+      return { state: "source-ok" };
     }
     const job = {
       active: false,
@@ -1763,7 +1849,9 @@ export function createShortVideosRuntime({
       file,
       id,
       key,
-      kind: options.kind === "background" ? "background" : "current",
+      kind: forceCompatibility ? "current" : "background",
+      forceCompatibility,
+      generation: smoothVideoJobGeneration,
       queuedAt: Date.now(),
       readyAt,
       stoppedByUser: false
@@ -1784,6 +1872,7 @@ export function createShortVideosRuntime({
   }
 
   function queueStartupVideoCache(id, options = {}) {
+    if (!videoCacheAccepting) return { state: "stopped" };
     if (!sharedCache?.rootDir) return { state: "disabled" };
     const file = store.videoFile(id, { allowMissing: true });
     const descriptor = startupVideoCacheDescriptor(id, file);
@@ -1794,13 +1883,25 @@ export function createShortVideosRuntime({
     }
     const key = descriptor.cachePath;
     const readyAt = Date.now() + Math.max(0, Number(options.delayMs || 0));
+    const kind = options.kind === "current" ? "current" : "background";
     const existing = videoCacheJobs.get(key);
     if (existing) {
       existing.readyAt = Math.min(existing.readyAt, readyAt);
+      if (kind === "current") existing.kind = "current";
       sortAndScheduleVideoCacheQueue();
       return { state: existing.active ? "copying" : "queued", path: descriptor.cachePath };
     }
-    const job = { active: false, descriptor, file, id, key, kind: "startup", readyAt };
+    if (videoCacheQueue.length >= SHORT_VIDEO_STARTUP_CACHE_PENDING_LIMIT) {
+      const speculative = videoCacheQueue.filter(job => job.kind !== "current");
+      const evicted = (speculative.length ? speculative : kind === "current" ? videoCacheQueue : [])
+        .reduce((oldest, job) => !oldest || job.order < oldest.order ? job : oldest, null);
+      if (!evicted) return { state: "skipped", reason: "启动片段当前请求队列已满" };
+      videoCacheQueue.splice(videoCacheQueue.indexOf(evicted), 1);
+      if (videoCacheJobs.get(evicted.key) === evicted) videoCacheJobs.delete(evicted.key);
+      evicted.controller.abort();
+    }
+    const job = { active: false, descriptor, file, id, key, kind, readyAt, order: ++videoCacheSequence,
+      generation: videoCacheGeneration, controller: new AbortController() };
     videoCacheJobs.set(key, job);
     videoCacheQueue.push(job);
     sortAndScheduleVideoCacheQueue();
@@ -1808,11 +1909,10 @@ export function createShortVideosRuntime({
   }
 
   function sortAndScheduleVideoCacheQueue() {
-    if (videoCacheActive) return;
-    videoCacheQueue.sort((left, right) => left.readyAt - right.readyAt);
-    if (videoCacheTimer) clearTimeout(videoCacheTimer);
+    if (!videoCacheAccepting || videoCacheActive) return;
+    if (videoCacheTimer != null) clearTimeout(videoCacheTimer);
     videoCacheTimer = null;
-    const next = videoCacheQueue[0];
+    const next = nextStartupVideoCacheJob();
     if (!next) return;
     videoCacheTimer = setTimeout(runVideoCacheQueue, Math.max(0, next.readyAt - Date.now()));
     videoCacheTimer.unref?.();
@@ -1820,52 +1920,147 @@ export function createShortVideosRuntime({
 
   async function runVideoCacheQueue() {
     videoCacheTimer = null;
-    if (videoCacheActive) return;
-    videoCacheQueue.sort((left, right) => left.readyAt - right.readyAt);
-    const next = videoCacheQueue[0];
+    if (!videoCacheAccepting || videoCacheActive) return;
+    const next = nextStartupVideoCacheJob();
     if (!next) return;
     if (next.readyAt > Date.now()) {
       sortAndScheduleVideoCacheQueue();
       return;
     }
-    videoCacheQueue.shift();
+    videoCacheQueue.splice(videoCacheQueue.indexOf(next), 1);
     next.active = true;
     videoCacheActive = true;
+    videoCacheActiveJob = next;
+    let release, fail;
+    const execution = { job: next, done: new Promise((resolve, reject) => { release = resolve; fail = reject; }) };
+    execution.done.catch(() => {});
+    videoCacheExecutions.add(execution);
     try {
       await copyVideoStartupToSharedCache(next);
     } catch (error) {
-      console.warn("[short-video-cache]", next.file?.id || next.id, error.message || error);
+      if (isCurrentStartupVideoJob(next) || next.drainFailure) console.warn("[short-video-cache]", next.file?.id || next.id, error.message || error);
     } finally {
-      videoCacheJobs.delete(next.key);
-      videoCacheActive = false;
-      sortAndScheduleVideoCacheQueue();
+      if (next.drainFailure) {
+        // An unconfirmed descriptor close or failed rollback must remain a
+        // failed drain; a restart cannot silently reuse this active slot.
+        fail(next.drainFailure);
+      } else {
+        if (videoCacheJobs.get(next.key) === next) videoCacheJobs.delete(next.key);
+        if (videoCacheActiveJob === next) {
+          videoCacheActiveJob = null;
+          videoCacheActive = false;
+        }
+        videoCacheExecutions.delete(execution);
+        release();
+        sortAndScheduleVideoCacheQueue();
+      }
     }
+  }
+
+  function nextStartupVideoCacheJob() {
+    const now = Date.now();
+    const eligible = videoCacheQueue.filter(job => job.readyAt <= now);
+    const candidates = eligible.length ? eligible : videoCacheQueue;
+    return candidates.reduce((next, job) => {
+      if (!next) return job;
+      if (!eligible.length && next.readyAt !== job.readyAt) return job.readyAt < next.readyAt ? job : next;
+      if ((job.kind === "current") !== (next.kind === "current")) return job.kind === "current" ? job : next;
+      return job.order < next.order ? job : next;
+    }, null);
+  }
+
+  function isCurrentStartupVideoJob(job) {
+    return videoCacheAccepting && !job.controller.signal.aborted && job.generation === videoCacheGeneration
+      && videoCacheJobs.get(job.key) === job;
+  }
+
+  function assertCurrentStartupVideoJob(job) {
+    if (!isCurrentStartupVideoJob(job)) {
+      throw Object.assign(new Error("启动片段缓存任务已取消"), { code: "SHORT_VIDEO_STARTUP_CANCELLED" });
+    }
+  }
+
+  function assertStartupVideoCatalog(job) {
+    assertCurrentStartupVideoJob(job);
+    const source = store.videoFile(job.id, { allowMissing: true });
+    if (!source || source.type !== "video" || String(source.path || "") !== String(job.file.path || "")
+      || Number(source.size || 0) !== job.descriptor.expectedSize
+      || Math.floor(Number(source.cacheVersion || 0)) !== job.descriptor.expectedMtimeMs) {
+      throw Object.assign(new Error("启动片段源视频已发生变化"), { code: "SHORT_VIDEO_STARTUP_SOURCE_CHANGED" });
+    }
+  }
+
+  function startupVideoSourceIdentity(stat) {
+    return JSON.stringify([String(stat.dev), String(stat.ino), stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+
+  async function validateStartupVideoSource(job, handle) {
+    assertStartupVideoCatalog(job);
+    const stat = await handle.stat();
+    assertStartupVideoCatalog(job);
+    const currentPath = await fs.promises.stat(job.file.path);
+    assertStartupVideoCatalog(job);
+    const identity = startupVideoSourceIdentity(stat);
+    if (!stat.isFile() || !currentPath.isFile() || stat.size !== job.descriptor.expectedSize
+      || Math.floor(stat.mtimeMs) !== job.descriptor.expectedMtimeMs
+      || startupVideoSourceIdentity(currentPath) !== identity
+      || (job.sourceIdentity && job.sourceIdentity !== identity)) {
+      throw Object.assign(new Error("启动片段源文件版本已发生变化"), { code: "SHORT_VIDEO_STARTUP_SOURCE_CHANGED" });
+    }
+    job.sourceIdentity ||= identity;
   }
 
   async function copyVideoStartupToSharedCache(job) {
     const { cacheDir, cachePath, expectedSize, prefixSize } = job.descriptor;
-    const currentSourceStat = await fs.promises.stat(job.file.path).catch(() => null);
-    if (!currentSourceStat?.isFile() || currentSourceStat.size !== expectedSize || prefixSize <= 0) return;
-    const cachedStat = safeStat(cachePath);
-    if (cachedStat?.isFile() && cachedStat.size === prefixSize) {
-      sharedCache.touch(cachePath);
-      return;
-    }
-    const tempPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-    await fs.promises.mkdir(cacheDir, { recursive: true });
+    if (expectedSize <= 0 || prefixSize <= 0) return;
+    let handle = null, sourceStream = null, targetStream = null, sourceClosed = null, targetClosed = null;
+    let tempPath = null, published = false, accepted = false;
     try {
-      await pipeline(
-        fs.createReadStream(job.file.path, { start: 0, end: prefixSize - 1 }),
-        fs.createWriteStream(tempPath, { flags: "wx" })
-      );
+      assertStartupVideoCatalog(job);
+      handle = await fs.promises.open(job.file.path, "r");
+      await validateStartupVideoSource(job, handle);
+      assertStartupVideoCatalog(job);
+      const cachedStat = safeStat(cachePath);
+      if (cachedStat?.isFile() && cachedStat.size === prefixSize) {
+        sharedCache.touch(cachePath);
+        return;
+      }
+      tempPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      await validateStartupVideoSource(job, handle);
+      assertStartupVideoCatalog(job);
+      sourceStream = handle.createReadStream({ start: 0, end: prefixSize - 1, autoClose: false, emitClose: true });
+      targetStream = fs.createWriteStream(tempPath, { flags: "wx" });
+      sourceClosed = new Promise(resolve => sourceStream.once("close", resolve));
+      targetClosed = new Promise(resolve => targetStream.once("close", resolve));
+      await pipeline(sourceStream, targetStream, { signal: job.controller.signal });
+      await validateStartupVideoSource(job, handle);
+      assertStartupVideoCatalog(job);
       const tempStat = await fs.promises.stat(tempPath);
+      assertStartupVideoCatalog(job);
       if (!tempStat.isFile() || tempStat.size !== prefixSize) throw new Error("启动片段缓存大小校验失败");
       await fs.promises.rm(cachePath, { force: true });
+      await validateStartupVideoSource(job, handle);
+      assertStartupVideoCatalog(job);
       await fs.promises.rename(tempPath, cachePath);
+      published = true;
+      await validateStartupVideoSource(job, handle);
+      assertStartupVideoCatalog(job);
+      accepted = true;
       sharedCache.touch(cachePath);
       sharedCache.scheduleCleanup();
     } finally {
-      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      sourceStream?.destroy(); targetStream?.destroy();
+      if (sourceStream && !sourceStream.closed) await sourceClosed;
+      if (targetStream && !targetStream.closed) await targetClosed;
+      if (published && !accepted) {
+        try { await fs.promises.rm(cachePath, { force: true }); }
+        catch (error) { job.drainFailure = error; }
+      }
+      if (tempPath) await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      try { await handle?.close(); }
+      catch (error) { job.drainFailure = error; }
+      if (job.drainFailure) throw job.drainFailure;
     }
   }
 
@@ -1874,7 +2069,7 @@ export function createShortVideosRuntime({
     smoothVideoTimer = null;
     if (smoothVideoPausedByUser || smoothVideoActiveJobs.size >= smoothVideoConcurrency()) return;
     smoothVideoQueue.sort((left, right) => left.readyAt - right.readyAt);
-    const next = smoothVideoQueue[0];
+    const next = smoothVideoQueue.find(job => !smoothVideoActiveJobs.has(job.key));
     if (!next) return;
     smoothVideoTimer = setTimeout(runSmoothVideoQueue, Math.max(0, next.readyAt - Date.now()));
     smoothVideoTimer.unref?.();
@@ -1885,16 +2080,18 @@ export function createShortVideosRuntime({
     if (smoothVideoPausedByUser) return;
     smoothVideoQueue.sort((left, right) => left.readyAt - right.readyAt);
     while (smoothVideoActiveJobs.size < smoothVideoConcurrency()) {
-      const next = smoothVideoQueue[0];
+      const index = smoothVideoQueue.findIndex(job => !smoothVideoActiveJobs.has(job.key));
+      const next = smoothVideoQueue[index];
       if (!next) break;
       if (next.readyAt > Date.now()) break;
-      smoothVideoQueue.shift();
+      smoothVideoQueue.splice(index, 1);
       startSmoothVideoJob(next);
     }
     sortAndScheduleSmoothVideoQueue();
   }
 
   function startSmoothVideoJob(next) {
+    if (!isCurrentSmoothVideoJob(next)) return;
     next.active = true;
     next.startedAt = Date.now();
     next.progress = {
@@ -1907,144 +2104,295 @@ export function createShortVideosRuntime({
   }
 
   async function executeSmoothVideoJob(next) {
+    let release, fail;
+    const execution = { job: next, done: new Promise((resolve, reject) => { release = resolve; fail = reject; }) };
+    execution.done.catch(() => {});
+    smoothVideoExecutions.add(execution);
     let outcome = null;
     try {
       outcome = await buildSmoothVideoCache(next);
+      // Alias cleanup is asynchronous even after a background skip decision.
+      // A current request can still promote the shared job before that build
+      // settles; honor it before retiring the only job for this cache key.
+      if (outcome?.state === "source-compatible" && next.forceCompatibility && isCurrentSmoothVideoJob(next)) {
+        outcome = await buildSmoothVideoCache(next);
+      }
     } catch (error) {
+      const cancelled = !next.drainFailure && !isCurrentSmoothVideoJob(next);
       outcome = {
-        state: next.stoppedByUser ? "stopped" : "failed",
-        reason: next.stoppedByUser
+        state: cancelled ? "stopped" : "failed",
+        reason: cancelled
           ? "用户已停止后台转码，恢复后会重新排队"
           : String(error?.message || error || "转码失败")
       };
-      if (!next.stoppedByUser) {
+      if (next.progress) next.progress.phase = outcome.state;
+      if (isCurrentSmoothVideoJob(next) || next.drainFailure) {
         console.warn("[short-video-smooth-cache]", next.file?.id || next.id, error.message || error);
       }
     } finally {
-      recordSmoothVideoJobResult(next, outcome || { state: "skipped", reason: "任务没有生成流畅版缓存" });
-      smoothVideoJobs.delete(next.key);
-      smoothVideoActiveJobs.delete(next.key);
-      smoothVideoChildren.delete(next.key);
-      if (next.stoppedByUser && !smoothVideoCandidateIds.has(String(next.id))) {
-        smoothVideoCandidateIds.add(String(next.id));
-        smoothVideoCandidateBacklog.unshift(String(next.id));
+      if (next.drainFailure) {
+        if (next.generation === smoothVideoJobGeneration) recordSmoothVideoJobResult(next, outcome);
+        fail(next.drainFailure);
+      } else {
+        try {
+          const currentGeneration = next.generation === smoothVideoJobGeneration;
+          const owned = smoothVideoJobs.get(next.key) === next;
+          if (currentGeneration) recordSmoothVideoJobResult(next, outcome || { state: "skipped", reason: "任务没有生成流畅版缓存" });
+          if (owned) smoothVideoJobs.delete(next.key);
+          if (smoothVideoActiveJobs.get(next.key) === next) smoothVideoActiveJobs.delete(next.key);
+          if (next.child && smoothVideoChildren.get(next.key) === next.child) smoothVideoChildren.delete(next.key);
+          // A user pause retains the logical request for resume. A runtime stop
+          // or catalog invalidation advances the generation and cannot requeue.
+          if (currentGeneration && owned && next.stoppedByUser && smoothPlaybackAccepting) {
+            tryQueueSmoothVideoCache(next.id, { kind: next.kind, forceCompatibility: next.forceCompatibility, delayMs: 0 });
+          }
+          if (currentGeneration) {
+            fillSmoothVideoCandidateQueue();
+          }
+          if (smoothPlaybackAccepting) sortAndScheduleSmoothVideoQueue();
+        } finally {
+          smoothVideoExecutions.delete(execution);
+          release();
+        }
       }
-      fillSmoothVideoCandidateQueue();
-      sortAndScheduleSmoothVideoQueue();
     }
   }
 
+  function isCurrentSmoothVideoJob(job) {
+    return !job.stoppedByUser && !job.drainFailure && job.generation === smoothVideoJobGeneration && smoothVideoJobs.get(job.key) === job;
+  }
+
+  function assertCurrentSmoothVideoJob(job) {
+    if (!isCurrentSmoothVideoJob(job)) {
+      throw Object.assign(new Error("流畅版转码任务已取消"), { code: "SHORT_VIDEO_TRANSCODE_CANCELLED" });
+    }
+  }
+
+  function assertSmoothVideoCatalog(job) {
+    assertCurrentSmoothVideoJob(job);
+    if (!sameSmoothPlaybackSource(job.file, store.videoFile(job.id, { allowMissing: true }))) {
+      throw Object.assign(new Error("源视频已发生变化"), { code: "SHORT_VIDEO_TRANSCODE_SOURCE_CHANGED" });
+    }
+  }
+
+  function smoothVideoDiskIdentity(stat) {
+    return JSON.stringify([String(stat.dev), String(stat.ino), stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+
+  async function validateSmoothVideoSource(job, lease) {
+    assertSmoothVideoCatalog(job);
+    const stat = lease.handle ? await lease.handle.stat() : await fs.promises.stat(lease.inputPath);
+    assertSmoothVideoCatalog(job);
+    const sourceStat = await fs.promises.stat(job.file.path);
+    assertSmoothVideoCatalog(job);
+    const inputStat = lease.inputPath === job.file.path ? sourceStat : await fs.promises.stat(lease.inputPath);
+    assertSmoothVideoCatalog(job);
+    const identity = smoothVideoDiskIdentity(stat);
+    if (!stat.isFile() || !sourceStat.isFile() || !inputStat.isFile() || stat.size !== job.descriptor.expectedSize
+      || Math.floor(stat.mtimeMs) !== job.descriptor.expectedMtimeMs
+      || smoothVideoDiskIdentity(sourceStat) !== identity || smoothVideoDiskIdentity(inputStat) !== identity
+      || (lease.identity && lease.identity !== identity)) {
+      throw Object.assign(new Error("转码源文件版本已发生变化"), { code: "SHORT_VIDEO_TRANSCODE_SOURCE_CHANGED" });
+    }
+    lease.identity ||= identity;
+  }
+
+  async function removeSmoothJobArtifact(job, filePath) {
+    try { await fs.promises.rm(filePath, { force: true }); }
+    catch (error) { job.drainFailure ||= error; throw error; }
+  }
+
+  function forgetSmoothVideoJobResolution(job) {
+    const id = String(job.id || "").trim();
+    const version = smoothVideoVersion(job.descriptor.expectedSize, job.descriptor.expectedMtimeMs);
+    if (smoothVideoResolvedVersions.get(id) === version) smoothVideoResolvedVersions.delete(id);
+    if (smoothVideoRenditionVersions.get(id) === version) smoothVideoRenditionVersions.delete(id);
+    smoothVideoCacheEntryNames.delete(path.basename(job.descriptor.cachePath));
+    smoothVideoCacheEntryNames.delete(path.basename(job.descriptor.skipPath));
+  }
+
   async function buildSmoothVideoCache(job) {
-    const { cacheDir, cachePath, expectedSize, skipPath } = job.descriptor;
-    const currentSourceStat = await fs.promises.stat(job.file.path).catch(() => null);
-    if (!currentSourceStat?.isFile() || currentSourceStat.size !== expectedSize) {
-      return { state: "skipped", reason: "源文件不存在或已发生变化" };
-    }
-    if (safeStat(cachePath)?.size > 0) {
-      rememberSmoothVideoResolved(job.id, job.descriptor, true);
-      sharedCache.touch(cachePath);
-      return { state: "cached", reason: "流畅版缓存已经存在" };
-    }
-
-    const inputAlias = await createSmoothVideoInputAlias(job.file.path);
-    const mediaInputPath = inputAlias?.path || job.file.path;
+    const { cacheDir, cachePath, skipPath } = job.descriptor;
+    let inputAlias = null, sourceHandle = null, lease = null;
+    let publishedCache = false, wroteSkip = false, acceptedSkip = false;
     try {
-    if (job.stoppedByUser) throw new Error("用户已停止后台转码");
-    job.progress.phase = "probing";
-    job.progress.updatedAt = Date.now();
-    const storedProbe = storedSmoothVideoProbe(job.file);
-    const probe = storedProbe || await probeSmoothVideo(mediaInputPath);
-    if (!probe) return { state: "skipped", reason: "无法读取源视频编码信息" };
-    if (!storedProbe) {
-      try {
-        const metadataUpdate = store.updateActualVideoPlaybackMetadata(job.id, probe);
-        if (metadataUpdate?.changed) clearShortVideoListCache();
-      } catch (error) {
-        console.warn("[short-video-smooth-metadata]", job.id, error.message || error);
+      assertSmoothVideoCatalog(job);
+      // Creating a hard-link alias changes ctime. Capture the bound input's
+      // physical identity after that legitimate operation, then require both
+      // the catalog path and the path passed to FFmpeg to keep that identity.
+      inputAlias = await createSmoothVideoInputAlias(job.file.path);
+      assertSmoothVideoCatalog(job);
+      const mediaInputPath = inputAlias?.path || job.file.path;
+      sourceHandle = await fs.promises.open(mediaInputPath, "r");
+      lease = { handle: sourceHandle, inputPath: mediaInputPath, identity: null };
+      await validateSmoothVideoSource(job, lease);
+      assertSmoothVideoCatalog(job);
+      if (safeStat(cachePath)?.size > 0) {
+        rememberSmoothVideoResolved(job.id, job.descriptor, true);
+        sharedCache.touch(cachePath);
+        return { state: "cached", reason: "流畅版缓存已经存在" };
       }
-    }
-    const longEdge = Math.max(Number(probe.width || 0), Number(probe.height || 0));
-    const codec = String(probe.codec || "").toLowerCase();
-    const frameRate = Number(probe.frameRate || 0);
-    const needsSmoothRendition = longEdge >= SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE
-      && (["hevc", "h265", "hev1", "hvc1"].includes(codec) || frameRate > 45);
-    await fs.promises.mkdir(cacheDir, { recursive: true });
-    if (!needsSmoothRendition) {
-      await fs.promises.writeFile(skipPath, JSON.stringify({ codec, frameRate, longEdge }));
-      smoothVideoCacheEntryNames.add(path.basename(skipPath));
-      rememberSmoothVideoResolved(job.id, job.descriptor);
-      sharedCache.touch(skipPath);
-      job.progress.phase = "source-compatible";
-      job.progress.updatedAt = Date.now();
-      return { state: "source-compatible", reason: "源视频已经适合直接播放，无需转码" };
-    }
 
-    const tempPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}.mp4`;
-    const sourceBitRate = Math.max(0, Number(probe.bitRate || 0));
-    const targetBitRate = Math.min(12_000_000, Math.max(3_000_000, Math.round(sourceBitRate * 1.15) || 6_000_000));
-    const maxBitRate = Math.min(18_000_000, Math.max(targetBitRate, Math.round(targetBitRate * 1.5)));
-    job.progress.phase = "transcoding";
-    job.progress.targetBitRate = targetBitRate;
-    job.progress.maxBitRate = maxBitRate;
-    job.progress.updatedAt = Date.now();
-    const args = [
-      "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats", "-hwaccel", "auto",
-      "-i", mediaInputPath,
-      "-map", "0:v:0", "-map", "0:a:0?",
-      "-vf", `scale=w='min(iw,${SHORT_VIDEO_SMOOTH_MAX_EDGE})':h='min(ih,${SHORT_VIDEO_SMOOTH_MAX_EDGE})':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${SHORT_VIDEO_SMOOTH_FPS}`
-    ];
-    if (hasNvenc) {
+      job.progress.phase = "probing";
+      job.progress.updatedAt = Date.now();
+      const storedProbe = storedSmoothVideoProbe(job.file);
+      const probe = storedProbe || await probeSmoothVideo(mediaInputPath, { job });
+      await validateSmoothVideoSource(job, lease);
+      assertSmoothVideoCatalog(job);
+      if (!probe) return { state: "skipped", reason: "无法读取源视频编码信息" };
+      if (!storedProbe) {
+        assertSmoothVideoCatalog(job);
+        try {
+          const metadataUpdate = store.updateActualVideoPlaybackMetadata(job.id, probe);
+          if (metadataUpdate?.changed) clearShortVideoListCache();
+        } catch (error) {
+          console.warn("[short-video-smooth-metadata]", job.id, error.message || error);
+        }
+      }
+      const longEdge = Math.max(Number(probe.width || 0), Number(probe.height || 0));
+      const codec = String(probe.codec || "").toLowerCase();
+      const frameRate = Number(probe.frameRate || 0);
+      const needsSmoothRendition = longEdge >= SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE
+        && (["hevc", "h265", "hev1", "hvc1"].includes(codec) || frameRate > 45);
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      await validateSmoothVideoSource(job, lease);
+      assertSmoothVideoCatalog(job);
+      if (!needsSmoothRendition && !job.forceCompatibility) {
+        await fs.promises.writeFile(skipPath, JSON.stringify({ codec, frameRate, longEdge }));
+        wroteSkip = true;
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        // A viewer may promote this shared background job while its probe or
+        // marker write is in flight. Recheck the live job before accepting a
+        // background-only skip decision.
+        if (!job.forceCompatibility) {
+          acceptedSkip = true;
+          smoothVideoCacheEntryNames.add(path.basename(skipPath));
+          rememberSmoothVideoResolved(job.id, job.descriptor);
+          sharedCache.touch(skipPath);
+          job.progress.phase = "source-compatible";
+          job.progress.updatedAt = Date.now();
+          return { state: "source-compatible", reason: "源视频已经适合直接播放，无需转码" };
+        }
+      }
+      await validateSmoothVideoSource(job, lease);
+      assertSmoothVideoCatalog(job);
+
+      const tempPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}.mp4`;
+      const sourceBitRate = Math.max(0, Number(probe.bitRate || 0));
+      const targetBitRate = Math.min(12_000_000, Math.max(3_000_000, Math.round(sourceBitRate * 1.15) || 6_000_000));
+      const maxBitRate = Math.min(18_000_000, Math.max(targetBitRate, Math.round(targetBitRate * 1.5)));
+      job.progress.phase = "transcoding";
+      job.progress.targetBitRate = targetBitRate;
+      job.progress.maxBitRate = maxBitRate;
+      job.progress.updatedAt = Date.now();
+      const args = [
+        "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats", "-hwaccel", "auto",
+        "-i", mediaInputPath,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", `scale=w='min(iw,${SHORT_VIDEO_SMOOTH_MAX_EDGE})':h='min(ih,${SHORT_VIDEO_SMOOTH_MAX_EDGE})':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=${SHORT_VIDEO_SMOOTH_FPS}`
+      ];
+      if (hasNvenc) {
+        args.push(
+          "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+          "-rc", "vbr", "-cq", "24", "-b:v", String(targetBitRate),
+          "-maxrate", String(maxBitRate), "-bufsize", String(maxBitRate * 2)
+        );
+      } else {
+        args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
+      }
       args.push(
-        "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-        "-rc", "vbr", "-cq", "24", "-b:v", String(targetBitRate),
-        "-maxrate", String(maxBitRate), "-bufsize", String(maxBitRate * 2)
+        "-g", String(SHORT_VIDEO_SMOOTH_FPS),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        tempPath
       );
-    } else {
-      args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
-    }
-    args.push(
-      "-g", String(SHORT_VIDEO_SMOOTH_FPS),
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "160k",
-      "-movflags", "+faststart",
-      tempPath
-    );
 
-    try {
-      await runMediaProcess(ffmpegPath, args, {
-        trackJobKey: job.key,
-        onProgress: (key, value) => updateSmoothVideoProgress(job, key, value)
-      });
-      job.progress.phase = "finalizing";
-      job.progress.updatedAt = Date.now();
-      const tempStat = await fs.promises.stat(tempPath);
-      if (!tempStat.isFile() || tempStat.size <= 0) throw new Error("流畅播放缓存为空");
-      await fs.promises.rm(cachePath, { force: true });
-      await fs.promises.rename(tempPath, cachePath);
-      smoothVideoCacheEntryNames.add(path.basename(cachePath));
-      await fs.promises.rm(skipPath, { force: true }).catch(() => {});
-      if (job.descriptor.legacyCachePath !== cachePath) {
-        await fs.promises.rm(job.descriptor.legacyCachePath, { force: true }).catch(() => {});
+      try {
+        await runMediaProcess(ffmpegPath, args, {
+          trackJobKey: job.key,
+          job,
+          onProgress: (key, value) => updateSmoothVideoProgress(job, key, value)
+        });
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        job.progress.phase = "finalizing";
+        job.progress.updatedAt = Date.now();
+        const tempStat = await fs.promises.stat(tempPath);
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        if (!tempStat.isFile() || tempStat.size <= 0) throw new Error("流畅播放缓存为空");
+        await fs.promises.rm(cachePath, { force: true });
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        await fs.promises.rename(tempPath, cachePath);
+        publishedCache = true;
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        await fs.promises.rm(skipPath, { force: true }).catch(() => {});
+        await validateSmoothVideoSource(job, lease);
+        assertSmoothVideoCatalog(job);
+        smoothVideoCacheEntryNames.add(path.basename(cachePath));
+        // Explicit legacy URLs keep their own bytes while a preferred file is
+        // published. Shared-cache cleanup may evict them independently later.
+        rememberSmoothVideoResolved(job.id, job.descriptor, true);
+        sharedCache.touch(cachePath);
+        sharedCache.scheduleCleanup();
+        job.progress.outTimeMs = Math.max(job.progress.outTimeMs || 0, Number(job.file.durationMs || 0));
+        job.progress.outputBytes = tempStat.size;
+        job.progress.phase = "completed";
+        job.progress.updatedAt = Date.now();
+        console.log(`[short-video-smooth-cache] ready id=${job.id} maxEdge=${SHORT_VIDEO_SMOOTH_MAX_EDGE} fps=${SHORT_VIDEO_SMOOTH_FPS} codec=h264 size=${tempStat.size}`);
+        return { state: "completed", reason: "已生成 2K 30fps H.264 流畅版" };
+      } finally {
+        await fs.promises.rm(tempPath, { force: true }).catch(() => {});
       }
-      rememberSmoothVideoResolved(job.id, job.descriptor, true);
-      sharedCache.touch(cachePath);
-      sharedCache.scheduleCleanup();
-      job.progress.outTimeMs = Math.max(job.progress.outTimeMs || 0, Number(job.file.durationMs || 0));
-      job.progress.outputBytes = tempStat.size;
-      job.progress.phase = "completed";
-      job.progress.updatedAt = Date.now();
-      console.log(`[short-video-smooth-cache] ready id=${job.id} maxEdge=${SHORT_VIDEO_SMOOTH_MAX_EDGE} fps=${SHORT_VIDEO_SMOOTH_FPS} codec=h264 size=${tempStat.size}`);
-      return { state: "completed", reason: "已生成 2K 30fps H.264 流畅版" };
     } finally {
-      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-    }
-    } finally {
-      await cleanupSmoothVideoInputAlias(inputAlias);
+      // A source/version failure after rename must remove only this job's
+      // publication before its active slot is released. Same-key jobs remain
+      // blocked behind that slot through descriptor/alias cleanup.
+      let sourceCurrent = false, sourceFailure = null;
+      try {
+        if (lease) { await validateSmoothVideoSource(job, lease); assertSmoothVideoCatalog(job); sourceCurrent = true; }
+      } catch (error) { sourceFailure = error; }
+      if ((publishedCache || wroteSkip) && !sourceCurrent) {
+        if (publishedCache) await removeSmoothJobArtifact(job, cachePath).catch(() => {});
+        if (wroteSkip) await removeSmoothJobArtifact(job, skipPath).catch(() => {});
+      } else if (wroteSkip && !acceptedSkip) {
+        await removeSmoothJobArtifact(job, skipPath).catch(() => {});
+      }
+      try {
+        await sourceHandle?.close();
+        if (lease) lease.handle = null;
+      }
+      catch (error) { job.drainFailure ||= error; }
+      if (lease && !sourceFailure && !job.drainFailure) {
+        try { await validateSmoothVideoSource(job, lease); assertSmoothVideoCatalog(job); }
+        catch (error) { sourceFailure = error; }
+      }
+      try { await cleanupSmoothVideoInputAlias(inputAlias); }
+      catch (error) { job.drainFailure ||= error; }
+      if (lease && !sourceFailure) {
+        try { assertSmoothVideoCatalog(job); }
+        catch (error) { sourceFailure = error; }
+      }
+      if (sourceFailure) {
+        if (publishedCache) await removeSmoothJobArtifact(job, cachePath).catch(() => {});
+        if (wroteSkip) await removeSmoothJobArtifact(job, skipPath).catch(() => {});
+      }
+      if (sourceFailure || job.drainFailure) forgetSmoothVideoJobResolution(job);
+      if (job.drainFailure) {
+        if (publishedCache) await removeSmoothJobArtifact(job, cachePath).catch(() => {});
+        if (wroteSkip) await removeSmoothJobArtifact(job, skipPath).catch(() => {});
+        throw job.drainFailure;
+      }
+      if (sourceFailure) throw sourceFailure;
     }
   }
 
   function updateSmoothVideoProgress(job, key, value) {
-    if (!job?.progress) return;
+    if (!job?.progress || !isCurrentSmoothVideoJob(job)) return;
     const name = String(key || "").trim();
     const raw = String(value || "").trim();
     if (name === "frame") job.progress.frame = Math.max(0, Number(raw || 0));
@@ -2085,22 +2433,35 @@ export function createShortVideosRuntime({
 
   async function cleanupSmoothVideoInputAlias(alias) {
     if (!alias?.path) return;
-    await fs.promises.rm(alias.path, { force: true }).catch(() => {});
-    await fs.promises.rmdir(alias.dir).catch(() => {});
+    await fs.promises.rm(alias.path, { force: true });
+    await fs.promises.rmdir(alias.dir).catch(error => {
+      if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY" && error.code !== "EEXIST") throw error;
+    });
   }
 
-  async function waitForSmoothVideoPlayback(id, file, timeoutMs) {
+  async function waitForSmoothVideoPlayback(id, file, timeoutMs, { signal } = {}) {
     const descriptor = smoothVideoCacheDescriptor(id, file);
-    if (!descriptor) return false;
+    if (!descriptor || signal?.aborted) return false;
     const deadline = Date.now() + Math.max(0, Number(timeoutMs || 0));
-    while (Date.now() <= deadline) {
-      if (safeStat(descriptor.cachePath)?.size > 0 || safeStat(descriptor.skipPath)?.isFile()) return true;
-      await new Promise((resolve) => setTimeout(resolve, SHORT_VIDEO_SMOOTH_ON_DEMAND_POLL_MS));
+    for (;;) {
+      if (signal?.aborted) return false;
+      if (safeStat(descriptor.cachePath)?.size > 0) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, Math.min(remaining, SHORT_VIDEO_SMOOTH_ON_DEMAND_POLL_MS));
+        signal?.addEventListener("abort", finish, { once: true });
+        if (signal?.aborted) finish();
+      });
     }
-    return false;
   }
 
-  async function probeSmoothVideo(filePath) {
+  async function probeSmoothVideo(filePath, { job } = {}) {
     try {
       const result = await runMediaProcess(ffprobePath, [
         "-v", "error",
@@ -2108,7 +2469,7 @@ export function createShortVideosRuntime({
         "-show_entries", "stream=codec_name,width,height,avg_frame_rate,r_frame_rate,bit_rate",
         "-of", "json",
         filePath
-      ], { captureStdout: true });
+      ], { captureStdout: true, trackJobKey: job?.key, job });
       const stream = JSON.parse(result.stdout || "{}").streams?.[0] || {};
       return {
         codec: String(stream.codec_name || ""),
@@ -2118,7 +2479,7 @@ export function createShortVideosRuntime({
         bitRate: Number(stream.bit_rate || 0)
       };
     } catch (error) {
-      console.warn("[short-video-smooth-probe]", error.message || error);
+      if (!job || isCurrentSmoothVideoJob(job)) console.warn("[short-video-smooth-probe]", error.message || error);
       return null;
     }
   }
@@ -2149,14 +2510,16 @@ export function createShortVideosRuntime({
 
   function runMediaProcess(command, args, options = {}) {
     return new Promise((resolve, reject) => {
+      if (options.job) assertCurrentSmoothVideoJob(options.job);
       const child = spawn(command, args, {
         windowsHide: true,
         stdio: ["ignore", options.captureStdout ? "pipe" : "ignore", "pipe"]
       });
       if (options.trackJobKey) {
         smoothVideoChildren.set(options.trackJobKey, child);
-        if (smoothVideoJobs.get(options.trackJobKey)?.stoppedByUser) child.kill("SIGKILL");
+        if (options.job) options.job.child = child;
       }
+      let processError = null;
       let stdout = "";
       let stderr = "";
       let progressBuffer = "";
@@ -2179,8 +2542,12 @@ export function createShortVideosRuntime({
           }
         }
       });
-      child.once("error", reject);
-      child.once("exit", (code) => {
+      child.once("error", error => { processError ||= error; });
+      // exit does not prove the stdout/stderr handles have closed. Keep the
+      // job (and runtime stop) pending through the physical close event.
+      child.once("close", (code) => {
+        if (options.trackJobKey && smoothVideoChildren.get(options.trackJobKey) === child) smoothVideoChildren.delete(options.trackJobKey);
+        if (options.job?.child === child) options.job.child = null;
         if (progressBuffer && typeof options.onProgress === "function") {
           const separator = progressBuffer.indexOf("=");
           if (separator > 0) {
@@ -2189,20 +2556,33 @@ export function createShortVideosRuntime({
             } catch {}
           }
         }
-        if (code === 0) resolve({ stdout, stderr });
+        if (processError) reject(processError);
+        else if (code === 0) resolve({ stdout, stderr });
         else reject(new Error((stderr || `${path.basename(command)} 退出码 ${code}`).trim().slice(-1200)));
       });
     });
   }
 
   function stopVideoCacheQueue() {
-    if (videoCacheTimer) clearTimeout(videoCacheTimer);
+    videoCacheAccepting = false;
+    videoCacheGeneration += 1;
+    if (videoCacheTimer != null) clearTimeout(videoCacheTimer);
     videoCacheTimer = null;
     videoCacheQueue.length = 0;
+    const executions = [...videoCacheExecutions];
+    for (const job of videoCacheJobs.values()) job.controller.abort();
+    for (const execution of executions) execution.job.controller.abort();
     videoCacheJobs.clear();
+    const drain = Promise.all(executions.map(execution => execution.done));
+    // Other runtime workers may still be stopping when a native close fails.
+    // Observe it immediately while preserving the rejection for the caller.
+    drain.catch(() => {});
+    return drain;
   }
 
   function stopSmoothVideoQueue({ pause = true } = {}) {
+    smoothVideoJobGeneration += 1;
+    const executions = [...smoothVideoExecutions];
     smoothVideoWarmupGeneration += 1;
     if (smoothVideoWarmupTimer) clearTimeout(smoothVideoWarmupTimer);
     smoothVideoWarmupTimer = null;
@@ -2212,6 +2592,7 @@ export function createShortVideosRuntime({
     if (smoothVideoTimer) clearTimeout(smoothVideoTimer);
     smoothVideoTimer = null;
     smoothVideoQueue.length = 0;
+    for (const job of smoothVideoJobs.values()) job.stoppedByUser = true;
     smoothVideoJobs.clear();
     smoothVideoCandidateBacklog.length = 0;
     smoothVideoCandidateIds.clear();
@@ -2221,11 +2602,13 @@ export function createShortVideosRuntime({
     smoothVideoCandidateScanComplete = true;
     if (pause) smoothVideoPausedByUser = true;
     for (const job of smoothVideoActiveJobs.values()) job.stoppedByUser = true;
+    for (const execution of executions) execution.job.stoppedByUser = true;
     for (const child of smoothVideoChildren.values()) {
       if (child && !child.killed) child.kill("SIGKILL");
     }
-    smoothVideoActiveJobs.clear();
-    smoothVideoChildren.clear();
+    const drain = Promise.all(executions.map(execution => execution.done));
+    drain.catch(() => {});
+    return drain;
   }
 
   function normalizeSmoothVideoConcurrency(value) {

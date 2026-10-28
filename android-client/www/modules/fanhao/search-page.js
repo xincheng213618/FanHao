@@ -1,6 +1,7 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-1443708f18b1";
-import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-1443708f18b1";
+import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-22080e82f167";
+import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-22080e82f167";
+import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
 
 const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 const DEFAULT_SEARCH_TERMS = Object.freeze(["[A]"]);
@@ -19,16 +20,28 @@ export function createFanhaoSearchPage({
   getActiveUrl = () => "",
   getLibrary = () => null
 }) {
-  let prepareTimer = 0;
-  let suggestionTimer = 0;
-  let suggestionController = null;
+  let activePage = null;
+  const retirePage = () => activePage?.retire();
+  globalThis.window?.addEventListener?.("fanhaoViewWillRender", retirePage);
+  globalThis.window?.addEventListener?.("pagehide", retirePage);
+  globalThis.window?.addEventListener?.("fanhaoAccountOwnerChanged", () => {
+    if (activePage && !activePage.isCurrent()) activePage.retire();
+  });
 
   function render(query = "") {
     const text = cleanQuery(query);
-    window.clearTimeout(prepareTimer);
-    window.clearTimeout(suggestionTimer);
-    suggestionController?.abort();
-    suggestionController = null;
+    activePage?.retire();
+    let prepareTimer = 0, suggestionTimer = 0, blurTimer = 0, suggestionVersion = 0;
+    let suggestionController = null, retired = false;
+    const activeUrl = getActiveUrl(), accountScope = captureAccountOwner(activeUrl);
+    const page = { isCurrent: () => !retired && activePage === page && head.isConnected
+      && getActiveUrl() === activeUrl && isAccountOwnerCurrent(accountScope), retire() {
+      retired = true;
+      window.clearTimeout(prepareTimer);
+      window.clearTimeout(blurTimer);
+      hideSuggestions();
+    } };
+    activePage = page;
     els.viewContent.className = "content-list fanhao-search-page-content";
     const head = document.createElement("header");
     head.className = "fanhao-search-page-head";
@@ -41,13 +54,14 @@ export function createFanhaoSearchPage({
     back.className = "fanhao-search-page-back";
     back.setAttribute("aria-label", "返回番号");
     back.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    back.addEventListener("click", goBack);
+    back.addEventListener("click", () => { if (page.isCurrent()) goBack(); });
 
     const field = document.createElement("label");
     field.className = "fanhao-search-page-field";
     field.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     const input = document.createElement("input");
     input.type = "search";
+    input.setAttribute("aria-label", "搜索番号、作品或演员");
     input.autocomplete = "off";
     input.enterKeyHint = "search";
     input.placeholder = "搜番号、作品、演员";
@@ -78,9 +92,12 @@ export function createFanhaoSearchPage({
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (!page.isCurrent()) return;
+      page.retire();
       submitQuery(input.value);
     });
     input.addEventListener("input", () => {
+      if (!page.isCurrent()) return;
       syncClear();
       window.clearTimeout(prepareTimer);
       const next = cleanQuery(input.value);
@@ -89,15 +106,22 @@ export function createFanhaoSearchPage({
         return;
       }
       if (!globalThis.navigator?.connection?.saveData) {
-        prepareTimer = window.setTimeout(() => Promise.resolve(warmSearch(next)).catch(() => {}), 180);
+        prepareTimer = window.setTimeout(() => {
+          if (page.isCurrent() && cleanQuery(input.value) === next) Promise.resolve(warmSearch(next)).catch(() => {});
+        }, 180);
       }
       requestSuggestions(next);
     });
     input.addEventListener("focus", () => requestSuggestions(input.value));
-    input.addEventListener("blur", () => window.setTimeout(() => {
-      if (!head.contains(document.activeElement)) hideSuggestions();
-    }, 80));
+    input.addEventListener("blur", () => {
+      window.clearTimeout(blurTimer);
+      blurTimer = window.setTimeout(() => {
+        if (page.isCurrent() && !head.contains(document.activeElement)) hideSuggestions();
+      }, 80);
+    });
     clear.addEventListener("click", () => {
+      if (!page.isCurrent()) return;
+      window.clearTimeout(prepareTimer);
       input.value = "";
       syncClear();
       hideSuggestions();
@@ -108,7 +132,7 @@ export function createFanhaoSearchPage({
     if (!text) {
       renderLanding(results);
       window.requestAnimationFrame(() => {
-        if (!input.isConnected) return;
+        if (!page.isCurrent()) return;
         input.focus({ preventScroll: true });
       });
     }
@@ -116,29 +140,28 @@ export function createFanhaoSearchPage({
 
     function requestSuggestions(value) {
       const next = cleanQuery(value);
-      window.clearTimeout(suggestionTimer);
-      suggestionController?.abort();
-      suggestionController = null;
-      if (!next) {
-        hideSuggestions();
-        return;
-      }
+      hideSuggestions();
+      if (!next || !page.isCurrent()) return;
+      const version = suggestionVersion;
       suggestionTimer = window.setTimeout(async () => {
+        if (!page.isCurrent() || version !== suggestionVersion || document.activeElement !== input) return;
         const controller = new AbortController();
         suggestionController = controller;
+        const ownsSuggestions = () => page.isCurrent() && version === suggestionVersion
+          && !controller.signal.aborted && cleanQuery(input.value) === next && head.contains(document.activeElement);
         try {
           const data = await fetchSuggestions(next, { signal: controller.signal });
-          if (controller.signal.aborted || !input.isConnected || cleanQuery(input.value) !== next) return;
-          renderSuggestions(buildFanhaoSearchSuggestions(data, MAX_LIVE_SUGGESTIONS));
+          if (!ownsSuggestions()) return;
+          renderSuggestions(buildFanhaoSearchSuggestions(data, MAX_LIVE_SUGGESTIONS), ownsSuggestions);
         } catch (error) {
-          if (error?.name !== "AbortError") hideSuggestions();
+          if (ownsSuggestions() && error?.name !== "AbortError") hideSuggestions();
         } finally {
           if (suggestionController === controller) suggestionController = null;
         }
       }, 220);
     }
 
-    function renderSuggestions(items) {
+    function renderSuggestions(items, ownsSuggestions) {
       suggestions.replaceChildren();
       if (!items.length) {
         suggestions.hidden = true;
@@ -159,6 +182,7 @@ export function createFanhaoSearchPage({
         button.append(visual, copy, createChevron());
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => {
+          if (!ownsSuggestions() || suggestions.hidden || !button.isConnected) return;
           const query = cleanQuery(input.value);
           rememberSearch(query);
           preserveQuery(query);
@@ -178,10 +202,12 @@ export function createFanhaoSearchPage({
     }
 
     function hideSuggestions() {
+      suggestionVersion += 1;
       window.clearTimeout(suggestionTimer);
       suggestionController?.abort();
       suggestionController = null;
       suggestions.hidden = true;
+      suggestions.replaceChildren();
     }
   }
 
@@ -217,6 +243,7 @@ export function createFanhaoSearchPage({
   }
 
   function createPersonMatch(person) {
+    const page = activePage;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "fanhao-search-person-card";
@@ -234,7 +261,9 @@ export function createFanhaoSearchPage({
     count.textContent = `${formatNumber(person.workCount || 0)} 部本地作品`;
     copy.append(title, count);
     button.append(visual, copy, createChevron());
-    button.addEventListener("click", () => showView("personDetail", personDetailParams(person.id), { push: true }));
+    button.addEventListener("click", () => {
+      if (page?.isCurrent() && button.isConnected) showView("personDetail", personDetailParams(person.id), { push: true });
+    });
     return button;
   }
 
@@ -264,6 +293,7 @@ export function createFanhaoSearchPage({
   }
 
   function renderLanding(container) {
+    const page = activePage;
     const landing = document.createElement("section");
     landing.className = "fanhao-search-landing";
     const defaultKeys = new Set(DEFAULT_SEARCH_TERMS.map((query) => query.toLocaleLowerCase("zh-CN")));
@@ -272,6 +302,7 @@ export function createFanhaoSearchPage({
       landing.append(createSearchGroup("搜索历史", history.map((query) => ({ query, label: query })), {
         actionLabel: "清空",
         onAction() {
+          if (!page?.isCurrent()) return;
           localStorage.removeItem(SEARCH_HISTORY_STORAGE_KEY);
           landing.replaceWith(createLanding());
         }
@@ -337,6 +368,7 @@ export function createFanhaoSearchPage({
           chip.append(meta);
         }
         chip.addEventListener("click", () => {
+          if (!page?.isCurrent() || !chip.isConnected) return;
           if (typeof item.onSelect === "function") item.onSelect();
           else submitQuery(item.query, { remember: item.remember !== false });
         });

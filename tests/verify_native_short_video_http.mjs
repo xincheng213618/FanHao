@@ -17,6 +17,9 @@ const javaExecutable = (name) => javaHome
 
 try {
   const sources = [
+    path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedRequests.java"),
+    path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedTransport.java"),
+    path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedPaging.java"),
     path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoHttpResponse.java"),
     path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoImageLoader.java"),
     path.join(root, "tests", "fixtures", "NativeShortVideoHttpHarness.java")

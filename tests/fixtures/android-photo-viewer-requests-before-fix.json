@@ -1,0 +1,9 @@
+{
+  "description": "Actual pre-fix full photo viewer hydration methods. Only synthetic controlled boundaries execute in the regression.",
+  "functions": {
+    "photoViewerItems": "  async function photoViewerItems(album = {}, sourceImages = []) {\n    const currentImages = Array.isArray(sourceImages) ? sourceImages : [];\n    const totalImages = Number(album.imageCount || currentImages.length || 0);\n    if (!album.id || currentImages.length >= totalImages) return photoViewerItemsFromImages(album, currentImages);\n\n    const activeUrl = getActiveUrl();\n    const path = photoDetailPath(album.id, { imageLimit: \"all\" });\n    const cached = await readCachedJson(activeUrl, path).catch(() => null);\n    if (cached?.payload?.album?.images?.length >= totalImages) {\n      return photoViewerItemsFromImages(cached.payload.album, cached.payload.album.images);\n    }\n\n    const data = await fetchJson(activeUrl, path, { timeoutMs: 26000 });\n    writeCachedJson(activeUrl, path, data).catch(() => {});\n    return photoViewerItemsFromImages(data.album || album, data.album?.images || currentImages);\n  }",
+    "hydratePhotoViewerItems": "  function hydratePhotoViewerItems(viewer, album = {}, sourceImages = [], sourceKey = \"\") {\n    const currentImages = Array.isArray(sourceImages) ? sourceImages : [];\n    const totalImages = Number(album.imageCount || currentImages.length || 0);\n    if (!viewer?.updateItems || !album.id || currentImages.length >= totalImages) return;\n\n    photoViewerItems(album, sourceImages)\n      .then((items) => {\n        if (items.length > currentImages.length) viewer.updateItems(items, { sourceKey });\n      })\n      .catch(() => {});\n  }",
+    "photoViewerSourceKey": "  function photoViewerSourceKey(album = {}) {\n    return album.id ? `photo:${album.id}` : \"\";\n  }"
+  },
+  "sha256": "bd1b271f2bb09ded7e17fc7cb985308be08082398d067ffddd4404d677e84ef7"
+}

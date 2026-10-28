@@ -13,11 +13,15 @@ export function createMediaViewer() {
   let suppressNextClick = false;
   let suppressClickTimer = 0;
   let swipeTracking = false;
+  let activeImage = null;
+  let activeImageUrl = "";
 
   function bindImageTrigger(element, imageUrl, title = "") {
     if (!element || !imageUrl) return;
     element.classList.add("image-view-trigger");
     element.setAttribute("role", "button");
+    const imageTitle = String(title || "").trim();
+    element.setAttribute("aria-label", imageTitle ? `查看图片：${imageTitle}` : "查看图片");
     element.tabIndex = 0;
     element.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -38,6 +42,9 @@ export function createMediaViewer() {
 
     overlay = document.createElement("div");
     overlay.className = "media-viewer";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "图片预览");
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) close();
     });
@@ -62,6 +69,23 @@ export function createMediaViewer() {
     stage.className = "media-viewer-stage";
 
     const img = document.createElement("img");
+    const feedback = document.createElement("div");
+    feedback.className = "media-viewer-feedback";
+    feedback.hidden = true;
+    const status = document.createElement("p");
+    status.className = "media-viewer-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "media-viewer-retry";
+    retry.textContent = "重新加载";
+    retry.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const item = viewerState?.items[viewerState.index];
+      if (item) loadCurrentImage(item, true);
+    });
+    feedback.append(status, retry);
     const prev = createNavButton("上一张", "prev");
     const next = createNavButton("下一张", "next");
     prev.addEventListener("click", (event) => {
@@ -77,11 +101,11 @@ export function createMediaViewer() {
         suppressNextClick = false;
         return;
       }
-      if (event.target instanceof Element && event.target.closest(".media-viewer-nav")) return;
+      if (event.target instanceof Element && event.target.closest(".media-viewer-nav, .media-viewer-feedback")) return;
       toggleControls();
     });
     bindStageSwipe(stage);
-    stage.append(img, prev, next);
+    stage.append(img, feedback, prev, next);
 
     const controlBar = document.createElement("div");
     controlBar.className = "media-viewer-control-bar";
@@ -196,8 +220,7 @@ export function createMediaViewer() {
     const progress = overlay.querySelector(".media-viewer-range");
     const progressValue = overlay.querySelector(".media-viewer-progress-value");
     if (!img || !item) return;
-    img.alt = item.title || "";
-    img.src = item.url;
+    loadCurrentImage(item);
     if (caption) caption.textContent = item.title || "图片";
     if (counter) counter.textContent = `${viewerState.index + 1} / ${viewerState.items.length}`;
     if (progress) {
@@ -209,6 +232,47 @@ export function createMediaViewer() {
     overlay.querySelector(".media-viewer-nav.prev")?.toggleAttribute("disabled", viewerState.items.length <= 1 || viewerState.index <= 0);
     overlay.querySelector(".media-viewer-nav.next")?.toggleAttribute("disabled", viewerState.items.length <= 1 || viewerState.index >= viewerState.items.length - 1);
     preloadNearbyImages();
+  }
+
+  function loadCurrentImage(item, force = false) {
+    if (!overlay || !item) return;
+    if (!force && activeImage && activeImageUrl === item.url) {
+      activeImage.alt = item.title || "";
+      return;
+    }
+    const stage = overlay.querySelector(".media-viewer-stage");
+    const previous = stage?.querySelector("img");
+    if (!previous) return;
+    const img = document.createElement("img");
+    img.alt = item.title || "";
+    img.decoding = "async";
+    activeImage = img;
+    activeImageUrl = item.url;
+    previous.replaceWith(img);
+    previous.removeAttribute("src");
+    setImageStatus("loading");
+    const isCurrent = () => activeImage === img && overlay?.contains(img);
+    img.onload = () => {
+      if (isCurrent()) setImageStatus("ready");
+    };
+    img.onerror = () => {
+      if (isCurrent()) {
+        setImageStatus("error");
+        setControlsVisible(true, false);
+      }
+    };
+    img.src = item.url;
+  }
+
+  function setImageStatus(state) {
+    if (!overlay) return;
+    const stage = overlay.querySelector(".media-viewer-stage");
+    stage.dataset.imageState = state;
+    stage.setAttribute("aria-busy", String(state === "loading"));
+    const feedback = stage.querySelector(".media-viewer-feedback");
+    feedback.hidden = state === "ready";
+    stage.querySelector(".media-viewer-status").textContent = state === "error" ? "图片加载失败，请重试" : state === "loading" ? "正在加载图片" : "";
+    stage.querySelector(".media-viewer-retry").hidden = state !== "error";
   }
 
   function showImageAt(index, options = {}) {
@@ -270,7 +334,7 @@ export function createMediaViewer() {
 
   function beginSwipeTracking(clientX, clientY, target = null) {
     swipeTracking = false;
-    if (target instanceof Element && target.closest(".media-viewer-nav")) return false;
+    if (target instanceof Element && target.closest(".media-viewer-nav, .media-viewer-feedback")) return false;
     if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
     touchStartX = clientX;
     touchStartY = clientY;
@@ -416,6 +480,9 @@ export function createMediaViewer() {
     if (!overlay) return false;
     window.clearTimeout(controlsHideTimer);
     window.clearTimeout(suppressClickTimer);
+    activeImage?.removeAttribute("src");
+    activeImage = null;
+    activeImageUrl = "";
     overlay.remove();
     overlay = null;
     viewerState = null;

@@ -100,7 +100,7 @@
 .novel-mobile-detail-hero .novel-mobile-cover strong { font-size: 14px; -webkit-line-clamp: 5; }
 .novel-mobile-detail-body { gap: 10px; align-content: start; }
 .novel-mobile-detail-body h1 { margin: 0; font-size: 22px; line-height: 1.4; font-weight: 650; overflow-wrap: anywhere; }
-.novel-mobile-detail-body > span { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.8; white-space: normal; }
+.novel-mobile-detail-body > span { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.8; white-space: normal; overflow-wrap: anywhere; }
 .novel-mobile-detail-hero > .novel-mobile-detail-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; margin: 0; gap: 10px; }
 .novel-mobile-detail-actions button { min-height: 46px; font-size: 13px; font-weight: 600; }
 .novel-mobile-detail-actions button.primary { border-color: var(--mobile-accent); background: var(--mobile-accent); }
@@ -120,6 +120,7 @@
 .novel-mobile-catalog-tools input,
 .novel-mobile-catalog-tools select,
 .novel-mobile-catalog-tools button { min-height: 44px; }
+#novelDetailCatalog .novel-reader-catalog-loading { min-width: 0; overflow-wrap: anywhere; }
 .novel-mobile-chapter { min-height: 50px; padding: 8px 0; }
 .novel-mobile-chapter strong { font-size: 14px; font-weight: 500; }
 

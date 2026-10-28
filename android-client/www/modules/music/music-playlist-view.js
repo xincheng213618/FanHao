@@ -1,3 +1,5 @@
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-22080e82f167";
+
 export function createMusicPlaylistView(deps) {
   const {
     deleteCurrentPlaylist,
@@ -110,24 +112,44 @@ export function createMusicPlaylistView(deps) {
   }
 
   function renderPlaylistManagement() {
-    const details = document.createElement("details");
-    details.className = "music-mobile-playlist-management";
-    const summary = document.createElement("summary");
-    summary.setAttribute("aria-label", "管理歌单");
-    setMusicSymbol(summary, "more");
-    const menu = document.createElement("span");
-    const edit = document.createElement("button");
-    edit.type = "button";
-    edit.textContent = "编辑歌单";
-    edit.addEventListener("click", () => editCurrentPlaylist().catch(() => {}));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "danger";
-    remove.textContent = "删除歌单";
-    remove.addEventListener("click", () => deleteCurrentPlaylist().catch(() => {}));
-    menu.append(edit, remove);
-    details.append(summary, menu);
-    return details;
+    const management = document.createElement("button");
+    management.type = "button";
+    management.className = "music-mobile-playlist-management";
+    management.setAttribute("aria-label", "管理歌单");
+    management.setAttribute("aria-haspopup", "dialog");
+    setMusicSymbol(management, "more");
+    management.addEventListener("click", () => {
+      if (!management.isConnected) return;
+      const sheet = openMobileActionSheet({
+        title: "管理歌单",
+        trigger: management,
+        value: "",
+        options: [
+          {
+            value: "edit",
+            label: "编辑歌单",
+            variant: "wide",
+            closeOnSelect: false,
+            select: (_value, _button, close) => {
+              close();
+              editCurrentPlaylist().catch(() => {});
+            }
+          },
+          {
+            value: "delete",
+            label: "删除歌单",
+            variant: "danger wide",
+            closeOnSelect: false,
+            select: (_value, _button, close) => {
+              close();
+              deleteCurrentPlaylist().catch(() => {});
+            }
+          }
+        ]
+      });
+      sheet.panel.classList.add("music-mobile-playlist-management-sheet");
+    });
+    return management;
   }
 
   function playlistTracks() {

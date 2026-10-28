@@ -28,6 +28,13 @@ export function parseRange(rangeHeader, size) {
 }
 
 function normalizedEntityMtimeMs(file, stat) {
+  // A verified startup prefix represents the original entity, whose logical
+  // size and timestamp differ from this physical cache file. All complete
+  // files keep their opened handle's metadata authoritative.
+  const prefixMtime = Number(file?.entityMtimeMs);
+  if (Number(file?.totalSize) > Number(stat?.size) && file?.entityMtimeMs !== null
+    && file?.entityMtimeMs !== undefined && file?.entityMtimeMs !== ""
+    && Number.isFinite(prefixMtime) && prefixMtime >= 0) return prefixMtime;
   for (const value of [stat?.mtimeMs, file?.entityMtimeMs, file?.cacheVersion]) {
     if (value === null || value === undefined || value === "") continue;
     const candidate = Number(value);
@@ -44,7 +51,11 @@ function normalizedEntityTag(value) {
 
 export function entityValidators(file, stat, entitySize = Number(stat?.size || 0)) {
   const size = Math.max(0, Math.floor(Number(entitySize || 0)) || 0);
-  const mtimeMs = normalizedEntityMtimeMs(file, stat);
+  const authoritativeMtimeMs = normalizedEntityMtimeMs(file, stat);
+  // Short-video source URLs and their verified startup prefixes share a
+  // catalog revision measured in milliseconds. This explicit precision choice
+  // never replaces a complete file's authoritative opened-handle timestamp.
+  const mtimeMs = file?.entityMtimeResolutionMs === 1 ? Math.floor(authoritativeMtimeMs) : authoritativeMtimeMs;
   const explicitTag = normalizedEntityTag(file?.entityTag);
   const versionMicros = Math.max(0, Math.round(mtimeMs * 1000));
   // Size and timestamps are revision hints, not byte identity. Only a caller
@@ -66,6 +77,54 @@ export function ifRangeMatches(ifRangeHeader, validators) {
   // Last-Modified has only second precision and is not a byte identity. This
   // server authorizes a resumed range only with a trusted strong entity tag.
   return false;
+}
+
+function entityTagConditionMatches(value, etag, weak) {
+  let remaining = String(value || "").trim();
+  if (remaining === "*") return true;
+  let matched = false, sawTag = false;
+  while (remaining) {
+    // Commas inside an opaque tag are data, so splitting on commas is unsafe.
+    const tag = /^(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*"/.exec(remaining)?.[0];
+    if (!tag) return false;
+    sawTag = true;
+    const compare = candidate => weak ? candidate.replace(/^W\//, "") : candidate;
+    if ((weak || (!tag.startsWith("W/") && !etag.startsWith("W/"))) && compare(tag) === compare(etag)) matched = true;
+    remaining = remaining.slice(tag.length).trimStart();
+    if (!remaining) break;
+    if (!remaining.startsWith(",")) return false;
+    remaining = remaining.slice(1).trimStart();
+    if (!remaining) return false;
+  }
+  return sawTag && matched;
+}
+
+function readPreconditionStatus(req, validators) {
+  if (req?.method !== "GET" && req?.method !== "HEAD") return 0;
+  const headers = req.headers || {}, etag = validators.ETag;
+  const modified = Date.parse(validators["Last-Modified"]);
+  const ifMatch = headers["if-match"], ifNoneMatch = headers["if-none-match"];
+  if (ifMatch !== undefined) {
+    if (!entityTagConditionMatches(ifMatch, etag, false)) return 412;
+  } else if (headers["if-unmodified-since"] !== undefined) {
+    const unmodifiedSince = parseHttpDate(headers["if-unmodified-since"]);
+    if (Number.isFinite(unmodifiedSince) && modified > unmodifiedSince) return 412;
+  }
+  if (ifNoneMatch !== undefined) {
+    if (entityTagConditionMatches(ifNoneMatch, etag, true)) return 304;
+  } else if (headers["if-modified-since"] !== undefined) {
+    const modifiedSince = parseHttpDate(headers["if-modified-since"]);
+    if (Number.isFinite(modifiedSince) && modified <= modifiedSince) return 304;
+  }
+  return 0;
+}
+
+function parseHttpDate(value) {
+  const date = String(value || "").trim();
+  // Accept the preferred HTTP-date and its two obsolete wire formats, while
+  // ignoring Date.parse extensions such as a bare year or a numeric string.
+  if (!/^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?: \d|\d{2}) \d{2}:\d{2}:\d{2} \d{4})$/.test(date)) return NaN;
+  return Date.parse(date);
 }
 
 function isSingleByteRange(rangeHeader) {
@@ -156,6 +215,20 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
   function attachmentDisposition(fileName = "download") {
     const fallback = String(fileName || "download").replace(/[^\w.-]+/g, "_").slice(0, 180) || "download";
     return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(String(fileName || fallback))}`;
+  }
+
+  function respondToReadPreconditions(req, res, validators, headers) {
+    const status = readPreconditionStatus(req, validators);
+    if (!status) return null;
+    res.writeHead(status, {
+      ...diagnosticResponseHeaders(headers),
+      ...(headers["Accept-Ranges"] ? { "Accept-Ranges": headers["Accept-Ranges"] } : {}),
+      ...(status === 412 ? { "Cache-Control": "no-store" }
+        : headers["Cache-Control"] ? { "Cache-Control": headers["Cache-Control"] } : {}),
+      ...validators,
+      ...(status === 412 ? { "Content-Length": 0 } : {})
+    });
+    return finishResponse(res, () => res.end());
   }
 
   function serveInlineFile(res, filePath, contentType = "", options = {}) {
@@ -254,6 +327,9 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
       if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
 
       const pipe = async (range) => {
+        const bounds = range || { start: 0, end: stat.size - 1 };
+        const expectedBytes = bounds.end - bounds.start + 1;
+        let receivedBytes = 0;
         const failed = () => {
           if (res.destroyed || res.writableEnded) return;
           if (!res.headersSent) {
@@ -265,13 +341,23 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
           }
         };
         try {
-          stream = handle.createReadStream({ ...(range || {}), autoClose: true, emitClose: true });
+          stream = handle.createReadStream({ ...bounds, autoClose: true, emitClose: true });
           streamClosed = new Promise(resolve => stream.once("close", resolve));
           stream.on("error", failed);
+          stream.on("data", chunk => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > expectedBytes) failed();
+          });
+          // End the destination ourselves: pipe's automatic end could still
+          // complete a response after a short-read destroy in this same event.
+          stream.once("end", () => {
+            if (receivedBytes !== expectedBytes) failed();
+            else if (!unavailable()) res.end();
+          });
           stream.once("close", () => { if (!stream.readableEnded) failed(); });
           await finishResponse(res, () => {
             if (unavailable()) { stream.destroy(); return; }
-            stream.pipe(res);
+            stream.pipe(res, { end: false });
           });
         } catch {
           failed();
@@ -306,7 +392,11 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
     return withOpenedFile(req, res, filePath, async (stat, pipe) => {
       // Headers and bytes refer to the same opened handle even if the lexical
       // path is moved/replaced before streaming starts.
-      res.writeHead(200, responseHeaders(stat));
+      const headers = responseHeaders(stat);
+      const validators = entityValidators({ entityTag: headers.ETag }, stat);
+      const conditional = respondToReadPreconditions(req, res, validators, headers);
+      if (conditional) { await conditional; return true; }
+      res.writeHead(200, { ...headers, ...validators });
       if (req?.method === "HEAD" || stat.size === 0) {
         await finishResponse(res, () => res.end());
         return true;
@@ -348,6 +438,11 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
       const responseHeaders = file.responseHeaders && typeof file.responseHeaders === "object"
         ? diagnosticResponseHeaders(file.responseHeaders)
         : {};
+
+      const conditional = respondToReadPreconditions(req, res, validators, {
+        ...responseHeaders, "Accept-Ranges": "bytes", "Cache-Control": cacheControl
+      });
+      if (conditional) { await conditional; return; }
 
       if (singleByteRange && rangeConditionMatches && !requestedRange) {
         res.writeHead(416, {

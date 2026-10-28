@@ -184,7 +184,7 @@ try {
     ["receipt retained without listener", "plugin", 'notifyListeners("progressCommitted", receipt, false)', 'notifyListeners("progressCommitted", receipt, true)', "receipts must not be retained"],
     ["Capacitor serialization bypassed", "plugin", "plugin.execute(this::deliver);", "deliver();", "notify must run on Capacitor task handler"],
     ["failed launch replaces current receiver", "plugin", "getActivity().startActivity(intent);\n      activeProgressReceiver = receiver;", "activeProgressReceiver = receiver;\n      getActivity().startActivity(intent);", "failed launch preserves previous active receiver"],
-    ["destroy does not invalidate receiver", "plugin", "destroyed = true;\n    activeProgressReceiver = null;", "", "destroy invalidates pending and later receipt delivery"],
+    ["destroy does not invalidate receiver", "plugin", "destroyed = true;\n    shortFeedEpoch.incrementAndGet(); pendingShortFeedPlay = 0L;\n    activeProgressReceiver = null;", "", "destroy invalidates pending and later receipt delivery"],
     ["source receipt fence removed", "activity", "receiver != null && snapshot.url.equals(expectedUrl)", "receiver != null", "Activity factory cannot acknowledge a different source URL"],
     ["receipt identity spoofed", "plugin", 'receipt.put("videoId", videoId);', 'receipt.put("videoId", "foreign-video");', "receipt identity mismatch"],
     ["listener failure strands final snapshot", "helper", "// An unavailable UI/bridge must not interrupt accepted final delivery.", "throw ignored;", "listener failure cannot strand a newer accepted final position"]

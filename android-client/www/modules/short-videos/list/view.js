@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-1443708f18b1";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-22080e82f167";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=assets-1443708f18b1";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-1443708f18b1";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-1443708f18b1";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-1443708f18b1";
+import { DEFAULT_SORT, initials } from "../shared.js?v=assets-22080e82f167";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-22080e82f167";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-22080e82f167";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-22080e82f167";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -13,6 +13,7 @@ export function createShortVideoListView(context = {}) {
   const clearSearchHistory = (...args) => context.clearSearchHistory(...args);
   const currentAuthorFacet = (...args) => context.currentAuthorFacet(...args);
   const fetchSearchSuggestions = (...args) => context.fetchSearchSuggestions(...args);
+  const cancelSearchSuggestions = (...args) => context.cancelSearchSuggestions(...args);
   const isAuthorFeedView = (...args) => context.isAuthorFeedView(...args);
   const isAuthorIndexView = (...args) => context.isAuthorIndexView(...args);
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
@@ -126,6 +127,9 @@ export function createShortVideoListView(context = {}) {
   function renderDedicatedSearchHeader() {
     const wrap = document.createElement("div");
     wrap.className = "short-video-search-page-head";
+    const headerBaseUrl = getActiveUrl();
+    const ownsHeader = () => wrap.isConnected && headerBaseUrl === getActiveUrl();
+    let suggestionGeneration = 0;
     const form = document.createElement("form");
     form.className = "short-video-search-page-form";
     form.setAttribute("role", "search");
@@ -135,7 +139,7 @@ export function createShortVideoListView(context = {}) {
     back.className = "short-video-search-page-back";
     back.setAttribute("aria-label", "返回短视频");
     back.append(createIcon("chevronLeft"));
-    back.addEventListener("click", () => goBack());
+    back.addEventListener("click", () => { if (ownsHeader()) goBack(); });
 
     const field = document.createElement("div");
     field.className = "short-video-search-page-field";
@@ -168,8 +172,15 @@ export function createShortVideoListView(context = {}) {
     const suggestions = document.createElement("div");
     suggestions.className = "short-video-search-suggestions";
     suggestions.hidden = true;
+    const retireSuggestions = () => {
+      window.clearTimeout(searchSuggestionTimer);
+      cancelSearchSuggestions();
+      suggestionGeneration += 1;
+      suggestions.hidden = true;
+    };
 
     const renderSuggestions = (items = []) => {
+      const generation = suggestionGeneration;
       suggestions.replaceChildren();
       const values = Array.isArray(items)
         ? items.filter((item) => item?.label || item?.query).filter((item) => !authorScoped || item.kind === "author")
@@ -198,6 +209,8 @@ export function createShortVideoListView(context = {}) {
         button.append(icon, copy, createIcon("chevronRight"));
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => {
+          if (!ownsHeader() || !button.isConnected || suggestions.hidden || generation !== suggestionGeneration) return;
+          retireSuggestions();
           input.value = item.query || item.label || "";
           submitSearch(input.value, { searchTab: authorScoped || item.kind === "author" ? "authors" : "all" });
           input.blur();
@@ -208,40 +221,52 @@ export function createShortVideoListView(context = {}) {
     };
 
     const requestSuggestions = (value) => {
-      window.clearTimeout(searchSuggestionTimer);
+      if (!ownsHeader()) return;
+      retireSuggestions();
+      const generation = suggestionGeneration;
       const query = String(value || "").trim();
       if (!query) {
         suggestions.hidden = true;
         return;
       }
       searchSuggestionTimer = window.setTimeout(async () => {
+        if (generation !== suggestionGeneration || !ownsHeader() || input.value.trim() !== query
+          || !wrap.contains(document.activeElement)) return;
         try {
           const result = await fetchSearchSuggestions(query);
-          if (!result || input.value.trim() !== query || !input.isConnected) return;
+          if (!result || generation !== suggestionGeneration || input.value.trim() !== query || !ownsHeader()
+            || !wrap.contains(document.activeElement)) return;
           renderSuggestions(result.suggestions || []);
         } catch {
-          suggestions.hidden = true;
+          if (generation === suggestionGeneration && ownsHeader() && input.value.trim() === query) suggestions.hidden = true;
         }
       }, 220);
     };
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (!ownsHeader()) return;
       const query = input.value.trim();
       if (!query) return;
-      suggestions.hidden = true;
+      retireSuggestions();
       submitSearch(query, { searchTab: listState.searchTab, sort: listState.sort || DEFAULT_SORT });
       input.blur();
     });
     input.addEventListener("focus", () => requestSuggestions(input.value));
     input.addEventListener("input", () => {
+      if (!ownsHeader()) return;
       clear.hidden = !input.value;
       requestSuggestions(input.value);
     });
     input.addEventListener("blur", () => window.setTimeout(() => {
-      if (!wrap.contains(document.activeElement)) suggestions.hidden = true;
+      if (!wrap.contains(document.activeElement)) {
+        suggestionGeneration += 1;
+        suggestions.hidden = true;
+      }
     }, 80));
     clear.addEventListener("click", () => {
+      if (!ownsHeader()) return;
+      retireSuggestions();
       input.value = "";
       clear.hidden = true;
       if (listState.query) submitSearch("", { searchTab: "all", remember: false });
@@ -252,7 +277,7 @@ export function createShortVideoListView(context = {}) {
     });
 
     wrap.append(form, suggestions);
-    if (!listState.query) requestAnimationFrame(() => input.focus());
+    if (!listState.query) requestAnimationFrame(() => { if (ownsHeader()) input.focus(); });
     return wrap;
   }
 

@@ -1,18 +1,18 @@
-import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-1443708f18b1";
-import { cacheAgeText } from "../../js/cache.js?v=assets-1443708f18b1";
+import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-22080e82f167";
+import { cacheAgeText } from "../../js/cache.js?v=assets-22080e82f167";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-1443708f18b1";
-import { getWorkSource } from "../../js/work-source.js?v=assets-1443708f18b1";
-import { personDetailPath } from "./features/people/detail-request.js?v=assets-1443708f18b1";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-1443708f18b1";
-import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-1443708f18b1";
-import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-1443708f18b1";
-import { createWorkActions } from "./features/works/actions.js?v=assets-1443708f18b1";
-import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-1443708f18b1";
-import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-1443708f18b1";
-import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-1443708f18b1";
+import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-22080e82f167";
+import { getWorkSource } from "../../js/work-source.js?v=assets-22080e82f167";
+import { personDetailPath } from "./features/people/detail-request.js?v=assets-22080e82f167";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-22080e82f167";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-22080e82f167";
+import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-22080e82f167";
+import { createWorkActions } from "./features/works/actions.js?v=assets-22080e82f167";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-22080e82f167";
+import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-22080e82f167";
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-22080e82f167";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 export function createDetailViews(context) {
@@ -78,6 +78,7 @@ export function createDetailViews(context) {
     if (title) title.textContent = String(value || "").trim() || "详情";
   };
   async function renderPersonDetail(personId, requestedScope = "main", isActive = () => true) {
+    videoSection.deactivate();
     const scope = String(requestedScope || "main").toLowerCase() === "western" ? "western" : "main";
     const activeUrl = getActiveUrl();
     setActiveBottom("people");
@@ -197,6 +198,7 @@ export function createDetailViews(context) {
   }
 
   async function renderWorkDetail(workId, isActive = () => true) {
+    videoSection.deactivate();
     workMove.detach();
     setActiveBottom("works");
     els.viewKicker.textContent = "作品详情";
@@ -217,9 +219,11 @@ export function createDetailViews(context) {
     const renderWorkData = (data, cacheEntry = null) => {
       const work = data.work;
       const person = data.person || null;
+      const playbackSection = videoSection.createVideoList(work, {
+        showFiles: false, showTitle: false, isActive, preservePlayback: true
+      });
       applyWorkHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
-      const playbackSection = videoSection.createVideoList(work, { showFiles: false, showTitle: false });
       const playDefaultVideo = () => videoSection.playDefaultVideo(playbackSection, work);
       const hero = createWorkDetailHero(work, playDefaultVideo);
       const factPanel = createWorkFactPanel(work);

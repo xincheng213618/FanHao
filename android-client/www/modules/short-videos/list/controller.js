@@ -1,4 +1,4 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-1443708f18b1";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-22080e82f167";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -6,6 +6,7 @@ export function createShortVideoListController(context = {}) {
   let listRequestGeneration = 0;
   let listAppendRequestId = 0;
   let listAppendRevision = 0;
+  let nativeOpenOwner = null;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
@@ -13,6 +14,31 @@ export function createShortVideoListController(context = {}) {
   const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
   const setListRefreshing = (...args) => context.setListRefreshing?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
+
+  function cancelShortVideoListRequests() {
+    // Pagination has no route render guard. Retire every read owned by the
+    // mounted list before another module or a new render takes its place.
+    listRequestGeneration += 1;
+    listAppendRequestId += 1;
+    listState.loading = false;
+    listState.loadingMore = false;
+    listState.allowLoadMore = false;
+  }
+
+  function cancelShortVideoNativeOpen(preserveOwner = null) {
+    if (preserveOwner && nativeOpenOwner === preserveOwner) return;
+    nativeOpenOwner?.controller.abort();
+    nativeOpenOwner = null;
+  }
+
+  function beginNativeOpen() {
+    cancelShortVideoNativeOpen();
+    const owner = { controller: new AbortController(), baseUrl: getActiveUrl(), scope: listScopeKey(getActiveUrl()) };
+    nativeOpenOwner = owner;
+    owner.isCurrent = () => nativeOpenOwner === owner && !owner.controller.signal.aborted
+      && owner.scope === listScopeKey(getActiveUrl());
+    return owner;
+  }
 
   function shortVideoApiSource() {
     const source = normalizeSource(listState.source);
@@ -48,6 +74,7 @@ export function createShortVideoListController(context = {}) {
     listState.authorAccountStatus = nextAuthorAccountStatus;
     listState.searchTab = nextSearchTab;
     if (scopeChanged) {
+      cancelShortVideoNativeOpen();
       if (!options.preserveData) {
         listState.data = null;
         listState.status = "";
@@ -377,6 +404,7 @@ export function createShortVideoListController(context = {}) {
   }
 
   function updateListParams(patch = {}, navigation = {}) {
+    cancelShortVideoNativeOpen();
     const next = {
       query: listState.query,
       author: listState.author,
@@ -450,8 +478,9 @@ export function createShortVideoListController(context = {}) {
   }
 
   async function openShortVideoFromList(video) {
-    const opened = await openNativeShortVideoFeed(video);
-    if (!opened) shortVideoToast("当前设备无法打开原生短视频播放器");
+    const owner = beginNativeOpen();
+    const opened = await openNativeShortVideoFeed(video, { owner, baseUrl: owner.baseUrl, isCurrent: owner.isCurrent });
+    if (!opened && owner.isCurrent()) shortVideoToast("当前设备无法打开原生短视频播放器");
     return opened;
   }
 
@@ -461,6 +490,7 @@ export function createShortVideoListController(context = {}) {
       shortVideoToast("该作者缺少可识别信息");
       return false;
     }
+    const owner = beginNativeOpen();
     const params = new URLSearchParams({
       author: authorFilter,
       source: "all",
@@ -470,10 +500,12 @@ export function createShortVideoListController(context = {}) {
       stats: "0"
     });
     try {
-      const data = await api.fetchCached(getActiveUrl(), `/api/short-videos?${params}`, {
+      const data = await api.fetchCached(owner.baseUrl, `/api/short-videos?${params}`, {
+        signal: owner.controller.signal,
         timeoutMs: 16000,
         cacheMaxAgeMs: 5 * 60 * 1000
       });
+      if (!owner.isCurrent()) return false;
       const first = data.videos?.[0];
       if (!first) {
         const profileUrl = authorOriginalUrl(author);
@@ -486,6 +518,9 @@ export function createShortVideoListController(context = {}) {
         return true;
       }
       const opened = await openNativeShortVideoFeed(first, {
+        owner,
+        baseUrl: owner.baseUrl,
+        isCurrent: owner.isCurrent,
         videos: data.videos || [],
         hasMore: data.hasMore,
         query: "",
@@ -494,9 +529,10 @@ export function createShortVideoListController(context = {}) {
         sort: listState.sort || DEFAULT_SORT,
         openAuthorPanel: true
       });
-      if (!opened) shortVideoToast("当前设备无法打开原生作者主页");
+      if (!opened && owner.isCurrent()) shortVideoToast("当前设备无法打开原生作者主页");
       return opened;
     } catch (error) {
+      if (!owner.isCurrent()) return false;
       shortVideoToast(shortVideoErrorMessage(error, "作者主页打开失败，请稍后重试"));
       return false;
     }
@@ -517,6 +553,8 @@ export function createShortVideoListController(context = {}) {
   }
 
   return {
+    cancelShortVideoListRequests,
+    cancelShortVideoNativeOpen,
     applyListParams,
     loadList,
     sortedAuthorFacets,

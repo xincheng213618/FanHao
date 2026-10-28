@@ -7,6 +7,11 @@
   --field: #e9edf2;
   --stat-surface: #fbfcfd;
   --nav-surface: rgba(255, 255, 255, 0.96);
+  --fanhao-bottom-nav-item-height: 58px;
+  --fanhao-bottom-nav-padding: 4px;
+  --fanhao-bottom-nav-border-width: 1px;
+  --fanhao-bottom-nav-fallback-height: calc(var(--fanhao-bottom-nav-item-height) + var(--fanhao-bottom-nav-padding) + var(--fanhao-bottom-nav-padding) + var(--fanhao-bottom-nav-border-width) + env(safe-area-inset-bottom));
+  --fanhao-bottom-nav-height: var(--fanhao-bottom-nav-fallback-height);
   --active-soft: #e7f0ff;
   --success-soft: #e7f4ef;
   --warning-soft: #fff0df;
@@ -126,7 +131,7 @@ button {
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
-  padding: 12px 16px calc(86px + env(safe-area-inset-bottom));
+  padding: 12px 16px calc(var(--fanhao-bottom-nav-height) + 19px);
 }
 
 body.app-starting .app-shell {
@@ -803,6 +808,9 @@ body.search-expanded .search-history {
 }
 
 .module-mode-switch[hidden] { display: none; }
+
+body.search-expanded .module-mode-switch,
+body.search-expanded .module-chrome { display: none; }
 
 .module-mode-switch select {
   min-width: 128px;

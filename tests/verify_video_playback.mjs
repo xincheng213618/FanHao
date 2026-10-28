@@ -82,7 +82,7 @@ assert(shortVideoRuntimeSource.includes("!hasIfRange(req)") && shortVideoRuntime
 assert(shortVideoRuntimeSource.includes("entityMtimeMs: Math.max(0, Number(cachedStat.mtimeMs || 0))"), "smooth renditions must expose the physical rendition timestamp without inventing a future revision");
 assert(!shortVideoRuntimeSource.includes("sourceEntityMtimeMs / 1000"), "smooth rendition validators must not synthesize a future timestamp from the source");
 assert(shortVideoRuntimeSource.includes("short-video-smooth") && shortVideoRuntimeSource.includes('"no-store"'), "uncached adaptive short-video responses must not pin the original stream under the rendition URL");
-assert(shortVideoRuntimeSource.includes('url.searchParams.get("wait")') && shortVideoRuntimeSource.includes('playbackPrepare = "source-no-wait"'), "mobile smooth playback must reuse a ready rendition without blocking first play on a background transcode");
+assert(shortVideoRuntimeSource.includes('url.searchParams.get("wait")') && shortVideoRuntimeSource.includes("sendSmoothPlaybackUnavailable") && shortVideoRuntimeSource.includes('"Retry-After": "1"'), "unready smooth playback must return a retryable response instead of original bytes under a rendition URL");
 assert(shortVideoRuntimeSource.includes("applyMobilePlaybackHints") && shortVideoRuntimeSource.includes('req.headers?.["x-fanhao-client"]'), "native playback must receive a stable rendition URL and an untruncated Media3 byte stream");
 assert(playerHtmlSource.includes('href="/css/foundation.css?'), "standalone player should load only the shared foundation styles");
 assert(!playerHtmlSource.includes('href="/styles.css?'), "standalone player must not parse every application module stylesheet");

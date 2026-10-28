@@ -58,6 +58,8 @@ function harness(input = source, { mode = "movie", cached = true } = {}) {
   const plugin = { async play(payload) { calls.bridge.push(plain(payload)); return { opened: true }; } };
   const c = vm.createContext({ ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
     currentView: "mediaDetail", currentViewParams: { id: ID, mode }, viewRenderToken: 0, activeViewController: null,
+    // No shell menus here; their actual lifecycle is covered by the gallery gate.
+    retireModePickerSession() {},
     performance: { now: () => clock }, window: eventTarget({ Capacitor: { Plugins: { FanHaoPlayer: plugin } },
       setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); } }),
     formatBytes, formatDate, formatNumber, formatTime, absoluteUrl, cacheAgeText: () => "synthetic", photoCatalogCollections: value => value,

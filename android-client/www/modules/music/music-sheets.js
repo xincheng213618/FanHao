@@ -18,10 +18,11 @@ import {
   writeShufflePreference,
   writeVersionPreferencesPreference,
   writeVersionStrategyPreference
-} from "./music-state.js?v=assets-1443708f18b1";
+} from "./music-state.js?v=assets-22080e82f167";
 
 export function createMusicSheets(deps) {
   const {
+    bindTrackPreference,
     activateSearchResultQueue,
     addTrackToPlaylist,
     appendTrackToQueue,
@@ -54,6 +55,7 @@ export function createMusicSheets(deps) {
     trackMeta,
     updateListParams
   } = deps;
+  let trackActionTarget = null;
 
   function renderSleepTimerSheet() {
     const sheet = document.createElement("section");
@@ -120,9 +122,11 @@ export function createMusicSheets(deps) {
     return sheet;
   }
 
-  function openTrackActions(trackId) {
-    const id = String(trackId || "").trim();
+  function openTrackActions(trackOrId) {
+    const supplied = trackOrId && typeof trackOrId === "object" ? trackOrId : null;
+    const id = String(supplied?.id || trackOrId || "").trim();
     if (!id || !trackForActions(id)) return;
+    trackActionTarget = supplied || trackForActions(id);
     els.viewContent?.querySelector(".music-mobile-search-input")?.blur();
     state.trackActionId = id;
     state.settingsOpen = false;
@@ -132,6 +136,7 @@ export function createMusicSheets(deps) {
   function closeTrackActions() {
     if (!state.trackActionId) return false;
     state.trackActionId = "";
+    trackActionTarget = null;
     renderShell();
     return true;
   }
@@ -139,6 +144,7 @@ export function createMusicSheets(deps) {
   function trackForActions(trackId = state.trackActionId) {
     const id = String(trackId || "").trim();
     if (!id) return null;
+    if (state.trackActionId === id && trackActionTarget?.id === id) return trackActionTarget;
     return [state.current, ...(state.data?.tracks || []), ...(state.queue || [])]
       .find((track) => track?.id === id) || null;
   }
@@ -148,7 +154,7 @@ export function createMusicSheets(deps) {
     backdrop.type = "button";
     backdrop.className = "music-mobile-settings-backdrop music-mobile-track-actions-backdrop";
     backdrop.setAttribute("aria-label", "关闭歌曲操作");
-    backdrop.addEventListener("click", closeTrackActions);
+    backdrop.addEventListener("click", trackActionHandler(backdrop, closeTrackActions));
     return backdrop;
   }
 
@@ -172,7 +178,7 @@ export function createMusicSheets(deps) {
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "完成";
-    close.addEventListener("click", closeTrackActions);
+    close.addEventListener("click", trackActionHandler(sheet, closeTrackActions));
     head.append(text, close);
 
     const actions = document.createElement("div");
@@ -196,10 +202,20 @@ export function createMusicSheets(deps) {
         state.playlistActionTrackId = track.id;
         renderShell();
       }, { primary: true, icon: "playlist-add" }));
-      actions.append(trackActionChoice(track.favorite ? "取消收藏" : "收藏歌曲", track.favorite ? "从收藏列表移除。" : "以后可以从收藏快速找到。", () => {
-        state.trackActionId = "";
-        toggleFavorite(track.id).catch(() => {});
-      }, { active: track.favorite, icon: track.favorite ? "favorite-fill" : "favorite" }));
+      const favorite = trackActionChoice(track.favorite ? "取消收藏" : "收藏歌曲", track.favorite ? "从收藏列表移除。" : "以后可以从收藏快速找到。", () => {
+        closeTrackActions();
+        toggleFavorite(track).catch(() => {});
+      }, { active: track.favorite, icon: track.favorite ? "favorite-fill" : "favorite" });
+      actions.append(favorite);
+      bindTrackPreference?.(track, favorite, () => {
+        const label = track.favorite ? "取消收藏" : "收藏歌曲";
+        setMusicSymbol(favorite, track.favorite ? "favorite-fill" : "favorite");
+        favorite.classList.toggle("active", Boolean(track.favorite));
+        favorite.setAttribute("aria-label", label);
+        favorite.title = label;
+        favorite.querySelector("strong").textContent = label;
+        favorite.querySelector("small").textContent = track.favorite ? "从收藏列表移除。" : "以后可以从收藏快速找到。";
+      });
       if (track.artistId) actions.append(trackActionChoice("查看歌手", track.artist || "打开歌手页面。", () => {
         state.trackActionId = "";
         updateListParams({ mode: "library", artistId: track.artistId, albumId: "", genre: "", query: "" }, { resetSearch: true });
@@ -220,17 +236,26 @@ export function createMusicSheets(deps) {
     }
     sheet.append(renderSheetHandle(), head, actions);
     return sheet;
+
+    function trackActionChoice(label, description, action, options = {}) {
+      const kind = `music-mobile-track-action-choice${options.primary ? " primary" : ""}${options.active ? " active" : ""}${options.danger ? " danger" : ""}`;
+      const button = symbolButton(options.icon || "more", trackActionHandler(sheet, action), false, kind, label);
+      const title = document.createElement("strong");
+      title.textContent = label;
+      const meta = document.createElement("small");
+      meta.textContent = description;
+      button.append(title, meta);
+      return button;
+    }
   }
 
-  function trackActionChoice(label, description, action, options = {}) {
-    const kind = `music-mobile-track-action-choice${options.primary ? " primary" : ""}${options.active ? " active" : ""}${options.danger ? " danger" : ""}`;
-    const button = symbolButton(options.icon || "more", action, false, kind, label);
-    const title = document.createElement("strong");
-    title.textContent = label;
-    const meta = document.createElement("small");
-    meta.textContent = description;
-    button.append(title, meta);
-    return button;
+  function trackActionHandler(node, action) {
+    const trackId = state.trackActionId;
+    return (...args) => {
+      if (!node.isConnected || !els.viewContent?.contains(node)
+          || state.trackActionId !== trackId) return;
+      return action(...args);
+    };
   }
 
   function closePlaylistActions() {

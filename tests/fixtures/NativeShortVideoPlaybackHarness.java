@@ -90,7 +90,7 @@ public final class NativeShortVideoPlaybackHarness {
       require(!f.player.getPlayWhenReady(), "unbound player restarted playback");
     });
     check("background error does not autoplay initial fallback", () -> {
-      Fixture f = new Fixture(); f.activityResumed = false; f.player.pause(); f.handle();
+      Fixture f = new Fixture(); f.activityResumed = false; f.player.pause(); f.decode();
       require(!f.player.getPlayWhenReady(), "initial fallback restarted background playback");
     });
     check("return before retry uses current resume intent", () -> {
@@ -227,18 +227,18 @@ public final class NativeShortVideoPlaybackHarness {
           boolean expected = requested && state != Player.STATE_ENDED;
           require(f.activePlayer.getPlayWhenReady() == expected, "author return discarded pre-navigation intent");
           require(f.activePlayer.position == 12345L, "author return must restore the selected video's position");
-          f.playAt(0); f.playAt(0);
+          f.selectForTest(0); f.selectForTest(0);
           require(f.activePlayer.getPlayWhenReady() == expected, "duplicate page callbacks overwrote restored intent");
           f.toggleActivePlayback();
           require(f.activePlayer.getPlayWhenReady() != expected, "restored intent must not block explicit stage tap");
-          f.playAt(0);
+          f.selectForTest(0);
           require(f.activePlayer.getPlayWhenReady() != expected, "page callback reversed an explicit post-return tap");
         });
         check("author background return waits for foreground: state=" + state + ", requested=" + requested, () -> {
           FeedFixture f = new FeedFixture(false);
           f.activePlayer.playbackState = state; f.activePlayer.setPlayWhenReady(requested);
           f.showAuthorPanel(f.videos.get(0)); f.onPause(); f.navigateBack(); f.drain();
-          require(!f.activePlayer.getPlayWhenReady(), "background return started playback");
+          require(f.activePlayer == null || !f.activePlayer.getPlayWhenReady(), "background return started playback");
           f.onResume(); f.drain();
           require(f.activePlayer.getPlayWhenReady() == (requested && state != Player.STATE_ENDED),
               "foreground failed to restore the author's saved playback intent");
@@ -251,7 +251,7 @@ public final class NativeShortVideoPlaybackHarness {
           FeedFixture f = new FeedFixture(true, segment);
           if (segment) { f.activePlayer.setPlayWhenReady(requested); f.activePlayer.position = 8123; }
           f.gallerySoundPlayer.setPlayWhenReady(requested); f.gallerySoundPlayer.position = 6789;
-          f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain(); f.playAt(0);
+          f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain(); f.selectForTest(0);
           require(f.gallerySoundPlayer.getPlayWhenReady() == requested, "gallery sound return lost pause intent");
           require(f.gallerySoundPlayer.position == 6789, "gallery sound return lost position");
           if (segment) {
@@ -264,8 +264,8 @@ public final class NativeShortVideoPlaybackHarness {
           if (segment) f.activePlayer.setPlayWhenReady(requested);
           f.gallerySoundPlayer.setPlayWhenReady(requested);
           f.showAuthorPanel(f.videos.get(0)); f.onPause(); f.navigateBack(); f.drain();
-          require(!f.gallerySoundPlayer.getPlayWhenReady(), "gallery sound started in background");
-          if (segment) require(!f.activePlayer.getPlayWhenReady(), "gallery segment started in background");
+          require(f.gallerySoundPlayer == null || !f.gallerySoundPlayer.getPlayWhenReady(), "gallery sound started in background");
+          if (segment) require(f.activePlayer == null || !f.activePlayer.getPlayWhenReady(), "gallery segment started in background");
           f.onResume(); f.drain();
           require(f.gallerySoundPlayer.getPlayWhenReady() == requested, "foreground discarded gallery sound pause");
           if (segment) require(f.activePlayer.getPlayWhenReady() == requested, "foreground discarded gallery segment pause");
@@ -275,20 +275,20 @@ public final class NativeShortVideoPlaybackHarness {
     check("author saved pause does not leak into another video", () -> {
       FeedFixture f = new FeedFixture(false); f.activePlayer.pause();
       f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain();
-      f.videos.add(new ShortVideoItem("second")); f.adapter.notifyDataSetChanged(); f.playAt(1);
+      f.videos.add(new ShortVideoItem("second")); f.adapter.notifyDataSetChanged(); f.selectForTest(1);
       require(f.activePlayer.getPlayWhenReady(), "newly selected video must keep existing autoplay behavior");
     });
     check("same index with another item ID invalidates the author snapshot", () -> {
       FeedFixture f = new FeedFixture(false); f.activePlayer.pause();
       f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain();
-      f.videos.set(0, new ShortVideoItem("replacement")); f.playAt(0);
+      f.videos.set(0, new ShortVideoItem("replacement")); f.selectForTest(0);
       require(f.activePlayer.getPlayWhenReady(), "old item pause leaked through its reused feed index");
     });
     for (boolean deleteCurrent : List.of(false, true)) {
       check("author return resolves item identity after deletion: current deleted=" + deleteCurrent, () -> {
         FeedFixture f = new FeedFixture(false);
         f.videos.add(new ShortVideoItem("selected")); f.videos.add(new ShortVideoItem("after"));
-        f.adapter.notifyDataSetChanged(); f.playAt(1); f.activePlayer.pause(); f.activePlayer.seekTo(27000);
+        f.adapter.notifyDataSetChanged(); f.selectForTest(1); f.activePlayer.pause(); f.activePlayer.seekTo(27000);
         f.showAuthorPanel(f.videos.get(1));
         FeedScreenState previous = (FeedScreenState) f.navigationStack.get(0);
         previous.items.remove(deleteCurrent ? 1 : 0);
@@ -303,7 +303,7 @@ public final class NativeShortVideoPlaybackHarness {
     check("restored user seek and pause survive duplicate callbacks and lifecycle", () -> {
       FeedFixture f = new FeedFixture(false);
       f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain();
-      f.activePlayer.seekTo(23456); f.toggleActivePlayback(); f.playAt(0); f.onPause(); f.onResume(); f.drain();
+      f.activePlayer.seekTo(23456); f.toggleActivePlayback(); f.selectForTest(0); f.onPause(); f.onResume(); f.drain();
       require(!f.activePlayer.getPlayWhenReady(), "lifecycle overwrote the user's new pause");
       require(f.activePlayer.position == 23456, "return snapshot overwrote the user's new seek");
       f.toggleActivePlayback(); f.onPause(); f.onResume(); f.drain();
@@ -324,7 +324,7 @@ public final class NativeShortVideoPlaybackHarness {
     check("pending author restore cannot start behind comments", () -> {
       FeedFixture f = new FeedFixture(false);
       f.showAuthorPanel(f.videos.get(0)); f.onPause(); f.navigateBack(); f.drain();
-      f.comments = true; f.onResume(); f.playAt(0); f.drain();
+      f.comments = true; f.onResume(); f.selectForTest(0); f.drain();
       require(!f.activePlayer.getPlayWhenReady(), "pending restore bypassed the comments visibility gate");
       f.comments = false; f.onResume(); f.drain();
       require(f.activePlayer.getPlayWhenReady(), "hidden restore should remain pending until it is visible");
@@ -342,7 +342,7 @@ public final class NativeShortVideoPlaybackHarness {
         require(!f.activePlayer.getPlayWhenReady(), "ended snapshot was restarted by its state listener");
         require(f.pager.getCurrentItem() == 0, "restored end callback advanced the feed");
         if (gallery) require(f.attachedHolders.get(0).galleryIndex == 0, "restored end callback advanced gallery media");
-        f.playAt(0); f.drain();
+        f.selectForTest(0); f.drain();
         require(f.activePlayer.position == 4567 && !f.activePlayer.getPlayWhenReady(),
             "duplicate page callback rewound a restored ended video");
         f.toggleActivePlayback();
@@ -372,7 +372,7 @@ public final class NativeShortVideoPlaybackHarness {
       FeedFixture f = new FeedFixture(false); f.activePlayer.position = 18000; f.activePlayer.pause();
       f.showAuthorPanel(f.videos.get(0)); f.navigateBack(); f.drain();
       ExoPlayer departed = f.activePlayer; departed.release();
-      f.activePlayer = null; f.playerCache.clear(); f.playAt(0);
+      f.activePlayer = null; f.playerCache.clear(); f.selectForTest(0);
       require(f.activePlayer.getPlayWhenReady(), "explicit retry should keep its existing autoplay policy");
       require(f.activePlayer.position == 4567, "replacement player received the obsolete author-return seek");
     });
@@ -463,11 +463,13 @@ public final class NativeShortVideoPlaybackHarness {
     final BooleanSupplier shouldPlay = () -> shouldResumeFallbackPlayback(0, player);
 
     Fixture() {
+      videos.add(item); attachedHolders.put(0, new ShortVideoHolder(0)); feedPlayback.select(item.id);
       activePlayer = player; playerCache.put(0, player);
       fallback.mediaUri(player, item); player.play();
     }
-    boolean handle() { return fallback.handle(player, item, new PlaybackException(), shouldPlay); }
-    void schedule() { require(handle(), "initial fallback required"); require(handle(), "retry required"); }
+    boolean decode() { return fallback.handle(player, item, new PlaybackException(PlaybackException.ERROR_CODE_DECODING_FAILED), shouldPlay); }
+    boolean handle() { return fallback.handle(player, item, new PlaybackException(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT), shouldPlay); }
+    void schedule() { require(decode(), "initial fallback required"); require(handle(), "retry required"); }
     Runnable openOverlay(String overlay) {
       if ("search".equals(overlay)) return pausePlaybackForFeedSearch();
       pauseForCommentsOverlay(); comments = true;

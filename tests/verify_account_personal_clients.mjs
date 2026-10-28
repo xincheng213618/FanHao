@@ -24,13 +24,17 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
 
 const appSource = fs.readFileSync(new URL("../android-client/www/app.js", import.meta.url), "utf8");
 const listenerSource = appSource.slice(appSource.indexOf("let accountReloadPending ="), appSource.indexOf("let connectionAttempt ="));
+const sheetSource = fs.readFileSync(new URL("../android-client/www/js/mobile-action-sheet.js", import.meta.url), "utf8").replace(/^export /gm, "");
 function accountPage() {
   const listeners = {}; const calls = { reload: 0, load: 0, render: 0 };
   const env = { URL, activeUrl: base, library: null, libraryLoadGeneration: 0, libraryLoadPromise: null, workViews: null, androidModuleRegistry: {},
     window: { addEventListener: (name, fn) => { listeners[name] = fn; }, location: { reload: () => { calls.reload += 1; } } },
-    document: { querySelectorAll: () => [] }, els: Object.fromEntries(["viewContent", "personPreview", "continuePreview"].map(key => [key, { replaceChildren() {} }])),
+    document: { querySelectorAll: () => [], querySelector: () => null }, els: Object.fromEntries(["viewContent", "personPreview", "continuePreview"].map(key => [key, { replaceChildren() {} }])),
     invalidateViewRender() {}, renderUserState() {}, queueMicrotask: fn => fn(), loadDashboard: () => { calls.load += 1; }, renderCurrentView: () => { calls.render += 1; } };
-  vm.runInNewContext(listenerSource, env);
+  vm.createContext(env);
+  // Bind the actual shared-sheet close contract in this isolated account page.
+  env.closeMobileActionSheet = vm.runInContext(`(function(){${sheetSource}\nreturn closeMobileActionSheet;})()`, env);
+  vm.runInContext(listenerSource, env);
   return { calls, change: value => listeners.fanhaoAccountOwnerChanged({ detail: { current: { origin: base, owner: value } } }),
     confirm: value => listeners.fanhaoAccountOwnerConfirmed({ detail: { origin: base, owner: value } }) };
 }

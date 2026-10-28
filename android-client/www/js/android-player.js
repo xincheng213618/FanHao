@@ -1,4 +1,4 @@
-import { fetchJson } from "./api.js?v=assets-1443708f18b1";
+import { fetchJson } from "./api.js?v=assets-22080e82f167";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
@@ -6,8 +6,71 @@ import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
 
 export function createAndroidVideoSection(context) {
   const { getActiveUrl } = context;
+  const mountScopes = new WeakMap();
+  let currentPlayback = null;
+
+  function ownsPlayback(owner, leaving = false) {
+    return currentPlayback === owner && !owner.controller.signal.aborted
+      && owner.mount.isConnected && (leaving || owner.isActive()) && owner.baseUrl === getActiveUrl()
+      && isAccountOwnerCurrent(owner.accountScope);
+  }
+
+  function releaseRendering(owner) {
+    const rendering = owner?.rendering;
+    if (!rendering) return;
+    rendering.report?.(true, true);
+    // Retire callbacks before pause/load can synchronously deliver media events.
+    owner.rendering = null;
+    rendering.controller.abort();
+    if (rendering.fallbackTimer != null) window.clearTimeout(rendering.fallbackTimer);
+    if (rendering.video) {
+      rendering.video.pause();
+      rendering.video.removeAttribute("src");
+      rendering.video.load();
+    }
+  }
+
+  function deactivate() {
+    const owner = currentPlayback;
+    if (!owner) return;
+    releaseRendering(owner);
+    currentPlayback = null;
+    owner.controller.abort();
+    owner.removeRouteListener?.();
+  }
+
+  function beginPlayback(mount, work, videoFile) {
+    const scope = mountScopes.get(mount);
+    if (!scope) return null;
+    const { baseUrl, accountScope, isActive } = scope;
+    if (!mount.isConnected || scope.workId !== work.id || baseUrl !== getActiveUrl() || !isActive()
+      || isActive.signal?.aborted || !isAccountOwnerCurrent(accountScope)) return null;
+    deactivate();
+    const owner = { mount, baseUrl, accountScope, isActive, section: scope.section,
+      workId: work.id, videoId: videoFile.id, showFiles: scope.showFiles,
+      controller: new AbortController(), rendering: null };
+    currentPlayback = owner;
+    if (isActive.signal) {
+      const leave = () => { if (currentPlayback === owner) deactivate(); };
+      isActive.signal.addEventListener("abort", leave, { once: true });
+      owner.removeRouteListener = () => isActive.signal.removeEventListener("abort", leave);
+    }
+    return owner;
+  }
+
+  window.addEventListener?.("fanhaoViewWillRender", deactivate);
+  window.addEventListener?.("pagehide", deactivate);
 
   function createVideoList(work, options = {}) {
+    if (options.preservePlayback) {
+      const owner = currentPlayback;
+      // Fresh metadata for this route must not discard the user's pending
+      // click or replace a playing media element. Visible file lists rerender.
+      if (owner && ownsPlayback(owner) && owner.showFiles === false && options.showFiles === false
+        && owner.workId != null && owner.workId === work.id && owner.isActive === options.isActive
+        && (work.videos || []).some(video => video.id === owner.videoId)) return owner.section;
+      deactivate();
+    }
     const showFiles = options.showFiles !== false;
     const showTitle = options.showTitle !== false;
     const section = document.createElement("div");
@@ -16,6 +79,11 @@ export function createAndroidVideoSection(context) {
 
     const playerMount = document.createElement("div");
     playerMount.className = "android-player-mount";
+    const baseUrl = getActiveUrl();
+    mountScopes.set(playerMount, {
+      baseUrl, accountScope: captureAccountOwner(baseUrl), section, workId: work.id, showFiles,
+      isActive: typeof options.isActive === "function" ? options.isActive : () => true
+    });
     section.append(playerMount);
 
     if (!showFiles) return section;
@@ -58,8 +126,7 @@ export function createAndroidVideoSection(context) {
     const mount = section?.querySelector(".android-player-mount");
     const video = selectDefaultVideo(work);
     if (!mount || !video) return false;
-    await playVideo(mount, work, video, { autoplay: true });
-    return true;
+    return playVideo(mount, work, video, { autoplay: true });
   }
 
   function selectDefaultVideo(work) {
@@ -68,48 +135,51 @@ export function createAndroidVideoSection(context) {
   }
 
   async function playVideo(mount, work, videoFile, options = {}) {
-    const activeUrl = getActiveUrl();
-    const accountScope = options.accountScope || captureAccountOwner(activeUrl);
-    if (!isAccountOwnerCurrent(accountScope)) return;
-    options = { ...options, accountScope };
+    const owner = beginPlayback(mount, work, videoFile);
+    if (!owner) return false;
+    const { baseUrl: activeUrl, accountScope } = owner;
     const resume = Number(options.startAt ?? videoFile.progress?.position ?? 0);
     mount.innerHTML = `<div class="loading-row">正在准备播放</div>`;
     revealDetailBlock(mount);
 
     let playInfo = null;
     try {
-      playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, { accountScope });
+      playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, {
+        accountScope, signal: owner.controller.signal
+      });
     } catch (error) {
+      if (!ownsPlayback(owner)) return false;
       mount.innerHTML = "";
       mount.append(createPlayerErrorBox(error.message || "播放地址准备失败，请重试", {
-        retry: () => playVideo(mount, work, videoFile, options)
+        retry: () => { if (ownsPlayback(owner)) return playVideo(mount, work, videoFile, options); }
       }));
       revealDetailBlock(mount);
-      return;
+      return false;
     }
 
+    if (!ownsPlayback(owner)) return false;
     const opened = await openNativePlayer(activeUrl, work, videoFile, playInfo, resume);
+    if (!ownsPlayback(owner)) return false;
     if (opened) {
       mount.innerHTML = "";
-      return;
+      return true;
     }
 
-    return renderAndroidPlayer(mount, work, videoFile, { ...options, playInfo, startAt: resume });
+    return renderAndroidPlayer(owner, work, videoFile, { ...options, playInfo, startAt: resume });
   }
 
   async function openNativePlayer(activeUrl, work, videoFile, playInfo, resume) {
     const plugin = nativePlayerPlugin();
     if (!plugin?.play) return false;
 
-    const directUrl = absoluteUrl(activeUrl, `/media/video/${encodeURIComponent(videoFile.id)}`);
-    const nativeFallbackInfo = playInfo?.mode === "direct" && playInfo.fallbackStreamUrl
-      ? { ...playInfo, mode: "transcode", streamUrl: playInfo.fallbackStreamUrl }
-      : playInfo;
-    const fallbackUrl = nativeFallbackInfo ? streamUrlFor(activeUrl, nativeFallbackInfo, 0) : "";
-    const progressUrl = absoluteUrl(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`);
-    const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "直连播放"].filter(Boolean).join(" · ");
-
     try {
+      const directUrl = absoluteUrl(activeUrl, `/media/video/${encodeURIComponent(videoFile.id)}`);
+      const nativeFallbackInfo = playInfo?.mode === "direct" && playInfo.fallbackStreamUrl
+        ? { ...playInfo, mode: "transcode", streamUrl: playInfo.fallbackStreamUrl }
+        : playInfo;
+      const fallbackUrl = nativeFallbackInfo ? streamUrlFor(activeUrl, nativeFallbackInfo, 0) : "";
+      const progressUrl = absoluteUrl(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`);
+      const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "直连播放"].filter(Boolean).join(" · ");
       await plugin.play({
         url: directUrl,
         fallbackUrl,
@@ -132,17 +202,22 @@ export function createAndroidVideoSection(context) {
     return window.Capacitor?.Plugins?.FanHaoPlayer || null;
   }
 
-  async function renderAndroidPlayer(mount, work, videoFile, options = {}) {
-    const activeUrl = getActiveUrl();
-    const accountScope = options.accountScope || captureAccountOwner(activeUrl);
-    if (!isAccountOwnerCurrent(accountScope)) return;
-    options = { ...options, accountScope };
+  async function renderAndroidPlayer(owner, work, videoFile, options = {}) {
+    if (!ownsPlayback(owner)) return false;
+    releaseRendering(owner);
+    const { mount, baseUrl: activeUrl, accountScope } = owner;
+    const rendering = { controller: new AbortController(), video: null, fallbackTimer: null, report: null };
+    owner.rendering = rendering;
+    const ownsRender = () => ownsPlayback(owner) && owner.rendering === rendering;
     if (!options.playInfo) {
       mount.innerHTML = `<div class="loading-row">正在探测播放方式</div>`;
       revealDetailBlock(mount);
     }
     try {
-      const playInfo = options.playInfo || await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`);
+      const playInfo = options.playInfo || await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, {
+        accountScope, signal: rendering.controller.signal
+      });
+      if (!ownsRender()) return false;
       const isSegmentedStream = playInfo.mode !== "direct";
       const resume = Number(options.startAt ?? videoFile.progress?.position ?? 0);
       const streamOffset = isSegmentedStream ? Math.max(0, resume) : 0;
@@ -151,12 +226,14 @@ export function createAndroidVideoSection(context) {
       playerShell.className = "android-player-shell";
 
       const video = document.createElement("video");
+      rendering.video = video;
       video.controls = !isSegmentedStream;
       video.preload = "metadata";
       video.playsInline = true;
       video.src = streamUrlFor(activeUrl, playInfo, streamOffset);
       if (playInfo.mode === "direct" && resume > 5) {
         video.addEventListener("loadedmetadata", () => {
+          if (!ownsRender()) return;
           if (resume < video.duration - 8) video.currentTime = resume;
         }, { once: true });
       }
@@ -176,39 +253,53 @@ export function createAndroidVideoSection(context) {
       actions.className = "player-action-row";
 
       let lastReportedAt = 0;
-      const report = (force = false) => {
-        if (!isAccountOwnerCurrent(accountScope)) return;
+      let lastReadyProgress = null;
+      const report = (force = false, leaving = false) => {
+        if (!ownsRender() && !(leaving && owner.rendering === rendering && ownsPlayback(owner, true))) return;
         const duration = timelineDuration(video, playInfo, streamOffset);
-        if (!duration || Number.isNaN(duration)) return;
+        const position = currentPlaybackPosition(video, streamOffset);
+        const ready = video.readyState >= 2 && !video.error && Number.isFinite(position) && duration > 0;
+        if (ready) lastReadyProgress = { position, duration };
+        // A prepared URL or a failed startup is not evidence of position zero.
+        // If buffering regresses readiness, exit can retain the last real sample.
+        if ((!ready && !force) || !lastReadyProgress) return;
         const now = Date.now();
         if (!force && now - lastReportedAt < 5000 && !video.paused) return;
         lastReportedAt = now;
         fetchJson(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`, { method: "POST", accountScope, body: {
           workId: work.id,
-          position: currentPlaybackPosition(video, streamOffset),
-          duration
+          position: lastReadyProgress.position,
+          duration: lastReadyProgress.duration
         } }).catch(() => {});
       };
-      video.addEventListener("timeupdate", report);
+      rendering.report = report;
+      video.addEventListener("timeupdate", () => report());
       video.addEventListener("pause", () => report(true));
       video.addEventListener("ended", () => report(true));
       video.addEventListener("play", () => {
+        if (!ownsRender()) return;
         status.textContent = "正在播放";
         actions.replaceChildren();
       });
       video.addEventListener("pause", () => {
+        if (!ownsRender()) return;
         if (!video.ended) status.textContent = "已暂停";
       });
       video.addEventListener("ended", () => {
+        if (!ownsRender()) return;
         status.textContent = "播放结束";
       });
       video.addEventListener("error", () => {
+        if (!ownsRender()) return;
         const message = videoErrorText(video);
         if (playInfo.mode === "direct" && !options.fallbackTried) {
           status.textContent = "直连失败，正在切换智能播放";
           const fallbackInfo = fallbackPlayInfo(playInfo, videoFile);
-          window.setTimeout(() => {
-            renderAndroidPlayer(mount, work, videoFile, {
+          if (rendering.fallbackTimer != null) return;
+          rendering.fallbackTimer = window.setTimeout(() => {
+            rendering.fallbackTimer = null;
+            if (!ownsRender()) return;
+            renderAndroidPlayer(owner, work, videoFile, {
               ...options,
               autoplay: true,
               fallbackTried: true,
@@ -220,27 +311,43 @@ export function createAndroidVideoSection(context) {
         }
         status.textContent = message;
         actions.replaceChildren(
-          createPlayerButton("重试", () => renderAndroidPlayer(mount, work, videoFile, { autoplay: true, startAt: resume })),
+          createPlayerButton("重试", () => {
+            if (ownsRender()) return renderAndroidPlayer(owner, work, videoFile, { autoplay: true, startAt: resume });
+          }),
           ...(playInfo.mode === "remux"
-            ? [createPlayerButton("强制转码", () => renderAndroidPlayer(mount, work, videoFile, {
-              autoplay: true,
-              playInfo: transcodePlayInfo(playInfo, videoFile),
-              startAt: currentPlaybackPosition(video, streamOffset) || resume
-            }))]
+            ? [createPlayerButton("强制转码", () => {
+              if (ownsRender()) return renderAndroidPlayer(owner, work, videoFile, {
+                autoplay: true,
+                playInfo: transcodePlayInfo(playInfo, videoFile),
+                startAt: currentPlaybackPosition(video, streamOffset) || resume
+              });
+            })]
             : [])
         );
       });
 
       playerShell.append(video, label, status, actions);
+      const requestPlay = (onRejected) => {
+        if (!ownsRender()) return;
+        try {
+          Promise.resolve(video.play()).then(() => {
+            if (!ownsRender()) video.pause();
+          }, () => { if (ownsRender()) onRejected(); });
+        } catch {
+          if (ownsRender()) onRejected();
+        }
+      };
       if (isSegmentedStream) {
         playerShell.append(createSegmentedControls({
           video,
           playInfo,
           streamOffset,
           status,
+          isCurrent: ownsRender,
+          requestPlay,
           onSeek: (nextPosition, autoplay) => {
-            report(true);
-            renderAndroidPlayer(mount, work, videoFile, {
+            if (!ownsRender()) return;
+            renderAndroidPlayer(owner, work, videoFile, {
               ...options,
               autoplay,
               playInfo,
@@ -253,23 +360,30 @@ export function createAndroidVideoSection(context) {
       revealDetailBlock(mount);
 
       if (options.autoplay) {
-        video.play().catch(() => {
+        requestPlay(() => {
           status.textContent = "手机系统拦截了自动播放，请点一下画面继续";
           actions.replaceChildren(
             createPlayerButton("继续播放", () => {
-              video.play().catch(() => {
+              requestPlay(() => {
                 status.textContent = "仍无法自动播放，请直接点画面";
               });
             })
           );
         });
       }
+      return true;
     } catch (error) {
+      if (!ownsRender()) return false;
+      releaseRendering(owner);
+      const errorRendering = { controller: new AbortController(), video: null, fallbackTimer: null, report: null };
+      owner.rendering = errorRendering;
+      const ownsError = () => ownsPlayback(owner) && owner.rendering === errorRendering;
       mount.innerHTML = "";
       mount.append(createPlayerErrorBox(error.message, {
-        retry: () => renderAndroidPlayer(mount, work, videoFile, { autoplay: true })
+        retry: () => { if (ownsError()) return renderAndroidPlayer(owner, work, videoFile, { autoplay: true }); }
       }));
       revealDetailBlock(mount);
+      return false;
     }
   }
 
@@ -364,7 +478,7 @@ export function createAndroidVideoSection(context) {
     return box;
   }
 
-  function createSegmentedControls({ video, playInfo, streamOffset, status, onSeek }) {
+  function createSegmentedControls({ video, playInfo, streamOffset, status, onSeek, isCurrent, requestPlay }) {
     const controls = document.createElement("div");
     controls.className = "android-stream-controls";
 
@@ -393,6 +507,7 @@ export function createAndroidVideoSection(context) {
     let seeking = false;
 
     const update = (preview = null) => {
+      if (!isCurrent()) return;
       const duration = timelineDuration(video, playInfo, streamOffset);
       const current = preview ?? currentPlaybackPosition(video, streamOffset);
       playButton.textContent = video.paused ? "播放" : "暂停";
@@ -411,8 +526,9 @@ export function createAndroidVideoSection(context) {
     };
 
     playButton.addEventListener("click", () => {
+      if (!isCurrent()) return;
       if (video.paused) {
-        video.play().catch(() => {
+        requestPlay(() => {
           status.textContent = "请点一下画面继续播放";
         });
       } else {
@@ -422,11 +538,13 @@ export function createAndroidVideoSection(context) {
     });
 
     seek.addEventListener("input", () => {
+      if (!isCurrent()) return;
       seeking = true;
       update(Number(seek.value || 0));
     });
 
     seek.addEventListener("change", () => {
+      if (!isCurrent()) return;
       const nextPosition = Number(seek.value || 0);
       const shouldPlay = !video.paused;
       seeking = false;
@@ -438,11 +556,13 @@ export function createAndroidVideoSection(context) {
     });
 
     muteButton.addEventListener("click", () => {
+      if (!isCurrent()) return;
       video.muted = !video.muted;
       update();
     });
 
     fullButton.addEventListener("click", () => {
+      if (!isCurrent()) return;
       if (document.fullscreenElement) {
         document.exitFullscreen?.();
       } else {
@@ -462,7 +582,8 @@ export function createAndroidVideoSection(context) {
 
   return {
     createVideoList,
-    playDefaultVideo
+    playDefaultVideo,
+    deactivate
   };
 }
 

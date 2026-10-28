@@ -3,6 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import { createMusicControlFocus } from "../android-client/www/modules/music/music-control-focus.js";
+import { createMusicTrackPreferences } from "../android-client/www/modules/music/music-track-preferences.js";
+import { captureAccountOwner } from "../android-client/www/js/account-owner.js";
 
 // Actual Android page function bodies with controlled transport, Audio and RAF.
 // This fixture does not start a server, read a library or decode media. Blob
@@ -80,9 +83,13 @@ function fixture(source, { restore = false } = {}) {
     summary: {}, playing: true, playbackSpeed: 1, volume: 0.86, crossfadeSeconds: 0,
     resumeQueue: restore, repeat: "off", lyrics: { lines: [], raw: "" }
   };
+  const trackPreferences = createMusicTrackPreferences({
+    send() { throw new Error("Transition-request fixture never sends track preference writes"); }
+  });
+  trackPreferences.preparePayload({ track: state.current, tracks: state.queue }, trackPreferences.owner(url));
   let context;
   const bindings = {
-    state, outgoing, incoming, console, URLSearchParams, encodeURIComponent,
+    state, outgoing, incoming, console, URLSearchParams, encodeURIComponent, trackPreferences, captureAccountOwner,
     DEFAULT_SORT: "updated", document: { body: { dataset: {} } },
     window: { performance: { now: () => 10 }, requestAnimationFrame: callback => { frames.push(callback); return frames.length; } },
     els: { viewTitle: {}, viewMeta: {}, viewKicker: {}, viewContent: {} },
@@ -95,7 +102,11 @@ function fixture(source, { restore = false } = {}) {
     musicListQuery: () => "", selectedSmartPlaylist: () => null, selectedPlaylist: () => null,
     musicTitle: () => "", musicMeta: () => "", focusedLibraryView: { emptyMessage: () => "" },
     loadSmartPlaylists: async () => {}, loadPlaylists: async () => {},
-    fetchJson(activeUrl, endpoint, options) { const gate = deferred(); api.push({ activeUrl, endpoint, options, ...gate }); return gate.promise; },
+    fetchJson(activeUrl, endpoint, options) {
+      const gate = deferred(), owner = trackPreferences.owner(activeUrl);
+      api.push({ activeUrl, endpoint, options, ...gate });
+      return gate.promise.then(data => trackPreferences.preparePayload(data, owner));
+    },
     cancelProgressClock() {}, createMusicProgressSession: (trackId, activeUrl, startedAt) => ({ trackId, activeUrl, startedAt }),
     hasLyrics: () => false, rememberLastTrack(track) { remembered.push(track.id); },
     absoluteUrl: (activeUrl, stream) => activeUrl + stream,
@@ -107,13 +118,19 @@ function fixture(source, { restore = false } = {}) {
     sleepAfterCurrentTimerActive: () => false, expireSleepTimer() {},
     async playAdjacent() { adjacentCalls += 1; },
     retireAudioElement(target) { if (target) { retired.push(target.name); target.pause(); } },
-    readPlaybackQueuePreference: () => ({ activeUrl: url, currentTrackId: "A", queue: [{ id: "A" }, { id: "C" }] }),
+    readPlaybackQueuePreference: () => ({ activeUrl: url, accountOwner: captureAccountOwner(url).owner, currentTrackId: "A", queue: [{ id: "A" }, { id: "C" }] }),
     normalizeQueueTrack: track => track,
-    readLastTrackPreference: () => ({ activeUrl: url, trackId: "last-C", track: { id: "last-C" } })
+    readLastTrackPreference: () => ({ activeUrl: url, accountOwner: captureAccountOwner(url).owner, trackId: "last-C", track: { id: "last-C" } })
   };
+  // These transition cases have no user control-focus intent. Retain the real
+  // helper's no-intent contract; it must never need a rendered DOM target.
+  bindings.controlFocus = createMusicControlFocus({
+    getActiveUrl: () => url, getStateKey: () => "", isActive: () => true,
+    resolveTarget() { throw new Error("Transition-request fixture must not resolve a control-focus target without an intent"); }
+  });
   context = vm.createContext(bindings);
   vm.runInContext(`
-    let moduleActive=false, musicRenderGeneration=0, openTrackGeneration=0, pendingTrackSelection=0;
+    let moduleActive=false, musicRenderGeneration=0, openTrackGeneration=0, pendingTrackSelection=0, routeControlFocus=null;
     let playReportSession=0, currentPlaybackUrl="http://synthetic.invalid";
     let gaplessPreloadAudio=incoming, gaplessPreloadTrackId="A", gaplessPreloadActiveUrl=currentPlaybackUrl;
     let audio=outgoing, gaplessHandoffPending=false, progressSession=null, progressClaimRequired=false, playedReport=null;
@@ -230,11 +247,23 @@ export async function runAndroidMusicTransitionRequestsFixture({ caseName = "", 
   const source = legacy ? selectionLegacy(currentSource) : currentSource;
   const selected = cases.filter(test => !caseName || test.name === caseName);
   assert(selected.length, `unknown case: ${caseName}`);
-  for (const test of selected) {
-    await test.run(source);
-    console.log(`android-music-transition-requests: PASS ${test.name}`);
+  // Real account-owner capture must stay inside this synthetic fixture even if
+  // the invoking Node process configures persistent host localStorage.
+  const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const storage = new Map();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value))
+  } });
+  try {
+    for (const test of selected) {
+      await test.run(source);
+      console.log(`android-music-transition-requests: PASS ${test.name}`);
+    }
+    console.log(`android-music-transition-requests: ${selected.length} cases PASS`);
+  } finally {
+    if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+    else delete globalThis.localStorage;
   }
-  console.log(`android-music-transition-requests: ${selected.length} cases PASS`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -292,6 +292,7 @@ body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-
   padding: 0;
 }
 
+body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="歌手"] .music-mobile-facet-scroll,
 body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="专辑"] .music-mobile-facet-scroll {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -299,17 +300,25 @@ body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-
 body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-scroll button {
   width: 100%;
   max-width: none;
-  min-height: 42px;
-  overflow: hidden;
+  min-height: 44px;
+  overflow: visible;
   border: 0;
   border-radius: 999px;
-  padding: 0 12px;
+  padding: 8px 12px;
   background: var(--surface-raised);
   color: var(--ink);
   font-size: 12px;
   font-weight: 750;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="歌手"] .music-mobile-facet-scroll button,
+body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="专辑"] .music-mobile-facet-scroll button {
+  border-radius: 12px;
+  text-align: left;
 }
 
 body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-scroll button.active {
@@ -344,6 +353,7 @@ body.music-mobile-view .music-mobile-library-sort-sheet {
   grid-auto-rows: auto;
   gap: 0;
   overflow-y: auto;
+  scroll-padding-top: 58px;
   padding: 0 20px calc(14px + env(safe-area-inset-bottom));
   border: 0;
   border-radius: 24px 24px 0 0;
@@ -353,12 +363,16 @@ body.music-mobile-view .music-mobile-library-sort-sheet {
 }
 
 body.music-mobile-view .music-mobile-library-sort-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: grid;
   min-height: 58px;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   border-bottom: 1px solid var(--line);
+  background: var(--bg);
 }
 
 body.music-mobile-view .music-mobile-library-sort-head strong {
@@ -420,7 +434,7 @@ body.music-mobile-view .music-mobile-library-sort-choice.active strong {
 }
 
 body.music-mobile-view .music-mobile-focused-library-head ~ .music-mobile-list .music-mobile-track-side {
-  min-width: 86px;
+  min-width: 88px;
 }
 
 body.music-mobile-view .music-mobile-focused-library-head ~ .music-mobile-list .music-mobile-icon-button.track-label {
@@ -438,6 +452,13 @@ body.music-mobile-view .music-mobile-focused-library-head ~ .music-mobile-list .
 
 body.music-mobile-view .music-mobile-focused-library-empty {
   min-height: 52vh;
+}
+
+@media (max-width: 380px) {
+  body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="歌手"] .music-mobile-facet-scroll,
+  body.music-mobile-view .music-mobile-library-filter-content .music-mobile-facet-row[data-facet="专辑"] .music-mobile-facet-scroll {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 360px) {

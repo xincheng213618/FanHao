@@ -159,7 +159,7 @@ function verifyCollectionSummaryQueryEquivalence() {
 }
 
 async function legacyCountStoreFactory() {
-  const root = new URL("../src/modules/short-videos/server", import.meta.url);
+  const root = new URL("../src/modules/short-videos/server/", import.meta.url);
   const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
   const absoluteImports = (source) => source.replace(/from\s+"(\.{1,2}\/[^\"]+)"/g,
     (_match, relative) => `from ${JSON.stringify(new URL(relative, root).href)}`);

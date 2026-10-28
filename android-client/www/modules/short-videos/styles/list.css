@@ -1450,7 +1450,7 @@ body.short-video-search-page-view .bottom-nav {
 .short-video-mobile-toast {
   position: fixed;
   left: 50%;
-  bottom: calc(80px + env(safe-area-inset-bottom));
+  bottom: calc(var(--fanhao-bottom-nav-height) + 13px);
   transform: translateX(-50%);
   z-index: 160;
   max-width: 80vw;

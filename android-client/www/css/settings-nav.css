@@ -55,8 +55,8 @@
 
 .settings-close-button {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 50%;
@@ -209,6 +209,20 @@ body.app-confirm-open {
 }
 .settings-account-group[open] > summary { margin-bottom: 12px; }
 
+.settings-panel .account-ui button {
+  min-height: 44px;
+}
+
+.settings-panel :is(button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.storage-limit-input:focus-within {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 #connectForm {
   display: grid;
   gap: 6px;
@@ -241,7 +255,7 @@ label {
 
 .address-row button,
 .server-list button {
-  min-height: 42px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
@@ -282,7 +296,7 @@ label {
 }
 
 .segmented-control button {
-  min-height: 40px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -365,7 +379,7 @@ label {
 }
 
 .settings-action-row button {
-  min-height: 42px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -501,7 +515,7 @@ label {
 
 .storage-limit-input input {
   min-width: 0;
-  height: 40px;
+  height: 44px;
   border: 0;
   outline: 0;
   background: transparent;
@@ -694,9 +708,9 @@ label {
   grid-template-columns: repeat(5, minmax(56px, 1fr));
   gap: 0;
   transform: translateX(-50%);
-  border-top: 1px solid var(--line);
+  border-top: var(--fanhao-bottom-nav-border-width) solid var(--line);
   background: var(--nav-surface);
-  padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+  padding: var(--fanhao-bottom-nav-padding) 8px calc(var(--fanhao-bottom-nav-padding) + env(safe-area-inset-bottom));
   box-shadow: 0 -8px 24px rgba(20, 29, 40, 0.06);
   backdrop-filter: blur(18px) saturate(1.2);
   -webkit-touch-callout: none;
@@ -708,7 +722,7 @@ label {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: 58px;
+  min-height: var(--fanhao-bottom-nav-item-height);
   align-items: center;
   justify-content: center;
   flex-direction: column;
@@ -868,13 +882,17 @@ label {
 }
 
 @media (max-height: 390px) {
-  .bottom-nav-gallery-picker {
-    max-height: calc(100dvh - 90px - env(safe-area-inset-bottom));
+  .bottom-nav-gallery-picker,
+  .bottom-nav-home-picker,
+  .bottom-nav-reading-picker {
+    max-height: calc(100dvh - var(--fanhao-bottom-nav-height) - 22px - var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
     overflow-y: auto;
     overscroll-behavior: contain;
   }
 
-  .bottom-nav-gallery-picker::after {
+  .bottom-nav-gallery-picker::after,
+  .bottom-nav-home-picker::after,
+  .bottom-nav-reading-picker::after {
     display: none;
   }
 }
@@ -1090,5 +1108,21 @@ button:active {
     min-width: 48px;
     padding: 0 1px;
     font-size: 10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .settings-connection-group .address-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .settings-overlay {
+    padding-top: var(--fanhao-safe-area-inset-top, env(safe-area-inset-top));
+  }
+
+  .settings-panel {
+    max-height: calc(100dvh - var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
   }
 }

@@ -48,7 +48,7 @@ const ACTION_BY_ID = new Map(ACTION_DEFINITIONS.map((action) => [action.id, acti
 
 export function createComputerControlService({
   platform = process.platform,
-  launch = launchDetached,
+  launch = launchComputerControlCommand,
   schedule = (callback, delayMs) => setTimeout(callback, delayMs),
   now = () => new Date(),
   warn = console.warn,
@@ -68,7 +68,7 @@ export function createComputerControlService({
       platform,
       platformLabel: platformName(platform),
       actions: actionDescriptors(),
-      lastDispatch
+      lastDispatch: lastDispatch ? { ...lastDispatch } : null
     };
   }
 
@@ -80,13 +80,29 @@ export function createComputerControlService({
     if (!command) throw controlError(`当前系统不支持“${definition.label}”`, 409);
 
     const queuedAt = now().toISOString();
-    lastDispatch = { action: id, queuedAt };
+    const dispatchState = { action: id, queuedAt, status: "queued" };
+    lastDispatch = dispatchState;
+    const fail = (message, details = {}) => {
+      if (dispatchState.status === "failed") return;
+      Object.assign(dispatchState, { status: "failed", error: String(message) }, details);
+      warn(`[computer-control:${id}]`, dispatchState.error);
+    };
     const timer = schedule(() => {
       try {
         const child = launch(command.file, command.args);
-        child?.once?.("error", (error) => warn(`[computer-control:${id}]`, error.message || error));
+        dispatchState.status = "dispatched";
+        child?.once?.("error", (error) => fail(error.message || error));
+        child?.once?.("exit", (code, signal) => {
+          if (dispatchState.status === "failed") return;
+          if (code === 0) {
+            dispatchState.status = "completed";
+          } else {
+            const reason = signal ? `信号 ${signal}` : `退出码 ${code ?? "未知"}`;
+            fail(`系统控制指令执行失败（${reason}）`, { exitCode: code ?? null, signal: signal || null });
+          }
+        });
       } catch (error) {
-        warn(`[computer-control:${id}]`, error.message || error);
+        fail(error.message || error);
       }
     }, dispatchDelayMs);
     timer?.unref?.();
@@ -114,20 +130,9 @@ export function commandForAction(actionId, platform = process.platform) {
 
 const PLATFORM_COMMANDS = Object.freeze({
   win32: Object.freeze({
-    // SetSuspendState is not a rundll32 entry point; its arguments must be typed.
-    // Hibernate preserves the session overnight, with normal wake events enabled.
-    sleep: command("powershell.exe", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-WindowStyle",
-      "Hidden",
-      "-Command",
-      [
-        "$ErrorActionPreference = 'Stop'",
-        "Add-Type -AssemblyName System.Windows.Forms",
-        "if (-not [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Hibernate, $false, $false)) { throw 'Windows hibernation request failed' }"
-      ].join("; ")
-    ]),
+    // /h requests hibernation and handles the required Windows privilege.
+    // Do not add /f or /t: applications and their session must be preserved.
+    sleep: command("shutdown.exe", ["/h"]),
     lock: command("rundll32.exe", ["user32.dll,LockWorkStation"]),
     mute: command("powershell.exe", [
       "-NoProfile",
@@ -162,9 +167,10 @@ function command(file, args) {
   return Object.freeze({ file, args: Object.freeze(args) });
 }
 
-function launchDetached(file, args) {
+export function launchComputerControlCommand(file, args) {
   const child = spawn(file, args, {
-    detached: true,
+    // A detached Windows console process can exit before executing its body.
+    // Hidden stdio and unref keep this non-blocking without detaching it.
     stdio: "ignore",
     windowsHide: true
   });

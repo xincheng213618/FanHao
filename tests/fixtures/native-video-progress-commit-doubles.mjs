@@ -17,6 +17,9 @@ export const commitDoubles = {
       public Intent started; public int starts; public boolean failStart;
       public void startActivity(Intent intent){if(failStart)throw new IllegalStateException("synthetic launch failure");started=intent;starts++;}
       public void overridePendingTransition(int enter,int exit){}
+      public boolean isFinishing(){return false;}public boolean isDestroyed(){return false;}public void runOnUiThread(Runnable task){task.run();}
+      public androidx.savedstate.SavedStateRegistry getSavedStateRegistry(){return new androidx.savedstate.SavedStateRegistry();}
+      public androidx.activity.result.ActivityResultRegistry getActivityResultRegistry(){return new androidx.activity.result.ActivityResultRegistry();}
     }`,
   'android/content/Intent.java': `package android.content;
     public class Intent {
@@ -36,6 +39,7 @@ export const commitDoubles = {
   'com/getcapacitor/annotation/CapacitorPlugin.java': 'package com.getcapacitor.annotation; public @interface CapacitorPlugin { String name(); }',
   'com/getcapacitor/PluginCall.java': `package com.getcapacitor;
     public class PluginCall {
+      public static final String CALLBACK_ID_DANGLING="-1";public String getCallbackId(){return "progress-fixture";}
       public final java.util.Map<String,Object> values=new java.util.HashMap<>();
       public JSObject result; public String error; public int resolves,rejects;
       public String getString(String key){return (String)values.get(key);}
@@ -53,6 +57,7 @@ export const commitDoubles = {
       public final java.util.List<JSObject> events=new java.util.ArrayList<>();
       public boolean executing,failExecute,failNotify; public int destroyCalls;
       public android.app.Activity getActivity(){return activity;}
+      public void load(){}protected void handleOnStart(){}protected void handleOnResume(){}protected void handleOnPause(){}protected void handleOnNewIntent(android.content.Intent intent){}
       public void execute(Runnable task){if(failExecute)throw new IllegalStateException("closed bridge");tasks.add(task);}
       public void drainTasks(){while(!tasks.isEmpty()){executing=true;try{tasks.removeFirst().run();}finally{executing=false;}}}
       protected void notifyListeners(String event,JSObject data,boolean retain){
@@ -75,4 +80,11 @@ export const commitDoubles = {
   'local/fanhao/library/NativeShortVideoActionState.java': `package local.fanhao.library; public class NativeShortVideoActionState { public static String serverScope(String base){return base==null?"":base;} }`,
   'local/fanhao/library/NativeShortVideoActionResult.java': `package local.fanhao.library; public class NativeShortVideoActionResult { public static final String EXTRA_SERVER_BASE="base",EXTRA_SNAPSHOTS_JSON="snapshots"; }`,
   'local/fanhao/library/NativeShortVideoActionResultDecoder.java': `package local.fanhao.library; public class NativeShortVideoActionResultDecoder { public static org.json.JSONArray decode(String json){return new org.json.JSONArray();} }`
+  ,'androidx/activity/result/ActivityResultLauncher.java':'package androidx.activity.result;public class ActivityResultLauncher<T>{public void launch(T value){}public void unregister(){}}'
+  ,'androidx/activity/result/contract/ActivityResultContracts.java':'package androidx.activity.result.contract;public class ActivityResultContracts{public static class StartActivityForResult{}}'
+  ,'androidx/activity/result/ActivityResultRegistry.java':'package androidx.activity.result;public class ActivityResultRegistry{public ActivityResultLauncher<android.content.Intent> register(String key,android.app.Activity owner,androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult contract,java.util.function.Consumer<ActivityResult> callback){return new ActivityResultLauncher<>();}}'
+  ,'androidx/savedstate/SavedStateRegistry.java':'package androidx.savedstate;public class SavedStateRegistry{public android.os.Bundle consumeRestoredStateForKey(String key){return null;}public void registerSavedStateProvider(String key,java.util.function.Supplier<android.os.Bundle> provider){}public void unregisterSavedStateProvider(String key){}}'
+  // Independent session boundaries for the ordinary progress verifier only.
+  // verify_native_short_video_session compiles the real class and AndroidX registry.
+  ,'local/fanhao/library/NativeShortVideoRecovery.java':`package local.fanhao.library;final class NativeShortVideoRecovery{static final String STATE_KEY="state",LAUNCHER_KEY="launcher";interface Results{void completed(String base,int code,android.content.Intent data);}NativeShortVideoRecovery(android.app.Activity a,java.util.function.Consumer<android.content.Intent> l,Results r,java.util.function.BooleanSupplier blocked){}void restore(android.os.Bundle state){}android.os.Bundle save(){return new android.os.Bundle();}void started(){}void resumed(){}void paused(){}boolean newIntent(android.content.Intent intent){return false;}void destroy(){}void fresh(android.content.Intent intent){}void failedOpen(android.content.Intent intent){}void result(int code,android.content.Intent data){}boolean acceptsSystemResult(android.content.Intent data){return false;}ResultTicket ticket(android.content.Intent data){return null;}static class ResultTicket{boolean isCurrent(){return false;}boolean consume(){return false;}}}`
 };

@@ -1,6 +1,6 @@
 import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-1443708f18b1";
-import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-1443708f18b1";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-22080e82f167";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-22080e82f167";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
 const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;
@@ -9,9 +9,46 @@ export function createShortVideoNativeFeed(context = {}) {
   const { getActiveUrl, listState } = context;
   const invalidateShortVideoCache = context.invalidateShortVideoCache || clearCachedJsonByPrefix;
   const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
+  const cancelShortVideoNativeOpen = (...args) => context.cancelShortVideoNativeOpen?.(...args);
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
+
+  // This module lives for the WebView lifetime. A restored player has no old
+  // JavaScript Promise, so its acknowledged actions return through a retained event.
+  const restoredPlugin = nativePlayerPlugin();
+  if (typeof restoredPlugin?.addListener === "function") {
+    try {
+      const registration = restoredPlugin.addListener("shortFeedRestored", (result) => {
+        if (result?.opened !== true || result?.canceled !== false) return;
+        const launchServerBase = normalizeServerBase(result?.serverBase);
+        if (!launchServerBase) return;
+        applyNativeActionResult(result, launchServerBase).catch(() => {});
+      });
+      registration?.catch?.(() => {});
+    } catch {
+      // A missing native listener must not prevent an ordinary user launch.
+    }
+  }
+
+  async function applyNativeActionResult(result, launchServerBase, options = {}) {
+    const resultServerBase = normalizeServerBase(result?.serverBase);
+    const snapshots = normalizeActionSnapshots(result?.snapshots);
+    if (launchServerBase && resultServerBase === launchServerBase && snapshots.length) {
+      if (normalizeServerBase(getActiveUrl()) === launchServerBase) {
+        const changedVideos = new Map();
+        mergeActionSnapshots(listState.data?.videos, snapshots, changedVideos);
+        mergeActionSnapshots(options.videos, snapshots, changedVideos);
+        for (const changed of changedVideos.values()) refreshVideoCards(changed);
+      }
+      await invalidateShortVideoCache(launchServerBase, "/api/short-videos").catch(() => {});
+    }
+  }
+
   async function openNativeShortVideoFeed(video, options = {}) {
+    if (options.isCurrent?.() === false) return false;
+    cancelShortVideoNativeOpen(options.owner);
+    const launchServerBase = normalizeServerBase(options.baseUrl || getActiveUrl());
+    if (!launchServerBase || normalizeServerBase(getActiveUrl()) !== launchServerBase || options.isCurrent?.() === false) return false;
     const plugin = nativePlayerPlugin();
     if (!plugin?.playShortFeed || !video?.id) return false;
     if (!isNativePlayableItem(video)) {
@@ -34,8 +71,8 @@ export function createShortVideoNativeFeed(context = {}) {
     const hasMoreAtEnd = boundary
       ? boundary.hasMore || end < playableEntries.length
       : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length);
-    const launchServerBase = normalizeServerBase(getActiveUrl());
     try {
+      if (options.isCurrent?.() === false || normalizeServerBase(getActiveUrl()) !== launchServerBase) return false;
       const result = await plugin.playShortFeed({
         baseUrl: launchServerBase,
         feedUrl,
@@ -47,17 +84,7 @@ export function createShortVideoNativeFeed(context = {}) {
         openAuthorPanel: Boolean(options.openAuthorPanel),
         videos: payload
       });
-      const resultServerBase = normalizeServerBase(result?.serverBase);
-      const snapshots = normalizeActionSnapshots(result?.snapshots);
-      if (launchServerBase && resultServerBase === launchServerBase && snapshots.length) {
-        if (normalizeServerBase(getActiveUrl()) === launchServerBase) {
-          const changedVideos = new Map();
-          mergeActionSnapshots(listState.data?.videos, snapshots, changedVideos);
-          mergeActionSnapshots(options.videos, snapshots, changedVideos);
-          for (const changed of changedVideos.values()) refreshVideoCards(changed);
-        }
-        await invalidateShortVideoCache(launchServerBase, "/api/short-videos").catch(() => {});
-      }
+      await applyNativeActionResult(result, launchServerBase, options);
       return true;
     } catch {
       return false;
@@ -119,7 +146,7 @@ export function createShortVideoNativeFeed(context = {}) {
   }
 
   function nativePlayerPlugin() {
-    return window.Capacitor?.Plugins?.FanHaoPlayer || null;
+    return globalThis.window?.Capacitor?.Plugins?.FanHaoPlayer || null;
   }
   return {
     openNativeShortVideoFeed,

@@ -4,6 +4,16 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 final class NativeShortVideoFeedTransport {
+  interface Cancellation {
+    boolean isCancelled();
+    boolean attach(HttpURLConnection connection);
+    void detach(HttpURLConnection connection);
+    default boolean publish(Runnable action) {
+      if (isCancelled()) return false;
+      action.run();
+      return !isCancelled();
+    }
+  }
   interface Parser<T> {
     Parsed<T> parse(String body) throws Exception;
   }
@@ -29,16 +39,27 @@ final class NativeShortVideoFeedTransport {
   }
 
   <T> NativeShortVideoFeedPaging.ReadResult<T> read(String feedUrl, Parser<T> parser) {
+    return read(feedUrl, parser, null);
+  }
+
+  <T> NativeShortVideoFeedPaging.ReadResult<T> read(String feedUrl, Parser<T> parser, Cancellation cancellation) {
     HttpURLConnection connection = null;
     try {
+      if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       connection = (HttpURLConnection) new URL(feedUrl).openConnection();
+      if (cancellation != null && !cancellation.attach(connection)) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       connection.setConnectTimeout(connectTimeoutMs);
       connection.setReadTimeout(readTimeoutMs);
       connection.setRequestProperty("Accept", "application/json");
+      if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       connection.connect();
+      if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       int responseCode = connection.getResponseCode();
       if (responseCode < 200 || responseCode >= 300) return failure(NativeShortVideoFeedPaging.Failure.HTTP);
-      Parsed<T> parsed = parser.parse(NativeShortVideoHttpResponse.readUtf8(connection, true));
+      String body = NativeShortVideoHttpResponse.readUtf8(connection, true);
+      if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
+      Parsed<T> parsed = parser.parse(body);
+      if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       if (parsed == null || parsed.value == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);
       return NativeShortVideoFeedPaging.ReadResult.success(parsed.value, parsed.hasMore, parsed.nextCursor);
     } catch (java.net.SocketTimeoutException error) {
@@ -50,6 +71,7 @@ final class NativeShortVideoFeedTransport {
     } catch (Exception error) {
       return failure(NativeShortVideoFeedPaging.Failure.PARSE);
     } finally {
+      if (cancellation != null && connection != null) cancellation.detach(connection);
       if (connection != null) connection.disconnect();
     }
   }

@@ -1,4 +1,4 @@
-import { DEFAULT_SORT, normalizeSearchTab, normalizeSource } from "./shared.js?v=assets-1443708f18b1";
+import { DEFAULT_SORT, normalizeSearchTab, normalizeSource } from "./shared.js?v=assets-22080e82f167";
 
 const SEARCH_HISTORY_KEY = "fanhao.shortVideo.searchHistory";
 const SEARCH_HISTORY_LIMIT = 8;
@@ -8,6 +8,13 @@ export function createShortVideoSearch(context = {}) {
   const { api, getActiveUrl, listState } = context;
   const updateListParams = (...args) => context.updateListParams(...args);
   let suggestionRequestId = 0;
+  let suggestionController = null;
+
+  function cancelSearchSuggestions() {
+    suggestionRequestId += 1;
+    suggestionController?.abort();
+    suggestionController = null;
+  }
 
   function readSearchHistory() {
     try {
@@ -36,13 +43,27 @@ export function createShortVideoSearch(context = {}) {
   }
 
   async function fetchSearchSuggestions(query) {
+    cancelSearchSuggestions();
     const normalized = normalizeQuery(query);
-    const requestId = ++suggestionRequestId;
+    const requestId = suggestionRequestId;
     if (!normalized) return { query: "", suggestions: [] };
+    const baseUrl = getActiveUrl();
+    const controller = new AbortController();
+    suggestionController = controller;
+    const isCurrent = () => requestId === suggestionRequestId && suggestionController === controller
+      && !controller.signal.aborted && baseUrl === getActiveUrl();
     const params = new URLSearchParams({ q: normalized, limit: String(SEARCH_SUGGESTION_LIMIT) });
-    const result = await api.fetch(getActiveUrl(), `/api/short-videos/suggestions?${params}`, { timeoutMs: 8000 });
-    if (requestId !== suggestionRequestId) return null;
-    return result;
+    try {
+      const result = await api.fetch(baseUrl, `/api/short-videos/suggestions?${params}`, {
+        timeoutMs: 8000, signal: controller.signal
+      });
+      return isCurrent() ? result : null;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      throw error;
+    } finally {
+      if (suggestionController === controller) suggestionController = null;
+    }
   }
 
   function submitSearch(query = "", options = {}) {
@@ -61,6 +82,7 @@ export function createShortVideoSearch(context = {}) {
   }
 
   return {
+    cancelSearchSuggestions,
     clearSearchHistory,
     fetchSearchSuggestions,
     readSearchHistory,

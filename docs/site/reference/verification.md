@@ -2,7 +2,7 @@
 title: 验证矩阵
 description: 按变更范围选择真实 package 脚本，明确依赖、临时写入和运行验收的区别。
 status: maintained
-verified_at: 2026-10-24
+verified_at: 2026-10-29
 sources:
   - package.json
   - tests/run_verification.mjs
@@ -107,6 +107,64 @@ sources:
   - src/modules/short-videos/download-manager/tests/test_manager_link_cursor.py
   - src/modules/short-videos/download-manager/tests/test_manager_profile_snapshot.py
   - .github/workflows/application-checks.yml
+  - android-client/www/modules/novels/mobile-refinements.css
+  - tests/serve_android_gallery_navigation_fixture.mjs
+  - android-client/www/modules/novels/android-module.js
+  - tests/verify_android_novel_categories.mjs
+  - tests/verify_android_novel_mobile_layout.mjs
+  - tests/verify_android_manga_mobile_layout.mjs
+  - tests/verify_android_gallery_mobile_layout.mjs
+  - tests/verify_android_gallery_navigation.mjs
+  - tests/fixtures/android-gallery-navigation-harness.mjs
+  - tests/verify_android_bottom_layout.mjs
+  - tests/verify_android_bottom_layout_metrics.mjs
+  - tests/verify_native_short_video_playback.mjs
+  - tests/verify_native_short_video_recovery.mjs
+  - tests/verify_native_short_video_manual_retry.mjs
+  - tests/verify_native_short_video_player_callbacks.mjs
+  - tests/verify_native_short_video_gallery_continuation.mjs
+  - tests/verify_native_short_video_playback_requests.mjs
+  - tests/verify_native_short_video_gallery_readiness.mjs
+  - tests/verify_native_short_video_gallery_recovery.mjs
+  - tests/verify_native_short_video_gallery_image_recovery.mjs
+  - tests/verify_native_short_video_gallery_sound.mjs
+  - tests/verify_native_short_video_interruption_advance.mjs
+  - tests/verify_native_short_video_gallery_rebind.mjs
+  - tests/verify_native_short_video_gallery_segment_rebind.mjs
+  - tests/verify_native_short_video_seek_rendering.mjs
+  - tests/verify_native_short_video_checkpoint.mjs
+  - tests/verify_native_short_video_session.mjs
+  - tests/verify_short_video_restored_actions.mjs
+  - tests/verify_native_short_video_screen_awake.mjs
+  - tests/verify_native_short_video_gestures.mjs
+  - tests/verify_native_short_video_overlay_playback.mjs
+  - tests/verify_native_short_video_first_frame.mjs
+  - tests/verify_native_short_video_cover_ownership.mjs
+  - tests/verify_native_short_video_frame_loading.mjs
+  - tests/verify_native_short_video_bitmap_decode.mjs
+  - tests/verify_native_short_video_author_requests.mjs
+  - tests/verify_android_short_video_list_lifecycle.mjs
+  - tests/verify_android_short_video_back.mjs
+  - tests/verify_android_short_video_suggestions.mjs
+  - tests/verify_android_mobile_action_sheet.mjs
+  - tests/verify_android_settings_focus.mjs
+  - android-client/www/js/settings-dialog-focus.js
+  - tests/verify_android_music_back.mjs
+  - tests/verify_android_fanhao_player_requests.mjs
+  - tests/verify_android_fanhao_player_lifecycle.mjs
+  - tests/verify_native_short_video_audio.mjs
+  - tests/verify_native_short_video_audio_focus.mjs
+  - tests/verify_native_short_video_prefetch.mjs
+  - tests/verify_native_short_video_cache_startup.mjs
+  - tests/verify_native_short_video_interaction.mjs
+  - tests/verify_native_short_video_request_lifecycle.mjs
+  - tests/verify_android_music_history_requests.mjs
+  - tests/verify_android_music_playlist_requests.mjs
+  - tests/verify_android_media_viewer.mjs
+  - tests/verify_android_photo_viewer_requests.mjs
+  - tests/verify_android_info_preview.mjs
+  - tests/verify_android_fanhao_search_suggestions.mjs
+  - tests/verify_android_manga_task_requests.mjs
 ---
 
 # 验证矩阵
@@ -209,8 +267,21 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:music-lyric-search` | 联想关联去重、专辑字段投影与旧库回退、完整响应及 SQL 参数/查询计划、错误及下一请求更新；原短词/FTS 有效总数与分页、歌词上下文和高亮。 | 当前 store、私有 SQLite 与合成歌词；旧联想宽字段应超过简介字节预算，原点查负控继续触发读取次数断言；纳入 `verify:music-scale`，详见[音乐搜索](../architecture/music-search.md)。 |
 | `npm run verify:music-m3u`、`npm run verify:music-playlist-order` | M3U 网络主机与本地路径身份、编码路径、同名歧义及解析顺序；歌单排序的完整旧响应、旧类型规范化、未变位置零写入、元数据时间戳与事务回滚。 | 当前匹配器/store、合成路径与内存 SQLite，不打开音频或启动扫描；排序以歌曲行 UPDATE 次数验证，旧全量写入负控应超预算；两项均纳入 `verify:music-scale`。 |
 | `npm run verify:music-summary-cache` | 会话及未应用进度的汇总复用、写入与回滚、有效期及扫描失效；播放最多的完整旧响应、并列与关联查找次数；有效目录的未听与待评分、智能歌单索引的合并计数、稀疏及密集状态、旧列类型、静态回退及时间边界。 | 当前 store、实际扫描发布和私有 SQLite、完整旧响应及 SQL/关联计数；旧索引计数负控应超过查询预算；只使用合成元数据，不扫描音频或操作实际历史记录。 |
-| `npm run verify:android-music` | 音频 Blob 生命周期、翻页与后台歌单请求归属；单曲详情、音频和播放 Promise 乱序，以及首屏恢复、自动衔接与最新选歌的交错。 | 实际客户端模块或未改写逻辑的函数体、受控 API 与 Audio；不访问真实音乐或数据库，不证明真实音频解码。 |
-| `npm run verify:android-music-rendering` | 普通歌曲翻页保留 DOM、失败重试、取消与筛选切换、重复 ID、分组回退和播放标记更新；完整样式下的屏幕外布局、行高、变宽、滚动定位、焦点、点击和封面懒加载；后台歌单局部更新、弹窗及首屏恢复与新选歌的归属。 | 当前 Android 音乐页与完整 CSS、私有 Chromium、合成 API 和受控 Audio；同步生成缓存引用，计时区分脚本与布局，仅作诊断，不证明真机播放。 |
+| `npm run verify:android-fanhao-player` | 普通作品视频快速点选、离页、服务器与账号切换；原生失败后的网页回退、兼容播放定时器、旧媒体回调、进度节流、拒绝未就绪零进度和退出前最终进度；同路由缓存刷新保留仍可用的已选作品，作品移除时取消播放。 | 完整播放工厂、真实请求与账号归属模块，以及受控 DOM、网络响应和媒体对象；不访问真实视频，不代表真机解码与播放验收。 |
+| `npm run verify:android-mobile-sheets` | 通用操作弹层的返回键优先级、路由/页面/当前账号退出、焦点恢复、旧控件失效，以及保留已接受的异步操作；设置面板的双向 Tab 循环、背景隔离、关闭回焦、迟到回调失效、确认框退栈与同页历史返回。 | 实际共享组件、设置焦点控制器、模块/工具栏和 shell 返回分发，DOM、导航与完成顺序为受控边界；不访问真实资料或执行真实资料变更，不代表 Android 真机辅助功能验收。 |
+| `npm run verify:android-music-back` | 音乐弹层、全屏、搜索到根目录的分层返回，保留播放与目录上下文；迷你播放器打开与队列入口、焦点往返、手势取消及旧控件失效；播放设置真实入口、关闭与焦点恢复，评分已发写入和关闭交错；歌曲及播放设置控件关闭、重开、切歌或停用后的归属。 | 完整音乐页面、实际模块/注册表/返回分发及受控 Audio、API 和时钟；不代表真机系统返回与真实音频验收。 |
+| `npm run verify:android-bottom-layout` | 底部导航实际高度同步、隐藏启动和恢复、旧回调释放及无观察器回退；导航、迷你播放器、内容末项和分类菜单的间距、命中与原生Tab焦点避让；三个分类菜单的键盘打开、方向键、Escape、页面NativeBack入口、焦点往返及长按点击抑制。 | 真实共享高度模块与受控观察器/时钟；完整 Android 入口、真实导航和 CSS、私有 Chromium 与合成只读目录。字体放大是渲染压力，安全区由浏览器环境覆盖，返回调用实际页面dispatcher；不代表 Android 真机验收。已纳入 Android 总入口，图库导航VM另查真实事件接线及返回优先级。 |
+| `npm run verify:android-gallery-layout` | 影视详情长片名、剧名与文件信息的完整阅读和换行，图库合集返回入口的点按区域及真实返回行为。 | 完整 Android 入口、真实模块与样式、私有 Chromium 和隔离的合成只读目录；覆盖窄屏与短横屏。已纳入 Android 总入口及媒体、图片域；不连接真实媒体、数据库或原生播放，不代表 Android 真机验收。 |
+| `npm run verify:android-manga-layout` | 漫画详情简介、长标题、章节切换与恢复；添加区与下载记录的焦点、触点和文字换行；提交中的只读链接、失败提示关联、编辑清错及重新采集。 | 完整 Android 入口、真实模块与样式、私有 Chromium，分两次独立进程运行常规布局和恢复流程，保持每个夹具12运行上限。恢复场景只对白名单合成链接返回内存503或完成回执，不启动采集；其他场景继续拒绝写入。不连接真实业务服务、媒体或数据库，不代表 Android 真机验收。 |
+| `npm run verify:android-novel-layout` | 小说搜索长查询换行与操作触点；清除、重搜、分类及排序；旋转后选中分类可见，同宽回调保留手动横滚；详情作者与分类全文、简介展开、目录搜索与分段，以及长目录错误提示。 | 完整 Android 入口、实际模块与样式、私有 Chromium；使用既有8本书库目录及独立4本详情场景，覆盖窄屏、短横屏和有无ResizeObserver的分支，单个夹具仍限12次运行。仅提供列表、汇总、显式元信息和目录GET，章节content始终为空。分类工厂专项另验退出清理；按可见选项验证篇幅排序。不提供正文、进度写入、下载、导入、上传或真实TXT，不连接业务服务、书库或数据库，不代表 Android 真机验收。 |
+| `npm run verify:android-media-viewer` | 全屏图片加载和失败重试、切图及关闭重开后的迟到回调、同图补齐保留节点；触摸翻页、滑动和按压定位，窄屏与横屏重试按钮。 | 当前查看器与完整 Android CSS、私有 Chromium、合成 SVG 和门控响应；三类回退开关分别验证加载、回调归属和按压定位，不能代替 Android 真机图片解码与手势验收。 |
+| `npm run verify:android-photo-viewer` | 全屏相册补齐期间的关闭重开、同 ID、服务器或账号切换、模块退出与旧回调；旧请求不覆盖新查看器或写入新缓存。 | 当前完整图库工厂、真实账号与 URL 模块及受控 DOM、查看器、缓存和 HTTP；真实旧方法负控应失败，不访问实际相册。 |
+| `npm run verify:android-info-preview` | 快速切换资料、收起后重开、离页与切换来源或账号；旧按钮、请求和排队滚动不能覆盖新预览。 | 当前完整资料组件、真实账号 scope 和受控 DOM、HTTP、帧；归属、旧控件和滚动负控应失败，不读取真实作品资料。 |
+| `npm run verify:android-fanhao-suggestions` | 新查询立即失效旧建议，迟到成功和失败、失焦、离页、重开同查询及切源/账号；旧建议按钮不能记录新查询并导航旧人物。 | 当前完整搜索工厂、真实账号与受控 DOM、请求和时钟；可见性、回调和按钮负控应失败，不访问实际人物或资料库。 |
+| `npm run verify:android-manga-tasks` | 漫画添加、更新、轮询与详情刷新等待期间的服务器和账号切换，任务列表、重试及清理确认的归属；同 ID 新任务与旧监控结束的交错，删除确认与返回只作用于原详情。 | 当前完整图库工厂、真实账号与缓存 fence 及受控请求、时钟、DOM 和弹窗；旧方法负控应失败，已接受任务继续执行，不发起实际采集、清理或删除。 |
+| `npm run verify:android-music-history`、`npm run verify:android-music-playlists` | 清空历史、新建/编辑/删除歌单、保存队列与加入/移出歌曲的回执及目录刷新，和新导航、选歌、关闭重开弹层交错；当前失败可重试，过期回调保留新页面与队列。 | 当前完整音乐工厂、操作组件及受控 API、Audio、DOM 和时钟；保留已接受写入，负控验证归属守卫，不操作真实歌单或历史记录。 |
+| `npm run verify:android-music` | 音频 Blob 生命周期、翻页与后台歌单请求归属；单曲详情、音频和播放 Promise 乱序，以及首屏恢复、自动衔接与最新选歌的交错；收藏与评分的来源、账号归属和字段写入顺序，已接受写入与离页、连续操作、迟到读取及恢复记录的交错。 | 实际客户端模块或未改写逻辑的函数体、受控 API 与 Audio；不访问真实音乐或数据库，不证明真实音频解码。 |
+| `npm run verify:android-music-rendering` | 歌曲翻页保留 DOM、失败重试、取消与筛选切换、重复 ID 和播放标记；完整样式下的屏幕外布局、滚动定位、焦点、点击与封面懒加载；双行长歌名、44px歌曲操作、匹配及版本标记和更多菜单长文案的窄屏布局，行与子按钮的键盘激活；迷你播放器原生打开按钮、44px快捷操作、Enter/Space、全屏焦点往返及深列表浏览位置保持；播放设置与评分真实入口、窄屏及横屏滚动、Tab/Escape、关闭焦点与面板内失败反馈；后台歌单更新及首屏恢复归属；中文组合输入暂停查询，候选确认键不触发搜索，提交后保留输入节点与焦点；排序和搜索筛选最终重绘后的焦点恢复，以及等待期间继续操作、乱序响应、切源和账号变化时的取消。 | 当前音乐页与完整 CSS、私有 Chromium、合成 API、受控 Audio、请求和输入事件；同步生成缓存引用，计时仅作诊断，不证明真机播放、TalkBack 或 Android 输入法兼容性。 |
 | `npm run verify:music-playback` | 旧播放 Promise 的成功/拒绝、换源与同源重载、当前拒绝与重试、暂停、睡眠定时和迟到媒体事件。 | 实际音乐页/播放器源码与受控 Audio、DOM 和时钟；不读取音频文件，不证明真实解码或音频设备播放。 |
 | `npm run verify:music-requests` | 列表、单曲、旁栏与上次歌曲恢复的请求归属；清空历史、启动扫描及歌单创建/导入/编辑/增删的写入和后续刷新与新导航、选歌交错；缓存失效、当前/过期错误及忙碌状态。 | 实际音乐 actions 源码、受控 API、播放器、状态和存储；导航取消读取但保留已发写入，不使用真实数据库、扫描或媒体。 |
 | `npm run verify:music-reader-browser` | 独立音乐馆的深链接、历史导航、列表切换、关闭详情、搜索定时器、跨页优先版本合并、原始 offset 和持续播放；实际点击编辑、加入/移出及删除歌单，核对当前成功与写入/旁栏刷新等待期间的新导航；清空历史的当前成功、导航后迟到成功/失败与播放保持。 | 当前宿主与音乐页、私有 Chromium、按请求方法门控的合成 API 和受控 Audio；歌单与历史写入仅修改 fixture 状态，不证明真实持久化、音频解码或设备播放。 |
@@ -245,30 +316,9 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 
 ## 启动与 Android 验证的特殊条件
 
-`verify:startup` 在 Windows 下要求 `powershell.exe` 和 `pwsh.exe` 都执行成功；不是任选其一。
-其 PowerShell fixture 拷贝启动器到临时目录、生成假服务并使用动态端口，不依赖正式的 `29998` 或 `8765`。
-安装缺失运行时后再重跑，不要用正式服务替代 fixture。
+`verify:startup` 在 Windows 下要求 `powershell.exe` 和 `pwsh.exe` 都执行成功；不是任选其一。其 PowerShell fixture 拷贝启动器到临时目录、生成假服务并使用动态端口，不依赖正式的 `29998` 或 `8765`。安装缺失运行时后再重跑，不要用正式服务替代 fixture。
 
-原生客户端门禁还会在宿主 JVM 中编译并运行 Java fixture，不能归为纯源码检查：
-
-- 准备包含 `javac` 与 `java` 的 JDK，按脚本的定位规则设置 `JAVA_HOME`；不同验证器的默认路径和 PATH 回退并不相同。
-- 短视频 actions 验证需要本地 Android platform 的 `android.jar`，可通过 `ANDROID_HOME` 或 `ANDROID_SDK_ROOT` 定位 SDK。
-- 短视频 actions 验证需要 Gradle 缓存中的 `org.json:json` JAR；缓存根由 `GRADLE_USER_HOME` 或用户目录下的 `.gradle` 决定。该 fixture 不自动下载缺失 JAR。
-- 视觉生命周期的 Google Tasks 验证需要 Android SDK 与本地 Gradle 依赖缓存。优先使用转换后的 runtime JAR；只有原始 AAR 时，仅把其中的 `classes.jar` 提取到验证临时目录，不需要先构建 APK，也不自动下载依赖。
-- 执行会创建并清理临时目录与编译产物，部分 fixture 会写入测试状态或使用本机 HTTP 服务。它们不构建 APK，也不替代 Android 真机验收。
-
-| 命令 | 注意事项 |
-| --- | --- |
-| `npm run setup:android-verification` | 显式在 Android 目录执行 `ci --include=dev --ignore-scripts --no-audit --no-fund`；需要包源访问并改写其依赖目录。首次运行或锁文件变化后执行。 |
-| `npm run verify:android-security` | 使用已有 Android 依赖运行安全检查；不会自动执行 `npm ci`。依赖缺失时先运行上面的 setup。 |
-| `npm run verify:android-gradle-config` | 调用 Android 工程自己的 Gradle 配置检查。 |
-| `npm run verify:short-video-client` | 已提交的短视频客户端检查入口；包含上述原生 JVM fixture，但不覆盖整个 Android 应用。 |
-| `npm run verify:android-release` | 发布所需的工作流、鉴权、写权限、安全、Gradle 配置和导入门禁；不包含所有 Android UI 回归。 |
-| `npm run verify:android-full` | 显式运行完整 Android 客户端、system control、作品移动、小说 UI、短视频原生、安全、鉴权和导入回归；runner 会把重复的缓存同步和叶子检查去重。 |
-
-`verify:android-security`、`verify:android-client` 和 `verify:short-video-client` 会先运行幂等的 `sync:cache`，同步 Android Web 缓存版本引用；这会改写需要更新的生成引用，但不会重装依赖。`verify:android-client` 继续作为客户端行为聚合入口使用，也不能替代真机验收。
-
-不要把 `install:debug`、`publish:debug` 等发布/安装脚本混进普通检查。它们的写入对象与授权要求不同，见[开发流程](../guide/development.md)。
+Android 的依赖准备、JDK / Android SDK / Gradle 缓存要求、原生 fixture 覆盖与缓存同步副作用，见[Android 验证环境与边界](android-verification.md)。
 
 ## 完整应用门禁
 
@@ -277,7 +327,7 @@ npm run verify:full
 ```
 
 该命令展开现有 `verify:*` 模块入口，按原有顺序执行全部行为检查，并对完全相同的叶子命令去重；例如 native video progress 和 media channel fixture 在一次完整门禁中各执行一次。模块入口本身保持兼容，可继续单独运行。
-前项失败会阻止后续项执行。除 Node 依赖外，还包括 Python 检查、浏览器、PowerShell 及 Java fixture；须先显式准备 Android npm 依赖，并具备 JDK、上述 Android platform 与 Gradle JAR 缓存。
+前项失败会阻止后续项执行。除 Node 依赖外，还包括 Python 检查、浏览器、PowerShell 及 Java fixture；须先按[Android 验证环境](android-verification.md)显式准备 Android npm 依赖、JDK、Android platform 与 Gradle JAR 缓存。
 部分 Python 检查依赖第三方包，例如 `verify:javdb-card-facts` 使用 `bs4`；不能只装根目录 npm 依赖就承诺完整门禁可运行。
 按失败脚本的导入与所属工具要求补齐环境，不要为了让总命令变绿而跳过门禁。
 

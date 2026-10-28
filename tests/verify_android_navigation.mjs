@@ -34,6 +34,7 @@ function shell() {
     AbortController,
     CustomEvent: class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } },
     events: [],
+    modePickerRetirements: 0,
     currentView: "channel",
     currentViewParams: { mode: "photo", category: "first" },
     viewRenderToken: 0,
@@ -63,6 +64,9 @@ function shell() {
     renderRouteLoadingState() {},
     setActiveBottom() {},
     finishAppStartup() {},
+    // Menu behavior belongs to the actual gallery shell harness; this isolated
+    // navigation fixture observes only its lifecycle boundary.
+    retireModePickerSession() { context.modePickerRetirements += 1; },
     currentViewNeedsLibrary: () => false,
     showHome(options = {}) {
       context.invalidateViewRender();
@@ -211,6 +215,7 @@ test("home restoration stays synchronous and does not re-arm after user input", 
   context.currentView = "home";
   context.currentViewParams = {};
   context.renderCurrentView({ restoreScrollY: 300 });
+  assert.equal(context.modePickerRetirements, 1, "home navigation retires the previous menu lifecycle");
   assert.equal(context.pendingScrollRestore.target, 300);
   context.cancelPendingScrollRestore();
   await flushPromises();

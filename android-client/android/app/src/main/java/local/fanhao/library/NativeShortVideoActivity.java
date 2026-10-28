@@ -46,18 +46,24 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
+import androidx.media3.common.audio.AudioBecomingNoisyManager;
+import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.database.StandaloneDatabaseProvider;
 import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.datasource.cache.CacheKeyFactory;
 import androidx.media3.datasource.cache.CacheWriter;
+import androidx.media3.datasource.cache.ContentMetadata;
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
 import androidx.media3.datasource.cache.SimpleCache;
 import androidx.media3.exoplayer.DefaultLoadControl;
@@ -84,8 +90,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 @UnstableApi
 public class NativeShortVideoActivity extends Activity {
   private static final String TAG = "NativeShortVideo";
@@ -121,12 +129,11 @@ public class NativeShortVideoActivity extends Activity {
   private static final int THUMBNAIL_MAX_SIZE = 512;
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private final ExecutorService executor = Executors.newFixedThreadPool(4);
-  private final ExecutorService videoPrefetchExecutor = Executors.newSingleThreadExecutor();
+  private final NativeShortVideoPrefetchController videoPrefetch = new NativeShortVideoPrefetchController();
   private final NativeShortVideoPlaybackFallback playbackFallback = new NativeShortVideoPlaybackFallback(mainHandler, executor);
-  private final Set<String> pendingFrameIds = Collections.synchronizedSet(new HashSet<>());
+  private final NativeShortVideoFrameLoader<Bitmap> frameLoading = new NativeShortVideoFrameLoader<>();
+  private volatile FrameLoadingWindow frameLoadingWindow = new FrameLoadingWindow(Collections.emptySet(), "");
   private final Set<String> pendingAuthorFollowKeys = Collections.synchronizedSet(new HashSet<>());
-  private final Set<String> pendingVideoPrefetchIds = Collections.synchronizedSet(new HashSet<>());
-  private final Set<String> completedVideoPrefetchIds = Collections.synchronizedSet(new HashSet<>());
   private final LruCache<String, Bitmap> frameCache = new LruCache<String, Bitmap>(FRAME_CACHE_MAX_KB) {
     @Override
     protected int sizeOf(String key, Bitmap value) {
@@ -135,6 +142,7 @@ public class NativeShortVideoActivity extends Activity {
   };
   private final NativeShortVideoFeedReader feedReader = new NativeShortVideoFeedReader(FEED_PAGE_LIMIT, FEED_CACHE_MAX_AGE_MS);
   private final NativeShortVideoFeedPaging feedPaging = new NativeShortVideoFeedPaging();
+  private final NativeShortVideoFeedRequests feedRequests = new NativeShortVideoFeedRequests();
   private final List<ShortVideoItem> videos = new ArrayList<>();
   private final Map<Integer, ShortVideoHolder> attachedHolders = new HashMap<>();
   private final Map<Integer, ExoPlayer> playerCache = new HashMap<>();
@@ -142,6 +150,7 @@ public class NativeShortVideoActivity extends Activity {
   private final Map<String, int[]> decodedVideoSizes = new HashMap<>();
   private final Map<String, Integer> galleryPositions = new HashMap<>();
   private final Set<Integer> failedPlayerIndexes = new HashSet<>();
+  private FailedVideoRetry failedVideoRetry;
   private final Set<String> followedAuthorKeys = new HashSet<>();
   private final List<ScreenState> navigationStack = new ArrayList<>();
   private ExoPlayer activePlayer;
@@ -150,18 +159,26 @@ public class NativeShortVideoActivity extends Activity {
   private int gallerySegmentFeedIndex = -1;
   private int gallerySegmentMediaIndex = -1;
   private String gallerySegmentUrl = "";
+  private long gallerySegmentGeneration;
+  private MediaItem gallerySegmentRenderedSource;
+  private String gallerySegmentItemId = "";
+  private GallerySegmentCallback gallerySegmentRetryOwner;
+  private long gallerySegmentRetryStatusGeneration = -1;
   private ExoPlayer gallerySoundPlayer;
   private int gallerySoundFeedIndex = -1;
   private String gallerySoundUrl = "";
-  private SimpleCache videoCache;
-  private CacheDataSource.Factory videoCacheDataSourceFactory;
-  private volatile CacheWriter activeVideoCacheWriter;
+  private long gallerySoundGeneration;
+  private NativeShortVideoCacheLifecycle<VideoCacheResource> videoCacheLifecycle;
+  private DataSource.Factory videoPlaybackDataSourceFactory;
+  private volatile long videoPrefetchGeneration;
+  private volatile String videoPrefetchOwner = "";
   private volatile boolean destroying;
   private ViewPager2 pager;
   private ScaleGestureDetector galleryScaleDetector;
   private ShortVideoHolder galleryScaleHolder;
   private ShortVideoAdapter adapter;
   private TextView statusView;
+  private long statusGeneration;
   private NativeShortVideoDeleteStatusView deleteStatusView;
   private TextView topInfoView;
   private ImageView topSearchButton;
@@ -178,9 +195,14 @@ public class NativeShortVideoActivity extends Activity {
   private boolean commentsResumeVideo;
   private boolean commentsResumeGallerySegment;
   private boolean commentsResumeGallerySound;
+  private long commentsAudioInterruptionGeneration;
+  private String commentsPausedItemId;
+  private ShortVideoHolder commentsPausedHolder;
+  private Object commentsVideoSourceOwner, commentsSegmentSourceOwner, commentsSoundSourceOwner;
   private int commentsPausedIndex = -1;
   private ScreenState currentScreen;
   private final NativeShortVideoFeedPlayback feedPlayback = new NativeShortVideoFeedPlayback();
+  private AudioBecomingNoisyManager audioInterruptionManager;
   private String apiBaseUrl;
   private NativeShortVideoActionPreferences actionPreferences;
   private final NativeShortVideoActionSnapshots actionSnapshots = new NativeShortVideoActionSnapshots();
@@ -193,13 +215,29 @@ public class NativeShortVideoActivity extends Activity {
   private boolean loadingMoreVideos;
   private volatile int currentIndex = -1;
   private int pendingPlayIndex = -1;
+  private PlaybackRequest selectedPlaybackRequest;
+  private Runnable pendingPlaybackRunnable;
   private Runnable pendingPrepareRunnable;
   private Runnable progressRunnable;
+  private final NativeShortVideoSeekSession progressSeekSession = new NativeShortVideoSeekSession();
+  private ShortVideoHolder progressSeekHolder;
+  private Runnable progressSeekFrame;
+  private ExoPlayer progressDurationPlayer;
+  private Object progressDurationSource;
+  private long progressDurationMs;
   private Runnable systemInfoRunnable;
   private Runnable pendingStageTapRunnable;
+  private StageGestureOwner pendingStageTapOwner;
+  private StageGestureOwner stageTouchOwner;
+  private ShortVideoHolder stageTouchHolder;
+  private View stageTouchView;
+  private long stageGestureGeneration;
   private Runnable galleryAutoAdvanceRunnable;
   private int galleryAutoAdvanceFeedIndex = -1;
   private int galleryAutoAdvanceMediaIndex = -1;
+  private long galleryAutoAdvanceDueAtMs;
+  private NativeShortVideoGalleryImageReadiness galleryAutoAdvanceReadiness;
+  private GallerySearchAdvancePause gallerySearchAdvancePause;
   private long lastStageTapAt;
   private long pageSelectedAtMs;
   private long loggedFramePageSelectedAtMs;
@@ -215,19 +253,33 @@ public class NativeShortVideoActivity extends Activity {
   private boolean muted;
   private boolean videoFitMode = true;
   private boolean autoNext;
+  private GalleryContinuation galleryContinuation;
   private boolean controlsHidden;
   private boolean openAuthorPanelOnStart;
-  private boolean activityResumed;
+  private volatile boolean activityResumed;
   private boolean pausedForLifecycle;
   private boolean resumePlaybackAfterPause;
+  private NativeShortVideoFeedPlayback.Snapshot checkpointLifecyclePlayback, checkpointOverlayPlayback;
+  private ShortVideoItem checkpointLifecycleItem, checkpointOverlayItem;
+  private NativeShortVideoCheckpoint.Recovery checkpointRecovery;
+  private NativeShortVideoRecovery.NativeOwner nativeSession;
+  private NativeShortVideoScreenAwake screenAwake;
+  private long screenAwakeRetryGeneration;
+  private static final String CHECKPOINT_KEY = "shortVideo.checkpoint.key";
+  private static final String CHECKPOINT_SCOPE = "shortVideo.checkpoint.scope";
+  private static final String CHECKPOINT_VERSION = "shortVideo.checkpoint.version";
+  private static final String CHECKPOINT_FAILED = "shortVideo.checkpoint.failed";
   @Override
   protected void onCreate(@Nullable Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
+    nativeSession = NativeShortVideoRecovery.attach(this, savedInstanceState);
+    if (nativeSession != null && nativeSession.isRejected()) { finish(); return; }
     createdAtMs = SystemClock.elapsedRealtime();
     requestWindowFeature(Window.FEATURE_NO_TITLE);
     setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
     hideSystemBars();
     readControlPreferences();
+    initializeAudioInterruptionHandling();
     initializeVideoCache();
     apiBaseUrl = getIntent().getStringExtra(EXTRA_BASE_URL);
     pendingFeedUrl = getIntent().getStringExtra(EXTRA_FEED_URL);
@@ -249,10 +301,12 @@ public class NativeShortVideoActivity extends Activity {
     int requestedStartIndex = findVideoIndex(videos, requestedStartId);
     if (requestedStartIndex >= 0) pendingStartIndex = requestedStartIndex;
     buildUi();
+    initializeScreenAwake();
     deleteController = createDeleteController();
     deleteController.restorePending(apiBase());
     currentScreen = captureFeedScreen();
     syncPendingVideoActions(true);
+    if (restorePlaybackCheckpoint(nativeSession == null ? savedInstanceState : nativeSession.restoreState(savedInstanceState))) return;
     if (!videos.isEmpty()) {
       int initialIndex = Math.max(0, Math.min(pendingStartIndex, videos.size() - 1));
       if (openAuthorPanelOnStart) openInitialAuthorScreen(initialIndex);
@@ -265,33 +319,284 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
   @Override
+  protected void onSaveInstanceState(@NonNull Bundle outState) {
+    savePlaybackCheckpoint(outState);
+    super.onSaveInstanceState(outState);
+  }
+
+  private String checkpointScope() {
+    return NativeShortVideoCheckpoint.scope(getIntent().getStringExtra(EXTRA_BASE_URL), getIntent().getStringExtra(EXTRA_FEED_URL),
+      getIntent().getStringExtra(EXTRA_VIDEOS_JSON), getIntent().getStringExtra(EXTRA_START_ID), getIntent().getIntExtra(EXTRA_START_INDEX, 0));
+  }
+
+  private File checkpointDirectory() {
+    return new File(getNoBackupFilesDir(), "short-video-checkpoints");
+  }
+
+  private FeedScreenState captureCheckpointFeed() {
+    int index = pager == null ? currentIndex : pager.getCurrentItem();
+    if (index < 0 || index >= videos.size()) index = Math.max(0, currentIndex);
+    ShortVideoItem item = index < videos.size() ? videos.get(index) : null;
+    NativeShortVideoFeedPlayback.Snapshot playback = null;
+    if (item != null) {
+      int media = item.isGallery() ? galleryPositions.getOrDefault(item.id, 0) : -1;
+      GallerySegmentCallback segmentOwner = item.isGallery() ? captureGallerySegmentCallback(activePlayer) : null;
+      boolean activeOwner = currentIndex == index && activePlayer != null && (item.isGallery()
+        ? segmentOwner != null && segmentOwner.owns() : playerCache.get(index) == activePlayer && playbackFallback.isBoundToItem(activePlayer, item));
+      GallerySoundCallback soundOwner = item.isGallery() ? captureGallerySoundCallback(gallerySoundPlayer) : null;
+      boolean activeSoundOwner = soundOwner != null && soundOwner.owns() && gallerySoundFeedIndex == index;
+      if ((feedSearchOpen() || commentsOpen()) && checkpointOverlayItem == item && checkpointOverlayPlayback != null) {
+        NativeShortVideoFeedPlayback.Snapshot overlay = checkpointOverlayPlayback.resolvedAt(feedPlayback.audioInterruptionGeneration());
+        // Transient search/comments views are dismissed by recreation. Keep their
+        // paused media quiet until a new explicit play, rather than playing under a lost overlay.
+        playback = NativeShortVideoFeedPlayback.Snapshot.fromSaved(item.id, media,
+          overlay.hasVideo() ? overlay.videoPosition() : null, false, overlay.hasSound() ? overlay.soundPosition() : null,
+          false, false, overlay.gallerySourceKey, feedPlayback.audioInterruptionGeneration());
+      } else if (pausedForLifecycle && checkpointLifecycleItem == item && checkpointLifecyclePlayback != null) {
+        NativeShortVideoFeedPlayback.Snapshot saved = checkpointLifecyclePlayback.resolvedAt(feedPlayback.audioInterruptionGeneration());
+        playback = NativeShortVideoFeedPlayback.Snapshot.fromSaved(item.id, media,
+          saved.hasVideo() ? (activeOwner && activePlayer != null ? Math.max(0L, activePlayer.getCurrentPosition()) : saved.videoPosition()) : null,
+          saved.videoRequested(), saved.hasSound() ? (activeSoundOwner
+            ? Math.max(0L, gallerySoundPlayer.getCurrentPosition()) : saved.soundPosition()) : null,
+          saved.soundRequested(), saved.automaticAdvanceRequested, saved.gallerySourceKey, feedPlayback.audioInterruptionGeneration());
+      } else {
+        playback = feedPlayback.captureForRecreation(item.id, media, activeOwner ? activePlayer : null,
+          activeSoundOwner ? gallerySoundPlayer : null);
+        PlaybackRequest request = selectedPlaybackRequest;
+        if (request != null && !request.committed && request.item == item && request.index == index
+          && !playback.hasVideo() && !playback.hasSound()) {
+          boolean requested = request.audioGeneration == feedPlayback.audioInterruptionGeneration();
+          boolean video = !item.isGallery() || (media >= 0 && media < item.galleryItems.size() && item.galleryItems.get(media).isVideo());
+          playback = NativeShortVideoFeedPlayback.Snapshot.fromSaved(item.id, media, video ? 0L : null, requested,
+            item.isGallery() && item.sound.isPlayable() ? 0L : null, requested, requested,
+            checkpointGallerySourceKey(item, media), feedPlayback.audioInterruptionGeneration());
+        }
+        if (!item.isGallery() && !playback.hasVideo()) {
+          long position = failedVideoRetry != null && failedVideoRetry.item == item ? failedVideoRetry.position : 0L;
+          playback = NativeShortVideoFeedPlayback.Snapshot.fromSaved(item.id, -1, position, false, null, false, false, null,
+            feedPlayback.audioInterruptionGeneration());
+        }
+      }
+    }
+    return new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, index, playback);
+  }
+
+  private void rememberCheckpointLifecycle() {
+    FeedScreenState feed = captureCheckpointFeed();
+    checkpointLifecycleItem = feed.items.isEmpty() ? null : feed.items.get(feed.playbackIndex());
+    checkpointLifecyclePlayback = feed.playback;
+  }
+
+  private String checkpointGallerySourceKey(ShortVideoItem item, int index) {
+    if (!item.isGallery() || index < 0 || index >= item.galleryItems.size()) return null;
+    GalleryMedia media = item.galleryItems.get(index);
+    return (media.isVideo() ? "video:" : "image:") + media.url;
+  }
+
+  private void rememberCheckpointOverlay() {
+    checkpointOverlayPlayback = null; checkpointOverlayItem = null;
+    FeedScreenState feed = captureCheckpointFeed();
+    checkpointOverlayItem = feed.items.isEmpty() ? null : feed.items.get(feed.playbackIndex());
+    checkpointOverlayPlayback = feed.playback;
+  }
+
+  private void savePlaybackCheckpoint(Bundle outState) {
+    if (isFinishing() || destroying) return;
+    outState.putInt(CHECKPOINT_VERSION, NativeShortVideoCheckpoint.VERSION);
+    String scope = checkpointScope(); outState.putString(CHECKPOINT_SCOPE, scope);
+    try {
+      FeedScreenState feed = captureCheckpointFeed();
+      if (feed.items.isEmpty()) {
+        if (checkpointRecovery != null) {
+          String key = NativeShortVideoCheckpoint.saveRecovery(checkpointDirectory(), scope, checkpointRecovery, System.currentTimeMillis());
+          outState.putString(CHECKPOINT_KEY, key); outState.putBoolean(CHECKPOINT_FAILED, false);
+          if (nativeSession != null) nativeSession.publish(scope, key);
+        } else {
+          outState.remove(CHECKPOINT_KEY); outState.putBoolean(CHECKPOINT_FAILED, true);
+          if (nativeSession != null) nativeSession.invalidateCheckpoint();
+        }
+        return;
+      }
+      List<ScreenState> stack = new ArrayList<>();
+      for (ScreenState entry : navigationStack) stack.add(checkpointResolvedScreen(entry));
+      ScreenState current = currentScreen instanceof AuthorScreenState ? ((AuthorScreenState) currentScreen).copy() : feed;
+      String key = NativeShortVideoCheckpoint.save(checkpointDirectory(), scope,
+        new NativeShortVideoCheckpoint.State(feed, current, stack), System.currentTimeMillis());
+      outState.putString(CHECKPOINT_KEY, key); outState.putBoolean(CHECKPOINT_FAILED, false);
+      if (nativeSession != null) nativeSession.publish(scope, key);
+    } catch (Exception error) {
+      outState.remove(CHECKPOINT_KEY); outState.putBoolean(CHECKPOINT_FAILED, true);
+      if (nativeSession != null) nativeSession.invalidateCheckpoint();
+      Log.w(TAG, "playback checkpoint unavailable", error);
+    }
+  }
+
+  private ScreenState checkpointResolvedScreen(ScreenState screen) {
+    if (!(screen instanceof FeedScreenState)) return ((AuthorScreenState) screen).copy();
+    FeedScreenState feed = (FeedScreenState) screen;
+    return new FeedScreenState(feed.items, feed.feedUrl, feed.nextOffset, feed.nextCursor, feed.hasMore, feed.currentIndex,
+      feed.playback == null ? null : feed.playback.resolvedAt(feedPlayback.audioInterruptionGeneration()));
+  }
+
+  private boolean restorePlaybackCheckpoint(Bundle savedState) {
+    if (savedState == null || !savedState.containsKey(CHECKPOINT_VERSION)) return false;
+    try {
+      if (savedState.getInt(CHECKPOINT_VERSION, -1) != NativeShortVideoCheckpoint.VERSION
+        || !checkpointScope().equals(savedState.getString(CHECKPOINT_SCOPE, "")) || savedState.getBoolean(CHECKPOINT_FAILED, false)) {
+        throw new java.io.IOException("invalid playback checkpoint reference");
+      }
+      NativeShortVideoCheckpoint.State state = NativeShortVideoCheckpoint.read(checkpointDirectory(), checkpointScope(),
+        savedState.getString(CHECKPOINT_KEY, ""), System.currentTimeMillis(), feedPlayback.audioInterruptionGeneration());
+      openAuthorPanelOnStart = false;
+      if (state.recovery != null) {
+        checkpointRecovery = state.recovery;
+        showCheckpointRecovery("列表状态过大，点此恢复当前作品");
+        return true;
+      }
+      navigationStack.clear(); navigationStack.addAll(state.backStack);
+      if (state.current instanceof AuthorScreenState) {
+        resetFeedScreen(state.feed, false);
+        pager.setCurrentItem(state.feed.playbackIndex(), false);
+        renderAuthorScreen((AuthorScreenState) state.current);
+      } else renderFeedScreen((FeedScreenState) state.current);
+      return true;
+    } catch (Exception error) {
+      Log.w(TAG, "cannot restore playback checkpoint", error);
+      showCheckpointRecovery("播放状态无法恢复，请返回重新打开");
+      return true;
+    }
+  }
+
+  private void showCheckpointRecovery(String message) {
+    cancelSelectedPlaybackRequest(); releaseAllPlayers(); attachedHolders.clear(); navigationStack.clear();
+    videos.clear(); currentIndex = -1; pendingPlayIndex = -1; hasMoreVideos = false;
+    openAuthorPanelOnStart = false; currentScreen = captureFeedScreen(); adapter.notifyDataSetChanged();
+    showStatus(message);
+    if (checkpointRecovery != null) showPersistentDeleteStatus(message, "恢复当前作品", this::retryCheckpointRecovery);
+  }
+
+  private void retryCheckpointRecovery() {
+    NativeShortVideoCheckpoint.Recovery owner = checkpointRecovery;
+    if (owner == null || !activityResumed || destroying || isFinishing()) return;
+    String base = apiBase(); if (base.isEmpty()) return;
+    String url = base + "/api/short-videos/videos/" + Uri.encode(owner.itemId);
+    showStatus("正在恢复当前作品");
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<ShortVideoItem> result = new NativeShortVideoFeedTransport(8000, 12000).read(url, body -> {
+        ShortVideoItem item = ShortVideoFeedContract.itemFromJson(new JSONObject(body).optJSONObject("video"), base, "");
+        return new NativeShortVideoFeedTransport.Parsed<>(item, false, "");
+      }, token);
+      mainHandler.post(() -> {
+        if (!token.isCurrent() || checkpointRecovery != owner || destroying || isFinishing()) return;
+        if (!result.succeeded() || result.value == null || !owner.itemId.equals(result.value.id)) {
+          showStatus(result.succeeded() ? "当前作品已不可用，请返回重新打开" : result.publicMessage()); return;
+        }
+        ShortVideoItem item = result.value;
+        NativeShortVideoFeedPlayback.Snapshot old = owner.playback;
+        int media = old == null ? (item.isGallery() ? 0 : -1) : old.mediaIndex;
+        boolean sameSource = owner.sourceHash.equals(NativeShortVideoCheckpoint.sourceHash(item, media));
+        media = item.isGallery() ? Math.max(0, Math.min(media, item.galleryItems.size() - 1)) : -1;
+        boolean hasVideo = !item.isGallery() || item.galleryItems.get(media).isVideo();
+        NativeShortVideoFeedPlayback.Snapshot playback = NativeShortVideoFeedPlayback.Snapshot.fromSaved(item.id, media,
+          hasVideo ? (sameSource && old != null && old.hasVideo() ? old.videoPosition() : 0L) : null, false,
+          item.isGallery() && item.sound.isPlayable() ? (sameSource && old != null && old.hasSound() ? old.soundPosition() : 0L) : null, false, false,
+          checkpointGallerySourceKey(item, media),
+          feedPlayback.audioInterruptionGeneration());
+        checkpointRecovery = null; clearPersistentDeleteStatus();
+        acceptServerActionSnapshots(Collections.singletonList(item), actionSnapshots.revision());
+        renderFeedScreen(new FeedScreenState(Collections.singletonList(item), owner.feedUrl, 0, "", false, 0, playback));
+        showTransientStatus("已恢复当前作品，返回可重新打开完整列表");
+      });
+    });
+  }
+
+  private void initializeScreenAwake() {
+    screenAwake = new NativeShortVideoScreenAwake(new NativeShortVideoScreenAwake.Host() {
+      @Override public NativeShortVideoScreenAwake.State readState() { return readScreenAwakeState(); }
+      @Override public void setKeepScreenOn(boolean keep) { if (rootView != null) rootView.setKeepScreenOn(keep); }
+    }, new NativeShortVideoScreenAwake.Scheduler() {
+      @Override public void postDelayed(Runnable task, long delay) { mainHandler.postDelayed(task, delay); }
+      @Override public void removeCallbacks(Runnable task) { mainHandler.removeCallbacks(task); }
+    }, SystemClock::uptimeMillis);
+    refreshScreenAwake();
+  }
+
+  private NativeShortVideoScreenAwake.State readScreenAwakeState() {
+    boolean visible = activityResumed && !destroying && !isFinishing() && authorOverlay == null && !commentsOpen()
+      && !feedSearchOpen() && playbackToolbarOverlay == null && pager != null && pager.getCurrentItem() == currentIndex
+      && currentIndex >= 0 && currentIndex < videos.size();
+    ShortVideoHolder holder = visible ? attachedHolders.get(currentIndex) : null;
+    if (holder == null || holder.index != currentIndex) return new NativeShortVideoScreenAwake.State("", false, false, false, false);
+    ShortVideoItem item = videos.get(currentIndex);
+    ExoPlayer player = activePlayer;
+    GallerySegmentCallback segment = item.isGallery() ? captureGallerySegmentCallback(player) : null;
+    boolean ownsVideo = player != null && (item.isGallery() ? segment != null && segment.owns()
+      : playerCache.get(currentIndex) == player && playbackFallback.isBoundToItem(player, item));
+    GallerySoundCallback sound = item.isGallery() ? captureGallerySoundCallback(gallerySoundPlayer) : null;
+    ExoPlayer soundPlayer = sound != null && sound.owns() ? gallerySoundPlayer : null;
+    String owner = item.id + ":" + currentIndex + ":" + (item.isGallery() ? checkpointGallerySourceKey(item, holder.galleryIndex)
+      + ":" + item.sound.previewUrl : item.streamUrl) + ":" + screenAwakeRetryGeneration;
+    boolean playing = (ownsVideo && player.getPlayerError() == null && player.isPlaying())
+      || (soundPlayer != null && soundPlayer.getPlayerError() == null && soundPlayer.isPlaying());
+    boolean buffering = (ownsVideo && screenAwakeBuffering(player)) || screenAwakeBuffering(soundPlayer);
+    boolean imageTiming = item.isGallery() && galleryAutoAdvanceRunnable != null && galleryAutoAdvanceFeedIndex == currentIndex
+      && galleryAutoAdvanceMediaIndex == holder.galleryIndex && galleryAutoAdvanceReadiness == holder.galleryImageReadiness
+      && isGalleryImageReady(holder, item, holder.galleryIndex) && feedPlayback.allowsAutomaticAdvance()
+      && !holder.touchActive && !holder.galleryScaling && !holder.galleryPanning && !holder.galleryDragActive
+      && !holder.galleryDragSettling && holder.galleryZoomScale <= 1.001f;
+    return new NativeShortVideoScreenAwake.State(owner, visible, playing, buffering, imageTiming);
+  }
+
+  private boolean screenAwakeBuffering(ExoPlayer player) {
+    return player != null && player.getPlayWhenReady() && player.getPlayerError() == null && player.getPlaybackState() == Player.STATE_BUFFERING
+      && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE;
+  }
+
+  private void refreshScreenAwake() {
+    if (screenAwake != null) screenAwake.refresh();
+  }
+  @Override
   protected void onResume() {
     super.onResume();
     activityResumed = true;
+    flushSelectedPlaybackRequest();
+    resumeFrameLoading();
+    boolean galleryCompleting = flushGalleryContinuation();
     hideSystemBars();
     startSystemInfoUpdates();
     boolean shouldResumePlayback = pausedForLifecycle
       && resumePlaybackAfterPause
       && authorOverlay == null
       && !commentsOpen()
+      && !feedSearchOpen()
       && activePlayer != null;
     Log.i(TAG, "lifecycle resume shouldPlay=" + shouldResumePlayback);
-    if ((shouldResumePlayback || feedPlayback.awaitingVideo()) && authorOverlay == null && !commentsOpen()) {
+    if (!galleryCompleting && (shouldResumePlayback || feedPlayback.awaitingVideo()) && authorOverlay == null && !commentsOpen() && !feedSearchOpen()) {
       startActivePlaybackIfVisible();
     } else {
       updateActiveProgress();
     }
-    if (gallerySoundPlayer != null && currentIndex >= 0 && currentIndex < videos.size()
-      && gallerySoundFeedIndex == currentIndex && authorOverlay == null && !commentsOpen() && !isFinishing()) {
+    if (!galleryCompleting && gallerySoundPlayer != null && currentIndex >= 0 && currentIndex < videos.size()
+      && gallerySoundFeedIndex == currentIndex && authorOverlay == null && !commentsOpen() && !feedSearchOpen() && !isFinishing()
+      && (gallerySoundPlayer.getPlayWhenReady() || feedPlayback.awaitingSound(gallerySoundPlayer, videos.get(currentIndex).id))) {
       feedPlayback.start(gallerySoundPlayer, true, videos.get(currentIndex).id, true);
     }
     resumeGalleryAutoAdvanceIfNeeded();
     if (currentIndex >= 0) mainHandler.post(() -> preparePlayersAround(currentIndex));
     pausedForLifecycle = false;
     resumePlaybackAfterPause = false;
+    checkpointLifecyclePlayback = null; checkpointLifecycleItem = null;
+    refreshScreenAwake();
+    if (nativeSession != null) nativeSession.resumed();
   }
   @Override
   protected void onPause() {
+    rememberCheckpointLifecycle();
+    pauseSelectedPlaybackRequest();
+    pauseGalleryContinuation();
+    cancelVideoPrefetch();
+    pauseFrameLoading();
+    cancelProgressSeek();
     feedPlayback.pauseForLifecycle(activePlayer, gallerySoundPlayer);
     resumePlaybackAfterPause = authorOverlay == null
       && activePlayer != null
@@ -300,19 +605,26 @@ public class NativeShortVideoActivity extends Activity {
     pausedForLifecycle = true;
     activityResumed = false;
     Log.i(TAG, "lifecycle pause resumePlayback=" + resumePlaybackAfterPause);
-    clearPendingStageTap();
+    cancelStageGestures();
     cancelGalleryAutoAdvance();
     stopSystemInfoUpdates();
     stopProgressUpdates();
     for (ExoPlayer cachedPlayer : playerCache.values()) cachedPlayer.pause();
     if (gallerySegmentPlayer != null) gallerySegmentPlayer.pause();
     if (gallerySoundPlayer != null) gallerySoundPlayer.pause();
+    refreshScreenAwake();
     super.onPause();
   }
   @Override
   protected void onDestroy() {
+    cancelProgressSeek();
+    gallerySearchAdvancePause = null;
     Log.i(TAG, "destroy");
     destroying = true;
+    if (screenAwake != null) screenAwake.close();
+    frameLoading.close();
+    releaseAudioInterruptionHandling();
+    feedRequests.close();
     if (deleteController != null) deleteController.destroy();
     if (feedSearchController != null) feedSearchController.dismiss(false);
     stopSystemInfoUpdates();
@@ -322,10 +634,8 @@ public class NativeShortVideoActivity extends Activity {
     releaseVideoCache();
     frameCache.evictAll();
     feedReader.clear();
-    pendingFrameIds.clear();
-    pendingVideoPrefetchIds.clear();
-    completedVideoPrefetchIds.clear();
     executor.shutdownNow();
+    if (nativeSession != null) nativeSession.destroy();
     super.onDestroy();
   }
 
@@ -362,29 +672,12 @@ public class NativeShortVideoActivity extends Activity {
     pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
       @Override
       public void onPageSelected(int position) {
-        if (openAuthorPanelOnStart || authorOverlay != null) return;
-        pageSelectedAtMs = SystemClock.elapsedRealtime();
-        pageSelectedIndex = position;
-        Log.i(TAG, "page selected " + position);
-        pendingPlayIndex = position;
-        loadMoreIfNeeded(position);
-        preparePlayersAround(position);
-        schedulePrepareAround(position, activePlayer == null ? 320 : 120);
-        pager.post(() -> playAt(position));
+        handlePlaybackPageSelected(position);
       }
 
       @Override
       public void onPageScrollStateChanged(int state) {
-        if (openAuthorPanelOnStart || authorOverlay != null) return;
-        if (state == ViewPager2.SCROLL_STATE_DRAGGING) {
-          runNeighborsDuringDrag(pager.getCurrentItem());
-          return;
-        }
-        if (state == ViewPager2.SCROLL_STATE_IDLE) {
-          int selectedIndex = pendingPlayIndex >= 0 ? pendingPlayIndex : pager.getCurrentItem();
-          playAt(selectedIndex);
-          pauseInactivePlayers(selectedIndex);
-        }
+        handlePlaybackPageScrollStateChanged(state);
       }
     });
     root.addView(pager, new FrameLayout.LayoutParams(
@@ -563,31 +856,89 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private Runnable pausePlaybackForFeedSearch() {
+    rememberCheckpointOverlay();
+    pauseGalleryContinuation();
+    cancelStageGestures();
+    Runnable resumeGalleryAdvance = pauseGalleryAutoAdvanceForSearch();
+    long audioGeneration = feedPlayback.audioInterruptionGeneration();
     int dialogIndex = currentIndex;
+    String dialogItemId = dialogIndex >= 0 && dialogIndex < videos.size() ? videos.get(dialogIndex).id : null;
+    ShortVideoHolder dialogHolder = attachedHolders.get(dialogIndex);
     ExoPlayer dialogPlayer = activePlayer;
     ExoPlayer dialogGallerySegment = gallerySegmentPlayer;
     ExoPlayer dialogGallerySound = gallerySoundPlayer;
+    Object videoSourceOwner = overlayPlaybackSourceOwner(dialogPlayer);
+    Object segmentSourceOwner = overlayPlaybackSourceOwner(dialogGallerySegment);
+    Object soundSourceOwner = overlayPlaybackSourceOwner(dialogGallerySound);
     boolean resumeVideo = dialogPlayer != null && dialogPlayer.getPlayWhenReady() && dialogPlayer.getPlaybackState() != Player.STATE_ENDED;
-    boolean resumeSegment = dialogGallerySegment != null && dialogGallerySegment.isPlaying();
-    boolean resumeSound = dialogGallerySound != null && dialogGallerySound.isPlaying();
+    boolean resumeSegment = dialogGallerySegment != null && dialogGallerySegment.getPlayWhenReady() && dialogGallerySegment.getPlaybackState() != Player.STATE_ENDED;
+    boolean resumeSound = dialogGallerySound != null && dialogGallerySound.getPlayWhenReady() && dialogGallerySound.getPlaybackState() != Player.STATE_ENDED;
     Log.i(TAG, "search overlay open video=" + resumeVideo
       + " segment=" + resumeSegment + " sound=" + resumeSound);
     if (dialogPlayer != null) dialogPlayer.pause();
     if (dialogGallerySegment != null) dialogGallerySegment.pause();
     if (dialogGallerySound != null) dialogGallerySound.pause();
+    refreshScreenAwake();
     return () -> {
-      if (!activityResumed || authorOverlay != null) return;
-      if (resumeVideo && currentIndex == dialogIndex && activePlayer == dialogPlayer && dialogPlayer.getPlaybackState() != Player.STATE_ENDED) {
-        dialogPlayer.play();
-        startProgressUpdates();
-      }
-      if (resumeSegment && gallerySegmentPlayer == dialogGallerySegment) dialogGallerySegment.play();
-      if (resumeSound && gallerySoundPlayer == dialogGallerySound) dialogGallerySound.play();
+      if (resumeGalleryAdvance != null) resumeGalleryAdvance.run();
+      if (!activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()
+        || audioGeneration != feedPlayback.audioInterruptionGeneration() || currentIndex != dialogIndex
+        || dialogItemId == null || dialogHolder == null || currentIndex < 0 || currentIndex >= videos.size()
+        || !dialogItemId.equals(videos.get(currentIndex).id) || attachedHolders.get(dialogIndex) != dialogHolder) return;
+      if (activePlayer == dialogPlayer && overlayPlaybackSourceOwner(dialogPlayer) == videoSourceOwner
+        && feedPlayback.restoreOverlayPlayback(dialogPlayer, false, dialogItemId, audioGeneration, resumeVideo) && resumeVideo) startProgressUpdates();
+      if (dialogGallerySegment != dialogPlayer && gallerySegmentPlayer == dialogGallerySegment
+        && overlayPlaybackSourceOwner(dialogGallerySegment) == segmentSourceOwner)
+        feedPlayback.restoreOverlayPlayback(dialogGallerySegment, false, dialogItemId, audioGeneration, resumeSegment);
+      if (gallerySoundPlayer == dialogGallerySound && overlayPlaybackSourceOwner(dialogGallerySound) == soundSourceOwner)
+        feedPlayback.restoreOverlayPlayback(dialogGallerySound, true, dialogItemId, audioGeneration, resumeSound);
+      flushGalleryContinuation();
+      restoreGalleryPlaybackStatus();
     };
+  }
+
+  private Object overlayPlaybackSourceOwner(ExoPlayer player) {
+    if (player == null) return null;
+    Object binding = playbackFallback.bindingOwner(player);
+    return binding == null ? player.getCurrentMediaItem() : binding;
   }
 
   private boolean commentsOpen() {
     return commentsController != null && commentsController.isOpen();
+  }
+
+  private void initializeAudioInterruptionHandling() {
+    if (audioInterruptionManager != null || destroying) return;
+    // Player managers pause their own tracks. This listener also invalidates
+    // playback saved while an overlay or the lifecycle has already paused them.
+    audioInterruptionManager = new AudioBecomingNoisyManager(this, mainHandler.getLooper(), mainHandler.getLooper(),
+      this::handleAudioInterruption, Clock.DEFAULT);
+    audioInterruptionManager.setEnabled(true);
+  }
+
+  private void releaseAudioInterruptionHandling() {
+    if (audioInterruptionManager == null) return;
+    audioInterruptionManager.setEnabled(false);
+    audioInterruptionManager = null;
+  }
+
+  private void handleAudioInterruption() {
+    if (destroying || isFinishing()) return;
+    cancelProgressSeek();
+    cancelStageGestures();
+    feedPlayback.interruptAudio();
+    cancelGalleryAutoAdvance();
+    cancelGalleryContinuation();
+    gallerySearchAdvancePause = null;
+    resumePlaybackAfterPause = false;
+    commentsResumeVideo = false;
+    commentsResumeGallerySegment = false;
+    commentsResumeGallerySound = false;
+    refreshScreenAwake();
+  }
+
+  private boolean feedSearchOpen() {
+    return feedSearchController != null && feedSearchController.isOpen();
   }
 
   private void installPagerGestureCommitObserver() {
@@ -678,7 +1029,7 @@ public class NativeShortVideoActivity extends Activity {
     int index = currentIndex >= 0 ? currentIndex : (pager == null ? 0 : pager.getCurrentItem());
     String itemId = index >= 0 && index < videos.size() ? videos.get(index).id : null;
     return new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, index,
-      NativeShortVideoFeedPlayback.capture(itemId, galleryPositions.getOrDefault(itemId, -1), activePlayer, gallerySoundPlayer));
+      feedPlayback.captureCurrent(itemId, galleryPositions.getOrDefault(itemId, -1), activePlayer, gallerySoundPlayer));
   }
 
   private void renderScreen(ScreenState screen) {
@@ -694,8 +1045,13 @@ public class NativeShortVideoActivity extends Activity {
     finishWithActionResult();
   }
   private void finishWithActionResult() {
-    setResult(RESULT_OK, acknowledgedActionResult.intent(
-      actionPreferences == null ? "" : actionPreferences.serverScope()));
+    if (nativeSession != null) nativeSession.close();
+    cancelVideoPrefetch();
+    feedRequests.cancel();
+    Intent result = acknowledgedActionResult.intent(
+      actionPreferences == null ? "" : actionPreferences.serverScope());
+    if (nativeSession != null) nativeSession.tagResult(result);
+    setResult(RESULT_OK, result);
     finish();
   }
   private void renderFeedScreen(FeedScreenState screen) {
@@ -715,6 +1071,9 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void resetFeedScreen(FeedScreenState screen, boolean syncActions) {
+    pauseFrameLoading();
+    cancelVideoPrefetch();
+    feedRequests.cancel();
     releaseAllPlayers();
     feedPlayback.restore(screen.playback, galleryPositions);
     attachedHolders.clear();
@@ -743,13 +1102,12 @@ public class NativeShortVideoActivity extends Activity {
     }
     hideStatus();
     int safeIndex = Math.max(0, Math.min(index, videos.size() - 1));
+    ShortVideoItem item = videos.get(safeIndex);
     pendingPlayIndex = safeIndex;
     pager.setCurrentItem(safeIndex, false);
-    preparePlayerAt(safeIndex);
-    pager.post(() -> {
-      playAt(safeIndex);
-      schedulePrepareAround(safeIndex, 360);
-    });
+    if (!isSelectedPlaybackItem(safeIndex, item)) return;
+    requestSelectedPlayback(safeIndex, 360);
+    if (playbackPageVisible()) preparePlayerAt(safeIndex);
   }
 
   private void openInitialAuthorScreen(int index) {
@@ -768,19 +1126,124 @@ public class NativeShortVideoActivity extends Activity {
     Log.i(TAG, "author direct " + displayAuthor(seed));
   }
 
+  private static final class PlaybackRequest {
+    final int index;
+    final ShortVideoItem item;
+    final long audioGeneration, prepareDelayMs;
+    boolean committed;
+
+    PlaybackRequest(int index, ShortVideoItem item, long audioGeneration, long prepareDelayMs) {
+      this.index = index; this.item = item; this.audioGeneration = audioGeneration; this.prepareDelayMs = prepareDelayMs;
+    }
+  }
+
+  private boolean playbackPageVisible() {
+    return activityResumed && !destroying && !isFinishing() && !openAuthorPanelOnStart
+      && authorOverlay == null && !commentsOpen() && !feedSearchOpen();
+  }
+
+  private boolean isSelectedPlaybackItem(int index, ShortVideoItem item) {
+    return !destroying && !isFinishing() && !openAuthorPanelOnStart && authorOverlay == null
+      && pager != null && pager.getCurrentItem() == index && index >= 0 && index < videos.size() && videos.get(index) == item;
+  }
+
+  private void pauseSelectedPlaybackRequest() {
+    if (pendingPlaybackRunnable != null) mainHandler.removeCallbacks(pendingPlaybackRunnable);
+    pendingPlaybackRunnable = null;
+    if (pendingPrepareRunnable != null) mainHandler.removeCallbacks(pendingPrepareRunnable);
+    pendingPrepareRunnable = null;
+  }
+
+  private void cancelSelectedPlaybackRequest() {
+    pauseSelectedPlaybackRequest();
+    selectedPlaybackRequest = null;
+  }
+
+  private void requestSelectedPlayback(int index, long prepareDelayMs) {
+    if (index < 0 || index >= videos.size() || !isSelectedPlaybackItem(index, videos.get(index))) return;
+    cancelSelectedPlaybackRequest();
+    pendingPlayIndex = index;
+    selectedPlaybackRequest = new PlaybackRequest(index, videos.get(index), feedPlayback.audioInterruptionGeneration(), prepareDelayMs);
+    flushSelectedPlaybackRequest();
+  }
+
+  private void flushSelectedPlaybackRequest() {
+    PlaybackRequest request = selectedPlaybackRequest;
+    if (request == null || request.committed || pendingPlaybackRunnable != null) return;
+    if (!isSelectedPlaybackItem(request.index, request.item)) { cancelSelectedPlaybackRequest(); return; }
+    if (!playbackPageVisible()) return;
+    pendingPlaybackRunnable = new Runnable() {
+      @Override public void run() {
+        if (pendingPlaybackRunnable != this) return;
+        pendingPlaybackRunnable = null;
+        if (selectedPlaybackRequest != request || request.committed || !isSelectedPlaybackItem(request.index, request.item) || !playbackPageVisible()) return;
+        playAt(request.index);
+      }
+    };
+    mainHandler.post(pendingPlaybackRunnable);
+  }
+
+  private void handlePlaybackPageSelected(int position) {
+    if (position < 0 || position >= videos.size() || !isSelectedPlaybackItem(position, videos.get(position))) return;
+    pageSelectedAtMs = SystemClock.elapsedRealtime();
+    pageSelectedIndex = position;
+    Log.i(TAG, "page selected " + position);
+    requestSelectedPlayback(position, activePlayer == null ? 320 : 120);
+    if (playbackPageVisible()) preparePlayersAround(position);
+  }
+
+  private void handlePlaybackPageScrollStateChanged(int state) {
+    if (!playbackPageVisible()) return;
+    if (state == ViewPager2.SCROLL_STATE_DRAGGING) { runNeighborsDuringDrag(pager.getCurrentItem()); return; }
+    if (state == ViewPager2.SCROLL_STATE_IDLE) {
+      int selected = pager.getCurrentItem();
+      playAt(selected);
+      if (currentIndex == selected) pauseInactivePlayers(selected);
+    }
+  }
+
   private void playAt(int index) {
+    if (index < 0 || index >= videos.size() || !isSelectedPlaybackItem(index, videos.get(index))) return;
+    ShortVideoItem item = videos.get(index);
+    PlaybackRequest request = selectedPlaybackRequest;
+    if (request == null || request.index != index || request.item != item) {
+      cancelSelectedPlaybackRequest();
+      request = new PlaybackRequest(index, item, feedPlayback.audioInterruptionGeneration(), 0);
+      selectedPlaybackRequest = request;
+    }
+    boolean firstCommit = !request.committed;
+    if (firstCommit && request.audioGeneration != feedPlayback.audioInterruptionGeneration()) {
+      feedPlayback.bindWithoutAutoplay(() -> bindSelectedPlaybackAt(index));
+    } else bindSelectedPlaybackAt(index);
+    if (selectedPlaybackRequest == request && attachedHolders.get(index) != null && currentIndex == index) {
+      request.committed = true;
+      if (firstCommit) schedulePrepareAround(index, request.prepareDelayMs);
+    }
+  }
+
+  private void bindSelectedPlaybackAt(int index) {
     if (index < 0 || index >= videos.size()) return;
+    if (currentIndex != index) cancelGalleryContinuation();
+    if (currentIndex != index) cancelStageGestures();
+    if (currentIndex != index) cancelVideoPrefetch();
+    invalidateGallerySearchAdvance(index);
+    boolean repeatedSelection = currentIndex == index;
     cancelGalleryAutoAdvance();
     currentIndex = index;
+    refreshFrameLoadingWindow();
     ShortVideoItem item = videos.get(index);
-    feedPlayback.select(item.id);
     ShortVideoHolder holder = attachedHolders.get(index);
     if (holder == null) {
-      pager.post(() -> playAt(index));
       return;
     }
+    repeatedSelection &= feedPlayback.select(item.id);
+    if (!item.isGallery()) bindFrame(index);
 
     if (item.isGallery()) {
+      ExoPlayer previousVideo = repeatedSelection && gallerySegmentFeedIndex == index ? gallerySegmentPlayer : null;
+      ExoPlayer previousSound = repeatedSelection && gallerySoundFeedIndex == index ? gallerySoundPlayer : null;
+      String previousSegmentUrl = gallerySegmentUrl;
+      int previousMediaIndex = gallerySegmentMediaIndex, previousCoverVisibility = holder.cover.getVisibility();
       if (activePlayer != null && (activePlayer != gallerySegmentPlayer || gallerySegmentFeedIndex != index)) {
         int previousIndex = playerIndex(activePlayer);
         activePlayer.pause();
@@ -790,9 +1253,14 @@ public class NativeShortVideoActivity extends Activity {
       stopProgressUpdates();
       resetHolderProgress(holder);
       releaseDistantPlayers(index);
-      playGallerySound(index, item);
-      bindGallery(holder, item, galleryPositions.getOrDefault(item.id, 0), 0);
-      hideStatus();
+      feedPlayback.bindPreservingPause(previousVideo, previousSound, () -> {
+        playGallerySound(index, item);
+        bindGallery(holder, item, galleryPositions.getOrDefault(item.id, 0), 0);
+      });
+      if (previousVideo != null && previousVideo == gallerySegmentPlayer && !previousVideo.getPlayWhenReady()
+        && gallerySegmentFeedIndex == index && gallerySegmentMediaIndex == previousMediaIndex
+        && previousSegmentUrl.equals(gallerySegmentUrl)) holder.cover.setVisibility(previousCoverVisibility);
+      if (!restoreGalleryPlaybackStatus()) hideStatus();
       loadMoreIfNeeded(index);
       scheduleVideoPrefetch(index + 1);
       Log.i(TAG, "gallery " + index + " media=" + item.galleryItems.size());
@@ -811,7 +1279,11 @@ public class NativeShortVideoActivity extends Activity {
       activePlayer.setVolume(activeVolume());
       ensurePlayerViewAt(index);
       feedPlayback.rewindEndedIfAllowed(activePlayer);
-      startActivePlaybackIfVisible();
+      // Pager IDLE also fires when a drag settles back on the same item.
+      // Binding it again must not turn an explicit pause into a new play request.
+      if (!repeatedSelection || activePlayer.getPlayWhenReady() || feedPlayback.awaitingVideo()) {
+        startActivePlaybackIfVisible();
+      } else updateActiveProgress();
       loadMoreIfNeeded(index);
       scheduleVideoPrefetch(index + 1);
       releaseDistantPlayers(index);
@@ -838,55 +1310,76 @@ public class NativeShortVideoActivity extends Activity {
 
   private void startActivePlaybackIfVisible() {
     String itemId = currentIndex >= 0 && currentIndex < videos.size() ? videos.get(currentIndex).id : null;
-    boolean visible = activityResumed && authorOverlay == null && !commentsOpen() && !isFinishing();
+    boolean visible = activityResumed && authorOverlay == null && !commentsOpen() && !feedSearchOpen() && !isFinishing();
     feedPlayback.start(activePlayer, false, itemId, visible);
     if (visible && activePlayer != null) startProgressUpdates();
+    refreshScreenAwake();
   }
 
   private void initializeVideoCache() {
+    if (videoCacheLifecycle != null) return;
+    Map<String, String> requestHeaders = new HashMap<>();
+    requestHeaders.put("X-FanHao-Client", "android");
+    requestHeaders.put("X-FanHao-Media-Cache", "1");
+    DefaultHttpDataSource.Factory httpDataSourceFactory = new DefaultHttpDataSource.Factory()
+      .setConnectTimeoutMs(8000)
+      .setReadTimeoutMs(12000)
+      .setAllowCrossProtocolRedirects(true)
+      .setDefaultRequestProperties(requestHeaders);
+    DataSource.Factory network = new DefaultDataSource.Factory(getApplicationContext(), httpDataSourceFactory);
+    NativeShortVideoCacheLifecycle<VideoCacheResource> owner = new NativeShortVideoCacheLifecycle<>(
+      () -> createVideoCacheResource(network), VideoCacheResource::release,
+      resource -> mainHandler.post(() -> {
+        if (destroying || videoCacheLifecycle == null || videoCacheLifecycle.ready() != resource) return;
+        if (activityResumed && currentIndex >= 0) scheduleVideoPrefetch(currentIndex + 1);
+      }), error -> Log.w(TAG, "video cache unavailable; a later source may retry", error), SystemClock::elapsedRealtime
+    );
+    videoCacheLifecycle = owner;
+    videoPlaybackDataSourceFactory = new NativeShortVideoCacheDataSourceFactory(network,
+      () -> { VideoCacheResource resource = owner.ready(); return resource == null ? null : resource.factory; },
+      owner::requestInitialization, () -> !destroying && !owner.isClosed());
+    owner.requestInitialization();
+  }
+
+  private VideoCacheResource createVideoCacheResource(DataSource.Factory network) throws Exception {
+    SimpleCache cache = null;
     try {
       File cacheDirectory = new File(getCacheDir(), "short-video-media");
-      StandaloneDatabaseProvider databaseProvider = new StandaloneDatabaseProvider(this);
-      videoCache = new SimpleCache(
-        cacheDirectory,
-        new LeastRecentlyUsedCacheEvictor(VIDEO_CACHE_MAX_BYTES),
-        databaseProvider
-      );
-      Map<String, String> requestHeaders = new HashMap<>();
-      requestHeaders.put("X-FanHao-Client", "android");
-      requestHeaders.put("X-FanHao-Media-Cache", "1");
-      DefaultHttpDataSource.Factory httpDataSourceFactory = new DefaultHttpDataSource.Factory()
-        .setConnectTimeoutMs(8000)
-        .setReadTimeoutMs(12000)
-        .setAllowCrossProtocolRedirects(true)
-        .setDefaultRequestProperties(requestHeaders);
-      videoCacheDataSourceFactory = new CacheDataSource.Factory()
-        .setCache(videoCache)
-        .setUpstreamDataSourceFactory(new DefaultDataSource.Factory(this, httpDataSourceFactory))
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR);
-      Log.i(TAG, "video cache ready bytes=" + videoCache.getCacheSpace());
+      cache = new SimpleCache(cacheDirectory, new LeastRecentlyUsedCacheEvictor(VIDEO_CACHE_MAX_BYTES),
+        new StandaloneDatabaseProvider(getApplicationContext()));
+      cache.checkInitialization();
+      CacheDataSource.Factory factory = new CacheDataSource.Factory().setCache(cache)
+        .setUpstreamDataSourceFactory(network).setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR);
+      Log.i(TAG, "video cache ready bytes=" + cache.getCacheSpace());
+      return new VideoCacheResource(cache, factory);
     } catch (Exception error) {
-      videoCacheDataSourceFactory = null;
-      if (videoCache != null) {
-        try {
-          videoCache.release();
-        } catch (Exception ignored) {}
-      }
-      videoCache = null;
-      Log.w(TAG, "video cache unavailable", error);
+      if (cache != null) { try { cache.release(); } catch (Exception ignored) {} }
+      throw error;
+    }
+  }
+
+  private static final class VideoCacheResource {
+    final SimpleCache cache;
+    final CacheDataSource.Factory factory;
+    private boolean released;
+
+    VideoCacheResource(SimpleCache cache, CacheDataSource.Factory factory) {
+      this.cache = cache;
+      this.factory = factory;
+    }
+
+    synchronized void release() {
+      if (released) return;
+      released = true;
+      try { cache.release(); }
+      catch (Exception error) { Log.w(TAG, "video cache release failed", error); }
     }
   }
 
   private void releaseVideoCache() {
-    videoCacheDataSourceFactory = null;
-    if (videoCache == null) return;
-    try {
-      Log.i(TAG, "video cache release bytes=" + videoCache.getCacheSpace());
-      videoCache.release();
-    } catch (Exception error) {
-      Log.w(TAG, "video cache release failed", error);
-    }
-    videoCache = null;
+    NativeShortVideoCacheLifecycle<VideoCacheResource> owner = videoCacheLifecycle;
+    videoCacheLifecycle = null;
+    if (owner != null) owner.close(resource -> videoPrefetch.whenIdle(resource::release));
   }
 
   private Uri cachedMediaUri(ShortVideoItem item) {
@@ -900,33 +1393,41 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void scheduleVideoPrefetch(int index) {
-    if (destroying || index < 0 || index >= videos.size()) return;
-    if (videoCache == null || videoCacheDataSourceFactory == null) return;
+    // An old callback must not cancel the newer current item's speculation.
+    if (index != currentIndex + 1 || index < 0) return;
+    VideoCacheResource resource = videoCacheLifecycle == null ? null : videoCacheLifecycle.ready();
+    if (destroying || !activityResumed || authorOverlay != null || currentIndex < 0 || currentIndex >= videos.size()
+      || index >= videos.size() || resource == null) {
+      cancelVideoPrefetch();
+      return;
+    }
     ShortVideoItem item = videos.get(index);
-    if (item.isGallery() || item.streamUrl.length() == 0) return;
-    if (item.id.length() == 0 || completedVideoPrefetchIds.contains(item.id)) return;
-    if (!pendingVideoPrefetchIds.add(item.id)) return;
-
-    videoPrefetchExecutor.execute(() -> {
+    if (item.isGallery() || item.streamUrl.length() == 0 || item.id.length() == 0) {
+      cancelVideoPrefetch();
+      return;
+    }
+    String url = playbackFallback.playbackUrl(item);
+    if (url.length() == 0) { cancelVideoPrefetch(); return; }
+    Uri mediaUri = cachedMediaUri(url);
+    DataSpec dataSpec = new DataSpec.Builder()
+      .setUri(mediaUri)
+      .setLength(NEXT_VIDEO_PREFETCH_BYTES)
+      .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION | DataSpec.FLAG_MIGHT_NOT_USE_FULL_NETWORK_SPEED)
+      .build();
+    String cacheKey = CacheKeyFactory.DEFAULT.buildCacheKey(dataSpec);
+    String owner = videoPrefetchGeneration + ":" + currentIndex + ":" + videos.get(currentIndex).id + ":" + item.id + ":" + url;
+    videoPrefetchOwner = owner;
+    SimpleCache cache = resource.cache;
+    CacheDataSource.Factory factory = resource.factory;
+    videoPrefetch.offer(owner, cacheKey, () -> !destroying && activityResumed && owner.equals(videoPrefetchOwner), lease -> {
       long startedAtMs = SystemClock.elapsedRealtime();
       try {
-        if (destroying) return;
-        int liveIndex = index;
-        if (liveIndex != currentIndex + 1) return;
-
-        SimpleCache cache = videoCache;
-        CacheDataSource.Factory factory = videoCacheDataSourceFactory;
-        if (cache == null || factory == null) return;
-        DataSpec dataSpec = new DataSpec.Builder()
-          .setUri(cachedMediaUri(item))
-          .setLength(NEXT_VIDEO_PREFETCH_BYTES)
-          .setFlags(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION | DataSpec.FLAG_MIGHT_NOT_USE_FULL_NETWORK_SPEED)
-          .build();
-        String cacheKey = CacheKeyFactory.DEFAULT.buildCacheKey(dataSpec);
+        if (!lease.isCurrent()) return;
+        long contentLength = ContentMetadata.getContentLength(cache.getContentMetadata(cacheKey));
+        long targetBytes = contentLength < 0 ? NEXT_VIDEO_PREFETCH_BYTES : Math.min(NEXT_VIDEO_PREFETCH_BYTES, contentLength);
         long beforeBytes = cache.getCachedBytes(cacheKey, 0, NEXT_VIDEO_PREFETCH_BYTES);
-        if (beforeBytes >= NEXT_VIDEO_PREFETCH_BYTES) {
-          completedVideoPrefetchIds.add(item.id);
-          Log.i(TAG, "prefetch hit " + liveIndex + " bytes=" + beforeBytes);
+        if (beforeBytes >= targetBytes) {
+          Log.i(TAG, "prefetch hit " + index + " bytes=" + beforeBytes);
           return;
         }
 
@@ -936,33 +1437,30 @@ public class NativeShortVideoActivity extends Activity {
           new byte[64 * 1024],
           null
         );
-        activeVideoCacheWriter = writer;
+        if (!lease.attach(writer::cancel)) return;
         writer.cache();
+        if (!lease.isCurrent()) return;
         long afterBytes = cache.getCachedBytes(cacheKey, 0, NEXT_VIDEO_PREFETCH_BYTES);
-        completedVideoPrefetchIds.add(item.id);
-        Log.i(TAG, "prefetch ready " + liveIndex
+        Log.i(TAG, "prefetch ready " + index
           + " added=" + Math.max(0, afterBytes - beforeBytes)
           + " bytes=" + afterBytes
           + " in=" + (SystemClock.elapsedRealtime() - startedAtMs) + "ms");
       } catch (Exception error) {
-        if (!destroying) Log.w(TAG, "prefetch failed " + index + " " + error.getClass().getSimpleName());
-      } finally {
-        activeVideoCacheWriter = null;
-        pendingVideoPrefetchIds.remove(item.id);
+        if (lease.isCurrent()) Log.w(TAG, "prefetch failed " + index + " " + error.getClass().getSimpleName());
       }
     });
   }
 
+  private void cancelVideoPrefetch() {
+    videoPrefetchGeneration++;
+    videoPrefetchOwner = "";
+    videoPrefetch.cancel();
+  }
+
   private void stopVideoPrefetch() {
-    CacheWriter writer = activeVideoCacheWriter;
-    if (writer != null) writer.cancel();
-    videoPrefetchExecutor.shutdownNow();
-    try {
-      videoPrefetchExecutor.awaitTermination(600, TimeUnit.MILLISECONDS);
-    } catch (InterruptedException error) {
-      Thread.currentThread().interrupt();
-    }
-    activeVideoCacheWriter = null;
+    videoPrefetchGeneration++;
+    videoPrefetchOwner = "";
+    videoPrefetch.close();
   }
 
   private ExoPlayer preparePlayerAt(int index) {
@@ -1000,12 +1498,12 @@ public class NativeShortVideoActivity extends Activity {
     }
 
     ExoPlayer.Builder playerBuilder = new ExoPlayer.Builder(this)
+      .setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
+      .setHandleAudioBecomingNoisy(true)
       .setLoadControl(new DefaultLoadControl.Builder()
         .setBufferDurationsMs(600, 2000, 100, 220)
         .build());
-    if (videoCacheDataSourceFactory != null) {
-      playerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoCacheDataSourceFactory));
-    }
+    playerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoPlaybackDataSourceFactory));
     ExoPlayer preparedPlayer = playerBuilder.build();
     preparedPlayer.setRepeatMode(activeRepeatMode());
     preparedPlayer.setVolume(0f);
@@ -1030,14 +1528,24 @@ public class NativeShortVideoActivity extends Activity {
         if (holder != null) holder.cover.setVisibility(View.GONE);
         hideStatus();
         scheduleVideoPrefetch(liveIndex + 1);
-        mainHandler.post(() -> preparePlayersAround(liveIndex));
+        MediaItem frameMediaItem = preparedPlayer.getCurrentMediaItem();
+        mainHandler.post(() -> {
+          if (!activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()
+            || currentIndex != liveIndex || activePlayer != preparedPlayer || playerCache.get(liveIndex) != preparedPlayer
+            || preparedPlayer.getCurrentMediaItem() != frameMediaItem) return;
+          preparePlayersAround(liveIndex);
+        });
       }
 
       @Override
       public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+        int liveIndex = playerIndex(preparedPlayer);
+        if (liveIndex < 0 || destroying || isFinishing()) return;
+        Object callbackOwner = playbackFallback.bindingOwner(preparedPlayer);
+        if (callbackOwner == null) return;
+        MediaItem callbackMediaItem = preparedPlayer.getCurrentMediaItem();
         mainHandler.post(() -> {
-          int liveIndex = playerIndex(preparedPlayer);
-          if (liveIndex < 0) return;
+          if (!ownsPlayerCallback(liveIndex, preparedPlayer, callbackOwner, callbackMediaItem)) return;
           rememberDecodedVideoSize(liveIndex, videoSize.width, videoSize.height);
           applyVideoResizeMode(liveIndex, videoSize.width, videoSize.height);
           Log.i(TAG, "video size " + liveIndex + " " + videoSize.width + "x" + videoSize.height
@@ -1047,31 +1555,52 @@ public class NativeShortVideoActivity extends Activity {
 
       @Override
       public void onPlaybackStateChanged(int playbackState) {
+        refreshScreenAwake();
         int liveIndex = playerIndex(preparedPlayer);
-        if (liveIndex < 0) return;
+        if (liveIndex < 0 || destroying || isFinishing()) return;
+        Object callbackOwner = playbackFallback.bindingOwner(preparedPlayer);
+        if (callbackOwner == null) return;
+        MediaItem callbackMediaItem = preparedPlayer.getCurrentMediaItem();
         if (playbackState == Player.STATE_ENDED && currentIndex == liveIndex && autoNext) {
-          mainHandler.post(() -> advanceAfterEnded(liveIndex));
+          mainHandler.post(() -> {
+            if (ownsPlayerCallback(liveIndex, preparedPlayer, callbackOwner, callbackMediaItem)) advanceAfterEnded(liveIndex);
+          });
           return;
         }
         if (playbackState != Player.STATE_READY) return;
         failedPlayerIndexes.remove(liveIndex);
         if (currentIndex == liveIndex) hideStatus();
-        mainHandler.post(() -> syncPlayIndicator(liveIndex, preparedPlayer));
+        mainHandler.post(() -> {
+          if (ownsPlayerCallback(liveIndex, preparedPlayer, callbackOwner, callbackMediaItem)) syncPlayIndicator(liveIndex, preparedPlayer);
+        });
       }
 
       @Override
+      public void onPlayWhenReadyChanged(boolean requested, int reason) { refreshScreenAwake(); }
+      @Override public void onPlaybackSuppressionReasonChanged(int reason) { refreshScreenAwake(); }
+      @Override
       public void onIsPlayingChanged(boolean isPlaying) {
+        refreshScreenAwake();
+        int liveIndex = playerIndex(preparedPlayer);
+        if (liveIndex < 0 || destroying || isFinishing()) return;
+        Object callbackOwner = playbackFallback.bindingOwner(preparedPlayer);
+        if (callbackOwner == null) return;
+        MediaItem callbackMediaItem = preparedPlayer.getCurrentMediaItem();
         mainHandler.post(() -> {
-          int liveIndex = playerIndex(preparedPlayer);
-          if (liveIndex >= 0) syncPlayIndicator(liveIndex, preparedPlayer);
+          if (ownsPlayerCallback(liveIndex, preparedPlayer, callbackOwner, callbackMediaItem)) syncPlayIndicator(liveIndex, preparedPlayer);
         });
       }
 
       @Override
       public void onPlayerError(@NonNull PlaybackException error) {
+        refreshScreenAwake();
+        int liveIndex = playerIndex(preparedPlayer);
+        if (liveIndex < 0 || destroying || isFinishing()) return;
+        Object callbackOwner = playbackFallback.bindingOwner(preparedPlayer);
+        if (callbackOwner == null) return;
+        MediaItem callbackMediaItem = preparedPlayer.getCurrentMediaItem();
         mainHandler.post(() -> {
-          int liveIndex = playerIndex(preparedPlayer);
-          if (liveIndex >= 0) handlePlaybackError(liveIndex, preparedPlayer, error);
+          if (ownsPlayerCallback(liveIndex, preparedPlayer, callbackOwner, callbackMediaItem)) handlePlaybackError(liveIndex, preparedPlayer, error);
         });
       }
     });
@@ -1081,6 +1610,12 @@ public class NativeShortVideoActivity extends Activity {
     if (preparedView != null) preparedView.setPlayer(preparedPlayer);
     Log.i(TAG, "prepare " + index + " " + item.streamUrl);
     return preparedPlayer;
+  }
+
+  private boolean ownsPlayerCallback(int index, ExoPlayer player, Object owner, MediaItem mediaItem) {
+    return !destroying && !isFinishing() && index >= 0 && index < videos.size()
+      && playerCache.get(index) == player && playbackFallback.isBound(player, owner)
+      && player.getCurrentMediaItem() == mediaItem;
   }
 
   private void setPlayerMedia(ExoPlayer player, ShortVideoItem item) {
@@ -1096,62 +1631,80 @@ public class NativeShortVideoActivity extends Activity {
   private ExoPlayer ensureGallerySegmentPlayer() {
     if (gallerySegmentPlayer != null) return gallerySegmentPlayer;
     ExoPlayer.Builder builder = new ExoPlayer.Builder(this)
+      .setHandleAudioBecomingNoisy(true)
       .setLoadControl(new DefaultLoadControl.Builder()
         .setBufferDurationsMs(600, 2000, 100, 220)
         .build());
-    if (videoCacheDataSourceFactory != null) {
-      builder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoCacheDataSourceFactory));
-    }
+    builder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoPlaybackDataSourceFactory));
     ExoPlayer player = builder.build();
     player.setRepeatMode(Player.REPEAT_MODE_OFF);
     player.setVolume(0f);
     player.addListener(new Player.Listener() {
       @Override
       public void onRenderedFirstFrame() {
+        GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+        if (owner == null) return;
+        gallerySegmentRenderedSource = owner.source;
         mainHandler.post(() -> {
-          ShortVideoHolder holder = attachedHolders.get(gallerySegmentFeedIndex);
-          if (holder == null || holder.galleryIndex != gallerySegmentMediaIndex || gallerySegmentPlayer != player) return;
-          holder.cover.setVisibility(View.GONE);
-          holder.galleryVideo.setVisibility(View.VISIBLE);
-          hideStatus();
-          Log.i(TAG, "gallery video frame " + gallerySegmentFeedIndex + " " + (gallerySegmentMediaIndex + 1));
+          if (!owner.owns() || player.getPlayerError() != null) return;
+          boolean retrying = gallerySegmentRetryOwner != null && gallerySegmentRetryOwner.owns();
+          boolean ownedRetryStatus = retrying && statusGeneration == gallerySegmentRetryStatusGeneration;
+          owner.holder.cover.setVisibility(View.GONE);
+          owner.holder.galleryVideo.setVisibility(View.VISIBLE);
+          if (!retrying || ownedRetryStatus) hideStatus();
+          if (retrying) clearGallerySegmentRetryStatus();
+          Log.i(TAG, "gallery video frame " + owner.feedIndex + " " + (owner.mediaIndex + 1));
         });
       }
 
       @Override
       public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+        GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+        if (owner == null) return;
         mainHandler.post(() -> {
-          if (gallerySegmentPlayer != player || gallerySegmentView == null) return;
-          gallerySegmentView.setResizeMode(activeVideoResizeMode());
+          if (owner.owns()) owner.holder.galleryVideo.setResizeMode(activeVideoResizeMode());
         });
       }
 
       @Override
       public void onPlaybackStateChanged(int playbackState) {
+        refreshScreenAwake();
+        GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+        if (owner == null) return;
         if (playbackState == Player.STATE_ENDED) {
-          int feedIndex = gallerySegmentFeedIndex;
-          int mediaIndex = gallerySegmentMediaIndex;
-          mainHandler.post(() -> advanceGallerySequence(feedIndex, mediaIndex, "video"));
+          mainHandler.post(() -> {
+            if (owner.owns() && player.getPlaybackState() == Player.STATE_ENDED) advanceGallerySequence(owner.feedIndex, owner.mediaIndex, "video");
+          });
           return;
         }
         if (playbackState == Player.STATE_READY) {
-          mainHandler.post(() -> syncPlayIndicator(gallerySegmentFeedIndex, player));
+          mainHandler.post(() -> { if (owner.owns()) syncPlayIndicator(owner.feedIndex, player); });
         }
       }
 
       @Override
+      public void onPlayWhenReadyChanged(boolean requested, int reason) { refreshScreenAwake(); }
+      @Override public void onPlaybackSuppressionReasonChanged(int reason) { refreshScreenAwake(); }
+      @Override
       public void onIsPlayingChanged(boolean isPlaying) {
-        mainHandler.post(() -> syncPlayIndicator(gallerySegmentFeedIndex, player));
+        refreshScreenAwake();
+        GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+        if (owner != null) mainHandler.post(() -> { if (owner.owns()) syncPlayIndicator(owner.feedIndex, player); });
       }
 
       @Override
       public void onPlayerError(@NonNull PlaybackException error) {
+        refreshScreenAwake();
+        GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+        if (owner == null) return;
+        if (owner.owns()) cancelStageGestures();
         mainHandler.post(() -> {
-          if (gallerySegmentPlayer != player || currentIndex != gallerySegmentFeedIndex) return;
-          ShortVideoHolder holder = attachedHolders.get(gallerySegmentFeedIndex);
-          if (holder != null) holder.cover.setVisibility(View.VISIBLE);
-          showStatus("图文中的视频播放失败，左右滑可继续查看");
-          Log.w(TAG, "gallery video error " + gallerySegmentFeedIndex + " " + error.getErrorCodeName());
+          if (!owner.owns()) return;
+          clearGallerySegmentRetryStatus();
+          gallerySegmentRenderedSource = null;
+          owner.holder.cover.setVisibility(View.VISIBLE);
+          showStatus("图文中的视频播放失败，点一下重试");
+          Log.w(TAG, "gallery video error " + owner.feedIndex + " " + error.getErrorCodeName());
         });
       }
     });
@@ -1159,11 +1712,114 @@ public class NativeShortVideoActivity extends Activity {
     return player;
   }
 
+  private final class GallerySegmentCallback {
+    final ExoPlayer player;
+    final ShortVideoHolder holder;
+    final ShortVideoItem item;
+    final GalleryMedia media;
+    final MediaItem source;
+    final int feedIndex, mediaIndex;
+    final long generation;
+
+    GallerySegmentCallback(ExoPlayer player, ShortVideoHolder holder, ShortVideoItem item, GalleryMedia media, MediaItem source) {
+      this.player = player; this.holder = holder; this.item = item; this.media = media; this.source = source;
+      feedIndex = gallerySegmentFeedIndex; mediaIndex = gallerySegmentMediaIndex; generation = gallerySegmentGeneration;
+    }
+
+    boolean owns() {
+      return !destroying && !isFinishing() && generation == gallerySegmentGeneration && player == gallerySegmentPlayer
+        && player == activePlayer && currentIndex == feedIndex && pager.getCurrentItem() == feedIndex
+        && gallerySegmentFeedIndex == feedIndex && gallerySegmentMediaIndex == mediaIndex && gallerySegmentView == holder.galleryVideo
+        && isBoundGallery(holder, item) && holder.galleryIndex == mediaIndex && galleryMediaAt(item, mediaIndex) == media
+        && media.url.equals(gallerySegmentUrl) && player.getCurrentMediaItem() == source;
+    }
+  }
+
+  private GallerySegmentCallback captureGallerySegmentCallback(ExoPlayer player) {
+    int feedIndex = gallerySegmentFeedIndex, mediaIndex = gallerySegmentMediaIndex;
+    if (destroying || isFinishing() || player == null || player != gallerySegmentPlayer || player != activePlayer
+      || feedIndex < 0 || feedIndex >= videos.size()) return null;
+    ShortVideoHolder holder = attachedHolders.get(feedIndex);
+    ShortVideoItem item = videos.get(feedIndex);
+    GalleryMedia media = galleryMediaAt(item, mediaIndex);
+    if (!isBoundGallery(holder, item) || holder.galleryIndex != mediaIndex || media == null || !media.isVideo()
+      || !media.url.equals(gallerySegmentUrl)) return null;
+    MediaItem source = player.getCurrentMediaItem();
+    return source == null ? null : new GallerySegmentCallback(player, holder, item, media, source);
+  }
+
+  private boolean retryGallerySegmentPlayback() {
+    ExoPlayer player = gallerySegmentPlayer;
+    if (player == null || activePlayer != player) return false;
+    if (destroying || isFinishing()) return true;
+    if (player.getPlayerError() == null) return false;
+    GallerySegmentCallback owner = captureGallerySegmentCallback(player);
+    if (owner == null || !owner.owns() || !activityResumed || authorOverlay != null || commentsOpen()
+      || feedSearchOpen() || playbackToolbarOverlay != null) return true;
+    long position = Math.max(0L, player.getCurrentPosition());
+    long audioGeneration = feedPlayback.audioInterruptionGeneration();
+    cancelStageGestures();
+    gallerySegmentGeneration++;
+    gallerySegmentRenderedSource = null;
+    gallerySegmentRetryOwner = captureGallerySegmentCallback(player);
+    GallerySegmentCallback attempt = gallerySegmentRetryOwner;
+    owner.holder.cover.setVisibility(View.VISIBLE);
+    showStatus("正在重试播放");
+    gallerySegmentRetryStatusGeneration = statusGeneration;
+    player.prepare();
+    if (attempt == null || !attempt.owns()) {
+      if (gallerySegmentRetryOwner == attempt) clearGallerySegmentRetryStatus();
+      return true;
+    }
+    if (position > 0L) player.seekTo(position);
+    if (!feedPlayback.restoreOverlayPlayback(player, false, owner.item.id, audioGeneration, true)) {
+      player.pause();
+      return true;
+    }
+    feedPlayback.requestExplicitPlayback();
+    player.play();
+    startProgressUpdates();
+    screenAwakeRetryGeneration++;
+    syncPlayIndicator(owner.feedIndex, player);
+    return true;
+  }
+
+  private void clearGallerySegmentRetryStatus() {
+    gallerySegmentRetryOwner = null;
+    gallerySegmentRetryStatusGeneration = -1;
+  }
+
+  private boolean restoreGallerySegmentFailureStatus() {
+    if (!activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()
+      || playbackToolbarOverlay != null) return false;
+    GallerySegmentCallback owner = captureGallerySegmentCallback(gallerySegmentPlayer);
+    if (owner == null || !owner.owns()) return false;
+    if (owner.player.getPlayerError() != null) {
+      clearGallerySegmentRetryStatus();
+      showStatus("图文中的视频播放失败，点一下重试");
+      return true;
+    }
+    if (gallerySegmentRetryOwner == null || !gallerySegmentRetryOwner.owns()) return false;
+    showStatus("正在重试播放");
+    gallerySegmentRetryStatusGeneration = statusGeneration;
+    return true;
+  }
+
   private void playGallerySegment(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
     if (!isBoundGallery(holder, item) || holder.index != currentIndex) return;
     GalleryMedia media = galleryMediaAt(item, mediaIndex);
     if (holder == null || media == null || !media.isVideo()) return;
     ExoPlayer player = ensureGallerySegmentPlayer();
+    boolean selectedNewMedia = gallerySegmentFeedIndex != holder.index || gallerySegmentMediaIndex != mediaIndex
+      || !item.id.equals(gallerySegmentItemId);
+    boolean sourceChanged = !media.url.equals(gallerySegmentUrl);
+    boolean sameRole = !selectedNewMedia && !sourceChanged;
+    GallerySegmentCallback retry = gallerySegmentRetryOwner;
+    boolean carryRetry = sameRole && retry != null && retry.player == player && retry.item == item && retry.media == media
+      && retry.generation == gallerySegmentGeneration && retry.source == player.getCurrentMediaItem();
+    if (!sameRole) clearGallerySegmentRetryStatus();
+    if (gallerySegmentFeedIndex != holder.index || gallerySegmentMediaIndex != mediaIndex
+      || gallerySegmentView != holder.galleryVideo || !media.url.equals(gallerySegmentUrl)) gallerySegmentGeneration++;
     if (gallerySegmentView != holder.galleryVideo) {
       if (gallerySegmentView != null) gallerySegmentView.setPlayer(null);
       gallerySegmentView = holder.galleryVideo;
@@ -1171,26 +1827,40 @@ public class NativeShortVideoActivity extends Activity {
     }
     gallerySegmentFeedIndex = holder.index;
     gallerySegmentMediaIndex = mediaIndex;
+    gallerySegmentItemId = item.id;
     holder.galleryVideo.setResizeMode(activeVideoResizeMode());
     holder.galleryVideo.setVisibility(View.VISIBLE);
     holder.cover.setVisibility(View.VISIBLE);
-    if (!media.url.equals(gallerySegmentUrl)) {
+    if (sourceChanged || (selectedNewMedia && player.getPlayerError() != null)) {
+      clearGallerySegmentRetryStatus();
+      gallerySegmentGeneration++;
+      gallerySegmentRenderedSource = null;
       gallerySegmentUrl = media.url;
       player.stop();
       player.clearMediaItems();
       player.setMediaItem(MediaItem.fromUri(cachedMediaUri(media.url)));
       player.prepare();
     }
-    player.setRepeatMode(item.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
+    if (player.getPlayerError() == null && player.getCurrentMediaItem() == gallerySegmentRenderedSource && gallerySegmentRenderedSource != null) {
+      holder.cover.setVisibility(View.GONE);
+    }
+    player.setRepeatMode(item.isSingleLivePhoto() && !autoNext ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
     player.setVolume(0f);
     activePlayer = player;
-    feedPlayback.start(player, false, item.id, activityResumed && authorOverlay == null && !commentsOpen() && !isFinishing());
+    if (carryRetry) gallerySegmentRetryOwner = captureGallerySegmentCallback(player);
+    Runnable start = () -> feedPlayback.start(player, false, item.id,
+      activityResumed && authorOverlay == null && !commentsOpen() && !feedSearchOpen() && !isFinishing());
+    if (sameRole) feedPlayback.bindPreservingPause(player, null, start);
+    else start.run();
     long soundPosition = gallerySoundPlayer == null ? -1 : gallerySoundPlayer.getCurrentPosition();
     boolean soundPlaying = gallerySoundPlayer != null && gallerySoundPlayer.isPlaying();
     Log.i(TAG, "gallery video play " + holder.index + " " + (mediaIndex + 1) + "/" + item.galleryItems.size()
       + " segmentVolume=0 soundPlaying=" + soundPlaying + " soundPosition=" + soundPosition);
   }
   private void stopGallerySegmentPlayback(@Nullable ShortVideoHolder holder, boolean release) {
+    clearGallerySegmentRetryStatus();
+    gallerySegmentGeneration++;
+    gallerySegmentRenderedSource = null;
     ExoPlayer player = gallerySegmentPlayer;
     if (player != null) {
       try {
@@ -1213,6 +1883,7 @@ public class NativeShortVideoActivity extends Activity {
     gallerySegmentFeedIndex = -1;
     gallerySegmentMediaIndex = -1;
     gallerySegmentUrl = "";
+    gallerySegmentItemId = "";
     if (release && player != null) {
       player.release();
       gallerySegmentPlayer = null;
@@ -1220,42 +1891,61 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void playGallerySound(int feedIndex, ShortVideoItem item) {
+    if (feedIndex < 0 || feedIndex >= videos.size() || currentIndex != feedIndex
+      || videos.get(feedIndex) != item || pager.getCurrentItem() != feedIndex) return;
     if (item == null || !item.sound.isPlayable()) {
       releaseGallerySoundPlayer();
       return;
     }
     if (gallerySoundPlayer == null) {
       ExoPlayer.Builder builder = new ExoPlayer.Builder(this)
+        .setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
+        .setHandleAudioBecomingNoisy(true)
         .setLoadControl(new DefaultLoadControl.Builder()
           .setBufferDurationsMs(900, 5000, 180, 320)
           .build());
-      if (videoCacheDataSourceFactory != null) {
-        builder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoCacheDataSourceFactory));
-      }
+      builder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoPlaybackDataSourceFactory));
       ExoPlayer player = builder.build();
       player.setRepeatMode(Player.REPEAT_MODE_ONE);
       player.setVolume(0f);
       player.addListener(new Player.Listener() {
+        @Override public void onIsPlayingChanged(boolean playing) { refreshScreenAwake(); }
+        @Override public void onPlayWhenReadyChanged(boolean requested, int reason) { refreshScreenAwake(); }
+        @Override public void onPlaybackSuppressionReasonChanged(int reason) { refreshScreenAwake(); }
         @Override
         public void onPlaybackStateChanged(int playbackState) {
+          refreshScreenAwake();
           if (playbackState != Player.STATE_READY) return;
-          Log.i(TAG, "gallery sound ready " + gallerySoundFeedIndex + " volume=" + player.getVolume());
-          mainHandler.post(NativeShortVideoActivity.this::refreshVisibleRails);
+          GallerySoundCallback owner = captureGallerySoundCallback(player);
+          if (owner == null) return;
+          mainHandler.post(() -> {
+            if (!owner.owns()) return;
+            Log.i(TAG, "gallery sound ready " + owner.feedIndex + " volume=" + player.getVolume());
+            refreshVisibleRails();
+          });
         }
 
         @Override
         public void onPlayerError(@NonNull PlaybackException error) {
-          Log.w(TAG, "gallery sound error " + gallerySoundFeedIndex + " " + error.getErrorCodeName());
+          refreshScreenAwake();
+          GallerySoundCallback owner = captureGallerySoundCallback(player);
+          if (owner == null) return;
           mainHandler.post(() -> {
-            if (currentIndex == gallerySoundFeedIndex) showTransientStatus("配乐暂时无法播放，图集内容不受影响");
+            if (!owner.owns()) return;
+            Log.w(TAG, "gallery sound error " + owner.feedIndex + " " + error.getErrorCodeName());
+            showTransientStatus("配乐不可用，可继续看图或点配乐重试");
+            refreshVisibleRails();
           });
         }
       });
       gallerySoundPlayer = player;
     }
+    boolean selectedNewWork = gallerySoundFeedIndex != feedIndex;
+    if (selectedNewWork || !item.sound.previewUrl.equals(gallerySoundUrl)) gallerySoundGeneration++;
     gallerySoundFeedIndex = feedIndex;
     ExoPlayer player = gallerySoundPlayer;
-    if (!item.sound.previewUrl.equals(gallerySoundUrl)) {
+    if (!item.sound.previewUrl.equals(gallerySoundUrl) || (selectedNewWork && player.getPlayerError() != null)) {
+      gallerySoundGeneration++;
       gallerySoundUrl = item.sound.previewUrl;
       player.stop();
       player.clearMediaItems();
@@ -1264,11 +1954,13 @@ public class NativeShortVideoActivity extends Activity {
     }
     player.setRepeatMode(Player.REPEAT_MODE_ONE);
     player.setVolume(activeVolume());
-    feedPlayback.start(player, true, item.id, activityResumed && authorOverlay == null && !commentsOpen() && !isFinishing());
+    feedPlayback.start(player, true, item.id, activityResumed && authorOverlay == null && !commentsOpen() && !feedSearchOpen() && !isFinishing());
+    refreshScreenAwake();
     Log.i(TAG, "gallery sound play " + feedIndex + " " + item.sound.title + " source=" + item.sound.previewSource);
   }
 
   private void releaseGallerySoundPlayer() {
+    gallerySoundGeneration++;
     ExoPlayer player = gallerySoundPlayer;
     gallerySoundPlayer = null;
     gallerySoundFeedIndex = -1;
@@ -1281,6 +1973,82 @@ public class NativeShortVideoActivity extends Activity {
     player.release();
   }
 
+  private final class GallerySoundCallback {
+    final ExoPlayer player;
+    final ShortVideoItem item;
+    final ShortVideoHolder holder;
+    final MediaItem source;
+    final int feedIndex;
+    final long generation;
+
+    GallerySoundCallback(ExoPlayer player, ShortVideoItem item, ShortVideoHolder holder, MediaItem source) {
+      this.player = player; this.item = item; this.holder = holder; this.source = source;
+      feedIndex = gallerySoundFeedIndex; generation = gallerySoundGeneration;
+    }
+
+    boolean owns() {
+      return !destroying && !isFinishing() && generation == gallerySoundGeneration && player == gallerySoundPlayer
+        && currentIndex == feedIndex && pager.getCurrentItem() == feedIndex && gallerySoundFeedIndex == feedIndex
+        && feedIndex >= 0 && feedIndex < videos.size() && videos.get(feedIndex) == item && item.isGallery()
+        && attachedHolders.get(feedIndex) == holder && holder.index == feedIndex
+        && item.sound.isPlayable() && item.sound.previewUrl.equals(gallerySoundUrl) && player.getCurrentMediaItem() == source;
+    }
+  }
+
+  private GallerySoundCallback captureGallerySoundCallback(ExoPlayer player) {
+    int feedIndex = gallerySoundFeedIndex;
+    if (destroying || isFinishing() || player == null || player != gallerySoundPlayer || feedIndex < 0 || feedIndex >= videos.size()) return null;
+    ShortVideoItem item = videos.get(feedIndex);
+    ShortVideoHolder holder = attachedHolders.get(feedIndex);
+    if (holder == null || holder.index != feedIndex) return null;
+    if (!item.isGallery() || !item.sound.isPlayable() || !item.sound.previewUrl.equals(gallerySoundUrl)) return null;
+    MediaItem source = player.getCurrentMediaItem();
+    return source == null ? null : new GallerySoundCallback(player, item, holder, source);
+  }
+
+  private boolean isGallerySoundFailed(ShortVideoItem item) {
+    GallerySoundCallback owner = captureGallerySoundCallback(gallerySoundPlayer);
+    return owner != null && owner.item == item && owner.owns() && owner.player.getPlayerError() != null;
+  }
+
+  private boolean retryGallerySoundPlayback(GallerySoundCallback owner) {
+    if (owner == null || !owner.owns() || !activityResumed || authorOverlay != null || commentsOpen()
+      || feedSearchOpen() || playbackToolbarOverlay != null || owner.player.getPlayerError() == null) return false;
+    ExoPlayer player = owner.player;
+    long position = Math.max(0L, player.getCurrentPosition());
+    long audioGeneration = feedPlayback.audioInterruptionGeneration();
+    gallerySoundGeneration++;
+    GallerySoundCallback attempt = captureGallerySoundCallback(player);
+    showTransientStatus("正在重试配乐");
+    player.prepare();
+    if (attempt == null || !attempt.owns()) return true;
+    if (position > 0L) player.seekTo(position);
+    if (!feedPlayback.restoreOverlayPlayback(player, true, owner.item.id, audioGeneration, true)) {
+      player.pause();
+      return true;
+    }
+    feedPlayback.requestExplicitPlayback();
+    player.play();
+    screenAwakeRetryGeneration++;
+    refreshScreenAwake();
+    resumeGalleryAutoAdvanceIfNeeded();
+    refreshVisibleRails();
+    return true;
+  }
+
+  private void handleGallerySoundAction(ShortVideoItem item, GallerySoundCallback owner) {
+    if (owner == null || owner.item != item || !owner.owns() || !activityResumed || authorOverlay != null
+      || commentsOpen() || feedSearchOpen() || playbackToolbarOverlay != null) return;
+    if (owner.player.getPlayerError() != null) {
+      if (muted) {
+        muted = false;
+        writeControlPreference(PREF_MUTED, false);
+        applyPlaybackControlState();
+      }
+      retryGallerySoundPlayback(owner);
+    } else toggleMuted();
+  }
+
   private int playerIndex(ExoPlayer player) {
     for (Map.Entry<Integer, ExoPlayer> entry : playerCache.entrySet()) {
       if (entry.getValue() == player) return entry.getKey();
@@ -1288,9 +2056,15 @@ public class NativeShortVideoActivity extends Activity {
     return -1;
   }
 
+  private boolean canAdvanceAfterEnded(int index) {
+    return !hasOwnedProgressSeek() && activityResumed && !destroying && !isFinishing() && authorOverlay == null && !commentsOpen() && !feedSearchOpen()
+      && autoNext && currentIndex == index && activePlayer != null && activePlayer.getPlaybackState() == Player.STATE_ENDED
+      && pager.getCurrentItem() == index
+      && feedPlayback.allowsAutomaticPlayback(activePlayer);
+  }
+
   private void advanceAfterEnded(int index) {
-    if (!activityResumed || authorOverlay != null || !autoNext || currentIndex != index
-      || !feedPlayback.allowsAutomaticPlayback(activePlayer)) return;
+    if (!canAdvanceAfterEnded(index)) return;
     if (index + 1 < videos.size()) {
       pager.setCurrentItem(index + 1, true);
       return;
@@ -1308,19 +2082,35 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
+  private static final class FailedVideoRetry {
+    final int index;
+    final ShortVideoItem item;
+    final long position;
+
+    FailedVideoRetry(int index, ShortVideoItem item, long position) {
+      this.index = index; this.item = item; this.position = position;
+    }
+  }
+
   private void handlePlaybackError(int index, ExoPlayer player, PlaybackException error) {
+    if (index < 0 || index >= videos.size() || videos.get(index).isGallery()) return;
     if (playerCache.get(index) != player && activePlayer != player) return;
+    cancelVideoPrefetch();
     if (playbackFallback.handle(player, videos.get(index), error, () -> NativeShortVideoPlaybackFallback.shouldResume(
       activityResumed && !destroying && !isFinishing(),
-      authorOverlay == null && !commentsOpen(),
+      authorOverlay == null && !commentsOpen() && !feedSearchOpen(),
       currentIndex == index && activePlayer == player && playerCache.get(index) == player,
       player
     ))) {
+      scheduleVideoPrefetch(currentIndex + 1);
       failedPlayerIndexes.remove(index);
       if (currentIndex == index) showStatus(playbackFallback.status());
       return;
     }
     if (playerCache.get(index) == player) {
+      if (currentIndex == index && activePlayer == player) {
+        failedVideoRetry = new FailedVideoRetry(index, videos.get(index), Math.max(0L, player.getCurrentPosition()));
+      }
       playerCache.remove(index);
       if (activePlayer == player) activePlayer = null;
       PlayerView view = playerViews.get(index);
@@ -1338,13 +2128,36 @@ public class NativeShortVideoActivity extends Activity {
     Log.w(TAG, "playback error " + index + " " + error.getErrorCodeName());
   }
 
+  private boolean ownsVideoRetry(int index, ShortVideoItem item, ShortVideoHolder holder) {
+    return activityResumed && !destroying && !isFinishing() && authorOverlay == null
+      && !commentsOpen() && !feedSearchOpen() && index == currentIndex && pager.getCurrentItem() == index
+      && index >= 0 && index < videos.size() && videos.get(index) == item && !item.isGallery()
+      && holder != null && holder.index == index && attachedHolders.get(index) == holder;
+  }
+
   private void retryPlaybackAt(int index) {
     if (index < 0 || index >= videos.size()) return;
+    ShortVideoItem item = videos.get(index);
+    ShortVideoHolder holder = attachedHolders.get(index);
+    if (!ownsVideoRetry(index, item, holder)) return;
+    ExoPlayer previous = playerCache.get(index);
+    long position = previous != null && previous == activePlayer ? Math.max(0L, previous.getCurrentPosition())
+      : failedVideoRetry != null && failedVideoRetry.index == index && failedVideoRetry.item == item
+        ? failedVideoRetry.position : 0L;
+    playbackFallback.resetRetryBudget(item);
     failedPlayerIndexes.remove(index);
     showStatus("正在重试播放");
     releasePlayerAt(index);
-    preparePlayerAt(index);
-    pager.post(() -> playAt(index));
+    ExoPlayer player = preparePlayerAt(index);
+    if (player == null || !ownsVideoRetry(index, item, holder) || playerCache.get(index) != player) return;
+    // An explicit retry supersedes an older lifecycle/author pause snapshot.
+    // Seeking also at zero preserves a newer rewind instead of an older position.
+    feedPlayback.restore(null);
+    player.seekTo(position);
+    feedPlayback.requestExplicitPlayback();
+    screenAwakeRetryGeneration++;
+    failedVideoRetry = null;
+    playAt(index);
   }
 
   private void releasePlayerAt(int index) {
@@ -1506,7 +2319,12 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void releaseAllPlayers() {
-    clearPendingStageTap();
+    clearProgressDuration();
+    cancelSelectedPlaybackRequest();
+    cancelGalleryContinuation();
+    failedVideoRetry = null;
+    pauseFrameLoading();
+    cancelStageGestures();
     cancelGalleryAutoAdvance();
     dismissPlaybackToolbar();
     stopProgressUpdates();
@@ -1527,25 +2345,127 @@ public class NativeShortVideoActivity extends Activity {
 
   private void toggleActivePlayback() {
     if (activePlayer == null || currentIndex < 0) return;
+    if (retryGallerySegmentPlayback()) return;
     if (activePlayer.getPlayWhenReady() && activePlayer.getPlaybackState() != Player.STATE_ENDED) {
       activePlayer.pause();
       updateActiveProgress();
     } else {
       if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
+      feedPlayback.requestExplicitPlayback();
       activePlayer.play();
       startProgressUpdates();
     }
     syncPlayIndicator(currentIndex, activePlayer);
   }
 
-  private void handleStageTap(int index) {
-    if (index < 0 || index >= videos.size()) return;
-    long now = SystemClock.uptimeMillis();
+  private final class StageGestureOwner {
+    final int index, mediaIndex;
+    final ShortVideoHolder holder;
+    final ShortVideoItem item;
+    final ExoPlayer player, sound;
+    final Object binding;
+    final MediaItem soundMedia;
+    final GalleryMedia media;
+    final long generation, audioGeneration;
+    final boolean failed;
+    StageGestureOwner(int index, ShortVideoHolder holder, ShortVideoItem item) {
+      this.index = index; this.holder = holder; this.item = item;
+      player = activePlayer;
+      binding = player == null ? null : item.isGallery() ? player.getCurrentMediaItem() : playbackFallback.bindingOwner(player);
+      mediaIndex = item.isGallery() ? holder.galleryIndex : -1;
+      media = item.isGallery() ? galleryMediaAt(item, mediaIndex) : null;
+      sound = item.isGallery() && gallerySoundFeedIndex == index ? gallerySoundPlayer : null;
+      soundMedia = sound == null ? null : sound.getCurrentMediaItem();
+      generation = stageGestureGeneration; audioGeneration = feedPlayback.audioInterruptionGeneration();
+      failed = failedPlayerIndexes.contains(index);
+    }
+  }
+
+  private boolean stageGestureVisible() {
+    return activityResumed && !destroying && !isFinishing() && authorOverlay == null
+      && !commentsOpen() && !feedSearchOpen() && playbackToolbarOverlay == null;
+  }
+
+  private StageGestureOwner captureStageGestureOwner(int index) {
+    if (!stageGestureVisible() || index != currentIndex || index < 0 || index >= videos.size()) return null;
     ShortVideoHolder holder = attachedHolders.get(index);
+    if (holder == null) return null;
+    ShortVideoItem item = videos.get(index);
+    if (!item.isGallery() && activePlayer != null && playerCache.get(index) != activePlayer) return null;
+    return new StageGestureOwner(index, holder, item);
+  }
+
+  private boolean ownsStageGesture(StageGestureOwner owner) {
+    if (owner == null || !stageGestureVisible() || owner.generation != stageGestureGeneration
+      || owner.audioGeneration != feedPlayback.audioInterruptionGeneration() || owner.index != currentIndex
+      || owner.index < 0 || owner.index >= videos.size() || videos.get(owner.index) != owner.item
+      || attachedHolders.get(owner.index) != owner.holder || owner.player != activePlayer
+      || owner.failed != failedPlayerIndexes.contains(owner.index)) return false;
+    if (!owner.item.isGallery()) return owner.player == null
+      || (playerCache.get(owner.index) == owner.player && playbackFallback.isBound(owner.player, owner.binding));
+    if (owner.holder.galleryIndex != owner.mediaIndex || galleryMediaAt(owner.item, owner.mediaIndex) != owner.media) return false;
+    if (owner.player != null && (owner.player != gallerySegmentPlayer || gallerySegmentFeedIndex != owner.index
+      || gallerySegmentMediaIndex != owner.mediaIndex || owner.player.getCurrentMediaItem() != owner.binding)) return false;
+    ExoPlayer sound = gallerySoundFeedIndex == owner.index ? gallerySoundPlayer : null;
+    return sound == owner.sound && (sound == null || sound.getCurrentMediaItem() == owner.soundMedia);
+  }
+
+  private void cancelStageTouch(ShortVideoHolder holder, View view) {
+    if (holder == null) return;
+    cancelStageLongPress(holder);
+    holder.touchActive = false; holder.horizontalGesture = false; holder.verticalGesture = false;
+    holder.longPressTriggered = false; holder.galleryPanning = false; holder.galleryScaling = false;
+    if (galleryScaleHolder == holder) galleryScaleHolder = null;
+    cancelGalleryDrag(holder);
+    setParentInterceptDisallowed(view, false);
+    if (stageTouchHolder == holder) { stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null; }
+    refreshScreenAwake();
+  }
+
+  private void cancelStageGestures() {
+    stageGestureGeneration++;
+    clearPendingStageTap();
+    View origin = stageTouchView;
+    ShortVideoHolder originHolder = stageTouchHolder;
+    for (ShortVideoHolder holder : new ArrayList<>(attachedHolders.values())) cancelStageTouch(holder, holder == originHolder ? origin : null);
+    stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null;
+  }
+
+  private void invalidateGalleryStageGesture(ShortVideoHolder holder, int mediaIndex) {
+    if (holder.index == currentIndex && holder.galleryIndex != mediaIndex) cancelStageGestures();
+  }
+
+  private boolean rejectStageTouch(ShortVideoHolder holder, View view, MotionEvent event) {
+    int action = event.getActionMasked();
+    if (action == MotionEvent.ACTION_DOWN) {
+      if (stageTouchHolder != null) cancelStageTouch(stageTouchHolder, stageTouchView);
+      StageGestureOwner owner = captureStageGestureOwner(holder.index);
+      if (owner == null || owner.holder != holder || event.getPointerCount() != 1) { cancelStageTouch(holder, view); return true; }
+      stageTouchOwner = owner; stageTouchHolder = holder; stageTouchView = view;
+      suppressPagerGestureCommit = false;
+      return false;
+    }
+    if (stageTouchHolder != holder || !ownsStageGesture(stageTouchOwner)) { cancelStageTouch(holder, view); return true; }
+    if (event.getPointerCount() > 1 || action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
+      clearPendingStageTap(); suppressPagerGestureCommit = true; cancelStageTouch(holder, view); return true;
+    }
+    return false;
+  }
+
+  private void handleStageTap(int index) {
+    handleOwnedStageTap(captureStageGestureOwner(index));
+  }
+
+  private void handleOwnedStageTap(StageGestureOwner owner) {
+    if (!ownsStageGesture(owner)) return;
+    int index = owner.index;
+    long now = SystemClock.uptimeMillis();
+    ShortVideoHolder holder = owner.holder;
     long doubleTapWindow = holder != null && videos.get(index).isGallery() && holder.galleryZoomScale > 1.001f
       ? 420L
       : STAGE_DOUBLE_TAP_MS;
-    if (pendingStageTapRunnable != null && lastStageTapIndex == index && now - lastStageTapAt <= doubleTapWindow) {
+    if (pendingStageTapRunnable != null && ownsStageGesture(pendingStageTapOwner)
+      && lastStageTapIndex == index && now - lastStageTapAt <= doubleTapWindow) {
       clearPendingStageTap();
       if (holder != null && videos.get(index).isGallery() && holder.galleryZoomScale > 1.001f) {
         animateGalleryZoomReset(holder, true);
@@ -1559,14 +2479,28 @@ public class NativeShortVideoActivity extends Activity {
     clearPendingStageTap();
     lastStageTapAt = now;
     lastStageTapIndex = index;
-    pendingStageTapRunnable = () -> {
-      pendingStageTapRunnable = null;
-      lastStageTapAt = 0;
-      lastStageTapIndex = -1;
-      if (currentIndex != index) return;
-      if (failedPlayerIndexes.contains(index)) retryPlaybackAt(index);
-      else if (controlsHidden) setControlsHidden(false, true);
-      else toggleActivePlayback();
+    pendingStageTapOwner = owner;
+    boolean revealControls = controlsHidden;
+    boolean play = activePlayer != null && (!activePlayer.getPlayWhenReady() || activePlayer.getPlaybackState() == Player.STATE_ENDED);
+    pendingStageTapRunnable = new Runnable() {
+      @Override public void run() {
+        if (pendingStageTapRunnable != this) return;
+        boolean current = ownsStageGesture(owner);
+        clearPendingStageTap();
+        if (!current) return;
+        if (owner.failed) retryPlaybackAt(index);
+        else if (retryGalleryImagePlayback()) return;
+        else if (retryGallerySegmentPlayback()) return;
+        else if (revealControls) setControlsHidden(false, true);
+        else if (activePlayer != null) {
+          if (play) {
+            if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
+            feedPlayback.requestExplicitPlayback();
+            activePlayer.play(); startProgressUpdates();
+          } else { activePlayer.pause(); updateActiveProgress(); }
+          syncPlayIndicator(index, activePlayer);
+        }
+      }
     };
     mainHandler.postDelayed(pendingStageTapRunnable, STAGE_DOUBLE_TAP_MS);
   }
@@ -1574,11 +2508,13 @@ public class NativeShortVideoActivity extends Activity {
   private boolean handleStageTouch(ShortVideoHolder holder, View view, MotionEvent event) {
     if (holder == null || event == null) return false;
     int action = event.getActionMasked();
+    if (rejectStageTouch(holder, view, event)) return true;
     if (action == MotionEvent.ACTION_DOWN) {
       holder.touchStartX = event.getX();
       holder.touchStartY = event.getY();
       holder.touchStartAtMs = SystemClock.uptimeMillis();
       holder.touchActive = true;
+      refreshScreenAwake();
       holder.horizontalGesture = false;
       holder.longPressTriggered = false;
       scheduleStageLongPress(holder, view);
@@ -1599,6 +2535,7 @@ public class NativeShortVideoActivity extends Activity {
       return holder.horizontalGesture;
     }
     if (action == MotionEvent.ACTION_UP) {
+      StageGestureOwner owner = stageTouchOwner;
       holder.lastTapX = event.getRawX();
       holder.lastTapY = event.getRawY();
       float dx = event.getX() - holder.touchStartX;
@@ -1606,23 +2543,25 @@ public class NativeShortVideoActivity extends Activity {
       boolean horizontal = holder.horizontalGesture || (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO);
       holder.touchActive = false;
       holder.horizontalGesture = false;
+      refreshScreenAwake();
       boolean consumedLongPress = holder.longPressTriggered;
       holder.longPressTriggered = false;
       cancelStageLongPress(holder);
       setParentInterceptDisallowed(view, false);
+      if (stageTouchHolder == holder) { stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null; }
+      if (view != null) view.setPressed(false);
       if (consumedLongPress) return true;
-      if (!horizontal) return false;
+      if (!horizontal) {
+        if (Math.abs(dx) <= dp(18) && Math.abs(dy) <= dp(18)) handleOwnedStageTap(owner);
+        return true;
+      }
       if (finishGalleryDrag(holder, dx, galleryDragVelocity(holder, dx))) return true;
       handleHorizontalSwipe(holder.index, dx);
       return true;
     }
     if (action == MotionEvent.ACTION_CANCEL) {
-      holder.touchActive = false;
-      holder.horizontalGesture = false;
-      holder.longPressTriggered = false;
-      cancelGalleryDrag(holder);
-      cancelStageLongPress(holder);
-      setParentInterceptDisallowed(view, false);
+      clearPendingStageTap();
+      cancelStageTouch(holder, view);
     }
     return false;
   }
@@ -1631,11 +2570,13 @@ public class NativeShortVideoActivity extends Activity {
     if (holder == null || event == null) return true;
     if (handleGalleryScaleAndPanTouch(holder, view, event)) return true;
     int action = event.getActionMasked();
+    if (rejectStageTouch(holder, view, event)) return true;
     if (action == MotionEvent.ACTION_DOWN) {
       holder.touchStartX = event.getRawX();
       holder.touchStartY = event.getRawY();
       holder.touchStartAtMs = SystemClock.uptimeMillis();
       holder.touchActive = true;
+      refreshScreenAwake();
       holder.horizontalGesture = false;
       holder.verticalGesture = false;
       holder.longPressTriggered = false;
@@ -1663,6 +2604,7 @@ public class NativeShortVideoActivity extends Activity {
       return true;
     }
     if (action == MotionEvent.ACTION_UP) {
+      StageGestureOwner owner = stageTouchOwner;
       holder.lastTapX = event.getRawX();
       holder.lastTapY = event.getRawY();
       float dx = event.getRawX() - holder.touchStartX;
@@ -1674,38 +2616,40 @@ public class NativeShortVideoActivity extends Activity {
       holder.horizontalGesture = false;
       holder.verticalGesture = false;
       holder.longPressTriggered = false;
+      refreshScreenAwake();
       cancelStageLongPress(holder);
       setParentInterceptDisallowed(view, false);
+      if (stageTouchHolder == holder) { stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null; }
       if (consumedLongPress) return true;
       if (horizontal) {
         if (!finishGalleryDrag(holder, dx, galleryDragVelocity(holder, dx))) handleHorizontalSwipe(holder.index, dx);
       } else if (!vertical) {
-        handleStageTap(holder.index);
+        handleOwnedStageTap(owner);
       }
       return true;
     }
     if (action == MotionEvent.ACTION_CANCEL) {
-      holder.touchActive = false;
-      holder.horizontalGesture = false;
-      holder.verticalGesture = false;
-      holder.longPressTriggered = false;
-      cancelGalleryDrag(holder);
-      cancelStageLongPress(holder);
-      setParentInterceptDisallowed(view, false);
+      clearPendingStageTap();
+      cancelStageTouch(holder, view);
     }
     return true;
   }
 
   private void scheduleStageLongPress(ShortVideoHolder holder, View view) {
     cancelStageLongPress(holder);
-    holder.longPressRunnable = () -> {
-      holder.longPressRunnable = null;
-      if (holder.index < 0 || holder.index >= videos.size()) return;
-      if (attachedHolders.get(holder.index) != holder || holder.horizontalGesture || holder.verticalGesture) return;
-      holder.longPressTriggered = true;
-      clearPendingStageTap();
-      if (view != null) view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-      showPlaybackToolbar(videos.get(holder.index));
+    StageGestureOwner owner = stageTouchHolder == holder ? stageTouchOwner : null;
+    if (!ownsStageGesture(owner)) return;
+    holder.longPressRunnable = new Runnable() {
+      @Override public void run() {
+        if (holder.longPressRunnable != this) return;
+        holder.longPressRunnable = null;
+        if (!ownsStageGesture(owner) || (!holder.touchActive && !holder.galleryPanning)
+          || holder.horizontalGesture || holder.verticalGesture) return;
+        holder.longPressTriggered = true;
+        clearPendingStageTap();
+        if (view != null) view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        showPlaybackToolbar(owner.item);
+      }
     };
     mainHandler.postDelayed(holder.longPressRunnable, 560);
   }
@@ -1730,6 +2674,7 @@ public class NativeShortVideoActivity extends Activity {
       clearPendingStageTap();
       cancelStageLongPress(holder);
       holder.touchActive = false;
+      if (stageTouchHolder == holder) { stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null; }
       holder.horizontalGesture = false;
       holder.verticalGesture = false;
       holder.galleryPanning = false;
@@ -1751,6 +2696,7 @@ public class NativeShortVideoActivity extends Activity {
       if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) galleryScaleHolder = null;
       return false;
     }
+    if (rejectStageTouch(holder, view, event)) return true;
     suppressPagerGestureCommit = true;
     setParentInterceptDisallowed(view, true);
     if (action == MotionEvent.ACTION_DOWN) {
@@ -1776,6 +2722,7 @@ public class NativeShortVideoActivity extends Activity {
       return true;
     }
     if (action == MotionEvent.ACTION_UP) {
+      StageGestureOwner owner = stageTouchOwner;
       holder.lastTapX = event.getRawX();
       holder.lastTapY = event.getRawY();
       boolean consumedLongPress = holder.longPressTriggered;
@@ -1786,7 +2733,8 @@ public class NativeShortVideoActivity extends Activity {
       cancelStageLongPress(holder);
       setParentInterceptDisallowed(view, false);
       galleryScaleHolder = null;
-      if (tap) handleStageTap(holder.index);
+      if (stageTouchHolder == holder) { stageTouchOwner = null; stageTouchHolder = null; stageTouchView = null; }
+      if (tap) handleOwnedStageTap(owner);
       return true;
     }
     if (action == MotionEvent.ACTION_CANCEL) {
@@ -1847,6 +2795,7 @@ public class NativeShortVideoActivity extends Activity {
     float translatedX = holder.cover.getTranslationX() * ratio + (focusX - centerX) * (1f - ratio);
     float translatedY = holder.cover.getTranslationY() * ratio + (focusY - centerY) * (1f - ratio);
     holder.galleryZoomScale = nextScale;
+    refreshScreenAwake();
     holder.cover.setPivotX(centerX);
     holder.cover.setPivotY(centerY);
     holder.cover.setScaleX(nextScale);
@@ -1984,12 +2933,8 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     GalleryMedia media = item.galleryItems.get(targetIndex);
-    executor.execute(() -> {
-      Bitmap bitmap = loadGalleryMediaFrame(media);
-      if (bitmap == null) return;
-      frameCache.put(key, bitmap);
-      mainHandler.post(() -> showGalleryDragPreview(holder, item, targetIndex, direction, key, bitmap));
-    });
+    requestFrame(key, () -> loadGalleryMediaFrame(media),
+      bitmap -> showGalleryDragPreview(holder, item, targetIndex, direction, key, bitmap));
   }
 
   private void showGalleryDragPreview(ShortVideoHolder holder, ShortVideoItem item, int targetIndex, int direction, String key, Bitmap bitmap) {
@@ -2204,12 +3149,22 @@ public class NativeShortVideoActivity extends Activity {
   private void bindGallery(ShortVideoHolder holder, ShortVideoItem item, int requestedIndex, int direction) {
     if (!isBoundGallery(holder, item)) return;
     boolean currentGallery = holder.index == currentIndex;
-    if (currentGallery) cancelGalleryAutoAdvance();
-    resetGalleryZoom(holder, true);
     int galleryIndex = Math.max(0, Math.min(requestedIndex, item.galleryItems.size() - 1));
-    if (currentGallery) feedPlayback.selectGalleryMedia(item.id, galleryIndex);
+    GalleryMedia targetMedia = galleryMediaAt(item, galleryIndex);
+    String imageKey = targetMedia != null && !targetMedia.isVideo() ? galleryCacheKey(item, galleryIndex) : "";
+    boolean sameImage = direction == 0 && holder.galleryImageReadiness != null && holder.galleryImageReadiness.key.equals(imageKey);
+    if (currentGallery && !sameImage) cancelGalleryAutoAdvance();
+    if (!sameImage) {
+      holder.galleryImageReadiness = imageKey.length() == 0 ? null : new NativeShortVideoGalleryImageReadiness(imageKey, GALLERY_IMAGE_AUTO_ADVANCE_MS);
+      resetGalleryZoom(holder, true);
+    }
+    if (currentGallery) invalidateGalleryStageGesture(holder, galleryIndex);
+    if (currentGallery) feedPlayback.selectGalleryMedia(item.id, galleryIndex,
+      targetMedia == null ? null : (targetMedia.isVideo() ? "video:" : "image:") + targetMedia.url);
     holder.galleryIndex = galleryIndex;
     galleryPositions.put(item.id, galleryIndex);
+    invalidateGalleryContinuation();
+    refreshFrameLoadingWindow();
     holder.cover.setScaleType(ImageView.ScaleType.FIT_CENTER);
     holder.cover.setVisibility(View.VISIBLE);
     holder.playIndicator.setVisibility(View.GONE);
@@ -2235,7 +3190,6 @@ public class NativeShortVideoActivity extends Activity {
       }
       holder.galleryVideo.setVisibility(View.GONE);
       loadGalleryImage(holder, item, galleryIndex, direction);
-      if (currentGallery) scheduleGalleryAutoAdvance(holder, item, galleryIndex);
     }
     prefetchGalleryMedia(item, galleryIndex - 1);
     prefetchGalleryMedia(item, galleryIndex + 1);
@@ -2258,20 +3212,34 @@ public class NativeShortVideoActivity extends Activity {
   private void loadGalleryImage(ShortVideoHolder holder, ShortVideoItem item, int galleryIndex, int direction) {
     if (galleryIndex < 0 || galleryIndex >= item.galleryItems.size()) return;
     String key = galleryCacheKey(item, galleryIndex);
+    NativeShortVideoGalleryImageReadiness readiness = holder.galleryImageReadiness;
+    if (readiness == null || !readiness.key.equals(key)) return;
+    if (isGalleryImageReady(holder, item, galleryIndex)) return;
+    if (readiness.failed) { restoreGalleryImageFailureStatus(); return; }
+    readiness.ready = false;
+    readiness.loading = true;
+    long attempt = ++readiness.attempt;
     String url = item.galleryItems.get(galleryIndex).url;
+    boolean changed = !key.equals(holder.cover.getTag());
     holder.cover.setTag(key);
     Bitmap cached = frameCache.get(key);
-    if (cached == null && galleryIndex == 0) cached = frameCache.get(item.id);
     if (cached != null) {
       showGalleryBitmap(holder, item, galleryIndex, cached, direction);
       return;
     }
-    executor.execute(() -> {
-      Bitmap bitmap = loadBitmap(url, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT);
-      if (bitmap == null) return;
-      frameCache.put(key, bitmap);
-      mainHandler.post(() -> showGalleryBitmap(holder, item, galleryIndex, bitmap, direction));
-    });
+    if (changed) holder.cover.setImageDrawable(null);
+    Bitmap thumbnail = galleryIndex == 0 ? frameCache.get(item.id) : null;
+    if (thumbnail != null) holder.cover.setImageBitmap(thumbnail);
+    requestFrame(key, () -> loadBitmap(url, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT),
+      bitmap -> {
+        if (ownsGalleryImageRead(holder, item, galleryIndex, readiness, attempt)) showGalleryBitmap(holder, item, galleryIndex, bitmap, direction);
+      }, () -> {
+        if (!ownsGalleryImageRead(holder, item, galleryIndex, readiness, attempt)) return;
+        readiness.loading = false;
+        readiness.retrying = false;
+        readiness.failed = true;
+        restoreGalleryImageFailureStatus();
+      });
   }
 
   private void loadGalleryFrame(ShortVideoHolder holder, ShortVideoItem item, int galleryIndex, int direction) {
@@ -2284,16 +3252,14 @@ public class NativeShortVideoActivity extends Activity {
       showGalleryBitmap(holder, item, galleryIndex, cached, direction);
       return;
     }
-    executor.execute(() -> {
-      Bitmap bitmap = loadGalleryMediaFrame(media);
-      if (bitmap == null) return;
-      frameCache.put(key, bitmap);
-      mainHandler.post(() -> showGalleryBitmap(holder, item, galleryIndex, bitmap, direction));
-    });
+    requestFrame(key, () -> loadGalleryMediaFrame(media),
+      bitmap -> {
+        if (key.equals(galleryCacheKey(item, galleryIndex))) showGalleryBitmap(holder, item, galleryIndex, bitmap, direction);
+      });
   }
 
   private void showGalleryBitmap(ShortVideoHolder holder, ShortVideoItem item, int galleryIndex, Bitmap bitmap, int direction) {
-    if (!isBoundGallery(holder, item) || holder.galleryIndex != galleryIndex) return;
+    if (bitmap == null || !isBoundGallery(holder, item) || holder.galleryIndex != galleryIndex) return;
     Object liveTag = holder.cover.getTag();
     if (!galleryCacheKey(item, galleryIndex).equals(liveTag)) return;
     holder.galleryCurrentLayer.animate().cancel();
@@ -2301,62 +3267,244 @@ public class NativeShortVideoActivity extends Activity {
     holder.galleryCurrentLayer.setAlpha(direction == 0 ? 1f : 0.72f);
     holder.galleryCurrentLayer.setTranslationX(direction == 0 ? 0f : (direction > 0 ? dp(72) : -dp(72)));
     holder.galleryCurrentLayer.animate().alpha(1f).translationX(0f).setDuration(direction == 0 ? 0 : 220).start();
+    GalleryMedia media = galleryMediaAt(item, galleryIndex);
+    if (media != null && !media.isVideo() && holder.galleryImageReadiness != null
+      && holder.galleryImageReadiness.key.equals(galleryCacheKey(item, galleryIndex))) {
+      boolean ownedRetryStatus = holder.galleryImageReadiness.retrying && statusGeneration == holder.galleryImageReadiness.retryStatusGeneration
+        && holder.index == currentIndex && pager.getCurrentItem() == currentIndex;
+      holder.galleryImageReadiness.ready = true;
+      holder.galleryImageReadiness.loading = false;
+      holder.galleryImageReadiness.failed = false;
+      holder.galleryImageReadiness.retrying = false;
+      if (ownedRetryStatus) hideStatus();
+      if (holder.index == currentIndex) scheduleGalleryAutoAdvance(holder, item, galleryIndex);
+    }
   }
+
+  private boolean isGalleryImageReady(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
+    return isBoundGallery(holder, item) && holder.galleryIndex == mediaIndex && holder.galleryImageReadiness != null
+      && holder.galleryImageReadiness.ready && holder.galleryImageReadiness.key.equals(galleryCacheKey(item, mediaIndex))
+      && holder.galleryImageReadiness.key.equals(holder.cover.getTag()) && holder.cover.getDrawable() != null;
+  }
+
+  private boolean ownsGalleryImageRead(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex,
+      NativeShortVideoGalleryImageReadiness readiness, long attempt) {
+    return !destroying && isBoundGallery(holder, item) && holder.galleryIndex == mediaIndex
+      && holder.galleryImageReadiness == readiness && readiness.attempt == attempt
+      && readiness.key.equals(galleryCacheKey(item, mediaIndex)) && readiness.key.equals(holder.cover.getTag());
+  }
+
+  private boolean restoreGalleryImageFailureStatus() {
+    if (!activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()
+      || playbackToolbarOverlay != null || currentIndex < 0 || currentIndex >= videos.size() || pager.getCurrentItem() != currentIndex) return false;
+    ShortVideoItem item = videos.get(currentIndex);
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (!isBoundGallery(holder, item)) return false;
+    GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
+    NativeShortVideoGalleryImageReadiness readiness = holder.galleryImageReadiness;
+    if (media == null || media.isVideo() || readiness == null
+      || !readiness.key.equals(galleryCacheKey(item, holder.galleryIndex))) return false;
+    if (readiness.loading && readiness.retrying && frameLoading.contains(readiness.key)) {
+      showStatus("正在重试图片");
+      readiness.retryStatusGeneration = statusGeneration;
+      return true;
+    }
+    if (!readiness.failed) return false;
+    showStatus("图片加载失败，点一下重试");
+    return true;
+  }
+
+  private boolean restoreGalleryPlaybackStatus() {
+    return restoreGalleryImageFailureStatus() || restoreGallerySegmentFailureStatus();
+  }
+
+  private boolean retryGalleryImagePlayback() {
+    if (!activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()
+      || playbackToolbarOverlay != null || currentIndex < 0 || currentIndex >= videos.size() || pager.getCurrentItem() != currentIndex) return false;
+    ShortVideoItem item = videos.get(currentIndex);
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (!isBoundGallery(holder, item)) return false;
+    GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
+    NativeShortVideoGalleryImageReadiness readiness = holder.galleryImageReadiness;
+    if (media == null || media.isVideo() || readiness == null || !readiness.key.equals(galleryCacheKey(item, holder.galleryIndex))) return false;
+    if (readiness.loading && readiness.retrying) {
+      if (frameLoading.contains(readiness.key)) return true;
+      readiness.loading = false;
+      readiness.failed = true;
+    }
+    if (!readiness.failed) return false;
+    readiness.failed = false;
+    readiness.retrying = true;
+    showStatus("正在重试图片");
+    readiness.retryStatusGeneration = statusGeneration;
+    loadGalleryImage(holder, item, holder.galleryIndex, 0);
+    return true;
+  }
+
   private void scheduleGalleryAutoAdvance(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
-    if (!isBoundGallery(holder, item) || holder.index != currentIndex || item.galleryItems.size() <= 1) return;
+    if (!isGalleryImageReady(holder, item, mediaIndex)) return;
+    scheduleGalleryAutoAdvanceAfter(holder, item, mediaIndex, holder.galleryImageReadiness.remainingMs);
+  }
+
+  private void scheduleGalleryAutoAdvanceAfter(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex, long delayMs) {
+    if (!feedPlayback.allowsAutomaticAdvance() || !activityResumed || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen() || playbackToolbarOverlay != null
+      || !isGalleryImageReady(holder, item, mediaIndex) || holder.index != currentIndex || pager.getCurrentItem() != holder.index
+      || (item.galleryItems.size() <= 1 && !autoNext)) return;
+    if (flushGalleryContinuation()) return;
+    if (galleryAutoAdvanceRunnable != null && galleryAutoAdvanceFeedIndex == holder.index && galleryAutoAdvanceMediaIndex == mediaIndex
+      && galleryAutoAdvanceReadiness == holder.galleryImageReadiness) return;
+    gallerySearchAdvancePause = null;
     cancelGalleryAutoAdvance();
     GalleryMedia media = galleryMediaAt(item, mediaIndex);
     if (media == null || media.isVideo()) return;
     galleryAutoAdvanceFeedIndex = holder.index;
     galleryAutoAdvanceMediaIndex = mediaIndex;
+    galleryAutoAdvanceReadiness = holder.galleryImageReadiness;
+    galleryAutoAdvanceReadiness.remainingMs = Math.max(0L, delayMs);
+    galleryAutoAdvanceDueAtMs = SystemClock.uptimeMillis() + Math.max(0L, delayMs);
     galleryAutoAdvanceRunnable = new Runnable() {
       @Override public void run() {
         if (galleryAutoAdvanceRunnable != this) return;
-        galleryAutoAdvanceRunnable = null;
+        if (!feedPlayback.allowsAutomaticAdvance()) { cancelGalleryAutoAdvance(); return; }
         int feedIndex = galleryAutoAdvanceFeedIndex;
         int liveMediaIndex = galleryAutoAdvanceMediaIndex;
-        galleryAutoAdvanceFeedIndex = -1;
-        galleryAutoAdvanceMediaIndex = -1;
         ShortVideoHolder liveHolder = attachedHolders.get(feedIndex);
-        if (liveHolder != holder || !isBoundGallery(liveHolder, item) || currentIndex != feedIndex || liveHolder.galleryIndex != liveMediaIndex) return;
-        if (!activityResumed || authorOverlay != null || commentsOpen() || playbackToolbarOverlay != null
-          || liveHolder.touchActive || liveHolder.galleryScaling || liveHolder.galleryPanning
-          || liveHolder.galleryDragActive || liveHolder.galleryDragSettling || liveHolder.galleryZoomScale > 1.001f) {
-          scheduleGalleryAutoAdvance(liveHolder, item, liveMediaIndex);
+        if (liveHolder != holder || !isBoundGallery(liveHolder, item) || currentIndex != feedIndex || pager.getCurrentItem() != feedIndex || liveHolder.galleryIndex != liveMediaIndex
+          || galleryMediaAt(item, liveMediaIndex) != media || !isGalleryImageReady(liveHolder, item, liveMediaIndex)) {
+          cancelGalleryAutoAdvance();
           return;
         }
+        galleryAutoAdvanceReadiness.remainingMs = 0L;
+        galleryAutoAdvanceDueAtMs = SystemClock.uptimeMillis();
+        if (!activityResumed || authorOverlay != null || commentsOpen() || feedSearchOpen() || playbackToolbarOverlay != null
+          || liveHolder.touchActive || liveHolder.galleryScaling || liveHolder.galleryPanning
+          || liveHolder.galleryDragActive || liveHolder.galleryDragSettling || liveHolder.galleryZoomScale > 1.001f) {
+          mainHandler.postDelayed(this, 250L);
+          return;
+        }
+        galleryAutoAdvanceRunnable = null;
+        galleryAutoAdvanceFeedIndex = -1;
+        galleryAutoAdvanceMediaIndex = -1;
+        galleryAutoAdvanceDueAtMs = 0L;
+        galleryAutoAdvanceReadiness = null;
         advanceGallerySequence(feedIndex, liveMediaIndex, "image");
       }
     };
-    mainHandler.postDelayed(galleryAutoAdvanceRunnable, GALLERY_IMAGE_AUTO_ADVANCE_MS);
+    mainHandler.postDelayed(galleryAutoAdvanceRunnable, Math.max(0L, delayMs));
+    refreshScreenAwake();
     Log.i(TAG, "gallery auto scheduled " + holder.index + " " + (mediaIndex + 1) + "/" + item.galleryItems.size());
   }
   private void resumeGalleryAutoAdvanceIfNeeded() {
+    if (!feedPlayback.allowsAutomaticAdvance()) return;
+    if (flushGalleryContinuation()) return;
+    if (feedSearchOpen() || resumeGalleryAutoAdvanceAfterSearch()) return;
     if (currentIndex < 0 || currentIndex >= videos.size()) return;
     ShortVideoItem item = videos.get(currentIndex);
     if (!item.isGallery()) return;
     ShortVideoHolder holder = attachedHolders.get(currentIndex);
     if (holder == null) return;
     GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
-    if (media != null && !media.isVideo() && holder.cover.getDrawable() != null) {
+    if (media != null && !media.isVideo() && isGalleryImageReady(holder, item, holder.galleryIndex)) {
       scheduleGalleryAutoAdvance(holder, item, holder.galleryIndex);
     }
   }
 
   private void cancelGalleryAutoAdvance() {
+    if (galleryAutoAdvanceRunnable != null && galleryAutoAdvanceReadiness != null)
+      galleryAutoAdvanceReadiness.remainingMs = Math.max(0L, galleryAutoAdvanceDueAtMs - SystemClock.uptimeMillis());
     if (galleryAutoAdvanceRunnable != null) mainHandler.removeCallbacks(galleryAutoAdvanceRunnable);
     galleryAutoAdvanceRunnable = null;
     galleryAutoAdvanceFeedIndex = -1;
     galleryAutoAdvanceMediaIndex = -1;
+    galleryAutoAdvanceDueAtMs = 0L;
+    galleryAutoAdvanceReadiness = null;
+    refreshScreenAwake();
+  }
+
+  private static final class GallerySearchAdvancePause {
+    final java.lang.ref.WeakReference<ShortVideoHolder> holder;
+    final String itemId;
+    final String imageKey;
+    final int mediaIndex;
+    final long remainingMs;
+    final boolean requested;
+    boolean released;
+
+    GallerySearchAdvancePause(ShortVideoHolder holder, String itemId, String imageKey, int mediaIndex, long remainingMs, boolean requested) {
+      this.holder = new java.lang.ref.WeakReference<>(holder);
+      this.itemId = itemId;
+      this.imageKey = imageKey;
+      this.mediaIndex = mediaIndex;
+      this.remainingMs = remainingMs;
+      this.requested = requested;
+    }
+  }
+
+  private void invalidateGallerySearchAdvance(int index) {
+    if (gallerySearchAdvancePause != null && (index != currentIndex || index < 0 || index >= videos.size()
+      || !gallerySearchAdvancePause.itemId.equals(videos.get(index).id)
+      || gallerySearchAdvancePause.holder.get() != attachedHolders.get(index))) gallerySearchAdvancePause = null;
+  }
+
+  private Runnable pauseGalleryAutoAdvanceForSearch() {
+    if (currentIndex < 0 || currentIndex >= videos.size()) return null;
+    ShortVideoItem item = videos.get(currentIndex);
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (!item.isGallery() || holder == null || !isBoundGallery(holder, item)) return null;
+    GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
+    if (media == null || media.isVideo()) return null;
+    GallerySearchAdvancePause previous = gallerySearchAdvancePause;
+    boolean retained = previous != null && previous.holder.get() == holder && previous.itemId.equals(item.id)
+      && previous.mediaIndex == holder.galleryIndex;
+    boolean pending = galleryAutoAdvanceRunnable != null && galleryAutoAdvanceFeedIndex == currentIndex
+      && galleryAutoAdvanceMediaIndex == holder.galleryIndex;
+    boolean awaitingImage = holder.galleryImageReadiness != null && !holder.galleryImageReadiness.ready
+      && holder.galleryImageReadiness.key.equals(galleryCacheKey(item, holder.galleryIndex));
+    GallerySearchAdvancePause pause = new GallerySearchAdvancePause(holder, item.id, galleryCacheKey(item, holder.galleryIndex), holder.galleryIndex,
+      retained ? previous.remainingMs : pending ? Math.max(0L, galleryAutoAdvanceDueAtMs - SystemClock.uptimeMillis())
+        : awaitingImage ? holder.galleryImageReadiness.remainingMs : 0L,
+      retained ? previous.requested : pending || awaitingImage);
+    cancelGalleryAutoAdvance();
+    gallerySearchAdvancePause = pause;
+    return () -> {
+      if (gallerySearchAdvancePause != pause) return;
+      pause.released = true;
+      if (!resumeGalleryAutoAdvanceAfterSearch()) resumeGalleryAutoAdvanceIfNeeded();
+    };
+  }
+
+  private boolean resumeGalleryAutoAdvanceAfterSearch() {
+    GallerySearchAdvancePause pause = gallerySearchAdvancePause;
+    if (pause == null) return false;
+    if (currentIndex < 0 || currentIndex >= videos.size() || !videos.get(currentIndex).id.equals(pause.itemId)
+      || attachedHolders.get(currentIndex) != pause.holder.get() || pause.holder.get() == null
+      || pause.holder.get().galleryIndex != pause.mediaIndex
+      || !pause.imageKey.equals(galleryCacheKey(videos.get(currentIndex), pause.mediaIndex))) {
+      gallerySearchAdvancePause = null;
+      return false;
+    }
+    if (!pause.released || !pause.requested || feedSearchOpen() || !activityResumed
+      || authorOverlay != null || commentsOpen() || playbackToolbarOverlay != null || isFinishing() || destroying) return true;
+    gallerySearchAdvancePause = null;
+    scheduleGalleryAutoAdvanceAfter(pause.holder.get(), videos.get(currentIndex), pause.mediaIndex, pause.remainingMs);
+    return true;
   }
 
   private void advanceGallerySequence(int feedIndex, int mediaIndex, String source) {
-    if ("video".equals(source) && !feedPlayback.allowsAutomaticPlayback(gallerySegmentPlayer)) return;
+    if (!feedPlayback.allowsAutomaticAdvance()) return;
+    if ("video".equals(source) && (gallerySegmentPlayer == null || gallerySegmentPlayer != activePlayer
+      || gallerySegmentFeedIndex != feedIndex || gallerySegmentMediaIndex != mediaIndex
+      || gallerySegmentPlayer.getPlaybackState() != Player.STATE_ENDED || !feedPlayback.allowsAutomaticPlayback(gallerySegmentPlayer))) return;
     if (feedIndex < 0 || feedIndex >= videos.size() || currentIndex != feedIndex) return;
     ShortVideoItem item = videos.get(feedIndex);
     ShortVideoHolder holder = attachedHolders.get(feedIndex);
-    if (!item.isGallery() || item.galleryItems.size() <= 1 || holder == null || holder.galleryIndex != mediaIndex) return;
-    if (!activityResumed || authorOverlay != null || commentsOpen() || playbackToolbarOverlay != null) {
+    if (!isBoundGallery(holder, item) || item.galleryItems.isEmpty() || holder.galleryIndex != mediaIndex) return;
+    if (autoNext && mediaIndex == item.galleryItems.size() - 1) {
+      beginGalleryContinuation(holder, item, mediaIndex);
+      return;
+    }
+    if (item.galleryItems.size() <= 1) return;
+    if (!activityResumed || authorOverlay != null || commentsOpen() || feedSearchOpen() || playbackToolbarOverlay != null) {
       if ("image".equals(source)) scheduleGalleryAutoAdvance(holder, item, mediaIndex);
       return;
     }
@@ -2366,15 +3514,98 @@ public class NativeShortVideoActivity extends Activity {
       + "/" + item.galleryItems.size());
   }
 
+  private final class GalleryContinuation {
+    final ShortVideoHolder holder;
+    final ShortVideoItem item;
+    final GalleryMedia media;
+    final int feedIndex, mediaIndex;
+    final ExoPlayer player;
+    final MediaItem source;
+    final long audioGeneration;
+    boolean completed, resumeAfterPause;
+
+    GalleryContinuation(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
+      this.holder = holder; this.item = item; this.feedIndex = holder.index; this.mediaIndex = mediaIndex;
+      media = item.galleryItems.get(mediaIndex);
+      player = media.isVideo() ? gallerySegmentPlayer : null;
+      source = player == null ? null : player.getCurrentMediaItem();
+      audioGeneration = feedPlayback.audioInterruptionGeneration();
+    }
+
+    boolean owns() {
+      if (!feedPlayback.allowsAutomaticAdvance() || !autoNext || destroying || isFinishing() || currentIndex != feedIndex || pager.getCurrentItem() != feedIndex || !isBoundGallery(holder, item)
+        || holder.galleryIndex != mediaIndex || mediaIndex >= item.galleryItems.size() || item.galleryItems.get(mediaIndex) != media
+        || audioGeneration != feedPlayback.audioInterruptionGeneration()) return false;
+      return player == null || (gallerySegmentPlayer == player && activePlayer == player && gallerySegmentFeedIndex == feedIndex
+        && gallerySegmentMediaIndex == mediaIndex && player.getCurrentMediaItem() == source && player.getPlaybackState() == Player.STATE_ENDED);
+    }
+
+    void drive() {
+      if (completed || !activityResumed || authorOverlay != null || commentsOpen() || feedSearchOpen() || playbackToolbarOverlay != null) return;
+      if (holder.touchActive || holder.galleryScaling || holder.galleryPanning || holder.galleryDragActive || holder.galleryDragSettling || holder.galleryZoomScale > 1.001f) {
+        cancelGalleryContinuation();
+        return;
+      }
+      if (player != null && resumeAfterPause) { player.setPlayWhenReady(true); resumeAfterPause = false; }
+      if (player != null && !player.getPlayWhenReady()) {
+        cancelGalleryContinuation();
+        return;
+      }
+      if (feedIndex + 1 < videos.size()) {
+        completed = true;
+        feedPaging.clearPendingAutoAdvance();
+        hideStatus();
+        pager.setCurrentItem(feedIndex + 1, true);
+      } else if (hasMoreVideos && pendingFeedUrl != null && !pendingFeedUrl.trim().isEmpty()) {
+        feedPaging.markPendingAutoAdvance(feedIndex);
+        showStatus("正在加载下一条");
+        loadMoreIfNeeded(feedIndex);
+      } else {
+        completed = true;
+        feedPaging.clearPendingAutoAdvance();
+        hideStatus();
+        if (player != null) player.seekTo(0L);
+        cancelGalleryContinuation();
+        bindGallery(holder, item, 0, 1);
+      }
+    }
+  }
+
+  private boolean flushGalleryContinuation() {
+    GalleryContinuation owner = galleryContinuation;
+    if (owner == null) return false;
+    if (!owner.owns()) { cancelGalleryContinuation(); return false; }
+    owner.drive();
+    return galleryContinuation == owner;
+  }
+
+  private void beginGalleryContinuation(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
+    if (!feedPlayback.allowsAutomaticAdvance()) return;
+    if (galleryContinuation == null || !galleryContinuation.owns()) galleryContinuation = new GalleryContinuation(holder, item, mediaIndex);
+    flushGalleryContinuation();
+  }
+
+  private void pauseGalleryContinuation() {
+    GalleryContinuation owner = galleryContinuation;
+    if (owner != null && owner.owns() && owner.player != null) owner.resumeAfterPause = owner.player.getPlayWhenReady();
+  }
+
+  private void invalidateGalleryContinuation() {
+    if (galleryContinuation != null && !galleryContinuation.owns()) cancelGalleryContinuation();
+  }
+
+  private void cancelGalleryContinuation() {
+    GalleryContinuation owner = galleryContinuation;
+    galleryContinuation = null;
+    if (owner != null && feedPaging.isPendingAutoAdvance(owner.feedIndex)) feedPaging.clearPendingAutoAdvance();
+  }
+
   private void prefetchGalleryMedia(ShortVideoItem item, int galleryIndex) {
     if (item == null || galleryIndex < 0 || galleryIndex >= item.galleryItems.size()) return;
     String key = galleryCacheKey(item, galleryIndex);
     if (frameCache.get(key) != null) return;
     GalleryMedia media = item.galleryItems.get(galleryIndex);
-    executor.execute(() -> {
-      Bitmap bitmap = loadGalleryMediaFrame(media);
-      if (bitmap != null) frameCache.put(key, bitmap);
-    });
+    requestFrame(key, () -> loadGalleryMediaFrame(media), null);
   }
 
   private Bitmap loadGalleryMediaFrame(GalleryMedia media) {
@@ -2395,7 +3626,10 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private String galleryCacheKey(ShortVideoItem item, int galleryIndex) {
-    return "gallery:" + item.id + ":" + galleryIndex;
+    GalleryMedia media = galleryMediaAt(item, galleryIndex);
+    if (media == null) return "gallery:" + item.id.length() + ":" + item.id + ":" + galleryIndex + ":missing";
+    return "gallery:" + item.id.length() + ":" + item.id + ":" + galleryIndex + ":" + (media.isVideo() ? "video" : "image")
+      + ":" + media.url.length() + ":" + media.url + ":" + media.posterUrl.length() + ":" + media.posterUrl;
   }
 
   private boolean isViewingAuthorFeed() {
@@ -2417,6 +3651,7 @@ public class NativeShortVideoActivity extends Activity {
     }
     lastStageTapAt = 0;
     lastStageTapIndex = -1;
+    pendingStageTapOwner = null;
   }
 
   private void activateLike(ShortVideoItem item, boolean showBurst) {
@@ -2775,13 +4010,14 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void syncPlayIndicator(int index, @Nullable ExoPlayer player) {
+    refreshScreenAwake();
     ShortVideoHolder holder = attachedHolders.get(index);
     if (holder == null) return;
     boolean paused = !controlsHidden
       && currentIndex == index
       && player != null
       && player.getPlaybackState() == Player.STATE_READY
-      && !player.isPlaying();
+      && !player.getPlayWhenReady();
     holder.playIndicator.animate().cancel();
     holder.playIndicator.setVisibility(paused ? View.VISIBLE : View.GONE);
     holder.playIndicator.setAlpha(paused ? 1f : 0f);
@@ -2841,10 +4077,12 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void updateActiveProgress() {
+    refreshScreenAwake();
+    if (hasOwnedProgressSeek()) return;
     if (currentIndex < 0) return;
     ShortVideoHolder holder = attachedHolders.get(currentIndex);
     if (holder == null || activePlayer == null) return;
-    long duration = activePlayer.getDuration();
+    long duration = progressDuration(activePlayer);
     long position = activePlayer.getCurrentPosition();
     float ratio = duration > 0 ? Math.max(0f, Math.min(1f, position / (float) duration)) : 0f;
     holder.progressFill.setScaleX(ratio);
@@ -2860,29 +4098,128 @@ public class NativeShortVideoActivity extends Activity {
   private boolean seekActivePlayerFromTouch(View view, MotionEvent event) {
     if (event == null) return true;
     int action = event.getActionMasked();
-    if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
-      setParentInterceptDisallowed(view, true);
-    } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-      setParentInterceptDisallowed(view, false);
-    }
+    if (action == MotionEvent.ACTION_DOWN) cancelProgressSeek();
+    if (action == MotionEvent.ACTION_CANCEL) { cancelProgressSeek(); return true; }
     ShortVideoHolder holder = attachedHolders.get(currentIndex);
-    if (activePlayer == null || currentIndex < 0 || holder == null) return true;
-    long duration = activePlayer.getDuration();
-    if (duration <= 0) {
-      hideSeekPreview(holder, false);
+    if (activePlayer == null || currentIndex < 0 || currentIndex >= videos.size() || holder == null
+      || holder.index != currentIndex || holder.progressTouch != view || !activityResumed
+      || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()) {
+      cancelProgressSeek();
       return true;
     }
-    if (action == MotionEvent.ACTION_CANCEL) {
-      hideSeekPreview(holder, false);
+    String itemId = videos.get(currentIndex).id;
+    if (action == MotionEvent.ACTION_DOWN) {
+      long duration = progressDuration(activePlayer);
+      if (duration <= 0) return true;
+      progressSeekSession.begin(view, activePlayer, progressSeekSourceOwner(activePlayer), itemId, event.getPointerId(0),
+        feedPlayback.audioInterruptionGeneration(), event.getX(0));
+      progressSeekHolder = holder;
+      setParentInterceptDisallowed(view, true);
+    }
+    if (!ownsProgressSeek(view)) {
+      cancelProgressSeek();
       return true;
+    }
+    if (action == MotionEvent.ACTION_POINTER_DOWN) return true;
+    if (action == MotionEvent.ACTION_POINTER_UP
+      && event.getPointerId(event.getActionIndex()) != progressSeekSession.pointerId()) return true;
+    if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_MOVE
+      && action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_POINTER_UP) return true;
+    int pointerIndex = event.findPointerIndex(progressSeekSession.pointerId());
+    if (pointerIndex < 0) { cancelProgressSeek(); return true; }
+    progressSeekSession.move(event.getX(pointerIndex));
+    if (action == MotionEvent.ACTION_MOVE) { scheduleProgressSeekFrame(view); return true; }
+    clearProgressSeekFrame();
+    applyProgressSeek(view, action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP);
+    return true;
+  }
+
+  private Object progressSeekSourceOwner(ExoPlayer player) {
+    return player == gallerySegmentPlayer ? player.getCurrentMediaItem() : playbackFallback.bindingOwner(player);
+  }
+
+  private void clearProgressDuration() {
+    progressDurationPlayer = null;
+    progressDurationSource = null;
+    progressDurationMs = 0L;
+  }
+
+  private long progressDuration(ExoPlayer player) {
+    Object source = progressSeekSourceOwner(player);
+    if (progressDurationPlayer != player || progressDurationSource != source) {
+      progressDurationPlayer = player;
+      progressDurationSource = source;
+      progressDurationMs = 0L;
+    }
+    long liveDuration = player.getDuration();
+    if (source != null && liveDuration > 0) progressDurationMs = liveDuration;
+    return liveDuration > 0 ? liveDuration : progressDurationMs;
+  }
+
+  private boolean ownsProgressSeek(View view) {
+    if (activePlayer == null || currentIndex < 0 || currentIndex >= videos.size() || pager.getCurrentItem() != currentIndex || !activityResumed
+      || destroying || isFinishing() || authorOverlay != null || commentsOpen() || feedSearchOpen()) return false;
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (holder == null || holder != progressSeekHolder || holder.index != currentIndex || holder.progressTouch != view
+      || (!videos.get(currentIndex).isGallery() && playerCache.get(currentIndex) != activePlayer)) return false;
+    return progressSeekSession.owns(view, activePlayer, progressSeekSourceOwner(activePlayer), videos.get(currentIndex).id,
+      feedPlayback.audioInterruptionGeneration());
+  }
+
+  private boolean hasOwnedProgressSeek() {
+    Object view = progressSeekSession.view();
+    return view instanceof View && ownsProgressSeek((View) view);
+  }
+
+  private void scheduleProgressSeekFrame(View view) {
+    if (progressSeekFrame != null) return;
+    Object owner = progressSeekSession.owner();
+    progressSeekFrame = new Runnable() {
+      @Override public void run() {
+        if (progressSeekFrame != this) return;
+        progressSeekFrame = null;
+        if (progressSeekSession.owner() != owner || !ownsProgressSeek(view)) { cancelProgressSeek(); return; }
+        applyProgressSeek(view, false);
+      }
+    };
+    view.postOnAnimation(progressSeekFrame);
+  }
+
+  private void clearProgressSeekFrame() {
+    Runnable frame = progressSeekFrame;
+    progressSeekFrame = null;
+    Object view = progressSeekSession.view();
+    if (frame != null && view instanceof View) ((View) view).removeCallbacks(frame);
+  }
+
+  private void applyProgressSeek(View view, boolean finished) {
+    if (!ownsProgressSeek(view)) { cancelProgressSeek(); return; }
+    long duration = progressDuration(activePlayer);
+    if (duration <= 0) {
+      cancelProgressSeek();
+      return;
     }
     float width = Math.max(1f, view.getWidth());
-    float ratio = Math.max(0f, Math.min(1f, event.getX() / width));
+    float ratio = Math.max(0f, Math.min(1f, progressSeekSession.x() / width));
     long targetPosition = Math.max(0, Math.min(duration - 1, (long) (duration * ratio)));
     activePlayer.seekTo(targetPosition);
-    updateActiveProgress();
-    showSeekPreview(holder, targetPosition, duration, action == MotionEvent.ACTION_UP);
-    return true;
+    progressSeekHolder.progressFill.setScaleX(targetPosition / (float) duration);
+    progressSeekHolder.progressTrack.setAlpha(1f);
+    showSeekPreview(progressSeekHolder, targetPosition, duration, finished);
+    if (finished) finishProgressSeek(false);
+  }
+
+  private void cancelProgressSeek() {
+    finishProgressSeek(true);
+  }
+
+  private void finishProgressSeek(boolean hidePreview) {
+    clearProgressSeekFrame();
+    Object view = progressSeekSession.view();
+    if (view instanceof View) setParentInterceptDisallowed((View) view, false);
+    if (hidePreview) hideSeekPreview(progressSeekHolder, false);
+    progressSeekSession.cancel();
+    progressSeekHolder = null;
   }
 
   private void showSeekPreview(ShortVideoHolder holder, long position, long duration, boolean scheduleHide) {
@@ -2936,13 +4273,15 @@ public class NativeShortVideoActivity extends Activity {
     String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, nextFeedCursor, FEED_PAGE_LIMIT);
     long actionRevision = actionSnapshots.revision();
     Log.i(TAG, "load more offset=" + nextFeedOffset + " cursor=" + (nextFeedCursor.length() > 0));
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(feedUrl);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(feedUrl, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent()) return;
         NativeShortVideoFeedPaging.Completion completion = feedPaging.complete(request, result);
         if (completion == NativeShortVideoFeedPaging.Completion.STALE) return;
         loadingMoreVideos = feedPaging.isLoading();
         if (completion == NativeShortVideoFeedPaging.Completion.FAILED) {
+          if (galleryContinuation != null) { cancelGalleryContinuation(); hideStatus(); }
           showTransientStatus(result == null ? "短视频服务暂时不可用，请重试" : result.publicMessage());
           return;
         }
@@ -2968,21 +4307,23 @@ public class NativeShortVideoActivity extends Activity {
           preparePlayersAround(currentIndex);
           scheduleVideoPrefetch(currentIndex + 1);
         }
-        NativeShortVideoFeedAutoAdvance.Action autoAdvance = NativeShortVideoFeedAutoAdvance.resolve(
-          feedPaging,
-          index,
-          currentIndex,
-          videos.size()
-        );
-        if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.ADVANCE) {
-          hideStatus();
-          pager.setCurrentItem(index + 1, true);
-        } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.END) {
-          hideStatus();
-          advanceAfterEnded(index);
-        } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.LOAD_MORE) {
-          showStatus("正在加载下一条");
-          loadMoreIfNeeded(index);
+        if (!flushGalleryContinuation()) {
+          NativeShortVideoFeedAutoAdvance.Action autoAdvance = NativeShortVideoFeedAutoAdvance.resolve(
+            feedPaging,
+            index,
+            currentIndex,
+            videos.size()
+          );
+          if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.ADVANCE && canAdvanceAfterEnded(index)) {
+            hideStatus();
+            pager.setCurrentItem(index + 1, true);
+          } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.END) {
+            hideStatus();
+            advanceAfterEnded(index);
+          } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.LOAD_MORE) {
+            showStatus("正在加载下一条");
+            loadMoreIfNeeded(index);
+          }
         }
         Log.i(TAG, "loaded more inserted=" + inserted + " nextOffset=" + nextFeedOffset + " nextCursor=" + (nextFeedCursor.length() > 0) + " hasMore=" + hasMoreVideos);
       });
@@ -3111,16 +4452,21 @@ public class NativeShortVideoActivity extends Activity {
 
   private void schedulePrepareAround(int index, long delayMs) {
     if (pendingPrepareRunnable != null) mainHandler.removeCallbacks(pendingPrepareRunnable);
-    pendingPrepareRunnable = () -> {
-      pendingPrepareRunnable = null;
-      framePrefetchEnabled = true;
-      prepareAround(index);
+    PlaybackRequest request = selectedPlaybackRequest;
+    pendingPrepareRunnable = new Runnable() {
+      @Override public void run() {
+        if (pendingPrepareRunnable != this) return;
+        pendingPrepareRunnable = null;
+        if (request == null || selectedPlaybackRequest != request || !isSelectedPlaybackItem(index, request.item) || !playbackPageVisible()) return;
+        framePrefetchEnabled = true;
+        prepareAround(index);
+      }
     };
     mainHandler.postDelayed(pendingPrepareRunnable, delayMs);
   }
 
   private void bindFrame(int index) {
-    if (index < 0 || index >= videos.size()) return;
+    if (destroying || index < 0 || index >= videos.size()) return;
     ShortVideoHolder holder = attachedHolders.get(index);
     ShortVideoItem item = videos.get(index);
     if (item.isGallery()) {
@@ -3128,38 +4474,27 @@ public class NativeShortVideoActivity extends Activity {
       else prefetchGalleryMedia(item, galleryPositions.getOrDefault(item.id, 0));
       return;
     }
+    String frameKey = normalVideoFrameKey(item);
     if (holder != null && applyCachedFrame(holder, item)) return;
-    if (holder == null && frameCache.get(item.id) != null) return;
+    if (holder == null && frameCache.get(frameKey) != null) return;
     if (item.coverUrl.length() > 0) {
       loadCover(index, item);
       return;
     }
-    if (!pendingFrameIds.add(item.id)) return;
-    executor.execute(() -> {
-      try {
-        Bitmap bitmap = extractFirstFrame(item.streamUrl);
-        if (bitmap == null) return;
-        frameCache.put(item.id, bitmap);
-        Bitmap finalBitmap = bitmap;
-        mainHandler.post(() -> {
-          ShortVideoHolder live = attachedHolders.get(index);
-          if (live != null) applyVideoFrame(live, item, finalBitmap);
-        });
-      } finally {
-        pendingFrameIds.remove(item.id);
-      }
-    });
+    requestFrame(frameKey, () -> extractFirstFrame(item.streamUrl),
+      bitmap -> applyLoadedVideoFrame(index, frameKey, bitmap));
   }
 
   private boolean applyCachedFrame(ShortVideoHolder holder, ShortVideoItem item) {
-    Bitmap cached = frameCache.get(item.id);
+    if (!isBoundVideoFrame(holder, item)) return false;
+    Bitmap cached = frameCache.get(normalVideoFrameKey(item));
     if (cached == null) return false;
     applyVideoFrame(holder, item, cached);
     return true;
   }
 
   private void applyVideoFrame(ShortVideoHolder holder, ShortVideoItem item, Bitmap bitmap) {
-    if (holder == null || item == null || bitmap == null) return;
+    if (bitmap == null || !isBoundVideoFrame(holder, item)) return;
     holder.cover.setImageBitmap(bitmap);
     holder.videoBackdrop.setImageBitmap(bitmap);
     holder.cover.setScaleType(videoFitMode ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
@@ -3167,20 +4502,101 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void loadCover(int index, ShortVideoItem item) {
-    if (!pendingFrameIds.add(item.id)) return;
-    executor.execute(() -> {
-      try {
-        Bitmap bitmap = loadBitmap(item.coverUrl, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT);
-        if (bitmap == null) return;
-        frameCache.put(item.id, bitmap);
-        mainHandler.post(() -> {
+    if (destroying) return;
+    String frameKey = normalVideoFrameKey(item);
+    requestFrame(frameKey, () -> loadBitmap(item.coverUrl, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT),
+      bitmap -> applyLoadedVideoFrame(index, frameKey, bitmap));
+  }
+
+  private String normalVideoFrameKey(ShortVideoItem item) {
+    if (item == null) return "";
+    if (item.isGallery()) return item.id;
+    String source = item.coverUrl.length() > 0 ? "cover:" + item.coverUrl : "stream:" + item.streamUrl;
+    return "video-frame:" + item.id.length() + ":" + item.id + ":" + source;
+  }
+
+  private static final class FrameLoadingWindow {
+    final Set<String> wanted;
+    final String current;
+    FrameLoadingWindow(Set<String> wanted, String current) { this.wanted = wanted; this.current = current; }
+  }
+
+  private void refreshFrameLoadingWindow() {
+    Set<String> wanted = new HashSet<>();
+    String current = "";
+    if (activityResumed && !destroying && !isFinishing() && authorOverlay == null && !commentsOpen() && !feedSearchOpen()
+      && currentIndex >= 0 && currentIndex < videos.size()) {
+      for (int index = Math.max(0, currentIndex - 1); index <= Math.min(videos.size() - 1, currentIndex + 1); index++) {
+        ShortVideoItem item = videos.get(index);
+        if (!item.isGallery()) {
+          String key = normalVideoFrameKey(item);
+          wanted.add(key);
+          if (index == currentIndex) current = key;
+        } else {
           ShortVideoHolder holder = attachedHolders.get(index);
-          if (holder != null && holder.index == index) applyVideoFrame(holder, item, bitmap);
-        });
-      } finally {
-        pendingFrameIds.remove(item.id);
+          int selected = holder == null ? galleryPositions.getOrDefault(item.id, 0) : holder.galleryIndex;
+          selected = Math.max(0, Math.min(selected, item.galleryItems.size() - 1));
+          for (int mediaIndex = Math.max(0, selected - 1); mediaIndex <= Math.min(item.galleryItems.size() - 1, selected + 1); mediaIndex++) {
+            String key = galleryCacheKey(item, mediaIndex);
+            wanted.add(key);
+            if (index == currentIndex && mediaIndex == selected) current = key;
+          }
+        }
       }
-    });
+    }
+    frameLoadingWindow = new FrameLoadingWindow(Collections.unmodifiableSet(wanted), current);
+    frameLoading.prune();
+  }
+
+  private void pauseFrameLoading() {
+    frameLoadingWindow = new FrameLoadingWindow(Collections.emptySet(), "");
+    frameLoading.prune();
+  }
+
+  private void resumeFrameLoading() {
+    refreshFrameLoadingWindow();
+    if (frameLoadingWindow.current.length() == 0) return;
+    ShortVideoItem item = videos.get(currentIndex);
+    if (!item.isGallery()) { bindFrame(currentIndex); return; }
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (holder == null) return;
+    GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
+    if (media != null && media.isVideo()) loadGalleryFrame(holder, item, holder.galleryIndex, 0);
+    else loadGalleryImage(holder, item, holder.galleryIndex, 0);
+  }
+
+  private void requestFrame(String key, Callable<Bitmap> read, Consumer<Bitmap> paint) {
+    requestFrame(key, read, paint, null);
+  }
+
+  private void requestFrame(String key, Callable<Bitmap> read, Consumer<Bitmap> paint, Runnable failed) {
+    refreshFrameLoadingWindow();
+    frameLoading.offer(key, () -> frameLoadingWindow.wanted.contains(key), () -> frameLoadingWindow.current.equals(key),
+      () -> { Bitmap cached = frameCache.get(key); return cached == null ? read.call() : cached; }, paint != null,
+      bitmap -> {
+        if (destroying) return;
+        frameCache.put(key, bitmap);
+        if (destroying) { frameCache.remove(key); return; }
+        if (paint != null) mainHandler.post(() -> {
+          if (!destroying && frameLoadingWindow.wanted.contains(key)) paint.accept(bitmap);
+        });
+      }, failed == null ? null : () -> {
+        if (!destroying) mainHandler.post(() -> {
+          if (!destroying) failed.run();
+        });
+      });
+  }
+
+  private boolean isBoundVideoFrame(ShortVideoHolder holder, ShortVideoItem item) {
+    return !destroying && holder != null && item != null && holder.index >= 0 && holder.index < videos.size()
+      && attachedHolders.get(holder.index) == holder && videos.get(holder.index) == item;
+  }
+
+  private void applyLoadedVideoFrame(int index, String frameKey, Bitmap bitmap) {
+    if (destroying || index < 0 || index >= videos.size()) return;
+    ShortVideoItem current = videos.get(index);
+    if (!frameKey.equals(normalVideoFrameKey(current))) return;
+    applyVideoFrame(attachedHolders.get(index), current, bitmap);
   }
 
   private Bitmap extractFirstFrame(String url) {
@@ -3236,8 +4652,12 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private int bitmapSampleSize(int width, int height, int maxWidth, int maxHeight) {
+    if (width <= 0 || height <= 0 || maxWidth <= 0 || maxHeight <= 0) return 1;
     int sample = 1;
-    while (width / (sample * 2) >= maxWidth && height / (sample * 2) >= maxHeight) sample *= 2;
+    // The image is fitted inside this box after decoding. Either oversized axis
+    // can determine that fit, including long portraits and panoramic images.
+    // Keep the largest power-of-two sample that does not undershoot that fit.
+    while (width / (sample * 2L) >= maxWidth || height / (sample * 2L) >= maxHeight) sample *= 2;
     return sample;
   }
 
@@ -3265,18 +4685,23 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void showStatus(String text) {
+    statusGeneration++;
     if (statusView == null) return;
     statusView.setText(text);
     statusView.setVisibility(View.VISIBLE);
   }
 
   private void hideStatus() {
+    statusGeneration++;
     if (statusView != null) statusView.setVisibility(View.GONE);
   }
 
   private void showTransientStatus(String text) {
     showStatus(text);
-    mainHandler.postDelayed(this::hideStatus, 1400);
+    long generation = statusGeneration;
+    mainHandler.postDelayed(() -> {
+      if (generation == statusGeneration && !restoreGalleryPlaybackStatus()) hideStatus();
+    }, 1400);
   }
 
   private void showPersistentDeleteStatus(String text, String actionLabel, @Nullable Runnable action) {
@@ -3332,10 +4757,12 @@ public class NativeShortVideoActivity extends Activity {
 
   private void toggleAutoNext() {
     autoNext = !autoNext;
+    if (!autoNext) cancelGalleryContinuation();
     writeControlPreference(PREF_AUTO_NEXT, autoNext);
     feedPaging.clearPendingAutoAdvance();
     applyPlaybackControlState();
     refreshVisibleRails();
+    resumeGalleryAutoAdvanceIfNeeded();
     showTransientStatus(autoNext ? "已开启连播" : "已关闭连播");
   }
 
@@ -3348,7 +4775,7 @@ public class NativeShortVideoActivity extends Activity {
     }
     if (gallerySegmentPlayer != null) {
       ShortVideoItem galleryItem = gallerySegmentFeedIndex >= 0 && gallerySegmentFeedIndex < videos.size() ? videos.get(gallerySegmentFeedIndex) : null;
-      gallerySegmentPlayer.setRepeatMode(galleryItem != null && galleryItem.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
+      gallerySegmentPlayer.setRepeatMode(galleryItem != null && galleryItem.isSingleLivePhoto() && !autoNext ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
       gallerySegmentPlayer.setVolume(0f);
     }
     if (gallerySoundPlayer != null) {
@@ -3365,12 +4792,15 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void loadFeedAsync(String feedUrl, int startIndex) {
+    pauseFrameLoading();
+    cancelVideoPrefetch();
     String normalizedFeedUrl = normalizeFeedUrl(feedUrl);
     long replacementGeneration = feedPaging.beginFeedReplacement(normalizedFeedUrl);
     long actionRevision = actionSnapshots.revision();
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(normalizedFeedUrl);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(normalizedFeedUrl, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent()) return;
         if (!feedPaging.finishFeedReplacement(replacementGeneration, normalizedFeedUrl)) return;
         if (!result.succeeded()) {
           loadingMoreVideos = false;
@@ -3431,6 +4861,10 @@ public class NativeShortVideoActivity extends Activity {
     return feedReader.read(feedUrl);
   }
 
+  private NativeShortVideoFeedPaging.ReadResult<FeedPage> readFeedPage(String feedUrl, NativeShortVideoFeedTransport.Cancellation cancellation) {
+    return feedReader.read(feedUrl, cancellation);
+  }
+
   private void showAuthorPanel(ShortVideoItem seed) {
     if (seed == null) return;
     if (seed.author.length() == 0 && seed.authorSecUid.length() == 0) {
@@ -3443,10 +4877,15 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void renderAuthorScreen(AuthorScreenState screen) {
+    cancelStageGestures();
+    pauseFrameLoading();
+    cancelVideoPrefetch();
+    feedRequests.cancel();
     applyCanonicalActionSnapshots(screen);
     if (screen.page != null) actionPreferences.reconcile(screen.page.items);
     ShortVideoItem seed = screen.seed;
     removeAuthorOverlay();
+    screen.loadingMore = false;
     cancelGalleryAutoAdvance();
     if (activePlayer != null) {
       activePlayer.pause();
@@ -3454,6 +4893,8 @@ public class NativeShortVideoActivity extends Activity {
     }
     if (gallerySoundPlayer != null) gallerySoundPlayer.pause();
     currentScreen = screen;
+
+    refreshScreenAwake();
 
     FrameLayout overlay = new FrameLayout(this) {
       private float authorTouchStartX;
@@ -3787,35 +5228,50 @@ public class NativeShortVideoActivity extends Activity {
     ));
     authorOverlay = overlay;
 
-    String authorUrl = authorFeedUrl(seed, 0, AUTHOR_PAGE_LIMIT, screen.sort);
-    if (shouldLoadInitialAuthorPage && authorUrl.length() > 0) {
-      long actionRevision = actionSnapshots.revision();
-      executor.execute(() -> {
-        NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(authorUrl);
-        mainHandler.post(() -> {
-          if (authorOverlay != overlay) return;
-          if (!result.succeeded()) {
-            showTransientStatus(result.publicMessage());
-            return;
-          }
-          FeedPage loaded = result.value;
-          if (loaded.items.isEmpty()) return;
-          acceptServerActionSnapshots(loaded.items, actionRevision);
-          actionPreferences.reconcile(loaded.items);
-          pageRef[0] = loaded;
-          screen.page = loaded.copy();
-          render[0].run();
-        });
-      });
-    }
+    if (shouldLoadInitialAuthorPage) loadInitialAuthorPage(screen, pageRef, render);
   }
 
   private void removeAuthorOverlay() {
     if (authorOverlay != null) {
+      feedRequests.cancel();
+      if (currentScreen instanceof AuthorScreenState) ((AuthorScreenState) currentScreen).loadingMore = false;
       rootView.removeView(authorOverlay);
       authorOverlay = null;
     }
     hideSystemBars();
+  }
+
+  private boolean ownsAuthorScreen(AuthorScreenState screen, View overlay) {
+    return !destroying && !isFinishing() && overlay != null && authorOverlay == overlay && currentScreen == screen;
+  }
+
+  private void loadInitialAuthorPage(AuthorScreenState screen, FeedPage[] pageRef, Runnable[] render) {
+    View overlay = authorOverlay;
+    if (!ownsAuthorScreen(screen, overlay)) return;
+    String url = authorFeedUrl(screen.seed, 0, AUTHOR_PAGE_LIMIT, screen.sort);
+    if (url.length() == 0) return;
+    screen.loadingMore = true;
+    long actionRevision = actionSnapshots.revision();
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url, token);
+      mainHandler.post(() -> {
+        if (!token.isCurrent() || !ownsAuthorScreen(screen, overlay)) return;
+        screen.loadingMore = false;
+        if (!result.succeeded()) {
+          showTransientStatus(result.publicMessage());
+          if (render[0] != null) render[0].run();
+          return;
+        }
+        FeedPage loaded = result.value;
+        if (!loaded.items.isEmpty()) {
+          acceptServerActionSnapshots(loaded.items, actionRevision);
+          actionPreferences.reconcile(loaded.items);
+          pageRef[0] = loaded;
+          screen.page = loaded.copy();
+        }
+        if (render[0] != null) render[0].run();
+      });
+    });
   }
 
   private void animateAuthorProfileSection(
@@ -3946,7 +5402,7 @@ public class NativeShortVideoActivity extends Activity {
       .setTitle("作者作品排序")
       .setSingleChoiceItems(labels, checked, (choice, which) -> {
         choice.dismiss();
-        if (which < 0 || which >= values.length || values[which].equals(screen.sort)) return;
+        if (which < 0 || which >= values.length || (values[which].equals(screen.sort) && !screen.loadingMore)) return;
         applyAuthorSort(screen, pageRef, activeTab, render, values[which]);
       })
       .setNegativeButton("取消", null)
@@ -3956,29 +5412,41 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void applyAuthorSort(AuthorScreenState screen, FeedPage[] pageRef, String[] activeTab, Runnable[] render, String sort) {
-    screen.sort = normalizeSortParam(sort);
+    View overlay = authorOverlay;
+    if (!ownsAuthorScreen(screen, overlay)) return;
+    String requestedSort = normalizeSortParam(sort);
+    feedRequests.cancel();
+    screen.loadingMore = false;
     screen.worksScrollY = 0;
     activeTab[0] = "works";
     screen.activeTab = "works";
-    String url = authorFeedUrl(screen.seed, 0, AUTHOR_PAGE_LIMIT, screen.sort);
+    String url = authorFeedUrl(screen.seed, 0, AUTHOR_PAGE_LIMIT, requestedSort);
     if (url.length() == 0) {
+      screen.sort = requestedSort;
       pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
+      screen.page = pageRef[0].copy();
+      hideStatus();
       if (render[0] != null) render[0].run();
       return;
     }
-    showStatus("正在按" + authorSortLabel(screen.sort) + "排序");
+    screen.loadingMore = true;
+    showStatus("正在按" + authorSortLabel(requestedSort) + "排序");
     long actionRevision = actionSnapshots.revision();
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent() || !ownsAuthorScreen(screen, overlay)) return;
+        screen.loadingMore = false;
         hideStatus();
         if (!result.succeeded()) {
           showTransientStatus(result.publicMessage());
+          if (render[0] != null) render[0].run();
           return;
         }
         FeedPage loaded = result.value;
         acceptServerActionSnapshots(loaded.items, actionRevision);
         actionPreferences.reconcile(loaded.items);
+        screen.sort = requestedSort;
         if (loaded.items.isEmpty()) pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
         else pageRef[0] = loaded;
         screen.page = pageRef[0].copy();
@@ -3988,6 +5456,8 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void loadMoreAuthorPage(AuthorScreenState screen, FeedPage[] pageRef, Runnable[] render) {
+    View overlay = authorOverlay;
+    if (!ownsAuthorScreen(screen, overlay)) return;
     FeedPage current = pageRef[0];
     if (screen.loadingMore || current == null || !current.hasMore) return;
     int offset = current.nextOffset();
@@ -3997,9 +5467,10 @@ public class NativeShortVideoActivity extends Activity {
     long actionRevision = actionSnapshots.revision();
     Log.i(TAG, "load author more author=" + displayAuthor(screen.seed) + " offset=" + offset + " sort=" + screen.sort);
     if (render[0] != null) render[0].run();
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent() || !ownsAuthorScreen(screen, overlay) || pageRef[0] != current) return;
         screen.loadingMore = false;
         if (!result.succeeded()) {
           showTransientStatus(result.publicMessage());
@@ -4380,9 +5851,9 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
     if (item.coverUrl.length() > 0) {
-      loadImageInto(cover, item.coverUrl, "cover:" + item.id);
+      loadImageInto(cover, item.coverUrl, item.isGallery() ? "cover:" + item.id : "cover:" + normalVideoFrameKey(item));
     } else {
-      cover.setImageBitmap(frameCache.get(item.id));
+      cover.setImageBitmap(frameCache.get(item.isGallery() ? item.id : normalVideoFrameKey(item)));
     }
     boolean liked = isLiked(item);
     LinearLayout badge = new LinearLayout(this);
@@ -4737,22 +6208,35 @@ public class NativeShortVideoActivity extends Activity {
     holder.rail.addView(metric(R.drawable.ic_short_star, displayCollects(item), isCollected(item), "收藏", view -> toggleCollected(item), 0xFFFFD54F));
     holder.rail.addView(metric(R.drawable.ic_short_share, item.shares, false, "分享", view -> shareVideo(item)));
     if (item.isGallery() && item.sound.isPlayable()) {
-      holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, muted ? "静音" : "配乐", view -> toggleMuted()));
+      GallerySoundCallback soundOwner = captureGallerySoundCallback(gallerySoundPlayer);
+      boolean soundFailed = isGallerySoundFailed(item);
+      String soundAction = soundFailed ? (muted ? "开声重试" : "重试配乐") : (muted ? "静音" : "配乐");
+      holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, soundAction, view -> handleGallerySoundAction(item, soundOwner)));
     }
   }
 
   private void pauseForCommentsOverlay() {
+    rememberCheckpointOverlay();
+    pauseGalleryContinuation();
+    cancelStageGestures();
     cancelGalleryAutoAdvance();
+    commentsAudioInterruptionGeneration = feedPlayback.audioInterruptionGeneration();
     commentsPausedIndex = currentIndex;
+    commentsPausedItemId = currentIndex >= 0 && currentIndex < videos.size() ? videos.get(currentIndex).id : null;
+    commentsPausedHolder = attachedHolders.get(currentIndex);
     commentsPausedVideo = activePlayer;
     commentsPausedGallerySegment = gallerySegmentPlayer;
     commentsPausedGallerySound = gallerySoundPlayer;
+    commentsVideoSourceOwner = overlayPlaybackSourceOwner(commentsPausedVideo);
+    commentsSegmentSourceOwner = overlayPlaybackSourceOwner(commentsPausedGallerySegment);
+    commentsSoundSourceOwner = overlayPlaybackSourceOwner(commentsPausedGallerySound);
     commentsResumeVideo = commentsPausedVideo != null && commentsPausedVideo.getPlayWhenReady() && commentsPausedVideo.getPlaybackState() != Player.STATE_ENDED;
-    commentsResumeGallerySegment = commentsPausedGallerySegment != null && commentsPausedGallerySegment.isPlaying();
-    commentsResumeGallerySound = commentsPausedGallerySound != null && commentsPausedGallerySound.isPlaying();
+    commentsResumeGallerySegment = commentsPausedGallerySegment != null && commentsPausedGallerySegment.getPlayWhenReady() && commentsPausedGallerySegment.getPlaybackState() != Player.STATE_ENDED;
+    commentsResumeGallerySound = commentsPausedGallerySound != null && commentsPausedGallerySound.getPlayWhenReady() && commentsPausedGallerySound.getPlaybackState() != Player.STATE_ENDED;
     if (commentsPausedVideo != null) commentsPausedVideo.pause();
     if (commentsPausedGallerySegment != null) commentsPausedGallerySegment.pause();
     if (commentsPausedGallerySound != null) commentsPausedGallerySound.pause();
+    refreshScreenAwake();
     stopProgressUpdates();
     Log.i(TAG, "comments open index=" + commentsPausedIndex + " video=" + commentsResumeVideo
       + " segment=" + commentsResumeGallerySegment + " sound=" + commentsResumeGallerySound);
@@ -4766,6 +6250,9 @@ public class NativeShortVideoActivity extends Activity {
     boolean resumeSegment = commentsResumeGallerySegment;
     boolean resumeSound = commentsResumeGallerySound;
     int pausedIndex = commentsPausedIndex;
+    String itemId = commentsPausedItemId;
+    ShortVideoHolder holder = commentsPausedHolder;
+    Object videoSource = commentsVideoSourceOwner, segmentSource = commentsSegmentSourceOwner, soundSource = commentsSoundSourceOwner;
     commentsPausedVideo = null;
     commentsPausedGallerySegment = null;
     commentsPausedGallerySound = null;
@@ -4773,12 +6260,22 @@ public class NativeShortVideoActivity extends Activity {
     commentsResumeGallerySegment = false;
     commentsResumeGallerySound = false;
     commentsPausedIndex = -1;
-    boolean sameWork = restorePlayback && activityResumed && currentIndex == pausedIndex && authorOverlay == null;
-    if (sameWork && resumeVideo && pausedVideo == activePlayer && pausedVideo.getPlaybackState() != Player.STATE_ENDED) pausedVideo.play();
-    if (sameWork && resumeSegment && pausedSegment == gallerySegmentPlayer) pausedSegment.play();
-    if (sameWork && resumeSound && pausedSound == gallerySoundPlayer) pausedSound.play();
-    if (sameWork && resumeVideo) startProgressUpdates();
+    commentsPausedItemId = null;
+    commentsPausedHolder = null;
+    commentsVideoSourceOwner = commentsSegmentSourceOwner = commentsSoundSourceOwner = null;
+    boolean sameWork = restorePlayback && activityResumed && !destroying && !isFinishing() && !commentsOpen() && !feedSearchOpen()
+      && currentIndex == pausedIndex && authorOverlay == null && itemId != null && holder != null && currentIndex >= 0 && currentIndex < videos.size()
+      && itemId.equals(videos.get(currentIndex).id) && attachedHolders.get(pausedIndex) == holder;
+    boolean restoreAudio = sameWork && commentsAudioInterruptionGeneration == feedPlayback.audioInterruptionGeneration();
+    if (restoreAudio && pausedVideo == activePlayer && overlayPlaybackSourceOwner(pausedVideo) == videoSource
+      && feedPlayback.restoreOverlayPlayback(pausedVideo, false, itemId, commentsAudioInterruptionGeneration, resumeVideo) && resumeVideo) startProgressUpdates();
+    if (restoreAudio && pausedSegment != pausedVideo && pausedSegment == gallerySegmentPlayer && overlayPlaybackSourceOwner(pausedSegment) == segmentSource)
+      feedPlayback.restoreOverlayPlayback(pausedSegment, false, itemId, commentsAudioInterruptionGeneration, resumeSegment);
+    if (restoreAudio && pausedSound == gallerySoundPlayer && overlayPlaybackSourceOwner(pausedSound) == soundSource)
+      feedPlayback.restoreOverlayPlayback(pausedSound, true, itemId, commentsAudioInterruptionGeneration, resumeSound);
     if (sameWork) resumeGalleryAutoAdvanceIfNeeded();
+    if (sameWork) flushGalleryContinuation();
+    if (sameWork) restoreGalleryPlaybackStatus();
     Log.i(TAG, "comments close restore=" + sameWork + " video=" + resumeVideo
       + " segment=" + resumeSegment + " sound=" + resumeSound);
   }
@@ -4795,6 +6292,7 @@ public class NativeShortVideoActivity extends Activity {
     if (item == null) return;
     clearPendingStageTap();
     dismissPlaybackToolbar();
+    cancelGalleryAutoAdvance();
 
     final List<Runnable> toolbarActions = new ArrayList<>();
     final LinearLayout[] rowRef = new LinearLayout[1];
@@ -4935,6 +6433,7 @@ public class NativeShortVideoActivity extends Activity {
       Gravity.BOTTOM
     ));
     playbackToolbarOverlay = overlay;
+    refreshScreenAwake();
     rootView.addView(overlay, new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.MATCH_PARENT
@@ -4954,6 +6453,10 @@ public class NativeShortVideoActivity extends Activity {
     if (playbackToolbarOverlay == null || rootView == null) return;
     rootView.removeView(playbackToolbarOverlay);
     playbackToolbarOverlay = null;
+    refreshScreenAwake();
+    flushGalleryContinuation();
+    resumeGalleryAutoAdvanceIfNeeded();
+    restoreGalleryPlaybackStatus();
     hideSystemBars();
   }
 
@@ -5068,6 +6571,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void applyFeedSort(String sort) {
+    cancelVideoPrefetch();
     String normalized = normalizeSortParam(sort);
     String sortedUrl = feedUrlWithSort(pendingFeedUrl, normalized);
     if (sortedUrl.length() == 0) {
@@ -5078,9 +6582,10 @@ public class NativeShortVideoActivity extends Activity {
     long replacementGeneration = feedPaging.beginFeedReplacement(sortedUrl);
     long actionRevision = actionSnapshots.revision();
     loadingMoreVideos = true;
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(sortedUrl);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(sortedUrl, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent()) return;
         if (!feedPaging.finishFeedReplacement(replacementGeneration, sortedUrl)) return;
         loadingMoreVideos = feedPaging.isLoading();
         if (!result.succeeded()) {
@@ -5148,6 +6653,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void applyFeedSearch(String query) {
+    cancelVideoPrefetch();
     String normalizedQuery = query == null ? "" : query.trim();
     if (normalizedQuery.equals(currentFeedQuery())) return;
     String searchUrl = feedUrlWithQuery(pendingFeedUrl, normalizedQuery);
@@ -5160,9 +6666,10 @@ public class NativeShortVideoActivity extends Activity {
     long replacementGeneration = feedPaging.beginFeedReplacement(searchUrl);
     long actionRevision = actionSnapshots.revision();
     loadingMoreVideos = true;
-    executor.execute(() -> {
-      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(searchUrl);
+    feedRequests.replace(token -> {
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(searchUrl, token);
       mainHandler.post(() -> {
+        if (!token.isCurrent()) return;
         if (!feedPaging.finishFeedReplacement(replacementGeneration, searchUrl)) return;
         loadingMoreVideos = feedPaging.isLoading();
         if (!result.succeeded()) {
@@ -5505,6 +7012,7 @@ public class NativeShortVideoActivity extends Activity {
 
     @Override
     public void onBindViewHolder(@NonNull ShortVideoHolder holder, int position) {
+      if (gallerySearchAdvancePause != null && gallerySearchAdvancePause.holder.get() == holder) gallerySearchAdvancePause = null;
       holder.index = position;
       holder.touchActive = false;
       holder.horizontalGesture = false;
@@ -5557,10 +7065,12 @@ public class NativeShortVideoActivity extends Activity {
         if (framePrefetchEnabled) bindFrame(position);
       }
       applyControlsVisibility(holder);
+      flushSelectedPlaybackRequest();
     }
 
     @Override
     public void onViewRecycled(@NonNull ShortVideoHolder holder) {
+      if (gallerySearchAdvancePause != null && gallerySearchAdvancePause.holder.get() == holder) gallerySearchAdvancePause = null;
       if (gallerySegmentView == holder.galleryVideo) stopGallerySegmentPlayback(holder, true);
       attachedHolders.remove(holder.index);
       cancelStageLongPress(holder);

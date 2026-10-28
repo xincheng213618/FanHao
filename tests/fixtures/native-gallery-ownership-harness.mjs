@@ -1,8 +1,16 @@
+import fs from 'node:fs';
 // Observable Android/Media3/UI leaf doubles for actual gallery ownership methods.
+export function extractPlaybackRequestMethods(activity) {
+  const names=['bindSelectedPlaybackAt','playbackPageVisible','isSelectedPlaybackItem','pauseSelectedPlaybackRequest','cancelSelectedPlaybackRequest','requestSelectedPlayback','flushSelectedPlaybackRequest'];
+  const result=Object.fromEntries(names.map(name=>{const method=activity.match(new RegExp(`  private (?:void|boolean) ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`))?.[0];if(!method)throw new Error(`missing request method ${name}`);return [name,method];}));
+  result.playbackRequestClass=activity.match(/  private static final class PlaybackRequest \{[\s\S]*?\n  \}/)?.[0];
+  if(!result.playbackRequestClass)throw new Error('missing PlaybackRequest');return result;
+}
 export function buildGalleryOwnershipDoubles(doubles, methods, firstFrame) {
+  doubles['local/fanhao/library/NativeShortVideoGalleryImageReadiness.java']=fs.readFileSync(new URL('../../android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoGalleryImageReadiness.java',import.meta.url),'utf8');
   const method = name => methods[name].replace(/private (?:void|boolean)/, value => value.replace('private ', ''));
-  doubles['android/os/SystemClock.java']='package android.os; public class SystemClock { public static long elapsedRealtime(){return 1000;} }';
-  doubles['android/view/View.java']='package android.view; public class View { public static final int VISIBLE=0,GONE=8; public int visibility=VISIBLE; public void setVisibility(int value){visibility=value;} }';
+  doubles['android/os/SystemClock.java']='package android.os; public class SystemClock { public static long elapsedRealtime(){return 1000;} public static long uptimeMillis(){return 1000;} }';
+  doubles['android/view/View.java']='package android.view; public class View { public static final int VISIBLE=0,GONE=8; public int visibility=VISIBLE; public void setVisibility(int value){visibility=value;} public int getVisibility(){return visibility;} }';
   doubles['local/fanhao/library/GalleryMedia.java']='package local.fanhao.library; class GalleryMedia { boolean video=true; String url="http://synthetic.invalid/gallery.mp4"; boolean isVideo(){return video;} }';
   doubles['local/fanhao/library/GallerySound.java']='package local.fanhao.library; class GallerySound {}';
   doubles['local/fanhao/library/SurfaceCoverProbe.java']=`package local.fanhao.library;
@@ -15,34 +23,56 @@ export function buildGalleryOwnershipDoubles(doubles, methods, firstFrame) {
       static class Color {static final int BLACK=0;}
       static class ImageView extends Visual {enum ScaleType{FIT_CENTER,CENTER_CROP}Object tag,drawable;void setScaleType(ScaleType t){}void setImageDrawable(Object x){drawable=x;}void setBackgroundColor(int c){}void setTag(Object x){tag=x;}Object getTag(){return tag;}void setImageBitmap(Bitmap x){drawable=x;}Object getDrawable(){return drawable;}}
       static class PlayerView extends Visual { ExoPlayer player; void setPlayer(ExoPlayer p){player=p;} void setResizeMode(int mode){} }
-      static class ShortVideoHolder { int index,galleryIndex; ImageView cover=new ImageView(); PlayerView galleryVideo=new PlayerView();Visual playIndicator=new Visual(),galleryCounter=new Visual(),galleryProgress=new Visual(),progressTouch=new Visual(),galleryCurrentLayer=new Visual();boolean touchActive,galleryScaling,galleryPanning,galleryDragActive,galleryDragSettling;float galleryZoomScale=1;ShortVideoHolder(int index){this.index=index;} }
-      static class Pager {void post(Runnable task){throw new AssertionError("unexpected unbound holder");}}
+      static class ShortVideoHolder { NativeShortVideoGalleryImageReadiness galleryImageReadiness;int index,galleryIndex; ImageView cover=new ImageView(); PlayerView galleryVideo=new PlayerView();Visual playIndicator=new Visual(),galleryCounter=new Visual(),galleryProgress=new Visual(),progressTouch=new Visual(),galleryCurrentLayer=new Visual();boolean touchActive,galleryScaling,galleryPanning,galleryDragActive,galleryDragSettling;float galleryZoomScale=1;ShortVideoHolder(int index){this.index=index;} }
+      static class Pager {int index=3;int getCurrentItem(){return index;}void setCurrentItem(int value,boolean smooth){index=value;}void post(Runnable task){throw new AssertionError("unexpected unbound holder");}}
+      ${methods.playbackRequestClass ? methods.playbackRequestClass.replace('private ','') : 'static class PlaybackRequest{}'}
+      PlaybackRequest selectedPlaybackRequest;Runnable pendingPlaybackRunnable,pendingPrepareRunnable;int pendingPlayIndex=-1;boolean openAuthorPanelOnStart;
       static final String TAG="synthetic"; final NativeShortVideoFeedPlayback feedPlayback=new NativeShortVideoFeedPlayback();
       final Map<Integer,ExoPlayer> playerCache=new HashMap<>();final Map<Integer,ShortVideoHolder> attachedHolders=new HashMap<>();
       final Set<Integer> failedPlayerIndexes=new HashSet<>();
       final Map<String,Integer> galleryPositions=new HashMap<>();final List<ShortVideoItem> videos=new ArrayList<>();final Handler mainHandler=new Handler();final Pager pager=new Pager();
-      int currentIndex=3,gallerySegmentFeedIndex=-1,gallerySegmentMediaIndex=-1,pageSelectedIndex=3;long pageSelectedAtMs=1,loggedFramePageSelectedAtMs,createdAtMs;
-      ExoPlayer activePlayer,gallerySegmentPlayer,gallerySoundPlayer;PlayerView gallerySegmentView;String gallerySegmentUrl="";boolean activityResumed=true,framePrefetchEnabled,loggedFirstFrame,controlsHidden,videoFitMode,comments,finishing;Object authorOverlay,playbackToolbarOverlay;
-      int imageLoads,videoFrameLoads,advances,lastAdvanceIndex=-1;Runnable galleryAutoAdvanceRunnable;int galleryAutoAdvanceFeedIndex=-1,galleryAutoAdvanceMediaIndex=-1;static final int GALLERY_IMAGE_AUTO_ADVANCE_MS=5000;
+      int currentIndex=3,gallerySegmentFeedIndex=-1,gallerySegmentMediaIndex=-1,gallerySoundFeedIndex=-1,pageSelectedIndex=3;long pageSelectedAtMs=1,loggedFramePageSelectedAtMs,createdAtMs;
+      ExoPlayer activePlayer,gallerySegmentPlayer,gallerySoundPlayer;PlayerView gallerySegmentView;String gallerySegmentUrl="";boolean activityResumed=true,framePrefetchEnabled,loggedFirstFrame,controlsHidden,videoFitMode,comments,finishing,destroying,autoNext;Object authorOverlay,playbackToolbarOverlay;
+      long gallerySegmentGeneration;MediaItem gallerySegmentRenderedSource;
+      // Explicit segment retries are tested by the dedicated segment fixture.
+      String gallerySegmentItemId="";GallerySegmentCallback gallerySegmentRetryOwner;long gallerySegmentRetryStatusGeneration=-1;
+      static class GallerySegmentCallback {ExoPlayer player;ShortVideoItem item;GalleryMedia media;MediaItem source;long generation;boolean owns(){return false;}}
+      GallerySegmentCallback captureGallerySegmentCallback(ExoPlayer player){return null;}
+      void clearGallerySegmentRetryStatus(){gallerySegmentRetryOwner=null;gallerySegmentRetryStatusGeneration=-1;}
+      long statusGeneration;
+      NativeShortVideoGalleryImageReadiness galleryAutoAdvanceReadiness;
+      int imageLoads,videoFrameLoads,advances,lastAdvanceIndex=-1;Runnable galleryAutoAdvanceRunnable;int galleryAutoAdvanceFeedIndex=-1,galleryAutoAdvanceMediaIndex=-1;long galleryAutoAdvanceDueAtMs;Object gallerySearchAdvancePause;static final int GALLERY_IMAGE_AUTO_ADVANCE_MS=5000;
+      void invalidateGallerySearchAdvance(int index){}
+      void cancelGalleryContinuation(){}void invalidateGalleryContinuation(){}boolean flushGalleryContinuation(){return false;}
       SurfaceCoverProbe(){for(int i=0;i<4;i++){videos.add(new ShortVideoItem("synthetic-"+i));attachedHolders.put(i,new ShortVideoHolder(i));}videos.get(2).galleryItems.add(new GalleryMedia());ExoPlayer p=new ExoPlayer();p.playbackState=Player.STATE_READY;p.playWhenReady=true;playerCache.put(3,p);activePlayer=p;}
       int playerIndex(ExoPlayer player){for(var entry:playerCache.entrySet())if(entry.getValue()==player)return entry.getKey();return -1;}
       ExoPlayer ensureGallerySegmentPlayer(){if(gallerySegmentPlayer==null)gallerySegmentPlayer=new ExoPlayer();return gallerySegmentPlayer;}
       GalleryMedia galleryMediaAt(ShortVideoItem item,int index){return item.galleryItems.get(index);}
       Uri cachedMediaUri(String url){return Uri.parse(url);}int activeVideoResizeMode(){return 0;}int activeRepeatMode(){return 0;}float activeVolume(){return 1f;}
-      boolean commentsOpen(){return comments;}boolean isFinishing(){return finishing;}
-      void hideStatus(){}void scheduleVideoPrefetch(int index){}void preparePlayersAround(int index){}void loadMoreIfNeeded(int index){}void releaseDistantPlayers(int index){}
-      void stopProgressUpdates(){}void startProgressUpdates(){}void resetHolderProgress(ShortVideoHolder h){}void playGallerySound(int index,ShortVideoItem item){}
+      boolean commentsOpen(){return comments;}boolean isFinishing(){return finishing;}boolean feedSearchOpen(){return false;}
+      void hideStatus(){}void scheduleVideoPrefetch(int index){}void cancelVideoPrefetch(){}void preparePlayersAround(int index){}void loadMoreIfNeeded(int index){}void releaseDistantPlayers(int index){}
+      ${methods.bindSelectedPlaybackAt ? 'boolean restoreGalleryPlaybackStatus(){return false;}' : ''}
+      void schedulePrepareAround(int index,long delay){}
+      void selectForTest(int index){pager.setCurrentItem(index,false);${methods.playbackRequestClass ? 'requestSelectedPlayback(index,0);' : ''}playAt(index);}
+      void refreshFrameLoadingWindow(){}void bindFrame(int index){}
+      void refreshScreenAwake(){}
+      void rememberCheckpointOverlay(){}
+      void cancelStageGestures(){}void invalidateGalleryStageGesture(ShortVideoHolder holder,int mediaIndex){}
+      void stopProgressUpdates(){}void startProgressUpdates(){}void updateActiveProgress(){}void resetHolderProgress(ShortVideoHolder h){}void playGallerySound(int index,ShortVideoItem item){}
       void resetGalleryZoom(ShortVideoHolder h,boolean b){}void syncGalleryZoomCounter(ShortVideoHolder h){}void rebuildGalleryProgress(ShortVideoHolder h,int n,int index){}
-      String galleryCacheKey(ShortVideoItem i,int n){return i.id+":"+n;}void loadGalleryFrame(ShortVideoHolder h,ShortVideoItem i,int n,int d){videoFrameLoads++;h.cover.setTag(galleryCacheKey(i,n));}void loadGalleryImage(ShortVideoHolder h,ShortVideoItem i,int n,int d){imageLoads++;h.cover.setTag(galleryCacheKey(i,n));}
+      String galleryCacheKey(ShortVideoItem i,int n){return i.id+":"+n;}void loadGalleryFrame(ShortVideoHolder h,ShortVideoItem i,int n,int d){videoFrameLoads++;h.cover.setTag(galleryCacheKey(i,n));}void loadGalleryImage(ShortVideoHolder h,ShortVideoItem i,int n,int d){imageLoads++;h.cover.setTag(galleryCacheKey(i,n));showGalleryBitmap(h,i,n,new Bitmap(),d);}
       void prefetchGalleryMedia(ShortVideoItem i,int n){}void advanceGallerySequence(int i,int n,String source){advances++;lastAdvanceIndex=n;}int dp(int n){return n;}
       void releaseGallerySoundPlayer(){gallerySoundPlayer=null;}void applyCachedFrame(ShortVideoHolder holder,ShortVideoItem item){}ExoPlayer preparePlayerAt(int index){return playerCache.get(index);}void ensurePlayerViewAt(int index){}
       ${methods.isBoundGallery ? method('isBoundGallery') : ''}
+      ${methods.isGalleryImageReady ? method('isGalleryImageReady') : ''}
       ${method('playAt')}
+      ${['bindSelectedPlaybackAt','playbackPageVisible','isSelectedPlaybackItem','pauseSelectedPlaybackRequest','cancelSelectedPlaybackRequest','requestSelectedPlayback','flushSelectedPlaybackRequest'].filter(name=>methods[name]).map(method).join('\n')}
       ${method('playGallerySegment')}
       ${method('stopGallerySegmentPlayback')}
       ${method('startActivePlaybackIfVisible')}
       ${method('bindGallery')}
       ${method('scheduleGalleryAutoAdvance')}
+      ${methods.scheduleGalleryAutoAdvanceAfter ? method('scheduleGalleryAutoAdvanceAfter') : ''}
       ${method('cancelGalleryAutoAdvance')}
       ${method('showGalleryBitmap')}
       ${firstFrame.replace('public void onRenderedFirstFrame()', 'void firstFrame(ExoPlayer preparedPlayer)')}
@@ -59,7 +89,7 @@ export function buildGalleryOwnershipDoubles(doubles, methods, firstFrame) {
           require(h.gallerySegmentView==null&&h.gallerySegmentFeedIndex==-1,"offscreen segment rebound the surface");
         });
         check("first_frame_remains_uncovered",()->{
-          SurfaceCoverProbe h=new SurfaceCoverProbe();ExoPlayer video=h.activePlayer;h.firstFrame(video);h.playGallerySegment(h.attachedHolders.get(2),h.videos.get(2),0);h.playAt(3);
+          SurfaceCoverProbe h=new SurfaceCoverProbe();ExoPlayer video=h.activePlayer;h.firstFrame(video);h.playGallerySegment(h.attachedHolders.get(2),h.videos.get(2),0);h.selectForTest(3);
           require(h.activePlayer==video&&video.playWhenReady,"visible video lost playback");
           require(video.prepares==0&&h.attachedHolders.get(3).cover.visibility==View.GONE,"same current video was covered again after its first frame");
         });
@@ -129,8 +159,8 @@ export function buildGalleryOwnershipDoubles(doubles, methods, firstFrame) {
           h.scheduleGalleryAutoAdvance(h.attachedHolders.get(2),offscreen,0);require(h.galleryAutoAdvanceRunnable==timer,"offscreen schedule canceled current timer");
         });
         check("retired_schedule_cannot_replace_timer",()->{
-          SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);ShortVideoHolder current=h.attachedHolders.get(3);h.bindGallery(current,item,0,0);Runnable timer=h.galleryAutoAdvanceRunnable;
-          h.scheduleGalleryAutoAdvance(new ShortVideoHolder(3),item,1);require(h.galleryAutoAdvanceRunnable==timer,"retired schedule replaced current timer");
+          SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);ShortVideoHolder retired=h.attachedHolders.get(3);h.bindGallery(retired,item,0,0);ShortVideoHolder current=new ShortVideoHolder(3);h.attachedHolders.put(3,current);h.bindGallery(current,item,0,0);Runnable timer=h.galleryAutoAdvanceRunnable;
+          h.scheduleGalleryAutoAdvance(retired,item,0);require(h.galleryAutoAdvanceRunnable==timer,"retired schedule replaced current timer");
         });
         check("old_timer_cannot_consume_new_timer",()->{
           SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);h.bindGallery(h.attachedHolders.get(3),item,0,0);Runnable old=h.galleryAutoAdvanceRunnable;
@@ -155,8 +185,8 @@ export function buildGalleryOwnershipDoubles(doubles, methods, firstFrame) {
           require(h.attachedHolders.get(2).cover.drawable==bitmap,"valid static preview was lost");
         });
         check("retired_bitmap_does_not_paint",()->{
-          SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);ShortVideoHolder old=h.attachedHolders.get(3);h.bindGallery(old,item,0,0);h.attachedHolders.put(3,new ShortVideoHolder(3));
-          h.showGalleryBitmap(old,item,0,new Bitmap(),0);require(old.cover.drawable==null,"late bitmap painted a retired holder");
+          SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);ShortVideoHolder old=h.attachedHolders.get(3);h.bindGallery(old,item,0,0);Object shown=old.cover.drawable;h.attachedHolders.put(3,new ShortVideoHolder(3));
+          h.showGalleryBitmap(old,item,0,new Bitmap(),0);require(old.cover.drawable==shown,"late bitmap painted a retired holder");
         });
         check("current_bitmap_and_tag_identity",()->{
           SurfaceCoverProbe h=new SurfaceCoverProbe();ShortVideoItem item=gallery(h,3,false);ShortVideoHolder holder=h.attachedHolders.get(3);h.bindGallery(holder,item,0,0);Bitmap bitmap=new Bitmap();h.showGalleryBitmap(holder,item,0,bitmap,0);require(holder.cover.drawable==bitmap,"current bitmap did not render");

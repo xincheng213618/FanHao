@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-1443708f18b1";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-1443708f18b1";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-1443708f18b1";
+import { fetchJson } from "../../js/api.js?v=assets-22080e82f167";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-22080e82f167";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-22080e82f167";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -449,6 +449,8 @@ export function createChannelViews(context) {
   let activePhotoDetailImageLoads = 0;
   let photoDetailImageGeneration = 0;
   let photoDetailStartupImage = null;
+  let photoViewerGeneration = 0;
+  let photoViewerRequestController = null;
   let channelPageState = null;
   let channelRequestGeneration = 0;
   let channelRequestController = null;
@@ -471,11 +473,49 @@ export function createChannelViews(context) {
   let mangaTaskListGeneration = 0;
   let mangaTaskNotice = null;
   let mangaTaskNoticeTimer = 0;
+  let mangaTaskScope = null;
   const mangaTaskRetrying = new Set();
   const mangaTaskActionErrors = new Map();
+  const mangaLibraryActionViews = new WeakMap();
+  const mangaTaskManagerScopes = new WeakMap();
   const mangaUpdateJobs = new Map();
   const mangaUpdatePolls = new Map();
   let mangaReaderProgressTracker = null;
+
+  function isMangaTaskScopeCurrent(scope) {
+    return Boolean(scope && scope === mangaTaskScope && getActiveUrl() === scope.activeUrl
+      && isAccountOwnerCurrent(scope.accountScope));
+  }
+
+  function ensureMangaTaskScope() {
+    if (isMangaTaskScopeCurrent(mangaTaskScope)) return mangaTaskScope;
+    const activeUrl = getActiveUrl();
+    mangaTaskScope = { activeUrl, accountScope: captureAccountOwner(activeUrl) };
+    // These are front-end snapshots only. Accepted server jobs keep running and
+    // will be rediscovered from that server's task list when it is reopened.
+    ++mangaAddGeneration;
+    ++mangaTaskListGeneration;
+    mangaAddOpen = false;
+    mangaAddUrl = "";
+    mangaAddJob = null;
+    mangaAddError = "";
+    mangaAddPoll = null;
+    mangaTaskJobs = [];
+    mangaTaskLoaded = false;
+    mangaTaskError = "";
+    mangaTaskHistoryOpen = false;
+    mangaTaskClearing = false;
+    mangaTaskActionError = "";
+    mangaTaskMonitor = null;
+    mangaTaskNotice = null;
+    window.clearTimeout(mangaTaskNoticeTimer);
+    mangaTaskNoticeTimer = 0;
+    mangaTaskRetrying.clear();
+    mangaTaskActionErrors.clear();
+    mangaUpdateJobs.clear();
+    mangaUpdatePolls.clear();
+    return mangaTaskScope;
+  }
 
   async function renderChannel(params = {}, isActive = () => true) {
     const generation = ++channelRequestGeneration;
@@ -549,7 +589,9 @@ export function createChannelViews(context) {
       els.viewTitle.textContent = query ? `${channel.label}：${query}` : channel.label;
       setChannelMeta(normalizedMode, query ? "正在筛选" : "正在读取");
       if (normalizedMode === "manga") {
-        els.viewContent.replaceChildren(createMangaLoading(query ? "正在筛选韩漫书库" : "正在读取韩漫书库"));
+        const loading = createMangaLoading(query ? "正在筛选韩漫书库" : "正在读取韩漫书库");
+        if (retainMangaLibraryActions()) els.viewContent.append(loading);
+        else els.viewContent.replaceChildren(loading);
       } else {
         els.viewContent.innerHTML = `<div class="loading-row">正在加载${channel.label}</div>`;
       }
@@ -817,10 +859,11 @@ export function createChannelViews(context) {
     const photoView = String(data.photoView || "") === "collections" ? "collections" : "albums";
     const seriesKey = String(data.seriesKey || "").trim();
     resetPreviewImageObserver();
-    els.viewContent.innerHTML = "";
+    const retainedActions = mode === "manga" && retainMangaLibraryActions();
+    if (!retainedActions) els.viewContent.innerHTML = "";
 
     if (mode === "manga") {
-      els.viewContent.append(createMangaLibraryActions());
+      if (!retainedActions) els.viewContent.append(createMangaLibraryActions());
       els.viewContent.append(createMangaTaskManager());
       void ensureMangaTaskMonitor();
     }
@@ -1181,8 +1224,12 @@ export function createChannelViews(context) {
   }
 
   function createMangaLibraryActions() {
+    const scope = ensureMangaTaskScope();
     const panel = document.createElement("section");
     panel.className = "manga-library-actions";
+    const view = { panel, scope, key: channelRenderingKey, open: mangaAddOpen,
+      toggle: null, history: null, input: null, submit: null, error: null };
+    mangaLibraryActionViews.set(panel, view);
 
     const head = document.createElement("div");
     head.className = "manga-library-actions-head";
@@ -1194,21 +1241,31 @@ export function createChannelViews(context) {
     copy.append(title, hint);
 
     const toggle = document.createElement("button");
+    view.toggle = toggle;
     toggle.type = "button";
+    toggle.dataset.mangaAddToggle = "";
     toggle.textContent = mangaAddOpen ? "收起" : mangaJobRunning(mangaAddJob) ? "采集中" : "添加漫画";
     toggle.setAttribute("aria-expanded", String(mangaAddOpen));
+    toggle.setAttribute("aria-controls", "mangaAddForm");
     toggle.addEventListener("click", () => {
+      if (!isMangaLibraryActionViewCurrent(view)) return;
       mangaAddOpen = !mangaAddOpen;
       syncMangaLibraryActions();
+      const current = els.viewContent.querySelector(".manga-library-actions");
+      if (!isMangaLibraryActionViewCurrent(mangaLibraryActionViews.get(current))) return;
+      const input = mangaAddOpen ? current.querySelector(".manga-add-form input") : null;
+      const target = input && !input.disabled ? input : current.querySelector("[data-manga-add-toggle]");
+      target?.focus({ preventScroll: true });
     });
     const actions = document.createElement("div");
     actions.className = "manga-library-head-actions";
     const history = document.createElement("button");
+    view.history = history;
     history.type = "button";
     history.className = "manga-task-history-toggle";
     history.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.7 7M3 5v6h6m3-4v5l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     updateMangaTaskHistoryControl(history);
-    history.addEventListener("click", toggleMangaTaskHistory);
+    history.addEventListener("click", () => { if (isMangaLibraryActionViewCurrent(view)) toggleMangaTaskHistory(); });
     actions.append(history, toggle);
     head.append(copy, actions);
     panel.append(head);
@@ -1217,39 +1274,88 @@ export function createChannelViews(context) {
 
     const form = document.createElement("form");
     form.className = "manga-add-form";
+    form.id = "mangaAddForm";
     const input = document.createElement("input");
+    view.input = input;
     input.type = "url";
+    input.setAttribute("aria-label", "漫画作品链接");
     input.required = true;
     input.placeholder = "粘贴漫画作品链接";
     input.value = mangaAddUrl;
-    input.disabled = mangaJobRunning(mangaAddJob);
+    input.disabled = false;
+    input.readOnly = mangaJobRunning(mangaAddJob);
     input.addEventListener("input", () => {
+      if (!isMangaLibraryActionViewCurrent(view) || input.readOnly) return;
       mangaAddUrl = input.value;
       if (!mangaAddError) return;
       mangaAddError = "";
       panel.querySelector(".manga-operation-error")?.remove();
+      view.error = null;
+      input.removeAttribute("aria-describedby");
     });
     const submit = document.createElement("button");
+    view.submit = submit;
     submit.type = "submit";
     submit.disabled = mangaJobRunning(mangaAddJob);
     submit.textContent = mangaJobRunning(mangaAddJob) ? "采集中" : mangaAddJob?.status === "failed" ? "重新采集" : "开始采集";
     form.append(input, submit);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (!isMangaLibraryActionViewCurrent(view) || mangaJobRunning(mangaAddJob)) return;
+      input.focus({ preventScroll: true });
       void startMangaAdd(input.value);
     });
     panel.append(form);
 
-    if (mangaAddError) {
-      const error = document.createElement("p");
-      error.className = "manga-operation-error";
-      error.textContent = mangaAddError;
-      panel.append(error);
-    }
+    patchMangaLibraryActions(view);
     return panel;
   }
 
+  function isMangaLibraryActionViewCurrent(view) {
+    return Boolean(view && view.key === channelRenderingKey && isMangaTaskScopeCurrent(view.scope)
+      && view.panel.isConnected && els.viewContent.querySelector(".manga-library-actions") === view.panel
+      && (!els.contentPanel || els.contentPanel.dataset.view === "channel" && els.contentPanel.dataset.channelMode === "manga"));
+  }
+
+  function patchMangaLibraryActions(view) {
+    view.toggle.textContent = mangaAddOpen ? "收起" : mangaJobRunning(mangaAddJob) ? "采集中" : "添加漫画";
+    view.toggle.setAttribute("aria-expanded", String(mangaAddOpen));
+    updateMangaTaskHistoryControl(view.history);
+    const input = view.input;
+    if (!input) return;
+    if (input.value !== mangaAddUrl) input.value = mangaAddUrl;
+    input.readOnly = mangaJobRunning(mangaAddJob);
+    view.submit.disabled = mangaJobRunning(mangaAddJob);
+    view.submit.textContent = mangaJobRunning(mangaAddJob) ? "采集中" : mangaAddJob?.status === "failed" ? "重新采集" : "开始采集";
+    if (mangaAddError) {
+      if (!view.error) {
+        view.error = document.createElement("p");
+        view.error.className = "manga-operation-error";
+        view.error.id = "mangaAddError";
+        view.error.setAttribute("role", "alert");
+        view.error.setAttribute("aria-atomic", "true");
+        view.panel.append(view.error);
+      }
+      if (view.error.textContent !== mangaAddError) view.error.textContent = mangaAddError;
+      input.setAttribute("aria-describedby", view.error.id);
+    } else {
+      view.error?.remove();
+      view.error = null;
+      input.removeAttribute("aria-describedby");
+    }
+  }
+
+  function retainMangaLibraryActions() {
+    const panel = els.viewContent.querySelector(".manga-library-actions");
+    const view = mangaLibraryActionViews.get(panel);
+    if (!isMangaLibraryActionViewCurrent(view) || view.open !== mangaAddOpen) return false;
+    patchMangaLibraryActions(view);
+    for (const sibling of [...els.viewContent.children]) if (sibling !== panel) sibling.remove();
+    return true;
+  }
+
   async function startMangaAdd(url) {
+    const scope = ensureMangaTaskScope();
     const value = String(url || "").trim();
     if (!value || mangaJobRunning(mangaAddJob)) return;
     const generation = ++mangaAddGeneration;
@@ -1259,25 +1365,35 @@ export function createChannelViews(context) {
     mangaAddJob = { status: "starting", message: "正在启动采集", progressPercent: 1 };
     syncMangaLibraryActions();
     try {
-      const result = await fetchJson(getActiveUrl(), "/api/manga/add", {
+      const result = await fetchJson(scope.activeUrl, "/api/manga/add", {
         method: "POST",
+        accountScope: scope.accountScope,
         body: { url: value },
         timeoutMs: 22000
       });
-      if (generation !== mangaAddGeneration) return;
+      if (!isMangaTaskScopeCurrent(scope) || generation !== mangaAddGeneration) return;
       const changed = updateMangaAddState(mergeMangaTaskJob(result.job || { status: "running", message: "正在读取远程目录" }));
-      if (mangaJobRunning(mangaAddJob) && mangaAddJob.id) void watchMangaAdd(mangaAddJob.id, generation);
+      if (mangaJobRunning(mangaAddJob) && mangaAddJob.id) void watchMangaAdd(mangaAddJob.id, generation, scope);
       if (changed) await refreshMangaLibrary();
     } catch (error) {
-      if (generation !== mangaAddGeneration) return;
+      if (!isMangaTaskScopeCurrent(scope) || generation !== mangaAddGeneration) return;
       updateMangaAddState({ status: "failed", message: error.message || "漫画采集启动失败" });
     }
   }
 
   function syncMangaLibraryActions() {
     const current = els.viewContent.querySelector(".manga-library-actions");
-    if (!current) return false;
-    current.replaceWith(createMangaLibraryActions());
+    const view = mangaLibraryActionViews.get(current);
+    if (!isMangaLibraryActionViewCurrent(view)) return false;
+    if (view.open === mangaAddOpen) {
+      patchMangaLibraryActions(view);
+      return true;
+    }
+    const restoreCloseFocus = view.open && !mangaAddOpen && current.contains(document.activeElement);
+    const next = createMangaLibraryActions();
+    current.replaceWith(next);
+    const nextView = mangaLibraryActionViews.get(next);
+    if (restoreCloseFocus && isMangaLibraryActionViewCurrent(nextView)) nextView.toggle.focus({ preventScroll: true });
     return true;
   }
 
@@ -1300,17 +1416,18 @@ export function createChannelViews(context) {
     return libraryChanged;
   }
 
-  function watchMangaAdd(jobId, generation = mangaAddGeneration) {
-    if (mangaAddPoll?.jobId === jobId && mangaAddPoll.generation === generation) return mangaAddPoll.promise;
-    const poll = { jobId, generation, promise: null };
-    const isCurrent = () => generation === mangaAddGeneration && mangaAddJob?.id === jobId;
+  function watchMangaAdd(jobId, generation = mangaAddGeneration, scope = ensureMangaTaskScope()) {
+    if (!isMangaTaskScopeCurrent(scope)) return Promise.resolve(null);
+    if (mangaAddPoll?.jobId === jobId && mangaAddPoll.generation === generation && mangaAddPoll.scope === scope) return mangaAddPoll.promise;
+    const poll = { jobId, generation, scope, promise: null };
+    const isCurrent = () => isMangaTaskScopeCurrent(scope) && generation === mangaAddGeneration && mangaAddJob?.id === jobId;
     mangaAddPoll = poll;
     poll.promise = (async () => {
       while (isCurrent() && mangaJobRunning(mangaAddJob)) {
         await mangaPollDelay();
         if (!isCurrent() || !mangaJobRunning(mangaAddJob)) break;
-        const data = await fetchJson(getActiveUrl(), `/api/manga/jobs/${encodeURIComponent(jobId)}`, {
-          timeoutMs: 12000
+        const data = await fetchJson(scope.activeUrl, `/api/manga/jobs/${encodeURIComponent(jobId)}`, {
+          timeoutMs: 12000, accountScope: scope.accountScope
         });
         if (!isCurrent()) break;
         const changed = updateMangaAddState(mergeMangaTaskJob(data.job || mangaAddJob));
@@ -1327,7 +1444,12 @@ export function createChannelViews(context) {
 
   async function refreshMangaLibrary() {
     channelPageState = null;
-    if (els.viewContent.querySelector("[data-manga-task-manager]")) await renderCurrentViewPreservingScroll();
+    if (els.viewContent.querySelector("[data-manga-task-manager]")) {
+      const panel = els.viewContent.querySelector(".manga-library-actions");
+      const view = mangaLibraryActionViews.get(panel);
+      const preserveMangaLibraryActions = isMangaLibraryActionViewCurrent(view) && view.open === mangaAddOpen;
+      await renderCurrentViewPreservingScroll({ preserveMangaLibraryActions });
+    }
   }
 
   function mergeMangaTaskJob(job = {}) {
@@ -1423,6 +1545,7 @@ export function createChannelViews(context) {
   }
 
   function toggleMangaTaskHistory() {
+    const scope = ensureMangaTaskScope();
     mangaTaskHistoryOpen = !mangaTaskHistoryOpen;
     syncMangaTaskManager();
     if (!mangaTaskHistoryOpen) {
@@ -1430,15 +1553,18 @@ export function createChannelViews(context) {
       return;
     }
     void refreshMangaTaskJobs().then(refreshMangaLibraryAfterTaskChange).catch((error) => {
+      if (!isMangaTaskScopeCurrent(scope)) return;
       mangaTaskError = error.message || "漫画任务读取失败";
       syncMangaTaskManager();
     });
   }
 
   function createMangaTaskManager() {
+    const scope = ensureMangaTaskScope();
     const panel = document.createElement("section");
     panel.className = "manga-task-manager";
     panel.dataset.mangaTaskManager = "";
+    mangaTaskManagerScopes.set(panel, scope);
     const jobs = mangaTaskDisplayJobs();
     const running = jobs.filter(mangaJobRunning).length;
     const failed = jobs.filter((job) => job.status === "failed").length;
@@ -1467,6 +1593,7 @@ export function createChannelViews(context) {
     copy.append(title, meta);
     const indicator = document.createElement("button");
     indicator.type = "button";
+    indicator.dataset.mangaTaskAction = "history";
     indicator.className = `manga-task-manager-indicator${running && !connectionError ? " is-running" : ""}`;
     indicator.textContent = connectionError ? "连接中断" : mangaTaskHistoryOpen ? "收起记录" : running ? "查看全部" : "任务记录";
     indicator.disabled = connectionError;
@@ -1479,6 +1606,7 @@ export function createChannelViews(context) {
     if (mangaTaskHistoryOpen && finished > 0) {
       const clear = document.createElement("button");
       clear.type = "button";
+      clear.dataset.mangaTaskAction = "clear";
       clear.className = "manga-task-clear";
       clear.textContent = mangaTaskClearing ? "清理中" : "清理记录";
       clear.disabled = mangaTaskClearing || connectionError;
@@ -1537,6 +1665,7 @@ export function createChannelViews(context) {
   }
 
   function createMangaTaskConnectionNotice() {
+    const scope = ensureMangaTaskScope();
     const notice = document.createElement("aside");
     notice.className = "manga-task-connection";
     const copy = document.createElement("div");
@@ -1547,13 +1676,16 @@ export function createChannelViews(context) {
     copy.append(title, detail);
     const retry = document.createElement("button");
     retry.type = "button";
+    retry.dataset.mangaTaskAction = "connect";
     retry.textContent = "重试";
     retry.addEventListener("click", async () => {
+      if (!isMangaTaskScopeCurrent(scope)) return;
       retry.disabled = true;
       retry.textContent = "连接中";
       try {
         await refreshMangaLibraryAfterTaskChange(await refreshMangaTaskJobs());
       } catch (error) {
+        if (!isMangaTaskScopeCurrent(scope)) return;
         mangaTaskError = error.message || "漫画任务读取失败";
         syncMangaTaskManager();
       }
@@ -1563,6 +1695,7 @@ export function createChannelViews(context) {
   }
 
   function createMangaTaskCard(job = {}, options = {}) {
+    const scope = ensureMangaTaskScope();
     const card = document.createElement("article");
     card.className = `manga-task-card is-${String(job.status || "idle")}${options.compact ? " is-compact" : ""}`;
     card.dataset.mangaTaskId = String(job.id || "");
@@ -1584,6 +1717,7 @@ export function createChannelViews(context) {
     if (job.comicAvailable && job.comicId) {
       const open = document.createElement("button");
       open.type = "button";
+      open.dataset.mangaTaskAction = "open";
       open.textContent = "书页";
       open.addEventListener("click", () => showMangaDetail?.(job.comicId));
       actions.append(open);
@@ -1592,10 +1726,11 @@ export function createChannelViews(context) {
       const retrying = mangaTaskRetrying.has(String(job.id));
       const retry = document.createElement("button");
       retry.type = "button";
+      retry.dataset.mangaTaskAction = "retry";
       retry.className = "primary";
       retry.textContent = retrying ? "重试中" : "重试";
       retry.disabled = retrying || mangaTaskClearing;
-      retry.addEventListener("click", () => void retryMangaTask(job));
+      retry.addEventListener("click", () => { if (isMangaTaskScopeCurrent(scope)) void retryMangaTask(job); });
       actions.append(retry);
     }
     if (actions.childElementCount) head.append(actions);
@@ -1613,6 +1748,7 @@ export function createChannelViews(context) {
   }
 
   async function retryMangaTask(job = {}) {
+    const scope = ensureMangaTaskScope();
     const jobId = String(job.id || "").trim();
     if (!jobId || job.status !== "failed" || mangaTaskRetrying.has(jobId)) return;
     mangaTaskRetrying.add(jobId);
@@ -1620,28 +1756,33 @@ export function createChannelViews(context) {
     mangaTaskActionError = "";
     syncMangaTaskManager();
     try {
-      const result = await fetchJson(getActiveUrl(), `/api/manga/jobs/${encodeURIComponent(jobId)}/retry`, {
+      const result = await fetchJson(scope.activeUrl, `/api/manga/jobs/${encodeURIComponent(jobId)}/retry`, {
         method: "POST",
+        accountScope: scope.accountScope,
         timeoutMs: 22000
       });
+      if (!isMangaTaskScopeCurrent(scope)) return;
       const next = result.job || { status: "running", message: "正在重新连接采集器" };
       mergeMangaTaskJob(next);
       if (mangaAddJob?.id === jobId) {
         const generation = ++mangaAddGeneration;
         updateMangaAddState(next);
-        if (mangaJobRunning(next) && next.id) void watchMangaAdd(next.id, generation);
+        if (mangaJobRunning(next) && next.id) void watchMangaAdd(next.id, generation, scope);
       }
       syncMangaTaskManager();
       ensureMangaTaskMonitor();
     } catch (error) {
-      mangaTaskActionErrors.set(jobId, error.message || "漫画任务重试失败");
+      if (isMangaTaskScopeCurrent(scope)) mangaTaskActionErrors.set(jobId, error.message || "漫画任务重试失败");
     } finally {
-      mangaTaskRetrying.delete(jobId);
-      syncMangaTaskManager();
+      if (isMangaTaskScopeCurrent(scope)) {
+        mangaTaskRetrying.delete(jobId);
+        syncMangaTaskManager();
+      }
     }
   }
 
   async function clearFinishedMangaTaskHistory() {
+    const scope = ensureMangaTaskScope();
     if (mangaTaskClearing) return;
     const finishedCount = mangaTaskJobs.filter((job) => !mangaJobRunning(job)).length;
     if (!finishedCount) return;
@@ -1654,16 +1795,18 @@ export function createChannelViews(context) {
       confirmLabel: "清理记录",
       danger: false
     });
-    if (!confirmed) return;
+    if (!confirmed || !isMangaTaskScopeCurrent(scope)) return;
     mangaTaskListGeneration += 1;
     mangaTaskClearing = true;
     mangaTaskActionError = "";
     syncMangaTaskManager();
     try {
-      await fetchJson(getActiveUrl(), "/api/manga/jobs/history", {
+      await fetchJson(scope.activeUrl, "/api/manga/jobs/history", {
         method: "DELETE",
+        accountScope: scope.accountScope,
         timeoutMs: 12000
       });
+      if (!isMangaTaskScopeCurrent(scope)) return;
       mangaTaskJobs = mangaTaskJobs.filter(mangaJobRunning);
       if (mangaAddJob && !mangaJobRunning(mangaAddJob)) mangaAddJob = null;
       for (const [mangaId, update] of mangaUpdateJobs) {
@@ -1673,10 +1816,12 @@ export function createChannelViews(context) {
       if (!mangaTaskJobs.length) mangaTaskHistoryOpen = false;
       await refreshMangaTaskJobs();
     } catch (error) {
-      mangaTaskActionError = error.message || "漫画任务记录清理失败";
+      if (isMangaTaskScopeCurrent(scope)) mangaTaskActionError = error.message || "漫画任务记录清理失败";
     } finally {
-      mangaTaskClearing = false;
-      syncMangaTaskManager();
+      if (isMangaTaskScopeCurrent(scope)) {
+        mangaTaskClearing = false;
+        syncMangaTaskManager();
+      }
     }
   }
 
@@ -1684,15 +1829,31 @@ export function createChannelViews(context) {
     els.viewContent.querySelectorAll(".manga-task-history-toggle").forEach(updateMangaTaskHistoryControl);
     const current = els.viewContent.querySelector("[data-manga-task-manager]");
     if (!current) return false;
-    current.replaceWith(createMangaTaskManager());
+    const scope = mangaTaskManagerScopes.get(current);
+    const active = document.activeElement;
+    const focused = isMangaTaskScopeCurrent(scope) && current.isConnected && current.contains(active)
+      && active.matches?.("button[data-manga-task-action]") ? active : null;
+    const action = focused?.dataset.mangaTaskAction;
+    const taskId = focused?.closest("[data-manga-task-id]")?.dataset.mangaTaskId || "";
+    const next = createMangaTaskManager();
+    current.replaceWith(next);
+    if (focused && isMangaTaskScopeCurrent(scope) && mangaTaskManagerScopes.get(next) === scope
+      && next.isConnected && els.viewContent.querySelector("[data-manga-task-manager]") === next) {
+      let target = [...next.querySelectorAll("button[data-manga-task-action]")].find((button) =>
+        button.dataset.mangaTaskAction === action && !button.disabled
+        && (button.closest("[data-manga-task-id]")?.dataset.mangaTaskId || "") === taskId);
+      if (!target || target.closest("[hidden]")) target = els.viewContent.querySelector(".manga-task-history-toggle");
+      if (target?.isConnected && !target.disabled && els.viewContent.contains(target)) target.focus({ preventScroll: true });
+    }
     return true;
   }
 
-  async function refreshMangaTaskJobs() {
+  async function refreshMangaTaskJobs(scope = ensureMangaTaskScope()) {
+    if (!isMangaTaskScopeCurrent(scope)) return false;
     const generation = ++mangaTaskListGeneration;
     const requestedIds = new Set(mangaTaskJobs.map((job) => String(job.id || "")));
-    const data = await fetchJson(getActiveUrl(), "/api/manga/jobs?limit=12", { timeoutMs: 12000 });
-    if (generation !== mangaTaskListGeneration || mangaTaskClearing) return false;
+    const data = await fetchJson(scope.activeUrl, "/api/manga/jobs?limit=12", { timeoutMs: 12000, accountScope: scope.accountScope });
+    if (!isMangaTaskScopeCurrent(scope) || generation !== mangaTaskListGeneration || mangaTaskClearing) return false;
     const incoming = Array.isArray(data.jobs) ? data.jobs : [];
     const incomingIds = new Set(incoming.map((job) => String(job.id || "")));
     let settled = false;
@@ -1715,26 +1876,31 @@ export function createChannelViews(context) {
   }
 
   function ensureMangaTaskMonitor() {
+    const scope = ensureMangaTaskScope();
     if (mangaTaskMonitor) return mangaTaskMonitor;
-    mangaTaskMonitor = (async () => {
-      while (els.viewContent.querySelector("[data-manga-task-manager]")) {
+    const monitor = (async () => {
+      while (isMangaTaskScopeCurrent(scope) && els.viewContent.querySelector("[data-manga-task-manager]")) {
         let shouldRefreshLibrary = false;
         try {
-          shouldRefreshLibrary = await refreshMangaTaskJobs();
+          shouldRefreshLibrary = await refreshMangaTaskJobs(scope);
         } catch (error) {
+          if (!isMangaTaskScopeCurrent(scope)) return;
           mangaTaskLoaded = true;
           mangaTaskError = error.message || "漫画任务读取失败";
           syncMangaTaskManager();
         }
+        if (!isMangaTaskScopeCurrent(scope)) return;
         await refreshMangaLibraryAfterTaskChange(shouldRefreshLibrary);
+        if (!isMangaTaskScopeCurrent(scope)) return;
         const delay = mangaTaskMonitorDelayMs(mangaTaskJobs, {
           connectionError: Boolean(mangaTaskError),
           hidden: document.visibilityState === "hidden"
         });
         await new Promise((resolve) => window.setTimeout(resolve, delay));
       }
-    })().finally(() => { mangaTaskMonitor = null; });
-    return mangaTaskMonitor;
+    })().finally(() => { if (mangaTaskMonitor === monitor) mangaTaskMonitor = null; });
+    mangaTaskMonitor = monitor;
+    return monitor;
   }
 
   function mangaPollDelay() {
@@ -2410,20 +2576,25 @@ export function createChannelViews(context) {
     return tile;
   }
 
-  async function photoViewerItems(album = {}, sourceImages = []) {
+  async function photoViewerItems(album = {}, sourceImages = [], request) {
+    if (!request.isCurrent()) return [];
     const currentImages = Array.isArray(sourceImages) ? sourceImages : [];
     const totalImages = Number(album.imageCount || currentImages.length || 0);
     if (!album.id || currentImages.length >= totalImages) return photoViewerItemsFromImages(album, currentImages);
 
-    const activeUrl = getActiveUrl();
+    const activeUrl = request.activeUrl;
     const path = photoDetailPath(album.id, { imageLimit: "all" });
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    if (!request.isCurrent()) return [];
     if (cached?.payload?.album?.images?.length >= totalImages) {
       return photoViewerItemsFromImages(cached.payload.album, cached.payload.album.images);
     }
 
-    const data = await fetchJson(activeUrl, path, { timeoutMs: 26000 });
-    writeCachedJson(activeUrl, path, data).catch(() => {});
+    const data = await fetchJson(activeUrl, path, {
+      timeoutMs: 26000, signal: request.signal, accountScope: request.accountScope
+    });
+    if (!request.isCurrent()) return [];
+    writeCachedJson(activeUrl, path, data, { fence: request.cacheFence }).catch(() => {});
     return photoViewerItemsFromImages(data.album || album, data.album?.images || currentImages);
   }
 
@@ -2432,15 +2603,34 @@ export function createChannelViews(context) {
     const totalImages = Number(album.imageCount || currentImages.length || 0);
     if (!viewer?.updateItems || !album.id || currentImages.length >= totalImages) return;
 
-    photoViewerItems(album, sourceImages)
+    const activeUrl = getActiveUrl();
+    const accountScope = captureAccountOwner(activeUrl);
+    const cacheFence = captureCachedJsonFence(activeUrl, accountScope);
+    const generation = photoViewerGeneration;
+    const controller = new AbortController();
+    photoViewerRequestController = controller;
+    const isCurrent = () => generation === photoViewerGeneration && !controller.signal.aborted
+      && getActiveUrl() === activeUrl && isAccountOwnerCurrent(accountScope);
+    photoViewerItems(album, sourceImages, {
+      activeUrl, accountScope, cacheFence, isCurrent, signal: controller.signal
+    })
       .then((items) => {
-        if (items.length > currentImages.length) viewer.updateItems(items, { sourceKey });
+        if (isCurrent() && items.length > currentImages.length) viewer.updateItems(items, { sourceKey });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (photoViewerRequestController === controller) photoViewerRequestController = null;
+      });
+  }
+
+  function cancelPhotoViewerRequest() {
+    photoViewerRequestController?.abort();
+    photoViewerRequestController = null;
   }
 
   function photoViewerSourceKey(album = {}) {
-    return album.id ? `photo:${album.id}` : "";
+    cancelPhotoViewerRequest();
+    return `photo:${getActiveUrl()}:${album.id || ""}:${++photoViewerGeneration}`;
   }
 
   function photoViewerItemsFromImages(album = {}, images = []) {
@@ -3252,6 +3442,7 @@ export function createChannelViews(context) {
   }
 
   function renderMangaComic(comic = {}, cacheEntry = null, update = null) {
+    ensureMangaTaskScope();
     const chapters = Array.isArray(comic.chapters) ? comic.chapters : [];
     const visible = chapters.slice(0, getChannelLimit());
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
@@ -3292,6 +3483,7 @@ export function createChannelViews(context) {
   }
 
   function createMangaSummary(comic = {}, update = {}) {
+    const scope = ensureMangaTaskScope();
     const panel = document.createElement("div");
     panel.className = "manga-detail-summary";
     panel.dataset.mangaId = String(comic.id || "");
@@ -3333,7 +3525,27 @@ export function createChannelViews(context) {
 
     const description = document.createElement("p");
     description.className = "manga-detail-description";
-    description.textContent = comic.description || "章节目录与下载状态以电脑端采集结果为准。";
+    const descriptionText = String(comic.description || "").trim();
+    description.textContent = descriptionText || "章节目录与下载状态以电脑端采集结果为准。";
+    let descriptionToggle = null;
+    if (descriptionText.length > 80 || (descriptionText.match(/\r\n|\r|\n/g) || []).length > 4) {
+      description.id = "mangaDetailDescription";
+      description.classList.add("is-collapsed");
+      descriptionToggle = document.createElement("button");
+      descriptionToggle.type = "button";
+      descriptionToggle.className = "manga-detail-description-toggle";
+      descriptionToggle.textContent = "展开简介";
+      descriptionToggle.setAttribute("aria-expanded", "false");
+      descriptionToggle.setAttribute("aria-controls", description.id);
+      descriptionToggle.addEventListener("click", () => {
+        if (!isMangaTaskScopeCurrent(scope) || !panel.isConnected
+          || els.viewContent.querySelector(".manga-detail-summary") !== panel
+          || !panel.contains(description) || !panel.contains(descriptionToggle)) return;
+        const collapsed = description.classList.toggle("is-collapsed");
+        descriptionToggle.textContent = collapsed ? "展开简介" : "收起简介";
+        descriptionToggle.setAttribute("aria-expanded", String(!collapsed));
+      });
+    }
 
     const actions = document.createElement("div");
     actions.className = "manga-detail-actions";
@@ -3356,7 +3568,7 @@ export function createChannelViews(context) {
     updateButton.dataset.mangaUpdate = "";
     updateButton.textContent = mangaUpdateButtonLabel(update);
     updateButton.disabled = !comic.sourceUrl || mangaJobRunning(update);
-    updateButton.addEventListener("click", () => void startMangaUpdate(comic));
+    updateButton.addEventListener("click", () => { if (isMangaTaskScopeCurrent(scope)) void startMangaUpdate(comic); });
 
     const wholeDownloadReady = mangaWholeDownloadReady(comic);
     const download = document.createElement(wholeDownloadReady ? "a" : "button");
@@ -3379,7 +3591,7 @@ export function createChannelViews(context) {
     remove.dataset.mangaDelete = "";
     remove.textContent = "删除漫画";
     remove.disabled = mangaJobRunning(update);
-    remove.addEventListener("click", () => void deleteMangaComic(comic));
+    remove.addEventListener("click", () => { if (isMangaTaskScopeCurrent(scope)) void deleteMangaComic(comic); });
     const favorite = createChannelFavoriteButton(mangaContentItem(comic));
     favorite.classList.add("manga-favorite");
     if (continueButton) actions.append(continueButton);
@@ -3391,6 +3603,7 @@ export function createChannelViews(context) {
     else if (mangaTaskNoticeMatchesComic(comic)) jobSlot.append(createMangaCompletionNotice());
 
     body.append(title, source, facts, description);
+    if (descriptionToggle) body.append(descriptionToggle);
     hero.append(cover, body);
     panel.append(hero, actions, jobSlot);
     return panel;
@@ -3412,45 +3625,58 @@ export function createChannelViews(context) {
   }
 
   async function startMangaUpdate(comic = {}) {
+    const scope = ensureMangaTaskScope();
     const mangaId = String(comic.id || "");
     if (!mangaId || mangaJobRunning(mangaUpdateJobs.get(mangaId))) return;
     const starting = { status: "starting", comicId: mangaId, title: comic.title, startedAt: new Date().toISOString(), message: "正在启动增量更新", progressPercent: 1 };
     mangaUpdateJobs.set(mangaId, starting);
     updateMangaDetailJob(mangaId, starting);
     try {
-      const result = await fetchJson(getActiveUrl(), `/api/manga/${encodeURIComponent(mangaId)}/update`, {
+      const result = await fetchJson(scope.activeUrl, `/api/manga/${encodeURIComponent(mangaId)}/update`, {
         method: "POST",
+        accountScope: scope.accountScope,
         timeoutMs: 22000
       });
+      if (!isMangaTaskScopeCurrent(scope)) return;
       const job = mergeMangaTaskJob(result.job || { status: "running", message: "正在检查远程目录" });
       mangaUpdateJobs.set(mangaId, job);
       updateMangaDetailJob(mangaId, job);
-      if (mangaJobRunning(job)) void watchMangaUpdate(mangaId, comic);
-      else if (job.status === "complete") await refreshMangaDetail(mangaId);
+      if (mangaJobRunning(job)) void watchMangaUpdate(mangaId, comic, scope);
+      else if (job.status === "complete") await refreshMangaDetail(mangaId, scope);
     } catch (error) {
+      if (!isMangaTaskScopeCurrent(scope)) return;
       const failed = { status: "failed", message: error.message || "漫画更新启动失败" };
       mangaUpdateJobs.set(mangaId, failed);
       updateMangaDetailJob(mangaId, failed);
     }
   }
 
-  function watchMangaUpdate(mangaId, comic = {}) {
-    if (mangaUpdatePolls.has(mangaId)) return mangaUpdatePolls.get(mangaId);
-    const poll = (async () => {
-      while (mangaJobRunning(mangaUpdateJobs.get(mangaId))) {
+  function watchMangaUpdate(mangaId, comic = {}, scope = ensureMangaTaskScope()) {
+    if (!isMangaTaskScopeCurrent(scope)) return Promise.resolve(null);
+    const previous = mangaUpdatePolls.get(mangaId);
+    if (previous?.scope === scope) return previous.promise;
+    const poll = { scope, promise: null };
+    const isCurrent = () => isMangaTaskScopeCurrent(scope) && mangaUpdatePolls.get(mangaId) === poll;
+    mangaUpdatePolls.set(mangaId, poll);
+    poll.promise = (async () => {
+      while (isCurrent() && mangaJobRunning(mangaUpdateJobs.get(mangaId))) {
         await mangaPollDelay();
-        const data = await fetchJson(getActiveUrl(), `/api/manga/${encodeURIComponent(mangaId)}/update`, {
-          timeoutMs: 12000
+        if (!isCurrent() || !mangaJobRunning(mangaUpdateJobs.get(mangaId))) break;
+        const data = await fetchJson(scope.activeUrl, `/api/manga/${encodeURIComponent(mangaId)}/update`, {
+          timeoutMs: 12000, accountScope: scope.accountScope
         });
+        if (!isCurrent()) return null;
         const job = mergeMangaTaskJob(data.job || { status: "idle" });
         const currentJob = job.status === "idle" ? job : rememberMangaUpdateJob({ ...job, comicId: mangaId });
         if (job.status === "idle") mangaUpdateJobs.set(mangaId, job);
         updateMangaDetailJob(mangaId, currentJob);
       }
+      if (!isCurrent()) return null;
       const job = mangaUpdateJobs.get(mangaId) || { status: "idle" };
-      if (job.status === "complete") await refreshMangaDetail(mangaId);
+      if (job.status === "complete") await refreshMangaDetail(mangaId, scope);
       return job;
     })().catch((error) => {
+      if (!isCurrent()) return null;
       const failed = {
         ...(mangaUpdateJobs.get(mangaId) || {}),
         status: "failed",
@@ -3459,9 +3685,8 @@ export function createChannelViews(context) {
       mangaUpdateJobs.set(mangaId, failed);
       updateMangaDetailJob(mangaId, failed);
       return failed;
-    }).finally(() => mangaUpdatePolls.delete(mangaId));
-    mangaUpdatePolls.set(mangaId, poll);
-    return poll;
+    }).finally(() => { if (mangaUpdatePolls.get(mangaId) === poll) mangaUpdatePolls.delete(mangaId); });
+    return poll.promise;
   }
 
   function updateMangaDetailJob(mangaId, job = {}) {
@@ -3482,11 +3707,14 @@ export function createChannelViews(context) {
     }
   }
 
-  async function refreshMangaDetail(mangaId) {
+  async function refreshMangaDetail(mangaId, scope = ensureMangaTaskScope()) {
+    if (!isMangaTaskScopeCurrent(scope)) return;
     channelPageState = null;
     const path = mangaDetailPath(mangaId);
-    const data = await fetchJson(getActiveUrl(), path, { timeoutMs: 16000 });
-    writeCachedJson(getActiveUrl(), path, data).catch(() => {});
+    const cacheFence = captureCachedJsonFence(scope.activeUrl, scope.accountScope);
+    const data = await fetchJson(scope.activeUrl, path, { timeoutMs: 16000, accountScope: scope.accountScope });
+    if (!isMangaTaskScopeCurrent(scope)) return;
+    writeCachedJson(scope.activeUrl, path, data, { fence: cacheFence }).catch(() => {});
     if (els.viewContent.querySelector(".manga-detail-summary")?.dataset.mangaId === String(mangaId)) {
       const finished = mangaUpdateJobs.get(mangaId) || data.update;
       renderMangaComic(data.comic, null, finished);
@@ -3496,30 +3724,36 @@ export function createChannelViews(context) {
   }
 
   async function deleteMangaComic(comic = {}) {
+    const scope = ensureMangaTaskScope();
     const mangaId = String(comic.id || "");
-    if (!mangaId || mangaJobRunning(mangaUpdateJobs.get(mangaId))) return;
+    const panel = els.viewContent.querySelector(".manga-detail-summary");
+    const isCurrent = () => isMangaTaskScopeCurrent(scope) && panel?.isConnected
+      && panel.dataset.mangaId === mangaId && els.viewContent.querySelector(".manga-detail-summary") === panel;
+    if (!mangaId || !isCurrent() || mangaJobRunning(mangaUpdateJobs.get(mangaId))) return;
     const confirmed = await requestConfirmation({
       title: "删除漫画",
       message: `确定删除《${comic.title || "这部漫画"}》吗？文件会移入可恢复的回收区。`,
       confirmLabel: "移入回收站",
       danger: true
     });
-    if (!confirmed) return;
-    const panel = els.viewContent.querySelector(".manga-detail-summary");
+    if (!confirmed || !isCurrent()) return;
     const button = panel?.querySelector("[data-manga-delete]");
     if (button) {
       button.disabled = true;
       button.textContent = "正在删除";
     }
     try {
-      await fetchJson(getActiveUrl(), `/api/manga/${encodeURIComponent(mangaId)}`, {
+      await fetchJson(scope.activeUrl, `/api/manga/${encodeURIComponent(mangaId)}`, {
         method: "DELETE",
+        accountScope: scope.accountScope,
         timeoutMs: 22000
       });
+      if (!isMangaTaskScopeCurrent(scope)) return;
       mangaUpdateJobs.delete(mangaId);
       channelPageState = null;
-      goBack();
+      if (isCurrent()) goBack();
     } catch (error) {
+      if (!isCurrent()) return;
       if (button) {
         button.disabled = false;
         button.textContent = "删除漫画";
@@ -3781,7 +4015,10 @@ export function createChannelViews(context) {
     els.viewMeta.textContent = `${formatNumber(images.length || chapter.imageCount || 0)} 张${chapterPositionText}${suffix}`;
     els.viewContent.innerHTML = "";
     recordMangaChapterRecent(mangaId, comic, chapter);
-    els.viewContent.append(createMangaChapterNavigation(mangaId, navigation, { chapterIndex: chapter.index }));
+    const title = document.createElement("h3");
+    title.className = "manga-reader-title";
+    title.textContent = els.viewTitle.textContent;
+    els.viewContent.append(title, createMangaChapterNavigation(mangaId, navigation, { chapterIndex: chapter.index }));
 
     if (!visible.length) {
       renderMessage("这一话暂时没有图片。", "quiet", false);
@@ -4205,7 +4442,7 @@ export function createChannelViews(context) {
   }
 
   return {
-    deactivate: () => { cancelChannelRequest(); resetPreviewImageObserver(); resetMangaReaderProgressTracker(); },
+    deactivate: () => { cancelChannelRequest(); cancelPhotoViewerRequest(); resetPreviewImageObserver(); resetMangaReaderProgressTracker(); },
     renderChannel,
     renderPhotoDetail,
     renderMangaDetail,

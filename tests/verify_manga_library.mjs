@@ -87,7 +87,7 @@ assert.match(androidMangaSource, /mangaJobRunning\(data\.update\)\) void watchMa
 assert.match(androidMangaSource, /deleteMangaComic/);
 assert.match(androidMangaSource, /createMangaJobProgress/);
 assert.match(androidMangaSource, /input\.value = mangaAddUrl/);
-assert.match(androidMangaSource, /input\.disabled = mangaJobRunning\(mangaAddJob\)/);
+assert.match(androidMangaSource, /input\.readOnly = mangaJobRunning\(mangaAddJob\)/);
 assert.match(androidMangaSource, /panel\.querySelector\("\.manga-operation-error"\)\?\.remove\(\)/);
 assert.match(androidMangaSource, /mangaAddError = job\.message/);
 assert.match(androidMangaSource, /updateMangaAddState\(\{ status: "failed", message: error\.message/, "add startup failures must reach the inline form state");
@@ -124,7 +124,7 @@ assert.match(androidAppSource, /currentView === "mangaChapter" && currentViewPar
 assert.match(androidAppSource, /classList\.toggle\("photo-detail-view", currentView === "photoDetail"\)/);
 assert.match(androidAppSource, /classList\.toggle\("manga-detail-view", currentView === "mangaDetail"\)/);
 assert.match(androidAppSource, /classList\.toggle\("manga-reader-view", currentView === "mangaChapter"\)/);
-assert.match(androidAppSource, /const shouldRestoreHistory = !options\.skipHistory && Boolean\(window\.history\.state\?\.settingsOpen\);[\s\S]*?hideSettingsSurface\(\);[\s\S]*?if \(shouldRestoreHistory\) \{\s*window\.history\.back\(\);/, "settings must close synchronously before Android Back restores browser history");
+assert.match(androidAppSource, /const shouldRestoreHistory = !options\.skipHistory && Boolean\(window\.history\.state\?\.settingsOpen\);[\s\S]*?hideSettingsSurface\((?:\{ preserveSession: true \})?\);[\s\S]*?if \(shouldRestoreHistory\) \{[\s\S]*?window\.history\.back\(\);/, "settings must close synchronously before Android Back restores browser history");
 assert.match(androidAppSource, /const danger = options\.danger === true/);
 assert.match(androidAppSource, /setAttribute\("role", danger \? "alertdialog" : "dialog"\)/);
 assert.match(androidAppSource, /suspendAppConfirmationBackground/);

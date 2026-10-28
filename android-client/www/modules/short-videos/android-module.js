@@ -1,5 +1,7 @@
-import { createShortVideoViews } from "./index.js?v=assets-1443708f18b1";
-import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-1443708f18b1";
+import { createShortVideoViews } from "./index.js?v=assets-22080e82f167";
+import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-22080e82f167";
+
+const sortDialogClosers = new WeakMap();
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({
@@ -23,6 +25,7 @@ export function createAndroidModule({ host }) {
       { view: "shortVideoSearch", render: (params, guard) => shortVideoViews.renderSearch(params, guard) }
     ],
     renderChrome: (context) => renderShortVideoChrome(context, host, shortVideoViews),
+    handleBack: () => closeSortDialog(),
     deactivate: () => shortVideoViews.deactivate?.(),
     api: { shortVideoViews }
   };
@@ -53,7 +56,7 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
       button.textContent = label;
       button.addEventListener("click", () => {
         if (value === activeGroup) {
-          openSortDialog(host, params);
+          openSortDialog(host, params, button);
           return;
         }
         host.navigation.showView("shortVideos", {
@@ -108,10 +111,27 @@ function shortVideoGroup(params = {}) {
   return ["recommended", "history", "all"].includes(source) ? source : "liked";
 }
 
-function openSortDialog(host, params = {}) {
-  document.querySelector(".short-video-sort-overlay")?.remove();
+function closeSortDialog(restoreFocus = true) {
+  const overlay = document.querySelector(".short-video-sort-overlay");
+  if (!overlay) return false;
+  const close = sortDialogClosers.get(overlay);
+  if (close) return close(restoreFocus);
+  overlay.remove();
+  return true;
+}
+
+function openSortDialog(host, params = {}, opener = null) {
+  closeSortDialog(false);
   const overlay = document.createElement("div");
   overlay.className = "short-video-sort-overlay";
+  const ownsDialog = () => document.querySelector(".short-video-sort-overlay") === overlay;
+  const close = (restoreFocus = true) => {
+    if (!ownsDialog()) return false;
+    overlay.remove();
+    if (restoreFocus && opener?.isConnected) opener.focus();
+    return true;
+  };
+  sortDialogClosers.set(overlay, close);
   const backdrop = document.createElement("button");
   backdrop.type = "button";
   backdrop.className = "short-video-sort-backdrop";
@@ -136,7 +156,7 @@ function openSortDialog(host, params = {}) {
     button.classList.toggle("active", value === activeSort);
     button.textContent = label;
     button.addEventListener("click", () => {
-      overlay.remove();
+      if (!close(false)) return;
       host.navigation.showView("shortVideos", {
         ...params,
         ...(following ? { authorSort: value } : { sort: value })
@@ -153,7 +173,7 @@ function openSortDialog(host, params = {}) {
     filter.classList.toggle("active", unlikedOnly);
     filter.textContent = unlikedOnly ? "查看全部关注" : "只看未点赞";
     filter.addEventListener("click", () => {
-      overlay.remove();
+      if (!close(false)) return;
       host.navigation.showView("shortVideos", {
         ...params,
         authorFilter: unlikedOnly ? "all" : "unliked"
@@ -162,10 +182,12 @@ function openSortDialog(host, params = {}) {
     });
     panel.append(filter);
   }
-  const close = () => overlay.remove();
-  backdrop.addEventListener("click", close);
+  backdrop.addEventListener("click", () => close());
   overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") close();
+    if (event.key === "Escape" && close()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   });
   overlay.append(backdrop, panel);
   document.body.append(overlay);

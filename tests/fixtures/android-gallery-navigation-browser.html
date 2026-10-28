@@ -12,7 +12,33 @@
   <body>
     <h1>Android 图库导航隔离夹具</h1>
     <p>每次新建运行冻结当前真实 Android 页面、模块和 CSS。后端仅返回合成数据；不代理电脑端服务。浏览器存储按运行编号隔离，同一运行刷新保留真实导航记忆。</p>
-    <button id="startRun" type="button">新建隔离运行并打开真实页面</button>
+    <button id="startRun" type="button" data-fixture-scenario="default">新建隔离运行并打开真实页面</button>
+    <p><button id="startPhotoCategoryStressRun" type="button" data-fixture-scenario="photo-categories">分类长列表测试（30项，含长名称）</button></p>
+    <p>长列表测试只为本次运行提供固定合成分类。打开图库分类菜单后，可滚动到第 30 项并选择最后一项长名称；普通运行的数据保持不变。</p>
+    <p><button id="startNovelCategoryRun" type="button" data-fixture-scenario="novel-categories">小说分类测试（8个书库分类，含长名称）</button></p>
+    <p>小说测试通过真实小说根页路由打开 8 本合成书，封面由应用生成占位样式；可在 320px 视口核对顶栏分类是否被裁切。该场景仅提供书库列表与汇总，不提供采集、写入或真实小说。</p>
+    <p><button type="button" data-fixture-scenario="novel-detail-layout">小说详情与章节目录（长书名、简介与分页）</button></p>
+    <p>独立只读场景提供长中文书名与 161 章、长英文书名和作者分类与 3 章、无简介与空目录，以及固定长目录错误四个示例。只能查看详情元信息、展开简介、搜索和翻页目录；不提供章节正文、阅读进度、下载、导入、删除或任何写入。</p>
+    <p><button id="startMusicSearchRun" type="button" data-fixture-scenario="music-search">音乐搜索筛选测试（2首普通歌曲、1首已收藏）</button></p>
+    <p>音乐测试通过真实搜索路由打开“合成”的综合结果。可依次点“歌曲 → 筛选 → 已收藏 → 综合”，检查仍然生效的筛选是否可见。这里只提供合成目录与 SVG 封面，不提供音频、收藏写入或真实媒体。</p>
+    <p><button id="startMusicDetailsRun" type="button" data-fixture-scenario="music-details">音乐详情测试（长名称、有封面与无封面专辑）</button></p>
+    <p>详情测试打开真实专辑列表，包含 1 位长姓名歌手、2 张长名称专辑，每张 2 首合成歌曲。可分别打开有封面和无封面专辑，再返回列表切换“歌手”查看歌手详情。仅提供只读目录与合成封面，不提供歌曲详情、音频或业务写入。</p>
+    <p><button id="startMusicPlaylistsRun" type="button" data-fixture-scenario="music-playlists">歌单与最近播放测试（长名自建歌单、空歌单、智能歌单）</button></p>
+    <p>从真实音乐首页打开长名自建歌单、空歌单、“无损与高解析”或最近播放。可查看管理菜单，或通过歌曲“更多 → 加入歌单”打开选择面板；这里的业务写入、音频和歌单导出均被拒绝。</p>
+    <p><button id="startMusicBottomLayoutRun" type="button" data-fixture-scenario="music-bottom-layout">底栏布局压力：32px 导航文字 + 24px 安全区模拟</button></p>
+    <p>此场景打开真实音乐歌曲列表并提供 200 首只读合成资料。只在隔离页面把导航标签设为 32px，并用测试专用 CSS 变量覆盖底部 env() 为 24px；这是受控排版压力，不是 Android 系统字体或设备安全区。可核对底栏、迷你播放器、末项和三个长按菜单，所有播放详情、媒体字节及业务写入仍被拒绝。</p>
+    <p><button id="startFanhaoSearchRun" type="button" data-fixture-scenario="fanhao-search">主库搜索测试（收藏、在看、未下载）</button></p>
+    <p><button id="startMediaLayoutRun" type="button" data-fixture-scenario="media-layout">影视布局压力（长片名、剧名与文件信息）</button></p>
+    <p><button id="startMangaLayoutRun" type="button" data-fixture-scenario="manga-layout">漫画详情与阅读布局（长简介与章节）</button></p>
+    <p>打开真实漫画列表中的三部合成漫画：长中文题名与长简介、长英文题名与短简介、无简介占位。每部含三章安全几何图片，可进入详情、阅读、下一话和返回目录。仅提供合成 GET 资料和 SVG，不提供更新、收藏、删除或下载内容。</p>
+    <p><button id="startMangaPanelsRun" type="button" data-fixture-scenario="manga-panels">漫画添加与下载记录面板（长任务信息）</button></p>
+    <p>打开同一组合成漫画，并提供固定的运行中、失败和完成任务记录。可展开添加表单与下载记录，核对长任务名称、错误和当前章节；这里只返回 GET 资料，拒绝采集、重试、清理、更新和下载内容。合成来源使用 .invalid 域名且不会访问。</p>
+    <p><button type="button" data-fixture-scenario="manga-recovery" data-fixture-profile="immediate-failure">漫画采集失败恢复（立即失败）</button></p>
+    <p><button type="button" data-fixture-scenario="manga-recovery" data-fixture-profile="delayed-failure">漫画采集失败恢复（延迟失败）</button></p>
+    <p><button type="button" data-fixture-scenario="manga-recovery" data-fixture-profile="retry-complete">漫画采集失败恢复（失败后重试完成）</button></p>
+    <p>恢复场景仅允许在真实添加表单输入 <code>https://manga-recovery.invalid/comic/synthetic-recovery</code>。立即/延迟失败只返回合成 503 错误；重试完成场景首次失败、第二次返回内存中的完成回执。没有任务被交给采集器，不访问任何网站、子进程、数据库或真实文件；其他地址和业务写入继续拒绝。重开隔离运行可从头观察。</p>
+    <p>从电影列表进入长片名详情，再用底部图库菜单切换电视剧，打开长剧名及两集长名称分集。文件信息包含长根目录和相对路径，仅用于布局检查；不提供播放地址、真实媒体或业务写入。</p>
+    <p>主库测试通过真实搜索路由打开“合成”，包含 3 个作品与 1 位匹配人物，可核对底部筛选、排序及清除后的结果。封面和头像均为几何 SVG，仅供页面布局检查，不提供媒体、移动、删除或收藏写入。</p>
     <p id="status" role="status"></p>
     <p>在真实页面长按/右键底部图库按钮，核对套图、韩漫、电影、电视剧。选择电影后应有合成电影列表；选择电视剧后应能打开剧集和分集。</p>
     <p>建议视口：320×740、390×844、568×320。请求记录：<a href="/fixture/requests">/fixture/requests</a>。媒体仅为合成封面，不验证实际播放或原生插件。</p>

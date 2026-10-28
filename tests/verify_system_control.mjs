@@ -3,10 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { createComputerControlRuntime } from "../src/modules/system/server/computer-control/runtime.js";
-import { commandForAction, createComputerControlService } from "../src/modules/system/server/computer-control/service.js";
+import { commandForAction, createComputerControlService, launchComputerControlCommand } from "../src/modules/system/server/computer-control/service.js";
 import { createStaticFileServer } from "../src/platform/server/static-files.js";
 import { createAuthServices } from "../src/platform/server/auth.js";
 import { routeAdminApi } from "../src/modules/system/server/admin/routes.js";
@@ -43,11 +43,8 @@ scheduled[0].callback();
 assert.deepEqual(launched, [{ file: "shutdown.exe", args: ["/s", "/t", "60"] }]);
 
 const sleepCommand = commandForAction("sleep", "win32");
-assert.equal(sleepCommand.file, "powershell.exe", "sleep must use a typed power API instead of the incompatible rundll32 entry point");
-assert.deepEqual(sleepCommand.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]);
-const sleepScript = sleepCommand.args.at(-1);
-assert.doesNotMatch(sleepScript, /rundll32|shutdown\.exe|Stop-Process|taskkill|ExitWindows|Stop-Service/i,
-  "sleep must not log off, shut down, or terminate applications");
+assert.deepEqual(sleepCommand, { file: "shutdown.exe", args: ["/h"] },
+  "sleep must request hibernation through the built-in command, without force-close, timeout, shutdown or logoff flags");
 
 service.dispatch("sleep");
 assert.equal(launched.length, 1, "sleep must also wait until after the HTTP response");
@@ -55,48 +52,83 @@ scheduled[1].callback();
 assert.deepEqual(launched[1], sleepCommand);
 assert.equal(service.status().lastDispatch.action, "sleep");
 
-if (process.platform === "win32") {
-  // Execute the exact production PowerShell body against a private fake type.
-  // Add-Type is shadowed before the body runs, so no real power API is loaded.
-  const powerFixture = `
-Add-Type -TypeDefinition @'
-namespace System.Windows.Forms {
-  public enum PowerState { Suspend = 0, Hibernate = 1 }
-  public static class Application {
-    public static bool Result = true;
-    public static int Calls;
-    public static PowerState State;
-    public static bool Force;
-    public static bool DisableWakeEvent;
-    public static bool SetSuspendState(PowerState state, bool force, bool disableWakeEvent) {
-      Calls++; State = state; Force = force; DisableWakeEvent = disableWakeEvent;
-      return Result;
-    }
+for (const outcome of ["success", "exit-error", "signal", "spawn-error", "throw"]) {
+  const child = new EventEmitter();
+  const warnings = [];
+  let run, launches = 0;
+  const fixtureService = createComputerControlService({
+    platform: "win32",
+    schedule(callback) { run = callback; },
+    launch() {
+      launches++;
+      if (outcome === "throw") throw Error("synthetic launch failure");
+      return child;
+    },
+    warn(...args) { warnings.push(args); }
+  });
+  fixtureService.dispatch("sleep");
+  const queuedSnapshot = fixtureService.status().lastDispatch;
+  assert.equal(queuedSnapshot.status, "queued");
+  run();
+  if (outcome === "success") child.emit("exit", 0, null);
+  if (outcome === "exit-error") child.emit("exit", 5, null);
+  if (outcome === "signal") child.emit("exit", null, "SIGTERM");
+  if (outcome === "spawn-error") {
+    child.emit("error", Error("synthetic permission error"));
+    child.emit("exit", 0, null);
   }
+  const finalState = fixtureService.status().lastDispatch;
+  assert.equal(finalState.status, outcome === "success" ? "completed" : "failed", outcome);
+  assert.equal(queuedSnapshot.status, "queued", "status must return a snapshot, not mutable dispatch state");
+  assert.equal(warnings.length, outcome === "success" ? 0 : 1, outcome);
+  if (outcome !== "success") assert(finalState.error, "failed commands must remain inspectable");
+  if (outcome === "exit-error") assert.equal(finalState.exitCode, 5);
+  assert.equal(launches, 1, "failure must not retry or fall back to a different power action");
 }
-'@
-$script:loadedAssembly = $null
-function Add-Type {
-  param([string]$AssemblyName)
-  $script:loadedAssembly = $AssemblyName
+
+{
+  const children = [];
+  let run;
+  const fixtureService = createComputerControlService({ platform: "win32", warn() {},
+    schedule(callback) { run = callback; },
+    launch() { const child = new EventEmitter(); children.push(child); return child; }
+  });
+  fixtureService.dispatch("sleep"); run();
+  fixtureService.dispatch("lock"); run();
+  children[0].emit("exit", 5, null);
+  assert.equal(fixtureService.status().lastDispatch.action, "lock");
+  assert.equal(fixtureService.status().lastDispatch.status, "dispatched", "a late failure must not replace the latest action");
 }
-`;
-  const fixture = spawnSync(sleepCommand.file, ["-NoProfile", "-NonInteractive", "-Command", `${powerFixture}
-& { ${sleepScript} }
-if ($script:loadedAssembly -ne 'System.Windows.Forms') { throw 'Missing power API assembly' }
-if ([System.Windows.Forms.Application]::Calls -ne 1) { throw 'Expected exactly one power request' }
-if ([System.Windows.Forms.Application]::State -ne [System.Windows.Forms.PowerState]::Hibernate) { throw 'Expected hibernation to preserve the session overnight' }
-if ([System.Windows.Forms.Application]::Force -or [System.Windows.Forms.Application]::DisableWakeEvent) { throw 'Power request must not force or disable wake events' }
-[System.Windows.Forms.Application]::Result = $false
-$failed = $false
-try { & { ${sleepScript} } } catch { $failed = $true }
-if (-not $failed) { throw 'A rejected power request must report failure' }
-if ([System.Windows.Forms.Application]::Calls -ne 2) { throw 'A rejected power request must not retry or fall back to shutdown' }
-Write-Output 'mocked-power-api: ok'
-`], { encoding: "utf8", windowsHide: true, timeout: 30000 });
-  assert.ifError(fixture.error);
-  assert.equal(fixture.status, 0, `PowerShell power fixture failed: ${fixture.stderr || fixture.stdout}`);
-  assert.match(fixture.stdout, /mocked-power-api: ok/);
+
+// Exercise the production launcher with harmless real console processes.
+// A detached PowerShell can exit zero without executing even a file write.
+const launchFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-control-launch-"));
+const markerPath = path.join(launchFixtureDir, "executed.txt");
+try {
+  const probe = process.platform === "win32"
+    ? { file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command",
+      `Set-Content -LiteralPath '${markerPath.replaceAll("'", "''")}' -Value 'control-launch-executed'`] }
+    : { file: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'control-launch-executed')`] };
+  await waitForCommand(probe.file, probe.args);
+  assert.equal(fs.readFileSync(markerPath, "utf8").trim(), "control-launch-executed", "successful exit must actually execute the command body");
+  // shutdown's help-only mode can return 1 even though it starts successfully.
+  if (process.platform === "win32") await waitForCommand(sleepCommand.file, ["/?"], [0, 1]);
+} finally {
+  if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath);
+  fs.rmdirSync(launchFixtureDir);
+}
+
+async function waitForCommand(file, args, acceptedCodes = [0]) {
+  await new Promise((resolve, reject) => {
+    const child = launchComputerControlCommand(file, args);
+    const timeout = setTimeout(() => { child.kill(); reject(Error("control launch fixture timed out")); }, 15000);
+    child.once("error", error => { clearTimeout(timeout); reject(error); });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      if (acceptedCodes.includes(code)) resolve();
+      else reject(Error(`${file} control launch fixture failed: ${code ?? signal}`));
+    });
+  });
 }
 
 assert.throws(() => service.dispatch("format-disk"), (error) => error.statusCode === 400);
@@ -208,4 +240,4 @@ for (const testCase of cases) for (const entry of ["status", "control", "setting
   assert.equal(securedReads, expectedWrites, `${testCase.name}: reject before reading a command`);
   assert.equal(securedDispatches, expectedWrites, `${testCase.name}: reject before queuing any OS action`);
 }
-console.log(`System control verification passed: ${cases.length * 3} actual network/admin gate cases plus command dispatch checks (commands mocked; no real OS action executed).`);
+console.log(`System control verification passed: ${cases.length * 3} actual network/admin gate cases, dispatch/failure status and safe real console launch (power actions mocked; no real OS action executed).`);

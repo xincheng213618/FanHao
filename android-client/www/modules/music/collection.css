@@ -110,7 +110,7 @@ body.music-mobile-view .music-mobile-collection-mode-tabs button.active::after {
 body.music-mobile-view .music-mobile-collection-browser-toolbar .music-mobile-sort {
   width: auto;
   min-width: 88px;
-  min-height: 36px;
+  min-height: 44px;
   border: 0;
   border-radius: 999px;
   padding: 0 12px;
@@ -264,6 +264,7 @@ body.music-mobile-view .music-mobile-collection-identity {
 
 body.music-mobile-view .music-mobile-collection-identity.has-art {
   grid-template-columns: 104px minmax(0, 1fr);
+  align-items: start;
   gap: 14px;
 }
 
@@ -293,15 +294,12 @@ body.music-mobile-view .music-mobile-collection-identity small {
 }
 
 body.music-mobile-view .music-mobile-collection-identity strong {
-  display: -webkit-box;
-  overflow: hidden;
+  display: block;
   color: var(--ink);
   font-size: clamp(22px, 7vw, 30px);
   font-weight: 950;
   line-height: 1.1;
   overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 
 body.music-mobile-view .music-mobile-collection-identity.has-art strong {
@@ -331,8 +329,8 @@ body.music-mobile-view .music-mobile-collection-actions {
 
 body.music-mobile-view .music-mobile-collection-actions button {
   display: flex;
-  min-width: 0;
-  min-height: 42px;
+  min-width: 44px;
+  min-height: 44px;
   align-items: center;
   justify-content: center;
   gap: 7px;
@@ -355,10 +353,6 @@ body.music-mobile-view .music-mobile-collection-actions button:disabled {
   background: var(--field);
   color: var(--quiet);
   box-shadow: none;
-}
-
-body.music-mobile-view .music-mobile-collection-detail.no-art .music-mobile-collection-actions button {
-  min-height: 40px;
 }
 
 body.music-mobile-view .music-mobile-collection-list-head {
@@ -393,7 +387,7 @@ body.music-mobile-view .music-mobile-collection-list-head small {
 
 body.music-mobile-view .music-mobile-collection-list-head button {
   min-width: 44px;
-  min-height: 36px;
+  min-height: 44px;
   border: 0;
   border-radius: 999px;
   padding: 0 12px;

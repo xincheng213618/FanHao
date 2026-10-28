@@ -1,0 +1,191 @@
+.photo-feed-appbar .photo-category-action {
+  display: flex;
+  flex: 0 0 54px;
+  width: 54px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.photo-chrome-tabs > button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-category-sheet {
+  width: min(100%, 560px);
+  max-height: calc(100dvh - 12px - var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
+  min-height: 0;
+  margin-inline: auto;
+  padding-top: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-content: start;
+  scroll-padding-top: 72px;
+}
+
+.photo-category-sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  grid-column: 1 / -1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 -16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  padding: 8px 16px;
+}
+
+.photo-category-sheet-head > strong {
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.photo-category-sheet-head .photo-category-close {
+  flex: 0 0 auto;
+  min-width: 60px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.photo-category-sheet .mobile-action-sheet-option {
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 8px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.content-panel[data-channel-mode="photo"] .channel-context-row button {
+  min-height: 44px;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-detail-description {
+  display: block;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: initial;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-detail-description.is-collapsed {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-detail-description-toggle {
+  justify-self: start;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-detail-actions button,
+.content-panel[data-view="mangaDetail"] .manga-detail-actions a,
+.content-panel[data-view="mangaDetail"] .manga-chapter-card > a,
+.content-panel[data-view="mangaChapter"] .manga-chapter-navigation button,
+.content-panel[data-view="mangaChapter"] .manga-chapter-navigation a,
+.content-panel[data-view="mangaChapter"] .manga-reader-resume {
+  min-height: 44px;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-chapter-card > a {
+  min-width: 44px;
+}
+
+.content-panel[data-view="mangaDetail"] .manga-detail-body > strong {
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.content-panel[data-view="mangaChapter"] .manga-reader-title {
+  min-width: 0;
+  margin: 0;
+  padding: 4px 12px 0;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 390px) {
+  .content-panel[data-view="mangaChapter"] {
+    width: calc(100% + 24px);
+    margin-inline: -12px;
+  }
+}
+
+.content-panel[data-channel-mode="manga"] .manga-library-actions button,
+.content-panel[data-channel-mode="manga"] .manga-add-form input,
+.content-panel[data-channel-mode="manga"] .manga-task-manager button,
+.content-panel .manga-cache-notice button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.content-panel[data-channel-mode="manga"] .manga-task-history-toggle {
+  width: 44px;
+}
+
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) :is(.manga-task-manager, .manga-task-list, .manga-task-card, .manga-job-progress) {
+  min-width: 0;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) :is(.manga-task-manager-head, .manga-task-card-head, .manga-job-progress-head) {
+  min-width: 0;
+  max-width: 100%;
+  align-items: flex-start;
+}
+
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) :is(.manga-task-manager-head, .manga-task-card-head) > div:first-child,
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) .manga-job-progress-head > strong {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) :is(.manga-task-manager-head strong, .manga-task-manager-head span, .manga-task-card-head strong, .manga-task-card-head span, .manga-job-progress-head strong, .manga-job-current, .manga-operation-error, .manga-job-progress-meta > span, .manga-task-notice strong, .manga-task-notice small) {
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.content-panel:is([data-channel-mode="manga"], [data-view="mangaDetail"]) .manga-job-progress-head > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}

@@ -6,9 +6,16 @@ import { createMusicListPagination } from "../android-client/www/modules/music/m
 
 const source = fs.readFileSync(new URL("../android-client/www/modules/music/music-views.js", import.meta.url), "utf8");
 
-test("all music list transitions cancel pending pagination before changing state", () => {
+test("all music list transitions cancel pending pagination before changing list state or awaiting requests", () => {
   for (const name of ["renderMusicList", "loadMusic", "refreshMountedSearchResults", "focusSearchDiscoveryScope", "switchSearchScope", "updateListParams", "deactivate"]) {
-    assert.match(source, new RegExp(`(?:async )?function ${name}\\([^\\n]*\\) \\{\\s*cancelMusicPagination\\(\\);`), `${name} must cancel pending pagination`);
+    const body = new RegExp(`(?:async )?function ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\r?\\n  \\}`).exec(source)?.[1];
+    assert(body, `${name} must exist`);
+    const cancel = body.indexOf("cancelMusicPagination();");
+    assert(cancel >= 0, `${name} must cancel pending pagination`);
+    // Focus-intent setup may precede cancellation; list mutations and work may not.
+    const beforeCancel = body.slice(0, cancel);
+    assert.doesNotMatch(beforeCancel, /\bstate(?:\.[\w$]+|\[[^\]]+\])+\s*(?:=(?!=)|\+\+|--|[+*/-]=)|\bmoduleActive\s*=(?!=)|\bawait\b|\b(?:fetchJson|postJson|putJson|deleteJson|renderShell|refreshMountedSearchUi|showView)\s*\(/,
+      `${name} must cancel pagination before changing the list or starting asynchronous work`);
   }
   assert.match(source, /cancelPending: cancelMusicPagination, loadMoreTracks \} = createMusicListPagination\(/);
   assert.match(source, /isActive: \(\) => moduleActive/);
