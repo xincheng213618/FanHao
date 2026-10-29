@@ -1,3 +1,17 @@
+.work-search .search-shortcut-hint {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 5px;
+}
+
+@media (max-width: 720px) {
+  .work-search .search-shortcut-hint { display: none; }
+}
+
 .person-profile {
   display: grid;
   grid-template-columns: 108px minmax(0, 1fr);
@@ -950,6 +964,40 @@
 
 .code-prefix-index-controls {
   grid-column: 1 / -1;
+  align-items: end;
+}
+
+.code-prefix-index-search {
+  display: grid;
+  flex: 1 1 240px;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.code-prefix-index-search input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.code-prefix-index-clear {
+  min-height: 44px;
+}
+
+.code-prefix-index-summary {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .stats-row {
@@ -1197,3 +1245,7 @@ body.code-prefix-index-view .work-grid {
   display: block;
 }
 
+.read-error-state .empty-state-copy { display: grid; gap: 8px; max-width: 64ch; margin-inline: auto; overflow-wrap: anywhere; }
+.read-error-state .empty-state-copy strong { color: var(--text); }
+.read-error-state .empty-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 18px; }
+.read-error-state .empty-state-actions button { min-height: 44px; }

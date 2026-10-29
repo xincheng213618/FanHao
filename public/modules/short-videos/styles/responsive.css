@@ -325,11 +325,15 @@
     bottom: 20px;
   }
 
+  .short-video-browser:has(.short-video-control-bar:not(.is-gallery)) .short-video-caption {
+    bottom: max(94px, calc(env(safe-area-inset-bottom) + 90px));
+  }
+
   .short-video-control-bar:not(.is-gallery) {
     grid-template-columns: 34px auto minmax(0, 1fr);
-    grid-template-rows: 18px 34px;
+    grid-template-rows: 24px 34px;
     gap: 0 7px;
-    min-height: 58px;
+    min-height: 64px;
     padding: 2px max(10px, env(safe-area-inset-right)) max(3px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
   }
 
@@ -338,13 +342,13 @@
     inset: auto;
     grid-column: 1 / -1;
     grid-row: 1;
-    height: 18px;
+    height: 24px;
   }
 
   .short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) .short-video-control-progress-wrap {
     position: absolute;
     inset: auto 0 -8px;
-    height: 18px;
+    height: 24px;
   }
 
   .short-video-control-bar:not(.is-gallery) .short-video-control-spacer {
@@ -352,7 +356,7 @@
   }
 
   .short-video-control-bar:not(.is-gallery) .short-video-control-progress {
-    height: 18px;
+    height: 24px;
   }
 
   .short-video-control-bar:not(.is-gallery) .short-video-control-play {
@@ -590,7 +594,7 @@
   .short-video-caption p {
     font-size: 15px;
     line-height: 1.38;
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: var(--short-video-caption-collapsed-lines, 2);
   }
 
   .short-video-caption-author {
@@ -939,11 +943,11 @@
 
 @media (max-width: 560px) and (max-height: 620px) {
   .short-video-caption {
-    bottom: max(62px, calc(env(safe-area-inset-bottom) + 58px));
+    bottom: max(68px, calc(env(safe-area-inset-bottom) + 64px));
   }
 
   .short-video-rail {
-    bottom: max(62px, calc(env(safe-area-inset-bottom) + 58px));
+    bottom: max(68px, calc(env(safe-area-inset-bottom) + 64px));
     gap: 1px;
   }
 
@@ -968,6 +972,64 @@
 
   .short-video-follow-button.is-rail {
     top: 25px;
+  }
+}
+
+/* A phone turned sideways still needs every action inside the short viewport. */
+@media (max-width: 1024px) and (max-height: 520px) and (orientation: landscape) {
+  .short-video-rail {
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(52px, calc(env(safe-area-inset-bottom) + 48px));
+    grid-template-columns: repeat(2, 52px);
+    align-content: center;
+    align-items: center;
+    gap: 2px 6px;
+    padding: 4px;
+    transform: none;
+  }
+
+  .short-video-rail .short-video-rail-button,
+  .short-video-rail .short-video-author-rail {
+    width: 52px;
+    min-height: 46px;
+    margin: 0;
+    gap: 0;
+  }
+
+  .short-video-rail .short-video-rail-button strong {
+    width: 28px;
+    height: 28px;
+  }
+
+  .short-video-rail .short-video-rail-button strong > .short-video-icon,
+  .short-video-rail .short-video-author-avatar,
+  .short-video-rail .short-video-sound-rail-cover {
+    width: 28px;
+    height: 28px;
+  }
+
+  .short-video-rail .short-video-rail-button > span {
+    font-size: 12px;
+    line-height: 1.1;
+  }
+
+  .short-video-rail .short-video-follow-button.is-rail {
+    top: 22px;
+  }
+
+  .short-video-rail .short-video-rail-button.is-delete,
+  .short-video-rail .short-video-rail-button.is-delete-group {
+    display: none;
+  }
+
+  .short-video-nav-pair {
+    right: max(142px, calc(env(safe-area-inset-right) + 142px));
+  }
+
+  .short-video-caption {
+    right: max(142px, calc(env(safe-area-inset-right) + 142px));
+    width: auto;
   }
 }
 

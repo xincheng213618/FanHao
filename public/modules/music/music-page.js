@@ -8,7 +8,9 @@ import { createMusicApi } from "./api.js?v=20261004-music-progress-01";
 import { createMusicPlayer } from "./player/engine.js?v=20261004-music-progress-01";
 import { createMusicActions } from "./actions.js?v=20261004-music-list-02";
 import { createComponents } from "./views/components.js";
+import { createLyricFinder } from "./views/lyric-finder.js";
 import { createMusicHome } from "./views/home.js";
+import { captureWebAccount } from "../../platform/accounts/session-context.js";
 import { formatSeconds, collapseDuplicateTracks } from "./format.js";
 import {
   MUSIC_SLEEP_TIMER_OPTIONS,
@@ -64,10 +66,23 @@ export function createMusicPage(deps) {
   let activeLyricElement = null;
   let lyricRaf = 0;
   let currentLyricIndex = -1;
+  let lyricViewport = null;
+  let lyricFinderState = null;
   let visibilityInstalled = false;
   let keyboardShortcutsInstalled = false;
   let progressLifecycleInstalled = false;
+  let favoriteFeedbackPosition = null;
   let trackReturnContext = null;
+  let trackReturnHistoryAccount = null;
+  let trackReturnHistoryOwner = "";
+  const listMoreRecords = new WeakMap();
+  const listResultRecords = new WeakMap();
+  let appendFocusRestore = null;
+  let pendingListAppend = null;
+  let appendViewportRestore = null;
+  let playlistDialogEvents = null;
+  let queueSearchState = null;
+  const queueViews = new WeakMap();
 
   // ---- 播放引擎（拥有 audio / 可视化 / MediaSession / 睡眠定时）----
   const player = createMusicPlayer({
@@ -166,6 +181,7 @@ export function createMusicPage(deps) {
     restoreMusicPanelScroll,
     clearMusicSuggestions,
     renderStats,
+    syncFavoriteFeedback,
     refreshTrackMetadata,
     updatePlaybackUi,
     updatePlaybackModeControls
@@ -179,9 +195,106 @@ export function createMusicPage(deps) {
   };
 
   function showError(error) {
+    const ratingFailure = actions.getRatingFailure();
+    if (ratingFailure && ratingFailure.error === error) {
+      state.music.status = ratingFailure.message;
+      const listFailure = actions.getListReadFailure();
+      if (ratingFailure.saved && !state.music.playlistDialogOpen
+          && listFailure?.message === ratingFailure.message && refreshMusicLibraryContent()) return;
+      setMusicListLoadingState(Boolean(state.music.loading || state.music.loadingMore), { append: state.music.loadingMore });
+      syncFavoriteFeedback();
+      return;
+    }
+    const favoriteFailure = actions.getFavoriteFailure();
+    if (favoriteFailure && favoriteFailure.error === error) {
+      state.music.status = favoriteFailure.message;
+      const listFailure = actions.getListReadFailure();
+      if (favoriteFailure.saved && !state.music.playlistDialogOpen
+          && listFailure?.message === favoriteFailure.message && refreshMusicLibraryContent()) return;
+      setMusicListLoadingState(Boolean(state.music.loading || state.music.loadingMore), { append: state.music.loadingMore });
+      syncFavoriteFeedback();
+      return;
+    }
     state.music.loading = false;
     state.music.status = error?.message || "音乐库读取失败";
+    const listFailure = actions.getListReadFailure();
+    if (!state.music.playlistDialogOpen && listFailure?.message === state.music.status && refreshMusicLibraryContent()) return;
     renderView();
+  }
+
+  function syncFavoriteFeedback() {
+    const shell = els.workGrid?.querySelector?.(".music-shell");
+    if (!shell) { clearFavoriteFeedbackPosition(); return; }
+    const listFailure = actions.getListReadFailure();
+    const recovery = shell.querySelector(".music-list-read-error");
+    const banners = [];
+    for (const [kind, failure] of [["favorite", actions.getFavoriteFailure()], ["rating", actions.getRatingFailure()]]) {
+      const covered = failure?.saved && listFailure?.message === failure.message && recovery?.textContent.includes(failure.message);
+      let banner = shell.querySelector(`:scope > .music-${kind}-feedback`);
+      if (!failure || covered) { banner?.remove(); continue; }
+      const message = kind === "favorite"
+        ? `${failure.saved ? "收藏已保存，列表刷新失败" : "收藏保存失败"}：${failure.message}`
+        : failure.saved ? `评分已保存，列表刷新失败：${failure.message}` : failure.message;
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.className = `music-${kind}-feedback`;
+        banner.tabIndex = 0;
+        banner.setAttribute("role", "alert");
+        banner.setAttribute("aria-atomic", "true");
+        shell.append(banner);
+      }
+      if (banner.textContent !== message) banner.textContent = message;
+      banners.push(banner);
+    }
+    if (!banners.length) { clearFavoriteFeedbackPosition(); return; }
+    if (favoriteFeedbackPosition?.shell !== shell || banners.length !== favoriteFeedbackPosition?.banners.length
+        || banners.some((banner, index) => banner !== favoriteFeedbackPosition.banners[index])) {
+      clearFavoriteFeedbackPosition();
+      const position = { banners, shell, player: null, observer: null };
+      favoriteFeedbackPosition = position;
+      if (typeof ResizeObserver === "function") position.observer = new ResizeObserver(() => updateFavoriteFeedbackPosition(position));
+      for (const banner of banners) position.observer?.observe(banner);
+    }
+    updateFavoriteFeedbackPosition(favoriteFeedbackPosition);
+  }
+
+  function clearFavoriteFeedbackPosition() {
+    favoriteFeedbackPosition?.observer?.disconnect();
+    favoriteFeedbackPosition = null;
+  }
+
+  function updateFavoriteFeedbackPosition(position) {
+    if (favoriteFeedbackPosition !== position) return;
+    const { banners, shell } = position;
+    if (banners.some(banner => !banner.isConnected) || shell !== els.workGrid?.querySelector?.(".music-shell")
+        || (!actions.getFavoriteFailure() && !actions.getRatingFailure())) {
+      clearFavoriteFeedbackPosition();
+      return;
+    }
+    const stage = shell.querySelector(".music-stage-player");
+    const player = stage || shell.querySelector(".music-player-bar");
+    if (position.player !== player) {
+      position.observer?.disconnect();
+      position.player = player;
+      for (const banner of banners) position.observer?.observe(banner);
+      if (player) position.observer?.observe(player);
+    }
+    // Observe the mobile static bar too: a responsive transition can make the
+    // same element fixed without changing the alert's owner or DOM identity.
+    const anchored = player?.isConnected && (stage || getComputedStyle(player).position === "fixed");
+    const property = "--music-favorite-feedback-bottom";
+    let bottom = anchored ? Math.max(12, Math.ceil(window.innerHeight - player.getBoundingClientRect().top + 12)) : null;
+    for (const banner of banners) {
+      if (bottom === null) {
+        if (banner.style.getPropertyValue(property)) banner.style.removeProperty(property);
+        const measured = Number.parseFloat(getComputedStyle(banner).bottom);
+        bottom = Number.isFinite(measured) ? measured : 12;
+      } else {
+        const value = `${bottom}px`;
+        if (banner.style.getPropertyValue(property) !== value) banner.style.setProperty(property, value);
+      }
+      bottom += Math.ceil(banner.getBoundingClientRect().height) + 8;
+    }
   }
 
   const actions = createMusicActions({ state, api: musicApi, player, view, router, showError });
@@ -228,8 +341,12 @@ export function createMusicPage(deps) {
   function applyRouteState(route = {}) {
     ensureState();
     resetReader();
-    trackReturnContext = null;
+    trackReturnContext = readTrackReturnHistory(route) || (route.musicTrackId ? { fresh: true } : null);
+    if (trackReturnContext?.route) route = { ...route, ...trackReturnContext.route, musicTrackId: route.musicTrackId };
     state.music.libraryDrawerOpen = false;
+    state.music.playlistDialogOpen = false;
+    state.music.playlistDialogTrackId = "";
+    state.music.playlistDialogName = "";
     state.music.trackPageOpen = Boolean(route.musicTrackId);
     state.music.playerStageOpen = false;
     state.music.mode = route.musicMode || "home";
@@ -316,7 +433,20 @@ export function createMusicPage(deps) {
   function renderView() {
     ensureState();
     if (!els.workGrid) return;
+    const liveQueue = els.workGrid.querySelector(".music-queue");
+    const queueView = queueViews.get(liveQueue);
+    if (queueViewCurrent(queueView) && (queueView.model.raw || queueView.composing || queueView.form.contains(document.activeElement))
+        && refreshMusicLibraryContent()) {
+      setMusicBodyClass();
+      refreshCurrentTrackSurfaces();
+      if (Boolean(els.workGrid.querySelector(".music-playlist-dialog-backdrop")) !== Boolean(state.music.playlistDialogOpen)) refreshPlaylistDialog();
+      if (Boolean(els.workGrid.querySelector(".music-library-layer")) !== Boolean(state.music.libraryDrawerOpen)) refreshLibraryDrawer();
+      updatePlaybackUi();
+      syncFavoriteFeedback();
+      return;
+    }
     const inputFocus = captureMusicInputFocus();
+    const playlistFocus = capturePlaylistDialogFocus();
     setMusicBodyClass();
     currentProgressEls = null;
     playbackButtonEls = [];
@@ -329,6 +459,8 @@ export function createMusicPage(deps) {
     repeatControlEls = [];
     sleepTimerControlEls = [];
     lyricLineEls = [];
+    lyricViewport = null;
+    if (!state.music.trackPageOpen) lyricFinderState = null;
     lyricFollowButtonEls = [];
     activeLyricElement = null;
     suggestionBox = null;
@@ -336,6 +468,7 @@ export function createMusicPage(deps) {
     if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
     lyricRaf = 0;
     player.stopVisualizer();
+    clearFavoriteFeedbackPosition();
     els.workGrid.innerHTML = "";
 
     const shell = document.createElement("section");
@@ -347,9 +480,11 @@ export function createMusicPage(deps) {
     setTrackOpeningState(state.music.openingTrackId);
     setMusicListLoadingState(Boolean(state.music.loading || state.music.loadingMore), { append: state.music.loadingMore });
     restoreMusicInputFocus(shell, inputFocus);
+    restorePlaylistDialogFocus(shell.querySelector(".music-playlist-dialog-backdrop"), playlistFocus);
     updatePlaybackUi();
     updateLyricHighlight(!state.music.lyricFollowPaused);
     player.startVisualizer();
+    syncFavoriteFeedback();
   }
 
   function refreshMusicLibraryContent() {
@@ -362,22 +497,70 @@ export function createMusicPage(deps) {
     currentTrackIndicatorMap = new Map();
     suggestionBox = null;
     const nextPanel = renderTrackPanel();
-    currentPanel.replaceWith(nextPanel);
+    const retained = retainMusicSortControls(currentPanel, nextPanel);
+    if (!retained) currentPanel.replaceWith(nextPanel);
     refreshLibrarySidebars();
     setTrackOpeningState(state.music.openingTrackId);
     setMusicListLoadingState(Boolean(state.music.loading || state.music.loadingMore), { append: state.music.loadingMore });
-    restoreMusicInputFocus(nextPanel, inputFocus);
+    restoreMusicInputFocus(retained ? currentPanel : nextPanel, inputFocus);
     const surfacedTrackId = state.music.current?.id || state.music.queue[0]?.id || "";
     const emptyNowPanel = !surfacedTrackId && shell.querySelector(".music-now-empty");
     if (emptyNowPanel) emptyNowPanel.textContent = state.music.status || "选择一首歌开始播放。";
     if (mountedTrackId !== surfacedTrackId && !refreshCurrentTrackSurfaces(mountedTrackId)) return false;
+    syncFavoriteFeedback();
+    return true;
+  }
+
+  function retainMusicSortControls(currentPanel, nextPanel) {
+    const mode = nextPanel.dataset.musicListMode;
+    if (!["library", "artists", "albums"].includes(mode) || currentPanel.dataset.musicListMode !== mode
+        || currentPanel.dataset.musicListQuery !== nextPanel.dataset.musicListQuery) return false;
+    const selector = mode === "library" ? ".music-controls" : ".music-artist-browser-controls";
+    const controls = currentPanel.querySelector(selector), nextControls = nextPanel.querySelector(selector);
+    const sort = controls?.querySelector("select"), nextSort = nextControls?.querySelector("select");
+    if (!sort || !nextSort || sort.options.length !== nextSort.options.length
+        || [...sort.options].some((option, index) => option.value !== nextSort.options[index].value)) return false;
+    for (let index = 0; index < sort.options.length; index++) {
+      if (sort.options[index].textContent !== nextSort.options[index].textContent) sort.options[index].textContent = nextSort.options[index].textContent;
+    }
+    sort.value = nextSort.value;
+    sort.disabled = nextSort.disabled;
+    // Keep the select and both ancestors mounted: moving an active native
+    // select into a replacement panel dismisses it and blurs keyboard focus.
+    for (const child of [...controls.children]) if (child !== sort) child.remove();
+    for (const child of [...nextControls.children]) if (child !== nextSort) controls.insertBefore(child, sort);
+    for (const child of [...currentPanel.children]) if (child !== controls) child.remove();
+    let afterControls = false;
+    for (const child of [...nextPanel.children]) {
+      if (child === nextControls) afterControls = true;
+      else if (afterControls) currentPanel.append(child);
+      else currentPanel.insertBefore(child, controls);
+    }
     return true;
   }
 
   function captureMusicInputFocus() {
     const input = document.activeElement;
+    const pending = isListOwnerCurrent(pendingListAppend?.owner) ? pendingListAppend : null;
+    if (pending?.newerIntent) {
+      const panel = els.workGrid?.querySelector(".music-track-panel");
+      if (panel) appendViewportRestore = { owner: pending.owner, data: state.music.data, top: panel.scrollTop, windowY: window.scrollY };
+    }
+    const more = listMoreRecords.get(input);
+    if (more && isListOwnerCurrent(more.owner)) {
+      if (pending?.newerIntent) return { more: more.owner, keepViewport: true };
+      const items = musicListItems(input.closest(".music-track-panel"));
+      const records = items.map(item => listResultRecords.get(item)).filter(Boolean);
+      return { more: more.owner, ids: new Set(records.flatMap(item => [item.id, ...(item.duplicateIds || [])]).filter(Boolean).map(String)), results: new Set(records) };
+    }
+    const alphabet = input?.closest?.(".music-alpha-index");
+    if (alphabet && input.matches(".music-alpha-index-item")) return { letter: input.dataset.musicLetter || "", mode: alphabet.dataset.musicAlphaMode };
     const key = String(input?.dataset?.musicSearch || "");
-    if (!key) return null;
+    if (!key) {
+      const box = input?.closest?.(".music-search-suggestions");
+      if (!box || box.hidden || !input.matches(".music-search-suggest-item")) return null;
+      return { key: "library", suggestion: [...box.querySelectorAll(".music-search-suggest-item")].indexOf(input), suggestionKey: input.dataset.musicSuggestionKey || "", query: state.music.query };
+    }
     return {
       key,
       start: Number.isFinite(input.selectionStart) ? input.selectionStart : String(input.value || "").length,
@@ -386,7 +569,49 @@ export function createMusicPage(deps) {
   }
 
   function restoreMusicInputFocus(shell, focus) {
+    const viewport = appendViewportRestore;
+    appendViewportRestore = null;
+    if (viewport && viewport.data === state.music.data && isListOwnerCurrent(viewport.owner)) {
+      const panel = shell.matches(".music-track-panel") ? shell : shell.querySelector(".music-track-panel") || shell.closest(".music-track-panel");
+      if (panel) { panel.scrollTop = viewport.top; window.scrollTo({ top: viewport.windowY, behavior: "instant" }); markAppendPosition(panel); }
+    }
+    if (focus?.more) {
+      if (!isListOwnerCurrent(focus.more)) return;
+      const panel = shell.matches(".music-track-panel") ? shell : shell.querySelector(".music-track-panel") || shell.closest(".music-track-panel");
+      if (!panel) return;
+      const items = musicListItems(panel);
+      let target = !focus.keepViewport && items.find(item => {
+        const result = listResultRecords.get(item);
+        return result && !focus.results.has(result) && ![result.id, ...(result.duplicateIds || [])].some(id => id && focus.ids.has(String(id)));
+      }) || panel.querySelector(".music-load-more");
+      if (!target) {
+        target = document.createElement("p");
+        target.className = "music-list-complete";
+        target.textContent = "已到列表末尾";
+        target.tabIndex = -1;
+        target.setAttribute("role", "status");
+        target.addEventListener("keydown", event => { if (event.key !== "Escape") event.stopPropagation(); });
+        (panel.querySelector(".music-track-table, .music-artist-browser-grid, .music-album-browser-grid") || panel).append(target);
+      }
+      target.focus({ preventScroll: true });
+      if (!focus.keepViewport) target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      markAppendPosition(panel);
+      return;
+    }
+    if (focus?.letter !== undefined) {
+      if (focus.mode === state.music.mode) [...shell.querySelectorAll(".music-alpha-index-item")].find(button => button.dataset.musicLetter === focus.letter)?.focus({ preventScroll: true });
+      return;
+    }
     if (!focus?.key) return;
+    if (Number.isInteger(focus.suggestion)) {
+      const box = shell.querySelector(".music-search-suggestions");
+      if (focus.query === state.music.query && box && !box.hidden) {
+        const buttons = [...box.querySelectorAll(".music-search-suggest-item")];
+        const button = focus.suggestionKey ? buttons.find(item => item.dataset.musicSuggestionKey === focus.suggestionKey) : buttons[focus.suggestion];
+        (button || shell.querySelector('[data-music-search="library"]'))?.focus({ preventScroll: true });
+      }
+      return;
+    }
     const input = shell.querySelector(`[data-music-search="${focus.key}"]`);
     if (!input) return;
     input.focus({ preventScroll: true });
@@ -443,7 +668,7 @@ export function createMusicPage(deps) {
 
   function closeLibraryDrawerBefore(action) {
     state.music.libraryDrawerOpen = false;
-    refreshLibraryDrawer();
+    refreshLibraryDrawer({ focus: true });
     action();
   }
 
@@ -469,6 +694,13 @@ export function createMusicPage(deps) {
     side.dataset.musicSidebarKey = musicSidebarRenderKey();
     if (!embedded) side.id = "music-library-drawer";
     side.setAttribute("aria-label", "音乐资料库");
+    const navigationAction = action => () => {
+      if (!side.isConnected || state.activeView !== "music") return;
+      if (embedded) action();
+      else closeLibraryDrawerBefore(action);
+    };
+    const filterButton = (id, label, count, active, action) => h.filterButton(id, label, count, active, navigationAction(action));
+    const browseButton = (label, meta, action) => h.sidebarBrowseButton(label, meta, navigationAction(action));
     const drawerHeader = document.createElement("div");
     drawerHeader.className = "music-sidebar-header";
     const drawerTitle = document.createElement("strong");
@@ -492,18 +724,18 @@ export function createMusicPage(deps) {
     drawerHeader.append(drawerTitle, drawerActions);
     const libraryList = document.createElement("div");
     libraryList.className = "music-artist-list";
-    libraryList.append(h.filterButton("home", "发现", "", state.music.mode === "home", () => actions.selectMusicMode("home")));
-    libraryList.append(h.filterButton("library", "全部歌曲", state.music.summary?.totals?.tracks || state.music.data?.total || 0, state.music.mode === "library" && !state.music.favorite, () => actions.selectMusicMode("library")));
-    libraryList.append(h.filterButton("artists", "歌手浏览", state.music.summary?.totals?.artists || 0, state.music.mode === "artists", () => actions.selectMusicMode("artists")));
-    libraryList.append(h.filterButton("albums", "专辑浏览", state.music.summary?.totals?.albums || 0, state.music.mode === "albums", () => actions.selectMusicMode("albums")));
-    libraryList.append(h.filterButton("history", "最近播放", state.music.summary?.recent?.length || 0, state.music.mode === "history", () => actions.selectMusicMode("history")));
-    libraryList.append(h.filterButton("report", "听歌报告", state.music.summary?.totals?.plays || 0, state.music.mode === "report", () => actions.selectMusicMode("report")));
-    libraryList.append(h.filterButton("favorites", "我喜欢", "", state.music.mode === "library" && state.music.favorite, () => actions.selectMusicMode("library", { favorite: true })));
+    libraryList.append(filterButton("home", "发现", "", state.music.mode === "home", () => actions.selectMusicMode("home")));
+    libraryList.append(filterButton("library", "全部歌曲", state.music.summary?.totals?.tracks || state.music.data?.total || 0, state.music.mode === "library" && !state.music.favorite, () => actions.selectMusicMode("library")));
+    libraryList.append(filterButton("artists", "歌手浏览", state.music.summary?.totals?.artists || 0, state.music.mode === "artists", () => actions.selectMusicMode("artists")));
+    libraryList.append(filterButton("albums", "专辑浏览", state.music.summary?.totals?.albums || 0, state.music.mode === "albums", () => actions.selectMusicMode("albums")));
+    libraryList.append(filterButton("history", "最近播放", state.music.summary?.recent?.length || 0, state.music.mode === "history", () => actions.selectMusicMode("history")));
+    libraryList.append(filterButton("report", "听歌报告", state.music.summary?.totals?.plays || 0, state.music.mode === "report", () => actions.selectMusicMode("report")));
+    libraryList.append(filterButton("favorites", "我喜欢", "", state.music.mode === "library" && state.music.favorite, () => actions.selectMusicMode("library", { favorite: true })));
 
     const smartList = document.createElement("div");
     smartList.className = "music-playlist-list";
     for (const smart of state.music.smartPlaylists || []) {
-      smartList.append(h.filterButton(smart.id, smart.name, smart.trackCount, state.music.mode === "smart" && state.music.activeSmartPlaylistId === smart.id, () => actions.selectMusicMode("smart", { smartId: smart.id })));
+      smartList.append(filterButton(smart.id, smart.name, smart.trackCount, state.music.mode === "smart" && state.music.activeSmartPlaylistId === smart.id, () => actions.selectMusicMode("smart", { smartId: smart.id })));
     }
     if (!(state.music.smartPlaylists || []).length) {
       const empty = document.createElement("div");
@@ -515,7 +747,7 @@ export function createMusicPage(deps) {
     const playlists = document.createElement("div");
     playlists.className = "music-playlist-list";
     for (const playlist of state.music.playlists || []) {
-      playlists.append(h.filterButton(playlist.id, playlist.name, playlist.trackCount, state.music.mode === "playlist" && state.music.activePlaylistId === playlist.id, () => actions.selectMusicMode("playlist", { playlistId: playlist.id })));
+      playlists.append(filterButton(playlist.id, playlist.name, playlist.trackCount, state.music.mode === "playlist" && state.music.activePlaylistId === playlist.id, () => actions.selectMusicMode("playlist", { playlistId: playlist.id })));
     }
     const createPlaylistButton = document.createElement("button");
     createPlaylistButton.type = "button";
@@ -532,14 +764,14 @@ export function createMusicPage(deps) {
 
     const languageList = document.createElement("div");
     languageList.className = "music-artist-list music-language-list";
-    languageList.append(h.filterButton("all", "全部", state.music.summary?.totals?.tracks || "", state.music.language === "all", () => {
+    languageList.append(filterButton("all", "全部", state.music.summary?.totals?.tracks || "", state.music.language === "all", () => {
       state.music.language = "all";
       state.music.artistId = "all";
       state.music.albumId = "all";
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     }));
     for (const language of state.music.languages || []) {
-      languageList.append(h.filterButton(language.id || language.name, language.name, language.trackCount, state.music.language === language.name, () => {
+      languageList.append(filterButton(language.id || language.name, language.name, language.trackCount, state.music.language === language.name, () => {
         if (!["artists", "albums"].includes(state.music.mode)) state.music.mode = "library";
         state.music.language = language.name || "all";
         state.music.artistId = "all";
@@ -552,14 +784,15 @@ export function createMusicPage(deps) {
     const genreList = document.createElement("div");
     genreList.className = "music-artist-list";
     for (const genre of (state.music.genres || []).slice(0, 24)) {
-      genreList.append(h.filterButton(genre.id || genre.name, genre.name, genre.trackCount, state.music.mode === "library" && state.music.genre === genre.name, () => actions.selectGenre(genre.name)));
+      genreList.append(filterButton(genre.id || genre.name, genre.name, genre.trackCount, state.music.mode === "library" && state.music.genre === genre.name, () => actions.selectGenre(genre.name)));
     }
 
     const artistList = document.createElement("div");
     artistList.className = "music-artist-list";
     for (const artist of (state.music.artists || []).slice(0, 8)) {
-      artistList.append(h.filterButton(artist.id, artist.name, artist.trackCount, state.music.mode === "library" && state.music.artistId === artist.id, () => {
+      artistList.append(filterButton(artist.id, artist.name, artist.trackCount, state.music.mode === "library" && state.music.artistId === artist.id, () => {
         state.music.mode = "library";
+        state.music.query = "";
         state.music.favorite = false;
         state.music.activePlaylistId = "";
         state.music.activeSmartPlaylistId = "";
@@ -569,7 +802,7 @@ export function createMusicPage(deps) {
         loadMusic({ replaceRoute: true }).catch(showError);
       }));
     }
-    artistList.append(h.sidebarBrowseButton("查看全部歌手", `${formatNumber(state.music.summary?.totals?.artists || 0)} 位`, () => actions.selectMusicMode("artists")));
+    artistList.append(browseButton("查看全部歌手", `${formatNumber(state.music.summary?.totals?.artists || 0)} 位`, () => actions.selectMusicMode("artists")));
 
     const albums = document.createElement("div");
     albums.className = "music-album-mini-list";
@@ -585,9 +818,10 @@ export function createMusicPage(deps) {
       small.textContent = `${album.artistName || "未知歌手"} · ${formatNumber(album.trackCount || 0)} 首`;
       span.append(strong, small);
       button.append(span);
-      button.addEventListener("click", () => {
+      button.addEventListener("click", navigationAction(() => {
         state.music.libraryDrawerOpen = false;
         state.music.mode = "library";
+        state.music.query = "";
         state.music.favorite = false;
         state.music.activePlaylistId = "";
         state.music.activeSmartPlaylistId = "";
@@ -595,10 +829,10 @@ export function createMusicPage(deps) {
         state.music.albumId = album.id;
         state.music.genre = "all";
         loadMusic({ replaceRoute: true }).catch(showError);
-      });
+      }));
       albums.append(button);
     }
-    albums.append(h.sidebarBrowseButton("查看全部专辑", `${formatNumber(state.music.summary?.totals?.albums || 0)} 张`, () => actions.selectMusicMode("albums")));
+    albums.append(browseButton("查看全部专辑", `${formatNumber(state.music.summary?.totals?.albums || 0)} 张`, () => actions.selectMusicMode("albums")));
 
     const smartSection = h.sidebarSection("智能歌单", smartList, { open: state.music.mode === "smart", meta: formatNumber((state.music.smartPlaylists || []).length) });
     const playlistSection = h.sidebarSection("歌单", playlists, { open: state.music.mode === "playlist", meta: formatNumber((state.music.playlists || []).length) });
@@ -650,15 +884,18 @@ export function createMusicPage(deps) {
 
   // ================= 歌手 / 专辑浏览 =================
   function renderArtistPanel() {
+    const failure = actions.getListReadFailure();
     const panel = document.createElement("section");
     panel.className = "music-track-panel music-artist-browser";
+    panel.dataset.musicListMode = "artists";
+    panel.dataset.musicListQuery = state.music.query || "";
     const heading = document.createElement("div");
     heading.className = "music-panel-heading";
     const headingText = document.createElement("span");
     const title = document.createElement("strong");
     title.textContent = state.music.language && state.music.language !== "all" ? `${state.music.language}歌手` : "全部歌手";
     const meta = document.createElement("small");
-    meta.textContent = `${formatNumber(state.music.data?.total || 0)} 位 · ${state.music.artistSort === "name" ? "按名称排序" : "按歌曲数排序"}`;
+    meta.textContent = failure ? "列表读取失败" : `${formatNumber(state.music.data?.total || 0)} 位 · ${state.music.artistSort === "name" ? "按名称排序" : "按歌曲数排序"}`;
     headingText.append(title, meta);
     heading.append(headingText);
     const controls = document.createElement("div");
@@ -669,7 +906,7 @@ export function createMusicPage(deps) {
     search.value = state.music.query || "";
     search.placeholder = "搜索歌手";
     search.setAttribute("aria-label", "搜索歌手");
-    search.addEventListener("input", () => {
+    bindMusicSearchInput(search, () => {
       resetReader();
       state.music.query = search.value.trim();
       window.clearTimeout(searchTimer);
@@ -685,6 +922,7 @@ export function createMusicPage(deps) {
       sort.append(option);
     }
     sort.addEventListener("change", () => {
+      if (!sort.isConnected || state.activeView !== "music" || state.music.mode !== "artists") return;
       state.music.artistSort = sort.value === "name" ? "name" : "count";
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
@@ -707,18 +945,22 @@ export function createMusicPage(deps) {
     const grid = document.createElement("div");
     grid.className = "music-artist-browser-grid";
     const artists = state.music.data?.artists || [];
-    if (state.music.loading && !artists.length) grid.append(h.emptyRow("正在读取歌手资料库"));
+    if (failure) grid.append(renderListReadRecovery(failure));
+    else if (state.music.loading && !artists.length) grid.append(h.emptyRow("正在读取歌手资料库"));
     else if (!artists.length) grid.append(h.emptyRow(state.music.status || "没有匹配的歌手"));
     else for (const artist of artists) grid.append(renderArtistCard(artist));
-    const more = renderArtistLoadMore(artists.length);
+    const more = !failure && renderArtistLoadMore(artists.length);
     if (more) grid.append(more);
     panel.append(heading, controls, alphaIndex, languages, grid);
     return panel;
   }
 
   function renderAlbumPanel() {
+    const failure = actions.getListReadFailure();
     const panel = document.createElement("section");
     panel.className = "music-track-panel music-album-browser";
+    panel.dataset.musicListMode = "albums";
+    panel.dataset.musicListQuery = state.music.query || "";
     const heading = document.createElement("div");
     heading.className = "music-panel-heading";
     const headingText = document.createElement("span");
@@ -726,7 +968,7 @@ export function createMusicPage(deps) {
     title.textContent = state.music.language && state.music.language !== "all" ? `${state.music.language}专辑` : "全部专辑";
     const meta = document.createElement("small");
     const sortText = { updated: "最近入库", title: "按名称", year: "按年份", tracks: "歌曲最多" }[state.music.albumSort] || "最近入库";
-    meta.textContent = `${formatNumber(state.music.data?.total || 0)} 张 · ${sortText}`;
+    meta.textContent = failure ? "列表读取失败" : `${formatNumber(state.music.data?.total || 0)} 张 · ${sortText}`;
     headingText.append(title, meta);
     heading.append(headingText);
     const controls = document.createElement("div");
@@ -737,7 +979,7 @@ export function createMusicPage(deps) {
     search.value = state.music.query || "";
     search.placeholder = "搜索专辑或歌手";
     search.setAttribute("aria-label", "搜索专辑");
-    search.addEventListener("input", () => {
+    bindMusicSearchInput(search, () => {
       resetReader();
       state.music.query = search.value.trim();
       window.clearTimeout(searchTimer);
@@ -753,6 +995,7 @@ export function createMusicPage(deps) {
       sort.append(option);
     }
     sort.addEventListener("change", () => {
+      if (!sort.isConnected || state.activeView !== "music" || state.music.mode !== "albums") return;
       state.music.albumSort = ["updated", "title", "year", "tracks"].includes(sort.value) ? sort.value : "updated";
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
@@ -775,10 +1018,11 @@ export function createMusicPage(deps) {
     const grid = document.createElement("div");
     grid.className = "music-album-browser-grid";
     const albums = state.music.data?.albums || [];
-    if (state.music.loading && !albums.length) grid.append(h.emptyRow("正在读取专辑资料库"));
+    if (failure) grid.append(renderListReadRecovery(failure));
+    else if (state.music.loading && !albums.length) grid.append(h.emptyRow("正在读取专辑资料库"));
     else if (!albums.length) grid.append(h.emptyRow(state.music.status || "没有匹配的专辑"));
     else for (const album of albums) grid.append(renderAlbumCard(album));
-    const more = renderAlbumLoadMore(albums.length);
+    const more = !failure && renderAlbumLoadMore(albums.length);
     if (more) grid.append(more);
     panel.append(heading, controls, alphaIndex, languages, grid);
     return panel;
@@ -788,6 +1032,7 @@ export function createMusicPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "music-artist-browser-card";
+    listResultRecords.set(button, artist);
     const avatar = document.createElement("b");
     avatar.textContent = Array.from(artist.name || "?")[0] || "?";
     const text = document.createElement("span");
@@ -805,6 +1050,7 @@ export function createMusicPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "music-album-browser-card";
+    listResultRecords.set(button, album);
     button.append(h.renderCover(album, "tiny"));
     const text = document.createElement("span");
     const name = document.createElement("strong");
@@ -819,49 +1065,39 @@ export function createMusicPage(deps) {
 
   function renderArtistLoadMore(artistCount) {
     if (!state.music.hasMore) return null;
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "music-load-more";
-    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - artistCount)))} 位`;
-    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
-    more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
-    return more;
+    return renderListLoadMore(`再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - artistCount)))} 位`);
   }
 
   function appendArtistPage(artists, startIndex) {
     const grid = els.workGrid?.querySelector?.(".music-artist-browser-grid");
     if (!grid) return false;
+    const focus = captureMusicInputFocus();
     grid.querySelector(".music-load-more")?.remove();
     const fragment = document.createDocumentFragment();
     for (const artist of artists) fragment.append(renderArtistCard(artist));
     const more = renderArtistLoadMore(startIndex + artists.length);
     if (more) fragment.append(more);
     grid.append(fragment);
+    restoreMusicInputFocus(grid.closest(".music-track-panel"), focus?.more ? focus : null);
     return true;
   }
 
   function renderAlbumLoadMore(albumCount) {
     if (!state.music.hasMore) return null;
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "music-load-more";
-    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - albumCount)))} 张`;
-    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
-    more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
-    return more;
+    return renderListLoadMore(`再加载 ${formatNumber(Math.min(80, Math.max(0, Number(state.music.data?.total || 0) - albumCount)))} 张`);
   }
 
   function appendAlbumPage(albums, startIndex) {
     const grid = els.workGrid?.querySelector?.(".music-album-browser-grid");
     if (!grid) return false;
+    const focus = captureMusicInputFocus();
     grid.querySelector(".music-load-more")?.remove();
     const fragment = document.createDocumentFragment();
     for (const album of albums) fragment.append(renderAlbumCard(album));
     const more = renderAlbumLoadMore(startIndex + albums.length);
     if (more) fragment.append(more);
     grid.append(fragment);
+    restoreMusicInputFocus(grid.closest(".music-track-panel"), focus?.more ? focus : null);
     return true;
   }
 
@@ -871,15 +1107,18 @@ export function createMusicPage(deps) {
     if (state.music.mode === "report") return home.renderReportPanel();
     if (state.music.mode === "artists") return renderArtistPanel();
     if (state.music.mode === "albums") return renderAlbumPanel();
+    const failure = actions.getListReadFailure();
     const panel = document.createElement("section");
     panel.className = "music-track-panel";
+    panel.dataset.musicListMode = state.music.mode;
+    panel.dataset.musicListQuery = state.music.query || "";
     const heading = document.createElement("div");
     heading.className = "music-panel-heading";
     const headingText = document.createElement("span");
     const headingTitle = document.createElement("strong");
     headingTitle.textContent = actions.currentMusicTitle();
     const headingMeta = document.createElement("small");
-    headingMeta.textContent = actions.currentMusicMeta();
+    headingMeta.textContent = failure ? "列表读取失败" : actions.currentMusicMeta();
     headingText.append(headingTitle, headingMeta);
     const headingActions = document.createElement("div");
     headingActions.className = "music-panel-actions";
@@ -924,17 +1163,20 @@ export function createMusicPage(deps) {
     input.setAttribute("enterkeyhint", "search");
     input.value = state.music.query || "";
     input.disabled = state.music.mode !== "library";
-    input.addEventListener("input", () => {
+    const ignoreSearchKey = bindMusicSearchInput(input, () => {
       resetReader();
       state.music.query = input.value.trim();
       queueMusicSuggest(state.music.query);
       window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(() => loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), state.music.query ? MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS : MUSIC_LIBRARY_CLEAR_DEBOUNCE_MS);
+      // This input already began its navigation. Restarting it here would
+      // cancel the suggestion read belonging to this very query.
+      searchTimer = window.setTimeout(() => actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError), state.music.query ? MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS : MUSIC_LIBRARY_CLEAR_DEBOUNCE_MS);
     });
     input.addEventListener("focus", () => {
       if (suggestionBox) renderMusicSuggestions(suggestionBox);
     });
     input.addEventListener("keydown", (event) => {
+      if (ignoreSearchKey(event)) return;
       if (event.key === "Escape") clearMusicSuggestions();
       if (event.key === "Enter" && state.music.mode === "library") {
         event.preventDefault();
@@ -976,6 +1218,7 @@ export function createMusicPage(deps) {
     sort.value = state.music.sort || "album";
     sort.disabled = state.music.mode !== "library";
     sort.addEventListener("change", () => {
+      if (!sort.isConnected || state.activeView !== "music" || state.music.mode !== "library") return;
       state.music.sort = sort.value;
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
@@ -984,47 +1227,161 @@ export function createMusicPage(deps) {
     table.className = "music-track-table";
     table.append(h.trackHeader());
     const tracks = state.music.data?.tracks || [];
-    if (state.music.loading && !tracks.length) table.append(h.emptyRow("正在读取音乐库"));
+    if (failure) table.append(renderListReadRecovery(failure));
+    else if (state.music.loading && !tracks.length) table.append(h.emptyRow("正在读取音乐库"));
     else if (!tracks.length) table.append(h.emptyRow(state.music.status || "没有匹配的歌曲。"));
-    else tracks.forEach((track, index) => table.append(h.trackRow(track, index)));
-    const more = renderTrackLoadMore(tracks.length);
+    else tracks.forEach((track, index) => { const row = h.trackRow(track, index); listResultRecords.set(row, track); table.append(row); });
+    const more = !failure && renderTrackLoadMore(tracks.length);
     if (more) table.append(more);
     panel.append(heading, controls, table);
     return panel;
   }
 
+  function renderListReadRecovery(failure) {
+    const panel = document.createElement("div");
+    panel.className = "music-list-read-error";
+    const message = document.createElement("p");
+    message.setAttribute("role", "alert");
+    message.textContent = failure.message;
+    const hint = document.createElement("span");
+    hint.textContent = "当前条件尚未载入成功，重新读取会保留搜索和筛选。";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-control-button music-list-retry";
+    button.textContent = "重新读取";
+    let busy = false;
+    button.addEventListener("click", async () => {
+      if (busy || !button.isConnected || actions.getListReadFailure() !== failure) return;
+      busy = true;
+      const hadFocus = document.activeElement === button;
+      const events = new AbortController();
+      let newerIntent = false;
+      const noteIntent = event => {
+        const activation = event.type === "keydown" && !event.ctrlKey && !event.metaKey && !event.altKey && ["Enter", " ", "Spacebar"].includes(event.key);
+        if (event.target === button && (activation || event.type === "pointerdown" || event.type === "focusin")) return;
+        if (event.type !== "focusin" || event.target !== document.body) newerIntent = true;
+      };
+      for (const type of ["pointerdown", "keydown", "wheel", "touchmove", "focusin"]) document.addEventListener(type, noteIntent, { capture: true, passive: true, signal: events.signal });
+      button.setAttribute("aria-disabled", "true");
+      button.textContent = "正在读取…";
+      const retry = actions.retryListRead(failure);
+      try { if (retry) await retry.pending; }
+      catch (error) { if (retry?.isCurrent() && !refreshMusicLibraryContent()) showError(error); }
+      finally {
+        events.abort();
+        busy = false;
+        if (button.isConnected && actions.getListReadFailure() === failure) { button.removeAttribute("aria-disabled"); button.textContent = "重新读取"; }
+      }
+      if (hadFocus && !newerIntent && retry?.isCurrent() && !state.music.trackPageOpen) {
+        const target = els.workGrid.querySelector(".music-list-retry") || els.workGrid.querySelector(".music-track-panel .music-panel-heading strong");
+        if (target) { if (target.tagName !== "BUTTON") target.tabIndex = -1; target.focus({ preventScroll: true }); }
+      }
+    });
+    panel.append(message, hint, button);
+    return panel;
+  }
+
   function renderTrackLoadMore(trackCount) {
     if (!state.music.hasMore) return null;
+    return renderListLoadMore(`再加载 ${formatNumber(Math.min(120, Math.max(0, Number(state.music.data?.total || 0) - trackCount)))} 首`);
+  }
+
+  function currentListOwner() {
+    try {
+      const account = captureWebAccount();
+      return { key: JSON.stringify([router.overrides(), state.music.letter]), account: account.owner, revision: account.revision };
+    } catch { return null; }
+  }
+
+  function isListOwnerCurrent(owner) {
+    if (!owner || state.activeView !== "music" || state.music.trackPageOpen) return false;
+    const current = currentListOwner();
+    return current && owner.key === current.key && owner.account === current.account && owner.revision === current.revision;
+  }
+
+  function musicListItems(panel) {
+    return panel ? [...panel.querySelectorAll(".music-track-row:not(.head), .music-artist-browser-card, .music-album-browser-card")] : [];
+  }
+
+  function markAppendPosition(panel) {
+    const restored = { panel, data: state.music.data };
+    appendFocusRestore = restored;
+    queueMicrotask(() => { if (appendFocusRestore === restored) appendFocusRestore = null; });
+  }
+
+  function setListMoreBusy(more, busy) {
+    more.setAttribute("aria-disabled", String(busy));
+    if (busy) more.setAttribute("aria-busy", "true");
+    else more.removeAttribute("aria-busy");
+    more.textContent = busy ? "正在加载…" : more.dataset.musicIdleLabel;
+  }
+
+  function renderListLoadMore(label) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "music-load-more";
-    more.dataset.musicIdleLabel = `再加载 ${formatNumber(Math.min(120, Math.max(0, Number(state.music.data?.total || 0) - trackCount)))} 首`;
-    more.textContent = state.music.loadingMore ? "正在加载…" : more.dataset.musicIdleLabel;
-    more.disabled = state.music.loadingMore;
-    more.addEventListener("click", () => loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
+    more.dataset.musicIdleLabel = label;
+    const record = { owner: currentListOwner() };
+    listMoreRecords.set(more, record);
+    setListMoreBusy(more, state.music.loadingMore);
+    more.addEventListener("click", async () => {
+      if (!more.isConnected || !isListOwnerCurrent(record.owner) || state.music.loadingMore) return;
+      more.closest(".music-track-panel")?.querySelector(".music-list-append-error")?.remove();
+      const events = new AbortController(), pending = { owner: record.owner, newerIntent: false };
+      pendingListAppend = pending;
+      const noteIntent = event => {
+        const activation = event.type === "keydown" && !event.ctrlKey && !event.metaKey && !event.altKey && ["Enter", " ", "Spacebar"].includes(event.key);
+        if (isListOwnerCurrent(listMoreRecords.get(event.target)?.owner) && (activation || event.type === "pointerdown" || event.type === "focusin")) return;
+        if (event.type !== "focusin" || event.target !== document.body) pending.newerIntent = true;
+      };
+      for (const type of ["pointerdown", "keydown", "wheel", "touchmove", "focusin"]) document.addEventListener(type, noteIntent, { capture: true, passive: true, signal: events.signal });
+      try { await loadMusic({ append: true, skipRoute: true, keepCurrent: true }); }
+      catch (error) {
+        if (!more.isConnected || !isListOwnerCurrent(record.owner) || state.music.loading || state.music.loadingMore) return;
+        const message = document.createElement("p");
+        message.className = "music-list-append-error";
+        message.setAttribute("role", "alert");
+        message.textContent = error?.message || "加载更多失败，请重试";
+        more.before(message);
+        more.textContent = "重试加载更多";
+        if (document.activeElement === more && !pending.newerIntent) more.scrollIntoView({ block: "nearest", behavior: "instant" });
+      } finally { events.abort(); if (pendingListAppend === pending) pendingListAppend = null; }
+    });
     return more;
   }
 
   function appendLibraryTrackPage(tracks, startIndex) {
     const table = els.workGrid?.querySelector?.(".music-track-panel .music-track-table");
     if (!table) return false;
+    const focus = captureMusicInputFocus();
     table.querySelector(".music-load-more")?.remove();
     const fragment = document.createDocumentFragment();
-    tracks.forEach((track, index) => fragment.append(h.trackRow(track, startIndex + index)));
+    tracks.forEach((track, index) => { const row = h.trackRow(track, startIndex + index); listResultRecords.set(row, track); fragment.append(row); });
     const more = renderTrackLoadMore(startIndex + tracks.length);
     if (more) fragment.append(more);
     table.append(fragment);
+    restoreMusicInputFocus(table.closest(".music-track-panel"), focus?.more ? focus : null);
     return true;
   }
 
   function restoreMusicPanelScroll(scrollTop) {
+    const panel = els.workGrid?.querySelector(".music-track-panel"), owner = currentListOwner();
+    if (appendFocusRestore?.panel === panel && appendFocusRestore.data === state.music.data) return;
+    const events = new AbortController();
+    let newerIntent = false;
+    const noteIntent = () => { newerIntent = true; };
+    for (const type of ["pointerdown", "keydown", "wheel", "touchmove", "focusin"]) document.addEventListener(type, noteIntent, { capture: true, passive: true, signal: events.signal });
+    // Layout/content anchoring also emits scroll after a panel refresh. Actual
+    // keyboard, wheel, touch and scrollbar-pointer intent is captured above.
     window.requestAnimationFrame(() => {
-      const panel = document.querySelector(".music-track-panel");
-      if (panel) panel.scrollTop = Math.max(0, Number(scrollTop || 0));
+      events.abort();
+      if (!newerIntent && panel?.isConnected && panel === els.workGrid?.querySelector(".music-track-panel") && isListOwnerCurrent(owner)
+          && !state.music.loading && !state.music.loadingMore) panel.scrollTop = Math.max(0, Number(scrollTop || 0));
     });
   }
 
   function setMusicListLoadingState(loading, { append = false } = {}) {
+    syncFavoriteFeedback();
     const panel = els.workGrid?.querySelector?.(".music-track-panel");
     if (!panel) return;
     panel.classList.toggle("list-loading", loading);
@@ -1044,13 +1401,7 @@ export function createMusicPage(deps) {
       badge?.remove();
     }
     const more = panel.querySelector(".music-load-more");
-    if (more && loading && append) {
-      more.disabled = true;
-      more.textContent = "正在加载…";
-    } else if (more && !loading && more.dataset.musicIdleLabel !== undefined) {
-      more.disabled = false;
-      more.textContent = more.dataset.musicIdleLabel;
-    }
+    if (more && more.dataset.musicIdleLabel !== undefined) setListMoreBusy(more, loading && append);
   }
 
   function setTrackOpeningState(trackId = "") {
@@ -1076,6 +1427,36 @@ export function createMusicPage(deps) {
   }
 
   // ================= 搜索联想 =================
+  function bindMusicSearchInput(input, acceptInput) {
+    let composing = false;
+    const current = () => input.isConnected && state.activeView === "music"
+      && state.music.mode === input.dataset.musicSearch;
+    const compositionKey = (event) => composing || event.isComposing || event.keyCode === 229;
+    input.addEventListener("compositionstart", () => {
+      if (!current()) return;
+      composing = true;
+      // Cancel both debounce work and reads that could replace the input while
+      // the IME still owns its uncommitted text and candidate selection.
+      resetReader();
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      if (current()) acceptInput();
+    });
+    input.addEventListener("input", (event) => {
+      if (!current() || composing || event.isComposing) return;
+      acceptInput();
+    });
+    input.addEventListener("keydown", (event) => {
+      // Keep candidate keys away from page-level Escape/navigation shortcuts;
+      // their native IME behavior must remain available.
+      if (compositionKey(event)) event.stopPropagation();
+    });
+    // Some browsers end composition before delivering the confirmation key.
+    // keyCode 229 still marks that key as belonging to the input method.
+    return (event) => !current() || compositionKey(event);
+  }
+
   function clearMusicSuggestions() {
     window.clearTimeout(suggestTimer);
     suggestController?.abort();
@@ -1179,10 +1560,11 @@ export function createMusicPage(deps) {
         count += 1;
       }
     };
-    const suggestButton = (main, sub, action) => {
+    const suggestButton = (key, main, sub, action) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "music-search-suggest-item";
+      if (key) button.dataset.musicSuggestionKey = key;
       const strong = document.createElement("strong");
       strong.textContent = main;
       const small = document.createElement("small");
@@ -1190,16 +1572,18 @@ export function createMusicPage(deps) {
       button.append(strong, small);
       button.addEventListener("mousedown", (event) => event.preventDefault());
       button.addEventListener("click", () => {
+        if (!box.isConnected || suggestionBox !== box || state.activeView !== "music" || state.music.mode !== "library"
+            || state.music.query !== query || state.music.suggestions !== suggestions) return;
         clearMusicSuggestions();
         action();
       });
       return button;
     };
     addGroup("歌曲", (suggestions.tracks || []).slice(0, 5), (track) =>
-      suggestButton(track.title || "未知歌曲", `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`, () => actions.openTrackFromList(track, [track], { autoplay: true }).catch(showError))
+      suggestButton(track.id ? `track:${track.id}` : "", track.title || "未知歌曲", `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`, () => actions.openTrackFromList(track, [track], { autoplay: true }).catch(showError))
     );
     addGroup("歌手", (suggestions.artists || []).slice(0, 4), (artist) =>
-      suggestButton(artist.name || "未知歌手", `${formatNumber(artist.trackCount || 0)} 首歌曲`, () => {
+      suggestButton(artist.id ? `artist:${artist.id}` : "", artist.name || "未知歌手", `${formatNumber(artist.trackCount || 0)} 首歌曲`, () => {
         state.music.mode = "library";
         state.music.query = artist.name || "";
         state.music.favorite = false;
@@ -1212,7 +1596,7 @@ export function createMusicPage(deps) {
       })
     );
     addGroup("专辑", (suggestions.albums || []).slice(0, 4), (album) =>
-      suggestButton(album.title || "未知专辑", `${album.artistName || "未知歌手"} · ${formatNumber(album.trackCount || 0)} 首`, () => {
+      suggestButton(album.id ? `album:${album.id}` : "", album.title || "未知专辑", `${album.artistName || "未知歌手"} · ${formatNumber(album.trackCount || 0)} 首`, () => {
         state.music.mode = "library";
         state.music.query = album.title || "";
         state.music.favorite = false;
@@ -1234,7 +1618,7 @@ export function createMusicPage(deps) {
   }
 
   // ================= 当前播放 / 队列 =================
-  function renderNowPanel() {
+  function renderNowPanel({ includeQueue = true } = {}) {
     const panel = document.createElement("aside");
     panel.className = "music-now-panel";
     const track = state.music.current || state.music.queue[0] || null;
@@ -1290,14 +1674,17 @@ export function createMusicPage(deps) {
     }
     info.append(title, meta, rating, actionsEl);
     summary.append(h.renderCover(track, "large"), info);
-    panel.append(summary, renderQueuePanel());
+    panel.append(summary);
+    if (includeQueue) panel.append(renderQueuePanel());
     return panel;
   }
 
   function renderQueuePanel() {
     const panel = document.createElement("div");
     panel.className = "music-queue";
-    const queue = state.music.queue || [];
+    const model = queueSearchModel();
+    const view = { panel, model, composing: false, candidateSubmit: false };
+    queueViews.set(panel, view);
     const head = document.createElement("div");
     head.className = "music-queue-head";
     const titleWrap = document.createElement("span");
@@ -1305,17 +1692,18 @@ export function createMusicPage(deps) {
     const title = document.createElement("strong");
     title.textContent = "播放队列";
     const count = document.createElement("small");
-    count.textContent = queueCountText(queue);
+    view.count = count;
     titleWrap.append(title, count);
     const actionsEl = document.createElement("span");
     actionsEl.className = "music-queue-head-actions";
-    if (queue.length > DESKTOP_QUEUE_PREVIEW_LIMIT) {
+    {
       const toggle = document.createElement("button");
+      view.toggle = toggle;
       toggle.type = "button";
       toggle.className = "music-inline-button";
-      toggle.textContent = state.music.queueExpanded ? "精简" : "全部";
-      toggle.title = state.music.queueExpanded ? "只显示队列摘要" : "显示完整队列";
+      toggle.dataset.musicQueueAction = "expand";
       toggle.addEventListener("click", () => {
+        if (!queueViewCurrent(view)) return;
         const expanding = !state.music.queueExpanded;
         state.music.queueExpanded = expanding;
         if (expanding) state.music.queueVisibleLimit = DESKTOP_QUEUE_PAGE_SIZE;
@@ -1324,47 +1712,217 @@ export function createMusicPage(deps) {
       actionsEl.append(toggle);
     }
     const save = document.createElement("button");
+    view.save = save;
     save.type = "button";
     save.className = "music-inline-button";
+    save.dataset.musicQueueAction = "save";
     save.textContent = "存为歌单";
-    save.disabled = !queue.length;
-    save.title = queue.length ? "把当前播放队列保存为新歌单" : "队列为空";
-    save.addEventListener("click", () => actions.saveQueueAsPlaylist().catch(showError));
+    save.addEventListener("click", () => { if (queueViewCurrent(view)) actions.saveQueueAsPlaylist().catch(showError); });
     actionsEl.append(save);
     const clear = document.createElement("button");
+    view.clear = clear;
     clear.type = "button";
     clear.className = "music-inline-button";
-    clear.textContent = state.music.current ? "清空其他" : "清空";
-    const removable = queueRemovableCountLocal();
-    clear.disabled = removable <= 0;
-    clear.title = removable > 0 ? `清空 ${formatNumber(removable)} 首待播歌曲` : "没有可清空的待播歌曲";
-    clear.addEventListener("click", () => actions.clearQueueAfterCurrent());
+    clear.dataset.musicQueueAction = "clear";
+    clear.addEventListener("click", () => { if (queueViewCurrent(view)) actions.clearQueueAfterCurrent(); });
     actionsEl.append(clear);
     head.append(titleWrap, actionsEl);
     const list = document.createElement("div");
-    list.className = `music-queue-list${state.music.queueExpanded ? " expanded" : ""}`;
-    if (!queue.length) list.append(h.emptyQueueRow("队列为空"));
-    else appendQueueRows(list, queue);
-    panel.append(head, list);
+    view.list = list;
+    queueViews.set(list, view);
+    const form = document.createElement("form");
+    view.form = form;
+    form.className = "music-queue-search";
+    form.setAttribute("role", "search");
+    const label = document.createElement("label");
+    label.textContent = "查找队列";
+    const input = document.createElement("input");
+    view.input = input;
+    input.type = "search";
+    input.setAttribute("aria-label", "查找播放队列");
+    input.dataset.musicQueueAction = "search";
+    input.placeholder = "歌名、歌手或专辑";
+    input.autocomplete = "off";
+    input.value = model?.raw || "";
+    input.disabled = !model;
+    label.append(input);
+    const clearSearch = document.createElement("button");
+    clearSearch.type = "button";
+    clearSearch.textContent = "清除";
+    clearSearch.setAttribute("aria-label", "清除队列查找");
+    const result = document.createElement("p");
+    view.result = result;
+    result.className = "music-queue-search-count";
+    result.setAttribute("role", "status");
+    const note = document.createElement("p");
+    note.className = "music-queue-search-note";
+    note.textContent = "仅筛选显示；移动按完整队列顺序，保存歌单和清空作用于整个队列。";
+    form.append(label, clearSearch, result, note);
+    const commit = () => {
+      if (!queueViewCurrent(view)) return;
+      model.raw = input.value;
+      if (view.composing) return;
+      const query = normalizeQueueQuery(input.value);
+      if (query === model.query) return;
+      model.query = query; model.limit = DESKTOP_QUEUE_PAGE_SIZE;
+      refreshQueueRows(view); list.scrollTop = 0;
+    };
+    const focusFirst = () => {
+      if (!queueViewCurrent(view) || view.composing) return;
+      const target = list.querySelector(".music-queue-play");
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    };
+    input.addEventListener("input", commit);
+    input.addEventListener("search", commit);
+    input.addEventListener("compositionstart", () => { if (queueViewCurrent(view)) { view.composing = true; view.candidateSubmit = false; } });
+    input.addEventListener("compositionend", () => { view.composing = false; commit(); });
+    input.addEventListener("keydown", event => {
+      if (!queueViewCurrent(view) || event.defaultPrevented) return;
+      if (view.composing || event.isComposing || event.keyCode === 229) {
+        if (event.key === "Enter" || event.keyCode === 229) view.candidateSubmit = true;
+        event.stopPropagation(); return;
+      }
+      view.candidateSubmit = false;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === "Enter" || event.key === "ArrowDown") { event.preventDefault(); commit(); focusFirst(); }
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      if (!queueViewCurrent(view) || view.composing) return;
+      if (view.candidateSubmit) { view.candidateSubmit = false; return; }
+      commit(); focusFirst();
+    });
+    clearSearch.addEventListener("click", () => {
+      if (!queueViewCurrent(view)) return;
+      view.composing = false; view.candidateSubmit = false;
+      input.value = ""; commit(); input.focus({ preventScroll: true });
+    });
+    panel.append(head, form, list);
+    refreshQueueRows(view);
     return panel;
   }
 
-  function refreshQueueSurface() {
+  function normalizeQueueQuery(value) { return String(value || "").normalize("NFKC").toLowerCase().trim(); }
+
+  function queueSearchModel() {
+    let account;
+    try { account = captureWebAccount(); } catch { queueSearchState = null; return null; }
+    if (!queueSearchState || queueSearchState.owner !== account.owner || queueSearchState.revision !== account.revision) {
+      queueSearchState = { owner: account.owner, revision: account.revision, raw: "", query: "", limit: DESKTOP_QUEUE_PAGE_SIZE, text: new WeakMap() };
+    }
+    return queueSearchState;
+  }
+
+  function queueViewCurrent(view) {
+    if (!view?.model || !view.panel.isConnected || state.activeView !== "music" || state.music.trackPageOpen
+        || els.workGrid?.querySelector(".music-queue") !== view.panel) return false;
+    return queueSearchModel() === view.model;
+  }
+
+  function queueMatches(view) {
+    const query = view.model?.query || "";
+    return (state.music.queue || []).flatMap((track, index) => {
+      if (!query) return [{ track, index }];
+      const raw = JSON.stringify([track.title, track.artist, track.album]);
+      let cached = view.model.text.get(track);
+      if (!cached || cached.raw !== raw) { cached = { raw, value: normalizeQueueQuery([track.title, track.artist, track.album].join(" ")) }; view.model.text.set(track, cached); }
+      return cached.value.includes(query) ? [{ track, index }] : [];
+    });
+  }
+
+  function createQueueRow(track, index, list) {
+    const view = queueViews.get(list);
+    return h.queueRow(track, index, () => queueViewCurrent(view) && (state.music.queue || []).some(item => item.id === track.id));
+  }
+
+  function updateQueueHead(view, matches = (state.music.queue || []).length) {
+    const queue = state.music.queue || [], query = view.model?.query;
+    view.count.textContent = query ? `${formatNumber(queue.length)} 首` : queueCountText(queue);
+    view.toggle.hidden = queue.length <= DESKTOP_QUEUE_PREVIEW_LIMIT || Boolean(query);
+    view.toggle.textContent = state.music.queueExpanded ? "精简" : "全部";
+    view.toggle.title = state.music.queueExpanded ? "只显示队列摘要" : "显示完整队列";
+    view.save.disabled = !queue.length;
+    view.save.title = queue.length ? `保存完整队列的 ${formatNumber(queue.length)} 首歌曲` : "队列为空";
+    const removable = queueRemovableCountLocal();
+    view.clear.textContent = state.music.current ? "清空其他" : "清空";
+    view.clear.disabled = removable <= 0;
+    view.clear.title = removable > 0 ? `清空完整队列中 ${formatNumber(removable)} 首待播歌曲` : "没有可清空的待播歌曲";
+    view.result.textContent = `匹配 ${formatNumber(matches)} / 共 ${formatNumber(queue.length)} 首${query ? ` · 已显示 ${formatNumber(Math.min(matches, view.model.limit))}` : ""}`;
+  }
+
+  function refreshQueueRows(view) {
+    const queue = state.music.queue || [], list = view.list;
+    unregisterMusicTrackElements(list);
+    list.replaceChildren();
+    list.className = `music-queue-list${state.music.queueExpanded || view.model?.query ? " expanded" : ""}`;
+    if (view.model?.query) {
+      const matches = queueMatches(view), limit = Math.min(matches.length, view.model.limit);
+      for (const { track, index } of matches.slice(0, limit)) list.append(createQueueRow(track, index, list));
+      if (!matches.length) list.append(h.emptyQueueRow("没有匹配的歌曲"));
+      appendQueueSearchTail(view, matches, limit);
+      updateQueueHead(view, matches.length);
+    } else {
+      if (!queue.length) list.append(h.emptyQueueRow("队列为空")); else appendQueueRows(list, queue);
+      updateQueueHead(view);
+    }
+  }
+
+  function appendQueueSearchTail(view, matches, limit) {
+    if (limit >= matches.length) return;
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "music-queue-load-more"; more.dataset.musicQueueAction = "search-more";
+    more.textContent = `再显示 ${formatNumber(Math.min(DESKTOP_QUEUE_PAGE_SIZE, matches.length - limit))} 条匹配`;
+    more.addEventListener("click", () => {
+      if (!queueViewCurrent(view) || !more.isConnected) return;
+      const context = captureQueueContext(view.panel), focused = document.activeElement === more;
+      const current = queueMatches(view), rows = [...view.list.querySelectorAll(".music-queue-row")];
+      const oldIds = new Set(rows.map(row => row.dataset.musicTrackId));
+      const prefixCurrent = rows.length === limit && rows.every((row, index) => row.dataset.musicTrackId === current[index]?.track.id && matches[index]?.index === current[index]?.index);
+      view.model.limit = limit + DESKTOP_QUEUE_PAGE_SIZE;
+      if (prefixCurrent) {
+        const nextLimit = Math.min(current.length, view.model.limit), fragment = document.createDocumentFragment();
+        more.remove();
+        for (const { track, index } of current.slice(limit, nextLimit)) fragment.append(createQueueRow(track, index, view.list));
+        view.list.append(fragment);
+        appendQueueSearchTail(view, current, nextLimit);
+        updateQueueHead(view, current.length);
+      } else refreshQueueRows(view);
+      const next = [...view.list.querySelectorAll(".music-queue-row")].find(row => !oldIds.has(row.dataset.musicTrackId));
+      if (focused && next) context.focus = { tracks: [next.dataset.musicTrackId], action: "play" };
+      restoreQueueContext(view.panel, context);
+      if (focused) document.activeElement?.scrollIntoView({ block: "nearest", behavior: "instant" });
+    });
+    view.list.append(more);
+  }
+
+  function refreshQueueSurface({ queueMove = null } = {}) {
     const nowPanel = els.workGrid?.querySelector?.(".music-now-panel");
     if (!nowPanel || state.music.trackPageOpen) {
       renderView();
       return;
     }
     const expectedTrackId = state.music.current?.id || state.music.queue[0]?.id || "";
+    const queuePanel = nowPanel.querySelector(".music-queue");
+    const context = captureQueueContext(queuePanel);
+    if (queueViewCurrent(queueViews.get(queuePanel))) {
+      if (nowPanel.dataset.musicTrackId !== expectedTrackId) refreshNowSummaryKeepingQueue(nowPanel);
+      const view = queueViews.get(queuePanel);
+      if (!view.model.query && moveCompleteQueueRow(queuePanel, queueMove)) updateQueueHead(view);
+      else refreshQueueRows(view);
+      restoreQueueContext(queuePanel, context);
+      pruneDetachedPlaybackControls(); updatePlaybackUi();
+      return;
+    }
     if (nowPanel.dataset.musicTrackId !== expectedTrackId) {
       unregisterMusicTrackElements(nowPanel);
       const nextPanel = renderNowPanel();
       nowPanel.replaceWith(nextPanel);
+      restoreQueueContext(nextPanel.querySelector(".music-queue"), context);
       playbackButtonEls = playbackButtonEls.filter(({ button }) => button?.isConnected);
       updatePlaybackUi();
       return;
     }
-    const queuePanel = nowPanel.querySelector(".music-queue");
     if (!queuePanel) {
       unregisterMusicTrackElements(nowPanel);
       const nextPanel = renderNowPanel();
@@ -1373,8 +1931,89 @@ export function createMusicPage(deps) {
       updatePlaybackUi();
       return;
     }
+    if (moveCompleteQueueRow(queuePanel, queueMove)) {
+      restoreQueueContext(queuePanel, context);
+      return;
+    }
     unregisterMusicTrackElements(queuePanel);
-    queuePanel.replaceWith(renderQueuePanel());
+    const nextQueuePanel = renderQueuePanel();
+    queuePanel.replaceWith(nextQueuePanel);
+    restoreQueueContext(nextQueuePanel, context);
+  }
+
+  function moveCompleteQueueRow(panel, move) {
+    const queue = state.music.queue || [];
+    if (!move || !state.music.queueExpanded || queue.length > Math.max(DESKTOP_QUEUE_PAGE_SIZE, Number(state.music.queueVisibleLimit || 0))) return false;
+    const { trackId, fromIndex, toIndex } = move;
+    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || Math.abs(toIndex - fromIndex) !== 1) return false;
+    const list = panel.querySelector(".music-queue-list");
+    const row = list?.children[fromIndex], neighbor = list?.children[toIndex];
+    if (list?.children.length !== queue.length || !row?.classList.contains("music-queue-row") || !neighbor?.classList.contains("music-queue-row")
+        || row.dataset.musicTrackId !== trackId || queue[toIndex]?.id !== trackId || queue[fromIndex]?.id !== neighbor.dataset.musicTrackId) return false;
+    // Only an explicitly described adjacent move in the fully mounted queue
+    // can reuse rows. Membership, pagination and rollback retain full refresh.
+    list.insertBefore(row, list.children[toIndex + (toIndex > fromIndex ? 1 : 0)] || null);
+    for (const index of [fromIndex, toIndex]) {
+      const currentRow = list.children[index];
+      currentRow.querySelector('[aria-label="上移"]').disabled = index === 0;
+      currentRow.querySelector('[aria-label="下移"]').disabled = index === queue.length - 1;
+    }
+    return true;
+  }
+
+  function refreshNowSummaryKeepingQueue(nowPanel) {
+    const queue = nowPanel.querySelector(".music-queue");
+    const next = renderNowPanel({ includeQueue: false });
+    nowPanel.dataset.musicTrackId = next.dataset.musicTrackId;
+    for (const child of [...nowPanel.children]) if (child !== queue) { unregisterMusicTrackElements(child); child.remove(); }
+    for (const child of [...next.children]) nowPanel.insertBefore(child, queue);
+  }
+
+  function captureQueueContext(panel) {
+    const list = panel?.querySelector(".music-queue-list");
+    const focused = document.activeElement;
+    const context = { scrollTop: list?.scrollTop || 0, focus: null };
+    if (!focused || !panel?.contains(focused)) return context;
+    const row = focused.closest(".music-queue-row");
+    if (row) {
+      const rows = [...list.querySelectorAll(".music-queue-row")];
+      const index = rows.indexOf(row);
+      context.focus = {
+        tracks: [row, rows[index + 1], rows[index - 1]].filter(Boolean).map(item => item.dataset.musicTrackId),
+        action: focused.classList.contains("music-queue-play") ? "play" : focused.getAttribute("aria-label")
+      };
+    } else if (focused.dataset.musicQueueAction) {
+      context.focus = { control: focused.dataset.musicQueueAction };
+    }
+    return context;
+  }
+
+  function restoreQueueContext(panel, context) {
+    const list = panel?.querySelector(".music-queue-list");
+    if (!list || !context) return;
+    list.scrollTop = context.scrollTop;
+    if (!context.focus) return;
+    // Removal normally leaves focus on body. Respect any new focus chosen by
+    // another control during teardown rather than redirecting it back here.
+    const active = document.activeElement;
+    const available = control => !control.disabled && !control.closest("[hidden], [inert]") && control.getClientRects().length > 0;
+    if (active?.isConnected && active !== document.body && active !== document.documentElement
+        && (!panel.contains(active) || available(active))) return;
+    let target = null;
+    const focus = context.focus;
+    if (focus.control) target = [...panel.querySelectorAll("[data-music-queue-action]")].find(button => button.dataset.musicQueueAction === focus.control && available(button));
+    const rows = [...list.querySelectorAll(".music-queue-row")];
+    for (const trackId of focus.tracks || []) {
+      const row = rows.find(item => item.dataset.musicTrackId === trackId);
+      if (!row) continue;
+      const actions = [...row.querySelectorAll(".music-queue-action")].filter(button => !button.disabled);
+      target = focus.action === "play" ? row.querySelector(".music-queue-play")
+        : actions.find(button => button.getAttribute("aria-label") === focus.action) || actions[0] || row.querySelector(".music-queue-play");
+      if (target) break;
+    }
+    target ||= list.querySelector(".music-queue-row.active .music-queue-play") || list.querySelector(".music-queue-play")
+      || [...panel.querySelectorAll("[data-music-queue-action]")].find(available);
+    target?.focus({ preventScroll: true });
   }
 
   function refreshCurrentTrackSurfaces(previousTrackId = "") {
@@ -1382,14 +2021,27 @@ export function createMusicPage(deps) {
     const nowPanel = shell?.querySelector?.(".music-now-panel");
     const playerBar = shell?.querySelector?.(".music-player-bar");
     if (!shell || !nowPanel || !playerBar || state.music.trackPageOpen) return false;
+    const context = captureQueueContext(nowPanel.querySelector(".music-queue"));
     updateBrowseTrackSelection(previousTrackId, state.music.current?.id || "");
+    const queuePanel = nowPanel.querySelector(".music-queue"), view = queueViews.get(queuePanel);
+    if (queueViewCurrent(view)) {
+      refreshNowSummaryKeepingQueue(nowPanel);
+      refreshQueueRows(view);
+      restoreQueueContext(queuePanel, context);
+      playerBar.replaceWith(renderPlayerBar());
+      pruneDetachedPlaybackControls(); updatePlaybackUi();
+      syncFavoriteFeedback();
+      return true;
+    }
     unregisterMusicTrackElements(nowPanel);
     const nextNowPanel = renderNowPanel();
     const nextPlayerBar = renderPlayerBar();
     nowPanel.replaceWith(nextNowPanel);
+    restoreQueueContext(nextNowPanel.querySelector(".music-queue"), context);
     playerBar.replaceWith(nextPlayerBar);
     pruneDetachedPlaybackControls();
     updatePlaybackUi();
+    syncFavoriteFeedback();
     return true;
   }
 
@@ -1428,19 +2080,19 @@ export function createMusicPage(deps) {
       return;
     }
     if (queue.length <= DESKTOP_QUEUE_PREVIEW_LIMIT) {
-      queue.forEach((track, index) => list.append(h.queueRow(track, index)));
+      queue.forEach((track, index) => list.append(createQueueRow(track, index, list)));
       return;
     }
     const shownIndexes = new Set();
     queue.slice(0, DESKTOP_QUEUE_PREVIEW_LIMIT).forEach((track, index) => {
       shownIndexes.add(index);
-      list.append(h.queueRow(track, index));
+      list.append(createQueueRow(track, index, list));
     });
     const currentIndex = queue.findIndex((track) => track.id === state.music.current?.id);
     if (currentIndex >= DESKTOP_QUEUE_PREVIEW_LIMIT) {
       shownIndexes.add(currentIndex);
       list.append(h.emptyQueueRow(`当前播放在第 ${formatNumber(currentIndex + 1)} 首`));
-      list.append(h.queueRow(queue[currentIndex], currentIndex));
+      list.append(createQueueRow(queue[currentIndex], currentIndex, list));
     }
     const hiddenCount = queue.length - shownIndexes.size;
     if (hiddenCount > 0) list.append(h.emptyQueueRow(`还有 ${formatNumber(hiddenCount)} 首未显示，点“全部”查看`));
@@ -1448,7 +2100,7 @@ export function createMusicPage(deps) {
 
   function appendExpandedQueueRows(list, queue) {
     const limit = Math.min(queue.length, Math.max(DESKTOP_QUEUE_PAGE_SIZE, Number(state.music.queueVisibleLimit || 0)));
-    queue.slice(0, limit).forEach((track, index) => list.append(h.queueRow(track, index)));
+    queue.slice(0, limit).forEach((track, index) => list.append(createQueueRow(track, index, list)));
     appendExpandedQueueTail(list, queue, limit);
   }
 
@@ -1457,7 +2109,7 @@ export function createMusicPage(deps) {
     if (currentIndex >= limit) {
       const marker = h.emptyQueueRow(`当前播放在第 ${formatNumber(currentIndex + 1)} 首`);
       marker.classList.add("music-queue-current-context");
-      const currentRow = h.queueRow(queue[currentIndex], currentIndex);
+      const currentRow = createQueueRow(queue[currentIndex], currentIndex, list);
       currentRow.dataset.queueContextCurrent = "true";
       list.append(marker, currentRow);
     }
@@ -1465,12 +2117,17 @@ export function createMusicPage(deps) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "music-queue-load-more";
+    more.dataset.musicQueueAction = "more";
     more.textContent = `再显示 ${formatNumber(Math.min(DESKTOP_QUEUE_PAGE_SIZE, queue.length - limit))} 首`;
     more.addEventListener("click", () => appendNextQueuePage(list, queue, more));
     list.append(more);
   }
 
   function appendNextQueuePage(list, queue, moreButton) {
+    if (!queueViewCurrent(queueViews.get(list)) || !moreButton.isConnected) return;
+    const panel = list.closest(".music-queue");
+    const context = captureQueueContext(panel);
+    const focusedMore = document.activeElement === moreButton;
     const oldLimit = Math.min(queue.length, Math.max(DESKTOP_QUEUE_PAGE_SIZE, Number(state.music.queueVisibleLimit || 0)));
     const nextLimit = Math.min(queue.length, oldLimit + DESKTOP_QUEUE_PAGE_SIZE);
     state.music.queueVisibleLimit = nextLimit;
@@ -1478,11 +2135,13 @@ export function createMusicPage(deps) {
     list.querySelector('[data-queue-context-current="true"]')?.remove();
     moreButton?.remove();
     const fragment = document.createDocumentFragment();
-    for (let index = oldLimit; index < nextLimit; index += 1) fragment.append(h.queueRow(queue[index], index));
+    for (let index = oldLimit; index < nextLimit; index += 1) fragment.append(createQueueRow(queue[index], index, list));
     list.append(fragment);
     appendExpandedQueueTail(list, queue, nextLimit);
     const count = list.closest(".music-queue")?.querySelector(".music-queue-title small");
     if (count) count.textContent = queueCountText(queue);
+    if (focusedMore && queue[oldLimit]) context.focus = { tracks: [queue[oldLimit].id], action: "play" };
+    restoreQueueContext(panel, context);
   }
 
   function queueCountText(queue) {
@@ -1561,6 +2220,13 @@ export function createMusicPage(deps) {
     options.append(h.iconControlButton("download", () => actions.downloadTrack(track), !track?.downloadUrl, "", "下载原文件"));
     options.append(renderSleepTimerControl(track));
     options.append(renderPlaybackSpeedControl(track));
+    options.append(renderVolumeControl());
+    bar.append(identity, center, options);
+    currentProgressEls = { current, progress, total };
+    return bar;
+  }
+
+  function renderVolumeControl() {
     const volumeWrap = document.createElement("label");
     volumeWrap.className = "music-volume-wrap";
     const volumeLabel = document.createElement("span");
@@ -1569,20 +2235,21 @@ export function createMusicPage(deps) {
     volume.type = "range";
     volume.min = "0";
     volume.max = "100";
-    volume.value = String(Math.round((state.music.volume ?? 0.82) * 100));
+    // The mounted control reflects the live player, including a quiet volume
+    // chosen before changing views when preference storage is unavailable.
+    state.music.volume = player.getAudio().volume;
+    volume.value = String(Math.round(state.music.volume * 100));
     volume.className = "music-volume";
     volume.setAttribute("aria-label", "音量");
     volume.addEventListener("input", () => {
+      if (!volume.isConnected || state.activeView !== "music") return;
       const value = Math.max(0, Math.min(1, Number(volume.value || 0) / 100));
       state.music.volume = value;
       player.setVolume(value);
       writeVolumePreferenceLocal(value);
     });
     volumeWrap.append(volumeLabel, volume);
-    options.append(volumeWrap);
-    bar.append(identity, center, options);
-    currentProgressEls = { current, progress, total };
-    return bar;
+    return volumeWrap;
   }
 
   function renderPlayerStage() {
@@ -1671,10 +2338,46 @@ export function createMusicPage(deps) {
     const title = document.createElement("h2");
     title.textContent = track.title || "未知歌曲";
     const artist = document.createElement("p");
-    artist.textContent = `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`;
+    artist.className = "music-stage-context";
+    const separator = document.createElement("span");
+    separator.textContent = "·";
+    separator.setAttribute("aria-hidden", "true");
+    artist.append(renderCurrentTrackContext(track, "artist"), separator, renderCurrentTrackContext(track, "album"));
     meta.append(title, artist, renderStageLyrics());
     panel.append(album, meta);
     return panel;
+  }
+
+  function renderCurrentTrackContext(track, kind) {
+    const idKey = kind === "artist" ? "artistId" : "albumId";
+    const label = track[kind] || (kind === "artist" ? "未知歌手" : "未知专辑");
+    const id = String(track[idKey] || "").trim();
+    let account;
+    try { account = captureWebAccount(); } catch { return document.createTextNode(label); }
+    if (!id) return document.createTextNode(label);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-current-context";
+    button.textContent = label;
+    button.setAttribute("aria-label", `浏览${kind === "artist" ? "歌手" : "专辑"}：${label}`);
+    button.addEventListener("click", () => {
+      if (!button.isConnected || state.activeView !== "music" || !state.music.trackPageOpen || state.music.openingTrackId
+          || state.music.current?.id !== track.id || String(state.music.current?.[idKey] || "").trim() !== id) return;
+      try {
+        const current = captureWebAccount();
+        if (current.owner !== account.owner || current.revision !== account.revision) return;
+      } catch { return; }
+      rememberTrackReturnHistory();
+      trackReturnContext = null;
+      state.music.trackPageOpen = false;
+      state.music.playerStageOpen = false;
+      state.music.libraryDrawerOpen = false;
+      actions.selectMusicMode("library", { artistId: kind === "artist" ? id : "all", albumId: kind === "album" ? id : "all", language: "all" });
+      pushRoute({ ...router.overrides(), musicTrackId: "" });
+      window.scrollTo({ top: 0, behavior: "instant" });
+      renderView();
+    });
+    return button;
   }
 
   function renderStageLyrics() {
@@ -1687,37 +2390,146 @@ export function createMusicPage(deps) {
     head.append(title);
     const lines = document.createElement("div");
     lines.className = "music-lyric-lines music-stage-lyric-lines";
-    const lyricLines = state.music.lyrics?.lines || [];
+    const lyrics = state.music.lyrics;
+    const timedLines = lyrics?.lines || [];
+    const timed = timedLines.length > 0;
+    const raw = String(lyrics?.raw || "");
+    const trackId = state.music.current?.id || "";
+    const source = timed ? timedLines : raw;
+    const lyricLines = timed ? timedLines : lyricFinderState?.trackId === trackId && lyricFinderState.source === source
+      ? lyricFinderState.lines : raw.trim() ? raw.trim().split(/\r\n?|\n/).map(text => ({ text })) : [];
     if (!lyricLines.length) {
+      lyricFinderState = null;
       const empty = document.createElement("p");
       empty.textContent = "暂无歌词";
       lines.append(empty);
     } else {
+      if (lyricFinderState?.trackId !== trackId || lyricFinderState.lines !== lyricLines) {
+        lyricFinderState = { trackId, source, lines: lyricLines, query: "", needle: "", matches: [], matchSet: new Set(), cursor: -1 };
+      }
+      const search = lyricFinderState;
+      const owner = { startIndex: 0, show: null, finder: null };
+      const isCurrent = () => lyricViewport === owner && wrap.isConnected && state.activeView === "music" && state.music.trackPageOpen
+        && state.music.current?.id === trackId && state.music.lyrics === lyrics
+        && (timed ? state.music.lyrics?.lines === lyricLines : state.music.lyrics?.raw === raw);
+      lyricViewport = owner;
       const follow = document.createElement("button");
       follow.type = "button";
       follow.className = `music-lyric-follow${state.music.lyricFollowPaused ? " visible" : ""}`;
       follow.textContent = "回到当前";
-      follow.addEventListener("click", resumeLyricFollow);
-      lyricFollowButtonEls.push(follow);
-      head.append(follow);
-      lyricLines.slice(0, 120).forEach((line, index) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.dataset.index = String(index);
-        button.dataset.timeMs = String(line.timeMs || 0);
-        button.textContent = line.text || "";
-        button.addEventListener("click", () => {
-          player.seekToLyricLine(line.timeMs || 0);
-          void actions.claimProgressOwner();
-        });
-        lyricLineEls.push(button);
-        lines.append(button);
+      follow.addEventListener("click", () => { if (isCurrent()) resumeLyricFollow(); });
+      if (timed) {
+        lyricFollowButtonEls.push(follow);
+        head.append(follow);
+      } else {
+        const description = document.createElement("small");
+        description.className = "music-lyric-plain-label";
+        description.textContent = "纯文本歌词 · 无时间轴";
+        head.append(description);
+      }
+      const label = document.createElement("small");
+      label.className = "music-lyric-window-label";
+      label.hidden = lyricLines.length <= 120;
+      const paragraphCount = Math.ceil(lyricLines.length / 120);
+      const navigation = document.createElement("div");
+      navigation.className = "music-lyric-window-controls";
+      const previous = document.createElement("button");
+      previous.type = "button";
+      previous.textContent = "上一段";
+      previous.setAttribute("aria-label", "上一段歌词");
+      const paragraph = document.createElement("select");
+      paragraph.setAttribute("aria-label", "歌词段落");
+      for (let index = 0; index < paragraphCount; index++) {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `第 ${index + 1} / ${paragraphCount} 段`;
+        paragraph.append(option);
+      }
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = "下一段";
+      next.setAttribute("aria-label", "下一段歌词");
+      navigation.append(previous, paragraph, next, label);
+      const browseParagraph = target => {
+        if (!isCurrent()) return;
+        const page = Number(target);
+        if (!Number.isInteger(page) || page < 0 || page >= paragraphCount) return;
+        const focused = document.activeElement;
+        pauseLyricFollow(follow);
+        owner.show(page * 120);
+        centerLyricLine(lyricLineEls[0], true);
+        if (isCurrent() && (focused === previous || focused === next) && focused.disabled
+            && (document.activeElement === focused || document.activeElement === document.body)) {
+          const fallback = !previous.disabled ? previous : !next.disabled ? next : paragraph;
+          fallback.focus({ preventScroll: true });
+        }
+      };
+      previous.addEventListener("click", () => browseParagraph(Math.floor(owner.startIndex / 120) - 1));
+      next.addEventListener("click", () => browseParagraph(Math.floor(owner.startIndex / 120) + 1));
+      paragraph.addEventListener("change", () => { if (paragraph.value !== "") browseParagraph(paragraph.value); });
+      paragraph.addEventListener("keydown", event => { if (isCurrent()) event.stopPropagation(); });
+      const paintMatches = () => lyricLineEls.forEach(button => owner.finder?.decorate(button, Number(button.dataset.index)));
+      owner.show = index => {
+        if (lyricLineEls.length && index >= owner.startIndex && index < owner.startIndex + lyricLineEls.length) return;
+        owner.startIndex = Math.floor(Math.max(0, Math.min(index, lyricLines.length - 1)) / 120) * 120;
+        const fragment = document.createDocumentFragment();
+        lyricLineEls = [];
+        currentLyricIndex = timed ? findLyricIndex(lyricLines, Math.round((player.getAudio().currentTime || 0) * 1000) + 180) : -1;
+        activeLyricElement = null;
+        for (let index = owner.startIndex; index < Math.min(lyricLines.length, owner.startIndex + 120); index++) {
+          const button = timed ? createLyricLineButton(lyricLines[index], index, isCurrent) : createPlainLyricLine(lyricLines[index], index, isCurrent);
+          if (index === currentLyricIndex) { button.classList.add("active"); activeLyricElement = button; }
+          lyricLineEls.push(button); fragment.append(button);
+        }
+        lines.replaceChildren(fragment);
+        paragraph.value = String(Math.floor(owner.startIndex / 120));
+        previous.disabled = owner.startIndex === 0;
+        next.disabled = owner.startIndex + lyricLineEls.length >= lyricLines.length;
+        label.textContent = `第 ${owner.startIndex + 1}–${owner.startIndex + lyricLineEls.length} 行 · 共 ${lyricLines.length} 行`;
+        paintMatches();
+      };
+      owner.finder = createLyricFinder({ state: search, lines: lyricLines, isCurrent, canSeek: timed, onChange: paintMatches,
+        onLocate(index) {
+          pauseLyricFollow(follow);
+          owner.show(index); paintMatches();
+          centerLyricLine(lyricLineEls[index - owner.startIndex], true);
+        }
       });
-      lines.addEventListener("wheel", () => pauseLyricFollow(follow), { passive: true });
-      lines.addEventListener("pointerdown", () => pauseLyricFollow(follow), { passive: true });
+      owner.show(owner.finder.selectedIndex() >= 0 ? owner.finder.selectedIndex() : timed ? findLyricIndex(lyricLines, Math.round((player.getAudio().currentTime || 0) * 1000) + 180) : 0);
+      wrap.append(head, owner.finder.element, ...(paragraphCount > 1 ? [navigation] : []), lines);
+      const pauseFollow = () => { if (isCurrent()) pauseLyricFollow(follow); };
+      navigation.addEventListener("focusin", pauseFollow);
+      lines.addEventListener("wheel", pauseFollow, { passive: true });
+      lines.addEventListener("pointerdown", pauseFollow, { passive: true });
+      lines.addEventListener("focusin", pauseFollow);
+      return wrap;
     }
     wrap.append(head, lines);
     return wrap;
+  }
+
+  function createLyricLineButton(line, index, isCurrent) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.index = String(index);
+    button.dataset.timeMs = String(line.timeMs || 0);
+    button.textContent = line.text || "";
+    button.addEventListener("click", () => {
+      if (!isCurrent()) return;
+      player.seekToLyricLine(line.timeMs || 0);
+      void actions.claimProgressOwner();
+    });
+    return button;
+  }
+
+  function createPlainLyricLine(line, index, isCurrent) {
+    const text = document.createElement("p");
+    text.className = "music-lyric-plain-line";
+    text.tabIndex = 0;
+    text.dataset.index = String(index);
+    text.textContent = line.text || "";
+    text.addEventListener("keydown", event => { if (isCurrent() && event.key !== "Escape") event.stopPropagation(); });
+    return text;
   }
 
   function renderStageWave() {
@@ -1770,6 +2582,7 @@ export function createMusicPage(deps) {
     options.className = "music-stage-options";
     options.append(h.controlButton(track?.favorite ? "已收藏" : "收藏", () => actions.toggleFavorite(track.id).catch(showError), !track, `text${track?.favorite ? " active" : ""}`, track?.favorite ? "取消收藏" : "收藏"));
     options.append(renderPlaybackSpeedControl(track));
+    options.append(renderVolumeControl());
     footer.append(identity, controls, progressWrap, options);
     currentProgressEls = { current, progress, total };
     return footer;
@@ -1820,18 +2633,53 @@ export function createMusicPage(deps) {
 
   // ================= 歌单对话框 =================
   function renderPlaylistDialog() {
+    playlistDialogEvents?.abort();
+    playlistDialogEvents = null;
     if (!state.music.playlistDialogOpen) return document.createDocumentFragment();
     const trackId = state.music.playlistDialogTrackId || "";
     const track = trackId ? findKnownTrack(trackId) : null;
     const backdrop = document.createElement("div");
     backdrop.className = "music-playlist-dialog-backdrop";
     backdrop.addEventListener("click", (event) => {
-      if (event.target === backdrop) actions.closePlaylistDialog();
+      if (event.target === backdrop && ownsDialog()) actions.closePlaylistDialog();
     });
     const dialog = document.createElement("section");
     dialog.className = "music-playlist-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", trackId ? "加入歌单" : "新建歌单");
+    dialog.tabIndex = -1;
+    const ownsDialog = () => backdrop.isConnected && state.activeView === "music" && state.music.playlistDialogOpen
+      && state.music.playlistDialogTrackId === trackId && els.workGrid?.querySelector(".music-playlist-dialog-backdrop") === backdrop;
+    const controls = () => [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")]
+      .filter(control => control.getClientRects().length > 0 && control.tabIndex >= 0);
+    const focusInside = () => (controls().find(control => control.tagName === "INPUT") || controls()[0] || dialog).focus({ preventScroll: true });
+    const events = new AbortController();
+    playlistDialogEvents = events;
+    document.addEventListener("focusin", event => {
+      if (ownsDialog() && !dialog.contains(event.target)) focusInside();
+    }, { signal: events.signal });
+    let composing = false;
+    dialog.addEventListener("compositionstart", () => { if (ownsDialog()) composing = true; });
+    dialog.addEventListener("compositionend", () => { composing = false; });
+    dialog.addEventListener("keydown", event => {
+      if (!ownsDialog() || event.defaultPrevented) return;
+      if (composing || event.isComposing || event.keyCode === 229) { event.stopPropagation(); return; }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        actions.closePlaylistDialog();
+      } else if (event.key === "Tab") {
+        const available = controls();
+        const first = available[0], last = available[available.length - 1];
+        if (!first || (event.shiftKey ? document.activeElement === first : document.activeElement === last)
+            || document.activeElement === dialog) {
+          event.preventDefault();
+          (event.shiftKey ? last || dialog : first || dialog).focus({ preventScroll: true });
+        }
+      }
+    });
     const head = document.createElement("div");
     head.className = "music-playlist-dialog-head";
     const title = document.createElement("strong");
@@ -1841,7 +2689,7 @@ export function createMusicPage(deps) {
     close.className = "music-control-button";
     close.textContent = "×";
     close.setAttribute("aria-label", "关闭");
-    close.addEventListener("click", () => actions.closePlaylistDialog());
+    close.addEventListener("click", () => { if (ownsDialog()) actions.closePlaylistDialog(); });
     head.append(title, close);
     dialog.append(head);
     if (track) {
@@ -1864,12 +2712,13 @@ export function createMusicPage(deps) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "music-playlist-choice";
+        button.dataset.musicPlaylistId = playlist.id;
         const strong = document.createElement("strong");
         strong.textContent = playlist.name;
         const small = document.createElement("small");
         small.textContent = `${formatNumber(playlist.trackCount || 0)} 首`;
         button.append(strong, small);
-        button.addEventListener("click", () => actions.addTrackToPlaylistTarget(playlist.id).catch(showError));
+        button.addEventListener("click", () => { if (ownsDialog()) actions.addTrackToPlaylistTarget(playlist.id).catch(showError); });
         choices.append(button);
       }
       dialog.append(choices);
@@ -1882,7 +2731,7 @@ export function createMusicPage(deps) {
     input.placeholder = "歌单名称";
     input.autofocus = true;
     input.addEventListener("input", () => {
-      state.music.playlistDialogName = input.value;
+      if (ownsDialog()) state.music.playlistDialogName = input.value;
     });
     const submit = document.createElement("button");
     submit.type = "submit";
@@ -1891,6 +2740,7 @@ export function createMusicPage(deps) {
     form.append(input, submit);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (!ownsDialog() || composing) return;
       actions.createPlaylistFromDialog().catch(showError);
     });
     dialog.append(form);
@@ -1901,16 +2751,35 @@ export function createMusicPage(deps) {
   function refreshPlaylistDialog({ focus = true } = {}) {
     const shell = els.workGrid?.querySelector?.(".music-shell");
     if (!shell) return false;
-    shell.querySelector(".music-playlist-dialog-backdrop")?.remove();
+    const previous = shell.querySelector(".music-playlist-dialog-backdrop");
+    const previousFocus = capturePlaylistDialogFocus(previous);
+    playlistDialogEvents?.abort();
+    playlistDialogEvents = null;
+    previous?.remove();
     if (!state.music.playlistDialogOpen) return true;
-    shell.append(renderPlaylistDialog());
-    if (focus) {
-      window.requestAnimationFrame(() => {
-        const input = shell.querySelector(".music-playlist-dialog-form input");
-        if (input?.isConnected) input.focus({ preventScroll: true });
-      });
-    }
+    const next = renderPlaylistDialog();
+    shell.append(next);
+    if (focus) restorePlaylistDialogFocus(next, previousFocus);
     return true;
+  }
+
+  function capturePlaylistDialogFocus(previous = els.workGrid?.querySelector(".music-playlist-dialog-backdrop")) {
+    const focused = document.activeElement;
+    const previousControl = previous?.contains(focused) ? focused : null;
+    return { focused, previousControl, selection: previousControl?.matches("input") ? [previousControl.selectionStart, previousControl.selectionEnd] : null };
+  }
+
+  function restorePlaylistDialogFocus(next, { focused, previousControl, selection }) {
+    if (!next?.isConnected || state.activeView !== "music" || !state.music.playlistDialogOpen
+        || els.workGrid?.querySelector(".music-playlist-dialog-backdrop") !== next
+        || (document.activeElement !== document.body && document.activeElement !== focused)) return;
+    const input = next.querySelector(".music-playlist-dialog-form input");
+    const target = previousControl?.dataset.musicPlaylistId
+      ? [...next.querySelectorAll(".music-playlist-choice")].find(button => button.dataset.musicPlaylistId === previousControl.dataset.musicPlaylistId)
+      : previousControl?.matches('button[type="submit"]') ? next.querySelector('button[type="submit"]')
+        : previousControl?.getAttribute("aria-label") === "关闭" ? next.querySelector('[aria-label="关闭"]') : input;
+    (target || input)?.focus({ preventScroll: true });
+    if (selection && document.activeElement === input) input.setSelectionRange(...selection);
   }
 
   function refreshLibrarySidebars() {
@@ -2085,10 +2954,10 @@ export function createMusicPage(deps) {
     }
   }
 
-  function refreshTrackMetadata(updated) {
+  function refreshTrackMetadata(updated, { allowStage = true } = {}) {
     if (state.activeView !== "music" || !updated?.id) return;
     if (state.music.trackPageOpen || state.music.playerStageOpen) {
-      renderView();
+      if (allowStage) renderView();
       return;
     }
     const visibleTrack = (state.music.data?.tracks || []).find((track) => track.id === updated.id) || updated;
@@ -2103,6 +2972,8 @@ export function createMusicPage(deps) {
     }
     const surfacedTrackId = state.music.current?.id || state.music.queue[0]?.id || "";
     if (surfacedTrackId === updated.id && !refreshCurrentTrackSurfaces(updated.id)) renderView();
+    else if (surfacedTrackId !== updated.id && (state.music.queue || []).some(track => track.id === updated.id)
+        && queueViews.get(els.workGrid?.querySelector(".music-queue"))?.model?.query) refreshQueueSurface();
   }
 
   // ================= 歌词 =================
@@ -2116,10 +2987,11 @@ export function createMusicPage(deps) {
       const audio = player.getAudio();
       if (!audio) return;
       const timeMs = Math.round((audio.currentTime || 0) * 1000);
-      const index = findLyricIndex(lines, timeMs + 180, lyricLineEls.length);
+      const index = findLyricIndex(lines, timeMs + 180);
       if (!force && index === currentLyricIndex) return;
+      if (!state.music.lyricFollowPaused || force) lyricViewport?.show(index);
       currentLyricIndex = index;
-      const nextActive = lyricLineEls[index] || null;
+      const nextActive = lyricLineEls[index - (lyricViewport?.startIndex || 0)] || null;
       if (activeLyricElement !== nextActive) activeLyricElement?.classList.remove("active");
       nextActive?.classList.add("active");
       activeLyricElement = nextActive;
@@ -2148,10 +3020,11 @@ export function createMusicPage(deps) {
   function centerLyricLine(item, immediate = false) {
     const container = item?.closest?.(".music-lyric-lines");
     if (!container) return;
+    if (immediate) container.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
     const containerRect = container.getBoundingClientRect();
     const itemRect = item.getBoundingClientRect();
     const targetTop = container.scrollTop + itemRect.top - containerRect.top - ((container.clientHeight - itemRect.height) / 2);
-    container.scrollTo({ top: Math.max(0, targetTop), behavior: immediate ? "auto" : "smooth" });
+    container.scrollTo({ top: Math.max(0, targetTop), behavior: immediate ? "instant" : "smooth" });
   }
 
   function pauseLyricFollow(button = null) {
@@ -2189,6 +3062,7 @@ export function createMusicPage(deps) {
     state.music.trackPageOpen = true;
     state.music.playerStageOpen = false;
     pushRoute({ ...router.overrides(), musicTrackId: state.music.current.id });
+    rememberTrackReturnHistory();
     window.scrollTo({ top: 0, behavior: "instant" });
     renderView();
   }
@@ -2204,10 +3078,45 @@ export function createMusicPage(deps) {
     trackReturnContext = null;
     state.music.trackPageOpen = false;
     state.music.playerStageOpen = false;
+    // Route-restored stages need their source read again. A live openPage
+    // still owns any list response accepted while the song was being opened.
+    if (returnContext?.fresh) state.music.data = null;
     replaceRoute({ ...(returnContext?.route || router.overrides()), musicTrackId: "" });
     renderView();
     restoreLibraryScroll(returnContext?.scroll, navigation);
     if (!state.music.data) actions.loadMusic({ skipRoute: true, keepCurrent: true, restoreLast: false }).catch(showError);
+  }
+
+  function currentTrackReturnHistoryOwner() {
+    try {
+      const account = captureWebAccount();
+      if (!trackReturnHistoryAccount || account.owner !== trackReturnHistoryAccount.owner || account.revision !== trackReturnHistoryAccount.revision) {
+        trackReturnHistoryAccount = account;
+        trackReturnHistoryOwner = Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16)).join("-");
+      }
+      return trackReturnHistoryOwner;
+    } catch {
+      trackReturnHistoryAccount = null;
+      trackReturnHistoryOwner = "";
+      return "";
+    }
+  }
+
+  function rememberTrackReturnHistory() {
+    const owner = currentTrackReturnHistoryOwner();
+    if (!owner || !trackReturnContext?.route || !state.music.trackPageOpen) return;
+    // Only small route/scroll scalars belong to this history entry; no library
+    // snapshots or account credentials survive a navigation through history.
+    history.replaceState({ ...history.state, fanhaoMusicTrackReturn: {
+      owner, route: trackReturnContext.route, scroll: trackReturnContext.scroll
+    } }, "");
+  }
+
+  function readTrackReturnHistory(route) {
+    if (!route.musicTrackId) return null;
+    const saved = history.state?.fanhaoMusicTrackReturn;
+    if (!saved?.owner || saved.owner !== currentTrackReturnHistoryOwner() || !saved.route) return null;
+    return { route: saved.route, scroll: saved.scroll, fresh: true };
   }
 
   function captureLibraryScroll() {
@@ -2245,6 +3154,7 @@ export function createMusicPage(deps) {
 
   function handleKeyboardShortcut(event) {
     if (event.defaultPrevented || state.activeView !== "music" || state.music.playlistDialogOpen) return;
+    if (event.target?.closest?.(".music-favorite-feedback, .music-rating-feedback")) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Escape" && (state.music.trackPageOpen || state.music.openingTrackId)) {
       event.preventDefault();

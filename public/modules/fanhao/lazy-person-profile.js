@@ -1,5 +1,6 @@
 export function createLazyPersonProfile({ els, loadPersonProfile, onLoadError = () => {} }) {
   let instancePromise = null;
+  let loadedInstance = null;
   let renderVersion = 0;
 
   function load() {
@@ -8,6 +9,7 @@ export function createLazyPersonProfile({ els, loadPersonProfile, onLoadError = 
         .then(loadPersonProfile)
         .then((instance) => {
           if (!instance) throw new Error("人物资料组件加载失败");
+          loadedInstance = instance;
           return instance;
         })
         .catch((error) => {
@@ -20,6 +22,7 @@ export function createLazyPersonProfile({ els, loadPersonProfile, onLoadError = 
 
   function hide() {
     renderVersion += 1;
+    loadedInstance?.hide?.();
     if (!els.personProfile) return;
     els.personProfile.hidden = true;
     els.personProfile.classList.remove("ranking-profile-panel");

@@ -15,7 +15,7 @@ import { createNovelStore } from "../src/modules/novels/server/store.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicRoot = path.join(root, "public");
 
-export async function runNovelProgressFixture({ legacyNovel = false, legacyClockSlot = false, memoryLedger = false, sourceOverrides = {}, casePattern = "" } = {}) {
+export async function runNovelProgressFixture({ legacyNovel = false, legacyClockSlot = false, memoryLedger = false, plainHttp = false, sourceOverrides = {}, casePattern = "" } = {}) {
   const executablePath = [process.env.CHROME_PATH, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"].filter(Boolean).find(value => fs.existsSync(value));
   assert(executablePath, "Chrome or Edge required for private novel progress fixture");
   const overrides = new Map(sourceOverrides instanceof Map ? sourceOverrides : Object.entries(sourceOverrides));
@@ -78,7 +78,7 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
       sendText(res, await fs.promises.readFile(target), type);
     } catch (error) { unexpected.push(`${url.pathname}: ${error.message}`); sendJson(res, { error: error.message }, 500); }
   });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); const base = `http://127.0.0.1:${server.address().port}`;
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); const base = `http://${plainHttp ? "fanhao-novel.test" : "127.0.0.1"}:${server.address().port}`;
   const run = async (name, task) => {
     if (casePattern && !name.includes(casePattern)) return;
     const dbPath = path.resolve(temporary, `case-${cases.length + 1}.sqlite`); assert(dbPath.startsWith(temporary + path.sep));
@@ -88,7 +88,8 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
     cases.push(current); await task(current); checks++; console.log(`PASS ${name}`);
   };
   try {
-    browser = await chromium.launch({ executablePath, headless: true });
+    browser = await chromium.launch({ executablePath, headless: true,
+      args: plainHttp ? ["--host-resolver-rules=MAP fanhao-novel.test 127.0.0.1", "--no-proxy-server"] : [] });
     await run("actual host late normal progress cannot roll back pagehide keepalive", async test => {
       const older = hold(entry => entry.bookId === test.books.get("A")), page = await newPage(test, true);
       try {
@@ -242,6 +243,113 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
         assert.equal(renewed.body.progressSequence, 1); assert.equal(saved(test, "A").chapterIndex, 2); assert(Math.abs(saved(test, "A").scrollRatio - latest) < .02);
       } finally { oldClock?.release(); newClock?.release(); await page.close(); }
     });
+    await run("ordinary progress retry persists and saves the latest visible position through coalescing", async test => {
+      const page = await newPage(test), pending = [];
+      try {
+        await openChapter(page, test.books.get("A"), 1); const initialRatio = await scrollRatio(page, .1);
+        await until(() => Math.abs((saved(test, "A")?.scrollRatio ?? -1) - initialRatio) < .02, "initial position must be acknowledged by SQLite"); await stable(test);
+        const initial = saved(test, "A"), failed = hold(entry => entry.bookId === test.books.get("A"), "Synthetic ordinary progress failure"); pending.push(failed);
+        await scrollRatio(page, .3); await requested(failed); await rememberProgressReader(page); await settleProgress(page, failed);
+        const status = page.locator('.novel-reader-progress-status[role="alert"]'), retry = page.locator(".novel-progress-save-retry");
+        await retry.waitFor({ state: "visible" }); await assertProgressReader(page);
+        assert((await status.textContent()).includes("Synthetic ordinary progress failure"));
+        assert.equal(saved(test, "A").scrollRatio, initial.scrollRatio, "HTTP failure must not change the actual SQLite position");
+        const idleWrites = test.received.length;
+        await page.waitForTimeout(3800); // The previous shared status disappeared after 3600ms.
+        assert.equal(await status.isVisible(), true, "save failures must remain visible until an acknowledged save");
+        assert.equal(test.received.length, idleWrites, "a failed position must not create an automatic retry loop");
+        await page.locator('[data-reader-focus="toolbar-设置"]').click();
+        assert.equal(await status.evaluate(node => node.hidden && node.inert), true);
+        await page.locator('[data-reader-focus="settings-close"]').click(); assert.equal(await status.isVisible(), true);
+        const again = hold(entry => entry.bookId === test.books.get("A"), "Second ordinary progress failure"); pending.push(again);
+        await retry.click(); await requested(again); await rememberProgressReader(page);
+        assert.equal(await retry.evaluate(node => !node.disabled && node.getAttribute("aria-busy") === "true"), true);
+        const busyWrites = test.received.length;
+        await page.keyboard.press("Enter"); await page.keyboard.press("Space"); await frames(page);
+        assert.equal(test.received.length, busyWrites, "busy retry activations must share one pending save");
+        await settleProgress(page, again); await assertProgressReader(page);
+        assert.equal(await retry.getAttribute("aria-busy"), "false"); assert((await status.textContent()).includes("Second ordinary progress failure"));
+        const active = hold(entry => entry.bookId === test.books.get("A")); pending.push(active);
+        const activeRatio = await scrollRatio(page, .55);
+        assert.equal(await retry.getAttribute("aria-busy"), "false"); await retry.click(); await requested(active);
+        assert(Math.abs(active.entry.body.scrollRatio - activeRatio) < .02);
+        assert.equal(await retry.getAttribute("aria-busy"), "true");
+        const latestRatio = await scrollRatio(page, .8);
+        await page.waitForFunction(() => fixture.state.novel.book.progress.scrollRatio > .75);
+        assert.equal(test.received.at(-1), active.entry, "new scroll samples must remain conflated behind the held manual save");
+        const latest = hold(entry => entry.bookId === test.books.get("A"), "Latest coalesced progress failure"); pending.push(latest);
+        await settleProgress(page, active); await requested(latest);
+        assert.equal(active.entry.result.applied, true); assert(Math.abs(saved(test, "A").scrollRatio - activeRatio) < .02);
+        assert.equal(await status.isVisible(), true); assert.equal(await retry.getAttribute("aria-busy"), "true", "an older ACK must not clear the newer queued save's feedback or busy state");
+        assert(Math.abs(latest.entry.body.scrollRatio - latestRatio) < .02); assert(latest.entry.body.progressSequence > active.entry.body.progressSequence);
+        await settleProgress(page, latest);
+        assert.equal(await retry.getAttribute("aria-busy"), "false"); assert((await status.textContent()).includes("Latest coalesced progress failure"));
+        const final = hold(entry => entry.bookId === test.books.get("A")); pending.push(final);
+        const finalRatio = await scrollRatio(page, .9); await retry.click(); await requested(final);
+        assert(Math.abs(final.entry.body.scrollRatio - finalRatio) < .02, "manual retry must sample the current ratio rather than replay the failed body");
+        assert(final.entry.body.progressSequence > latest.entry.body.progressSequence); assert.equal(final.entry.body.progressSessionId, failed.entry.body.progressSessionId);
+        assert.deepEqual(Object.keys(final.entry.body).sort(), ["catalogRevision", "chapterId", "chapterIndex", "progressSequence", "progressSessionId", "progressSessionStartedAt", "scrollRatio", "sourceRealm"].sort());
+        await settleProgress(page, final); assert.equal(final.entry.result.applied, true); await status.waitFor({ state: "detached" });
+        assert(Math.abs(saved(test, "A").scrollRatio - finalRatio) < .02); assert.equal(saved(test, "A").chapterIndex, 1);
+      } finally { for (const gate of pending) gate.release(); await page.close(); }
+    });
+    await run("ordinary progress retry requires an applied SQLite acknowledgement", async test => {
+      assert(!memoryLedger, "manual retry acceptance requires the actual SQLite store");
+      const page = await newPage(test), pending = [];
+      try {
+        await openChapter(page, test.books.get("A"), 1); await until(() => test.committed.length > 0, "initial progress must commit"); await stable(test);
+        const failed = hold(entry => entry.bookId === test.books.get("A"), "Synthetic retry receipt failure"); pending.push(failed);
+        await scrollRatio(page, .6); await requested(failed); await settleProgress(page, failed);
+        const status = page.locator(".novel-reader-progress-status"), retry = page.locator(".novel-progress-save-retry"); await retry.waitFor({ state: "visible" });
+        const stale = hold(entry => entry.bookId === test.books.get("A")); pending.push(stale);
+        await retry.click(); await requested(stale);
+        const higher = { ...stale.entry.body, progressSequence: stale.entry.body.progressSequence + 1, scrollRatio: .95 };
+        assert.equal(test.store.saveProgress(test.books.get("A"), higher).applied, true);
+        await settleProgress(page, stale); assert.equal(stale.entry.result.applied, false);
+        assert.equal(await retry.getAttribute("aria-busy"), "false");
+        assert.equal(await status.isVisible(), true, "HTTP 200/applied:false must not erase the failed save's recovery action");
+        assert.equal(saved(test, "A").scrollRatio, .95);
+        const ratio = await scrollRatio(page, .7); let accepted;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const next = hold(entry => entry.bookId === test.books.get("A")); pending.push(next);
+          await retry.click(); await requested(next); await settleProgress(page, next);
+          if (next.entry.result.applied) { accepted = next.entry; break; }
+          assert.equal(await retry.getAttribute("aria-busy"), "false"); assert.equal(await status.isVisible(), true);
+        }
+        assert(accepted, "a higher-sequence manual retry must eventually obtain an applied acknowledgement");
+        await status.waitFor({ state: "detached" }); assert(Math.abs(saved(test, "A").scrollRatio - ratio) < .02);
+      } finally { for (const gate of pending) gate.release(); await page.close(); }
+    });
+
+    await run("ordinary progress retry and late receipts retire with their reader owner", async test => {
+      for (const outcome of ["success", "failure"]) {
+        const page = await newPage(test), pending = [];
+        try {
+          const committedBefore = test.committed.length;
+          await openChapter(page, test.books.get("A"), 1); await until(() => test.committed.length > committedBefore, "this reader's source progress must commit"); await stable(test);
+          const failed = hold(entry => entry.bookId === test.books.get("A"), "Old reader progress failure"); pending.push(failed);
+          await scrollRatio(page, .4); await requested(failed); await settleProgress(page, failed);
+          const retry = page.locator(".novel-progress-save-retry"); await retry.waitFor({ state: "visible" });
+          const heldRetry = hold(entry => entry.bookId === test.books.get("A"), outcome === "failure" ? "Obsolete manual progress failure" : ""); pending.push(heldRetry);
+          await retry.evaluate(node => { window.__oldProgressRetry = node; }); await retry.click(); await requested(heldRetry);
+          // Public controller navigation, not a fabricated native cross-module transition.
+          await openChapter(page, test.books.get("B"), 2); const ratio = await scrollRatio(page, .75); await rememberProgressReader(page);
+          const count = test.received.filter(entry => entry.bookId === test.books.get("A")).length;
+          assert.equal(await page.evaluate(() => { const book = fixture.state.novel.book; __oldProgressRetry.click(); return fixture.state.novel.book === book; }), true,
+            "a detached retry must not create an optimistic save for the new book"); await frames(page);
+          assert.equal(test.received.filter(entry => entry.bookId === test.books.get("A")).length, count, "a detached retry must not submit against the old reader");
+          await settleProgress(page, heldRetry); await assertProgressReader(page);
+          assert.equal(await page.locator(".novel-reader-progress-status").count(), 0);
+          await until(() => saved(test, "B")?.chapterIndex === 2 && Math.abs(saved(test, "B").scrollRatio - ratio) < .02, "the new source identity and measured ratio must commit to SQLite");
+          assert.equal(await page.locator(".novel-reader-paper h1").textContent(), "B Chapter 2");
+          if (outcome === "success") {
+            assert.equal(heldRetry.entry.committed, true, "an accepted old write must still receive its actual old-book store receipt");
+            assert.equal(heldRetry.entry.result.chapterId, heldRetry.entry.body.chapterId);
+            assert.equal(saved(test, "A").chapterIndex, 1);
+          }
+        } finally { for (const gate of pending) gate.release(); await page.close(); }
+      }
+    });
     assert(checks > 0, `no novel progress cases matched: ${casePattern}`); assert.deepEqual(faults, []); assert.deepEqual(unexpected, []);
     console.log(`Novel progress fixture passed (${checks} cases; Chromium + ${memoryLedger ? "memory packet ledger" : "actual private SQLite store"})`); return { checks };
   } finally {
@@ -253,6 +361,12 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
   function holdClock(bookId) { let release; const gate = { bookId, used: false, promise: new Promise(resolve => { release = resolve; }), release }; clockGates.add(gate); return gate; }
   function owner(bookId) { const test = cases.find(value => [...value.books.values()].includes(bookId)); assert(test, "request must target a private fixture book"); return test; }
   async function requested(gate) { await until(() => gate.used, "expected controlled API request did not arrive"); }
+  async function settleProgress(page, gate) {
+    const identity = { bookId: gate.entry.bookId, sequence: gate.entry.body.progressSequence };
+    gate.release();
+    await page.waitForFunction(({ bookId, sequence }) => __progressReceipts.some(receipt => receipt.bookId === bookId && receipt.sequence === sequence), identity);
+    await frames(page);
+  }
   function saved(test, id) { const bookId = test.books.get(id); return memoryLedger ? test.ledger.get(bookId) : test.store.bookDetail(bookId).book.progress; }
   async function stable(test) { let count = test.received.length, last = Date.now(); const deadline = Date.now() + 7000; while (Date.now() - last < 400) { assert(Date.now() < deadline, "progress queue must drain in bounded time"); await new Promise(resolve => setTimeout(resolve, 20)); if (count !== test.received.length) { count = test.received.length; last = Date.now(); } } }
   async function newPage(test, real = false) {
@@ -261,15 +375,21 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
     // its page route callback can disappear when the reader document unloads.
     await page.route(url => url.origin !== base, route => { unexpected.push(`blocked non-fixture origin: ${new URL(route.request().url()).origin}`); return route.abort(); });
     await page.addInitScript(() => {
-      window.__progressPackets = []; window.__chapterReads = []; const original = fetch.bind(window);
+      window.__progressPackets = []; window.__progressReceipts = []; window.__chapterReads = []; const original = fetch.bind(window);
       window.fetch = async (url, options = {}) => {
         if (String(url).includes("/progress")) __progressPackets.push({ url: String(url), body: typeof options.body === "string" ? JSON.parse(options.body) : options.body, keepalive: Boolean(options.keepalive) });
         const response = await original(url, options);
         if (new URL(String(url), location.href).pathname.includes("/chapters/")) { const json = response.json.bind(response); response.json = async () => { const data = await json(); __chapterReads.push({ index: data.chapter?.index, serverClockMs: data.serverClockMs }); return data; }; }
+        const progress = /^\/api\/novels\/([^/]+)\/progress$/.exec(new URL(String(url), location.href).pathname);
+        if (progress && options.method === "POST") {
+          const json = response.json.bind(response), body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
+          response.json = async () => { try { return await json(); } finally { __progressReceipts.push({ bookId: decodeURIComponent(progress[1]), sequence: body.progressSequence }); } };
+        }
         return response;
       };
     });
     await page.goto(real ? `${base}/novels/${test.books.get("A")}/1` : `${base}/probe`);
+    if (plainHttp) assert.deepEqual(await page.evaluate(() => [isSecureContext, typeof crypto.randomUUID, typeof crypto.getRandomValues]), [false, "undefined", "function"], "SQLite progress checks must execute on genuine non-secure HTTP");
     if (real) await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading")); else await page.waitForFunction(() => fixture?.ready);
     return page;
   }
@@ -277,6 +397,25 @@ export async function runNovelProgressFixture({ legacyNovel = false, legacyClock
 
 async function openChapter(page, id, index) { await page.evaluate(([id, index]) => fixture.page.openChapter(id, index, { skipRoute: true }), [id, index]); await frames(page); }
 async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+async function rememberProgressReader(page) {
+  await page.evaluate(() => {
+    const reader = document.querySelector(".novel-reader-page"), paragraphs = [...reader.querySelectorAll(".novel-reader-content p")];
+    const range = document.createRange(); range.setStart(paragraphs[0].firstChild, 2); range.setEnd(paragraphs[0].firstChild, 14);
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    window.__progressReaderSurface = { reader, paragraphs, selection: getSelection().toString(), focus: document.activeElement, scroll: scrollY,
+      identity: [fixture.state.novel.book.id, fixture.state.novel.book.sourceRealm, fixture.state.novel.book.catalogRevision, fixture.state.novel.chapter.id],
+      status: fixture.state.novel.status, navigationStatus: reader.querySelector(".novel-reader-navigation-status")?.textContent || "" };
+  });
+}
+async function assertProgressReader(page) {
+  assert.deepEqual(await page.evaluate(() => {
+    const before = __progressReaderSurface, paragraphs = [...document.querySelectorAll(".novel-reader-content p")];
+    return { reader: before.reader === document.querySelector(".novel-reader-page"), paragraphs: before.paragraphs.every((node, index) => node.isConnected && node === paragraphs[index]),
+      selection: getSelection().toString() === before.selection, focus: document.activeElement === before.focus, scroll: scrollY === before.scroll,
+      identity: JSON.stringify([fixture.state.novel.book.id, fixture.state.novel.book.sourceRealm, fixture.state.novel.book.catalogRevision, fixture.state.novel.chapter.id]) === JSON.stringify(before.identity),
+      status: fixture.state.novel.status === before.status, navigationStatus: (before.reader.querySelector(".novel-reader-navigation-status")?.textContent || "") === before.navigationStatus };
+  }), { reader: true, paragraphs: true, selection: true, focus: true, scroll: true, identity: true, status: true, navigationStatus: true }, "progress receipts must preserve the current reader, source identity, native Range, focus and measured scroll");
+}
 async function scrollRatio(page, ratio) { return page.evaluate(async ratio => { const reader = document.querySelector(".novel-reader-page"), top = reader.getBoundingClientRect().top + scrollY, height = Math.max(1, reader.scrollHeight - innerHeight); scrollTo(0, top + height * ratio); dispatchEvent(new Event("scroll")); await new Promise(resolve => requestAnimationFrame(resolve)); return Math.max(0, Math.min(1, (scrollY - top) / height)); }, ratio); }
 async function until(predicate, message) { const deadline = Date.now() + 7000; while (!predicate()) { assert(Date.now() < deadline, message); await new Promise(resolve => setTimeout(resolve, 10)); } }
 function sendText(res, body, type) { if (res.destroyed) return; res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" }); res.end(body); }
@@ -289,4 +428,4 @@ const api=async(url,options={})=>{const init={...options};if(init.body&&typeof i
 const page=createNovelPage({api,state,els:{workGrid:document.querySelector('#workGrid'),statsRow:document.querySelector('#statsRow')},formatNumber:String,formatBytes:String,formatDateTime:String,cancelScheduledWorkRendering:noop,disconnectPeopleIndexAutoload:noop,resetProgressiveCoverLoading:noop,hidePersonProfile:noop,setMainHeader:noop,openAdminScript:noop,pushRoute:noop,replaceRoute:noop,syncRouteAfterNavigation:noop});window.fixture={state,page,ready:true};page.enter({skipRoute:true,deferInitialLoad:true});</script>`;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runNovelProgressFixture({ legacyNovel: process.argv.includes("--legacy-novel"), legacyClockSlot: process.argv.includes("--legacy-clock-slot"), memoryLedger: process.argv.includes("--memory-ledger"), casePattern: process.argv.find(value => value.startsWith("--case="))?.slice(7) || "" });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runNovelProgressFixture({ legacyNovel: process.argv.includes("--legacy-novel"), legacyClockSlot: process.argv.includes("--legacy-clock-slot"), memoryLedger: process.argv.includes("--memory-ledger"), plainHttp: process.argv.includes("--plain-http"), casePattern: process.argv.find(value => value.startsWith("--case="))?.slice(7) || "" });

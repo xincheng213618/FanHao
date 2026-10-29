@@ -1,12 +1,16 @@
+import { createShortVideoSoundPreviewController, disposeShortVideoSoundPreviews } from "./sound-preview-controller.js?v=20261027-sound-preview-01";
+
 export function createShortVideoAuthorPanel(deps) {
   const {
     activateShortVideoCovers,
+    acquireShortVideoSoundPreviewPlayback,
     activePlayer,
     activeReelStack,
     api,
     appendCaptionText,
     applyShortVideoLikeBadgeState,
     authorAvatar,
+    beginShortVideoPanelNavigation,
     bindAuthorPanelDragToClose,
     cacheAuthorPanelVideo,
     cacheAuthorPanelVideos,
@@ -22,7 +26,7 @@ export function createShortVideoAuthorPanel(deps) {
     currentAuthorPanelVideoRequestId,
     disposeShortVideoMedia,
     els,
-    fetchShortVideoDetail,
+    flushActiveShortVideoWatch,
     formatBytes,
     formatCompact,
     formatDate,
@@ -34,8 +38,9 @@ export function createShortVideoAuthorPanel(deps) {
     isGalleryPost,
     isolateAuthorPanelAsMobileModal,
     isShortVideoAuthorDetailPage,
+    isCurrentShortVideoNavigation,
+    hydratePromotedShortVideo,
     lazyShortVideoCommentsView,
-    loadAdjacentVideos,
     nextAuthorPanelVideoRequestId,
     normalizeShortVideoSortValue,
     normalizeShortVideoSound,
@@ -44,7 +49,6 @@ export function createShortVideoAuthorPanel(deps) {
     openDouyinLink,
     openShortVideoAuthorPage,
     prefetchRelatedVideo,
-    refreshAdjacentPanelsDom,
     renderAuthorSignature,
     renderReelPanel,
     renderStats,
@@ -69,10 +73,24 @@ export function createShortVideoAuthorPanel(deps) {
     syncShortVideoBrowserSearchDom
   } = deps;
 
+  function isCurrentPanel(panel) {
+    return Boolean(panel?.isConnected && panel.dataset?.closing !== "1" && panel.dataset?.disposed !== "1"
+      && (!panel._shortVideoAuthorBrowser || panel.closest?.(".short-video-browser") === panel._shortVideoAuthorBrowser));
+  }
+
+  function disposeAuthorPanelChildViews(root) {
+    root?.shortVideoDisposeComments?.();
+    root?.querySelectorAll?.(".short-video-comments")?.forEach?.((view) => view.shortVideoDisposeComments?.());
+  }
+
   async function showAuthorPanel(video, options = {}) {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser) return;
     const existingPanel = browser.querySelector(".short-video-author-panel");
+    const handoffGallery = existingPanel ? deps.activeGalleryPlayer?.() : null;
+    const handoffOwner = {};
+    handoffGallery?.shortVideoGalleryPause?.(handoffOwner);
+    try {
     if (existingPanel) closeAuthorPanel(existingPanel, { restoreFeed: false, restoreFocus: false, animate: false });
     closeTransientPlayerControls();
     setAuthorPanelReturnFeed(shortVideoFeedSnapshot());
@@ -80,6 +98,37 @@ export function createShortVideoAuthorPanel(deps) {
     const selectedTopic = normalizeShortVideoTopic(options.topic || video.tags?.[0]);
     const selectedSound = options.sound || video.sound || null;
     const panel = document.createElement("section");
+    panel._shortVideoAuthorBrowser = browser;
+    let disposed = false;
+    const frames = new Set();
+    const timers = new Set();
+    const idleCallbacks = new Set();
+    const scheduleFrame = (callback) => {
+      const handle = window.requestAnimationFrame(() => {
+        frames.delete(handle);
+        if (isCurrentPanel(panel)) callback();
+      });
+      frames.add(handle);
+      return handle;
+    };
+    const scheduleTimer = (callback, delay) => {
+      const handle = window.setTimeout(() => {
+        timers.delete(handle);
+        if (isCurrentPanel(panel)) callback();
+      }, delay);
+      timers.add(handle);
+      return handle;
+    };
+    panel.shortVideoScheduleIdle = (callback, timeout) => {
+      if (!isCurrentPanel(panel)) return;
+      if (typeof window.requestIdleCallback !== "function") return scheduleTimer(callback, timeout);
+      const handle = window.requestIdleCallback(() => {
+        idleCallbacks.delete(handle);
+        if (isCurrentPanel(panel)) callback();
+      }, { timeout: 900 });
+      idleCallbacks.add(handle);
+      return handle;
+    };
     panel.className = "short-video-author-panel is-douyin-style";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "false");
@@ -96,7 +145,7 @@ export function createShortVideoAuthorPanel(deps) {
       ? "本地内容识别"
       : (options.initialTab === "related" ? "相关推荐" : "作者作品"));
     panel.addEventListener("click", (event) => {
-      if (event.target === panel) closeAuthorPanel(panel);
+      if (event.target === panel && isCurrentPanel(panel)) closeAuthorPanel(panel);
     });
 
     const sheet = document.createElement("div");
@@ -145,7 +194,7 @@ export function createShortVideoAuthorPanel(deps) {
     contextTabItems.forEach((item) => appendTabButton(item, contextTabs, "button"));
     tabNav.append(tabs, contextTabs);
     const syncContextTabOverflow = () => {
-      if (!contextTabs.isConnected) return;
+      if (!isCurrentPanel(panel) || !contextTabs.isConnected) return;
       const overflow = contextTabs.scrollWidth > contextTabs.clientWidth + 2;
       const atStart = contextTabs.scrollLeft <= 2;
       const atEnd = contextTabs.scrollLeft + contextTabs.clientWidth >= contextTabs.scrollWidth - 2;
@@ -159,13 +208,13 @@ export function createShortVideoAuthorPanel(deps) {
       panel._shortVideoContextTabsObserver = new ResizeObserver(syncContextTabOverflow);
       panel._shortVideoContextTabsObserver.observe(contextTabs);
     }
-    window.requestAnimationFrame(syncContextTabOverflow);
+    scheduleFrame(syncContextTabOverflow);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "short-video-author-close";
     close.append(createIcon("close"));
     close.setAttribute("aria-label", "关闭");
-    close.addEventListener("click", () => closeAuthorPanel(panel));
+    close.addEventListener("click", () => { if (isCurrentPanel(panel)) closeAuthorPanel(panel); });
     top.append(tabNav, close);
 
     const head = document.createElement("header");
@@ -201,11 +250,12 @@ export function createShortVideoAuthorPanel(deps) {
     const douyin = document.createElement("button");
     douyin.type = "button";
     douyin.textContent = "抖音主页";
-    douyin.addEventListener("click", () => openAuthorDouyinLink(author));
+    douyin.addEventListener("click", () => { if (isCurrentPanel(panel)) openAuthorDouyinLink(author); });
     const authorPage = document.createElement("button");
     authorPage.type = "button";
     authorPage.textContent = "作者主页";
     authorPage.addEventListener("click", () => {
+      if (!isCurrentPanel(panel)) return;
       closeAuthorPanel(panel, { restoreFeed: false });
       openShortVideoAuthorPage(author, video);
     });
@@ -214,7 +264,7 @@ export function createShortVideoAuthorPanel(deps) {
     authorFolder.textContent = "作者文件夹";
     authorFolder.disabled = !video?.id;
     authorFolder.title = video?.id ? "打开作者本地文件夹" : "当前作者没有可定位的本地作品";
-    authorFolder.addEventListener("click", () => runShortVideoLocalAction(video, "open-author-folder", authorFolder));
+    authorFolder.addEventListener("click", () => { if (isCurrentPanel(panel)) runShortVideoLocalAction(video, "open-author-folder", authorFolder); });
     actions.append(follow, douyin, authorPage, authorFolder);
     head.append(title, actions);
 
@@ -260,37 +310,51 @@ export function createShortVideoAuthorPanel(deps) {
     let soundLoading = false;
     let soundLoaded = false;
     let soundError = "";
+    panel.shortVideoDisposeAuthorPanel = (disposeOptions = {}) => {
+      if (disposed) return;
+      disposed = true;
+      panel.dataset.disposed = "1";
+      authorWorksRequestId += 1;
+      for (const handle of frames) window.cancelAnimationFrame?.(handle);
+      for (const handle of timers) window.clearTimeout(handle);
+      for (const handle of idleCallbacks) window.cancelIdleCallback?.(handle);
+      frames.clear(); timers.clear(); idleCallbacks.clear();
+      panel._shortVideoContextTabsObserver?.disconnect?.();
+      panel._shortVideoContextTabsObserver = null;
+      disposeAuthorPanelChildViews(content);
+      disposeShortVideoSoundPreviews(content, disposeOptions);
+    };
     const startAuthorFeedSwitch = () => {
-      if (!panel.isConnected || authorFeedSwitchStarted || !authorScopeId(video, author)) return;
+      if (!isCurrentPanel(panel) || authorFeedSwitchStarted || !authorScopeId(video, author)) return;
       if (!authorVideosLoaded) {
         authorFeedSwitchRequested = true;
         return;
       }
       authorFeedSwitchStarted = true;
       authorFeedSwitchRequested = false;
-      switchToAuthorWorksFeed(video, author, panel, authorWorksSort).catch(showError);
+      switchToAuthorWorksFeed(video, author, panel, authorWorksSort).catch((error) => { if (isCurrentPanel(panel)) showError(error); });
     };
     const loadRelatedRecommendations = async (force = false) => {
-      if (relatedLoading || (relatedLoaded && !force)) return;
+      if (!isCurrentPanel(panel) || relatedLoading || (relatedLoaded && !force)) return;
       relatedLoading = true;
       relatedError = "";
       try {
         const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}/related?limit=36`);
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         relatedItems = Array.isArray(data.videos) ? data.videos : [];
         for (const item of relatedItems) cacheAuthorPanelVideo(item);
         relatedBasis = data.basis || null;
         relatedLoaded = true;
       } catch (error) {
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         relatedError = shortVideoFriendlyError(error, "相关推荐读取失败");
       } finally {
         relatedLoading = false;
-        if (panel.isConnected && ["related", "ai"].includes(activeTab)) renderAuthorTab(activeTab);
+        if (isCurrentPanel(panel) && ["related", "ai"].includes(activeTab)) renderAuthorTab(activeTab);
       }
     };
     const loadTopicWorks = async (force = false) => {
-      if (!selectedTopic || topicLoading || (topicLoaded && !force)) return;
+      if (!isCurrentPanel(panel) || !selectedTopic || topicLoading || (topicLoaded && !force)) return;
       topicLoading = true;
       topicError = "";
       try {
@@ -303,20 +367,20 @@ export function createShortVideoAuthorPanel(deps) {
           stats: "0"
         });
         const data = await api(`/api/short-videos?${params}`);
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         topicItems = Array.isArray(data.videos) ? data.videos : [];
         topicTotal = Number(data.total || topicItems.length || 0);
         topicLoaded = true;
       } catch (error) {
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         topicError = shortVideoFriendlyError(error, "话题作品读取失败");
       } finally {
         topicLoading = false;
-        if (panel.isConnected && activeTab === "topic") renderAuthorTab("topic");
+        if (isCurrentPanel(panel) && activeTab === "topic") renderAuthorTab("topic");
       }
     };
     const loadSoundWorks = async (force = false) => {
-      if (!selectedSound?.key || soundLoading || (soundLoaded && !force)) return;
+      if (!isCurrentPanel(panel) || !selectedSound?.key || soundLoading || (soundLoaded && !force)) return;
       soundLoading = true;
       soundError = "";
       try {
@@ -329,26 +393,27 @@ export function createShortVideoAuthorPanel(deps) {
           stats: "0"
         });
         const data = await api(`/api/short-videos?${params}`);
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         soundItems = Array.isArray(data.videos) ? data.videos : [];
         soundTotal = Number(data.total || soundItems.length || 0);
         soundLoaded = true;
       } catch (error) {
-        if (!panel.isConnected) return;
+        if (!isCurrentPanel(panel)) return;
         soundError = shortVideoFriendlyError(error, "原声作品读取失败");
       } finally {
         soundLoading = false;
-        if (panel.isConnected && activeTab === "sound") renderAuthorTab("sound");
+        if (isCurrentPanel(panel) && activeTab === "sound") renderAuthorTab("sound");
       }
     };
     const loadAuthorWorks = async (requestedSort = authorWorksSort) => {
+      if (!isCurrentPanel(panel)) return;
       const nextSort = normalizeShortVideoSortValue(requestedSort);
       const requestId = ++authorWorksRequestId;
       authorWorksSort = nextSort;
       state.shortVideo.sort = nextSort;
       authorWorksLoading = true;
       authorWorksError = "";
-      if (panel.isConnected && activeTab === "works") renderAuthorTab("works");
+      if (isCurrentPanel(panel) && activeTab === "works") renderAuthorTab("works");
       try {
         const params = new URLSearchParams();
         if (author.secUid) params.set("author", author.secUid);
@@ -358,7 +423,7 @@ export function createShortVideoAuthorPanel(deps) {
         params.set("facets", "0");
         params.set("stats", "0");
         const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
+        if (!isCurrentPanel(panel) || requestId !== authorWorksRequestId) return;
         authorVideos = data.videos || [];
         authorTotal = Number(data.total || authorVideos.length || 0);
         authorVideosLoaded = true;
@@ -371,17 +436,19 @@ export function createShortVideoAuthorPanel(deps) {
           ? `${formatNumber(authorTotal)} 个本地作品 / 主页 ${formatNumber(homeCount)}`
           : `${formatNumber(authorTotal)} 个本地作品`;
       } catch (error) {
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
+        if (!isCurrentPanel(panel) || requestId !== authorWorksRequestId) return;
         authorVideosLoaded = true;
         authorWorksError = shortVideoFriendlyError(error, "作者作品读取失败");
         if (authorFeedSwitchRequested && activeTab === "works") startAuthorFeedSwitch();
       } finally {
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
+        if (!isCurrentPanel(panel) || requestId !== authorWorksRequestId) return;
         authorWorksLoading = false;
         if (activeTab === "works" || activeTab === "detail") renderAuthorTab(activeTab);
       }
     };
     const renderAuthorTab = (tab, renderOptions = {}) => {
+      if (!isCurrentPanel(panel)) return;
+      const previousTab = activeTab;
       activeTab = tab;
       panel.dataset.activeTab = tab;
       for (const [key, button] of tabButtons) {
@@ -390,8 +457,15 @@ export function createShortVideoAuthorPanel(deps) {
         if (button.getAttribute("role") === "tab") button.setAttribute("aria-selected", String(selected));
         else button.setAttribute("aria-pressed", String(selected));
       }
+      let preservedSoundHeading = null;
       try {
         setAuthorPanelTileMap(null);
+        if (tab === "sound" && previousTab === "sound") {
+          preservedSoundHeading = content.querySelector(".short-video-sound-heading");
+          preservedSoundHeading?.remove();
+        }
+        disposeAuthorPanelChildViews(content);
+        disposeShortVideoSoundPreviews(content);
         content.replaceChildren();
       if (tab === "works") {
         if (autoSwitchAuthorFeed || renderOptions.userInitiated) startAuthorFeedSwitch();
@@ -404,7 +478,7 @@ export function createShortVideoAuthorPanel(deps) {
         return;
       }
       if (tab === "detail") {
-        content.append(authorDetailView(video, author));
+        content.append(authorDetailView(video, author, panel));
         return;
       }
       if (tab === "comments") {
@@ -457,6 +531,7 @@ export function createShortVideoAuthorPanel(deps) {
           loading: soundLoading,
           loaded: soundLoaded,
           error: soundError,
+          previewHeading: preservedSoundHeading,
           onRetry: () => loadSoundWorks(true)
         }, panel, state.shortVideo?.current || video));
         if (!soundLoaded && !soundLoading) loadSoundWorks().catch(() => {});
@@ -464,36 +539,47 @@ export function createShortVideoAuthorPanel(deps) {
       }
         content.append(authorComingSoonView("内容待接入"));
       } catch (error) {
+        if (!isCurrentPanel(panel)) return;
         console.error("[short-video-author-panel]", error);
+        disposeShortVideoSoundPreviews(preservedSoundHeading);
         const failure = document.createElement("div");
         failure.className = "short-video-author-status";
         failure.textContent = error?.message || "面板内容加载失败";
+        disposeAuthorPanelChildViews(content);
+        disposeShortVideoSoundPreviews(content);
         content.replaceChildren(failure);
         showBrowserToast(failure.textContent);
       }
     };
     renderAuthorTab(activeTab);
     const commitPanelOpen = () => {
-      if (!panel.isConnected || panel.dataset.openCommitted === "1") return;
+      if (!isCurrentPanel(panel) || panel.dataset.openCommitted === "1") return;
       panel.dataset.openCommitted = "1";
       browser.classList.add("is-author-panel-open");
       panel.classList.add("is-open");
+      const focusOrigin = document.activeElement;
+      let focusedTab = null;
       const focusActiveTab = () => {
-        if (!panel.isConnected) return;
-        tabButtons.get(activeTab)?.focus?.({ preventScroll: true });
+        if (!isCurrentPanel(panel)) return;
+        if (document.activeElement !== focusOrigin && document.activeElement !== focusedTab) return;
+        focusedTab = tabButtons.get(activeTab);
+        focusedTab?.focus?.({ preventScroll: true });
       };
-      window.requestAnimationFrame(focusActiveTab);
-      window.setTimeout(focusActiveTab, 100);
+      scheduleFrame(focusActiveTab);
+      scheduleTimer(focusActiveTab, 100);
     };
-    window.requestAnimationFrame(commitPanelOpen);
-    window.setTimeout(commitPanelOpen, 80);
+    scheduleFrame(commitPanelOpen);
+    scheduleTimer(commitPanelOpen, 80);
 
-    loadAuthorWorks().catch(showError);
+    loadAuthorWorks().catch((error) => { if (isCurrentPanel(panel)) showError(error); });
+    } finally {
+      handoffGallery?.shortVideoGalleryResume?.(handoffOwner);
+    }
   }
 
   async function switchToAuthorWorksFeed(video, author = {}, panel = null, sort = state.shortVideo?.sort) {
     const authorId = authorScopeId(video, author);
-    if (!authorId || !panel?.isConnected || !isCurrentShortVideo(video)) return;
+    if (!authorId || !isCurrentPanel(panel) || !isCurrentShortVideo(video)) return;
     state.shortVideo.author = authorId;
     if (!isShortVideoAuthorDetailPage()) state.shortVideo.source = "all";
     state.shortVideo.query = "";
@@ -502,15 +588,7 @@ export function createShortVideoAuthorPanel(deps) {
     state.shortVideo.soundInfo = null;
     if (!isShortVideoAuthorDetailPage()) state.shortVideo.sort = normalizeShortVideoSortValue(sort || "published");
     state.shortVideo.data = null;
-    const data = await fetchShortVideoDetail(video.id);
-    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
-    state.shortVideo.current = data.video || state.shortVideo.current;
-    cacheAuthorPanelVideo(state.shortVideo.current);
-    state.shortVideo.prevId = data.prevId || "";
-    state.shortVideo.nextId = data.nextId || "";
-    await loadAdjacentVideos(state.shortVideo.current.id);
-    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
-    refreshAdjacentPanelsDom();
+    if (!await refreshAuthorPanelNavigation() || !isCurrentPanel(panel)) return;
     syncShortVideoBrowserSearchDom();
     syncAuthorPanelCurrentTile();
     replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current.id });
@@ -556,7 +634,7 @@ export function createShortVideoAuthorPanel(deps) {
     }
     sort.value = normalizeShortVideoSortValue(options.sort || "published");
     sort.disabled = Boolean(options.loading);
-    sort.addEventListener("change", () => options.onSortChange?.(sort.value));
+    sort.addEventListener("change", () => { if (isCurrentPanel(panel) && wrap.isConnected) options.onSortChange?.(sort.value); });
     heading.append(label, sort);
     const grid = document.createElement("div");
     grid.className = "short-video-author-grid";
@@ -599,14 +677,14 @@ export function createShortVideoAuthorPanel(deps) {
     return wrap;
   }
 
-  function authorDetailView(video, author) {
+  function authorDetailView(video, author, panel) {
     const detail = document.createElement("div");
     detail.className = "short-video-author-detail";
     const authorLine = document.createElement("button");
     authorLine.type = "button";
     authorLine.className = "short-video-author-detail-owner";
     authorLine.textContent = `${shortVideoAuthorHandle(author.name)} ›`;
-    authorLine.addEventListener("click", () => openAuthorDouyinLink(author));
+    authorLine.addEventListener("click", () => { if (isCurrentPanel(panel) && detail.isConnected) openAuthorDouyinLink(author); });
     const profile = authorProfileBlock(author);
     const title = document.createElement("p");
     appendCaptionText(title, captionTitleWithTags(video), video);
@@ -633,11 +711,11 @@ export function createShortVideoAuthorPanel(deps) {
     const original = document.createElement("button");
     original.type = "button";
     original.textContent = "打开原视频";
-    original.addEventListener("click", () => openDouyinLink(video));
+    original.addEventListener("click", () => { if (isCurrentPanel(panel) && detail.isConnected) openDouyinLink(video); });
     const home = document.createElement("button");
     home.type = "button";
     home.textContent = "打开抖音主页";
-    home.addEventListener("click", () => openAuthorDouyinLink(author));
+    home.addEventListener("click", () => { if (isCurrentPanel(panel) && detail.isConnected) openAuthorDouyinLink(author); });
     actions.append(original, home);
     detail.append(authorLine);
     if (profile) detail.append(profile);
@@ -722,77 +800,75 @@ export function createShortVideoAuthorPanel(deps) {
     const sound = data.sound || currentVideo?.sound || {};
     const wrap = document.createElement("div");
     wrap.className = "short-video-sound";
-    const heading = document.createElement("div");
-    heading.className = "short-video-sound-heading";
-    const cover = document.createElement("span");
-    cover.className = "short-video-sound-cover";
-    if (sound.coverUrl) {
-      const image = document.createElement("img");
-      image.src = sound.coverUrl;
-      image.alt = `${sound.title || "原声"}封面`;
-      image.decoding = "async";
-      cover.append(image);
+    const heading = data.previewHeading || document.createElement("div");
+    if (!data.previewHeading) {
+      heading.className = "short-video-sound-heading";
+      const cover = document.createElement("span");
+      cover.className = "short-video-sound-cover";
+      if (sound.coverUrl) {
+        const image = document.createElement("img");
+        image.src = sound.coverUrl;
+        image.alt = `${sound.title || "原声"}封面`;
+        image.decoding = "async";
+        cover.append(image);
+      } else {
+        cover.append(createIcon("headphones"));
+      }
+      const copy = document.createElement("div");
+      const eyebrow = document.createElement("span");
+      eyebrow.textContent = sound.localAvailable ? "本地原声" : "作品原声";
+      const title = document.createElement("strong");
+      title.textContent = sound.title || "作品原声";
+      const author = document.createElement("small");
+      author.textContent = [sound.author ? `音乐人 ${sound.author}` : "", data.loaded ? `${formatNumber(data.total || 0)} 个作品` : "正在统计"].filter(Boolean).join(" · ");
+      copy.append(eyebrow, title, author);
+      const actions = document.createElement("div");
+      actions.className = "short-video-sound-actions";
+      let audio = null;
+      let preview = null;
+      if (sound.previewUrl) {
+        audio = document.createElement("audio");
+        audio.className = "short-video-sound-audio";
+        audio.src = sound.previewUrl;
+        audio.preload = "metadata";
+        preview = document.createElement("button");
+        preview.type = "button";
+        preview.textContent = sound.localAvailable ? "播放本地原声" : "试听原声";
+        createShortVideoSoundPreviewController({
+          audio,
+          preview,
+          cover,
+          idleLabel: sound.localAvailable ? "播放本地原声" : "试听原声",
+          isCurrent: () => isCurrentPanel(panel) && audio.isConnected,
+          acquirePlayback: () => {
+            if (acquireShortVideoSoundPreviewPlayback) return acquireShortVideoSoundPreviewPlayback(audio, panel);
+            activePlayer()?.shortVideoSetPlaybackIntent?.(false);
+            activePlayer()?.pause?.();
+            return null;
+          },
+          showError: (error) => showBrowserToast(error?.name === "NotAllowedError"
+            ? "浏览器拦截了播放，请再次点击试听"
+            : "原声暂时无法播放")
+        });
+        actions.append(preview, audio);
+      }
+      const enter = document.createElement("button");
+      enter.type = "button";
+      enter.className = "is-primary";
+      enter.textContent = "进入原声流";
+      enter.disabled = !sound.key || data.loading;
+      enter.addEventListener("click", () => {
+        if (!isCurrentPanel(panel) || !heading.isConnected) return;
+        enterShortVideoSoundFeed(sound, currentVideo, panel).catch((error) => { if (isCurrentPanel(panel) && heading.isConnected) showError(error); });
+      });
+      actions.append(enter);
+      heading.append(cover, copy, actions);
     } else {
-      cover.append(createIcon("headphones"));
+      const description = heading.querySelector("small");
+      if (description) description.textContent = [sound.author ? `音乐人 ${sound.author}` : "", data.loaded ? `${formatNumber(data.total || 0)} 个作品` : "正在统计"].filter(Boolean).join(" · ");
+      const enter = heading.querySelector(".is-primary");
+      if (enter) enter.disabled = !sound.key || data.loading;
     }
-    const copy = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = sound.localAvailable ? "本地原声" : "作品原声";
-    const title = document.createElement("strong");
-    title.textContent = sound.title || "作品原声";
-    const author = document.createElement("small");
-    author.textContent = [sound.author ? `音乐人 ${sound.author}` : "", data.loaded ? `${formatNumber(data.total || 0)} 个作品` : "正在统计"].filter(Boolean).join(" · ");
-    copy.append(eyebrow, title, author);
-    const actions = document.createElement("div");
-    actions.className = "short-video-sound-actions";
-    let audio = null;
-    let preview = null;
-    if (sound.previewUrl) {
-      audio = document.createElement("audio");
-      audio.className = "short-video-sound-audio";
-      audio.src = sound.previewUrl;
-      audio.preload = "metadata";
-      preview = document.createElement("button");
-      preview.type = "button";
-      preview.textContent = sound.localAvailable ? "播放本地原声" : "试听原声";
-      const syncPreview = () => {
-        const playing = !audio.paused && !audio.ended;
-        preview.textContent = playing ? "暂停原声" : (sound.localAvailable ? "播放本地原声" : "试听原声");
-        cover.classList.toggle("is-playing", playing);
-      };
-      audio.addEventListener("play", syncPreview);
-      audio.addEventListener("pause", syncPreview);
-      audio.addEventListener("ended", syncPreview);
-      audio.addEventListener("error", () => {
-        preview.disabled = true;
-        preview.textContent = "原声暂不可播放";
-        cover.classList.remove("is-playing");
-      });
-      preview.addEventListener("click", async () => {
-        if (audio.paused) {
-          activePlayer()?.pause?.();
-          try {
-            await audio.play();
-          } catch (error) {
-            showBrowserToast(error?.name === "NotAllowedError"
-              ? "浏览器拦截了播放，请再次点击试听"
-              : "原声暂时无法播放");
-          }
-        } else {
-          audio.pause();
-        }
-        syncPreview();
-      });
-      actions.append(preview, audio);
-    }
-    const enter = document.createElement("button");
-    enter.type = "button";
-    enter.className = "is-primary";
-    enter.textContent = "进入原声流";
-    enter.disabled = !sound.key || data.loading;
-    enter.addEventListener("click", () => enterShortVideoSoundFeed(sound, currentVideo, panel).catch(showError));
-    actions.append(enter);
-    heading.append(cover, copy, actions);
     wrap.append(heading);
 
     if (data.error) {
@@ -803,7 +879,7 @@ export function createShortVideoAuthorPanel(deps) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
+      retry.addEventListener("click", () => { if (isCurrentPanel(panel) && wrap.isConnected) data.onRetry?.(); });
       error.append(message, retry);
       wrap.append(error);
       return wrap;
@@ -842,7 +918,7 @@ export function createShortVideoAuthorPanel(deps) {
   async function enterShortVideoSoundFeed(sound, targetVideo, panel) {
     const key = normalizeShortVideoSound(sound?.key);
     const video = targetVideo || state.shortVideo?.current;
-    if (!key || !video?.id) return;
+    if (!isCurrentPanel(panel) || !key || !video?.id) return;
     setAuthorPanelReturnFeed(null);
     state.shortVideo.authorPage = "";
     state.shortVideo.author = "all";
@@ -858,21 +934,11 @@ export function createShortVideoAuthorPanel(deps) {
     clearShortVideoDeleteSelection();
 
     if (isCurrentShortVideo(video)) {
-      const data = await fetchShortVideoDetail(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      state.shortVideo.current = data.video || video;
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      renderStats();
-      refreshAdjacentPanelsDom();
-      syncCurrentNavigationDom();
-    } else {
-      await replaceVideoFromAuthorPanel(video, panel);
-    }
+      if (!await refreshAuthorPanelNavigation()) return;
+    } else if (!await replaceVideoFromAuthorPanel(video, panel)) return;
+    if (!isCurrentPanel(panel)) return;
     syncShortVideoBrowserSearchDom();
-    if (panel?.isConnected) closeAuthorPanel(panel, { restoreFeed: false });
+    closeAuthorPanel(panel, { restoreFeed: false });
     replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current?.id || video.id });
     showBrowserToast(`已进入原声：${sound.title || "作品原声"}`);
   }
@@ -895,7 +961,10 @@ export function createShortVideoAuthorPanel(deps) {
     enter.type = "button";
     enter.textContent = "进入话题流";
     enter.disabled = !topic || data.loading;
-    enter.addEventListener("click", () => enterShortVideoTopicFeed(topic, currentVideo, panel).catch(showError));
+    enter.addEventListener("click", () => {
+      if (!isCurrentPanel(panel) || !wrap.isConnected) return;
+      enterShortVideoTopicFeed(topic, currentVideo, panel).catch((error) => { if (isCurrentPanel(panel) && wrap.isConnected) showError(error); });
+    });
     heading.append(copy, enter);
     wrap.append(heading);
 
@@ -907,7 +976,7 @@ export function createShortVideoAuthorPanel(deps) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
+      retry.addEventListener("click", () => { if (isCurrentPanel(panel) && wrap.isConnected) data.onRetry?.(); });
       error.append(message, retry);
       wrap.append(error);
       return wrap;
@@ -946,7 +1015,7 @@ export function createShortVideoAuthorPanel(deps) {
   async function enterShortVideoTopicFeed(value, targetVideo, panel) {
     const topic = normalizeShortVideoTopic(value);
     const video = targetVideo || state.shortVideo?.current;
-    if (!topic || !video?.id) return;
+    if (!isCurrentPanel(panel) || !topic || !video?.id) return;
     setAuthorPanelReturnFeed(null);
     state.shortVideo.authorPage = "";
     state.shortVideo.author = "all";
@@ -962,21 +1031,11 @@ export function createShortVideoAuthorPanel(deps) {
     clearShortVideoDeleteSelection();
 
     if (isCurrentShortVideo(video)) {
-      const data = await fetchShortVideoDetail(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      state.shortVideo.current = data.video || video;
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      renderStats();
-      refreshAdjacentPanelsDom();
-      syncCurrentNavigationDom();
-    } else {
-      await replaceVideoFromAuthorPanel(video, panel);
-    }
+      if (!await refreshAuthorPanelNavigation()) return;
+    } else if (!await replaceVideoFromAuthorPanel(video, panel)) return;
+    if (!isCurrentPanel(panel)) return;
     syncShortVideoBrowserSearchDom();
-    if (panel?.isConnected) closeAuthorPanel(panel, { restoreFeed: false });
+    closeAuthorPanel(panel, { restoreFeed: false });
     replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current?.id || video.id });
     showBrowserToast(`已进入 #${topic}`);
   }
@@ -1080,11 +1139,11 @@ export function createShortVideoAuthorPanel(deps) {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.textContent = `#${topic}`;
-      chip.addEventListener("click", () => showAuthorPanel(video, {
-        initialTab: "topic",
-        topic,
-        switchAuthorFeed: false
-      }).catch(showError));
+      chip.addEventListener("click", () => {
+        if (!isCurrentPanel(panel) || !wrap.isConnected) return;
+        showAuthorPanel(video, { initialTab: "topic", topic, switchAuthorFeed: false })
+          .catch((error) => { if (isCurrentPanel(panel)) showError(error); });
+      });
       chips.append(chip);
     }
     if (video.author?.name) {
@@ -1092,6 +1151,7 @@ export function createShortVideoAuthorPanel(deps) {
       author.type = "button";
       author.textContent = shortVideoAuthorHandle(video.author.name);
       author.addEventListener("click", () => {
+        if (!isCurrentPanel(panel) || !wrap.isConnected) return;
         closeAuthorPanel(panel, { restoreFeed: false });
         openShortVideoAuthorPage(video.author, video);
       });
@@ -1113,13 +1173,14 @@ export function createShortVideoAuthorPanel(deps) {
     search.textContent = query ? `搜索“${query}”` : "搜索相关内容";
     search.disabled = !query;
     search.addEventListener("click", () => {
+      if (!isCurrentPanel(panel) || !wrap.isConnected) return;
       closeAuthorPanel(panel, { restoreFeed: false });
       commitShortVideoSearch(query);
     });
     const related = document.createElement("button");
     related.type = "button";
     related.textContent = data.loading ? "正在匹配相似作品" : "查看全部相关推荐";
-    related.addEventListener("click", () => data.onShowRelated?.());
+    related.addEventListener("click", () => { if (isCurrentPanel(panel) && wrap.isConnected) data.onShowRelated?.(); });
     actions.append(search, related);
 
     const recommendation = document.createElement("section");
@@ -1144,7 +1205,7 @@ export function createShortVideoAuthorPanel(deps) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.textContent = "重新匹配";
-      retry.addEventListener("click", () => data.onRetry?.());
+      retry.addEventListener("click", () => { if (isCurrentPanel(panel) && wrap.isConnected) data.onRetry?.(); });
       error.append(message, retry);
       recommendation.append(error);
     } else if (data.loading || !data.loaded) {
@@ -1215,7 +1276,7 @@ export function createShortVideoAuthorPanel(deps) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
+      retry.addEventListener("click", () => { if (isCurrentPanel(panel) && wrap.isConnected) data.onRetry?.(); });
       error.append(message, retry);
       wrap.append(error);
       return wrap;
@@ -1299,27 +1360,24 @@ export function createShortVideoAuthorPanel(deps) {
       copy.append(itemTitle, metrics);
       button.append(media, copy);
       const warmRelatedItem = () => {
-        if (isCurrent || button.dataset.prefetchStarted === "1" || !button.isConnected) return;
+        if (!isCurrentPanel(panel) || isCurrent || button.dataset.prefetchStarted === "1" || !button.isConnected) return;
         button.dataset.prefetchStarted = "1";
         button.classList.add("is-prefetching");
         prefetchRelatedVideo(video).then((detail) => {
-          if (!button.isConnected || !detail?.video) return;
+          if (!isCurrentPanel(panel) || !button.isConnected || !detail?.video) return;
           button.dataset.detailReady = "1";
           button.classList.add("is-prefetched");
         }).catch(() => {}).finally(() => {
-          button.classList.remove("is-prefetching");
+          if (isCurrentPanel(panel) && button.isConnected) button.classList.remove("is-prefetching");
         });
       };
       button.addEventListener("pointerenter", warmRelatedItem, { once: true });
       button.addEventListener("focus", warmRelatedItem, { once: true });
       if (!isCurrent && index <= 4) {
-        if (typeof window.requestIdleCallback === "function") {
-          window.requestIdleCallback(warmRelatedItem, { timeout: 900 });
-        } else {
-          window.setTimeout(warmRelatedItem, 80 + index * 55);
-        }
+        panel.shortVideoScheduleIdle?.(warmRelatedItem, 80 + index * 55);
       }
       button.addEventListener("click", async () => {
+        if (!isCurrentPanel(panel) || !button.isConnected) return;
         button.classList.add("is-opening");
         panel?.classList.add("is-switching-video");
         try {
@@ -1328,8 +1386,10 @@ export function createShortVideoAuthorPanel(deps) {
             next: videos[index + 1] || null
           });
         } finally {
-          button.classList.remove("is-opening");
-          panel?.classList.remove("is-switching-video");
+          if (isCurrentPanel(panel) && button.isConnected) {
+            button.classList.remove("is-opening");
+            panel.classList.remove("is-switching-video");
+          }
         }
       });
       list.append(button);
@@ -1340,7 +1400,7 @@ export function createShortVideoAuthorPanel(deps) {
   }
 
   async function openRelatedVideo(video, panel, neighbors = {}) {
-    if (!video?.id) return;
+    if (!isCurrentPanel(panel) || !video?.id) return;
     if (isCurrentShortVideo(video)) {
       showBrowserToast("正在观看这条");
       return;
@@ -1399,6 +1459,7 @@ export function createShortVideoAuthorPanel(deps) {
     meta.textContent = cardTitle(video);
     button.append(media, meta);
     button.addEventListener("click", () => {
+      if (!isCurrentPanel(panel) || !button.isConnected) return;
       if (isCurrentShortVideo(video)) {
         showBrowserToast("正在观看这条");
         return;
@@ -1407,21 +1468,38 @@ export function createShortVideoAuthorPanel(deps) {
         Promise.resolve(options.onOpen(video, panel, {
           previous: options.previous || null,
           next: options.next || null
-        })).catch(showError);
+        })).catch((error) => { if (isCurrentPanel(panel) && button.isConnected) showError(error); });
         return;
       }
       replaceVideoFromAuthorPanel(video, panel, {
         previous: options.previous || null,
         next: options.next || null
-      }).catch(showError);
+      }).catch((error) => { if (isCurrentPanel(panel) && button.isConnected) showError(error); });
     });
     return button;
   }
 
+  async function refreshAuthorPanelNavigation() {
+    // A new topic/sound scope needs its own navigation owner even when the
+    // current work stays mounted. The old scope's neighbors are not seeds.
+    state.shortVideo.prevVideo = null;
+    state.shortVideo.nextVideo = null;
+    state.shortVideo.prevId = "";
+    state.shortVideo.nextId = "";
+    const video = state.shortVideo.current;
+    const owner = beginShortVideoPanelNavigation(video);
+    syncCurrentNavigationDom();
+    const loaded = await hydratePromotedShortVideo(video, owner);
+    if (!loaded || !isCurrentShortVideoNavigation(owner)) return false;
+    renderStats();
+    return true;
+  }
+
   async function replaceVideoFromAuthorPanel(video, panel, neighbors = {}) {
     const videoId = String(video?.id || "").trim();
-    if (!videoId || !panel?.isConnected) return;
+    if (!videoId || !isCurrentPanel(panel)) return false;
 
+    flushActiveShortVideoWatch?.();
     const requestId = nextAuthorPanelVideoRequestId();
     panel.setAttribute("aria-busy", "true");
     state.shortVideo.current = video;
@@ -1432,41 +1510,35 @@ export function createShortVideoAuthorPanel(deps) {
     state.shortVideo.nextVideo = neighbors.next || null;
     state.shortVideo.prevId = neighbors.previous?.id || "";
     state.shortVideo.nextId = neighbors.next?.id || "";
+    const owner = beginShortVideoPanelNavigation(video, {
+      prevKnown: Boolean(neighbors.previous?.id), nextKnown: Boolean(neighbors.next?.id)
+    });
 
     replaceCurrentReelDom(video, { transition: true });
     syncAuthorPanelCurrentTile();
     syncRelatedPanelCurrentItem(panel);
     syncCurrentNavigationDom();
     replaceRoute({ view: "shortVideos", shortVideoId: videoId });
-    resumeActiveSound();
+    resumeActiveSound({ navigationOwner: owner });
 
     try {
-      const data = await fetchShortVideoDetail(videoId);
-      if (requestId !== currentAuthorPanelVideoRequestId() || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
-      state.shortVideo.current = data.video || video;
-      cacheAuthorPanelVideo(state.shortVideo.current);
-      const currentPanel = els.workGrid?.querySelector?.(".short-video-reel-panel.is-current");
-      const needsGallerySoundRefresh = isGalleryPost(state.shortVideo.current)
-        && state.shortVideo.current?.sound?.localAvailable
-        && state.shortVideo.current?.sound?.previewUrl
-        && !currentPanel?.querySelector?.(".short-video-gallery-audio");
-      if (needsGallerySoundRefresh) replaceCurrentReelDom(state.shortVideo.current);
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(videoId);
-      if (requestId !== currentAuthorPanelVideoRequestId() || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
-      refreshAdjacentPanelsDom();
+      // Metadata follows the same owner/ABA/scope checks as a reel swipe. It
+      // may complete after this panel closes, without changing playback.
+      const loaded = await hydratePromotedShortVideo(video, owner);
+      if (!loaded || !isCurrentShortVideoNavigation(owner)) return false;
+      if (requestId !== currentAuthorPanelVideoRequestId() || !isCurrentPanel(panel)) return true;
       syncAuthorPanelCurrentTile();
       syncRelatedPanelCurrentItem(panel);
       syncCurrentNavigationDom();
-      resumeActiveSound();
+      return true;
     } catch (error) {
       console.warn(error);
-      if (requestId === currentAuthorPanelVideoRequestId() && panel.isConnected) {
-        showBrowserToast("已切换视频，详情仍在后台读取");
+      if (isCurrentShortVideoNavigation(owner) && requestId === currentAuthorPanelVideoRequestId() && isCurrentPanel(panel)) {
+        showBrowserToast("已切换作品，详情暂时读取失败");
       }
+      return false;
     } finally {
-      if (requestId === currentAuthorPanelVideoRequestId() && panel.isConnected) {
+      if (requestId === currentAuthorPanelVideoRequestId() && isCurrentPanel(panel)) {
         panel.removeAttribute("aria-busy");
       }
     }
@@ -1475,6 +1547,7 @@ export function createShortVideoAuthorPanel(deps) {
   function replaceCurrentReelDom(video, options = {}) {
     const stack = activeReelStack();
     if (!stack) return;
+    stack._shortVideoFinishDirectTransition?.();
     const oldCurrent = stack.querySelector(".short-video-reel-panel.is-current");
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
     const animateTransition = Boolean(options.transition && oldCurrent && !reducedMotion);
@@ -1494,6 +1567,8 @@ export function createShortVideoAuthorPanel(deps) {
     disposeShortVideoMedia(stack);
     stack.querySelectorAll(".short-video-reel-panel.is-transition-outgoing").forEach((panel) => panel.remove());
     if (stack._shortVideoDirectTransitionTimer) window.clearTimeout(stack._shortVideoDirectTransitionTimer);
+    stack._shortVideoDirectTransitionTimer = 0;
+    stack.classList.remove("is-direct-switching");
     stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing");
     stack.style.setProperty("--short-video-drag-y", "0px");
 
@@ -1510,15 +1585,19 @@ export function createShortVideoAuthorPanel(deps) {
     stack.replaceChildren(...panels);
     if (outgoing) stack.append(outgoing);
     if (animateTransition) {
-      let transitionFinished = false;
+      const transition = { finished: false, timer: 0 };
       const finishTransition = () => {
-        if (transitionFinished) return;
-        transitionFinished = true;
-        window.clearTimeout(stack._shortVideoDirectTransitionTimer);
-        stack._shortVideoDirectTransitionTimer = 0;
+        if (transition.finished) return;
+        transition.finished = true;
+        window.clearTimeout(transition.timer);
         current.panel.removeEventListener("animationend", handleTransitionEnd);
         current.panel.classList.remove("is-transition-incoming");
         outgoing?.remove();
+        // An already-queued old timeout/animation event may run after another
+        // direct switch has installed its own timer and incoming panel.
+        if (stack._shortVideoFinishDirectTransition !== finishTransition) return;
+        stack._shortVideoFinishDirectTransition = null;
+        stack._shortVideoDirectTransitionTimer = 0;
         stack.classList.remove("is-direct-switching");
       };
       const handleTransitionEnd = (event) => {
@@ -1526,14 +1605,11 @@ export function createShortVideoAuthorPanel(deps) {
       };
       stack.classList.add("is-direct-switching");
       current.panel.addEventListener("animationend", handleTransitionEnd);
-      stack._shortVideoDirectTransitionTimer = window.setTimeout(finishTransition, 420);
+      stack._shortVideoFinishDirectTransition = finishTransition;
+      transition.timer = window.setTimeout(finishTransition, 420);
+      stack._shortVideoDirectTransitionTimer = transition.timer;
     }
     current.syncPlayToggle();
-    if (current.player) {
-      window.requestAnimationFrame(() => {
-        current.player?.play?.().then(current.syncPlayToggle).catch(current.syncPlayToggle);
-      });
-    }
   }
 
 

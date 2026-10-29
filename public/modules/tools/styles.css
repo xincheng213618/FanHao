@@ -1,3 +1,110 @@
+.txt-format-tool {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.txt-format-tool summary {
+  cursor: pointer;
+  padding: 20px;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.txt-format-tool summary span {
+  display: block;
+  margin: 6px 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.txt-format-workspace {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  padding: 0 20px 20px;
+}
+
+.txt-format-workspace p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.txt-format-workspace form,
+.txt-format-file,
+.txt-format-workspace fieldset,
+.txt-format-result {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.txt-format-workspace input[type="file"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 0;
+}
+
+.txt-format-workspace fieldset {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.txt-format-workspace fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  font-size: 13px;
+}
+
+.txt-format-submit,
+.txt-format-download {
+  display: inline-grid;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 10px 16px;
+  text-align: center;
+  text-decoration: none;
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+
+.txt-format-submit:disabled,
+.txt-format-submit[aria-disabled="true"],
+.txt-format-download[aria-disabled="true"] { opacity: .6; }
+.txt-format-status.is-error { color: #ad3535; }
+.txt-format-result[hidden] { display: none; }
+.txt-format-result h4 { margin: 0; overflow-wrap: anywhere; }
+.txt-format-result pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.txt-format-tool :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
 .game-library {
   display: grid;
   gap: 18px;
@@ -44,6 +151,24 @@
   color: rgba(255, 255, 255, 0.76);
   font-size: 15px;
   line-height: 1.75;
+}
+
+.game-library-tool-shortcut {
+  justify-self: start;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, .35);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.game-library-tool-shortcut:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
 }
 
 .game-library-notes {

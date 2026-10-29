@@ -1,4 +1,5 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+import { resolveWorkPage } from "./features/works/work-page-state.js";
 
 const RANKING_DESKTOP_PAGE_SIZE = 64;
 const RANKING_MOBILE_PAGE_SIZE = 48;
@@ -23,9 +24,43 @@ export function createRankingPage(deps) {
     visibleWorks
   } = deps;
   const rankingRequests = createLatestRequestGate();
+  let pendingRead = null;
+  let appendOwner = null;
+  let loadedKey = null;
+  let pageableTotal = 0;
 
   function cancelPendingRequests() {
     rankingRequests.cancel();
+    pendingRead = null;
+    resetRankingPaging();
+  }
+
+  function resetRankingPaging() {
+    appendOwner = null;
+    loadedKey = null;
+    pageableTotal = 0;
+    state.rankingLoadingMore = false;
+    state.rankingRawLoaded = null;
+    state.rankingHasMore = null;
+  }
+
+  function beginRead(append = false) {
+    if (!append) {
+      resetRankingPaging();
+      state.rankingHasMore = false;
+    }
+    const request = rankingRequests.begin();
+    pendingRead = request;
+    return request;
+  }
+
+  function finishRead(request) {
+    if (pendingRead === request) pendingRead = null;
+    request.finish();
+  }
+
+  function isCurrentRead(request, key) {
+    return request.isCurrent() && state.activeView === "rankings" && key === (state.selectedRankingKey || "");
   }
 
   function enter(options = {}) {
@@ -37,7 +72,9 @@ export function createRankingPage(deps) {
   }
 
   async function loadRankings() {
-    const request = rankingRequests.begin();
+    if (state.activeView !== "rankings") return;
+    const request = beginRead();
+    let key = state.selectedRankingKey || "";
     els.workGrid.innerHTML = `<div class="empty-state">正在加载排行榜</div>`;
     clearPersonSelection();
     state.searchPeople = [];
@@ -49,22 +86,23 @@ export function createRankingPage(deps) {
         api("/api/rankings", { signal: request.signal }),
         fetchRankingPage(anticipatedKey, 0, { signal: request.signal })
       ]);
-      if (!request.isCurrent() || state.activeView !== "rankings") return;
+      if (!isCurrentRead(request, key)) return;
       state.rankingLists = summary.lists || [];
       if (state.rankingLists.length && !state.rankingLists.some((item) => item.key === state.selectedRankingKey)) {
         state.selectedRankingKey = state.rankingLists.find((item) => item.key === "y2025")?.key || state.rankingLists[0].key || "";
       }
-      const data = state.selectedRankingKey === anticipatedKey
+      key = state.selectedRankingKey || "";
+      const data = key === anticipatedKey
         ? anticipatedData
-        : await fetchRankingPage(state.selectedRankingKey || "", 0, { signal: request.signal });
-      if (!request.isCurrent() || state.activeView !== "rankings") return;
+        : await fetchRankingPage(key, 0, { signal: request.signal });
+      if (!isCurrentRead(request, key)) return;
       applyRankingPage(data);
     } catch (error) {
-      if (!request.isCurrent() || state.activeView !== "rankings") return;
+      if (!isCurrentRead(request, key)) return;
       hidePersonProfile();
       renderEmpty(error.message || "排行榜读取失败");
     } finally {
-      request.finish();
+      finishRead(request);
     }
   }
 
@@ -85,35 +123,44 @@ export function createRankingPage(deps) {
   }
 
   async function loadRankingWorks(options = {}) {
+    if (state.activeView !== "rankings") return;
     const key = state.selectedRankingKey || "";
     const append = Boolean(options.append);
-    const request = rankingRequests.begin();
+    const offset = append ? (Number.isSafeInteger(state.rankingRawLoaded) ? state.rankingRawLoaded : state.works.length) : 0;
+    const request = beginRead(append);
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载榜单作品</div>`;
     try {
-      const data = await fetchRankingPage(key, append ? state.works.length : 0, { signal: request.signal });
-      if (!request.isCurrent() || state.activeView !== "rankings" || key !== (state.selectedRankingKey || "")) return;
-      applyRankingPage(data, { append });
+      const data = await fetchRankingPage(key, offset, { signal: request.signal });
+      if (!isCurrentRead(request, key)) return;
+      applyRankingPage(data, { append, offset });
     } catch (error) {
-      if (!request.isCurrent() || state.activeView !== "rankings") return;
+      if (!isCurrentRead(request, key)) return;
       if (append) throw error;
       renderEmpty(error.message || "排行榜读取失败");
     } finally {
-      request.finish();
+      finishRead(request);
     }
   }
 
   function applyRankingPage(data, options = {}) {
+    const page = resolveWorkPage(data, {
+      existingWorks: options.append ? state.works : [], offset: options.offset || 0,
+      previousTotal: options.append ? pageableTotal : 0
+    });
     if (options.append) {
-      const seen = new Set(state.works.map((work) => work.id));
-      state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+      state.works.push(...page.works);
       state.workVisibleLimit += rankingPageSize();
     } else {
-      state.works = data.works || [];
+      state.works = page.works;
       resetWorkPaging();
     }
-    state.rankingTotal = data.rankingTotal || data.total || state.works.length;
-    state.rankingMissingTotal = data.missingTotal || 0;
-    state.rankingLocalTotal = data.localTotal || 0;
+    state.rankingRawLoaded = page.rawLoaded;
+    state.rankingHasMore = page.hasMore;
+    pageableTotal = page.total;
+    loadedKey = state.selectedRankingKey || "";
+    state.rankingTotal = data.rankingTotal ?? page.total;
+    state.rankingMissingTotal = data.missingTotal ?? 0;
+    state.rankingLocalTotal = data.localTotal ?? 0;
     state.rankingUpdatedAt = data.updatedAt || "";
     state.rankingPageUrl = data.pageUrl || "";
     renderPanel(data);
@@ -123,7 +170,13 @@ export function createRankingPage(deps) {
   }
 
   async function loadMoreRankingWorks(button) {
-    if (state.rankingLoadingMore || state.works.length >= state.rankingTotal) return;
+    if (state.activeView !== "rankings" || pendingRead || state.rankingLoadingMore
+      || !(state.rankingHasMore ?? state.works.length < state.rankingTotal)
+      || (loadedKey !== null && loadedKey !== (state.selectedRankingKey || ""))) return;
+    const owner = {};
+    appendOwner = owner;
+    const key = state.selectedRankingKey || "";
+    const ownsButton = () => appendOwner === owner && state.activeView === "rankings" && key === (state.selectedRankingKey || "");
     state.rankingLoadingMore = true;
     const originalText = button?.textContent || "";
     if (button) {
@@ -133,10 +186,13 @@ export function createRankingPage(deps) {
     try {
       await loadRankingWorks({ append: true });
     } catch (error) {
-      if (button?.isConnected) button.textContent = error.message || "加载失败";
+      if (ownsButton() && button?.isConnected) button.textContent = error.message || "加载失败";
     } finally {
+      if (appendOwner !== owner) return;
+      const updateButton = ownsButton();
+      appendOwner = null;
       state.rankingLoadingMore = false;
-      if (button?.isConnected) {
+      if (updateButton && button?.isConnected) {
         button.disabled = false;
         if (button.textContent === "正在加载") button.textContent = originalText;
       }
@@ -201,9 +257,9 @@ export function createRankingPage(deps) {
     const summary = document.createElement("div");
     summary.className = "ranking-toolbar-summary";
     summary.textContent = [
-      `${formatNumber(data.rankingTotal || state.rankingTotal || 0)} 榜单`,
-      `${formatNumber(data.localTotal || state.rankingLocalTotal || 0)} 本地`,
-      `${formatNumber(data.missingTotal || state.rankingMissingTotal || 0)} 未下载`,
+      `${formatNumber(data.rankingTotal ?? state.rankingTotal ?? 0)} 榜单`,
+      `${formatNumber(data.localTotal ?? state.rankingLocalTotal ?? 0)} 本地`,
+      `${formatNumber(data.missingTotal ?? state.rankingMissingTotal ?? 0)} 未下载`,
       `${formatNumber(visibleWorks().length)} 显示`
     ].join(" · ");
 

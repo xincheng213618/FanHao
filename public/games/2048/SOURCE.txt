@@ -6,3 +6,5 @@ License: GPL-3.0
 Local changes:
 - Added a "返回资料库" link.
 - Changed the document title for the host app.
+- Bound AI replies to their request, board and play mode; stop, board edits, undo and page exit retire pending results.
+- Kept game keys out of native controls and browser shortcuts; keyboard speed adjustments retain native focus.

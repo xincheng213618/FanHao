@@ -12,13 +12,35 @@ export function createShortVideoCommentsView(deps) {
     showBrowserToast
   } = deps;
 
-  return function shortVideoCommentsView(video) {
+  return function shortVideoCommentsView(video, { isCurrent = () => true } = {}) {
     const commentCount = Math.max(0, Number(video?.stats?.comments || 0));
     const originalUrl = originalDouyinUrl(video);
     const videoId = String(video?.id || "").trim();
     const commentsEndpoint = `/api/short-videos/${encodeURIComponent(videoId)}/comments`;
     const wrap = document.createElement("div");
     wrap.className = "short-video-comments";
+    let disposed = false;
+    const lifetime = new AbortController();
+    const ownsView = () => !disposed && wrap.isConnected && isCurrent();
+    const confirmationTimers = new Set();
+    const clearConfirmationTimers = () => {
+      for (const timer of confirmationTimers) window.clearTimeout(timer);
+      confirmationTimers.clear();
+    };
+    let loadRequestId = 0;
+    let localMutationRevision = 0;
+    let remoteMutationRevision = 0;
+    const pendingCommentPosts = new Set();
+    const pendingCommentDeletes = new Set();
+    wrap.shortVideoDisposeComments = () => {
+      if (disposed) return;
+      disposed = true;
+      loadRequestId += 1;
+      clearConfirmationTimers();
+      pendingCommentPosts.clear();
+      pendingCommentDeletes.clear();
+      lifetime.abort();
+    };
 
     const heading = document.createElement("div");
     heading.className = "short-video-comments-heading";
@@ -75,13 +97,14 @@ export function createShortVideoCommentsView(deps) {
     open.textContent = "查看原评论";
     open.disabled = !originalUrl;
     open.title = originalUrl ? "打开抖音原视频" : "当前作品没有原始链接";
-    open.addEventListener("click", () => openDouyinLink(video));
+    open.addEventListener("click", () => { if (ownsView()) openDouyinLink(video); });
     const copy = document.createElement("button");
     copy.type = "button";
     copy.textContent = "复制链接";
     copy.addEventListener("click", () => {
+      if (!ownsView()) return;
       const value = originalUrl || localShortVideoUrl(video);
-      copyShortVideoValue(value, originalUrl ? "已复制抖音原链接" : "已复制本地链接").catch(() => {});
+      copyShortVideoValue(value, originalUrl ? "已复制抖音原链接" : "已复制本地链接", { isCurrent: ownsView }).catch(() => {});
     });
     actions.append(sync, open, copy);
     remote.append(remoteIcon, remoteCopy, actions);
@@ -186,6 +209,7 @@ export function createShortVideoCommentsView(deps) {
     };
 
     const renderLocalComments = () => {
+      clearConfirmationTimers();
       localList.innerHTML = "";
       localCount.textContent = loading ? "读取中" : `${comments.length} 条`;
       if (loading) {
@@ -244,32 +268,65 @@ export function createShortVideoCommentsView(deps) {
       remove.className = "short-video-local-comment-delete";
       remove.textContent = "删除";
       remove.setAttribute("aria-label", "删除本地评论");
-      let confirmTimer = 0;
+      const commentId = String(comment.id || "");
+      if (pendingCommentDeletes.has(commentId)) {
+        remove.disabled = true;
+        remove.setAttribute("aria-busy", "true");
+      }
+      let confirmTimer = null;
+      const clearConfirmTimer = () => {
+        if (confirmTimer === null) return;
+        window.clearTimeout(confirmTimer);
+        confirmationTimers.delete(confirmTimer);
+        confirmTimer = null;
+      };
       remove.addEventListener("click", async () => {
+        if (!ownsView() || !remove.isConnected || pendingCommentDeletes.has(commentId)) return;
         if (remove.dataset.confirm !== "1") {
           remove.dataset.confirm = "1";
           remove.textContent = "确认删除";
-          window.clearTimeout(confirmTimer);
-          confirmTimer = window.setTimeout(() => {
+          clearConfirmTimer();
+          const timer = window.setTimeout(() => {
+            if (!confirmationTimers.delete(timer) || !ownsView() || !remove.isConnected) return;
+            confirmTimer = null;
             remove.dataset.confirm = "0";
             remove.textContent = "删除";
           }, 10000);
+          confirmTimer = timer;
+          confirmationTimers.add(timer);
           return;
         }
-        window.clearTimeout(confirmTimer);
+        clearConfirmTimer();
+        pendingCommentDeletes.add(commentId);
         remove.disabled = true;
         remove.setAttribute("aria-busy", "true");
         try {
-          const data = await api(`${commentsEndpoint}/${encodeURIComponent(comment.id || "")}`, { method: "DELETE" });
-          comments = Array.isArray(data.comments) ? data.comments : comments.filter((itemComment) => itemComment.id !== comment.id);
+          const data = await api(`${commentsEndpoint}/${encodeURIComponent(comment.id || "")}`, { method: "DELETE", signal: lifetime.signal });
+          if (!ownsView()) return;
+          localMutationRevision += 1;
+          const deletedId = String(data.deletedId || comment.id || "");
+          for (const post of pendingCommentPosts) post.deletedIds.add(deletedId);
+          comments = comments.filter(itemComment => String(itemComment.id || "") !== deletedId);
+          loading = false;
+          loadError = "";
           renderLocalComments();
           showBrowserToast("已删除本地评论");
         } catch (error) {
-          remove.disabled = false;
-          remove.removeAttribute("aria-busy");
-          remove.dataset.confirm = "0";
-          remove.textContent = "删除";
+          if (!ownsView()) return;
           showBrowserToast(error.message || "本地评论删除失败");
+        } finally {
+          pendingCommentDeletes.delete(commentId);
+          if (ownsView()) {
+            const currentItem = [...localList.querySelectorAll(".short-video-local-comment")]
+              .find(item => String(item.dataset.commentId || "") === commentId);
+            const currentRemove = currentItem?.querySelector(".short-video-local-comment-delete");
+            if (currentRemove) {
+              currentRemove.disabled = false;
+              currentRemove.removeAttribute("aria-busy");
+              currentRemove.dataset.confirm = "0";
+              currentRemove.textContent = "删除";
+            }
+          }
         }
       });
       body.append(meta, content, remove);
@@ -277,46 +334,63 @@ export function createShortVideoCommentsView(deps) {
       return item;
     };
 
-    const loadLocalComments = async () => {
+    const loadLocalComments = async ({ initial = false } = {}) => {
+      if (disposed || !isCurrent() || (!initial && !wrap.isConnected)) return;
+      const requestId = ++loadRequestId;
+      const localRevision = localMutationRevision, remoteRevision = remoteMutationRevision;
       loading = true;
       loadError = "";
       renderLocalComments();
       try {
-        const data = await api(commentsEndpoint);
-        comments = Array.isArray(data.comments) ? data.comments : [];
-        remoteComments = Array.isArray(data.remoteComments) ? data.remoteComments : [];
+        const data = await api(commentsEndpoint, { signal: lifetime.signal });
+        if (!ownsView() || requestId !== loadRequestId) return;
+        if (localRevision === localMutationRevision) {
+          comments = Array.isArray(data.comments) ? data.comments : [];
+          loading = false;
+          renderLocalComments();
+        }
+        if (remoteRevision === remoteMutationRevision) {
+          remoteComments = Array.isArray(data.remoteComments) ? data.remoteComments : [];
+          renderRemoteComments();
+        }
       } catch (error) {
+        if (!ownsView() || requestId !== loadRequestId || localRevision !== localMutationRevision) return;
         loadError = error.message || "本地评论读取失败";
-      } finally {
         loading = false;
         renderLocalComments();
-        renderRemoteComments();
       }
     };
 
     sync.addEventListener("click", async () => {
-      if (sync.getAttribute("aria-busy") === "true") return;
+      if (!ownsView() || sync.getAttribute("aria-busy") === "true") return;
       sync.setAttribute("aria-busy", "true");
       sync.disabled = true;
       sync.textContent = "同步中";
       try {
         const data = await api(`${commentsEndpoint}/sync`, {
           method: "POST",
+          signal: lifetime.signal,
           body: { maxComments: 100 }
         });
+        if (!ownsView()) return;
+        remoteMutationRevision += 1;
         remoteComments = Array.isArray(data.remoteComments) ? data.remoteComments : [];
         renderRemoteComments();
         showBrowserToast(`已同步 ${formatNumber(data.imported || remoteComments.length)} 条抖音评论`);
       } catch (error) {
+        if (!ownsView()) return;
         showBrowserToast(error.message || "抖音评论同步失败");
       } finally {
-        sync.removeAttribute("aria-busy");
-        sync.disabled = false;
-        sync.textContent = "同步评论";
+        if (ownsView()) {
+          sync.removeAttribute("aria-busy");
+          sync.disabled = false;
+          sync.textContent = "同步评论";
+        }
       }
     });
 
     const syncComposer = () => {
+      if (!ownsView()) return;
       const value = textarea.value || "";
       const length = Array.from(value).length;
       characterCount.textContent = `${length}/500`;
@@ -327,38 +401,58 @@ export function createShortVideoCommentsView(deps) {
     };
     textarea.addEventListener("input", syncComposer);
     textarea.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      if (!ownsView() || event.key !== "Enter" || event.shiftKey || event.isComposing) return;
       event.preventDefault();
       if (!submit.disabled) composer.requestSubmit();
     });
     composer.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (!ownsView()) return;
       const body = textarea.value.trim();
       if (!body || submit.getAttribute("aria-busy") === "true") return;
+      const focusOwner = document.activeElement;
+      const submittedValue = textarea.value;
+      // Only in-flight posts need deletion history: a late post snapshot can
+      // include comments already deleted by a concurrent successful request.
+      const pendingPost = { deletedIds: new Set() };
+      pendingCommentPosts.add(pendingPost);
       submit.setAttribute("aria-busy", "true");
       submit.disabled = true;
       submit.textContent = "发送中";
       try {
-        const data = await api(commentsEndpoint, { method: "POST", body: { body } });
-        comments = Array.isArray(data.comments) ? data.comments : [data.comment, ...comments].filter(Boolean);
-        textarea.value = "";
+        const data = await api(commentsEndpoint, { method: "POST", body: { body }, signal: lifetime.signal });
+        if (!ownsView()) return;
+        localMutationRevision += 1;
+        const merged = new Map();
+        for (const item of [data.comment, ...(Array.isArray(data.comments) ? data.comments : []), ...comments]) {
+          const id = String(item?.id || "");
+          if (id && !pendingPost.deletedIds.has(id) && !merged.has(id)) merged.set(id, item);
+        }
+        comments = [...merged.values()];
+        loading = false;
+        loadError = "";
+        if (textarea.value === submittedValue) textarea.value = "";
         renderLocalComments();
         scroll.scrollTop = 0;
         showBrowserToast("本地评论已保存");
       } catch (error) {
+        if (!ownsView()) return;
         showBrowserToast(error.message || "本地评论保存失败");
       } finally {
-        submit.removeAttribute("aria-busy");
-        submit.textContent = "发送";
-        syncComposer();
-        textarea.focus();
+        pendingCommentPosts.delete(pendingPost);
+        if (ownsView()) {
+          submit.removeAttribute("aria-busy");
+          submit.textContent = "发送";
+          syncComposer();
+          if (document.activeElement === focusOwner && composer.contains(focusOwner) && focusOwner !== textarea) textarea.focus();
+        }
       }
     });
 
     wrap.append(heading, scroll, composer);
     renderRemoteComments();
     renderLocalComments();
-    loadLocalComments();
+    loadLocalComments({ initial: true });
     return wrap;
   }
 

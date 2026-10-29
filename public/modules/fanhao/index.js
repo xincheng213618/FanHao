@@ -4,6 +4,7 @@ export { createPlaybackPrefetch } from "./playback-prefetch.js?v=20260717-fanhao
 export { createRankingPage } from "./ranking-page.js?v=20260726-work-sort-01";
 export { createFanhaoState } from "./state.js?v=20260717-fanhao-people-first-paint-01";
 export { createSearchRequestService } from "./search-request-service.js?v=20261004-request-lifecycle-02";
+export { resolveWorkPage } from "./features/works/work-page-state.js";
 export { selectVisibleWorks } from "./features/works/query.js?v=20260726-work-sort-01";
 export { createWorkActions } from "./features/works/work-actions.js?v=20260717-fanhao-work-actions-01";
 export { appendWorkCardsInPlace, workServerMoreState } from "./features/works/work-page-appender.js?v=20260724-work-pagination-02";

@@ -224,6 +224,43 @@
 }
 
 @media (max-width: 560px) {
+  .music-alpha-index {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+    gap: 4px;
+  }
+
+  .music-alpha-index-item {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 5px;
+  }
+
+  .music-track-row {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .music-track-row:not(.head) {
+    min-height: 104px;
+    contain-intrinsic-size: auto 104px;
+  }
+
+  .music-track-row > .music-track-actions {
+    grid-column: 2 / -1;
+    overflow: visible;
+    justify-content: stretch;
+  }
+
+  .music-track-row.head > span:last-child { display: none; }
+
+  .music-track-action {
+    flex: 1 1 0;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   .music-single-track-page .music-stage-content {
     padding: 52px 14px 4px;
   }

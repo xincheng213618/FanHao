@@ -11,7 +11,7 @@
 //   showError 错误展示回调
 
 import { ensureMusicState } from "./state.js";
-import { collapseDuplicateTracks, compactTrack, normalizePlaybackSpeed, nextRepeat } from "./format.js";
+import { collapseDuplicateTracks, createDuplicateTrackAccumulator, compactTrack, normalizePlaybackSpeed, nextRepeat } from "./format.js";
 import {
   writeLastTrackPreference,
   readLastTrackPreference,
@@ -33,6 +33,9 @@ export function createMusicActions({ state, api, player, view, router, showError
   let musicLoadGeneration = 0;
   let musicLoadController = null;
   let musicLoadRequest = null;
+  let lastAcceptedListRead = null;
+  let musicListFailure = null;
+  let searchDuplicateSession = null;
   let trackOpenGeneration = 0;
   let trackOpenController = null;
   let trackOpenRestoreOwner = null;
@@ -49,6 +52,15 @@ export function createMusicActions({ state, api, player, view, router, showError
   let progressClockRequest = null;
   let progressHidden = false;
   let playlistDialogReturnFocus = null;
+  const playlistOrderWrites = new Map();
+  const playlistOrderCapacity = 8;
+  const ratingWrites = new Map();
+  let ratingErrorStatus = null;
+  let latestRatingUiIntent = null;
+  let ratingFeedbackSequence = 0;
+  let favoriteFeedbackSequence = 0;
+  let latestFavoriteFailureId = 0;
+  let favoriteFailure = null;
 
   const music = () => state.music;
   const progressWriter = createMusicProgressWriter({
@@ -81,6 +93,10 @@ export function createMusicActions({ state, api, player, view, router, showError
   // existing lifetime when the user leaves a reader or changes the route.
   function cancelPendingRequests() {
     view.cancelNavigationTimers?.();
+    musicListFailure = null;
+    favoriteFailure = null;
+    ratingErrorStatus = null;
+    searchDuplicateSession = null;
     navigationGeneration += 1;
     foregroundGeneration += 1;
     musicLoadGeneration += 1;
@@ -96,6 +112,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
     musicLoadController = null;
     musicLoadRequest = null;
+    lastAcceptedListRead = null;
     trackOpenController = null;
     if (trackOpenRestoreOwner) restoreAttemptKey = "";
     trackOpenRestoreOwner = null;
@@ -112,6 +129,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       if (requestStatusOwner && music().status === requestStatusOwner.status) music().status = "";
     }
     requestStatusOwner = null;
+    view.syncFavoriteFeedback?.();
     return navigationGeneration;
   }
 
@@ -148,6 +166,32 @@ export function createMusicActions({ state, api, player, view, router, showError
         : music().data?.rawLoaded ?? music().data?.tracks?.length ?? 0;
   }
 
+  function collapseSearchAppend(request, previousRawTracks, incomingTracks, mergedRawTracks) {
+    let account;
+    try { account = captureWebAccount(); } catch {
+      searchDuplicateSession = null;
+      return collapseDuplicateTracks(mergedRawTracks);
+    }
+    const data = music().data, session = searchDuplicateSession;
+    const reusable = session && session.data === data && session.raw === previousRawTracks
+      && session.tracks === data?.tracks && session.rawLength === previousRawTracks.length
+      && session.selection === request.selection && session.navigation === request.navigation
+      && session.account.owner === account.owner && session.account.revision === account.revision;
+    const next = reusable ? session : {
+      accumulator: createDuplicateTrackAccumulator(), selection: request.selection,
+      navigation: request.navigation, account
+    };
+    let tracks;
+    try {
+      tracks = next.accumulator.append(reusable ? incomingTracks : mergedRawTracks);
+    } catch (error) {
+      searchDuplicateSession = null;
+      throw error;
+    }
+    searchDuplicateSession = next;
+    return tracks;
+  }
+
   function ownsMusicLoad(request) {
     return musicLoadRequest === request && request.generation === musicLoadGeneration
       && request.navigation === navigationGeneration && !request.controller.signal.aborted;
@@ -175,11 +219,37 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   // ---------- 列表加载 ----------
+  function getListReadFailure() {
+    const failure = musicListFailure;
+    if (!failure || state.activeView !== "music" || failure.navigation !== navigationGeneration
+        || failure.generation !== musicLoadGeneration || failure.selection !== listSelectionKey()) return null;
+    let account;
+    try { account = captureWebAccount(); } catch { return null; }
+    return account.owner === failure.account.owner && account.revision === failure.account.revision ? failure : null;
+  }
+
+  function retryListRead(failure) {
+    if (getListReadFailure() !== failure) return null;
+    beginNavigation();
+    const pending = loadMusic({ replaceRoute: true, keepCurrent: true, restoreLast: failure.restoreLast, retryFailure: failure });
+    const owner = { navigation: navigationGeneration, generation: musicLoadGeneration, foreground: foregroundGeneration, selection: listSelectionKey(), account: captureWebAccount() };
+    return { pending, isCurrent: () => {
+      let account;
+      try { account = captureWebAccount(); } catch { return false; }
+      return state.activeView === "music" && owner.navigation === navigationGeneration && owner.generation === musicLoadGeneration
+        && owner.foreground === foregroundGeneration && owner.selection === listSelectionKey()
+        && account.owner === owner.account.owner && account.revision === owner.account.revision;
+    } };
+  }
+
   function loadMusic(options = {}) {
     ensureMusicState(state);
     const artistMode = music().mode === "artists";
     const albumMode = music().mode === "albums";
     const append = Boolean(options.append && (music().mode === "library" || artistMode || albumMode));
+    if (!append) searchDuplicateSession = null;
+    if (append && getListReadFailure()) return Promise.resolve(null);
+    if (!append) musicListFailure = null;
     const selection = listSelectionKey();
     const offset = append ? listOffset(artistMode, albumMode) : 0;
     if (append && musicLoadRequest?.append && isMusicLoadCurrent(musicLoadRequest)
@@ -198,10 +268,24 @@ export function createMusicActions({ state, api, player, view, router, showError
     musicLoadController = controller;
     const request = {
       controller, generation, selection, offset, append, artistMode, albumMode,
-      background: Boolean(options.background),
+      background: Boolean(options.background), account: captureWebAccount(),
       navigation: navigationGeneration, foreground: foregroundGeneration
     };
     musicLoadRequest = request;
+    const feedback = options.preserveFavoriteFailure;
+    if (feedback && favoriteFailure === feedback && feedback.generation === generation - 1
+        && isFavoriteContextCurrent(feedback)) {
+      // An older confirmed favorite still maintains list membership. That
+      // read is not a new user intent which may dismiss a newer save failure.
+      favoriteFailure = { ...feedback, generation };
+      request.preservedFavoriteFailure = favoriteFailure;
+    }
+    const ratingFeedback = options.preserveRatingFailure;
+    if (ratingFeedback && ratingErrorStatus === ratingFeedback && ratingFeedback.generation === generation - 1
+        && isRatingContextCurrent(ratingFeedback)) {
+      ratingErrorStatus = { ...ratingFeedback, generation };
+      request.preservedRatingFailure = ratingErrorStatus;
+    }
     request.promise = performMusicLoad(request, options, appendScrollTop);
     return request.promise;
   }
@@ -217,7 +301,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     } else {
       music().loading = !append;
       music().loadingMore = append;
-      if (!trackOpenController) setRequestStatus(request, append ? "正在加载更多" : "正在读取音乐库");
+      if (!trackOpenController && (!request.preservedFavoriteFailure || getFavoriteFailure() !== request.preservedFavoriteFailure)
+          && (!request.preservedRatingFailure || getRatingFailure() !== request.preservedRatingFailure)) {
+        setRequestStatus(request, append ? "正在加载更多" : "正在读取音乐库");
+      }
       view.setMusicListLoadingState(true, { append });
     }
     const listsPromise = append ? Promise.resolve() : Promise.all([
@@ -268,12 +355,36 @@ export function createMusicActions({ state, api, player, view, router, showError
       }
       await listsPromise;
     } catch (error) {
-      if (!isMusicLoadCurrent(request) || !isForegroundCurrent(request) || requestStatusOwner !== request) {
+      if (options.canReportFailure && !options.canReportFailure()) {
+        // This maintenance read still finishes its own loading lifecycle, but
+        // must not turn an obsolete failure into a new status or retry panel.
+        if (requestStatusOwner === request) requestStatusOwner = null;
+        finishMusicLoad(request);
+        return;
+      }
+      const preservedFavoriteFailure = request.preservedFavoriteFailure && options.canReportFailure?.();
+      const preservedRatingFailure = request.preservedRatingFailure && options.canReportFailure?.();
+      if (!isMusicLoadCurrent(request) || !isForegroundCurrent(request)
+          || (requestStatusOwner !== request && !preservedFavoriteFailure && !preservedRatingFailure)) {
+        // A new song can take foreground ownership while this same list is
+        // retrying. Keep its previous recovery usable without reporting the
+        // background rejection over the newly chosen song.
+        if (isMusicLoadCurrent(request) && options.retryFailure && !append && !background) {
+          musicListFailure = Object.assign(options.retryFailure, { navigation: request.navigation, generation: request.generation,
+            selection: request.selection, account: request.account });
+        }
         finishMusicLoad(request);
         return;
       }
       music().loading = false;
       music().loadingMore = false;
+      if (!append && !background && ["library", "artists", "albums"].includes(music().mode)) {
+        musicListFailure = { navigation: request.navigation, generation: request.generation, selection: request.selection,
+          account: request.account, message: error?.message || "音乐列表读取失败", restoreLast: options.restoreLast === true };
+      }
+      // A carried favorite hint kept its status while this read was pending.
+      // Once it is cleared, the still-current read owns its failure again.
+      if (preservedFavoriteFailure || preservedRatingFailure) setRequestStatus(request, music().status);
       settleRequestStatus(request, error?.message || "音乐列表读取失败");
       finishMusicLoad(request);
       // UI callers present the rejection through showError; rendering here
@@ -287,8 +398,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     const incomingTracks = data.tracks || [];
     const previousRawTracks = append ? music().data?.rawTracks || music().data?.tracks || [] : [];
     const mergedRawTracks = append ? [...previousRawTracks, ...incomingTracks] : incomingTracks;
-    const mergedTracks = music().mode === "library" && music().query
-      ? collapseDuplicateTracks(mergedRawTracks)
+    const searching = music().mode === "library" && Boolean(music().query);
+    if (!searching) searchDuplicateSession = null;
+    const mergedTracks = searching
+      ? (append ? collapseSearchAppend(request, previousRawTracks, incomingTracks, mergedRawTracks) : collapseDuplicateTracks(mergedRawTracks))
       : mergedRawTracks;
     const previousArtists = append && artistMode ? music().data?.artists || [] : [];
     const mergedArtists = artistMode ? (append ? [...previousArtists, ...(data.artists || [])] : data.artists || []) : data.artists;
@@ -299,6 +412,12 @@ export function createMusicActions({ state, api, player, view, router, showError
       : albumMode
         ? { ...data, albums: mergedAlbums, tracks: [] }
         : { ...data, tracks: mergedTracks, rawTracks: mergedRawTracks, rawLoaded: mergedRawTracks.length };
+    if (searchDuplicateSession) {
+      searchDuplicateSession.data = music().data;
+      searchDuplicateSession.raw = mergedRawTracks;
+      searchDuplicateSession.rawLength = mergedRawTracks.length;
+      searchDuplicateSession.tracks = mergedTracks;
+    }
     music().summary = data.summary || music().summary;
     music().artists = mergedArtists || music().artists || [];
     music().albums = mergedAlbums || music().albums || [];
@@ -328,6 +447,8 @@ export function createMusicActions({ state, api, player, view, router, showError
       finishMusicLoad(request);
       return;
     }
+    lastAcceptedListRead = { generation: request.generation, navigation: request.navigation,
+      selection: request.selection, account: request.account };
     finishMusicLoad(request);
     if (background) return;
     if (!isForegroundCurrent(request)) {
@@ -410,6 +531,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     if (!restoring) {
       foregroundGeneration += 1;
       view.cancelNavigationTimers?.();
+      view.syncFavoriteFeedback?.();
     }
     cancelTrackRequest();
     const request = { kind: "track", navigation: navigationGeneration, foreground: foregroundGeneration };
@@ -584,9 +706,12 @@ export function createMusicActions({ state, api, player, view, router, showError
     queue.splice(nextIndex, 0, item);
     music().queue = queue;
     music().status = `已调整「${item.title || "歌曲"}」顺序`;
-    view.refreshQueueSurface();
-    persistPlaylistQueueOrder(queue).catch((error) => {
-      music().queue = previousQueue;
+    view.refreshQueueSurface({ queueMove: { trackId, fromIndex: index, toIndex: nextIndex } });
+    const request = queueOrderOwner(queue);
+    request.rollbackQueue = previousQueue;
+    persistPlaylistQueueOrder(queue, request).catch((error) => {
+      if (!isQueueOrderCurrent(request)) return;
+      music().queue = request.rollbackQueue;
       view.refreshQueueSurface();
       showError(error);
     });
@@ -629,12 +754,85 @@ export function createMusicActions({ state, api, player, view, router, showError
     return uniqueTrackIds(music().queue || []);
   }
 
-  async function persistPlaylistQueueOrder(queue = music().queue || []) {
+  function queueOrderOwner(queue) {
+    const account = captureWebAccount();
+    return { queue, navigation: navigationGeneration, foreground: foregroundGeneration,
+      mode: music().mode, playlistId: music().activePlaylistId,
+      webAccountOwner: account.owner, webAccountRevision: account.revision };
+  }
+
+  function isQueueOrderCurrent(request) {
+    if (!isQueueOrderAccountCurrent(request)) return false;
+    return isForegroundCurrent(request) && state.activeView === "music" && music().queue === request.queue
+      && music().mode === request.mode && music().activePlaylistId === request.playlistId;
+  }
+
+  function isQueueOrderAccountCurrent(request) {
+    try {
+      const account = captureWebAccount();
+      return account.revision === request.webAccountRevision && (!request.webAccountOwner || account.owner === request.webAccountOwner);
+    } catch { return false; }
+  }
+
+  function restoreConfirmedQueueOrder(confirmedQueue, members) {
+    const current = new Map(members.map(track => [track.id, track]));
+    const known = new Set(confirmedQueue.map(track => track.id));
+    const ordered = confirmedQueue.filter(track => current.has(track.id)).map(track => current.get(track.id));
+    let index = 0;
+    // Only undo ordering. Later membership edits and their new-track slots
+    // belong to the user, even when an earlier full-order write has settled.
+    return members.map(track => known.has(track.id) ? ordered[index++] : track);
+  }
+
+  function writePlaylistQueueOrder(playlistId, queue, trackIds, owner) {
+    const key = JSON.stringify([owner.webAccountOwner, owner.webAccountRevision, playlistId]);
+    let writes = playlistOrderWrites.get(key);
+    if (!writes) {
+      if (playlistOrderWrites.size >= playlistOrderCapacity) return Promise.reject(new Error("歌单排序保存繁忙，请稍后重试"));
+      writes = { active: null, pending: null, confirmedQueue: owner.rollbackQueue || queue };
+      playlistOrderWrites.set(key, writes);
+    }
+    return new Promise((resolve, reject) => {
+      const job = { queue, trackIds, owner, resolve, reject };
+      if (writes.active) {
+        // A full order replaces earlier unsent adjustments for this playlist.
+        // Keep one physical write and only the user's latest pending order.
+        writes.pending?.resolve(null);
+        writes.pending = job;
+      } else {
+        void send(job);
+      }
+    });
+
+    async function send(job) {
+      writes.active = job;
+      try {
+        if (!isQueueOrderAccountCurrent(job.owner)) throw Object.assign(new Error("账号已切换，请重新操作"), { code: "ACCOUNT_CHANGED" });
+        const data = await api.reorderPlaylist(playlistId, { trackIds: job.trackIds });
+        writes.confirmedQueue = job.queue;
+        job.resolve(data);
+      } catch (error) {
+        job.owner.rollbackQueue = restoreConfirmedQueueOrder(writes.confirmedQueue, job.owner.rollbackQueue || job.queue);
+        job.reject(error);
+      } finally {
+        const next = writes.pending;
+        writes.pending = null;
+        if (next) void send(next);
+        else playlistOrderWrites.delete(key);
+      }
+    }
+  }
+
+  async function persistPlaylistQueueOrder(queue = music().queue || [], request = queueOrderOwner(queue)) {
     const playlistId = music().mode === "playlist" ? String(music().activePlaylistId || "").trim() : "";
     if (!playlistId) return null;
     const trackIds = uniqueTrackIds(queue);
     if (!trackIds.length) return null;
-    const data = await api.reorderPlaylist(playlistId, { trackIds });
+    const data = await writePlaylistQueueOrder(playlistId, queue, trackIds, request);
+    if (!data) return null;
+    if (!isQueueOrderAccountCurrent(request)) return data;
+    invalidatePlaylistCache();
+    if (!isQueueOrderCurrent(request)) return data;
     music().activePlaylist = data.playlist || music().activePlaylist;
     if (music().data?.playlist?.id === playlistId) music().data.playlist = data.playlist || music().data.playlist;
     music().status = "歌单顺序已保存";
@@ -667,7 +865,8 @@ export function createMusicActions({ state, api, player, view, router, showError
     const currentIndex = queue.findIndex((track) => track.id === music().current?.id);
     let nextIndex = currentIndex + direction;
     if (nextIndex < 0 || nextIndex >= queue.length) {
-      if (!options.wrap) return;
+      const wrap = options.wrap ?? (music().repeat === "all");
+      if (!wrap) return;
       nextIndex = nextIndex < 0 ? queue.length - 1 : 0;
     }
     const target = queue[nextIndex] || queue[0];
@@ -712,10 +911,14 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   // ---------- 收藏 / 评分 ----------
   function applyTrackUpdate(updated) {
+    searchDuplicateSession = null;
     if (music().current?.id === updated.id) music().current = { ...music().current, ...updated };
     music().queue = (music().queue || []).map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     if (music().data?.tracks) {
       music().data.tracks = music().data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
+    }
+    if (Array.isArray(music().data?.rawTracks)) {
+      music().data.rawTracks = music().data.rawTracks.map((track) => (track?.id === updated.id ? { ...track, ...updated } : track));
     }
   }
 
@@ -729,25 +932,311 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function toggleFavorite(trackId) {
     const id = String(trackId || "").trim();
     if (!id) return;
-    const source = music().current?.id === id
-      ? music().current
-      : (music().queue || []).find((track) => track.id === id)
-        || (music().data?.tracks || []).find((track) => track.id === id);
-    const data = await api.setFavorite(id, !Boolean(source?.favorite));
+    let account;
+    try { account = captureWebAccount(); } catch { return; }
+    const owner = { account, navigation: navigationGeneration, foreground: foregroundGeneration,
+      selection: listSelectionKey(), generation: musicLoadGeneration, pendingRead: Boolean(musicLoadRequest),
+      feedbackId: ++favoriteFeedbackSequence };
+    const source = favoriteTrackSource(id);
+    let data;
+    try { data = await api.setFavorite(id, !Boolean(source?.favorite)); }
+    catch (error) {
+      if (canReportFavoriteFailure(owner) && owner.generation === musicLoadGeneration) {
+        publishFavoriteFailure(owner, error, owner.generation, false);
+        throw error;
+      }
+      return;
+    }
+    if (!isFavoriteAccountCurrent(owner.account)) return;
     const updated = data.track;
-    if (!updated) return;
-    applyTrackUpdate(updated);
-    if (trackMetadataRequiresReload("favorite")) await loadMusic({ replaceRoute: true, keepCurrent: true });
-    else view.refreshTrackMetadata(updated);
+    if (!updated || updated.id !== id) return;
+    const confirmed = { id, favorite: Boolean(updated.favorite) };
+    const timely = isFavoriteContextCurrent(owner) && owner.generation === musicLoadGeneration && !owner.pendingRead
+      && source && favoriteTrackSource(id) === source;
+    // A late receipt still confirms this field for known copies of the song,
+    // but its older metadata must not replace a newer title, rating or detail.
+    applyTrackUpdate(timely ? updated : confirmed);
+    if (!isFavoriteContextCurrent(owner)) return;
+    clearFavoriteFailure(owner);
+
+    const reading = musicLoadRequest;
+    if (reading) {
+      if (reading.navigation !== owner.navigation || reading.selection !== owner.selection
+          || reading.generation !== musicLoadGeneration || reading.account.owner !== account.owner
+          || reading.account.revision !== account.revision) return;
+      try { await reading.promise; } catch { return; }
+      if (!isFavoriteContextCurrent(owner) || reading.generation !== musicLoadGeneration) return;
+      // The read may have captured its body before the POST was confirmed.
+      applyTrackUpdate(confirmed);
+    }
+    if (!isFavoriteContextCurrent(owner)) return;
+    if (owner.pendingRead || owner.generation !== musicLoadGeneration) {
+      const accepted = lastAcceptedListRead;
+      // A failed append has no first-page recovery object. Its generation must
+      // not be mistaken for a successful read or have its error replaced.
+      if (!accepted || accepted.generation !== musicLoadGeneration || accepted.navigation !== owner.navigation
+          || accepted.selection !== owner.selection || accepted.account.owner !== account.owner
+          || accepted.account.revision !== account.revision) return;
+    }
+    const known = music().current?.id === id ? music().current
+      : (music().queue || []).find(track => track.id === id)
+        || (music().data?.tracks || []).find(track => track.id === id)
+        || (music().data?.rawTracks || []).find(track => track?.id === id);
+    if (known) view.refreshTrackMetadata(known);
+    if (!isFavoriteContextCurrent(owner) || !trackMetadataRequiresReload("favorite")) return;
+    let refreshed;
+    try {
+      const feedback = getFavoriteFailure();
+      const pending = loadMusic({ replaceRoute: true, keepCurrent: true, canReportFailure: () => canReportFavoriteFailure(owner),
+        preserveFavoriteFailure: feedback && feedback.feedbackId > owner.feedbackId ? feedback : null,
+        preserveRatingFailure: getRatingFailure() });
+      refreshed = musicLoadRequest;
+      await pending;
+    } catch (error) {
+      // Successful reads clear/abort their request too; compare the actual
+      // maintenance generation rather than its live request/controller.
+      if (canReportFavoriteFailure(owner) && refreshed?.generation === musicLoadGeneration
+          && refreshed.selection === listSelectionKey() && isForegroundCurrent(refreshed)) {
+        publishFavoriteFailure(owner, error, refreshed.generation, true);
+        throw error;
+      }
+    }
+  }
+
+  function favoriteTrackSource(id) {
+    return music().current?.id === id ? music().current
+      : (music().queue || []).find(track => track.id === id) || (music().data?.tracks || []).find(track => track.id === id);
+  }
+
+  function canReportFavoriteFailure(owner) {
+    // Once a newer failure has been cleared, a still-required maintenance read
+    // may report its own failure instead of leaving a confirmed write stranded.
+    return isFavoriteContextCurrent(owner) && (!getFavoriteFailure() || owner.feedbackId >= latestFavoriteFailureId);
+  }
+
+  function publishFavoriteFailure(owner, error, generation, saved) {
+    latestFavoriteFailureId = owner.feedbackId;
+    favoriteFailure = { ...owner, generation, saved, error, message: error?.message || "音乐库读取失败" };
+  }
+
+  function getFavoriteFailure() {
+    const failure = favoriteFailure;
+    return failure && failure.feedbackId === latestFavoriteFailureId && failure.generation === musicLoadGeneration
+      && isFavoriteContextCurrent(failure) ? failure : null;
+  }
+
+  function clearFavoriteFailure(owner) {
+    const failure = favoriteFailure;
+    if (!failure || failure.feedbackId > owner.feedbackId || failure.navigation !== owner.navigation
+        || failure.foreground !== owner.foreground || failure.selection !== owner.selection
+        || failure.account.owner !== owner.account.owner || failure.account.revision !== owner.account.revision) return;
+    const current = getFavoriteFailure() === failure;
+    favoriteFailure = null;
+    if (current && music().status === failure.message) music().status = "";
+    view.syncFavoriteFeedback?.();
+  }
+
+  function isFavoriteAccountCurrent(expected) {
+    try {
+      const account = captureWebAccount();
+      return account.owner === expected.owner && account.revision === expected.revision;
+    } catch { return false; }
+  }
+
+  function isFavoriteContextCurrent(owner) {
+    return state.activeView === "music" && isForegroundCurrent(owner) && owner.selection === listSelectionKey()
+      && isFavoriteAccountCurrent(owner.account);
   }
 
   async function setTrackRating(trackId, rating) {
-    const data = await api.setRating(trackId, rating);
-    const updated = data.track;
+    const id = String(trackId || "").trim();
+    if (!id) return;
+    let account;
+    try { account = captureWebAccount(); } catch { return; }
+    const owner = { navigation: navigationGeneration, foreground: foregroundGeneration,
+      webAccountOwner: account.owner, webAccountRevision: account.revision,
+      selection: listSelectionKey(), generation: musicLoadGeneration, pendingRead: Boolean(musicLoadRequest),
+      feedbackId: ++ratingFeedbackSequence };
+    latestRatingUiIntent = owner;
+    let result;
+    try { result = await writeTrackRating(id, rating, owner); }
+    catch (error) {
+      const known = favoriteTrackSource(id);
+      result = { track: { id, rating: Number(known?.rating || 0) }, error };
+    }
+    if (!result || !isRatingAccountCurrent(owner)) return;
+    const updated = result.track;
     if (!updated) return;
+    const previous = music().current?.id === id ? music().current : (music().data?.tracks || []).find(track => track.id === id);
+    const changed = Number(previous?.rating || 0) !== Number(updated.rating || 0);
     applyTrackUpdate(updated);
-    if (trackMetadataRequiresReload("rating")) await loadMusic({ replaceRoute: true, keepCurrent: true });
-    else view.refreshTrackMetadata(updated);
+    if (state.activeView !== "music") return;
+    const current = isRatingContextCurrent(owner) && latestRatingUiIntent === owner
+      && owner.generation === musicLoadGeneration;
+    // A confirmed score still updates known copies after navigation. Only its
+    // original UI may rebuild the stage; library rows can update in place.
+    if (!result.error || changed) view.refreshTrackMetadata(updated, { allowStage: current });
+    const reading = musicLoadRequest;
+    if (result.error && current && reading && (!changed || !trackMetadataRequiresReload("rating"))) {
+      // The save failure is already known. Do not hide it behind an unrelated
+      // held read; repair its older snapshot only after that read is accepted.
+      void settleRatingListRead(owner, updated).then(accepted => {
+        if (accepted) view.refreshTrackMetadata(updated, { allowStage: false });
+      }).catch(error => {
+        if (isRatingContextCurrent(owner) && latestRatingUiIntent === owner) showError(error);
+      });
+      const error = new Error(`评分未保存，已保留${Number(updated.rating) ? ` ${updated.rating} 星` : "未评分"}：${result.error.message || "请重试"}`);
+      publishRatingFailure(owner, id, error, false);
+      throw error;
+    }
+    if (!await settleRatingListRead(owner, updated)) return;
+    if (reading) view.refreshTrackMetadata(updated, { allowStage: current });
+    if (result.error) {
+      let refreshError = null;
+      let errorGeneration = owner.generation;
+      if (current && changed && trackMetadataRequiresReload("rating")) {
+        const pending = loadMusic({ replaceRoute: true, keepCurrent: true,
+          canReportFailure: () => canReportRatingFailure(owner), preserveFavoriteFailure: getFavoriteFailure(),
+          preserveRatingFailure: getRatingFailure() });
+        const refreshed = musicLoadRequest;
+        try { await pending; } catch (failure) { refreshError = failure; }
+        // A normal completion clears its request object. Compare its generation
+        // and selection after await so a newer read/error keeps the UI.
+        if (!refreshed || refreshed.generation !== musicLoadGeneration || refreshed.selection !== listSelectionKey()
+            || !isRatingContextCurrent(owner) || !isForegroundCurrent(refreshed)) return;
+        if (latestRatingUiIntent !== owner) {
+          // A newer confirmed score can be waiting on this same required read.
+          // Report its read error, without reviving the older score-save cause.
+          if (refreshError && canReportRatingFailure(owner)) {
+            publishRatingFailure(owner, id, refreshError, true);
+            throw refreshError;
+          }
+          return;
+        }
+        errorGeneration = refreshed.generation;
+      }
+      if (current && errorGeneration === musicLoadGeneration && isRatingContextCurrent(owner) && latestRatingUiIntent === owner) {
+        const detail = refreshError ? `；列表刷新失败：${refreshError.message || "请重试"}` : "";
+        const error = new Error(`评分未保存，已保留${Number(updated.rating) ? ` ${updated.rating} 星` : "未评分"}：${result.error.message || "请重试"}${detail}`);
+        publishRatingFailure(owner, id, error, false);
+        throw error;
+      }
+    } else {
+      clearRatingFailure(owner, id);
+      // The write is confirmed even if its dependent list read later fails.
+      if (isRatingContextCurrent(owner) && latestRatingUiIntent === owner && trackMetadataRequiresReload("rating")) {
+        const pending = loadMusic({ replaceRoute: true, keepCurrent: true,
+          canReportFailure: () => canReportRatingFailure(owner), preserveFavoriteFailure: getFavoriteFailure(),
+          preserveRatingFailure: getRatingFailure() });
+        const refreshed = musicLoadRequest;
+        try { await pending; } catch (failure) {
+          if (canReportRatingFailure(owner) && refreshed?.generation === musicLoadGeneration
+              && refreshed.selection === listSelectionKey() && isForegroundCurrent(refreshed)
+              && isRatingContextCurrent(owner)) {
+            publishRatingFailure(owner, id, failure, true);
+            throw failure;
+          }
+        }
+      }
+    }
+  }
+
+  function isRatingContextCurrent(owner) {
+    return state.activeView === "music" && isForegroundCurrent(owner) && owner.selection === listSelectionKey()
+      && isRatingAccountCurrent(owner);
+  }
+
+  async function settleRatingListRead(owner, updated) {
+    if (!isRatingContextCurrent(owner) || latestRatingUiIntent !== owner) return false;
+    const reading = musicLoadRequest;
+    if (reading) {
+      if (reading.navigation !== owner.navigation || reading.foreground !== owner.foreground
+          || reading.selection !== owner.selection || reading.generation !== musicLoadGeneration
+          || reading.account.owner !== owner.webAccountOwner || reading.account.revision !== owner.webAccountRevision) return false;
+      try { await reading.promise; } catch { return false; }
+      if (!isRatingContextCurrent(owner) || latestRatingUiIntent !== owner || reading.generation !== musicLoadGeneration) return false;
+      applyTrackUpdate(updated);
+    }
+    if (owner.pendingRead || owner.generation !== musicLoadGeneration) {
+      const accepted = lastAcceptedListRead;
+      if (!accepted || accepted.generation !== musicLoadGeneration || accepted.navigation !== owner.navigation
+          || accepted.selection !== owner.selection || accepted.account.owner !== owner.webAccountOwner
+          || accepted.account.revision !== owner.webAccountRevision) return false;
+    }
+    return isRatingContextCurrent(owner) && latestRatingUiIntent === owner;
+  }
+
+  function canReportRatingFailure(owner) {
+    const failure = getRatingFailure();
+    return isRatingContextCurrent(owner) && (!failure || owner.feedbackId >= failure.feedbackId);
+  }
+
+  function publishRatingFailure(owner, trackId, error, saved) {
+    ratingErrorStatus = { ...owner, generation: musicLoadGeneration, trackId, error, saved,
+      message: error?.message || "评分保存失败" };
+  }
+
+  function getRatingFailure() {
+    const failure = ratingErrorStatus;
+    return failure && failure.generation === musicLoadGeneration && isRatingContextCurrent(failure) ? failure : null;
+  }
+
+  function clearRatingFailure(owner, trackId) {
+    const failure = ratingErrorStatus;
+    if (!failure || latestRatingUiIntent !== owner || failure.trackId !== trackId
+        || failure.navigation !== owner.navigation || failure.foreground !== owner.foreground
+        || failure.selection !== owner.selection || failure.webAccountOwner !== owner.webAccountOwner
+        || failure.webAccountRevision !== owner.webAccountRevision || !isRatingContextCurrent(owner)) return;
+    const current = getRatingFailure() === failure;
+    ratingErrorStatus = null;
+    if (current && music().status === failure.message) music().status = "";
+    view.syncFavoriteFeedback?.();
+  }
+
+  function isRatingAccountCurrent(owner) {
+    try {
+      const account = captureWebAccount();
+      return account.owner === owner.webAccountOwner && account.revision === owner.webAccountRevision;
+    } catch { return false; }
+  }
+
+  function writeTrackRating(trackId, rating, owner) {
+    const key = JSON.stringify([owner.webAccountOwner, owner.webAccountRevision, trackId]);
+    let writes = ratingWrites.get(key);
+    if (!writes) {
+      if (ratingWrites.size >= 8) return Promise.reject(new Error("评分保存繁忙，请稍后重试"));
+      const track = music().current?.id === trackId ? music().current
+        : (music().queue || []).find(item => item.id === trackId) || (music().data?.tracks || []).find(item => item.id === trackId);
+      writes = { active: null, pending: null, confirmed: track ? { id: trackId, rating: Number(track.rating || 0) } : null };
+      ratingWrites.set(key, writes);
+    }
+    return new Promise(resolve => {
+      const job = { rating, owner, resolve };
+      if (writes.active) {
+        // Scores replace unsent choices for this track. Keep only one physical
+        // write and the latest choice so an older commit cannot win later.
+        writes.pending?.resolve(null);
+        writes.pending = job;
+      } else void send(job);
+    });
+
+    async function send(job) {
+      writes.active = job;
+      let error = null;
+      try {
+        if (!isRatingAccountCurrent(job.owner)) { job.resolve(null); return; }
+        const data = await api.setRating(trackId, job.rating);
+        if (!isRatingAccountCurrent(job.owner)) { job.resolve(null); return; }
+        if (data.track) writes.confirmed = { id: trackId, rating: data.track.rating };
+      } catch (failure) { error = failure; }
+      finally {
+        const next = writes.pending;
+        writes.pending = null;
+        job.resolve(!next && isRatingAccountCurrent(job.owner) ? { track: writes.confirmed, error } : null);
+        if (next) void send(next);
+        else ratingWrites.delete(key);
+      }
+    }
   }
 
   // ---------- 下载 ----------
@@ -787,6 +1276,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().playlistDialogOpen = false;
     music().playlistDialogTrackId = "";
     music().playlistDialogName = "";
+    music().query = "";
     music().favorite = mode === "library" ? Boolean(options.favorite) : false;
     if (mode === "library") {
       music().artistId = options.artistId || "all";
@@ -795,7 +1285,6 @@ export function createMusicActions({ state, api, player, view, router, showError
       if (options.language) music().language = options.language;
     }
     if (mode !== "library") {
-      music().query = "";
       music().artistId = "all";
       music().albumId = "all";
       music().genre = "all";
@@ -813,6 +1302,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().activeSmartPlaylistId = "";
     music().artistId = "all";
     music().albumId = "all";
+    music().query = "";
     music().genre = String(genre || "").trim() || "all";
     loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
   }
@@ -1148,14 +1638,18 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function refreshProgressClock() {
     const trackId = music().current?.id;
     if (!trackId || progressHidden || typeof api.claimProgressSession !== "function") return;
-    if (progressClockRequest?.trackId === trackId && progressClockRequest.session === playReportSession) return;
+    const account = captureWebAccount();
+    if (progressClockRequest?.trackId === trackId && progressClockRequest.session === playReportSession
+        && progressClockRequest.webAccountOwner === account.owner && progressClockRequest.webAccountRevision === account.revision) return;
     cancelProgressClock();
-    const request = { trackId, session: playReportSession, controller: new AbortController() };
+    const request = { trackId, session: playReportSession, controller: new AbortController(),
+      webAccountOwner: account.owner, webAccountRevision: account.revision };
     progressClockRequest = request;
     try {
       const data = await api.claimProgressSession(trackId, progressSession?.id, request.controller.signal);
       if (progressClockRequest !== request || request.controller.signal.aborted || progressHidden
           || request.session !== playReportSession || music().current?.id !== trackId) return;
+      checkProgressAccount(request);
       const next = createMusicProgressSession(trackId, "", data?.progressSessionStartedAt, data?.progressSessionId);
       if (!next) return;
       if (next.id !== progressSession?.id) progressSession = next;
@@ -1347,6 +1841,8 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   return {
+    getListReadFailure,
+    retryListRead,
     beginNavigation,
     cancelPendingRequests,
     isNavigationCurrent,
@@ -1381,6 +1877,8 @@ export function createMusicActions({ state, api, player, view, router, showError
     clearHistory,
     startMusicRescan,
     toggleFavorite,
+    getFavoriteFailure,
+    getRatingFailure,
     setTrackRating,
     downloadTrack,
     downloadPlaylistM3u,

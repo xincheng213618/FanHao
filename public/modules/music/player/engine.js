@@ -4,6 +4,7 @@
 
 import { normalizePlaybackSpeed } from "../format.js";
 import { MUSIC_VISUALIZER_FRAME_MS } from "../constants.js";
+import { captureWebAccount } from "../../../platform/accounts/session-context.js";
 
 /**
  * @param {object} options
@@ -19,6 +20,10 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
   let audio = null;
   let audioEventsInstalled = false;
   let playGeneration = 0;
+  let metadataLoaded = false;
+  let restoreSavedPosition = false;
+  let retryPosition = null;
+  let sourceDiscarded = false;
   let audioContext = null;
   let audioAnalyser = null;
   let audioSource = null;
@@ -41,56 +46,109 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
       audio = new Audio();
       audio.preload = "metadata";
       audio.volume = readVolumePreferenceLocal();
-      audio.playbackRate = normalizePlaybackSpeed(music().playbackSpeed ?? readPlaybackSpeedPreferenceLocal());
+      applyPlaybackRate(music().playbackSpeed ?? readPlaybackSpeedPreferenceLocal());
     }
     if (audioEventsInstalled) return;
     audioEventsInstalled = true;
     audio.addEventListener("play", () => {
-      if (audio.paused) return;
+      if (discardStaleRetry() || sourceDiscarded || audio.paused || audio.error) return;
       music().playing = true;
       startVisualizer();
       callbacks.onPlay && callbacks.onPlay();
     });
     audio.addEventListener("pause", () => {
-      if (!audio.paused) return;
+      if (discardStaleRetry() || sourceDiscarded || !audio.paused) return;
       playGeneration += 1;
       music().playing = false;
       stopVisualizer({ draw: true });
       callbacks.onPause && callbacks.onPause();
     });
     audio.addEventListener("loadedmetadata", () => {
-      const position = Number(music().current?.positionMs || 0);
-      if (position > 0 && Number.isFinite(audio.duration) && position / 1000 < audio.duration - 3) {
-        audio.currentTime = position / 1000;
+      if (discardStaleRetry() || sourceDiscarded || !audio.src || !music().current || audio.error || audio.readyState === 0 || (audio.currentSrc && audio.currentSrc !== audio.src)) return;
+      metadataLoaded = true;
+      const pending = retryPosition;
+      retryPosition = null;
+      const position = pending ? pending.position : Number(music().current?.positionMs || 0) / 1000;
+      const restore = pending || restoreSavedPosition;
+      restoreSavedPosition = false;
+      const resumeLimit = audio.duration - (pending ? 0 : 3);
+      if (restore && position > 0 && Number.isFinite(audio.duration) && position < resumeLimit) {
+        audio.currentTime = position;
       }
       callbacks.onTimeUpdate && callbacks.onTimeUpdate();
     });
     audio.addEventListener("timeupdate", () => {
+      if (discardStaleRetry() || sourceDiscarded) return;
       callbacks.onTimeUpdate && callbacks.onTimeUpdate();
     });
     audio.addEventListener("ended", () => {
+      if (discardStaleRetry() || sourceDiscarded) return;
       callbacks.onEnded && callbacks.onEnded();
     });
     audio.addEventListener("error", () => {
+      // A queued error from a discarded resource no longer owns this element.
+      if (discardStaleRetry() || sourceDiscarded || !audio.error || !audio.src || !music().current) return;
+      playGeneration += 1;
+      // Native media failures can leave paused=false. Normalize that state so
+      // the next press of the playback control expresses a retry.
+      if (!audio.paused) audio.pause();
       music().playing = false;
       stopVisualizer({ draw: true });
-      callbacks.onError && callbacks.onError("音频播放失败，请尝试其他歌曲或检查音频格式");
+      callbacks.onError && callbacks.onError("音频播放失败，可再次播放重试，或检查网络与音频格式");
     });
     installMediaSessionHandlers();
   }
 
   function play() {
     ensureAudio();
+    discardStaleRetry();
+    sourceDiscarded = false;
     ensureAudioGraph();
     const generation = ++playGeneration;
     const source = audio.src;
     const trackId = music().current?.id || "";
+    if (audio.error && source && trackId) {
+      // play() alone cannot recover a terminal MediaError. Reload only on an
+      // explicit play intent, retaining the same track and its listening point.
+      const position = retryPosition && isRetryPositionCurrent(retryPosition) ? retryPosition.position
+        : metadataLoaded || !restoreSavedPosition ? Number(audio.currentTime || 0) : Number(music().current?.positionMs || 0) / 1000;
+      retryPosition = { source, trackId, position, account: captureWebAccount() };
+      metadataLoaded = false;
+      applyPlaybackRate(music().playbackSpeed);
+      audio.load();
+      // Preserve the default start position before metadata too: a pause or
+      // progress flush during the reload must not persist its unloaded zero.
+      if (Number.isFinite(position) && position > 0) audio.currentTime = position;
+    }
     audio.play().catch((error) => {
       // A source change or a later playback intent can reject an older play().
       // That promise no longer owns the current track's error surface.
       if (generation !== playGeneration || audio.src !== source || (music().current?.id || "") !== trackId) return;
       callbacks.onError && callbacks.onError(error?.message || "浏览器阻止了自动播放");
     });
+  }
+
+  function isRetryPositionCurrent(pending) {
+    if (audio.src !== pending.source || music().current?.id !== pending.trackId) return false;
+    try {
+      const account = captureWebAccount();
+      return account.owner === pending.account.owner && account.revision === pending.account.revision;
+    } catch { return false; }
+  }
+
+  function discardStaleRetry() {
+    if (!retryPosition || isRetryPositionCurrent(retryPosition)) return false;
+    // The default start is already installed. Clear it and silence queued
+    // media callbacks before pausing, so they cannot save for a new account.
+    retryPosition = null;
+    sourceDiscarded = true;
+    playGeneration += 1;
+    audio.currentTime = 0;
+    audio.pause();
+    music().playing = false;
+    stopVisualizer({ draw: true });
+    callbacks.onError && callbacks.onError("");
+    return true;
   }
 
   function pause() {
@@ -101,12 +159,20 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   function load(track, autoplay) {
     ensureAudio();
+    sourceDiscarded = false;
+    // An initial seek also installs a native default start. It must not carry
+    // into a replacement track, even when both tracks share the same URL.
+    const resettingStart = Boolean(retryPosition) || Boolean(audio.src && !metadataLoaded && !restoreSavedPosition && audio.readyState === 0);
     playGeneration += 1;
+    metadataLoaded = false;
+    retryPosition = null;
+    restoreSavedPosition = true;
     const target = new URL(track.streamUrl, window.location.href).href;
-    audio.playbackRate = normalizePlaybackSpeed(music().playbackSpeed);
-    if (audio.src !== target) {
+    applyPlaybackRate(music().playbackSpeed);
+    if (audio.src !== target || resettingStart) {
       audio.src = target;
       audio.load();
+      if (resettingStart) audio.currentTime = 0;
     }
     callbacks.onError && callbacks.onError("");
     updateMediaSession();
@@ -115,7 +181,12 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   function seek(seconds) {
     ensureAudio();
-    audio.currentTime = Number(seconds || 0);
+    // A user seek owns this load's start point, including an explicit zero.
+    // Native Audio retains that default start until metadata becomes ready.
+    restoreSavedPosition = false;
+    const position = Number(seconds || 0);
+    if (retryPosition && isRetryPositionCurrent(retryPosition)) retryPosition.position = position;
+    audio.currentTime = position;
   }
 
   function getAudio() {
@@ -130,7 +201,15 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   function setRate(value) {
     ensureAudio();
-    audio.playbackRate = normalizePlaybackSpeed(value);
+    applyPlaybackRate(value);
+  }
+
+  function applyPlaybackRate(value) {
+    const rate = normalizePlaybackSpeed(value);
+    // Native load() resets playbackRate to defaultPlaybackRate. Keep the
+    // selected speed through source selection and explicit failure recovery.
+    audio.defaultPlaybackRate = rate;
+    audio.playbackRate = rate;
   }
 
   // ---- WebAudio 图（可视化数据源）----
@@ -231,7 +310,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     ensureAudio();
     const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number(music().current?.durationMs || 0) / 1000;
     const target = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, Number(audio.currentTime || 0) + Number(offsetSeconds || 0)));
-    audio.currentTime = target;
+    seek(target);
     callbacks.onTimeUpdate && callbacks.onTimeUpdate();
   }
 
@@ -241,7 +320,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     if (!Number.isFinite(nextTime)) return;
     music().lyricFollowPaused = false;
     callbacks.onLyricFollowResume && callbacks.onLyricFollowResume();
-    audio.currentTime = nextTime;
+    seek(nextTime);
     callbacks.onTimeUpdate && callbacks.onTimeUpdate();
   }
 

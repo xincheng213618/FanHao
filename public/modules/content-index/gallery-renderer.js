@@ -61,6 +61,8 @@ export function createGalleryRenderer(deps) {
 
   let galleryCoverObserver = null;
   let galleryListRegistration = null;
+  let gallerySummaryRegistration = null;
+  let gallerySummaryGeneration = 0;
   let galleryReaderObserver = null;
   let galleryReaderScrollCleanup = null;
   let galleryReaderImageQueue = [];
@@ -68,11 +70,15 @@ export function createGalleryRenderer(deps) {
   let galleryReaderImageGeneration = 0;
   let galleryReaderStartupFigure = null;
   let galleryReaderRegistration = null;
+  let galleryReaderWidthRestore = null;
   let galleryMoreScrollCleanup = null;
   let galleryMoreGestureConsumed = false;
   let galleryMoreGestureReleaseTimer = 0;
   let galleryPagerCleanup = null;
   let galleryScrollRestoreGeneration = 0;
+  let galleryListReturnRestore = null;
+  const gallerySelectValues = new WeakMap();
+  const photoCategoryStrips = new WeakMap();
   let mediaLayout = "posters";
   try {
     if (window.localStorage.getItem("fanhao.media.layout") === "list") mediaLayout = "list";
@@ -237,71 +243,165 @@ function photoCategoryDisplayName(value) {
   return bracketOnly ? bracketOnly[1].trim() || text : text;
 }
 
-function createPhotoCategoryStrip() {
-  const strip = document.createElement("div");
-  strip.className = "gallery-category-strip gallery-photo-category-strip";
-  strip.setAttribute("role", "group");
-  strip.setAttribute("aria-label", "套图大类");
+function currentPhotoCategoryStrip(record) {
+  const strip = record.strip, controls = strip.closest(".gallery-controls");
+  return strip.isConnected && state.activeView === "gallery" && state.gallery.mode === "photo" && !state.gallery.photoCollection
+    && !state.gallery.album && !state.gallery.comic && !state.gallery.media
+    && controls === els.workGrid.querySelector(".gallery-shell > .gallery-controls")
+    && controls?.querySelector(".gallery-photo-category-strip") === strip;
+}
 
-  const addChip = (value, label, count, target = strip) => {
-    const active = (state.gallery.category || "all") === value;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `gallery-category-chip${active ? " active" : ""}`;
-    button.textContent = label;
-    button.setAttribute("aria-pressed", String(active));
-    if (count !== undefined) {
-      button.title = `${label} · ${formatNumber(count)} 期`;
-      button.setAttribute("aria-label", `${label}，${formatNumber(count)} 期`);
-    }
-    button.addEventListener("click", () => {
-      if ((state.gallery.category || "all") === value && !state.gallery.photoCollection) return;
-      state.gallery.photoView = "collections";
-      state.gallery.photoCollection = null;
-      state.gallery.sort = "count";
-      state.gallery.category = value;
-      state.gallery.subCategory = "all";
-      state.gallery.person = "all";
-      state.gallery.seriesKey = "";
-      state.gallery.photoDate = "all";
-      state.gallery.visibleLimit = 80;
-      resetGalleryReader();
-      renderGalleryView();
-      syncGalleryRoute();
-    });
-    target.append(button);
+function createPhotoCategoryButton(record, value, withCount) {
+  const button = document.createElement("button"), text = document.createTextNode("");
+  button.type = "button";
+  button.append(text);
+  const entry = { value, button, text, alive: true };
+  if (withCount) {
+    entry.count = document.createElement("small");
+    entry.count.setAttribute("aria-hidden", "true");
+    entry.countText = document.createTextNode("");
+    entry.count.append(entry.countText);
+    button.append(entry.count);
+  }
+  button.addEventListener("click", () => {
+    if (!entry.alive || !button.isConnected || !record.strip.contains(button) || !currentPhotoCategoryStrip(record)) return;
+    if ((state.gallery.category || "all") === entry.value && !state.gallery.photoCollection) return;
+    state.gallery.photoView = "collections";
+    state.gallery.photoCollection = null;
+    state.gallery.sort = "count";
+    state.gallery.category = entry.value;
+    state.gallery.subCategory = "all";
+    state.gallery.person = "all";
+    state.gallery.seriesKey = "";
+    state.gallery.photoDate = "all";
+    state.gallery.visibleLimit = 80;
+    resetGalleryReader();
+    renderGalleryView();
+    syncGalleryRoute();
+  });
+  return entry;
+}
+
+function updatePhotoCategoryButton(entry, label, count) {
+  const active = (state.gallery.category || "all") === entry.value;
+  const className = `gallery-category-chip${active ? " active" : ""}`;
+  if (entry.button.className !== className) entry.button.className = className;
+  if (entry.text.data !== label) entry.text.data = label;
+  if (entry.button.getAttribute("aria-pressed") !== String(active)) entry.button.setAttribute("aria-pressed", String(active));
+  if (count === undefined) {
+    if (entry.button.hasAttribute("title")) entry.button.removeAttribute("title");
+    if (entry.button.hasAttribute("aria-label")) entry.button.removeAttribute("aria-label");
+  } else {
+    const title = `${label} · ${formatNumber(count)} 期`;
+    if (entry.button.title !== title) entry.button.title = title;
+    const ariaLabel = `${label}，${formatNumber(count)} 期`;
+    if (entry.button.getAttribute("aria-label") !== ariaLabel) entry.button.setAttribute("aria-label", ariaLabel);
+  }
+  if (entry.countText) {
+    const text = String(formatNumber(count || 0));
+    if (entry.countText.data !== text) entry.countText.data = text;
+  }
+}
+
+function syncPhotoCategoryButtons(record, container, previous, facets, withCount, first = null, end = null) {
+  const available = new Map();
+  for (const entry of previous) {
+    if (!available.has(entry.value)) available.set(entry.value, { entries: [], next: 0 });
+    available.get(entry.value).entries.push(entry);
+  }
+  const retained = new Set(), entries = [];
+  let focused = -1;
+  for (const facet of facets) {
+    const matches = available.get(facet.value);
+    const entry = matches?.entries[matches.next++] || createPhotoCategoryButton(record, facet.value, withCount);
+    updatePhotoCategoryButton(entry, photoCategoryDisplayName(facet.value), facet.count);
+    if (entry.button === document.activeElement && entry.button.parentElement === container) focused = entries.length;
+    entries.push(entry); retained.add(entry);
+  }
+  for (const entry of previous) if (!retained.has(entry)) { entry.alive = false; entry.button.remove(); }
+  const place = (entry, before) => {
+    if (entry.button !== before) container.insertBefore(entry.button, before || end);
+    return entry.button.nextSibling;
   };
+  let before = first ? first.nextSibling : container.firstChild;
+  const prefix = focused < 0 ? entries.length : focused;
+  for (let index = 0; index < prefix; index++) before = place(entries[index], before);
+  if (focused >= 0) {
+    // Moving the focused button itself would blur it even within one parent.
+    before = entries[focused].button.nextSibling;
+    for (let index = focused + 1; index < entries.length; index++) before = place(entries[index], before);
+  }
+  return entries;
+}
 
+function syncPhotoCategoryStrip(record) {
+  const { strip } = record, active = document.activeElement;
+  const ownedFocus = strip.contains(active), panel = record.menu?.panel;
+  const focusedMenuButton = panel?.contains(active) && active.matches("button");
+  const focusedTop = focusedMenuButton ? active.getBoundingClientRect().top : 0;
   const facets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
-  addChip("all", "全部大类", facets.reduce((sum, item) => sum + Number(item.count || 0), 0));
   const featured = facets.slice(0, 4);
-  const selected = facets.find((item) => item.value === state.gallery.category);
+  let selected, total = 0;
+  for (const facet of facets) {
+    total += Number(facet.count || 0);
+    if (selected === undefined && facet.value === state.gallery.category) selected = facet;
+  }
   if (selected && !featured.includes(selected)) featured[featured.length - 1] = selected;
-  for (const item of featured) addChip(item.value, photoCategoryDisplayName(item.value), item.count);
-  if (facets.length > featured.length) {
-    const more = document.createElement("details");
-    more.className = "gallery-category-menu";
+  updatePhotoCategoryButton(record.all, "全部大类", total);
+  const needsMenu = facets.length > featured.length;
+  if (needsMenu && !record.menu) {
+    const details = document.createElement("details");
+    details.className = "gallery-category-menu";
     const summary = document.createElement("summary");
-    summary.textContent = `全部分类 · ${formatNumber(facets.length)}`;
-    const panel = document.createElement("div");
-    panel.className = "gallery-category-menu-panel";
-    panel.setAttribute("role", "group");
-    panel.setAttribute("aria-label", "全部套图分类");
-    for (const item of facets) {
-      addChip(item.value, photoCategoryDisplayName(item.value), item.count, panel);
-      const count = document.createElement("small");
-      count.textContent = formatNumber(item.count || 0);
-      count.setAttribute("aria-hidden", "true");
-      panel.lastElementChild.append(count);
-    }
-    more.append(summary, panel);
-    more.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      more.open = false;
+    const text = document.createTextNode(""); summary.append(text);
+    const nextPanel = document.createElement("div");
+    nextPanel.className = "gallery-category-menu-panel";
+    nextPanel.setAttribute("role", "group");
+    nextPanel.setAttribute("aria-label", "全部套图分类");
+    record.menu = { details, summary, text, panel: nextPanel, entries: [] };
+    details.append(summary, nextPanel); strip.append(details);
+    details.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !details.isConnected || !strip.contains(details) || record.menu?.details !== details || !currentPhotoCategoryStrip(record)) return;
+      details.open = false;
       summary.focus();
     });
-    strip.append(more);
+  } else if (!needsMenu && record.menu) {
+    for (const entry of record.menu.entries) entry.alive = false;
+    record.menu.details.remove(); record.menu = null;
   }
+  record.featured = syncPhotoCategoryButtons(record, strip, record.featured, featured, false, record.all.button, record.menu?.details || null);
+  if (record.menu) {
+    const text = `全部分类 · ${formatNumber(facets.length)}`;
+    if (record.menu.text.data !== text) record.menu.text.data = text;
+    record.menu.entries = syncPhotoCategoryButtons(record, record.menu.panel, record.menu.entries, facets, true);
+  }
+  return () => {
+    if (!currentPhotoCategoryStrip(record)) return;
+    if (ownedFocus && !active.isConnected && document.activeElement === document.body) {
+      (record.menu?.summary || record.all.button).focus({ preventScroll: true });
+    } else if (focusedMenuButton && record.menu?.panel === panel && document.activeElement === active && panel.contains(active)) {
+      const delta = active.getBoundingClientRect().top - focusedTop;
+      if (delta) panel.scrollTop += delta;
+    }
+  };
+}
+
+function createPhotoCategoryStrip(options = {}) {
+  const previous = options.reusePhotoCategoryStrip;
+  const record = previous && photoCategoryStrips.get(previous);
+  if (record) {
+    options.finishPhotoCategoryUpdate = syncPhotoCategoryStrip(record);
+    const slot = document.createElement("span");
+    slot.dataset.galleryPhotoCategorySlot = "true";
+    return slot;
+  }
+  const strip = document.createElement("div");
+  strip.className = "gallery-category-strip gallery-photo-category-strip";
+  strip.setAttribute("role", "group"); strip.setAttribute("aria-label", "套图大类");
+  const next = { strip, featured: [], menu: null };
+  next.all = createPhotoCategoryButton(next, "all", false); strip.append(next.all.button);
+  photoCategoryStrips.set(strip, next);
+  syncPhotoCategoryStrip(next);
   return strip;
 }
 
@@ -352,10 +452,59 @@ function createGalleryResultsHeader(titleText, detailText) {
   return header;
 }
 
-function appendFacetOption(select, label, value, count) {
-  const option = new Option(label, value);
-  if (count !== undefined) option.title = `${label} · ${formatNumber(count)}`;
-  select.append(option);
+function gallerySelectOption(label, value, count) {
+  const text = label === undefined ? "" : String(label);
+  return { label: text, value: value === undefined ? text : String(value), title: count !== undefined ? `${label} · ${formatNumber(count)}` : "" };
+}
+
+function syncGallerySelectOptions(select, spec) {
+  const selected = select.value;
+  const available = new Map();
+  for (const option of select.options) {
+    if (!available.has(option.value)) available.set(option.value, { options: [], next: 0 });
+    available.get(option.value).options.push(option);
+  }
+  const retained = new Set();
+  for (const [index, item] of spec.options.entries()) {
+    const matches = available.get(item.value);
+    const option = matches?.options[matches.next++] || new Option(item.label, item.value);
+    if (option.textContent !== item.label) option.textContent = item.label;
+    if (option.title !== item.title) option.title = item.title;
+    if (select.options[index] !== option) select.insertBefore(option, select.options[index] || null);
+    retained.add(option);
+  }
+  for (const option of [...select.options]) if (!retained.has(option)) option.remove();
+  // An unchanged committed value must not reset a native selection in progress.
+  const value = String(spec.value);
+  if (!gallerySelectValues.has(select) || gallerySelectValues.get(select) !== value || !spec.options.some(option => option.value === selected)) {
+    if (select.value !== value) select.value = value;
+  } else if (select.value !== selected) select.value = selected;
+  gallerySelectValues.set(select, value);
+}
+
+function renderGallerySelectControl(controls, options, key, spec, onChange) {
+  const previous = options.reuseSelects?.get(key);
+  const select = previous || document.createElement("select");
+  if (select.dataset.galleryControl !== key) select.dataset.galleryControl = key;
+  if (select.className !== spec.className) select.className = spec.className;
+  if (spec.label === undefined) {
+    if (select.hasAttribute("aria-label")) select.removeAttribute("aria-label");
+  } else if (select.getAttribute("aria-label") !== spec.label) select.setAttribute("aria-label", spec.label);
+  if (select.disabled !== Boolean(spec.disabled)) select.disabled = Boolean(spec.disabled);
+  syncGallerySelectOptions(select, spec);
+  if (previous) {
+    // The detached blueprint describes a slot; it never adopts a live control.
+    const slot = document.createElement("span");
+    slot.dataset.gallerySelectSlot = key;
+    return slot;
+  }
+  const mode = state.gallery.mode;
+  select.addEventListener("change", () => {
+    if (!select.isConnected || !controls.isConnected || !controls.contains(select) || state.activeView !== "gallery"
+        || state.gallery.mode !== mode || els.workGrid.querySelector(".gallery-shell > .gallery-controls") !== controls) return;
+    onChange(select);
+  });
+  return select;
 }
 
 function mediaItemsForMode(mode = state.gallery.mode) {
@@ -457,6 +606,7 @@ function galleryRescanScopeForMode() {
 function renderGalleryControls(options = {}) {
   const controls = document.createElement("div");
   controls.className = "gallery-controls";
+  controls.dataset.galleryMode = state.gallery.mode;
   const imageModule = ["photo", "manga"].includes(state.gallery.mode);
   if (imageModule) controls.classList.add("gallery-image-controls");
 
@@ -477,10 +627,17 @@ function renderGalleryControls(options = {}) {
       : "搜索标题、人物、合集；多个词可同时匹配";
   search.setAttribute("aria-label", state.gallery.mode === "manga" ? "搜索韩漫" : mediaModule ? "搜索影视资料库" : "搜索套图");
   search.value = options.searchValue ?? state.gallery.query;
+  let composing = false;
+  search.addEventListener("compositionstart", () => { composing = true; });
+  search.addEventListener("compositionend", () => { composing = false; });
   search.addEventListener("search", () => {
+    if (composing) return;
     if (!search.value && state.gallery.query) submitGallerySearch("");
   });
   search.addEventListener("keydown", (event) => {
+    // Confirmation/cancellation belongs to the IME, including its trailing
+    // keyCode 229 after compositionend on engines that clear isComposing early.
+    if (composing || event.isComposing || event.keyCode === 229 || event.defaultPrevented) return;
     if (event.key === "Enter") {
       event.preventDefault();
       submitGallerySearch(search.value, { restoreFocus: true });
@@ -493,63 +650,64 @@ function renderGalleryControls(options = {}) {
     }
   });
 
-  const category = document.createElement("select");
-  category.className = "gallery-select";
-  category.setAttribute("aria-label", state.gallery.mode === "photo" ? "套图分类" : "分类");
-  category.append(new Option(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部地区" : "全部片库分区", "all"));
-  const categoryFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
-  for (const item of categoryFacets) {
-    const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(item.value) : galleryCategoryDisplayName(item.value);
-    appendFacetOption(category, label, item.value, item.count);
+  // Only construct selects that this mode mounts. Large facet sets otherwise
+  // create hundreds of detached options on every page/summary refresh.
+  let category = null;
+  if (mediaModule) {
+    const categoryOptions = [gallerySelectOption(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部地区" : "全部片库分区", "all")];
+    const categoryFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
+    for (const item of categoryFacets) {
+      const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(item.value) : galleryCategoryDisplayName(item.value);
+      categoryOptions.push(gallerySelectOption(label, item.value, item.count));
+    }
+    if (
+      state.gallery.category !== "all" &&
+      !categoryFacets.some((item) => item.value === state.gallery.category)
+    ) {
+      const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(state.gallery.category) : galleryCategoryDisplayName(state.gallery.category);
+      categoryOptions.push(gallerySelectOption(label, state.gallery.category));
+    }
+    category = renderGallerySelectControl(controls, options, "category", {
+      className: "gallery-select", label: state.gallery.mode === "photo" ? "套图分类" : "分类", value: state.gallery.category, options: categoryOptions
+    }, select => {
+      state.gallery.category = select.value || "all";
+      state.gallery.subCategory = "all";
+      state.gallery.photoCollection = null;
+      state.gallery.person = "all";
+      state.gallery.seriesKey = "";
+      state.gallery.photoDate = "all";
+      state.gallery.visibleLimit = 80;
+      resetGalleryReader();
+      renderGalleryView();
+      syncGalleryRoute();
+    });
   }
-  if (
-    state.gallery.category !== "all" &&
-    !categoryFacets.some((item) => item.value === state.gallery.category)
-  ) {
-    const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(state.gallery.category) : galleryCategoryDisplayName(state.gallery.category);
-    category.append(new Option(label, state.gallery.category));
-  }
-  category.value = state.gallery.category;
-  category.addEventListener("change", () => {
-    state.gallery.category = category.value || "all";
-    state.gallery.subCategory = "all";
-    state.gallery.photoCollection = null;
-    state.gallery.person = "all";
-    state.gallery.seriesKey = "";
-    state.gallery.photoDate = "all";
-    state.gallery.visibleLimit = 80;
-    resetGalleryReader();
-    renderGalleryView();
-    syncGalleryRoute();
-  });
 
-  const people = document.createElement("select");
-  people.className = "gallery-select";
-  people.append(new Option(state.gallery.mode === "tv" ? "全部作品" : "全部人物", "all"));
-  const peopleFacets = currentGalleryPeopleFacets().slice(0, state.gallery.mode === "tv" ? 1000 : 300);
-  for (const item of peopleFacets) {
-    appendFacetOption(people, state.gallery.mode === "photo" ? photoPersonDisplayName(item.value) : item.value, item.value, item.count);
+  let people = null;
+  if (["western", "tv"].includes(state.gallery.mode)) {
+    const peopleOptions = [gallerySelectOption(state.gallery.mode === "tv" ? "全部作品" : "全部人物", "all")];
+    const peopleFacets = currentGalleryPeopleFacets().slice(0, state.gallery.mode === "tv" ? 1000 : 300);
+    for (const item of peopleFacets) {
+      peopleOptions.push(gallerySelectOption(state.gallery.mode === "photo" ? photoPersonDisplayName(item.value) : item.value, item.value, item.count));
+    }
+    if (
+      state.gallery.person !== "all" &&
+      !peopleFacets.some((item) => item.value === state.gallery.person)
+    ) {
+      peopleOptions.push(gallerySelectOption(photoPersonDisplayName(state.gallery.person), state.gallery.person));
+    }
+    people = renderGallerySelectControl(controls, options, "people", { className: "gallery-select", value: state.gallery.person, options: peopleOptions }, select => {
+      const nextPerson = select.value || "all";
+      state.gallery.photoCollection = null;
+      state.gallery.person = nextPerson;
+      state.gallery.seriesKey = "";
+      state.gallery.visibleLimit = 80;
+      resetGalleryReader();
+      renderGalleryView();
+      syncGalleryRoute();
+    });
   }
-  if (
-    state.gallery.person !== "all" &&
-    !peopleFacets.some((item) => item.value === state.gallery.person)
-  ) {
-    people.append(new Option(photoPersonDisplayName(state.gallery.person), state.gallery.person));
-  }
-  people.value = state.gallery.person;
-  people.addEventListener("change", () => {
-    const nextPerson = people.value || "all";
-    state.gallery.photoCollection = null;
-    state.gallery.person = nextPerson;
-    state.gallery.seriesKey = "";
-    state.gallery.visibleLimit = 80;
-    resetGalleryReader();
-    renderGalleryView();
-    syncGalleryRoute();
-  });
 
-  const sort = document.createElement("select");
-  sort.className = "gallery-select gallery-sort-select";
   const photoSearchActive = state.gallery.mode === "photo" && Boolean(String(state.gallery.query || "").trim());
   const sortOptions = photoSearchActive
     ? [["updated", "相关性排序"]]
@@ -558,18 +716,20 @@ function renderGalleryControls(options = {}) {
         ? PHOTO_COLLECTION_SORT_OPTIONS
         : PHOTO_ALBUM_SORT_OPTIONS
       : MEDIA_SORT_OPTIONS;
-  for (const [value, label] of sortOptions) sort.append(new Option(label, value));
   if (!sortOptions.some(([value]) => value === state.gallery.sort)) state.gallery.sort = "updated";
-  sort.value = state.gallery.sort || "updated";
-  sort.setAttribute("aria-label", "排序");
-  sort.disabled = photoSearchActive;
-  sort.addEventListener("change", () => {
-    state.gallery.sort = sort.value || "updated";
-    state.gallery.visibleLimit = 80;
-    resetGalleryReader();
-    renderGalleryView();
-    syncGalleryRoute();
-  });
+  let sort = null;
+  if (["photo", "movie", "media"].includes(state.gallery.mode)) {
+    sort = renderGallerySelectControl(controls, options, "sort", {
+      className: "gallery-select gallery-sort-select", label: "排序", disabled: photoSearchActive, value: state.gallery.sort || "updated",
+      options: sortOptions.map(([value, label]) => gallerySelectOption(label, value))
+    }, select => {
+      state.gallery.sort = select.value || "updated";
+      state.gallery.visibleLimit = 80;
+      resetGalleryReader();
+      renderGalleryView();
+      syncGalleryRoute();
+    });
+  }
 
   const refresh = document.createElement("button");
   refresh.type = "button";
@@ -588,8 +748,10 @@ function renderGalleryControls(options = {}) {
   if (imageModule) {
     const searchRow = document.createElement("div");
     searchRow.className = "gallery-control-row gallery-search-row";
+    searchRow.dataset.galleryControlRow = "search";
     const hierarchy = document.createElement("div");
     hierarchy.className = "gallery-control-row gallery-hierarchy-row";
+    hierarchy.dataset.galleryControlRow = "facets";
     const maintenance = document.createElement("div");
     maintenance.className = "gallery-maintenance";
     maintenance.append(refresh, status);
@@ -616,7 +778,7 @@ function renderGalleryControls(options = {}) {
       // must not be presented as the categories or totals of the whole library.
       if (state.gallery.photoCollection) hierarchy.classList.add("gallery-photo-collection-controls");
       hierarchy.append(
-        ...(!state.gallery.photoCollection ? [createPhotoCategoryStrip()] : []),
+        ...(!state.gallery.photoCollection ? [createPhotoCategoryStrip(options)] : []),
         createGalleryControlGroup("浏览", photoViews, "gallery-photo-view-switch"),
         createGalleryControlGroup("排序", sort, "gallery-photo-sort")
       );
@@ -631,6 +793,7 @@ function renderGalleryControls(options = {}) {
   controls.classList.add("gallery-media-controls");
   const searchRow = document.createElement("div");
   searchRow.className = "gallery-media-search-row";
+  searchRow.dataset.galleryControlRow = "search";
   const searchBox = document.createElement("div");
   searchBox.className = "gallery-media-search-box";
   const searchSubmit = document.createElement("button");
@@ -644,6 +807,7 @@ function renderGalleryControls(options = {}) {
 
   const filterRow = document.createElement("div");
   filterRow.className = "gallery-media-filter-row";
+  filterRow.dataset.galleryControlRow = "facets";
   if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
     filterRow.append(createGalleryControlGroup(state.gallery.mode === "tv" ? "地区" : "片库分区", category));
   }
@@ -702,16 +866,10 @@ function submitGallerySearch(value, options = {}) {
 }
 
 function restoreGallerySearchFocus() {
-  const focusSearch = () => {
-    const search = els.workGrid?.querySelector(".gallery-search");
-    search?.focus({ preventScroll: true });
-    search?.setSelectionRange?.(search.value.length, search.value.length);
-  };
-  focusSearch();
-  window.requestAnimationFrame(focusSearch);
-  window.setTimeout(focusSearch, 0);
-  window.setTimeout(focusSearch, 80);
-  window.setTimeout(focusSearch, 180);
+  // Later renders restore their own focus; retries would override newer input.
+  const search = els.workGrid?.querySelector(".gallery-search");
+  search?.focus({ preventScroll: true });
+  search?.setSelectionRange?.(search.value.length, search.value.length);
 }
 
 function activeGallerySearchValue() {
@@ -720,7 +878,12 @@ function activeGallerySearchValue() {
 }
 
 function resetGalleryRenderedState() {
+  galleryListReturnRestore?.abort();
+  galleryListReturnRestore = null;
+  galleryReaderWidthRestore = null;
   galleryListRegistration = null;
+  gallerySummaryRegistration = null;
+  gallerySummaryGeneration += 1;
   disconnectPeopleIndexAutoload();
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
@@ -1659,28 +1822,75 @@ function refreshGalleryControls() {
   if (description) description.textContent = galleryBrowseDescription();
   const controls = els.workGrid.querySelector(".gallery-shell > .gallery-controls");
   if (!controls) return;
+  if (controls.dataset.galleryMode !== state.gallery.mode) {
+    renderGalleryView({ preserveScroll: true });
+    return;
+  }
   const active = document.activeElement;
   const search = controls.querySelector(".gallery-search");
-  const selection = active === search ? [search.selectionStart, search.selectionEnd] : null;
-  const replacement = renderGalleryControls({ searchValue: search?.value });
-  // The whole search field retains its own input and submit-button closures.
+  const selects = new Map([...controls.querySelectorAll("select[data-gallery-control]")].map(select => [select.dataset.galleryControl, select]));
+  const categoryStrip = controls.querySelector(".gallery-photo-category-strip");
+  const controlOptions = { searchValue: search?.value, reuseSelects: selects, reusePhotoCategoryStrip: categoryStrip };
+  const replacement = renderGalleryControls(controlOptions);
   const oldField = search?.closest(".gallery-search-field, .gallery-media-search-field");
   const newField = replacement.querySelector(".gallery-search")?.closest(".gallery-search-field, .gallery-media-search-field");
-  if (oldField && newField) newField.replaceWith(oldField);
-  const selects = [...controls.querySelectorAll("select.gallery-select")];
-  for (const [index, next] of [...replacement.querySelectorAll("select.gallery-select")].entries()) {
-    const previous = selects[index];
-    if (!previous) continue;
-    const value = next.value;
-    previous.replaceChildren(...next.childNodes);
-    previous.value = value;
-    previous.disabled = next.disabled;
-    next.replaceWith(previous);
+  const rows = [...controls.children], nextRows = [...replacement.children];
+  const plans = [], reused = new Set();
+  let compatible = Boolean(oldField && newField && rows.length === 2 && nextRows.length === 2);
+  for (const [index, next] of nextRows.entries()) {
+    const row = rows[index], keep = new Map();
+    if (!row || row.dataset.galleryControlRow !== next.dataset.galleryControlRow) { compatible = false; break; }
+    if (newField?.parentElement === next) {
+      if (oldField?.parentElement !== row) { compatible = false; break; }
+      keep.set(newField, oldField);
+    }
+    const categorySlot = next.querySelector("[data-gallery-photo-category-slot]");
+    if (categorySlot) {
+      if (!categoryStrip || categoryStrip.parentElement !== row || categorySlot.parentElement !== next) { compatible = false; break; }
+      keep.set(categorySlot, categoryStrip);
+    }
+    for (const slot of next.querySelectorAll("[data-gallery-select-slot]")) {
+      const key = slot.dataset.gallerySelectSlot, select = selects.get(key);
+      const group = select?.parentElement, nextGroup = slot.parentElement;
+      if (!group?.classList.contains("gallery-control-group") || group.parentElement !== row || nextGroup.parentElement !== next || reused.has(key)) {
+        compatible = false; break;
+      }
+      keep.set(nextGroup, group);
+      reused.add(key);
+    }
+    const protectedChildren = new Set(keep.values());
+    const existing = [...row.children].filter(child => protectedChildren.has(child));
+    const wanted = [...next.children].filter(child => keep.has(child)).map(child => keep.get(child));
+    if (existing.length !== wanted.length || existing.some((child, childIndex) => child !== wanted[childIndex])) compatible = false;
+    plans.push({ row, next, keep, protectedChildren });
   }
-  controls.replaceWith(replacement);
-  if (active?.isConnected) {
+  if (!compatible || reused.size !== selects.size) {
+    renderGalleryView({ preserveScroll: true });
+    return;
+  }
+  if (controls.className !== replacement.className) controls.className = replacement.className;
+  for (const { row, next, keep, protectedChildren } of plans) {
+    if (row.className !== next.className) row.className = next.className;
+    // Only unprotected siblings are replaced. Search fields, native selects,
+    // their labels/groups and both live rows never pass through the blueprint.
+    for (const child of [...row.children]) if (!protectedChildren.has(child)) child.remove();
+    let before = row.firstChild;
+    for (const child of [...next.children]) {
+      const retained = keep.get(child);
+      if (retained) {
+        if (retained.classList.contains("gallery-control-group")) {
+          if (retained.className !== child.className) retained.className = child.className;
+          if (retained.getAttribute("aria-label") !== child.getAttribute("aria-label")) retained.setAttribute("aria-label", child.getAttribute("aria-label"));
+          const label = retained.querySelector(".gallery-control-label"), nextLabel = child.querySelector(".gallery-control-label");
+          if (label && nextLabel && label.textContent !== nextLabel.textContent) label.textContent = nextLabel.textContent;
+        }
+        before = retained.nextSibling;
+      } else row.insertBefore(child, before);
+    }
+  }
+  controlOptions.finishPhotoCategoryUpdate?.();
+  if (controls.contains(active) && active.isConnected && document.activeElement === document.body) {
     active.focus?.({ preventScroll: true });
-    if (selection) search.setSelectionRange(...selection);
   }
 }
 
@@ -1737,6 +1947,7 @@ function showMoreGalleryList(label = "") {
 
 function refreshGalleryList(options = {}) {
   if (state.activeView !== "gallery" || state.gallery.album || state.gallery.comic || state.gallery.media) return false;
+  if (!options.readerActive && refreshGallerySummaryContent(options)) return true;
   const registration = galleryListRegistration, list = currentImageLibraryList();
   if (!registration?.grid.isConnected || !list || registration.key !== list.key) return false;
   if (options.loading !== undefined) { updateGalleryListMore(); return true; }
@@ -1900,6 +2111,19 @@ function activateGalleryReaderImages(root) {
     progressTicking = true;
     window.requestAnimationFrame(reportProgress);
   };
+  const cancelWidthRestoreForInput = (event) => {
+    if (galleryReaderWidthRestore?.viewer !== root) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (event.type === "keydown") {
+      if (!["PageUp", "PageDown", "Home", "End", " ", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+      if (target?.closest("input, select, textarea, [contenteditable='true']") || event.key === " " && target?.closest("button, a")) return;
+    }
+    if (event.type === "pointerdown" && target?.closest("button, input, select, textarea, a")) return;
+    if (event.type === "focusin" && target?.closest(".gallery-reader-fit-group")) return;
+    galleryReaderWidthRestore = null;
+  };
+  const widthInputTypes = ["wheel", "touchmove", "pointerdown", "keydown", "focusin"];
+  for (const type of widthInputTypes) window.addEventListener(type, cancelWidthRestoreForInput, { passive: true });
   let checkNewFigures = null;
   galleryReaderRegistration = {
     root,
@@ -1915,6 +2139,7 @@ function activateGalleryReaderImages(root) {
   galleryReaderScrollCleanup = () => {
     window.removeEventListener("scroll", requestProgress);
     window.removeEventListener("resize", requestProgress);
+    for (const type of widthInputTypes) window.removeEventListener(type, cancelWidthRestoreForInput);
   };
   reportProgress();
 
@@ -2022,6 +2247,9 @@ function drainGalleryReaderImageQueue() {
     const onError = () => settle(false);
     img.addEventListener("load", onLoad);
     img.addEventListener("error", onError);
+    // This queue already owns the preload window and concurrency slot. Native
+    // lazy deferral can otherwise occupy every slot without starting a request.
+    img.loading = "eager";
     img.src = imageUrl;
   }
 }
@@ -2094,7 +2322,8 @@ function renderPagedImageLibrary(container) {
   const page = getGalleryPage();
   const list = currentImageLibraryList();
   if (!state.gallery.data) {
-    renderPagedImageLibraryMessage(container, "正在读取图库概览");
+    gallerySummaryRegistration = { content: container, key: page.imageLibraryListKey?.() || "", generation: gallerySummaryGeneration, panel: null, complete: false };
+    renderGallerySummaryState(gallerySummaryRegistration);
     return;
   }
   if (!list) {
@@ -2127,6 +2356,98 @@ function renderPagedImageLibrary(container) {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoShelf(container, list);
   }
+}
+
+function refreshGallerySummaryContent(options) {
+  const registration = gallerySummaryRegistration;
+  if (!registration?.content.isConnected || registration.key !== getGalleryPage().imageLibraryListKey?.()) return false;
+  if (!state.gallery.data) {
+    renderGallerySummaryState(registration);
+    if (options.summaryChanged) refreshGalleryControls();
+    return true;
+  }
+  const content = registration.content;
+  content.replaceChildren();
+  renderGalleryContent(content);
+  if (options.summaryChanged) refreshGalleryControls();
+  // Keep the initial list response on the same browse shell as the summary:
+  // an input composition must not be detached by either asynchronous receipt.
+  if (currentImageLibraryList()) {
+    registration.complete = true;
+    gallerySummaryRegistration = null;
+  }
+  return true;
+}
+
+function renderGallerySummaryState(registration) {
+  const page = getGalleryPage();
+  const failure = page.getSummaryReadFailure?.();
+  let panel = registration.panel;
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.className = "empty-state gallery-list-state gallery-summary-state";
+    panel.append(document.createElement("span"));
+    registration.panel = panel;
+    registration.content.append(panel);
+  }
+  panel.classList.toggle("gallery-summary-recovery", Boolean(failure));
+  panel.setAttribute("role", failure ? "alert" : "status");
+  panel.firstElementChild.textContent = failure?.message || "正在读取图库概览";
+  let retry = panel.querySelector(".gallery-summary-retry");
+  if (!failure) { retry?.remove(); return; }
+  if (!retry) {
+    retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "text-button gallery-summary-retry";
+    retry.textContent = "重试读取图库概览";
+    let busy = false;
+    retry.addEventListener("click", async () => {
+      const owns = () => gallerySummaryRegistration === registration && registration.content.isConnected
+        && panel.isConnected && panel.contains(retry) && state.activeView === "gallery"
+        && registration.key === page.imageLibraryListKey?.() && !state.gallery.album && !state.gallery.comic && !state.gallery.media;
+      const currentFailure = page.getSummaryReadFailure?.();
+      if (busy || !owns() || !currentFailure) return;
+      busy = true;
+      retry.setAttribute("aria-disabled", "true");
+      retry.setAttribute("aria-busy", "true");
+      const hadFocus = document.activeElement === retry;
+      const shell = registration.content.closest(".gallery-shell");
+      const events = new AbortController();
+      let newerIntent = false;
+      let result = null;
+      const noteIntent = (event) => {
+        const activation = event.target === retry && event.type === "keydown"
+          && ["Enter", " "].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey;
+        if (activation || event.target === retry && ["pointerdown", "focusin"].includes(event.type)) return;
+        newerIntent = true;
+      };
+      for (const type of ["keydown", "input", "compositionstart", "focusin", "pointerdown", "wheel", "touchstart"]) {
+        document.addEventListener(type, noteIntent, { capture: true, signal: events.signal });
+      }
+      try {
+        result = await page.retrySummaryRead?.(currentFailure);
+      } finally {
+        events.abort();
+        busy = false;
+        if (retry.isConnected) {
+          retry.setAttribute("aria-disabled", "false");
+          retry.setAttribute("aria-busy", "false");
+        }
+        if (!hadFocus || newerIntent || !result?.isCurrent() || !shell?.isConnected || state.activeView !== "gallery"
+          || registration.generation !== gallerySummaryGeneration
+          || registration.key !== page.imageLibraryListKey?.() || state.gallery.album || state.gallery.comic || state.gallery.media) return;
+        if (owns()) retry.focus({ preventScroll: true });
+        else if (state.gallery.data && (gallerySummaryRegistration === registration || registration.complete)) {
+          const target = shell.querySelector(".gallery-browse-header h1") || registration.content;
+          target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }
+      }
+    });
+    panel.append(retry);
+  }
+  retry.setAttribute("aria-disabled", String(Boolean(state.gallery.loading)));
+  retry.setAttribute("aria-busy", String(Boolean(state.gallery.loading)));
 }
 
 function renderPagedImageLibrarySearchSummary(container, list = {}) {
@@ -2452,9 +2773,13 @@ function createPagedPhotoCard(item, index, options = {}) {
     meta: collectionView ? collectionPerson : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
     extra: [gallerySearchMatchText(item), collectionView ? item.archiveDate : "", formatBytes(item.size), collectionView ? "" : formatDateTime(item.updatedAt)].filter(Boolean).join(" · "),
     placeholder: "套图",
-    onOpen: () => openPhotoSet(item.id)
+    onOpen: event => openPhotoSet(item.id, { listReturn: {
+      albumId: String(item.id), top: event.currentTarget.getBoundingClientRect().top,
+      restoreFocus: event.detail === 0 && document.activeElement === event.currentTarget
+    } })
   });
   card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
+  card.dataset.galleryAlbumId = String(item.id);
   activateEagerGalleryCardImage(card, index);
   return card;
 }
@@ -2885,8 +3210,9 @@ async function loadPhotoReaderImages(limit) {
   return album;
 }
 
-function captureGalleryReaderScrollAnchor() {
-  const figures = [...els.workGrid.querySelectorAll(".gallery-reader-figure[data-image-index]")];
+function captureGalleryReaderScrollAnchor(viewer) {
+  if (galleryReaderWidthRestore?.viewer === viewer) return galleryReaderWidthRestore.anchor;
+  const figures = [...viewer.querySelectorAll(".gallery-reader-figure[data-image-index]")];
   const target = figures.find((figure) => figure.getBoundingClientRect().bottom > 0);
   if (!target) return null;
   return {
@@ -2895,11 +3221,17 @@ function captureGalleryReaderScrollAnchor() {
   };
 }
 
-function restoreGalleryReaderScrollAnchor(anchor) {
+function restoreGalleryReaderScrollAnchor(anchor, viewer) {
   if (!anchor?.index) return;
+  const owner = { anchor, viewer, generation: galleryReaderImageGeneration };
+  galleryReaderWidthRestore = owner;
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
-      const target = [...els.workGrid.querySelectorAll(".gallery-reader-figure[data-image-index]")]
+      if (galleryReaderWidthRestore !== owner) return;
+      galleryReaderWidthRestore = null;
+      if (owner.generation !== galleryReaderImageGeneration || !viewer.isConnected || state.activeView !== "gallery"
+          || els.workGrid.querySelector(".gallery-reader-images") !== viewer) return;
+      const target = [...viewer.querySelectorAll(".gallery-reader-figure[data-image-index]")]
         .find((figure) => figure.dataset.imageIndex === String(anchor.index));
       if (!target) return;
       window.scrollBy({ top: target.getBoundingClientRect().top - Number(anchor.top || 0), behavior: "auto" });
@@ -2918,6 +3250,44 @@ async function fullPhotoReaderImages(album = state.gallery.album) {
   return getGalleryPage().fullPhotoReaderImages(album);
 }
 
+function restorePhotoListReturn(anchor) {
+  if (!anchor?.albumId || !anchor.isCurrent()) return false;
+  const root = els.workGrid.querySelector(".gallery-content");
+  const card = [...(root?.querySelectorAll(".gallery-photo-album-card") || [])]
+    .find(card => card.dataset.galleryAlbumId === anchor.albumId);
+  if (!card) return false;
+  galleryListReturnRestore?.abort();
+  const controller = new AbortController();
+  galleryListReturnRestore = controller;
+  const generation = ++galleryScrollRestoreGeneration;
+  let restoring = false;
+  const finish = () => {
+    controller.abort();
+    if (galleryListReturnRestore === controller) galleryListReturnRestore = null;
+  };
+  const noteIntent = () => { if (!restoring) finish(); };
+  for (const type of ["pointerdown", "keydown", "wheel", "touchmove", "focusin"]) {
+    document.addEventListener(type, noteIntent, { capture: true, passive: true, signal: controller.signal });
+  }
+  const restore = () => {
+    if (controller.signal.aborted || generation !== galleryScrollRestoreGeneration || !anchor.isCurrent()
+      || !root.isConnected || els.workGrid.querySelector(".gallery-content") !== root || !card.isConnected) {
+      finish();
+      return;
+    }
+    restoring = true;
+    const rect = card.getBoundingClientRect();
+    const availableTop = window.innerHeight - rect.height;
+    const top = Math.min(Math.max(Number(anchor.top) || 0, Math.min(0, availableTop)), Math.max(0, availableTop));
+    window.scrollBy({ top: rect.top - top, behavior: "auto" });
+    if (anchor.restoreFocus && document.activeElement === document.body) card.focus({ preventScroll: true });
+    restoring = false;
+  };
+  restore();
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => { restore(); finish(); }));
+  return true;
+}
+
 function readerToolbar(title, meta, onBack, options = {}) {
   const bar = document.createElement("div");
   bar.className = "gallery-reader-toolbar";
@@ -2926,11 +3296,13 @@ function readerToolbar(title, meta, onBack, options = {}) {
   back.className = "text-button gallery-reader-back";
   back.textContent = "返回";
   back.addEventListener("click", () => {
-    resetGalleryReader();
+    if (!bar.isConnected || state.activeView !== "gallery") return;
+    const listReturn = options.albumId ? getGalleryPage().closePhotoSet?.(options.albumId) : null;
+    if (!listReturn) resetGalleryReader();
     onBack?.();
     renderGalleryView();
     syncGalleryRoute("replace");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!restorePhotoListReturn(listReturn)) window.scrollTo({ top: 0, behavior: "smooth" });
   });
   const copy = document.createElement("div");
   copy.className = "gallery-reader-title";
@@ -2949,12 +3321,24 @@ function readerToolbar(title, meta, onBack, options = {}) {
   const actions = document.createElement("div");
   actions.className = "gallery-reader-actions";
   const setFitWidth = (fitWidth) => {
-    if (state.gallery.fitWidth === fitWidth) return;
-    const scrollAnchor = captureGalleryReaderScrollAnchor();
+    if (!bar.isConnected || state.activeView !== "gallery" || state.gallery.fitWidth === fitWidth) return;
+    const viewer = bar.parentElement?.querySelector(".gallery-reader-images");
+    if (!viewer) {
+      state.gallery.fitWidth = fitWidth;
+      writeStoredFlag("fanhao.gallery.fitWidth", state.gallery.fitWidth);
+      renderGalleryView();
+      return;
+    }
+    const scrollAnchor = captureGalleryReaderScrollAnchor(viewer);
     state.gallery.fitWidth = fitWidth;
     writeStoredFlag("fanhao.gallery.fitWidth", state.gallery.fitWidth);
-    renderGalleryView();
-    restoreGalleryReaderScrollAnchor(scrollAnchor);
+    viewer.classList.toggle("fit-width", fitWidth);
+    viewer.classList.toggle("natural-width", !fitWidth);
+    for (const button of bar.querySelectorAll(".gallery-reader-fit-group button")) {
+      button.setAttribute("aria-pressed", String(button.dataset.galleryFitWidth === String(fitWidth)));
+    }
+    if (galleryReaderRegistration?.root === viewer) galleryReaderRegistration.register([]);
+    restoreGalleryReaderScrollAnchor(scrollAnchor, viewer);
   };
   if (options.showFit !== false) {
     const fitGroup = document.createElement("div");
@@ -2963,11 +3347,13 @@ function readerToolbar(title, meta, onBack, options = {}) {
     fitGroup.setAttribute("aria-label", "图片宽度");
     const fit = document.createElement("button");
     fit.type = "button";
+    fit.dataset.galleryFitWidth = "true";
     fit.textContent = "适应宽度";
     fit.setAttribute("aria-pressed", String(state.gallery.fitWidth));
     fit.addEventListener("click", () => setFitWidth(true));
     const natural = document.createElement("button");
     natural.type = "button";
+    natural.dataset.galleryFitWidth = "false";
     natural.textContent = "原始大小";
     natural.setAttribute("aria-pressed", String(!state.gallery.fitWidth));
     natural.addEventListener("click", () => setFitWidth(false));
@@ -2997,13 +3383,25 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   let list = (images || []).filter((image) => image?.url);
   if (!list.length) return;
   closeGalleryImagePager();
+  const opener = document.activeElement;
 
   let currentIndex = Math.min(Math.max(Number(startIndex) || 0, 0), list.length - 1);
   let hideTimer = null;
   let wheelLockedUntil = 0;
   let pointerStart = null;
+  let imagePan = null;
   let rangeScrubbing = false;
+  let pendingRangeImages = null;
   let zoomLevel = 1;
+  let imageFailed = false;
+  let imageRetrying = false;
+  let preserveImageScroll = false;
+  let restoreRetryFocus = false;
+  let fullscreenOperation = null;
+  let fullscreenFrame = null;
+  let catalogRequest = null;
+  let catalogFailed = false;
+  let zoomAnchor = null;
   const sourceKey = String(options.sourceKey || "");
   const previousOverflow = document.body.style.overflow;
   const abortController = new AbortController();
@@ -3028,6 +3426,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   strong.textContent = title || "图片";
   const sub = document.createElement("span");
   sub.textContent = meta || "";
+  const fullscreenStatus = document.createElement("span");
+  fullscreenStatus.className = "gallery-image-pager-fullscreen-status";
+  fullscreenStatus.setAttribute("role", "status");
+  fullscreenStatus.hidden = true;
   heading.append(strong, sub);
   const topActions = document.createElement("div");
   topActions.className = "gallery-image-pager-top-actions";
@@ -3049,9 +3451,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   const fullscreen = document.createElement("button");
   fullscreen.type = "button";
   fullscreen.className = "gallery-image-pager-button compact";
+  fullscreen.dataset.galleryFullscreen = "true";
   fullscreen.textContent = "全屏";
   topActions.append(zoomOut, zoomReset, zoomIn, fullscreen);
-  top.append(close, heading, topActions);
+  top.append(close, heading, topActions, fullscreenStatus);
 
   const stage = document.createElement("div");
   stage.className = "gallery-image-pager-stage";
@@ -3059,6 +3462,16 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   const imageNode = document.createElement("img");
   imageNode.alt = "";
   stage.append(imageNode);
+  const imageError = document.createElement("div");
+  imageError.className = "gallery-image-pager-error";
+  imageError.hidden = true;
+  const imageErrorText = document.createElement("span");
+  imageErrorText.setAttribute("role", "status");
+  const imageRetry = document.createElement("button");
+  imageRetry.type = "button";
+  imageRetry.className = "gallery-image-pager-button gallery-image-pager-retry";
+  imageRetry.textContent = "重试当前图片";
+  imageError.append(imageErrorText, imageRetry);
 
   const controls = document.createElement("div");
   controls.className = "gallery-image-pager-controls";
@@ -3066,8 +3479,12 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   prev.type = "button";
   prev.className = "gallery-image-pager-button";
   prev.textContent = "上一张";
-  const counter = document.createElement("span");
+  const counter = document.createElement("button");
+  counter.type = "button";
   counter.className = "gallery-image-pager-counter";
+  counter.title = "跳到指定图片";
+  counter.setAttribute("aria-expanded", "false");
+  counter.setAttribute("aria-controls", "galleryPagerJump");
   const range = document.createElement("input");
   range.type = "range";
   range.className = "gallery-image-pager-range";
@@ -3086,12 +3503,64 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   thumbnails.className = "gallery-image-pager-thumbnails";
   thumbnails.setAttribute("role", "list");
   thumbnails.setAttribute("aria-label", "图片缩略图");
-  controls.append(controlRow, thumbnails);
-  overlay.append(top, stage, controls);
+  const catalog = document.createElement("div");
+  catalog.className = "gallery-image-pager-catalog";
+  catalog.hidden = true;
+  const catalogText = document.createElement("span");
+  catalogText.setAttribute("role", "status");
+  const catalogRetry = document.createElement("button");
+  catalogRetry.type = "button";
+  catalogRetry.className = "gallery-image-pager-button gallery-image-pager-catalog-retry";
+  catalogRetry.textContent = "重试完整目录";
+  catalogRetry.hidden = true;
+  catalog.append(catalogText, catalogRetry);
+  controls.append(catalog, controlRow, thumbnails);
+  const jumpPanel = document.createElement("div");
+  jumpPanel.id = "galleryPagerJump";
+  jumpPanel.className = "gallery-image-pager-jump";
+  jumpPanel.hidden = true;
+  jumpPanel.setAttribute("role", "group");
+  jumpPanel.setAttribute("aria-label", "跳到指定图片");
+  const jumpLabel = document.createElement("label");
+  jumpLabel.textContent = "跳到第几张？";
+  const jumpInput = document.createElement("input");
+  jumpInput.type = "text";
+  jumpInput.inputMode = "numeric";
+  jumpInput.enterKeyHint = "go";
+  jumpInput.autocomplete = "off";
+  jumpInput.maxLength = 16;
+  jumpInput.setAttribute("aria-label", "目标图片序号");
+  jumpInput.setAttribute("aria-describedby", "galleryPagerJumpHint galleryPagerJumpError");
+  jumpLabel.append(jumpInput);
+  const jumpHint = document.createElement("span");
+  jumpHint.id = "galleryPagerJumpHint";
+  jumpHint.className = "gallery-image-pager-jump-hint";
+  const jumpError = document.createElement("span");
+  jumpError.id = "galleryPagerJumpError";
+  jumpError.className = "gallery-image-pager-jump-error";
+  jumpError.setAttribute("role", "status");
+  const jumpActions = document.createElement("div");
+  jumpActions.className = "gallery-image-pager-jump-actions";
+  const jumpSubmit = document.createElement("button");
+  jumpSubmit.type = "button";
+  jumpSubmit.className = "gallery-image-pager-button";
+  jumpSubmit.textContent = "跳转";
+  const jumpCancel = document.createElement("button");
+  jumpCancel.type = "button";
+  jumpCancel.className = "gallery-image-pager-button";
+  jumpCancel.textContent = "取消跳转";
+  jumpActions.append(jumpSubmit, jumpCancel);
+  jumpPanel.append(jumpLabel, jumpHint, jumpError, jumpActions);
+  let jumpComposing = false;
+  overlay.append(top, stage, controls, imageError, jumpPanel);
 
   const scheduleHide = () => {
     window.clearTimeout(hideTimer);
-    hideTimer = window.setTimeout(() => overlay.classList.add("chrome-hidden"), 2500);
+    hideTimer = window.setTimeout(() => {
+      if (!jumpPanel.hidden) return;
+      if (imageFailed || imageRetrying || catalogFailed || top.contains(document.activeElement) || controls.contains(document.activeElement)) return;
+      overlay.classList.add("chrome-hidden");
+    }, 2500);
   };
   const showChrome = () => {
     overlay.classList.remove("chrome-hidden");
@@ -3104,8 +3573,84 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     preload.src = item.url;
   };
   const clampPagerIndex = (index) => Math.min(Math.max(Number(index) || 0, 0), list.length - 1);
+  const jumpTarget = () => {
+    const value = jumpInput.value.trim(), target = Number(value);
+    return /^[0-9]+$/.test(value) && Number.isSafeInteger(target) && target >= 1 && target <= list.length ? target : null;
+  };
+  const clearJumpError = () => {
+    jumpInput.removeAttribute("aria-invalid");
+    jumpError.textContent = "";
+  };
+  const updateJumpBounds = () => {
+    jumpHint.textContent = `请输入 1 至 ${formatNumber(list.length)} 的整数`;
+    if (jumpInput.getAttribute("aria-invalid") === "true") {
+      if (jumpTarget() != null) clearJumpError();
+      else jumpError.textContent = jumpHint.textContent;
+    }
+  };
+  const closeJump = () => {
+    const ownsFocus = jumpPanel.contains(document.activeElement);
+    jumpPanel.hidden = true;
+    jumpComposing = false;
+    counter.setAttribute("aria-expanded", "false");
+    if (ownsFocus && !abortController.signal.aborted && overlay.isConnected) counter.focus({ preventScroll: true });
+    showChrome();
+  };
+  const openJump = () => {
+    if (abortController.signal.aborted || !overlay.isConnected) return;
+    jumpInput.value = String(currentIndex + 1);
+    clearJumpError();
+    updateJumpBounds();
+    jumpPanel.hidden = false;
+    counter.setAttribute("aria-expanded", "true");
+    showChrome();
+    jumpInput.focus({ preventScroll: true });
+    jumpInput.select();
+  };
+  const finishImagePan = () => {
+    const pan = imagePan;
+    imagePan = null;
+    pointerStart = null;
+    stage.classList.remove("panning");
+    if (pan && stage.hasPointerCapture?.(pan.id)) stage.releasePointerCapture(pan.id);
+  };
+  const stopZoomAnchor = () => {
+    const anchor = zoomAnchor;
+    zoomAnchor = null;
+    anchor?.events.abort();
+    if (anchor?.frame != null) window.cancelAnimationFrame(anchor.frame);
+  };
+  const keepZoomRegion = point => {
+    // Follow the existing 160ms size transition, then release all listeners.
+    const anchor = { ...point, source: imageNode.getAttribute("src"), events: new AbortController(), frame: null, until: performance.now() + 240 };
+    zoomAnchor = anchor;
+    const cancel = event => { if (zoomAnchor === anchor && (event.type !== "focusin" || event.target !== document.body)) stopZoomAnchor(); };
+    for (const type of ["pointerdown", "keydown", "wheel", "touchstart", "focusin"]) document.addEventListener(type, cancel, { capture: true, passive: true, signal: anchor.events.signal });
+    window.addEventListener("resize", () => { if (zoomAnchor === anchor) stopZoomAnchor(); }, { signal: anchor.events.signal });
+    const follow = () => {
+      if (zoomAnchor !== anchor) return;
+      if (abortController.signal.aborted || !overlay.isConnected || imageNode.getAttribute("src") !== anchor.source || !imageNode.naturalWidth) { stopZoomAnchor(); return; }
+      const bounds = stage.getBoundingClientRect(), rect = imageNode.getBoundingClientRect();
+      stage.scrollTo({ left: stage.scrollLeft + rect.left + rect.width * anchor.u - bounds.left - stage.clientLeft - stage.clientWidth / 2,
+        top: stage.scrollTop + rect.top + rect.height * anchor.v - bounds.top - stage.clientTop - stage.clientHeight / 2, behavior: "auto" });
+      const settled = Math.abs(rect.width - parseFloat(imageNode.style.width)) < .5 && Math.abs(rect.height - parseFloat(imageNode.style.height)) < .5;
+      if (settled || performance.now() >= anchor.until) stopZoomAnchor();
+      else anchor.frame = window.requestAnimationFrame(follow);
+    };
+    anchor.frame = window.requestAnimationFrame(follow);
+  };
   const applyZoom = (nextZoom = zoomLevel, options = {}) => {
-    zoomLevel = Math.min(3, Math.max(1, Math.round(Number(nextZoom || 1) * 4) / 4));
+    const nextLevel = Math.min(3, Math.max(1, Math.round(Number(nextZoom || 1) * 4) / 4));
+    let point = null;
+    if (nextLevel !== zoomLevel) {
+      if (nextLevel > 1 && imageNode.naturalWidth && !options.preserveScroll) {
+        const bounds = stage.getBoundingClientRect(), rect = imageNode.getBoundingClientRect();
+        if (rect.width && rect.height) point = { u: Math.max(0, Math.min(1, (bounds.left + stage.clientLeft + stage.clientWidth / 2 - rect.left) / rect.width)),
+          v: Math.max(0, Math.min(1, (bounds.top + stage.clientTop + stage.clientHeight / 2 - rect.top) / rect.height)) };
+      }
+      stopZoomAnchor(); finishImagePan();
+    }
+    zoomLevel = nextLevel;
     const naturalWidth = Number(imageNode.naturalWidth || 0);
     const naturalHeight = Number(imageNode.naturalHeight || 0);
     const availableWidth = Math.max(1, stage.clientWidth - 24);
@@ -3114,18 +3659,22 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       ? Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight)
       : 1;
     const displayScale = fitScale * zoomLevel;
+    if (zoomAnchor && options.preserveScroll) zoomAnchor.until = performance.now() + 240;
     if (naturalWidth && naturalHeight) {
       imageNode.style.width = `${Math.max(1, Math.round(naturalWidth * displayScale))}px`;
       imageNode.style.height = `${Math.max(1, Math.round(naturalHeight * displayScale))}px`;
     }
     stage.classList.toggle("zoomed", zoomLevel > 1);
+    stage.setAttribute("aria-label", zoomLevel > 1 ? "放大图片，方向键和 Page Up、Page Down 可滚动查看" : "图片查看区域，方向键可切换图片");
     zoomOut.disabled = zoomLevel <= 1;
     zoomIn.disabled = zoomLevel >= 3;
     zoomReset.textContent = `${Math.round(zoomLevel * 100)}%`;
-    if (!options.preserveScroll) stage.scrollTo({ left: 0, top: 0, behavior: "auto" });
+    if (point) keepZoomRegion(point);
+    else if (!options.preserveScroll) { stopZoomAnchor(); stage.scrollTo({ left: 0, top: 0, behavior: "auto" }); }
     showChrome();
   };
   const renderThumbnails = () => {
+    const restoreThumbnailFocus = thumbnails.contains(document.activeElement);
     thumbnails.innerHTML = "";
     const windowSize = Math.min(7, list.length);
     const start = Math.max(0, Math.min(currentIndex - 3, list.length - windowSize));
@@ -3149,6 +3698,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       button.addEventListener("click", () => goTo(index), listenerOptions);
       thumbnails.append(button);
     }
+    if (restoreThumbnailFocus) thumbnails.querySelector(`[data-index="${currentIndex}"]`)?.focus({ preventScroll: true });
   };
   const updateThumbnails = () => {
     const buttons = [...thumbnails.querySelectorAll(".gallery-image-pager-thumbnail")];
@@ -3164,6 +3714,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     const previewIndex = clampPagerIndex(index);
     const item = list[previewIndex] || {};
     counter.textContent = `第 ${formatNumber(previewIndex + 1)} / ${formatNumber(list.length)} 张`;
+    counter.setAttribute("aria-label", `跳到指定图片，当前第 ${formatNumber(previewIndex + 1)} 张，共 ${formatNumber(list.length)} 张`);
     range.value = String(previewIndex + 1);
     sub.textContent = [meta, item.name].filter(Boolean).join(" · ");
     showChrome();
@@ -3174,10 +3725,28 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   };
   const update = ({ preserveView = false } = {}) => {
     const item = list[currentIndex] || {};
-    if (!preserveView) zoomLevel = 1;
-    if (imageNode.getAttribute("src") !== item.url) imageNode.src = item.url;
+    if (!preserveView) {
+      stopZoomAnchor();
+      finishImagePan();
+      zoomLevel = 1;
+    }
+    if (imageNode.getAttribute("src") !== item.url) {
+      finishImagePan();
+      imageFailed = false;
+      imageRetrying = false;
+      preserveImageScroll = false;
+      restoreRetryFocus = false;
+      imageError.hidden = true;
+      imageRetry.disabled = false;
+      imageRetry.textContent = "重试当前图片";
+      stage.setAttribute("aria-busy", "true");
+      imageNode.src = item.url;
+    }
+    if (imageFailed || imageRetrying) imageErrorText.textContent = imageRetrying ? `正在重新加载第 ${formatNumber(currentIndex + 1)} 张图片` : `第 ${formatNumber(currentIndex + 1)} 张图片加载失败，可以重试或继续翻页`;
     imageNode.alt = item.name || title || "";
     counter.textContent = `第 ${formatNumber(currentIndex + 1)} / ${formatNumber(list.length)} 张`;
+    counter.setAttribute("aria-label", `跳到指定图片，当前第 ${formatNumber(currentIndex + 1)} 张，共 ${formatNumber(list.length)} 张`);
+    updateJumpBounds();
     range.max = String(list.length);
     range.value = String(currentIndex + 1);
     prev.disabled = currentIndex <= 0;
@@ -3191,7 +3760,15 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     showChrome();
   };
   const goTo = (index) => {
+    if (!jumpPanel.hidden) closeJump();
     const nextIndex = clampPagerIndex(index);
+    rangeScrubbing = false;
+    if (pendingRangeImages) {
+      const pending = pendingRangeImages;
+      pendingRangeImages = null;
+      updateImages(pending.images, { ...pending.options, index: nextIndex });
+      return;
+    }
     if (nextIndex === currentIndex) {
       showChrome();
       return;
@@ -3199,11 +3776,28 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     currentIndex = nextIndex;
     update();
   };
+  const submitJump = () => {
+    if (abortController.signal.aborted || !overlay.isConnected || jumpPanel.hidden || jumpComposing) return;
+    const target = jumpTarget();
+    if (target == null) {
+      jumpInput.setAttribute("aria-invalid", "true");
+      jumpError.textContent = jumpHint.textContent;
+      jumpInput.focus({ preventScroll: true });
+      return;
+    }
+    closeJump();
+    goTo(target - 1);
+  };
   const updateImages = (nextImages = [], updateOptions = {}) => {
     if (abortController.signal.aborted) return false;
     if (updateOptions.sourceKey && sourceKey && String(updateOptions.sourceKey) !== sourceKey) return false;
     const nextList = (nextImages || []).filter((image) => image?.url);
     if (!nextList.length) return false;
+    // A native range drag keeps its starting domain until release/cancel.
+    if (rangeScrubbing) {
+      pendingRangeImages = { images: nextList, options: { ...updateOptions } };
+      return true;
+    }
 
     const current = list[currentIndex] || {};
     const requestedIndex = Number(updateOptions.index);
@@ -3215,25 +3809,156 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
         : Math.min(currentIndex, nextList.length - 1);
     const preserveView = nextList[currentIndex]?.url === current.url;
     list = nextList;
-    rangeScrubbing = false;
     update({ preserveView });
     return true;
   };
 
+  const loadCatalog = () => {
+    if (abortController.signal.aborted || !overlay.isConnected || typeof options.fullImages !== "function") return Promise.resolve();
+    if (catalogRequest) return catalogRequest.promise;
+    const request = { promise: null, restoreFocus: document.activeElement === catalogRetry };
+    catalogRequest = request;
+    if (request.restoreFocus) stage.focus({ preventScroll: true });
+    catalog.hidden = false;
+    catalogFailed = false;
+    catalogText.textContent = `正在读取完整目录，仍可浏览已加载的 ${formatNumber(list.length)} 张。`;
+    catalogRetry.disabled = true;
+    catalogRetry.textContent = "正在读取目录…";
+    catalog.setAttribute("aria-busy", "true");
+    applyZoom(zoomLevel, { preserveScroll: true });
+    request.promise = (async () => {
+      try {
+        const images = await options.fullImages();
+        if (abortController.signal.aborted || !overlay.isConnected) return;
+        catalog.hidden = true;
+        if (Array.isArray(images) && images.length) updateImages(images, { sourceKey });
+        else applyZoom(zoomLevel, { preserveScroll: true });
+      } catch {
+        if (abortController.signal.aborted || !overlay.isConnected) return;
+        catalogFailed = true;
+        catalogText.textContent = `完整目录读取失败，仍可浏览已加载的 ${formatNumber(list.length)} 张。`;
+        catalogRetry.hidden = false;
+        catalogRetry.disabled = false;
+        catalogRetry.textContent = "重试完整目录";
+        applyZoom(zoomLevel, { preserveScroll: true });
+        if (request.restoreFocus && document.activeElement === stage) catalogRetry.focus({ preventScroll: true });
+      } finally {
+        if (catalogRequest === request) catalogRequest = null;
+        if (!abortController.signal.aborted && overlay.isConnected) catalog.removeAttribute("aria-busy");
+      }
+    })();
+    return request.promise;
+  };
+
   prev.addEventListener("click", () => goTo(currentIndex - 1), listenerOptions);
   next.addEventListener("click", () => goTo(currentIndex + 1), listenerOptions);
+  counter.addEventListener("click", () => jumpPanel.hidden ? openJump() : closeJump(), listenerOptions);
+  jumpSubmit.addEventListener("click", submitJump, listenerOptions);
+  jumpCancel.addEventListener("click", closeJump, listenerOptions);
+  catalogRetry.addEventListener("click", loadCatalog, listenerOptions);
+  jumpInput.addEventListener("input", clearJumpError, listenerOptions);
+  jumpInput.addEventListener("compositionstart", () => { jumpComposing = true; }, listenerOptions);
+  jumpInput.addEventListener("compositionend", () => { jumpComposing = false; }, listenerOptions);
+  jumpInput.addEventListener("keydown", (event) => {
+    if (jumpComposing || event.isComposing || event.keyCode === 229) { event.stopPropagation(); return; }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Enter" && !event.defaultPrevented) { event.preventDefault(); submitJump(); }
+  }, listenerOptions);
   zoomOut.addEventListener("click", () => applyZoom(zoomLevel - 0.25), listenerOptions);
   zoomReset.addEventListener("click", () => applyZoom(1), listenerOptions);
   zoomIn.addEventListener("click", () => applyZoom(zoomLevel + 0.25), listenerOptions);
-  fullscreen.addEventListener("click", async () => {
-    if (document.fullscreenElement) await document.exitFullscreen?.();
-    else await overlay.requestFullscreen?.();
+  const fullscreenCurrent = () => !abortController.signal.aborted && overlay.isConnected;
+  const fullscreenSupported = () => Boolean(document.fullscreenEnabled && overlay.requestFullscreen && document.exitFullscreen);
+  const updateFullscreen = () => {
+    const active = document.fullscreenElement === overlay;
+    fullscreen.hidden = !fullscreenSupported() || Boolean(document.fullscreenElement && !active);
+    fullscreen.textContent = active ? "退出全屏" : "全屏";
+    fullscreen.setAttribute("aria-pressed", String(active));
+    fullscreen.setAttribute("aria-busy", String(Boolean(fullscreenOperation)));
+    fullscreen.setAttribute("aria-disabled", String(Boolean(fullscreenOperation)));
+  };
+  fullscreen.addEventListener("click", () => {
+    if (!fullscreenCurrent() || fullscreenOperation || !fullscreenSupported()
+        || document.fullscreenElement && document.fullscreenElement !== overlay) return;
+    const operation = { exiting: document.fullscreenElement === overlay };
+    fullscreenOperation = operation;
+    fullscreenStatus.hidden = true;
+    fullscreenStatus.textContent = "";
+    updateFullscreen();
+    showChrome();
+    // Invoke the native transition in this click's activation, while keeping
+    // rejection and completion bound to this particular image reader.
+    void (async () => {
+      try {
+        if (operation.exiting) await document.exitFullscreen();
+        else await overlay.requestFullscreen();
+        if (!fullscreenCurrent() && document.fullscreenElement === overlay) await document.exitFullscreen();
+      } catch {
+        if (fullscreenCurrent()) {
+          fullscreenStatus.textContent = "全屏切换失败，请重试。";
+          fullscreenStatus.hidden = false;
+          applyZoom(zoomLevel, { preserveScroll: true });
+          showChrome();
+        }
+      } finally {
+        if (fullscreenOperation === operation) fullscreenOperation = null;
+        if (fullscreenCurrent()) updateFullscreen();
+      }
+    })();
   }, listenerOptions);
   document.addEventListener("fullscreenchange", () => {
-    fullscreen.textContent = document.fullscreenElement ? "退出全屏" : "全屏";
-    window.requestAnimationFrame(() => applyZoom(zoomLevel, { preserveScroll: true }));
+    if (!fullscreenCurrent()) return;
+    stopZoomAnchor();
+    updateFullscreen();
+    if (fullscreenFrame != null) window.cancelAnimationFrame(fullscreenFrame);
+    fullscreenFrame = window.requestAnimationFrame(() => {
+      fullscreenFrame = null;
+      if (fullscreenCurrent()) applyZoom(zoomLevel, { preserveScroll: true });
+    });
   }, listenerOptions);
-  imageNode.addEventListener("load", () => applyZoom(zoomLevel), listenerOptions);
+  updateFullscreen();
+  const currentImage = () => !abortController.signal.aborted && overlay.isConnected
+    && imageNode.getAttribute("src") === list[currentIndex]?.url;
+  imageNode.addEventListener("load", () => {
+    if (!currentImage() || !imageNode.complete || !imageNode.naturalWidth) return;
+    imageFailed = false;
+    imageRetrying = false;
+    imageError.hidden = true;
+    imageRetry.disabled = false;
+    imageRetry.textContent = "重试当前图片";
+    stage.removeAttribute("aria-busy");
+    applyZoom(zoomLevel, { preserveScroll: preserveImageScroll });
+    preserveImageScroll = false;
+    restoreRetryFocus = false;
+  }, listenerOptions);
+  imageNode.addEventListener("error", () => {
+    if (!currentImage() || !imageNode.complete || imageNode.naturalWidth) return;
+    const returnFocus = restoreRetryFocus && document.activeElement === stage;
+    imageFailed = true;
+    imageRetrying = false;
+    preserveImageScroll = false;
+    restoreRetryFocus = false;
+    imageError.hidden = false;
+    imageErrorText.textContent = `第 ${formatNumber(currentIndex + 1)} 张图片加载失败，可以重试或继续翻页`;
+    imageRetry.disabled = false;
+    imageRetry.textContent = "重试当前图片";
+    stage.removeAttribute("aria-busy");
+    showChrome();
+    if (returnFocus) imageRetry.focus({ preventScroll: true });
+  }, listenerOptions);
+  imageRetry.addEventListener("click", () => {
+    if (!currentImage() || !imageFailed || imageRetrying) return;
+    imageRetrying = true;
+    preserveImageScroll = true;
+    restoreRetryFocus = document.activeElement === imageRetry;
+    if (restoreRetryFocus) stage.focus({ preventScroll: true });
+    imageRetry.disabled = true;
+    imageRetry.textContent = "正在重试…";
+    imageErrorText.textContent = `正在重新加载第 ${formatNumber(currentIndex + 1)} 张图片`;
+    stage.setAttribute("aria-busy", "true");
+    imageNode.removeAttribute("src");
+    imageNode.src = list[currentIndex].url;
+  }, listenerOptions);
   range.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
     rangeScrubbing = true;
@@ -3247,7 +3972,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   }, listenerOptions);
   range.addEventListener("pointercancel", () => {
     rangeScrubbing = false;
-    update();
+    const pending = pendingRangeImages;
+    pendingRangeImages = null;
+    if (pending) updateImages(pending.images, pending.options);
+    else update();
   }, listenerOptions);
   range.addEventListener("input", () => {
     if (rangeScrubbing) previewRangeIndex(Number(range.value) - 1);
@@ -3257,6 +3985,22 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     commitRangeIndex();
   }, listenerOptions);
   stage.addEventListener("click", showChrome, listenerOptions);
+  stage.addEventListener("pointerdown", (event) => {
+    if (zoomLevel <= 1 || !imageNode.naturalWidth || event.button !== 0 || event.isPrimary === false || imagePan) return;
+    imagePan = { id: event.pointerId, x: event.clientX, y: event.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+    stage.setPointerCapture?.(event.pointerId);
+    stage.classList.add("panning");
+    event.preventDefault();
+    showChrome();
+  }, listenerOptions);
+  stage.addEventListener("pointermove", (event) => {
+    if (!imagePan || imagePan.id !== event.pointerId) return;
+    stage.scrollTo({ left: imagePan.left + imagePan.x - event.clientX, top: imagePan.top + imagePan.y - event.clientY, behavior: "auto" });
+    event.preventDefault();
+  }, listenerOptions);
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) stage.addEventListener(type, (event) => {
+    if (imagePan?.id === event.pointerId) finishImagePan();
+  }, listenerOptions);
   stage.addEventListener("dblclick", (event) => {
     event.preventDefault();
     applyZoom(zoomLevel > 1 ? 1 : 2);
@@ -3264,13 +4008,13 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   overlay.addEventListener("pointermove", showChrome, listenerOptions);
   overlay.addEventListener("pointerdown", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls")) return;
+    if (target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls, .gallery-image-pager-error, .gallery-image-pager-jump")) return;
     pointerStart = { x: event.clientX, y: event.clientY };
     showChrome();
   }, listenerOptions);
   overlay.addEventListener("pointerup", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    if (!pointerStart || target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls")) return;
+    if (!pointerStart || target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls, .gallery-image-pager-error, .gallery-image-pager-jump")) return;
     const dy = event.clientY - pointerStart.y;
     const dx = event.clientX - pointerStart.x;
     pointerStart = null;
@@ -3280,6 +4024,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     else goTo(currentIndex + (dy < 0 ? 1 : -1));
   }, listenerOptions);
   overlay.addEventListener("wheel", (event) => {
+    if (event.target instanceof Element && event.target.closest(".gallery-image-pager-error, .gallery-image-pager-jump")) return;
     if (zoomLevel > 1) return;
     if (Math.abs(event.deltaY) < 18 || Math.abs(event.deltaY) < Math.abs(event.deltaX)) return;
     event.preventDefault();
@@ -3288,10 +4033,36 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     wheelLockedUntil = now + 360;
     goTo(currentIndex + (event.deltaY > 0 ? 1 : -1));
   }, { signal: abortController.signal, passive: false });
+  document.addEventListener("focusin", (event) => {
+    if (!overlay.contains(event.target)) stage.focus({ preventScroll: true });
+    else showChrome();
+  }, listenerOptions);
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+    if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Tab") {
+      showChrome();
+      const focusRoot = jumpPanel.hidden ? overlay : jumpPanel;
+      const targets = [...focusRoot.querySelectorAll("button, input, [href], [tabindex]")]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+      const first = targets[0] || stage;
+      const last = targets.at(-1) || stage;
+      if (!focusRoot.contains(document.activeElement) || event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus({ preventScroll: true });
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    } else if (event.key === "Escape") {
       event.preventDefault();
-      closeGalleryImagePager();
+      if (!jumpPanel.hidden) closeJump();
+      else closeGalleryImagePager();
+    } else if (jumpPanel.contains(event.target)) {
+      return;
+    } else if (zoomLevel > 1 && imageNode.naturalWidth && event.target === stage
+        && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp"].includes(event.key)) {
+      // The focused scrollable image keeps its native keyboard scrolling.
+      return;
     } else if (["ArrowDown", "ArrowRight", "PageDown"].includes(event.key)) {
       event.preventDefault();
       goTo(currentIndex + 1);
@@ -3321,16 +4092,25 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
 
   galleryPagerCleanup = () => {
     window.clearTimeout(hideTimer);
+    pendingRangeImages = null;
+    stopZoomAnchor();
+    finishImagePan();
+    const restoreFocus = overlay.contains(document.activeElement);
     abortController.abort();
+    if (fullscreenFrame != null) window.cancelAnimationFrame(fullscreenFrame);
+    if (document.fullscreenElement === overlay && !fullscreenOperation?.exiting) void document.exitFullscreen().catch(() => {});
+    imageNode.removeAttribute("src");
     overlay.remove();
     document.body.classList.remove("gallery-image-pager-open");
     document.body.style.overflow = previousOverflow;
+    if (restoreFocus && opener?.isConnected) opener.focus({ preventScroll: true });
   };
   document.body.classList.add("gallery-image-pager-open");
   document.body.style.overflow = "hidden";
   document.body.append(overlay);
   update();
   stage.focus({ preventScroll: true });
+  void loadCatalog();
   return {
     updateImages,
     close: closeGalleryImagePager,
@@ -3369,20 +4149,13 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
       ? state.gallery.album?.id === options.albumId ? state.gallery.album.images : []
       : fallbackImages;
     if (!currentList?.length) return;
-    const pager = openGalleryImagePager(
+    openGalleryImagePager(
       currentList,
       Math.min(currentList.length - 1, fallbackIndex),
       options.title || "",
       options.meta || "",
-      { sourceKey }
+      { sourceKey, fullImages: options.fullImages }
     );
-    if (typeof options.fullImages === "function") {
-      options.fullImages()
-        .then((pagerImages) => {
-          pager?.updateImages?.(pagerImages, { sourceKey });
-        })
-        .catch(() => {});
-    }
   };
   figure.addEventListener("click", openImage);
   figure.addEventListener("keydown", (event) => {
@@ -3469,14 +4242,12 @@ function renderPhotoReader(container) {
   const sourceKey = album.id ? `photo:${album.id}` : "";
   const openPager = (startIndex = 0) => {
     const currentImages = state.gallery.album?.id === album.id ? state.gallery.album.images : images;
-    const pager = openGalleryImagePager(currentImages, startIndex, album.title, meta, { sourceKey });
-    fullPhotoReaderImages(album)
-      .then((pagerImages) => pager?.updateImages?.(pagerImages, { sourceKey }))
-      .catch(() => {});
+    openGalleryImagePager(currentImages, startIndex, album.title, meta, { sourceKey, fullImages: () => fullPhotoReaderImages(album) });
   };
   container.append(readerToolbar(album.title, meta, () => {
     state.gallery.album = null;
   }, {
+    albumId: album.id,
     totalCount,
     onOpen: openPager
   }));

@@ -42,6 +42,8 @@
       }
       .player-page-header h1 {
         margin: 0;
+        flex: 1 1 auto;
+        min-width: 0;
         max-width: min(1100px, calc(100% - 150px));
         overflow: hidden;
         color: #fff;
@@ -88,6 +90,41 @@
         stroke-linejoin: round;
         stroke-width: 1.7;
       }
+      .player-file-navigation {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 4px;
+        pointer-events: auto;
+      }
+      .player-file-navigation[hidden] { display: none; }
+      .player-file-navigation button {
+        display: inline-grid;
+        place-items: center;
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        background: rgba(6, 10, 8, 0.7);
+        color: #eef7f2;
+        cursor: pointer;
+      }
+      .player-file-navigation button:focus-visible {
+        outline: 2px solid #60d3aa;
+        outline-offset: 2px;
+      }
+      .player-file-navigation button[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+      .player-file-navigation svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .player-file-position { color: #eef7f2; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
       body.player-ui-idle .player-page-header:not(:focus-within) {
         opacity: 0;
         transform: translateY(-8px);
@@ -487,6 +524,20 @@
         cursor: progress;
         opacity: 0.72;
       }
+      .player-time-link-status { flex-basis: 100%; color: #bff5de; font-size: 12px; line-height: 1.5; }
+      .player-utility-dialog { width: min(520px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow: auto; padding: 22px; border: 1px solid #456255; border-radius: 14px; background: #14231c; color: #eef7f2; }
+      .player-utility-dialog::backdrop { background: #000b; }
+      .player-utility-dialog h2 { margin: 0; font-size: 18px; }
+      .player-utility-dialog p { font-size: 14px; line-height: 1.6; }
+      .player-utility-dialog label { display: grid; gap: 8px; font-size: 14px; }
+      .player-utility-dialog input { width: 100%; min-width: 0; min-height: 44px; padding: 10px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #09140e; font: inherit; }
+      .player-utility-dialog button { min-height: 44px; margin-top: 16px; padding: 8px 18px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #234837; font: inherit; cursor: pointer; }
+      .player-utility-dialog :focus-visible { outline: 2px solid #8ce1b8; outline-offset: 3px; }
+      .player-time-jump-actions { display: flex; gap: 10px; }
+      .player-time-jump-error { color: #ffd1d1; }
+      .player-shortcuts-dialog dl { display: grid; grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1fr); gap: 14px 12px; margin: 20px 0 0; font-size: 14px; line-height: 1.5; }
+      .player-shortcuts-dialog dd { margin: 0; }
+      .player-shortcuts-dialog kbd { display: inline-block; padding: 0 5px; border: 1px solid #638172; border-radius: 4px; font: inherit; }
       .player-move-backdrop {
         position: fixed;
         inset: 0;
@@ -756,6 +807,11 @@
         <section class="player-stage">
           <header class="player-page-header">
             <h1 id="playerTitle">FanHao 播放</h1>
+            <div class="player-file-navigation" id="playerFileNavigation" role="group" aria-label="文件切换" hidden>
+              <button id="playerFilePrevious" type="button" aria-label="上一个文件" aria-disabled="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 6l-9 6 9 6z"></path></svg></button>
+              <span class="player-file-position" id="playerFilePosition" role="status"></span>
+              <button id="playerFileNext" type="button" aria-label="下一个文件" aria-disabled="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l9 6-9 6z"></path></svg></button>
+            </div>
             <button class="player-sidebar-toggle" id="toggleSidebarButton" type="button" aria-controls="playerSidebar" aria-expanded="true" title="隐藏资料与操作（I）">
               <svg viewBox="0 0 20 20" aria-hidden="true">
                 <rect x="2.5" y="3" width="15" height="14" rx="2"></rect>
@@ -802,6 +858,10 @@
             <h2>操作</h2>
             <div class="player-actions-row">
               <button id="backButton" type="button">返回资料库</button>
+              <button id="copyTimeLinkButton" type="button" disabled>复制时间链接</button>
+              <button id="playerTimeJumpButton" type="button" disabled aria-haspopup="dialog" title="跳到时间（G）">跳到时间</button>
+              <button id="playerShortcutsButton" type="button" aria-haspopup="dialog" aria-controls="playerShortcutsDialog">快捷键 (?)</button>
+              <span id="playerTimeLinkStatus" class="player-time-link-status" role="status" aria-live="polite" hidden></span>
               <button id="markerAButton" type="button">标记 A</button>
               <button id="correctActorButton" type="button" hidden>订正演员</button>
               <button id="moveToPersonButton" type="button" hidden>迁移演员</button>
@@ -813,6 +873,22 @@
         </aside>
       </main>
     </div>
+    <dialog id="playerShortcutsDialog" class="player-utility-dialog player-shortcuts-dialog" aria-labelledby="playerShortcutsTitle" aria-describedby="playerShortcutsNote">
+      <h2 id="playerShortcutsTitle">播放快捷键</h2>
+      <p id="playerShortcutsNote">在播放器中使用。输入文字或操作弹窗时，播放快捷键会暂停响应。</p>
+      <dl>
+        <dt><kbd>空格</kbd> / <kbd>K</kbd></dt><dd>播放 / 暂停</dd>
+        <dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>后退 / 前进 10 秒</dd>
+        <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>音量增加 / 减少 5%</dd>
+        <dt><kbd>M</kbd></dt><dd>静音 / 恢复声音</dd>
+        <dt><kbd>F</kbd></dt><dd>切换全屏</dd>
+        <dt><kbd>I</kbd></dt><dd>显示 / 隐藏资料栏</dd>
+        <dt><kbd>G</kbd></dt><dd>跳到指定时间</dd>
+        <dt><kbd>?</kbd></dt><dd>打开快捷键帮助</dd>
+        <dt><kbd>Esc</kbd></dt><dd>关闭当前帮助</dd>
+      </dl>
+      <button type="button" autofocus>关闭</button>
+    </dialog>
     <script src="/vendor/plyr/plyr.min.js"></script>
     <script type="module">
       try {

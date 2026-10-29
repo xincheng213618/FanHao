@@ -181,9 +181,12 @@ function verifyWebMutationBoundary() {
   for (const [name, block] of [["single/group", single], ["batch", batch]]) {
     const requestAt = block.indexOf("deleteActions.delete");
     const rollbackAt = block.indexOf("if (!data?.committed)");
-    const mutationAt = block.indexOf("loadedCoverIds.delete");
+    const mutationAt = block.indexOf("applyShortVideoDeletion(data, owner");
     assert(requestAt >= 0 && rollbackAt > requestAt && mutationAt > rollbackAt, `${name} delete must validate and return on rollback before model mutation`);
   }
+  const applyStart = source.indexOf("async function applyShortVideoDeletion");
+  const applyEnd = source.indexOf("function decrementCurrentAuthorCount", applyStart);
+  assert(applyStart > batchStart && source.slice(applyStart, applyEnd).includes("loadedCoverIds.delete"), "committed deletion must share the cache/model cleanup boundary");
   assert(actions.includes("shortVideoDeleteApiPath(video.id)"), "single/group delete must use the explicit video endpoint");
   assert(actions.includes('requestShortVideoDelete(api, "/api/short-videos"'), "batch delete must share the same response validator");
   assert(actions.includes("showShortVideoDeleteConfirm") && actions.includes("confirmed = Boolean(await confirmDelete(prompt))") && actions.includes("confirmationInFlight"), "Web deletes must use a visible in-page asynchronous confirmation with a single-flight gate");

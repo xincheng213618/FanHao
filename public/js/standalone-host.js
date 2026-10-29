@@ -275,7 +275,7 @@ function createHost({ api, els, initialParams, pages, state }) {
         await page.openRouteTarget(next);
       } else {
         hidePersonProfile();
-        setMainHeader("小游戏", "离线游戏中心");
+        setMainHeader("小工具", "离线游戏与 TXT 整理");
         page.renderStats();
         page.renderView();
       }

@@ -3,6 +3,8 @@ export function createShortVideoFilterControls(deps) {
     clearSelection,
     formatNumber,
     isAuthorDetailPage,
+    captureControlContext,
+    isCurrentControl,
     loadVideos,
     normalizeAuthorAccountStatus,
     normalizeDeleted,
@@ -10,6 +12,36 @@ export function createShortVideoFilterControls(deps) {
     showError,
     state
   } = deps;
+
+  const controls = new WeakMap();
+
+  function trackControl(select, kind, value) {
+    select.dataset.shortVideoFilter = kind;
+    controls.set(select, { value });
+  }
+
+  function syncControls(home, data = {}) {
+    for (const select of home.querySelectorAll("select[data-short-video-filter]")) {
+      const kind = select.dataset.shortVideoFilter;
+      const value = kind === "deleted" ? normalizeDeleted(state.shortVideo.deleted)
+        : kind === "account" ? normalizeAuthorAccountStatus(state.shortVideo.authorAccountStatus)
+          : normalizeSort(state.shortVideo.sort);
+      const control = controls.get(select);
+      // Do not reset a native select's uncommitted keyboard choice merely
+      // because unrelated author metadata or list totals finished loading.
+      if (control && control.value !== value) {
+        if (select.value !== value) select.value = value;
+        control.value = value;
+      }
+      const option = kind === "deleted" ? select.querySelector('option[value="deleted"]')
+        : kind === "account" ? select.querySelector('option[value="banned"]') : null;
+      if (option) {
+        const total = kind === "deleted" ? data.deletedTotal : state.shortVideo.authorBannedTotal;
+        const text = `${kind === "deleted" ? "主页已删除" : "已封禁"} (${formatNumber(Math.max(0, Number(total || 0)))})`;
+        if (option.textContent !== text) option.textContent = text;
+      }
+    }
+  }
 
   function renderDeletedControl(data = {}) {
     const label = document.createElement("label");
@@ -27,7 +59,10 @@ export function createShortVideoFilterControls(deps) {
       select.append(option);
     }
     select.value = normalizeDeleted(state.shortVideo.deleted);
+    trackControl(select, "deleted", select.value);
+    const context = captureControlContext();
     select.addEventListener("change", () => {
+      if (!isCurrentControl(select, context)) return;
       const nextDeleted = normalizeDeleted(select.value);
       if (normalizeDeleted(state.shortVideo.deleted) === nextDeleted) return;
       state.shortVideo.deleted = nextDeleted;
@@ -60,7 +95,10 @@ export function createShortVideoFilterControls(deps) {
       select.append(option);
     }
     select.value = normalizeSort(state.shortVideo.sort);
+    trackControl(select, "sort", select.value);
+    const context = captureControlContext();
     select.addEventListener("change", () => {
+      if (!isCurrentControl(select, context)) return;
       const nextSort = normalizeSort(select.value);
       if ((state.shortVideo.sort || "published") === nextSort) return;
       state.shortVideo.sort = nextSort;
@@ -92,7 +130,10 @@ export function createShortVideoFilterControls(deps) {
       select.append(option);
     }
     select.value = normalizeAuthorAccountStatus(state.shortVideo.authorAccountStatus);
+    trackControl(select, "account", select.value);
+    const context = captureControlContext();
     select.addEventListener("change", () => {
+      if (!isCurrentControl(select, context)) return;
       const nextStatus = normalizeAuthorAccountStatus(select.value);
       if (nextStatus === state.shortVideo.authorAccountStatus) return;
       state.shortVideo.authorAccountStatus = nextStatus;
@@ -104,5 +145,5 @@ export function createShortVideoFilterControls(deps) {
     return wrap;
   }
 
-  return Object.freeze({ renderAuthorAccountStatusControl, renderDeletedControl, renderSortControl });
+  return Object.freeze({ renderAuthorAccountStatusControl, renderDeletedControl, renderSortControl, syncControls });
 }

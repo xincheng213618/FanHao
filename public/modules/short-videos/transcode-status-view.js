@@ -22,8 +22,9 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
   let content = null;
   let autoRefreshButton = null;
   let refreshButton = null;
-  let pollTimer = 0;
+  let pollTimer = null;
   let refreshing = false;
+  let refreshRequest = null;
   let latestData = null;
   let transcodeControlBusy = false;
   let cacheCleanupBusy = false;
@@ -32,12 +33,33 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
   let interactionHoldUntil = 0;
   let regions = Object.create(null);
   let regionSignatures = Object.create(null);
+  let mountOwner = null;
+  let mutationEpoch = 0;
+
+  function ownsMount(owner) {
+    return Boolean(owner && owner === mountOwner && !owner.disposed && owner.root === root && root?.isConnected);
+  }
+
+  function listen(target, name, callback, options) {
+    const owner = mountOwner;
+    const handler = event => {
+      if (ownsMount(owner) && target.isConnected !== false) return callback(event);
+    };
+    target.addEventListener(name, handler, options);
+    // Local controls are collected with their detached DOM. Retaining every
+    // rendered control here would keep a second's worth of old job cards alive.
+    if (target === window || target === document || target === owner.root) {
+      owner.listeners.push(() => target.removeEventListener(name, handler, options));
+    }
+  }
 
   function mount(container) {
     stopPolling();
     regions = Object.create(null);
     regionSignatures = Object.create(null);
     root = document.createElement("section");
+    const owner = { root, disposed: false, listeners: [], timers: new Set() };
+    mountOwner = owner;
     root.className = "short-video-transcode-management";
     root.setAttribute("aria-labelledby", "shortVideoTranscodePageTitle");
 
@@ -63,7 +85,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     autoRefreshButton = document.createElement("button");
     autoRefreshButton.type = "button";
     autoRefreshButton.className = "short-video-transcode-auto-refresh";
-    autoRefreshButton.addEventListener("click", () => {
+    listen(autoRefreshButton, "click", () => {
       autoRefreshEnabled = !autoRefreshEnabled;
       updateAutoRefreshButton();
       if (autoRefreshEnabled) refresh({ force: true });
@@ -72,7 +94,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     refreshButton.type = "button";
     refreshButton.className = "short-video-transcode-refresh";
     refreshButton.textContent = "刷新";
-    refreshButton.addEventListener("click", () => refresh({ force: true }));
+    listen(refreshButton, "click", () => refresh({ force: true }));
     actions.append(back, autoRefreshButton, refreshButton);
     header.append(heading, actions);
 
@@ -80,7 +102,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     content.className = "short-video-transcode-content";
     shell.append(header, content);
     root.append(shell);
-    root.addEventListener("pointerdown", (event) => {
+    listen(root, "pointerdown", (event) => {
       if (!content?.contains(event.target)) return;
       pointerInteracting = true;
       updateAutoRefreshButton();
@@ -91,52 +113,91 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
       interactionHoldUntil = Date.now() + 1500;
       updateAutoRefreshButton();
     };
-    window.addEventListener("pointerup", finishPointerInteraction, true);
-    window.addEventListener("pointercancel", finishPointerInteraction, true);
-    root.addEventListener("toggle", updateAutoRefreshButton, true);
-    document.addEventListener("selectionchange", updateAutoRefreshButton);
+    const cancelPointerInteraction = () => {
+      if (!pointerInteracting) return;
+      pointerInteracting = false;
+      interactionHoldUntil = 0;
+      updateAutoRefreshButton();
+    };
+    listen(window, "pointerup", finishPointerInteraction, true);
+    listen(window, "pointercancel", finishPointerInteraction, true);
+    listen(window, "blur", cancelPointerInteraction);
+    listen(document, "visibilitychange", () => { if (document.hidden) cancelPointerInteraction(); });
+    listen(root, "toggle", updateAutoRefreshButton, true);
+    listen(document, "selectionchange", updateAutoRefreshButton);
     container.replaceChildren(root);
     updateAutoRefreshButton();
     if (latestData) renderStatus(latestData);
     else renderLoading();
     updateAutoRefreshButton();
     refresh({ force: true });
-    pollTimer = window.setInterval(refresh, 1000);
+    pollTimer = window.setInterval(() => { if (ownsMount(owner)) refresh(); }, 1000);
     return root;
   }
 
   function stopPolling() {
-    if (pollTimer) window.clearInterval(pollTimer);
-    pollTimer = 0;
+    const owner = mountOwner;
+    mountOwner = null;
+    if (owner) {
+      owner.disposed = true;
+      owner.listeners.forEach(remove => remove());
+      owner.listeners.length = 0;
+      for (const timer of owner.timers) window.clearTimeout(timer);
+      owner.timers.clear();
+      owner.root = null;
+    }
+    if (pollTimer !== null) window.clearInterval(pollTimer);
+    pollTimer = null;
+    refreshing = false;
+    const pendingRead = refreshRequest;
+    refreshRequest = null;
+    pendingRead?.abort.abort();
+    transcodeControlBusy = false;
+    cacheCleanupBusy = false;
+    pointerInteracting = false;
+    interactionHoldUntil = 0;
+    root = content = autoRefreshButton = refreshButton = null;
+    regions = Object.create(null);
+    regionSignatures = Object.create(null);
   }
 
   async function refresh(options = {}) {
-    if (!root?.isConnected) {
+    const owner = mountOwner;
+    if (!ownsMount(owner)) {
       stopPolling();
       return;
     }
-    if (refreshing) return;
+    if (refreshing || transcodeControlBusy || cacheCleanupBusy || (document.hidden && !options.force)) return;
     if (!options.force && isAutoRefreshPaused()) {
       updateAutoRefreshButton();
       return;
     }
     refreshing = true;
+    const request = { abort: new AbortController() };
+    refreshRequest = request;
+    const readEpoch = mutationEpoch;
     const showBusy = Boolean(options.force);
     if (showBusy) {
       refreshButton.disabled = true;
       refreshButton.textContent = "读取中…";
     }
     try {
-      latestData = await api("/api/short-videos/playback-cache-status");
+      const data = await api("/api/short-videos/playback-cache-status", { signal: request.abort.signal });
+      if (!ownsMount(owner) || readEpoch !== mutationEpoch) return;
+      latestData = data;
       if (!options.force && isAutoRefreshPaused()) return;
       renderStatus(latestData);
     } catch (error) {
+      if (!ownsMount(owner) || readEpoch !== mutationEpoch) return;
       renderError(error, !latestData);
     } finally {
-      refreshing = false;
-      if (showBusy) {
-        refreshButton.disabled = false;
-        refreshButton.textContent = "刷新";
+      if (ownsMount(owner) && refreshRequest === request) {
+        refreshRequest = null;
+        refreshing = false;
+        if (showBusy) {
+          refreshButton.disabled = false;
+          refreshButton.textContent = "刷新";
+        }
       }
     }
   }
@@ -150,7 +211,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
   }
 
   function renderError(error, replace) {
-    if (!content) return;
+    if (!ownsMount(mountOwner) || !content) return;
     content.querySelector(".short-video-transcode-error")?.remove();
     const banner = document.createElement("div");
     banner.className = "short-video-transcode-error";
@@ -160,6 +221,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
   }
 
   function renderStatus(data = {}) {
+    if (!ownsMount(mountOwner)) return;
     const smooth = data.smooth || {};
     const jobs = smooth.activeJobs || (smooth.activeJob ? [smooth.activeJob] : []);
     const queue = smooth.queue || [];
@@ -261,11 +323,11 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     control.type = "button";
     control.className = `short-video-transcode-run-control${pausedByUser ? " is-resume" : " is-stop"}`;
     control.textContent = transcodeControlBusy ? "处理中…" : pausedByUser ? "恢复转码" : "停止转码";
-    control.disabled = transcodeControlBusy;
+    control.disabled = transcodeControlBusy || cacheCleanupBusy;
     control.title = pausedByUser
       ? "恢复后台转码队列"
       : "停止当前 FFmpeg 并暂停后续转码；恢复后当前任务会重新开始";
-    control.addEventListener("click", () => controlTranscoding(pausedByUser ? "resume" : "pause"));
+    listen(control, "click", () => controlTranscoding(pausedByUser ? "resume" : "pause"));
     const concurrency = document.createElement("label");
     concurrency.className = "short-video-transcode-concurrency";
     const concurrencyLabel = document.createElement("span");
@@ -280,8 +342,8 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
       option.selected = value === Number(smooth.concurrency || smooth.pipeline?.concurrency || 1);
       concurrencySelect.append(option);
     }
-    concurrencySelect.disabled = transcodeControlBusy;
-    concurrencySelect.addEventListener("change", () => controlTranscoding("set-concurrency", {
+    concurrencySelect.disabled = transcodeControlBusy || cacheCleanupBusy;
+    listen(concurrencySelect, "change", () => controlTranscoding("set-concurrency", {
       concurrency: Number(concurrencySelect.value)
     }));
     concurrency.append(concurrencyLabel, concurrencySelect);
@@ -289,11 +351,11 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     clearCache.type = "button";
     clearCache.className = "short-video-transcode-cache-clear";
     clearCache.textContent = cacheCleanupBusy ? "清除中…" : "清除转码缓存";
-    clearCache.disabled = cacheCleanupBusy || activeCount > 0;
+    clearCache.disabled = cacheCleanupBusy || transcodeControlBusy || activeCount > 0;
     clearCache.title = clearCache.disabled && !cacheCleanupBusy
       ? "请先停止转码并等待任务退出"
       : "只删除可重新生成的 H.264 流畅版，不会删除源视频";
-    clearCache.addEventListener("click", cleanupTranscodeCache);
+    listen(clearCache, "click", cleanupTranscodeCache);
     banner.append(dot, copy, stamp, concurrency, clearCache, control);
     return banner;
   }
@@ -534,18 +596,23 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
     copy.type = "button";
     copy.textContent = "复制";
     copy.disabled = !valueText;
-    copy.addEventListener("click", async () => {
+    const owner = mountOwner;
+    listen(copy, "click", async () => {
       if (!valueText) return;
       interactionHoldUntil = Date.now() + 3000;
       try {
         await copyText(valueText);
+        if (!ownsMount(owner) || !copy.isConnected) return;
         copy.textContent = "已复制";
       } catch {
+        if (!ownsMount(owner) || !copy.isConnected) return;
         copy.textContent = "复制失败";
       }
-      window.setTimeout(() => {
-        copy.textContent = "复制";
+      const timer = window.setTimeout(() => {
+        owner.timers.delete(timer);
+        if (ownsMount(owner) && copy.isConnected) copy.textContent = "复制";
       }, 1600);
+      owner.timers.add(timer);
       updateAutoRefreshButton();
     });
     row.append(label, code, copy);
@@ -553,7 +620,7 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
   }
 
   function updateAutoRefreshButton() {
-    if (!autoRefreshButton) return;
+    if (!ownsMount(mountOwner) || !autoRefreshButton) return;
     const interactionPaused = autoRefreshEnabled && isInteractionPaused();
     autoRefreshButton.classList.toggle("is-paused", !autoRefreshEnabled || interactionPaused);
     autoRefreshButton.textContent = !autoRefreshEnabled
@@ -564,8 +631,19 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
       : interactionPaused ? "选择文字或展开路径期间不会重绘" : "暂停自动更新，便于查看和复制";
   }
 
+  function invalidateStatusRead() {
+    mutationEpoch += 1;
+    const pendingRead = refreshRequest;
+    refreshRequest = null;
+    refreshing = false;
+    pendingRead?.abort.abort();
+    if (refreshButton) { refreshButton.disabled = false; refreshButton.textContent = "刷新"; }
+  }
+
   async function controlTranscoding(action, values = {}) {
-    if (transcodeControlBusy) return;
+    const owner = mountOwner;
+    if (!ownsMount(owner) || transcodeControlBusy || cacheCleanupBusy) return;
+    invalidateStatusRead();
     transcodeControlBusy = true;
     const button = content?.querySelector(".short-video-transcode-run-control");
     if (button) {
@@ -578,34 +656,44 @@ export function createShortVideoTranscodeStatusView({ api, formatBytes }) {
         method: "POST",
         body: { action, ...values }
       });
+      if (!ownsMount(owner)) return;
       latestData = result?.status || latestData;
       succeeded = true;
     } catch (error) {
+      if (!ownsMount(owner)) return;
       renderError(error, false);
     } finally {
-      transcodeControlBusy = false;
-      if (succeeded && latestData) renderStatus(latestData);
-      else if (button) {
-        button.disabled = false;
-        button.textContent = action === "pause" ? "停止转码" : action === "resume" ? "恢复转码" : "设置并发";
+      if (ownsMount(owner)) {
+        transcodeControlBusy = false;
+        if (succeeded && latestData) renderStatus(latestData);
+        else if (button) {
+          button.disabled = false;
+          button.textContent = action === "pause" ? "停止转码" : action === "resume" ? "恢复转码" : "设置并发";
+        }
       }
     }
   }
 
   async function cleanupTranscodeCache() {
-    if (cacheCleanupBusy || !window.confirm("只删除转码生成的流畅版缓存，不会删除源视频。确定清除吗？")) return;
+    const owner = mountOwner;
+    if (!ownsMount(owner) || cacheCleanupBusy || transcodeControlBusy || !window.confirm("只删除转码生成的流畅版缓存，不会删除源视频。确定清除吗？")) return;
+    invalidateStatusRead();
     cacheCleanupBusy = true;
     if (latestData) renderStatus(latestData);
     try {
       const result = await api("/api/short-videos/playback-cache-cleanup", { method: "POST" });
+      if (!ownsMount(owner)) return;
       latestData = result?.status || latestData;
       const bytes = Math.max(0, Number(result?.removed?.removedBytes || 0));
       window.alert(`已清除 ${result?.removed?.removedCount || 0} 个转码缓存，释放 ${formatBytes(bytes)}。`);
     } catch (error) {
+      if (!ownsMount(owner)) return;
       renderError(error, false);
     } finally {
-      cacheCleanupBusy = false;
-      if (latestData) renderStatus(latestData);
+      if (ownsMount(owner)) {
+        cacheCleanupBusy = false;
+        if (latestData) renderStatus(latestData);
+      }
     }
   }
 

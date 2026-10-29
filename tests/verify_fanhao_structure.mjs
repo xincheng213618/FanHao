@@ -204,7 +204,10 @@ assert(!fanhaoModuleIndexSource.includes("createPersonProfile"), "the FanHao bar
 assert(!fanhaoModuleIndexSource.includes("createWorkDetailPage"), "the FanHao barrel must not pull the retired work drawer into the startup graph");
 assert(!webApp.includes("createWorkDetailPage") && webApp.includes("createWorkActions"), "the FanHao composition root must use focused work actions without composing the retired drawer");
 assert(webApp.includes("toggleFavorite(work.id, favorite)"), "work cards must expose immediate favorite-control feedback while the API is pending");
-assert(webApp.includes("onCollectionStateChanged: () => collectionPage.invalidatePrefetches()") && workActionsSource.includes("onCollectionStateChanged();"), "favorite changes must invalidate prefetched collection pages");
+const collectionChangeSource = /function onCollectionStateChanged\([\s\S]*?\n  \}/.exec(collectionPageSource)?.[0] || "";
+assert(webApp.includes("onCollectionStateChanged: (change) => collectionPage.onCollectionStateChanged(change)")
+  && workActionsSource.includes("onCollectionStateChanged({ removedWorkIds });")
+  && collectionChangeSource.includes("invalidatePrefetches();"), "favorite changes must invalidate prefetched collection pages through the owned collection mutation handler");
 assert(webApp.includes('window.open(playerPageUrl(work.id), "_blank", "noopener")'), "work cards must keep opening the standalone player");
 assert(webApp.includes("playbackPrefetch.bindContainer(els.workGrid)") && webApp.includes("cover.dataset.playbackWorkId") && webApp.includes("body.dataset.playbackWorkId"), "work-card primary targets must delegate playback preparation through the persistent grid");
 assert(!webApp.includes("playbackPrefetch.bind(cover") && !webApp.includes("playbackPrefetch.bind(body"), "work cards must not attach playback listeners per rendered card");
@@ -250,8 +253,9 @@ assert(webApp.includes('trigger.dataset.autoConsumed = "1"') && webApp.includes(
 assert(!webApp.includes("WORK_AUTO_LOAD_RECHECK_DELAYS"), "work rendering must not schedule autonomous load-more cascades");
 assert(!webApp.includes("workLoadMoreObserver"), "work continuation observers must stay scoped to their rendered sentinel");
 assert(webApp.includes("const moduleNavigationPromise = initializeModuleNavigation();"), "FanHao startup must begin module navigation without blocking the first route");
-assert(webApp.includes("collectionPage.prefetch(initialRoute.view);"), "direct collection routes must start their data request before library hydration");
-assert(webApp.indexOf("collectionPage.prefetch(initialRoute.view);") < webApp.indexOf("await applyRoute(initialRoute);"), "collection and library startup requests must overlap");
+const startupCollectionPrefetch = "collectionPage.prefetch(initialRoute.view, { retainFailureForActivation: true });";
+assert(webApp.includes(startupCollectionPrefetch), "direct collection routes must start their data request before library hydration and retain its result for activation");
+assert(webApp.indexOf(startupCollectionPrefetch) < webApp.indexOf("await applyRoute(initialRoute);"), "collection and library startup requests must overlap");
 assert(!webApp.includes("await initializeModuleNavigation();"), "FanHao startup must not serialize module discovery ahead of the first library request");
 assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf("await applyRoute(initialRoute);"), "module discovery and route data must start concurrently");
 assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must still observe module-navigation completion");
@@ -283,7 +287,11 @@ assert(personLibraryServiceSource.includes("previousWork?.infoSummary") && perso
 assert(peoplePageSource.includes("works.map((work) => workCoverUrl(work)).find(Boolean)"), "Web person details must reuse the prepared work page for fallback artwork");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
-assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
+const personSelectionSource = peoplePageSource.slice(peoplePageSource.indexOf("async function selectPerson("), peoplePageSource.indexOf("async function loadMoreWorks("));
+assert(personSelectionSource.includes('const isCurrent = () => request.isCurrent() && state.activeView === "people"')
+  && personSelectionSource.includes("state.selectedPersonId === personId")
+  && personSelectionSource.includes("personDetailRequestUrl(personId, 0) === query")
+  && personSelectionSource.includes("if (!isCurrent()) return;"), "stale person responses and changed-query snapshots must not overwrite newer navigation");
 assert(webApp.includes("if (view !== \"people\") peoplePage.cancelPendingSelection()"), "leaving the people view must cancel pending person work");
 assert(webApp.includes("const searchRequests = createSearchRequestService({"), "FanHao search must retain a cancellable active request");
 assert(searchRequestSource.includes("const request = requests.begin()"), "search and load-more requests must replace stale work");
@@ -1317,7 +1325,7 @@ assert.equal(collectionInvalidationCount, 1, "failed favorite changes must keep 
 advisories.check(lines("public/js/standalone-host.js") <= 650, "standalone Web host is over 650 lines; review its responsibilities");
 const peoplePage = read("public/modules/fanhao/people-page.js");
 const webRankingPage = read("public/modules/fanhao/ranking-page.js");
-const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
+const loadMorePeopleSource = /function loadMorePeopleIndex\([^)]*\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
 const loadMoreCodePrefixIndexSource = /function loadMoreIndex\(\)\s*\{([\s\S]*?)\n  \}/.exec(codePrefixPageSource)?.[1] || "";

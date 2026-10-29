@@ -30,6 +30,8 @@ export function createGalleryPage(deps) {
   let imageListRequest = null;
   let listRefreshHandler = null;
   let librarySummaryTimer = 0;
+  let librarySummaryRequest = null;
+  let librarySummaryFailure = null;
   let readerGeneration = 0;
   let readerOwner = null;
   let readerStatusRequest = null;
@@ -110,7 +112,7 @@ export function createGalleryPage(deps) {
     if (state.activeView !== "gallery") return;
     renderGalleryStats();
     if (hasReaderIntent()) {
-      listRefreshHandler?.({ loading: false });
+      listRefreshHandler?.({ loading: false, readerActive: true });
       setStatus(state.gallery.status);
       return;
     }
@@ -141,33 +143,73 @@ export function createGalleryPage(deps) {
     state.gallery.listLoadingKey = "";
   }
 
+  function summaryEndpoint() {
+    return isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";
+  }
+
+  function getSummaryReadFailure() {
+    return state.activeView === "gallery" && !state.gallery.data && !hasReaderIntent()
+      && librarySummaryFailure?.endpoint === summaryEndpoint() ? librarySummaryFailure : null;
+  }
+
+  function retrySummaryRead(failure) {
+    if (!failure || failure !== getSummaryReadFailure()) return Promise.resolve(null);
+    const generation = readerGeneration;
+    return loadImageLibrary({ reload: true }).then(data => ({
+      data,
+      isCurrent: () => state.activeView === "gallery" && readerGeneration === generation && !hasReaderIntent()
+    }));
+  }
+
   async function loadImageLibrary(options = {}) {
     if (state.activeView !== "gallery") return;
-    if (state.gallery.loading) return;
-    if (state.gallery.data && !options.refresh && !options.reload) {
+    const endpoint = options.refresh ? "/api/image-library/rescan" : summaryEndpoint();
+    if (librarySummaryRequest) {
+      if (librarySummaryRequest.endpoint === endpoint || options.refresh || librarySummaryRequest.endpoint === "/api/image-library/rescan") return librarySummaryRequest.promise;
+      librarySummaryRequest.controller.abort();
+    }
+    if (state.gallery.data && !options.refresh && !options.reload && !librarySummaryRequest) {
       setLibraryStatus(state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status);
       refreshGalleryAfterLibraryChange({ preserveScroll: true });
       return;
     }
+    const request = { endpoint, controller: new AbortController(), promise: null };
+    librarySummaryRequest = request;
     state.gallery.loading = true;
     setLibraryStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
+    request.promise = readLibrarySummary(request, options);
+    refreshGalleryAfterLibraryChange({ preserveScroll: true, summaryChanged: true });
+    return request.promise;
+  }
+
+  async function readLibrarySummary(request, options) {
+    const isCurrent = () => librarySummaryRequest === request && !request.controller.signal.aborted;
     try {
-      const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";
-      const data = await api(options.refresh ? "/api/image-library/rescan" : summaryEndpoint, {
-        method: options.refresh ? "POST" : "GET"
+      const data = await api(request.endpoint, {
+        method: options.refresh ? "POST" : "GET",
+        signal: request.controller.signal
       });
+      if (!isCurrent()) return null;
       state.gallery.data = data;
       state.gallery.cache = data.cache || null;
       state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
+      librarySummaryFailure = null;
       setLibraryStatus(data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : "");
       state.gallery.loading = false;
-      refreshGalleryAfterLibraryChange({ preserveScroll: true });
+      refreshGalleryAfterLibraryChange({ preserveScroll: true, summaryChanged: true });
+      return data;
     } catch (error) {
+      if (!isCurrent()) return null;
       state.gallery.loading = false;
-      setLibraryStatus(error.message || "图像资料库读取失败");
-      refreshGalleryAfterLibraryChange({ preserveScroll: true });
+      librarySummaryFailure = { endpoint: request.endpoint, message: error.message || "图像资料库读取失败" };
+      setLibraryStatus(librarySummaryFailure.message);
+      refreshGalleryAfterLibraryChange({ preserveScroll: true, summaryChanged: true });
+      return null;
     } finally {
-      state.gallery.loading = false;
+      if (librarySummaryRequest === request) {
+        librarySummaryRequest = null;
+        state.gallery.loading = false;
+      }
     }
   }
 
@@ -432,6 +474,7 @@ export function createGalleryPage(deps) {
 
   async function openPhotoSet(albumId, options = {}) {
     const owner = beginReaderRequest("photo", albumId);
+    if (options.listReturn) owner.listReturn = { ...options.listReturn, key: imageLibraryListKey() };
     setReaderRequestStatus(owner, owner, "正在读取套图");
     try {
       const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }), { signal: owner.controller.signal });
@@ -449,6 +492,18 @@ export function createGalleryPage(deps) {
       if (readerRequestCurrent(owner)) setReaderRequestStatus(owner, owner, error.message || "套图读取失败");
       return null;
     }
+  }
+
+  function closePhotoSet(albumId) {
+    if (!readerRequestCurrent(readerOwner, albumId)) return null;
+    const anchor = readerOwner.listReturn;
+    resetReader();
+    const generation = readerGeneration;
+    return {
+      ...anchor,
+      isCurrent: () => readerGeneration === generation && state.activeView === "gallery" && !hasReaderIntent()
+        && anchor?.key === imageLibraryListKey()
+    };
   }
 
   function photoSetPath(albumId, options = {}) {
@@ -617,6 +672,8 @@ export function createGalleryPage(deps) {
     imageLibraryListKey,
     imageLibraryListNeedsLoad,
     isImageLibraryListLoading,
+    getSummaryReadFailure,
+    retrySummaryRead,
     loadImageLibrary,
     loadImageLibraryItems,
     loadPhotoReaderImages,
@@ -625,6 +682,7 @@ export function createGalleryPage(deps) {
     openMangaChapter,
     openMangaComic,
     openPhotoSet,
+    closePhotoSet,
     openRouteTarget,
     resetReader,
     setStatus,

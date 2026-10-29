@@ -1,3 +1,5 @@
+const photoTitleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export const PHOTO_COLLECTION_SORT_OPTIONS = [
   ["updated", "最近更新"],
   ["count", "期数最多"],
@@ -30,10 +32,7 @@ export function photoCatalogCollections(categoryItems = [], sort = "updated") {
 
 export function sortPhotoCatalogCollections(items = [], sort = "updated") {
   const list = [...(Array.isArray(items) ? items : [])];
-  const byTitle = (a, b) => String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
-    numeric: true,
-    sensitivity: "base"
-  });
+  const byTitle = (a, b) => photoTitleCollator.compare(String(a?.title || ""), String(b?.title || ""));
   if (sort === "count") {
     return list.sort((a, b) => Number(b?.albumCount || 0) - Number(a?.albumCount || 0) || Number(b?.size || 0) - Number(a?.size || 0) || byTitle(a, b));
   }

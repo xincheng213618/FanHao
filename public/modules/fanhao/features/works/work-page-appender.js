@@ -54,13 +54,13 @@ export function appendWorkCardsInPlace(options = {}) {
 
 export function workServerMoreState(state = {}) {
   return {
-    hasSearchServerMore: state.activeView === "search" && state.works.length < state.searchTotal,
-    hasPersonServerMore: Boolean(state.activeView === "people" && state.selectedPersonId && state.works.length < state.personWorksTotal),
-    hasCodePrefixServerMore: Boolean(state.activeView === "codes" && state.selectedCodePrefix && state.works.length < state.codePrefixTotal),
-    hasRankingServerMore: state.activeView === "rankings" && state.works.length < state.rankingTotal,
-    hasCollectionServerMore: ["favorites", "history"].includes(state.activeView) && state.works.length < state.collectionTotal,
-    hasVrServerMore: state.activeView === "vr" && state.works.length < state.vrTotal,
-    hasStudioServerMore: Boolean(state.activeView === "studios" && state.selectedStudio && state.works.length < state.studioWorksTotal)
+    hasSearchServerMore: state.activeView === "search" && (state.searchHasMore ?? state.works.length < state.searchTotal),
+    hasPersonServerMore: Boolean(state.activeView === "people" && state.selectedPersonId && (state.personWorksHasMore ?? state.works.length < state.personWorksTotal)),
+    hasCodePrefixServerMore: Boolean(state.activeView === "codes" && state.selectedCodePrefix && (state.codePrefixHasMore ?? state.works.length < state.codePrefixTotal)),
+    hasRankingServerMore: state.activeView === "rankings" && (state.rankingHasMore ?? state.works.length < state.rankingTotal),
+    hasCollectionServerMore: ["favorites", "history"].includes(state.activeView) && (state.collectionHasMore ?? state.works.length < state.collectionTotal),
+    hasVrServerMore: state.activeView === "vr" && (state.vrHasMore ?? state.works.length < state.vrTotal),
+    hasStudioServerMore: Boolean(state.activeView === "studios" && state.selectedStudio && (state.studioWorksHasMore ?? state.works.length < state.studioWorksTotal))
   };
 }
 

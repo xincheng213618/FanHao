@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import process from "node:process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { verifyAndroidNavigationRestoration } from "./fixtures/android-navigation-browser.mjs";
@@ -25,6 +26,8 @@ const fixtureCollectionPageRequests = [];
 const fixtureFanhaoCollectionRequests = [];
 const fixturePersonDetailRequests = [];
 const authorCardSelector = ".short-video-author-index-card-main";
+const shortVideoSortControl = '.short-video-delete-actions > .short-video-sort-control:not(.short-video-deleted-control) > select';
+const shortVideoSearchInput = '[data-short-video-search-input]';
 
 try {
   await waitForHealth(baseUrl);
@@ -36,9 +39,18 @@ try {
       await verifyAndroidMangaReadingProgress(browser);
     } else if (process.argv.includes("--android-person-first")) {
       await verifyAndroidPersonFirstLibraries(browser);
+    } else if (process.argv.includes("--short-video-controls")) {
+      assert(!suppliedBaseUrl, "short-video control checks require their own private fixture server");
+      await verifyShortVideoControls(browser);
+      await verifyShortVideoSearchHints(browser);
+      await verifyShortVideoControlsNegative(browser);
     } else if (process.argv.includes("--short-video-search")) {
+      await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
       await verifyAndroidRestartActionConvergence(browser);
+    } else if (process.argv.includes("--web-only")) {
+      await verifyFanhaoRequestLifecycle(browser);
+      await verifyWebSurfaceBehavior(browser);
     } else {
     await verifyFanhaoRequestLifecycle(browser);
     if (!process.argv.includes("--fanhao-requests")) {
@@ -46,13 +58,7 @@ try {
     await verifyAndroidMangaAddLifecycle(browser);
     await verifyAndroidMangaTaskNotices(browser);
     await verifyAndroidMangaReadingProgress(browser);
-    await verifyStandaloneStyles(browser);
-    await verifyNovelLibraryIntent(browser);
-    await verifyNovelLibraryAppendRecovery(browser);
-    await verifyNovelCardAccessibility(browser);
-    await verifyNovelRankingClampHistory(browser);
-    await verifyNovelManageExitStopsPolling(browser);
-    await verifyMobileGallery(browser);
+    await verifyWebSurfaceBehavior(browser);
     await verifyAndroidStartupSurface(browser);
     await verifyAndroidOfflineStartup(browser);
     await verifyAndroidReconnectFlow(browser);
@@ -80,11 +86,25 @@ try {
   } finally {
     await browser.close();
   }
-  console.log(process.argv.includes("--android-manga")
+  console.log(process.argv.includes("--short-video-controls")
+    ? "Short-video Web controls passed (3 native control profiles, source lifecycle, search hints and retention negative)."
+    : process.argv.includes("--android-manga")
     ? "Android manga browser behavior checks passed (9 add, 9 task-notice, 13 reading-progress profiles)."
+    : process.argv.includes("--web-only")
+    ? "Web browser behavior checks passed (FanHao, standalone styles, novel library, gallery)."
     : "Executable browser behavior checks passed.");
 } finally {
   if (ownedServer) await stopServer(ownedServer);
+}
+
+async function verifyWebSurfaceBehavior(browser) {
+  await verifyStandaloneStyles(browser);
+  await verifyNovelLibraryIntent(browser);
+  await verifyNovelLibraryAppendRecovery(browser);
+  await verifyNovelCardAccessibility(browser);
+  await verifyNovelRankingClampHistory(browser);
+  await verifyNovelManageExitStopsPolling(browser);
+  await verifyMobileGallery(browser);
 }
 
 async function verifyShortVideoSearchHints(browser) {
@@ -129,13 +149,322 @@ async function verifyShortVideoSearchHints(browser) {
   }
 }
 
+// These profiles exercise the production bundle through the real Web shell.
+// Every API is private, read-only and synthetic; held replies expose the native
+// select/search lifecycle rather than restoring focus after a replacement.
+
+function shortControlGate() {
+  let arrive, release, finish;
+  return { requested: new Promise(resolve => { arrive = resolve; }), wait: new Promise(resolve => { release = resolve; }),
+    done: new Promise(resolve => { finish = resolve; }), arrive, release, finish };
+}
+
+async function shortControlFrames(page) {
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+async function shortControlRequest(gate) {
+  let timeout;
+  try { await Promise.race([gate.requested, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('native filter request did not arrive')), 5000); })]); }
+  finally { clearTimeout(timeout); }
+}
+
+async function captureShortControl(page, selector) {
+  const control = await page.locator(selector).elementHandle();
+  assert(control, `native control must exist: ${selector}`);
+  await page.evaluate(({ selector, inputSelector }) => {
+    const control = document.querySelector(selector), input = document.querySelector(inputSelector);
+    const chain = [];
+    for (let node = control; node; node = node.parentElement) chain.push(node);
+    const probe = globalThis.__shortControlProbe = { control, input, chain, parents: chain.map(node => node.parentNode),
+      options: [...control.options], blur: 0, removed: 0 };
+    control.addEventListener('blur', () => probe.blur++);
+    new MutationObserver(records => {
+      for (const record of records) for (const node of record.removedNodes) {
+        if (node.nodeType === 1 && chain.some(ancestor => node === ancestor || node.contains(ancestor))) probe.removed++;
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  }, { selector, inputSelector: shortVideoSearchInput });
+  return control;
+}
+
+async function assertShortControlRetained(page, selector, { focus = true, raw } = {}) {
+  const actual = await page.evaluate(selector => {
+    const probe = globalThis.__shortControlProbe, live = document.querySelector(selector);
+    return { connected: probe.control.isConnected && probe.control === live,
+      ancestry: probe.chain.every((node, index) => node.isConnected && node.parentNode === probe.parents[index]),
+      options: probe.options.every((option, index) => option === live?.options[index]),
+      removed: probe.removed, blur: probe.blur, focused: document.activeElement === probe.control,
+      inputRetained: probe.input?.isConnected && probe.input === document.querySelector('[data-short-video-search-input]'),
+      raw: probe.input?.value };
+  }, selector);
+  assert.equal(actual.connected && actual.ancestry, true, 'filter completion must retain the original native control and every ancestor');
+  assert.equal(actual.options, true, 'filter completion must retain every original option node');
+  assert.equal(actual.removed, 0, 'a retained control ancestor must never be detached during accepted rendering');
+  assert.equal(actual.inputRetained, true, 'same-scope results must keep the original search form and input');
+  if (focus) {
+    assert.equal(actual.focused, true, 'same-scope results must preserve native control focus');
+    assert.equal(actual.blur, 0, 'same-scope results must not blur the native control');
+  }
+  if (raw !== undefined) assert.equal(actual.raw, raw, 'accepted results must retain unsubmitted raw search text');
+}
+
+async function shortControlFixture(browser, { bundle } = {}) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const reads = [], mutations = [], errors = [], gates = [];
+  let responseNumber = 0, bundleLoads = 0;
+  page.on('pageerror', error => errors.push(String(error)));
+  if (bundle) await page.route(url => url.pathname === '/short-video-app.min.js', async route => {
+    bundleLoads++;
+    await route.fulfill({ contentType: 'text/javascript; charset=utf-8', body: bundle });
+  });
+  await page.route(url => url.pathname.startsWith('/api/'), async route => {
+    const request = route.request(), url = new URL(request.url());
+    if (request.method() !== 'GET') {
+      mutations.push(`${request.method()} ${url.pathname}`);
+      await route.fulfill({ status: 405, json: { error: 'private controls fixture rejects mutations' } });
+      return;
+    }
+    const business = ['/api/short-videos', '/api/short-videos/authors'].includes(url.pathname);
+    const gate = gates.find(item => !item.used && item.match(url));
+    const number = business ? ++responseNumber : 0;
+    if (business) reads.push({ url, number });
+    if (gate) { gate.used = true; gate.arrive(); await gate.wait; }
+    let payload;
+    if (gate?.failure) payload = { error: gate.failure };
+    else if (gate?.payload) payload = gate.payload;
+    else if (url.pathname === '/api/short-videos') {
+      const source = url.searchParams.get('source') || 'all', sort = url.searchParams.get('sort') || 'published';
+      payload = { videos: Array.from({ length: 4 }, (_, index) => ({ ...fixtureVideo(`control-${number}-${index}`, url.searchParams.get('author') || 'fixture-author-7'), title: `${source}:${sort}:${number}:${index}` })),
+        total: 10 + number, deletedTotal: 20 + number, hasMore: false, source,
+        query: url.searchParams.get('q') || '', deleted: url.searchParams.get('deleted') === '1' ? 'deleted' : 'all' };
+    } else if (url.pathname === '/api/short-videos/authors') {
+      payload = { authors: [{ secUid: `control-author-${number}`, name: `Control author ${number}`, count: number }],
+        total: 30 + number, scopeTotal: 40 + number, bannedTotal: 50 + number, unlikedTotal: 60 + number, hasMore: false };
+    } else payload = await fixtureApi(url);
+    await route.fulfill({ status: gate?.failure ? 503 : 200, json: payload }).catch(error => {
+      if (!/already handled|Target closed|Invalid InterceptionId|cancel/i.test(String(error))) throw error;
+    });
+    gate?.finish();
+  });
+  return { page, reads, errors, mutations, get bundleLoads() { return bundleLoads; },
+    hold(match, failure = '', payload) { const gate = { ...shortControlGate(), match, failure, payload, used: false }; gates.push(gate); return gate; },
+    async close() { for (const gate of gates) gate.release(); await page.close(); },
+    async clean() { assert.deepEqual(mutations, [], 'control browsing must never mutate library data'); assert.deepEqual(errors, [], 'control browsing must not produce page errors'); }
+  };
+}
+
+async function verifyShortVideoFeedControl(browser, options = {}) {
+  const fixture = await shortControlFixture(browser, options), { page, reads } = fixture;
+  try {
+    const sidebar = fixture.hold(url => url.pathname === '/api/short-videos/collections', '', {
+      collections: [{ id: 'control-sidebar', name: 'Private control sidebar', itemCount: 3 }], total: 1
+    });
+    await page.goto(`${baseUrl}/short-videos?source=all&sort=published`, { waitUntil: 'domcontentloaded' });
+    if (options.bundle) assert.equal(fixture.bundleLoads, 1, 'negative must load the in-memory mutated production bundle');
+    await page.locator('.short-video-card').first().waitFor();
+    const raw = '  unsubmitted V2  ';
+    await page.locator(shortVideoSearchInput).fill(raw);
+    await page.locator(shortVideoSortControl).focus();
+    const control = await captureShortControl(page, shortVideoSortControl);
+    const first = fixture.hold(url => url.pathname === '/api/short-videos' && url.searchParams.get('sort') === 'publishedAsc');
+    await page.keyboard.press('ArrowDown');
+    await shortControlRequest(first);
+    await assertShortControlRetained(page, shortVideoSortControl, { raw });
+    first.release();
+    await page.locator('.short-video-card-title').first().filter({ hasText: 'publishedAsc' }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, shortVideoSortControl, { raw });
+    await shortControlRequest(sidebar); sidebar.release(); await sidebar.done;
+    await page.locator('.short-video-collection-sidebar-item').filter({ hasText: 'Private control sidebar' }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, shortVideoSortControl, { raw });
+    const firstRead = reads.at(-1);
+    assert.equal(firstRead.url.searchParams.get('q'), null, 'raw draft must not become a committed query');
+    assert.match(await page.locator('.short-video-home-total').textContent(), new RegExp(String(10 + firstRead.number)));
+    assert.equal(new URL(page.url()).searchParams.get('sort'), 'publishedAsc');
+    const second = fixture.hold(url => url.pathname === '/api/short-videos' && url.searchParams.get('sort') === 'likes');
+    const before = reads.length;
+    await control.press('ArrowDown'); await control.press('Enter');
+    await shortControlRequest(second);
+    assert.equal(reads.length, before + 1, 'the same native select must issue exactly one next-sort request');
+    second.release();
+    await page.locator('.short-video-card-title').first().filter({ hasText: ':likes:' }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, shortVideoSortControl, { raw });
+    await page.locator('.short-video-source-tab[data-source="liked"]').click();
+    await page.locator('.short-video-card-title').first().filter({ hasText: 'liked:' }).waitFor();
+    const oldAll = await page.locator('.short-video-source-tab[data-source="all"]').elementHandle();
+    const retiredSort = await page.locator(shortVideoSortControl).elementHandle();
+    const stale = fixture.hold(url => url.pathname === '/api/short-videos' && url.searchParams.get('source') === 'all');
+    await oldAll.click(); await shortControlRequest(stale);
+    const back = fixture.hold(url => url.pathname === '/api/short-videos' && url.searchParams.get('source') === 'liked');
+    await page.locator('.short-video-source-tab[data-source="liked"]').click();
+    await shortControlRequest(back); back.release();
+    await page.locator('.short-video-card-title').first().filter({ hasText: `liked:likes:${reads.at(-1).number}:` }).waitFor();
+    const accepted = await page.locator('.short-video-home').elementHandle();
+    const acceptedUrl = page.url();
+    stale.release(); await stale.done; await shortControlFrames(page);
+    assert.equal(await accepted.evaluate(node => node === document.querySelector('.short-video-home')), true, 'late All response must not replace the latest liked home');
+    assert.equal(page.url(), acceptedUrl, 'late All response must preserve the accepted liked route');
+    assert.equal(new URL(page.url()).searchParams.get('source') || 'liked', 'liked', 'pending source ABA must publish the last source, whose canonical route omits the default liked value');
+    await page.locator('.short-video-source-tab[data-source="authors"]').click();
+    await page.locator('select[aria-label="作者账号状态筛选"]').waitFor();
+    const retiredReads = reads.length;
+    await retiredSort.evaluate(node => { node.value = 'duration'; node.dispatchEvent(new Event('change', { bubbles: true })); });
+    await oldAll.evaluate(node => node.click()); await shortControlFrames(page);
+    assert.equal(reads.length, retiredReads, 'detached sort and source controls must not start reads in a later view');
+    if (options.bundle) assert.equal(fixture.bundleLoads, 1, 'negative must run the mutated production bundle');
+    await fixture.clean();
+  } finally { await fixture.close(); }
+}
+
+async function verifyShortVideoAuthorControl(browser) {
+  const fixture = await shortControlFixture(browser), { page, reads } = fixture;
+  const selector = 'select[aria-label="作者作品状态筛选"]';
+  try {
+    await page.goto(`${baseUrl}/short-videos/authors/fixture-author-7?sort=published`, { waitUntil: 'domcontentloaded' });
+    await page.locator(selector).waitFor(); await page.locator('.short-video-card').first().waitFor();
+    await page.locator(selector).focus();
+    const control = await captureShortControl(page, selector);
+    const failure = fixture.hold(url => url.pathname === '/api/short-videos' && url.searchParams.get('deleted') === '1', 'private status read failed');
+    await control.press('ArrowDown'); await shortControlRequest(failure);
+    const input = page.locator(shortVideoSearchInput), raw = '  草稿 V2 尚未提交  ';
+    await input.focus(); await input.dispatchEvent('compositionstart');
+    await input.fill(raw);
+    await input.evaluate(node => { node.setSelectionRange(2, 7, 'backward'); });
+    await page.evaluate(() => {
+      const input = globalThis.__shortControlProbe.input;
+      globalThis.__shortInputProbe = { input, blur: 0, parents: [] };
+      for (let node = input; node; node = node.parentElement) globalThis.__shortInputProbe.parents.push([node, node.parentNode]);
+      input.addEventListener('blur', () => globalThis.__shortInputProbe.blur++);
+    });
+    failure.release();
+    await page.locator('.short-video-toast').filter({ hasText: 'private status read failed' }).waitFor();
+    await assertShortControlRetained(page, selector, { focus: false, raw });
+    assert.deepEqual(await page.evaluate(() => {
+      const probe = globalThis.__shortInputProbe, input = probe.input;
+      return [input === document.activeElement, probe.blur, input.selectionStart, input.selectionEnd, input.selectionDirection,
+        probe.parents.every(([node, parent]) => node.isConnected && node.parentNode === parent)];
+    }), [true, 0, 2, 7, 'backward', true], 'current failure must keep raw composing input, range, focus and its complete ancestor chain');
+    await input.dispatchEvent('compositionend');
+    const count = reads.length; await shortControlFrames(page);
+    assert.equal(reads.length, count, 'ending composition must not submit the raw draft');
+    await control.focus();
+    const retry = fixture.hold(url => url.pathname === '/api/short-videos' && !url.searchParams.has('deleted'));
+    await control.press('ArrowUp'); await shortControlRequest(retry);
+    await input.focus(); await input.dispatchEvent('compositionstart');
+    await input.evaluate(node => { node.setSelectionRange(2, 7, 'backward'); globalThis.__shortInputProbe.blur = 0; });
+    retry.release();
+    const number = reads.at(-1).number;
+    await page.locator('.short-video-card-title').first().filter({ hasText: `:${number}:` }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, selector, { focus: false, raw });
+    assert.deepEqual(await page.evaluate(() => {
+      const probe = globalThis.__shortInputProbe, input = probe.input;
+      return [input === document.activeElement, probe.blur, input.selectionStart, input.selectionEnd, input.selectionDirection,
+        probe.parents.every(([node, parent]) => node.isConnected && node.parentNode === parent)];
+    }), [true, 0, 2, 7, 'backward', true], 'successful filter ACK must keep the original composing input focused without replacing an ancestor or stealing its selection');
+    await input.dispatchEvent('compositionend');
+    const option = await control.evaluate(node => node.options[1].textContent);
+    assert.match(option, new RegExp(String(20 + number)), 'deleted count must refresh on the original option node');
+    assert(reads.every(({ url }) => !url.searchParams.has('q')), 'author status reads must use the committed empty query');
+    assert.equal(new URL(page.url()).searchParams.has('q'), false);
+    await fixture.clean();
+  } finally { await fixture.close(); }
+}
+
+async function verifyShortVideoAccountControl(browser) {
+  const fixture = await shortControlFixture(browser), { page, reads } = fixture;
+  const selector = 'select[aria-label="作者账号状态筛选"]';
+  try {
+    await page.goto(`${baseUrl}/short-videos?source=authors`, { waitUntil: 'domcontentloaded' });
+    await page.locator(selector).waitFor(); await page.locator(authorCardSelector).first().waitFor();
+    const raw = '  作者原始草稿  ';
+    await page.locator(shortVideoSearchInput).fill(raw);
+    await page.locator(selector).focus();
+    const control = await captureShortControl(page, selector);
+    const first = fixture.hold(url => url.pathname === '/api/short-videos/authors' && url.searchParams.get('filter') === 'banned');
+    await control.press('ArrowDown'); await shortControlRequest(first); first.release();
+    const number = reads.at(-1).number;
+    await page.locator(authorCardSelector).filter({ hasText: `Control author ${number}` }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, selector, { raw });
+    assert.match(await control.evaluate(node => node.options[1].textContent), new RegExp(String(50 + number)), 'account count must refresh on the original option');
+    const second = fixture.hold(url => url.pathname === '/api/short-videos/authors' && url.searchParams.get('filter') === 'all');
+    const count = reads.length;
+    await control.press('ArrowUp'); await control.press('Enter'); await shortControlRequest(second);
+    assert.equal(reads.length, count + 1, 'same account select must support the next native change');
+    second.release();
+    await page.locator(authorCardSelector).filter({ hasText: `Control author ${reads.at(-1).number}` }).waitFor();
+    await shortControlFrames(page);
+    await assertShortControlRetained(page, selector, { raw });
+    assert(reads.every(({ url }) => !url.searchParams.has('q')), 'account status reads must not submit a draft');
+    await page.locator('.short-video-source-tab[data-source="following"]').click();
+    const followingSelector = 'select[aria-label="我的关注排序"]';
+    await page.locator(followingSelector).waitFor();
+    await page.locator(followingSelector).focus();
+    const followingControl = await captureShortControl(page, followingSelector);
+    const following = fixture.hold(url => url.pathname === '/api/short-videos/authors' && url.searchParams.get('scope') === 'following' && url.searchParams.get('sort') === 'count');
+    await followingControl.press('ArrowDown'); await shortControlRequest(following); following.release();
+    await page.locator(authorCardSelector).filter({ hasText: `Control author ${reads.at(-1).number}` }).waitFor();
+    await shortControlFrames(page); await assertShortControlRetained(page, followingSelector);
+    const toggle = await page.locator('.short-video-following-unliked').elementHandle();
+    for (const filter of ['unliked', 'all']) {
+      const next = fixture.hold(url => url.pathname === '/api/short-videos/authors' && url.searchParams.get('filter') === filter);
+      await toggle.click(); await shortControlRequest(next); next.release();
+      await page.locator(authorCardSelector).filter({ hasText: `Control author ${reads.at(-1).number}` }).waitFor();
+      assert.equal(await toggle.evaluate(node => node.isConnected && node === document.querySelector('.short-video-following-unliked')), true, 'following toggle must remain the same live button across consecutive filters');
+      assert.equal(await toggle.getAttribute('aria-pressed'), String(filter === 'unliked'), 'following toggle must read current state on every use');
+    }
+    await fixture.clean();
+  } finally { await fixture.close(); }
+}
+
+async function verifyShortVideoControls(browser) {
+  assert(!suppliedBaseUrl, 'short-video controls need their own private fixture server');
+  await verifyShortVideoFeedControl(browser);
+  await verifyShortVideoAuthorControl(browser);
+  await verifyShortVideoAccountControl(browser);
+  console.log('short-video-controls: 3 native control profiles, raw drafts, current failure, source ABA and retired handlers passed');
+}
+
+async function verifyShortVideoControlsNegative(browser) {
+  const { build } = await import('esbuild');
+  let mutations = 0;
+  const result = await build({ entryPoints: [path.join(root, 'public/short-video-app.js')], bundle: true, minify: true,
+    format: 'esm', platform: 'browser', target: ['chrome110', 'edge110'], legalComments: 'none', charset: 'utf8', treeShaking: true,
+    write: false, outfile: path.join(root, 'public/short-video-app.min.js'),
+    plugins: [{ name: 'retire-short-video-home-negative', setup(builder) {
+      builder.onLoad({ filter: /short-video-page\.js$/ }, args => {
+        const source = fs.readFileSync(args.path, 'utf8'), marker = 'if (refreshShortVideoHome()) return;';
+        assert.equal(source.split(marker).length - 1, 1, 'retention negative needs the unique owning render branch');
+        mutations++;
+        return { contents: source.replace(marker, 'if (false) return;'), loader: 'js', resolveDir: path.dirname(args.path) };
+      });
+    } }]
+  });
+  assert.equal(mutations, 1, 'negative must disable exactly one production retention branch');
+  assert.equal(result.outputFiles.length, 1);
+  await assert.rejects(verifyShortVideoFeedControl(browser, { bundle: result.outputFiles[0].text }),
+    error => error instanceof assert.AssertionError && error.message.includes('filter completion must retain the original native control and every ancestor'),
+    'retention negative must fail the actual control-ancestry assertion');
+  console.log('short-video-controls: in-memory production retention negative rejected by the control-ancestry assertion');
+}
+
 async function verifyFanhaoRequestLifecycle(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   let delayedLibrary = null, delayedAppend = null, delayedPrefixIndex = null, delayedPrefixAppend = null;
   const studioRequests = [];
+  const workSearchQueries = [];
+  const searchPageOffsets = [];
+  let pagingScenario = null;
+  let favoriteRemovalScenario = null;
+  const recoveryScenarios = new Map();
   const delayedRequests = new Set();
+  const overlappingSearchPage = delayed(), emptySearchPage = delayed();
   function delayed() {
     let arrived, release, requested = false;
     const pending = { requested: new Promise((resolve) => { arrived = resolve; }), wait: new Promise((resolve) => { release = resolve; }), arrived: () => { requested = true; arrived(); }, isRequested: () => requested, release: () => { delayedRequests.delete(pending); release(); } };
@@ -146,8 +475,36 @@ async function verifyFanhaoRequestLifecycle(browser) {
   try {
     await page.route((url) => url.origin === new URL(baseUrl).origin && url.pathname.startsWith("/api/"), async (route) => {
       const url = new URL(route.request().url());
-      let payload;
-      if (url.pathname === "/api/library") {
+      let payload, status = 200;
+      if (favoriteRemovalScenario && url.pathname === "/api/favorites") {
+        const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit"));
+        favoriteRemovalScenario.requests.push({ offset, limit });
+        payload = { works: favoriteRemovalScenario.works.slice(offset, offset + limit), total: favoriteRemovalScenario.works.length, offset, folders: [], selectedFolderId: "all" };
+      } else if (favoriteRemovalScenario && url.pathname === "/api/favorites/removal-0" && route.request().method() === "POST") {
+        favoriteRemovalScenario.removals += 1;
+        favoriteRemovalScenario.works = favoriteRemovalScenario.works.filter(work => work.id !== "removal-0");
+        payload = { favorite: false, folders: [], user: {} };
+      } else if (pagingScenario?.path === url.pathname) {
+        const scenario = pagingScenario;
+        const offset = Number(url.searchParams.get("offset") || 0);
+        scenario.requests.push({ offset, query: url.searchParams.toString() });
+        if (offset === 3 && scenario.overlap) { scenario.overlap.arrived(); await scenario.overlap.wait; }
+        if (offset === 7 && scenario.empty) { scenario.empty.arrived(); await scenario.empty.wait; }
+        const ids = offset === 0 ? ["A", "A", "B"] : offset === 3 ? ["A", "C", "C"] : offset === 6 ? ["B"] : [];
+        payload = {
+          person: people[0], codePrefix: { prefix: "ABC", localCount: 8 },
+          studio: { id: "request-studio", name: "请求测试片商", series: [] },
+          folders: [], selectedFolderId: "all", facets: { all: 8 },
+          rankingTotal: 9999, localTotal: 8, missingTotal: 9991, label: "分页测试榜单",
+          total: scenario.totalBoundary ? 3 : offset === 7 ? 999 : 8, offset,
+          works: ids.map((id, index) => ({
+            id: `paging-${scenario.kind}-${id}`, title: `Paging ${id}`, personId: people[0].id,
+            videoCount: 1, playableCount: 1, vrVideoCount: 1, favorite: true,
+            progress: { positionMs: 1000, durationMs: 60000, updatedAt: "2026-10-01T00:00:00Z" },
+            ranking: { rankNo: offset + index + 1 }, infoSummary: { rating: 4, releaseDate: "2026-10-04" }
+          }))
+        };
+      } else if (url.pathname === "/api/library") {
         if (url.searchParams.get("scope") === "western" && delayedLibrary) {
           const pending = delayedLibrary;
           delayedLibrary = null;
@@ -173,6 +530,27 @@ async function verifyFanhaoRequestLifecycle(browser) {
             favorite, videoCount: 1, playableCount: 1, infoSummary: { rating: 4, releaseDate: "2026-10-04" }
           }))
         };
+      } else if (url.pathname === "/api/search") {
+        workSearchQueries.push(url.searchParams.get("q"));
+        payload = { works: [], people: [], total: 0 };
+        const recovery = recoveryScenarios.get(url.searchParams.get("q"));
+        if (recovery) {
+          recovery.requests.push(url);
+          const response = recovery.responses.shift() || { error: "Unexpected extra formal recovery request" };
+          if (response.gate) { response.gate.arrived(); await response.gate.wait; }
+          status = response.error ? 503 : 200;
+          payload = response.error ? { error: response.error } : response.data;
+        } else if (url.searchParams.get("q") === "cursor-fixture") {
+          const offset = Number(url.searchParams.get("offset") || 0);
+          searchPageOffsets.push(offset);
+          if (offset === 3) { overlappingSearchPage.arrived(); await overlappingSearchPage.wait; }
+          if (offset === 7) { emptySearchPage.arrived(); await emptySearchPage.wait; }
+          const ids = offset === 0 ? ["A", "A", "B"] : offset === 3 ? ["A", "C", "C"] : offset === 6 ? ["B"] : [];
+          payload = { works: ids.map(id => ({ id: `cursor-${id}`, title: `Cursor ${id}`, videoCount: 1, playableCount: 1 })), people: [], total: offset === 7 ? 999 : 8, offset };
+        } else if (url.searchParams.get("q") === "empty-cursor-fixture") {
+          searchPageOffsets.push(Number(url.searchParams.get("offset") || 0));
+          payload = { works: [], people: [], total: 999 };
+        }
       } else if (url.pathname === "/api/modules") payload = { modules: [] };
       else if (url.pathname === "/api/code-prefixes") {
         if (delayedPrefixIndex) {
@@ -199,16 +577,48 @@ async function verifyFanhaoRequestLifecycle(browser) {
         const offset = Number(url.searchParams.get("offset") || 0);
         payload = { studio: { id: "request-studio", name: "请求测试片商", series: [] }, total: matches.length, facets: { all: 160, favorite: 60 }, works: matches.slice(offset, offset + Number(url.searchParams.get("limit"))) };
       }
+      else if (url.pathname === "/api/rankings") payload = { lists: [{ key: "y2025", label: "分页测试榜单", localTotal: 8, missingTotal: 9991 }] };
       else if (url.pathname === "/api/favorites") payload = { works: [], total: 0, folders: [], selectedFolderId: "all" };
       else payload = {};
       // Superseded fetches are deliberately fulfilled after cancellation to
       // exercise the real shell, while their client-side abort remains valid.
-      await route.fulfill({ json: payload }).catch((error) => {
+      await route.fulfill({ json: payload, status }).catch((error) => {
         if (!/already handled|Target closed|Invalid InterceptionId|cancel/i.test(String(error))) throw error;
       });
     });
     await page.goto(`${baseUrl}/fanhao`, { waitUntil: "domcontentloaded" });
     await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    await verifyWorkSearchShortcut(page);
+    assert.deepEqual(workSearchQueries, [], "focusing search must not submit or prefetch a query");
+    const search = page.locator("#workSearch");
+    await search.focus();
+    await search.dispatchEvent("compositionstart");
+    await search.evaluate((input) => {
+      input.value = "zhongwen";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    });
+    await page.waitForTimeout(220);
+    assert.deepEqual(workSearchQueries, [], "composing text must not issue a speculative search");
+    for (const key of ["Enter", "Escape"]) {
+      const prevented = await search.evaluate((input, key) => !input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, isComposing: true })), key);
+      assert.equal(prevented, false, "candidate keys remain available to the input method");
+    }
+    assert.equal(await search.inputValue(), "zhongwen");
+    assert.equal(await page.locator("#currentTitle").textContent(), "人物", "candidate confirmation must preserve the current page");
+    const committedRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/search");
+    await search.evaluate((input) => {
+      input.value = "中文";
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "中文" }));
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: false }));
+    });
+    await committedRequest;
+    await search.press("Enter");
+    await page.locator("#currentTitle", { hasText: "搜索：中文" }).waitFor();
+    await page.waitForURL((url) => url.searchParams.get("q") === "中文");
+    assert.deepEqual(workSearchQueries, ["中文"], "submit must reuse the committed prefetch without intermediate pinyin queries");
+    await search.press("Escape");
+    await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    assert.equal(await search.inputValue(), "", "ordinary Escape still returns from search");
     const firstScope = delayed();
     delayedLibrary = firstScope;
     await page.locator('[data-view="people"][data-people-scope="western"]').click();
@@ -298,10 +708,260 @@ async function verifyFanhaoRequestLifecycle(browser) {
     assert(studioRequests.some((url) => url.searchParams.get("filter") === "favorite" && url.searchParams.get("offset") === "48"), "studio pagination must retain its server filter and use matching-result offset");
     await page.locator('.work-card[data-work-id="studio-159"]').waitFor();
     assert.equal(await page.locator('.work-card[data-work-id="studio-0"]').count(), 0);
+
+    await search.fill("cursor-fixture"); await search.press("Enter");
+    await overlappingSearchPage.requested;
+    assert.deepEqual(searchPageOffsets, [0, 3], "actual autoload must consume raw response rows rather than deduplicated cards");
+    assert.equal(await page.locator('.work-card[data-work-id^="cursor-"]').count(), 2, "the first page must not mount duplicate work IDs");
+    await page.evaluate(() => { window.__cursorFirstCard = document.querySelector('.work-card[data-work-id="cursor-A"]'); });
+    overlappingSearchPage.release();
+    await emptySearchPage.requested;
+    assert.deepEqual(searchPageOffsets, [0, 3, 6, 7], "overlap-only pages must still advance their wire cursor");
+    emptySearchPage.release();
+    await page.waitForFunction(() => document.querySelectorAll('#workGrid .work-card[data-work-id^="cursor-"]').length === 3 && !document.querySelector('#workGrid .load-more-row'));
+    assert.equal(await page.evaluate(() => __cursorFirstCard.isConnected && __cursorFirstCard === document.querySelector('.work-card[data-work-id="cursor-A"]')), true, "paging must retain already rendered cards");
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.waitForTimeout(150);
+    assert.deepEqual(searchPageOffsets, [0, 3, 6, 7], "a stale total must not restart automatic requests after an empty page");
+    searchPageOffsets.length = 0;
+    await search.fill("empty-cursor-fixture"); await search.press("Enter");
+    await page.locator('#workGrid .empty-state').waitFor();
+    assert.equal(await page.locator('#workGrid .load-more-row').count(), 0, "an empty first page must show its empty state without an autoload sentinel");
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.waitForTimeout(150);
+    assert.deepEqual(searchPageOffsets, [0], "a new empty search must reset its cursor and finish without an empty-page loop");
+    for (const [kind, path] of [
+      ["people", "/api/people/request-person"], ["codes", "/api/code-prefixes/ABC"],
+      ["studios", "/api/studios/request-studio"], ["favorites", "/api/favorites"],
+      ["history", "/api/history"], ["vr", "/api/works"], ["rankings", "/api/rankings/top"]
+    ]) {
+      const scenario = { kind, path, requests: [], overlap: delayed(), empty: delayed() };
+      pagingScenario = scenario;
+      await openPagingView(kind);
+      await reachPagingRequest(scenario.overlap);
+      assert.deepEqual(appendOffsets(scenario), [3], `${kind}: the first append must consume all three raw rows`);
+      assert.equal(await page.locator("#workGrid .work-card").count(), 2, `${kind}: duplicate first-page IDs must mount only two cards`);
+      await page.evaluate(() => { window.__pagingRetainedCards = [...document.querySelectorAll("#workGrid .work-card")]; });
+      scenario.overlap.release();
+      await reachPagingRequest(scenario.empty);
+      assert.deepEqual(appendOffsets(scenario), [3, 6, 7], `${kind}: overlap-only pages must advance the raw cursor`);
+      scenario.empty.release();
+      await page.waitForFunction(() => document.querySelectorAll("#workGrid .work-card").length === 3 && !document.querySelector("#workGrid .load-more-row"));
+      assert.equal(await page.evaluate(() => __pagingRetainedCards.every(card => card.isConnected && card === document.querySelector(`.work-card[data-work-id="${card.dataset.workId}"]`))), true,
+        `${kind}: successful appends must preserve the existing card nodes`);
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(150);
+      assert.deepEqual(appendOffsets(scenario), [3, 6, 7], `${kind}: an empty page with stale total 999 must remove the loader and stop requests`);
+      console.log(`PASS FanHao ${kind} raw-row pagination in actual shell`);
+    }
+    pagingScenario = { kind: "rankings", path: "/api/rankings/top", requests: [], totalBoundary: true };
+    await openPagingView("rankings");
+    await page.locator('.work-card[data-work-id="paging-rankings-A"]').waitFor();
+    await page.waitForFunction(() => !document.querySelector("#workGrid .load-more-row"));
+    assert.equal(await page.locator("#workGrid .work-card").count(), 2);
+    assert((await page.locator(".ranking-toolbar-summary").textContent()).includes("9,999 榜单"), "the ranking summary must retain its independent full-board total");
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(150);
+    assert.deepEqual(appendOffsets(pagingScenario), [], "ranking data.total=3 must stop after three raw rows despite rankingTotal=9999 and two unique cards");
+    console.log("PASS FanHao ranking page total is independent of full-board total");
+    pagingScenario = null;
+    favoriteRemovalScenario = {
+      removals: 0, requests: [],
+      works: Array.from({ length: 60 }, (_, index) => ({ id: `removal-${index}`, title: `Removal ${index}`, favorite: true, videoCount: 1, playableCount: 1 }))
+    };
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openPagingView("favorites");
+    await page.locator('.work-card[data-work-id="removal-0"]').waitFor();
+    assert(favoriteRemovalScenario.requests.some(request => request.offset === 0 && request.limit === 48), "mobile favorites must read its natural 48-row server page");
+    assert.deepEqual(appendOffsets(favoriteRemovalScenario), [], "the initial mobile page must not preload a later server offset before removal");
+    await page.locator('.work-card[data-work-id="removal-0"]').getByRole("button", { name: "取消收藏", exact: true }).click();
+    await page.locator('.work-card[data-work-id="removal-0"]').waitFor({ state: "detached" });
+    assert.equal(favoriteRemovalScenario.removals, 1, "the actual star control must confirm one favorite removal");
+    assert.equal(favoriteRemovalScenario.works.length, 59);
+    for (let attempt = 0; attempt < 12 && !appendOffsets(favoriteRemovalScenario).length; attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(50);
+    }
+    assert.deepEqual(appendOffsets(favoriteRemovalScenario), [47], "removing one loaded favorite must shift the next raw offset from 48 to 47");
+    await page.locator('.work-card[data-work-id="removal-48"]').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll("#workGrid .work-card").length === 59 && !document.querySelector("#workGrid .load-more-row"));
+    assert.equal(await page.locator('.work-card[data-work-id="removal-0"]').count(), 0);
+    console.log("PASS FanHao mobile favorite removal preserves the next raw row");
+    favoriteRemovalScenario = null;
+    await page.addInitScript(() => Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } }));
+    await page.setViewportSize({ width: 320, height: 844 });
+    await page.goto(`${baseUrl}/fanhao`, { waitUntil: "domcontentloaded" });
+    await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    const longError = "合成搜索服务暂时不可用，请稍后重试。".repeat(32);
+    const conditions = recoveryScenario("recovery-conditions", [
+      { data: recoveryResults("conditions-seed") }, { data: recoveryResults("conditions-filter") },
+      { error: longError }, { error: "合成重复搜索失败" }, { data: recoveryResults("conditions-success") }
+    ]);
+    await submitRecoverySearch("recovery-conditions");
+    await page.locator('.work-card[data-work-id="conditions-seed"]').waitFor();
+    await page.locator('[data-work-filter="favorite"]').click();
+    await page.locator('.work-card[data-work-id="conditions-filter"]').waitFor();
+    await page.locator("#sortSelect").selectOption("ratingDesc");
+    const panel = page.locator(".search-error-state"), retrySearch = page.getByRole("button", { name: "重试搜索", exact: true });
+    await panel.waitFor();
+    assert.equal(await panel.getByRole("alert").textContent(), longError, "transport failure must be distinct from an empty result");
+    await retrySearch.scrollIntoViewIfNeeded();
+    assert.equal(await retrySearch.evaluate(button => { const box = button.getBoundingClientRect(); return box.height >= 44 && box.left >= 0 && box.right <= innerWidth && document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button; }), true,
+      "long search errors must leave a real 44px clickable recovery action at 320px");
+    assert.equal(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1), true, "long search errors must wrap within the mobile viewport");
+    const screenshotPath = path.join(tmpdir(), `fanhao-search-recovery-320-${Date.now()}.png`);
+    await page.screenshot({ path: screenshotPath }); console.log(`SCREENSHOT FanHao search recovery: ${screenshotPath}`);
+    const recoveryHistoryLength = await page.evaluate(() => history.length);
+    await retrySearch.focus(); await retrySearch.press("Enter");
+    await panel.getByRole("alert").filter({ hasText: "合成重复搜索失败" }).waitFor();
+    await page.waitForFunction(() => document.activeElement?.classList.contains("search-retry-button"));
+    assert.equal(await page.evaluate(() => history.length), recoveryHistoryLength, "a failed retry must replace its search route without growing history");
+    await retrySearch.press("Space");
+    await page.locator('.work-card[data-work-id="conditions-success"]').waitFor();
+    await page.waitForFunction(() => document.activeElement?.id === "currentTitle");
+    assert.equal(await page.evaluate(() => history.length), recoveryHistoryLength, "successful retry must not add a new search history entry");
+    assert.equal(conditions.requests.length, 5);
+    assert(conditions.requests.slice(2).every(url => url.searchParams.get("sort") === "ratingDesc" && url.searchParams.get("filter") === "favorite"), "retries must preserve the committed query's sort and filter");
+    recoveryScenario("recovery-clear", [{ error: "合成可清空搜索失败" }]);
+    await submitRecoverySearch("recovery-clear"); await panel.waitFor();
+    await page.getByRole("button", { name: "清空搜索", exact: true }).click();
+    await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    assert.equal(await search.inputValue(), ""); assert.equal(await page.locator("#currentTitle").textContent(), "人物", "clearing a failed search must return to its original view");
+    console.log("PASS FanHao search recovery preserves conditions, keyboard focus, history and clear origin");
+
+    const draftGate = delayed(), draft = recoveryScenario("recovery-draft", [{ error: "合成草稿恢复失败" }, { gate: draftGate, data: recoveryResults("draft-success") }]);
+    await submitRecoverySearch("recovery-draft"); await panel.waitFor();
+    await search.fill("重试前未提交的中文草稿"); await search.evaluate(input => input.setSelectionRange(1, 6));
+    await retrySearch.focus(); await retrySearch.press("Enter"); await draftGate.requested;
+    assert.deepEqual(await search.evaluate(input => [input.value, input.selectionStart, input.selectionEnd]), ["重试前未提交的中文草稿", 1, 6], "starting a retry must retain an already edited draft and selection");
+    await search.fill("尚未提交的中文草稿"); await search.evaluate(input => input.setSelectionRange(2, 8));
+    draftGate.release(); await page.locator('.work-card[data-work-id="draft-success"]').waitFor();
+    assert.deepEqual(await search.evaluate(input => [input.value, input.selectionStart, input.selectionEnd, document.activeElement === input]), ["尚未提交的中文草稿", 2, 8, true], "retry completion must preserve a newer Chinese draft, selection and input focus");
+    assert.equal(draft.requests.length, 2, "saveData must suppress speculative draft searches without hiding formal retries");
+    console.log("PASS FanHao search retry respects a newer Chinese draft and selection");
+
+    const focusGate = delayed(); recoveryScenario("recovery-focus", [{ error: "合成焦点恢复失败" }, { gate: focusGate, error: "合成迟到焦点失败" }]);
+    await submitRecoverySearch("recovery-focus"); await panel.waitFor();
+    await retrySearch.focus(); await retrySearch.press("Enter"); await focusGate.requested;
+    await page.locator("#fanhaoNavigationButton").focus(); await page.mouse.wheel(0, 80);
+    focusGate.release(); await panel.getByRole("alert").filter({ hasText: "合成迟到焦点失败" }).waitFor();
+    assert.equal(await page.locator("#fanhaoNavigationButton").evaluate(button => button === document.activeElement), true, "late retry failure must respect a newer focus and wheel intent");
+    const wheelGate = delayed(); recoveryScenarios.get("recovery-focus").responses.push({ gate: wheelGate, error: "合成只滚动后的重试失败" });
+    await retrySearch.focus(); await retrySearch.press("Enter"); await wheelGate.requested;
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await page.evaluate(() => { window.__recoveryWheelSeen = false; document.addEventListener("wheel", () => { __recoveryWheelSeen = true; }, { once: true, capture: true }); });
+    await page.mouse.wheel(0, 80); await page.waitForFunction(() => __recoveryWheelSeen);
+    wheelGate.release(); await panel.getByRole("alert").filter({ hasText: "合成只滚动后的重试失败" }).waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true, "wheel intent alone must suppress a retry's automatic focus restoration");
+    console.log("PASS FanHao search retry respects newer focus and scrolling");
+
+    for (const destination of ["new query", "new view", "same query"]) {
+      const query = `recovery-owner-${destination.replaceAll(" ", "-")}`, gate = delayed();
+      const obsolete = recoveryScenario(query, [{ error: "合成旧搜索失败" }, { gate, ...(destination === "new view" ? { error: "合成旧重试迟到失败" } : { data: recoveryResults("obsolete-retry-success") }) }, ...(destination === "same query" ? [{ error: "合成当前同词新导航失败" }] : [])]);
+      await submitRecoverySearch(query); await panel.waitFor();
+      await page.evaluate(() => { window.__oldSearchRecovery = { retry: document.querySelector(".search-retry-button"), clear: [...document.querySelectorAll(".search-error-state button")].find(button => button.textContent === "清空搜索") }; });
+      await retrySearch.focus(); await retrySearch.press("Enter"); await gate.requested;
+      if (destination === "new query") {
+        recoveryScenario("recovery-new-query", [{ data: recoveryResults("current-new-query") }]);
+        await submitRecoverySearch("recovery-new-query"); await page.locator('.work-card[data-work-id="current-new-query"]').waitFor();
+      } else if (destination === "new view") {
+        await page.locator("#fanhaoNavigationButton").click(); await page.locator('[data-view="codes"]:not([data-code-prefix])').click(); await page.locator(".code-prefix-row", { hasText: "ABC" }).waitFor();
+      } else {
+        await submitRecoverySearch(query); await panel.getByRole("alert").filter({ hasText: "合成当前同词新导航失败" }).waitFor();
+      }
+      const before = await recoverySurface(), reads = workSearchQueries.length;
+      await useOldRecovery(); gate.release(); await page.waitForTimeout(80); await useOldRecovery(); await page.waitForTimeout(40);
+      assert.equal(workSearchQueries.length, reads, `old recovery controls must not restart a search after ${destination}`);
+      assert.deepEqual(await recoverySurface(), before, `late retry success or failure and old clear must not replace ${destination}`);
+      assert.equal(obsolete.requests.length, destination === "same query" ? 3 : 2);
+      console.log(`PASS FanHao old search recovery is inert after ${destination}`);
+    }
     assert.deepEqual(pageErrors, [], "FanHao request fixtures must not emit browser script errors");
   } finally {
     for (const pending of delayedRequests) pending.release();
     await page.close();
+  }
+
+  function recoveryScenario(query, responses) { const scenario = { requests: [], responses }; recoveryScenarios.set(query, scenario); return scenario; }
+  function recoveryResults(id) { return { works: [{ id, title: `Synthetic ${id}`, favorite: true, videoCount: 1, playableCount: 1 }], people: [], total: 1, facets: { all: 1, favorite: 1 } }; }
+  async function submitRecoverySearch(query) { await page.locator("#workSearch").fill(query); await page.locator("#workSearch").press("Enter"); }
+  async function recoverySurface() { return page.evaluate(() => ({ url: location.href, title: document.querySelector("#currentTitle").textContent, body: document.querySelector("#workGrid").textContent, draft: document.querySelector("#workSearch").value, focus: document.activeElement?.id || document.activeElement?.className || "" })); }
+  async function useOldRecovery() { await page.evaluate(() => { __oldSearchRecovery.retry.dispatchEvent(new MouseEvent("click")); __oldSearchRecovery.clear.dispatchEvent(new MouseEvent("click")); }); }
+
+  function appendOffsets(scenario) { return scenario.requests.filter(request => request.offset > 0).map(request => request.offset); }
+  async function reachPagingRequest(pending) {
+    for (let attempt = 0; attempt < 12 && !pending.isRequested(); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(50);
+    }
+    assert(pending.isRequested(), `${pagingScenario.kind}: scrolling must request the next server page`);
+  }
+  async function openPagingView(kind) {
+    await page.goto(`${baseUrl}/fanhao`, { waitUntil: "domcontentloaded" });
+    await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
+    if (kind === "people") await page.locator(".person-index-card", { hasText: people[0].name }).click();
+    else {
+      const tab = page.locator(`[data-view="${kind}"]${kind === "codes" ? ":not([data-code-prefix])" : ""}`);
+      if (!await tab.isVisible()) await page.locator("#fanhaoNavigationButton").click();
+      await tab.click();
+      if (kind === "codes") await page.locator(".code-prefix-row", { hasText: "ABC" }).click();
+      if (kind === "studios") await page.locator(".studio-card", { hasText: "请求测试片商" }).click();
+    }
+  }
+}
+
+async function verifyWorkSearchShortcut(page) {
+  const search = page.locator("#workSearch");
+  assert.equal(await search.getAttribute("aria-keyshortcuts"), "/");
+  assert.equal(await page.locator(".work-search .search-shortcut-hint").textContent(), "/");
+  await page.evaluate(() => {
+    const panel = document.createElement("section"); panel.id = "shortcutFixture";
+    panel.innerHTML = '<button id="shortcutAway">Other action</button><textarea id="shortcutText"></textarea><div id="shortcutEditable" contenteditable="true">Editable</div><div id="shortcutModal" role="dialog" hidden><button id="shortcutModalAction">Modal action</button></div><dialog id="shortcutNative"><button id="shortcutNativeAction">Dialog action</button></dialog>';
+    document.body.append(panel);
+    document.querySelector("#workSearch").value = "Existing query";
+  });
+  const away = page.locator("#shortcutAway");
+  const focused = locator => locator.evaluate(node => document.activeElement === node);
+  try {
+    await away.focus(); await page.keyboard.press("/");
+    assert.equal(await focused(search), true, "slash focuses global work search");
+    assert.deepEqual(await search.evaluate(input => [input.selectionStart, input.selectionEnd, input.value]), [0, 14, "Existing query"], "shortcut selects the existing query without changing it");
+    assert.equal(await search.evaluate(input => input.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }))), true, "slash remains available while editing the search itself");
+
+    const textarea = page.locator("#shortcutText");
+    await textarea.focus(); await page.keyboard.press("/");
+    assert.equal(await textarea.inputValue(), "/");
+    assert.equal(await focused(textarea), true, "typing a slash in another field retains that field");
+    const editable = page.locator("#shortcutEditable");
+    await editable.focus(); await page.keyboard.press("/");
+    assert.equal(await focused(editable), true, "contenteditable keeps its native typing behavior");
+
+    await page.evaluate(() => { document.querySelector("#shortcutModal").hidden = false; });
+    const modalAction = page.locator("#shortcutModalAction");
+    await modalAction.focus(); await page.keyboard.press("/");
+    assert.equal(await focused(modalAction), true, "a visible custom dialog owns keyboard focus");
+    await page.evaluate(() => { document.querySelector("#shortcutModal").hidden = true; document.querySelector("#shortcutNative").showModal(); });
+    const nativeAction = page.locator("#shortcutNativeAction");
+    await nativeAction.focus(); await page.keyboard.press("/");
+    assert.equal(await focused(nativeAction), true, "a native modal dialog must not send focus behind itself");
+    await page.evaluate(() => document.querySelector("#shortcutNative").close());
+    await away.focus(); await page.keyboard.press("/");
+    assert.equal(await focused(search), true, "hidden dialogs do not block the shortcut");
+
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { isComposing: true }, { keyCode: 229 }, { repeat: true }, { prevented: true }]) {
+      await away.focus();
+      const cancelled = await away.evaluate((node, init) => {
+        const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true, ...init });
+        if (init.prevented) event.preventDefault();
+        node.dispatchEvent(event); return event.defaultPrevented;
+      }, init);
+      assert.equal(cancelled, Boolean(init.prevented), `shortcut must preserve modifier, repeat and input-method events: ${JSON.stringify(init)}`);
+      assert.equal(await focused(away), true);
+    }
+    for (const property of ["disabled", "readOnly", "hidden", "inert"]) {
+      await search.evaluate((input, property) => { input[property] = true; }, property);
+      await away.focus(); await page.keyboard.press("/");
+      assert.equal(await focused(away), true, `${property} search cannot take shortcut focus`);
+      await search.evaluate((input, property) => { input[property] = false; }, property);
+    }
+  } finally {
+    await page.evaluate(() => { document.querySelector("#workSearch").value = ""; document.querySelector("#shortcutFixture").remove(); window.scrollTo(0, 0); });
   }
 }
 

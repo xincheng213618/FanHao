@@ -13,6 +13,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
     isShortVideoGestureClickBlocked,
     isShortVideoKeyboardControl,
     markPlayerSoundBlocked,
+    onGalleryUserPlaybackIntent,
     persistShortVideoWatch,
     revealShortVideoClearScreen,
     setIconButton,
@@ -44,7 +45,12 @@ export function createShortVideoGalleryPlayer(dependencies) {
     wrap.dataset.galleryIndex = "0";
     wrap.dataset.galleryRequestedIndex = "0";
     wrap.dataset.galleryCount = String(images.length);
+    wrap.dataset.shortVideoPlaybackIntentGeneration = "0";
     wrap.style.setProperty("--short-video-gallery-advance-duration", `${SHORT_VIDEO_GALLERY_ADVANCE_MS}ms`);
+    const recordUserPlaybackIntent = () => {
+      wrap.dataset.shortVideoPlaybackIntentGeneration = String(Number(wrap.dataset.shortVideoPlaybackIntentGeneration || 0) + 1);
+      if (!ghost && !disposed) onGalleryUserPlaybackIntent?.(wrap);
+    };
 
     const track = document.createElement("div");
     track.className = "short-video-gallery-track";
@@ -146,14 +152,23 @@ export function createShortVideoGalleryPlayer(dependencies) {
     let dragPreviewEntry = null;
     let dragPreviewToken = 0;
     let dragSettleTimer = 0;
+    let dragSettleToken = 0;
+    let dragFrame = 0;
+    let dragFrameToken = 0;
+    let dragDeltaX = 0;
+    let roleToken = 0;
     let advanceTimer = 0;
     let advanceStartedAt = 0;
     let advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;
     let advanceEntry = null;
     let videoProgressRaf = 0;
-    let galleryVisibilityPaused = false;
+    let videoProgressToken = 0;
+    let videoPlayToken = 0;
+    const galleryTimingPauseReasons = new Set();
     let galleryUserPaused = false;
     let backgroundAudio = null;
+    let backgroundSoundAwaitingStart = false;
+    let backgroundSoundGeneration = 0;
     let syncGallerySoundState = () => {};
     let galleryClickTimer = 0;
     let counterMotionTimer = 0;
@@ -409,11 +424,14 @@ export function createShortVideoGalleryPlayer(dependencies) {
       edgeNext.disabled = images.length <= 1;
     };
     const stopVideoProgress = () => {
+      videoProgressToken += 1;
       if (videoProgressRaf) window.cancelAnimationFrame(videoProgressRaf);
       videoProgressRaf = 0;
     };
+    const ownsVideoEntry = entry => Boolean(entry?.mediaType === "video" && !ghost && !disposed && wrap.isConnected
+      && currentIndex === entry.index && image === entry.image);
     const updateVideoProgress = (entry) => {
-      if (!entry || entry.mediaType !== "video") return 0;
+      if (!ownsVideoEntry(entry)) return 0;
       const clip = entry.image;
       const duration = Math.max(0, Number(clip.duration || 0));
       const currentTime = Math.max(0, Number(clip.currentTime || 0));
@@ -422,25 +440,21 @@ export function createShortVideoGalleryPlayer(dependencies) {
       wrap.dataset.galleryVideoProgress = ratio.toFixed(4);
       return ratio;
     };
-    const startVideoProgress = (entry) => {
+    const startVideoProgress = (entry, playToken) => {
+      if (!ownsVideoEntry(entry) || playToken !== videoPlayToken || galleryTimingPaused()) return;
       stopVideoProgress();
-      if (!entry || entry.mediaType !== "video") {
-        delete wrap.dataset.galleryVideoProgress;
-        return;
-      }
+      const token = videoProgressToken, role = roleToken;
       const tick = () => {
+        if (token !== videoProgressToken || role !== roleToken || !ownsVideoEntry(entry) || galleryTimingPaused()) return;
         videoProgressRaf = 0;
         updateVideoProgress(entry);
-        if (!wrap.isConnected
-          || currentIndex !== entry.index
-          || entry.image.paused
-          || entry.image.ended
-          || galleryTimingPaused()) return;
+        if (entry.image.paused || entry.image.ended) return;
         videoProgressRaf = window.requestAnimationFrame(tick);
       };
       tick();
     };
     const clearAdvance = (options = {}) => {
+      videoPlayToken += 1;
       window.clearTimeout(advanceTimer);
       advanceTimer = 0;
       advanceStartedAt = 0;
@@ -454,11 +468,11 @@ export function createShortVideoGalleryPlayer(dependencies) {
         advanceEntry = null;
       }
     };
-    const galleryTimingPaused = () => ghost || disposed || galleryVisibilityPaused || galleryUserPaused;
+    const galleryTimingPaused = () => ghost || disposed || galleryTimingPauseReasons.size > 0 || galleryUserPaused;
     const advanceFromEntry = (entry) => {
       if (!entry || !wrap.isConnected || galleryTimingPaused() || currentIndex !== entry.index) return;
       if (currentIndex === images.length - 1 && handleGalleryAutoNext?.(video)) return;
-      if (images.length > 1) move(1);
+      if (images.length > 1) move(1, { automatic: true });
     };
     const syncGalleryPlaybackState = () => {
       const paused = galleryTimingPaused();
@@ -475,13 +489,18 @@ export function createShortVideoGalleryPlayer(dependencies) {
       if (!entry || ghost || !wrap.isConnected || galleryTimingPaused()) return;
       if (entry.mediaType === "video") {
         const clip = entry.image;
+        const token = ++videoPlayToken, role = roleToken;
+        const ownsPlayback = () => token === videoPlayToken && role === roleToken && ownsVideoEntry(entry) && !galleryTimingPaused();
         if (options.restartVideo !== false) clip.currentTime = 0;
         clip.muted = true;
         clip.onended = () => {
+          if (!ownsPlayback()) return;
           updateVideoProgress(entry);
           advanceFromEntry(entry);
         };
-        clip.play?.().catch(() => {}).finally(() => startVideoProgress(entry));
+        clip.play?.().catch(() => {}).finally(() => {
+          if (ownsPlayback()) startVideoProgress(entry, token);
+        });
         return;
       }
       advanceStartedAt = Date.now();
@@ -501,8 +520,9 @@ export function createShortVideoGalleryPlayer(dependencies) {
     };
     const pauseAutoAdvance = (reason = "visibility") => {
       const wasPaused = galleryTimingPaused();
+      if (reason === "user") recordUserPlaybackIntent();
       if (reason === "user") galleryUserPaused = true;
-      else galleryVisibilityPaused = true;
+      else galleryTimingPauseReasons.add(reason);
       if (!wasPaused && advanceTimer && advanceStartedAt) {
         advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt));
       }
@@ -515,45 +535,84 @@ export function createShortVideoGalleryPlayer(dependencies) {
       if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
     };
     const resumeAutoAdvance = (reason = "visibility") => {
-      if (reason === "user") galleryUserPaused = false;
-      else galleryVisibilityPaused = false;
+      const wasPaused = galleryTimingPaused();
+      if (reason === "user") recordUserPlaybackIntent();
+      if (reason === "user") {
+        galleryUserPaused = false;
+        if (backgroundAudio && wasPaused) backgroundSoundAwaitingStart = true;
+      } else galleryTimingPauseReasons.delete(reason);
       syncGalleryPlaybackState();
-      if (galleryTimingPaused()) return;
+      if (!wasPaused || galleryTimingPaused()) return;
+      if (backgroundAudio && (reason === "user" || backgroundSoundAwaitingStart)) playGallerySound();
       const entry = advanceEntry;
       if (!entry || entry.index !== currentIndex || !currentReady) return;
       startAdvance(entry, { restartVideo: false });
-      if (reason === "user" && backgroundAudio) playGallerySound();
       if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
     };
     const playGallerySound = async () => {
-      if (!backgroundAudio || !wrap.isConnected || galleryTimingPaused()) return false;
+      if (!backgroundAudio || !wrap.isConnected || ghost || disposed || galleryUserPaused) return false;
+      if (galleryTimingPaused()) {
+        backgroundSoundAwaitingStart = true;
+        return false;
+      }
+      backgroundSoundAwaitingStart = false;
+      const audio = backgroundAudio;
+      const owner = {
+        generation: ++backgroundSoundGeneration,
+        role: roleToken,
+        source: String(audio.getAttribute("src") || audio.currentSrc || ""),
+        sourceGeneration: String(audio.dataset.shortVideoSourceGeneration || "0"),
+        playbackIntent: wrap.dataset.shortVideoPlaybackIntentGeneration,
+        soundIntent: String(audio.dataset.shortVideoSoundIntentGeneration || "0"),
+        muted: Boolean(audio.muted),
+        preferenceMuted: Boolean(state.shortVideo.muted)
+      };
+      const ownsSound = () => owner.generation === backgroundSoundGeneration && owner.role === roleToken
+        && backgroundAudio === audio && !ghost && !disposed && wrap.isConnected && audio.isConnected
+        && owner.source === String(audio.getAttribute("src") || audio.currentSrc || "")
+        && owner.sourceGeneration === String(audio.dataset.shortVideoSourceGeneration || "0")
+        && owner.playbackIntent === wrap.dataset.shortVideoPlaybackIntentGeneration
+        && owner.soundIntent === String(audio.dataset.shortVideoSoundIntentGeneration || "0")
+        && owner.muted === Boolean(audio.muted) && owner.preferenceMuted === Boolean(state.shortVideo.muted);
+      const settlePausedSound = () => {
+        if (!ownsSound()) return true;
+        if (!galleryTimingPaused()) return false;
+        backgroundSoundAwaitingStart = !galleryUserPaused;
+        audio.pause?.();
+        return true;
+      };
       try {
-        await backgroundAudio.play?.();
-        if (galleryTimingPaused() || !wrap.isConnected) {
-          backgroundAudio.pause?.();
-          return false;
-        }
+        await audio.play?.();
+        if (settlePausedSound()) return false;
         delete wrap.dataset.gallerySoundError;
         syncGallerySoundState();
-        return !backgroundAudio.paused;
+        return !audio.paused;
       } catch (error) {
-        if (galleryTimingPaused() || !wrap.isConnected) return false;
+        if (settlePausedSound()) return false;
         wrap.dataset.gallerySoundError = `${String(error?.name || "PlaybackError")}: ${String(error?.message || error || "unknown")}`;
-        if (!state.shortVideo.muted) markPlayerSoundBlocked(stage);
-        backgroundAudio.muted = true;
+        if (error?.name !== "NotAllowedError" || audio.muted || state.shortVideo.muted) {
+          syncGallerySoundState();
+          return false;
+        }
+        markPlayerSoundBlocked(stage);
+        audio.muted = true;
+        owner.muted = true;
         syncGallerySoundState();
+        if (settlePausedSound()) return false;
         try {
-          await backgroundAudio.play?.();
+          await audio.play?.();
         } catch (mutedError) {
+          if (settlePausedSound()) return false;
           wrap.dataset.gallerySoundError = `${wrap.dataset.gallerySoundError}; muted retry: ${String(mutedError?.name || "PlaybackError")}: ${String(mutedError?.message || mutedError || "unknown")}`;
           // The environment may block audio playback entirely; keep the blocked state visible.
         }
+        if (settlePausedSound()) return false;
         syncGallerySoundState();
         return false;
       }
     };
     const restoreGallerySound = async () => {
-      if (!backgroundAudio) return "missing";
+      if (!backgroundAudio || ghost || disposed || !wrap.isConnected) return "missing";
       state.shortVideo.muted = false;
       writeMutedPreference(false);
       backgroundAudio.muted = false;
@@ -582,6 +641,10 @@ export function createShortVideoGalleryPlayer(dependencies) {
     });
     const commitImage = (entry, direction = 0, commitOptions = {}) => {
       const nextImage = entry.image;
+      cancelDragFrame();
+      window.clearTimeout(dragSettleTimer);
+      dragSettleTimer = 0;
+      dragSettleToken += 1;
       clearAdvance();
       if (image && image !== nextImage) {
         image.onended = null;
@@ -596,6 +659,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       dragActive = false;
       dragDirection = 0;
       dragVisualX = 0;
+      dragDeltaX = 0;
       dragPreviewEntry = null;
       dragPreviewToken += 1;
       wrap.classList.remove("is-gallery-dragging", "is-gallery-settling");
@@ -675,7 +739,8 @@ export function createShortVideoGalleryPlayer(dependencies) {
       const entry = loadImage(targetIndex);
       trimImageCache(new Set([currentIndex, targetIndex]));
       const attach = (readyEntry) => {
-        if (!readyEntry || !dragActive || token !== dragPreviewToken || dragDirection !== direction) return;
+        if (!readyEntry || ghost || disposed || !wrap.isConnected || !dragActive
+          || token !== dragPreviewToken || dragDirection !== direction) return;
         if (readyEntry.index !== resolveGalleryIndex(currentIndex + direction)) return;
         const previewImage = readyEntry.image;
         previewImage.className = `short-video-gallery-image is-drag-preview ${direction > 0 ? "is-next" : "is-previous"}`;
@@ -685,8 +750,30 @@ export function createShortVideoGalleryPlayer(dependencies) {
       if (entry.status === "ready") attach(entry);
       else entry.promise.then(attach);
     };
+    const cancelDragFrame = () => {
+      if (dragFrame) window.cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+      dragFrameToken += 1;
+    };
+    const resetDragSession = () => {
+      cancelDragFrame();
+      window.clearTimeout(dragSettleTimer);
+      dragSettleTimer = 0;
+      dragSettleToken += 1;
+      dragPreviewToken += 1;
+      clearDragPreview();
+      dragActive = false;
+      dragDirection = 0;
+      dragVisualX = 0;
+      dragDeltaX = 0;
+      wrap.classList.remove("is-gallery-dragging", "is-gallery-settling");
+      track.style.setProperty("--short-video-gallery-drag-x", "0px");
+      wrap.dataset.galleryDragX = "0";
+      delete wrap.dataset.galleryDragTarget;
+    };
     const startDrag = () => {
-      if (ghost || images.length <= 1 || !currentReady || dragActive || wrap.classList.contains("is-gallery-settling")) return false;
+      if (ghost || disposed || !wrap.isConnected || images.length <= 1 || !currentReady || dragActive || wrap.classList.contains("is-gallery-settling")) return false;
+      recordUserPlaybackIntent();
       window.clearTimeout(dragSettleTimer);
       clearAdvance();
       wrap.classList.add("is-gallery-timing-paused");
@@ -698,27 +785,47 @@ export function createShortVideoGalleryPlayer(dependencies) {
       dragActive = true;
       dragDirection = 0;
       dragVisualX = 0;
+      dragDeltaX = 0;
       image?.classList.remove("is-entering-next", "is-entering-previous");
       wrap.classList.add("is-gallery-dragging");
       wrap.dataset.galleryDragX = "0";
       track.style.setProperty("--short-video-gallery-drag-x", "0px");
       return true;
     };
-    const updateDrag = (deltaX) => {
-      if (!dragActive) return false;
-      const rawDelta = Number(deltaX || 0);
+    const applyDrag = (rawDelta, width) => {
       const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : 0);
       if (direction && direction !== dragDirection) prepareDragPreview(direction);
-      const targetIndex = resolveGalleryIndex(currentIndex + direction);
       const canMove = Boolean(direction && images.length > 1);
-      const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
       const bounded = Math.sign(rawDelta) * Math.min(Math.abs(rawDelta), width * 1.06);
       dragVisualX = canMove ? bounded : rawDelta * .22;
       track.style.setProperty("--short-video-gallery-drag-x", `${dragVisualX}px`);
       wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
+    };
+    const flushDrag = (deltaX = dragDeltaX) => {
+      cancelDragFrame();
+      if (!dragActive || ghost || disposed || !wrap.isConnected) return 0;
+      dragDeltaX = Number(deltaX || 0);
+      const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
+      applyDrag(dragDeltaX, width);
+      return width;
+    };
+    const updateDrag = (deltaX) => {
+      if (!dragActive || ghost || disposed || !wrap.isConnected) return false;
+      dragDeltaX = Number(deltaX || 0);
+      if (dragFrame) return true;
+      const token = ++dragFrameToken, role = roleToken, currentImage = image;
+      const handle = window.requestAnimationFrame(() => {
+        if (dragFrame !== handle || token !== dragFrameToken || role !== roleToken || image !== currentImage) return;
+        dragFrame = 0;
+        if (!dragActive || ghost || disposed || !wrap.isConnected) return;
+        const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
+        applyDrag(dragDeltaX, width);
+      });
+      dragFrame = handle;
       return true;
     };
     const settleDrag = (targetX, callback, durationMs = 230) => {
+      cancelDragFrame();
       dragActive = false;
       wrap.classList.remove("is-gallery-dragging");
       wrap.classList.add("is-gallery-settling");
@@ -730,9 +837,14 @@ export function createShortVideoGalleryPlayer(dependencies) {
       track.style.setProperty("--short-video-gallery-drag-x", `${dragVisualX}px`);
       wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
       window.clearTimeout(dragSettleTimer);
+      const token = ++dragSettleToken, role = roleToken, currentImage = image, index = currentIndex;
       dragSettleTimer = window.setTimeout(() => {
+        if (token !== dragSettleToken || role !== roleToken || image !== currentImage || currentIndex !== index
+          || ghost || disposed || !wrap.isConnected) return;
+        dragSettleTimer = 0;
         wrap.classList.remove("is-gallery-settling");
         callback?.();
+        if (token !== dragSettleToken || role !== roleToken) return;
         dragVisualX = 0;
         track.style.setProperty("--short-video-gallery-drag-x", "0px");
         wrap.dataset.galleryDragX = "0";
@@ -740,14 +852,14 @@ export function createShortVideoGalleryPlayer(dependencies) {
       }, settleDuration + 10);
     };
     const endDrag = (deltaX, velocityX = 0) => {
-      if (!dragActive) return false;
-      const rawDelta = Number(deltaX || dragVisualX || 0);
+      if (!dragActive || ghost || disposed || !wrap.isConnected) return false;
+      const rawDelta = deltaX == null ? dragDeltaX : Number(deltaX || 0);
+      const width = flushDrag(rawDelta);
       const velocity = Math.max(-2.4, Math.min(2.4, Number(velocityX || 0)));
       const projectedDelta = rawDelta + velocity * 180;
       const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : (velocity < 0 ? 1 : (velocity > 0 ? -1 : dragDirection)));
       const targetIndex = resolveGalleryIndex(currentIndex + direction);
       const canMove = Boolean(direction && images.length > 1);
-      const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
       const distanceReady = Math.abs(rawDelta) >= Math.min(120, width * .22);
       const projectedReady = Math.abs(projectedDelta) >= Math.min(96, width * .18)
         && Math.sign(projectedDelta) === Math.sign(rawDelta || projectedDelta);
@@ -775,7 +887,8 @@ export function createShortVideoGalleryPlayer(dependencies) {
       return true;
     };
     const cancelDrag = () => {
-      if (!dragActive) return false;
+      if (!dragActive || ghost || disposed || !wrap.isConnected) return false;
+      flushDrag();
       settleDrag(0, () => {
         clearDragPreview();
         dragDirection = 0;
@@ -783,9 +896,10 @@ export function createShortVideoGalleryPlayer(dependencies) {
       });
       return true;
     };
-    const move = (delta) => {
+    const move = (delta, options = {}) => {
       const direction = Math.sign(Number(delta) || 0);
       if (!direction) return false;
+      if (!options.automatic) recordUserPlaybackIntent();
       const nextIndex = resolveGalleryIndex(requestedIndex + direction);
       return Boolean(show(nextIndex, direction));
     };
@@ -804,6 +918,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        recordUserPlaybackIntent();
         show(index, Math.sign(index - requestedIndex));
       });
       button.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -881,15 +996,20 @@ export function createShortVideoGalleryPlayer(dependencies) {
       audio.src = localSoundUrl;
       audio.dataset.streamUrl = localSoundUrl;
       audio.loop = true;
-      audio.autoplay = true;
+      audio.autoplay = false;
       audio.preload = "auto";
       audio.muted = Boolean(state.shortVideo.muted);
       audio.volume = currentShortVideoVolume();
       backgroundAudio = audio;
+      backgroundSoundGeneration += 1;
+      backgroundSoundAwaitingStart = true;
+      window.clearTimeout(localSoundPollTimer);
+      localSoundPollTimer = 0;
       video.sound = sound;
       if (state.shortVideo?.current?.id === video.id) state.shortVideo.current.sound = sound;
       wrap.append(audio);
       syncGallerySoundState = () => {
+        if (ghost || disposed || !wrap.isConnected || backgroundAudio !== audio) return;
         const playing = !audio.paused && !audio.ended;
         const muted = Boolean(audio.muted || audio.volume <= 0);
         const blocked = Boolean(stage?.classList.contains("is-sound-blocked"));
@@ -908,9 +1028,15 @@ export function createShortVideoGalleryPlayer(dependencies) {
       audio.addEventListener("ended", syncGallerySoundState);
       audio.addEventListener("volumechange", syncGallerySoundState);
       audio.addEventListener("error", syncGallerySoundState);
+      const invalidateSoundRequest = () => { backgroundSoundGeneration += 1; };
+      audio.addEventListener("seeking", invalidateSoundRequest);
+      audio.addEventListener("emptied", invalidateSoundRequest);
       els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoEnableGallerySound?.(sound);
+      const attachmentRole = roleToken, attachmentGeneration = backgroundSoundGeneration;
       window.requestAnimationFrame(() => {
-        if (galleryUserPaused) {
+        if (attachmentRole !== roleToken || attachmentGeneration !== backgroundSoundGeneration
+          || backgroundAudio !== audio || ghost || disposed || !wrap.isConnected) return;
+        if (galleryTimingPaused()) {
           syncGallerySoundState();
           return;
         }
@@ -918,6 +1044,11 @@ export function createShortVideoGalleryPlayer(dependencies) {
         syncGallerySoundState();
       });
       return true;
+    };
+    wrap.shortVideoGalleryUpdateMetadata = (next) => {
+      if (ghost || disposed || !wrap.isConnected || String(next?.id || "") !== String(video.id || "")) return false;
+      if (backgroundAudio) return true;
+      return attachLocalBackgroundSound(next.sound);
     };
     const refreshLocalBackgroundSound = async () => {
       if (backgroundAudio) return true;
@@ -973,9 +1104,12 @@ export function createShortVideoGalleryPlayer(dependencies) {
     };
     wrap.shortVideoGallerySetActive = (active) => {
       if (disposed || ghost === !active) return;
+      roleToken += 1;
       ghost = !active;
       wrap.classList.toggle("is-ghost", ghost);
       if (ghost) {
+        backgroundSoundGeneration += 1;
+        resetDragSession();
         clearAdvance();
         window.clearTimeout(localSoundPollTimer);
         window.clearTimeout(galleryClickTimer);
@@ -1005,7 +1139,9 @@ export function createShortVideoGalleryPlayer(dependencies) {
     wrap.shortVideoGalleryDispose = () => {
       if (disposed) return;
       wrap.shortVideoGallerySetActive(false);
+      resetDragSession();
       disposed = true;
+      galleryTimingPauseReasons.clear();
       requestToken += 1;
       dragPreviewToken += 1;
       [animationTimer, boundaryTimer, loadStatusTimer, loadStatusHideTimer, dragSettleTimer, counterMotionTimer]

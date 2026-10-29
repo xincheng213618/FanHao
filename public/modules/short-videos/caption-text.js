@@ -1,5 +1,5 @@
 export function createShortVideoCaptionText({ normalizeTopic, openTopic }) {
-  return function appendCaptionText(target, text, video = null) {
+  return function appendCaptionText(target, text, video = null, options = {}) {
     const value = String(text || "");
     const knownTags = (Array.isArray(video?.tags) ? video.tags : [])
       .map((tag) => normalizeTopic(tag))
@@ -22,6 +22,7 @@ export function createShortVideoCaptionText({ normalizeTopic, openTopic }) {
         tag.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
+          if (options.isCurrent?.(event.currentTarget) === false) return;
           if (video) openTopic(video, topic);
         });
         target.append(tag);

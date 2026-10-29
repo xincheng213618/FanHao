@@ -1,3 +1,5 @@
+const workTitleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export function selectVisibleWorks(works, options = {}) {
   const query = String(options.query || "").trim().toLowerCase();
   const filters = Array.isArray(options.filters) ? options.filters : [];
@@ -107,10 +109,7 @@ export function numericRating(value) {
 }
 
 export function compareWorkTitle(a, b) {
-  return String(a?.title || a?.directoryName || "").localeCompare(String(b?.title || b?.directoryName || ""), undefined, {
-    numeric: true,
-    sensitivity: "base"
-  });
+  return workTitleCollator.compare(String(a?.title || a?.directoryName || ""), String(b?.title || b?.directoryName || ""));
 }
 
 function defaultIncludesText(value, query) {

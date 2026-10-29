@@ -277,6 +277,49 @@ body.novel-reader-active .product-topbar {
   font-size: 14px;
 }
 
+.novel-book-recovery .novel-secondary-button {
+  min-height: 44px;
+}
+
+.novel-book-recovery .novel-empty-card p {
+  overflow-wrap: anywhere;
+}
+
+.novel-browse-authors,
+.novel-author-dialog button,
+.novel-author-dialog input,
+.novel-author-dialog select {
+  min-height: 44px;
+}
+
+.novel-author-dialog {
+  width: min(820px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  box-sizing: border-box;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 20px;
+  color: #343a46;
+  background: #fff;
+}
+
+.novel-author-dialog::backdrop { background: rgba(20, 25, 35, .5); }
+.novel-author-dialog[open] { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: 10px; height: min(760px, calc(100dvh - 32px)); }
+.novel-author-dialog header,
+.novel-author-dialog nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.novel-author-dialog h2 { margin: 0; font-size: 20px; }
+.novel-author-search { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.novel-author-search input { flex: 1 1 220px; min-width: 0; }
+.novel-author-search select { flex: 1 1 140px; min-width: 0; }
+.novel-author-status { margin: 0; color: #667085; overflow-wrap: anywhere; }
+.novel-author-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-height: 0; padding: 0; margin: 0; list-style: none; overflow: auto; overscroll-behavior: contain; }
+.novel-author-result { display: grid; gap: 5px; width: 100%; min-width: 0; padding: 10px; text-align: left; overflow-wrap: anywhere; border: 1px solid #e2e4e8; border-radius: 5px; background: #fafbfc; color: inherit; }
+.novel-author-result span { color: #667085; font-size: 12px; }
+@media (max-width: 600px) {
+  .novel-author-dialog { padding: 14px; }
+  .novel-author-results { grid-template-columns: minmax(0, 1fr); }
+}
+
 .novel-home.novel-home-manage {
   width: min(1600px, calc(100vw - 28px));
 }
@@ -1992,6 +2035,27 @@ body.novel-reader-active .product-topbar {
   gap: 12px;
 }
 
+.novel-correction-dialog:not(.novel-reimport-dialog) .novel-correction-head > button {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+}
+
+.novel-correction-dialog:not(.novel-reimport-dialog) .novel-correction-actions {
+  flex-wrap: wrap;
+}
+
+.novel-correction-dialog:not(.novel-reimport-dialog) .novel-correction-primary-actions {
+  margin-left: auto;
+}
+
+.novel-correction-dialog:not(.novel-reimport-dialog) .novel-correction-actions button {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+  white-space: nowrap;
+}
+
 .novel-danger-button {
   min-height: 38px;
   border: 1px solid #d92d20;
@@ -2344,6 +2408,19 @@ button.novel-book-latest:focus-visible {
   cursor: default;
 }
 
+.novel-breadcrumbs .novel-list-return {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid rgba(122, 132, 149, .35);
+  border-radius: 8px;
+  color: inherit;
+  white-space: nowrap;
+}
+
+.novel-breadcrumbs .novel-list-return::after {
+  content: none;
+}
+
 .novel-detail-hero {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) 260px;
@@ -2472,6 +2549,23 @@ button.novel-book-latest:focus-visible {
   background: #ed4259;
   color: #fff;
 }
+
+.novel-ranking-status {
+  box-sizing: border-box;
+  display: grid;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px solid #ead1d1;
+  border-radius: 8px;
+  background: #fff8f7;
+  color: #9b3443;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.novel-ranking-status .novel-ranking-retry { justify-self: start; min-height: 44px; }
 
 .novel-ranking-heading h2,
 .novel-ranking-heading p {
@@ -2710,8 +2804,30 @@ button.novel-book-latest:focus-visible {
 }
 
 .novel-catalog-pagination {
+  grid-column: 1 / -1;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
+}
+
+.novel-catalog-pagination[hidden] {
+  display: none;
+}
+
+.novel-catalog-pagination input {
+  width: 72px;
+  min-width: 0;
+}
+
+.novel-catalog-pagination > span {
+  color: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.novel-catalog-pagination .novel-catalog-locate {
+  margin-left: auto;
 }
 
 .novel-catalog-status {

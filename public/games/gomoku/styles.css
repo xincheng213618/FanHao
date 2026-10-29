@@ -311,6 +311,28 @@ h2 {
   pointer-events: none;
 }
 
+.loading-panel.failed .loader,
+.loading-panel.failed .progress-track,
+#engineRetryButton[hidden] {
+  display: none;
+}
+
+.loading-panel.failed {
+  padding: 16px;
+}
+
+.loading-panel.failed #loadingDetail {
+  max-width: 100%;
+  max-height: 100px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.loading-panel.failed #engineRetryButton {
+  flex-shrink: 0;
+}
+
 .loading-panel strong {
   margin-top: 5px;
   font-size: 18px;

@@ -53,7 +53,7 @@ class Element extends EventTarget {
 }
 
 function fixture({ ghost = true, count = 5, firstVideo = false } = {}) {
-  const timers = new Map(), frames = new Map(), elements = [], watches = [];
+  const timers = new Map(), frames = new Map(), elements = [], watches = [], intents = [];
   let clock = 0;
   globalThis.window = {
     setTimeout: (callback, delay) => { const id = ++clock; timers.set(id, { callback, delay }); return id; },
@@ -79,6 +79,7 @@ function fixture({ ghost = true, count = 5, firstVideo = false } = {}) {
     createIcon: () => new Element("span"), currentShortVideoVolume: () => 0.5,
     els: { workGrid: root }, galleryImageEntries: (item) => item.images,
     handleGalleryAutoNext: () => false, isShortVideoGestureClickBlocked: () => false,
+    onGalleryUserPlaybackIntent: (gallery) => intents.push(gallery),
     isShortVideoKeyboardControl: () => false, markPlayerSoundBlocked() {},
     persistShortVideoWatch: (...args) => watches.push(args), revealShortVideoClearScreen: () => false,
     setIconButton() {}, SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS: 200, SHORT_VIDEO_GALLERY_ADVANCE_MS: 4000,
@@ -95,7 +96,7 @@ function fixture({ ghost = true, count = 5, firstVideo = false } = {}) {
     image.dispatchEvent(new Event("load"));
     await tick();
   };
-  return { root, gallery, video, timers, elements, watches, flushFrames, tick, load };
+  return { root, gallery, video, timers, elements, watches, intents, flushFrames, tick, load };
 }
 
 {
@@ -176,6 +177,28 @@ function fixture({ ghost = true, count = 5, firstVideo = false } = {}) {
   rejectPlay(new Error("late autoplay rejection")); await f.tick();
   assert.equal(attempts, 1, "a late play rejection after demotion must not restart background music");
   assert.equal(audio.paused, true);
+  disposeShortVideoMedia(f.root);
+}
+
+{
+  const f = fixture({ ghost: false, count: 2 });
+  await f.load(f.gallery.querySelector(".short-video-gallery-image"));
+  f.flushFrames(); await f.tick();
+  f.gallery.shortVideoGalleryPause("user");
+  f.gallery.shortVideoGalleryResume("user");
+  assert.equal(f.intents.length, 2, "manual pause/resume must invalidate a pending post-level auto-next request");
+  assert.equal(f.gallery.dataset.shortVideoPlaybackIntentGeneration, "2");
+  f.gallery.shortVideoGalleryPause("modal");
+  const timersBeforeResume = new Set(f.timers.keys());
+  f.gallery.shortVideoGalleryResume("modal");
+  assert.equal(f.intents.length, 2, "modal timing restoration is not a new user playback action");
+  const advance = [...f.timers.entries()].find(([id]) => !timersBeforeResume.has(id));
+  assert(advance, "the active gallery must still schedule ordinary image advancement");
+  f.timers.delete(advance[0]); advance[1].callback(); await f.tick();
+  assert.equal(f.intents.length, 2, "automatic image advancement must not masquerade as manual navigation");
+  f.gallery.shortVideoGalleryMove(-1);
+  assert.equal(f.intents.length, 3, "manual image navigation must cancel a pending auto-next even while media is loading");
+  assert(f.intents.every((gallery) => gallery === f.gallery));
   disposeShortVideoMedia(f.root);
 }
 

@@ -86,6 +86,7 @@ export function createPersonProfile(deps) {
     state,
     workCoverUrl
   } = deps;
+  let activeMapping = null;
 
 function uniqueSourcePaths(person) {
   const seen = new Set();
@@ -116,6 +117,7 @@ function sourceButtonLabel(sourcePath) {
 }
 
 function hidePersonProfile() {
+  activeMapping?.close();
   if (!els.personProfile) return;
   els.personProfile.hidden = true;
   els.personProfile.classList.remove("ranking-profile-panel");
@@ -124,6 +126,7 @@ function hidePersonProfile() {
 
 function renderPersonProfile(person) {
   if (!els.personProfile || !person) return;
+  if (activeMapping && activeMapping.personId !== String(person.id)) activeMapping.close();
 
   const profile = person.actorProfile || null;
   const avatarUrl = person.avatarUrl || profile?.avatarUrl || coverUrl(person.coverId);
@@ -194,6 +197,9 @@ function renderPersonProfile(person) {
 }
 
 async function saveActorProfileMapping(person, options) {
+  const requestApi = options.requestApi || api;
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   const originalText = options.button?.textContent || "";
   if (options.button) {
     options.button.disabled = true;
@@ -215,28 +221,30 @@ async function saveActorProfileMapping(person, options) {
         status: "ok"
     };
     let data = await saveActorProfileRequest({
-      api,
+      api: requestApi,
       body: requestBody,
       path: `/api/actor-profiles/${encodeURIComponent(person.id)}`
     });
+    if (!isCurrent()) return false;
     if (data.operation) {
       if (options.status) options.status.textContent = "保存已接收，正在恢复";
-      const routePersonId = String(state.selectedPersonId || "");
       const refreshed = await waitForActorProfileOperation({
-        api,
-        isRouteCurrent: () => state.activeView === "people"
-          && (!routePersonId || String(state.selectedPersonId || "") === routePersonId),
+        api: requestApi,
+        isRouteCurrent: isCurrent,
         operation: data.operation,
         personId: person.id
       });
       data = refreshed;
     }
+    if (!isCurrent()) return false;
     updatePersonActorProfile(person.id, data.profile);
-    const merged = options.mergePrompt === false ? null : await maybeMergeActorCandidates(person.id, data.mergeCandidates || [], options.status);
+    const merged = options.mergePrompt === false ? null : await maybeMergeActorCandidates(person.id, data.mergeCandidates || [], options.status, requestApi, isCurrent);
+    if (!isCurrent()) return false;
     if (options.status) options.status.textContent = merged ? "已保存并合并人物" : "已保存";
     await selectPerson(merged?.person?.id || person.id, { resetFilter: false });
+    return true;
   } catch (error) {
-    if (options.status && error.name !== "AbortError") {
+    if (isCurrent() && options.status && error.name !== "AbortError") {
       const operationId = error.payload?.operation?.id || "";
       options.status.textContent = operationId
         ? `${error.message || "保存失败"}（任务 ${operationId}，可从任务接口重试）`
@@ -244,14 +252,15 @@ async function saveActorProfileMapping(person, options) {
     }
     if (options.throwOnError) throw error;
   } finally {
-    if (options.button) {
+    if (options.button && isCurrent()) {
       options.button.disabled = false;
       options.button.textContent = originalText;
     }
   }
 }
 
-async function maybeMergeActorCandidates(targetPersonId, candidates, status) {
+async function maybeMergeActorCandidates(targetPersonId, candidates, status, requestApi = api, isCurrent = () => true) {
+  if (!isCurrent()) return null;
   const items = (candidates || []).filter((item) => item?.id && String(item.id) !== String(targetPersonId));
   if (!items.length) return null;
 
@@ -264,15 +273,16 @@ async function maybeMergeActorCandidates(targetPersonId, candidates, status) {
     .join("\n");
   const more = items.length > 6 ? `\n另有 ${formatNumber(items.length - 6)} 个候选` : "";
   const sourcePersonIds = items.map((item) => item.id);
-  const preview = await api(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
+  const preview = await requestApi(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
     method: "POST", body: { sourcePersonIds, preview: true }
   });
+  if (!isCurrent()) return null;
   const warnings = (preview.warnings || []).join("\n");
   const ok = window.confirm(`这些人物的名字或别名相同，请核对是否确为同一人：\n\n${summary}${more}\n\n${warnings ? `${warnings}\n\n` : ""}合并后共 ${formatNumber(preview.workCount)} 部作品。目录与作品关系归到当前人物；旧 ID 保留并指向当前人物，原记录归档，不删除本地文件。`);
-  if (!ok) return null;
+  if (!ok || !isCurrent()) return null;
 
   if (status) status.textContent = "正在合并人物";
-  const data = await api(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
+  const data = await requestApi(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
     method: "POST",
     body: { sourcePersonIds, confirmDifferentExternalIds: Boolean(warnings) }
   });
@@ -328,6 +338,10 @@ function normalizePersonNameValue(value) {
 }
 
 async function openActorMappingModal(person) {
+  if (state.activeView !== "people" || String(state.selectedPersonId || state.selectedPerson?.id || "") !== String(person.id)) return;
+  activeMapping?.close();
+  const owner = { personId: String(person.id), close: null };
+  const lifecycle = new AbortController();
   const initialProfile = person.actorProfile || {};
   const overlay = document.createElement("div");
   overlay.className = "mapping-modal-backdrop";
@@ -444,12 +458,15 @@ async function openActorMappingModal(person) {
   let modalPerson = person;
   let coverCandidateWorks = [];
   let coverCandidatesLoaded = false;
+  let coverCandidatesController = null;
   let coverPickerOverlay = null;
   let coverPickerGrid = null;
   let coverPickerStatus = null;
   let folderOperationOverlay = null;
 
   const closeModal = () => {
+    lifecycle.abort();
+    coverCandidatesController?.abort();
     folderOperationOverlay?.remove();
     folderOperationOverlay = null;
     coverPickerOverlay?.remove();
@@ -457,7 +474,36 @@ async function openActorMappingModal(person) {
     coverPickerGrid = null;
     coverPickerStatus = null;
     overlay.remove();
+    if (activeMapping === owner) activeMapping = null;
   };
+  owner.close = closeModal;
+  activeMapping = owner;
+  const isCurrent = () => activeMapping === owner && !lifecycle.signal.aborted && overlay.isConnected
+    && state.activeView === "people" && String(state.selectedPersonId || state.selectedPerson?.id || "") === owner.personId;
+
+  async function modalApi(path, options = {}) {
+    const stale = () => Object.assign(new Error("人物资料编辑器已经关闭或切换"), { name: "AbortError" });
+    if (!isCurrent()) throw stale();
+    const reading = ["GET", "HEAD"].includes(String(options.method || "GET").toUpperCase());
+    const controller = reading ? new AbortController() : null;
+    const abort = () => controller?.abort();
+    if (controller) {
+      lifecycle.signal.addEventListener("abort", abort, { once: true });
+      options.signal?.addEventListener("abort", abort, { once: true });
+      if (options.signal?.aborted) abort();
+    }
+    try {
+      const data = await api(path, controller ? { ...options, signal: controller.signal } : options);
+      if (!isCurrent()) throw stale();
+      return data;
+    } catch (error) {
+      if (!isCurrent()) throw stale();
+      throw error;
+    } finally {
+      lifecycle.signal.removeEventListener("abort", abort);
+      options.signal?.removeEventListener("abort", abort);
+    }
+  }
   close.addEventListener("click", closeModal);
 
   function applyProfileFields(profile = modalPerson.actorProfile || {}) {
@@ -471,7 +517,7 @@ async function openActorMappingModal(person) {
   async function loadMapping(options = {}) {
     status.textContent = "正在同步映射";
     const query = manualSourcePaths.map((sourcePath) => `sourcePath=${encodeURIComponent(sourcePath)}`).join("&");
-    const data = await api(`/api/admin/person-mapping/${encodeURIComponent(modalPerson.id)}${query ? `?${query}` : ""}`);
+    const data = await modalApi(`/api/admin/person-mapping/${encodeURIComponent(modalPerson.id)}${query ? `?${query}` : ""}`);
     modalPerson = data.person || modalPerson;
     if (options.syncProfileFields) applyProfileFields(modalPerson.actorProfile || {});
     renderCurrentCover();
@@ -489,6 +535,7 @@ async function openActorMappingModal(person) {
   }
 
   async function openFolderMutationDialog({ mode, sourcePath, targetPath = "" }) {
+    if (!isCurrent()) return;
     if (folderOperationOverlay) return;
     const actionOverlay = document.createElement("div");
     actionOverlay.className = "mapping-cover-picker-backdrop";
@@ -558,6 +605,7 @@ async function openActorMappingModal(person) {
     actionClose.addEventListener("click", closeAction);
     cancel.addEventListener("click", closeAction);
     confirm.addEventListener("click", async () => {
+      if (!isCurrent() || folderOperationOverlay !== actionOverlay || !actionOverlay.isConnected) return;
       const value = input.value.trim();
       if (!value) {
         actionStatus.textContent = mode === "rename" ? "请输入新文件夹名称" : "请输入现有文件夹路径";
@@ -570,7 +618,7 @@ async function openActorMappingModal(person) {
         const body = mode === "rename"
           ? { personId: modalPerson.id, sourcePath, folderName: value }
           : { personId: modalPerson.id, sourcePath, targetPath: value };
-        const data = await api(endpoint, { method: "POST", body });
+        const data = await modalApi(endpoint, { method: "POST", body });
         modalPerson = data.person || modalPerson;
         manualSourcePaths = [data.newPath, ...manualSourcePaths]
           .filter(Boolean)
@@ -594,6 +642,10 @@ async function openActorMappingModal(person) {
 
   async function loadCoverCandidates() {
     if (!coverPickerGrid) return;
+    const pickerGrid = coverPickerGrid;
+    coverCandidatesController?.abort();
+    const controller = new AbortController();
+    coverCandidatesController = controller;
     coverPickerGrid.innerHTML = `<div class="mapping-source-empty">正在读取作品封面</div>`;
     if (coverPickerStatus) coverPickerStatus.textContent = "正在读取作品封面";
     try {
@@ -602,19 +654,23 @@ async function openActorMappingModal(person) {
         sort: "releaseDesc",
         filter: "all"
       });
-      const data = await api(`/api/people/${encodeURIComponent(modalPerson.id)}?${params}`);
+      const data = await modalApi(`/api/people/${encodeURIComponent(modalPerson.id)}?${params}`, { signal: controller.signal });
+      if (coverPickerGrid !== pickerGrid) return;
       coverCandidateWorks = (data.works || []).filter((work) => workCoverUrl(work));
       if (data.person) modalPerson = { ...modalPerson, ...data.person };
       coverCandidatesLoaded = true;
       if (coverPickerStatus) coverPickerStatus.textContent = `${formatNumber(coverCandidateWorks.length)} 张可选封面`;
       renderCoverPicker();
     } catch (error) {
+      if (!isCurrent() || coverPickerGrid !== pickerGrid) return;
       coverPickerGrid.innerHTML = "";
       const empty = document.createElement("div");
       empty.className = "mapping-source-empty";
       empty.textContent = error.message || "封面候选读取失败";
       coverPickerGrid.append(empty);
       if (coverPickerStatus) coverPickerStatus.textContent = "封面候选读取失败";
+    } finally {
+      if (coverCandidatesController === controller) coverCandidatesController = null;
     }
   }
 
@@ -663,6 +719,7 @@ async function openActorMappingModal(person) {
   }
 
   async function openCoverPicker() {
+    if (!isCurrent()) return;
     if (coverPickerOverlay) return;
     coverPickerOverlay = document.createElement("div");
     coverPickerOverlay.className = "mapping-cover-picker-backdrop";
@@ -697,6 +754,8 @@ async function openActorMappingModal(person) {
     document.body.append(coverPickerOverlay);
 
     const closePicker = () => {
+      coverCandidatesController?.abort();
+      coverCandidatesController = null;
       coverPickerOverlay?.remove();
       coverPickerOverlay = null;
       coverPickerGrid = null;
@@ -739,11 +798,12 @@ async function openActorMappingModal(person) {
 
   async function setPersonCover(options = {}) {
     const { workId = "", imageBase64 = "", imageMime = "", fileName = "", button = null } = options;
+    if (!isCurrent() || (button && !button.isConnected)) return;
     setButtonBusy(button, true, workId ? "设置中" : imageBase64 ? "上传中" : "恢复中");
     status.textContent = workId ? "正在复制作品封面" : imageBase64 ? "正在上传封面" : "正在恢复默认封面";
     try {
       const body = imageBase64 ? { imageBase64, imageMime, fileName } : { workId };
-      const data = await api(`/api/people/${encodeURIComponent(modalPerson.id)}/cover`, {
+      const data = await modalApi(`/api/people/${encodeURIComponent(modalPerson.id)}/cover`, {
         method: "PUT",
         body
       });
@@ -838,6 +898,7 @@ async function openActorMappingModal(person) {
   }
 
   addManual.addEventListener("click", async () => {
+    if (!isCurrent()) return;
     const value = manualInput.value.trim();
     if (!value) return;
     if (!manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(value))) {
@@ -852,6 +913,7 @@ async function openActorMappingModal(person) {
   });
 
   uploadCover.addEventListener("click", () => {
+    if (!isCurrent()) return;
     uploadInput.value = "";
     uploadInput.click();
   });
@@ -863,6 +925,7 @@ async function openActorMappingModal(person) {
   });
 
   uploadInput.addEventListener("change", async () => {
+    if (!isCurrent()) return;
     const file = uploadInput.files?.[0];
     if (!file) return;
     if (!file.type.startsWith("image/")) {
@@ -887,6 +950,8 @@ async function openActorMappingModal(person) {
 
   save.addEventListener("click", async () => {
     await saveActorProfileMapping(modalPerson, {
+      requestApi: modalApi,
+      isCurrent,
       javdbUrl: urlInput.value,
       displayName: nameInput.value,
       gender: genderSelect.value,
@@ -897,11 +962,12 @@ async function openActorMappingModal(person) {
   });
 
   syncLocal.addEventListener("click", async () => {
+    if (!isCurrent()) return;
     setButtonBusy(syncLocal, true, "扫描中");
     status.textContent = "正在扫描选中的本地来源";
     try {
       const sourcePaths = selectedSourcePaths(sourceList);
-      const data = await api(`/api/admin/rescan-person?limit=1&sort=releaseDesc`, {
+      const data = await modalApi(`/api/admin/rescan-person?limit=1&sort=releaseDesc`, {
         method: "POST",
         body: { personId: modalPerson.id, sourcePaths }
       });
@@ -917,11 +983,14 @@ async function openActorMappingModal(person) {
   });
 
   refreshJavdb.addEventListener("click", async () => {
+    if (!isCurrent()) return;
     setButtonBusy(refreshJavdb, true, "访问中");
     urlInput.value = normalizeActorMappingInput(urlInput.value);
     status.textContent = "正在保存映射，随后启动片单更新";
     try {
       await saveActorProfileMapping(modalPerson, {
+        requestApi: modalApi,
+        isCurrent,
         javdbUrl: urlInput.value,
         displayName: nameInput.value,
         gender: genderSelect.value,
@@ -930,12 +999,12 @@ async function openActorMappingModal(person) {
         mergePrompt: false,
         throwOnError: true
       });
-      const data = await api("/api/admin/refresh-actor-movies", {
+      const data = await modalApi("/api/admin/refresh-actor-movies", {
         method: "POST",
         body: { personId: modalPerson.id, sleep: 1, maxPages: 1 }
       });
       status.textContent = `JavDB 任务已启动：${data.task?.id || ""} · 如弹出安全验证请手动确认`;
-      await waitForAdminTask(data.task?.id, status);
+      await waitForAdminTask(data.task?.id, status, modalApi);
       await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
       status.textContent = "JavDB 人物资料、片单和本地文件已同步";
@@ -947,11 +1016,14 @@ async function openActorMappingModal(person) {
   });
 
   refreshAllJavdb.addEventListener("click", async () => {
+    if (!isCurrent()) return;
     setButtonBusy(refreshAllJavdb, true, "扫描中");
     urlInput.value = normalizeActorMappingInput(urlInput.value);
     status.textContent = "正在保存映射，随后启动当前人物全量扫描";
     try {
       await saveActorProfileMapping(modalPerson, {
+        requestApi: modalApi,
+        isCurrent,
         javdbUrl: urlInput.value,
         displayName: nameInput.value,
         gender: genderSelect.value,
@@ -960,12 +1032,12 @@ async function openActorMappingModal(person) {
         mergePrompt: false,
         throwOnError: true
       });
-      const data = await api("/api/admin/refresh-actor-movies", {
+      const data = await modalApi("/api/admin/refresh-actor-movies", {
         method: "POST",
         body: { personId: modalPerson.id, sleep: 1, maxPages: 0 }
       });
       status.textContent = `当前人物全量任务已启动：${data.task?.id || ""} · 如弹出安全验证请手动确认`;
-      await waitForAdminTask(data.task?.id, status);
+      await waitForAdminTask(data.task?.id, status, modalApi);
       await selectPerson(modalPerson.id, { resetFilter: false, reusePrefetch: false });
       await loadMapping({ syncProfileFields: true });
       status.textContent = "当前人物全量 JavDB 扫描和本地文件同步已完成";
@@ -983,14 +1055,14 @@ async function openActorMappingModal(person) {
     status.textContent = error.message || "映射读取失败";
   }
 
-  window.setTimeout(() => urlInput.focus(), 0);
+  window.setTimeout(() => { if (isCurrent()) urlInput.focus(); }, 0);
 }
 
-async function waitForAdminTask(taskId, status) {
+async function waitForAdminTask(taskId, status, requestApi = api) {
   if (!taskId) throw new Error("未取得片单更新任务，请重新点击更新");
   for (let index = 0; index < 420; index += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
-    const data = await api("/api/admin/tasks");
+    const data = await requestApi("/api/admin/tasks");
     const task = (data.tasks || []).find((item) => item.id === taskId);
     if (!task) continue;
     status.textContent = `JavDB ${task.status}${task.logs?.length ? ` · ${task.logs.at(-1)}` : ""}`;

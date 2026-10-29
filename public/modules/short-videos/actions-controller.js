@@ -1,4 +1,6 @@
 import { createIcon, railButton } from "./icons.js?v=20260716-short-video-icons-01";
+import { createShortVideoPanelLoadingController } from "./panel-loading-controller.js";
+import { createShortVideoInteractionState } from "./interaction-state.js";
 import {
   formatCompact,
   formatDuration,
@@ -18,11 +20,33 @@ export function createShortVideoActionsController(dependencies) {
     isCurrentVideo,
     isGalleryPost,
     isolateTransientModal,
+    interactionState: suppliedInteractionState,
+    requestPanel,
     shortVideoAuthorHandle,
     showToast,
     state
   } = dependencies;
   let sharePanelPromise = null;
+  const interactionState = suppliedInteractionState || createShortVideoInteractionState();
+  const captureShareContext = () => ({
+    browser: getBrowser?.(),
+    grid: getWorkGrid?.(),
+    view: state.activeView,
+    id: String(state.shortVideo?.current?.id || ""),
+    scope: JSON.stringify([state.shortVideo?.mode, state.shortVideo?.collectionId, state.shortVideo?.source,
+      state.shortVideo?.author, state.shortVideo?.query, state.shortVideo?.topic, state.shortVideo?.sound,
+      state.shortVideo?.sort, state.shortVideo?.deleted, state.shortVideo?.authorAccountStatus])
+  });
+  const sharePanelLoading = requestPanel ? null : createShortVideoPanelLoadingController({
+    captureContext: captureShareContext,
+    isCurrentContext: (owner) => {
+      const current = captureShareContext();
+      return owner.browser === current.browser && owner.grid === current.grid
+        && owner.browser?.isConnected !== false && owner.view === current.view
+        && owner.id === current.id && owner.scope === current.scope;
+    },
+    showError: (error, message) => showToast(error?.message || message)
+  });
 
   function railMetric(icon, value, kind = "", label = "", action = null) {
     const metric = Math.max(0, Number(value || 0));
@@ -66,78 +90,75 @@ export function createShortVideoActionsController(dependencies) {
     const type = actionType === "collect" ? "collect" : "like";
     const button = resolveRailActionButton(target, type);
     const videoId = String(video?.id || button?.dataset?.videoId || "").trim();
-    if (!button || !videoId || button.getAttribute("aria-busy") === "true") return;
-    const activeClass = type === "like" ? "is-liked" : "is-active";
-    const wasActive = button.classList.contains(activeClass);
+    if (!button || !videoId) return;
+    const field = type === "like" ? "liked" : "collected", metric = type === "like" ? "likes" : "collects";
+    const sourceVideo = video?.id ? video : { id: videoId, actions: { [field]: button.classList.contains(type === "like" ? "is-liked" : "is-active") }, stats: { [metric]: Number(button.dataset.metricValue || 0) } };
+    const wasActive = interactionState.videoState(sourceVideo, type).active;
     const nextActive = typeof options.forceActive === "boolean" ? options.forceActive : !wasActive;
     if (nextActive === wasActive) return;
-    const previousMetric = Math.max(0, Number(button.dataset.metricValue || 0));
-    const optimisticMetric = Math.max(0, previousMetric + (nextActive ? 1 : -1));
-    applyRailActionButtonState(button, type, nextActive, optimisticMetric);
     animateRailActionButton(button, nextActive);
-    button.setAttribute("aria-busy", "true");
-    try {
-      const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}/actions/${type}`, {
+    const result = await interactionState.mutateVideo(sourceVideo, type, nextActive, {
+      send: active => api(`/api/short-videos/${encodeURIComponent(videoId)}/actions/${type}`, {
         method: "PUT",
-        body: { active: nextActive }
-      });
-      const updated = data.video || null;
-      if (updated) {
-        syncShortVideoActionVideo(updated);
-        syncShortVideoActionButtons(updated, type);
-      } else {
-        applyRailActionButtonState(button, type, Boolean(data.active), optimisticMetric);
+        body: { active }
+      }),
+      onChange: () => {
+        syncShortVideoActionVideo(sourceVideo);
+        syncShortVideoActionButtons(sourceVideo, type);
+        const current = interactionState.videoState(sourceVideo, type);
+        applyRailActionButtonState(button, type, current.active, sourceVideo.stats?.[metric]);
+        if (current.pending) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
       }
-      if (!options.silent) {
-        showToast(type === "like"
-          ? (nextActive ? "已点赞" : "已取消点赞")
-          : (nextActive ? "已收藏" : "已取消收藏"));
-      }
-    } catch (error) {
-      console.warn(error);
-      applyRailActionButtonState(button, type, wasActive, previousMetric);
-      showToast(type === "like" ? "点赞状态保存失败" : "收藏状态保存失败");
-    } finally {
-      button.removeAttribute("aria-busy");
+    });
+    if (!result.superseded && !options.silent && button.isConnected !== false) {
+      showToast(!result.ok ? (type === "like" ? "点赞状态保存失败" : "收藏状态保存失败") : type === "like"
+        ? (result.active ? "已点赞" : "已取消点赞") : (result.active ? "已收藏" : "已取消收藏"));
     }
   }
 
-  async function toggleShortVideoDislike(video, active = !Boolean(video?.actions?.disliked)) {
+  async function toggleShortVideoDislike(video, active) {
     const videoId = String(video?.id || "").trim();
     if (!videoId) return false;
-    try {
-      const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}/actions/dislike`, {
+    const desired = typeof active === "boolean" ? active : !interactionState.videoState(video, "dislike").active;
+    const result = await interactionState.mutateVideo(video, "dislike", desired, {
+      send: desired => api(`/api/short-videos/${encodeURIComponent(videoId)}/actions/dislike`, {
         method: "PUT",
-        body: { active: Boolean(active) }
-      });
-      const updated = data.video || null;
-      if (updated) syncShortVideoActionVideo(updated);
-      const disliked = updated ? Boolean(updated.actions?.disliked) : Boolean(data.active);
-      showToast(disliked ? "已减少此类推荐" : "已撤销不感兴趣");
-      return disliked;
-    } catch (error) {
-      console.warn(error);
-      showToast("推荐反馈保存失败");
-      return false;
-    }
+        body: { active: desired }
+      }), onChange: () => syncShortVideoActionVideo(video)
+    });
+    if (!result.superseded) showToast(result.ok ? (result.active ? "已减少此类推荐" : "已撤销不感兴趣") : "推荐反馈保存失败");
+    return result.ok && result.active;
   }
 
   function createAuthorFollowButton(video, author = video?.author || {}, variant = "panel") {
+    let boundVideo = video, boundAuthor = author;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `short-video-follow-button is-${variant}`;
     button.dataset.authorFollowVariant = variant;
-    button.dataset.authorFollowKey = authorFollowKey(video, author);
-    applyAuthorFollowButtonState(button, Boolean(author?.following), author?.name || "作者");
-    if (!authorFollowKey(video, author)) {
-      button.disabled = true;
-      button.setAttribute("aria-label", "当前作者无法关注");
-      return button;
-    }
+    const sync = () => {
+      interactionState.mergeVideo(boundVideo);
+      const current = interactionState.followState(boundVideo, boundAuthor);
+      boundAuthor.following = current.active;
+      button.dataset.authorFollowKey = current.key;
+      button.disabled = !current.key;
+      applyAuthorFollowButtonState(button, current.active, boundAuthor?.name || "作者");
+      if (current.pending) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
+      if (!current.key) button.setAttribute("aria-label", "当前作者无法关注");
+    };
+    button.shortVideoUpdateMetadata = nextVideo => {
+      if (!nextVideo || String(nextVideo.id || "") !== String(boundVideo?.id || "")) return false;
+      boundVideo = nextVideo;
+      boundAuthor = nextVideo.author || {};
+      sync();
+      return true;
+    };
+    button.shortVideoSyncFollow = sync;
+    sync();
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      toggleAuthorFollow(video, author, button).catch(() => {});
+      return toggleAuthorFollow(boundVideo, boundAuthor, button).catch(() => {});
     });
     return button;
   }
@@ -164,12 +185,17 @@ export function createShortVideoActionsController(dependencies) {
   }
 
   function shareShortVideo(video, options = {}) {
-    return ensureShortVideoSharePanel()
-      .then((showSharePanel) => showSharePanel(video, options))
-      .catch((error) => showToast(error?.message || "分享模块加载失败"));
+    return (requestPanel || sharePanelLoading.open)({
+      load: ensureShortVideoSharePanel,
+      show: (showSharePanel, { isCurrent }) => showSharePanel(video, { ...options, isCurrent }),
+      trigger: options.trigger,
+      errorMessage: "分享模块加载失败"
+    });
   }
 
-  async function copyShortVideoValue(value, message = "已复制链接") {
+  async function copyShortVideoValue(value, message = "已复制链接", options = {}) {
+    const isCurrent = () => options.isCurrent?.() !== false;
+    if (!isCurrent()) return false;
     const text = String(value || "").trim();
     if (!text) throw new Error("没有可复制的内容");
     try {
@@ -180,14 +206,17 @@ export function createShortVideoActionsController(dependencies) {
             new Promise((_, reject) => window.setTimeout(() => reject(new Error("clipboard timeout")), 800))
           ]);
         } catch {
+          if (!isCurrent()) return false;
           fallbackCopyText(text);
         }
       } else {
         fallbackCopyText(text);
       }
+      if (!isCurrent()) return false;
       showToast(message);
       return true;
     } catch (error) {
+      if (!isCurrent()) return false;
       showToast("复制失败，请手动选择链接");
       throw error;
     }
@@ -223,14 +252,15 @@ export function createShortVideoActionsController(dependencies) {
 
   function syncShortVideoActionVideo(updated) {
     if (!updated?.id) return;
+    interactionState.mergeVideo(updated);
     for (const item of shortVideoCandidates()) {
-      if (!item || !isCurrentVideo(updated, item)) continue;
-      item.stats = { ...(item.stats || {}), ...(updated.stats || {}) };
-      item.actions = { ...(item.actions || {}), ...(updated.actions || {}) };
+      if (!item || String(updated.id) !== String(item.id)) continue;
+      interactionState.mergeVideo(item);
     }
   }
 
   function syncShortVideoActionButtons(video, actionType) {
+    interactionState.mergeVideo(video);
     const type = actionType === "collect" ? "collect" : "like";
     const active = type === "like" ? Boolean(video.actions?.liked) : Boolean(video.actions?.collected);
     const metric = type === "like" ? video.stats?.likes : video.stats?.collects;
@@ -238,6 +268,7 @@ export function createShortVideoActionsController(dependencies) {
     for (const button of buttons) {
       if (String(button.dataset.videoId || "") !== String(video.id || "")) continue;
       applyRailActionButtonState(button, type, active, metric);
+      if (interactionState.videoState(video, type).pending) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
     }
   }
 
@@ -275,55 +306,35 @@ export function createShortVideoActionsController(dependencies) {
 
   async function toggleAuthorFollow(video, author = video?.author || {}, button) {
     const authorId = authorFollowKey(video, author);
-    if (!authorId || !button || button.getAttribute("aria-busy") === "true") return;
-    const wasFollowing = button.classList.contains("is-following");
-    const nextFollowing = !wasFollowing;
-    applyAuthorFollowButtonState(button, nextFollowing, author?.name || "作者");
-    button.setAttribute("aria-busy", "true");
-    try {
-      const data = await api(`/api/short-videos/authors/${encodeURIComponent(authorId)}/follow`, {
+    if (!authorId || !button) return;
+    const nextFollowing = !interactionState.followState(video, author).active;
+    const result = await interactionState.mutateFollow(video, author, nextFollowing, {
+      send: active => api(`/api/short-videos/authors/${encodeURIComponent(authorId)}/follow`, {
         method: "PUT",
-        body: { active: nextFollowing }
-      });
-      const following = Boolean(data.active);
-      const updated = {
-        ...(video || {}),
-        ownerUserId: data.targetUserId || author?.id || video?.ownerUserId || "",
-        author: {
-          ...(author || {}),
-          id: data.targetUserId || author?.id || "",
-          secUid: data.secUid || author?.secUid || "",
-          following
-        }
-      };
-      syncShortVideoAuthorFollow(updated, following);
-      showToast(following ? `已关注 ${author?.name || "作者"}` : `已取关 ${author?.name || "作者"}`);
-    } catch (error) {
-      console.warn(error);
-      applyAuthorFollowButtonState(button, wasFollowing, author?.name || "作者");
-      showToast("关注状态保存失败");
-    } finally {
-      button.removeAttribute("aria-busy");
+        body: { active }
+      }), onChange: () => syncShortVideoAuthorFollow(video)
+    });
+    if (!result.superseded && button.isConnected !== false && button.dataset.authorFollowKey === result.key) {
+      showToast(result.ok ? (result.active ? `已关注 ${author?.name || "作者"}` : `已取关 ${author?.name || "作者"}`) : "关注状态保存失败");
     }
   }
 
   function syncShortVideoAuthorFollow(updatedVideo, following) {
     if (!updatedVideo) return;
+    interactionState.mergeVideo(updatedVideo);
     for (const item of shortVideoCandidates()) {
-      if (!item || !sameShortVideoAuthor(updatedVideo, item)) continue;
-      item.author = { ...(item.author || {}), following: Boolean(following) };
+      if (item) interactionState.mergeVideo(item);
     }
-    const authorKey = authorFollowKey(updatedVideo, updatedVideo.author);
     for (const item of state.shortVideo?.authors || []) {
-      if (authorFollowKey({}, item) === authorKey) item.following = Boolean(following);
+      item.following = interactionState.mergeVideo({ author: item }).author.following;
     }
-    if (state.shortVideo?.authorDetail && authorFollowKey({}, state.shortVideo.authorDetail) === authorKey) {
-      state.shortVideo.authorDetail.following = Boolean(following);
+    if (state.shortVideo?.authorDetail) {
+      const item = state.shortVideo.authorDetail;
+      item.following = interactionState.mergeVideo({ author: item }).author.following;
     }
     const buttons = getWorkGrid()?.querySelectorAll?.("[data-author-follow-key]") || [];
     for (const followButton of buttons) {
-      if (String(followButton.dataset.authorFollowKey || "") !== authorKey) continue;
-      applyAuthorFollowButtonState(followButton, following, updatedVideo.author?.name || "作者");
+      followButton.shortVideoSyncFollow?.();
     }
   }
 
@@ -332,13 +343,14 @@ export function createShortVideoActionsController(dependencies) {
       state.shortVideo?.current,
       state.shortVideo?.prevVideo,
       state.shortVideo?.nextVideo,
-      ...(state.shortVideo?.data?.videos || [])
+      ...(state.shortVideo?.data?.videos || []),
+      ...(state.shortVideo?.collectionData?.videos || [])
     ];
   }
 
   function ensureShortVideoSharePanel() {
     if (sharePanelPromise) return sharePanelPromise;
-    const moduleUrl = "/modules/short-videos/share-panel.js?v=20260715-share-lazy-01";
+    const moduleUrl = "/modules/short-videos/share-panel.js?v=20261027-share-lifecycle-01";
     sharePanelPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoSharePanel !== "function") throw new Error("分享模块加载失败");
       return module.createShortVideoSharePanel({

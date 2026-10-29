@@ -15,12 +15,89 @@
       html.app-module-loading body {
         visibility: hidden;
       }
+      #appStartupNotice {
+        box-sizing: border-box;
+        display: grid;
+        gap: 12px;
+        width: calc(100% - 32px);
+        max-width: 720px;
+        margin: 24px auto;
+        padding: 20px;
+        border: 1px solid #91a79f;
+        border-radius: 12px;
+        background: #f5faf7;
+        color: #18382d;
+        font: 16px/1.55 system-ui, sans-serif;
+        overflow-wrap: anywhere;
+      }
+      #appStartupNotice h2, #appStartupNotice p { margin: 0; }
+      #appStartupNotice h2 { font-size: 20px; }
+      #appStartupNotice[role="alert"] { visibility: visible; }
+      #appStartupReload {
+        justify-self: start;
+        min-width: 44px;
+        min-height: 44px;
+        border: 1px solid #1f7a62;
+        border-radius: 6px;
+        background: #1f7a62;
+        color: #fff;
+        padding: 8px 16px;
+        font: inherit;
+        cursor: pointer;
+      }
+      #appStartupReload:focus-visible { outline: 3px solid #18382d; outline-offset: 3px; }
+      #appStartupReload[aria-disabled="true"] { cursor: wait; opacity: .7; }
     </style>
     <script>
       (() => {
         document.documentElement.classList.add("app-styles-loading");
+        const startupHref = window.location.href;
+        const failedStyles = new Set();
+        let moduleFailed = false;
+        let startupNotice = null;
+        let reloading = false;
+        const ownsStartup = () => window.location.href === startupHref
+          || document.documentElement.classList.contains("app-module-loading");
+        const renderStartupNotice = () => {
+          if (!document.body || !ownsStartup() || !moduleFailed && !failedStyles.size) return;
+          if (!startupNotice?.isConnected) {
+            const notice = document.createElement("section");
+            notice.id = "appStartupNotice";
+            notice.setAttribute("aria-labelledby", "appStartupTitle");
+            notice.setAttribute("aria-describedby", "appStartupMessage");
+            const title = document.createElement("h2");
+            title.id = "appStartupTitle";
+            const message = document.createElement("p");
+            message.id = "appStartupMessage";
+            const reload = document.createElement("button");
+            reload.id = "appStartupReload";
+            reload.type = "button";
+            reload.textContent = "重新加载页面";
+            reload.addEventListener("click", () => {
+              if (reloading || startupNotice !== notice || !notice.isConnected) return;
+              reloading = true;
+              reload.setAttribute("aria-disabled", "true");
+              reload.setAttribute("aria-busy", "true");
+              window.location.reload();
+            });
+            notice.append(title, message, reload);
+            startupNotice = notice;
+            document.body.prepend(notice);
+          }
+          startupNotice.setAttribute("role", moduleFailed ? "alert" : "status");
+          startupNotice.querySelector("h2").textContent = moduleFailed ? "页面未能启动" : "部分页面样式未加载";
+          startupNotice.querySelector("p").textContent = moduleFailed
+            ? "页面所需内容加载失败。请检查网络连接，再重新加载页面。"
+            : "页面仍可继续使用，显示可能不完整。可以重新加载页面再试。";
+        };
+        window.__fanhaoReportStartupFailure = () => {
+          if (!ownsStartup()) return;
+          moduleFailed = true;
+          renderStartupNotice();
+        };
+        document.addEventListener("DOMContentLoaded", renderStartupNotice, { once: true });
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-b511a5489b24";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-a6283233aace";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -33,13 +110,13 @@
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/short-videos/styles/list.css?v=20260917-author-delete-01",
-          "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
+          "/modules/short-videos/styles/viewer.css?v=20261027-caption-01",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
-          "/modules/short-videos/styles/panels.css?v=20260823-delete-confirm-01",
-          "/modules/short-videos/styles/responsive.css?v=20260812-collection-review-02"
+          "/modules/short-videos/styles/panels.css?v=20261027-speed-picker-01",
+          "/modules/short-videos/styles/responsive.css?v=20261027-caption-01"
         ];
         const shortVideoViewerStyleUrls = [
-          "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
+          "/modules/short-videos/styles/viewer.css?v=20261027-caption-01",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75"
         ];
         const fanhaoStyleUrls = [
@@ -111,7 +188,13 @@
             link.href = href;
             link.fetchPriority = "high";
             link.addEventListener("load", resolve, { once: true });
-            link.addEventListener("error", resolve, { once: true });
+            link.addEventListener("error", () => {
+              resolve();
+              if (ownsStartup()) {
+                failedStyles.add(href);
+                renderStartupNotice();
+              }
+            }, { once: true });
             document.head.append(link);
           });
           stylePromises.set(href, promise);
@@ -257,10 +340,13 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-b511a5489b24");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-a6283233aace");
+        shortVideoModulePromise.catch(() => window.__fanhaoReportStartupFailure?.());
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;
+        } catch {
+          window.__fanhaoReportStartupFailure?.();
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }
@@ -268,6 +354,8 @@
         await window.__fanhaoStylesReady;
         try {
           await import("/standalone-app.js?v=20261004-reader-navigation-owner-06");
+        } catch {
+          window.__fanhaoReportStartupFailure?.();
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }
@@ -275,6 +363,8 @@
         await window.__fanhaoStylesReady;
         try {
           await import("/fanhao-app.js?v=20261023-person-aliases-01");
+        } catch {
+          window.__fanhaoReportStartupFailure?.();
         } finally {
           document.documentElement.classList.remove("app-module-loading");
         }

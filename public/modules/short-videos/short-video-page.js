@@ -1,21 +1,37 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
-import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
+import { createShortVideoActionsController } from "./actions-controller.js?v=20261027-interaction-state-01";
+import { createShortVideoPanelLoadingController } from "./panel-loading-controller.js?v=20261027-panel-loading-01";
+import { createShortVideoFullscreenController } from "./fullscreen-controller.js?v=20261027-fullscreen-01";
+import { createShortVideoPictureInPictureController } from "./picture-in-picture-controller.js?v=20261027-picture-in-picture-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260917-author-delete-01";
-import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260812-collection-busy-01";
-import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20260811-custom-collections-01";
+import { createShortVideoCollectionsController } from "./collections-controller.js?v=20261027-detail-lifecycle-01";
+import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20261027-caption-01";
+import { createShortVideoCaptionController } from "./caption-controller.js?v=20261027-caption-01";
+import { createShortVideoInteractionState } from "./interaction-state.js?v=20261027-interaction-state-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260824-local-file-actions-01";
 import { createShortVideoLocalActions } from "./local-actions.js?v=20260824-local-file-actions-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
-import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
+import { createShortVideoMediaCache } from "./media-cache.js?v=20261027-detail-lifecycle-01";
+import { allowShortVideoSpeculativePrewarm } from "./prewarm-policy.js?v=20261027-prewarm-budget-01";
+import { runShortVideoRead } from "./read-request.js?v=20261027-detail-lifecycle-01";
 import { readLikeDistributionCache } from "./like-distribution-cache.js?v=20260825-author-efficiency-01";
 import { createLikeDistributionLoader } from "./like-distribution-loader.js?v=20260825-author-cleanup-02";
 import { renderLikeDistributionPageShell } from "./like-distribution-page-shell.js?v=20260825-author-efficiency-01";
-import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20260720-observed-playback-issues-01";
-import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20261016-gallery-handoff-01";
-import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
+import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20261027-retry-intent-01";
+import { shouldHandleShortVideoShortcut } from "./playback-keyboard-policy.js?v=20261027-playback-keyboard-01";
+import { createShortVideoSeekController } from "./seek-controller.js?v=20261027-page-lifecycle-02";
+import { createShortVideoProgressLoop } from "./progress-loop-controller.js?v=20261027-progress-loop-01";
+import { createShortVideoHoldSpeedController } from "./hold-speed-controller.js?v=20261027-hold-speed-01";
+import { createShortVideoWheelController } from "./wheel-controller.js?v=20261027-wheel-controller-01";
+import { createShortVideoBufferedProgress } from "./buffered-progress.js?v=20261027-buffered-progress-01";
+import { createShortVideoAutoNextController } from "./auto-next-controller.js?v=20261027-auto-next-01";
+import { createShortVideoWatchResumeController } from "./watch-resume-controller.js?v=20261027-watch-resume-01";
+import { createShortVideoFirstFrameController } from "./first-frame-controller.js?v=20261027-page-lifecycle-02";
+import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20261027-prewarm-budget-01";
+import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20261027-transcode-lifecycle-01";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
-import { mergeShortVideoWatchPayload } from "./watch-write-payload.js?v=20260813-watch-write-pending-01";
+import { createShortVideoWatchWriteController } from "./watch-write-controller.js?v=20261027-watch-queue-01";
 import { shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
 import { createShortVideoDeleteActions } from "./delete-actions.js?v=20260823-delete-confirm-01";
 import { createShortVideoDeleteRecoveryController } from "./delete-recovery.js?v=20260813-delete-client-state-02";
@@ -72,8 +88,7 @@ export function createShortVideoPage(deps) {
     resetProgressiveCoverLoading,
     setMainHeader,
     state,
-    syncRouteAfterNavigation,
-    takeDirectShortVideoPlaybackPrewarm
+    syncRouteAfterNavigation
   } = deps;
   let likeDistributionViewPromise = null;
   let likeDistributionRenderToken = 0;
@@ -84,7 +99,9 @@ export function createShortVideoPage(deps) {
   let shortVideoGalleryPlayerPromise = null;
   let shortVideoListCardsPromise = null;
   let shortVideoListCards = null;
+  let shortVideoHomePresentation = null;
   const playbackRenditionPolicy = createShortVideoPlaybackRenditionPolicy({ api });
+  const shortVideoInteractionState = createShortVideoInteractionState();
   const deleteRecoveryController = createShortVideoDeleteRecoveryController({ api });
   const deleteActions = createShortVideoDeleteActions({ api, recovery: deleteRecoveryController, showToast: showBrowserToast });
   const runShortVideoLocalAction = createShortVideoLocalActions({ api, showToast: showBrowserToast });
@@ -110,6 +127,9 @@ export function createShortVideoPage(deps) {
   let touchVelocityX = 0;
   let touchVelocityY = 0;
   let touchControlInteraction = false;
+  let touchGestureOwner = null;
+  let touchIdentifier = null;
+  let touchBlockedUntilLift = false;
   let pointerStartX = 0;
   let pointerStartY = 0;
   let pointerDeltaX = 0;
@@ -121,24 +141,36 @@ export function createShortVideoPage(deps) {
   let pointerLastAt = 0;
   let pointerVelocityX = 0;
   let pointerVelocityY = 0;
+  let pointerGestureOwner = null;
+  let pointerIdentifier = null;
   let suppressNextPlayerClick = false;
   let holdSpeedGestureConsumed = false;
   let holdSpeedGestureBlockUntil = 0;
-  let wheelDeltaY = 0;
-  let wheelLastAt = 0;
-  let wheelResetTimer = 0;
+  let shortVideoWheelController = null;
   let reelDragRaf = 0;
   let reelDragDeltaY = 0;
+  let reelDragOwner = null;
+  let reelDragToken = 0;
   let reelBoundaryPulseRaf = 0;
   let reelBoundaryPulseTimer = 0;
   let reelBoundaryResetTimer = 0;
   let wheelIgnoreUntil = 0;
-  let wheelGestureConsumed = false;
-  let wheelGestureStartedAt = 0;
   let queuedAdjacentDirection = 0;
+  let shortVideoNavigationState = null;
+  let shortVideoSoundPreviewAudio = null;
+  let shortVideoFullscreenController = null;
+  let shortVideoPictureInPictureController = null;
+  const shortVideoPanelLoadingController = createShortVideoPanelLoadingController({
+    captureContext: captureShortVideoPanelContext,
+    isCurrentContext: isCurrentShortVideoPanelContext,
+    showError: (error, message) => showBrowserToast(error?.message || message)
+  });
+  let shortVideoAutoNextController = null;
+  let shortVideoAutoNextStatus = null;
   let eventsInstalled = false;
   let playerClickTimer = 0;
   let pendingPlayerTap = null;
+  let shortVideoTapGuardPlayer = null;
   const initialVideoLimit = 48;
   const appendVideoLimit = 72;
   const coverEagerCount = 18;
@@ -153,6 +185,9 @@ export function createShortVideoPage(deps) {
   let shortVideoListRequestId = 0;
   let searchUsersGeneration = 0;
   let shortVideoOpenRequestId = 0;
+  let shortVideoOpenReadController = null;
+  let shortVideoPlaybackLifecycleGeneration = 0;
+  let shortVideoPageSuspended = false;
   let shortVideoOpeningId = "";
   let shortVideoOpenError = "";
   let shortVideoNavigationPrefetchTimer = 0;
@@ -162,6 +197,8 @@ export function createShortVideoPage(deps) {
   let shortVideoCacheSampleCounter = 0;
   const loadedCoverIds = new Set();
   const shortVideoWatchWrites = new Map();
+  let shortVideoWatchWriteController = null;
+  let shortVideoWatchWriteNoticeAt = null;
   const shortVideoAuthorMentionCache = new Map();
   const shortVideoVideoPrefetches = new Map();
   const SHORT_VIDEO_WATCH_SAVE_INTERVAL = 4000;
@@ -220,6 +257,7 @@ export function createShortVideoPage(deps) {
     toggleShortVideoAction,
     toggleShortVideoDislike
   } = createShortVideoActionsController({
+    interactionState: shortVideoInteractionState,
     api,
     bindModalFocusLoop: bindShortVideoModalFocusLoop,
     cardTitle,
@@ -231,17 +269,20 @@ export function createShortVideoPage(deps) {
     isCurrentVideo: isCurrentShortVideo,
     isGalleryPost,
     isolateTransientModal: isolateShortVideoTransientModal,
+    requestPanel: requestShortVideoPanel,
     shortVideoAuthorHandle: (author) => shortVideoAuthorHandle(author),
     showToast: showBrowserToast,
     state
   });
   const collectionsController = createShortVideoCollectionsController({
+    interactionState: shortVideoInteractionState,
     api,
     createIcon,
     ensureListCards: ensureShortVideoListCards,
     getListCards: () => shortVideoListCards,
     loadFeed: () => loadVideos({ skipRoute: true }).catch(showError),
     onNavigationChange: () => { syncCurrentNavigationDom(); syncActivePlaybackMode(); },
+    onScopeChange: invalidateShortVideoListWork,
     onOpenVideo: (video, options = {}) => openVideo(video.id, {
       ...options,
       ...(Object.keys(video || {}).length > 1 ? { video } : {})
@@ -316,9 +357,12 @@ export function createShortVideoPage(deps) {
   const {
     renderAuthorAccountStatusControl,
     renderDeletedControl: renderShortVideoDeletedControl,
-    renderSortControl: renderShortVideoSortControl
+    renderSortControl: renderShortVideoSortControl,
+    syncControls: syncShortVideoFilterControls
   } = createShortVideoFilterControls({
     clearSelection: clearShortVideoDeleteSelection,
+    captureControlContext: shortVideoHomeScope,
+    isCurrentControl: isCurrentShortVideoHomeControl,
     formatNumber,
     isAuthorDetailPage: isShortVideoAuthorDetailPage,
     loadVideos,
@@ -353,14 +397,18 @@ export function createShortVideoPage(deps) {
     cachedNavigation: cachedShortVideoNavigation,
     cachedVideo: cachedShortVideo,
     fetchDetail: fetchShortVideoDetail,
+    forgetVideos: forgetCachedShortVideos,
+    isDeleted: isDeletedShortVideo,
     prefetchFirstMedia: prefetchShortVideoFirstMedia,
-    prefetchRelatedVideo,
+    prefetchRelatedVideo: prefetchRelatedShortVideoMedia,
     prewarmPlayback: prewarmShortVideoPlayback,
+    releasePlaybackPreloads: releaseShortVideoMediaPreloads,
     rememberVideo: rememberShortVideo,
     resolvedDetail: resolvedShortVideoDetail,
     stats: shortVideoMediaCacheStats,
     takePrewarmedPlayer: takePrewarmedShortVideoPlayer
   } = createShortVideoMediaCache({
+    interactionState: shortVideoInteractionState,
     api,
     cacheAuthorPanelVideo,
     cachedAuthorPanelVideo,
@@ -370,14 +418,40 @@ export function createShortVideoPage(deps) {
     markPerformance: markShortVideoPerformance,
     shortVideoCardCoverUrl,
     shortVideoPlaybackUrl,
-    takeDirectPlaybackPrewarm: takeDirectShortVideoPlaybackPrewarm,
+    canSpeculate: canSpeculativelyWarmShortVideo,
     waitForVideoFirstFrame
   });
 
-  function contextualShortVideoDetail(videoId) {
+  function canSpeculativelyWarmShortVideo() {
+    return allowShortVideoSpeculativePrewarm({ hidden: document.hidden,
+      connection: globalThis.navigator?.connection, currentPlayer: activePlayer() });
+  }
+
+  function releaseUnusedShortVideoPreloads(options = {}) {
+    releaseShortVideoMediaPreloads(options);
+  }
+
+  function prewarmShortVideoListCard(video) {
+    const root = els.workGrid?.firstElementChild;
+    const scope = shortVideoNavigationScope();
+    return prewarmShortVideoPlayback(video, { owner: root,
+      isCurrent: () => Boolean(root?.isConnected && root.getAttribute("aria-busy") !== "true"
+        && scope === shortVideoNavigationScope() && state.activeView === "shortVideos" && !state.shortVideo.current) });
+  }
+
+  function prefetchRelatedVideo(video) {
+    const panel = els.workGrid?.querySelector?.(".short-video-author-panel");
+    const root = panel?.querySelector?.(".short-video-author-content")?.firstElementChild;
+    const tab = panel?.dataset.activeTab;
+    return prefetchRelatedShortVideoMedia(video, { owner: root || panel,
+      isCurrent: () => Boolean(state.activeView === "shortVideos" && root?.isConnected && panel?.isConnected && panel.dataset.activeTab === tab
+        && panel.dataset.closing !== "1" && panel.dataset.disposed !== "1") });
+  }
+
+  function contextualShortVideoDetail(videoId, options = {}) {
     return state.shortVideo.mode === "collection"
-      ? collectionsController.loadCollectionVideoDetail(videoId)
-      : fetchShortVideoDetail(videoId);
+      ? collectionsController.loadCollectionVideoDetail(videoId, options)
+      : fetchShortVideoDetail(videoId, shortVideoFeedParams(), options);
   }
   function markShortVideoPerformance(name, details = {}) {
     const now = Date.now();
@@ -430,15 +504,6 @@ export function createShortVideoPage(deps) {
     }
   }
 
-  function trimShortVideoWatchWrites(protectedVideoId = "") {
-    while (shortVideoWatchWrites.size > SHORT_VIDEO_WATCH_WRITE_CACHE_LIMIT) {
-      const removable = [...shortVideoWatchWrites.entries()]
-        .find(([videoId, write]) => videoId !== protectedVideoId && !write?.inFlight && !write?.pending);
-      if (!removable) return;
-      shortVideoWatchWrites.delete(removable[0]);
-    }
-  }
-
   function markShortVideoCacheState() {
     if (document.documentElement.dataset.shortVideoPerfCapture !== "1") return;
     shortVideoCacheSampleCounter += 1;
@@ -488,6 +553,8 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    flushActiveShortVideoWatch();
+    invalidateShortVideoListWork();
     const previousAuthorPage = state.shortVideo.authorPage;
     syncAuthorCollectorRouteLifecycle(route.shortVideoMode !== "likes" && !route.shortVideoId ? route.shortVideoAuthorPage : "");
     state.shortVideo.mode = ["collection", "likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
@@ -526,11 +593,13 @@ export function createShortVideoPage(deps) {
       return;
     }
     if (route.shortVideoMode === "transcoding") {
+      invalidateShortVideoListWork();
       transcodeManagementPage.activate();
       renderView();
       return;
     }
     if (route.shortVideoMode === "likes") {
+      invalidateShortVideoListWork();
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;
       state.shortVideo.nextVideo = null;
@@ -569,10 +638,74 @@ export function createShortVideoPage(deps) {
     await loadVideos({ skipRoute: true });
   }
 
+  function shortVideoListScope() {
+    return JSON.stringify([shortVideoNavigationScope(), state.shortVideo.authorPage || "",
+      state.shortVideo.source || "liked", state.shortVideo.authorSort || "", state.shortVideo.authorFilter || ""]);
+  }
+
+  function invalidateShortVideoListWork() {
+    collectionsController.cancelReads?.();
+    shortVideoListRequestId += 1;
+    searchUsersGeneration += 1;
+    shortVideoOpenRequestId += 1;
+    shortVideoOpeningId = "";
+    shortVideoOpenError = "";
+    state.shortVideo.loading = false;
+    state.shortVideo.loadingMore = false;
+    state.shortVideo.authorLoadingMore = false;
+    cancelShortVideoNavigation();
+  }
+
+  function captureShortVideoListOwner(requestId, append = false, authorIndex = false) {
+    return { requestId, scope: shortVideoListScope(), append, authorIndex,
+      cursor: String(state.shortVideo.data?.nextCursor || ""),
+      ids: append && !authorIndex ? (state.shortVideo.data?.videos || []).map(video => String(video.id)) : null };
+  }
+
+  function ownsShortVideoListOwner(owner) {
+    if (state.activeView !== "shortVideos" || owner.requestId !== shortVideoListRequestId || owner.scope !== shortVideoListScope()) return false;
+    if (!owner.ids) return true;
+    if (!state.shortVideo.data || owner.cursor !== String(state.shortVideo.data.nextCursor || "")) return false;
+    const expected = owner.ids.filter(id => !isDeletedShortVideo(id));
+    const current = (state.shortVideo.data.videos || []).filter(video => !isDeletedShortVideo(video.id)).map(video => String(video.id));
+    return expected.length === current.length && expected.every((id, index) => id === current[index]);
+  }
+
+  function shortVideoListHasViewer() {
+    return Boolean(state.shortVideo.current || shortVideoOpeningId);
+  }
+
+  function staleShortVideoListResult(owner) {
+    if (state.activeView === "shortVideos" && owner.requestId === shortVideoListRequestId && owner.scope === shortVideoListScope()) {
+      state.shortVideo.loading = false;
+      state.shortVideo.loadingMore = false;
+      state.shortVideo.authorLoadingMore = false;
+    }
+    return SHORT_VIDEO_LOAD_STALE;
+  }
+
+  function handleShortVideoListFailure(error, owner) {
+    if (!ownsShortVideoListOwner(owner)) return staleShortVideoListResult(owner);
+    state.shortVideo.loading = false;
+    state.shortVideo.loadingMore = false;
+    state.shortVideo.authorLoadingMore = false;
+    if (shortVideoListHasViewer()) {
+      state.shortVideo.status = shortVideoFriendlyError(error, "列表读取失败");
+      return false;
+    }
+    throw error;
+  }
+
   async function loadVideos(options = {}) {
     ensureState();
     syncAuthorCollectorRouteLifecycle(state.shortVideo.current ? "" : state.shortVideo.authorPage);
     const append = Boolean(options.append);
+    if (!append && !options.keepCurrent) {
+      cancelShortVideoNavigation();
+      shortVideoOpenRequestId += 1;
+      shortVideoOpeningId = "";
+      shortVideoOpenError = "";
+    }
     if (!append) searchUsersGeneration += 1;
     const preserveHomeDuringLoad = preserveShortVideoHomeDuringLoad(append);
     if (!append && !shortVideoListCards) {
@@ -582,6 +715,7 @@ export function createShortVideoPage(deps) {
       if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
       if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => { renderStats(); renderView(); }, () => { shortVideoListRequestId += 1; shortVideoOpenRequestId += 1; })) return;
       const requestId = ++shortVideoListRequestId;
+      const owner = captureShortVideoListOwner(requestId, append, true);
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;
       state.shortVideo.nextVideo = null;
@@ -616,8 +750,11 @@ export function createShortVideoPage(deps) {
         params.set("filter", state.shortVideo.authorAccountStatus);
       }
       if (state.shortVideo.query) params.set("q", state.shortVideo.query);
-      const data = await api(`/api/short-videos/authors?${params}`);
-      if (requestId !== shortVideoListRequestId) return;
+      const data = await settleShortVideoLoad(api(`/api/short-videos/authors?${params}`), () => ownsShortVideoListOwner(owner))
+        .catch(error => handleShortVideoListFailure(error, owner));
+      if (data === SHORT_VIDEO_LOAD_STALE) return staleShortVideoListResult(owner);
+      if (data === false) return false;
+      if (!ownsShortVideoListOwner(owner)) return staleShortVideoListResult(owner);
       const nextAuthors = Array.isArray(data.authors) ? data.authors : [];
       if (append) {
         const merged = [...state.shortVideo.authors];
@@ -641,9 +778,9 @@ export function createShortVideoPage(deps) {
       state.shortVideo.authorLoadingMore = false;
       state.shortVideo.status = "";
       renderStats();
-      renderView();
+      if (!shortVideoListHasViewer()) renderView();
       loadShortVideoSummary().catch(handleSummaryLoadError);
-      if (!options.skipRoute) {
+      if (!options.skipRoute && !shortVideoListHasViewer()) {
         const writer = options.replaceRoute ? replaceRoute : pushRoute;
         writer({ view: "shortVideos", shortVideoId: "" });
       }
@@ -651,6 +788,7 @@ export function createShortVideoPage(deps) {
     }
     if (append && (state.shortVideo.loading || state.shortVideo.loadingMore || !state.shortVideo.data?.hasMore)) return;
     const requestId = ++shortVideoListRequestId;
+    const owner = captureShortVideoListOwner(requestId, append);
     const captureListPerformance = document.documentElement.dataset.shortVideoPerfCapture === "1";
     const listRequestStartedAt = Date.now();
     if (captureListPerformance) {
@@ -699,15 +837,19 @@ export function createShortVideoPage(deps) {
     // Quality-filtered pages are cheap indexed reads and must not mix a cached
     // pre-probe page with newly measured append pages.
     if (state.shortVideo.quality !== "all") params.set("refresh", "1");
-    const requestedAuthorPage = String(state.shortVideo.authorPage || "").trim(); const currentRequest = () => isCurrentShortVideoLoadRequest(requestId, shortVideoListRequestId, requestedAuthorPage, state.shortVideo.authorPage, isShortVideoAuthorDetailPage());
+    const requestedAuthorPage = String(state.shortVideo.authorPage || "").trim(); const currentRequest = () => ownsShortVideoListOwner(owner)
+      && isCurrentShortVideoLoadRequest(requestId, shortVideoListRequestId, requestedAuthorPage, state.shortVideo.authorPage, isShortVideoAuthorDetailPage());
     if (!append && requestedAuthorPage) {
       resolveShortVideoAuthor(requestedAuthorPage).then((author) => {
-        if (requestId !== shortVideoListRequestId || state.shortVideo.authorPage !== requestedAuthorPage || !author) return;
+        if (!currentRequest() || !author) return;
         state.shortVideo.authorDetail = { ...(state.shortVideo.authorDetail || {}), ...author };
-        renderView();
+        if (!shortVideoListHasViewer()) renderView();
       }).catch(() => {});
     }
-    const data = await settleShortVideoLoad(api(`/api/short-videos?${params}`), currentRequest); if (data === SHORT_VIDEO_LOAD_STALE) return data;
+    const data = await settleShortVideoLoad(api(`/api/short-videos?${params}`), currentRequest)
+      .catch(error => handleShortVideoListFailure(error, owner));
+    if (data === SHORT_VIDEO_LOAD_STALE) return staleShortVideoListResult(owner);
+    if (data === false) return false;
     if (captureListPerformance) {
       markShortVideoPerformance("short-video-list-request-finish", {
         append,
@@ -726,8 +868,9 @@ export function createShortVideoPage(deps) {
           currentRequestId: shortVideoListRequestId
         });
       }
-      return SHORT_VIDEO_LOAD_STALE;
+      return staleShortVideoListResult(owner);
     }
+    const receivedVideos = (data.videos || []).filter(video => !isDeletedShortVideo(video.id));
     if (append && state.shortVideo.data) {
       const previousUsers = Array.isArray(state.shortVideo.data.users) ? state.shortVideo.data.users : [];
       const previousUsersTotal = Math.max(0, Number(state.shortVideo.data.usersTotal || 0));
@@ -735,11 +878,11 @@ export function createShortVideoPage(deps) {
       const stableTotal = appendCursor
         ? Math.max(0, Number(state.shortVideo.data.total || 0))
         : Math.max(0, Number(data.total || 0));
-      const seen = new Set((state.shortVideo.data.videos || []).map((video) => video.id));
-      const merged = [...(state.shortVideo.data.videos || [])];
-      for (const video of data.videos || []) {
-        if (seen.has(video.id)) continue;
-        seen.add(video.id);
+      const merged = (state.shortVideo.data.videos || []).filter(video => !isDeletedShortVideo(video.id));
+      const seen = new Set(merged.map(video => String(video.id)));
+      for (const video of receivedVideos) {
+        if (seen.has(String(video.id))) continue;
+        seen.add(String(video.id));
         merged.push(video);
       }
       state.shortVideo.data = {
@@ -757,6 +900,7 @@ export function createShortVideoPage(deps) {
     } else {
       state.shortVideo.data = {
         ...data,
+        videos: receivedVideos,
         usersLoading: Boolean(state.shortVideo.query && !isShortVideoAuthorDetailPage())
       };
     }
@@ -766,7 +910,7 @@ export function createShortVideoPage(deps) {
     state.shortVideo.topic = normalizeShortVideoTopic(data.topic || state.shortVideo.topic);
     state.shortVideo.sound = normalizeShortVideoSound(data.sound || state.shortVideo.sound);
     if (state.shortVideo.sound) {
-      state.shortVideo.soundInfo = (data.videos || []).find((video) => video?.sound?.key === state.shortVideo.sound)?.sound || state.shortVideo.soundInfo;
+      state.shortVideo.soundInfo = receivedVideos.find((video) => video?.sound?.key === state.shortVideo.sound)?.sound || state.shortVideo.soundInfo;
     }
     state.shortVideo.media = normalizeShortVideoMedia(data.media || state.shortVideo.media);
     state.shortVideo.quality = normalizeShortVideoQuality(data.quality || state.shortVideo.quality);
@@ -786,12 +930,12 @@ export function createShortVideoPage(deps) {
             ? "暂时没有推荐内容。可以在全部作品中撤销“不感兴趣”。"
         : "还没有短视频。");
     renderStats();
-    if (append) {
-      renderShortVideoWindow(false);
-      scheduleShortVideoWindowUpdate();
-      scheduleShortVideoAppendContinuation();
-    } else {
-      renderView();
+    if (!shortVideoListHasViewer()) {
+      if (append) {
+        renderShortVideoWindow(false);
+        scheduleShortVideoWindowUpdate();
+        scheduleShortVideoAppendContinuation();
+      } else renderView();
     }
     if (captureListPerformance) {
       markShortVideoPerformance("short-video-list-applied", {
@@ -803,7 +947,7 @@ export function createShortVideoPage(deps) {
         durationMs: Date.now() - listRequestStartedAt
       });
     }
-    if (!options.skipRoute) {
+    if (!options.skipRoute && !shortVideoListHasViewer()) {
       const writer = options.replaceRoute ? replaceRoute : pushRoute;
       writer({
         view: "shortVideos",
@@ -872,17 +1016,29 @@ export function createShortVideoPage(deps) {
 
   async function openVideo(videoId, options = {}) {
     ensureState();
-    if (!videoId) return;
+    if (!videoId || isDeletedShortVideo(videoId) || (options.video && isDeletedShortVideo(options.video))) return false;
+    flushActiveShortVideoWatch();
+    cancelShortVideoNavigation({ preserveWheelGesture: Boolean(options.preserveWheelGesture) });
     cancelAuthorCollectorPolling();
     const requestId = ++shortVideoOpenRequestId;
+    const controller = new AbortController();
+    shortVideoOpenReadController = controller;
+    const requestScope = shortVideoListScope();
+    const ownsOpenContext = () => requestId === shortVideoOpenRequestId && state.activeView === "shortVideos" && requestScope === shortVideoListScope();
+    const ownsOpen = () => ownsOpenContext() && !controller.signal.aborted && !isDeletedShortVideo(videoId) && (!options.video || !isDeletedShortVideo(options.video));
     const openStartedAt = Date.now();
-    const viewerStylesReady = Promise.resolve(ensureShortVideoViewerStyles?.()).catch(() => false);
+    const viewerStylesReady = runShortVideoRead(() => ensureShortVideoViewerStyles?.(), {
+      signal: controller.signal, timeoutMessage: "播放界面加载超时，请重试"
+    });
+    // Both reads start together. A timeout/abort may occur before the other
+    // await is reached; keep every independently settling read observed.
+    viewerStylesReady.catch(() => {});
     if (document.documentElement.dataset.shortVideoPerfCapture === "1") {
       viewerStylesReady.then(() => markShortVideoPerformance("video-viewer-styles-ready", {
         videoId: String(videoId),
         requestId,
         durationMs: Date.now() - openStartedAt
-      }));
+      })).catch(() => {});
     }
     markShortVideoPerformance("video-open-start", {
       videoId: String(videoId),
@@ -895,6 +1051,7 @@ export function createShortVideoPage(deps) {
     const openingVideo = state.shortVideo.mode === "collection"
       ? null
       : options.video || cachedShortVideo(videoId) || (feedIndex >= 0 ? feedVideos[feedIndex] : null);
+    try {
     if (openingVideo?.id) {
       markShortVideoPerformance("video-open-fast-path", {
         videoId: String(openingVideo.id),
@@ -902,20 +1059,26 @@ export function createShortVideoPage(deps) {
         feedIndex
       });
       rememberShortVideo(openingVideo);
-      prewarmShortVideoPlayback(openingVideo).catch(() => {});
+      prewarmShortVideoPlayback(openingVideo, { explicit: true, owner: `open:${requestId}`,
+        isCurrent: ownsOpen }).catch(() => {});
       await viewerStylesReady;
-      if (requestId !== shortVideoOpenRequestId) return false;
+      if (!ownsOpen()) return false;
       const collectionNavigation = collectionsController.collectionNavigation(openingVideo.id);
       const navigation = collectionNavigation || cachedShortVideoNavigation(openingVideo.id);
       const feedPrevious = feedIndex > 0 ? feedVideos[feedIndex - 1] : null;
       const feedNext = feedIndex >= 0 && feedIndex < feedVideos.length - 1 ? feedVideos[feedIndex + 1] : null;
-      const previousId = navigation?.prevId || String(feedPrevious?.id || "");
-      const nextId = navigation?.nextId || String(feedNext?.id || "");
+      const previousId = navigation && Object.hasOwn(navigation, "prevId") ? String(navigation.prevId || "") : String(feedPrevious?.id || "");
+      const nextId = navigation && Object.hasOwn(navigation, "nextId") ? String(navigation.nextId || "") : String(feedNext?.id || "");
       state.shortVideo.current = openingVideo;
       state.shortVideo.prevId = previousId;
       state.shortVideo.nextId = nextId;
       state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(previousId) || feedPrevious || null;
       state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(nextId) || feedNext || null;
+      beginShortVideoNavigation(openingVideo, {
+        prevKnown: Boolean(navigation && Object.hasOwn(navigation, "prevId")),
+        nextKnown: Boolean(navigation && Object.hasOwn(navigation, "nextId")
+          && !(state.shortVideo.mode === "collection" && !nextId && state.shortVideo.collectionData?.hasMore))
+      });
       rememberShortVideo(state.shortVideo.prevVideo);
       rememberShortVideo(state.shortVideo.nextVideo);
       state.shortVideo.slideDirection = Number(options.slideDirection || 0);
@@ -939,33 +1102,59 @@ export function createShortVideoPage(deps) {
     }
     state.shortVideo.loading = true;
     state.shortVideo.status = "正在打开视频";
-    const detailPromise = options.detailData
+    const detailPromise = runShortVideoRead(signal => options.detailData
       ? Promise.resolve(options.detailData)
-      : contextualShortVideoDetail(videoId);
-    try {
+      : contextualShortVideoDetail(videoId, { signal, isCurrent: ownsOpen, owner: controller, priority: "current" }),
+    { signal: controller.signal });
+    detailPromise.catch(() => {});
       if (options.renderLoading !== false) {
         await viewerStylesReady;
-        if (requestId !== shortVideoOpenRequestId) {
+        if (!ownsOpen()) {
           detailPromise.catch(() => {});
           return false;
         }
         renderView();
+        document.documentElement.classList?.remove("app-module-loading");
       }
       const [data] = await Promise.all([detailPromise, viewerStylesReady]);
-      if (requestId !== shortVideoOpenRequestId) return false;
+      if (!ownsOpen()) return false;
       markShortVideoPerformance("video-detail-ready", {
         videoId: String(data?.video?.id || videoId),
         requestId,
         durationMs: Date.now() - openStartedAt
       });
+      const navigationInvalidated = data.shortVideoNavigationInvalidated === true;
+      const previousCurrentId = String(state.shortVideo.current?.id || "");
       state.shortVideo.current = data.video;
       if (state.shortVideo.sound && data.video?.sound?.key === state.shortVideo.sound) state.shortVideo.soundInfo = data.video.sound;
-      const collectionNavigation = collectionsController.collectionNavigation(data.video.id);
-      state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
-      state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
+      let collectionNavigation = collectionsController.collectionNavigation(data.video.id);
+      let prevKnown = true, nextKnown = true;
+      if (navigationInvalidated && !collectionNavigation) {
+        collectionNavigation = cachedShortVideoNavigation(data.video.id);
+        if (!collectionNavigation && previousCurrentId === String(data.video.id)) {
+          collectionNavigation = { prevId: state.shortVideo.prevId, nextId: state.shortVideo.nextId,
+            prevVideo: state.shortVideo.prevVideo, nextVideo: state.shortVideo.nextVideo };
+        }
+        if (!collectionNavigation) {
+          const rows = (state.shortVideo.data?.videos || []).filter(item => !isDeletedShortVideo(item));
+          const index = rows.findIndex(item => String(item.id) === String(data.video.id));
+          collectionNavigation = { prevId: index > 0 ? String(rows[index - 1].id) : "",
+            nextId: index >= 0 ? String(rows[index + 1]?.id || "") : "",
+            prevVideo: index > 0 ? rows[index - 1] : null, nextVideo: index >= 0 ? rows[index + 1] || null : null };
+          prevKnown = Boolean(collectionNavigation.prevId);
+          nextKnown = Boolean(collectionNavigation.nextId);
+        }
+      }
+      state.shortVideo.prevId = collectionNavigation ? String(collectionNavigation.prevId || "") : data.prevId || "";
+      state.shortVideo.nextId = collectionNavigation ? String(collectionNavigation.nextId || "") : data.nextId || "";
       state.shortVideo.slideDirection = Number(options.slideDirection || 0);
-      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || data.prevVideo || null;
-      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || data.nextVideo || null;
+      state.shortVideo.prevVideo = collectionNavigation ? collectionNavigation.prevVideo || null : data.prevVideo || null;
+      state.shortVideo.nextVideo = collectionNavigation ? collectionNavigation.nextVideo || null : data.nextVideo || null;
+      const owner = beginShortVideoNavigation(data.video, {
+        pending: !navigationInvalidated ? false : undefined, prevKnown,
+        nextKnown: nextKnown && !(state.shortVideo.mode === "collection" && !state.shortVideo.nextId && state.shortVideo.collectionData?.hasMore)
+      });
+      if (navigationInvalidated) owner.refreshNavigation = true;
       state.shortVideo.loading = false;
       state.shortVideo.status = "";
       shortVideoOpeningId = "";
@@ -982,13 +1171,37 @@ export function createShortVideoPage(deps) {
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
       if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: data.video.id });
       loadShortVideoSummary().catch(handleSummaryLoadError);
-      loadAdjacentVideos(data.video.id).then((loaded) => {
+      loadAdjacentVideos(data.video.id, owner).then((loaded) => {
         if (!loaded) return;
+        if (navigationInvalidated && isCurrentShortVideoNavigation(owner)) {
+          owner.status = "ready";
+          syncCurrentNavigationDom();
+          flushQueuedAdjacent();
+          flushShortVideoAutoNext();
+        }
         scheduleInitialAdjacentPanelsRefresh(data.video.id);
-      }).catch((error) => console.warn(error));
+      }).catch((error) => {
+        if (navigationInvalidated && isCurrentShortVideoNavigation(owner)) {
+          owner.status = "error";
+          syncCurrentNavigationDom();
+        }
+        console.warn(error);
+      });
       return true;
     } catch (error) {
-      if (requestId !== shortVideoOpenRequestId) return false;
+      if (!ownsOpenContext()) return false;
+      if (controller.signal.aborted) return false;
+      if (!ownsOpen()) {
+        state.shortVideo.loading = false;
+        state.shortVideo.status = "";
+        shortVideoOpeningId = "";
+        shortVideoOpenError = "";
+        if (!state.shortVideo.current || isDeletedShortVideo(state.shortVideo.current)) {
+          state.shortVideo.current = null;
+          showHome();
+        }
+        return false;
+      }
       markShortVideoPerformance("video-open-error", {
         videoId: String(videoId),
         requestId,
@@ -1000,13 +1213,16 @@ export function createShortVideoPage(deps) {
       if (state.shortVideo.current) {
         shortVideoOpeningId = "";
         shortVideoOpenError = "";
-        renderView();
-        throw error;
+        showBrowserToast(shortVideoFriendlyError(error, "本地视频暂时无法打开"));
+        return false;
       }
       shortVideoOpenError = shortVideoFriendlyError(error, "本地视频暂时无法打开");
       renderView();
       console.warn(error);
       return false;
+    } finally {
+      if (shortVideoOpenReadController === controller) shortVideoOpenReadController = null;
+      controller.abort();
     }
   }
 
@@ -1034,29 +1250,138 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function shortVideoHomeScope() {
+    const view = state.shortVideo;
+    return JSON.stringify([view.mode, view.source, view.authorPage, view.author,
+      view.authorIndexSource, view.query, view.topic, view.sound, view.media, view.quality]);
+  }
+
+  function shortVideoHomeSidebarScope() {
+    const view = state.shortVideo;
+    return JSON.stringify([view.collectionsLoaded, view.collectionsLoading,
+      (view.collections || []).map(item => [item.id, item.name, item.itemCount])]);
+  }
+
+  function syncShortVideoHomeSidebar(view) {
+    if (view.sidebarScope !== shortVideoHomeSidebarScope()) {
+      const sidebar = collectionsController.renderSidebar();
+      view.sidebar.replaceWith(sidebar);
+      view.sidebar = sidebar;
+      view.sidebarScope = shortVideoHomeSidebarScope();
+    }
+    if (state.shortVideo.collectionsLoaded || !state.shortVideo.collectionsLoading || view.sidebarRead) return;
+    // The sidebar's original read owner includes sort/status. Observe its
+    // existing shared read so those local filters cannot strand a loading
+    // sidebar; publication remains limited to this structural home.
+    const ownsSidebar = () => shortVideoHomePresentation === view
+      && isMountedShortVideoHomeControl(view.content) && view.scope === shortVideoHomeScope();
+    const request = collectionsController.loadCollections();
+    view.sidebarRead = request;
+    request.then(() => {
+      if (ownsSidebar()) syncShortVideoHomeSidebar(view);
+    }, (error) => {
+      if (!ownsSidebar()) return;
+      const status = view.sidebar.querySelector(".short-video-collection-sidebar-status");
+      if (status) status.textContent = error?.message || "清单读取失败";
+    }).finally(() => {
+      if (view.sidebarRead === request) view.sidebarRead = null;
+    });
+  }
+
+  function isMountedShortVideoHomeControl(control) {
+    const view = shortVideoHomePresentation;
+    return Boolean(view && control?.isConnected && view.shell.isConnected
+      && els.workGrid?.contains(view.shell) && view.shell.contains(control)
+      && state.activeView === "shortVideos" && state.shortVideo.mode === "feed"
+      && !state.shortVideo.current && !shortVideoOpeningId);
+  }
+
+  function isCurrentShortVideoHomeControl(control, scope) {
+    return isMountedShortVideoHomeControl(control)
+      && scope === shortVideoHomePresentation.scope && scope === shortVideoHomeScope();
+  }
+
   function preserveShortVideoHomeDuringLoad(append) {
     if (append) return false;
     const home = els.workGrid?.querySelector?.(".short-video-home");
     if (!home) return false;
     home.setAttribute("aria-busy", "true");
-    const activeSource = state.shortVideo.source || "liked";
-    for (const button of home.querySelectorAll(".short-video-source-tab")) {
-      const active = button.dataset.source === activeSource;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-pressed", String(active));
+    releaseUnusedShortVideoPreloads();
+    syncShortVideoHomeToolbar(home.querySelector(".short-video-home-toolbar"));
+    return true;
+  }
+
+  function refreshShortVideoHome() {
+    const view = shortVideoHomePresentation;
+    if (!view || !isMountedShortVideoHomeControl(view.content) || view.scope !== shortVideoHomeScope()
+      || view.deleteMode !== state.shortVideo.deleteMode) return false;
+    const data = state.shortVideo.data || {};
+    const needsListCards = isShortVideoAuthorIndexPage()
+      ? Boolean(state.shortVideo.authors?.length)
+      : shortVideosWithCovers(data.videos || []).length > 0 || Boolean(data.users?.length);
+    if (needsListCards && !shortVideoListCards) {
+      ensureShortVideoListCards().then(() => {
+        if (shortVideoHomePresentation === view) renderView();
+      }).catch(showError);
+      return true;
     }
+    resetShortVideoWindow();
+    releaseUnusedShortVideoPreloads();
+    transcodeManagementPage.stop();
+    setBodyClass();
+    if (state.shortVideo.loading) view.shell.setAttribute("aria-busy", "true");
+    else view.shell.removeAttribute("aria-busy");
+    // Only data siblings are replaced. Never move a retained form, native
+    // select or one of its ancestors through a detached staging tree.
+    syncShortVideoHomeSidebar(view);
+    syncShortVideoHomeToolbar(view.toolbar, data);
+    syncShortVideoFilterControls(view.shell, data);
+    syncShortVideoFollowingControls(view.toolbar);
+    const selection = shortVideoDeleteSelection();
+    const loadedIds = shortVideosWithCovers(data.videos || []).map(video => String(video.id || "")).filter(Boolean);
+    const allSelected = loadedIds.length > 0 && loadedIds.every(id => selection.has(id));
+    for (const button of view.shell.querySelectorAll("[data-short-video-selection-action]")) {
+      if (button.dataset.shortVideoSelectionAction === "all") {
+        button.textContent = allSelected ? "取消全选" : "全选已加载";
+        button.disabled = !loadedIds.length;
+      } else {
+        button.textContent = selection.size ? `删除选中 ${selection.size}` : "删除选中";
+        button.disabled = !selection.size;
+      }
+    }
+    if (view.workspace) {
+      const author = currentShortVideoAuthorDetail(data);
+      const count = view.workspace.querySelector(".short-video-author-workspace-tab small");
+      if (count) count.textContent = state.shortVideo.loading ? "…" : formatNumber(author.count || data.total || 0);
+    }
+    renderShortVideoHomeResults(view, data);
     return true;
   }
 
   function renderView() {
     ensureState();
     if (!els.workGrid) return;
+    syncShortVideoNativePlaybackModes();
+    cancelShortVideoPanelLoading();
+    stopShortVideoSoundPreview({ restorePlayback: false });
+    cancelShortVideoAutoNext();
+    cancelShortVideoBrowseGestures();
+    if (refreshShortVideoHome()) return;
+    shortVideoHomePresentation = null;
     resetShortVideoWindow();
     clearPendingPlayerClick();
     els.workGrid.querySelector?.(".short-video-browser")?.shortVideoControlsDispose?.();
     els.workGrid.querySelector?.(".short-video-control-bar")?.shortVideoDispose?.();
     disposeShortVideoMedia(els.workGrid);
+    const authorPanels = [...(els.workGrid.querySelectorAll?.(".short-video-author-panel") || [])];
+    if (authorPanels.length) {
+      authorPanelVideoRequestId += 1;
+      authorPanelReturnFeed = null;
+      clearAuthorPanelCaches();
+      authorPanels.forEach((panel) => disposeAuthorPanelResources(panel, { restorePlayback: false }));
+    }
     els.workGrid.innerHTML = "";
+    releaseUnusedShortVideoPreloads();
     if (state.shortVideo.mode !== "transcoding") transcodeManagementPage.stop();
     setBodyClass();
     if (state.shortVideo.mode === "transcoding") {
@@ -1110,7 +1435,7 @@ export function createShortVideoPage(deps) {
         isShortVideoAuthorDetailPage,
         openShortVideoAuthorPage,
         openVideo,
-        prewarmShortVideoPlayback,
+        prewarmShortVideoPlayback: prewarmShortVideoListCard,
         rememberShortVideo,
         shortVideoAuthorHandle,
         shortVideoCardCoverUrl,
@@ -1153,26 +1478,48 @@ export function createShortVideoPage(deps) {
     const shell = document.createElement("section");
     shell.className = "short-video-home";
     shell.classList.toggle("is-author-page", isShortVideoAuthorDetailPage());
+    // Detached controls must not navigate or submit into a later presentation.
+    for (const type of ["click", "change", "submit"]) {
+      shell.addEventListener(type, (event) => {
+        if (isMountedShortVideoHomeControl(shell)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }, true);
+    }
     const layout = document.createElement("div");
     layout.className = "short-video-home-layout";
     const content = document.createElement("section");
     content.className = "short-video-home-main";
-    layout.append(collectionsController.renderSidebar(), content);
+    const sidebar = collectionsController.renderSidebar();
+    layout.append(sidebar, content);
     shell.append(layout);
-    if (!isShortVideoAuthorDetailPage()) {
-      content.append(isShortVideoAuthorIndexPage()
-        ? renderShortVideoAuthorIndexSearch()
-        : renderShortVideoDiscovery());
+    const discovery = !isShortVideoAuthorDetailPage()
+      ? isShortVideoAuthorIndexPage() ? renderShortVideoAuthorIndexSearch() : renderShortVideoDiscovery()
+      : null;
+    if (discovery) content.append(discovery);
+    const toolbar = renderHomeToolbar(data);
+    content.append(toolbar);
+    const workspace = isShortVideoAuthorDetailPage() ? renderAuthorWorkspaceToolbar(data) : null;
+    if (workspace) content.append(workspace);
+    const view = { shell, content, sidebar, toolbar, workspace,
+      scope: shortVideoHomeScope(), deleteMode: state.shortVideo.deleteMode,
+      sidebarScope: shortVideoHomeSidebarScope(), controls: new Set([discovery, toolbar, workspace].filter(Boolean)) };
+    shortVideoHomePresentation = view;
+    els.workGrid.append(shell);
+    syncShortVideoHomeSidebar(view);
+    renderShortVideoHomeResults(view, data);
+  }
+
+  function renderShortVideoHomeResults(view, data) {
+    const { content, controls, workspace } = view;
+    for (const child of [...content.children]) {
+      if (!controls.has(child)) child.remove();
     }
-    content.append(renderHomeToolbar(data));
     if (isShortVideoAuthorIndexPage()) {
       content.append(renderAuthorIndex());
-      els.workGrid.append(shell);
       return;
     }
-    if (isShortVideoAuthorDetailPage()) {
-      content.append(renderAuthorDetailHome(data), renderAuthorWorkspaceToolbar(data));
-    }
+    if (workspace) content.insertBefore(renderAuthorDetailHome(data), workspace);
     if (state.shortVideo.query && !isShortVideoAuthorDetailPage()) {
       content.append(renderAggregateSearchResults(data));
     }
@@ -1195,7 +1542,6 @@ export function createShortVideoPage(deps) {
       grid.append(inner);
     }
     content.append(grid);
-    els.workGrid.append(shell);
     attachShortVideoWindow(grid, inner);
     renderShortVideoWindow(true);
   }
@@ -1606,7 +1952,8 @@ export function createShortVideoPage(deps) {
         button.setAttribute("aria-pressed", String(active));
         button.textContent = item[1];
         button.addEventListener("click", () => {
-          if (activeSource === item[0] && !isShortVideoAuthorDetailPage()) return;
+          if (!isMountedShortVideoHomeControl(button)) return;
+          if (state.shortVideo.source === item[0] && !isShortVideoAuthorDetailPage()) return;
           if (isShortVideoAuthorDetailPage()) state.shortVideo.authorIndexWindow = null;
           state.shortVideo.authorPage = "";
           state.shortVideo.source = item[0];
@@ -1654,6 +2001,21 @@ export function createShortVideoPage(deps) {
           : renderDeleteSelectionActions(data);
     const total = document.createElement("div");
     total.className = "short-video-home-total";
+    toolbar.append(tabs, actions, total);
+    syncShortVideoHomeToolbar(toolbar, data);
+    return toolbar;
+  }
+
+  function syncShortVideoHomeToolbar(toolbar, data = state.shortVideo.data || {}) {
+    if (!toolbar) return;
+    const activeSource = isShortVideoAuthorDetailPage() ? state.shortVideo.authorIndexSource : (state.shortVideo.source || "liked");
+    for (const button of toolbar.querySelectorAll(".short-video-source-tab")) {
+      const active = button.dataset.source === activeSource;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    const total = toolbar.querySelector(".short-video-home-total");
+    if (!total) return;
     if (isShortVideoAuthorIndexPage()) {
       const loadedCount = state.shortVideo.authors.length;
       const authorTotal = state.shortVideo.authorTotal;
@@ -1684,8 +2046,6 @@ export function createShortVideoPage(deps) {
     } else {
       total.textContent = `${formatNumber(data.total || 0)} 条`;
     }
-    toolbar.append(tabs, actions, total);
-    return toolbar;
   }
 
   function renderDeleteSelectionActions(data = {}) {
@@ -1725,14 +2085,17 @@ export function createShortVideoPage(deps) {
     const selectLoaded = document.createElement("button");
     selectLoaded.type = "button";
     selectLoaded.className = "short-video-delete-tool";
+    selectLoaded.dataset.shortVideoSelectionAction = "all";
     selectLoaded.textContent = allLoadedSelected ? "取消全选" : "全选已加载";
     selectLoaded.disabled = !loadedIds.length;
     selectLoaded.addEventListener("click", () => {
-      toggleLoadedShortVideoSelection(loadedIds, allLoadedSelected);
+      const ids = shortVideosWithCovers(state.shortVideo.data?.videos || []).map(video => String(video.id || "")).filter(Boolean);
+      toggleLoadedShortVideoSelection(ids, ids.length > 0 && ids.every(id => shortVideoDeleteSelection().has(id)));
     });
     const commit = document.createElement("button");
     commit.type = "button";
     commit.className = "short-video-delete-tool is-danger";
+    commit.dataset.shortVideoSelectionAction = "commit";
     commit.textContent = selection.size ? `删除选中 ${selection.size}` : "删除选中";
     commit.disabled = !selection.size;
     commit.addEventListener("click", () => deleteSelectedShortVideos().catch(showError));
@@ -1769,7 +2132,10 @@ export function createShortVideoPage(deps) {
       select.append(option);
     }
     select.value = normalizeShortVideoAuthorSort(state.shortVideo.authorSort);
+    select.dataset.shortVideoFollowingSort = select.value;
+    const scope = shortVideoHomeScope();
     select.addEventListener("change", () => {
+      if (!isCurrentShortVideoHomeControl(select, scope)) return;
       const nextSort = normalizeShortVideoAuthorSort(select.value);
       if (nextSort === state.shortVideo.authorSort) return;
       state.shortVideo.authorSort = nextSort;
@@ -1785,11 +2151,28 @@ export function createShortVideoPage(deps) {
     filter.setAttribute("aria-pressed", String(unlikedOnly));
     filter.textContent = `只看未点赞 ${formatNumber(state.shortVideo.authorUnlikedTotal || 0)}`;
     filter.addEventListener("click", () => {
-      state.shortVideo.authorFilter = unlikedOnly ? "all" : "unliked";
+      if (!isCurrentShortVideoHomeControl(filter, scope)) return;
+      state.shortVideo.authorFilter = state.shortVideo.authorFilter === "unliked" ? "all" : "unliked";
       reloadFollowingAuthors();
     });
     wrap.append(label, filter);
     return wrap;
+  }
+
+  function syncShortVideoFollowingControls(toolbar) {
+    const select = toolbar.querySelector("select[data-short-video-following-sort]");
+    const sort = normalizeShortVideoAuthorSort(state.shortVideo.authorSort);
+    if (select && select.dataset.shortVideoFollowingSort !== sort) {
+      if (select.value !== sort) select.value = sort;
+      select.dataset.shortVideoFollowingSort = sort;
+    }
+    const filter = toolbar.querySelector(".short-video-following-unliked");
+    if (filter) {
+      const active = state.shortVideo.authorFilter === "unliked";
+      filter.classList.toggle("is-active", active);
+      filter.setAttribute("aria-pressed", String(active));
+      filter.textContent = `只看未点赞 ${formatNumber(state.shortVideo.authorUnlikedTotal || 0)}`;
+    }
   }
 
   function reloadFollowingAuthors() {
@@ -1807,7 +2190,17 @@ export function createShortVideoPage(deps) {
     selection.clear();
     if (!options.keepMode) state.shortVideo.deleteMode = false;
   }
-  function refreshShortVideoDeleteSelectionUi() { const actions = els.workGrid?.querySelector?.(".short-video-delete-actions"); if (actions) actions.replaceWith(renderDeleteSelectionActions(state.shortVideo.data || {})); shortVideoListCards?.syncRenderedSelection?.(els.workGrid); }
+  function refreshShortVideoDeleteSelectionUi() {
+    const actions = els.workGrid?.querySelector?.(".short-video-delete-actions");
+    if (actions) {
+      const owned = shortVideoHomePresentation?.shell.contains(actions);
+      actions.replaceWith(renderDeleteSelectionActions(state.shortVideo.data || {}));
+      if (owned) {
+        shortVideoHomePresentation.deleteMode = state.shortVideo.deleteMode;
+      }
+    }
+    shortVideoListCards?.syncRenderedSelection?.(els.workGrid);
+  }
   function toggleShortVideoSelected(id) {
     const videoId = String(id || "").trim();
     if (!videoId) return;
@@ -1967,25 +2360,34 @@ export function createShortVideoPage(deps) {
     }
     page.append(top, stack, renderBrowserNav(), isGalleryPost(video) ? renderGalleryControlBar(video) : renderControlBar());
     els.workGrid.append(page);
+    syncShortVideoModalPlayback(page);
     syncPlayToggle();
     bindBrowserControlVisibility(page, player);
     if (!player) return;
+    const playbackOwner = captureShortVideoPlaybackOwner(player);
+    const syncOwnedPlayToggle = () => {
+      if (ownsShortVideoPlaybackOwner(playbackOwner)) syncPlayToggle();
+    };
     window.requestAnimationFrame(() => {
-      player.play().then(syncPlayToggle).catch(() => {
-        if (state.shortVideo.muted) {
-          player.muted = true;
-          player.play().then(syncPlayToggle).catch(syncPlayToggle);
-          return;
-        }
-        markPlayerSoundBlocked(player.closest(".short-video-stage"));
+      if (!ownsShortVideoPlaybackOwner(playbackOwner)) return;
+      player.play().then(syncOwnedPlayToggle).catch((error) => {
+        if (!ownsShortVideoPlaybackOwner(playbackOwner) || error?.name !== "NotAllowedError") return;
+        if (!state.shortVideo.muted) markPlayerSoundBlocked(player.closest(".short-video-stage"));
         player.muted = true;
-        player.play().then(syncPlayToggle).catch(syncPlayToggle);
-        syncPlayToggle();
+        player.play().then(syncOwnedPlayToggle).catch(syncOwnedPlayToggle);
+        syncOwnedPlayToggle();
       });
     });
   }
 
   function renderReelPanel(video, options = {}) {
+    if (video?.id && String(state.shortVideo?.current?.id || "") === String(video.id)) video = state.shortVideo.current;
+    // Event handlers retain this view-local record while detail hydration can
+    // replace state.current. Never mutate the card/navigation cache's object.
+    const authorRecord = { ...(video?.author || {}) };
+    const statsRecord = { ...(video?.stats || {}) };
+    const actionsRecord = { ...(video?.actions || {}) };
+    video = { ...video, author: authorRecord, stats: statsRecord, actions: actionsRecord };
     const ghost = Boolean(options.ghost);
     const slot = options.slot || "current";
     const panel = document.createElement("div");
@@ -1995,10 +2397,10 @@ export function createShortVideoPage(deps) {
 
     const gallery = isGalleryPost(video);
     panel.classList.toggle("is-gallery-post", gallery);
-    const staticBackdropUrl = video.coverUrl || (gallery
+    let staticBackdropUrl = video.coverUrl || (gallery
       ? galleryImageEntries(video).find((item) => item.type !== "video")?.url || ""
       : "");
-    const backdrop = document.createElement(staticBackdropUrl ? "img" : "div");
+    let backdrop = document.createElement(staticBackdropUrl ? "img" : "div");
     backdrop.className = "short-video-backdrop-video";
     if (staticBackdropUrl) {
       backdrop.classList.add("short-video-backdrop-image");
@@ -2044,22 +2446,23 @@ export function createShortVideoPage(deps) {
       player = ghost ? null : takePrewarmedShortVideoPlayer(video);
       const reusedPrewarmedPlayer = Boolean(player);
       if (!player) player = document.createElement("video");
+      player.shortVideoCancelPictureInPicture = () => shortVideoPictureInPictureController?.cancel(player);
       player.className = "short-video-player";
       if (ghost) player.classList.add("is-ghost");
       player.removeAttribute("aria-hidden");
       player.removeAttribute("tabindex");
-      // Loading policy must be applied before src. Setting src first lets the
-      // browser start both off-screen reels with its default `auto` preload,
-      // which can compete with the current video's first range request.
+      // A source-bound ghost can issue a media request even with preload=none.
+      // Keep its canonical URL deferred until budgeted warmup or explicit use.
       player.preload = ghost ? "none" : "auto";
       player.fetchPriority = ghost ? "low" : "high";
       player.setAttribute("fetchpriority", ghost ? "low" : "high");
       playbackRenditionPolicy.preparePlayer(player, video);
       const playbackUrl = shortVideoPlaybackUrl(video);
-      ensureShortVideoPlayerSource(player, video, {
+      if (ghost) player.dataset.streamUrl = playbackUrl;
+      else ensureShortVideoPlayerSource(player, video, {
         source: playbackUrl,
         forceReload: player.dataset.streamUrl !== playbackUrl,
-        reason: ghost ? "render-adjacent" : "render-current"
+        reason: "render-current"
       });
       player.dataset.videoId = String(video?.id || "");
       player.dataset.shortVideoSlot = slot;
@@ -2072,9 +2475,7 @@ export function createShortVideoPage(deps) {
       player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
       player.playsInline = true;
       player.loop = true;
-      let firstFramePromise = null;
-      let firstFrameAttempts = 0;
-      let firstFrameRetryTimer = 0;
+      let firstFrameController = null;
       const mediaEvents = new Set();
       const markMediaEvent = (eventName) => {
         if (mediaEvents.has(eventName)) return;
@@ -2108,7 +2509,7 @@ export function createShortVideoPage(deps) {
           readyState: Number(player.readyState || 0),
           currentTime: Number(player.currentTime || 0),
           prewarmed: reusedPrewarmedPlayer,
-          attempts: firstFrameAttempts,
+          attempts: firstFrameController?.attempts || 0,
           attachedDurationMs: Date.now() - Number(player.dataset.shortVideoAttachedAt || Date.now())
         });
         if (!player.classList.contains("is-ghost") && isCurrentShortVideo(video)) {
@@ -2116,26 +2517,12 @@ export function createShortVideoPage(deps) {
         }
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
       };
-      const markVideoReady = () => {
-        if (stage.classList.contains("is-video-ready") || firstFramePromise) return;
-        firstFrameAttempts += 1;
-        firstFramePromise = waitForVideoFirstFrame(player, ghost ? 1200 : SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS).then((ready) => {
-          firstFramePromise = null;
-          if (!player.isConnected || stage.classList.contains("is-video-ready")) return;
-          if (!ready) {
-            if (!player.requestVideoFrameCallback && player.readyState >= 2) {
-              revealVideoFrame();
-              return;
-            }
-            if (!player.error && firstFrameAttempts < SHORT_VIDEO_FIRST_FRAME_RETRY_LIMIT) {
-              window.clearTimeout(firstFrameRetryTimer);
-              firstFrameRetryTimer = window.setTimeout(markVideoReady, 120);
-            }
-            return;
-          }
-          revealVideoFrame();
-        });
-      };
+      firstFrameController = createShortVideoFirstFrameController({
+        player, stage, waitForFirstFrame: waitForVideoFirstFrame, reveal: revealVideoFrame,
+        timeout: ghost ? 1200 : SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS,
+        retryLimit: SHORT_VIDEO_FIRST_FRAME_RETRY_LIMIT
+      });
+      const markVideoReady = () => firstFrameController.check();
       player.addEventListener("loadedmetadata", () => {
         markMediaEvent("loadedmetadata");
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
@@ -2169,18 +2556,24 @@ export function createShortVideoPage(deps) {
     const captionCopy = document.createElement("div");
     captionCopy.className = "short-video-caption-copy";
     const title = document.createElement("p");
-    appendCaptionText(title, captionTitleWithTags(video), video);
     captionCopy.append(title);
     info.append(author, captionCopy);
     panel.append(backdrop, stage, info);
+    const captionController = createShortVideoCaptionController({
+      panel, container: captionCopy, paragraph: title, video, appendCaptionText, captionTitleWithTags
+    });
+    panel.shortVideoSyncCaptionOverflow = captionController.sync;
+    panel.shortVideoDisposeCaption = captionController.dispose;
 
     const rail = document.createElement("aside");
     rail.className = "short-video-rail";
-    const aiButton = railButton("识别", createIcon("ai"), "ai", "识别当前内容", () => showAuthorPanel(video, {
+    const aiButton = railButton("识别", createIcon("ai"), "ai", "识别当前内容", (event) => showAuthorPanel(video, {
+      trigger: event?.currentTarget,
       initialTab: "ai",
       switchAuthorFeed: false
     }).catch(showError));
-    rail.append(authorRailButton(video));
+    const authorRail = authorRailButton(video);
+    rail.append(authorRail);
     const likeButton = railMetric("heart", video.stats?.likes, "like", "点赞");
     likeButton.dataset.videoId = String(video.id || "");
     likeButton.dataset.actionType = "like";
@@ -2191,10 +2584,12 @@ export function createShortVideoPage(deps) {
     });
     applyRailActionButtonState(likeButton, "like", Boolean(video.actions?.liked), video.stats?.likes);
     rail.append(likeButton);
-    rail.append(railMetric("comment", video.stats?.comments, "comment", "评论", () => showAuthorPanel(video, {
+    const commentButton = railMetric("comment", video.stats?.comments, "comment", "评论", (event) => showAuthorPanel(video, {
+      trigger: event?.currentTarget,
       initialTab: "comments",
       switchAuthorFeed: false
-    })));
+    }));
+    rail.append(commentButton);
     const collectButton = railMetric("star", video.stats?.collects, "collect", "收藏");
     collectButton.dataset.videoId = String(video.id || "");
     collectButton.dataset.actionType = "collect";
@@ -2206,11 +2601,12 @@ export function createShortVideoPage(deps) {
       event?.stopPropagation?.();
       collectionsController.showPicker(video).catch((error) => showBrowserToast(error?.message || "清单读取失败"));
     }));
-    rail.append(railMetric("share", video.stats?.shares, "share", "分享", (event) => {
+    const shareButton = railMetric("share", video.stats?.shares, "share", "分享", (event) => {
       event?.preventDefault?.();
       event?.stopPropagation?.();
       shareShortVideo(video, { trigger: event?.currentTarget || null });
-    }));
+    });
+    rail.append(shareButton);
     const soundVisual = video.sound?.coverUrl
       ? Object.assign(document.createElement("img"), {
         className: "short-video-sound-rail-cover",
@@ -2218,12 +2614,12 @@ export function createShortVideoPage(deps) {
         alt: ""
       })
       : createIcon("headphones");
-    const listenButton = railButton(video.sound ? "原声" : "听抖音", soundVisual, "listen", video.sound ? `原声：${video.sound.title}` : "听抖音", () => {
+    const listenButton = railButton(video.sound ? "原声" : "听抖音", soundVisual, "listen", video.sound ? `原声：${video.sound.title}` : "听抖音", (event) => {
       if (!video.sound) {
         openDouyinLink(video);
         return;
       }
-      showAuthorPanel(video, { initialTab: "sound", switchAuthorFeed: false }).catch(showError);
+      showAuthorPanel(video, { initialTab: "sound", switchAuthorFeed: false, trigger: event?.currentTarget }).catch(showError);
     });
     rail.append(listenButton);
     rail.append(aiButton);
@@ -2233,6 +2629,65 @@ export function createShortVideoPage(deps) {
       showPlaybackSettings(video, { trigger: event.currentTarget });
     }));
     panel.append(rail);
+
+    let soundVisualKey = String(video.sound?.coverUrl || "");
+    const syncMetric = (button, value, label) => {
+      const metric = Math.max(0, Number(value || 0));
+      button.dataset.metricValue = String(metric);
+      button.setAttribute("aria-label", `${label}，${formatCompact(metric)}`);
+      const valueLabel = button.querySelector(":scope > span");
+      if (valueLabel) valueLabel.textContent = formatCompact(metric);
+    };
+    panel.shortVideoUpdateMetadata = (next) => {
+      if (!panel.isConnected || !next || String(next.id || "") !== panel.dataset.videoId) return false;
+      Object.assign(authorRecord, next.author || {});
+      Object.assign(statsRecord, next.stats || {});
+      Object.assign(actionsRecord, next.actions || {});
+      Object.assign(video, next, { author: authorRecord, stats: statsRecord, actions: actionsRecord });
+      captionController.update(video);
+      author.shortVideoUpdateMetadata?.(video);
+      authorRail.shortVideoUpdateMetadata?.(video);
+      if (likeButton.getAttribute("aria-busy") !== "true") {
+        applyRailActionButtonState(likeButton, "like", Boolean(video.actions.liked), video.stats.likes);
+      }
+      if (collectButton.getAttribute("aria-busy") !== "true") {
+        applyRailActionButtonState(collectButton, "collect", Boolean(video.actions.collected), video.stats.collects);
+      }
+      syncMetric(commentButton, video.stats.comments, "评论");
+      syncMetric(shareButton, video.stats.shares, "分享");
+      const soundLabel = video.sound ? "原声" : "听抖音";
+      const soundDescription = video.sound ? `原声：${video.sound.title || "作品原声"}` : "听抖音";
+      listenButton.setAttribute("aria-label", soundDescription);
+      listenButton.title = soundDescription;
+      const soundLabelNode = listenButton.querySelector(":scope > span");
+      if (soundLabelNode) soundLabelNode.textContent = soundLabel;
+      const nextSoundVisualKey = String(video.sound?.coverUrl || "");
+      if (nextSoundVisualKey !== soundVisualKey) {
+        soundVisualKey = nextSoundVisualKey;
+        const visual = soundVisualKey ? Object.assign(document.createElement("img"), {
+          className: "short-video-sound-rail-cover", src: soundVisualKey, alt: ""
+        }) : createIcon("headphones");
+        listenButton.querySelector(":scope > strong")?.replaceChildren(visual);
+      }
+      const nextBackdropUrl = video.coverUrl || (gallery
+        ? galleryImageEntries(video).find((item) => item.type !== "video")?.url || ""
+        : "");
+      if (nextBackdropUrl !== staticBackdropUrl) {
+        staticBackdropUrl = nextBackdropUrl;
+        const nextBackdrop = document.createElement(staticBackdropUrl ? "img" : "div");
+        nextBackdrop.className = `short-video-backdrop-video ${staticBackdropUrl ? "short-video-backdrop-image" : "is-empty"}`;
+        nextBackdrop.setAttribute("aria-hidden", "true");
+        if (staticBackdropUrl) {
+          nextBackdrop.src = staticBackdropUrl;
+          nextBackdrop.alt = "";
+          nextBackdrop.decoding = "async";
+          nextBackdrop.loading = panel.classList.contains("is-ghost-panel") ? "lazy" : "eager";
+        }
+        backdrop.replaceWith(nextBackdrop);
+        backdrop = nextBackdrop;
+      }
+      return true;
+    };
 
     return { panel, player, syncPlayToggle };
   }
@@ -2247,7 +2702,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoGalleryPlayer() {
     if (shortVideoGalleryPlayerPromise) return shortVideoGalleryPlayerPromise;
     markShortVideoPerformance("gallery-player-module-start");
-    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20261016-gallery-handoff-02";
+    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20261027-gallery-sound-01";
     shortVideoGalleryPlayerPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoGalleryPlayer !== "function") {
         throw new Error("图文播放器模块加载失败");
@@ -2262,6 +2717,9 @@ export function createShortVideoPage(deps) {
         formatBytes,
         galleryImageEntries,
         handleGalleryAutoNext,
+        onGalleryUserPlaybackIntent: (gallery) => {
+          if (activeGalleryPlayer() === gallery) cancelShortVideoAutoNext();
+        },
         isShortVideoGestureClickBlocked,
         isShortVideoKeyboardControl,
         markPlayerSoundBlocked,
@@ -2292,7 +2750,7 @@ export function createShortVideoPage(deps) {
   }
 
   function renderGalleryPlayer(video, options = {}) {
-    const ghost = Boolean(options.ghost);
+    let ghost = Boolean(options.ghost);
     const stage = options.stage;
     const placeholder = document.createElement("div");
     placeholder.className = `short-video-gallery-player is-loading${ghost ? " is-ghost" : ""}`;
@@ -2312,15 +2770,78 @@ export function createShortVideoPage(deps) {
       placeholder.append(status);
       stage?.setAttribute("aria-busy", "true");
     }
-    let mountPromise = null;
+    let mountPromise = null, mountedPlayer = null, mountFrame = 0, disposed = false, userPaused = false;
+    const timingPauses = new Set();
+    let latestVideo = video;
+    placeholder.dataset.shortVideoPlaybackIntentGeneration = "0";
+    const syncPlaceholderPause = () => {
+      placeholder.dataset.galleryPlaybackPaused = userPaused ? "1" : "0";
+      placeholder.classList.toggle("is-gallery-timing-paused", ghost || userPaused || timingPauses.size > 0);
+      stage?.classList.toggle("is-paused", userPaused);
+      if (!ghost && placeholder.isConnected && isCurrentShortVideo(video)) syncActiveControlBar();
+    };
+    const recordPlaceholderIntent = () => {
+      placeholder.dataset.shortVideoPlaybackIntentGeneration = String(Number(placeholder.dataset.shortVideoPlaybackIntentGeneration || 0) + 1);
+      if (!ghost && placeholder.isConnected && isCurrentShortVideo(video)) cancelShortVideoAutoNext();
+    };
+    placeholder.shortVideoGalleryResolve = () => mountedPlayer || placeholder;
+    placeholder.shortVideoGalleryIsPaused = () => mountedPlayer?.shortVideoGalleryIsPaused?.() ?? userPaused;
+    placeholder.shortVideoGalleryPause = (reason = "visibility") => {
+      if (disposed) return;
+      if (mountedPlayer) return mountedPlayer.shortVideoGalleryPause?.(reason);
+      if (reason === "user") { userPaused = true; recordPlaceholderIntent(); }
+      else timingPauses.add(reason);
+      syncPlaceholderPause();
+    };
+    placeholder.shortVideoGalleryResume = (reason = "visibility") => {
+      if (disposed) return;
+      if (mountedPlayer) return mountedPlayer.shortVideoGalleryResume?.(reason);
+      if (reason === "user") { userPaused = false; recordPlaceholderIntent(); }
+      else timingPauses.delete(reason);
+      syncPlaceholderPause();
+    };
+    placeholder.shortVideoGalleryTogglePlayback = () => {
+      if (disposed) return false;
+      if (mountedPlayer) return mountedPlayer.shortVideoGalleryTogglePlayback?.();
+      if (userPaused) placeholder.shortVideoGalleryResume("user");
+      else placeholder.shortVideoGalleryPause("user");
+      return userPaused;
+    };
+    placeholder.shortVideoGallerySetActive = (active) => {
+      if (disposed) return;
+      ghost = !active;
+      if (mountedPlayer) return mountedPlayer.shortVideoGallerySetActive?.(active);
+      placeholder.classList.toggle("is-ghost", ghost);
+      syncPlaceholderPause();
+      if (active) mount();
+    };
+    placeholder.shortVideoGalleryDispose = () => {
+      if (disposed) return;
+      disposed = true;
+      if (mountFrame) window.cancelAnimationFrame(mountFrame);
+      mountFrame = 0;
+      mountedPlayer?.shortVideoGalleryDispose?.();
+    };
+    placeholder.shortVideoGalleryUpdateMetadata = (next) => {
+      if (disposed || String(next?.id || "") !== String(video?.id || "")) return false;
+      if (mountedPlayer) return mountedPlayer.shortVideoGalleryUpdateMetadata?.(next) || false;
+      if (ghost || !placeholder.isConnected) return false;
+      latestVideo = { ...latestVideo, ...next };
+      return true;
+    };
     const mount = () => {
       if (mountPromise) return mountPromise;
-      if (!placeholder.isConnected) return Promise.resolve(null);
+      if (disposed || !placeholder.isConnected) return Promise.resolve(null);
       const startedAt = Date.now();
       mountPromise = ensureShortVideoGalleryPlayer().then((render) => {
-        if (!placeholder.isConnected) return null;
-        const player = render(video, options);
+        if (disposed || !placeholder.isConnected) return null;
+        const player = render(latestVideo, { ...options, ghost });
+        if (userPaused) player.shortVideoGalleryPause?.("user");
+        for (const reason of timingPauses) player.shortVideoGalleryPause?.(reason);
+        player.dataset.shortVideoPlaybackIntentGeneration = placeholder.dataset.shortVideoPlaybackIntentGeneration;
+        mountedPlayer = player;
         placeholder.replaceWith(player);
+        syncShortVideoModalPlayback();
         stage?.setAttribute("aria-busy", "false");
         markShortVideoPerformance("gallery-player-mounted", {
           videoId: String(video?.id || ""),
@@ -2331,7 +2852,7 @@ export function createShortVideoPage(deps) {
         return player;
       }).catch((error) => {
         mountPromise = null;
-        if (!placeholder.isConnected) return null;
+        if (disposed || !placeholder.isConnected) return null;
         placeholder.classList.remove("is-loading");
         placeholder.classList.add("is-error");
         placeholder.setAttribute("aria-busy", "false");
@@ -2347,7 +2868,8 @@ export function createShortVideoPage(deps) {
     if (ghost) {
       // Adjacent galleries prepare only their first item, after the visible
       // video has painted. Navigation can request the same preparation sooner.
-      window.requestAnimationFrame(() => {
+      mountFrame = window.requestAnimationFrame(() => {
+        mountFrame = 0;
         const current = activePlayer();
         const ready = current?.tagName === "VIDEO"
           ? waitForVideoFirstFrame(current, SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS)
@@ -2356,7 +2878,7 @@ export function createShortVideoPage(deps) {
       });
       return placeholder;
     }
-    window.requestAnimationFrame(mount);
+    mountFrame = window.requestAnimationFrame(() => { mountFrame = 0; mount(); });
 
     return placeholder;
   }
@@ -2377,6 +2899,8 @@ export function createShortVideoPage(deps) {
     nav.className = "short-video-nav-pair";
     const prev = railNav("↑", () => openAdjacent(-1), !state.shortVideo.prevId);
     const next = railNav("↓", () => openAdjacent(1), !state.shortVideo.nextId);
+    syncShortVideoNavigationButton(prev, -1);
+    syncShortVideoNavigationButton(next, 1);
     nav.append(prev, next);
     return nav;
   }
@@ -2408,8 +2932,24 @@ export function createShortVideoPage(deps) {
     let stuckTimer = 0;
     let retrying = false;
     let automaticSourceRecoveryAttempted = false;
-    let wantsToPlay = Boolean(player.autoplay);
+    // An incoming reel may already be playing silently from warmup. Its play
+    // event can precede status binding and autoplay remains false for ghosts.
+    let wantsToPlay = Boolean(player.autoplay || (!player.paused && !player.ended));
     let lastGoodTime = Math.max(0, Number(player.currentTime || 0));
+    let lastSeekTime = null;
+    let manualRestore = null;
+    const hasFirstFrame = () => player.dataset.shortVideoFrameReady === "1";
+    const ownsVisiblePlayer = () => !shortVideoPageSuspended && state.activeView === "shortVideos"
+      && activePlayer() === player && String(state.shortVideo?.current?.id || "") === String(video?.id || "")
+      && player.isConnected && !player.classList.contains("is-ghost")
+      && String(player.dataset.videoId || "") === String(video?.id || "");
+    const resumeTime = () => lastSeekTime ?? Math.max(lastGoodTime, Math.max(0, Number(player.currentTime || 0)));
+    const cancelManualRestore = () => {
+      if (!manualRestore) return;
+      player.removeEventListener("loadedmetadata", manualRestore.metadata);
+      player.removeEventListener("canplay", manualRestore.resume);
+      manualRestore = null;
+    };
 
     const clearTimers = () => {
       window.clearTimeout(feedbackTimer);
@@ -2435,8 +2975,9 @@ export function createShortVideoPage(deps) {
       syncStageState(kind);
       if (kind === "loading" || kind === "buffering" || kind === "retrying") {
         stuckTimer = window.setTimeout(() => {
-          if (player.readyState >= 2 && !stage.classList.contains("is-video-buffering")) return;
-          const issueReason = player.currentTime > 0.05 ? "playback-stalled" : "first-frame-timeout";
+          if (!ownsVisiblePlayer() || !wantsToPlay) return;
+          if (hasFirstFrame() && !stage.classList.contains("is-video-buffering")) return;
+          const issueReason = hasFirstFrame() ? "playback-stalled" : "first-frame-timeout";
           if (switchToSmoothFallback(issueReason)) return;
           const boundSource = String(player.currentSrc || player.getAttribute("src") || "").trim();
           if (
@@ -2461,10 +3002,14 @@ export function createShortVideoPage(deps) {
       }
     };
     const switchToSmoothFallback = (reason) => {
+      if (!ownsVisiblePlayer() || !wantsToPlay) return false;
       const switched = playbackRenditionPolicy.switchToSmoothFallback(player, video, reason, {
         ensureSource: ensureShortVideoPlayerSource,
         lastGoodTime,
-        wantsToPlay
+        resumeTime: resumeTime(),
+        wantsToPlay,
+        isCurrent: ownsVisiblePlayer,
+        canResume: () => wantsToPlay
       });
       if (!switched) return false;
       retrying = true;
@@ -2478,51 +3023,77 @@ export function createShortVideoPage(deps) {
       status.removeAttribute("data-state");
       status.setAttribute("aria-hidden", "true");
       stage.classList.remove("is-video-buffering", "is-video-error");
-      if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1") {
+      if (hasFirstFrame()) {
         stage.classList.remove("is-video-loading");
         stage.classList.add("is-video-ready");
+        stage.setAttribute("aria-busy", "false");
+      } else if (!wantsToPlay) {
+        stage.classList.remove("is-video-loading");
         stage.setAttribute("aria-busy", "false");
       }
       syncPlayToggle();
     };
     const showDelayed = (kind) => {
       window.clearTimeout(feedbackTimer);
+      if (!ownsVisiblePlayer() || !wantsToPlay) return;
       feedbackTimer = window.setTimeout(() => {
-        if (kind === "loading" && player.readyState >= 2) return;
+        if (!ownsVisiblePlayer() || !wantsToPlay) return;
+        if (kind === "loading" && hasFirstFrame()) return;
         if (kind === "buffering" && (!wantsToPlay || player.readyState >= 3)) return;
         if (kind === "loading") showStatus("loading", "正在加载视频", "即将开始播放");
         else showStatus("buffering", "正在缓冲", "网络恢复后会自动继续");
       }, 420);
     };
     const handleLoadStart = () => {
+      if (!ownsVisiblePlayer()) return;
       stage.classList.add("is-video-loading");
       stage.classList.remove("is-video-ready", "is-video-error");
       showDelayed("loading");
       syncPlayToggle();
     };
     const handleWaiting = () => {
-      if (!wantsToPlay && player.currentTime > 0) return;
-      showDelayed(player.readyState >= 2 ? "buffering" : "loading");
+      if (!ownsVisiblePlayer() || !wantsToPlay) return;
+      showDelayed(hasFirstFrame() ? "buffering" : "loading");
     };
     const handleReady = () => {
       if (player.readyState < 2) return;
+      if (!hasFirstFrame()) {
+        if (ownsVisiblePlayer() && wantsToPlay) showDelayed("loading");
+        else if (!wantsToPlay) hideStatus();
+        return;
+      }
       automaticSourceRecoveryAttempted = false;
       const recoveredFromRetry = retrying;
       hideStatus();
       if (recoveredFromRetry) warmVisibleAdjacentVideoPlayers();
     };
     const handleError = () => {
+      if (!ownsVisiblePlayer()) return;
+      if (!wantsToPlay) {
+        showStatus("error", "视频加载失败", "点击重新加载后重试");
+        return;
+      }
       if ([3, 4].includes(Number(player.error?.code || 0)) && switchToSmoothFallback("decode-error")) return;
       if (playbackRenditionPolicy.retrySmoothFallback(player, video, {
         ensureSource: ensureShortVideoPlayerSource,
         lastGoodTime,
+        resumeTime: resumeTime(),
         wantsToPlay,
+        isCurrent: ownsVisiblePlayer,
+        canResume: () => wantsToPlay,
         onScheduled: (attempt, limit) => {
           retrying = true; showStatus("retrying", "兼容版本正在生成", `自动重试 ${attempt}/${limit}`);
         }
       })) return;
       retrying = false;
       showStatus("error", "视频加载失败", "保留当前进度后重试");
+    };
+    const rememberSeekIntent = () => {
+      // A seek can fail before HAVE_CURRENT_DATA. Keep its target, including
+      // zero, while ignoring load() resets which have no metadata at all.
+      if (!ownsVisiblePlayer() || player.readyState < 1 || !Number.isFinite(player.currentTime)
+        || !Number.isFinite(player.duration) || player.duration <= 0) return;
+      lastSeekTime = Math.max(0, Number(player.currentTime));
     };
     const rememberProgress = () => {
       // A failed source reset emits timeupdate with currentTime = 0 and
@@ -2533,29 +3104,62 @@ export function createShortVideoPage(deps) {
       if (!Number.isFinite(current)) return;
       const madeForwardProgress = current > lastGoodTime + 0.04;
       lastGoodTime = current;
+      lastSeekTime = null;
       // Some media stacks resume advancing without another canplay/playing
       // event. Progress itself is the strongest recovery signal.
-      if (madeForwardProgress && wantsToPlay && status.dataset.state === "buffering") hideStatus();
+      if (madeForwardProgress && wantsToPlay && hasFirstFrame() && status.dataset.state === "buffering") hideStatus();
     };
 
+    // Reloads may pause media without cancelling the user's play request.
+    // Explicit controls set intent separately so a pending retry cannot undo
+    // a user pause or a seek that has already chosen another position.
+    player.shortVideoSetPlaybackIntent = (shouldPlay) => {
+      player.shortVideoCancelTapGuard?.();
+      player.shortVideoCancelWatchResume?.();
+      player.shortVideoCancelHoldSpeed?.();
+      if (ownsVisiblePlayer()) cancelShortVideoAutoNext();
+      player.dataset.shortVideoExplicitPlaybackIntent = shouldPlay ? "play" : "pause";
+      player.dataset.shortVideoPlaybackIntentGeneration = String(Number(player.dataset.shortVideoPlaybackIntentGeneration || 0) + 1);
+      wantsToPlay = Boolean(shouldPlay);
+      if (!wantsToPlay) {
+        if (ownsVisiblePlayer()) {
+          queuedAdjacentDirection = 0;
+        }
+        playbackRenditionPolicy.cancelPlayerRecovery(player);
+        player.shortVideoCancelFirstFrame?.();
+        cancelManualRestore();
+        hideStatus();
+      } else if (!hasFirstFrame()) {
+        showDelayed("loading");
+      }
+    };
+    player.shortVideoCancelPlaybackStatus = () => {
+      cancelManualRestore();
+      hideStatus();
+    };
     player.addEventListener("loadstart", handleLoadStart);
     player.addEventListener("waiting", handleWaiting);
     player.addEventListener("stalled", handleWaiting);
     player.addEventListener("error", handleError);
     player.addEventListener("loadeddata", handleReady);
     player.addEventListener("canplay", handleReady);
+    player.addEventListener("shortvideoframeready", handleReady);
     player.addEventListener("playing", () => {
+      if (!ownsVisiblePlayer() || player.paused || player.ended || player.dataset.shortVideoExplicitPlaybackIntent === "pause") return;
       wantsToPlay = true;
       handleReady();
     });
     player.addEventListener("play", () => {
+      if (!ownsVisiblePlayer() || player.paused || player.ended || player.dataset.shortVideoExplicitPlaybackIntent === "pause") return;
       wantsToPlay = true;
+      if (!hasFirstFrame()) showDelayed("loading");
     });
     player.addEventListener("pause", () => {
       if (!retrying && !player.error && !stage.classList.contains("is-video-error")) wantsToPlay = false;
     });
     player.addEventListener("timeupdate", rememberProgress);
-    player.addEventListener("seeked", rememberProgress);
+    player.addEventListener("seeking", rememberSeekIntent);
+    player.addEventListener("seeked", () => { rememberSeekIntent(); rememberProgress(); });
 
     retry.addEventListener("pointerdown", (event) => event.stopPropagation());
     retry.addEventListener("dblclick", (event) => {
@@ -2565,21 +3169,27 @@ export function createShortVideoPage(deps) {
     retry.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (!ownsVisiblePlayer()) return;
       const source = String(player.dataset.streamUrl || shortVideoPlaybackUrl(video) || player.currentSrc || player.src || "").trim();
       if (!source) {
         showStatus("error", "视频加载失败", "暂时找不到可播放的视频地址");
         return;
       }
-      const preservedTime = Math.max(lastGoodTime, Math.max(0, Number(player.currentTime || 0)));
+      const preservedTime = resumeTime();
       const preservedMuted = Boolean(player.muted);
       const preservedVolume = Math.max(0, Math.min(1, Number(player.volume || 0)));
       const preservedRate = normalizePlaybackRate(player.playbackRate);
       const shouldPlay = wantsToPlay || (!player.paused && !player.ended);
+      cancelManualRestore();
       retrying = true;
       wantsToPlay = shouldPlay;
       showStatus("retrying", "正在重新加载", "恢复播放状态中");
 
+      const restore = { metadata: null, resume: null, generation: null };
+      const ownsManualRestore = () => manualRestore === restore && ownsVisiblePlayer()
+        && restore.generation === String(player.dataset.shortVideoSourceGeneration || "0");
       const restorePlaybackState = () => {
+        if (!ownsManualRestore()) return;
         player.muted = preservedMuted;
         player.volume = preservedVolume;
         player.playbackRate = preservedRate;
@@ -2589,28 +3199,37 @@ export function createShortVideoPage(deps) {
             player.currentTime = Math.min(preservedTime, Math.max(0, duration - 0.2));
           } catch {}
         }
-        if (!shouldPlay) return;
+        if (!shouldPlay || !wantsToPlay) { cancelManualRestore(); return; }
         const resume = () => {
+          if (!ownsManualRestore() || !wantsToPlay) return;
+          const playbackOwner = captureShortVideoPlaybackOwner(player);
+          cancelManualRestore();
           player.play().catch(() => {
+            if (!ownsShortVideoPlaybackOwner(playbackOwner)) return;
             if (!player.error) {
               wantsToPlay = false;
               handleReady();
             }
           });
         };
+        restore.resume = resume;
         if (player.readyState >= 2) resume();
         else player.addEventListener("canplay", resume, { once: true });
       };
+      restore.metadata = restorePlaybackState;
+      manualRestore = restore;
       player.addEventListener("loadedmetadata", restorePlaybackState, { once: true });
       ensureShortVideoPlayerSource(player, video, {
         source,
         forceReload: true,
+        preservePlaybackStatus: true,
         reason: "manual-retry"
       });
+      restore.generation = String(player.dataset.shortVideoSourceGeneration || "0");
     });
 
     if (player.error) handleError();
-    else if (player.readyState >= 2) hideStatus();
+    else if (hasFirstFrame()) hideStatus();
     else showDelayed("loading");
   }
 
@@ -2633,26 +3252,37 @@ export function createShortVideoPage(deps) {
       centerPlay.tabIndex = centerVisible ? 0 : -1;
       centerPlay.setAttribute("aria-hidden", String(!centerVisible));
     };
+    const ownsPrimaryPlayer = () => ownsShortVideoPlaybackOwner(captureShortVideoPlaybackOwner(player, { allowPaused: true, soundIntent: false }));
+    const playWithCurrentIntent = (focus = false) => {
+      const owner = captureShortVideoPlaybackOwner(player, { soundIntent: false });
+      const focusOrigin = focus ? document.activeElement : null;
+      player.play().then(() => {
+        if (!ownsShortVideoPlaybackOwner(owner)) return;
+        syncPlayToggle();
+        if (focus && document.activeElement === focusOrigin) stage.focus({ preventScroll: true });
+      }).catch(() => { if (ownsShortVideoPlaybackOwner(owner)) syncPlayToggle(); });
+    };
     centerPlay.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (!player.paused) return;
-      player.play().then(() => {
-        syncPlayToggle();
-        stage.focus({ preventScroll: true });
-      }).catch(syncPlayToggle);
+      if (!ownsPrimaryPlayer() || !player.paused) return;
+      clearPendingPlayerClick();
+      player.shortVideoSetPlaybackIntent?.(true);
+      playWithCurrentIntent(true);
     });
     centerPlay.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
       clearPendingPlayerClick();
+      if (!ownsPrimaryPlayer()) return;
       toggleShortVideoAction(state.shortVideo?.current, "like", railGetter?.(), { forceActive: true, silent: true });
       showHeartBurst(stage, event);
     });
     if (player.dataset.primaryControlsBound !== "1") {
       const togglePlay = () => {
+        player.shortVideoSetPlaybackIntent?.(player.paused);
         if (player.paused) {
-          player.play().then(syncPlayToggle).catch(syncPlayToggle);
+          playWithCurrentIntent();
         } else {
           player.pause();
           syncPlayToggle();
@@ -2676,6 +3306,7 @@ export function createShortVideoPage(deps) {
       player.addEventListener("ended", () => handleAutoNextEnded(player));
       bindHoldToSpeed(stage, player);
       player.addEventListener("click", (event) => {
+        if (!ownsPrimaryPlayer()) return;
         if (suppressNextPlayerClick) {
           clearPendingPlayerClick();
           suppressNextPlayerClick = false;
@@ -2695,23 +3326,25 @@ export function createShortVideoPage(deps) {
           restorePlayerSound(player, stage);
           return;
         }
-        if (pendingPlayerTap?.player === player) {
+        if (pendingPlayerTap?.player === player && ownsShortVideoPlaybackOwner(pendingPlayerTap.owner)) {
           window.clearTimeout(playerClickTimer);
           playerClickTimer = 0;
           return;
         }
         clearPendingPlayerClick();
         const tapToken = String(Date.now());
-        pendingPlayerTap = {
+        const tap = {
           player,
           wasPlaying: Boolean(!player.paused && !player.ended),
           token: tapToken
         };
+        pendingPlayerTap = tap;
         player.dataset.shortVideoTapToken = tapToken;
         player.dataset.shortVideoTapWasPlaying = pendingPlayerTap.wasPlaying ? "1" : "0";
         togglePlay();
+        tap.owner = captureShortVideoPlaybackOwner(player, { allowPaused: true, soundIntent: false });
         playerClickTimer = window.setTimeout(() => {
-          if (pendingPlayerTap?.player === player && pendingPlayerTap.token === tapToken) {
+          if (pendingPlayerTap === tap) {
             clearPendingPlayerClick();
           }
         }, SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS);
@@ -2723,26 +3356,38 @@ export function createShortVideoPage(deps) {
           event.stopPropagation();
           return;
         }
-        const tapWasPlaying = player.dataset.shortVideoTapWasPlaying;
+        const tap = pendingPlayerTap?.player === player ? pendingPlayerTap : null;
+        const tapWasPlaying = tap && ownsShortVideoPlaybackOwner(tap.owner) ? tap.wasPlaying : null;
         clearPendingPlayerClick();
-        if (tapWasPlaying === "1" && player.paused) {
-          player.play().then(syncPlayToggle).catch(syncPlayToggle);
-        } else if (tapWasPlaying === "0") {
-          const pauseGuard = String(Date.now());
-          player.dataset.shortVideoTapPauseGuard = pauseGuard;
+        if (!ownsPrimaryPlayer()) return;
+        if (tapWasPlaying === true) {
+          player.shortVideoSetPlaybackIntent?.(true);
+          if (player.paused) playWithCurrentIntent();
+        } else if (tapWasPlaying === false) {
+          player.shortVideoSetPlaybackIntent?.(false);
+          const owner = captureShortVideoPlaybackOwner(player, { allowPaused: true, soundIntent: false });
+          let pauseGuardTimer = null;
+          const cancelPauseGuard = () => {
+            player.removeEventListener("play", enforcePausedTapState);
+            if (pauseGuardTimer != null) window.clearTimeout(pauseGuardTimer);
+            if (player.shortVideoCancelTapGuard === cancelPauseGuard) {
+              delete player.shortVideoCancelTapGuard;
+              if (shortVideoTapGuardPlayer === player) shortVideoTapGuardPlayer = null;
+            }
+          };
           const enforcePausedTapState = () => {
-            if (player.dataset.shortVideoTapPauseGuard !== pauseGuard) return;
+            if (!ownsShortVideoPlaybackOwner(owner) || player.dataset.shortVideoExplicitPlaybackIntent !== "pause") {
+              cancelPauseGuard();
+              return;
+            }
             player.pause();
             syncPlayToggle();
           };
+          player.shortVideoCancelTapGuard = cancelPauseGuard;
+          shortVideoTapGuardPlayer = player;
           player.addEventListener("play", enforcePausedTapState);
           enforcePausedTapState();
-          window.setTimeout(() => {
-            player.removeEventListener("play", enforcePausedTapState);
-            if (player.dataset.shortVideoTapPauseGuard === pauseGuard) {
-              delete player.dataset.shortVideoTapPauseGuard;
-            }
-          }, 240);
+          pauseGuardTimer = window.setTimeout(cancelPauseGuard, 240);
         }
         toggleShortVideoAction(state.shortVideo?.current, "like", railGetter?.(), { forceActive: true, silent: true });
         showHeartBurst(stage, event);
@@ -2757,6 +3402,8 @@ export function createShortVideoPage(deps) {
   }
 
   function clearPendingPlayerClick() {
+    shortVideoTapGuardPlayer?.shortVideoCancelTapGuard?.();
+    shortVideoTapGuardPlayer = null;
     const tap = pendingPlayerTap;
     window.clearTimeout(playerClickTimer);
     playerClickTimer = 0;
@@ -2769,130 +3416,72 @@ export function createShortVideoPage(deps) {
 
   function bindShortVideoWatchTracking(stage, player, video, options = {}) {
     const videoId = String(video?.id || "").trim();
-    if (!videoId || player.dataset.watchTrackingVideoId === videoId) return;
+    if (!videoId) return;
+    if (player.dataset.watchTrackingVideoId === videoId) {
+      player.shortVideoUpdateWatchMetadata?.(video);
+      return;
+    }
+    player.shortVideoDisposeWatchResume?.();
     player.dataset.watchTrackingVideoId = videoId;
-    const resumeProgressMs = Math.max(0, Number(video?.watch?.progressMs || 0));
-    const resumeCompleted = Boolean(video?.watch?.completed);
-    const restore = () => {
-      if (player.dataset.watchRestored === "1") return;
-      player.dataset.watchRestored = "1";
-      player.dataset.watchRestoredAt = String(Date.now());
-      const durationMs = Math.max(0, Number(player.duration || 0) * 1000);
-      const canResume = options.resume !== false
-        && !resumeCompleted
-        && resumeProgressMs >= 1500
-        && durationMs > 0
-        && durationMs - resumeProgressMs >= 1500;
-      if (canResume) {
-        try {
-          player.currentTime = resumeProgressMs / 1000;
-          window.requestAnimationFrame(() => {
-            if (stage.isConnected && player === activePlayer()) {
-              showBrowserToast(`已续播至 ${formatSeconds(resumeProgressMs / 1000)}`);
-            }
-          });
-        } catch {}
-      }
-      persistShortVideoWatch(video, player, { force: true });
+    for (const name of ["watchRestored", "watchRestoredAt", "watchRestoreScheduled", "watchCompleted"]) delete player.dataset[name];
+    const controller = createShortVideoWatchResumeController({
+      stage, player, video, resume: options.resume !== false, getActivePlayer: activePlayer,
+      getVideo: () => state.activeView === "shortVideos" ? state.shortVideo.current : null,
+      getWatch: (current) => shortVideoWatchWriteController?.latestWatch(videoId, current?.watch) || current?.watch,
+      getContext: () => [shortVideoOpenRequestId, shortVideoNavigationState, shortVideoNavigationScope()],
+      waitForFirstFrame: waitForVideoFirstFrame, persist: persistShortVideoWatch,
+      onResume: (seconds) => showBrowserToast(`已续播至 ${formatSeconds(seconds)}`)
+    });
+    player.shortVideoCancelWatchResume = controller.cancel;
+    player.shortVideoUpdateWatchMetadata = controller.update;
+    player.shortVideoWatchCanPersist = controller.canPersist;
+    player.shortVideoFlushWatch = controller.flush;
+    player.shortVideoDisposeWatchResume = () => {
+      controller.dispose();
+      delete player.dataset.watchTrackingVideoId;
     };
-    const scheduleRestore = () => {
-      if (player.dataset.watchRestored === "1" || player.dataset.watchRestoreScheduled === "1") return;
-      const durationMs = Math.max(0, Number(player.duration || 0) * 1000);
-      const canResume = options.resume !== false
-        && !resumeCompleted
-        && resumeProgressMs >= 1500
-        && durationMs > 0
-        && durationMs - resumeProgressMs >= 1500;
-      if (!canResume) {
-        restore();
-        return;
-      }
-      player.dataset.watchRestoreScheduled = "1";
-      waitForVideoFirstFrame(player, 1800).finally(() => {
-        window.requestAnimationFrame(() => {
-          if (player.isConnected) restore();
-        });
-      });
-    };
-    player.addEventListener("loadedmetadata", scheduleRestore, { once: true });
-    player.addEventListener("playing", () => {
-      if (player.dataset.watchRestored === "1") persistShortVideoWatch(video, player);
-    });
-    player.addEventListener("pause", () => {
-      if (player.dataset.watchRestored === "1") persistShortVideoWatch(video, player, { force: true });
-    });
-    player.addEventListener("timeupdate", () => {
-      if (player.dataset.watchRestored !== "1") return;
-      const duration = Math.max(0, Number(player.duration || 0));
-      const current = Math.max(0, Number(player.currentTime || 0));
-      if (duration > 0 && duration - current <= 0.8) {
-        if (player.dataset.watchCompleted !== "1") {
-          player.dataset.watchCompleted = "1";
-          persistShortVideoWatch(video, player, { force: true, completed: true });
-        }
-        return;
-      }
-      if (duration > 0 && current < duration * 0.5) player.dataset.watchCompleted = "";
-      persistShortVideoWatch(video, player);
-    });
-    player.addEventListener("ended", () => persistShortVideoWatch(video, player, { force: true, completed: true }));
-    if (player.readyState >= 1) window.requestAnimationFrame(scheduleRestore);
   }
 
   function persistShortVideoWatch(video, player, options = {}) {
     const videoId = String(video?.id || "").trim();
-    if (!videoId) return;
-    const now = Date.now();
-    let write = shortVideoWatchWrites.get(videoId);
-    if (!write) {
-      write = { inFlight: false, lastSavedAt: 0, lastPayload: null, pending: null };
-      shortVideoWatchWrites.set(videoId, write);
-    } else {
-      shortVideoWatchWrites.delete(videoId);
-      shortVideoWatchWrites.set(videoId, write);
-    }
-    trimShortVideoWatchWrites(videoId);
-    if (!options.force && now - write.lastSavedAt < SHORT_VIDEO_WATCH_SAVE_INTERVAL) return;
-    const progressMs = Math.max(0, Math.round(Number(player?.currentTime || 0) * 1000));
-    const payload = { progressMs, completed: Boolean(options.completed) };
-    if (
-      options.force
-      && now - write.lastSavedAt < 600
-      && write.lastPayload?.completed === payload.completed
-      && Math.abs(Number(write.lastPayload?.progressMs || 0) - progressMs) < 1000
-    ) {
-      return;
-    }
-    write.lastSavedAt = now;
-    write.lastPayload = payload;
-    if (write.inFlight) {
-      write.pending = mergeShortVideoWatchPayload(write.pending, payload);
-      return;
-    }
-    dispatchShortVideoWatchWrite(video, write, payload);
+    if (!videoId || isDeletedShortVideo(video)) return false;
+    const currentTime = Number(player?.currentTime);
+    const progressMs = Number.isFinite(currentTime) ? Math.max(0, Math.round(currentTime * 1000)) : 0;
+    const controller = ensureShortVideoWatchWriteController();
+    const accepted = controller.submit(videoId, {
+      progressMs, completed: Boolean(options.completed)
+    }, { force: Boolean(options.force), watch: video.watch });
+    if (accepted) video.watch = { ...(video.watch || {}), ...controller.latestWatch(videoId) };
+    return accepted;
   }
 
-  function dispatchShortVideoWatchWrite(video, write, payload) {
-    const videoId = String(video?.id || "").trim();
-    if (!videoId) return;
-    write.inFlight = true;
-    api(`/api/short-videos/${encodeURIComponent(videoId)}/watch`, {
+  function ensureShortVideoWatchWriteController() {
+    if (!shortVideoWatchWriteController) {
+      shortVideoWatchWriteController = createShortVideoWatchWriteController({
+        entries: shortVideoWatchWrites,
+        maxEntries: SHORT_VIDEO_WATCH_WRITE_CACHE_LIMIT,
+        saveIntervalMs: SHORT_VIDEO_WATCH_SAVE_INTERVAL,
+        now: () => Date.now(),
+        write: dispatchShortVideoWatchWrite,
+        onUpdate: (videoId, watch) => syncShortVideoWatchVideo({ id: videoId, watch }),
+        onError: (error) => {
+          console.warn("观看进度保存失败", error);
+          const now = Date.now();
+          if (state.activeView !== "shortVideos" || document.hidden
+            || (shortVideoWatchWriteNoticeAt !== null && now - shortVideoWatchWriteNoticeAt < 30000)) return;
+          shortVideoWatchWriteNoticeAt = now;
+          showBrowserToast("部分观看进度尚未保存");
+        }
+      });
+    }
+    return shortVideoWatchWriteController;
+  }
+
+  function dispatchShortVideoWatchWrite(videoId, payload, options = {}) {
+    return api(`/api/short-videos/${encodeURIComponent(videoId)}/watch`, {
       method: "PUT",
-      keepalive: true,
+      keepalive: options.keepalive === true,
       body: payload
-    }).then((data) => {
-      if (data?.video) syncShortVideoWatchVideo(data.video);
-      else if (data?.videoId && data?.watch) {
-        syncShortVideoWatchVideo({ id: data.videoId, watch: data.watch });
-      }
-    }).catch((error) => {
-      console.warn("观看进度保存失败", error);
-    }).finally(() => {
-      write.inFlight = false;
-      const pending = write.pending;
-      write.pending = null;
-      if (pending) dispatchShortVideoWatchWrite(video, write, pending);
-      else trimShortVideoWatchWrites();
     });
   }
 
@@ -3033,6 +3622,8 @@ export function createShortVideoPage(deps) {
       state.shortVideo?.current,
       state.shortVideo?.prevVideo,
       state.shortVideo?.nextVideo,
+      cachedShortVideo(updated.id),
+      resolvedShortVideoDetail(updated.id)?.video,
       ...(state.shortVideo?.data?.videos || [])
     ];
     for (const item of candidates) {
@@ -3043,40 +3634,113 @@ export function createShortVideoPage(deps) {
 
   function flushActiveShortVideoWatch() {
     const video = state.shortVideo?.current;
-    if (!video?.id) return;
-    if (isGalleryPost(video)) {
+    if (video?.id && isGalleryPost(video)) {
       persistShortVideoWatch(video, null, { force: true, completed: true });
-      return;
+    } else if (video?.id) {
+      const player = activePlayer();
+      player?.shortVideoFlushWatch?.({ force: true });
     }
-    persistShortVideoWatch(video, activePlayer(), { force: true });
+    shortVideoWatchWriteController?.flush({ keepalive: true });
   }
 
   function handleAutoNextEnded(player) {
-    if (!state.shortVideo?.autoNext || els.workGrid?.querySelector?.(".short-video-more-overlay")) return;
     if (player !== activePlayer()) return;
-    if (!state.shortVideo.nextId) {
-      player.loop = true;
-      player.currentTime = 0;
-      player.play?.().catch(() => {});
-      showBrowserToast("已经是最后一条");
-      return;
-    }
-    openAdjacent(1).catch(showError);
+    ensureShortVideoAutoNextController().ended("video", player);
   }
 
   function handleGalleryAutoNext(video) {
     if (!state.shortVideo?.autoNext || !isCurrentShortVideo(video)) return false;
-    if (!state.shortVideo.nextId) {
-      showBrowserToast("已经是最后一条");
-      return false;
+    const gallery = activeGalleryPlayer();
+    if (hasShortVideoBrowseOverlay() || gallery?.shortVideoGalleryIsPaused?.()) return true;
+    return ensureShortVideoAutoNextController().ended("gallery", gallery);
+  }
+
+  function captureShortVideoAutoNextOwner(kind, target) {
+    if (!state.shortVideo?.autoNext || state.activeView !== "shortVideos" || !state.shortVideo.current
+      || hasShortVideoBrowseOverlay() || !target?.isConnected || target.classList.contains("is-ghost")) return null;
+    const gallery = kind === "gallery";
+    if (gallery ? target !== activeGalleryPlayer() || target.shortVideoGalleryIsPaused?.()
+      : target !== activePlayer() || !target.ended || target.dataset.shortVideoExplicitPlaybackIntent === "pause"
+        || isGalleryPost(state.shortVideo.current)) return null;
+    return {
+      kind, target, id: String(state.shortVideo.current.id || ""),
+      navigation: shortVideoNavigationState, scope: shortVideoNavigationScope(), openRequestId: shortVideoOpenRequestId,
+      source: gallery ? "" : String(target.getAttribute?.("src") || target.currentSrc || ""),
+      generation: String(target.dataset.shortVideoSourceGeneration || "0"),
+      intent: String(target.dataset.shortVideoPlaybackIntentGeneration || "0"),
+      promotion: String(target.dataset.shortVideoPromotedAt || ""),
+      index: gallery ? String(target.dataset.galleryIndex || "0") : ""
+    };
+  }
+
+  function ownsShortVideoAutoNextOwner(owner) {
+    if (!owner) return false;
+    const current = captureShortVideoAutoNextOwner(owner.kind, owner.target);
+    return Boolean(current && ["kind", "target", "id", "navigation", "scope", "openRequestId", "source", "generation", "intent", "promotion", "index"]
+      .every((key) => current[key] === owner[key]));
+  }
+
+  function renderShortVideoAutoNextState({ waiting = false, error = false, owner = null } = {}) {
+    for (const button of els.workGrid?.querySelectorAll?.(".short-video-control-auto") || []) {
+      button.setAttribute("aria-busy", String(waiting));
+      button.title = waiting ? "正在准备下一条，关闭连播可取消" : error ? "相邻作品读取失败，请点击下一条重试" : "自动播放下一条";
+      const label = button.querySelector?.(".short-video-control-auto-label");
+      if (label) label.textContent = waiting ? "准备中" : "连播";
     }
-    openAdjacent(1).catch(showError);
-    return true;
+    if ((!waiting && !error) || !ownsShortVideoAutoNextOwner(owner)) {
+      shortVideoAutoNextStatus?.remove();
+      shortVideoAutoNextStatus = null;
+      return;
+    }
+    const stage = owner.target.closest?.(".short-video-stage");
+    if (!stage) return;
+    if (shortVideoAutoNextStatus?.parentElement !== stage) {
+      shortVideoAutoNextStatus?.remove();
+      shortVideoAutoNextStatus = document.createElement("div");
+      shortVideoAutoNextStatus.className = "short-video-auto-next-status";
+      shortVideoAutoNextStatus.setAttribute("role", "status");
+      shortVideoAutoNextStatus.setAttribute("aria-live", "polite");
+      stage.append(shortVideoAutoNextStatus);
+    }
+    shortVideoAutoNextStatus.textContent = waiting ? "正在准备下一条…" : "下一条暂时无法读取，可点击下一条重试";
+  }
+
+  function ensureShortVideoAutoNextController() {
+    if (shortVideoAutoNextController) return shortVideoAutoNextController;
+    shortVideoAutoNextController = createShortVideoAutoNextController({
+      capture: captureShortVideoAutoNextOwner, owns: ownsShortVideoAutoNextOwner,
+      getNavigation: () => ({
+        nextId: state.shortVideo.nextId,
+        known: Boolean(isCurrentShortVideoNavigation(shortVideoNavigationState) && shortVideoNavigationState.nextKnown),
+        error: shortVideoNavigationState?.status === "error"
+      }),
+      loadNavigation: (owner) => hydratePromotedShortVideo(state.shortVideo.current, owner.navigation),
+      advance: () => openAdjacent(1),
+      boundary: (owner) => {
+        if (owner.kind === "gallery") owner.target.shortVideoGalleryPause?.("user");
+        else owner.target.pause?.();
+        showBrowserToast("已经是最后一条");
+      },
+      waiting: () => {},
+      failed: (error) => showBrowserToast(error?.message || "相邻作品读取失败，请点击下一条重试"),
+      onStateChange: renderShortVideoAutoNextState
+    });
+    return shortVideoAutoNextController;
+  }
+
+  function cancelShortVideoAutoNext() {
+    shortVideoAutoNextController?.cancel();
+  }
+
+  function flushShortVideoAutoNext() {
+    shortVideoAutoNextController?.flush();
   }
 
   function syncActivePlaybackMode(player = activePlayer()) {
+    if (!state.shortVideo?.autoNext) cancelShortVideoAutoNext();
+    else flushShortVideoAutoNext();
     if (!player || player.classList.contains("is-ghost")) return;
-    player.loop = !(state.shortVideo?.autoNext && state.shortVideo?.nextId);
+    player.loop = isGalleryPost(state.shortVideo?.current) || !state.shortVideo?.autoNext;
     if (player.dataset.holdSpeedActive !== "1") {
       player.playbackRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
     }
@@ -3085,78 +3749,23 @@ export function createShortVideoPage(deps) {
   function bindHoldToSpeed(stage, player) {
     if (!stage || !player || player.dataset.holdSpeedBound === "1") return;
     player.dataset.holdSpeedBound = "1";
-    let holdTimer = 0;
-    let holdPointerId = null;
-    let holdStartX = 0;
-    let holdStartY = 0;
-    let holdActive = false;
-    let holdBaseRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
-
-    const clearHoldTimer = () => {
-      window.clearTimeout(holdTimer);
-      holdTimer = 0;
-    };
-    const setClickSuppression = () => {
-      suppressNextPlayerClick = true;
-      window.setTimeout(() => {
-        suppressNextPlayerClick = false;
-      }, 280);
-    };
-    const stopHold = (options = {}) => {
-      clearHoldTimer();
-      if (holdActive) {
-        holdActive = false;
-        delete player.dataset.holdSpeedActive;
-        player.playbackRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
-        clearHoldSpeedFeedback(stage);
-        if (options.suppressClick) setClickSuppression();
-      }
-      holdPointerId = null;
-    };
-    const startHold = () => {
-      holdTimer = 0;
-      if (holdPointerId == null || !player.isConnected || player.paused) return;
-      holdActive = true;
-      holdSpeedGestureConsumed = true;
-      state.shortVideo.dragging = false;
-      snapStackBack();
-      holdBaseRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
-      player.dataset.holdSpeedActive = "1";
-      player.playbackRate = 2;
-      showHoldSpeedFeedback(stage, holdBaseRate);
-    };
-    const finishPointer = (event, options = {}) => {
-      if (holdPointerId == null || (event?.pointerId != null && event.pointerId !== holdPointerId)) return;
-      const wasActive = holdActive;
-      stopHold({ suppressClick: wasActive && options.suppressClick !== false });
-    };
-
-    player.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.isPrimary === false || player.paused) return;
-      if (pendingPlayerTap?.player !== player) clearPendingPlayerClick();
-      stopHold();
-      holdPointerId = event.pointerId;
-      holdStartX = Number(event.clientX || 0);
-      holdStartY = Number(event.clientY || 0);
-      holdTimer = window.setTimeout(startHold, 360);
+    const controller = createShortVideoHoldSpeedController({
+      stage, player, getActivePlayer: activePlayer,
+      getBaseRate: () => state.shortVideo?.playbackRate,
+      normalizeRate: normalizePlaybackRate,
+      armTolerance: SHORT_VIDEO_HOLD_ARM_MOVE_TOLERANCE,
+      activeTolerance: SHORT_VIDEO_HOLD_ACTIVE_MOVE_TOLERANCE,
+      onArm: () => { if (pendingPlayerTap?.player !== player) clearPendingPlayerClick(); },
+      onActivate: (baseRate) => {
+        holdSpeedGestureConsumed = true;
+        state.shortVideo.dragging = false;
+        snapStackBack();
+        showHoldSpeedFeedback(stage, baseRate);
+      },
+      onFinish: () => clearHoldSpeedFeedback(stage)
     });
-    player.addEventListener("pointermove", (event) => {
-      if (holdPointerId == null || event.pointerId !== holdPointerId) return;
-      const deltaX = Number(event.clientX || 0) - holdStartX;
-      const deltaY = Number(event.clientY || 0) - holdStartY;
-      const moveTolerance = holdActive ? SHORT_VIDEO_HOLD_ACTIVE_MOVE_TOLERANCE : SHORT_VIDEO_HOLD_ARM_MOVE_TOLERANCE;
-      if (Math.hypot(deltaX, deltaY) <= moveTolerance) return;
-      finishPointer(event, { suppressClick: holdActive });
-    });
-    player.addEventListener("pointerup", (event) => finishPointer(event));
-    player.addEventListener("pointercancel", (event) => finishPointer(event, { suppressClick: false }));
-    player.addEventListener("pointerleave", (event) => finishPointer(event));
-    player.addEventListener("pause", () => stopHold());
-    player.addEventListener("emptied", () => stopHold());
-    player.addEventListener("contextmenu", (event) => {
-      if (!holdTimer && !holdActive) return;
-      event.preventDefault();
-    });
+    player.shortVideoCancelHoldSpeed = controller.cancel;
+    player.shortVideoDisposeHoldSpeed = controller.dispose;
   }
 
   function showHoldSpeedFeedback(stage, baseRate) {
@@ -3204,12 +3813,18 @@ export function createShortVideoPage(deps) {
 
   function restorePlayerSound(player, stage = player?.closest?.(".short-video-stage")) {
     if (!player) return;
+    stopShortVideoSoundPreview({ restorePlayback: false });
+    player.shortVideoSetPlaybackIntent?.(true);
+    player.dataset.shortVideoSoundIntentGeneration = String(Number(player.dataset.shortVideoSoundIntentGeneration || 0) + 1);
+    const playbackOwner = captureShortVideoPlaybackOwner(player);
+    if (!ownsShortVideoPlaybackOwner(playbackOwner)) return;
     state.shortVideo.muted = false;
     writeMutedPreference(false);
     player.muted = false;
     player.volume = currentShortVideoVolume();
     clearPlayerSoundBlocked(stage);
-    player.play?.().catch(() => {
+    player.play?.().catch((error) => {
+      if (!ownsShortVideoPlaybackOwner(playbackOwner) || error?.name !== "NotAllowedError") return;
       if (!player.paused) {
         clearPlayerSoundBlocked(stage);
         return;
@@ -3221,16 +3836,15 @@ export function createShortVideoPage(deps) {
   }
 
   function activeShortVideoFullscreenTarget() {
+    if (state.activeView !== "shortVideos" || !state.shortVideo?.current
+      || ["likes", "transcoding"].includes(state.shortVideo.mode)) return null;
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     return browser ? els.workGrid : null;
   }
 
   function shortVideoFullscreenActive() {
-    const fullscreenElement = document.fullscreenElement;
-    return Boolean(fullscreenElement && (
-      fullscreenElement === els.workGrid
-      || fullscreenElement.classList?.contains?.("short-video-browser")
-    ));
+    const target = activeShortVideoFullscreenTarget();
+    return Boolean(target && document.fullscreenElement === target);
   }
 
   function syncShortVideoDisplayModeControl(control) {
@@ -3300,27 +3914,86 @@ export function createShortVideoPage(deps) {
     els.workGrid?.querySelectorAll?.("[data-short-video-fullscreen-control]")?.forEach(syncShortVideoFullscreenControl);
   }
 
+  function ensureShortVideoFullscreenController() {
+    if (!shortVideoFullscreenController) shortVideoFullscreenController = createShortVideoFullscreenController({
+      document, getTarget: activeShortVideoFullscreenTarget, onChange: syncShortVideoFullscreenControls,
+      onError: (error, phase) => showBrowserToast(error?.name === "NotSupportedError"
+        ? (phase === "exit" ? "当前浏览器无法退出网页全屏" : "当前浏览器不支持网页全屏")
+        : phase === "exit" ? "退出全屏失败" : "全屏启动失败")
+    });
+    return shortVideoFullscreenController;
+  }
+
   async function toggleShortVideoFullscreen() {
-    const target = activeShortVideoFullscreenTarget();
-    if (!target) return false;
-    const exiting = Boolean(document.fullscreenElement);
-    if (exiting && typeof document.exitFullscreen !== "function") {
-      showBrowserToast("当前浏览器无法退出网页全屏");
-      return false;
-    }
-    if (!exiting && typeof target.requestFullscreen !== "function") {
-      showBrowserToast("当前浏览器不支持网页全屏");
-      return false;
-    }
-    try {
-      if (exiting) await document.exitFullscreen();
-      else await target.requestFullscreen();
-      syncShortVideoFullscreenControls();
-      return true;
-    } catch {
-      showBrowserToast(exiting ? "退出全屏失败" : "全屏启动失败");
-      return false;
-    }
+    return ensureShortVideoFullscreenController().toggle();
+  }
+
+  function cancelShortVideoFullscreen() {
+    const controller = ensureShortVideoFullscreenController();
+    controller.changed();
+    return controller.cancel();
+  }
+
+  function shortVideoPictureInPicturePlayer() {
+    if (state.activeView !== "shortVideos" || !state.shortVideo?.current || isGalleryPost(state.shortVideo.current)) return null;
+    const player = activePlayer();
+    return player?.tagName === "VIDEO" && player.isConnected && !player.classList.contains("is-ghost")
+      && String(player.dataset.videoId || "") === String(state.shortVideo.current.id || "") ? player : null;
+  }
+
+  function ensureShortVideoPictureInPictureController() {
+    if (!shortVideoPictureInPictureController) shortVideoPictureInPictureController = createShortVideoPictureInPictureController({
+      document, getPlayer: shortVideoPictureInPicturePlayer,
+      isCurrentPlayer: (player) => shortVideoPictureInPicturePlayer() === player,
+      onChange: syncShortVideoPictureInPictureControls,
+      onError: (error) => {
+        console.debug("Short-video picture-in-picture request failed", error?.name, error?.message);
+        showBrowserToast(error?.name === "NotSupportedError" ? "当前环境不支持画中画" : "画中画操作失败，请重试");
+      }
+    });
+    return shortVideoPictureInPictureController;
+  }
+
+  function shortVideoPictureInPictureState() {
+    const player = shortVideoPictureInPicturePlayer();
+    return {
+      supported: Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled && !player.disablePictureInPicture
+        && shortVideoPictureInPictureController?.isSupported() !== false),
+      unavailableReason: !player || player.disablePictureInPicture ? "当前作品不支持" : "当前环境不支持画中画",
+      ready: Boolean(player && player.readyState >= 1 && !player.error),
+      active: Boolean(player && document.pictureInPictureElement === player),
+      closing: Boolean(shortVideoPictureInPictureController?.isClosing?.()),
+      pending: Boolean(shortVideoPictureInPictureController?.isPending())
+    };
+  }
+
+  function toggleShortVideoPictureInPicture(player = shortVideoPictureInPicturePlayer()) {
+    return ensureShortVideoPictureInPictureController().toggle(player);
+  }
+
+  function syncShortVideoPictureInPictureControls() {
+    els.workGrid?.querySelectorAll?.("[data-short-video-picture-in-picture-control]")?.forEach((control) => {
+      control.shortVideoSyncPictureInPicture?.();
+    });
+  }
+
+  function handleShortVideoPictureInPictureChange(event) {
+    ensureShortVideoPictureInPictureController().changed(event);
+  }
+
+  function handleShortVideoFullscreenChange() {
+    shortVideoFullscreenController?.changed();
+    syncShortVideoFullscreenControls();
+  }
+
+  function syncShortVideoNativePlaybackModes() {
+    shortVideoFullscreenController?.changed();
+    shortVideoPictureInPictureController?.changed();
+  }
+
+  function cancelShortVideoNativePlaybackModes() {
+    shortVideoFullscreenController?.cancel();
+    shortVideoPictureInPictureController?.cancel();
   }
 
   function createAutoNextControl() {
@@ -3332,6 +4005,7 @@ export function createShortVideoPage(deps) {
     track.className = "short-video-control-switch-track";
     track.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
+    label.className = "short-video-control-auto-label";
     label.textContent = "连播";
     autoNext.append(track, label);
     autoNext.title = "自动播放下一条";
@@ -3341,11 +4015,16 @@ export function createShortVideoPage(deps) {
       autoNext.setAttribute("aria-pressed", String(enabled));
       autoNext.setAttribute("aria-checked", String(enabled));
       autoNext.setAttribute("aria-label", enabled ? "关闭连播" : "开启连播");
+      autoNext.setAttribute("aria-busy", String(Boolean(shortVideoAutoNextController?.isPending())));
+      label.textContent = shortVideoAutoNextController?.isPending() ? "准备中" : "连播";
     };
     autoNext.addEventListener("click", () => {
+      cancelShortVideoAutoNext();
       state.shortVideo.autoNext = !state.shortVideo.autoNext;
       writeAutoNextPreference(state.shortVideo.autoNext);
       syncActivePlaybackMode();
+      const player = activePlayer();
+      if (state.shortVideo.autoNext && player?.ended && !isGalleryPost(state.shortVideo.current)) handleAutoNextEnded(player);
       showBrowserToast(state.shortVideo.autoNext ? "已开启连播" : "已关闭连播");
       sync();
     });
@@ -3515,7 +4194,10 @@ export function createShortVideoPage(deps) {
     seekPreview.className = "short-video-seek-preview";
     seekPreview.textContent = "0:00";
     seekPreview.setAttribute("aria-hidden", "true");
-    progressWrap.append(progress, seekPreview);
+    const bufferedTrack = document.createElement("div");
+    bufferedTrack.className = "short-video-buffered-track";
+    bufferedTrack.setAttribute("aria-hidden", "true");
+    progressWrap.append(bufferedTrack, progress, seekPreview);
     const autoNext = createAutoNextControl();
     const clearScreen = document.createElement("button");
     clearScreen.type = "button";
@@ -3536,7 +4218,7 @@ export function createShortVideoPage(deps) {
     const rate = document.createElement("button");
     rate.type = "button";
     rate.className = "short-video-control-rate";
-    rate.textContent = "倍速";
+    rate.textContent = playbackRateControlLabel();
     rate.title = "播放速度";
     const settings = document.createElement("button");
     settings.type = "button";
@@ -3546,6 +4228,17 @@ export function createShortVideoPage(deps) {
     pip.type = "button";
     pip.className = "short-video-control-icon short-video-control-pip";
     setIconButton(pip, "pictureInPicture", "画中画");
+    pip.dataset.shortVideoPictureInPictureControl = "icon";
+    pip.shortVideoSyncPictureInPicture = () => {
+      const mode = shortVideoPictureInPictureState();
+      pip.disabled = mode.closing || !(mode.active || (mode.supported && mode.ready));
+      pip.classList.toggle("active", mode.active);
+      pip.setAttribute("aria-pressed", String(mode.active));
+      pip.setAttribute("aria-busy", String(mode.pending));
+      setIconButton(pip, "pictureInPicture", mode.active ? "退出画中画" : "画中画");
+      if (mode.closing) pip.title = "正在退出旧画中画";
+      else if (mode.supported && !mode.ready) pip.title = "视频加载后可用";
+    };
     const smartFill = document.createElement("button");
     smartFill.type = "button";
     smartFill.className = "short-video-control-icon short-video-control-smart-fill";
@@ -3581,16 +4274,7 @@ export function createShortVideoPage(deps) {
     full.dataset.shortVideoFullscreenControl = "icon";
     full.dataset.shortVideoFullscreenLabel = "全屏";
     syncShortVideoFullscreenControl(full);
-    let scrubbing = false;
-    let progressFrameHandle = 0;
-    let progressRaf = 0;
-    let progressPlayer = null;
-    let lastProgressFrameAt = 0;
     let volumeScrubbing = false, volumeCloseTimer = 0;
-    let scrubPlayer = null;
-    let scrubWasPlaying = false;
-    let scrubTargetTime = 0;
-    let scrubSeekRaf = 0;
     const setVolumePopoverOpen = (open) => {
       const expanded = Boolean(open); if (expanded) window.clearTimeout(volumeCloseTimer);
       volumeControl.classList.toggle("is-open", expanded);
@@ -3606,103 +4290,44 @@ export function createShortVideoPage(deps) {
     volumeControl.shortVideoSetOpen = setVolumePopoverOpen;
     setVolumePopoverOpen(false);
 
-    const updateSeekPreview = (ratio, duration) => {
-      const safeRatio = Math.max(0, Math.min(1, Number(ratio || 0)));
-      const width = Math.max(0, progress.getBoundingClientRect().width || progressWrap.clientWidth || 0);
-      const bubbleHalfWidth = 30;
-      const left = width
-        ? Math.max(bubbleHalfWidth, Math.min(width - bubbleHalfWidth, safeRatio * width))
-        : 0;
-      seekPreview.textContent = formatSeconds(Math.max(0, duration) * safeRatio);
-      seekPreview.style.left = width ? `${left}px` : `${safeRatio * 100}%`;
-    };
-
-    const updateSeekPreviewFromPointer = (event) => {
-      const player = activePlayer();
-      if (!player) return;
-      const duration = Number(player.duration || 0);
-      const rect = progress.getBoundingClientRect();
-      if (!duration || !rect.width) return;
-      const ratio = (Number(event.clientX || rect.left) - rect.left) / rect.width;
-      updateSeekPreview(ratio, duration);
-    };
-
-    const applyScrubTarget = (exact = false) => {
-      if (scrubSeekRaf) {
-        window.cancelAnimationFrame(scrubSeekRaf);
-        scrubSeekRaf = 0;
+    const bufferedProgress = createShortVideoBufferedProgress({ container: bufferedTrack, getPlayer: activePlayer });
+    const seekController = createShortVideoSeekController({
+      progress, progressWrap, time, seekPreview, getPlayer: activePlayer, formatSeconds,
+      onChange: () => {
+        stopShortVideoSoundPreview({ restorePlayback: false });
+        const player = activePlayer();
+        player?.shortVideoCancelWatchResume?.();
+        if (!seekController.isScrubbing()) player?.shortVideoFlushWatch?.({ force: true });
+        shortVideoWheelController?.cancel();
+        cancelShortVideoAutoNext();
+        sync(true);
+        scheduleProgressLoop();
       }
-      const player = scrubPlayer;
-      if (!player || player !== activePlayer() || !Number.isFinite(scrubTargetTime)) return;
-      try {
-        if (!exact && typeof player.fastSeek === "function") player.fastSeek(scrubTargetTime);
-        else player.currentTime = scrubTargetTime;
-      } catch {
-        try {
-          player.currentTime = scrubTargetTime;
-        } catch {}
-      }
+    });
+    let bufferedPlayer = null;
+    const bufferedEvents = ["progress", "loadedmetadata", "durationchange", "emptied", "loadstart"];
+    const refreshBufferedProgress = () => {
+      if (bufferedPlayer !== activePlayer()) return;
+      seekController.sync();
+      bufferedProgress.sync({ force: true });
     };
-
-    const scheduleScrubTarget = (player, target, duration) => {
-      scrubPlayer = player;
-      scrubTargetTime = Math.max(0, Math.min(duration, Number(target || 0)));
-      const ratio = duration ? scrubTargetTime / duration : 0;
-      const timeText = `${formatSeconds(scrubTargetTime)} / ${formatSeconds(duration)}`;
-      progress.value = String(Math.round(ratio * 1000));
-      progress.style.setProperty("--short-video-progress", `${ratio * 100}%`);
-      time.textContent = timeText;
-      progress.setAttribute("aria-valuetext", timeText);
-      updateSeekPreview(ratio, duration);
-      if (scrubSeekRaf) return;
-      scrubSeekRaf = window.requestAnimationFrame(() => {
-        scrubSeekRaf = 0;
-        applyScrubTarget(false);
-      });
+    const detachBufferedPlayer = () => {
+      bufferedEvents.forEach((event) => bufferedPlayer?.removeEventListener?.(event, refreshBufferedProgress));
+      bufferedPlayer = null;
     };
-
-    const seekFromProgressPointer = (event) => {
-      const player = activePlayer();
-      if (!player) return;
-      const duration = Number(player.duration || 0);
-      const rect = progress.getBoundingClientRect();
-      if (!duration || !rect.width) return;
-      const ratio = Math.max(0, Math.min(1, (Number(event.clientX || rect.left) - rect.left) / rect.width));
-      scheduleScrubTarget(player, ratio * duration, duration);
-    };
-
-    const finishProgressScrub = (event, usePointer = false) => {
-      if (!scrubbing) return;
-      if (usePointer) seekFromProgressPointer(event);
-      const player = scrubPlayer;
-      const shouldResume = scrubWasPlaying && player === activePlayer();
-      applyScrubTarget(true);
-      scrubbing = false;
-      progressWrap.classList.remove("is-scrubbing");
-      if (progress.hasPointerCapture?.(event?.pointerId)) progress.releasePointerCapture?.(event.pointerId);
-      scrubPlayer = null;
-      scrubWasPlaying = false;
-      if (shouldResume) player.play?.().catch(() => {});
-      sync(true);
-      scheduleProgressLoop();
-    };
-
     const syncProgress = (player = activePlayer()) => {
-      if (!player) return;
-      const duration = Number(player.duration || 0);
-      const current = Number(player.currentTime || 0);
-      const timeText = `${formatSeconds(current)} / ${formatSeconds(duration)}`;
-      if (time.textContent !== timeText) time.textContent = timeText;
-      const progressValue = duration ? Math.round((current / duration) * 1000) : 0;
-      const progressText = String(progressValue);
-      if (!scrubbing && progress.value !== progressText) progress.value = progressText;
-      progress.style.setProperty("--short-video-progress", `${Math.max(0, Math.min(100, progressValue / 10))}%`);
-      if (progress.getAttribute("aria-valuetext") !== timeText) progress.setAttribute("aria-valuetext", timeText);
+      if (bufferedPlayer !== player) {
+        detachBufferedPlayer();
+        bufferedPlayer = player;
+        bufferedEvents.forEach((event) => player?.addEventListener?.(event, refreshBufferedProgress));
+      }
+      seekController.sync(player);
+      bufferedProgress.sync();
     };
 
     const sync = (force = false) => {
       const player = activePlayer();
-      if (!player) return;
+      if (!player) { syncProgress(null); return; }
       setIconButton(play, player.paused ? "play" : "pause", player.paused ? "播放" : "暂停");
       play.title = `${player.paused ? "播放" : "暂停"}（空格）`;
       const volumePercent = player.muted ? 0 : Math.round(currentShortVideoVolume() * 100);
@@ -3718,72 +4343,24 @@ export function createShortVideoPage(deps) {
       clearScreen.setAttribute("aria-pressed", String(clearScreenActive));
       clearScreen.setAttribute("aria-checked", String(clearScreenActive));
       clearScreen.setAttribute("aria-label", clearScreenActive ? "退出清屏" : "开启清屏");
-      rate.textContent = "倍速";
+      rate.textContent = playbackRateControlLabel();
       rate.setAttribute("aria-label", `播放速度 ${formatPlaybackRate(state.shortVideo?.playbackRate)}`);
       rate.title = `播放速度：${formatPlaybackRate(state.shortVideo?.playbackRate)}`;
       quality.textContent = shortVideoPlaybackQualityLabel(state.shortVideo?.current);
       quality.setAttribute("aria-label", shortVideoPlaybackQualityDescription(state.shortVideo?.current));
       syncShortVideoDisplayModeControl(smartFill);
-      const pictureInPictureAvailable = Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled);
-      const pictureInPictureActive = Boolean(player && document.pictureInPictureElement === player);
-      pip.disabled = !pictureInPictureAvailable;
-      pip.classList.toggle("active", pictureInPictureActive);
-      setIconButton(pip, "pictureInPicture", pictureInPictureActive ? "退出画中画" : "画中画");
+      pip.shortVideoSyncPictureInPicture();
       syncProgress(player);
       player.closest(".short-video-stage")?.classList.toggle("is-paused", player.paused);
       syncActivePlaybackMode(player);
     };
 
-    const stopProgressLoop = () => {
-      if (progressFrameHandle && progressPlayer?.cancelVideoFrameCallback) {
-        progressPlayer.cancelVideoFrameCallback(progressFrameHandle);
-      }
-      if (progressRaf) window.cancelAnimationFrame(progressRaf);
-      progressFrameHandle = 0;
-      progressRaf = 0;
-      progressPlayer = null;
-      lastProgressFrameAt = 0;
-    };
-
-    const scheduleProgressLoop = () => {
-      if (!bar.isConnected) {
-        stopProgressLoop();
-        return;
-      }
-      const player = activePlayer();
-      if (!player) {
-        stopProgressLoop();
-        return;
-      }
-      if (progressPlayer !== player) {
-        stopProgressLoop();
-        progressPlayer = player;
-      }
-      if (player.paused || player.ended) {
-        stopProgressLoop();
-        syncProgress(player);
-        return;
-      }
-      if (progressFrameHandle || progressRaf) return;
-      const paintProgress = (now) => {
-        progressFrameHandle = 0;
-        progressRaf = 0;
-        if (!bar.isConnected || player !== activePlayer()) {
-          scheduleProgressLoop();
-          return;
-        }
-        if (!lastProgressFrameAt || now - lastProgressFrameAt >= 30) {
-          lastProgressFrameAt = now;
-          syncProgress(player);
-        }
-        scheduleProgressLoop();
-      };
-      if (player.requestVideoFrameCallback) {
-        progressFrameHandle = player.requestVideoFrameCallback(paintProgress);
-      } else {
-        progressRaf = window.requestAnimationFrame(paintProgress);
-      }
-    };
+    const progressLoop = createShortVideoProgressLoop({
+      getPlayer: activePlayer, isConnected: () => bar.isConnected,
+      onProgress: (player) => syncProgress(player), intervalMs: 30
+    });
+    const stopProgressLoop = () => progressLoop.stop();
+    const scheduleProgressLoop = () => progressLoop.sync();
     play.addEventListener("click", () => {
       toggleActivePlayer();
       window.requestAnimationFrame(() => sync(true));
@@ -3876,68 +4453,14 @@ export function createShortVideoPage(deps) {
       showBrowserToast(shortVideoPlaybackQualityDescription(state.shortVideo?.current));
     });
     rate.addEventListener("click", (event) => {
-      showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget, focusSpeed: true });
+      showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget, speedOnly: true });
     });
     settings.addEventListener("click", (event) => {
       showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget });
     });
-    pip.addEventListener("click", async () => {
-      const player = activePlayer();
-      if (!player?.requestPictureInPicture || !document.pictureInPictureEnabled) return;
-      try {
-        if (document.pictureInPictureElement === player) await document.exitPictureInPicture();
-        else await player.requestPictureInPicture();
-      } catch {
-        showBrowserToast("画中画启动失败");
-      }
-      sync(true);
-    });
+    pip.addEventListener("click", () => toggleShortVideoPictureInPicture());
     smartFill.addEventListener("click", toggleShortVideoSmartFill);
     full.addEventListener("click", () => toggleShortVideoFullscreen());
-    progress.addEventListener("pointerenter", (event) => {
-      progressWrap.classList.add("is-hovering");
-      updateSeekPreviewFromPointer(event);
-    });
-    progress.addEventListener("pointermove", (event) => {
-      progressWrap.classList.add("is-hovering");
-      if (scrubbing) seekFromProgressPointer(event);
-      else updateSeekPreviewFromPointer(event);
-    });
-    progress.addEventListener("pointerleave", () => {
-      progressWrap.classList.remove("is-hovering");
-      if (!scrubbing) sync(true);
-    });
-    progress.addEventListener("pointerdown", (event) => {
-      scrubbing = true;
-      scrubPlayer = activePlayer();
-      scrubWasPlaying = Boolean(scrubPlayer && !scrubPlayer.paused && !scrubPlayer.ended);
-      scrubTargetTime = Math.max(0, Number(scrubPlayer?.currentTime || 0));
-      scrubPlayer?.pause?.();
-      progress.setPointerCapture?.(event.pointerId);
-      progressWrap.classList.add("is-scrubbing");
-      seekFromProgressPointer(event);
-    });
-    progress.addEventListener("pointerup", (event) => finishProgressScrub(event, true));
-    progress.addEventListener("pointercancel", (event) => finishProgressScrub(event));
-    progress.addEventListener("focus", () => {
-      const player = activePlayer();
-      const duration = Number(player?.duration || 0);
-      updateSeekPreview(Number(progress.value || 0) / 1000, duration);
-    });
-    progress.addEventListener("input", () => {
-      const player = activePlayer();
-      if (!player) return;
-      const duration = Number(player.duration || 0);
-      if (!duration) return;
-      const ratio = Number(progress.value || 0) / 1000;
-      if (scrubbing) {
-        scheduleScrubTarget(player, ratio * duration, duration);
-      } else {
-        player.currentTime = ratio * duration;
-        updateSeekPreview(ratio, duration);
-        sync(true);
-      }
-    });
     const tools = document.createElement("div");
     tools.className = "short-video-control-tools";
     tools.append(autoNext, clearScreen, quality, rate, settings, pip, volumeControl, smartFill, full);
@@ -3946,21 +4469,120 @@ export function createShortVideoPage(deps) {
       sync();
       scheduleProgressLoop();
     };
+    bar.shortVideoCancelSeek = () => seekController.cancel();
     bar.shortVideoDispose = () => {
       setVolumePopoverOpen(false);
+      seekController.dispose({ restorePlayback: false });
+      bufferedProgress.dispose();
+      detachBufferedPlayer();
       stopProgressLoop();
-      if (scrubSeekRaf) window.cancelAnimationFrame(scrubSeekRaf);
-      scrubSeekRaf = 0;
-      scrubPlayer = null;
+      progressLoop.dispose();
       window.removeEventListener("pointerdown", closeVolumeFromOutside, true);
     };
     window.requestAnimationFrame(() => bar.shortVideoSync?.());
     return bar;
   }
 
+  function shortVideoNavigationScope() {
+    return JSON.stringify([state.shortVideo.mode, state.shortVideo.collectionId || "", shortVideoFeedParams(),
+      state.shortVideo.deleted || "all", state.shortVideo.authorAccountStatus || "all"]);
+  }
+
+  function cancelShortVideoNavigation(options = {}) {
+    shortVideoOpenReadController?.abort();
+    shortVideoOpenReadController = null;
+    shortVideoNavigationState?.controller?.abort();
+    cancelShortVideoPanelLoading();
+    stopShortVideoSoundPreview({ restorePlayback: false });
+    shortVideoWheelController?.cancel({ preserveConsumed: Boolean(options.preserveWheelGesture) });
+    cancelShortVideoAutoNext();
+    shortVideoNavigationState = null;
+    shortVideoAdjacentRequestId += 1;
+    queuedAdjacentDirection = 0;
+  }
+
+  function beginShortVideoNavigation(video, options = {}) {
+    shortVideoNavigationState?.controller?.abort();
+    if (String(state.shortVideo?.current?.id || "") === String(video?.id || "")) {
+      state.shortVideo.current = shortVideoInteractionState.mergeVideo(state.shortVideo.current);
+    }
+    syncShortVideoNativePlaybackModes();
+    cancelShortVideoPanelLoading();
+    stopShortVideoSoundPreview({ restorePlayback: false });
+    cancelShortVideoAutoNext();
+    cancelShortVideoBrowseGestures();
+    const owner = {
+      id: String(video?.id || ""), scope: shortVideoNavigationScope(), openRequestId: shortVideoOpenRequestId,
+      status: options.pending === false ? "ready" : "pending",
+      prevKnown: Boolean(options.prevKnown), nextKnown: Boolean(options.nextKnown), promise: null, noticeDirection: 0,
+      controller: new AbortController()
+    };
+    shortVideoNavigationState = owner;
+    shortVideoAdjacentRequestId += 1;
+    return owner;
+  }
+
+  function isCurrentShortVideoNavigation(owner) {
+    return Boolean(owner && shortVideoNavigationState === owner && state.activeView === "shortVideos"
+      && String(state.shortVideo?.current?.id || "") === owner.id
+      && shortVideoOpenRequestId === owner.openRequestId && shortVideoNavigationScope() === owner.scope);
+  }
+
+  function beginShortVideoPanelNavigation(video, options = {}) {
+    cancelShortVideoNavigation();
+    cancelAuthorCollectorPolling();
+    shortVideoOpenRequestId += 1;
+    shortVideoOpeningId = "";
+    shortVideoOpenError = "";
+    return beginShortVideoNavigation(video, options);
+  }
+
+  function shortVideoNavigationUnknown(direction) {
+    const owner = shortVideoNavigationState;
+    return Boolean(isCurrentShortVideoNavigation(owner) && !owner[direction < 0 ? "prevKnown" : "nextKnown"]);
+  }
+
+  function waitForShortVideoNavigation(direction) {
+    const owner = shortVideoNavigationState;
+    if (!shortVideoNavigationUnknown(direction)) return false;
+    queuedAdjacentDirection = direction < 0 ? -1 : 1;
+    if (owner.status !== "pending" || !owner.promise) {
+      hydratePromotedShortVideo(state.shortVideo.current, owner).catch(() => {});
+    }
+    if (owner.noticeDirection !== direction) {
+      owner.noticeDirection = direction;
+      showBrowserToast("正在读取相邻作品，准备好后继续播放");
+    }
+    syncCurrentNavigationDom();
+    return true;
+  }
+
+  function syncShortVideoNavigationButton(button, direction) {
+    if (!button) return;
+    const id = direction < 0 ? state.shortVideo.prevId : state.shortVideo.nextId;
+    const unknown = !id && shortVideoNavigationUnknown(direction);
+    button.disabled = !id && !unknown;
+    const pending = unknown && shortVideoNavigationState?.status === "pending";
+    button.setAttribute("aria-busy", String(pending));
+    button.title = pending ? "正在读取相邻作品，点击后准备好自动继续" : direction < 0 ? "上一个（↑）" : "下一个（↓）";
+  }
+
   async function openAdjacent(direction, options = {}) {
+    cancelShortVideoAutoNext();
+    cancelShortVideoBrowseGestures();
+    activePlayer()?.shortVideoCancelHoldSpeed?.();
+    // Resolve a queued gesture against the destination's neighbors after the
+    // handoff. The old item may be at a boundary even when the requested
+    // reverse direction will be valid as soon as the animation completes.
+    if (wheelLocked) {
+      clearPendingPlayerClick();
+      closeTransientPlayerControls();
+      queuedAdjacentDirection = direction;
+      return;
+    }
     const id = direction < 0 ? state.shortVideo.prevId : state.shortVideo.nextId;
     if (!id) {
+      if (waitForShortVideoNavigation(direction)) return;
       if (queuedAdjacentDirection === direction) queuedAdjacentDirection = 0;
       pulseBoundaryStack(direction);
       return;
@@ -3976,10 +4598,6 @@ export function createShortVideoPage(deps) {
     });
     clearPendingPlayerClick();
     closeTransientPlayerControls();
-    if (wheelLocked) {
-      queuedAdjacentDirection = direction;
-      return;
-    }
     shortVideoLastNavigationAt = Date.now();
     const cachedVideo = (direction < 0 ? state.shortVideo.prevVideo : state.shortVideo.nextVideo)
       || cachedShortVideo(id);
@@ -3987,26 +4605,39 @@ export function createShortVideoPage(deps) {
     const canPromoteVideoPanel = hasCachedAdjacent
       && !isGalleryPost(state.shortVideo.current)
       && !isGalleryPost(cachedVideo);
-    if (!canPromoteVideoPanel) flushActiveShortVideoWatch();
+    const startingVideoId = String(state.shortVideo.current?.id || "");
+    const startingStack = activeReelStack();
+    flushActiveShortVideoWatch();
     wheelLocked = true;
-    wheelDeltaY = 0;
     queuedAdjacentDirection = 0;
     wheelIgnoreUntil = Date.now() + 180;
-    window.clearTimeout(wheelResetTimer);
     try {
-      if (hasCachedAdjacent && isGalleryPost(cachedVideo)) await prepareAdjacentGallery(direction);
-      const incomingPanel = activeReelStack()?.querySelector(direction > 0 ? ".short-video-reel-panel.is-next" : ".short-video-reel-panel.is-prev");
-      const canPromotePanel = hasCachedAdjacent && incomingPanel && (!isGalleryPost(cachedVideo)
-        || Boolean(incomingPanel.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive));
+      // Preparing media starts with the gesture, but it must not hold the
+      // navigation lock after the visible transition has finished. A cold
+      // destination keeps its poster/loading state while the next gesture is
+      // already available.
+      if (hasCachedAdjacent && isGalleryPost(cachedVideo)) prepareAdjacentGallery(direction).catch(() => {});
       const animationPromise = animateActiveStack(direction, {
         ...(options.motion || {}),
         prewarmed: incomingPlayer?.dataset.shortVideoFrameReady === "1" && incomingPlayer.readyState >= 2
       });
-      const primePromise = primeAdjacentSound(direction, cachedVideo).catch(() => false);
-      const [, incomingReady] = await Promise.all([
-        animationPromise,
-        primePromise
-      ]);
+      primeAdjacentSound(direction, cachedVideo).catch(() => false);
+      await animationPromise;
+      if (state.activeView !== "shortVideos"
+        || String(state.shortVideo?.current?.id || "") !== startingVideoId
+        || activeReelStack() !== startingStack || isDeletedShortVideo(id)) {
+        queuedAdjacentDirection = 0;
+        return;
+      }
+      // Detail hydration can replace an adjacent panel during the animation.
+      // Recheck the target rather than promoting a different item's DOM under
+      // the requested video's metadata.
+      const incomingPanel = startingStack?.querySelector(direction > 0 ? ".short-video-reel-panel.is-next" : ".short-video-reel-panel.is-prev");
+      const canPromotePanel = hasCachedAdjacent && incomingPanel?.isConnected
+        && String(incomingPanel.dataset.videoId || "") === String(id)
+        && (!isGalleryPost(cachedVideo)
+          || Boolean(incomingPanel.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive));
+      const incomingReady = incomingPlayer?.dataset.shortVideoFrameReady === "1" && incomingPlayer.readyState >= 2;
       if (canPromoteVideoPanel && incomingPlayer && !incomingReady) {
         markShortVideoPerformance("adjacent-switch-promoting-unready", {
           videoId: String(id),
@@ -4022,7 +4653,7 @@ export function createShortVideoPage(deps) {
       } else if (hasCachedAdjacent) {
         await promoteAdjacentMedia(cachedVideo, direction, { renderCurrent: true });
       } else {
-        await openVideo(id, { renderLoading: false });
+        await openVideo(id, { renderLoading: false, preserveWheelGesture: true });
       }
       markShortVideoPerformance("adjacent-switch-ready", {
         videoId: String(state.shortVideo.current?.id || id),
@@ -4044,32 +4675,37 @@ export function createShortVideoPage(deps) {
     const panel = activeReelStack()?.querySelector(direction > 0 ? ".short-video-reel-panel.is-next" : ".short-video-reel-panel.is-prev");
     const gallery = panel?.querySelector(".short-video-gallery-player");
     if (!gallery) return;
-    let timer;
-    try {
-      await Promise.race([
-        gallery.shortVideoGalleryPrepare?.() || gallery.shortVideoGalleryReady,
-        new Promise((resolve) => { timer = window.setTimeout(resolve, SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS); })
-      ]);
-    } finally {
-      window.clearTimeout(timer);
-    }
+    return gallery.shortVideoGalleryPrepare?.() || gallery.shortVideoGalleryReady;
   }
 
   function flushQueuedAdjacent() {
     const direction = queuedAdjacentDirection;
-    queuedAdjacentDirection = 0;
+    if (wheelLocked) return;
     if (!direction || state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+    if (els.workGrid?.querySelector?.(".short-video-more-overlay, .short-video-search-overlay, .short-video-author-panel, .short-video-share-panel")) {
+      queuedAdjacentDirection = 0;
+      return;
+    }
     const id = direction < 0 ? state.shortVideo.prevId : state.shortVideo.nextId;
-    if (!id) return;
+    if (!id && waitForShortVideoNavigation(direction)) return;
+    queuedAdjacentDirection = 0;
+    if (!id) {
+      pulseBoundaryStack(direction);
+      return;
+    }
     openAdjacent(direction).catch(showError);
   }
 
   async function primeAdjacentSound(direction, video) {
     const player = adjacentPlayer(direction);
-    if (!player) return false;
+    if (!player || !player.isConnected || !player.classList.contains("is-ghost")
+      || String(player.dataset.videoId || "") !== String(video?.id || "")) return false;
     // A delayed warm/release callback created while this player was an
     // off-screen ghost must not be allowed to clear its src mid-transition.
     player.dataset.shortVideoWarmScheduleToken = String(++shortVideoAdjacentWarmScheduleId);
+    player.muted = true;
+    player.volume = currentShortVideoVolume();
+    player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
     const ready = await warmAdjacentVideoPlayer(player, video, {
       forceReload: Boolean(
         player.error
@@ -4079,17 +4715,9 @@ export function createShortVideoPage(deps) {
       pauseAfter: false,
       timeout: SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS
     });
-    if (player.currentTime > 0.12) {
-      try {
-        player.currentTime = 0;
-      } catch {}
-    }
-    // Keep the incoming reel silent until the visual handoff finishes. The
-    // promoted player restores the user's sound preference in one step.
-    player.muted = true;
-    player.volume = currentShortVideoVolume();
-    player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
-    player.play?.().catch(() => {});
+    // Promotion may have made this player current (or another navigation may
+    // already have demoted it again). Completing an old warmup must never
+    // seek, mute or restart whichever role now owns the element.
     return ready || player.readyState >= 2;
   }
 
@@ -4100,14 +4728,39 @@ export function createShortVideoPage(deps) {
     return els.workGrid?.querySelector?.(selector) || null;
   }
 
-  function scheduleAdjacentVideoWarmup(player, video, slot = "next") {
+  function scheduleAdjacentVideoWarmup(player, video, slot = "next", options = {}) {
     if (!player) return;
+    player.shortVideoCancelWarmup?.();
+    if (document.hidden) {
+      releaseOffscreenVideoDecoder(player, "document-hidden");
+      return;
+    }
     const scheduleToken = String(++shortVideoAdjacentWarmScheduleId);
     player.dataset.shortVideoWarmScheduleToken = scheduleToken;
+    let timer = null, waitingPlayer = null;
+    const readyEvents = ["shortvideoframeready", "canplay", "playing"];
+    const clearWaiting = () => {
+      readyEvents.forEach(event => waitingPlayer?.removeEventListener?.(event, retryWhenReady));
+      waitingPlayer = null;
+    };
+    const cancel = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      clearWaiting();
+      if (player.shortVideoCancelWarmup === cancel) delete player.shortVideoCancelWarmup;
+    };
+    const queue = delay => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; warm(); }, delay);
+    };
+    const retryWhenReady = () => { clearWaiting(); queue(0); };
+    player.shortVideoCancelWarmup = cancel;
     const preferredSlot = shortVideoAdjacentWarmDirection < 0 ? "prev" : "next";
     if (slot !== preferredSlot) {
-      window.setTimeout(() => {
-        if (player.dataset.shortVideoWarmScheduleToken !== scheduleToken) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!player.isConnected || !player.classList.contains("is-ghost")
+          || player.dataset.shortVideoWarmScheduleToken !== scheduleToken) return;
         releaseOffscreenVideoDecoder(player, `adjacent-${slot}`);
       }, 80);
       return;
@@ -4124,28 +4777,39 @@ export function createShortVideoPage(deps) {
         !player.isConnected
         || !player.classList.contains("is-ghost")
         || player.dataset.shortVideoWarmScheduleToken !== scheduleToken
-      ) return;
+      ) { cancel(); return; }
+      if (document.hidden) {
+        releaseOffscreenVideoDecoder(player, "document-hidden");
+        return;
+      }
       const currentPreferredSlot = shortVideoAdjacentWarmDirection < 0 ? "prev" : "next";
       if (slot !== currentPreferredSlot) {
         releaseOffscreenVideoDecoder(player, `adjacent-${slot}`);
         return;
       }
+      if (!allowShortVideoSpeculativePrewarm({ hidden: document.hidden, connection: globalThis.navigator?.connection })) {
+        releaseOffscreenVideoDecoder(player, "network-budget");
+        return;
+      }
       const current = activePlayer();
       if (current && current !== player) {
-        const elapsed = Date.now() - startedAt;
-        if (current.dataset.shortVideoFrameReady !== "1" && elapsed < 5200) {
-          window.setTimeout(warm, 120);
+        if (!canSpeculativelyWarmShortVideo()) {
+          clearWaiting();
+          waitingPlayer = current;
+          readyEvents.forEach(event => current.addEventListener?.(event, retryWhenReady));
           return;
         }
         const currentFrameReadyAt = Number(current.dataset.shortVideoFrameReadyAt || 0);
         const currentCooldown = stableDelayMs - (Date.now() - currentFrameReadyAt);
         if (currentFrameReadyAt && currentCooldown > 0) {
-          window.setTimeout(warm, currentCooldown);
+          queue(currentCooldown);
           return;
         }
       }
       if (warmStarted) return;
       warmStarted = true;
+      cancel();
+      if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1" && !player.error) return;
       const warmStartedAt = Date.now();
       markShortVideoPerformance("adjacent-warm-start", {
         videoId: String(video?.id || player.dataset.videoId || ""),
@@ -4164,7 +4828,8 @@ export function createShortVideoPage(deps) {
         });
       }).catch(() => {});
     };
-    window.setTimeout(warm, rapidNavigation ? 0 : (slot === "next" ? 40 : 220));
+    if (options.immediate) warm();
+    else queue(rapidNavigation ? 0 : (slot === "next" ? 40 : 220));
   }
 
   function warmVisibleAdjacentVideoPlayers() {
@@ -4173,20 +4838,33 @@ export function createShortVideoPage(deps) {
     const preferred = stack?.querySelector?.(`.short-video-reel-panel.is-${preferredSlot} .short-video-player`);
     const oppositeSlot = preferredSlot === "next" ? "prev" : "next";
     const opposite = stack?.querySelector?.(`.short-video-reel-panel.is-${oppositeSlot} .short-video-player`);
+    if (document.hidden) {
+      releaseOffscreenVideoDecoder(opposite, "document-hidden");
+      releaseOffscreenVideoDecoder(preferred, "document-hidden");
+      return;
+    }
     releaseOffscreenVideoDecoder(opposite, `adjacent-${oppositeSlot}`);
     if (!preferred) return;
-    warmAdjacentVideoPlayer(preferred, null, {
-      forceReload: Boolean(preferred.error),
-      pauseAfter: true,
-      timeout: 1200
-    }).catch(() => {});
+    scheduleAdjacentVideoWarmup(preferred, null, preferredSlot, { immediate: true });
   }
 
   function releaseOffscreenVideoDecoder(player, reason = "offscreen") {
     if (!player || player.dataset.shortVideoSlot === "current") return false;
+    player.shortVideoCancelWarmup?.();
+    // Both scheduled starts and in-flight completion callbacks belong to the
+    // previous warmup. Releasing a decoder must revoke them before media
+    // events or a later visible warmup can reuse the same element.
+    player.dataset.shortVideoWarmScheduleToken = String(++shortVideoAdjacentWarmScheduleId);
+    player.shortVideoCancelPictureInPicture?.();
+    player.shortVideoCancelWatchResume?.();
+    player.shortVideoCancelHoldSpeed?.();
+    player.shortVideoCancelPlaybackRecovery?.();
+    player.shortVideoCancelFirstFrame?.();
+    player.shortVideoCancelPlaybackStatus?.();
     const source = String(player.dataset.streamUrl || player.currentSrc || player.getAttribute("src") || "").trim();
     const hadMedia = Boolean(player.currentSrc || player.getAttribute("src") || player.readyState > 0);
     const retainPlayedAdjacent = reason.startsWith("adjacent-")
+      && allowShortVideoSpeculativePrewarm({ hidden: document.hidden, connection: globalThis.navigator?.connection })
       && player.dataset.shortVideoPlayed === "1"
       && !player.error
       && player.readyState >= 2
@@ -4194,7 +4872,7 @@ export function createShortVideoPage(deps) {
     if (retainPlayedAdjacent) {
       player.muted = true;
       player.pause?.();
-      player.preload = "auto";
+      player.preload = "metadata";
       delete player.dataset.shortVideoDecoderReleased;
       const retentionKey = `${player.dataset.shortVideoSlot || ""}:${reason}`;
       if (player.dataset.shortVideoDecoderRetentionKey !== retentionKey) {
@@ -4218,7 +4896,7 @@ export function createShortVideoPage(deps) {
     delete player.dataset.shortVideoFrameReadyAt;
     player.dataset.shortVideoDecoderReleased = "1";
     player.removeAttribute("src");
-    player.load?.();
+    if (hadMedia) player.load?.();
     if (hadMedia) {
       markShortVideoPerformance("video-decoder-released", {
         videoId: String(player.dataset.videoId || ""),
@@ -4266,6 +4944,11 @@ export function createShortVideoPage(deps) {
     outgoing.querySelector(".short-video-gallery-player")?.shortVideoGallerySetActive?.(false);
     const previousPlayer = outgoing.querySelector(".short-video-player:not(.short-video-gallery-audio)");
     if (previousPlayer) {
+      previousPlayer.shortVideoCancelWatchResume?.();
+      previousPlayer.shortVideoCancelHoldSpeed?.();
+      previousPlayer.shortVideoCancelPlaybackRecovery?.();
+      previousPlayer.shortVideoCancelFirstFrame?.();
+      previousPlayer.shortVideoCancelPlaybackStatus?.();
       previousPlayer.classList.add("is-ghost");
       previousPlayer.dataset.shortVideoSlot = direction > 0 ? "prev" : "next";
       previousPlayer.dataset.shortVideoPlayed = "1";
@@ -4303,6 +4986,9 @@ export function createShortVideoPage(deps) {
       if (player.dataset.primaryControlsBound !== "1") {
         attachPrimaryPlayerControls(stage, player, () => incoming.querySelector(".short-video-rail"), video, { resume: false });
       }
+      // A ghost may already be playing muted. Calling play() again does not
+      // emit a new play event, so explicitly restore the visible intent.
+      player.shortVideoSetPlaybackIntent?.(true);
       const likeButton = incoming.querySelector(".short-video-rail-button.is-like");
       if (likeButton && !likeButton.dataset.boundPrimaryLike) {
         likeButton.dataset.boundPrimaryLike = "1";
@@ -4311,7 +4997,9 @@ export function createShortVideoPage(deps) {
           showHeartBurst(stage, event);
         });
       }
-      player.play?.().catch(() => {
+      const playbackOwner = captureShortVideoPlaybackOwner(player, { videoId: String(video?.id || ""), navigation: false });
+      player.play?.().catch((error) => {
+        if (!ownsShortVideoPlaybackOwner(playbackOwner) || error?.name !== "NotAllowedError") return;
         if (!state.shortVideo.muted) {
           markPlayerSoundBlocked(stage);
           player.muted = true;
@@ -4339,19 +5027,26 @@ export function createShortVideoPage(deps) {
     state.shortVideo.slideDirection = 0;
     state.shortVideo.loading = false;
     state.shortVideo.status = "";
-    state.shortVideo.prevId = navigation?.prevId || fallbackPrevId;
-    state.shortVideo.nextId = navigation?.nextId || fallbackNextId;
+    const prevKnown = Boolean(navigation && Object.hasOwn(navigation, "prevId"));
+    const nextKnown = Boolean(navigation && Object.hasOwn(navigation, "nextId")
+      && !(state.shortVideo.mode === "collection" && !navigation.nextId && state.shortVideo.collectionData?.hasMore));
+    state.shortVideo.prevId = prevKnown ? String(navigation.prevId || "") : fallbackPrevId;
+    state.shortVideo.nextId = nextKnown ? String(navigation.nextId || "") : fallbackNextId;
     state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(state.shortVideo.prevId)
       || (previousCurrent?.id === state.shortVideo.prevId ? previousCurrent : null);
     state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(state.shortVideo.nextId)
       || (previousCurrent?.id === state.shortVideo.nextId ? previousCurrent : null);
+    const owner = beginShortVideoNavigation(video, { prevKnown, nextKnown });
     replaceRoute({ view: "shortVideos", shortVideoId: video.id });
     if (!options.renderCurrent && (isGalleryPost(previousCurrent) || isGalleryPost(video))) {
       const previousBar = els.workGrid?.querySelector(".short-video-control-bar");
       previousBar?.shortVideoDispose?.();
       previousBar?.replaceWith(isGalleryPost(video) ? renderGalleryControlBar(video) : renderControlBar());
     }
-    if (!options.renderCurrent) activeGalleryPlayer()?.shortVideoGallerySetActive?.(true);
+    if (!options.renderCurrent) {
+      syncShortVideoModalPlayback();
+      activeGalleryPlayer()?.shortVideoGallerySetActive?.(true);
+    }
     syncActiveControlBar();
     if (options.renderCurrent) {
       renderStats();
@@ -4361,34 +5056,83 @@ export function createShortVideoPage(deps) {
       refreshAdjacentPanelsDom();
     }
     scheduleAdjacentNavigationPrefetch();
-    hydratePromotedShortVideo(video).catch((error) => console.warn(error));
+    hydratePromotedShortVideo(video, owner).catch((error) => console.warn(error));
   }
 
-  async function hydratePromotedShortVideo(video) {
-    try {
-      const data = await contextualShortVideoDetail(video.id);
-      if (state.shortVideo.current?.id !== video.id) return;
-      state.shortVideo.current = data.video || video;
-      cacheAuthorPanelVideo(state.shortVideo.current);
-      const collectionNavigation = collectionsController.collectionNavigation(video.id);
-      state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
-      state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
-      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || data.prevVideo || cachedShortVideo(state.shortVideo.prevId);
-      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || data.nextVideo || cachedShortVideo(state.shortVideo.nextId);
-      await loadAdjacentVideos(video.id);
-      if (state.shortVideo.current?.id === video.id) {
-        refreshAdjacentPanelsDom();
-        syncAuthorPanelCurrentTile();
-      }
-      resumeActiveSound();
-    } catch (error) {
-      if (state.shortVideo.current?.id === video.id) {
-        refreshAdjacentPanelsDom();
-        syncAuthorPanelCurrentTile();
-        resumeActiveSound();
-      }
-      throw error;
+  async function hydratePromotedShortVideo(video, owner = shortVideoNavigationState) {
+    if (!isCurrentShortVideoNavigation(owner)) {
+      if (owner) return false;
+      if (String(state.shortVideo?.current?.id || "") !== String(video?.id || "") || state.activeView !== "shortVideos") return false;
+      owner = beginShortVideoNavigation(video);
     }
+    if (owner.promise) return owner.promise;
+    owner.status = "pending";
+    owner.noticeDirection = 0;
+    const request = Promise.resolve().then(async () => {
+      try {
+        const data = await runShortVideoRead(signal => contextualShortVideoDetail(video.id, {
+          signal, isCurrent: () => isCurrentShortVideoNavigation(owner), owner, priority: "current"
+        }), { signal: owner.controller?.signal });
+        if (!isCurrentShortVideoNavigation(owner)) return false;
+        if (!data || (!data.shortVideoNavigationInvalidated && (!Object.hasOwn(data, "prevId") || !Object.hasOwn(data, "nextId")))
+          || (data.video && String(data.video.id || "") !== owner.id)) throw new Error("相邻作品信息不完整，请重试");
+        state.shortVideo.current = shortVideoInteractionState.mergeVideo(data.video || video);
+        els.workGrid?.querySelector?.(".short-video-reel-panel.is-current")?.shortVideoUpdateMetadata?.(state.shortVideo.current);
+        activePlayer()?.shortVideoUpdateWatchMetadata?.(state.shortVideo.current);
+        activeGalleryPlayer()?.shortVideoGalleryUpdateMetadata?.(state.shortVideo.current);
+        syncActiveControlBar();
+        cacheAuthorPanelVideo(state.shortVideo.current);
+        const collectionNavigation = collectionsController.collectionNavigation(video.id);
+        if (data.shortVideoNavigationInvalidated === true) {
+          // The metadata is useful, but a deletion changed membership while
+          // this GET was pending. Keep the already repaired current neighbors.
+          owner.refreshNavigation = true;
+        } else {
+        state.shortVideo.prevId = collectionNavigation ? String(collectionNavigation.prevId || "") : data.prevId || "";
+        state.shortVideo.nextId = collectionNavigation ? String(collectionNavigation.nextId || "") : data.nextId || "";
+        state.shortVideo.prevVideo = collectionNavigation ? collectionNavigation.prevVideo || cachedShortVideo(state.shortVideo.prevId)
+          : data.prevVideo || cachedShortVideo(state.shortVideo.prevId);
+        state.shortVideo.nextVideo = collectionNavigation ? collectionNavigation.nextVideo || cachedShortVideo(state.shortVideo.nextId)
+          : data.nextVideo || cachedShortVideo(state.shortVideo.nextId);
+        owner.prevKnown = true;
+        owner.nextKnown = !(state.shortVideo.mode === "collection" && !state.shortVideo.nextId && state.shortVideo.collectionData?.hasMore);
+        }
+        syncCurrentNavigationDom();
+        // Known directions are usable as soon as their ids arrive; neighbor
+        // thumbnails and collection paging must not delay a queued gesture.
+        flushQueuedAdjacent();
+        flushShortVideoAutoNext();
+        const loaded = await loadAdjacentVideos(video.id, owner);
+        if (!loaded || !isCurrentShortVideoNavigation(owner)) return false;
+        owner.status = "ready";
+        owner.prevKnown = true;
+        owner.nextKnown = true;
+        refreshAdjacentPanelsDom();
+        syncAuthorPanelCurrentTile();
+        syncCurrentNavigationDom();
+        // This response only completes metadata/navigation. Playback already
+        // started when the item was opened/promoted, and the user may have
+        // paused the video or gallery while waiting for these ids.
+        flushQueuedAdjacent();
+        flushShortVideoAutoNext();
+        return true;
+      } catch (error) {
+        if (!isCurrentShortVideoNavigation(owner)) return false;
+        owner.status = "error";
+        const hadPendingDirection = Boolean(queuedAdjacentDirection);
+        queuedAdjacentDirection = 0;
+        owner.noticeDirection = 0;
+        syncCurrentNavigationDom();
+        flushShortVideoAutoNext();
+        if (hadPendingDirection) showBrowserToast("相邻作品读取失败，请再次切换重试");
+        throw error;
+      } finally {
+        if (owner.promise === request) owner.promise = null;
+      }
+    });
+    owner.promise = request;
+    syncCurrentNavigationDom();
+    return request;
   }
 
   function scheduleInitialAdjacentPanelsRefresh(videoId) {
@@ -4478,8 +5222,7 @@ export function createShortVideoPage(deps) {
   function syncCurrentNavigationDom() {
     const buttons = els.workGrid?.querySelectorAll?.(".short-video-browser > .short-video-nav-pair .short-video-rail-button.is-nav");
     if (!buttons?.length) return;
-    if (buttons[0]) buttons[0].disabled = !state.shortVideo.prevId;
-    if (buttons[1]) buttons[1].disabled = !state.shortVideo.nextId;
+    buttons.forEach((button, index) => syncShortVideoNavigationButton(button, index === 0 ? -1 : 1));
   }
 
   function syncShortVideoBrowserSearchDom() {
@@ -4542,47 +5285,82 @@ export function createShortVideoPage(deps) {
     return key ? authorPanelVideoCache?.get(key) || null : null;
   }
 
-  function closeAuthorPanel(panel, options = {}) {
-    if (!panel || panel.dataset.closing === "1") return;
-    const browser = panel.closest?.(".short-video-browser");
-    const returnFocus = panel._shortVideoReturnFocus;
+  function disposeAuthorPanelResources(panel, options = {}) {
+    if (!panel) return;
+    panel._shortVideoCancelAuthorClose?.();
+    panel.dataset.disposed = "1";
+    panel.shortVideoDisposeAuthorPanel?.({ restorePlayback: options.restorePlayback === true });
+    panel.querySelectorAll?.(".short-video-comments")?.forEach?.((comments) => comments.shortVideoDisposeComments?.());
     panel._shortVideoDragAbort?.abort?.();
     panel._shortVideoDragAbort = null;
-    browser?.classList.remove("is-author-panel-open");
+    panel._shortVideoContextTabsObserver?.disconnect?.();
+    panel._shortVideoContextTabsObserver = null;
+    if (panel._shortVideoModalFocusFrame != null) window.cancelAnimationFrame?.(panel._shortVideoModalFocusFrame);
+    panel._shortVideoModalFocusFrame = null;
     panel?.querySelectorAll?.(".short-video-sound-audio")?.forEach?.((audio) => {
       try {
+        if (audio.shortVideoDisposeSoundPreview) {
+          audio.shortVideoDisposeSoundPreview({ restorePlayback: options.restorePlayback === true });
+          return;
+        }
         audio.pause?.();
         audio.removeAttribute?.("src");
         audio.load?.();
       } catch {}
     });
+    if (options.releaseModal !== false) restoreAuthorPanelModalIsolation(panel);
+    releaseUnusedShortVideoPreloads();
+  }
+
+  function closeAuthorPanel(panel, options = {}) {
+    if (!panel) return;
+    if (panel.dataset.closing === "1") {
+      if (options.animate === false) panel._shortVideoFinishAuthorClose?.(options);
+      return;
+    }
+    if (panel.dataset.disposed === "1") return;
+    cancelShortVideoPanelLoading();
+    const browser = panel.closest?.(".short-video-browser");
+    const returnFocus = panel._shortVideoReturnFocus;
+    const closeOptions = { ...options };
+    panel.dataset.closing = "1";
+    disposeAuthorPanelResources(panel, { restorePlayback: options.restorePlayback !== false, releaseModal: false });
+    browser?.classList.remove("is-author-panel-open");
     authorPanelVideoRequestId += 1;
     clearAuthorPanelCaches();
     if (options.restoreFeed === false) authorPanelReturnFeed = null;
     let finished = false;
     let handleTransitionEnd = null;
-    const finish = () => {
-      if (finished) return;
+    const cancelClose = () => {
       finished = true;
       if (panel._shortVideoCloseTimer) window.clearTimeout(panel._shortVideoCloseTimer);
       panel._shortVideoCloseTimer = 0;
       if (handleTransitionEnd) panel.removeEventListener("transitionend", handleTransitionEnd);
-      panel._shortVideoContextTabsObserver?.disconnect?.();
-      panel._shortVideoContextTabsObserver = null;
-      const fallbackFocus = resolveAuthorPanelReturnFocus(panel, returnFocus);
-      restoreAuthorPanelModalIsolation(panel);
+      panel._shortVideoCancelAuthorClose = null;
+      panel._shortVideoFinishAuthorClose = null;
+    };
+    const finish = (overrides = {}) => {
+      if (finished) return;
+      Object.assign(closeOptions, overrides);
+      const canRestore = panel.isConnected && browser?.isConnected !== false;
+      const fallbackFocus = canRestore && closeOptions.restoreFocus !== false
+        ? resolveAuthorPanelReturnFocus(panel, returnFocus) : null;
+      cancelClose();
+      disposeAuthorPanelResources(panel, { restorePlayback: closeOptions.restorePlayback !== false });
       panel.remove();
-      if (options.restoreFocus !== false && fallbackFocus?.isConnected) {
+      if (closeOptions.restoreFeed === false) authorPanelReturnFeed = null;
+      if (fallbackFocus?.isConnected) {
         fallbackFocus.focus?.({ preventScroll: true });
       }
-      if (options.restoreFeed !== false) restoreAuthorPanelFeed().catch(showError);
+      if (canRestore && closeOptions.restoreFeed !== false) restoreAuthorPanelFeed().catch(showError);
     };
+    panel._shortVideoCancelAuthorClose = cancelClose;
+    panel._shortVideoFinishAuthorClose = finish;
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
     if (options.animate === false || reduceMotion || !panel.isConnected) {
       finish();
       return;
     }
-    panel.dataset.closing = "1";
     panel.classList.add("is-closing");
     panel.classList.remove("is-open");
     handleTransitionEnd = (event) => {
@@ -4619,19 +5397,17 @@ export function createShortVideoPage(deps) {
   function isolateAuthorPanelAsMobileModal(panel, sheet, browser, initialFocus) {
     if (!panel || !sheet || !browser || !window.matchMedia?.("(max-width: 680px)")?.matches) return;
     panel.setAttribute("aria-modal", "true");
-    panel._shortVideoModalSiblings = [...browser.children]
-      .filter((element) => element !== panel)
-      .map((element) => ({ element, wasInert: element.hasAttribute("inert") }));
-    for (const item of panel._shortVideoModalSiblings) item.element.setAttribute("inert", "");
+    isolateShortVideoTransientModal(panel);
     bindShortVideoModalFocusLoop(panel, sheet, () => closeAuthorPanel(panel));
-    window.requestAnimationFrame(() => initialFocus?.focus?.({ preventScroll: true }));
+    panel._shortVideoModalFocusFrame = window.requestAnimationFrame(() => {
+      panel._shortVideoModalFocusFrame = null;
+      if (!panel.isConnected || panel.dataset.closing === "1" || panel.dataset.disposed === "1") return;
+      initialFocus?.focus?.({ preventScroll: true });
+    });
   }
 
   function restoreAuthorPanelModalIsolation(panel) {
-    for (const item of panel?._shortVideoModalSiblings || []) {
-      if (!item.wasInert && item.element?.isConnected) item.element.removeAttribute("inert");
-    }
-    panel._shortVideoModalSiblings = null;
+    restoreShortVideoTransientModalIsolation(panel);
   }
 
   function bindAuthorPanelDragToClose(panel, sheet, handle) {
@@ -4766,13 +5542,14 @@ export function createShortVideoPage(deps) {
       replaceRoute({ view: "shortVideos", shortVideoId: "" });
       return;
     }
-    const data = await fetchShortVideoDetail(currentId);
-    if (state.shortVideo?.current?.id !== currentId) return;
-    state.shortVideo.current = data.video || state.shortVideo.current;
-    state.shortVideo.prevId = data.prevId || "";
-    state.shortVideo.nextId = data.nextId || "";
-    await loadAdjacentVideos(currentId);
-    if (state.shortVideo?.current?.id !== currentId) return;
+    state.shortVideo.prevId = "";
+    state.shortVideo.nextId = "";
+    state.shortVideo.prevVideo = null;
+    state.shortVideo.nextVideo = null;
+    const owner = beginShortVideoPanelNavigation(state.shortVideo.current);
+    syncCurrentNavigationDom();
+    const loaded = await hydratePromotedShortVideo(state.shortVideo.current, owner);
+    if (!loaded || !isCurrentShortVideoNavigation(owner)) return;
     renderStats();
     refreshAdjacentPanelsDom();
     syncShortVideoBrowserSearchDom();
@@ -4835,30 +5612,40 @@ export function createShortVideoPage(deps) {
     media.append(currentBadge);
   }
 
-  function waitForVideoFirstFrame(player, timeout = 260) {
+  function waitForVideoFirstFrame(player, timeout = 260, options = {}) {
     if (!player) return Promise.resolve(false);
+    const signal = options.signal;
+    if (signal?.aborted) return Promise.resolve(false);
+    const source = String(player.getAttribute("src") || player.currentSrc || "");
+    const sourceGeneration = String(player.dataset.shortVideoSourceGeneration || "0");
+    const ownsSource = () => !signal?.aborted
+      && source === String(player.getAttribute("src") || player.currentSrc || "")
+      && sourceGeneration === String(player.dataset.shortVideoSourceGeneration || "0");
     if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1") return Promise.resolve(true);
     const supportsPaintedFrame = typeof player.requestVideoFrameCallback === "function";
     if (player.readyState >= 2 && !supportsPaintedFrame) {
       player.dataset.shortVideoFrameReady = "1";
       player.dataset.shortVideoFrameReadyAt = String(Date.now());
+      player.dispatchEvent(new Event("shortvideoframeready"));
       return Promise.resolve(true);
     }
     return new Promise((resolve) => {
       let finished = false;
       let frameHandle = null;
-      let timeoutHandle = 0;
+      let timeoutHandle = null;
       const done = (ready) => {
         if (finished) return;
+        ready = Boolean(ready && ownsSource());
         finished = true;
         player.removeEventListener("loadeddata", onReady);
         player.removeEventListener("canplay", onReady);
         player.removeEventListener("playing", onReady);
         player.removeEventListener("error", onUnavailable);
         player.removeEventListener("emptied", onUnavailable);
-        if (timeoutHandle) {
+        signal?.removeEventListener("abort", onUnavailable);
+        if (timeoutHandle !== null) {
           window.clearTimeout(timeoutHandle);
-          timeoutHandle = 0;
+          timeoutHandle = null;
         }
         if (frameHandle != null && player.cancelVideoFrameCallback) {
           player.cancelVideoFrameCallback(frameHandle);
@@ -4876,6 +5663,7 @@ export function createShortVideoPage(deps) {
               currentTime: Number(player.currentTime || 0),
               prewarmed: player.dataset.shortVideoPrewarmed === "1"
             });
+            player.dispatchEvent(new Event("shortvideoframeready"));
           }
         }
         resolve(ready);
@@ -4899,6 +5687,7 @@ export function createShortVideoPage(deps) {
       player.addEventListener("playing", onReady, { once: true });
       player.addEventListener("error", onUnavailable, { once: true });
       player.addEventListener("emptied", onUnavailable, { once: true });
+      signal?.addEventListener("abort", onUnavailable, { once: true });
       requestPaintedFrame();
       timeoutHandle = window.setTimeout(() => {
         const readyWithoutFrameCallback = !supportsPaintedFrame && player.readyState >= 2;
@@ -4907,18 +5696,31 @@ export function createShortVideoPage(deps) {
     });
   }
 
-  function resumeActiveSound() {
+  function resumeActiveSound(options = {}) {
+    syncShortVideoModalPlayback();
+    const gallery = isGalleryPost(state.shortVideo.current) ? activeGalleryPlayer() : null;
+    const player = gallery ? null : activePlayer();
+    const bar = els.workGrid?.querySelector?.(".short-video-control-bar");
+    const galleryPost = isGalleryPost(state.shortVideo.current);
+    if (bar && bar.classList.contains("is-gallery") !== galleryPost) {
+      bar.shortVideoDispose?.();
+      bar.replaceWith(galleryPost ? renderGalleryControlBar(state.shortVideo.current) : renderControlBar());
+    }
+    syncActiveControlBar();
     if (state.shortVideo.muted) return;
+    if (options.navigationOwner && options.navigationOwner !== shortVideoNavigationState) return;
+    const owner = captureShortVideoPlaybackOwner(gallery ? activePlayer() : player);
+    const ownsPlayback = () => !state.shortVideo.muted && ownsShortVideoPlaybackOwner(owner);
     window.requestAnimationFrame(() => {
-      if (isGalleryPost(state.shortVideo.current)) {
-        activeGalleryPlayer()?.shortVideoGalleryPlaySound?.();
+      if (!ownsPlayback()) return;
+      if (gallery) {
+        gallery.shortVideoGalleryPlaySound?.();
         return;
       }
-      const player = activePlayer();
-      if (!player) return;
       player.muted = false;
       player.volume = currentShortVideoVolume();
-      player.play?.().catch(() => {
+      player.play?.().catch((error) => {
+        if (!ownsPlayback() || error?.name !== "NotAllowedError") return;
         markPlayerSoundBlocked(player.closest(".short-video-stage"));
         player.muted = true;
         player.play?.().catch(() => {});
@@ -4926,7 +5728,103 @@ export function createShortVideoPage(deps) {
     });
   }
 
+  function captureShortVideoPlaybackOwner(player, options = {}) {
+    const gallery = isGalleryPost(state.shortVideo?.current) ? activeGalleryPlayer() : null;
+    return {
+      player, gallery, navigation: shortVideoNavigationState, checkNavigation: options.navigation !== false,
+      lifecycleGeneration: shortVideoPageSuspended ? null : shortVideoPlaybackLifecycleGeneration,
+      openRequestId: shortVideoOpenRequestId, scope: shortVideoNavigationScope(),
+      id: String(options.videoId || player?.dataset?.videoId || state.shortVideo?.current?.id || ""),
+      source: String(player?.getAttribute?.("src") || player?.currentSrc || ""),
+      generation: String(player?.dataset?.shortVideoSourceGeneration || "0"),
+      slot: String(player?.dataset?.shortVideoSlot || ""),
+      promotion: String(player?.dataset?.shortVideoPromotedAt || ""),
+      warm: String(player?.dataset?.shortVideoWarmScheduleToken || ""),
+      intent: String(player?.dataset?.shortVideoPlaybackIntentGeneration || "0"),
+      soundIntent: String(player?.dataset?.shortVideoSoundIntentGeneration || "0"),
+      checkSoundIntent: options.soundIntent !== false,
+      checkPlayer: !options.galleryOnly,
+      galleryIntent: String(gallery?.dataset?.shortVideoPlaybackIntentGeneration || "0"),
+      allowPaused: Boolean(options.allowPaused)
+    };
+  }
+
+  function ownsShortVideoPlaybackOwner(owner) {
+    if (!owner || shortVideoPageSuspended || owner.lifecycleGeneration !== shortVideoPlaybackLifecycleGeneration
+      || state.activeView !== "shortVideos" || !state.shortVideo?.current
+      || String(state.shortVideo.current.id || "") !== owner.id || shortVideoOpenRequestId !== owner.openRequestId
+      || shortVideoNavigationScope() !== owner.scope
+      || (owner.checkNavigation && shortVideoNavigationState !== owner.navigation)) return false;
+    const player = owner.player;
+    const gallery = owner.gallery?.shortVideoGalleryResolve?.() || owner.gallery;
+    if (gallery && (activeGalleryPlayer() !== gallery || !gallery.isConnected
+      || String(gallery.dataset?.shortVideoPlaybackIntentGeneration || "0") !== owner.galleryIntent
+      || (!owner.allowPaused && gallery.shortVideoGalleryIsPaused?.()))) return false;
+    if (gallery && !owner.checkPlayer) return true;
+    return Boolean((player || gallery) && player === activePlayer()
+      && (!player || (player.isConnected && !player.classList.contains("is-ghost")
+        && (owner.allowPaused || player.dataset.shortVideoExplicitPlaybackIntent !== "pause")
+        && String(player.getAttribute?.("src") || player.currentSrc || "") === owner.source
+        && String(player.dataset.shortVideoSourceGeneration || "0") === owner.generation
+        && String(player.dataset.shortVideoSlot || "") === owner.slot
+        && String(player.dataset.shortVideoPromotedAt || "") === owner.promotion
+        && String(player.dataset.shortVideoWarmScheduleToken || "") === owner.warm
+        && String(player.dataset.shortVideoPlaybackIntentGeneration || "0") === owner.intent
+        && (!owner.checkSoundIntent || String(player.dataset.shortVideoSoundIntentGeneration || "0") === owner.soundIntent))));
+  }
+
+  function stopShortVideoSoundPreview(options = {}) {
+    const audio = shortVideoSoundPreviewAudio;
+    shortVideoSoundPreviewAudio = null;
+    if (audio?.shortVideoStopSoundPreview) audio.shortVideoStopSoundPreview(options);
+    else audio?.shortVideoDisposeSoundPreview?.(options);
+  }
+
+  function acquireShortVideoSoundPreviewPlayback(audio, panel) {
+    stopShortVideoSoundPreview();
+    shortVideoSoundPreviewAudio = audio;
+    shortVideoWheelController?.cancel();
+    cancelShortVideoAutoNext();
+    cancelShortVideoBrowseGestures();
+    clearPendingPlayerClick();
+    const gallery = isGalleryPost(state.shortVideo?.current) ? activeGalleryPlayer() : null;
+    const player = activePlayer();
+    const wasPlaying = Boolean(player && !player.paused && !player.ended);
+    if (gallery) gallery.shortVideoGalleryPause?.(audio);
+    else player?.shortVideoSetPlaybackIntent?.(false);
+    player?.pause?.();
+    audio.volume = currentShortVideoVolume();
+    audio.muted = false;
+    const owner = captureShortVideoPlaybackOwner(player, { allowPaused: true, soundIntent: false, galleryOnly: Boolean(gallery) });
+    let released = false;
+    return (options = {}) => {
+      if (released) return;
+      released = true;
+      if (shortVideoSoundPreviewAudio === audio) shortVideoSoundPreviewAudio = null;
+      const currentGallery = gallery?.shortVideoGalleryResolve?.() || gallery;
+      const shouldRestore = options.restorePlayback !== false && ownsShortVideoPlaybackOwner(owner);
+      if (currentGallery?.isConnected) {
+        if (!shouldRestore) currentGallery.shortVideoGalleryPause?.("user");
+        currentGallery.shortVideoGalleryResume?.(audio);
+      }
+      if (!shouldRestore || !wasPlaying) return;
+      if (currentGallery) {
+        currentGallery.shortVideoGalleryPlaySound?.();
+        return;
+      }
+      player.shortVideoSetPlaybackIntent?.(true);
+      const resumeOwner = captureShortVideoPlaybackOwner(player);
+      player.play?.().catch((error) => {
+        if (!ownsShortVideoPlaybackOwner(resumeOwner) || error?.name !== "NotAllowedError") return;
+        markPlayerSoundBlocked(player.closest(".short-video-stage"));
+        player.muted = true;
+        player.play?.().catch(() => {});
+      });
+    };
+  }
+
   function showHome() {
+    cancelShortVideoNavigation();
     shortVideoOpenRequestId += 1;
     shortVideoOpeningId = "";
     shortVideoOpenError = "";
@@ -4954,6 +5852,7 @@ export function createShortVideoPage(deps) {
     pushRoute({ view: "shortVideos", shortVideoId: "" });
   }
   function showShortVideoSearchOverlay(trigger = null) {
+    cancelShortVideoPanelLoading();
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser) return;
     const existing = browser.querySelector(".short-video-search-overlay");
@@ -5011,6 +5910,7 @@ export function createShortVideoPage(deps) {
 
   function closeShortVideoSearchOverlay(overlay, options = {}) {
     if (!overlay) return;
+    cancelShortVideoPanelLoading();
     const browser = overlay.closest?.(".short-video-browser");
     const returnFocus = overlay._shortVideoReturnFocus;
     restoreShortVideoTransientModalIsolation(overlay);
@@ -5020,14 +5920,96 @@ export function createShortVideoPage(deps) {
     if (returnFocus?.isConnected) returnFocus.focus?.({ preventScroll: true });
   }
 
+  function hasShortVideoBrowseOverlay() {
+    return Boolean(els.workGrid?.querySelector?.(
+      ".short-video-search-overlay, .short-video-author-panel, .short-video-more-overlay, .short-video-share-panel"
+    ) || document.querySelector?.(".short-video-collection-picker"));
+  }
+
+  function captureShortVideoBrowseGesture() {
+    const stack = activeReelStack();
+    if (state.activeView !== "shortVideos" || !state.shortVideo?.current || !stack?.isConnected || hasShortVideoBrowseOverlay()) return null;
+    const player = activePlayer();
+    return {
+      stack, player, gallery: activeGalleryPlayer(),
+      id: String(state.shortVideo.current.id || ""), scope: shortVideoNavigationScope(),
+      navigation: shortVideoNavigationState, openRequestId: shortVideoOpenRequestId,
+      source: String(player?.getAttribute?.("src") || player?.currentSrc || ""),
+      videoId: String(player?.dataset?.videoId || ""),
+      generation: String(player?.dataset?.shortVideoSourceGeneration || "0"),
+      slot: String(player?.dataset?.shortVideoSlot || ""),
+      promotion: String(player?.dataset?.shortVideoPromotedAt || ""),
+      warm: String(player?.dataset?.shortVideoWarmScheduleToken || ""),
+      intent: String(player?.dataset?.shortVideoPlaybackIntentGeneration || "0")
+    };
+  }
+
+  function ownsShortVideoBrowseGesture(owner) {
+    if (!owner || state.activeView !== "shortVideos" || !owner.stack.isConnected
+      || owner.stack !== activeReelStack() || owner.player !== activePlayer() || owner.gallery !== activeGalleryPlayer()
+      || String(state.shortVideo?.current?.id || "") !== owner.id
+      || shortVideoNavigationState !== owner.navigation || shortVideoOpenRequestId !== owner.openRequestId
+      || shortVideoNavigationScope() !== owner.scope || hasShortVideoBrowseOverlay()
+      || (owner.gallery && !owner.gallery.isConnected)) return false;
+    const player = owner.player;
+    return (!player || (player.isConnected && !player.classList.contains("is-ghost")))
+      && String(player?.getAttribute?.("src") || player?.currentSrc || "") === owner.source
+      && String(player?.dataset?.videoId || "") === owner.videoId
+      && String(player?.dataset?.shortVideoSourceGeneration || "0") === owner.generation
+      && String(player?.dataset?.shortVideoSlot || "") === owner.slot
+      && String(player?.dataset?.shortVideoPromotedAt || "") === owner.promotion
+      && String(player?.dataset?.shortVideoWarmScheduleToken || "") === owner.warm
+      && String(player?.dataset?.shortVideoPlaybackIntentGeneration || "0") === owner.intent;
+  }
+
+  function clearShortVideoBrowseGesture(owner) {
+    if (!owner) return;
+    const owners = [touchGestureOwner, pointerGestureOwner];
+    if (!owners.some((current) => current && current !== owner && current.stack === owner.stack)) {
+      owner.stack.classList.remove("is-dragging", "is-boundary-start", "is-boundary-end");
+      owner.stack.style.setProperty("--short-video-drag-y", "0px");
+    }
+    if (!owners.some((current) => current && current !== owner && current.gallery === owner.gallery)) {
+      owner.gallery?.shortVideoGalleryDragCancel?.();
+    }
+  }
+
+  function endShortVideoTouchSession() {
+    touchGestureOwner = null;
+    touchIdentifier = null;
+    touchControlInteraction = false;
+    touchHorizontalDragging = false;
+    touchDeltaX = 0; touchDeltaY = 0;
+    touchVelocityX = 0; touchVelocityY = 0;
+    if (state.shortVideo) state.shortVideo.dragging = Boolean(pointerGestureOwner);
+  }
+
+  function endShortVideoPointerSession() {
+    pointerGestureOwner = null;
+    pointerIdentifier = null;
+    pointerDragging = false;
+    pointerHorizontalDragging = false;
+    pointerDeltaX = 0; pointerDeltaY = 0;
+    pointerVelocityX = 0; pointerVelocityY = 0;
+    if (state.shortVideo) state.shortVideo.dragging = Boolean(touchGestureOwner);
+  }
+
+  function cancelShortVideoBrowseGestures() {
+    shortVideoWheelController?.cancelVisual();
+    const owners = new Set([touchGestureOwner, pointerGestureOwner, reelDragOwner]);
+    endShortVideoTouchSession();
+    endShortVideoPointerSession();
+    touchBlockedUntilLift = false;
+    cancelReelDragDelta();
+    owners.forEach(clearShortVideoBrowseGesture);
+  }
+
   function installBrowseEvents() {
     if (eventsInstalled) return;
     eventsInstalled = true;
     window.addEventListener("wheel", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-      if (isShortVideoOverlayTarget(event.target)) return;
-      event.preventDefault();
-      handleWheelSwipe(event.deltaY);
+      if (handleWheelSwipe(event)) event.preventDefault();
     }, { passive: false });
     window.addEventListener("scroll", () => {
       if (state.activeView !== "shortVideos" || state.shortVideo?.current) return;
@@ -5048,14 +6030,28 @@ export function createShortVideoPage(deps) {
       });
     });
     window.addEventListener("touchstart", (event) => {
+      const touches = Array.from(event.touches || []);
+      if (touchBlockedUntilLift) return;
+      if (touches.length !== 1) {
+        cancelShortVideoBrowseGestures();
+        touchBlockedUntilLift = touches.length > 0;
+        return;
+      }
+      if (touchGestureOwner || pointerGestureOwner) return;
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      shortVideoWheelController?.cancel();
       touchControlInteraction = isShortVideoOverlayTarget(event.target) || isShortVideoKeyboardControl(event.target);
       if (touchControlInteraction) return;
+      const touch = touches[0];
+      if (!Number.isFinite(touch.identifier) || !Number.isFinite(touch.clientX) || !Number.isFinite(touch.clientY)) return;
+      const owner = captureShortVideoBrowseGesture();
+      if (!owner) return;
+      touchGestureOwner = owner;
+      touchIdentifier = touch.identifier;
       holdSpeedGestureConsumed = false;
       holdSpeedGestureBlockUntil = 0;
-      const touch = event.touches?.[0];
-      touchStartX = touch?.clientX || 0;
-      touchStartY = touch?.clientY || 0;
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
       touchLastX = touchStartX;
       touchLastY = touchStartY;
       touchLastAt = Date.now();
@@ -5065,15 +6061,24 @@ export function createShortVideoPage(deps) {
       touchDeltaY = 0;
       touchHorizontalDragging = false;
       state.shortVideo.dragging = true;
-      activeReelStack()?.classList.add("is-dragging");
+      owner.stack.classList.add("is-dragging");
     }, { passive: true });
     window.addEventListener("touchmove", (event) => {
-      if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-      if (touchControlInteraction) return;
-      if (isShortVideoOverlayTarget(event.target)) return;
-      const touch = event.touches?.[0];
-      const x = touch?.clientX || 0;
-      const y = touch?.clientY || 0;
+      if (touchBlockedUntilLift || touchControlInteraction || !touchGestureOwner) return;
+      const touches = Array.from(event.touches || []);
+      if (touches.length !== 1) {
+        cancelShortVideoBrowseGestures();
+        touchBlockedUntilLift = touches.length > 0;
+        return;
+      }
+      const touch = touches.find((point) => point.identifier === touchIdentifier);
+      if (!touch || !ownsShortVideoBrowseGesture(touchGestureOwner) || isShortVideoOverlayTarget(event.target)) {
+        cancelShortVideoBrowseGestures();
+        return;
+      }
+      const x = touch.clientX;
+      const y = touch.clientY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       const now = Date.now();
       const elapsed = Math.max(1, now - touchLastAt);
       const instantVelocityX = (x - touchLastX) / elapsed;
@@ -5104,73 +6109,74 @@ export function createShortVideoPage(deps) {
       event.preventDefault();
     }, { passive: false });
     window.addEventListener("touchend", (event) => {
-      if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      const touches = Array.from(event.touches || []);
+      if (touchBlockedUntilLift) {
+        if (!touches.length) touchBlockedUntilLift = false;
+        return;
+      }
       if (touchControlInteraction) {
-        touchControlInteraction = false;
+        if (!touches.length) touchControlInteraction = false;
+        return;
+      }
+      const owner = touchGestureOwner;
+      if (!owner) return;
+      if (touches.length) {
+        cancelShortVideoBrowseGestures();
+        touchBlockedUntilLift = true;
+        return;
+      }
+      const touch = Array.from(event.changedTouches || []).find((point) => point.identifier === touchIdentifier);
+      if (!touch) return;
+      if (!ownsShortVideoBrowseGesture(owner) || isShortVideoOverlayTarget(event.target)) {
+        cancelShortVideoBrowseGestures();
         return;
       }
       if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
         holdSpeedGestureConsumed = false;
         holdSpeedGestureBlockUntil = Date.now() + 120;
-        state.shortVideo.dragging = false;
-        touchHorizontalDragging = false;
-        activeReelStack()?.classList.remove("is-dragging");
-        snapStackBack();
+        cancelShortVideoBrowseGestures();
         return;
       }
-      if (isShortVideoOverlayTarget(event.target)) return;
-      const touch = event.changedTouches?.[0];
-      const endX = touch?.clientX || 0;
-      const endY = touch?.clientY || 0;
+      const endX = Number.isFinite(touch.clientX) ? touch.clientX : touchLastX;
+      const endY = Number.isFinite(touch.clientY) ? touch.clientY : touchLastY;
       const deltaX = touchDeltaX || endX - touchStartX;
       const deltaY = touchDeltaY || endY - touchStartY;
       if (Math.hypot(deltaX, deltaY) > 8) {
-        markShortVideoGestureClickBlocked(event.target);
+        markShortVideoGestureClickBlocked(owner.stack);
       }
       if (Date.now() - touchLastAt > 80) {
         const velocityDecay = Math.max(0, 1 - (Date.now() - touchLastAt - 80) / 180);
         touchVelocityX *= velocityDecay;
         touchVelocityY *= velocityDecay;
       }
-      if (touchHorizontalDragging) {
-        state.shortVideo.dragging = false;
-        touchHorizontalDragging = false;
-        activeReelStack()?.classList.remove("is-dragging");
+      const wasHorizontal = touchHorizontalDragging;
+      const velocityX = touchVelocityX, velocityY = touchVelocityY;
+      endShortVideoTouchSession();
+      if (wasHorizontal) {
+        owner.stack.classList.remove("is-dragging");
         snapStackBack();
-        const handled = finishActiveGalleryDrag(deltaX, touchVelocityX);
+        const handled = finishActiveGalleryDrag(deltaX, velocityX);
         if (!handled && isHorizontalSwipe(deltaX, deltaY, 72)) handleHorizontalSwipe(deltaX);
         else if (!handled) finishDrag(0, 0);
         return;
       }
-      finishDrag(deltaY, touchVelocityY);
+      finishDrag(deltaY, velocityY);
     }, { passive: true });
     window.addEventListener("touchcancel", () => {
-      if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-      if (touchControlInteraction) {
-        touchControlInteraction = false;
-        return;
-      }
-      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
-        holdSpeedGestureConsumed = false;
-        holdSpeedGestureBlockUntil = Date.now() + 120;
-        touchHorizontalDragging = false;
-        state.shortVideo.dragging = false;
-        activeReelStack()?.classList.remove("is-dragging");
-        snapStackBack();
-        return;
-      }
-      const wasHorizontal = touchHorizontalDragging;
-      touchHorizontalDragging = false;
-      state.shortVideo.dragging = false;
-      activeReelStack()?.classList.remove("is-dragging");
-      if (wasHorizontal) cancelActiveGalleryDrag();
-      finishDrag(0, 0);
+      cancelShortVideoBrowseGestures();
     }, { passive: true });
     window.addEventListener("pointerdown", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
       if (event.pointerType === "touch") return;
-      if (isShortVideoOverlayTarget(event.target)) return;
+      shortVideoWheelController?.cancel();
+      if (isShortVideoOverlayTarget(event.target) || hasShortVideoBrowseOverlay()) { cancelShortVideoBrowseGestures(); return; }
+      if (pointerGestureOwner || touchGestureOwner || event.isPrimary === false || !Number.isFinite(event.pointerId)) return;
       if (event.button !== 0 || event.target?.closest?.("button, select, input, textarea, a")) return;
+      if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+      const owner = captureShortVideoBrowseGesture();
+      if (!owner) return;
+      pointerGestureOwner = owner;
+      pointerIdentifier = event.pointerId;
       holdSpeedGestureConsumed = false;
       holdSpeedGestureBlockUntil = 0;
       pointerStartX = event.clientX || 0;
@@ -5185,13 +6191,18 @@ export function createShortVideoPage(deps) {
       pointerHorizontalDragging = false;
       pointerDragging = true;
       state.shortVideo.dragging = true;
-      activeReelStack()?.classList.add("is-dragging");
+      owner.stack.classList.add("is-dragging");
     });
     window.addEventListener("pointermove", (event) => {
       if (event.pointerType === "touch") return;
-      if (!pointerDragging || state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-      const x = event.clientX || 0;
-      const y = event.clientY || 0;
+      if (!pointerDragging || !pointerGestureOwner || event.pointerId !== pointerIdentifier) return;
+      if (!ownsShortVideoBrowseGesture(pointerGestureOwner) || isShortVideoOverlayTarget(event.target)) {
+        cancelShortVideoBrowseGestures();
+        return;
+      }
+      const x = event.clientX;
+      const y = event.clientY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       const now = Date.now();
       const elapsed = Math.max(1, now - pointerLastAt);
       const instantVelocityX = (x - pointerLastX) / elapsed;
@@ -5223,19 +6234,17 @@ export function createShortVideoPage(deps) {
     }, { passive: false });
     window.addEventListener("pointerup", (event) => {
       if (event.pointerType === "touch") return;
-      if (!pointerDragging) return;
-      pointerDragging = false;
+      const owner = pointerGestureOwner;
+      if (!pointerDragging || !owner || event.pointerId !== pointerIdentifier) return;
+      if (!ownsShortVideoBrowseGesture(owner) || isShortVideoOverlayTarget(event.target)) { cancelShortVideoBrowseGestures(); return; }
       if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
         holdSpeedGestureConsumed = false;
         holdSpeedGestureBlockUntil = Date.now() + 120;
-        pointerHorizontalDragging = false;
-        state.shortVideo.dragging = false;
-        activeReelStack()?.classList.remove("is-dragging");
-        snapStackBack();
+        cancelShortVideoBrowseGestures();
         return;
       }
       if (Math.hypot(pointerDeltaX, pointerDeltaY) > 8) {
-        markShortVideoGestureClickBlocked(event.target);
+        markShortVideoGestureClickBlocked(owner.stack);
         suppressNextPlayerClick = true;
         window.setTimeout(() => {
           suppressNextPlayerClick = false;
@@ -5246,40 +6255,47 @@ export function createShortVideoPage(deps) {
         pointerVelocityX *= velocityDecay;
         pointerVelocityY *= velocityDecay;
       }
-      if (pointerHorizontalDragging) {
-        state.shortVideo.dragging = false;
-        pointerHorizontalDragging = false;
-        activeReelStack()?.classList.remove("is-dragging");
+      const deltaX = pointerDeltaX, deltaY = pointerDeltaY;
+      const velocityX = pointerVelocityX, velocityY = pointerVelocityY;
+      const wasHorizontal = pointerHorizontalDragging;
+      endShortVideoPointerSession();
+      if (wasHorizontal) {
+        owner.stack.classList.remove("is-dragging");
         snapStackBack();
-        const handled = finishActiveGalleryDrag(pointerDeltaX, pointerVelocityX);
-        if (!handled && isHorizontalSwipe(pointerDeltaX, pointerDeltaY, 72)) handleHorizontalSwipe(pointerDeltaX);
+        const handled = finishActiveGalleryDrag(deltaX, velocityX);
+        if (!handled && isHorizontalSwipe(deltaX, deltaY, 72)) handleHorizontalSwipe(deltaX);
         else if (!handled) finishDrag(0, 0);
         return;
       }
-      finishDrag(pointerDeltaY, pointerVelocityY);
+      finishDrag(deltaY, velocityY);
     });
     window.addEventListener("pointercancel", (event) => {
       if (event.pointerType === "touch") return;
-      if (!pointerDragging) return;
-      pointerDragging = false;
-      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
-        holdSpeedGestureConsumed = false;
-        holdSpeedGestureBlockUntil = Date.now() + 120;
-        pointerHorizontalDragging = false;
-        state.shortVideo.dragging = false;
-        suppressNextPlayerClick = false;
-        activeReelStack()?.classList.remove("is-dragging");
-        snapStackBack();
-        return;
-      }
-      const wasHorizontal = pointerHorizontalDragging;
-      pointerHorizontalDragging = false;
+      if (!pointerGestureOwner || event.pointerId !== pointerIdentifier) return;
       suppressNextPlayerClick = false;
-      if (wasHorizontal) cancelActiveGalleryDrag();
-      finishDrag(0, 0);
+      cancelShortVideoBrowseGestures();
+    });
+    window.addEventListener("blur", () => {
+      shortVideoWheelController?.cancel();
+      cancelShortVideoBrowseGestures();
+    });
+    window.addEventListener("focusin", () => {
+      if ((touchGestureOwner || pointerGestureOwner) && hasShortVideoBrowseOverlay()) cancelShortVideoBrowseGestures();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        shortVideoWheelController?.cancel();
+        cancelShortVideoBrowseGestures();
+      }
     });
     window.addEventListener("keydown", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229
+        || event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.key === "Escape") {
+        cancelShortVideoPanelLoading();
+        if (shortVideoFullscreenController?.isPending()) cancelShortVideoFullscreen();
+      }
       const playbackSettings = event.target?.closest?.(".short-video-more-overlay")
         || els.workGrid?.querySelector?.(".short-video-more-overlay");
       if (playbackSettings) {
@@ -5289,8 +6305,27 @@ export function createShortVideoPage(deps) {
         }
         return;
       }
-      if (isShortVideoKeyboardControl(event.target)) return;
+      const searchOverlay = event.target?.closest?.(".short-video-search-overlay")
+        || els.workGrid?.querySelector?.(".short-video-search-overlay");
+      if (searchOverlay) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeShortVideoSearchOverlay(searchOverlay);
+        }
+        return;
+      }
+      const authorPanel = event.target?.closest?.(".short-video-author-panel");
+      if (authorPanel) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeAuthorPanel(authorPanel);
+        }
+        return;
+      }
+      if (isShortVideoOverlayTarget(event.target)) return;
+      if (!shouldHandleShortVideoShortcut(event)) return;
       if (["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "PageDown", "PageUp", " ", "m", "M", "j", "J", "f", "F", "Escape"].includes(event.key)) {
+        shortVideoWheelController?.cancel();
         els.workGrid?.querySelector?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
       }
       if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && isGalleryPost(state.shortVideo.current)) {
@@ -5311,6 +6346,7 @@ export function createShortVideoPage(deps) {
       } else if (event.key?.toLowerCase?.() === "m") {
         event.preventDefault();
         toggleActiveMute().then((soundOn) => {
+          if (soundOn == null) return;
           showBrowserToast(soundOn ? "声音已开启" : "已静音");
         });
       } else if (event.key?.toLowerCase?.() === "j") {
@@ -5321,16 +6357,59 @@ export function createShortVideoPage(deps) {
         toggleShortVideoFullscreen();
       } else if (event.key === "Escape") {
         event.preventDefault();
-        if (document.fullscreenElement) toggleShortVideoFullscreen();
+        if (document.fullscreenElement) cancelShortVideoFullscreen();
         else closeOrRevealBrowser();
       }
     });
     document.addEventListener("visibilitychange", handleShortVideoVisibilityChange);
-    document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls);
+    globalThis.navigator?.connection?.addEventListener?.("change", handleShortVideoPrewarmConnectionChange);
+    document.addEventListener("fullscreenchange", handleShortVideoFullscreenChange);
+    document.addEventListener("enterpictureinpicture", handleShortVideoPictureInPictureChange, true);
+    document.addEventListener("leavepictureinpicture", handleShortVideoPictureInPictureChange, true);
+    window.addEventListener("pagehide", cancelShortVideoNativePlaybackModes);
     window.addEventListener("pagehide", flushActiveShortVideoWatch);
+    window.addEventListener("pagehide", handleShortVideoPageHide);
+    window.addEventListener("pageshow", handleShortVideoPageShow);
+  }
+
+  function handleShortVideoPageHide() {
+    cancelShortVideoNavigation();
+    collectionsController.cancelReads?.();
+    if (shortVideoOpeningId && !state.shortVideo.current) {
+      state.shortVideo.loading = false;
+      state.shortVideo.status = "";
+      shortVideoOpenError = "读取已中断，请重新加载";
+    }
+    releaseUnusedShortVideoPreloads({ force: true });
+    if (shortVideoPageSuspended) return;
+    shortVideoPageSuspended = true;
+    shortVideoPlaybackLifecycleGeneration += 1;
+    els.workGrid?.querySelector?.(".short-video-control-bar")?.shortVideoCancelSeek?.();
+    const player = activePlayer();
+    player?.shortVideoCancelPlaybackRecovery?.();
+    player?.shortVideoCancelPlaybackStatus?.();
+    player?.shortVideoSuspendFirstFrame?.();
+    stopShortVideoSoundPreview({ restorePlayback: false });
+    cancelShortVideoPanelLoading();
+    cancelShortVideoAutoNext();
+    shortVideoWheelController?.cancel();
+    cancelShortVideoBrowseGestures();
+    clearPendingPlayerClick();
+  }
+
+  function handleShortVideoPageShow() {
+    if (!shortVideoPageSuspended) return;
+    shortVideoPageSuspended = false;
+    if (state.activeView === "shortVideos" && shortVideoOpeningId && !state.shortVideo.current) renderView();
+    if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+    activePlayer()?.shortVideoResumeFirstFrame?.();
+    syncActiveControlBar();
+    warmVisibleAdjacentVideoPlayers();
   }
 
   function handleShortVideoVisibilityChange() {
+    if (document.hidden) releaseUnusedShortVideoPreloads({ force: true });
+    if (document.hidden) shortVideoWatchWriteController?.flush({ keepalive: true });
     if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
     if (document.hidden) {
       // Keep the active video and gallery playing when another tab is selected.
@@ -5342,6 +6421,13 @@ export function createShortVideoPage(deps) {
     }
     syncActiveControlBar();
     warmVisibleAdjacentVideoPlayers();
+  }
+
+  function handleShortVideoPrewarmConnectionChange() {
+    releaseUnusedShortVideoPreloads();
+    if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+    if (canSpeculativelyWarmShortVideo()) warmVisibleAdjacentVideoPlayers();
+    else els.workGrid?.querySelectorAll?.(".short-video-player.is-ghost")?.forEach?.(player => releaseOffscreenVideoDecoder(player, "network-budget"));
   }
 
   function activePlayer() {
@@ -5423,6 +6509,7 @@ export function createShortVideoPage(deps) {
   }
 
   function seekActiveVideo(deltaSeconds) {
+    stopShortVideoSoundPreview({ restorePlayback: false });
     const player = activePlayer();
     if (!player) return false;
     const duration = Number(player.duration || 0);
@@ -5431,7 +6518,10 @@ export function createShortVideoPage(deps) {
     const requestedDelta = Number(deltaSeconds || 0);
     const target = Math.max(0, Math.min(duration, current + requestedDelta));
     const actualDelta = target - current;
+    player.shortVideoCancelWatchResume?.();
+    cancelShortVideoAutoNext();
     player.currentTime = target;
+    player.shortVideoFlushWatch?.({ force: true });
     syncActiveControlBar();
     showKeyboardSeekFeedback(player.closest(".short-video-stage"), requestedDelta, actualDelta, target, duration);
     return true;
@@ -5458,6 +6548,7 @@ export function createShortVideoPage(deps) {
   }
 
   function toggleActivePlayer() {
+    stopShortVideoSoundPreview({ restorePlayback: false });
     const gallery = activeGalleryPlayer();
     if (gallery && isGalleryPost(state.shortVideo?.current)) {
       gallery.shortVideoGalleryTogglePlayback?.();
@@ -5466,6 +6557,7 @@ export function createShortVideoPage(deps) {
     }
     const player = activePlayer();
     if (!player) return;
+    player.shortVideoSetPlaybackIntent?.(player.paused);
     if (player.paused) player.play().catch(() => {}).finally(syncActiveControlBar);
     else {
       player.pause();
@@ -5479,8 +6571,9 @@ export function createShortVideoPage(deps) {
   }
 
   function setActiveShortVideoVolume(percent) {
-    const player = activePlayer();
+    const player = activePlayer() || shortVideoSoundPreviewAudio;
     if (!player) return;
+    player.dataset.shortVideoSoundIntentGeneration = String(Number(player.dataset.shortVideoSoundIntentGeneration || 0) + 1);
     const wasPlaying = !player.paused && !player.ended;
     const rawPercent = Math.max(0, Math.min(100, Number(percent || 0)));
     if (rawPercent <= 0) {
@@ -5497,12 +6590,30 @@ export function createShortVideoPage(deps) {
       player.muted = false;
       if (wasPlaying) player.play?.().catch(() => {});
     }
+    if (shortVideoSoundPreviewAudio?.isConnected) {
+      shortVideoSoundPreviewAudio.volume = currentShortVideoVolume();
+      shortVideoSoundPreviewAudio.muted = state.shortVideo.muted;
+    }
     clearPlayerSoundBlocked(player.closest(".short-video-stage"));
   }
 
   async function toggleActiveMute() {
     const player = activePlayer();
+    const preview = shortVideoSoundPreviewAudio;
+    if (preview?.isConnected) {
+      preview.muted = !preview.muted;
+      preview.volume = currentShortVideoVolume();
+      state.shortVideo.muted = preview.muted;
+      writeMutedPreference(preview.muted);
+      if (player) {
+        player.dataset.shortVideoSoundIntentGeneration = String(Number(player.dataset.shortVideoSoundIntentGeneration || 0) + 1);
+        player.muted = preview.muted;
+      }
+      syncActiveControlBar();
+      return !preview.muted;
+    }
     if (!player) return false;
+    player.dataset.shortVideoSoundIntentGeneration = String(Number(player.dataset.shortVideoSoundIntentGeneration || 0) + 1);
     const stage = player.closest(".short-video-stage");
     const wasPlaying = !player.paused && !player.ended;
     player.muted = !player.muted;
@@ -5511,13 +6622,19 @@ export function createShortVideoPage(deps) {
     writeMutedPreference(player.muted);
     clearPlayerSoundBlocked(stage);
     if (wasPlaying && !player.muted) {
+      const owner = captureShortVideoPlaybackOwner(player);
       try {
         await player.play?.();
-      } catch {
+      } catch (error) {
+        if (!ownsShortVideoPlaybackOwner(owner)) return null;
         if (!player.paused) {
           clearPlayerSoundBlocked(stage);
           syncActiveControlBar();
           return true;
+        }
+        if (error?.name !== "NotAllowedError") {
+          syncActiveControlBar();
+          return !player.muted;
         }
         player.muted = true;
         state.shortVideo.muted = true;
@@ -5526,6 +6643,7 @@ export function createShortVideoPage(deps) {
         player.play?.().catch(() => {});
         syncActiveControlBar();
       }
+      if (!ownsShortVideoPlaybackOwner(owner)) return null;
     }
     syncActiveControlBar();
     return !player.muted;
@@ -5643,33 +6761,45 @@ export function createShortVideoPage(deps) {
         deferredMs: Date.now() - scheduledAt,
         currentFrameReady: current?.dataset?.shortVideoFrameReady === "1"
       });
-      prefetchAdjacentNavigation(candidate.video, candidate.direction, params).catch(() => {});
+      prefetchAdjacentNavigation(candidate.video, candidate.direction, params, shortVideoNavigationState).catch(() => {});
     };
     shortVideoNavigationPrefetchTimer = window.setTimeout(run, 60);
   }
 
-  async function prefetchAdjacentNavigation(video, direction, params) {
+  async function prefetchAdjacentNavigation(video, direction, params, owner = shortVideoNavigationState) {
     const videoId = String(video?.id || "").trim();
-    if (!videoId) return;
+    const isCurrent = () => isCurrentShortVideoNavigation(owner);
+    if (!videoId || !isCurrent()) return;
     rememberShortVideo(video);
-    const detail = await fetchShortVideoDetail(videoId, params);
+    const detail = await fetchShortVideoDetail(videoId, params, { signal: owner.controller?.signal, isCurrent, owner, priority: "speculative" });
+    if (!isCurrent() || detail?.shortVideoNavigationInvalidated === true) return;
     const farId = String(direction > 0 ? detail?.nextId || "" : detail?.prevId || "").trim();
-    if (!farId || cachedShortVideo(farId) || shortVideoVideoPrefetches.has(farId)) return;
-    const request = api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction > 0 ? "next" : "prev"}&${params}`)
-      .then((data) => rememberShortVideo(data?.video))
-      .finally(() => shortVideoVideoPrefetches.delete(farId));
-    shortVideoVideoPrefetches.set(farId, request);
+    const prefetchKey = `${params}::${farId}`;
+    if (!farId || cachedShortVideo(farId) || shortVideoVideoPrefetches.has(prefetchKey)) return;
+    const request = runShortVideoRead(signal => api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction > 0 ? "next" : "prev"}&${params}`, { signal }), { signal: owner.controller?.signal })
+      .then((data) => isCurrent() && String(data?.video?.id || "") === farId ? rememberShortVideo(data.video) : null)
+      .finally(() => { if (shortVideoVideoPrefetches.get(prefetchKey) === request) shortVideoVideoPrefetches.delete(prefetchKey); });
+    shortVideoVideoPrefetches.set(prefetchKey, request);
     await request;
   }
 
-  async function loadAdjacentVideos(videoId) {
+  async function loadAdjacentVideos(videoId, owner = shortVideoNavigationState) {
     const requestId = ++shortVideoAdjacentRequestId;
-    if (state.shortVideo.mode === "collection") await collectionsController.prepareCollectionNavigation(videoId).catch(() => {});
-    if (requestId !== shortVideoAdjacentRequestId || state.shortVideo.current?.id !== videoId) return false;
+    const isCurrent = () => requestId === shortVideoAdjacentRequestId && isCurrentShortVideoNavigation(owner);
+    if (!isCurrent()) return false;
+    if (state.shortVideo.mode === "collection") {
+      const prepared = await collectionsController.prepareCollectionNavigation(videoId, { isCurrent });
+      if (!isCurrent()) return false;
+      if (!prepared && !state.shortVideo.nextId && state.shortVideo.collectionData?.hasMore) {
+        throw new Error("清单导航读取已中断，请重试");
+      }
+    }
+    if (!isCurrent()) return false;
     const prevId = state.shortVideo.prevId;
     const nextId = state.shortVideo.nextId;
     const params = shortVideoFeedParams();
     const collectionNavigation = collectionsController.collectionNavigation(videoId);
+    const refreshNavigation = owner.refreshNavigation === true;
     const knownPrev = collectionNavigation?.prevVideo || (String(state.shortVideo.prevVideo?.id || "") === String(prevId || "")
       ? state.shortVideo.prevVideo
       : cachedShortVideo(prevId));
@@ -5677,23 +6807,47 @@ export function createShortVideoPage(deps) {
       ? state.shortVideo.nextVideo
       : cachedShortVideo(nextId));
     const loadAdjacent = (id, known, direction) => {
-      if (!id) return Promise.resolve(null);
-      if (known) return Promise.resolve({ video: known });
-      const prefetched = shortVideoVideoPrefetches.get(String(id));
-      if (prefetched) {
+      if (!refreshNavigation && !id) return Promise.resolve(null);
+      if (!refreshNavigation && known) return Promise.resolve({ video: known });
+      const prefetched = shortVideoVideoPrefetches.get(`${params}::${id}`);
+      const read = () => isCurrent()
+        ? runShortVideoRead(signal => api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction}&${params}`, { signal }), { signal: owner.controller?.signal })
+        : Promise.resolve(null);
+      if (!refreshNavigation && prefetched) {
         return prefetched
           .then((video) => video ? { video } : null)
-          .catch(() => api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction}&${params}`));
+          .catch(read);
       }
-      return api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction}&${params}`);
+      return read();
     };
     const [prevResult, nextResult] = await Promise.allSettled([
       loadAdjacent(prevId, knownPrev, "prev"),
       loadAdjacent(nextId, knownNext, "next")
     ]);
-    if (requestId !== shortVideoAdjacentRequestId || state.shortVideo.current?.id !== videoId) return false;
-    state.shortVideo.prevVideo = prevResult.status === "fulfilled" ? prevResult.value?.video || null : null;
-    state.shortVideo.nextVideo = nextResult.status === "fulfilled" ? nextResult.value?.video || null : null;
+    if (!isCurrent()) return false;
+    if (refreshNavigation) {
+      const apply = (direction, result) => {
+        if (result.status !== "fulfilled" || !result.value || !Object.hasOwn(result.value, "video")) return false;
+        const video = result.value.video;
+        if (video && (!video.id || isDeletedShortVideo(video))) return false;
+        state.shortVideo[`${direction}Id`] = String(video?.id || "");
+        state.shortVideo[`${direction}Video`] = video || null;
+        owner[`${direction}Known`] = true;
+        return true;
+      };
+      const previousReady = apply("prev", prevResult), nextReady = apply("next", nextResult);
+      if (!previousReady || !nextReady) throw new Error("相邻作品读取失败，请再次切换重试");
+      owner.refreshNavigation = false;
+      rememberShortVideo(state.shortVideo.prevVideo);
+      rememberShortVideo(state.shortVideo.nextVideo);
+      scheduleAdjacentNavigationPrefetch();
+      return true;
+    }
+    const matchingVideo = (result, id) => Boolean(id) && result.status === "fulfilled" && result.value?.video
+      && String(result.value.video.id || "") === String(id)
+      ? result.value.video : null;
+    state.shortVideo.prevVideo = matchingVideo(prevResult, prevId);
+    state.shortVideo.nextVideo = matchingVideo(nextResult, nextId);
     rememberShortVideo(state.shortVideo.prevVideo);
     rememberShortVideo(state.shortVideo.nextVideo);
     cacheAuthorPanelVideo(state.shortVideo.prevVideo);
@@ -5754,107 +6908,82 @@ export function createShortVideoPage(deps) {
   }
 
   function scheduleReelDragDelta(deltaY) {
+    const owner = touchGestureOwner || pointerGestureOwner
+      || (ownsShortVideoBrowseGesture(reelDragOwner) ? reelDragOwner : captureShortVideoBrowseGesture());
+    if (!owner || !ownsShortVideoBrowseGesture(owner)) return;
+    if (reelDragOwner && reelDragOwner !== owner) cancelReelDragDelta();
+    reelDragOwner = owner;
     reelDragDeltaY = deltaY;
     if (reelDragRaf) return;
-    reelDragRaf = window.requestAnimationFrame(() => {
+    const token = ++reelDragToken;
+    const handle = window.requestAnimationFrame(() => {
+      if (reelDragRaf !== handle || reelDragToken !== token || reelDragOwner !== owner) return;
+      const delta = reelDragDeltaY;
       reelDragRaf = 0;
-      applyDragDelta(reelDragDeltaY);
+      reelDragOwner = null;
+      if (!ownsShortVideoBrowseGesture(owner)) {
+        if (touchGestureOwner === owner || pointerGestureOwner === owner) cancelShortVideoBrowseGestures();
+        else clearShortVideoBrowseGesture(owner);
+        return;
+      }
+      applyDragDelta(delta);
     });
+    reelDragRaf = handle;
   }
 
   function flushReelDragDelta() {
-    if (reelDragRaf) window.cancelAnimationFrame(reelDragRaf);
-    reelDragRaf = 0;
-    applyDragDelta(reelDragDeltaY);
+    const owner = reelDragOwner, delta = reelDragDeltaY;
+    cancelReelDragDelta();
+    if (owner && ownsShortVideoBrowseGesture(owner)) applyDragDelta(delta);
+    else if (owner) {
+      if (touchGestureOwner === owner || pointerGestureOwner === owner) cancelShortVideoBrowseGestures();
+      else clearShortVideoBrowseGesture(owner);
+    }
   }
 
   function cancelReelDragDelta() {
     if (reelDragRaf) window.cancelAnimationFrame(reelDragRaf);
     reelDragRaf = 0;
     reelDragDeltaY = 0;
+    reelDragOwner = null;
+    reelDragToken += 1;
   }
 
-  function handleWheelSwipe(deltaY) {
-    const now = Date.now();
-    if (Math.abs(deltaY) < 2) return;
-    const previousWheelAt = wheelLastAt;
-    wheelLastAt = now;
-    const gestureAge = wheelGestureStartedAt ? now - wheelGestureStartedAt : 0;
-    const isExplicitNewGesture = Math.abs(deltaY) >= 70
-      && (now - previousWheelAt >= WHEEL_NEW_GESTURE_GAP_MS || gestureAge >= 400);
-    if (wheelLocked && now >= wheelIgnoreUntil && isExplicitNewGesture) {
-      queuedAdjacentDirection = deltaY > 0 ? 1 : -1;
-      wheelGestureConsumed = true;
-      wheelGestureStartedAt = now;
-      scheduleWheelGestureRelease();
-      return;
-    }
-    const startsExplicitNewGesture = wheelGestureConsumed
-      && !wheelLocked
-      && now >= wheelIgnoreUntil
-      && isExplicitNewGesture;
-    if (startsExplicitNewGesture) {
-      wheelGestureConsumed = false;
-      wheelDeltaY = 0;
-    }
-    if (wheelLocked || wheelGestureConsumed || now < wheelIgnoreUntil) {
-      wheelGestureConsumed = true;
-      wheelDeltaY = 0;
-      cancelReelDragDelta();
-      scheduleWheelGestureRelease();
-      return;
-    }
-    if (now - previousWheelAt > 260 || Math.sign(wheelDeltaY) !== Math.sign(deltaY)) {
-      wheelDeltaY = 0;
-    }
-    wheelDeltaY = Math.max(-180, Math.min(180, wheelDeltaY + deltaY));
-    const visualDelta = wheelDeltaY * -0.55;
-    activeReelStack()?.classList.add("is-dragging");
-    scheduleReelDragDelta(visualDelta);
-    window.clearTimeout(wheelResetTimer);
-    wheelResetTimer = window.setTimeout(() => {
-      wheelDeltaY = 0;
-      snapStackBack();
-    }, 160);
-    if (Math.abs(wheelDeltaY) < SHORT_VIDEO_WHEEL_DISTANCE) return;
-    const direction = wheelDeltaY > 0 ? 1 : -1;
-    const wheelMotion = {
-      dragDistance: Math.abs(visualDelta),
-      velocity: Math.min(1.4, Math.abs(deltaY) / 80)
-    };
-    wheelDeltaY = 0;
-    wheelGestureConsumed = true;
-    wheelGestureStartedAt = now;
-    flushReelDragDelta();
-    scheduleWheelGestureRelease();
-    activeReelStack()?.classList.remove("is-dragging");
-    openAdjacent(direction, { motion: wheelMotion }).catch(showError);
+  function getShortVideoWheelController() {
+    if (shortVideoWheelController) return shortVideoWheelController;
+    shortVideoWheelController = createShortVideoWheelController({
+      captureOwner: captureShortVideoBrowseGesture, ownsOwner: ownsShortVideoBrowseGesture,
+      clearOwner: clearShortVideoBrowseGesture,
+      hasPointerSession: () => Boolean(touchGestureOwner || pointerGestureOwner),
+      getScope: shortVideoNavigationScope, isLocked: () => wheelLocked, getIgnoreUntil: () => wheelIgnoreUntil,
+      pageHeight: () => window.innerHeight || 720,
+      distance: SHORT_VIDEO_WHEEL_DISTANCE, idleMs: WHEEL_GESTURE_IDLE_MS, newGestureGapMs: WHEEL_NEW_GESTURE_GAP_MS,
+      onDrag: (owner, delta) => {
+        if (!ownsShortVideoBrowseGesture(owner)) return;
+        owner.stack.classList.add("is-dragging");
+        scheduleReelDragDelta(delta);
+      },
+      onCancelDrag: () => { if (!touchGestureOwner && !pointerGestureOwner) cancelReelDragDelta(); },
+      onFlushDrag: (owner) => { if (ownsShortVideoBrowseGesture(owner)) flushReelDragDelta(); },
+      onSnap: (owner) => { if (ownsShortVideoBrowseGesture(owner)) snapStackBack(); },
+      onNavigate: (direction, motion) => openAdjacent(direction, { motion }),
+      queueDirection: (direction, owner) => { if (ownsShortVideoBrowseGesture(owner)) queuedAdjacentDirection = direction; },
+      onError: showError
+    });
+    return shortVideoWheelController;
+  }
+
+  function handleWheelSwipe(event) {
+    if (isShortVideoOverlayTarget(event.target) || hasShortVideoBrowseOverlay()) return false;
+    const target = event.target?.nodeType === 3 ? event.target.parentElement : event.target;
+    if (target?.isContentEditable || target?.closest?.("input, textarea, select, [contenteditable='true'], [role='slider']")) return false;
+    const caption = target?.closest?.(".short-video-caption-copy.is-expanded")?.querySelector?.("p");
+    if (caption && caption.contains(target) && caption.scrollHeight > caption.clientHeight + 1) return false;
+    return getShortVideoWheelController().handle(event);
   }
 
   function scheduleWheelGestureRelease() {
-    window.clearTimeout(wheelResetTimer);
-    if (!wheelGestureConsumed) return;
-    const idleFor = Date.now() - wheelLastAt;
-    if (!wheelLocked && idleFor >= WHEEL_GESTURE_IDLE_MS) {
-      wheelGestureConsumed = false;
-      wheelGestureStartedAt = 0;
-      wheelDeltaY = 0;
-      snapStackBack();
-      return;
-    }
-    const delay = Math.max(16, WHEEL_GESTURE_IDLE_MS - idleFor);
-    wheelResetTimer = window.setTimeout(() => {
-      if (wheelLocked) return;
-      const remaining = WHEEL_GESTURE_IDLE_MS - (Date.now() - wheelLastAt);
-      if (remaining > 0) {
-        scheduleWheelGestureRelease();
-        return;
-      }
-      wheelGestureConsumed = false;
-      wheelGestureStartedAt = 0;
-      wheelDeltaY = 0;
-      snapStackBack();
-    }, delay);
+    shortVideoWheelController?.release();
   }
 
   function finishDrag(deltaY, velocityY = 0) {
@@ -6030,25 +7159,85 @@ export function createShortVideoPage(deps) {
   function isolateShortVideoTransientModal(overlay) {
     const browser = overlay?.parentElement;
     if (!overlay || !browser) return;
+    cancelShortVideoPanelLoading();
+    if (overlay._shortVideoModalIsolationActive) return;
+    overlay._shortVideoModalIsolationActive = true;
+    shortVideoWheelController?.cancel();
+    cancelShortVideoAutoNext();
+    cancelShortVideoBrowseGestures();
+    activePlayer()?.shortVideoCancelHoldSpeed?.();
     const gallery = activeGalleryPlayer();
     if (gallery) {
       overlay._shortVideoPausedGallery = gallery;
-      gallery.shortVideoGalleryPause?.("modal");
+      gallery.shortVideoGalleryPause?.(overlay);
     }
     overlay._shortVideoModalSiblings = [...browser.children]
-      .filter((element) => element !== overlay)
-      .map((element) => ({ element, wasInert: element.hasAttribute("inert") }));
-    for (const item of overlay._shortVideoModalSiblings) item.element.setAttribute("inert", "");
+      .filter((element) => element !== overlay);
+    for (const element of overlay._shortVideoModalSiblings) {
+      acquireShortVideoModalInert(overlay, element);
+    }
   }
 
   function restoreShortVideoTransientModalIsolation(overlay) {
-    for (const item of overlay?._shortVideoModalSiblings || []) {
-      if (!item.wasInert && item.element?.isConnected) item.element.removeAttribute("inert");
+    if (!overlay?._shortVideoModalIsolationActive) return;
+    overlay._shortVideoModalIsolationActive = false;
+    for (const element of overlay._shortVideoModalSiblings || []) {
+      releaseShortVideoModalInert(overlay, element);
     }
-    const gallery = overlay?._shortVideoPausedGallery;
-    if (gallery?.isConnected) gallery.shortVideoGalleryResume?.("modal");
+    const capturedGallery = overlay?._shortVideoPausedGallery;
+    const gallery = capturedGallery?.shortVideoGalleryResolve?.() || capturedGallery;
+    if (gallery?.isConnected) gallery.shortVideoGalleryResume?.(overlay);
     if (overlay) overlay._shortVideoPausedGallery = null;
     overlay._shortVideoModalSiblings = null;
+  }
+
+  function acquireShortVideoModalInert(overlay, element) {
+    const lease = element._shortVideoModalInertLease || {
+      wasInert: element.hasAttribute("inert"),
+      owners: new Set()
+    };
+    element._shortVideoModalInertLease = lease;
+    lease.owners.add(overlay);
+    element.setAttribute("inert", "");
+  }
+
+  function releaseShortVideoModalInert(overlay, element) {
+    const lease = element._shortVideoModalInertLease;
+    if (!lease || !lease.owners.delete(overlay) || lease.owners.size) return;
+    if (lease.wasInert) element.setAttribute("inert", "");
+    else element.removeAttribute("inert");
+    delete element._shortVideoModalInertLease;
+  }
+
+  function syncShortVideoModalPlayback(browser = els.workGrid?.querySelector?.(".short-video-browser")) {
+    if (!browser?.isConnected) return;
+    const children = [...browser.children];
+    const current = activeGalleryPlayer();
+    const gallery = current?.shortVideoGalleryResolve?.() || current;
+    for (const overlay of children.filter((element) => element._shortVideoModalIsolationActive)) {
+      const captured = overlay._shortVideoPausedGallery;
+      const previous = captured?.shortVideoGalleryResolve?.() || captured;
+      if (previous !== gallery) {
+        // Acquire the incoming gallery before releasing the outgoing one, so
+        // a replacement cannot start its music or slideshow between owners.
+        gallery?.shortVideoGalleryPause?.(overlay);
+        previous?.shortVideoGalleryResume?.(overlay);
+      }
+      overlay._shortVideoPausedGallery = current || null;
+      const siblings = (overlay._shortVideoModalSiblings || []).filter((element) => {
+        if (element.parentElement === browser) return true;
+        releaseShortVideoModalInert(overlay, element);
+        return false;
+      });
+      // Existing lower-dialog leases stay intact. Newly mounted dialogs must
+      // remain interactive while new background controls receive isolation.
+      for (const element of children) {
+        if (element === overlay || element._shortVideoModalIsolationActive || siblings.includes(element)) continue;
+        acquireShortVideoModalInert(overlay, element);
+        siblings.push(element);
+      }
+      overlay._shortVideoModalSiblings = siblings;
+    }
   }
 
   function focusShortVideoTransientModal(sheet, target) {
@@ -6062,7 +7251,7 @@ export function createShortVideoPage(deps) {
 
   function ensureShortVideoPlaybackSettings() {
     if (shortVideoPlaybackSettingsPromise) return shortVideoPlaybackSettingsPromise;
-    const moduleUrl = "/modules/short-videos/playback-settings.js?v=20260824-local-file-actions-01";
+    const moduleUrl = "/modules/short-videos/playback-settings.js?v=20261027-native-modes-01";
     shortVideoPlaybackSettingsPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoPlaybackSettings !== "function") {
         throw new Error("播放设置模块加载失败");
@@ -6096,6 +7285,8 @@ export function createShortVideoPage(deps) {
         toggleClearScreen,
         toggleShortVideoDislike,
         toggleShortVideoFullscreen,
+        toggleShortVideoPictureInPicture,
+        shortVideoPictureInPictureState,
         writeAutoNextPreference
       });
     }).catch((error) => {
@@ -6129,17 +7320,42 @@ export function createShortVideoPage(deps) {
     }, 180);
   }
 
+  function captureShortVideoPanelContext() {
+    return {
+      browser: els.workGrid?.querySelector?.(".short-video-browser"),
+      id: String(state.shortVideo?.current?.id || ""), scope: shortVideoNavigationScope(),
+      navigation: shortVideoNavigationState, openRequestId: shortVideoOpenRequestId
+    };
+  }
+
+  function isCurrentShortVideoPanelContext(owner) {
+    return Boolean(owner && state.activeView === "shortVideos" && owner.browser?.isConnected
+      && els.workGrid?.querySelector?.(".short-video-browser") === owner.browser
+      && String(state.shortVideo?.current?.id || "") === owner.id
+      && shortVideoOpenRequestId === owner.openRequestId && shortVideoNavigationState === owner.navigation
+      && shortVideoNavigationScope() === owner.scope);
+  }
+
+  function requestShortVideoPanel(options) {
+    return shortVideoPanelLoadingController.open(options);
+  }
+
+  function cancelShortVideoPanelLoading() {
+    return shortVideoPanelLoadingController.cancel();
+  }
+
   function showPlaybackSettings(video = state.shortVideo?.current, options = {}) {
-    const trigger = options.trigger;
-    trigger?.setAttribute?.("aria-busy", "true");
-    return ensureShortVideoPlaybackSettings()
-      .then((showSettings) => showSettings(video, options))
-      .catch((error) => showBrowserToast(error?.message || "播放设置模块加载失败"))
-      .finally(() => trigger?.removeAttribute?.("aria-busy"));
+    return requestShortVideoPanel({
+      load: ensureShortVideoPlaybackSettings,
+      show: (showSettings, { isCurrent }) => showSettings(video, { ...options, isCurrent }),
+      trigger: options.trigger,
+      errorMessage: "播放设置模块加载失败"
+    });
   }
 
   function closePlaybackSettings(overlay, options = {}) {
     if (!overlay) return;
+    cancelShortVideoPanelLoading();
     const returnFocus = overlay._shortVideoReturnFocus;
     restoreShortVideoTransientModalIsolation(overlay);
     overlay.remove();
@@ -6154,6 +7370,11 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function playbackRateControlLabel() {
+    const rate = normalizePlaybackRate(state.shortVideo?.playbackRate);
+    return rate === 1 ? "倍速" : formatPlaybackRate(rate);
+  }
+
   function setPlaybackRate(value) {
     const rate = normalizePlaybackRate(value);
     state.shortVideo.playbackRate = rate;
@@ -6162,64 +7383,132 @@ export function createShortVideoPage(deps) {
       ".short-video-player, .short-video-gallery-image[data-gallery-media-type='video']"
     ) || [];
     players.forEach((player) => {
+      player.shortVideoCancelHoldSpeed?.();
       player.playbackRate = rate;
     });
     const controlRate = els.workGrid?.querySelector?.(".short-video-control-rate");
-    if (controlRate) controlRate.textContent = formatPlaybackRate(rate);
+    if (controlRate) {
+      controlRate.textContent = playbackRateControlLabel();
+      controlRate.setAttribute("aria-label", `播放速度 ${formatPlaybackRate(rate)}`);
+      controlRate.title = `播放速度：${formatPlaybackRate(rate)}`;
+    }
     showBrowserToast(`已切换到 ${formatPlaybackRate(rate)}`);
   }
 
   async function deleteShortVideo(video, options = {}) {
     if (!video?.id) return;
     const scope = options.scope === "group" ? "group" : "single";
-    const deletingCurrent = state.shortVideo?.current?.id === video.id;
-    const nextId = deletingCurrent ? state.shortVideo.nextId || "" : "";
-    const prevId = deletingCurrent ? state.shortVideo.prevId || "" : "";
+    const owner = captureShortVideoDeleteContext();
     const data = await deleteActions.deleteVideo(video, { scope });
     if (!data?.committed) return;
-    const deletedIds = new Set(data.ids);
-    for (const id of deletedIds) loadedCoverIds.delete(id);
-    if (state.shortVideo.data?.videos) {
-      state.shortVideo.data.videos = state.shortVideo.data.videos.filter((item) => !deletedIds.has(String(item.id || "")));
-      state.shortVideo.data.total = Math.max(0, Number(state.shortVideo.data.total || 0) - deletedIds.size);
-    }
-    decrementCurrentAuthorCount(deletedIds.size);
     const message = data.pending ? shortVideoDeletePendingMessage(data) : shortVideoDeleteCompletedMessage(data, { scope });
-    if (deletingCurrent) {
-      showBrowserToast(message);
-      const fallbackId = [nextId, prevId].find((id) => id && !deletedIds.has(String(id)));
-      if (fallbackId) {
-        await openVideo(fallbackId);
-      } else {
-        state.shortVideo.data = null;
-        showHome();
-      }
-      return;
-    }
-    state.shortVideo.data = null;
-    await loadVideos({ replaceRoute: true });
-    if (options.fromBrowser || scope === "group") showBrowserToast(message);
+    await applyShortVideoDeletion(data, owner, { message, notify: options.fromBrowser || scope === "group" });
   }
 
   async function deleteSelectedShortVideos() {
     const selection = shortVideoDeleteSelection();
     const ids = [...selection].filter(Boolean);
+    const owner = captureShortVideoDeleteContext();
     const data = await deleteActions.deleteSelected(ids);
     if (!data?.committed) return;
-    const deletedIds = new Set(data.ids);
-    for (const id of deletedIds) loadedCoverIds.delete(id);
-    if (state.shortVideo.data?.videos) {
-      state.shortVideo.data.videos = state.shortVideo.data.videos.filter((item) => !deletedIds.has(String(item.id || "")));
-      state.shortVideo.data.total = Math.max(0, Number(state.shortVideo.data.total || 0) - deletedIds.size);
-    }
-    decrementCurrentAuthorCount(deletedIds.size);
-    clearShortVideoDeleteSelection();
-    state.shortVideo.data = null;
-    await loadVideos({ replaceRoute: true });
-    showBrowserToast(data.pending ? shortVideoDeletePendingMessage(data) : shortVideoDeleteCompletedMessage(data));
+    for (const id of data.ids) selection.delete(String(id));
+    if (isCurrentShortVideoDeleteContext(owner) && selection === shortVideoDeleteSelection() && !selection.size) clearShortVideoDeleteSelection();
+    await applyShortVideoDeletion(data, owner, {
+      message: data.pending ? shortVideoDeletePendingMessage(data) : shortVideoDeleteCompletedMessage(data), notify: true
+    });
   }
 
-  function decrementCurrentAuthorCount(value) {
+  function captureShortVideoDeleteContext() {
+    return { view: state.activeView, currentId: String(state.shortVideo?.current?.id || ""),
+      scope: shortVideoNavigationScope(), authorPage: String(state.shortVideo.authorPage || ""),
+      openRequestId: shortVideoOpenRequestId, listRequestId: shortVideoListRequestId };
+  }
+
+  function isCurrentShortVideoDeleteContext(owner) {
+    return owner.view === "shortVideos" && state.activeView === owner.view
+      && owner.currentId === String(state.shortVideo?.current?.id || "")
+      && owner.scope === shortVideoNavigationScope() && owner.authorPage === String(state.shortVideo.authorPage || "")
+      && owner.openRequestId === shortVideoOpenRequestId && owner.listRequestId === shortVideoListRequestId;
+  }
+
+  async function applyShortVideoDeletion(data, owner, options = {}) {
+    const current = state.shortVideo.current;
+    const feed = state.shortVideo.mode === "collection" ? state.shortVideo.collectionData?.videos : state.shortVideo.data?.videos;
+    const index = (feed || []).findIndex(video => String(video?.id || "") === String(current?.id || ""));
+    const nextCandidates = [state.shortVideo.nextId, ...(index >= 0 ? feed.slice(index + 1).map(video => video.id) : [])];
+    const prevCandidates = [state.shortVideo.prevId, ...(index >= 0 ? feed.slice(0, index).reverse().map(video => video.id) : [])];
+    const contextIsCurrent = isCurrentShortVideoDeleteContext(owner);
+    const deletedIds = forgetCachedShortVideos(data.ids, [current, state.shortVideo.prevVideo, state.shortVideo.nextVideo,
+      ...(feed || []), ...((authorPanelVideoCache || new Map()).values())]);
+    shortVideoAdjacentRequestId += 1;
+    const adjacentDeleted = isDeletedShortVideo(state.shortVideo.prevId) || isDeletedShortVideo(state.shortVideo.prevVideo)
+      || isDeletedShortVideo(state.shortVideo.nextId) || isDeletedShortVideo(state.shortVideo.nextVideo);
+    for (const id of deletedIds) {
+      loadedCoverIds.delete(id);
+      shortVideoWatchWrites.delete(id);
+      authorPanelVideoCache?.delete(id);
+    }
+    for (const [id, video] of authorPanelVideoCache || []) if (isDeletedShortVideo(video)) authorPanelVideoCache.delete(id);
+    for (const [key, tile] of authorPanelTileMap || []) if (isDeletedShortVideo(key.replace(/^(?:id|aweme):/, ""))) {
+      authorPanelTileMap.delete(key);
+      tile.remove?.();
+    }
+    if (state.shortVideo.data?.videos) {
+      const previous = state.shortVideo.data.videos;
+      const videos = previous.filter(video => !isDeletedShortVideo(video));
+      state.shortVideo.data = { ...state.shortVideo.data, videos,
+        total: Math.max(0, Number(state.shortVideo.data.total || 0) - (previous.length - videos.length)) };
+    }
+    for (const id of state.shortVideo.deleteSelection || []) if (isDeletedShortVideo(id)) state.shortVideo.deleteSelection.delete(id);
+    collectionsController.forgetVideos(deletedIds);
+    decrementCurrentAuthorCount(data.ids.length, owner);
+    const surviving = id => id && !isDeletedShortVideo(id);
+    const nextId = nextCandidates.find(surviving) || "", prevId = prevCandidates.find(surviving) || "";
+    const currentDeleted = current && isDeletedShortVideo(current);
+    if (state.activeView === "shortVideos" && currentDeleted) {
+      // The result may include a different group member opened while DELETE
+      // was pending. Remove the item visible now, using its current neighbors.
+      showBrowserToast(options.message);
+      if (shortVideoOpeningId && !isDeletedShortVideo(shortVideoOpeningId)) {
+        // An explicit open may still be waiting for styles or details while
+        // the old media is visible. Remove the deleted media without replacing
+        // that newer intent with an automatic neighbor fallback.
+        state.shortVideo.current = null;
+        state.shortVideo.prevId = "";
+        state.shortVideo.nextId = "";
+        state.shortVideo.prevVideo = null;
+        state.shortVideo.nextVideo = null;
+        state.shortVideo.loading = true;
+        state.shortVideo.status = "正在打开视频";
+        renderStats();
+        renderView();
+        return;
+      }
+      const fallbackId = nextId || prevId;
+      if (fallbackId) await openVideo(fallbackId);
+      else showHome();
+      return;
+    }
+    if (state.activeView === "shortVideos" && current) {
+      if (adjacentDeleted) {
+        state.shortVideo.prevId = prevId;
+        state.shortVideo.nextId = nextId;
+        state.shortVideo.prevVideo = cachedShortVideo(prevId) || (feed || []).find(video => String(video.id) === String(prevId)) || null;
+        state.shortVideo.nextVideo = cachedShortVideo(nextId) || (feed || []).find(video => String(video.id) === String(nextId)) || null;
+        refreshAdjacentPanelsDom();
+      }
+      if (contextIsCurrent && options.notify) showBrowserToast(options.message);
+      return;
+    }
+    // A late receipt still invalidates caches, but it cannot reopen a viewer,
+    // refresh a different feed, or clear a new selection after navigation.
+    if (!contextIsCurrent) return;
+    await loadVideos({ replaceRoute: true });
+    if (isCurrentShortVideoDeleteContext({ ...owner, listRequestId: shortVideoListRequestId }) && options.notify) showBrowserToast(options.message);
+  }
+
+  function decrementCurrentAuthorCount(value, owner) {
+    if (owner && (owner.scope !== shortVideoNavigationScope() || owner.authorPage !== String(state.shortVideo.authorPage || ""))) return;
     if (!isShortVideoAuthorDetailPage()) return;
     const amount = Math.max(0, Number(value) || 0);
     if (!amount) return;
@@ -6251,42 +7540,64 @@ export function createShortVideoPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-caption-author";
-    button.title = video.author?.name ? `查看 ${video.author.name}` : "查看作者";
     const copy = document.createElement("span");
     const name = document.createElement("strong");
-    name.textContent = shortVideoAuthorHandle(video.author?.name);
     const meta = document.createElement("em");
-    meta.textContent = formatDate(video.publishedAt);
     copy.append(name, meta);
     button.append(copy);
     button.addEventListener("click", () => openShortVideoAuthorPage(video.author, video));
+    button.shortVideoUpdateMetadata = (next = video) => {
+      if (String(next?.id || "") !== String(video?.id || "")) return false;
+      video = next;
+      button.title = video.author?.name ? `查看 ${video.author.name}` : "查看作者";
+      name.textContent = shortVideoAuthorHandle(video.author?.name);
+      meta.textContent = formatDate(video.publishedAt);
+      return true;
+    };
+    button.shortVideoUpdateMetadata(video);
     return button;
   }
 
   function authorAvatar(author = {}, className = "short-video-author-avatar") {
     const avatar = document.createElement("span");
     avatar.className = className;
-    if (author?.avatarUrl) {
-      const img = document.createElement("img");
-      img.src = author.avatarUrl;
-      img.alt = author?.name || "作者";
-      img.decoding = "async";
-      img.addEventListener("error", () => {
-        img.remove();
+    let image = null, imageUrl = "";
+    avatar.shortVideoUpdateMetadata = (next = {}) => {
+      author = next;
+      const nextUrl = String(author?.avatarUrl || "");
+      if (!nextUrl) {
+        image?.remove(); image = null; imageUrl = "";
         avatar.classList.add("is-fallback");
         avatar.textContent = initials(author?.name || "?");
-      }, { once: true });
-      avatar.append(img);
-    } else {
-      avatar.classList.add("is-fallback");
-      avatar.textContent = initials(author?.name || "?");
-    }
+        return true;
+      }
+      avatar.classList.remove("is-fallback");
+      if (!image || imageUrl !== nextUrl) {
+        image?.remove();
+        avatar.textContent = "";
+        imageUrl = nextUrl;
+        const currentImage = document.createElement("img");
+        image = currentImage;
+        currentImage.src = nextUrl;
+        currentImage.decoding = "async";
+        currentImage.addEventListener("error", () => {
+          if (image !== currentImage) return;
+          currentImage.remove(); image = null;
+          avatar.classList.add("is-fallback");
+          avatar.textContent = initials(author?.name || "?");
+        }, { once: true });
+        avatar.append(currentImage);
+      }
+      image.alt = author?.name || "作者";
+      return true;
+    };
+    avatar.shortVideoUpdateMetadata(author);
     return avatar;
   }
 
   function ensureShortVideoCommentsView() {
     if (shortVideoCommentsViewPromise) return shortVideoCommentsViewPromise;
-    const moduleUrl = "/modules/short-videos/comments-view.js?v=20260715-comments-lazy-01";
+    const moduleUrl = "/modules/short-videos/comments-view.js?v=20261027-comments-lifecycle-02";
     shortVideoCommentsViewPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoCommentsView !== "function") {
         throw new Error("评论模块加载失败");
@@ -6315,15 +7626,36 @@ export function createShortVideoPage(deps) {
     placeholder.className = "short-video-comments short-video-related-status is-loading";
     placeholder.setAttribute("aria-busy", "true");
     placeholder.textContent = "正在载入评论…";
+    let disposed = false;
+    let requestGeneration = 0;
+    let mountedComments = null;
+    const ownsPanel = () => !disposed && panel.isConnected && panel.dataset.activeTab === "comments"
+      && panel.dataset.closing !== "1" && panel.dataset.disposed !== "1";
+    const ownsRequest = (request) => ownsPanel() && placeholder.isConnected && requestGeneration === request;
+    placeholder.shortVideoDisposeComments = () => {
+      if (disposed) return;
+      disposed = true;
+      requestGeneration += 1;
+      mountedComments?.shortVideoDisposeComments?.();
+      mountedComments = null;
+    };
     const load = () => {
+      if (!ownsPanel()) return;
+      const request = ++requestGeneration;
       placeholder.classList.add("is-loading");
       placeholder.setAttribute("aria-busy", "true");
       placeholder.textContent = "正在载入评论…";
       ensureShortVideoCommentsView().then((renderComments) => {
-        if (!placeholder.isConnected || panel.dataset.activeTab !== "comments") return;
-        placeholder.replaceWith(renderComments(video));
+        if (!ownsRequest(request)) return;
+        const comments = renderComments(video, { isCurrent: ownsPanel });
+        if (!ownsRequest(request)) {
+          comments?.shortVideoDisposeComments?.();
+          return;
+        }
+        mountedComments = comments;
+        placeholder.replaceWith(comments);
       }).catch((error) => {
-        if (!placeholder.isConnected || panel.dataset.activeTab !== "comments") return;
+        if (!ownsRequest(request)) return;
         placeholder.classList.remove("is-loading");
         placeholder.removeAttribute("aria-busy");
         const message = document.createElement("span");
@@ -6342,7 +7674,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoAuthorPanel() {
     if (shortVideoAuthorPanelPromise) return shortVideoAuthorPanelPromise;
     markShortVideoPerformance("author-panel-module-start");
-    const moduleUrl = "/modules/short-videos/author-panel.js?v=20260824-local-file-actions-01";
+    const moduleUrl = "/modules/short-videos/author-panel.js?v=20261027-author-disposal-02";
     shortVideoAuthorPanelPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoAuthorPanel !== "function") {
         throw new Error("作者信息模块加载失败");
@@ -6350,11 +7682,14 @@ export function createShortVideoPage(deps) {
       const showPanel = module.createShortVideoAuthorPanel({
         activateShortVideoCovers,
         activePlayer,
+        activeGalleryPlayer,
         activeReelStack,
+        acquireShortVideoSoundPreviewPlayback,
         api,
         appendCaptionText,
         applyShortVideoLikeBadgeState,
         authorAvatar,
+        beginShortVideoPanelNavigation,
         bindAuthorPanelDragToClose,
         cacheAuthorPanelVideo,
         cacheAuthorPanelVideos,
@@ -6371,6 +7706,7 @@ export function createShortVideoPage(deps) {
         disposeShortVideoMedia,
         els,
         fetchShortVideoDetail,
+        flushActiveShortVideoWatch,
         formatBytes,
         formatCompact,
         formatDate,
@@ -6380,6 +7716,8 @@ export function createShortVideoPage(deps) {
         galleryBadge,
         galleryLabel,
         isGalleryPost,
+        isCurrentShortVideoNavigation,
+        hydratePromotedShortVideo,
         isolateAuthorPanelAsMobileModal,
         isShortVideoAuthorDetailPage,
         lazyShortVideoCommentsView,
@@ -6432,11 +7770,12 @@ export function createShortVideoPage(deps) {
   }
 
   function showAuthorPanel(video, options = {}) {
-    return ensureShortVideoAuthorPanel()
-      .then((showPanel) => showPanel(video, options))
-      .catch((error) => {
-        showBrowserToast(error?.message || "作者信息模块加载失败");
-      });
+    return requestShortVideoPanel({
+      load: ensureShortVideoAuthorPanel,
+      show: (showPanel, { isCurrent }) => showPanel(video, { ...options, isCurrent }),
+      trigger: options.trigger,
+      errorMessage: "作者信息模块加载失败"
+    });
   }
 
   function authorScopeId(video = {}, author = {}) {
@@ -6503,9 +7842,19 @@ export function createShortVideoPage(deps) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-author-rail";
     const avatar = authorAvatar(video.author, "short-video-author-avatar");
-    const profile = railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者", () => showAuthorPanel(video));
+    const profile = railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者", (event) => showAuthorPanel(video, { trigger: event?.currentTarget }));
     const follow = createAuthorFollowButton(video, video.author, "rail");
     wrap.append(profile, follow);
+    wrap.shortVideoUpdateMetadata = (next = video) => {
+      if (String(next?.id || "") !== String(video?.id || "")) return false;
+      video = next;
+      const label = video.author?.name ? `作者 ${video.author.name}` : "作者";
+      profile.setAttribute("aria-label", label);
+      profile.title = label;
+      avatar.shortVideoUpdateMetadata?.(video.author);
+      follow.shortVideoUpdateMetadata?.(video);
+      return true;
+    };
     return wrap;
   }
 

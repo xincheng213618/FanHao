@@ -21,6 +21,7 @@ export function createShortVideoSharePanel(deps) {
   } = deps;
 
   function showSharePanel(video = state.shortVideo?.current, options = {}) {
+    if (options.isCurrent?.() === false) return;
     const browser = getBrowser();
     if (!browser || !video?.id) return;
     const existingOverlay = browser.querySelector(".short-video-more-overlay");
@@ -35,6 +36,7 @@ export function createShortVideoSharePanel(deps) {
 
     const overlay = document.createElement("div");
     overlay.className = "short-video-more-overlay short-video-share-overlay";
+    const ownsPanel = () => overlay.isConnected && options.isCurrent?.() !== false;
     overlay._shortVideoReturnFocus = options.trigger || null;
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) closePlaybackSettings(overlay);
@@ -104,19 +106,19 @@ export function createShortVideoSharePanel(deps) {
     actions.className = "short-video-share-actions";
 
     const copyLocal = sharePanelAction("复制本地链接", "在这台设备或局域网打开", "link", async (button) => {
-      await copyShortVideoValue(localUrl, "已复制本地链接");
-      syncShareActionDone(button, "已复制");
-    });
+      const copied = await copyShortVideoValue(localUrl, "已复制本地链接", { isCurrent: ownsPanel });
+      if (copied !== false && ownsPanel()) syncShareActionDone(button, "已复制", ownsPanel);
+    }, ownsPanel);
     copyLocal.classList.add("is-primary");
     const copyOriginal = sharePanelAction("复制抖音链接", originalUrl ? "打开原作品" : "当前作品没有原链接", "external", async (button) => {
-      await copyShortVideoValue(originalUrl, "已复制抖音原链接");
-      syncShareActionDone(button, "已复制");
-    });
+      const copied = await copyShortVideoValue(originalUrl, "已复制抖音原链接", { isCurrent: ownsPanel });
+      if (copied !== false && ownsPanel()) syncShareActionDone(button, "已复制", ownsPanel);
+    }, ownsPanel);
     copyOriginal.disabled = !originalUrl;
     const copyText = sharePanelAction("复制分享文案", "标题、作者和观看地址", "comment", async (button) => {
-      await copyShortVideoValue(shareText, "已复制分享文案");
-      syncShareActionDone(button, "已复制文案");
-    });
+      const copied = await copyShortVideoValue(shareText, "已复制分享文案", { isCurrent: ownsPanel });
+      if (copied !== false && ownsPanel()) syncShareActionDone(button, "已复制文案", ownsPanel);
+    }, ownsPanel);
     const systemShareAvailable = typeof navigator.share === "function";
     const systemShare = sharePanelAction("系统分享", systemShareAvailable ? "发送到其他应用" : "当前浏览器不支持", "share", async (button) => {
       if (!systemShareAvailable) return;
@@ -126,11 +128,11 @@ export function createShortVideoSharePanel(deps) {
           text: [title, authorName ? shortVideoAuthorHandle(authorName) : ""].filter(Boolean).join("\n"),
           url: localUrl
         });
-        syncShareActionDone(button, "已打开分享");
+        if (ownsPanel()) syncShareActionDone(button, "已打开分享", ownsPanel);
       } catch (error) {
-        if (error?.name !== "AbortError") showBrowserToast("系统分享启动失败");
+        if (ownsPanel() && error?.name !== "AbortError") showBrowserToast("系统分享启动失败");
       }
-    });
+    }, ownsPanel);
     systemShare.disabled = !systemShareAvailable;
     actions.append(copyLocal, copyOriginal, copyText, systemShare);
     actionSection.append(actionTitle, actions);
@@ -149,12 +151,15 @@ export function createShortVideoSharePanel(deps) {
     linkButton.type = "button";
     linkButton.textContent = "复制";
     linkButton.addEventListener("click", () => {
-      copyShortVideoValue(localUrl, "已复制本地链接").then(() => {
+      if (!ownsPanel()) return;
+      copyShortVideoValue(localUrl, "已复制本地链接", { isCurrent: ownsPanel }).then((copied) => {
+        if (copied === false || !ownsPanel()) return;
         linkButton.textContent = "已复制";
         window.setTimeout(() => {
-          if (linkButton.isConnected) linkButton.textContent = "复制";
+          if (ownsPanel()) linkButton.textContent = "复制";
         }, 1800);
       }).catch(() => {
+        if (!ownsPanel()) return;
         input.focus({ preventScroll: true });
         input.select();
       });
@@ -172,9 +177,10 @@ export function createShortVideoSharePanel(deps) {
     isolateShortVideoTransientModal(overlay);
     bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
     focusShortVideoTransientModal(sheet, copyLocal);
+    return overlay;
   }
 
-  function sharePanelAction(label, description, icon, action) {
+  function sharePanelAction(label, description, icon, action, isCurrent = () => true) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-share-action";
@@ -188,7 +194,7 @@ export function createShortVideoSharePanel(deps) {
     copy.append(title, detail);
     button.append(visual, copy);
     button.addEventListener("click", async () => {
-      if (button.disabled || button.getAttribute("aria-busy") === "true") return;
+      if (!isCurrent() || button.disabled || button.getAttribute("aria-busy") === "true") return;
       button.setAttribute("aria-busy", "true");
       try {
         await action?.(button);
@@ -201,14 +207,14 @@ export function createShortVideoSharePanel(deps) {
     return button;
   }
 
-  function syncShareActionDone(button, detail) {
-    if (!button) return;
+  function syncShareActionDone(button, detail, isCurrent = () => true) {
+    if (!button || !isCurrent()) return;
     button.classList.add("is-done");
     const description = button.querySelector("small");
     const previous = description?.textContent || "";
     if (description) description.textContent = detail;
     window.setTimeout(() => {
-      if (!button.isConnected) return;
+      if (!button.isConnected || !isCurrent()) return;
       button.classList.remove("is-done");
       if (description) description.textContent = previous;
     }, 1800);

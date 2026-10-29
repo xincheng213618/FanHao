@@ -4,7 +4,7 @@ import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-reque
 const PREFETCH_TTL_MS = 60 * 1000;
 const PREFETCH_LIMIT = 8;
 
-export function createSearchRequestService({ api, filter, pageSize, sort }) {
+export function createSearchRequestService({ api, filter, pageSize, sort, onWorkRead = () => null }) {
   const requests = createLatestRequestGate();
   const prefetchCache = createPrefetchCache({ limit: PREFETCH_LIMIT, ttlMs: PREFETCH_TTL_MS });
 
@@ -32,9 +32,10 @@ export function createSearchRequestService({ api, filter, pageSize, sort }) {
     return prefetchCache.consume(key, signal);
   }
 
-  async function fetchPage(query, offset = 0) {
+  async function fetchPage(query, offset = 0, refresh = null) {
     const request = requests.begin();
     const target = requestFor(query, offset);
+    const finishWorkRead = onWorkRead(target.path, () => request.isCurrent(), refresh);
     try {
       const warmed = Number(offset || 0) === 0 ? consumePrefetch(target.key, request.signal) : null;
       prefetchCache.clear();
@@ -46,6 +47,7 @@ export function createSearchRequestService({ api, filter, pageSize, sort }) {
       if (!request.isCurrent()) return null;
       throw error;
     } finally {
+      finishWorkRead?.();
       request.finish();
     }
   }
@@ -55,5 +57,9 @@ export function createSearchRequestService({ api, filter, pageSize, sort }) {
     prefetchCache.clear();
   }
 
-  return { cancel, fetchPage, prefetch };
+  function invalidatePrefetches() {
+    prefetchCache.clear();
+  }
+
+  return { cancel, fetchPage, invalidatePrefetches, prefetch };
 }

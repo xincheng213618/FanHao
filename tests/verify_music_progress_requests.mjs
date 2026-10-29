@@ -190,6 +190,10 @@ export async function runMusicProgressFixture({ legacy = false, sourceOverrides 
       const page = await newPage(test);
       try {
         await open(page, "A"); await play(page, 11); await until(() => saved(test, "A").playCount === 1, "initial played receipt must commit");
+        await page.waitForFunction(() => Boolean(window.__lastClaimOwner));
+        const initialOwner = await page.evaluate(() => __lastClaimOwner);
+        await until(() => test.committed.some(entry => entry.body.progressSessionId === initialOwner), "initial claim cursor must commit before measuring pageshow work");
+        await stable(test);
         await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
         const before = test.received.length;
         await page.evaluate(() => { dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });

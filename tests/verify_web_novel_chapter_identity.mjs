@@ -4,6 +4,8 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../public/modules/novels/novel-page.js", import.meta.url), "utf8");
 const writerSource = fs.readFileSync(new URL("../public/modules/novels/progress-writer.js", import.meta.url), "utf8");
+const fullscreenSource = fs.readFileSync(new URL("../public/modules/novels/reader-fullscreen.js", import.meta.url), "utf8");
+const bookmarksSource = fs.readFileSync(new URL("../public/modules/novels/bookmarks.js", import.meta.url), "utf8");
 const deferred = () => { let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject}; };
 const settle = async () => {for(let i=0;i<24;i++)await Promise.resolve();};
 class Element {
@@ -42,8 +44,11 @@ function harness({production=source,initial=detail(),respond}={}){
     return Promise.resolve({book:current.book,chapters:[],chapterTotal:2});};
   window.fetch=(url,options)=>api(url,options);
   const context=vm.createContext({document,window,Element,URL,URLSearchParams,AbortController,console,Intl,Map,Set,Date,Promise,
+    captureWebAccount:()=>({owner:"vm",revision:""}),
     localStorage:{getItem(){return null;},setItem(){}},createNovelCollectionAdmin:()=>({ensureState(){},stopPolling(){}})});
   vm.runInContext(writerSource.replace("export function createNovelProgressWriter", "function createNovelProgressWriter"), context, { filename: "production-progress-writer.js" });
+  vm.runInContext(fullscreenSource.replace("export function createNovelReaderFullscreen", "function createNovelReaderFullscreen"), context, { filename: "production-reader-fullscreen.js" });
+  vm.runInContext(bookmarksSource.replace(/^import .*\r?\n/gm, "").replace("export function createNovelBookmarksPanel", "function createNovelBookmarksPanel"), context, { filename: "production-bookmarks.js" });
   vm.runInContext(production.replace(/^import .*\r?\n/gm,"").replace("export function createNovelPage","function createNovelPage")+"\nglobalThis.createPage=createNovelPage;",context,{filename:"production-novel-page.js"});
   const noop=()=>{};const page=context.createPage({api,state,els:{workGrid:grid},formatBytes:String,formatDateTime:String,formatNumber:String,
     cancelScheduledWorkRendering:noop,disconnectPeopleIndexAutoload:noop,hidePersonProfile:noop,openAdminScript:noop,pushRoute:noop,replaceRoute:noop,resetProgressiveCoverLoading:noop,setMainHeader:noop,syncRouteAfterNavigation:noop});

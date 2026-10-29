@@ -12,6 +12,19 @@ let score = 0;
 let bestScore = parseInt(localStorage.getItem('2048-best') || '0');
 bestScoreEl.innerText = bestScore;
 let isAutoRunning = false;
+let aiRequestSequence = 0;
+let pendingAIRequest = null;
+
+function invalidateAIRequest() {
+    pendingAIRequest = null;
+}
+
+function stopAuto() {
+    invalidateAIRequest();
+    isAutoRunning = false;
+    btnAuto.innerText = "Auto Run";
+    btnAuto.classList.remove('active');
+}
 
 // 移动历史记录 (用于撤销)
 let history = [];
@@ -176,6 +189,9 @@ function pushHistory() {
 }
 
 function applyMove(direction) {
+    // A manual move is a new intent even when it cannot move any tiles.
+    // Accepted AI replies have already consumed their pending request.
+    invalidateAIRequest();
     // 【拦截器】：如果还在动画中又来了新输入，立刻打断并快进，绝不丢弃输入
     if (animTimeout) {
         clearTimeout(animTimeout);
@@ -294,10 +310,7 @@ function applyMove(direction) {
         }, 100);
 
     } else {
-        if (isAutoRunning) {
-            isAutoRunning = false;
-            btnAuto.innerText = "Auto Run";
-        }
+        if (isAutoRunning) stopAuto();
     }
 }
 
@@ -323,6 +336,7 @@ function addRandomTileToNewGrid() {
 // 外部交互与 AI Worker 通讯
 // ==========================================
 function loadFromHex(hexStr, keepScore = false) {
+    stopAuto();
     if (animTimeout) {
         clearTimeout(animTimeout);
         animTimeout = null;
@@ -351,10 +365,13 @@ function loadFromHex(hexStr, keepScore = false) {
     saveGameState();
 }
 
-function triggerAI() {
-    if (!isAutoRunning && document.activeElement !== btnStep) return;
-    let str = getGridHex();
-    aiWorker.postMessage({ type: 'calculate', board_encoded: str });
+function triggerAI(mode = isAutoRunning ? 'auto' : 'step') {
+    if ((mode === 'auto') !== isAutoRunning) return;
+    const board = getGridHex();
+    if (pendingAIRequest?.board === board && pendingAIRequest.mode === mode) return;
+    const request = { requestId: ++aiRequestSequence, board, mode };
+    pendingAIRequest = request;
+    aiWorker.postMessage({ type: 'calculate', board_encoded: board, requestId: request.requestId });
 }
 
 function undo() {
@@ -388,20 +405,26 @@ aiWorker.onmessage = function (e) {
             saveGameState();
         }
     } else if (e.data.type === 'move_result') {
+        const request = pendingAIRequest;
+        if (!request || e.data.requestId !== request.requestId || request.board !== getGridHex()
+            || (request.mode === 'auto') !== isAutoRunning) return;
+        // Consume before applying: duplicate replies cannot move twice, and
+        // auto may synchronously schedule the next board's calculation.
+        pendingAIRequest = null;
         const moveCode = e.data.best_move;
         if (moveCode > 0) {
             applyMove(moveCode);
         } else {
-            isAutoRunning = false;
-            btnAuto.innerText = "Auto Run";
-            btnAuto.classList.remove('active');
+            stopAuto();
         }
     }
 };
 
 // 手动把玩拦截
 document.addEventListener('keydown', (e) => {
-    if (document.activeElement === inputEl) return;
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    const target = e.target instanceof Element ? e.target : document.activeElement;
+    if (target?.closest('input, textarea, select, button, a[href], [contenteditable]')) return;
     if (isAutoRunning) return;
 
     const keyMap = {
@@ -412,10 +435,12 @@ document.addEventListener('keydown', (e) => {
         'z': 'undo'
     };
 
-    if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+    if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
         undo();
         return;
     }
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey && !/^[wasd]$/i.test(e.key)) return;
 
     if (keyMap[e.key]) {
         if (keyMap[e.key] === 'undo') {
@@ -434,10 +459,6 @@ speedSlider.addEventListener('input', (e) => {
     const ratio = Math.pow(10, exponent);
     aiWorker.postMessage({ type: 'update_speed', ratio: ratio });
 });
-speedSlider.addEventListener('change', (e) => {
-    e.target.blur();
-});
-
 btnSet.addEventListener('click', () => {
     const val = inputEl.value.toLowerCase().padStart(16, '0');
     if (/^[0-9a-f]{16}$/.test(val)) {
@@ -450,21 +471,21 @@ btnSet.addEventListener('click', () => {
 
 // 控制面板
 btnAuto.addEventListener('click', () => {
-    isAutoRunning = !isAutoRunning;
-    if (isAutoRunning) {
+    if (!isAutoRunning) {
+        invalidateAIRequest();
+        isAutoRunning = true;
         btnAuto.innerText = "Stop Auto";
         btnAuto.classList.add('active');
         triggerAI();
     } else {
-        btnAuto.innerText = "Auto Run";
-        btnAuto.classList.remove('active');
+        stopAuto();
     }
     btnAuto.blur();
 });
 
 btnStep.addEventListener('click', () => {
     if (isAutoRunning) return;
-    triggerAI();
+    triggerAI('step');
     btnStep.blur();
 });
 
@@ -478,6 +499,8 @@ boardEl.addEventListener('click', () => {
         document.activeElement.blur();
     }
 });
+
+window.addEventListener('pagehide', stopAuto);
 
 // ==========================================
 // 移动端手势逻辑 (Swipe Detection)

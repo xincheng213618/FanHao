@@ -1,4 +1,7 @@
 import { createApiClient, addQueryParam } from "./api.js?v=20260701-gallery-merge-01";
+import { createLatestRequestGate } from "../modules/fanhao/latest-request.js?v=20260717-fanhao-latest-request-01";
+import { createPlaybackTimeLink, createPlaybackTimeLinkControl, parsePlaybackStart } from "./player-time-link.js";
+import { createPlaybackTimeJumpControl } from "./player-time-jump.js";
 import {
   createWorkMoveCleanupRetryGuard,
   fetchWorkMoveJobWithBackoff,
@@ -15,12 +18,15 @@ import {
 } from "../modules/fanhao/work-move-target.js?v=20260816-vr-target-01";
 
 const api = createApiClient();
+const playInfoRequests = createLatestRequestGate();
 const params = new URLSearchParams(window.location.search);
 const workId = params.get("workId") || "";
 const mediaId = params.get("mediaId") || "";
 const diskDrive = params.get("diskDrive") || "";
 const diskPath = params.get("diskPath") || "";
 const requestedVideoId = params.get("videoId") || "";
+let pendingLinkStart = parsePlaybackStart(params.get("t"));
+let pendingLinkVideoId = "";
 const returnTo = params.get("returnTo") || "";
 
 const els = {
@@ -43,6 +49,10 @@ const els = {
   skipForward: document.querySelector("#skipForwardButton"),
   reloadStream: document.querySelector("#reloadStreamButton"),
   files: document.querySelector("#playerFiles"),
+  fileNavigation: document.querySelector("#playerFileNavigation"),
+  filePrevious: document.querySelector("#playerFilePrevious"),
+  fileNext: document.querySelector("#playerFileNext"),
+  filePosition: document.querySelector("#playerFilePosition"),
   meta: document.querySelector("#playerMeta"),
   back: document.querySelector("#backButton"),
   markerA: document.querySelector("#markerAButton"),
@@ -50,15 +60,22 @@ const els = {
   moveToPerson: document.querySelector("#moveToPersonButton"),
   openFile: document.querySelector("#openFileButton"),
   deleteLocal: document.querySelector("#deleteLocalButton"),
+  copyTimeLink: document.querySelector("#copyTimeLinkButton"),
+  shortcuts: document.querySelector("#playerShortcutsButton"),
+  shortcutsDialog: document.querySelector("#playerShortcutsDialog"),
+  timeJump: document.querySelector("#playerTimeJumpButton"),
   javdb: document.querySelector("#javdbLink")
 };
 const subtitleControls = createSubtitleControls({ api, container: document.querySelector("#playerSubtitles") });
 
 let currentWork = null;
+let renderedFilesWork = null;
+let renderedFileRows = [];
 let currentVideo = null;
 let currentPlayInfo = null;
 let progressTimer = null;
 let lastProgressReport = 0;
+let lastKeepaliveProgress = null;
 let playbackOffset = 0;
 let isSeeking = false;
 let player = null;
@@ -72,6 +89,27 @@ let streamNeedsActivation = false;
 let pendingMoveJob = null;
 let pendingMoveRequestKey = "";
 let movePollController = null;
+let playbackSourceController = null;
+let playbackAttempt = 0;
+let sourceAutoPlay = false;
+let pendingSourcePosition = null;
+let pendingSourceAutoPlay = null;
+let pagePlaybackSnapshot = null;
+let playerVideoEventsController = null;
+const timeLinkControl = createPlaybackTimeLinkControl({
+  button: els.copyTimeLink,
+  status: document.querySelector("#playerTimeLinkStatus"),
+  getLink: playbackTimeLinkSnapshot
+});
+const timeJumpControl = createPlaybackTimeJumpControl({
+  button: els.timeJump,
+  getPosition: () => currentVideo && currentPlayInfo ? {
+    position: mediaPosition(),
+    duration: usesCustomControls() || els.video?.readyState >= 1 ? mediaDuration() : 0
+  } : null,
+  seek: seekTo,
+  formatTime: formatPlaybackTime
+});
 const completedMoveReloader = createCompletedWorkMoveReloader({
   api,
   getCurrentWork: () => currentWork,
@@ -122,21 +160,12 @@ els.moveToPerson?.addEventListener("click", () => {
 els.toggleSidebar?.addEventListener("click", () => {
   setSidebarCollapsed(!sidebarCollapsed, { persist: true });
 });
+els.filePrevious?.addEventListener("click", () => playAdjacentFile(-1));
+els.fileNext?.addEventListener("click", () => playAdjacentFile(1));
 
 els.streamStart?.addEventListener("click", startDeferredStream);
 
-els.video?.addEventListener("loadedmetadata", () => {
-  updateVideoAspect();
-  updateSeekControl();
-});
-
-els.video?.addEventListener("durationchange", () => {
-  updateSeekControl();
-});
-
-els.video?.addEventListener("timeupdate", () => {
-  updateSeekControl();
-});
+installPlayerVideoEvents();
 
 els.seekRange?.addEventListener("input", () => {
   isSeeking = true;
@@ -159,37 +188,29 @@ els.reloadStream?.addEventListener("click", () => {
   reloadCurrentStream();
 });
 
-els.video?.addEventListener("click", () => {
-  return;
-});
-
-els.video?.addEventListener("waiting", () => {
-  setPlaybackStatus("缓冲中", { transient: true });
-});
-
-els.video?.addEventListener("playing", () => {
-  streamNeedsActivation = false;
-  setPlaybackStatus(els.video.dataset.autoplayMuted === "1" ? "已静音自动播放，点击页面恢复声音" : "");
-  hideFrameHold();
-  scheduleUiIdle();
-});
-
-els.video?.addEventListener("pause", revealPlayerUi);
-els.video?.addEventListener("ended", revealPlayerUi);
-
-els.video?.addEventListener("error", () => {
-  handleVideoPlaybackError();
-});
-
-window.addEventListener("beforeunload", () => {
-  reportProgress();
+window.addEventListener("beforeunload", flushPlaybackProgress);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushPlaybackProgress();
 });
 window.addEventListener("pagehide", () => {
+  flushPlaybackProgress();
+  timeLinkControl.invalidate();
+  timeJumpControl.invalidate();
+  pagePlaybackSnapshot = capturePlaybackSnapshot();
+  playInfoRequests.cancel();
+  resetPlaybackSource();
+  stopProgressTimer();
   movePollController?.abort();
   subtitleControls.reset();
 });
 window.addEventListener("pageshow", (event) => {
-  if (event.persisted) { restoreMoveJobEntry(); updateSubtitleContext(); }
+  if (event.persisted) {
+    restoreMoveJobEntry();
+    const snapshot = pagePlaybackSnapshot;
+    pagePlaybackSnapshot = null;
+    if (snapshot) restorePlaybackSnapshot(snapshot);
+    else updateSubtitleContext();
+  }
 });
 
 mobileStreamControlsQuery.addEventListener?.("change", () => {
@@ -198,6 +219,8 @@ mobileStreamControlsQuery.addEventListener?.("change", () => {
 
 window.addEventListener("resize", updateVideoAspect);
 document.addEventListener("keydown", handlePlayerKeyboard);
+els.shortcuts?.addEventListener("click", () => els.shortcutsDialog?.showModal());
+els.shortcutsDialog?.querySelector("button")?.addEventListener("click", () => els.shortcutsDialog.close());
 document.addEventListener("keydown", restoreAutoplayAudioFromInteraction, { capture: true });
 document.addEventListener("click", restoreAutoplayAudioFromInteraction, { capture: true });
 document.addEventListener("pointerdown", revealPlayerUi, { passive: true });
@@ -211,6 +234,26 @@ function initializePlayerExperience() {
   const collapsedByDefault = mobileSidebarQuery.matches;
   setSidebarCollapsed(storedPreference == null ? collapsedByDefault : storedPreference === "1");
   revealPlayerUi();
+}
+
+function installPlayerVideoEvents() {
+  playerVideoEventsController?.abort();
+  if (!els.video) return;
+  playerVideoEventsController = new AbortController();
+  const listen = (type, handler) => els.video.addEventListener(type, handler, { signal: playerVideoEventsController.signal });
+  listen("loadedmetadata", () => { updateVideoAspect(); updateSeekControl(); });
+  listen("durationchange", () => updateSeekControl());
+  listen("timeupdate", () => updateSeekControl());
+  listen("waiting", () => setPlaybackStatus("缓冲中", { transient: true }));
+  listen("playing", () => {
+    streamNeedsActivation = false;
+    setPlaybackStatus(els.video.dataset.autoplayMuted === "1" ? "已静音自动播放，点击页面恢复声音" : "");
+    hideFrameHold();
+    scheduleUiIdle();
+  });
+  listen("pause", revealPlayerUi);
+  listen("ended", revealPlayerUi);
+  listen("error", handleVideoPlaybackError);
 }
 
 function setSidebarCollapsed(collapsed, options = {}) {
@@ -263,6 +306,18 @@ function scheduleUiIdle() {
 function handlePlayerKeyboard(event) {
   if (shouldIgnorePlayerShortcut(event)) return;
   const key = String(event.key || "").toLowerCase();
+  if (key === "g") {
+    event.preventDefault();
+    timeJumpControl.open();
+    revealPlayerUi();
+    return;
+  }
+  if (key === "?") {
+    event.preventDefault();
+    els.shortcutsDialog?.showModal();
+    revealPlayerUi();
+    return;
+  }
   if (key === "i") {
     event.preventDefault();
     setSidebarCollapsed(!sidebarCollapsed, { persist: true });
@@ -275,7 +330,7 @@ function handlePlayerKeyboard(event) {
     if (els.video.paused && streamNeedsActivation && usesCustomControls()) {
       startDeferredStream();
     } else if (els.video.paused) requestVideoPlayback();
-    else els.video.pause();
+    else pauseVideoPlayback();
   } else if (key === "arrowleft") {
     event.preventDefault();
     seekTo(mediaPosition() - 10);
@@ -303,11 +358,23 @@ function handlePlayerKeyboard(event) {
 }
 
 function shouldIgnorePlayerShortcut(event) {
-  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return true;
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey) return true;
+  if (document.querySelector("dialog[open], .player-move-dialog")) return true;
   const target = event.target;
   if (!(target instanceof Element)) return false;
-  if (target.closest("input, textarea, select, [contenteditable='true'], .player-move-dialog")) return true;
+  if (target.closest("input, textarea, select, [contenteditable='true'], .player-move-dialog, .player-time-link-dialog")) return true;
   return target.matches("button, a") && [" ", "enter"].includes(String(event.key || "").toLowerCase());
+}
+
+function playbackTimeLinkSnapshot() {
+  if (!currentVideo || !currentPlayInfo || !playbackSourceController) return null;
+  const href = new URL(window.location.href);
+  if (currentWork?.diskUsage) {
+    href.searchParams.set("diskDrive", currentVideo.diskDrive || diskDrive);
+    href.searchParams.set("diskPath", currentVideo.diskPath || diskPath);
+  }
+  const position = mediaPosition();
+  return { href: createPlaybackTimeLink(href.href, currentVideo.id, position), label: formatPlaybackTime(position) };
 }
 
 async function load() {
@@ -460,21 +527,78 @@ function applyCurrentWorkDetails(work) {
 }
 
 function renderFiles(work) {
-  els.files.innerHTML = "";
-  for (const video of work.videos || []) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `player-file-button${video.id === currentVideo?.id ? " active" : ""}`;
-    button.innerHTML = `<strong></strong><span></span>`;
-    button.querySelector("strong").textContent = video.name || video.title || "视频";
-    button.querySelector("span").textContent = `${formatLibraryPath(video.relativePath)}${video.progress?.percent ? ` · ${Math.floor(video.progress.percent)}%` : ""}`;
-    button.addEventListener("click", () => playVideo(video));
-    els.files.append(button);
+  const videos = work.videos || [];
+  const reusable = renderedFilesWork === work && renderedFileRows.length === videos.length
+    && els.files.children.length === videos.length && renderedFileRows.every((row, index) =>
+      row.video.id === videos[index].id && els.files.children[index] === row.button);
+  if (!reusable) {
+    els.files.replaceChildren();
+    renderedFilesWork = work;
+    renderedFileRows = videos.map(video => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "player-file-button";
+      const title = document.createElement("strong"), path = document.createElement("span");
+      const row = { button, title, path, video };
+      button.append(title, path);
+      button.addEventListener("click", () => {
+        if (renderedFilesWork !== work || currentWork !== work || button.parentElement !== els.files
+            || !(work.videos || []).includes(row.video)) return;
+        void playVideo(row.video);
+      });
+      els.files.append(button);
+      return row;
+    });
+  }
+  for (let index = 0; index < videos.length; index++) {
+    const video = videos[index], row = renderedFileRows[index];
+    row.video = video;
+    const active = video.id === currentVideo?.id;
+    row.button.classList.toggle("active", active);
+    if (active) row.button.setAttribute("aria-current", "true");
+    else row.button.removeAttribute("aria-current");
+    const title = video.name || video.title || "视频";
+    const path = `${formatLibraryPath(video.relativePath)}${video.progress?.percent ? ` · ${Math.floor(video.progress.percent)}%` : ""}`;
+    if (row.title.textContent !== title) row.title.textContent = title;
+    if (row.path.textContent !== path) row.path.textContent = path;
+  }
+  updateFileNavigation();
+}
+
+function updateFileNavigation() {
+  if (!els.fileNavigation) return;
+  const videos = currentWork?.videos || [];
+  const index = videos.findIndex(video => video.id === currentVideo?.id);
+  els.fileNavigation.hidden = videos.length < 2 || index < 0;
+  const position = `${Math.max(0, index + 1)} / ${videos.length}`;
+  if (els.filePosition.textContent !== position) els.filePosition.textContent = position;
+  for (const [button, offset, label] of [[els.filePrevious, -1, "上一个文件"], [els.fileNext, 1, "下一个文件"]]) {
+    const target = index >= 0 ? videos[index + offset] : null;
+    button.setAttribute("aria-disabled", String(!target));
+    button.title = target ? `${label}：${target.name || target.title || "视频"}` : `${label}（已到边界）`;
   }
 }
 
+function playAdjacentFile(offset) {
+  const videos = currentWork?.videos || [];
+  const index = videos.findIndex(video => video.id === currentVideo?.id);
+  const target = index >= 0 ? videos[index + offset] : null;
+  if (!target || !els.fileNavigation?.isConnected || els.fileNavigation.hidden) return;
+  void playVideo(target);
+}
+
 async function playVideo(video, options = {}) {
-  reportProgress();
+  reportProgress(null, { force: true });
+  timeLinkControl.invalidate();
+  timeJumpControl.invalidate();
+  if (pendingLinkStart !== null) {
+    if (!pendingLinkVideoId) {
+      if (requestedVideoId && requestedVideoId !== video.id) pendingLinkStart = null;
+      else pendingLinkVideoId = video.id;
+    } else if (pendingLinkVideoId !== video.id) pendingLinkStart = null;
+  }
+  const request = playInfoRequests.begin();
+  resetPlaybackSource();
   stopProgressTimer();
   currentVideo = video;
   subtitleControls.detachMedia();
@@ -490,37 +614,62 @@ async function playVideo(video, options = {}) {
   currentPlayInfo = null;
   playbackOffset = 0;
   isSeeking = false;
+  const savedProgress = video.progress || (currentWork.progress?.videoId === video.id ? currentWork.progress : null);
+  const requestedResumePosition = Number(options.resumePosition !== undefined ? options.resumePosition
+    : pendingLinkStart !== null && pendingLinkVideoId === video.id ? pendingLinkStart : undefined);
+  const resumePosition = Number.isFinite(requestedResumePosition)
+    ? Math.max(0, requestedResumePosition)
+    : (savedProgress?.position > 5 ? Number(savedProgress.position) : 0);
+  pendingSourcePosition = resumePosition;
+  pendingSourceAutoPlay = options.autoPlay !== false;
   setPlyrLayoutMode(false);
   hidePlaybackControls();
 
   try {
     const playInfo = currentWork?.diskUsage
-      ? await api(`/api/disk-usage/playinfo?${new URLSearchParams({ drive: video.diskDrive || diskDrive, path: video.diskPath || diskPath })}`)
-      : await api(`/api/playinfo/${encodeURIComponent(video.id)}${mediaId ? "?source=gallery" : ""}`);
+      ? await api(`/api/disk-usage/playinfo?${new URLSearchParams({ drive: video.diskDrive || diskDrive, path: video.diskPath || diskPath })}`, { signal: request.signal })
+      : await api(`/api/playinfo/${encodeURIComponent(video.id)}${mediaId ? "?source=gallery" : ""}`, { signal: request.signal });
+    if (!request.isCurrent()) return;
     currentPlayInfo = playInfo;
-    const savedProgress = video.progress || (currentWork.progress?.videoId === video.id ? currentWork.progress : null);
-    const requestedResumePosition = Number(options.resumePosition);
-    const resumePosition = Number.isFinite(requestedResumePosition)
-      ? Math.max(0, requestedResumePosition)
-      : (savedProgress?.position > 5 ? Number(savedProgress.position) : 0);
     setPlaybackStatus("准备中");
     setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });
     startProgressTimer();
   } catch (error) {
+    if (!request.isCurrent()) return;
     showNotice(error.message || "播放失败");
+  } finally {
+    request.finish();
   }
+}
+
+function resetPlaybackSource() {
+  playbackSourceController?.abort();
+  playbackSourceController = null;
+  playbackAttempt += 1;
+  sourceAutoPlay = false;
+  pendingSourcePosition = null;
+  pendingSourceAutoPlay = null;
 }
 
 function setVideoSourceAt(position, options = {}) {
   if (!currentPlayInfo?.streamUrl || !els.video) return;
-  const target = clampSeekTime(position);
+  resetPlaybackSource();
+  const controller = new AbortController();
+  playbackSourceController = controller;
+  const sourceEvents = { once: true, signal: controller.signal };
   const mode = currentPlayInfo.mode || "direct";
+  const target = clampSeekTime(position, { deferUpperBound: mode === "direct" });
+  if (pendingLinkStart !== null && pendingLinkVideoId === currentVideo?.id) pendingLinkStart = target;
+  pendingSourcePosition = target;
   const autoPlay = Boolean(options.autoPlay);
+  sourceAutoPlay = autoPlay;
+  pendingSourceAutoPlay = autoPlay;
   const customControls = mode !== "direct";
   const deferGeneratedStream = customControls && !autoPlay;
   let streamUrl = currentPlayInfo.streamUrl;
   els.video.preload = mode === "direct" ? "auto" : "none";
   els.video.setAttribute("preload", els.video.preload);
+  els.video.autoplay = false;
   updateVideoAspect();
   configurePlyrForCurrentMode();
   els.video.preload = mode === "direct" ? "auto" : "none";
@@ -543,24 +692,31 @@ function setVideoSourceAt(position, options = {}) {
   updateSubtitleContext();
   els.video.hidden = false;
   els.notice.hidden = true;
-
-  if (deferGeneratedStream) {
-    updateSeekControl(target);
-    return;
-  }
+  timeLinkControl.setAvailable(true);
+  timeJumpControl.setAvailable(true);
 
   els.video.addEventListener(
     "loadedmetadata",
     () => {
-      if (mode === "direct" && target > 0 && Number.isFinite(els.video.duration) && target < els.video.duration) {
-        els.video.currentTime = target;
+      const seekTarget = pendingSourcePosition ?? target;
+      const directDuration = mode === "direct" ? els.video.duration : 0;
+      const bounded = Number.isFinite(directDuration) && directDuration > 0;
+      const appliedTarget = bounded ? Math.min(seekTarget, directDuration) : seekTarget;
+      if (bounded && appliedTarget > 0) els.video.currentTime = appliedTarget;
+      if (mode !== "direct" && appliedTarget > playbackOffset) els.video.currentTime = appliedTarget - playbackOffset;
+      if (bounded && appliedTarget >= directDuration) pauseVideoPlayback();
+      pendingSourcePosition = null;
+      pendingSourceAutoPlay = null;
+      if (pendingLinkVideoId === currentVideo?.id) pendingLinkStart = null;
+      updateSeekControl(appliedTarget);
+      if (appliedTarget !== seekTarget || (bounded && directDuration !== Number(currentPlayInfo.duration))) {
+        reportProgress(appliedTarget, { force: true });
       }
-      updateSeekControl(target);
-      if (autoPlay) {
+      if (sourceAutoPlay && els.video.paused) {
         requestVideoPlayback({ allowMutedFallback: true });
       }
     },
-    { once: true }
+    sourceEvents
   );
 
   if (customControls) {
@@ -568,13 +724,18 @@ function setVideoSourceAt(position, options = {}) {
       "canplay",
       () => {
         setPlaybackStatus("");
-        if (autoPlay) {
+        if (sourceAutoPlay && els.video.paused) {
           requestVideoPlayback({ allowMutedFallback: true });
         }
         endStreamSwitchSoon();
       },
-      { once: true }
+      sourceEvents
     );
+  }
+
+  if (deferGeneratedStream) {
+    updateSeekControl(target);
+    return;
   }
 
   els.video.load();
@@ -595,13 +756,21 @@ function updateSubtitleContext(media = els.video) {
 }
 
 function requestVideoPlayback(options = {}) {
+  const source = playbackSourceController;
+  if (!source || source.signal.aborted) return;
+  sourceAutoPlay = true;
+  if (pendingSourcePosition != null) pendingSourceAutoPlay = true;
+  const attemptId = ++playbackAttempt;
+  const isCurrent = () => playbackSourceController === source && !source.signal.aborted && attemptId === playbackAttempt;
   const attempt = els.video?.play?.();
   if (!attempt?.then) return;
   attempt.then(() => {
+    if (!isCurrent()) return;
     if (els.video) delete els.video.dataset.playbackError;
     streamNeedsActivation = false;
     setStreamPending(false);
   }).catch((error) => {
+    if (!isCurrent()) return;
     const name = String(error?.name || "PlaybackError");
     const message = String(error?.message || "播放启动失败").trim();
     if (name === "NotAllowedError" && options.allowMutedFallback && els.video && !els.video.muted) {
@@ -621,7 +790,18 @@ function requestVideoPlayback(options = {}) {
   });
 }
 
-function restoreAutoplayAudioFromInteraction() {
+function pauseVideoPlayback() {
+  sourceAutoPlay = false;
+  if (pendingSourcePosition != null) pendingSourceAutoPlay = false;
+  playbackAttempt += 1;
+  els.video.pause();
+}
+
+function restoreAutoplayAudioFromInteraction(event) {
+  // Utility dialogs and their openers preserve the current playback intent.
+  if (document.querySelector("dialog[open]") ||
+      event?.target?.closest?.("#playerShortcutsButton, #playerTimeJumpButton, #copyTimeLinkButton, #playerFileNavigation [aria-disabled='true']") ||
+      (event?.type === "keydown" && (["?", "g"].includes(String(event.key).toLowerCase()) || event.isComposing || event.keyCode === 229))) return;
   if (!els.video || els.video.dataset.autoplayMuted !== "1") return;
   delete els.video.dataset.autoplayMuted;
   els.video.muted = false;
@@ -649,24 +829,51 @@ function configurePlyrForCurrentMode() {
     return;
   }
 
+  const mediaState = player ? { muted: els.video.muted, volume: els.video.volume, rate: els.video.playbackRate, autoplayMuted: els.video.dataset.autoplayMuted } : null;
   if (player) {
     restoreStreamSeekControl();
     hideFrameHold();
     try {
       player.destroy();
     } catch {}
+    // Plyr restores a fresh media clone on destroy. Adopt that visible node
+    // and detach host listeners from the previous instance before continuing.
+    const restoredVideo = els.stage?.querySelector("#playerVideo");
+    if (restoredVideo && restoredVideo !== els.video) {
+      els.video = restoredVideo;
+      installPlayerVideoEvents();
+    }
     player = null;
     frameHoldCanvas = null;
   }
 
   playerControlMode = nextMode;
   player = new window.Plyr(els.video, {
+    autoplay: false,
     controls: directMode ? PLYR_DIRECT_CONTROLS : PLYR_STREAM_CONTROLS,
     iconUrl: "/vendor/plyr/plyr.svg",
     invertTime: false,
     keyboard: { focused: true, global: false },
     tooltips: { controls: true, seek: directMode }
   });
+  if (mediaState) {
+    els.video.muted = mediaState.muted;
+    els.video.volume = mediaState.volume;
+    els.video.playbackRate = mediaState.rate;
+    if (mediaState.autoplayMuted) els.video.dataset.autoplayMuted = mediaState.autoplayMuted;
+    else delete els.video.dataset.autoplayMuted;
+  }
+  const currentPlayer = player;
+  player.togglePlay = (playing) => {
+    if (player !== currentPlayer || !els.video.isConnected) return;
+    const shouldPlay = typeof playing === "boolean" ? playing : els.video.paused;
+    if (shouldPlay) {
+      if (streamNeedsActivation && usesCustomControls()) startDeferredStream();
+      else requestVideoPlayback();
+    } else {
+      pauseVideoPlayback();
+    }
+  };
   placeStreamSeekControl();
 }
 
@@ -781,12 +988,17 @@ function reloadCurrentStream() {
 function seekTo(position) {
   if (!currentVideo || !currentPlayInfo || !els.video) return;
   const target = clampSeekTime(position);
+  if (pendingLinkStart !== null && pendingLinkVideoId === currentVideo.id) pendingLinkStart = target;
   const wasPaused = els.video.paused;
   isSeeking = false;
 
   if ((currentPlayInfo.mode || "direct") === "direct") {
-    if (Number.isFinite(els.video.duration) && target <= els.video.duration) {
+    if (els.video.readyState >= 1 && Number.isFinite(els.video.duration) && els.video.duration > 0 && target <= els.video.duration) {
       els.video.currentTime = target;
+      if (pendingSourcePosition != null) pendingSourcePosition = target;
+      if (target >= els.video.duration) pauseVideoPlayback();
+    } else {
+      pendingSourcePosition = target;
     }
     updateSeekControl(target);
     reportProgress(target, { force: true });
@@ -798,26 +1010,33 @@ function seekTo(position) {
 }
 
 function mediaDuration() {
+  const elementDuration = Number(els.video?.duration || 0);
+  if (currentPlayInfo && (currentPlayInfo.mode || "direct") === "direct" && els.video.readyState >= 1
+      && Number.isFinite(elementDuration) && elementDuration > 0) return elementDuration;
   const probedDuration = Number(currentPlayInfo?.duration || 0);
   if (Number.isFinite(probedDuration) && probedDuration > 0) return probedDuration;
   const savedDuration = Number(currentVideo?.progress?.duration || currentWork?.progress?.duration || 0);
   if (Number.isFinite(savedDuration) && savedDuration > 0) return savedDuration;
   const metadataDuration = Number(currentWork?.infoSummary?.durationMinutes || 0) * 60;
   if (Number.isFinite(metadataDuration) && metadataDuration > 0) return metadataDuration;
-  const elementDuration = Number(els.video?.duration || 0);
   return Number.isFinite(elementDuration) && elementDuration > 0 ? elementDuration : 0;
 }
 
 function mediaPosition() {
+  if (pendingSourcePosition != null) return clampSeekTime(pendingSourcePosition);
   const elementPosition = Number(els.video?.currentTime || 0);
   const position = (currentPlayInfo?.mode || "direct") === "direct" ? elementPosition : playbackOffset + elementPosition;
   return clampSeekTime(position);
 }
 
-function clampSeekTime(position) {
+function clampSeekTime(position, { deferUpperBound = false } = {}) {
   const duration = mediaDuration();
-  const value = Math.max(0, Number(position || 0) || 0);
-  if (duration > 0) return Math.min(value, duration);
+  const number = Number(position || 0);
+  const value = Number.isFinite(number) ? Math.max(0, number) : 0;
+  // Probe hints can be shorter than a valid saved position. Direct metadata
+  // supplies the real upper bound; keep pending intent intact until then.
+  const pendingDirect = (currentPlayInfo?.mode || "direct") === "direct" && Number(els.video?.readyState || 0) < 1;
+  if (duration > 0 && !deferUpperBound && !pendingDirect) return Math.min(value, duration);
   return value;
 }
 
@@ -936,6 +1155,7 @@ function handleVideoPlaybackError() {
   const fallbackStreamUrl = String(currentPlayInfo?.fallbackStreamUrl || "").trim();
   if ((currentPlayInfo?.mode || "direct") === "direct" && fallbackStreamUrl) {
     const resumePosition = mediaPosition();
+    const autoPlay = pendingSourceAutoPlay ?? (!els.video.paused && !els.video.ended);
     currentPlayInfo = {
       ...currentPlayInfo,
       mode: "transcode",
@@ -944,7 +1164,7 @@ function handleVideoPlaybackError() {
       fallbackStreamUrl: ""
     };
     setPlaybackStatus("直连失败，正在切换兼容播放");
-    setVideoSourceAt(resumePosition, { autoPlay: true, holdFrame: true });
+    setVideoSourceAt(resumePosition, { autoPlay, holdFrame: true });
     return;
   }
   setPlaybackStatus(videoErrorMessage());
@@ -1210,8 +1430,8 @@ function capturePlaybackSnapshot() {
   const hasPreparedPlayback = Boolean(currentPlayInfo);
   return {
     videoId: currentVideo.id,
-    position: hasPreparedPlayback ? mediaPosition() : Number(currentVideo.progress?.position || 0),
-    autoPlay: hasPreparedPlayback ? (!els.video.paused && !els.video.ended) : true,
+    position: pendingSourcePosition ?? (hasPreparedPlayback ? mediaPosition() : Number(currentVideo.progress?.position || 0)),
+    autoPlay: pendingSourceAutoPlay ?? (hasPreparedPlayback ? (!els.video.paused && !els.video.ended) : true),
     muted: Boolean(els.video.muted),
     volume: Number(els.video.volume)
   };
@@ -2066,6 +2286,11 @@ async function deleteCurrentLocalFiles() {
 }
 
 function stopCurrentPlayback() {
+  timeLinkControl.invalidate();
+  timeJumpControl.invalidate();
+  pendingLinkStart = null;
+  playInfoRequests.cancel();
+  resetPlaybackSource();
   subtitleControls.reset();
   stopProgressTimer();
   currentVideo = null;
@@ -2139,18 +2364,33 @@ function stopProgressTimer() {
 
 function reportProgress(positionOverride = null, options = {}) {
   const duration = mediaDuration();
-  if (!currentVideo || !els.video || !duration || currentWork?.diskUsage) return;
-  const now = Date.now();
+  if (!currentVideo || !currentPlayInfo || !playbackSourceController || !els.video || !duration || currentWork?.diskUsage) return;
+  if (positionOverride == null && els.video.readyState < 1) return;
+  if (els.video.readyState < 1 && (currentPlayInfo.mode || "direct") === "direct" && positionOverride > duration) return;
+  const now = performance.now();
   if (!options.force && now - lastProgressReport < 1000) return;
+  const body = {
+    workId: currentWork?.id || "",
+    position: positionOverride == null ? mediaPosition() : clampSeekTime(positionOverride),
+    duration
+  };
+  const key = JSON.stringify([currentVideo.id, body]);
+  if (options.keepalive && lastKeepaliveProgress?.source === playbackSourceController
+      && lastKeepaliveProgress.key === key && now - lastKeepaliveProgress.at < 1000) return;
   lastProgressReport = now;
+  const attempt = options.keepalive ? { source: playbackSourceController, key, at: now } : null;
+  if (attempt) lastKeepaliveProgress = attempt;
   api(`/api/progress/${encodeURIComponent(currentVideo.id)}`, {
     method: "POST",
-    body: {
-      workId: currentWork?.id || "",
-      position: positionOverride == null ? mediaPosition() : clampSeekTime(positionOverride),
-      duration
-    }
-  }).catch(() => {});
+    ...(options.keepalive ? { keepalive: true } : {}),
+    body
+  }).catch(() => {
+    if (attempt && lastKeepaliveProgress === attempt) lastKeepaliveProgress = null;
+  });
+}
+
+function flushPlaybackProgress() {
+  reportProgress(null, { force: true, keepalive: true });
 }
 
 function formatLibraryPath(value) {

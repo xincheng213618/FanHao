@@ -24,7 +24,7 @@ function fixture(t, { mode = "library", saved = null } = {}) {
   globalThis.document = { querySelector() { return null; }, activeElement: null };
   const requests = [];
   const api = {};
-  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists", "createPlaylist", "importM3u", "deletePlaylist", "updatePlaylist", "addTrackToPlaylist", "removeTrackFromPlaylist", "runScript", "clearHistory"]) {
+  for (const method of ["getTracks", "getHome", "getArtists", "getAlbums", "getHistory", "getPlaylist", "getSmartPlaylist", "getReport", "getTrack", "getPlaylists", "getSmartPlaylists", "createPlaylist", "importM3u", "deletePlaylist", "updatePlaylist", "addTrackToPlaylist", "removeTrackFromPlaylist", "reorderPlaylist", "runScript", "clearHistory", "setFavorite", "setRating"]) {
     api[method] = (...args) => new Promise((resolve, reject) => {
       const signal = args.find(arg => arg instanceof AbortSignal);
       requests.push({ method, args, signal, resolve, reject });
@@ -56,6 +56,560 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const track = id => ({ id, title: id, streamUrl: `/fixture/${id}`, durationMs: 180000 });
 const trackData = id => ({ track: track(id), lyrics: { lines: [{ text: id }] } });
 const listData = (...ids) => ({ tracks: ids.map(track), total: ids.length, hasMore: false });
+
+function favoriteOwnershipFixture(t) {
+  const f = fixture(t);
+  const current = { ...track("A"), title: "Current A metadata", rating: 5, favorite: true };
+  const prefix = [current, track("B"), ...Array.from({ length: 118 }, (_, index) => track(`existing-${index}`))];
+  f.state.music.current = current;
+  f.state.music.queue = [current, track("B")];
+  f.state.music.data = { tracks: prefix.map(item => ({ ...item })), rawTracks: prefix.map(item => ({ ...item })), rawLoaded: 120, total: 300, hasMore: true };
+  f.state.music.hasMore = true;
+  f.audio.src = current.streamUrl;
+  return f;
+}
+
+test("favorite ownership late success and failure preserve newer navigation, playback and controller leave", async t => {
+  for (const outcome of ["success", "failure"]) for (const destination of ["navigation", "playback", "leave"]) await t.test(`${outcome} to ${destination}`, async sub => {
+    const f = favoriteOwnershipFixture(sub);
+    f.state.music.query = "Current";
+    f.state.music.data.rawTracks.unshift(null, { ...f.state.music.current });
+    f.state.music.data.rawLoaded += 2;
+    const saving = f.actions.toggleFavorite("A").then(() => null, error => error), write = f.requests[0];
+    assert.deepEqual(write.args, ["A", false]);
+    assert.equal(write.signal, undefined, "accepted writes must not be cancelled by leaving the view");
+    if (destination === "playback") {
+      const opening = f.actions.openTrack("B", { openPage: true });
+      f.requests.find(request => request.method === "getTrack").resolve(trackData("B")); await opening;
+    } else {
+      f.actions.beginNavigation();
+      if (destination === "leave") f.state.activeView = "novels"; // Explicit controller contract, not native cross-module UI.
+      else f.state.music.favorite = true;
+    }
+    f.state.music.status = "New destination status";
+    const events = f.events.length, reads = f.requests.length, routes = f.routes.length, current = f.state.music.current;
+    if (outcome === "success") write.resolve({ track: { ...track("A"), favorite: false, title: "Obsolete title", rating: 0 } });
+    else write.reject(new Error("Obsolete favorite failure"));
+    assert.equal(await saving, null, "obsolete errors must not reach a newer page's showError callback");
+    assert.equal(f.events.length, events); assert.equal(f.requests.length, reads); assert.equal(f.routes.length, routes);
+    assert.equal(f.state.music.status, "New destination status");
+    if (destination === "playback") assert.equal(f.state.music.current, current);
+    for (const item of [f.state.music.queue[0], f.state.music.data.tracks[0], ...f.state.music.data.rawTracks.filter(item => item?.id === "A")]) {
+      assert.equal(item.favorite, outcome !== "success");
+      assert.equal(item.title, "Current A metadata"); assert.equal(item.rating, 5, "stale favorite DTOs must not overwrite newer metadata");
+    }
+    assert.equal(f.state.music.data.rawTracks[0], null);
+    assert.equal(f.audio.currentTime, 12);
+  });
+});
+
+test("favorite ownership waits for a same-context read and maintains only accepted results", async t => {
+  for (const outcome of ["success", "failure"]) await t.test(outcome, async sub => {
+    const f = favoriteOwnershipFixture(sub); f.state.music.favorite = true;
+    const saving = f.actions.toggleFavorite("A").then(() => null, error => error), write = f.requests[0];
+    const reading = f.actions.loadMusic({ append: true, keepCurrent: true }).then(() => null, error => error), read = f.requests[1];
+    assert.equal(read.args[0].get("offset"), "120");
+    write.resolve({ track: { ...track("A"), favorite: false, title: "Obsolete title", rating: 0 } }); await tick();
+    assert.equal(f.requests.length, 2, "favorite confirmation must wait rather than replace an in-flight read");
+    assert.equal(read.signal.aborted, false);
+    if (outcome === "success") read.resolve({ ...listData("C"), total: 300, hasMore: true });
+    else read.reject(new Error("Newer append failure"));
+    const readError = await reading; await tick();
+    if (outcome === "success") {
+      assert.equal(f.requests.length, 3, "an accepted append must still trigger favorite membership maintenance");
+      assert.equal(Number(f.requests[2].args[0].get("offset") || 0), 0);
+      f.requests[2].resolve(listData("B", "C"));
+    } else {
+      assert.equal(f.actions.getListReadFailure(), null, "append errors do not create replacement-list retry records");
+      assert.equal(readError?.message, "Newer append failure");
+      assert.equal(f.requests.length, 2, "a failed append's status must not be hidden by an automatic favorite reload");
+      assert.equal(f.state.music.status, "Newer append failure");
+    }
+    assert.equal(await saving, null);
+    assert.equal(f.state.music.current.favorite, false);
+    assert.equal(f.state.music.current.title, "Current A metadata"); assert.equal(f.state.music.current.rating, 5);
+    if (outcome === "success") assert.deepEqual(f.state.music.data.tracks.map(item => item.id), ["B", "C"]);
+  });
+});
+
+test("favorite ownership started during a replacement read waits and reapplies only its confirmed field", async t => {
+  const f = favoriteOwnershipFixture(t); f.state.music.favorite = true;
+  const reading = f.actions.loadMusic({ keepCurrent: true, restoreLast: false });
+  const saving = f.actions.toggleFavorite("A"), write = f.requests[1];
+  write.resolve({ track: { ...track("A"), favorite: false, title: "Obsolete title", rating: 0 } }); await tick();
+  assert.equal(f.requests.length, 2); assert.equal(f.requests[0].signal.aborted, false);
+  f.requests[0].resolve({ ...listData("A", "B"), tracks: [{ ...track("A"), title: "New read title", rating: 4, favorite: true }, track("B")] });
+  await reading; await tick();
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.state.music.data.tracks[0].favorite, false, "a precommit read body must not undo the accepted favorite confirmation");
+  assert.equal(f.state.music.data.tracks[0].title, "New read title"); assert.equal(f.state.music.data.tracks[0].rating, 4);
+  f.requests[2].resolve(listData("B")); await saving;
+});
+
+test("favorite ownership accepted ordinary append refreshes the current star without an extra GET", async t => {
+  const f = favoriteOwnershipFixture(t);
+  const saving = f.actions.toggleFavorite("A"), write = f.requests[0];
+  const reading = f.actions.loadMusic({ append: true, keepCurrent: true });
+  f.requests[1].resolve({ ...listData("C"), total: 300, hasMore: true }); await reading;
+  const start = f.events.length;
+  write.resolve({ track: { ...track("A"), favorite: false, title: "Obsolete title", rating: 0 } }); await saving;
+  assert.equal(f.requests.length, 2);
+  const metadata = f.events.slice(start).filter(event => event.name === "refreshTrackMetadata");
+  assert.equal(metadata.length, 1, "the current star must not stay stale after a successful ordinary append");
+  assert.equal(metadata[0].args[0].favorite, false);
+  assert.equal(metadata[0].args[0].title, "Current A metadata"); assert.equal(metadata[0].args[0].rating, 5);
+});
+
+test("favorite ownership keeps favorite-sort and smart membership maintenance", async t => {
+  for (const context of ["sort", "smart"]) await t.test(context, async sub => {
+    const f = favoriteOwnershipFixture(sub);
+    if (context === "sort") f.state.music.sort = "favorite";
+    else { f.state.music.mode = "smart"; f.state.music.activeSmartPlaylistId = "new-smart"; }
+    const saving = f.actions.toggleFavorite("A");
+    f.requests[0].resolve({ track: { ...track("A"), favorite: false } }); await tick();
+    assert.equal(f.requests[1].method, context === "sort" ? "getTracks" : "getSmartPlaylist");
+    const params = f.requests[1].args[context === "sort" ? 0 : 1];
+    assert.equal(Number(params.get("offset") || 0), 0);
+    if (context === "sort") assert.equal(params.get("sort"), "favorite");
+    f.requests[1].resolve(listData("B")); await saving;
+    assert.equal(f.state.music.current.favorite, false);
+  });
+});
+
+test("favorite ownership account owner, revision and invalidation suppress old confirmations and failures", async t => {
+  const account = globalThis.__fanhaoWebAccountContext, original = { ...account };
+  const storage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  t.after(() => { Object.assign(account, original); if (storage) Object.defineProperty(globalThis, "localStorage", storage); else delete globalThis.localStorage; });
+  for (const change of ["owner", "revision", "invalid"]) for (const outcome of ["success", "failure"]) await t.test(`${change} ${outcome}`, async sub => {
+    Object.assign(account, { owner: "old-owner", revision: "old-revision", invalid: false });
+    globalThis.localStorage = { getItem: () => account.revision };
+    const f = favoriteOwnershipFixture(sub), saving = f.actions.toggleFavorite("A").then(() => null, error => error);
+    if (change === "owner") account.owner = "new-owner";
+    else if (change === "revision") account.revision = "new-revision";
+    else account.invalid = true;
+    const events = f.events.length, current = f.state.music.current, data = f.state.music.data, queue = f.state.music.queue;
+    if (outcome === "success") f.requests[0].resolve({ track: { ...track("A"), favorite: false } });
+    else f.requests[0].reject(new Error("Old account favorite failure"));
+    assert.equal(await saving, null);
+    assert.equal(f.state.music.current, current); assert.equal(f.state.music.queue, queue); assert.equal(f.state.music.data, data);
+    assert.equal(current.favorite, true); assert.equal(f.events.length, events); assert.equal(f.requests.length, 1);
+  });
+});
+
+test("favorite feedback retirement does not hide an ordinary replacement read failure", async t => {
+  const f = favoriteOwnershipFixture(t);
+  const saving = f.actions.toggleFavorite("A").then(() => null, error => error);
+  f.requests[0].reject(new Error("Current favorite save failure"));
+  assert.equal((await saving)?.message, "Current favorite save failure");
+  assert.equal(f.actions.getFavoriteFailure()?.message, "Current favorite save failure");
+  assert.equal(f.actions.getFavoriteFailure()?.saved, false);
+  const reading = f.actions.loadMusic({ keepCurrent: true, restoreLast: false });
+  assert.equal(f.actions.getFavoriteFailure(), null, "an explicit newer read must retire the previous favorite feedback");
+  f.requests[1].reject(new Error("Ordinary replacement failure"));
+  await assert.rejects(reading, /Ordinary replacement failure/);
+  assert.equal(f.state.music.status, "Ordinary replacement failure");
+  assert.equal(f.actions.getListReadFailure()?.message, "Ordinary replacement failure", "independent failed reads must retain their normal retry contract");
+  f.state.music.favorite = true;
+  const first = f.actions.toggleFavorite("A").then(() => null, error => error);
+  f.requests[2].resolve({ track: { ...track("A"), favorite: false } }); await tick();
+  assert.equal(f.requests[3].method, "getTracks");
+  const newer = f.actions.toggleFavorite("A").then(() => null, error => {
+    // Model the real UI caller publishing its rejected POST, not another read.
+    f.state.music.status = error.message; return error;
+  });
+  f.requests[4].reject(new Error("正在读取音乐库"));
+  assert.equal((await newer)?.message, "正在读取音乐库");
+  f.requests[3].reject(new Error("Obsolete favorite read failure"));
+  assert.equal(await first, null);
+  assert.equal(f.state.music.status, "正在读取音乐库", "retiring an old read must preserve a newer error even when its text equals that read's old loading caption");
+  assert.equal(f.actions.getListReadFailure(), null, "a retired read must not create a stale retry record");
+  assert.equal(f.actions.getFavoriteFailure()?.message, "正在读取音乐库");
+  assert.equal(f.actions.getFavoriteFailure()?.saved, false);
+});
+
+test("favorite feedback keeps a shared refresh failure after newer success and permits a fresh undo", async t => {
+  const f = favoriteOwnershipFixture(t); f.state.music.favorite = true;
+  const first = f.actions.toggleFavorite("A").then(() => null, error => error);
+  f.requests[0].resolve({ track: { ...track("A"), favorite: false } }); await tick();
+  const read = f.requests[1];
+  assert.equal(read.method, "getTracks");
+  const newer = f.actions.toggleFavorite("A").then(() => null, error => error);
+  f.requests[2].resolve({ track: { ...track("A"), favorite: true } }); await tick();
+  assert.equal(f.requests.length, 3, "a newer successful favorite must share the pending same-context read rather than cancel it");
+  assert.equal(read.signal.aborted, false);
+  read.reject(new Error("Shared favorite refresh failure"));
+  assert.equal((await first)?.message, "Shared favorite refresh failure", "starting or confirming a newer favorite must not silently swallow a shared refresh failure");
+  assert.equal(await newer, null);
+  assert.equal(f.state.music.status, "Shared favorite refresh failure");
+  assert.equal(f.actions.getListReadFailure()?.message, "Shared favorite refresh failure");
+  assert.equal(f.state.music.current.favorite, true);
+  const undo = f.actions.toggleFavorite("A");
+  assert.deepEqual(f.requests[3].args, ["A", false]);
+  f.requests[3].resolve({ track: { ...track("A"), favorite: false } }); await tick();
+  assert.equal(f.requests[4].method, "getTracks");
+  assert.equal(Number(f.requests[4].args[0].get("offset") || 0), 0);
+  f.requests[4].resolve(listData("B")); await undo;
+  assert.equal(f.state.music.current.favorite, false);
+  assert.equal(f.actions.getListReadFailure(), null); assert.equal(f.state.music.status, "");
+  assert.equal(f.actions.getFavoriteFailure(), null, "a confirmed fresh undo must retire old favorite feedback");
+  const older = f.actions.toggleFavorite("A").then(() => null, error => error);
+  const failed = f.actions.toggleFavorite("A").then(() => null, error => { f.state.music.status = error.message; return error; });
+  f.requests[6].reject(new Error("Newer favorite failure to carry"));
+  assert.equal((await failed)?.message, "Newer favorite failure to carry");
+  assert.equal(f.actions.getFavoriteFailure()?.message, "Newer favorite failure to carry");
+  f.requests[5].resolve({ track: { ...track("A"), favorite: true } }); await tick();
+  assert.equal(f.requests[7].method, "getTracks");
+  assert.equal(f.actions.getFavoriteFailure()?.message, "Newer favorite failure to carry", "an older successful write and its maintenance must not clear a newer favorite failure");
+  assert.equal(f.state.music.status, "Newer favorite failure to carry");
+  const latest = f.actions.toggleFavorite("A").then(() => null, error => error);
+  f.requests[8].resolve({ track: { ...track("A"), favorite: false } }); await tick();
+  assert.equal(f.requests.length, 9, "the latest favorite success must share the already pending maintenance read");
+  assert.equal(f.actions.getFavoriteFailure(), null, "the latest success must clear the carried favorite failure");
+  f.requests[7].reject(new Error("Carried maintenance still failed"));
+  assert.equal((await older)?.message, "Carried maintenance still failed");
+  assert.equal(await latest, null);
+  assert.equal(f.state.music.status, "Carried maintenance still failed");
+  assert.equal(f.actions.getListReadFailure()?.message, "Carried maintenance still failed", "clearing a carried hint must not silence a subsequently failed read or lose its retry");
+  const explicit = f.actions.loadMusic({ keepCurrent: true, restoreLast: false });
+  assert.equal(f.actions.getFavoriteFailure(), null);
+  f.requests[9].resolve(listData("B")); await explicit;
+  assert.equal(f.actions.getFavoriteFailure(), null); assert.equal(f.actions.getListReadFailure(), null);
+});
+
+function ratingOwnershipFixture(t) {
+  const f = favoriteOwnershipFixture(t);
+  for (const item of [f.state.music.current, ...f.state.music.queue, ...f.state.music.data.tracks, ...f.state.music.data.rawTracks]) if (item.id === "A") item.rating = 0;
+  return f;
+}
+
+test("rating feedback retains a failed confirmation until retry ACK and retires on explicit reads", async t => {
+  const f = ratingOwnershipFixture(t);
+  const saving = f.actions.setTrackRating("A", 5).catch(error => error);
+  f.requests[0].reject(new Error("Current rating POST failure"));
+  const error = await saving, failure = f.actions.getRatingFailure();
+  assert.match(error.message, /Current rating POST failure/);
+  assert.equal(failure?.trackId, "A"); assert.equal(failure?.saved, false); assert.equal(failure?.error, error);
+  assert.equal(f.state.music.current.rating, 0);
+  const retry = f.actions.setTrackRating("A", 4);
+  assert.equal(f.actions.getRatingFailure(), failure, "a newly started rating retry must not claim an unconfirmed save succeeded");
+  f.requests[1].resolve({ track: { ...track("A"), rating: 4 } }); await retry;
+  assert.equal(f.actions.getRatingFailure(), null); assert.equal(f.state.music.current.rating, 4);
+  const failed = f.actions.setTrackRating("A", 2).catch(error => error);
+  f.requests[2].reject(new Error("Another rating failure")); await failed;
+  assert.match(f.actions.getRatingFailure()?.message, /Another rating failure/);
+  const reading = f.actions.loadMusic({ keepCurrent: true, restoreLast: false });
+  assert.equal(f.actions.getRatingFailure(), null, "explicit newer library reads must retire old rating feedback");
+  f.requests[3].reject(new Error("Ordinary read remains recoverable"));
+  await assert.rejects(reading, /Ordinary read remains recoverable/);
+  assert.equal(f.actions.getListReadFailure()?.message, "Ordinary read remains recoverable");
+});
+
+test("rating ownership updates known copies without requesting a newer track stage rebuild", async t => {
+  for (const outcome of ["success", "failure"]) await t.test(outcome, async sub => {
+    const f = ratingOwnershipFixture(sub), saving = f.actions.setTrackRating("A", 3).catch(error => error), write = f.requests[0];
+    const opening = f.actions.openTrack("B", { openPage: true });
+    f.requests[1].resolve({ ...trackData("B"), track: { ...track("B"), rating: 4 } }); await opening;
+    const current = f.state.music.current, routes = f.routes.length, loads = f.loads.length, events = f.events.length;
+    if (outcome === "success") write.resolve({ track: { ...track("A"), rating: 3 } });
+    else write.reject(new Error("Obsolete A score failed"));
+    assert.equal(await saving, undefined);
+    assert.equal(f.state.music.current, current); assert.equal(current.rating, 4);
+    assert.equal(f.loads.length, loads); assert.equal(f.routes.length, routes); assert.equal(f.requests.length, 2);
+    assert.equal(f.actions.getRatingFailure(), null);
+    for (const item of [f.state.music.queue[0], f.state.music.data.tracks[0], f.state.music.data.rawTracks[0]]) {
+      assert.equal(item.rating, outcome === "success" ? 3 : 0); assert.equal(item.title, "Current A metadata"); assert.equal(item.favorite, true);
+    }
+    for (const event of f.events.slice(events).filter(event => event.name === "refreshTrackMetadata")) {
+      assert.equal(event.args[1]?.allowStage, false, "a stale rating completion may update library stars but must not rebuild the current B stage");
+    }
+  });
+});
+
+test("rating feedback survives internal maintenance for another field or track", async t => {
+  for (const kind of ["favorite", "rating"]) await t.test(kind, async sub => {
+    const f = ratingOwnershipFixture(sub);
+    f.state.music.favorite = kind === "favorite"; f.state.music.sort = kind === "rating" ? "rating" : "title";
+    let maintaining, write;
+    if (kind === "favorite") { maintaining = f.actions.toggleFavorite("A"); write = f.requests[0]; }
+    const failing = f.actions.setTrackRating("B", 5).catch(error => error), failedWrite = f.requests.at(-1);
+    failedWrite.reject(new Error("Unconfirmed B rating failure")); await failing;
+    assert.match(f.actions.getRatingFailure()?.message, /Unconfirmed B rating failure/);
+    if (kind === "rating") { maintaining = f.actions.setTrackRating("A", 3); write = f.requests.at(-1); }
+    write.resolve({ track: { ...track("A"), ...(kind === "rating" ? { rating: 3 } : { favorite: false }) } }); await tick();
+    const read = f.requests.at(-1); assert.equal(read.method, "getTracks");
+    assert.equal(f.actions.getRatingFailure()?.trackId, "B");
+    assert.match(f.actions.getRatingFailure()?.message, /Unconfirmed B rating failure/, "unrelated confirmed maintenance must not hide a rating that has no ACK");
+    read.resolve(listData("A", "B")); await maintaining;
+    assert.match(f.actions.getRatingFailure()?.message, /Unconfirmed B rating failure/);
+    const explicit = f.actions.loadMusic({ keepCurrent: true, restoreLast: false });
+    assert.equal(f.actions.getRatingFailure(), null);
+    f.requests.at(-1).resolve(listData("A", "B")); await explicit;
+  });
+});
+
+test("rating confirmation survives an accepted ordinary pending read without replacing it", async t => {
+  for (const outcome of ["success", "later failure"]) await t.test(outcome, async sub => {
+    const f = ratingOwnershipFixture(sub); f.state.music.sort = "title";
+    const reading = f.actions.loadMusic({ keepCurrent: true, restoreLast: false }), read = f.requests[0], confirmed = outcome === "success" ? 5 : 3;
+    const first = f.actions.setTrackRating("A", confirmed);
+    let observedError = null;
+    const last = outcome === "later failure" ? f.actions.setTrackRating("A", 5).catch(error => { observedError = error; return error; }) : first;
+    f.requests[1].resolve({ track: { ...track("A"), rating: confirmed } }); await tick();
+    if (outcome === "later failure") {
+      assert.equal(f.requests[2].method, "setRating"); f.requests[2].reject(new Error("Later score failed during title read")); await tick();
+      assert.match(observedError?.message, /Later score failed during title read/, "an ordinary pending read must not delay a current POST failure reaching its UI caller");
+      assert.match(f.actions.getRatingFailure()?.message, /Later score failed during title read/);
+    }
+    assert.equal(f.requests.filter(request => request.method === "getTracks").length, 1); assert.equal(read.signal.aborted, false);
+    read.resolve({ ...listData("A", "B"), tracks: [{ ...track("A"), title: "Accepted newer read title", rating: 0 }, track("B")] });
+    await reading; await first; const error = await last; await tick();
+    if (outcome === "later failure") { assert.match(error?.message, /Later score failed during title read/); assert.match(f.actions.getRatingFailure()?.message, /3 星/); }
+    for (const item of [f.state.music.current, f.state.music.queue[0], f.state.music.data.tracks[0], f.state.music.data.rawTracks[0]]) assert.equal(item.rating, confirmed, "the accepted list snapshot must not undo a confirmed score");
+    assert.equal(f.state.music.data.tracks[0].title, "Accepted newer read title");
+    assert.equal(f.requests.filter(request => request.method === "getTracks").length, 1, "an ordinary same-context read must be awaited, not replaced with an extra GET");
+  });
+});
+
+test("rating capacity rejection is recoverable once existing track writes settle", async t => {
+  const f = ratingOwnershipFixture(t);
+  const busyTracks = Array.from({ length: 8 }, (_, index) => ({ ...track(`busy-${index}`), rating: 0 }));
+  f.state.music.queue.push(...busyTracks);
+  const pending = busyTracks.map(item => f.actions.setTrackRating(item.id, 3));
+  const rejected = await f.actions.setTrackRating("A", 5).catch(error => error);
+  assert.equal(f.requests.length, 8, "the ninth distinct track must not bypass the bounded write capacity");
+  assert.match(rejected.message, /评分保存繁忙/); assert.match(f.actions.getRatingFailure()?.message, /评分保存繁忙/);
+  assert.equal(f.state.music.current.rating, 0);
+  for (const request of f.requests) request.resolve({ track: { ...track(request.args[0]), rating: 3 } });
+  await Promise.all(pending);
+  assert.match(f.actions.getRatingFailure()?.message, /评分保存繁忙/, "other tracks completing must not clear this track's rejected save");
+  const retry = f.actions.setTrackRating("A", 5);
+  assert.equal(f.requests.length, 9);
+  f.requests[8].resolve({ track: { ...track("A"), rating: 5 } }); await retry;
+  assert.equal(f.state.music.current.rating, 5); assert.equal(f.actions.getRatingFailure(), null);
+});
+
+test("rating callers expose one current shared refresh rejection after a newer score is confirmed", async t => {
+  const f = ratingOwnershipFixture(t); f.state.music.sort = "rating";
+  const failures = [];
+  const first = f.actions.setTrackRating("A", 3).catch(error => { failures.push(error); });
+  f.requests[0].resolve({ track: { ...track("A"), rating: 3 } }); await tick();
+  const read = f.requests[1]; assert.equal(read.method, "getTracks");
+  const second = f.actions.setTrackRating("A", 4).catch(error => { failures.push(error); });
+  f.requests[2].resolve({ track: { ...track("A"), rating: 4 } }); await tick();
+  assert.equal(f.requests.length, 3); assert.equal(read.signal.aborted, false);
+  read.reject(new Error("Current shared rating refresh failure")); await Promise.all([first, second]);
+  assert.equal(failures.length, 1, "exactly one current rating caller must expose a shared failed read to showError rather than silently resolving both");
+  assert.equal(failures[0].message, "Current shared rating refresh failure");
+  const failure = f.actions.getRatingFailure();
+  assert.equal(failure?.error, failures[0]); assert.equal(failure?.saved, true);
+  assert.equal(failure?.message, "Current shared rating refresh failure");
+  assert.equal(f.actions.getListReadFailure()?.message, failure.message);
+  for (const item of [f.state.music.current, f.state.music.queue[0], f.state.music.data.tracks[0], f.state.music.data.rawTracks[0]]) assert.equal(item.rating, 4);
+  assert.equal(f.state.music.loading, false);
+  assert.equal(f.requests.filter(request => request.method === "getTracks").length, 1);
+});
+
+function queueOrderFixture(t) {
+  const f = fixture(t, { mode: "playlist" });
+  f.state.music.activePlaylistId = "target";
+  f.state.music.activePlaylist = { id: "target", name: "Original playlist" };
+  f.state.music.data = { ...listData("A", "B", "C"), playlist: f.state.music.activePlaylist };
+  f.state.music.queue = f.state.music.data.tracks;
+  f.state.music.current = f.state.music.queue[0];
+  f.audio.src = f.state.music.current.streamUrl;
+  f.audio.paused = false;
+  return f;
+}
+
+test("queue reorder current success updates its playlist without replacing playback or queue", async t => {
+  const f = queueOrderFixture(t);
+  f.actions.moveQueueTrack("B", -1);
+  const queue = f.state.music.queue, current = f.state.music.current;
+  assert.deepEqual(f.requests[0].args, ["target", { trackIds: ["B", "A", "C"] }]);
+  assert.equal(f.requests[0].signal, undefined, "accepted order writes must not be cancelled by navigation");
+  const playlist = { id: "target", name: "Saved playlist" };
+  f.requests[0].resolve({ playlist }); await tick();
+  assert.equal(f.state.music.queue, queue);
+  assert.equal(f.state.music.current, current);
+  assert.equal(f.audio.paused, false);
+  assert.equal(f.audio.currentTime, 12);
+  assert.equal(f.state.music.activePlaylist, playlist);
+  assert.equal(f.state.music.data.playlist, playlist);
+  assert.equal(f.state.music.status, "歌单顺序已保存");
+  assert.equal(f.state.music.playlistsLoadedAt, 0);
+  assert.deepEqual(f.errors, []);
+});
+
+test("queue reorder current failure rolls back its own optimistic order and remains visible", async t => {
+  const f = queueOrderFixture(t);
+  f.actions.moveQueueTrack("B", -1);
+  const failure = new Error("current reorder failure");
+  f.requests[0].reject(failure); await tick();
+  assert.deepEqual(f.state.music.queue.map(item => item.id), ["A", "B", "C"]);
+  assert.deepEqual(f.errors, [failure]);
+  assert.equal(f.state.music.current.id, "A");
+  assert.equal(f.audio.paused, false);
+});
+
+for (const outcome of ["success", "failure"]) for (const next of ["append", "remove", "clear", "new order", "new playlist", "leave", "new track"]) {
+  test(`queue reorder late ${outcome} preserves ${next}`, async t => {
+    const f = queueOrderFixture(t);
+    f.actions.moveQueueTrack("B", -1);
+    const write = f.requests[0];
+    if (next === "append") f.actions.appendTrackToQueue(track("D"));
+    else if (next === "remove") f.actions.removeTrackFromQueue("C");
+    else if (next === "clear") f.actions.clearQueueAfterCurrent();
+    else if (next === "new order") f.actions.moveQueueTrack("C", -1);
+    else if (next === "new playlist") {
+      f.actions.beginNavigation();
+      f.state.music.activePlaylistId = "other";
+      f.state.music.activePlaylist = { id: "other", name: "New playlist" };
+      f.state.music.data = { ...listData("D"), playlist: f.state.music.activePlaylist };
+      f.state.music.queue = f.state.music.data.tracks;
+      f.state.music.status = "new playlist status";
+    } else if (next === "leave") {
+      f.actions.beginNavigation(); f.state.activeView = "novels";
+      f.state.music.status = "destination status";
+    } else {
+      const opening = f.actions.openTrack("chosen", { openPage: true });
+      f.requests.find(request => request.method === "getTrack").resolve(trackData("chosen"));
+      await opening;
+    }
+    const queue = f.state.music.queue, playlist = f.state.music.activePlaylist, data = f.state.music.data;
+    const status = f.state.music.status, events = f.events.length, requests = f.requests.length;
+    if (outcome === "success") write.resolve({ playlist: { id: "target", name: "Obsolete reorder response" } });
+    else write.reject(new Error("obsolete reorder failure"));
+    await tick();
+    assert.equal(f.state.music.queue, queue, "old completion must not replace newer queue edits");
+    assert.equal(f.state.music.activePlaylist, playlist);
+    assert.equal(f.state.music.data, data);
+    assert.equal(f.state.music.status, status);
+    assert.equal(f.events.length, events, "old completion must not rerender the current destination");
+    assert.equal(f.requests.length, requests + (next === "new order" ? 1 : 0), "only an already accepted pending order may start after the previous write settles");
+    assert.deepEqual(f.errors, [], "old errors cannot enter the new page's error handler");
+    assert.equal(write.signal, undefined);
+    if (outcome === "success") assert.equal(f.state.music.playlistsLoadedAt, 0);
+    if (next !== "new track") assert.equal(f.audio.paused, false);
+  });
+}
+
+for (const first of ["success", "failure"]) for (const last of ["success", "failure"]) {
+  test(`queue reorder serializes writes after ${first} then ${last}`, async t => {
+    const f = queueOrderFixture(t);
+    f.actions.moveQueueTrack("B", -1);
+    f.actions.moveQueueTrack("C", -1);
+    assert.equal(f.requests.length, 1, "same-playlist writes cannot race to the server");
+    assert.deepEqual(f.state.music.queue.map(item => item.id), ["B", "C", "A"]);
+    if (first === "success") f.requests[0].resolve({ playlist: { id: "target", name: "First order" } });
+    else f.requests[0].reject(new Error("first order failure"));
+    await tick();
+    assert.equal(f.requests.length, 2);
+    assert.deepEqual(f.requests[1].args, ["target", { trackIds: ["B", "C", "A"] }]);
+    assert.equal(f.requests[1].signal, undefined);
+    const failure = new Error("latest order failure");
+    if (last === "success") f.requests[1].resolve({ playlist: { id: "target", name: "Final order" } });
+    else f.requests[1].reject(failure);
+    await tick();
+    assert.deepEqual(f.state.music.queue.map(item => item.id), last === "success" ? ["B", "C", "A"] : first === "success" ? ["B", "A", "C"] : ["A", "B", "C"], "latest failure must return to the last confirmed order, including when both writes failed");
+    assert.deepEqual(f.errors, last === "success" ? [] : [failure]);
+    assert.equal(f.audio.paused, false);
+    assert.equal(f.audio.currentTime, 12);
+  });
+}
+
+for (const first of ["success", "failure"]) for (const edit of ["append", "remove"]) {
+  test(`queue reorder rollback preserves ${edit} membership after earlier ${first}`, async t => {
+    const f = queueOrderFixture(t);
+    f.actions.moveQueueTrack("B", -1);
+    if (edit === "append") {
+      f.actions.appendTrackToQueue(track("D"));
+      f.actions.moveQueueTrack("D", -1);
+    } else {
+      f.actions.removeTrackFromQueue("C");
+      f.actions.moveQueueTrack("A", -1);
+    }
+    if (first === "success") f.requests[0].resolve({ playlist: { id: "target", name: "First order" } });
+    else f.requests[0].reject(new Error("first order failure"));
+    await tick();
+    f.requests[1].reject(new Error("latest order failure")); await tick();
+    const expected = edit === "append"
+      ? first === "success" ? ["B", "A", "C", "D"] : ["A", "B", "C", "D"]
+      : first === "success" ? ["B", "A"] : ["A", "B"];
+    assert.deepEqual(f.state.music.queue.map(item => item.id), expected, "rollback must restore confirmed order while preserving current membership and the added track's prior slot");
+    assert.equal(f.audio.paused, false);
+    assert.equal(f.errors.length, 1);
+  });
+}
+
+test("queue reorder keeps only the latest pending order during rapid adjustments", async t => {
+  const f = queueOrderFixture(t);
+  f.actions.moveQueueTrack("B", -1);
+  for (let index = 0; index < 101; index++) f.actions.moveQueueTrack("C", index % 2 ? 1 : -1);
+  const expected = f.state.music.queue.map(item => item.id);
+  assert.equal(f.requests.length, 1, "rapid input must not accumulate physical writes");
+  f.requests[0].resolve({ playlist: { id: "target", name: "First order" } }); await tick();
+  assert.equal(f.requests.length, 2, "intermediate unsent orders must be coalesced");
+  assert.deepEqual(f.requests[1].args[1].trackIds, expected);
+  f.requests[1].resolve({ playlist: { id: "target", name: "Final order" } }); await tick();
+  assert.deepEqual(f.state.music.queue.map(item => item.id), expected);
+  assert.equal(f.requests.length, 2);
+  assert.deepEqual(f.errors, []);
+});
+
+test("queue reorder bounds distinct pending playlists and releases settled capacity", async t => {
+  const f = queueOrderFixture(t);
+  for (let index = 0; index < 9; index++) {
+    f.state.music.activePlaylistId = `p${index}`;
+    f.state.music.queue = ["A", "B", "C"].map(track);
+    f.actions.moveQueueTrack("B", -1);
+  }
+  await tick();
+  assert.equal(f.requests.length, 8, "distinct playlists also need a physical write bound");
+  assert.deepEqual(f.state.music.queue.map(item => item.id), ["A", "B", "C"], "a rejected new order must roll back visibly");
+  assert.match(f.errors[0].message, /繁忙/);
+  for (const request of f.requests) request.resolve({ playlist: { id: request.args[0] } });
+  await tick();
+  f.actions.moveQueueTrack("B", -1);
+  assert.equal(f.requests.length, 9, "settled slots must accept new orders again");
+  f.requests[8].resolve({ playlist: { id: "p8" } }); await tick();
+});
+
+test("queue reorder never sends an unsent old-account order using a new account", async t => {
+  const account = globalThis.__fanhaoWebAccountContext;
+  const original = { ...account };
+  t.after(() => Object.assign(account, original));
+  account.owner = "first-account";
+  const f = queueOrderFixture(t);
+  f.actions.moveQueueTrack("B", -1);
+  f.actions.moveQueueTrack("C", -1);
+  assert.equal(f.requests.length, 1);
+  account.owner = "second-account";
+  const queue = f.state.music.queue, status = f.state.music.status;
+  const loadedAt = f.state.music.playlistsLoadedAt;
+  f.requests[0].resolve({ playlist: { id: "target", name: "Old account response" } }); await tick();
+  assert.equal(f.requests.length, 1, "the unsent order must not adopt the new account's identity");
+  assert.equal(f.state.music.queue, queue);
+  assert.equal(f.state.music.status, status);
+  assert.equal(f.state.music.playlistsLoadedAt, loadedAt, "an old account response must not invalidate the new account's cache");
+  assert.deepEqual(f.errors, []);
+});
+
+test("queue reorder separates same-revision owners and their rollback bases", async t => {
+  const account = globalThis.__fanhaoWebAccountContext;
+  const original = { ...account };
+  t.after(() => Object.assign(account, original));
+  account.owner = "first-account";
+  const f = queueOrderFixture(t);
+  f.actions.moveQueueTrack("B", -1);
+  account.owner = "guest";
+  f.state.music.queue = ["C", "B", "A"].map(track);
+  f.actions.moveQueueTrack("B", -1);
+  assert.equal(f.requests.length, 2, "a guest transition with unchanged revision must use its own writer slot");
+  f.requests[0].resolve({ playlist: { id: "target", name: "Old account" } }); await tick();
+  f.requests[1].reject(new Error("guest order failure")); await tick();
+  assert.deepEqual(f.state.music.queue.map(item => item.id), ["C", "B", "A"], "guest rollback must not reuse another account's confirmed order");
+  assert.equal(f.errors.length, 1);
+});
 
 for (const outcome of ["success", "failure"]) {
   test(`clearHistory late ${outcome} cannot cancel or overwrite a newer page load`, async t => {

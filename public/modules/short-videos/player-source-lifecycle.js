@@ -15,6 +15,14 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
     const shouldReload = Boolean(options.forceReload || player.error
       || player.dataset.shortVideoDecoderReleased === "1" || !boundSource);
     if (!shouldReload) return false;
+    player.shortVideoCancelTapGuard?.();
+    player.shortVideoCancelPictureInPicture?.();
+    player.shortVideoCancelWatchResume?.({ settle: false });
+    player.shortVideoCancelHoldSpeed?.();
+    if (!options.preservePlaybackRecovery) player.shortVideoCancelPlaybackRecovery?.();
+    player.shortVideoCancelFirstFrame?.();
+    if (!options.preservePlaybackStatus) player.shortVideoCancelPlaybackStatus?.();
+    player.dataset.shortVideoSourceGeneration = String(Number(player.dataset.shortVideoSourceGeneration || 0) + 1);
     delete player.dataset.shortVideoFrameReady;
     delete player.dataset.shortVideoFrameReadyAt;
     delete player.dataset.shortVideoDecoderReleased;
@@ -33,13 +41,7 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
       || player.currentSrc || player.getAttribute("src") || "").trim();
     if (!source) return false;
     const pauseAfter = options.pauseAfter !== false;
-    const settleGhost = () => {
-      if (!pauseAfter || !player.classList.contains("is-ghost")) return;
-      player.pause?.();
-      player.muted = true;
-      player.preload = "metadata";
-    };
-    if (options.forceReload || player.error || !player.currentSrc
+    if (options.forceReload || player.error || !(player.currentSrc || player.getAttribute("src"))
       || player.dataset.shortVideoDecoderReleased === "1") {
       ensureSource(player, video, {
         source,
@@ -47,6 +49,23 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
         reason: String(options.reason || "adjacent-warm")
       });
     }
+    const warmIdentity = {
+      token: player.dataset.shortVideoWarmScheduleToken,
+      videoId: player.dataset.videoId,
+      slot: player.dataset.shortVideoSlot,
+      sourceGeneration: player.dataset.shortVideoSourceGeneration,
+      source: player.getAttribute("src") || player.currentSrc || ""
+    };
+    const ownsWarmup = () => warmIdentity.token === player.dataset.shortVideoWarmScheduleToken
+      && warmIdentity.videoId === player.dataset.videoId && warmIdentity.slot === player.dataset.shortVideoSlot
+      && warmIdentity.sourceGeneration === player.dataset.shortVideoSourceGeneration
+      && warmIdentity.source === (player.getAttribute("src") || player.currentSrc || "");
+    const settleGhost = () => {
+      if (!pauseAfter || !ownsWarmup() || !player.classList.contains("is-ghost")) return;
+      player.pause?.();
+      player.muted = true;
+      player.preload = "metadata";
+    };
     player.preload = "auto";
     player.muted = true;
     if (player.readyState >= 1 && player.currentTime > 0.12) {
@@ -58,7 +77,7 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
     player.play?.().catch(() => {});
     const ready = await readyPromise;
     settleGhost();
-    return ready || player.readyState >= 2;
+    return ownsWarmup() && ready;
   }
 
   return {
@@ -69,11 +88,27 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
 
 export function disposeShortVideoMedia(root, options = {}) {
   const release = options.release !== false;
+  if (release) {
+    root?.shortVideoDisposeCaption?.();
+    root?.querySelectorAll?.(".short-video-reel-panel")?.forEach?.((panel) => panel.shortVideoDisposeCaption?.());
+  }
   if (release) root?.querySelectorAll?.(".short-video-gallery-player")?.forEach?.((gallery) => {
     gallery.shortVideoGalleryDispose?.();
   });
   root?.querySelectorAll?.("video, audio")?.forEach?.((player) => {
     try {
+      player.shortVideoCancelWarmup?.();
+      player.shortVideoCancelTapGuard?.();
+      player.shortVideoCancelPictureInPicture?.();
+      player.shortVideoDisposeSoundPreview?.({ restorePlayback: false });
+      player.shortVideoFlushWatch?.({ force: true });
+      if (release) player.shortVideoDisposeWatchResume?.();
+      else player.shortVideoCancelWatchResume?.();
+      if (release) player.shortVideoDisposeHoldSpeed?.();
+      else player.shortVideoCancelHoldSpeed?.();
+      player.shortVideoCancelPlaybackRecovery?.();
+      player.shortVideoCancelFirstFrame?.();
+      player.shortVideoCancelPlaybackStatus?.();
       player.muted = true;
       player.onended = null;
       player.pause?.();

@@ -239,6 +239,7 @@ function settingsController() {
         root: els.settingsRoot,
         summary: els.settingsSummary,
         status: els.settingsStatus,
+        isActive: () => state.activeView === "settings",
         onSaved: () => invalidateResource("readerCache")
       }));
   }
@@ -1142,6 +1143,11 @@ function setView(view, options = {}) {
   else clearWorkMoveOpsPoll();
   if (options.pushHash) {
     history.replaceState(null, "", `#${state.activeView}`);
+  }
+  if (state.activeView === "settings" && settingsControllerPromise) {
+    settingsControllerPromise.then(controller => {
+      if (state.activeView === "settings") controller.render();
+    }).catch(reportViewLoadError);
   }
   if (options.load !== false) {
     loadView(state.activeView).catch(reportViewLoadError);

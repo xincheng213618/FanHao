@@ -1,54 +1,195 @@
-export function createSettingsController({ api, root, summary, status, onSaved }) {
+export function createSettingsController({ api, root, summary, status, onSaved, isActive = () => true }) {
   let modules = [];
   let activeModuleId = "";
+  let navigation = null;
+  let content = null;
+  let readOwner = null;
+  let writeVersion = 0;
+  let statusOwner = null;
+  let catalogError = "";
+  let messageState = { message: "", tone: "" };
+  const views = new Map();
+  const fields = new WeakMap();
+  const mutations = new Set();
 
   root?.addEventListener("click", handleClick);
   root?.addEventListener("submit", handleSubmit);
+  for (const type of ["input", "change", "compositionstart", "compositionend"]) {
+    root?.addEventListener(type, event => {
+      const binding = fields.get(event.target);
+      if (!binding) return;
+      binding.revision++;
+      if (type === "compositionstart") binding.composing = true;
+      if (type === "compositionend") binding.composing = false;
+    });
+  }
 
   async function load(options = {}) {
     if (!root) return false;
+    readOwner?.controller?.abort();
+    const request = { controller: null };
+    readOwner = request;
+    statusOwner = request;
+    root.setAttribute("aria-busy", "true");
     if (!options.quiet) setStatus("正在读取模块设置");
     try {
-      const data = await api("/api/admin/settings");
-      modules = Array.isArray(data.modules) ? data.modules : [];
-      if (!modules.some((module) => module.id === activeModuleId)) {
-        activeModuleId = modules[0]?.id || "";
+      while (readOwner === request) {
+        while (mutations.size) {
+          await Promise.all([...mutations].map(operation => operation.done));
+          if (readOwner !== request) return false;
+        }
+        if (readOwner !== request) return false;
+        const version = writeVersion;
+        request.controller = new AbortController();
+        request.readFields = captureReadFields(root);
+        let data;
+        try { data = await api("/api/admin/settings", { signal: request.controller.signal }); }
+        catch (error) {
+          if (readOwner !== request) return false;
+          if (version !== writeVersion || mutations.size) continue;
+          throw error;
+        }
+        if (readOwner !== request) return false;
+        // A catalog captured before a write cannot undo its confirmed receipt.
+        if (version !== writeVersion || mutations.size) continue;
+        modules = Array.isArray(data.modules) ? data.modules : [];
+        if (!modules.some(module => module.id === activeModuleId)) activeModuleId = modules[0]?.id || "";
+        render("", request);
+        if (statusOwner === request) setStatus("");
+        return true;
       }
-      render();
-      if (!options.quiet) setStatus("");
-      return true;
-    } catch (error) {
-      modules = [];
-      render(error.message || "模块设置读取失败");
-      setStatus(error.message || "模块设置读取失败", "error");
       return false;
+    } catch (error) {
+      if (readOwner !== request) return false;
+      render(error.message || "模块设置读取失败");
+      if (statusOwner === request) setStatus(error.message || "模块设置读取失败", "error");
+      return false;
+    } finally {
+      if (readOwner === request) { readOwner = null; root.removeAttribute("aria-busy"); }
     }
   }
 
-  function render(errorMessage = "") {
+  function render(errorMessage = catalogError, confirmation = null) {
     if (!root) return;
-    root.replaceChildren();
+    catalogError = errorMessage;
     const sectionCount = modules.reduce((total, module) => total + sectionsOf(module).length, 0);
-    if (summary) {
+    if (summary && isActive()) {
       summary.textContent = errorMessage
-        ? "设置注册表暂不可用"
+        ? (modules.length ? "刷新失败，已保留当前设置和输入" : "设置注册表暂不可用")
         : `${modules.length} 个模块 · ${sectionCount} 组设置`;
     }
     if (!modules.length) {
-      root.append(emptyState(errorMessage || "当前没有模块声明可配置项"));
+      views.clear(); navigation = null; content = null;
+      const empty = emptyState(errorMessage || (readOwner ? "正在读取模块设置" : "当前没有模块声明可配置项"));
+      if (errorMessage) {
+        const retry = document.createElement("button");
+        retry.type = "button"; retry.className = "folder-button"; retry.textContent = "重试读取";
+        retry.addEventListener("click", () => { if (root.contains(retry) && isActive() && !readOwner) void load(); });
+        empty.append(retry);
+      }
+      root.replaceChildren(empty);
+      paintStatus();
       return;
     }
+    if (navigation?.parentElement !== root || content?.parentElement !== root) {
+      views.clear();
+      navigation = document.createElement("nav");
+      navigation.className = "admin-settings-modules";
+      navigation.setAttribute("aria-label", "设置模块");
+      content = document.createElement("div"); content.className = "admin-settings-content";
+      root.replaceChildren(navigation, content);
+    }
+    for (const [index, module] of modules.entries()) {
+      const nextButton = createModuleButton(module, index), nextPanel = createModulePanel(module);
+      let view = views.get(module.id);
+      if (!view) { view = { button: nextButton, panel: nextPanel }; views.set(module.id, view); }
+      else {
+        view.button.replaceChildren(...nextButton.childNodes);
+        syncPanel(view.panel, nextPanel, confirmation);
+      }
+    }
+    for (const id of views.keys()) if (!modules.some(module => module.id === id)) views.delete(id);
+    reconcileChildren(navigation, modules.map(module => views.get(module.id).button));
+    reconcileChildren(content, modules.map(module => views.get(module.id).panel));
+    activateModule();
+    paintMutations();
+    paintStatus();
+  }
 
-    const navigation = document.createElement("nav");
-    navigation.className = "admin-settings-modules";
-    navigation.setAttribute("aria-label", "设置模块");
-    modules.forEach((module, index) => navigation.append(createModuleButton(module, index)));
+  function activateModule() {
+    for (const [id, view] of views) {
+      const active = id === activeModuleId;
+      view.button.classList.toggle("active", active);
+      view.button.setAttribute("aria-pressed", String(active));
+      view.panel.hidden = !active;
+      view.panel.inert = !active;
+    }
+  }
 
-    const content = document.createElement("div");
-    content.className = "admin-settings-content";
-    const activeModule = modules.find((module) => module.id === activeModuleId) || modules[0];
-    content.append(createModulePanel(activeModule));
-    root.append(navigation, content);
+  function syncPanel(panel, next, confirmation) {
+    panel.querySelector(".admin-settings-module-head").replaceWith(next.querySelector(".admin-settings-module-head"));
+    const forms = new Map([...panel.querySelectorAll("form")].map(form => [form.dataset.settingsSection, form]));
+    const wanted = [panel.firstElementChild];
+    for (const fresh of [...next.querySelectorAll("form")]) {
+      const form = forms.get(fresh.dataset.settingsSection);
+      if (!form) { wanted.push(fresh); continue; }
+      form.querySelector(".admin-settings-section-head").replaceWith(fresh.querySelector(".admin-settings-section-head"));
+      let grid = form.querySelector(".admin-settings-fields");
+      const nextGrid = fresh.querySelector(".admin-settings-fields");
+      if (nextGrid) {
+        grid ||= document.createElement("div"); grid.className = nextGrid.className;
+        const controls = new Map([...grid.querySelectorAll("[data-setting-key]")].map(control => [control.dataset.settingKey, control]));
+        const wrappers = [];
+        for (const wrapper of [...nextGrid.children]) {
+          const expected = wrapper.querySelector("[data-setting-key]"), control = controls.get(expected.dataset.settingKey);
+          if (!control || !sameControlKind(control, expected)) { wrappers.push(wrapper); continue; }
+          const binding = fields.get(control), nextBinding = fields.get(expected), value = controlValue(control);
+          const submitted = confirmation?.submitted?.get(control);
+          const selection = controlSelection(control);
+          const selectedLater = submitted && document.activeElement === control && selection && submitted.selection
+            && (selection.start !== submitted.selection.start || selection.end !== submitted.selection.end || selection.direction !== submitted.selection.direction);
+          const confirmed = submitted && submitted.revision === binding.revision && submitted.value === value && !selectedLater;
+          const editedAfterSave = submitted && !confirmed;
+          if (submitted && (editedAfterSave || binding.composing)) confirmation.laterEdits = true;
+          const observed = confirmation?.readFields?.get(control);
+          const editedAfterRead = observed && (observed.revision !== binding.revision || (document.activeElement === control && selection && observed.selection
+            && (selection.start !== observed.selection.start || selection.end !== observed.selection.end || selection.direction !== observed.selection.direction)));
+          const update = !binding.composing && !editedAfterSave && !editedAfterRead && (confirmed || value === binding.baseline || nextBinding.field.readOnly);
+          syncControlAttributes(control, expected);
+          if (control.tagName === "SELECT") reconcileOptions(control, expected);
+          if (update || (control.tagName === "SELECT" && ![...control.options].some(option => option.value === value))) {
+            assignControlValue(control, nextBinding.baseline);
+          }
+          binding.field = nextBinding.field; binding.baseline = nextBinding.baseline;
+          const oldWrapper = control.parentElement;
+          oldWrapper.className = wrapper.className;
+          oldWrapper.querySelector(".admin-setting-field-title").replaceWith(wrapper.querySelector(".admin-setting-field-title"));
+          const help = oldWrapper.querySelector(".admin-setting-help"), nextHelp = wrapper.querySelector(".admin-setting-help");
+          if (help && nextHelp) help.replaceWith(nextHelp);
+          else if (help) help.remove();
+          else if (nextHelp) oldWrapper.append(nextHelp);
+          wrappers.push(oldWrapper);
+        }
+        reconcileChildren(grid, wrappers);
+      } else { grid?.remove(); grid = null; }
+      let actions = form.querySelector(".admin-actions");
+      const nextActions = fresh.querySelector(".admin-actions");
+      if (nextActions) {
+        actions ||= document.createElement("div"); actions.className = nextActions.className;
+        const buttons = new Map([...actions.children].map(button => [button.dataset.settingsAction || "save", button]));
+        const wantedButtons = [...nextActions.children].map(button => {
+          const current = buttons.get(button.dataset.settingsAction || "save");
+          if (!current) return button;
+          current.className = button.className;
+          current.dataset.settingsIdleLabel = button.dataset.settingsIdleLabel;
+          return current;
+        });
+        reconcileChildren(actions, wantedButtons);
+      } else { actions?.remove(); actions = null; }
+      reconcileChildren(form, [form.firstElementChild, grid, actions, form.querySelector("[data-settings-section-status]")].filter(Boolean));
+      wanted.push(form);
+    }
+    reconcileChildren(panel, wanted);
   }
 
   function createModuleButton(module, index) {
@@ -132,6 +273,7 @@ export function createSettingsController({ api, root, summary, status, onSaved }
         save.type = "submit";
         save.className = "folder-button";
         save.textContent = section.saveLabel || "保存设置";
+        save.dataset.settingsIdleLabel = save.textContent;
         actionRow.append(save);
       }
       for (const action of actions) actionRow.append(createActionButton(module, section, action));
@@ -161,6 +303,7 @@ export function createSettingsController({ api, root, summary, status, onSaved }
 
     const control = createControl(module, field);
     control.dataset.settingKey = key;
+    fields.set(control, { field, baseline: controlValue(control), revision: 0, composing: false });
     wrapper.append(control);
 
     const help = [field.help || field.description || "", statusSummary(fieldStatus)].filter(Boolean).join(" · ");
@@ -175,7 +318,7 @@ export function createSettingsController({ api, root, summary, status, onSaved }
 
   function createControl(module, field) {
     const key = fieldKey(field);
-    const value = module.values?.[key];
+    const value = field.writeOnly ? undefined : module.values?.[key];
     let control;
     if (["string-list", "secret"].includes(field.type) && Number(field.rows || 0) > 1) {
       control = document.createElement("textarea");
@@ -227,6 +370,7 @@ export function createSettingsController({ api, root, summary, status, onSaved }
     button.type = "button";
     button.className = `folder-button ${action.kind === "primary" ? "" : "subtle"}`.trim();
     button.textContent = action.label || action.id;
+    button.dataset.settingsIdleLabel = button.textContent;
     button.dataset.settingsAction = action.id;
     button.dataset.settingsModule = module.id;
     button.dataset.settingsSection = section.id;
@@ -234,85 +378,164 @@ export function createSettingsController({ api, root, summary, status, onSaved }
   }
 
   async function handleSubmit(event) {
-    const form = event.target.closest("form[data-settings-module][data-settings-section]");
+    const form = event.target.closest?.("form[data-settings-module][data-settings-section]");
     if (!form) return;
     event.preventDefault();
+    if (!currentForm(form)) return;
     const module = modules.find((item) => item.id === form.dataset.settingsModule);
     const section = sectionsOf(module).find((item) => item.id === form.dataset.settingsSection);
-    if (!module || !section) return;
+    if (!module || !section || mutationBlocked(module.id, section, false)) return;
     const button = form.querySelector('button[type="submit"]');
-    const sectionStatus = form.querySelector("[data-settings-section-status]");
-    setBusy(button, true, "保存中");
-    setNodeStatus(sectionStatus, "正在保存此分组");
+    const values = valuesFromForm(form, section);
+    if (!Object.keys(values).length) { setNodeStatus(form.querySelector("[data-settings-section-status]"), "没有填写需要保存的新内容"); return; }
+    const request = beginMutation(module, section, form, button, "save", "保存中");
+    for (const control of form.querySelectorAll("[data-setting-key]")) {
+      if (Object.hasOwn(values, control.dataset.settingKey)) request.submitted.set(control, {
+        value: controlValue(control), revision: fields.get(control).revision, selection: controlSelection(control)
+      });
+    }
+    setNodeStatus(request.status, "正在保存此分组");
     try {
-      const values = valuesFromForm(form, section);
-      if (!Object.keys(values).length) {
-        setNodeStatus(sectionStatus, "没有填写需要保存的新内容");
-        return;
-      }
       const data = await api(`/api/admin/settings/${encodeURIComponent(module.id)}`, {
         method: "PATCH",
         body: { values }
       });
-      replaceModule(data.module);
-      render();
-      setStatus(`${module.title || module.id} · ${section.title || section.id} 已保存`, "success");
-      await onSaved?.(data.module || module);
+      acceptReceipt(data.module, request);
+      const message = `${module.title || module.id} · ${section.title || section.id} ${request.laterEdits ? "已保存提交内容；保留了后续编辑" : "已保存"}`;
+      finishMessage(request, message, "success");
+      await notifySaved(data.module, request, message);
     } catch (error) {
-      setNodeStatus(sectionStatus, error.message || "保存失败", "error");
-      setStatus(error.message || "保存失败", "error");
-    } finally {
-      setBusy(button, false);
-    }
+      finishMessage(request, error.message || "保存失败", "error");
+    } finally { endMutation(request); }
   }
 
   async function handleClick(event) {
-    const moduleButton = event.target.closest("[data-settings-module]:not([data-settings-section])");
-    if (moduleButton?.dataset.settingsModule && modules.some((module) => module.id === moduleButton.dataset.settingsModule)) {
+    const moduleButton = event.target.closest?.("button[data-settings-module]:not([data-settings-section])");
+    if (moduleButton && root.contains(moduleButton) && isActive()
+        && views.get(moduleButton.dataset.settingsModule)?.button === moduleButton) {
+      if (activeModuleId === moduleButton.dataset.settingsModule) return;
       activeModuleId = moduleButton.dataset.settingsModule;
-      render();
+      statusOwner = null; setStatus(""); activateModule();
       return;
     }
 
-    const actionButton = event.target.closest("button[data-settings-action]");
-    if (!actionButton) return;
+    const actionButton = event.target.closest?.("button[data-settings-action]");
+    const form = actionButton?.closest("form");
+    if (!actionButton || !currentForm(form)) return;
     const module = modules.find((item) => item.id === actionButton.dataset.settingsModule);
     const section = sectionsOf(module).find((item) => item.id === actionButton.dataset.settingsSection);
     const action = (section?.actions || []).find((item) => item.id === actionButton.dataset.settingsAction);
-    if (!module || !section || !action) return;
+    if (!module || !section || !action || mutationBlocked(module.id, section, true)) return;
     if (action.confirm && !window.confirm(action.confirm)) return;
 
-    const form = actionButton.closest("form");
-    const sectionStatus = form?.querySelector("[data-settings-section-status]");
-    setBusy(actionButton, true, action.busyLabel || "执行中");
-    setNodeStatus(sectionStatus, action.progressLabel || "正在执行模块操作");
+    const request = beginMutation(module, section, form, actionButton, "action", action.busyLabel || "执行中");
+    setNodeStatus(request.status, action.progressLabel || "正在执行模块操作");
     try {
       const data = await api(`/api/admin/settings/${encodeURIComponent(module.id)}/actions/${encodeURIComponent(action.id)}`, {
         method: "POST",
         body: {}
       });
-      replaceModule(data.module);
-      render();
+      acceptReceipt(data.module, request);
       const result = data.action?.result || data.result || {};
       const resultMessage = result.message
         || (result.test?.ok ? `测试通过${result.test.title ? `：${result.test.title}` : ""}` : result.test?.error)
         || `${action.label || action.id} 已完成`;
-      setStatus(resultMessage, result.ok === false ? "error" : "success");
-      await onSaved?.(data.module || module);
+      finishMessage(request, resultMessage, result.ok === false || data.ok === false ? "error" : "success");
+      await notifySaved(data.module, request, resultMessage);
     } catch (error) {
-      setNodeStatus(sectionStatus, error.message || "操作失败", "error");
-      setStatus(error.message || "操作失败", "error");
-    } finally {
-      setBusy(actionButton, false);
+      finishMessage(request, error.message || "操作失败", "error");
+    } finally { endMutation(request); }
+  }
+
+  function currentForm(form) {
+    return Boolean(form && root.isConnected && root.contains(form) && isActive()
+      && form.dataset.settingsModule === activeModuleId
+      && views.get(activeModuleId)?.panel.contains(form) && !views.get(activeModuleId).panel.hidden);
+  }
+
+  function captureReadFields(scope) {
+    return new Map([...scope.querySelectorAll("[data-setting-key]")].filter(control => fields.has(control))
+      .map(control => [control, { revision: fields.get(control).revision, selection: controlSelection(control) }]));
+  }
+
+  function mutationBlocked(moduleId, section, action) {
+    const keys = new Set((section.fields || []).map(fieldKey));
+    return [...mutations].some(request => request.module.id === moduleId && (action || request.kind === "action"
+      || request.section.id === section.id || [...request.keys].some(key => keys.has(key))));
+  }
+
+  function beginMutation(module, section, form, button, kind, busyLabel) {
+    let resolve;
+    const request = { module, section, form, button, kind, busyLabel, submitted: new Map(),
+      keys: new Set((section.fields || []).map(fieldKey)), status: form.querySelector("[data-settings-section-status]"),
+      done: new Promise(done => { resolve = done; }), resolve: () => resolve() };
+    if (kind === "action") request.readFields = captureReadFields(views.get(module.id).panel);
+    mutations.add(request); writeVersion++;
+    statusOwner = request;
+    setStatus(`${module.title || module.id} · ${section.title || section.id} ${kind === "save" ? "正在保存" : "正在执行"}`);
+    paintMutations();
+    return request;
+  }
+
+  function endMutation(request) {
+    mutations.delete(request); request.submitted.clear(); request.resolve(); paintMutations();
+  }
+
+  function paintMutations() {
+    for (const module of modules) {
+      const panel = views.get(module.id)?.panel;
+      if (!panel) continue;
+      for (const form of panel.querySelectorAll("form")) {
+        const section = sectionsOf(module).find(item => item.id === form.dataset.settingsSection);
+        if (!section) continue;
+        const pending = [...mutations].find(request => request.form === form);
+        if (pending) form.setAttribute("aria-busy", "true"); else form.removeAttribute("aria-busy");
+        for (const button of form.querySelectorAll(".admin-actions button")) {
+          const busy = pending?.button === button;
+          button.setAttribute("aria-disabled", String(mutationBlocked(module.id, section, Boolean(button.dataset.settingsAction))));
+          if (busy) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
+          button.textContent = busy ? pending.busyLabel : button.dataset.settingsIdleLabel;
+        }
+      }
     }
+  }
+
+  function acceptReceipt(nextModule, request) {
+    if (nextModule?.id !== request.module.id) throw new Error("设置回执不匹配，请刷新确认保存结果");
+    const index = modules.findIndex(module => module.id === nextModule.id);
+    if (index < 0 || !mutations.has(request)) return;
+    if (request.kind === "action") modules[index] = nextModule;
+    else {
+      const current = modules[index], values = { ...current.values }, fieldStatus = { ...current.status?.fields };
+      const status = { ...current.status, fields: fieldStatus };
+      for (const key of request.keys) {
+        if (Object.hasOwn(nextModule.values || {}, key)) values[key] = nextModule.values[key]; else delete values[key];
+        const nextStatus = fieldStatusOf(nextModule, key);
+        if (nextStatus) fieldStatus[key] = nextStatus; else delete fieldStatus[key];
+        delete status[key];
+      }
+      modules[index] = { ...current, values, status };
+    }
+    render("", request);
+  }
+
+  function finishMessage(request, message, tone) {
+    if (root.contains(request.form)) setNodeStatus(request.status, message, tone);
+    if (statusOwner === request && activeModuleId === request.module.id) setStatus(message, tone);
+  }
+
+  async function notifySaved(module, request, message) {
+    try { await onSaved?.(module); }
+    catch (error) { finishMessage(request, `${message}；关联状态刷新失败：${error.message || "未知错误"}`, "error"); }
   }
 
   function valuesFromForm(form, section) {
     const values = {};
+    const controls = new Map([...form.querySelectorAll("[data-setting-key]")].map(control => [control.dataset.settingKey, control]));
     for (const field of Array.isArray(section.fields) ? section.fields : []) {
       if (field.readOnly) continue;
       const key = fieldKey(field);
-      const control = [...form.querySelectorAll("[data-setting-key]")].find((node) => node.dataset.settingKey === key);
+      const control = controls.get(key);
       if (!control) continue;
       if (field.writeOnly && !String(control.value || "").trim()) continue;
       if (field.type === "boolean") values[key] = Boolean(control.checked);
@@ -324,14 +547,13 @@ export function createSettingsController({ api, root, summary, status, onSaved }
     return values;
   }
 
-  function replaceModule(nextModule) {
-    if (!nextModule?.id) return;
-    const index = modules.findIndex((module) => module.id === nextModule.id);
-    if (index >= 0) modules[index] = nextModule;
+  function setStatus(message, tone = "") {
+    messageState = { message, tone };
+    paintStatus();
   }
 
-  function setStatus(message, tone = "") {
-    setNodeStatus(status, message, tone);
+  function paintStatus() {
+    if (root?.isConnected && isActive()) setNodeStatus(status, messageState.message, messageState.tone);
   }
 
   return Object.freeze({ load, render });
@@ -395,11 +617,49 @@ function formatDateTime(value) {
   return Number.isNaN(date.getTime()) ? String(value || "") : date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function setBusy(button, busy, busyText) {
-  if (!button) return;
-  button.dataset.originalText ||= button.textContent;
-  button.disabled = busy;
-  button.textContent = busy ? busyText : button.dataset.originalText;
+function controlValue(control) {
+  return control.type === "checkbox" ? control.checked : control.value;
+}
+
+function assignControlValue(control, value) {
+  if (controlValue(control) === value) return;
+  const selection = document.activeElement === control ? controlSelection(control) : null;
+  if (control.type === "checkbox") control.checked = value;
+  else control.value = value;
+  if (selection) control.setSelectionRange(selection.start, selection.end, selection.direction);
+}
+
+function controlSelection(control) {
+  return Number.isFinite(control.selectionStart) && Number.isFinite(control.selectionEnd)
+    ? { start: control.selectionStart, end: control.selectionEnd,
+      direction: control.selectionStart === control.selectionEnd ? "none" : control.selectionDirection || "none" } : null;
+}
+
+function sameControlKind(control, expected) {
+  return control.tagName === expected.tagName && (control.tagName !== "INPUT" || control.type === expected.type);
+}
+
+function syncControlAttributes(control, expected) {
+  for (const key of ["type", "rows", "spellcheck", "placeholder", "min", "max", "step", "required", "disabled", "autocomplete", "data-setting-unit"]) {
+    const value = expected.getAttribute(key);
+    if (value === null) control.removeAttribute(key);
+    else if (control.getAttribute(key) !== value) control.setAttribute(key, value);
+  }
+}
+
+function reconcileOptions(control, expected) {
+  if (control.options.length === expected.options.length && [...control.options].every((option, index) => option.value === expected.options[index].value)) {
+    [...control.options].forEach((option, index) => { if (option.textContent !== expected.options[index].textContent) option.textContent = expected.options[index].textContent; });
+    return;
+  }
+  const value = control.value, fallback = expected.value;
+  control.replaceChildren(...expected.options);
+  control.value = [...control.options].some(option => option.value === value) ? value : fallback;
+}
+
+function reconcileChildren(parent, wanted) {
+  wanted.forEach((node, index) => { if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null); });
+  for (const child of [...parent.children]) if (!wanted.includes(child)) child.remove();
 }
 
 function setNodeStatus(node, message, tone = "") {
@@ -407,6 +667,7 @@ function setNodeStatus(node, message, tone = "") {
   node.textContent = message || "";
   node.classList.toggle("error", tone === "error");
   node.classList.toggle("success", tone === "success");
+  node.setAttribute("role", tone === "error" ? "alert" : "status");
 }
 
 function emptyState(message) {

@@ -1,3 +1,5 @@
+import { createTxtFormatTool } from "./txt-format-tool.js";
+
 const GAMES = [
   {
     availability: "网页 + 手机端",
@@ -65,6 +67,7 @@ export function createToolsPage(deps) {
     els,
     resetProgressiveCoverLoading
   } = deps;
+  let txtTool = null;
 
   function renderStats() {
     els.statsRow.innerHTML = "";
@@ -72,6 +75,7 @@ export function createToolsPage(deps) {
   }
 
   function renderView() {
+    txtTool?.destroy();
     disconnectPeopleIndexAutoload();
     cancelScheduledWorkRendering();
     resetProgressiveCoverLoading();
@@ -80,7 +84,8 @@ export function createToolsPage(deps) {
     const library = document.createElement("section");
     library.className = "game-library";
     library.setAttribute("aria-labelledby", "gameLibraryTitle");
-    library.append(createHero(), createGameCollection());
+    txtTool = createTxtFormatTool(deps);
+    library.append(createHero(), createGameCollection(), txtTool.element);
     els.workGrid.append(library);
   }
 
@@ -102,6 +107,20 @@ export function createToolsPage(deps) {
     const description = document.createElement("p");
     description.textContent = "不需要安装，也没有账号流程。所有游戏都直接在浏览器本地运行，打开就能玩。";
 
+    const textTool = txtTool.element;
+    const shortcut = document.createElement("button");
+    shortcut.type = "button";
+    shortcut.className = "game-library-tool-shortcut";
+    shortcut.textContent = "TXT 文本整理 →";
+    shortcut.setAttribute("aria-label", "打开 TXT 文本整理");
+    shortcut.addEventListener("click", () => {
+      if (!hero.isConnected || !textTool.isConnected) return;
+      textTool.open = true;
+      const summary = textTool.querySelector("summary");
+      summary.focus({ preventScroll: true });
+      summary.scrollIntoView({ block: "center", behavior: "auto" });
+    });
+
     const notes = document.createElement("div");
     notes.className = "game-library-notes";
     notes.append(
@@ -110,7 +129,7 @@ export function createToolsPage(deps) {
       createNote("本地", "浏览器运行")
     );
 
-    copy.append(eyebrow, title, description);
+    copy.append(eyebrow, title, description, shortcut);
     hero.append(copy, notes);
     return hero;
   }
@@ -222,6 +241,7 @@ export function createToolsPage(deps) {
   }
 
   return {
+    resetReader() { txtTool?.destroy(); txtTool = null; },
     renderStats,
     renderView
   };

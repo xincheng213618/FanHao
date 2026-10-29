@@ -1,4 +1,5 @@
 const COLLECTION_WINDOW_TTL_MS = 5 * 60 * 1000;
+let cancelPositionRestore = null;
 
 export function captureCollectionWindow(shortVideo = {}, scrollY = 0, anchorVideoId = "", activeElement = null, now = Date.now()) {
   const data = shortVideo.collectionData;
@@ -19,7 +20,8 @@ export function captureCollectionWindow(shortVideo = {}, scrollY = 0, anchorVide
   };
 }
 
-export function restoreCollectionWindow(shortVideo = {}, snapshot = {}, render = () => {}) {
+export function restoreCollectionWindow(shortVideo = {}, snapshot = {}, render = () => {}, options = {}) {
+  if (options.isCurrent?.() === false) return false;
   if (!matchesCollectionWindow(snapshot, shortVideo.collectionId)) return false;
   shortVideo.collectionData = {
     ...snapshot.data,
@@ -34,8 +36,13 @@ export function restoreCollectionWindow(shortVideo = {}, snapshot = {}, render =
   };
   shortVideo.collectionLoading = false;
   shortVideo.collectionError = "";
+  const restoredData = shortVideo.collectionData;
   render();
-  restoreCollectionPosition(snapshot);
+  restoreCollectionPosition(snapshot, {
+    isCurrent: () => options.isCurrent?.() !== false && shortVideo.mode === "collection"
+      && !shortVideo.current && shortVideo.collectionData === restoredData
+      && String(shortVideo.collectionId || "") === String(snapshot.collectionId || "")
+  });
   return true;
 }
 
@@ -50,18 +57,38 @@ export function matchesCollectionWindow(snapshot, collectionId, now = Date.now()
   );
 }
 
-export function restoreCollectionPosition(snapshot = {}) {
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
+export function restoreCollectionPosition(snapshot = {}, options = {}) {
+  const root = document.querySelector(".short-video-home");
+  let cancelled = false, frame = null;
+  const isCurrent = () => !cancelled && options.isCurrent?.() !== false && root?.isConnected
+    && document.querySelector(".short-video-home") === root && root.getAttribute?.("aria-busy") !== "true";
+  const cancel = () => {
+    cancelled = true;
+    if (frame != null) window.cancelAnimationFrame?.(frame);
+    frame = null;
+    if (cancelPositionRestore === cancel) cancelPositionRestore = null;
+  };
+  if (!isCurrent()) { cancel(); return cancel; }
+  cancelPositionRestore?.();
+  cancelPositionRestore = cancel;
+  frame = window.requestAnimationFrame(() => {
+    frame = null;
+    if (!isCurrent()) { cancel(); return; }
+    frame = window.requestAnimationFrame(() => {
+      frame = null;
+      if (!isCurrent()) { cancel(); return; }
       window.scrollTo({ top: Math.max(0, Number(snapshot.scrollY || 0)), left: 0, behavior: "auto" });
+      if (!isCurrent()) { cancel(); return; }
       const videoId = String(snapshot.focusVideoId || snapshot.anchorVideoId || "").trim();
-      const target = videoId
+      const target = options.focusTarget ? options.focusTarget() : videoId
         ? document.querySelector(`[data-collection-video-id="${CSS.escape(videoId)}"] .short-video-thumb-open`)
           || document.querySelector(`[data-collection-video-id="${CSS.escape(videoId)}"]`)
         : null;
       target?.focus?.({ preventScroll: true });
+      cancel();
     });
   });
+  return cancel;
 }
 
 export function captureCollectionFeedWindow(shortVideo = {}, scrollY = 0, activeElement = null, now = Date.now()) {
@@ -80,21 +107,24 @@ export function captureCollectionFeedWindow(shortVideo = {}, scrollY = 0, active
   };
 }
 
-export function restoreCollectionFeedWindow(shortVideo = {}, snapshot = {}, render = () => {}, targetRoute = null) {
+export function restoreCollectionFeedWindow(shortVideo = {}, snapshot = {}, render = () => {}, targetRoute = null, options = {}) {
+  if (options.isCurrent?.() === false) return false;
   const age = Date.now() - Number(snapshot?.createdAt || 0);
   if (!snapshot?.state || age < 0 || age > COLLECTION_WINDOW_TTL_MS) return false;
   if (targetRoute && snapshot.routeSignature !== collectionFeedRouteSignature(targetRoute)) return false;
   Object.assign(shortVideo, snapshot.state, { data: clonePageData(snapshot.state.data) });
+  const restoredData = shortVideo.data;
+  const signature = collectionFeedRouteSignature(shortVideo);
   render();
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
-      window.scrollTo({ top: Math.max(0, Number(snapshot.scrollY || 0)), left: 0, behavior: "auto" });
+  restoreCollectionPosition(snapshot, {
+    isCurrent: () => options.isCurrent?.() !== false && !shortVideo.current
+      && shortVideo.data === restoredData && collectionFeedRouteSignature(shortVideo) === signature,
+    focusTarget: () => {
       const collectionId = String(snapshot.focusCollectionId || "").trim();
-      const focusTarget = collectionId
+      return collectionId
         ? document.querySelector(`.short-video-collection-sidebar-item[data-collection-id="${CSS.escape(collectionId)}"]`)
         : null;
-      focusTarget?.focus?.({ preventScroll: true });
-    });
+    }
   });
   return true;
 }

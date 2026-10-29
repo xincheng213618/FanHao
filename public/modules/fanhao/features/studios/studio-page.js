@@ -1,5 +1,6 @@
 import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPrefetchCache } from "../../prefetch-cache.js?v=20261004-fanhao-requests-01";
+import { resolveWorkPage } from "../works/work-page-state.js";
 
 const STUDIO_DESKTOP_PAGE_SIZE = 48;
 const STUDIO_MOBILE_PAGE_SIZE = 32;
@@ -10,7 +11,7 @@ const STUDIO_INDEX_BATCH_SIZE = 64;
 const STUDIO_INDEX_BATCH_DELAY_MS = 16;
 
 export function createStudioPage(deps) {
-  const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, getWorkFilterMode, hidePersonProfile, onNavigationStarted, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, getWorkFilterMode, hidePersonProfile, onNavigationStarted, onWorkRead = () => null, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
   const studioPrefetches = createPrefetchCache({ limit: STUDIO_PREFETCH_LIMIT, ttlMs: STUDIO_PREFETCH_TTL_MS });
   let studioIndexRenderTimer = null;
@@ -35,6 +36,10 @@ export function createStudioPage(deps) {
     cancelIndexRendering();
   }
 
+  function invalidatePrefetches() {
+    studioPrefetches.clear();
+  }
+
   function studioPageSize() {
     const viewportLimit = globalThis.matchMedia?.("(max-width: 720px)")?.matches
       ? STUDIO_MOBILE_PAGE_SIZE
@@ -46,6 +51,8 @@ export function createStudioPage(deps) {
     onNavigationStarted?.(options);
     studioPageOwner = null;
     state.studioWorksLoadingMore = false;
+    state.studioWorksRawLoaded = null;
+    state.studioWorksHasMore = null;
     cancelIndexRendering();
     const request = studioRequests.begin();
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
@@ -71,23 +78,29 @@ export function createStudioPage(deps) {
       onNavigationStarted?.(options);
       studioPageOwner = null;
       state.studioWorksLoadingMore = false;
+      state.studioWorksRawLoaded = null;
+      state.studioWorksHasMore = null;
     }
     cancelIndexRendering();
     const append = Boolean(options.append);
     const request = studioRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
-    const path = studioDetailPath(studioId, seriesId, append ? state.works.length : 0);
+    const offset = append ? (Number.isSafeInteger(state.studioWorksRawLoaded) ? state.studioWorksRawLoaded : state.works.length) : 0;
+    const path = studioDetailPath(studioId, seriesId, offset);
     const query = studioDetailPath(studioId, seriesId, 0);
     const isCurrent = () => request.isCurrent() && state.activeView === "studios"
       && query === studioDetailPath(studioId, seriesId, 0);
+    const finishWorkRead = onWorkRead(path, isCurrent, () => {
+      cancelPendingRequests();
+      return loadStudioDetail(studioId, seriesId);
+    });
     try {
       const data = await fetchStudioDetail(path, request, !append);
       if (!isCurrent()) return;
       if (!append) resetSelection();
       state.selectedStudio = data.studio || state.selectedStudio || null;
       state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
-      applyStudioWorks(data.works || [], append);
-      state.studioWorksTotal = data.total ?? data.count ?? state.works.length;
+      applyStudioWorks(data, append, offset);
       state.studioWorksTraitFacets = data.traitFacets || (append ? state.studioWorksTraitFacets : null) || null;
       if (!append) resetWorkPaging();
       const studio = state.selectedStudio;
@@ -104,6 +117,7 @@ export function createStudioPage(deps) {
       els.workGrid.innerHTML = "";
       appendEmpty(error.message || "片商作品读取失败");
     } finally {
+      finishWorkRead?.();
       request.finish();
     }
   }
@@ -138,18 +152,20 @@ export function createStudioPage(deps) {
     return api(path, { signal: request.signal });
   }
 
-  function applyStudioWorks(nextWorks, append) {
-    if (!append) {
-      state.works = nextWorks;
-      return;
-    }
-    const seen = new Set(state.works.map((work) => work.id));
-    state.works.push(...nextWorks.filter((work) => !seen.has(work.id)));
-    state.workVisibleLimit += studioPageSize();
+  function applyStudioWorks(data, append, offset) {
+    const page = resolveWorkPage(data, { existingWorks: append ? state.works : [], offset, previousTotal: append ? state.studioWorksTotal : 0 });
+    if (append) {
+      state.works.push(...page.works);
+      state.workVisibleLimit += studioPageSize();
+    } else state.works = page.works;
+    state.studioWorksTotal = page.total;
+    state.studioWorksRawLoaded = page.rawLoaded;
+    state.studioWorksHasMore = page.hasMore;
   }
 
   async function loadMoreStudioWorks(button) {
-    if (state.activeView !== "studios" || state.studioWorksLoadingMore || state.works.length >= state.studioWorksTotal || !state.selectedStudio) return;
+    if (state.activeView !== "studios" || state.studioWorksLoadingMore || !state.selectedStudio
+      || !(state.studioWorksHasMore ?? state.works.length < state.studioWorksTotal)) return;
     const owner = {};
     studioPageOwner = owner;
     state.studioWorksLoadingMore = true;
@@ -180,6 +196,8 @@ export function createStudioPage(deps) {
     state.selectedStudio = null;
     state.selectedStudioSeriesId = "all";
     state.studioWorksTotal = 0;
+    state.studioWorksRawLoaded = null;
+    state.studioWorksHasMore = null;
     state.studioWorksTraitFacets = null;
     state.works = [];
     state.searchPeople = [];
@@ -362,5 +380,5 @@ export function createStudioPage(deps) {
     });
   }
 
-  return { cancelPendingRequests, loadStudios, loadMoreStudioWorks, loadStudioDetail };
+  return { cancelPendingRequests, invalidatePrefetches, loadStudios, loadMoreStudioWorks, loadStudioDetail };
 }

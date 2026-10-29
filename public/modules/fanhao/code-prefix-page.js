@@ -1,4 +1,5 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+import { resolveWorkPage } from "./features/works/work-page-state.js";
 
 const PREFIX_INDEX_DESKTOP_PAGE_SIZE = 96;
 const PREFIX_INDEX_MOBILE_PAGE_SIZE = 64;
@@ -16,6 +17,7 @@ export function createCodePrefixPage(deps) {
     hidePersonProfile,
     isNavigationCurrent,
     onNavigationStarted,
+    onWorkRead = () => null,
     renderWorks,
     resetWorkPaging,
     setMainHeader,
@@ -28,6 +30,9 @@ export function createCodePrefixPage(deps) {
   const indexRequests = createLatestRequestGate();
   let indexLoadObserver = null;
   let indexLoadPending = false;
+  let indexLoadTimer = null;
+  let indexQuery = "";
+  let renderedPrefixes = [];
   let detailPageOwner = null;
 
   state.codePrefixSortMode = readPrefixSortMode();
@@ -37,7 +42,7 @@ export function createCodePrefixPage(deps) {
   }
 
   async function applyRoute(route, options = {}) {
-    clearWorkSearch();
+    if (!options.preserveSearchDraft) clearWorkSearch();
     return route?.codePrefix
       ? selectPrefix(route.codePrefix, {
           ...options,
@@ -87,6 +92,8 @@ export function createCodePrefixPage(deps) {
     state.selectedCodePrefixFamily = false;
     state.selectedCodePrefixMeta = null;
     state.codePrefixTotal = 0;
+    state.codePrefixRawLoaded = null;
+    state.codePrefixHasMore = null;
     state.codePrefixFacets = null;
     state.codePrefixTraitFacets = null;
     state.codePrefixLoadingMore = false;
@@ -153,18 +160,52 @@ export function createCodePrefixPage(deps) {
       .filter((item) => item.prefix === "FC2" || item.prefix.startsWith("FC2-"))
       .reduce((sum, item) => sum + Number(item.localCount || 0), 0);
 
-    els.statsRow.innerHTML = "";
+    const existingControls = els.statsRow.querySelector(".code-prefix-index-controls");
+    if (existingControls) {
+      for (const child of [...els.statsRow.children]) if (child !== existingControls) child.remove();
+    } else els.statsRow.innerHTML = "";
     for (const [label, value] of [
       ["番号前缀", prefixes.length],
       ["已识别作品", localCount],
       ["已有厂商对应", mappedCount],
       ["FC2", fc2Count]
     ]) {
-      els.statsRow.append(createStat(label, value));
+      const stat = createStat(label, value);
+      if (existingControls) els.statsRow.insertBefore(stat, existingControls);
+      else els.statsRow.append(stat);
     }
+    if (existingControls) return;
 
     const controls = document.createElement("div");
     controls.className = "stat-quick-filters code-prefix-index-controls";
+    const searchLabel = document.createElement("label");
+    searchLabel.className = "code-prefix-index-search";
+    const caption = document.createElement("span");
+    caption.textContent = "搜索索引";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "前缀或厂商名称";
+    search.setAttribute("aria-label", "搜索番号前缀或厂商");
+    search.value = indexQuery;
+    search.addEventListener("input", () => {
+      if (!search.isConnected || state.activeView !== "codes" || state.selectedCodePrefix) return;
+      indexQuery = search.value;
+      state.codePrefixVisibleLimit = prefixIndexPageSize();
+      renderIndex();
+    });
+    searchLabel.append(caption, search);
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "text-button code-prefix-index-clear";
+    clear.textContent = "清空";
+    clear.setAttribute("aria-label", "清空索引搜索");
+    clear.addEventListener("click", () => {
+      if (!clear.isConnected || state.activeView !== "codes" || state.selectedCodePrefix) return;
+      search.value = indexQuery = "";
+      state.codePrefixVisibleLimit = prefixIndexPageSize();
+      renderIndex();
+      search.focus({ preventScroll: true });
+    });
     const group = document.createElement("div");
     group.className = "stat-filter-group stat-sort-group";
     const label = document.createElement("label");
@@ -181,13 +222,17 @@ export function createCodePrefixPage(deps) {
     );
     select.value = state.codePrefixSortMode || "count";
     select.addEventListener("change", () => {
+      if (!select.isConnected || state.activeView !== "codes" || state.selectedCodePrefix) return;
       state.codePrefixSortMode = select.value === "name" ? "name" : "count";
       writePrefixSortMode(state.codePrefixSortMode);
       state.codePrefixVisibleLimit = prefixIndexPageSize();
       renderIndex();
     });
     group.append(label, select);
-    controls.append(group);
+    const summary = document.createElement("span");
+    summary.className = "code-prefix-index-summary";
+    summary.setAttribute("role", "status");
+    controls.append(searchLabel, clear, group, summary);
     els.statsRow.append(controls);
   }
 
@@ -195,9 +240,14 @@ export function createCodePrefixPage(deps) {
     if (state.activeView !== "codes" || state.selectedCodePrefix) return;
     disconnectIndexAutoload();
     const prefixes = sortedPrefixes();
+    renderedPrefixes = prefixes;
+    const summary = els.statsRow.querySelector(".code-prefix-index-summary");
+    if (summary) summary.textContent = `${formatNumber(prefixes.length)} / ${formatNumber(state.codePrefixes.length)} 个番号前缀`;
+    const clear = els.statsRow.querySelector(".code-prefix-index-clear");
+    if (clear) clear.hidden = !indexQuery;
     els.workGrid.innerHTML = "";
     if (!prefixes.length) {
-      appendEmpty("本地资料库里还没有可识别的番号。");
+      appendEmpty(indexQuery.trim() ? "没有匹配的番号前缀或厂商，试试其他名称。" : "本地资料库里还没有可识别的番号。");
       return;
     }
 
@@ -231,6 +281,7 @@ export function createCodePrefixPage(deps) {
     row.className = "code-prefix-row";
     row.title = `查看 ${item.prefix} 番号作品`;
     row.addEventListener("click", () => {
+      if (row.isConnected === false || state.activeView !== "codes" || state.selectedCodePrefix) return;
       clearWorkSearch();
       selectPrefix(item.prefix);
     });
@@ -269,7 +320,9 @@ export function createCodePrefixPage(deps) {
 
   function sortedPrefixes() {
     const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
-    return [...(state.codePrefixes || [])].sort((a, b) =>
+    const query = indexQuery.trim().toLocaleLowerCase();
+    return (state.codePrefixes || []).filter(item => !query || [item.prefix, item.maker?.name, ...(item.makers || []).map(maker => maker.name)]
+      .some(value => String(value || "").toLocaleLowerCase().includes(query))).sort((a, b) =>
       state.codePrefixSortMode === "name"
         ? collator.compare(a.prefix, b.prefix) || Number(b.localCount || 0) - Number(a.localCount || 0)
         : Number(b.localCount || 0) - Number(a.localCount || 0) || collator.compare(a.prefix, b.prefix));
@@ -290,7 +343,7 @@ export function createCodePrefixPage(deps) {
 
   function loadMoreIndex() {
     if (state.activeView !== "codes" || state.selectedCodePrefix) return;
-    const prefixes = sortedPrefixes();
+    const prefixes = renderedPrefixes;
     const start = Math.min(state.codePrefixVisibleLimit, prefixes.length);
     if (start >= prefixes.length) return;
     const end = Math.min(prefixes.length, start + prefixIndexPageSize());
@@ -313,11 +366,13 @@ export function createCodePrefixPage(deps) {
   function observeIndexLoadMore(target) {
     if (!("IntersectionObserver" in window)) return;
     indexLoadObserver = new IntersectionObserver((entries) => {
-      if (indexLoadPending || !entries.some((entry) => entry.isIntersecting)) return;
+      if (!target.isConnected || indexLoadPending || !entries.some((entry) => entry.isIntersecting)) return;
       indexLoadPending = true;
       indexLoadObserver?.disconnect();
-      window.setTimeout(() => {
+      indexLoadTimer = window.setTimeout(() => {
+        indexLoadTimer = null;
         indexLoadPending = false;
+        if (!target.isConnected) return;
         loadMoreIndex();
       }, 80);
     }, { root: null, rootMargin: "720px 0px", threshold: 0 });
@@ -327,6 +382,9 @@ export function createCodePrefixPage(deps) {
   function disconnectIndexAutoload() {
     indexLoadObserver?.disconnect();
     indexLoadObserver = null;
+    if (indexLoadTimer !== null) window.clearTimeout(indexLoadTimer);
+    indexLoadTimer = null;
+    indexLoadPending = false;
   }
 
   async function selectPrefix(prefix, options = {}) {
@@ -347,6 +405,8 @@ export function createCodePrefixPage(deps) {
     state.searchPeople = [];
     state.works = [];
     state.codePrefixTotal = 0;
+    state.codePrefixRawLoaded = null;
+    state.codePrefixHasMore = null;
     state.codePrefixFacets = null;
     state.codePrefixTraitFacets = null;
     state.codePrefixLoadingMore = false;
@@ -360,6 +420,7 @@ export function createCodePrefixPage(deps) {
     els.statsRow.innerHTML = "";
     els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
 
+    const finishWorkRead = onWorkRead(query, isCurrent);
     try {
       const data = await api(query, { signal: request.signal });
       if (!isCurrent()) return;
@@ -386,6 +447,7 @@ export function createCodePrefixPage(deps) {
       els.workGrid.innerHTML = "";
       appendEmpty(error.message || "番号作品读取失败");
     } finally {
+      finishWorkRead?.();
       request.finish();
     }
   }
@@ -402,23 +464,25 @@ export function createCodePrefixPage(deps) {
 
   async function loadMore(button) {
     if (state.codePrefixLoadingMore || state.activeView !== "codes" || !state.selectedCodePrefix) return;
-    if (state.works.length >= state.codePrefixTotal) return;
+    if (!(state.codePrefixHasMore ?? state.works.length < state.codePrefixTotal)) return;
     const request = detailRequests.begin();
     detailPageOwner = request;
     const prefix = state.selectedCodePrefix;
     const family = state.selectedCodePrefixFamily;
     const query = detailPath(prefix, 0, family);
-    const path = detailPath(prefix, state.works.length, family);
+    const offset = Number.isSafeInteger(state.codePrefixRawLoaded) ? state.codePrefixRawLoaded : state.works.length;
+    const path = detailPath(prefix, offset, family);
     state.codePrefixLoadingMore = true;
     const originalText = button?.textContent || "";
     if (button) {
       button.disabled = true;
       button.textContent = "正在加载";
     }
+    const finishWorkRead = onWorkRead(path, () => detailIsCurrent(request, query) && detailPageOwner === request);
     try {
       const data = await api(path, { signal: request.signal });
       if (!detailIsCurrent(request, query) || detailPageOwner !== request) return;
-      applyDetailPayload(data, true);
+      applyDetailPayload(data, true, offset);
       state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
       renderPrefixHeader();
       renderDetailStats();
@@ -426,6 +490,7 @@ export function createCodePrefixPage(deps) {
     } catch (error) {
       if (detailIsCurrent(request, query) && detailPageOwner === request) throw error;
     } finally {
+      finishWorkRead?.();
       if (detailPageOwner === request) {
         detailPageOwner = null;
         state.codePrefixLoadingMore = false;
@@ -464,16 +529,17 @@ export function createCodePrefixPage(deps) {
     disconnectIndexAutoload();
   }
 
-  function applyDetailPayload(data, append) {
-    const next = data.works || [];
+  function applyDetailPayload(data, append, offset = 0) {
+    const page = resolveWorkPage(data, { existingWorks: append ? state.works : [], offset, previousTotal: append ? state.codePrefixTotal : 0 });
     if (append) {
-      const seen = new Set(state.works.map((work) => String(work.id)));
-      state.works.push(...next.filter((work) => !seen.has(String(work.id))));
+      state.works.push(...page.works);
     } else {
-      state.works = next;
+      state.works = page.works;
     }
+    state.codePrefixRawLoaded = page.rawLoaded;
+    state.codePrefixHasMore = page.hasMore;
     state.selectedCodePrefixMeta = data.codePrefix || state.selectedCodePrefixMeta;
-    state.codePrefixTotal = data.total ?? state.works.length;
+    state.codePrefixTotal = page.total;
     state.codePrefixFacets = data.facets || state.codePrefixFacets || null;
     state.codePrefixTraitFacets = data.traitFacets || (append ? state.codePrefixTraitFacets : null) || null;
   }

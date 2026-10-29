@@ -38,6 +38,53 @@ export function collapseDuplicateTracks(tracks = []) {
   return result;
 }
 
+// One accepted search prefix owns this accumulator. Published arrays and
+// duplicateIds stay immutable when later pages contribute more versions.
+export function createDuplicateTrackAccumulator() {
+  const groups = new Map();
+  const result = [];
+  return {
+    append(tracks = []) {
+      const changed = new Set();
+      for (const source of Array.isArray(tracks) ? tracks : []) {
+        if (!source?.id) continue;
+        const key = duplicateTrackKey(source);
+        const group = groups.get(key);
+        if (!group) {
+          groups.set(key, {
+            index: result.length, selected: source, scored: false, selectedScore: 0,
+            ids: [source.id], favorite: Boolean(source.favorite),
+            rating: Number(source.rating || 0), playCount: Number(source.playCount || 0)
+          });
+          result.push(source);
+          continue;
+        }
+        if (!group.scored) {
+          group.selectedScore = duplicateTrackScore(group.selected);
+          group.scored = true;
+        }
+        const score = duplicateTrackScore(source);
+        if (score > group.selectedScore) {
+          group.selected = source;
+          group.selectedScore = score;
+        }
+        group.ids.push(source.id);
+        group.favorite = group.favorite || Boolean(source.favorite);
+        group.rating = Math.max(group.rating, Number(source.rating || 0));
+        group.playCount = Math.max(group.playCount, Number(source.playCount || 0));
+        changed.add(group);
+      }
+      for (const group of changed) {
+        result[group.index] = {
+          ...group.selected, duplicateCount: group.ids.length, duplicateIds: [...group.ids],
+          favorite: group.favorite, rating: group.rating, playCount: group.playCount
+        };
+      }
+      return result.slice();
+    }
+  };
+}
+
 export function duplicateTrackKey(track = {}) {
   const title = normalizeDuplicateText(track.title);
   const artist = normalizeDuplicateText(track.artist);

@@ -1,6 +1,7 @@
 import { createApiClient } from "./js/api.js?v=20260812-collection-busy-01";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./modules/short-videos/router.js?v=20260715-dedicated-router-01";
 import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260813-delete-client-state-02";
+import { allowShortVideoSpeculativePrewarm } from "./modules/short-videos/prewarm-policy.js?v=20261027-prewarm-budget-01";
 
 const formatter = new Intl.NumberFormat("zh-CN");
 const initialParams = new URLSearchParams(window.location.search);
@@ -54,158 +55,18 @@ markShortVideoPerformance("app-module-start", {
   videoId: initialShortVideoRoute.shortVideoId || ""
 });
 
-let directShortVideoPlaybackPrewarm = shouldPrewarmDirectShortVideo(initialShortVideoRoute)
-  ? createDirectShortVideoPlaybackPrewarm(initialShortVideoRoute.shortVideoId)
-  : null;
+// Media starts only after detail metadata supplies its canonical, versioned
+// source. A guessed smooth URL can fetch a second file and even queue a
+// transcode that the source-first player will never use.
 const shortVideoPlaybackPrimerPromise = initialShortVideoRoute.shortVideoId
+  || !allowShortVideoSpeculativePrewarm({ hidden: document.hidden, connection: navigator.connection })
   ? Promise.resolve(false)
   : scheduleShortVideoPlaybackDecoderPrimer();
 if (initialShortVideoRoute.shortVideoId) {
   markShortVideoPerformance("playback-decoder-primer-skipped", {
-    reason: "direct-video-uses-real-stream",
+    reason: "direct-video-uses-canonical-stream",
     videoId: initialShortVideoRoute.shortVideoId
   });
-}
-
-function shouldPrewarmDirectShortVideo(route = {}) {
-  if (!route.shortVideoId) return false;
-  return route.shortVideoMedia === "video" || route.shortVideoQuality !== "all";
-}
-
-function createDirectShortVideoPlaybackPrewarm(videoId) {
-  const id = String(videoId || "").trim();
-  if (!id) return null;
-  const streamUrl = `/media/short-video-smooth/${encodeURIComponent(id)}?rendition=2k30-v2-range2`;
-  const player = document.createElement("video");
-  const startedAt = Date.now();
-  const entry = {
-    id,
-    player,
-    streamUrl,
-    startedAt,
-    taken: false,
-    settled: false,
-    frameHandle: 0,
-    readyTimer: 0,
-    cleanupTimer: 0
-  };
-  player.className = "short-video-prewarm-player short-video-direct-prewarm-player";
-  player.dataset.streamUrl = streamUrl;
-  player.dataset.videoId = id;
-  player.dataset.shortVideoSlot = "direct-prewarm";
-  player.src = streamUrl;
-  player.preload = "auto";
-  player.fetchPriority = "high";
-  player.controls = false;
-  player.autoplay = false;
-  player.loop = false;
-  player.muted = true;
-  player.volume = 0;
-  player.playsInline = true;
-  player.tabIndex = -1;
-  player.setAttribute("aria-hidden", "true");
-  Object.assign(player.style, {
-    position: "fixed",
-    left: "-10000px",
-    top: "0",
-    width: "2px",
-    height: "2px",
-    opacity: "0.001",
-    pointerEvents: "none"
-  });
-  document.body.append(player);
-  markShortVideoPerformance("direct-video-prewarm-start", { videoId: id });
-
-  const removeReadyListeners = () => {
-    player.removeEventListener("loadeddata", requestFrame);
-    player.removeEventListener("canplay", requestFrame);
-    player.removeEventListener("playing", requestFrame);
-  };
-  const finish = (ready, reason = "ready") => {
-    if (entry.settled) return;
-    entry.settled = true;
-    removeReadyListeners();
-    if (entry.frameHandle && player.cancelVideoFrameCallback) {
-      player.cancelVideoFrameCallback(entry.frameHandle);
-      entry.frameHandle = 0;
-    }
-    if (entry.readyTimer) {
-      window.clearTimeout(entry.readyTimer);
-      entry.readyTimer = 0;
-    }
-    if (ready) {
-      player.dataset.shortVideoFrameReady = "1";
-      player.dataset.shortVideoFrameReadyAt = String(Date.now());
-    }
-    if (!entry.taken) player.pause?.();
-    markShortVideoPerformance("direct-video-prewarm-finish", {
-      videoId: id,
-      ready: Boolean(ready),
-      reason,
-      readyState: Number(player.readyState || 0),
-      durationMs: Date.now() - startedAt,
-      taken: entry.taken
-    });
-  };
-  function requestFrame() {
-    if (entry.settled || player.readyState < 2) return;
-    if (player.requestVideoFrameCallback) {
-      if (!entry.frameHandle) {
-        entry.frameHandle = player.requestVideoFrameCallback(() => finish(true, "painted-frame"));
-      }
-      return;
-    }
-    finish(true, "media-ready");
-  }
-  const cleanup = () => {
-    if (entry.taken) return;
-    removeReadyListeners();
-    player.muted = true;
-    player.pause?.();
-    player.removeAttribute("src");
-    player.load?.();
-    player.remove();
-    if (directShortVideoPlaybackPrewarm === entry) directShortVideoPlaybackPrewarm = null;
-  };
-  player.addEventListener("loadeddata", requestFrame);
-  player.addEventListener("canplay", requestFrame);
-  player.addEventListener("playing", requestFrame);
-  player.load?.();
-  player.play?.().catch(() => {});
-  entry.readyTimer = window.setTimeout(() => finish(player.readyState >= 2, "timeout"), 1800);
-  entry.cleanupTimer = window.setTimeout(cleanup, 5200);
-  return entry;
-}
-
-function takeDirectShortVideoPlaybackPrewarm(video = {}, playbackUrl = "") {
-  const entry = directShortVideoPlaybackPrewarm;
-  const videoId = String(video?.id || "").trim();
-  if (!entry || !videoId || entry.id !== videoId || !entry.player?.isConnected) return null;
-  let expectedPath = "";
-  let playbackPath = "";
-  try {
-    expectedPath = new URL(entry.streamUrl, window.location.href).pathname;
-    playbackPath = new URL(playbackUrl, window.location.href).pathname;
-  } catch {}
-  if (!expectedPath || expectedPath !== playbackPath) return null;
-  entry.taken = true;
-  if (entry.cleanupTimer) {
-    window.clearTimeout(entry.cleanupTimer);
-    entry.cleanupTimer = 0;
-  }
-  const player = entry.player;
-  player.dataset.streamUrl = playbackUrl;
-  player.dataset.shortVideoPrewarmed = "1";
-  player.removeAttribute("aria-hidden");
-  player.removeAttribute("tabindex");
-  directShortVideoPlaybackPrewarm = null;
-  markShortVideoPerformance("direct-video-prewarm-taken", {
-    videoId,
-    readyState: Number(player.readyState || 0),
-    frameReady: player.dataset.shortVideoFrameReady === "1",
-    durationMs: Date.now() - entry.startedAt
-  });
-  return player;
 }
 
 function scheduleShortVideoPlaybackDecoderPrimer() {
@@ -218,18 +79,20 @@ function scheduleShortVideoPlaybackDecoderPrimer() {
   markShortVideoPerformance("playback-decoder-primer-scheduled", { quietMs });
   return new Promise((resolve) => {
     let started = false;
-    let quietTimer = 0;
-    let idleHandle = 0;
-    let fallbackRunTimer = 0;
+    let quietTimer = null;
+    let idleHandle = null;
+    let fallbackRunTimer = null;
+    let idleGeneration = 0;
     let lastActivityAt = Date.now();
     const clearIdle = () => {
-      if (idleHandle && typeof window.cancelIdleCallback === "function") {
+      idleGeneration += 1;
+      if (idleHandle != null && typeof window.cancelIdleCallback === "function") {
         window.cancelIdleCallback(idleHandle);
-        idleHandle = 0;
+        idleHandle = null;
       }
-      if (fallbackRunTimer) {
+      if (fallbackRunTimer != null) {
         window.clearTimeout(fallbackRunTimer);
-        fallbackRunTimer = 0;
+        fallbackRunTimer = null;
       }
     };
     const removeActivityListeners = () => {
@@ -237,38 +100,44 @@ function scheduleShortVideoPlaybackDecoderPrimer() {
       document.removeEventListener("visibilitychange", noteActivity, true);
     };
     const run = () => {
-      idleHandle = 0;
-      fallbackRunTimer = 0;
+      idleHandle = null;
+      fallbackRunTimer = null;
       if (started) return;
       if (document.visibilityState !== "visible") {
         noteActivity();
         return;
       }
       started = true;
-      if (quietTimer) window.clearTimeout(quietTimer);
-      quietTimer = 0;
+      if (quietTimer != null) window.clearTimeout(quietTimer);
+      quietTimer = null;
       removeActivityListeners();
+      if (!allowShortVideoSpeculativePrewarm({ hidden: document.hidden, connection: navigator.connection })) {
+        resolve(false);
+        return;
+      }
       primeShortVideoPlaybackDecoder().then(resolve, () => resolve(false));
     };
     const queueIdle = () => {
-      quietTimer = 0;
+      quietTimer = null;
       const remainingQuietMs = quietMs - (Date.now() - lastActivityAt);
       if (remainingQuietMs > 0) {
         quietTimer = window.setTimeout(queueIdle, remainingQuietMs);
         return;
       }
       markShortVideoPerformance("playback-decoder-primer-quiet-ready", { quietMs });
+      const generation = ++idleGeneration;
+      const runIfCurrent = () => { if (!started && generation === idleGeneration) run(); };
       if (typeof window.requestIdleCallback === "function") {
-        idleHandle = window.requestIdleCallback(run, { timeout: idleTimeoutMs });
+        idleHandle = window.requestIdleCallback(runIfCurrent, { timeout: idleTimeoutMs });
       } else {
-        fallbackRunTimer = window.setTimeout(run, 240);
+        fallbackRunTimer = window.setTimeout(runIfCurrent, 240);
       }
     };
     function noteActivity() {
       if (started) return;
       lastActivityAt = Date.now();
       clearIdle();
-      if (!quietTimer) quietTimer = window.setTimeout(queueIdle, quietMs);
+      if (quietTimer == null) quietTimer = window.setTimeout(queueIdle, quietMs);
     }
     activityEvents.forEach((eventName) => window.addEventListener(eventName, noteActivity, { capture: true, passive: true }));
     document.addEventListener("visibilitychange", noteActivity, { capture: true, passive: true });
@@ -478,8 +347,7 @@ const shortVideoPage = createShortVideoPage({
   resetProgressiveCoverLoading() {},
   setMainHeader,
   state,
-  syncRouteAfterNavigation,
-  takeDirectShortVideoPlaybackPrewarm
+  syncRouteAfterNavigation
 });
 
 async function applyShortVideoRoute(route) {

@@ -441,7 +441,7 @@ try {
   assert.match(webActionsSource, /view\.appendArtistPage\([\s\S]*?view\.appendAlbumPage\([\s\S]*?view\.appendLibraryTrackPage\(/, "pagination must delegate bounded DOM appends to the view");
   assert.match(webActionsSource, /!appendedInPlace && !view\.refreshMusicLibraryContent\(\)/, "completed searches must prefer a local library refresh");
   assert.match(webPageSource, /function refreshMusicLibraryContent\([\s\S]*?currentPanel\.replaceWith\(nextPanel\);\s*refreshLibrarySidebars\(\)/, "search results should replace only the central panel and sidebar facets");
-  assert.match(webPageSource, /captureMusicInputFocus\(\)[\s\S]*?restoreMusicInputFocus\(nextPanel, inputFocus\)/, "local refresh must preserve search focus and selection");
+  assert.match(webPageSource, /function refreshMusicLibraryContent\([\s\S]*?captureMusicInputFocus\(\)[\s\S]*?restoreMusicInputFocus\(retained \? currentPanel : nextPanel, inputFocus\)/, "local refresh must preserve search focus and selection in the retained or replaced panel");
   assert.match(webPageSource, /function appendLibraryTrackPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?table\.append\(fragment\)/, "track pagination must append one fragment");
   assert.match(webPageSource, /function appendArtistPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?grid\.append\(fragment\)/, "artist pagination must append one fragment");
   assert.match(webPageSource, /function appendAlbumPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?grid\.append\(fragment\)/, "album pagination must append one fragment");

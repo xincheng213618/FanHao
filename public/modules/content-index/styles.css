@@ -699,6 +699,22 @@ body.gallery-view .gallery-controls {
   gap: 10px;
 }
 
+.gallery-summary-recovery { flex-wrap: wrap; }
+.gallery-summary-recovery > span { min-width: 0; overflow-wrap: anywhere; }
+.gallery-summary-retry {
+  min-height: 44px;
+  border: 1px solid var(--gallery-accent);
+  border-radius: var(--radius);
+  background: var(--gallery-accent);
+  color: #fff;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+.gallery-summary-retry:focus-visible { outline: 3px solid rgba(85, 90, 168, 0.28); outline-offset: 2px; }
+.gallery-summary-retry[aria-disabled="true"] { cursor: wait; opacity: .65; }
+
 .gallery-search-summary {
   display: flex;
   align-items: center;
@@ -1607,13 +1623,43 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 }
 
 .gallery-image-pager-stage {
+  grid-column: 1;
+  grid-row: 2;
   display: grid;
   min-height: 0;
   place-items: center;
   overflow: auto;
+  touch-action: none;
   outline: none;
   overscroll-behavior: contain;
   scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+.gallery-image-pager-error {
+  z-index: 3;
+  grid-column: 1;
+  grid-row: 2;
+  align-self: center;
+  justify-self: center;
+  display: grid;
+  gap: 12px;
+  width: min(420px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 12px;
+  background: #171c1e;
+  color: #fff;
+  padding: 16px;
+  text-align: center;
+}
+
+.gallery-image-pager-error[hidden] {
+  display: none;
+}
+
+.gallery-image-pager-retry {
+  min-height: 44px;
 }
 
 .gallery-image-pager-stage img {
@@ -1631,6 +1677,10 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 .gallery-image-pager-stage.zoomed {
   place-items: start center;
   cursor: grab;
+}
+
+.gallery-image-pager-stage.panning {
+  cursor: grabbing;
 }
 
 .gallery-image-pager-top,
@@ -1700,8 +1750,59 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 
 .gallery-image-pager-counter {
   min-width: 98px;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, .24);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .09);
+  padding: 0 4px;
+  cursor: pointer;
   font-variant-numeric: tabular-nums;
 }
+
+.gallery-image-pager-counter:focus-visible,
+.gallery-image-pager-jump :focus-visible {
+  outline: 3px solid #a8e0ce;
+  outline-offset: 2px;
+}
+
+.gallery-image-pager-jump {
+  z-index: 4;
+  grid-column: 1;
+  grid-row: 2;
+  align-self: center;
+  justify-self: center;
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, .24);
+  border-radius: 12px;
+  background: #171c1e;
+  color: #fff;
+  padding: 16px;
+}
+
+.gallery-image-pager-jump[hidden] { display: none; }
+.gallery-image-pager-jump label { display: grid; gap: 8px; font-weight: 750; }
+.gallery-image-pager-jump input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, .4);
+  border-radius: 6px;
+  background: #0c1113;
+  color: #fff;
+  padding: 8px 10px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.gallery-image-pager-jump-hint,
+.gallery-image-pager-jump-error { font-size: 13px; overflow-wrap: anywhere; }
+.gallery-image-pager-jump-error { color: #ffb0a8; }
+.gallery-image-pager-jump-error:empty { display: none; }
+.gallery-image-pager-jump-actions { display: flex; gap: 10px; }
+.gallery-image-pager-jump-actions button { flex: 1 1 0; min-height: 44px; }
 
 .gallery-image-pager-button {
   min-width: 58px;
@@ -1730,6 +1831,14 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 .gallery-image-pager-button:disabled {
   opacity: 0.42;
 }
+
+.gallery-image-pager-button[hidden],
+.gallery-image-pager-fullscreen-status[hidden] { display: none; }
+.gallery-image-pager-fullscreen-status { grid-column: 1 / -1; color: #ffb0a8; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+
+.gallery-image-pager-catalog { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 44px; color: #fff; font-size: 12px; line-height: 1.5; }
+.gallery-image-pager-catalog[hidden] { display: none; }
+.gallery-image-pager-catalog .gallery-image-pager-button { min-height: 44px; height: auto; padding: 7px 10px; }
 
 .gallery-image-pager-range {
   flex: 1 1 auto;

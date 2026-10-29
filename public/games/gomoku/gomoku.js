@@ -20,6 +20,7 @@
     loadingTitle: document.querySelector("#loadingTitle"),
     loadingDetail: document.querySelector("#loadingDetail"),
     loadingProgress: document.querySelector("#loadingProgress"),
+    engineRetryButton: document.querySelector("#engineRetryButton"),
     turnPill: document.querySelector("#turnPill"),
     turnText: document.querySelector("#turnText"),
     statusStone: document.querySelector("#statusStone"),
@@ -49,6 +50,7 @@
   let engineReady = false;
   let engineThinking = false;
   let engineFailed = false;
+  let engineSuspended = false;
   let canvasSize = 0;
   let geometry = null;
 
@@ -95,6 +97,18 @@
     });
     els.undoButton.addEventListener("click", undoLastRound);
     els.newGameButton.addEventListener("click", resetGame);
+    els.engineRetryButton.addEventListener("click", startEngine);
+    window.addEventListener("pagehide", () => {
+      engineSuspended = true;
+      retireEngine();
+      engineReady = false;
+      engineThinking = false;
+    });
+    window.addEventListener("pageshow", () => {
+      if (!engineSuspended) return;
+      engineSuspended = false;
+      startEngine();
+    });
   }
 
   function loadSettings() {
@@ -112,27 +126,44 @@
   }
 
   function saveSettings() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ humanSide, difficulty }));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ humanSide, difficulty }));
+    } catch {
+      // Storage is optional; applying the selected side must still reset the match.
+    }
+  }
+
+  function retireEngine() {
+    const worker = engineWorker;
+    engineWorker = null;
+    worker?.terminate();
   }
 
   function startEngine() {
-    if (engineWorker) engineWorker.terminate();
+    retireEngine();
     engineReady = false;
     engineThinking = false;
     engineFailed = false;
+    els.thinkingIndicator.className = "thinking-indicator";
+    els.thinkingIndicator.textContent = "引擎加载中";
     showLoading("正在加载 Rapfi 引擎", "首次载入约 40 MB NNUE 模型，之后由浏览器缓存", 0);
 
-    const worker = new Worker("./engine-worker.js?v=20260718-rapfi-01");
-    engineWorker = worker;
-    worker.addEventListener("message", (event) => {
-      if (engineWorker !== worker) return;
-      handleWorkerMessage(event.data || {});
-    });
-    worker.addEventListener("error", (event) => {
-      if (engineWorker !== worker) return;
-      failEngine(event.message || "AI Worker 启动失败");
-    });
-    worker.postMessage({ type: "init" });
+    try {
+      const worker = new Worker("./engine-worker.js?v=20260718-rapfi-01");
+      engineWorker = worker;
+      worker.addEventListener("message", (event) => {
+        if (engineWorker !== worker) return;
+        handleWorkerMessage(event.data || {});
+      });
+      worker.addEventListener("error", (event) => {
+        event.preventDefault();
+        if (engineWorker !== worker) return;
+        failEngine(event.message || "AI Worker 启动失败");
+      });
+      worker.postMessage({ type: "init" });
+    } catch (error) {
+      failEngine(error?.message || "AI Worker 启动失败");
+    }
     updateUi();
   }
 
@@ -144,6 +175,8 @@
     if (message.type === "ready") {
       engineReady = true;
       engineFailed = false;
+      els.thinkingIndicator.className = "thinking-indicator";
+      els.thinkingIndicator.textContent = "等待对局";
       els.loadingPanel.classList.add("hidden");
       els.engineBadge.className = "engine-badge";
       els.engineBadge.textContent = "Rapfi 已就绪";
@@ -163,7 +196,7 @@
       failEngine(message.message || "Rapfi 初始化失败");
       return;
     }
-    if (message.type === "exit" && engineThinking) {
+    if (message.type === "exit") {
       failEngine(`Rapfi 已退出（代码 ${message.code ?? "?"}）`);
     }
   }
@@ -187,6 +220,9 @@
 
   function showLoading(title, detail, progress) {
     els.loadingPanel.classList.remove("hidden");
+    els.loadingPanel.classList.remove("failed");
+    els.engineRetryButton.hidden = true;
+    els.loadingDetail.removeAttribute("tabindex");
     els.loadingTitle.textContent = title;
     els.loadingDetail.textContent = detail;
     els.loadingProgress.style.width = `${Math.max(0, Math.min(1, progress || 0)) * 100}%`;
@@ -195,12 +231,18 @@
   }
 
   function failEngine(message) {
+    retireEngine();
     engineReady = false;
     engineThinking = false;
     engineFailed = true;
+    els.thinkingIndicator.className = "thinking-indicator";
+    els.thinkingIndicator.textContent = "引擎不可用";
     els.engineBadge.className = "engine-badge error";
     els.engineBadge.textContent = "引擎加载失败";
-    showLoading("Rapfi 加载失败", `${message}。请刷新页面重试。`, 0);
+    showLoading("Rapfi 暂时不可用", `${message}。可以重试引擎，当前棋局会保留。`, 0);
+    els.loadingPanel.classList.add("failed");
+    els.loadingDetail.tabIndex = 0;
+    els.engineRetryButton.hidden = false;
     els.engineBadge.className = "engine-badge error";
     els.engineBadge.textContent = "引擎加载失败";
     updateUi();
@@ -275,12 +317,7 @@
     }
 
     if (line.startsWith("ERROR ")) {
-      engineThinking = false;
-      els.thinkingIndicator.className = "thinking-indicator";
-      els.thinkingIndicator.textContent = "计算异常";
-      els.statusTitle.textContent = "AI 计算失败";
-      els.statusDetail.textContent = line.slice(6);
-      updateControls();
+      failEngine(`AI 计算失败：${line.slice(6)}`);
     }
   }
 
@@ -330,7 +367,7 @@
     winLine = null;
     hover = null;
     clearAnalysis();
-    if (wasThinking) startEngine();
+    if (wasThinking || engineFailed) startEngine();
     updateUi();
     if (!wasThinking && engineReady && currentSide() === aiSide()) setTimeout(requestAiMove, 120);
   }
@@ -395,7 +432,7 @@
     els.turnText.textContent = `${sideName}行棋`;
     if (engineFailed) {
       els.statusTitle.textContent = "AI 引擎不可用";
-      els.statusDetail.textContent = "请刷新页面重新加载 Rapfi。";
+      els.statusDetail.textContent = "可以重试引擎继续当前棋局，或重新开始新对局。";
     } else if (!engineReady) {
       els.statusTitle.textContent = "正在准备 AI";
       els.statusDetail.textContent = "NNUE 模型较大，首次打开需要一点时间。";

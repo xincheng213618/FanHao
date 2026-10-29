@@ -1074,6 +1074,31 @@
   box-shadow: 0 7px 18px rgba(254, 44, 85, .22);
 }
 
+.short-video-more-sheet.is-speed-picker {
+  width: min(320px, calc(100vw - 32px));
+  gap: 12px;
+}
+
+.is-speed-picker .short-video-speed-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.is-speed-picker .short-video-speed-grid button,
+.is-speed-picker .short-video-more-close {
+  min-height: 44px;
+}
+
+.is-speed-picker .short-video-more-close {
+  min-width: 44px;
+}
+
+@media (max-width: 680px) {
+  .short-video-more-overlay.is-speed-picker .short-video-more-sheet {
+    width: 100%;
+  }
+}
+
 .short-video-more-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

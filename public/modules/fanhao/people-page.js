@@ -1,5 +1,6 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-requests-01";
+import { resolveWorkPage } from "./features/works/work-page-state.js";
 
 const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
 const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
@@ -26,6 +27,7 @@ export function createPeoplePage(deps) {
     getWorkFilterMode,
     hidePersonProfile,
     onNavigationStarted,
+    onWorkRead = () => null,
     preparePersonProfile,
     renderPersonProfile,
     renderPersonWorkStats,
@@ -43,6 +45,8 @@ export function createPeoplePage(deps) {
 
   let peopleIndexLoadObserver = null;
   let peopleIndexLoadPending = false;
+  let peopleIndexLoadTimer = null;
+  let peopleIndexSnapshot = null;
   let personDetailHoverTimer = null;
   let personDetailHoverTarget = "";
   const personIndexRecords = new WeakMap();
@@ -70,6 +74,8 @@ function showPeopleIndex(options = {}) {
   state.searchPeople = [];
   state.works = [];
   state.personWorksTotal = 0;
+  state.personWorksRawLoaded = null;
+  state.personWorksHasMore = null;
   state.personWorksFacets = null;
   state.personWorksTraitFacets = null;
   syncNavigationState("people");
@@ -112,6 +118,7 @@ function renderPeopleIndex() {
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
   const people = filteredPeople();
+  peopleIndexSnapshot = { source: state.people, scope: state.peopleScope, people };
   els.workGrid.innerHTML = "";
 
   if (!people.length) {
@@ -132,14 +139,17 @@ function renderPeopleIndex() {
 }
 
 function disconnectPeopleIndexAutoload() {
-  if (!peopleIndexLoadObserver) return;
-  peopleIndexLoadObserver.disconnect();
+  peopleIndexLoadObserver?.disconnect();
   peopleIndexLoadObserver = null;
+  if (peopleIndexLoadTimer !== null) window.clearTimeout(peopleIndexLoadTimer);
+  peopleIndexLoadTimer = null;
+  peopleIndexLoadPending = false;
 }
 
-function loadMorePeopleIndex() {
+function loadMorePeopleIndex(snapshot = peopleIndexSnapshot) {
   if (state.activeView !== "people" || state.selectedPersonId) return;
-  const people = filteredPeople();
+  if (!snapshot || snapshot !== peopleIndexSnapshot || snapshot.source !== state.people || snapshot.scope !== state.peopleScope) return;
+  const people = snapshot.people;
   if (state.personVisibleLimit >= people.length) return;
   disconnectPeopleIndexAutoload();
 
@@ -166,19 +176,24 @@ function loadMorePeopleIndex() {
 
 function observePeopleIndexLoadMore(target) {
   if (!("IntersectionObserver" in window)) return;
-  peopleIndexLoadObserver = new IntersectionObserver(
+  const snapshot = peopleIndexSnapshot;
+  const observer = new IntersectionObserver(
     (entries) => {
-      if (peopleIndexLoadPending || !entries.some((entry) => entry.isIntersecting)) return;
+      if (peopleIndexLoadObserver !== observer || snapshot !== peopleIndexSnapshot || !target.isConnected
+          || peopleIndexLoadPending || !entries.some((entry) => entry.isIntersecting)) return;
       peopleIndexLoadPending = true;
-      peopleIndexLoadObserver?.disconnect();
-      window.setTimeout(() => {
+      observer.disconnect();
+      peopleIndexLoadTimer = window.setTimeout(() => {
+        if (peopleIndexLoadObserver !== observer || snapshot !== peopleIndexSnapshot || !target.isConnected) return;
+        peopleIndexLoadTimer = null;
         peopleIndexLoadPending = false;
-        loadMorePeopleIndex();
+        loadMorePeopleIndex(snapshot);
       }, 80);
     },
     { root: null, rootMargin: "720px 0px", threshold: 0 }
   );
-  peopleIndexLoadObserver.observe(target);
+  peopleIndexLoadObserver = observer;
+  observer.observe(target);
 }
 
 function appendPeopleIndexLoadMore(visibleCount, totalCount) {
@@ -189,7 +204,8 @@ function appendPeopleIndexLoadMore(visibleCount, totalCount) {
   button.type = "button";
   button.className = "text-button";
   button.textContent = `显示更多人物 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)}`;
-  button.addEventListener("click", loadMorePeopleIndex);
+  const snapshot = peopleIndexSnapshot;
+  button.addEventListener("click", () => loadMorePeopleIndex(snapshot));
 
   wrap.append(button);
   els.workGrid.append(wrap);
@@ -301,6 +317,12 @@ async function selectPerson(personId, options = {}) {
   syncNavigationState("people");
   const indexedPerson = state.people.find((person) => String(person.id) === String(personId)) || null;
   state.works = [];
+  state.personWorksTotal = 0;
+  state.personWorksRawLoaded = null;
+  state.personWorksHasMore = null;
+  const query = personDetailRequestUrl(personId, 0);
+  const isCurrent = () => request.isCurrent() && state.activeView === "people"
+    && state.selectedPersonId === personId && personDetailRequestUrl(personId, 0) === query;
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
   state.personWorksTraitFacets = null;
   if (indexedPerson) {
@@ -312,17 +334,21 @@ async function selectPerson(personId, options = {}) {
     renderPersonProfile(state.selectedPerson);
   }
 
+  const finishWorkRead = onWorkRead(query, isCurrent);
   try {
     const data = await fetchPersonWorksPage(personId, 0, {
       reusePrefetch: options.reusePrefetch !== false,
       signal: request.signal
     });
-    if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId) return;
+    if (!isCurrent()) return;
     state.selectedPerson = mergeIndexedPerson(indexedPerson, data.person, data.works);
     const resolvedPersonId = state.selectedPerson?.id || personId;
     state.selectedPersonId = resolvedPersonId;
-    state.works = data.works || [];
-    state.personWorksTotal = data.total || state.works.length;
+    const page = resolveWorkPage(data);
+    state.works = page.works;
+    state.personWorksTotal = page.total;
+    state.personWorksRawLoaded = page.rawLoaded;
+    state.personWorksHasMore = page.hasMore;
     state.personWorksFacets = data.facets || null;
     state.personWorksTraitFacets = data.traitFacets || null;
     resetWorkPaging();
@@ -335,44 +361,51 @@ async function selectPerson(personId, options = {}) {
       routeOverrides: { view: "people", peopleScope: state.peopleScope || "main", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
     });
   } catch (error) {
-    if (!request.signal.aborted) throw error;
+    if (isCurrent()) throw error;
   } finally {
+    finishWorkRead?.();
     request.finish();
   }
 }
 
 async function loadMoreWorks(button) {
   if (state.personWorksLoadingMore || state.activeView !== "people" || !state.selectedPersonId) return;
-  if (state.works.length >= state.personWorksTotal) return;
+  if (!(state.personWorksHasMore ?? state.works.length < state.personWorksTotal)) return;
   const personId = state.selectedPersonId;
   const query = personDetailRequestUrl(personId, 0);
   const request = personDetailRequests.begin();
+  const isCurrent = () => request.isCurrent() && state.activeView === "people" && state.selectedPersonId === personId
+    && personDetailRequestUrl(personId, 0) === query;
+  const offset = Number.isSafeInteger(state.personWorksRawLoaded) ? state.personWorksRawLoaded : state.works.length;
+  const finishWorkRead = onWorkRead(personDetailRequestUrl(personId, offset), isCurrent);
   state.personWorksLoadingMore = true;
   const originalText = button?.textContent || "";
   let restoreText = true;
   if (button) { button.disabled = true; button.textContent = "正在加载"; }
   try {
-    const data = await fetchPersonWorksPage(personId, state.works.length, { signal: request.signal });
-    if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId
-      || personDetailRequestUrl(personId, 0) !== query) return;
-    const seen = new Set(state.works.map((work) => work.id));
-    state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+    const data = await fetchPersonWorksPage(personId, offset, { signal: request.signal });
+    if (!isCurrent()) return;
+    const page = resolveWorkPage(data, { existingWorks: state.works, offset, previousTotal: state.personWorksTotal });
+    state.works.push(...page.works);
+    state.personWorksRawLoaded = page.rawLoaded;
+    state.personWorksHasMore = page.hasMore;
     state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
     state.selectedPerson = data.person || state.selectedPerson;
-    state.personWorksTotal = data.total ?? state.personWorksTotal ?? state.works.length;
+    state.personWorksTotal = page.total;
     state.personWorksFacets = data.facets || state.personWorksFacets || null;
     state.personWorksTraitFacets = data.traitFacets || state.personWorksTraitFacets || null;
     renderPersonProfile(state.selectedPerson);
     renderPersonWorkStats();
     appendLoadedWorkPage();
   } catch (error) {
-    if (!request.isCurrent()) return;
+    if (!isCurrent()) return;
     toastInline(button, error.message || "加载失败", originalText);
     restoreText = false;
   } finally {
+    finishWorkRead?.();
     if (request.isCurrent()) {
       state.personWorksLoadingMore = false;
-      if (button?.isConnected) {
+      if (isCurrent() && button?.isConnected) {
         button.disabled = false;
         if (restoreText) button.textContent = originalText || button.textContent;
       }
@@ -460,6 +493,10 @@ function invalidatePersonDetailPrefetches(personId) {
   personDetailPrefetches.clear((requestUrl) => requestUrl.startsWith(prefix));
 }
 
+function invalidatePrefetches() {
+  personDetailPrefetches.clear();
+}
+
 async function goToPerson(personId) {
   if (!personId) return;
   clearWorkSearch();
@@ -481,6 +518,7 @@ function personIndexPageSize() {
     disconnectIndexAutoload: disconnectPeopleIndexAutoload,
     fetchPersonWorksPage,
     goToPerson,
+    invalidatePrefetches,
     loadMoreWorks,
     personIndexPageSize,
     personWorkPageSize,

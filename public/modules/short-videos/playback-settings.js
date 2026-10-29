@@ -23,12 +23,14 @@ export function createShortVideoPlaybackSettings(deps) {
     shareShortVideo,
     showBrowserToast,
     showError,
+    shortVideoPictureInPictureState,
     state,
     syncActivePlaybackMode,
     syncShortVideoFullscreenControl,
     toggleClearScreen,
     toggleShortVideoDislike,
     toggleShortVideoFullscreen,
+    toggleShortVideoPictureInPicture,
     writeAutoNextPreference
   } = deps;
 
@@ -36,18 +38,19 @@ export function createShortVideoPlaybackSettings(deps) {
     const browser = getBrowser();
     if (!browser) return;
     const galleryMode = isGalleryPost(video);
+    const speedOnly = Boolean(options.speedOnly && !galleryMode);
     const existingOverlay = browser.querySelector(".short-video-more-overlay");
     if (existingOverlay) closePlaybackSettings(existingOverlay, { restoreFocus: false });
 
     const overlay = document.createElement("div");
-    overlay.className = "short-video-more-overlay";
+    overlay.className = `short-video-more-overlay${speedOnly ? " is-speed-picker" : ""}`;
     overlay._shortVideoReturnFocus = options.trigger || null;
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) closePlaybackSettings(overlay);
     });
 
     const sheet = document.createElement("section");
-    sheet.className = "short-video-more-sheet";
+    sheet.className = `short-video-more-sheet${speedOnly ? " is-speed-picker" : ""}`;
     sheet.setAttribute("role", "dialog");
     sheet.setAttribute("aria-modal", "true");
     sheet.setAttribute("aria-labelledby", "short-video-playback-settings-title");
@@ -60,13 +63,13 @@ export function createShortVideoPlaybackSettings(deps) {
     eyebrow.textContent = "本地播放器";
     const heading = document.createElement("h2");
     heading.id = "short-video-playback-settings-title";
-    heading.textContent = "更多功能";
+    heading.textContent = speedOnly ? "播放速度" : "更多功能";
     headingWrap.append(eyebrow, heading);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "short-video-more-close";
     close.append(createIcon("close"));
-    close.setAttribute("aria-label", "关闭更多功能");
+    close.setAttribute("aria-label", speedOnly ? "关闭播放速度" : "关闭更多功能");
     close.addEventListener("click", () => closePlaybackSettings(overlay));
     header.append(headingWrap, close);
 
@@ -96,33 +99,67 @@ export function createShortVideoPlaybackSettings(deps) {
       button.addEventListener("click", () => {
         setPlaybackRate(value);
         syncSpeedButtons();
+        if (speedOnly) closePlaybackSettings(overlay);
       });
       speedButtons.set(value, button);
       speedGrid.append(button);
     }
     speedSection.append(speedHead, speedGrid);
 
+    let syncPictureInPicture = () => {};
+    const mountSettings = (initialFocus) => {
+      overlay.append(sheet);
+      browser.append(overlay);
+      isolateShortVideoTransientModal(overlay);
+      syncPictureInPicture();
+      bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
+      focusShortVideoTransientModal(sheet, initialFocus);
+    };
+    if (speedOnly) {
+      sheet.append(header, speedSection);
+      syncSpeedButtons();
+      mountSettings(speedButtons.get(normalizePlaybackRate(state.shortVideo?.playbackRate)) || close);
+      return;
+    }
+
     const actions = document.createElement("div");
     actions.className = "short-video-more-actions is-primary-actions";
     const player = activePlayer();
-    const pictureInPictureAvailable = Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled);
-    const pictureInPictureActive = Boolean(player && document.pictureInPictureElement === player);
     const pip = playbackSettingsAction(
-      pictureInPictureActive ? "退出画中画" : "画中画",
-      pictureInPictureAvailable ? "悬浮在其他窗口上方" : "当前作品不支持",
+      "画中画",
+      "悬浮在其他窗口上方",
       "pictureInPicture",
-      async () => {
-        if (!pictureInPictureAvailable) return;
+      () => {
+        pip.shortVideoSyncPictureInPicture();
+        if (pip.disabled) return;
+        toggleShortVideoPictureInPicture(player);
         closePlaybackSettings(overlay, { restoreFocus: false });
-        try {
-          if (pictureInPictureActive) await document.exitPictureInPicture();
-          else await player.requestPictureInPicture();
-        } catch {
-          showBrowserToast("画中画启动失败");
-        }
       }
     );
-    pip.disabled = !pictureInPictureAvailable;
+    pip.dataset.shortVideoPictureInPictureControl = "settings";
+    pip.shortVideoSyncPictureInPicture = () => {
+      const contextCurrent = Boolean(overlay.isConnected && options.isCurrent?.() !== false && isCurrentShortVideo(video));
+      const current = Boolean(player && contextCurrent && activePlayer() === player);
+      const status = shortVideoPictureInPictureState?.() || {};
+      const active = Boolean(current && status.active);
+      const pending = Boolean(current && status.pending);
+      const supported = Boolean(current && status.supported && typeof toggleShortVideoPictureInPicture === "function");
+      const ready = status.ready !== false;
+      const label = active ? "退出画中画" : "画中画";
+      pip.disabled = !current || typeof toggleShortVideoPictureInPicture !== "function"
+        || pending || !(active || (supported && ready));
+      pip.classList.toggle("active", active);
+      pip.setAttribute("aria-label", label);
+      pip.title = label;
+      pip.setAttribute("aria-pressed", String(active));
+      pip.setAttribute("aria-busy", String(pending));
+      pip.querySelector("b").textContent = label;
+      pip.querySelector("small").textContent = !contextCurrent || (player && !current) ? "当前作品已切换"
+        : pending ? (active ? "正在退出画中画" : "正在打开画中画")
+        : active ? "返回页面内播放"
+        : supported ? (ready ? "悬浮在其他窗口上方" : "视频加载后可用") : (status.unavailableReason || "当前作品不支持");
+    };
+    syncPictureInPicture = pip.shortVideoSyncPictureInPicture;
 
     const fullscreen = playbackSettingsAction("全屏播放", "沉浸观看当前作品", "fullscreen", () => {
       closePlaybackSettings(overlay, { restoreFocus: false });
@@ -266,15 +303,11 @@ export function createShortVideoPlaybackSettings(deps) {
     sheet.append(header);
     if (!galleryMode) sheet.append(speedSection);
     sheet.append(primarySection, localSection, manageSection, shortcuts);
-    overlay.append(sheet);
-    browser.append(overlay);
-    isolateShortVideoTransientModal(overlay);
-    bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
     if (!galleryMode) syncSpeedButtons();
     const initialFocus = options.focusSpeed && !galleryMode
       ? speedButtons.get(normalizePlaybackRate(state.shortVideo?.playbackRate))
       : close;
-    focusShortVideoTransientModal(sheet, initialFocus);
+    mountSettings(initialFocus);
   }
 
   function playbackSettingsAction(label, description, icon, action) {

@@ -766,12 +766,12 @@ function handleCalculate(data) {
         }
     }
 
-    runAI(boardArray, counts, hexStr);
+    runAI(boardArray, counts, hexStr, data.requestId);
 }
 
 let core_ai_logic = null;
 
-function runAI(boardArray, counts, hexStr) {
+function runAI(boardArray, counts, hexStr, requestId) {
     if (!core_ai_logic) {
         core_ai_logic = new CoreAILogic();
     }
@@ -783,5 +783,5 @@ function runAI(boardArray, counts, hexStr) {
     const bestMove = core_ai_logic.calculate_step(ai_player, boardArray, counts);
     console.log(`%c>>> Decision: ${bestMove} <<<`, "background: #222; color: #ffeb3b; font-weight: bold; font-size: 16px;");
 
-    postMessage({ type: 'move_result', best_move: bestMove });
+    postMessage({ type: 'move_result', best_move: bestMove, requestId });
 }

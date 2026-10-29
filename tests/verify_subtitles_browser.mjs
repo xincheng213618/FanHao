@@ -16,7 +16,7 @@ const media = fs.readFileSync(mediaPath);
 const work = { id: "subtitle-work", title: "中性字幕验证视频", relativePath: "fixture", videos: ["a", "b"].map((id) => ({ id: `subtitle-${id}`, name: `TEST-001 中性片段 ${id}.mp4`, playable: true, ext: ".mp4", size: media.length, relativePath: `fixture/${id}.mp4` })), infos: [], images: [], infoSummary: { code: "错误的人物资料" }, people: [] };
 const requests = [];
 const uploaded = [];
-let mode = "direct", failList = false, delaySearch = false;
+let mode = "direct", failList = false, delaySearch = false, probedDuration = 60;
 const extraTracks = new Map();
 function track(id, label, language = "zh", autoSelect = false) { return { id, label, language, autoSelect, format: "srt", match: "exact", source: "local", url: `/api/works/subtitle-work/subtitles/vtt/${id}?videoId=subtitle-a`, downloadUrl: `/api/works/subtitle-work/subtitles/original/${id}?videoId=subtitle-a` }; }
 function tracks(videoId) { return videoId === "subtitle-a" ? [track("zh", "简体中文 · 精确匹配", "zh-Hans", true), track("en", "English", "en"), track("ambiguous", "中文 · 待核对", "zh", false), ...extraTracks.values()] : []; }
@@ -51,7 +51,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname.startsWith("/api/")) {
     let payload = {}, status = 200;
     if (url.pathname === "/api/works/subtitle-work") payload = { work };
-    else if (url.pathname.startsWith("/api/playinfo/")) payload = { mode, streamUrl: "/fixture-media.mp4", duration: 60, label: mode === "direct" ? "直接播放" : "转码测试" };
+    else if (url.pathname.startsWith("/api/playinfo/")) payload = { mode, streamUrl: "/fixture-media.mp4", duration: probedDuration, label: mode === "direct" ? "直接播放" : "转码测试" };
     else if (url.pathname.endsWith("/subtitles")) { payload = failList ? { error: "字幕列表测试失败" } : { query: "TEST-001", tracks: tracks(url.searchParams.get("videoId")) }; status = failList ? 503 : 200; }
     else if (url.pathname.endsWith("/subtitles/search")) {
       if (delaySearch) await new Promise((resolve) => setTimeout(resolve, 600));
@@ -119,11 +119,80 @@ try {
     } finally { await element?.dispose(); }
   }
 
+  for (const scenario of [{ hint: 60, steps: 6 }, { hint: 600, steps: 9 }]) {
+    probedDuration = scenario.hint;
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const holdMedia = async route => { await held; await route.continue(); };
+    await page.route("**/fixture-media.mp4", holdMedia);
+    try {
+      await page.goto(`${address}/player.html?workId=subtitle-work`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.querySelector("#playerVideo")?.src.endsWith("/fixture-media.mp4") && !document.querySelector("#playerVideo").hidden);
+      assert.equal(await page.locator("#playerVideo").evaluate(video => video.readyState), 0, "the synthetic MP4 is held before metadata");
+      for (let index = 0; index < scenario.steps; index++) await page.keyboard.press("ArrowRight");
+      const corrected = scenario.hint === 600 ? page.waitForResponse(response => response.url().endsWith("/api/progress/subtitle-a")
+        && response.request().postDataJSON()?.position === 60 && response.request().postDataJSON()?.duration === 60) : null;
+      release();
+      await page.waitForFunction(() => {
+        const video = document.querySelector("#playerVideo");
+        return video?.readyState >= 2 && !video.seeking && video.currentTime >= video.duration - .05;
+      });
+      assert.equal(await page.locator("#playerVideo").evaluate(video => video.paused), true, "terminal pending seeks must not replay the decoded MP4");
+      if (corrected) await corrected;
+      await page.keyboard.press("Space");
+      await page.waitForFunction(() => {
+        const video = document.querySelector("#playerVideo");
+        return video && !video.paused && video.currentTime < 2;
+      });
+      console.log(`PASS decoded MP4 terminal seek and explicit replay (duration hint ${scenario.hint}s, actual 60s)`);
+    } finally {
+      release();
+      await page.unroute("**/fixture-media.mp4", holdMedia);
+    }
+  }
+  probedDuration = 60;
+  for (const scenario of [{ playbackMode: "direct", position: 6.5, relative: 6.5 }, { playbackMode: "transcode", position: 20.25, relative: .25 }]) {
+    mode = scenario.playbackMode;
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const holdMedia = async route => { await held; await route.continue(); };
+    await page.route("**/fixture-media.mp4*", holdMedia);
+    try {
+      await page.goto(`${address}/player.html?workId=subtitle-work&t=${scenario.position}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.querySelector("#playerVideo")?.src.includes("/fixture-media.mp4") && !document.querySelector("#playerVideo").hidden);
+      if (await page.locator("#playerVideo").evaluate(video => video.paused)) await page.keyboard.press("k");
+      await page.keyboard.press("k");
+      release();
+      await page.waitForFunction(() => { const video = document.querySelector("#playerVideo"); return video?.readyState >= 2 && !video.seeking; });
+      const position = await page.locator("#playerVideo").evaluate(video => ({ time: video.currentTime, paused: video.paused }));
+      assert(Math.abs(position.time - scenario.relative) < .01, `URL time must select its native decoded position in ${scenario.playbackMode}: ${position.time}`);
+      assert.equal(position.paused, true, "the pending link must preserve an explicit pause before metadata");
+      console.log(`PASS decoded MP4 URL position ${scenario.position}s (${scenario.playbackMode})`);
+      if (scenario.playbackMode === "direct") {
+        await page.locator("#playerTimeJumpButton").click();
+        const dialog = page.getByRole("dialog", { name: "跳到时间", exact: true });
+        await dialog.getByLabel("播放位置", { exact: true }).fill("0:11.75");
+        await dialog.getByRole("button", { name: "跳转", exact: true }).click();
+        await page.waitForFunction(() => { const video = document.querySelector("#playerVideo"); return !video.seeking && Math.abs(video.currentTime - 11.75) < .01; });
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.paused), true, "manual time jump must preserve an actually decoded video's explicit pause");
+        console.log("PASS decoded MP4 manual time jump to 11.75s remains paused");
+      }
+    } finally { release(); await page.unroute("**/fixture-media.mp4*", holdMedia); }
+  }
+  mode = "direct";
   await page.goto(`${address}/player.html?workId=subtitle-work`); await waitTrack("zh");
   await pauseAt(6); await checkCaption("中文字幕测试");
   await clickFullscreen(page.locator('[data-plyr="fullscreen"]'), page.locator(".plyr"));
   await page.waitForFunction(() => document.fullscreenElement?.contains(document.querySelector(".fanhao-subtitle-cues")));
   assert(await page.locator(".fanhao-subtitle-cues").isVisible(), "the subtitle overlay remains visible inside Plyr fullscreen");
+  await page.keyboard.press("g");
+  const fullscreenJump = page.getByRole("dialog", { name: "跳到时间", exact: true });
+  await fullscreenJump.waitFor({ state: "visible" });
+  await fullscreenJump.getByLabel("播放位置", { exact: true }).fill("6.25");
+  await fullscreenJump.getByRole("button", { name: "跳转", exact: true }).click();
+  await page.waitForFunction(() => { const video = document.querySelector("#playerVideo"); return !video.seeking && Math.abs(video.currentTime - 6.25) < .01; });
+  assert.equal(await page.locator("#playerVideo").evaluate(video => video.paused && document.fullscreenElement?.contains(video)), true, "fullscreen time jump must preserve decoded playback pause and fullscreen ownership");
+  console.log("PASS decoded MP4 G time jump remains paused inside fullscreen");
   await page.evaluate(() => document.exitFullscreen());
   await openControls();
   assert.equal(await page.getByRole("searchbox", { name: "字幕搜索番号" }).inputValue(), "TEST-001", "the API-derived video code overrides incorrect work metadata");
@@ -178,8 +247,16 @@ try {
   mode = "transcode";
   await page.goto(`${address}/player.html?workId=subtitle-work`); await waitTrack("zh"); await pauseAt(6);
   await openControls(); await page.getByRole("combobox", { name: "字幕轨道" }).selectOption("en"); await waitTrack("en");
+  const streamsBeforePausedSeek = requests.filter((request) => request.url.pathname === "/fixture-media.mp4").length;
   await page.locator("#playerSeekRange").evaluate((seek) => { seek.value = "20"; seek.dispatchEvent(new Event("change", { bubbles: true })); });
-  await waitTrack("en", -20); await pauseAt(2); await checkCaption("English subtitle fixture");
+  await waitTrack("en", -20);
+  assert.equal(await page.locator("video").evaluate((video) => video.paused && video.readyState === 0), true, "paused compatibility seeking must defer media activation even after its VTT has loaded");
+  assert.equal(requests.filter((request) => request.url.pathname === "/fixture-media.mp4").length, streamsBeforePausedSeek, "a paused compatibility seek must not silently start a new media request");
+  // VTT loading alone does not establish a media timeline. Start the deferred
+  // source through its actual user control before seeking into an active cue.
+  await page.getByRole("button", { name: "开始播放", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("video").readyState >= 2 && !document.querySelector("video").paused);
+  await pauseAt(2); await checkCaption("English subtitle fixture");
   assert.equal(await page.getByRole("combobox", { name: "字幕轨道" }).inputValue(), "en");
   await page.getByRole("combobox", { name: "字幕轨道" }).selectOption("");
   await page.locator("#playerSeekRange").evaluate((seek) => { seek.value = "30"; seek.dispatchEvent(new Event("change", { bubbles: true })); });

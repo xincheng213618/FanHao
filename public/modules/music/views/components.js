@@ -164,6 +164,12 @@ export function createComponents(deps) {
     row.append(number, title, artist, album, quality, duration, actionsEl);
     row.addEventListener("click", () => actions.openTrackFromList(track, music.data?.tracks || [], { autoplay: true }).catch(() => {}));
     row.addEventListener("keydown", (event) => {
+      if (event.target !== row || event.defaultPrevented) return;
+      if (event.isComposing || event.keyCode === 229) {
+        event.stopPropagation();
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       actions.openTrackFromList(track, music.data?.tracks || [], { autoplay: true }).catch(() => {});
@@ -219,14 +225,22 @@ export function createComponents(deps) {
   function renderAlphaIndex(currentLetter) {
     const bar = document.createElement("div");
     bar.className = "music-alpha-index";
-    const items = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").concat(["0-9", "待", "#"]);
+    const mode = music.mode;
+    bar.dataset.musicAlphaMode = mode;
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "按首字母筛选");
+    const items = ["", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""), "0-9", "待", "#"];
     for (const item of items) {
       const value = item === "0-9" ? "0" : item;
       const button = document.createElement("button");
       button.type = "button";
       button.className = "music-alpha-index-item" + (currentLetter === value ? " active" : "");
-      button.textContent = item;
+      button.textContent = item || "全部";
+      button.dataset.musicLetter = value;
+      button.setAttribute("aria-pressed", String((currentLetter || "") === value));
+      if (!value) button.setAttribute("aria-label", "显示全部首字母");
       button.addEventListener("click", () => {
+        if (!button.isConnected || music.mode !== mode) return;
         music.letter = music.letter === value ? "" : value;
         actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
@@ -235,7 +249,7 @@ export function createComponents(deps) {
     return bar;
   }
 
-  function queueRow(track, index) {
+  function queueRow(track, index, isCurrent = () => true) {
     const row = document.createElement("div");
     row.className = `music-queue-row${music.current?.id === track.id ? " active" : ""}`;
     registerMusicTrackElement(row, track.id);
@@ -243,13 +257,13 @@ export function createComponents(deps) {
     play.type = "button";
     play.className = "music-queue-play";
     play.textContent = `${track.title} - ${track.artist || "未知歌手"}`;
-    play.addEventListener("click", () => actions.openTrack(track.id, { autoplay: true }).catch(() => {}));
+    play.addEventListener("click", () => { if (row.isConnected && isCurrent()) actions.openTrack(track.id, { autoplay: true }).catch(() => {}); });
     const actionsEl = document.createElement("span");
     actionsEl.className = "music-queue-actions";
     actionsEl.append(
-      queueActionButton("↑", "上移", () => actions.moveQueueTrack(track.id, -1), index <= 0),
-      queueActionButton("↓", "下移", () => actions.moveQueueTrack(track.id, 1), index >= (music.queue || []).length - 1),
-      queueActionButton("×", "移出队列", () => actions.removeTrackFromQueue(track.id), music.current?.id === track.id)
+      queueActionButton("↑", "上移", () => { if (row.isConnected && isCurrent()) actions.moveQueueTrack(track.id, -1); }, index <= 0),
+      queueActionButton("↓", "下移", () => { if (row.isConnected && isCurrent()) actions.moveQueueTrack(track.id, 1); }, index >= (music.queue || []).length - 1),
+      queueActionButton("×", "移出队列", () => { if (row.isConnected && isCurrent()) actions.removeTrackFromQueue(track.id); }, music.current?.id === track.id)
     );
     row.append(play, actionsEl);
     return row;

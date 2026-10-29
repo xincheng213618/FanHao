@@ -144,7 +144,7 @@ function clientFixture(platform, { modern = true, playId = 1 } = {}) {
       return new Promise((resolve,reject)=>claims.push({trackId,previousSessionId,signal,resolve,reject}));
     }};
   `;
-  const webNames = ["reportPlayedOnce", "captureProgressRecord", "cancelProgressClock", "refreshProgressClock",
+  const webNames = ["reportPlayedOnce", "captureProgressRecord", "cancelProgressClock", "checkProgressAccount", "refreshProgressClock",
     "flushProgressKeepalive", "resumeProgress", "saveProgressSoon"];
   const androidNames = ["transitionPreloadEnabled", "scheduleGaplessPreload", "nextQueueCandidate",
     "tryPromoteGaplessPreload", "hydratePromotedTrack", "reportPlayedOnce", "saveProgressSoon", "saveProgress",
@@ -196,6 +196,31 @@ function clientFixture(platform, { modern = true, playId = 1 } = {}) {
     platform === "Web" ? webNames : androidNames, setup,
     platform === "Android" ? "(installLifecycle(),installMediaSessionHandlers()," + expose + ")" : expose, deps);
   return { ...wrapped, claims, reads, saved, playedRecords, leave, audioAttempts, loaded, retired, fades, events, base };
+}
+
+for (const change of ["owner", "revision"]) for (const replacePending of [false, true]) {
+  test(`Web: ${change} change ${replacePending ? "replaces a pending claim" : "rejects a late claim"} without adopting its progress`, async () => {
+    const f = clientFixture("Web");
+    void f.claim();
+    const old = f.claims[0], initial = f.inspect().progressSession.id;
+    f.account[change] = `synthetic-new-${change}`;
+    if (replacePending) {
+      void f.claim();
+      assert.equal(f.claims.length, 2);
+      assert.equal(old.signal.aborted, true, "a new identity must not coalesce into the old claim");
+    }
+    old.resolve({ progressSessionId: ID(50), progressSessionStartedAt: CLOCK + 50 });
+    await tick();
+    assert.equal(f.saved.length, 0, "an old identity response must not capture new-identity progress");
+    assert.equal(f.inspect().progressSession.id, initial);
+    if (!replacePending) void f.claim();
+    f.claims[1].resolve({ progressSessionId: ID(51), progressSessionStartedAt: CLOCK + 51 });
+    await tick();
+    assert.equal(f.saved.length, 1);
+    assert.equal(f.saved[0].progressSessionId, ID(51));
+    assert.equal(f.saved[0].webAccountOwner, f.account.owner);
+    assert.equal(f.saved[0].webAccountRevision, f.account.revision);
+  });
 }
 
 for (const platform of ["Web", "Android"]) {
@@ -305,17 +330,13 @@ test("Web actual rendered lyric button seeks and claims ownership even while pau
     addEventListener(name,callback){this.listeners[name]=callback;}
   }
   const calls=[];
-  const result=compile(webPageSource,["renderStageLyrics"],`
+  const result=compile(webPageSource,["createLyricLineButton"],`
     const {Node,calls}=deps;
     const document={createElement:tag=>new Node(tag)};
-    const state={music:{lyrics:{lines:[{timeMs:42000,text:"fixture lyric"}]},lyricFollowPaused:false}};
-    const lyricFollowButtonEls=[],lyricLineEls=[];
-    const resumeLyricFollow=()=>{},pauseLyricFollow=()=>{};
     const player={seekToLyricLine(time){calls.push(["seek",time]);}};
     const actions={claimProgressOwner(){calls.push(["claim"]);}};
-  `,"(renderStageLyrics(),{lyricLineEls})",{Node,calls});
-  assert.equal(result.lyricLineEls.length,1);
-  result.lyricLineEls[0].listeners.click();
+  `,"createLyricLineButton({timeMs:42000,text:'fixture lyric'},0,()=>true)",{Node,calls});
+  result.listeners.click();
   assert.deepEqual(calls,[["seek",42000],["claim"]]);
 });
 
