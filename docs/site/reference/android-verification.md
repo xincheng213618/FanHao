@@ -2,7 +2,7 @@
 title: Android 验证环境与边界
 description: 准备 Android 客户端检查依赖，区分受控浏览器、宿主 JVM、APK 构建和真机验收。
 status: maintained
-verified_at: 2026-10-29
+verified_at: 2026-10-28
 sources:
   - package.json
   - android-client/package.json
@@ -96,7 +96,7 @@ Android 客户端检查同时包含源码核对、受控页面和宿主 JVM fixt
 | `npm run verify:android-music-rendering` | 私有浏览器执行实际音乐模块与完整 CSS；检查列表、搜索、播放器归属、详情长文与44px操作，包含管理弹层、排序固定标题、完整筛选标签和原生排序入口。路由接回场景验证菜单真实请求，音频为受控替身，不代表真机或原生选择器弹出层验收。 |
 | `npm run verify:android-music-back` | 执行实际音乐模块及 JavaScript 返回分发；含歌单管理弹层、排序/筛选关闭后焦点恢复、离页后旧控件失效，以及编辑/删除仍进入原提示流程。延迟焦点检查保留来源与账户边界；DOM、音频与确认结果受控，不执行实际写入，不代表真机返回键验收。 |
 
-`node tests/serve_android_gallery_navigation_fixture.mjs` 提供真实 Android 页面和完整 CSS 的只读合成预览，启动器包含多种隔离场景，例如：
+`node tests/serve_android_gallery_navigation_fixture.mjs` 提供真实 Android 页面和完整 CSS 的只读合成预览，启动器包含以下场景：
 
 - 普通图库导航、图库 30 项长分类、小说 8 分类书库，用于检查长名称、末项选择及当前分类可见性。
 - 音乐搜索筛选含 2 首普通歌曲和 1 首收藏歌曲，用于检查切换范围后的有效条件、清除及窄屏菜单，不提供音频或收藏写入。
@@ -104,4 +104,4 @@ Android 客户端检查同时包含源码核对、受控页面和宿主 JVM fixt
 - 歌单场景从首页进入长名自建歌单、空歌单、真实 `hires` 智能歌单与 2 条合成最近播放；可打开本地管理菜单，不提供写入、歌曲详情、音频或导出。
 - 主库搜索含 3 个状态不同的作品和 1 位匹配人物，用于检查输入、筛选排序与详情往返；已知作品的迁移状态只返回空任务，不提供任务操作。
 
-默认与普通预览场景拒绝业务写入且不代理真实服务。独立 `manga-recovery` 场景仅对精确白名单合成链接在内存中返回失败或完成回执，不启动采集、子进程或数据库操作；其他链接、方法和场景仍拒绝写入。`--smoke` 与 `--smoke-recovery` 仅核对 HTTP、数据与资源隔离，不能替代页面截图和实际交互验证。
+所有场景均拒绝业务写入且不代理真实服务。`--smoke` 仅核对 HTTP、数据与资源隔离，不能替代页面截图和实际交互验证。
