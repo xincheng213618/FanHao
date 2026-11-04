@@ -2,8 +2,42 @@
 title: 验证矩阵
 description: 按变更范围选择真实 package 脚本，明确依赖、临时写入和运行验收的区别。
 status: maintained
-verified_at: 2026-10-29
+verified_at: 2026-11-05
 sources:
+  - tools/rescan_novel_library.py
+  - tests/verify_novel_author_index.mjs
+  - tests/verify_novel_author_index_migration.mjs
+  - tests/verify_android_novel_list_rendering.mjs
+  - tests/verify_manga_cold_entry.mjs
+  - tests/verify_manga_detail_first_images.mjs
+  - lib/info-metadata.js
+  - tests/verify_work_facet_tags.mjs
+  - android-client/www/app.js
+  - android-client/www/platform/content-index/channel-views.js
+  - tests/verify_android_channel_paging_mount.mjs
+  - android-client/www/modules/fanhao/work-views.js
+  - android-client/www/modules/fanhao/features/works/cards.js
+  - android-client/www/modules/fanhao/android-module.js
+  - android-client/www/js/auto-load.js
+  - tests/verify_android_work_list_rendering.mjs
+  - src/modules/fanhao/server/works/work-info-service.js
+  - src/modules/fanhao/server/works/presenter-service.js
+  - src/modules/fanhao/server/works/work-detail-service.js
+  - tests/verify_work_detail_facet_read.mjs
+  - src/modules/fanhao/server/collections/account-user-state-service.js
+  - tests/verify_account_state_revision_read.mjs
+  - src/modules/fanhao/server/user-state/collection-query-service.js
+  - tests/verify_collection_query_reuse.mjs
+  - src/modules/fanhao/server/playback/playback-progress-service.js
+  - tests/verify_collection_history_window.mjs
+  - src/modules/music/server/store.js
+  - src/modules/music/server/schema.js
+  - src/modules/music/server/helpers.js
+  - src/modules/music/server/smart-mix.js
+  - tests/verify_music_duration_sort.mjs
+  - tests/verify_music_state_filter.mjs
+  - android-client/www/modules/music/music-views.js
+  - tests/verify_android_music_playlist_requests.mjs
   - public/index.html
   - tests/verify_web_bootstrap_recovery.mjs
   - public/modules/music/music-page.js
@@ -28,6 +62,8 @@ sources:
   - android-client/www/modules/novels/mobile-refinements.css
   - tests/serve_android_gallery_navigation_fixture.mjs
   - android-client/www/modules/novels/android-module.js
+  - android-client/www/modules/novels/novel-views.js
+  - tests/verify_android_novel_catalog_filter.mjs
   - tests/verify_android_novel_categories.mjs
   - tests/verify_android_novel_mobile_layout.mjs
   - tests/verify_android_manga_mobile_layout.mjs
@@ -40,6 +76,8 @@ sources:
   - tests/run_verification.mjs
   - tests/verify_verification_runner.mjs
   - android-client/package.json
+  - android-client/www/js/android-module-registry.js
+  - tests/verify_android_module_loading.mjs
   - tests/verify_fanhao_startup.mjs
   - tests/verify_fanhao_startup.ps1
   - tests/verify_browser_behavior.mjs
@@ -68,6 +106,10 @@ sources:
   - tests/verify_account_clients.mjs
   - tests/verify_account_recovery_clients.mjs
   - tests/verify_short_video_watch_write.mjs
+  - tests/verify_short_video_collections.mjs
+  - tests/verify_short_video_collection_projection.mjs
+  - src/modules/short-videos/server/collections-repository.js
+  - src/modules/short-videos/server/collection-video-projection.js
   - tests/verify_short_video_keyboard.mjs
   - tests/verify_short_video_playback_settings.mjs
   - tests/verify_short_video_playback_recovery.mjs
@@ -115,6 +157,14 @@ sources:
   - tests/verify_short_video_startup_preload.mjs
   - tests/verify_short_video_collection_restore.mjs
   - tests/verify_short_video_collection_lifecycle.mjs
+  - tests/verify_short_video_collection_rendering.mjs
+  - tests/verify_web_short_video_author_rendering.mjs
+  - public/modules/short-videos/author-pages.js
+  - public/modules/short-videos/collections-controller.js
+  - public/modules/short-videos/short-video-page.js
+  - public/modules/short-videos/list-window.js
+  - public/modules/short-videos/styles/list.css
+  - public/modules/short-videos/list-cards.js
   - tests/verify_short_video_list_lifecycle.mjs
   - tests/verify_short_video_delete_playback.mjs
   - tests/verify_short_video_media_representation.mjs
@@ -172,6 +222,11 @@ sources:
   - tests/verify_native_short_video_bitmap_decode.mjs
   - tests/verify_native_short_video_author_requests.mjs
   - tests/verify_android_short_video_list_lifecycle.mjs
+  - tests/verify_android_short_video_author_rendering.mjs
+  - android-client/www/modules/short-videos/index.js
+  - android-client/www/modules/short-videos/list/controller.js
+  - android-client/www/modules/short-videos/list/view.js
+  - android-client/www/modules/short-videos/list/following-view.js
   - tests/verify_android_short_video_back.mjs
   - tests/verify_android_short_video_suggestions.mjs
   - tests/verify_android_mobile_action_sheet.mjs
@@ -213,6 +268,8 @@ sources:
   - tests/verify_work_cover_async.mjs
   - tests/verify_gallery_cover_async.mjs
   - tests/verify_image_query_correctness.mjs
+  - tests/verify_movie_cold_projection.mjs
+  - src/modules/media/server/gallery-metadata-service.js
   - tests/diagnose_image_query_cpu.mjs
   - tests/verify_video_probe_cache.mjs
   - tests/verify_video_probe_lifecycle.mjs
@@ -220,19 +277,29 @@ sources:
   - tests/verify_remote_image_lifecycle.mjs
   - tests/verify_media_stream_lifecycle.mjs
   - tests/verify_web_gallery_requests.mjs
+  - tests/verify_gallery_reader_progress.mjs
+  - public/modules/content-index/gallery-renderer.js
   - tests/verify_gallery_summary_recovery.mjs
   - tests/verify_photo_pager_keyboard.mjs
   - tests/verify_manga_reader_requests.mjs
   - tests/verify_manga_image_layout.mjs
   - tests/verify_manga_lookup_performance.mjs
+  - tests/verify_manga_metadata_file_cache.mjs
+  - tests/verify_manga_comic_statement_cache.mjs
+  - tests/verify_manga_summary_read_budget.mjs
+  - tests/fixtures/manga-comic-reader-before-cache.txt
+  - src/modules/photos/server/manga-service.js
+  - src/modules/photos/server/manga-database.js
   - tests/verify_music_facet_cache.mjs
   - tests/verify_music_lyric_search.mjs
   - tests/verify_music_m3u.mjs
   - tests/verify_music_playlist_order.mjs
   - tests/verify_music_summary_reuse.mjs
   - tests/verify_music_active_catalogue.mjs
+  - tests/verify_music_empty_pages.mjs
   - tests/verify_studio_cache_dependencies.mjs
   - tests/verify_android_music_list_rendering.mjs
+  - tests/verify_android_music_queue_rendering.mjs
   - tests/verify_android_music_catalogue_requests.mjs
   - tests/verify_android_music_playback_requests.mjs
   - tests/verify_android_music_transition_requests.mjs
@@ -259,11 +326,20 @@ sources:
   - tests/verify_web_novel_chapter_identity.mjs
   - tests/diagnose_web_gallery_navigation.mjs
   - tests/verify_archive_reader_lifecycle.mjs
+  - tests/verify_archive_list_authority.mjs
+  - src/platform/server/archive-image-service.js
   - tests/verify_rescan_image_library.mjs
   - tests/verify_image_library_performance.mjs
   - tests/verify_media_metadata_identity.mjs
   - tests/fixtures/archive_image_helper_fixture.mjs
   - tests/verify_novel_summary_cache.mjs
+  - tests/verify_novel_recent_reading.mjs
+  - tests/verify_novel_reading_page.mjs
+  - src/modules/novels/server/store.js
+  - tests/verify_western_image_query_cache.mjs
+  - tests/verify_photo_query_cache.mjs
+  - src/modules/content-index/server/image-library-service.js
+  - src/modules/content-index/server/image-query-cache.js
   - tests/verify_novel_empty_pages.mjs
   - tests/verify_novel_write_worker.mjs
   - tests/verify_novel_credentials_async.mjs
@@ -324,12 +400,12 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 
 独立下载管理器的源码与验证工具选择 `verify:douyin-manager` 和导入检查，不连带执行主服务短视频与 Android 门禁。共享媒体响应、文件服务和媒体 Worker 的改动会额外选择图库、视频播放、音乐和封面行为检查。
 
-主资料库网页核心检查使用 `npm run verify:web-core`，可加 `-- --plan` 先查看 18 个入口、21 条去重命令；覆盖共同启动恢复、列表、播放器、图库、漫画、小说、音乐、工具和人物资料的私有 fixture。需要 Chrome/Edge 与 TXT 检查所需的 Python，过程中不启动正式服务或运行 Android 界面/构建门禁；完整应用检查继续使用 `verify:full`。
+主资料库网页核心检查使用 `npm run verify:web-core`，可加 `-- --plan` 先查看 20 个入口、24 条去重命令；覆盖共同启动恢复、列表、播放器、图库、漫画、小说、音乐、工具和人物资料的私有 fixture。需要 Chrome/Edge 与 TXT 检查所需的 Python，过程中不启动正式服务或运行 Android 界面/构建门禁；完整应用检查继续使用 `verify:full`。
 网页搜索、阅读、播放器和工具的交互专项见[网页交互验证](web-verification.md)，包含各浏览器 fixture 的适用范围与用例边界。
 
 | 命令 | 检查内容 | 执行边界 |
 | --- | --- | --- |
-| `npm run verify:repo-hygiene`、`npm run verify:modules`、`npm run verify:imports` | Git 跟踪文件中的禁止产物、运行状态与文本异常，模块结构与职责约束，以及相对导入引用。 | 读取 Git 清单和源码，不启动应用；不是秘密扫描器，也不能替代真实调用验证。 |
+| `npm run verify:repo-hygiene`、`npm run verify:modules`、`npm run verify:imports`、`npm run verify:android-module-loading` | 跟踪文件的禁止产物、运行状态与文本异常，模块职责和相对导入；Android 模块最多7项并行导入，工厂、归一化及错误仍按定义顺序，保留注册器契约。 | 前三项读取清单和源码；加载专项使用完整旧/当前注册器、临时ESM及门控异步导入，核对有界并发、未处理拒绝与串行负控；不启动正式应用，不代表真机启动验收。 |
 | `npm run verify:auth` | 来源识别、登录与会话等鉴权规则。 | 使用临时鉴权状态文件，并清理临时目录。 |
 | `npm run verify:mutation-auth`、`npm run verify:json-responses` | 写接口权限与 API 错误边界；JSON 编码权重、明文拒绝、Vary 合并、压缩失败回退和断开后回调。 | 前者调用 mutation 与 error-boundary 检查；后者使用动态 loopback HTTP、实际压缩/解压及门控压缩故障，不启动正式服务。 |
 | `npm run verify:settings` | 模块和应用设置契约。 | 会生成并清理临时模块 fixture。 |
@@ -345,11 +421,12 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:web-settings-browser` | 网页设置草稿、并行分组回执、读取归属与原生键盘/焦点保留。 | 需要 Chrome/Edge；仅使用私有静态服务器与合成 API，不操作真实设置、凭据或数据库；详见[网页交互验证](web-verification.md)。 |
 | `npm run verify:short-video-build` | bundle 字节与 HTML 版本引用是否一致。 | esbuild 内存构建并比较；`--check` 不写产物。 |
 | `npm run verify:short-video-playback` | 按钮聚焦后的快捷键与原生激活、独立倍速面板和焦点恢复、首帧等待与恢复、慢预热/导航详情延迟时的连续切换、缓存请求与播放重试的归属、进度拖动与缓冲分段、长按倍速的释放恢复、滑动指针与作品归属、滚轮输入和回弹、未知下一条时的连播等待与取消、续播的来源与操作归属、观看进度的串行保存和回执、作者面板切换的导航与暂停保持，原声试听与主播放的互斥、迟到播放回调和弹层暂停的独立归属、面板模块加载的取消与最后操作优先、分享异步回调的归属、作者面板关闭后的延迟回调、全屏和画中画的原生请求归属与控件同步、拖动与预览按帧合并及布局读取计数、进度刷新链的归属、图集横滑和实况进度回调、长文案展开与详情原位同步、点赞收藏关注的串行写入与迟到详情合并、双击点赞与后续播放意图、页面离开及返回时的请求归属、隐藏页面后的相邻预热取消、图集音乐的迟到播放回调、作者面板关闭与直接离开时的资源清理、作者与评论异步视图的归属、评论并发写入和焦点保持、弱网及省流量下的预热预算、当前首帧优先和完整源地址复用、清单与列表迟到响应、删除后的播放与缓存归属、返回位置的延迟恢复、转码页的加载和轮询归属与操作回执顺序、详情读取的取消与 12 秒超时和最多 4 个在途/6 个排队请求、重试保留最新定位，以及图集加载时的暂停传递、预热、切换复用和迟到音轨的原位补齐。 | 当前处理器/模块、受控 DOM、媒体事件、Promise 与计时器；不访问真实媒体、数据库或正式服务，不代表真机流畅度验收。 |
-| `npm run verify:short-video-client` | Web/原生短视频结构、分页、请求与动作契约；原生视频和图集的来源/视图归属、暂停与连播意图、错误恢复及同页提示、首帧与封面、音频焦点和中断、按帧定位与手势、请求取消、有限解码/字节预取和异步缓存启动；另覆盖新实例恢复、私有检查点与任务会话的域/容量/过期校验、系统保存标记和正常退出边界、跨 JVM 的新进程恢复及恢复结果回传，以及当前播放舞台的保屏归属和有限缓冲等待；具体子检查以 package 脚本为准。 | 包含源码检查及 `javac` 编译、`java` 执行的 fixture；会写入并清理临时类文件、合成检查点，并使用临时本机 HTTP 服务，另需下述 JDK/Android 依赖。预取和媒体解码保留物理读取槽直至读取实际结束；JVM 的 Bundle 替身与字节预算不证明 Android Parcel 的实际大小，跨 JVM 新进程、受控新实例与保屏状态不代表 Android 系统杀进程、真实熄屏或耗电验收。 |
+| `npm run verify:short-video-collection-rendering`、`npm run verify:short-video-author-rendering` | Web清单、作者和关注页保留已有卡片、滚动及焦点，仅追加新项；清单删除只移除目标。作者保原排序、去重、显示和旧控件归属，新筛选首屏失败后重试首屏，不混入旧页。清单新卡复用实际封面队列，作者头像保留原生懒加载。 | 完整旧/当前owner、实际入口、私有Chromium、合成API/SVG及CSS；清单48→1008和作者每页96项核对节点预算、原响应/行为及退回整页渲染负控。图片使用生产src和解码路径，夹具不补写；不证明真机或实际网络提速。 |
+| `npm run verify:short-video-client` | Web/原生短视频结构、分页、动作和来源/视图归属；视频/图集恢复、首帧/封面、焦点/中断、手势、取消、有限解码/预取与缓存启动；检查点、会话容量/过期、正常退出、跨JVM恢复、保屏和有限缓冲。`verify:android-short-video-author-rendering` 另验作者/关注分页复用卡片，保原排序、去重、汇总、点击与旧请求归属；首屏/重新校验保持完整渲染；新筛选首屏失败后，空匹配或旧列表已到底仍能重试首屏并替换旧数据，同条件分页失败保原位置重试。 | 包含源码、临时`javac`/`java`和本机HTTP夹具，需下述JDK/Android依赖。作者专项使用完整旧/当前模块及受控DOM/API，20页追加的创建预算与恢复整页渲染负控；不替换卡片/加载功能。预取/解码保留物理槽至读取结束；Bundle替身与字节预算不证明Parcel大小，跨JVM、受控实例和保屏状态不代表系统杀进程、真机布局、熄屏或耗电验收。 |
 | `npm run verify:short-video-watch-write` | SQLite 竞争、提交回执、超时与停止恢复。 | 临时 SQLite、真实 Worker 与故障 fixture。 |
 | `npm run verify:short-video-delete-jobs` | 删除恢复与幂等协议。 | 临时文件/数据库、进程和 Worker；会在 fixture 内移动或删除文件。 |
 | `npm run verify:short-video-runtime` | 运行队列与生命周期、流畅版固定文件版本、未就绪响应、低分辨率兼容转码、转码源版本与文件替换校验、断连与停机取消等待，以及启动片段缓存的取消、文件实际关闭、源版本校验与发布归属；启动缓存最多 6 个等待任务，已就绪的当前视频优先于列表预热。 | 创建临时媒体、缓存与数据库，使用受控文件句柄和流验证竞态，结束后清理；不启动正式服务。 |
-| `npm run verify:short-video-store` | 导入、列表与状态契约；回退总数省去无关视图关联的完整旧响应与查找门槛、旧列空值及比较规则；相邻播放、预取与列表在并列值、空值、正反方向和过滤条件下保持相同顺序。 | 临时合成媒体和 SQLite；计数与相邻顺序专项使用内存数据库，不读取真实资料；同步 fixture 使用下载器 Python 安装增量日志。 |
+| `npm run verify:short-video-store`、`npm run verify:short-video-collections` | 导入、列表与状态契约；计数省去无关视图关联、相邻播放/预取排序。清单游标、详情及快照；`verify:short-video-collection-projection` 另核对仅缩窄普通视频元数据、保留封面和图集/旧值、重复JSON键、转义、异常、schema变化及恢复。 | 临时合成媒体、SQLite与真实mapper；唯一64KiB元数据的十页及详情比较完整旧响应和SQL到JS/JSON.parse字节，关闭投影负控应超预算；业务查询与额外schema探测分计，计时仅诊断，不代表磁盘读取字节或真实服务延迟；同步fixture使用下载器Python安装增量日志。 |
 | `npm run verify:short-video-sync` | 增量日志、分页初始化、无变化与单条更新的查询和逻辑 I/O 预算、删除与改名、回滚、并发提交、重启游标和来源代际变化。 | 临时 SQLite 和合成媒体；Python 运行实际迁移。Windows 用进程读取计数比较逻辑 I/O，不代表物理磁盘吞吐；不启动正式服务。下载器初始化另用 `tests.test_manager_library_sync` 和 `tests.test_manager_database_lifecycle` 验证。 |
 | `npm run verify:work-move-jobs`、`npm run verify:person-organization` | 作品移动作业与 UI；人物整理另查预览、分段、冲突、路径同步、目录发布日期、重试、使用已有资料与封面地址、无备份替换、旧封面与遗留文件清理、权限和焦点。 | 临时合成文件及 SQLite、Worker/任务子进程、可控图片下载和动态 HTTP/无头浏览器；不整理真实媒体，不访问外部封面站点。 |
 | `npm run verify:file-workflows`、`npm run verify:file-workflows-ui` | 后端预览、校验后移动、路径与已入库保护、冲突、源文件变化、权限、恢复、暂停/继续及互斥；浏览器预览、取消/确认执行、持久历史与窄屏布局，另查切换计划、轮询/重试、停止响应、页面离开及连续写入的归属。 | 当前服务、路由与 CLI，临时合成文件及 SQLite；UI 另用动态 loopback HTTP 与无头 Chrome/Edge，实际复制、移动临时文件，竞态使用门控 API/计时器，并在 `.codex-artifacts/` 保存截图，不操作真实媒体。 |
@@ -357,12 +434,12 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:duplicates` | 番号与分卷候选、只读列表及候选路径可用性、完整 SHA256、网络文件身份碰撞、别名变化、子集比较、取消与停机、权限、搜索分页、播放与文件夹入口、保留和忽略、手动删除后的文件复核、失效索引事务清理与重启、收藏和观看记录保留、离线及链接保护、移动预留冲突与回滚、清理失败重试和窄屏布局。 | 临时 SQLite、合成文件、虚拟网络文件系统、独立 Worker、动态 loopback HTTP 与无头 Chrome/Edge；仅清理临时索引，不读取真实媒体，不执行媒体删除或打开真实文件夹。 |
 | `npm run verify:music-rescan-worker` | 音乐扫描 Worker、锁竞争与停止流程。 | 临时音乐文件、数据库、假探测器与子进程。 |
 | `npm run verify:browser-behavior` | 浏览器中的页面行为、导航与异步状态。 | 默认本机临时 HTTP fixture，并启动无头 Chrome/Edge。 |
-| `npm run verify:accounts` | 账号权限、设备会话、邀请码、密码重置及跨账号资料隔离；客户端另查登录、注册、改密时逐字段显示/隐藏密码，鼠标和键盘不误提交、校验与提交值保留、新表单默认隐藏，以及管理重置和窄屏布局。 | 临时账号服务、SQLite、合成账号和私有 Chromium；Web 与 Android 共用的账号组件保持一致，含 320px 密码控件实际操作，不访问真实账号或证明 Android 真机交互。 |
+| `npm run verify:accounts`、`npm run verify:account-state-revision` | 账号权限、设备会话、邀请码、密码重置及跨账号资料隔离；个人状态专项核对完整旧状态/错误、跨连接版本变化、正文传输预算和旧宽读取负控；客户端另查登录、注册、改密时逐字段显示/隐藏密码，鼠标和键盘不误提交、校验与提交值保留、新表单默认隐藏，以及管理重置和窄屏布局。 | 临时账号服务、原生 SQLite、合成账号和私有 Chromium；Web 与 Android 共用的账号组件保持一致，含 320px 密码控件实际操作，不访问真实账号或证明 Android 真机交互。 |
 | `npm run verify:startup` | 启动器健康、超时、占用与失败边界。 | 临时启动器/假服务与动态端口，要求 PowerShell 运行时。 |
 | `npm run verify:fanhao-requests` | 人物与番号导航竞态、翻页取消、片商完整筛选、预取在途上限与释放；输入法合成期间暂停预取并保留候选确认/取消键。 | 调用当前请求模块及壳函数，HTTP/DOM 使用可控 doubles，含合成输入与计时器负控，不访问正式服务。 |
 | `npm run verify:work-sorting`、`npm run verify:works-performance` | 公共排序的缺失值、并列规则、输入不变性和延后标题比较；冷路径另核对人物详情分页的完整旧响应、分类/排序复用、来源/账号/配置失效、单项筛选容量与原引用预算，以及观看历史和 HTTP 行为。 | 合成内存数据、实际详情/查询/呈现服务、私有 SQLite 与动态 HTTP；旧人物来源负控应超过分类预算，计时不代表真实 API 延迟。 |
 | `npm run verify:work-facets` | 评分计数一致性、等价筛选复用、列表与搜索筛选/排序缓存容量。 | 合成内存数据，覆盖空值与数值零，以及多组筛选、排序后的淘汰和复用。 |
-| `npm run verify:work-cache-budget` | 全局权重和条目淘汰、大页不缓存、普通分页复用、账号失效与弱引用释放；人物筛选及 GC；番号前缀记录、桶数与键长上限；收藏/历史整页作品引用预算、完整旧响应及路由、异常和重试、普通/空页 LRU、版本释放与旧机制负控。 | 合成内存目录、内存 SQLite 和真实 GC；不访问实际资料库，超限结果完整返回。 |
+| `npm run verify:work-cache-budget`、`npm run verify:collection-query-cache`、`npm run verify:collection-history-window`、`npm run verify:work-detail-facets`、`npm run verify:work-facet-tags` | 全局权重和条目淘汰、大页不缓存、普通分页复用、账号失效与弱引用释放；人物筛选及 GC；番号前缀记录、桶数与键长上限；收藏/历史整页引用预算及完整旧响应；历史过期边界、回拨和空来源；[作品详情标签](../architecture/list-queries.md#作品详情标签)另核对完整旧响应、目标行读取与故障隔离、旧结构回退、版本和容量释放及旧全库负控；标签专项保留原文本解析并跳过无用推断，核对完整旧行、特殊输入及巨大父字符串释放。 | 合成目录、当前查询与呈现工厂、原生临时 SQLite 和真实 GC；查询、时间窗口及详情专项纳入预算入口，逐页对照响应并计数访问；不访问实际资料库，超限结果完整返回，计时仅诊断。 |
 | `npm run verify:code-prefixes` | 前缀分页、状态失效和账号隔离；片商可见性与筛选在分页之前生效；前缀来源/结果共享预算、强引用、LRU、大结果回退和释放。 | 合成目录数据、真实 GC 与有效筛选组合，验证容量、淘汰、重建和跨页复用；堆内存和计时仅为诊断。 |
 | `npm run verify:studio-cache` | 片商与前缀依赖表更新、同时间戳提交、旧表、显式失效和主线程/Worker 交接。 | 实际 API 路由、私有 SQLite 与持久 Worker；不访问正式资料库，外部提交由既有数据戳刷新发现。 |
 | `npm run verify:file-streams` | 异步打开及属性读取、同句柄和读取长度、完整传输等待、GET/HEAD、条件缓存与前置条件、范围和下载头、断连、短读、实际关闭及停机/重启。 | 临时合成文件、动态 loopback HTTP/Host、受控文件句柄和慢速读流；不读取真实媒体。 |
@@ -374,35 +451,35 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:music-cover-async` | 音乐封面异步文件查询/读图、来源与数据库变化、缓存锁回退、准入容量、迟到写入和停止/重启。 | 受控文件查询与读取、私有 SQLite 与响应 doubles；不读取真实图片或数据库。 |
 | `npm run verify:work-cover-async` | 作品封面探测/抽帧的异步响应、并发和容量、取消/停机、来源变化、人工封面冲突与提交异常。 | 受控子进程、私有内存 SQLite 与动态 HTTP fixture；不运行 FFmpeg 或读取真实视频。 |
 | `npm run verify:gallery-cover-async` | 图库视频封面的异步探测/抽帧、合并请求、并发、断连、停止和来源/缓存/数据库变化。 | 受控子进程、私有内存 SQLite 和动态 HTTP；不运行 FFmpeg 或读取真实视频。 |
-| `npm run verify:image-query`、`npm run verify:image-query-cache` | 相册字段延后、影视批量投影与解析复用、媒体 ID 索引；电视剧公开批量读取省去 JSON-LD，默认原始记录、详情和封面保持；旧库、DDL、连接及异常。分页版本与原额度、失效、隔离和停机规则；`verify:image-library` 另查年份排序、季集规范化及重复来源才创建两张暂存表、分组/异常顺序、同分封面及索引装配。 | 完整旧响应、实际服务及私有 SQLite、字节与固定探测门槛；恢复旧 JSON-LD 或封面 BLOB 批量读取应超出对应复制预算，旧年份/剧名算法应超出解析预算，提前创建两张规范化表应违反唯一来源零分配预算；计时仅作诊断，不读取真实资料。 |
+| `npm run verify:image-query`、`npm run verify:image-query-cache` | 相册字段延后、影视批量投影与解析复用、媒体ID索引；电视剧公开读取省去JSON-LD，原始记录、详情及封面保持。`verify:movie-cold-projection` 查无搜索且筛选结果超过12k的电影页先读必要字段，同快照补齐当页详情；已有事务、旧库及异常保原回退。`verify:western-query-cache`、`verify:photo-query-cache` 查按索引版本复用，编号主题仍按页生成；保留单查询30秒、12k输出、16MiB及隔离规则。`verify:image-library` 另查排序、季集、分组/异常顺序、同分封面及索引装配。 | 固定完整旧响应、实际服务和私有SQLite；电影核对原生解码异常、WAL提交、释放/回退和缓存边界，恢复整批详情须超复制及解析预算；还原旧JSON-LD、BLOB、年份/剧名算法或逐页套图搜索，应超各自预算，提前规范化表违反零分配门槛；计时仅诊断，不读取真实资料。 |
 | `npm run verify:video-probe-cache` | 视频来源更新、缓存容量、缓存锁回退、统一调度、前台优先、慢文件查询预算、实际进程关闭和停止/重启竞态。 | 合成来源、受控进程和私有 SQLite；响应和停机验证使用实际 Node 子进程与动态 HTTP，不运行 FFprobe 或读取真实媒体。 |
 | `npm run verify:media-images` | 共享图片 Worker 的任务/参数容量、串行派发、冷读取合并、逐请求头像撤销、实际退出及启停竞态；远程图片的流式大小限制、统一预热准入、完成缓存权重与条目上限、长 URL 边界。 | 受控 Worker/网络、私有 SQLite 与实际图片 Worker、动态 loopback 分块响应；不读取真实图片或连接外部图片源。 |
 | `npm run verify:media-streams` | 转码任务容量、首字节和排队超时、背压、输出后失败、断连、管道错误及实际进程关闭。 | 受控管道、私有 Node 子进程及动态 HTTP/Host 停机 fixture；不运行 FFmpeg 或读取真实视频。 |
-| `npm run verify:photo-reader-browser` | 相册/章节/媒体的乱序请求、返回与取消、分页去重、既有 DOM 与 observer 保留、迟到全目录时保留阅读位置，以及深链接恢复期间的历史导航、启动与模块切换；单页图片弹层的焦点限制、缩略图焦点、控件显隐与关闭恢复。 | 真实入口与当前宿主/阅读器源码，完整 101 场景通过；动态 HTTP 和无头 Chrome/Edge，数据及图片均为合成，不访问正式图库。 |
-| `npm run verify:gallery-rendering`、`npm run verify:android-channel-rendering` | 两端普通卡片、Web 电视剧和西方人物书架追加、原始 offset、版本补齐、封面缓存无关写入、限量分段、重复尾页、账号聚合冷启动缓存/失败/取消、搜索焦点与封面保留；Web 延后布局、Android 瀑布流和分组/变宽回退。详见[图库列表](../architecture/gallery-lists.md)。 | 当前客户端与完整 CSS、私有 Chromium、实际查询服务及私有 SQLite、合成 API/图片；含关闭复用的行为负例。Android 同步生成缓存引用；不证明真实资料库或真机性能。 |
+| `npm run verify:photo-reader-browser` | 相册/章节/媒体乱序、返回/取消、分页去重、DOM/observer保留、迟到全目录的阅读位置、深链接及模块切换；图片弹层焦点与关闭恢复。`verify:gallery-reader-progress` 另查实时几何二分定位、相等边界、图片高度/宽度变化及追加，进度不变省去重复写，外部重置和新工具栏仍同步。 | 真实入口与完整旧/当前阅读器、CSS、动态HTTP及私有Chrome/Edge，基础101场景与进度专项；合成SVG由实际队列加载/解码，核对几何读取和DOM变更预算，恢复线性扫描或重复写的负控应失败；不访问正式图库，受控帧耗时不代表真机。 |
+| `npm run verify:gallery-rendering`、`npm run verify:android-channel-rendering`、`npm run verify:android-channel-paging-mount` | 两端普通卡片、Web 电视剧和西方人物书架追加、原始 offset、版本补齐、封面缓存无关写入、限量分段、重复尾页、账号聚合冷启动缓存/失败/取消、搜索焦点与封面保留；Web 延后布局、Android 瀑布流和分组/变宽回退。实际 Android 宿主另验同归属续页保留、旧控件退休及原请求序列。详见[图库列表](../architecture/gallery-lists.md)。 | 当前客户端与完整 CSS、私有 Chromium、实际查询服务及私有 SQLite、合成 API/图片；含关闭复用的行为负例。Android 同步生成缓存引用；不证明真实资料库或真机性能。 |
 | `npm run verify:android-cache` | 服务统计与旧完整结果对照、索引巡检/历史回退、预算及淘汰集合、升级与事务回滚、跨页面并发；图片清空后的迟到写入、跨服务与账号、访问更新、取消。 | 当前缓存与图片模块、合成 IndexedDB 及私有 Chromium 的实际 IndexedDB/DOM；动态 loopback 与合成图片，不读取真实缓存。同步生成缓存引用，已纳入全 Android 门禁。 |
-| `npm run verify:manga-reader-browser` | 独立漫画馆的深链接、历史导航、作品/章节乱序、进度归属、后台目录/作业刷新，以及删除结果与新导航交错。 | 独立宿主与漫画阅读页，最近完整复核 120 场景（封面加载调整后）；私有 Chromium、合成 API 和图片，更新与删除仅由 fixture 模拟，不操作正式资料。 |
-| `npm run verify:manga-lookup` | 热态图片/章节请求的固定查询次数、详情封面语句复用的编译次数与完整旧响应；连续请求、同源去重、旧 ID、JSON 回退、WAL/schema 更新、失败重试及语句预热后的数据库文件替换。 | 实际采集器 schema、临时 SQLite 与合成目录、受控图片响应；计时限于进入图片服务前的查找，不证明实际图片解码或网络耗时。 |
+| `npm run verify:manga-reader-browser`、`npm run verify:manga-cold-entry` | 独立漫画馆的深链接、无旧界面时省去临时目录及当前失败恢复、历史导航、作品/章节乱序、进度归属、后台目录/作业刷新，以及删除结果与新导航交错。 | 独立宿主与漫画阅读页、私有 Chromium、合成 API 和图片；冷入口另对照完整旧模块、创建预算及旧渲染负控，计时仅诊断；更新与删除仅由 fixture 模拟，不操作正式资料。 |
+| `npm run verify:manga-lookup`、`npm run verify:manga-metadata-cache`、`npm run verify:manga-detail-first-images` | 热态图片/章节固定查询、漫画及封面语句复用和完整旧响应；ID与摘要共享数据库行，已有封面省去首图查询；旧 ID、JSON 回退、WAL/schema 更新、失败重试、数据库替换。详情首图在标准表按请求章节批读，旧结构及批读错误回逐章隔离，核对原索引语义、完整 DTO、WAL 和文件替换。目录字段复用每次核对 JSON/HTML 文件身份、合并最新数据库字段，覆盖读取/解析失败恢复、替换更新、响应隔离及容量限制。 | 实际采集器 schema、临时 SQLite、合成目录与受控图片；1000本列表页核对文本读取、SQL/编译与文件身份探测预算；关闭文件缓存、重复读行/封面、关闭详情批读或恢复旧编译机制的负控应超对应预算；计时仅作诊断，不证明真实图片解码、网络或客户资料库耗时。 |
 | `npm run verify:music-facet-cache` | 等价字母复用、歌手排序键与缓存字段、分页读取门槛；专辑计数关联、普通分页及筛选投影、默认与最大页、完整旧响应与查询计划、旧列迁移及缺列回退、详情简介；原容量、权重淘汰、LRU、键碰撞、超大回退及弱引用释放。 | 私有 SQLite、合成音乐元数据及 GC 子进程；恢复旧歌手宽记录应超出分页预算，恢复旧专辑分页或筛选完整字段均应超出简介字节预算；不读取音频文件，缓存预算为估算 JSON 大小。 |
 | `npm run verify:music-lyric-search` | 联想关联去重、专辑字段投影与旧库回退、完整响应及 SQL 参数/查询计划、错误及下一请求更新；原短词/FTS 有效总数与分页、歌词上下文和高亮。 | 当前 store、私有 SQLite 与合成歌词；旧联想宽字段应超过简介字节预算，原点查负控继续触发读取次数断言；纳入 `verify:music-scale`，详见[音乐搜索](../architecture/music-search.md)。 |
 | `npm run verify:music-m3u`、`npm run verify:music-playlist-order` | M3U 网络主机与本地路径身份、编码路径、同名歧义及解析顺序；歌单排序的完整旧响应、旧类型规范化、未变位置零写入、元数据时间戳与事务回滚。 | 当前匹配器/store、合成路径与内存 SQLite，不打开音频或启动扫描；排序以歌曲行 UPDATE 次数验证，旧全量写入负控应超预算；两项均纳入 `verify:music-scale`。 |
-| `npm run verify:music-summary-cache` | 会话及未应用进度的汇总复用、写入与回滚、有效期及扫描失效；播放最多的完整旧响应、并列与关联查找次数；有效目录的未听与待评分、智能歌单索引的合并计数、稀疏及密集状态、旧列类型、静态回退及时间边界。 | 当前 store、实际扫描发布和私有 SQLite、完整旧响应及 SQL/关联计数；旧索引计数负控应超过查询预算；只使用合成元数据，不扫描音频或操作实际历史记录。 |
+| `npm run verify:music-summary-cache`、`npm run verify:music-state-filter`、`npm run verify:music-empty-pages` | 汇总复用、写入/回滚及扫描失效；智能歌单计数、稀疏状态、空页/越界访问、旧类型/关联回退和快照。`verify:music-duration-sort` 另查[时长排序](../architecture/music-search.md#时长排序)按ID固定完全并列顺序、索引和列表/邻接/长曲一致，以及旧库缺列和初始化边界。 | 当前store、实际扫描发布、私有SQLite与合成元数据；同一明确排序的完整无索引响应、原生错误、SQL计划和访问预算，禁用新索引的负控须超预算；各分页/排序专项纳入 `verify:music-scale`，不读取真实音频或历史，计时仅诊断。 |
 | `npm run verify:android-fanhao-player` | 普通作品视频快速点选、离页、服务器与账号切换；原生失败后的网页回退、兼容播放定时器、旧媒体回调、进度节流、拒绝未就绪零进度和退出前最终进度；同路由缓存刷新保留仍可用的已选作品，作品移除时取消播放。 | 完整播放工厂、真实请求与账号归属模块，以及受控 DOM、网络响应和媒体对象；不访问真实视频，不代表真机解码与播放验收。 |
 | `npm run verify:android-mobile-sheets` | 通用操作弹层的返回键优先级、路由/页面/当前账号退出、焦点恢复、旧控件失效，以及保留已接受的异步操作；设置面板的双向 Tab 循环、背景隔离、关闭回焦、迟到回调失效、确认框退栈与同页历史返回。 | 实际共享组件、设置焦点控制器、模块/工具栏和 shell 返回分发，DOM、导航与完成顺序为受控边界；不访问真实资料或执行真实资料变更，不代表 Android 真机辅助功能验收。 |
 | `npm run verify:android-music-back` | 音乐弹层、全屏、搜索到根目录的分层返回，保留播放与目录上下文；迷你播放器打开与队列入口、焦点往返、手势取消及旧控件失效；播放设置真实入口、关闭与焦点恢复，评分已发写入和关闭交错；歌曲及播放设置控件关闭、重开、切歌或停用后的归属。 | 完整音乐页面、实际模块/注册表/返回分发及受控 Audio、API 和时钟；不代表真机系统返回与真实音频验收。 |
 | `npm run verify:android-bottom-layout` | 底部导航实际高度同步、隐藏启动和恢复、旧回调释放及无观察器回退；导航、迷你播放器、内容末项和分类菜单的间距、命中与原生Tab焦点避让；三个分类菜单的键盘打开、方向键、Escape、页面NativeBack入口、焦点往返及长按点击抑制。 | 真实共享高度模块与受控观察器/时钟；完整 Android 入口、真实导航和 CSS、私有 Chromium 与合成只读目录。字体放大是渲染压力，安全区由浏览器环境覆盖，返回调用实际页面dispatcher；不代表 Android 真机验收。已纳入 Android 总入口，图库导航VM另查真实事件接线及返回优先级。 |
 | `npm run verify:android-gallery-layout` | 影视详情长片名、剧名与文件信息的完整阅读和换行，图库合集返回入口的点按区域及真实返回行为。 | 完整 Android 入口、真实模块与样式、私有 Chromium 和隔离的合成只读目录；覆盖窄屏与短横屏。已纳入 Android 总入口及媒体、图片域；不连接真实媒体、数据库或原生播放，不代表 Android 真机验收。 |
 | `npm run verify:android-manga-layout` | 漫画详情简介、长标题、章节切换与恢复；添加区与下载记录的焦点、触点和文字换行；提交中的只读链接、失败提示关联、编辑清错及重新采集。 | 完整 Android 入口、真实模块与样式、私有 Chromium，分两次独立进程运行常规布局和恢复流程，保持每个夹具12运行上限。恢复场景只对白名单合成链接返回内存503或完成回执，不启动采集；其他场景继续拒绝写入。不连接真实业务服务、媒体或数据库，不代表 Android 真机验收。 |
-| `npm run verify:android-novel-layout` | 小说搜索长查询换行与操作触点；清除、重搜、分类及排序；旋转后选中分类可见，同宽回调保留手动横滚；详情作者与分类全文、简介展开、目录搜索与分段，以及长目录错误提示。 | 完整 Android 入口、实际模块与样式、私有 Chromium；使用既有8本书库目录及独立4本详情场景，覆盖窄屏、短横屏和有无ResizeObserver的分支，单个夹具仍限12次运行。仅提供列表、汇总、显式元信息和目录GET，章节content始终为空。分类工厂专项另验退出清理；按可见选项验证篇幅排序。不提供正文、进度写入、下载、导入、上传或真实TXT，不连接业务服务、书库或数据库，不代表 Android 真机验收。 |
+| `npm run verify:android-novel-layout`、`npm run verify:android-novel-catalog-filter`、`npm run verify:android-novel-list-rendering` | 小说长查询、分类横滚、触点、详情全文和目录错误提示；电脑书库与搜索续页核对卡片复用、最新动作绑定、同目标重试及缓存/来源/账号归属；本地目录同词同序暖分页复用筛选，更新回调包括同数组更新均失效；保持搜索、反序、页码、高亮、远程分页及控件归属。 | 布局使用完整 Android 入口、样式、私有 Chromium和合成只读目录；8本书库及独立4本详情，窄屏、短横屏、有无ResizeObserver，每夹具至多12次运行。筛选专项使用完整当前工厂、固定旧实现与受控DOM/存储，万章目录暖翻段预算及恢复重复筛选的负控；仍逐段创建分段选项和80行按钮，不把VM时间视为设备提速。不连接真实服务、书库或数据库，不代表 Android 真机验收。 |
 | `node tests/verify_browser_behavior.mjs --android-manga` | 定向执行既有漫画新增流程、任务提示和阅读进度配置；保留延迟图片、缓存更新、用户移动、恢复阅读及页面生命周期回归。 | 默认随机端口的自有 fixture 服务、临时数据和私有 Chromium；可选服务地址环境变量仅供受控夹具，不得指向真实服务。完整浏览器入口仍包含同一组场景。 |
 | `npm run verify:android-media-viewer` | 全屏图片加载和失败重试、切图及关闭重开后的迟到回调、同图补齐保留节点；触摸翻页、滑动和按压定位，窄屏与横屏重试按钮。 | 当前查看器与完整 Android CSS、私有 Chromium、合成 SVG 和门控响应；三类回退开关分别验证加载、回调归属和按压定位，不能代替 Android 真机图片解码与手势验收。 |
 | `npm run verify:android-photo-viewer` | 全屏相册补齐期间的关闭重开、同 ID、服务器或账号切换、模块退出与旧回调；旧请求不覆盖新查看器或写入新缓存。 | 当前完整图库工厂、真实账号与 URL 模块及受控 DOM、查看器、缓存和 HTTP；真实旧方法负控应失败，不访问实际相册。 |
 | `npm run verify:android-info-preview` | 快速切换资料、收起后重开、离页与切换来源或账号；旧按钮、请求和排队滚动不能覆盖新预览。 | 当前完整资料组件、真实账号 scope 和受控 DOM、HTTP、帧；归属、旧控件和滚动负控应失败，不读取真实作品资料。 |
-| `npm run verify:android-fanhao-suggestions` | 新查询立即失效旧建议，迟到成功和失败、失焦、离页、重开同查询及切源/账号；旧建议按钮不能记录新查询并导航旧人物。 | 当前完整搜索工厂、真实账号与受控 DOM、请求和时钟；可见性、回调和按钮负控应失败，不访问实际人物或资料库。 |
+| `npm run verify:android-fanhao-suggestions`、`npm run verify:android-work-list-rendering` | 建议的查询、迟到响应、失焦、离页及来源/账号归属；片库累计翻页复用旧卡、封面和 More 焦点，前缀变化、重复或无 ID 回退，纯失败重试同目标、缓存与新响应交错及离页释放。 | 搜索使用完整工厂和受控 DOM/请求；片库使用实际 Android 入口、原模块/封面加载、完整旧源码与私有 Chromium，合成 API/SVG；创建预算负控应失败，累计请求量保持，计时不代表真机性能，不访问真实资料库。 |
 | `npm run verify:android-manga-tasks` | 漫画添加、更新、轮询与详情刷新等待期间的服务器和账号切换，任务列表、重试及清理确认的归属；同 ID 新任务与旧监控结束的交错，删除确认与返回只作用于原详情。 | 当前完整图库工厂、真实账号与缓存 fence 及受控请求、时钟、DOM 和弹窗；旧方法负控应失败，已接受任务继续执行，不发起实际采集、清理或删除。 |
-| `npm run verify:android-music-history`、`npm run verify:android-music-playlists` | 清空历史、新建/编辑/删除歌单、保存队列与加入/移出歌曲的回执及目录刷新，和新导航、选歌、关闭重开弹层交错；当前失败可重试，过期回调保留新页面与队列。 | 当前完整音乐工厂、操作组件及受控 API、Audio、DOM 和时钟；保留已接受写入，负控验证归属守卫，不操作真实歌单或历史记录。 |
+| `npm run verify:android-music-history`、`npm run verify:android-music-playlists` | 清空历史、新建/编辑/删除歌单、保存队列与加入/移出歌曲的回执及目录刷新，和新导航、选歌、关闭重开弹层交错；连续排序合并写入、确认顺序回滚和容量释放；当前失败可重试，过期回调保留新页面与队列。 | 当前完整音乐工厂、操作组件及受控 API、Audio、DOM 和时钟；保留已发写入，待办受来源、账号及页面归属约束，负控验证归属守卫，不操作真实歌单或历史记录。 |
 | `npm run verify:android-music` | 音频 Blob 生命周期、翻页与后台歌单请求归属；单曲详情、音频和播放 Promise 乱序，以及首屏恢复、自动衔接与最新选歌的交错；收藏与评分的来源、账号归属和字段写入顺序，已接受写入与离页、连续操作、迟到读取及恢复记录的交错。 | 实际客户端模块或未改写逻辑的函数体、受控 API 与 Audio；不访问真实音乐或数据库，不证明真实音频解码。 |
-| `npm run verify:android-music-rendering` | 歌曲翻页保留 DOM、失败重试、取消与筛选切换、重复 ID 和播放标记；完整样式下的屏幕外布局、滚动定位、焦点、点击与封面懒加载；双行长歌名、44px歌曲操作、匹配及版本标记和更多菜单长文案的窄屏布局，行与子按钮的键盘激活；迷你播放器原生打开按钮、44px快捷操作、Enter/Space、全屏焦点往返及深列表浏览位置保持；播放设置与评分真实入口、窄屏及横屏滚动、Tab/Escape、关闭焦点与面板内失败反馈；后台歌单更新及首屏恢复归属；中文组合输入暂停查询，候选确认键不触发搜索，提交后保留输入节点与焦点；排序和搜索筛选最终重绘后的焦点恢复，以及等待期间继续操作、乱序响应、切源和账号变化时的取消。 | 当前音乐页与完整 CSS、私有 Chromium、合成 API、受控 Audio、请求和输入事件；同步生成缓存引用，计时仅作诊断，不证明真机播放、TalkBack 或 Android 输入法兼容性。 |
+| `npm run verify:android-music-rendering`、`npm run verify:android-music-queue` | 歌曲翻页保留 DOM、重试、取消、去重和播放标记；屏幕外布局、滚动、焦点、封面懒加载；长歌名、44px操作、匹配及版本标记、更多菜单和键盘激活；迷你播放器入口、全屏焦点往返及深列表位置；播放设置、评分、Tab/Escape和失败反馈；后台歌单及首屏恢复归属；中文组合输入和搜索焦点；排序和筛选乱序回执；300/1000首队列相邻排序仅重建两行，单曲移出仅删除目标行并同步禁用和计数，CSS counter显示序号，保持播放器、滚动和焦点，覆盖空态、预览、回执、回滚与旧控件失效。 | 当前音乐页与完整 CSS、私有 Chromium、合成 API、受控 Audio、请求和输入事件；队列专项纳入渲染入口，旧全量重绘负控须超出元素预算，上轮局部重编号负控须超出DOM变更与读取预算，真实布局文本核对01/99/100/1000；同步生成缓存引用，计时仅作诊断，不证明真机播放、TalkBack 或 Android 输入法兼容性。 |
 | `npm run verify:music-playback` | 旧播放 Promise 的成功/拒绝、换源与同源重载、当前拒绝与重试、暂停、睡眠定时和迟到媒体事件。 | 实际音乐页/播放器源码与受控 Audio、DOM 和时钟；不读取音频文件，不证明真实解码或音频设备播放。 |
 | `npm run verify:music-requests` | 列表、单曲、旁栏与上次歌曲恢复的请求归属；清空历史、启动扫描及歌单创建/导入/编辑/增删的写入和后续刷新与新导航、选歌交错；同歌单排序保留一个在途和一个最新待办、最多八个活跃歌单槽，确认顺序回滚保留当前成员与对象，覆盖账号切换和容量背压；缓存失效、当前/过期错误及忙碌状态。 | 实际音乐 actions 源码、受控 API、播放器、状态和存储；导航取消读取但保留已发写入，不使用真实数据库、扫描或媒体。排序尚无确认基线的新成员，失败时保留末次排序前的局部位置。 |
 | `npm run verify:music-progress` | 两端写入合并、普通及退出容量、账号归属和实际回执；服务端持久顺序、播放去重、预留复用、过期、回拨、竞争及迁移。 | 当前 Web/Android 写入与传输源码、实际 store/routes 和临时 SQLite；显式跳转及无缝切歌使用受控音频与请求，不证明 Android 真机播放。 |
@@ -410,8 +487,8 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:novel-reader` | Web 小说章节身份、版本变化、阅读进度恢复确认和聚焦控件下的键盘操作。 | 当前完整阅读模块与受控 API、DOM、帧和计时器；包含行为负控制，不使用真实数据库。 |
 | `npm run verify:novel-progress` | 高频保存合并与容量、显式确认回执、keepalive；持久序号、合法回读、多会话、过期和时钟回拨、容量背压及 Worker 重启。 | 当前写入器、实际 store/routes/Worker 和临时 SQLite；只使用合成文本，不操作真实书库。 |
 | `npm run verify:novel-progress-browser` | 迟到普通请求与最新 keepalive、真实文档离开、高频保存、跨书位置、恢复确认及会话续期时的新滚动和导航。 | 当前入口与阅读页、私有 Chromium、动态 loopback 及实际临时 SQLite；不证明真实网络卸载送达、排队恢复确认在退出后完成或正式服务已部署。 |
-| `npm run verify:archive-images` | 压缩包列表/抽取合并、helper 和响应流的容量及关闭、发送前来源与路径检查；索引查找的来源/记录/数据库/停机竞态、身份替换、迟到写入、旧库迁移及异步巡检；封面评分、字节转换/复制及清单序列化门槛，核对完整旧响应、字段顺序、旧类型与记录格式切换。 | 受控 helper/文件流、私有 Node/Python 子进程、合成 ZIP 和临时 SQLite/缓存目录；旧封面选择与整行序列化分别超过评分记录与清单原文字节预算；不操作真实压缩包或缓存。 |
-| `npm run verify:novel-summary-cache`、`npm run verify:novel-empty-pages` | 小说汇总及作者页静态聚合复用、可选探测回退；阅读计数、零总数及非零总数越界页、最后非空页的完整旧响应、SQL 编译/绑定/执行错误与访问门槛；分页版本、进度重排、Worker/外部提交、快照竞态及替库。 | 实际 store/写入 Worker、临时 SQLite 与合成 TXT；每请求关闭连接，核对快照边界、外部替库及探测失败回退；旧聚合与仅判断零总数的负控应超过对应访问预算；空页专项已纳入汇总入口。 |
+| `npm run verify:archive-images` | 压缩包列表/抽取合并、helper 和响应流的容量及关闭、发送前来源与路径检查；索引的来源/记录/数据库/停机竞态、身份替换、迟到写入、旧库迁移及异步巡检。`verify:archive-list-authority` 核对原生索引快照复用、冷暖A→B→A变更不把清单绑定错版本、一次读取故障及共享列表变更后的计费/异常；保留旧类型和非原生行回退。 | 固定旧服务、实际临时SQLite/WAL、受控helper/文件流、私有Node/Python子进程、合成ZIP和缓存目录；暖读取省一份原生索引JSON，旧封面选择与整行序列化仍分别超过原评分/字节预算，恢复旧版本绑定应触发竞态断言；不操作真实压缩包或缓存。 |
+| `npm run verify:novel-summary-cache`、`npm run verify:novel-empty-pages` | 作者索引、标准并列规则及 Node/Python v6 事务迁移见[专页](../architecture/novel-author-queries.md)。 汇总及作者静态聚合复用；`verify:novel-recent-reading`、`verify:novel-reading-page` 查最近阅读及阅读页按进度排序从少量状态驱动，旧键/排序规则、稠密、NULL或并列时间及探测失败保原查询；计数、空页/越界/最后非空页、SQL错误；分页版本、进度重排、Worker/外部提交、快照竞态及替库。 | 实际store/Worker、临时SQLite及合成TXT；每请求关闭连接，对照完整旧响应/异常、外部提交和回退；10万本、0/10/1000阅读状态核对查询计划及访问起点，恢复旧查询的负控须超预算；空页、最近阅读及阅读分页专项均纳入汇总入口，不代表真实书库延迟。 |
 | `npm run verify:novel-write-worker` | 小说写入锁竞争、六类 API、提交/回滚异常、回执恢复/清理、换库与来源、排队容量和停机。 | 临时 SQLite、真实/受控 Worker、HTTP doubles 和仅扫描合成 TXT 的 Python；不访问真实资料库。 |
 | `npm run verify:novel-credentials-async` | 登录凭据检测的主线程响应、取消、超时、输出限制、来源变化与停机。 | 临时假凭据、受控子进程及本机 Node 子进程/动态 HTTP；不启动 Python 检测器或访问外站。 |
 | `npm run verify:novel-collection-worker` | 小说采集后台的锁等待、RPC 容量、子进程所有权、入库标识持久化、不确定任务的重试/历史清理保护与停机。 | 临时 SQLite、真实/受控 Worker、本机受控子进程和动态 HTTP；不运行真实采集或访问外站。 |

@@ -54,7 +54,7 @@ function integration({ browser, window, document, state }) {
     activePlayer: () => main, activeGalleryPlayer: () => null,
     cancelShortVideoPanelLoading() {}, cancelShortVideoAutoNext() {}, cancelShortVideoBrowseGestures() {}, clearPendingPlayerClick() {}, stopShortVideoSoundPreview() {},
     syncShortVideoNativePlaybackModes() {}, resetShortVideoWindow() {}, ensureState() {}, setBodyClass() {},
-    releaseUnusedShortVideoPreloads() {},
+    releaseUnusedShortVideoPreloads() {}, releaseAuthorIndex() {},
     transcodeManagementPage: { stop() {} }, renderHome() {}, renderBrowser() { contexts.push("new-browser"); },
     bindShortVideoModalFocusLoop() {},
     restoreAuthorPanelFeed: async () => { calls.push("restore-feed"); }, showError: error => { throw error; }
@@ -152,7 +152,7 @@ try {
   Object.defineProperty(root, "innerHTML", { set() { root.replaceChildren(); } });
   g.state.activeView = "shortVideos";
   const env = vm.createContext({ window, document, state: g.state, els: { workGrid: root }, disposeShortVideoMedia,
-    releaseUnusedShortVideoPreloads() {}, shortVideoHomePresentation: null,
+    releaseUnusedShortVideoPreloads() {}, releaseAuthorIndex() {}, shortVideoHomePresentation: null,
     activePlayer: () => audio, activeGalleryPlayer: () => g.gallery, shortVideoWheelController: null,
     cancelShortVideoPanelLoading() {}, cancelShortVideoAutoNext() {}, cancelShortVideoBrowseGestures() {}, clearPendingPlayerClick() {}, stopShortVideoSoundPreview() {},
     syncShortVideoNativePlaybackModes() {}, resetShortVideoWindow() {}, ensureState() {}, setBodyClass() {},

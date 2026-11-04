@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
@@ -13,6 +14,12 @@ const www = path.join(root, "android-client", "www");
 const legacyRevision = "1f6ddf213f0fbab4d417fdf61636b957d1909338";
 const legacy = process.argv.includes("--legacy") || process.argv.includes("--measure-legacy");
 const measureOnly = process.argv.includes("--measure-legacy");
+const legacyQueueOrder = process.argv.includes("--legacy-queue-order");
+const measureQueueOrder = process.argv.includes("--measure-queue-order");
+const legacyQueueRemoval = process.argv.includes("--legacy-queue-removal");
+const legacyQueueRemovalTail = process.argv.includes("--legacy-queue-removal-tail");
+const measureQueueRemoval = process.argv.includes("--measure-queue-removal");
+const queueOrderOnly = process.argv.includes("--queue-order") || legacyQueueOrder || measureQueueOrder || legacyQueueRemoval || legacyQueueRemovalTail || measureQueueRemoval;
 const legacyContainment = process.argv.includes("--legacy-containment");
 const legacyCoverOrder = process.argv.includes("--legacy-cover-order");
 const legacyAuxiliary = process.argv.includes("--legacy-auxiliary");
@@ -63,7 +70,71 @@ const flatRows = ".music-mobile-shell > .music-mobile-list > .music-mobile-track
 const median = values => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
 const executablePath = [process.env.CHROME_PATH, "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"].filter(Boolean).find(value => fs.existsSync(value));
 assert(executablePath, "Chrome or Edge required for the private Android music fixture");
+// Captured preceding local-removal algorithm, including its tail validation and
+// explicit data-track-index/text renumbering. Never used by the production owner.
+const legacyQueueRemovalTailKernel = function removeMountedQueueTrack(previousQueue, index) {
+    const mounted = mountedQueueList, queue = state.queue;
+    // Without a selected song the player previews queue[0]. A changed preview
+    // needs the existing full render to rebind its track-specific actions.
+    if (!mounted?.isCurrent() || mounted.queue !== previousQueue || (!state.current && index === 0)
+      || queue.length !== previousQueue.length - 1 || mounted.list.children.length !== previousQueue.length) return false;
+    for (let position = index; position < previousQueue.length; position++) {
+      const row = mounted.list.children[position];
+      if (!row?.classList.contains("music-mobile-queue-item") || row.dataset.trackId !== String(previousQueue[position]?.id || "")
+        || Number(row.dataset.trackIndex) !== position || (position > index && queue[position - 1] !== previousQueue[position])) return false;
+    }
+    const removed = mounted.list.children[index], focused = document.activeElement;
+    const restoreFocus = removed.contains(focused);
+    const action = focused?.classList.contains("music-mobile-queue-action") ? focused.getAttribute("aria-label") : "";
+    const top = mounted.list.scrollTop;
+    removed.remove();
+    mounted.queue = queue;
+    if (!queue.length) mounted.list.append(messageBox("队列里还没有歌曲"));
+    for (let position = index; position < queue.length; position++) {
+      const row = mounted.list.children[position], number = row.querySelector(".music-mobile-queue-index");
+      row.dataset.trackIndex = String(position);
+      if (number && !number.querySelector(".music-mobile-playing-bars")) number.textContent = String(position + 1).padStart(2, "0");
+    }
+    for (const row of new Set(queue.length ? [mounted.list.children[0], mounted.list.children[queue.length - 1]] : [])) {
+      if (!row) continue;
+      const position = Number(row.dataset.trackIndex);
+      for (const [label, disabled] of [["上移", position === 0], ["下移", position === queue.length - 1]]) {
+        const button = row.querySelector(`[aria-label="${label}"]`);
+        if (button) { button.disabled = disabled; button.classList.toggle("disabled", disabled); }
+      }
+    }
+    mounted.count.textContent = `${formatNumber(queue.length)} 首`;
+    mounted.save.disabled = !queue.length;
+    mounted.manage.disabled = queue.length <= 1;
+    mounted.clear.disabled = queueRemovableCount() <= 0;
+    const toggle = els.viewContent?.querySelector(".music-mobile-full-queue");
+    if (toggle) toggle.disabled = !queue.length;
+    if (restoreFocus) {
+      const row = mounted.list.children[Math.min(index, queue.length - 1)];
+      const requested = action ? row?.querySelector(`[aria-label="${action}"]`) : null;
+      const fallback = action ? [...(row?.querySelectorAll(".music-mobile-queue-action") || [])].find(button => !button.disabled) : null;
+      (requested && !requested.disabled ? requested : fallback || row || mounted.close).focus({ preventScroll: true });
+    }
+    mounted.list.scrollTop = top;
+    return true;
+  }.toString();
 let viewsSource = fs.readFileSync(path.join(www, "modules/music/music-views.js"), "utf8");
+if (legacyQueueOrder) {
+  const hook = "  function replaceMountedQueueOrder(previousQueue, move = null) {";
+  assert.equal(viewsSource.split(hook).length, 2, "queue negative control restores the actual whole-shell fallback at one production hook");
+  viewsSource = viewsSource.replace(hook, hook + "\n    return false; // Restore the preceding whole-shell queue rendering path.");
+}
+if (legacyQueueRemoval) {
+  const hook = "  function removeMountedQueueTrack(previousQueue, index) {";
+  assert.equal(viewsSource.split(hook).length, 2, "removal negative control restores one actual whole-shell fallback");
+  viewsSource = viewsSource.replace(hook, hook + "\n    return false; // Restore the preceding whole-shell queue removal path.");
+}
+if (legacyQueueRemovalTail) {
+  const start = viewsSource.indexOf("  function removeMountedQueueTrack(previousQueue, index) {"),
+    end = viewsSource.indexOf("  function clearQueueExceptCurrent()", start);
+  assert(start >= 0 && end > start, "restore one complete preceding local-removal kernel");
+  viewsSource = viewsSource.slice(0, start) + "  " + legacyQueueRemovalTailKernel + "\n\n" + viewsSource.slice(end);
+}
 if (legacyMiniKeyboard) {
   const hook = /(    const open = document\.createElement\()"button"(\);\r?\n    open\.type = "button";\r?\n    open\.className = "music-mobile-mini-open";)/g;
   assert.equal([...viewsSource.matchAll(hook)].length, 1, "mini keyboard negative restores one actual non-native opener");
@@ -148,6 +219,7 @@ viewsSource = viewsSource.replace("  installLifecycle();", `
       // preference regressions below establish owners through real GET/open.
       const fixtureOwner = trackPreferences.owner(getActiveUrl(), captureAccountOwner(getActiveUrl()));
       trackPreferences.preparePayload(data, fixtureOwner);
+      if (options.queue) trackPreferences.preparePayload({ tracks: options.queue }, fixtureOwner);
       if (options.current) trackPreferences.preparePayload({ track: options.current }, fixtureOwner);
       state.data = { ...data, rawTracks: data.tracks, rawLoaded: data.tracks.length };
       state.summary = data.summary; state.queue = data.tracks; state.hasMore = data.hasMore;
@@ -158,6 +230,16 @@ viewsSource = viewsSource.replace("  installLifecycle();", `
     route: params => renderMusicList(params)
   };
   installLifecycle();`);
+if (queueOrderOnly) {
+  const hook = /^  async function persistPlaylistQueueOrder\(([^)]*)\) \{/m;
+  assert.match(viewsSource, hook);
+  viewsSource = viewsSource.replace(hook, `  function persistPlaylistQueueOrder(...args) {
+    const task = persistPlaylistQueueOrderObserved(...args);
+    (window.__queueOrderTasks ||= []).push(task.then(() => null, error => error?.message));
+    return task;
+  }
+  async function persistPlaylistQueueOrderObserved($1) {`);
+}
 viewsSource = viewsSource.replace("render: renderMusicUiPreservingSearch,", "render: () => { const start = performance.now(); renderMusicUiPreservingSearch(); window.__renderSamples.push(performance.now() - start); },");
 // Observe the real quick-filter task without replacing its request/render logic.
 const mountedSearchHook = /^  async function refreshMountedSearchResults\(([^)]*)\) \{/m;
@@ -196,7 +278,7 @@ let browser, checks = 0;
 const requestHandler = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-FanHao-Client, X-FanHao-Account-Owner");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
   const url = new URL(req.url, `http://${req.headers.host}`);
   requests.push(`${url.pathname}${url.search}`);
@@ -204,7 +286,12 @@ const requestHandler = async (req, res) => {
     if (trackWriteFixture && await trackWriteFixture.handle(req, res, url)) return;
     const gate = [...gates].find(item => !item.used && item.match(url));
     if (gate) {
-      gate.used = true; gate.url = `${url.pathname}${url.search}`; gate.requestedResolve();
+      gate.used = true; gate.url = `${url.pathname}${url.search}`; gate.method = req.method;
+      if (req.method === "PUT" && url.pathname.endsWith("/tracks/order")) {
+        const chunks = []; for await (const chunk of req) chunks.push(chunk);
+        gate.input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      }
+      gate.requestedResolve();
       res.once("close", () => { gate.closed = true; });
       await gate.promise;
       if (gate.error) { json(res, { error: gate.error }, 503); return; }
@@ -243,6 +330,7 @@ await new Promise(resolve => alternateServer.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 const alternateBase = `http://127.0.0.1:${alternateServer.address().port}`;
 const run = async (name, task) => {
+  if (queueOrderOnly && !name.startsWith("queue order:")) return;
   if (miniPlayerOnly && !name.startsWith("mini player:")) return;
   if (legacyMiniKeyboard && name !== "mini player: native mouse Enter and Space roundtrips retain deep scroll and focus") return;
   if (legacyMiniGesture && name !== "mini player: retired mini and fullscreen nodes cannot change the new surface") return;
@@ -256,10 +344,15 @@ const run = async (name, task) => {
   if (focusNegativeCase && name !== focusNegativeCase) return;
   if (rowLayoutOnly && !name.startsWith("row layout:")) return;
   if (rowNegativeCase && name !== rowNegativeCase) return;
-  await task(); checks++; console.log(`${measureOnly ? "MEASURE" : "PASS"} ${name}`);
+  await task(); checks++; console.log(`${measureOnly || measureQueueOrder || measureQueueRemoval ? "MEASURE" : "PASS"} ${name}`);
 };
 try {
   browser = await chromium.launch({ executablePath, headless: true });
+  if (queueOrderOnly) {
+    await verifyQueueOrderRendering();
+    assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
+    console.log(`${measureQueueOrder || measureQueueRemoval ? "DIAGNOSTIC" : "PASS"} Android music queue rendering: ${checks} actual Chromium scenarios`);
+  } else {
   if (!measureOnly && !searchOverviewOnly) await verifyMusicSearchComposition();
   if (searchOverviewOnly) {
     await verifySearchOverviewOwnership();
@@ -415,6 +508,7 @@ try {
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log(`PASS Android music list rendering: ${checks} actual Chromium scenarios`);
   } else if (measureOnly) console.log("DIAGNOSTIC legacy rendering only; correctness assertions not run");
+  }
 } finally {
   for (const gate of gates) gate.release();
   await browser?.close(); await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => alternateServer.close(resolve))]);
@@ -658,6 +752,476 @@ window.__startupTask=__fixtureRoute(${JSON.stringify(JSON.parse(url.searchParams
 }
 
 async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+
+async function paintedQueueCounters(page, trackIds) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    // DOMSnapshot layout.text contains the generated counter's laid-out text.
+    // getComputedStyle(::before).content merely returns counter(...) syntax.
+    const snapshot = await session.send("DOMSnapshot.captureSnapshot", { computedStyles: [], includeDOMRects: true, includePaintOrder: true });
+    const document = snapshot.documents[0], nodes = document.nodes, strings = snapshot.strings;
+    const attributes = index => new Map(Array.from({ length: (nodes.attributes[index]?.length || 0) / 2 }, (_, pair) =>
+      [strings[nodes.attributes[index][pair * 2]], strings[nodes.attributes[index][pair * 2 + 1]]]));
+    const result = {};
+    for (const id of trackIds) {
+      const row = nodes.nodeName.findIndex((_name, index) => attributes(index).get("data-track-id") === id
+        && attributes(index).get("class")?.split(/\s/u).includes("music-mobile-queue-item"));
+      assert(row >= 0, "the real queue row appears in Chromium's DOM snapshot: " + id);
+      const number = nodes.parentIndex.findIndex((parent, index) => parent === row
+        && attributes(index).get("class")?.split(/\s/u).includes("music-mobile-queue-index"));
+      const before = nodes.parentIndex.findIndex((parent, index) => parent === number && strings[nodes.nodeName[index]] === "::before");
+      assert(before >= 0, "the queue number is painted by its actual CSS pseudo element: " + id);
+      result[id] = document.layout.nodeIndex.flatMap((node, index) => node === before && document.layout.text[index] >= 0
+        ? [strings[document.layout.text[index]]] : []).join("");
+    }
+    return result;
+  } finally { await session.detach(); }
+}
+
+async function verifyQueueOrderRendering() {
+  const queueRows = ".music-mobile-queue-list > .music-mobile-queue-item";
+  const setup = async (count = 300, playlist = false, viewport = { width: 430, height: 900 }) => {
+    const page = await newPage({ width: viewport.width });
+    await page.setViewportSize(viewport);
+    await page.evaluate(({ body, queue, playlist }) => {
+      const f = __musicListFixture;
+      if (playlist) body.playlist = { id: "queue-fixture", name: "Synthetic queue", trackCount: queue.length };
+      f.seed(body, { queue, current: queue[0], playing: true, fullscreen: true, fullPanel: "cover",
+        queueOpen: true, queueManageOpen: true, mode: playlist ? "playlist" : "library",
+        playlistId: playlist ? "queue-fixture" : "", playlist: body.playlist || null,
+        gapless: false, crossfadeSeconds: 0, resumeQueue: false });
+      f.audio().paused = false; f.audio().currentTime = 41; f.render();
+      window.__queueOrderTasks = [];
+    }, { body: data(80, 0, { hasMore: false }), queue: data(count).tracks, playlist });
+    if (legacyQueueRemovalTail) {
+      // Prepare the old explicit labels outside the observed click. Keep the
+      // new row handlers and scope guards; restore only the former tail work.
+      await page.addStyleTag({ content: ".music-mobile-queue-index::before { content: none !important; }" });
+      await page.evaluate(() => {
+        for (const [index, row] of [...document.querySelectorAll(".music-mobile-queue-item")].entries()) {
+          row.dataset.trackIndex = String(index);
+          const number = row.querySelector(".music-mobile-queue-index");
+          if (!number.querySelector(".music-mobile-playing-bars")) number.textContent = String(index + 1).padStart(2, "0");
+        }
+      });
+    }
+    await frames(page);
+    await page.evaluate(() => {
+      const list = document.querySelector(".music-mobile-queue-list");
+      list.scrollTop = Math.min(1500, Math.max(0, list.scrollHeight - list.clientHeight - 100));
+      window.__queueSaved = { list, full: document.querySelector(".music-mobile-full-player"),
+        stage: document.querySelector(".music-mobile-full-stage"), mini: document.querySelector(".music-mobile-mini-player"),
+        shell: document.querySelector(".music-mobile-shell"), audio: __musicListFixture.audio(),
+        scrollTop: list.scrollTop, current: __musicListFixture.state.current };
+      __created = 0; __shellCalls.length = 0;
+    });
+    return page;
+  };
+  const identity = page => page.evaluate(() => {
+    const saved = __queueSaved, f = __musicListFixture;
+    return { shell: saved.shell === document.querySelector(".music-mobile-shell"),
+      full: saved.full === document.querySelector(".music-mobile-full-player"),
+      stage: saved.stage === document.querySelector(".music-mobile-full-stage"),
+      mini: saved.mini === document.querySelector(".music-mobile-mini-player"),
+      list: saved.list === document.querySelector(".music-mobile-queue-list"),
+      audio: saved.audio === f.audio(), current: saved.current === f.state.current,
+      rowsMatchQueue: [...document.querySelector(".music-mobile-queue-list").children].every((row, index) =>
+        row.dataset.trackId === f.state.queue[index]?.id),
+      time: f.audio().currentTime, paused: f.audio().paused,
+      scrollTop: document.querySelector(".music-mobile-queue-list")?.scrollTop,
+      created: __created, shellCalls: __shellCalls.length, status: f.state.status };
+  });
+  const assertPlayer = result => {
+    for (const name of ["shell", "full", "stage", "mini", "list", "audio", "current"]) assert.equal(result[name], true, "queue operation retains " + name);
+    assert.equal(result.rowsMatchQueue, true, "mounted row identities and positions match the live queue");
+    assert.equal(result.time, 41); assert.equal(result.paused, false);
+  };
+  const clickMove = async (page, id = "T31", label = "上移") => page.evaluate(({ id, label }) => {
+    const list = document.querySelector(".music-mobile-queue-list"), rows = [...list.children];
+    const row = rows.find(node => node.getAttribute("aria-label") === `播放 Synthetic Track ${id.slice(1)}`);
+    const button = row.querySelector(`button[aria-label="${label}"]`);
+    window.__retiredQueueRow = row; window.__retiredQueueButton = button;
+    button.focus({ preventScroll: true }); button.click();
+    const next = [...document.querySelector(".music-mobile-queue-list").children];
+    return { changed: rows.filter((node, index) => node !== next[index]).length,
+      retained: rows.filter(node => node.isConnected).length,
+      focusId: document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId,
+      focusedAction: document.activeElement.getAttribute("aria-label"),
+      beforeScroll: __queueSaved.scrollTop, scrollTop: document.querySelector(".music-mobile-queue-list").scrollTop };
+  }, { id, label });
+  for (const count of measureQueueRemoval || legacyQueueRemoval || legacyQueueRemovalTail ? [] : [300, 1000]) for (const moves of [1, 10]) await run(`queue order: ${count} tracks ${moves} adjacent moves retain player and create two rows per move`, async () => {
+    const page = await setup(count);
+    try {
+      const deltas = [];
+      for (let index = 0; index < moves; index++) deltas.push(await clickMove(page, "T31", index % 2 ? "下移" : "上移"));
+      await frames(page);
+      const result = await identity(page);
+      console.log(JSON.stringify({ queueRendering: legacyQueueOrder ? "legacy" : "current", count, moves, ...result, changedRows: deltas.map(delta => delta.changed) }));
+      if (measureQueueOrder) return;
+      assert(result.created <= 80 * moves, `adjacent movement must create O(1) elements per move; got ${result.created} for ${moves} moves`);
+      assertPlayer(result); assert.equal(result.shellCalls, 0);
+      for (const delta of deltas) {
+        assert.equal(delta.changed, 2, "only the two affected rows are replaced");
+        assert.equal(delta.retained, count - 2, "every unaffected queue row keeps its identity");
+        assert.equal(delta.focusId, "T31", "focus follows the moved track's actual action");
+        assert.equal(delta.scrollTop, delta.beforeScroll, "an adjacent move retains queue scrolling");
+      }
+    } finally { await page.close(); }
+  });
+  if (measureQueueOrder) return;
+  for (const count of [300, 1000]) for (const removals of [1, 10]) await run(`queue order: ${count} tracks ${removals} removals retain all surviving rows and player`, async () => {
+    const samples = [];
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const page = await setup(count);
+      try {
+        const deltas = [];
+        for (let index = 0; index < removals; index++) deltas.push(await page.evaluate(() => {
+          const list = document.querySelector(".music-mobile-queue-list"), rows = [...list.children], row = rows[30];
+          const button = row.querySelector('[aria-label="移出队列"]');
+          window.__retiredRemovedRow = row; window.__retiredRemoveButton = button;
+          button.focus({ preventScroll: true });
+          const observer = new MutationObserver(() => {});
+          observer.observe(list, { subtree: true, childList: true, characterData: true, attributes: true });
+          const query = Element.prototype.querySelector, queryAll = Element.prototype.querySelectorAll;
+          let selectorReads = 0;
+          Element.prototype.querySelector = function (...args) { selectorReads++; return query.apply(this, args); };
+          Element.prototype.querySelectorAll = function (...args) { selectorReads++; return queryAll.apply(this, args); };
+          let synchronousClickMs;
+          try { const started = performance.now(); button.click(); synchronousClickMs = performance.now() - started; }
+          finally { Element.prototype.querySelector = query; Element.prototype.querySelectorAll = queryAll; }
+          const records = observer.takeRecords(); observer.disconnect();
+          const mutations = { entries: records.length, attributes: records.filter(record => record.type === "attributes").length,
+            characterData: records.filter(record => record.type === "characterData").length,
+            childList: records.filter(record => record.type === "childList").length,
+            addedText: records.reduce((sum, record) => sum + [...record.addedNodes].filter(node => node.nodeType === Node.TEXT_NODE).length, 0) };
+          const next = [...document.querySelector(".music-mobile-queue-list").children];
+          return { synchronousClickMs, mutations, selectorReads, detached: rows.filter(node => !node.isConnected).length,
+            preserved: next.every(node => rows.includes(node)),
+            focusId: document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId,
+            nextId: __musicListFixture.state.queue[30]?.id,
+            focusedAction: document.activeElement.getAttribute("aria-label") };
+        }));
+        await frames(page);
+        const result = await identity(page);
+        samples.push({ ...result, detachedRows: deltas.map(delta => delta.detached),
+          synchronousClickMs: deltas.reduce((sum, delta) => sum + delta.synchronousClickMs, 0),
+          selectorReads: deltas.reduce((sum, delta) => sum + delta.selectorReads, 0),
+          mutations: Object.fromEntries(Object.keys(deltas[0].mutations).map(key => [key, deltas.reduce((sum, delta) => sum + delta.mutations[key], 0)])) });
+        if (!measureQueueRemoval) {
+          assert(result.created <= 8 * removals, `single removals must create O(1) elements; got ${result.created} for ${removals} removals`);
+          assertPlayer(result); assert.equal(result.shellCalls, 0);
+          assert.equal(result.scrollTop, await page.evaluate(() => __queueSaved.scrollTop), "removal retains queue scrolling");
+          assert.equal(await page.locator(queueRows).count(), count - removals);
+          for (const delta of deltas) {
+            assert.equal(delta.detached, 1, "only the removed row is retired");
+            assert.equal(delta.preserved, true, "all surviving queue rows retain their nodes");
+            assert.equal(delta.focusId, delta.nextId, "focus advances to the next surviving song");
+            assert.equal(delta.focusedAction, "移出队列");
+          }
+          assert(samples.at(-1).mutations.entries <= 16 * removals, "queue removal DOM mutation entries stay constant per click");
+          assert(samples.at(-1).selectorReads <= 40 * removals, "queue removal selector method reads stay constant per click");
+        }
+      } finally { await page.close(); }
+    }
+    const times = samples.map(sample => sample.synchronousClickMs);
+    // Timing is diagnostic only. Mutation records additionally observe Text
+    // replacement and attributes, which createElement instrumentation omits.
+    console.log(JSON.stringify({ queueRemoval: legacyQueueRemoval ? "legacy" : legacyQueueRemovalTail ? "legacy-tail" : "current", count, removals,
+      ...samples.at(-1), diagnosticSynchronousClickMs: { samples: times.map(value => Number(value.toFixed(2))),
+        median: Number(median(times).toFixed(2)), repeats: samples.length } }));
+  });
+  if (measureQueueRemoval || legacyQueueRemoval || legacyQueueRemovalTail) return;
+  await run("queue order: removal renumbers survivors and keeps their original move/remove actions live", async () => {
+    const page = await setup(300);
+    try {
+      await page.evaluate(() => {
+        const rows = document.querySelectorAll(".music-mobile-queue-item");
+        window.__survivingQueueRow = rows[49];
+        rows[30].querySelector('[aria-label="移出队列"]').click();
+      });
+      assert.equal(await page.evaluate(() => __survivingQueueRow.isConnected && document.querySelectorAll(".music-mobile-queue-item")[48] === __survivingQueueRow), true);
+      assert.equal(await page.evaluate(() => [...document.querySelectorAll(".music-mobile-queue-item")].every((row, index) =>
+        row.dataset.trackId === __musicListFixture.state.queue[index].id)), true,
+      "surviving row identities follow the shortened queue without eager position attributes");
+      await page.evaluate(() => __survivingQueueRow.querySelector('[aria-label="上移"]').click());
+      assert.equal(await page.evaluate(() => __musicListFixture.state.queue[47].id), "T50", "a retained row's original handler uses its new position");
+      assertPlayer(await identity(page));
+      assert.equal(await page.evaluate(() => document.querySelector(".music-mobile-queue-heading small").textContent), "299 首");
+    } finally { await page.close(); }
+  });
+  await run("queue order: painted CSS counters show 01 99 100 and 1000 across removal and movement", async () => {
+    const page = await setup(1000);
+    try {
+      await page.evaluate(() => {
+        const f = __musicListFixture; f.state.current = f.state.data.tracks[1]; f.render();
+      });
+      await frames(page);
+      const before = await paintedQueueCounters(page, ["T1", "T99", "T100", "T1000"]);
+      assert.deepEqual(before, { T1: "01", T99: "99", T100: "100", T1000: "1000" });
+      assert.equal(await page.locator('.music-mobile-queue-item[data-track-id="T2"] .music-mobile-queue-index .music-mobile-playing-bars').count(), 1);
+      assert.equal(await page.locator('.music-mobile-queue-item[data-track-id="T2"] .music-mobile-queue-index').getAttribute("aria-hidden"), "true");
+      await page.evaluate(() => {
+        const list = document.querySelector(".music-mobile-queue-list"), row = list.querySelector('[data-track-id="T97"]');
+        list.scrollTop = row.offsetTop - list.offsetTop;
+      });
+      const screenshotPath = path.join(os.tmpdir(), `fanhao-queue-counter-${process.pid}.png`);
+      await page.screenshot({ path: screenshotPath });
+      console.log(JSON.stringify({ queueCounterScreenshot: screenshotPath, paintedBefore: before }));
+      await page.locator('.music-mobile-queue-item[data-track-id="T31"] [aria-label="移出队列"]').evaluate(button => button.click());
+      assert.deepEqual(await paintedQueueCounters(page, ["T1", "T99", "T100", "T101", "T1000"]),
+        { T1: "01", T99: "98", T100: "99", T101: "100", T1000: "999" });
+      await clickMove(page, "T1000", "上移");
+      assert.deepEqual(await paintedQueueCounters(page, ["T1000", "T999"]), { T1000: "998", T999: "999" });
+      assert.equal(await page.locator('.music-mobile-queue-item[data-track-id="T2"] .music-mobile-queue-index .music-mobile-playing-bars').count(), 1,
+        "CSS numbering does not replace the current track's playback bars");
+    } finally { await page.close(); }
+  });
+  await run("queue order: first and last removals update boundary disabling and never remove the current song", async () => {
+    const page = await setup(3);
+    try {
+      await clickMove(page, "T2", "上移");
+      await page.evaluate(() => document.querySelector(".music-mobile-queue-item").querySelector('[aria-label="移出队列"]').click());
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T3"]);
+      assert.equal(await page.locator(queueRows).first().getByRole("button", { name: "上移", exact: true }).isDisabled(), true);
+      await page.locator(queueRows).last().getByRole("button", { name: "移出队列", exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1"]);
+      assert.equal(await page.locator(queueRows).first().getByRole("button", { name: "下移", exact: true }).isDisabled(), true);
+      const blocked = await page.evaluate(() => {
+        const row = document.querySelector(".music-mobile-queue-item"), remove = row.querySelector('[aria-label="移出队列"]'), queue = __musicListFixture.state.queue;
+        const disabled = remove.disabled; remove.click(); remove.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return { disabled, untouched: queue === __musicListFixture.state.queue, focusInCurrent: row.contains(document.activeElement),
+          focusDisabled: Boolean(document.activeElement.disabled) };
+      });
+      assert.deepEqual(blocked, { disabled: true, untouched: true, focusInCurrent: true, focusDisabled: false });
+      assertPlayer(await identity(page));
+      assert.equal(await page.getByRole("button", { name: "清空其他歌曲", exact: true }).isDisabled(), true);
+    } finally { await page.close(); }
+  });
+  await run("queue order: a removed row and its detached controls cannot remove or play another song", async () => {
+    const page = await setup(300);
+    try {
+      await page.evaluate(() => {
+        window.__deletedQueueRow = document.querySelectorAll(".music-mobile-queue-item")[30];
+        window.__deletedQueueButton = __deletedQueueRow.querySelector('[aria-label="移出队列"]');
+        __deletedQueueButton.click();
+      });
+      const before = requests.length;
+      const after = await page.evaluate(() => {
+        const queue = __musicListFixture.state.queue, status = __musicListFixture.state.status, created = __created;
+        __deletedQueueButton.click(); __deletedQueueRow.click();
+        __deletedQueueRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        return { connected: __deletedQueueRow.isConnected, queue: queue === __musicListFixture.state.queue,
+          status: status === __musicListFixture.state.status, created: __created - created };
+      });
+      assert.deepEqual(after, { connected: false, queue: true, status: true, created: 0 });
+      assert.equal(requests.length, before); assertPlayer(await identity(page));
+    } finally { await page.close(); }
+  });
+  await run("queue order: native Enter and Space remove once and keep focus when only the current song remains", async () => {
+    const page = await setup(3);
+    try {
+      const before = requests.length;
+      await page.locator(queueRows).nth(1).getByRole("button", { name: "移出队列", exact: true }).focus();
+      await page.keyboard.press("Enter"); await frames(page);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T3"]);
+      assert.deepEqual(await page.evaluate(() => ({ track: document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId,
+        action: document.activeElement.getAttribute("aria-label") })), { track: "T3", action: "移出队列" });
+      await page.keyboard.press("Space"); await frames(page);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1"]);
+      assert.equal(await page.evaluate(() => document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId), "T1");
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement.disabled)), false);
+      assert.equal(requests.length, before, "native remove keys cannot activate track playback");
+      assertPlayer(await identity(page));
+    } finally { await page.close(); }
+  });
+  await run("queue order: deleting an unplayed first preview rebuilds its controls for the new song", async () => {
+    const page = await setup(3);
+    try {
+      await page.evaluate(() => {
+        const f = __musicListFixture; f.state.current = null; f.audio().paused = true; f.state.playing = false; f.render();
+        window.__oldPreview = document.querySelector(".music-mobile-full-player");
+        window.__oldPreviewDismiss = __oldPreview.querySelector(".music-mobile-full-dismiss");
+        window.__oldPreviewRow = document.querySelector(".music-mobile-queue-item");
+        __oldPreviewRow.querySelector('[aria-label="移出队列"]').click();
+      });
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T2", "T3"]);
+      assert.equal(await page.evaluate(() => __oldPreview.isConnected), false, "changing the unplayed preview replaces captured playback controls");
+      assert.match(await page.locator(".music-mobile-full-track-info").innerText(), /Synthetic Track 2/);
+      const before = requests.length;
+      await page.evaluate(() => { __oldPreviewDismiss.click(); __oldPreviewRow.click(); });
+      assert.equal(await page.evaluate(() => __musicListFixture.state.fullscreen && __musicListFixture.state.queueOpen && __musicListFixture.state.current === null), true);
+      assert.equal(requests.length, before, "retired preview dismissal and row cannot control the replacement preview");
+    } finally { await page.close(); }
+  });
+  await run("queue order: removing the final queued song keeps an outside playing track and focuses the empty sheet close", async () => {
+    const page = await setup(1);
+    try {
+      await page.evaluate(() => {
+        const f = __musicListFixture;
+        // Browsing another collection can replace the queue while the former
+        // selected track continues playing outside that queue.
+        f.state.current = f.state.data.tracks[1]; f.render();
+      });
+      await frames(page);
+      await page.evaluate(() => {
+        window.__emptyQueueSaved = { full: document.querySelector(".music-mobile-full-player"),
+          list: document.querySelector(".music-mobile-queue-list"), current: __musicListFixture.state.current };
+        document.querySelector('.music-mobile-queue-item [aria-label="移出队列"]').focus({ preventScroll: true });
+        document.querySelector('.music-mobile-queue-item [aria-label="移出队列"]').click();
+      });
+      assert.equal(await page.locator(queueRows).count(), 0);
+      assert.match(await page.locator(".music-mobile-queue-list").innerText(), /队列里还没有歌曲/);
+      assert.deepEqual(await page.evaluate(() => ({ full: __emptyQueueSaved.full === document.querySelector(".music-mobile-full-player"),
+        list: __emptyQueueSaved.list === document.querySelector(".music-mobile-queue-list"), current: __emptyQueueSaved.current === __musicListFixture.state.current,
+        closeFocused: document.activeElement === document.querySelector(".music-mobile-sheet-close"),
+        paused: __musicListFixture.audio().paused, time: __musicListFixture.audio().currentTime })),
+      { full: true, list: true, current: true, closeFocused: true, paused: false, time: 41 });
+      assert.equal(await page.getByRole("button", { name: "清空其他歌曲", exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "存为歌单", exact: true }).isDisabled(), true);
+    } finally { await page.close(); }
+  });
+  for (const transition of ["source", "account", "navigation"]) await run(`queue order: ${transition} invalidates the original remove button`, async () => {
+    const page = await setup(300);
+    try {
+      await page.evaluate(async transition => {
+        window.__oldRemoveButton = document.querySelectorAll(".music-mobile-queue-item")[30].querySelector('[aria-label="移出队列"]');
+        if (transition === "source") __fixtureActiveUrl = __fixtureAlternateUrl;
+        else if (transition === "account") { const { setAccountOwner } = await import("/js/account-owner.js"); setAccountOwner(location.origin, "account:removeB"); }
+        else await __fixtureRoute({ mode: "library", dashboard: "0", favorite: "1" });
+        window.__removeScopeSnapshot = { queue: __musicListFixture.state.queue, status: __musicListFixture.state.status,
+          current: __musicListFixture.state.current, shell: document.querySelector(".music-mobile-shell") };
+        __created = 0;
+      }, transition);
+      await page.evaluate(() => __oldRemoveButton.click()); await frames(page);
+      assert.deepEqual(await page.evaluate(() => ({ queue: __musicListFixture.state.queue === __removeScopeSnapshot.queue,
+        status: __musicListFixture.state.status === __removeScopeSnapshot.status, current: __musicListFixture.state.current === __removeScopeSnapshot.current,
+        shell: document.querySelector(".music-mobile-shell") === __removeScopeSnapshot.shell, created: __created })),
+      { queue: true, status: true, current: true, shell: true, created: 0 });
+    } finally { await page.close(); }
+  });
+  await run("queue order: real Enter and Space move once without activating row playback and keep boundary focus", async () => {
+    const page = await setup(300);
+    try {
+      const beforeRequests = requests.length;
+      const second = page.locator(queueRows).nth(1).getByRole("button", { name: "上移", exact: true });
+      await second.focus(); await page.keyboard.press("Enter"); await frames(page);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.slice(0, 3).map(track => track.id)), ["T2", "T1", "T3"]);
+      assert.equal(await page.locator(queueRows).first().getByRole("button", { name: "上移", exact: true }).isDisabled(), true);
+      assert.deepEqual(await page.evaluate(() => ({ id: document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId,
+        action: document.activeElement.getAttribute("aria-label"), disabled: document.activeElement.disabled })), { id: "T2", action: "下移", disabled: false });
+      await page.keyboard.press("Space"); await frames(page);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.slice(0, 3).map(track => track.id)), ["T1", "T2", "T3"]);
+      const penultimate = page.locator(queueRows).nth(298).getByRole("button", { name: "下移", exact: true });
+      await penultimate.focus(); await page.keyboard.press("Space"); await frames(page);
+      assert.equal(await page.locator(queueRows).last().getByRole("button", { name: "下移", exact: true }).isDisabled(), true);
+      assert.deepEqual(await page.evaluate(() => ({ id: document.activeElement.closest(".music-mobile-queue-item")?.dataset.trackId,
+        action: document.activeElement.getAttribute("aria-label"), disabled: document.activeElement.disabled })), { id: "T299", action: "上移", disabled: false });
+      assert.equal(requests.length, beforeRequests, "descendant keys reorder without opening tracks or issuing playback requests");
+      assertPlayer(await identity(page));
+    } finally { await page.close(); }
+  });
+  await run("queue order: detached moved rows and buttons cannot replay actions", async () => {
+    const page = await setup(300);
+    try {
+      await clickMove(page); const before = requests.length;
+      const result = await page.evaluate(async () => {
+        const queue = __musicListFixture.state.queue, status = __musicListFixture.state.status, created = __created;
+        __retiredQueueButton.click();
+        __retiredQueueRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        __retiredQueueRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        await Promise.resolve();
+        return { detached: !__retiredQueueRow.isConnected, sameQueue: queue === __musicListFixture.state.queue,
+          sameStatus: status === __musicListFixture.state.status, created: __created - created };
+      });
+      assert.deepEqual(result, { detached: true, sameQueue: true, sameStatus: true, created: 0 });
+      assert.equal(requests.length, before); assertPlayer(await identity(page));
+    } finally { await page.close(); }
+  });
+  for (const failure of [false, true]) await run(`queue order: current save ${failure ? "failure rolls back" : "success acknowledges"} without replacing player or queue container`, async () => {
+    const page = await setup(300, true), gate = hold(url => url.pathname === "/api/music/playlists/queue-fixture/tracks/order",
+      { playlist: { id: "queue-fixture", name: "Saved synthetic queue", trackCount: 300 } }, failure ? "controlled queue save failure" : "");
+    try {
+      await clickMove(page); await requested(gate);
+      assert.equal(gate.method, "PUT"); assert.deepEqual(gate.input.trackIds.slice(28, 32), ["T29", "T31", "T30", "T32"]);
+      await page.evaluate(() => { __created = 0; __shellCalls.length = 0; });
+      gate.release(); await page.evaluate(() => Promise.all(__queueOrderTasks)); await frames(page);
+      const result = await identity(page); assertPlayer(result); assert.equal(result.shellCalls, 0);
+      assert.equal(result.scrollTop, await page.evaluate(() => __queueSaved.scrollTop), "save completion retains queue scrolling");
+      assert.equal(result.status, failure ? "controlled queue save failure" : "歌单顺序已保存");
+      assert.equal(await page.locator(".music-mobile-queue-status").innerText(), result.status);
+      assert.equal(await page.evaluate(() => __musicListFixture.state.queue[29].id), failure ? "T30" : "T31");
+      assert(result.created <= (failure ? 300 * 20 : 0), "save success creates no nodes; failed rollback is bounded by the queue size");
+    } finally { gate.release(); await page.close(); }
+  });
+  for (const focus of ["toolbar", "unaffected row"]) await run(`queue order: rollback preserves a later focus on ${focus}`, async () => {
+    const page = await setup(1000, true), gate = hold(url => url.pathname === "/api/music/playlists/queue-fixture/tracks/order", null, "controlled focus rollback");
+    try {
+      await clickMove(page); await requested(gate);
+      await page.evaluate(focus => {
+        const target = focus === "toolbar" ? document.querySelector(".music-mobile-queue-toolbar .music-mobile-queue-tool")
+          : document.querySelectorAll(".music-mobile-queue-item")[5].querySelector('[aria-label="上移"]');
+        target.focus({ preventScroll: true }); window.__laterQueueFocus = target;
+      }, focus);
+      gate.release(); await page.evaluate(() => Promise.all(__queueOrderTasks)); await frames(page);
+      assert.equal(await page.evaluate(() => document.activeElement === __laterQueueFocus && __laterQueueFocus.isConnected), true,
+        "a delayed rollback keeps the user's currently focused unaffected control");
+      const result = await identity(page); assertPlayer(result);
+      assert.equal(result.scrollTop, await page.evaluate(() => __queueSaved.scrollTop));
+    } finally { gate.release(); await page.close(); }
+  });
+  for (const viewport of [{ width: 320, height: 568 }, { width: 568, height: 320 }]) await run(`queue order: long save errors fit and scroll at ${viewport.width}x${viewport.height}`, async () => {
+    const page = await setup(1000, true, viewport);
+    const message = "保存排序失败，请稍后重试。".repeat(30) + "LongUnbrokenSyntheticError".repeat(100);
+    const gate = hold(url => url.pathname === "/api/music/playlists/queue-fixture/tracks/order", null, message);
+    try {
+      await clickMove(page); await requested(gate);
+      gate.release(); await page.evaluate(() => Promise.all(__queueOrderTasks)); await frames(page);
+      const layout = await page.evaluate(() => {
+        const status = document.querySelector(".music-mobile-queue-status"), list = document.querySelector(".music-mobile-queue-list"),
+          sheet = document.querySelector(".music-mobile-queue-sheet"), close = sheet.querySelector(".music-mobile-sheet-close");
+        const box = node => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }; };
+        const before = status.scrollTop; status.scrollTop = status.scrollHeight;
+        return { status: box(status), list: box(list), sheet: box(sheet), close: box(close), statusHidden: status.hidden,
+          text: status.textContent, statusScrolls: status.scrollHeight > status.clientHeight && status.scrollTop > before,
+          horizontalOverflow: status.scrollWidth > status.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth,
+          width: innerWidth, height: innerHeight };
+      });
+      assert.equal(layout.text, message); assert.equal(layout.statusHidden, false); assert.equal(layout.statusScrolls, true);
+      assert.equal(layout.horizontalOverflow, false, "long CJK and unbroken error text cannot widen the sheet or page");
+      assert(layout.status.top >= layout.sheet.top && layout.status.bottom <= layout.sheet.bottom);
+      assert(layout.close.top >= 0 && layout.close.bottom <= layout.height && layout.close.right <= layout.width);
+      assert(layout.list.height >= 32, "the bounded status leaves room for a complete queue action in short landscape");
+      const result = await identity(page); assertPlayer(result);
+      assert.equal(result.scrollTop, await page.evaluate(() => __queueSaved.scrollTop), "error wrapping retains the queue's scroll position");
+    } finally { gate.release(); await page.close(); }
+  });
+  for (const transition of ["source", "account", "navigation"]) for (const failure of [false, true]) await run(`queue order: ${transition} retires a late save ${failure ? "failure" : "success"}`, async () => {
+    const page = await setup(300, true), gate = hold(url => url.pathname === "/api/music/playlists/queue-fixture/tracks/order",
+      { playlist: { id: "queue-fixture", name: "Retired synthetic save" } }, failure ? "retired queue failure" : "");
+    try {
+      await clickMove(page); await requested(gate);
+      await page.evaluate(async transition => {
+        if (transition === "source") __fixtureActiveUrl = __fixtureAlternateUrl;
+        else if (transition === "account") {
+          const { setAccountOwner } = await import("/js/account-owner.js"); setAccountOwner(location.origin, "account:queueB");
+        } else await __fixtureRoute({ mode: "library", dashboard: "0", favorite: "1" });
+        window.__queueRetiredSnapshot = { queue: __musicListFixture.state.queue, status: __musicListFixture.state.status,
+          playlist: __musicListFixture.state.playlist, shell: document.querySelector(".music-mobile-shell"), current: __musicListFixture.state.current };
+        __created = 0; __shellCalls.length = 0;
+      }, transition);
+      assert.notEqual(gate.closed, true, "UI retirement does not cancel an accepted order PUT");
+      gate.release(); await page.evaluate(() => Promise.all(__queueOrderTasks)); await frames(page);
+      assert.deepEqual(await page.evaluate(() => {
+        const old = __queueRetiredSnapshot, f = __musicListFixture;
+        return { queue: old.queue === f.state.queue, status: old.status === f.state.status,
+          playlist: old.playlist === f.state.playlist, shell: old.shell === document.querySelector(".music-mobile-shell"),
+          current: old.current === f.state.current, created: __created, shellCalls: __shellCalls.length };
+      }), { queue: true, status: true, playlist: true, shell: true, current: true, created: 0, shellCalls: 0 });
+      assert.equal(gate.closed, true, "an accepted order request is allowed to settle after UI retirement");
+    } finally { gate.release(); await page.close(); }
+  });
+}
+
 async function geometry(page) {
   return page.evaluate(selector => {
     const rows = [...document.querySelectorAll(selector)], first = rows[0], last = rows.at(-1), style = getComputedStyle(first);

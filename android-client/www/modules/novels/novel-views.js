@@ -1,8 +1,10 @@
-import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-22080e82f167";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-22080e82f167";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-eb78be0b425d";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-eb78be0b425d";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-22080e82f167";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-22080e82f167";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-eb78be0b425d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-eb78be0b425d";
+import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-eb78be0b425d";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";
@@ -57,6 +59,7 @@ export function createNovelViews(context) {
   const remoteSourceRealms = new Map();
   const remoteSourceReceiptWrites = new Map();
   const remoteBookOrigins = new WeakMap();
+  const novelCardRecords = new WeakMap();
   let localLibraryVersion = 0;
   let localLibraryRequestId = 0;
   const selectedLocalBookIds = new Set();
@@ -122,6 +125,7 @@ export function createNovelViews(context) {
   installLocalRecoveryLifecycle();
 
   function beginNovelPage(routeGuard, kind) {
+    releaseNovelCollection(novelPage);
     closeLocalRecovery(false);
     const page = { kind, routeGuard, sourceUrl: getActiveUrl(), issue: null, retryBusy: false, localData: null, remoteData: null, remoteCache: null };
     page.isActive = () => novelPage === page && routeGuard() && page.sourceUrl === getActiveUrl();
@@ -131,7 +135,7 @@ export function createNovelViews(context) {
   }
 
   function installLocalRecoveryLifecycle() {
-    const leave = () => { novelPage = null; closeLocalRecovery(false); };
+    const leave = () => { releaseNovelCollection(novelPage); novelPage = null; closeLocalRecovery(false); };
     window.addEventListener("fanhaoViewWillRender", leave);
     window.addEventListener("fanhaoViewChanged", (event) => {
       if (!["novels", "novelSearch", "novelDetail", "novelReader"].includes(event.detail?.view)) leave();
@@ -417,6 +421,7 @@ export function createNovelViews(context) {
       clearLocalLibraryError(page);
       renderNovelListData(mergeNovelListData(page.remoteData || {}, data), page.remoteCache);
     };
+    page.refreshLocal = refreshLocal;
     try { page.localData = await loadLocalListData(); }
     catch (error) {
       if (!isActive()) return;
@@ -454,6 +459,205 @@ export function createNovelViews(context) {
     }
   }
 
+  function novelCollectionScope() {
+    return JSON.stringify([listState.source, listState.searchPage, listState.query, listState.category, listState.author, listState.sort]);
+  }
+
+  function ownsNovelCollection(mount) {
+    return Boolean(mount && mount.page === novelPage && novelPage.collectionMount === mount
+      && !mount.life.signal.aborted && mount.page.isActive() && mount.scope === novelCollectionScope()
+      && isAccountOwnerCurrent(mount.account)
+      && mount.realm === (remoteSourceRealms.get(mount.page.sourceUrl) || ""));
+  }
+
+  function retireNovelCollectionMount(page) {
+    const mount = page?.collectionMount;
+    if (!mount) return;
+    page.collectionMount = null;
+    mount.life.abort();
+    for (const record of mount.records) {
+      novelCardRecords.delete(record.card);
+      record.book = null;
+    }
+    mount.records = [];
+    mount.list = mount.more = mount.controls = null;
+    mount.data = null;
+  }
+
+  function releaseNovelCollection(page) {
+    if (!page) return;
+    retireNovelCollectionMount(page);
+    page.collectionLife?.abort();
+    page.routeGuard.signal?.removeEventListener("abort", page.collectionAbort);
+    page.collectionPending = null;
+    page.collectionFocus = null;
+    page.restoreCollectionFocus = false;
+    page.collectionNotice = null;
+    page.remoteData = page.localData = page.remoteCache = null;
+    page.refreshLocal = null;
+  }
+
+  function beginNovelCollectionMount() {
+    const page = novelPage;
+    retireNovelCollectionMount(page);
+    if (!page || page.kind !== "collection") return null;
+    if (!page.collectionLife) {
+      page.collectionLife = new AbortController();
+      page.collectionAbort = () => releaseNovelCollection(page);
+      page.routeGuard.signal?.addEventListener("abort", page.collectionAbort, { once: true });
+      document.addEventListener("focusin", (event) => {
+        page.collectionFocus = event.target === page.collectionMount?.more ? event.target : null;
+        if (!page.collectionFocus) page.restoreCollectionFocus = false;
+      }, { signal: page.collectionLife.signal });
+    }
+    const mount = {
+      page, scope: novelCollectionScope(), account: captureAccountOwner(page.sourceUrl),
+      realm: remoteSourceRealms.get(page.sourceUrl) || "", life: new AbortController(), records: [],
+      list: null, more: null, controls: null, data: null
+    };
+    page.collectionMount = mount;
+    return mount;
+  }
+
+  function novelCollectionMoreHasFocus(mount) {
+    return Boolean(mount?.more && (document.activeElement === mount.more
+      || document.activeElement === document.body && mount.page.collectionFocus === mount.more));
+  }
+
+  function restoreNovelCollectionFocus(page) {
+    const mount = page.collectionMount;
+    if (!page.restoreCollectionFocus || !ownsNovelCollection(mount)) return;
+    if (document.activeElement === document.body) {
+      const target = mount.more || mount.records.at(-1)?.card.querySelector(".novel-mobile-book-detail");
+      if (!target?.isConnected || target.disabled) return;
+      target.focus({ preventScroll: true });
+    }
+    page.restoreCollectionFocus = false;
+  }
+
+  function syncNovelCollectionMore(mount) {
+    if (!ownsNovelCollection(mount) || !mount.more?.isConnected) return;
+    mount.more.disabled = Boolean(mount.page.collectionPending);
+    mount.more.textContent = mount.page.collectionPending ? "正在加载更多"
+      : mount.page.collectionError ? "加载失败，点一下重试" : mount.moreText;
+  }
+
+  function sameNovelBookData(left, right) {
+    try { return JSON.stringify(left) === JSON.stringify(right); }
+    catch { return false; }
+  }
+
+  function appendMountedNovelCollection(mount, data) {
+    if (!ownsNovelCollection(mount) || !mount.list?.isConnected || mount.list.parentElement !== els.viewContent) return false;
+    const books = Array.isArray(data.books) ? data.books : [];
+    if (books.length < mount.records.length || mount.list.children.length !== mount.records.length) return false;
+    const ids = new Set();
+    for (const book of books) {
+      if (typeof book?.id !== "string" || !book.id.trim() || ids.has(book.id)) return false;
+      ids.add(book.id);
+    }
+    for (let index = 0; index < mount.records.length; index++) {
+      const record = mount.records[index];
+      if (!sameNovelBookData(record.book, books[index])
+        || record.card.parentElement !== mount.list || mount.list.children[index] !== record.card) return false;
+    }
+    const needsMore = books.length < Number(data.total || books.length);
+    if (needsMore && !mount.more?.isConnected) return false;
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < mount.records.length; index++) mount.records[index].book = books[index];
+    for (let index = mount.records.length; index < books.length; index++) fragment.append(createNovelCard(books[index], mount));
+    mount.list.append(fragment);
+    mount.data = data;
+    if (listState.searchPage) {
+      els.viewMeta.textContent = listState.query ? `${formatNumber(data.total || books.length)} 本` : "";
+      els.viewContent.querySelector(".novel-mobile-search-result-meta").textContent = `${formatNumber(data.total || books.length)} 本结果`;
+    } else {
+      listState.facets = Array.isArray(data.facets || data.summary?.categories) ? [...(data.facets || data.summary?.categories)] : [];
+      listState.total = Number(data.total || books.length || 0);
+      const sortLabel = NOVEL_SORT_OPTIONS.find((option) => option.value === listState.sort)?.label || "最近更新";
+      els.viewMeta.textContent = `${formatNumber(data.total || books.length)} 本 · ${sortLabel}`;
+      notifyLibrarySourceChanged();
+    }
+    renderLocalLibraryErrorCard();
+    mount.moreText = `加载更多 · 还剩 ${formatNumber(Math.max(0, Number(data.total || 0) - books.length))} 本`;
+    if (!needsMore) {
+      mount.page.restoreCollectionFocus ||= novelCollectionMoreHasFocus(mount);
+      mount.more?.remove();
+      mount.more = null;
+    }
+    syncNovelCollectionMore(mount);
+    return true;
+  }
+
+  async function loadMoreNovelCollection(mount) {
+    if (!ownsNovelCollection(mount) || !mount.list?.isConnected || !mount.more?.isConnected) return;
+    const page = mount.page;
+    if (page.collectionPending) return;
+    const account = mount.account, scope = mount.scope;
+    const current = () => page === novelPage && page.isActive() && scope === novelCollectionScope() && isAccountOwnerCurrent(account);
+    page.restoreCollectionFocus = novelCollectionMoreHasFocus(mount);
+    page.collectionError = "";
+    page.collectionNotice?.remove();
+    page.collectionNotice = null;
+    if (!page.collectionRetryLimit) {
+      listState.remoteLimit += NOVEL_REMOTE_PAGE_SIZE;
+      page.collectionRetryLimit = listState.remoteLimit;
+    }
+    const path = novelListPath();
+    let accepted = false;
+    const publish = (data, cacheEntry = null) => {
+      if (!current()) return;
+      page.remoteData = data; page.remoteCache = cacheEntry; page.remoteStatus = "loaded";
+      const merged = mergeNovelListData(data, page.localData);
+      const previous = page.collectionMount;
+      if (!appendMountedNovelCollection(previous, merged)) {
+        const top = previous?.list?.isConnected ? window.scrollY : null;
+        renderNovelListData(merged, cacheEntry);
+        if (top !== null && current()) window.scrollTo({ top, behavior: "auto" });
+      }
+      accepted = true;
+      page.collectionRetryLimit = null;
+    };
+    const request = {};
+    page.collectionPending = request;
+    syncNovelCollectionMore(mount);
+    try {
+      try {
+        const local = await loadLocalListData();
+        if (!current()) return;
+        page.localData = local;
+        clearLocalLibraryError(page);
+      }
+      catch (error) {
+        if (!current()) return;
+        recordLocalLibraryError(page, error, page.refreshLocal);
+      }
+      if (!current()) return;
+      const cached = await readCachedJson(page.sourceUrl, path).catch(() => null);
+      if (!current()) return;
+      if (cached?.payload?.books && canUseRemotePayload(page.sourceUrl, cached.payload)) {
+        rememberRemoteSourceRealm(page.sourceUrl, cached.payload, { cached: true });
+        publish(cached.payload, cached);
+      }
+      const data = await fetchJson(page.sourceUrl, path, { timeoutMs: 16000, signal: page.isActive.signal, accountScope: account });
+      if (!current()) return;
+      rememberRemoteSourceRealm(page.sourceUrl, data);
+      writeCachedJson(page.sourceUrl, path, data).catch(() => {});
+      publish(data);
+    } catch (error) {
+      if (!current()) return;
+      page.collectionError = accepted ? "" : (error.message || "请检查电脑连接后重试。");
+      renderMessage(accepted ? "电脑端暂时连不上，当前显示的是上次内容。" : page.collectionError, accepted ? "quiet" : "error", false);
+      page.collectionNotice = els.viewContent.lastElementChild;
+    } finally {
+      if (page.collectionPending === request) page.collectionPending = null;
+      if (current()) {
+        syncNovelCollectionMore(page.collectionMount);
+        restoreNovelCollectionFocus(page);
+      }
+    }
+  }
+
   function renderNovelListData(data = {}, cacheEntry = null) {
     const books = Array.isArray(data.books) ? data.books : [];
     const remotePending = listState.source !== "local" && !novelPage?.remoteData
@@ -463,6 +667,7 @@ export function createNovelViews(context) {
       renderNovelSearchData(data, remotePending);
       return;
     }
+    const mount = beginNovelCollectionMount();
     listState.facets = Array.isArray(data.facets || data.summary?.categories) ? [...(data.facets || data.summary?.categories)] : [];
     listState.total = Number(data.total || books.length || 0);
 
@@ -473,7 +678,7 @@ export function createNovelViews(context) {
     els.viewContent.innerHTML = "";
     els.viewContent.className = "content-list novel-mobile-library-content";
     notifyLibrarySourceChanged();
-    els.viewContent.append(createNovelShelfToolbar());
+    els.viewContent.append(createNovelShelfToolbar(mount));
     renderLocalLibraryErrorCard();
 
     if (remotePending) {
@@ -488,28 +693,34 @@ export function createNovelViews(context) {
 
     const list = document.createElement("div");
     list.className = "novel-mobile-list";
-    for (const entry of books) list.append(createNovelCard(entry));
+    if (mount) { mount.list = list; mount.data = data; }
+    for (const entry of books) list.append(createNovelCard(entry, mount));
     els.viewContent.append(list);
-    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books");
+    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books", mount);
     if (more) els.viewContent.append(more);
+    syncNovelCollectionMore(mount);
   }
 
-  function createNovelShelfToolbar() {
+  function createNovelShelfToolbar(mount = null) {
     const toolbar = document.createElement("div");
     toolbar.className = "novel-mobile-shelf-toolbar";
     const sources = document.createElement("nav");
     sources.setAttribute("aria-label", "小说来源");
     for (const [source, label] of [["bookstore", "电脑书库"], ["local", "手机离线"]]) {
       const button = actionButton(label, () => {
+        if (mount && (!ownsNovelCollection(mount) || !toolbar.isConnected || mount.controls !== toolbar)) return;
         if (setLibrarySource(source)) renderCurrentView();
       });
       button.setAttribute("aria-pressed", String(getLibrarySource() === source));
       sources.append(button);
     }
     toolbar.append(sources);
+    if (mount) mount.controls = toolbar;
     if (listState.source === "local") {
       const input = createLocalNovelInput();
-      const add = actionButton("导入 TXT", () => input.click(), listState.uploading);
+      const add = actionButton("导入 TXT", () => {
+        if (!mount || ownsNovelCollection(mount) && toolbar.isConnected && mount.controls === toolbar) input.click();
+      }, listState.uploading);
       add.className = "novel-mobile-shelf-import";
       toolbar.append(input, add);
     }
@@ -533,12 +744,13 @@ export function createNovelViews(context) {
 
   function renderNovelSearchData(data = {}, remotePending = false) {
     const books = Array.isArray(data.books) ? data.books : [];
+    const mount = beginNovelCollectionMount();
     els.viewKicker.textContent = "小说";
     els.viewTitle.textContent = "搜索";
     els.viewMeta.textContent = listState.query ? `${formatNumber(data.total || books.length)} 本` : "";
     els.viewContent.innerHTML = "";
     els.viewContent.className = "content-list novel-mobile-search-page-content";
-    els.viewContent.append(createNovelSearchHeader());
+    els.viewContent.append(createNovelSearchHeader(mount));
     renderLocalLibraryErrorCard();
 
     if (remotePending) {
@@ -566,13 +778,15 @@ export function createNovelViews(context) {
     meta.textContent = `${formatNumber(data.total || books.length)} 本结果`;
     const list = document.createElement("div");
     list.className = "novel-mobile-list";
-    for (const book of books) list.append(createNovelCard(book));
+    if (mount) { mount.list = list; mount.data = data; }
+    for (const book of books) list.append(createNovelCard(book, mount));
     els.viewContent.append(meta, list);
-    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books");
+    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books", mount);
     if (more) els.viewContent.append(more);
+    syncNovelCollectionMore(mount);
   }
 
-  function createNovelSearchHeader() {
+  function createNovelSearchHeader(mount = null) {
     const head = document.createElement("div");
     head.className = "novel-mobile-search-page-head";
     const form = document.createElement("form");
@@ -583,7 +797,9 @@ export function createNovelViews(context) {
     back.className = "novel-mobile-search-page-back";
     back.setAttribute("aria-label", "返回小说");
     back.textContent = "‹";
-    back.addEventListener("click", () => goBack());
+    const current = () => !mount || ownsNovelCollection(mount) && mount.controls === head && head.isConnected;
+    if (mount) mount.controls = head;
+    back.addEventListener("click", () => { if (current()) goBack(); });
     const field = document.createElement("div");
     field.className = "novel-mobile-search-page-field";
     const icon = document.createElement("span");
@@ -603,11 +819,13 @@ export function createNovelViews(context) {
     clear.textContent = "×";
     clear.hidden = !input.value;
     clear.addEventListener("click", () => {
+      if (!current()) return;
       input.value = "";
       clear.hidden = true;
       input.focus();
     });
     input.addEventListener("input", () => {
+      if (!current()) return;
       clear.hidden = !input.value;
     });
     field.append(icon, input, clear);
@@ -617,11 +835,12 @@ export function createNovelViews(context) {
     submit.textContent = "搜索";
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (!current()) return;
       showView("novelSearch", { query: input.value.trim() }, { skipHistory: true, replaceHistory: true });
     });
     form.append(back, field, submit);
     head.append(form);
-    window.requestAnimationFrame(() => input.focus({ preventScroll: true }));
+    if (!mount?.page.collectionPending) window.requestAnimationFrame(() => { if (current()) input.focus({ preventScroll: true }); });
     return head;
   }
 
@@ -1389,13 +1608,22 @@ export function createNovelViews(context) {
     return bar;
   }
 
-  function createNovelLoadMore(total, visible, kind) {
+  function createNovelLoadMore(total, visible, kind, mount = null) {
     const remaining = Math.max(0, Number(total || 0) - Number(visible || 0));
     if (!remaining) return null;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-mobile-load-more";
     button.textContent = `加载更多 · 还剩 ${formatNumber(remaining)} ${kind === "authors" ? "位作者" : "本"}`;
+    if (mount && kind === "books" && listState.source !== "local") {
+      mount.more = button;
+      mount.moreText = button.textContent;
+      return enhanceAutoLoadMore(button, () => loadMoreNovelCollection(mount), {
+        auto: false, signal: mount.life.signal,
+        getIdleText: () => mount.page.collectionError ? "加载失败，点一下重试" : mount.moreText,
+        loadingText: "正在加载更多", retryText: "加载失败，点一下重试"
+      });
+    }
     button.addEventListener("click", () => {
       if (kind === "authors") listState.authorLimit += NOVEL_AUTHOR_PAGE_SIZE;
       else listState.remoteLimit += NOVEL_REMOTE_PAGE_SIZE;
@@ -1608,22 +1836,29 @@ export function createNovelViews(context) {
     return Number(book.chapterCount || 0) <= 1 && Number(book.charCount || book.sizeBytes || 0) < 1200;
   }
 
-  function createNovelCard(book = {}) {
+  function createNovelCard(book = {}, mount = null) {
     const card = document.createElement("article");
     card.className = "novel-mobile-card novel-mobile-book-row";
+    const record = { card, book };
+    if (mount) { mount.records.push(record); novelCardRecords.set(card, record); }
+    const currentBook = () => !mount ? book : ownsNovelCollection(mount) && card.isConnected
+      && card.parentElement === mount.list && novelCardRecords.get(card) === record ? record.book : null;
     const detail = document.createElement("button");
     detail.type = "button";
     detail.className = "novel-mobile-book-detail";
     detail.setAttribute("aria-label", `查看《${book.title || "未命名小说"}》详情`);
-    const longPress = installNovelLongPress(detail, () => openNovelBookActions(book));
+    const longPress = installNovelLongPress(detail, () => { const current = currentBook(); if (current) openNovelBookActions(current); });
     detail.addEventListener("click", () => {
+      const current = currentBook();
+      if (!current) return;
       if (longPress.consumeClick()) return;
-      showView("novelDetail", { id: detailBookId(book) }, { push: true });
+      showView("novelDetail", { id: detailBookId(current) }, { push: true });
     });
     detail.addEventListener("keydown", (event) => {
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         event.preventDefault();
-        openNovelBookActions(book);
+        const current = currentBook();
+        if (current) openNovelBookActions(current);
       }
     });
 
@@ -1647,10 +1882,10 @@ export function createNovelViews(context) {
     progress.textContent = readable.progressRecovery ? "续读位置待确认"
       : readable.progress ? compactBookProgress(readable)
       : book.local || book.cachedLocal ? "已在手机 · 未读" : "未开始阅读";
-    const read = actionButton(readable.progressRecovery ? "选择位置" : readable.progress ? "继续阅读" : "开始阅读", () => openReader(book));
+    const read = actionButton(readable.progressRecovery ? "选择位置" : readable.progress ? "继续阅读" : "开始阅读", () => { const current = currentBook(); if (current) openReader(current); });
     read.className = "novel-mobile-book-read";
     read.setAttribute("aria-label", `${read.textContent}《${book.title || "未命名小说"}》`);
-    const more = actionButton("···", () => openNovelBookActions(book));
+    const more = actionButton("···", () => { const current = currentBook(); if (current) openNovelBookActions(current); });
     more.className = "novel-mobile-book-more";
     more.setAttribute("aria-label", `《${book.title || "未命名小说"}》更多操作`);
     footer.append(progress, read, more);
@@ -2212,6 +2447,7 @@ export function createNovelViews(context) {
 
   function createCatalogBrowser(book, chapters, options = {}) {
     let source = Array.isArray(chapters) ? chapters : [];
+    let preparedLocal = null;
     const ownAction = options.ownAction || (handler => handler);
     let serverPaged = Boolean(options.serverPaged);
     let loading = false, error = "";
@@ -2276,10 +2512,15 @@ export function createNovelViews(context) {
       let visible = source;
       let filteredTotal = Number(catalogState.filteredTotal || source.length);
       if (!serverPaged) {
-        filtered = query
-          ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
-          : [...source];
-        if (catalogState.descending) filtered.reverse();
+        if (!preparedLocal || preparedLocal.query !== query || preparedLocal.descending !== catalogState.descending) {
+          filtered = query
+            ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
+            : [...source];
+          if (catalogState.descending) filtered.reverse();
+          preparedLocal = { query, descending: catalogState.descending, chapters: filtered };
+        } else {
+          filtered = preparedLocal.chapters;
+        }
         filteredTotal = filtered.length;
       }
       const pageCount = Math.max(1, Math.ceil(filteredTotal / NOVEL_CATALOG_PAGE_SIZE));
@@ -2354,6 +2595,9 @@ export function createNovelViews(context) {
     tools.append(search, order, pagination, status);
     shell.append(tools, list);
     catalogBrowserUpdates.set(shell, (nextChapters, state) => {
+      // Updates can reuse and mutate the same catalog array. Only paging
+      // within this mounted browser may reuse a prepared local result.
+      preparedLocal = null;
       source = Array.isArray(nextChapters) ? nextChapters : [];
       book = state.book || book;
       serverPaged = Boolean(state.serverPaged);

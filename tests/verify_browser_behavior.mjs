@@ -437,7 +437,7 @@ async function verifyShortVideoControlsNegative(browser) {
     write: false, outfile: path.join(root, 'public/short-video-app.min.js'),
     plugins: [{ name: 'retire-short-video-home-negative', setup(builder) {
       builder.onLoad({ filter: /short-video-page\.js$/ }, args => {
-        const source = fs.readFileSync(args.path, 'utf8'), marker = 'if (refreshShortVideoHome()) return;';
+        const source = fs.readFileSync(args.path, 'utf8'), marker = 'if (refreshShortVideoHome(options)) return;';
         assert.equal(source.split(marker).length - 1, 1, 'retention negative needs the unique owning render branch');
         mutations++;
         return { contents: source.replace(marker, 'if (false) return;'), loader: 'js', resolveDir: path.dirname(args.path) };

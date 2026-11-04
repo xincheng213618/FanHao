@@ -3,6 +3,9 @@ import { deriveWorkTraits, summarizeWorkTraits } from "../../../../../lib/work-t
 
 const COLLECTION_PAGE_CACHE_LIMIT = 64;
 const COLLECTION_PAGE_WORK_BUDGET = 4096;
+const COLLECTION_QUERY_WORK_BUDGET = 50_000;
+const COLLECTION_QUERY_CACHE_LIMIT = 32;
+const COLLECTION_QUERY_KEY_LIMIT = 1024;
 const COLLECTION_WORK_CACHE_LIMIT = 4096;
 const COLLECTION_PREWARM_PAGE_SIZES = [8, 48, 64];
 
@@ -27,6 +30,9 @@ export function createCollectionQueryService({
   workInfoFacetRow = () => null,
   workQueryStamp = () => ""
 }) {
+  const queryBudget = createWeightedCacheBudget(COLLECTION_QUERY_WORK_BUDGET, COLLECTION_QUERY_CACHE_LIMIT);
+  const queryCache = new Map();
+  const historyPageWindows = new WeakMap();
   const pageBudget = createWeightedCacheBudget(COLLECTION_PAGE_WORK_BUDGET);
   let cacheStamp = "";
   let pageCache = new Map();
@@ -51,8 +57,8 @@ export function createCollectionQueryService({
     const cached = readPage(cacheKey);
     if (cached) return cached;
 
-    const allWorks = favoriteStateService.favoriteWorks(selectedFolderId);
-    const queried = queryWorks(allWorks, { filter, sort });
+    const queried = preparedQuery(["favorites", selectedFolderId, filter, sort],
+      () => favoriteStateService.favoriteWorks(selectedFolderId), { filter, sort });
     const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
     const works = preparePage(page);
     return cachePage(cacheKey, {
@@ -82,14 +88,23 @@ export function createCollectionQueryService({
     const filter = requestFilter(url);
     const sort = requestSort(url);
     const cacheKey = `history:${days}:${filter}:${sort}:${limit}:${offset}`;
+    const now = days ? Date.now() : 0;
     const cached = readPage(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      const window = historyPageWindows.get(cached);
+      if (!window || currentHistoryWindow(window, now)) return cached;
+      pageBudget.drop(pageCache, cacheKey);
+    }
 
-    const entries = playbackProgressService.historyEntries({ days });
-    const queried = queryWorks(entries.map((entry) => entry.work), { filter, sort });
+    const loadSource = () => playbackProgressService.historyEntries({ days }).map((entry) => entry.work);
+    // Providers without a timed snapshot keep their existing per-page reads.
+    let queried;
+    if (!days) queried = preparedQuery(["history", filter, sort], loadSource, { filter, sort });
+    else if (typeof playbackProgressService.historySnapshot === "function") queried = preparedHistoryQuery(days, { filter, sort }, now);
+    else queried = queryWorks(loadSource(), { filter, sort });
     const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
     const works = preparePage(page);
-    return cachePage(cacheKey, {
+    const payload = {
       count: works.length,
       total: queried.works.length,
       days,
@@ -101,7 +116,48 @@ export function createCollectionQueryService({
       works,
       traitFacets: queried.traitFacets,
       facets: queried.facets
-    });
+    };
+    if (queried.historyWindow) {
+      historyPageWindows.set(payload, queried.historyWindow);
+      if (!currentHistoryWindow(queried.historyWindow, Date.now())) return payload;
+    }
+    return cachePage(cacheKey, payload);
+  }
+
+  function currentHistoryWindow(window, now) {
+    return Number.isFinite(now) && Number.isFinite(window.observedAt)
+      && (Number.isFinite(window.expiresAt) || window.expiresAt === Infinity)
+      && now >= window.observedAt && now <= window.expiresAt;
+  }
+
+  function preparedHistoryQuery(days, options, now) {
+    ensureCache();
+    const key = JSON.stringify(["history", days, options.filter, options.sort]);
+    const cached = queryBudget.read(queryCache, key);
+    if (cached) {
+      if (currentHistoryWindow(cached.historyWindow, now)) return cached;
+      queryBudget.drop(queryCache, key);
+    }
+    const snapshot = playbackProgressService.historySnapshot({ days });
+    const result = queryWorks(snapshot.entries.map(entry => entry.work), options);
+    result.historyWindow = { observedAt: snapshot.observedAt, expiresAt: snapshot.expiresAt };
+    if (key.length <= COLLECTION_QUERY_KEY_LIMIT && workInfoReadCacheable() !== false
+      && currentHistoryWindow(result.historyWindow, Date.now())) {
+      queryBudget.write(queryCache, key, result, result.works.length);
+    }
+    return result;
+  }
+
+  function preparedQuery(parts, loadSource, options) {
+    ensureCache();
+    const key = JSON.stringify(parts);
+    const cached = queryBudget.read(queryCache, key);
+    if (cached) return cached;
+    const result = queryWorks(loadSource(), options);
+    if (key.length <= COLLECTION_QUERY_KEY_LIMIT && workInfoReadCacheable() !== false) {
+      queryBudget.write(queryCache, key, result, result.works.length);
+    }
+    return result;
   }
 
   function queryWorks(sourceWorks, { filter, sort }) {
@@ -178,6 +234,7 @@ export function createCollectionQueryService({
     if (cacheStamp === nextStamp) return;
     cacheStamp = nextStamp;
     pageBudget.clear();
+    queryBudget.clear();
     pageCache = new Map();
     workPayloadCache = new Map();
   }

@@ -109,7 +109,7 @@ const androidAppSource = fs.readFileSync(path.join(root, "android-client", "www"
 assert(!/from\s+["']\.\/modules\//.test(androidAppSource), "Android shell must not statically import business modules");
 assert(androidAppSource.includes("loadAndroidModules("), "Android shell must load module entries through the registry");
 const androidRegistrySource = fs.readFileSync(path.join(root, "android-client", "www", "js", "android-module-registry.js"), "utf8");
-assert(androidRegistrySource.includes("await import(entryUrl)"), "Android module registry must dynamically import discovered entries");
+assert(androidRegistrySource.includes("import(entryUrl)"), "Android module registry must dynamically import discovered entries");
 assert(androidRegistrySource.includes("renderChrome(view"), "Android module registry must delegate module chrome rendering");
 const androidIndexSource = fs.readFileSync(path.join(root, "android-client", "www", "index.html"), "utf8");
 const androidBottomNavigationSource = fs.readFileSync(path.join(root, "android-client", "www", "js", "module-navigation.js"), "utf8");

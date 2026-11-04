@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-22080e82f167";
-import { fetchJson } from "./js/api.js?v=assets-22080e82f167";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-eb78be0b425d";
+import { fetchJson } from "./js/api.js?v=assets-eb78be0b425d";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-22080e82f167";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-22080e82f167";
-import { getElements } from "./js/dom.js?v=assets-22080e82f167";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-22080e82f167";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-22080e82f167";
+import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-eb78be0b425d";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-eb78be0b425d";
+import { getElements } from "./js/dom.js?v=assets-eb78be0b425d";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-eb78be0b425d";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-eb78be0b425d";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-22080e82f167";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-22080e82f167";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-22080e82f167";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-22080e82f167";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-eb78be0b425d";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-eb78be0b425d";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-eb78be0b425d";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-eb78be0b425d";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-22080e82f167";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-22080e82f167";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-22080e82f167";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-22080e82f167";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-eb78be0b425d";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-eb78be0b425d";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-eb78be0b425d";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-eb78be0b425d";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -2268,20 +2268,30 @@ function renderCurrentView(options = {}) {
   els.contentPanel.hidden = false;
   syncContentPanelMode();
   els.viewBack.hidden = isRootNavigationView(currentView);
-  if (!preserveShortVideoHome && !preserveMangaLibraryActions) {
-    els.viewContent.innerHTML = "";
-    els.viewContent.className = "content-list";
+  let preserveChannelList = false;
+  if (currentView === "channel" && typeof options.preserveChannelList === "function") {
+    try { preserveChannelList = options.preserveChannelList() === true; } catch {}
   }
-  syncSearchSurface();
-  if (!preserveShortVideoHome && !preserveMangaLibraryActions) renderRouteLoadingState();
-  setActiveBottom();
-  const renderGuard = beginViewRender(currentView, currentViewParams);
-  finishAppStartup();
-  if (!library && currentViewNeedsLibrary()) {
-    renderLibraryAvailability();
-    return;
+  try {
+    if (!preserveShortVideoHome && !preserveMangaLibraryActions && !preserveChannelList) {
+      els.viewContent.innerHTML = "";
+      els.viewContent.className = "content-list";
+    }
+    syncSearchSurface();
+    if (!preserveShortVideoHome && !preserveMangaLibraryActions && !preserveChannelList) renderRouteLoadingState();
+    setActiveBottom();
+    const renderGuard = beginViewRender(currentView, currentViewParams);
+    finishAppStartup();
+    if (!library && currentViewNeedsLibrary()) {
+      renderLibraryAvailability();
+      return;
+    }
+    return restoreAfterRender(androidModuleRegistry?.render(currentView, currentViewParams, renderGuard), renderGuard);
+  } finally {
+    // renderChannel adopts the new guard synchronously. A failed handoff must
+    // not leave the old presentation exempt from its aborted route guard.
+    if (preserveChannelList) { try { options.preserveChannelList(false); } catch {} }
   }
-  return restoreAfterRender(androidModuleRegistry?.render(currentView, currentViewParams, renderGuard), renderGuard);
 }
 
 function renderLibraryAvailability() {
@@ -2320,7 +2330,8 @@ function finishAppStartup() {
 }
 
 function renderCurrentViewPreservingScroll(options = {}) {
-  return renderCurrentView({ restoreScrollY: currentScrollY(), preserveMangaLibraryActions: options.preserveMangaLibraryActions === true });
+  return renderCurrentView({ restoreScrollY: currentScrollY(), preserveMangaLibraryActions: options.preserveMangaLibraryActions === true,
+    preserveChannelList: options.preserveChannelList });
 }
 
 function renderRouteLoadingState() {

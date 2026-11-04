@@ -303,9 +303,9 @@ const mutations = [
   { name: "append loses existing-page treatment", target: "movie: pending append", from: "const loadingMore = Boolean(currentPage && offset > 0);", to: "const loadingMore = false;" },
   { name: "pending footer is normal autoload", target: "movie: pending append", from: 'const pendingPaging = loadingMore ? { status: "loading" } : {};', to: "const pendingPaging = {};" },
   { name: "error branch drops explicit recovery", target: "movie: miss/error", from: "if (loadingMore) {", to: "if (false) {" },
-  { name: "error retry reenables automatic loading", target: "movie: miss/error", from: 'paging.retry, { auto: false }', to: 'paging.retry, { auto: true }' },
+  { name: "error retry reenables automatic loading", target: "movie: miss/error", from: '}, { auto: false, signal: mounted?.moreLife.signal });', to: '}, { auto: true, signal: mounted?.moreLife.signal });' },
   { name: "load-more wrapper drops auto:false forwarding", target: "movie: miss/error", from: "auto: options.auto,", to: "/* auto option lost */" },
-  { name: "retry increases target again", target: "movie: miss/error", from: "retry: () => isCurrent() ? renderCurrentViewPreservingScroll() : undefined", to: "retry: () => isCurrent() ? (increaseChannelLimit(48), renderCurrentViewPreservingScroll()) : undefined" },
+  { name: "retry increases target again", target: "movie: miss/error", from: "retry: (options = {}) => isCurrent() ? renderCurrentViewPreservingScroll(options) : undefined", to: "retry: (options = {}) => isCurrent() ? (increaseChannelLimit(48), renderCurrentViewPreservingScroll(options)) : undefined" },
   { name: "cached target completion discards outstanding request", target: "movie: cached append", from: "const retryPage = currentPage && channelPageState.retry?.targetLimit === limit ? channelPageState.retry : null;", to: "const retryPage = null;" },
   { name: "retry merges cached stale tail rather than original base", target: "fresh retry replaces cached tail", from: "const basePage = retryPage ? retryPage.base : currentPage;", to: "const basePage = currentPage;" },
   { name: "same-signature shortcut leaves loading footer", target: "movie: cached append", prepare: source => {

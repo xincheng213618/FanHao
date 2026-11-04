@@ -47,6 +47,9 @@ class Element extends Events {
       toggle: (name, force) => { const on = force === undefined ? !this.classList.contains(name) : Boolean(force); this.classList[on ? "add" : "remove"](name); return on; }
     };
   }
+  get parentElement() {
+    return this.parentNode instanceof Element && this.parentNode.tagName !== "#FRAGMENT" ? this.parentNode : null;
+  }
   set innerHTML(value) { for (const child of this.children) child.parentNode = null; this.children = []; this._text = ""; this._html = String(value); }
   get innerHTML() { return this._html; }
   set textContent(value) { this.innerHTML = ""; this._text = String(value); }

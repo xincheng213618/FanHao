@@ -96,7 +96,7 @@ export function createWorkDetailService({
 
     const person = library.peopleById.get(work.personId);
     prewarmCoreWorkCovers([work]);
-    const publicItem = publicWork(work, true);
+    const publicItem = publicWork(work, true, { detailFacets: true });
     prewarmRemoteImagesForWorks([publicItem], 100);
     const payload = { work: publicItem, person: person ? publicPerson(person) : null };
     const bytes = detailPayloadWeight(payload);

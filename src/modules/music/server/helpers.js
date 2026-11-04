@@ -46,7 +46,7 @@ export function normalizeAlbumSort(value) {
 export function trackOrderSql(sort) {
   if (sort === "title") return "t.title COLLATE NOCASE ASC, t.display_artist COLLATE NOCASE ASC";
   if (sort === "artist") return "t.display_artist COLLATE NOCASE ASC, t.album_title COLLATE NOCASE ASC, t.track_no ASC, t.title COLLATE NOCASE ASC";
-  if (sort === "duration") return "t.duration_ms DESC, t.title COLLATE NOCASE ASC";
+  if (sort === "duration") return "t.duration_ms DESC, t.title COLLATE NOCASE ASC, t.id COLLATE BINARY ASC";
   if (sort === "played") return "s.last_played_at IS NULL ASC, s.last_played_at DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC";
   if (sort === "favorite") return "COALESCE(s.favorite, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC";
   if (sort === "rating") return "COALESCE(s.rating, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC";

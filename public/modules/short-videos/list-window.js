@@ -39,6 +39,7 @@ export function createShortVideoListWindow(dependencies) {
   let expandIdle = 0;
   let coverObserver = null;
   let coverTimer = 0;
+  let coverGeneration = 0;
   const coverQueue = [];
 
   function attach(grid, inner = null) {
@@ -49,6 +50,7 @@ export function createShortVideoListWindow(dependencies) {
   }
 
   function reset() {
+    coverGeneration += 1;
     start = 0;
     end = 0;
     total = 0;
@@ -319,12 +321,29 @@ export function createShortVideoListWindow(dependencies) {
     }
   }
 
+  function releaseCoversForNodes(nodes) {
+    const released = new Set();
+    for (const node of nodes || []) {
+      for (const image of node?.querySelectorAll?.("img.short-video-cover-image") || []) {
+        coverObserver?.unobserve?.(image);
+        released.add(image);
+      }
+    }
+    for (let index = coverQueue.length - 1; index >= 0; index -= 1) {
+      if (!released.has(coverQueue[index])) continue;
+      delete coverQueue[index].dataset.queued;
+      coverQueue.splice(index, 1);
+    }
+  }
+
   function ensureCoverObserver() {
     if (!("IntersectionObserver" in window)) return null;
     if (!coverObserver) {
+      const generation = coverGeneration;
       coverObserver = new IntersectionObserver((entries) => {
+        if (generation !== coverGeneration) return;
         for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
+          if (!entry.isIntersecting || !entry.target.isConnected) continue;
           entry.target.fetchPriority = "high";
           queueCover(entry.target);
         }
@@ -343,7 +362,10 @@ export function createShortVideoListWindow(dependencies) {
 
   function scheduleCoverDrain(delay = 0) {
     if (coverTimer) return;
-    coverTimer = window.setTimeout(drainCoverQueue, delay);
+    const generation = coverGeneration;
+    coverTimer = window.setTimeout(() => {
+      if (generation === coverGeneration) drainCoverQueue();
+    }, delay);
   }
 
   function drainCoverQueue() {
@@ -360,19 +382,25 @@ export function createShortVideoListWindow(dependencies) {
 
   function loadCover(image) {
     const source = image.dataset.src;
+    const generation = coverGeneration;
     image.dataset.loaded = "1";
     delete image.dataset.src;
     image.addEventListener("load", () => {
+      if (generation !== coverGeneration || !image.isConnected) return;
       image.classList.add("is-loaded");
       const videoId = image.dataset.videoId;
       if (videoId) rememberLoadedCoverId(videoId);
     }, { once: true });
-    image.addEventListener("error", () => image.classList.add("is-cover-error"), { once: true });
+    image.addEventListener("error", () => {
+      if (generation === coverGeneration && image.isConnected) image.classList.add("is-cover-error");
+    }, { once: true });
     image.src = source;
   }
 
   return Object.freeze({
     activateCovers,
+    activateCoversForNodes,
+    releaseCoversForNodes,
     attach,
     render,
     reset,

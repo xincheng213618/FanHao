@@ -2096,15 +2096,26 @@ function activateGalleryReaderImages(root) {
   const reportProgress = () => {
     progressTicking = false;
     const readingLine = Math.max(1, window.innerHeight * 0.46);
-    const current = figures.find((figure) => figure.getBoundingClientRect().bottom >= readingLine) || figures.at(-1);
+    // Reader figures occupy consecutive rows. Read live geometry so image
+    // loads, width changes and appended pages need no retained measurements.
+    let start = 0, end = figures.length;
+    while (start < end) {
+      const middle = Math.floor((start + end) / 2);
+      if (figures[middle].getBoundingClientRect().bottom < readingLine) start = middle + 1;
+      else end = middle;
+    }
+    const current = figures[Math.min(start, figures.length - 1)];
     const currentIndex = Math.max(1, Number(current?.dataset.imageIndex || 1));
     const totalCount = Math.max(currentIndex, Number(root.dataset.totalCount || figures.length));
     const toolbar = root.parentElement?.querySelector(".gallery-reader-toolbar");
     const progress = toolbar?.querySelector(".gallery-reader-progress");
     if (!toolbar || !progress) return;
-    progress.dataset.currentIndex = String(currentIndex);
-    progress.textContent = `${formatNumber(currentIndex)} / ${formatNumber(totalCount)}`;
-    toolbar.style.setProperty("--reader-progress", `${Math.min(100, currentIndex / Math.max(1, totalCount) * 100)}%`);
+    const indexValue = String(currentIndex);
+    const progressText = `${formatNumber(currentIndex)} / ${formatNumber(totalCount)}`;
+    const progressValue = `${Math.min(100, currentIndex / Math.max(1, totalCount) * 100)}%`;
+    if (progress.dataset.currentIndex !== indexValue) progress.dataset.currentIndex = indexValue;
+    if (progress.textContent !== progressText) progress.textContent = progressText;
+    if (toolbar.style.getPropertyValue("--reader-progress") !== progressValue) toolbar.style.setProperty("--reader-progress", progressValue);
   };
   const requestProgress = () => {
     if (progressTicking) return;

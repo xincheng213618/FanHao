@@ -17,6 +17,7 @@ export function createShortVideoAuthorPages(deps) {
     authorProfileLineText,
     authorScopeId,
     cacheShortVideoAuthorMention,
+    captureAuthorIndexOwner,
     clearShortVideoDeleteSelection,
     createAuthorFollowButton,
     createIcon,
@@ -26,6 +27,7 @@ export function createShortVideoAuthorPages(deps) {
     formatNumber,
     getShortVideoListCards,
     loadVideos,
+    needsAuthorFirstPageRetry,
     openAuthorDouyinLink,
     profileNumber,
     pushRoute,
@@ -42,6 +44,7 @@ export function createShortVideoAuthorPages(deps) {
   } = deps;
   let authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
   let authorPageEnteredWithinApp = false;
+  let authorIndexView = null;
   const {
     cancel: cancelAuthorCollectorPolling,
     isCurrent: isCurrentAuthorPage,
@@ -460,27 +463,105 @@ export function createShortVideoAuthorPages(deps) {
     return author;
   }
 
+  function releaseAuthorIndex() {
+    authorIndexView = null;
+  }
+
+  function ownsAuthorIndex(view) {
+    return authorIndexView === view && view.wrap.isConnected && view.owner.isCurrent();
+  }
+
+  function authorCardSignature(author) {
+    const values = [author.secUid, author.name, author.count, author.likedCount, author.avatarUrl,
+      author.fallbackCoverUrl, author.following, author.accountStatus, author.accountStatusReason];
+    return values.every(value => value == null || ["string", "boolean"].includes(typeof value)
+      || typeof value === "number" && Number.isFinite(value))
+      ? JSON.stringify(values) : null;
+  }
+
+  function createAuthorRecord(view, author) {
+    const key = shortVideoAuthorFilterValue(author);
+    const record = { key, author, signature: authorCardSignature(author), card: null };
+    record.card = renderAuthorIndexCard(author, { getCurrentAuthor: () => {
+      if (!ownsAuthorIndex(view) || record.card.parentNode !== view.wrap || !view.cards.has(record.card)) return null;
+      return (state.shortVideo.authors || []).find(current => current === record.author && shortVideoAuthorFilterValue(current) === key) || null;
+    } });
+    view.cards.add(record.card);
+    return record;
+  }
+
+  function syncAuthorIndexStatus(view) {
+    const retry = needsAuthorFirstPageRetry();
+    const wanted = retry || state.shortVideo.authorHasMore || state.shortVideo.authorLoadingMore;
+    if (!wanted) { view.status?.remove(); view.status = null; return; }
+    if (!view.status || (view.status.tagName === "BUTTON") !== retry) {
+      view.status?.remove();
+      const status = view.status = document.createElement(retry ? "button" : "div");
+      status.className = "short-video-author-index-status short-video-author-index-more";
+      if (retry) {
+        status.type = "button";
+        status.addEventListener("click", () => { if (ownsAuthorIndex(view)) appendVisibleAuthorsIfNeeded(true); });
+      }
+      view.wrap.append(status);
+    }
+    view.status.textContent = state.shortVideo.authorLoadingMore ? "正在加载更多作者" : retry ? "重试读取作者" : "继续下滑加载更多作者";
+    if (retry) view.status.disabled = Boolean(state.shortVideo.loading || state.shortVideo.authorLoadingMore);
+  }
+
+  function reconcileAuthorIndex(content) {
+    const view = authorIndexView;
+    if (!view || !view.reusable || view.wrap.parentNode !== content || !ownsAuthorIndex(view)) return null;
+    const authors = sortedShortVideoAuthors(), keys = new Set(), records = new Map();
+    for (const author of authors) {
+      const key = shortVideoAuthorFilterValue(author), record = view.records.get(key);
+      const signature = authorCardSignature(author);
+      if (signature === null || keys.has(key) || record && (record.author !== author || record.signature !== signature)) return null;
+      keys.add(key);
+      records.set(key, record || null);
+    }
+    if ([...view.records.keys()].some(key => !keys.has(key))) return null;
+    authors.forEach(author => {
+      const key = shortVideoAuthorFilterValue(author);
+      if (!records.get(key)) records.set(key, createAuthorRecord(view, author));
+    });
+    const focused = view.wrap.contains(document.activeElement) ? document.activeElement : null;
+    if (records.size) view.empty?.remove();
+    let cursor = view.heading.nextSibling;
+    for (const record of records.values()) {
+      if (record.card !== cursor) view.wrap.insertBefore(record.card, cursor);
+      cursor = record.card.nextSibling;
+    }
+    view.records = records;
+    syncAuthorIndexStatus(view);
+    if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+    return view.wrap;
+  }
+
   function renderAuthorIndex() {
     const authors = sortedShortVideoAuthors();
     const wrap = document.createElement("div");
     wrap.className = "short-video-author-index";
+    const view = { wrap, owner: captureAuthorIndexOwner(), records: new Map(), cards: new Set(), reusable: true, status: null };
+    authorIndexView = view;
     const heading = document.createElement("h1");
     heading.className = "short-video-visually-hidden";
     heading.dataset.shortVideoAuthorIndexHeading = "1";
     heading.tabIndex = -1;
     heading.textContent = state.shortVideo.source === "following" ? "我的关注作者" : "作者列表";
     wrap.append(heading);
+    view.heading = heading;
     if (state.shortVideo.loading && !authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-author-index-status";
       status.textContent = "正在读取作者";
       wrap.append(status);
+      view.empty = status;
       return wrap;
     }
     if (!authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-author-index-status";
-      status.textContent = state.shortVideo.source === "following"
+      status.textContent = needsAuthorFirstPageRetry() ? "读取失败，请重试读取作者" : state.shortVideo.source === "following"
         ? state.shortVideo.authorFilter === "unliked"
           ? "没有未点赞的关注账号"
           : "还没有已关注的作者"
@@ -488,17 +569,17 @@ export function createShortVideoAuthorPages(deps) {
           ? "没有已封禁的作者"
           : "还没有作者数据";
       wrap.append(status);
+      view.empty = status;
+      syncAuthorIndexStatus(view);
       return wrap;
     }
     for (const author of authors) {
-      wrap.append(renderAuthorIndexCard(author));
+      const record = createAuthorRecord(view, author);
+      if (view.records.has(record.key) || record.signature === null) view.reusable = false;
+      view.records.set(record.key, record);
+      wrap.append(record.card);
     }
-    if (state.shortVideo.authorHasMore || state.shortVideo.authorLoadingMore) {
-      const status = document.createElement("div");
-      status.className = "short-video-author-index-status short-video-author-index-more";
-      status.textContent = state.shortVideo.authorLoadingMore ? "正在加载更多作者" : "继续下滑加载更多作者";
-      wrap.append(status);
-    }
+    syncAuthorIndexStatus(view);
     return wrap;
   }
 
@@ -511,7 +592,10 @@ export function createShortVideoAuthorPages(deps) {
 
   function appendVisibleAuthorsIfNeeded(force = false) {
     if (state.activeView !== "shortVideos" || state.shortVideo?.current || !isShortVideoAuthorIndexPage()) return;
-    if (!state.shortVideo.authorHasMore || state.shortVideo.loading || state.shortVideo.authorLoadingMore) return;
+    if (state.shortVideo.loading || state.shortVideo.authorLoadingMore) return;
+    if (needsAuthorFirstPageRetry()) {
+      if (!force) return;
+    } else if (!state.shortVideo.authorHasMore) return;
     if (!force) {
       const doc = document.documentElement;
       const bottomDistance = Math.max(0, (doc.scrollHeight || 0) - ((window.scrollY || 0) + (window.innerHeight || 0)));
@@ -579,8 +663,8 @@ export function createShortVideoAuthorPages(deps) {
     return `@${shortVideoAuthorDisplayName(value, fallback)}`;
   }
 
-  function renderAuthorIndexCard(author = {}) {
-    return getShortVideoListCards()?.renderAuthorIndexCard(author) || null;
+  function renderAuthorIndexCard(author = {}, options) {
+    return getShortVideoListCards()?.renderAuthorIndexCard(author, options) || null;
   }
 
   function renderSearchUserCard(author = {}) {
@@ -598,6 +682,8 @@ export function createShortVideoAuthorPages(deps) {
     openShortVideoAuthorPage,
     renderAuthorDetailHome,
     renderAuthorIndex,
+    reconcileAuthorIndex,
+    releaseAuthorIndex,
     renderAuthorIndexCard,
     renderAuthorSignature,
     renderAuthorWorkspaceToolbar,

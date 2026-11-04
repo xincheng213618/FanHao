@@ -67,10 +67,10 @@ test("latest keepalive arriving before 40 older normal bodies never rewinds SQLi
   assert.equal(sessions(fixture.dbPath)[0].max_sequence, 99);
 });
 
-test("metadata server clock is read-only, uses its persisted floor and keeps v5 lazy", async () => {
+test("metadata server clock is read-only, uses its persisted floor and keeps the progress ledger lazy", async () => {
   const fixture = fresh();
   assert.equal(hasLedger(fixture.dbPath), false);
-  assert.equal(sql(fixture.dbPath, db => db.prepare("SELECT value FROM novel_meta WHERE key='schema_version'").get().value), "5");
+  assert.equal(sql(fixture.dbPath, db => db.prepare("SELECT value FROM novel_meta WHERE key='schema_version'").get().value), "6");
   await withClock(Date.now() + 10_000, async clock => {
     assert.equal(fixture.store.bookMeta(fixture.detail.book.id).serverClockMs, clock.now);
     assert.equal(floor(fixture.dbPath), 0, "metadata cannot create a clock floor");

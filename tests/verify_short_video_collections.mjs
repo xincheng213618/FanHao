@@ -179,6 +179,7 @@ async function legacyCountStoreFactory() {
 function countedCollectionPage(work) {
   const prepare = DatabaseSync.prototype.prepare;
   let reads = 0;
+  let schemaReads = 0;
   DatabaseSync.prototype.prepare = function(sql) {
     const statement = prepare.call(this, sql);
     return new Proxy(statement, {
@@ -186,7 +187,8 @@ function countedCollectionPage(work) {
         const member = target[key];
         if ((key === "get" || key === "all") && typeof member === "function") {
           return (...values) => {
-            reads += 1;
+            if (/^\s*PRAGMA\s+(?:main|temp)\.schema_version\s*;?\s*$/i.test(sql)) schemaReads += 1;
+            else reads += 1;
             return member.apply(target, values);
           };
         }
@@ -195,7 +197,7 @@ function countedCollectionPage(work) {
     });
   };
   try {
-    return { page: work(), reads };
+    return { page: work(), reads, schemaReads };
   } finally {
     DatabaseSync.prototype.prepare = prepare;
   }
@@ -270,9 +272,12 @@ function verifyCollectionPageCountReuse() {
     legacy.listCollectionVideos(mixed.id, pageUrl);
     const oldCount = countedCollectionPage(() => legacy.listCollectionVideos(mixed.id, pageUrl));
     assert.equal(oldCount.reads, 4, "legacy page count control must perform four reads");
+    assert.equal(oldCount.schemaReads, 2, "warm projection keeps both schema identity probes visible");
+    store.listCollectionVideos(mixed.id, pageUrl);
     for (const collection of [mixed, empty, orphanOnly]) {
       const actual = countedCollectionPage(() => store.listCollectionVideos(collection.id, pageUrl));
       assert.equal(actual.reads, 3, "collection page must use three reads without a second total aggregate");
+      assert.equal(actual.schemaReads, 2, "count reuse must retain the same two schema probes");
     }
   } finally {
     legacy.close();

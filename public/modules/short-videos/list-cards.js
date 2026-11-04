@@ -30,7 +30,7 @@ export function createShortVideoListCards(dependencies) {
   let authorStatusDescriptionId = 0;
 
 
-  function renderAuthorIndexCard(author = {}) {
+  function renderAuthorIndexCard(author = {}, { getCurrentAuthor } = {}) {
     const card = document.createElement("article");
     card.className = "short-video-author-index-card";
     const button = document.createElement("button");
@@ -76,7 +76,8 @@ export function createShortVideoListCards(dependencies) {
       appendAuthorStatusDescription(button, author);
     }
     button.addEventListener("click", () => {
-      openShortVideoAuthorPage(author);
+      const current = getCurrentAuthor ? getCurrentAuthor() : author;
+      if (current) openShortVideoAuthorPage(current);
     });
     card.append(button);
     return card;

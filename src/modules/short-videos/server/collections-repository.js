@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { LOCAL_SHORT_VIDEO_USER_ID } from "./constants.js";
+import { collectionVideoProjections } from "./collection-video-projection.js";
 
 const COLLECTION_NAME_MAX_LENGTH = 40;
 const COLLECTION_PAGE_DEFAULT_LIMIT = 48;
@@ -113,8 +114,9 @@ export function createShortVideoCollectionsRepository({
         ? "AND (item.added_at < ? OR (item.added_at = ? AND item.video_id < ?))"
         : "";
       const cursorParams = cursor ? [cursor.addedAt, cursor.addedAt, cursor.videoId] : [];
+      const projection = collectionVideoProjections(db);
       const rows = db.prepare(`
-        SELECT video.*, item.added_at AS collection_added_at
+        SELECT ${projection.video}, item.added_at AS collection_added_at
         FROM short_video_collection_items item
         JOIN short_video_catalog video ON video.id = item.video_id
         WHERE item.collection_id = ?
@@ -148,12 +150,13 @@ export function createShortVideoCollectionsRepository({
     const lookup = normalizeVideoId(videoId);
     return withDatabaseAccess((db) => readTransaction(db, () => {
       const collection = requireCollection(db, id);
-      const video = resolveVideo(db, lookup);
+      const projection = collectionVideoProjections(db);
+      const video = resolveVideo(db, lookup, projection.catalog);
       if (!video?.id) throw httpError(404, "没有找到这个短视频");
-      const current = collectionVideoRow(db, id, video.id);
+      const current = collectionVideoRow(db, id, video.id, projection.video);
       if (!current) throw httpError(404, "这个短视频不在该清单中");
       const previous = db.prepare(`
-        SELECT candidate.*, item.added_at AS collection_added_at
+        SELECT ${projection.candidate}, item.added_at AS collection_added_at
         FROM short_video_collection_items item
         JOIN short_video_catalog candidate ON candidate.id = item.video_id
         WHERE item.collection_id = ?
@@ -162,7 +165,7 @@ export function createShortVideoCollectionsRepository({
         LIMIT 1
       `).get(id, current.collection_added_at, current.collection_added_at, current.id);
       const next = db.prepare(`
-        SELECT candidate.*, item.added_at AS collection_added_at
+        SELECT ${projection.candidate}, item.added_at AS collection_added_at
         FROM short_video_collection_items item
         JOIN short_video_catalog candidate ON candidate.id = item.video_id
         WHERE item.collection_id = ?
@@ -349,9 +352,9 @@ function requireCollection(db, id) {
   throw httpError(404, "没有找到这个清单");
 }
 
-function collectionVideoRow(db, collectionId, videoId) {
+function collectionVideoRow(db, collectionId, videoId, projection) {
   return db.prepare(`
-    SELECT video.*, item.added_at AS collection_added_at
+    SELECT ${projection}, item.added_at AS collection_added_at
     FROM short_video_collection_items item
     JOIN short_video_catalog video ON video.id = item.video_id
     WHERE item.collection_id = ? AND item.video_id = ?

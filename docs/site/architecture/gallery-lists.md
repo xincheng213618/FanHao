@@ -2,8 +2,12 @@
 title: 图库列表与分页
 description: 图库版本变化后的分页补齐、原始偏移和两端卡片复用边界。
 status: maintained
-verified_at: 2026-10-05
+verified_at: 2026-11-05
 sources:
+  - public/modules/photos/manga-page.js
+  - tests/verify_manga_cold_entry.mjs
+  - android-client/www/app.js
+  - tests/verify_android_channel_paging_mount.mjs
   - src/modules/content-index/server/image-library-service.js
   - src/modules/content-index/server/image-library-index-service.js
   - src/modules/content-index/server/image-query-cache.js
@@ -31,6 +35,7 @@ sources:
   - tests/verify_android_image_cache.mjs
   - tests/verify_android_cache_stats.mjs
   - tests/verify_manga_lookup_performance.mjs
+  - tests/verify_manga_detail_first_images.mjs
   - tests/verify_archive_reader_lifecycle.mjs
   - tests/fixtures/image-library-channel-server.mjs
   - package.json
@@ -91,9 +96,13 @@ Android 首次完整范围读取及版本变化后的成功补齐，按 offset 0
 
 ## 漫画章节封面查询
 
-漫画详情逐章读取首张已下载图片。读取连接分别保留作品与章节两条固定 SQL 语句，后续执行仍绑定当前作品和章节，不保存行结果。1,000 章的私有详情样本中，整个响应的 SELECT 编译次数从 1,005 次降至 4 次；SQL 执行和数据库文件检查仍各为 1,005 次。
+漫画详情按已读取的章节顺序批量获取首张已下载图片。采集器标准图片表在一次数据库文件身份检查后，用一条 SQL 核对表结构和临时同名对象，并为每个请求章节查找原排序中的首行；资格与图片来自同一语句快照，不缓存首图结果。
 
-每次读取继续检查数据库文件身份。连接关闭、文件替换或查询失败时释放两条语句；下次读取重新准备。外部 WAL 更新和 schema 变化仍由当前 SQLite 连接读取，新增列继续出现在 `SELECT *` 中。完整旧响应、参数边界、表重建重试及相同 mtime 文件替换由现有查找 fixture 核对。
+旧表结构、非有限章节索引、过大请求或批读失败沿用逐章 `firstImage`。单个坏首图仍只影响对应章节；其它章节继续读取。逐章回退保留作品与章节两条固定语句，不缓存行结果；专项分别核对标准表的批读预算和兼容路径的原编译预算。
+
+连接关闭、文件替换或逐章查询失败时释放已准备语句，下次读取重新准备。外部 WAL 更新和 schema 变化仍由当前 SQLite 连接读取，新增列使批读回到原 `SELECT *` 路径。完整旧响应、原数值索引、坏行隔离、表重建重试及相同 mtime 文件替换由查找和详情首图专项核对；批读快照不代表整个详情请求的跨查询一致性。
+
+Web 漫画直接进入某章且没有当前目录或阅读界面时，使用已有状态节点等待章节响应，省去会立即丢弃的整份目录。成功后创建原阅读器；当前请求失败时建立目录及重试反馈。已有界面续读按原位置显示等待和错误，来源或页面变化仍撤销旧请求。
 
 ## 套图封面选择与校验
 
@@ -116,6 +125,8 @@ Android 首次完整范围读取及版本变化后的成功补齐，按 offset 0
 Android 影视标题栏在同一频道和标题布局下保留内联搜索按钮，只更新数量、文字与辅助标签，避免翻页时丢失键盘焦点或重复绑定点击。频道、布局或搜索能力变化时按原有规则重建。
 
 Android 普通列表追加保留旧条目引用，相同引用的已挂载项跳过 JSON 序列化；新引用仍比较内容，同 ID 内容变化时替换卡片，相同内容时更新保存的引用。加载下一页期间不计算不会用于跳过渲染的整页签名；完整刷新仍沿用原有比较。
+
+实际 Android 宿主仅为当前来源、账号、路由和已挂载列表发起的续页保留内容，再交给上述列表复用逻辑。重新进入页面、切换筛选或账号仍按原流程重建；旧控件与迟到响应不得取得新页面归属。`verify:android-channel-paging-mount` 从完整应用入口核对卡片创建预算、原请求序列、封面、滚动、焦点和失败恢复，不以自定义宿主代替实际接线。
 
 Android 相册瀑布流沿用条目索引与列数分配，追加到既有列。列数变化、重排、删除、缺少稳定 ID 或客户端分组时仍使用完整重建。漫画分组与相册集合展开保留原有完整渲染规则，不把展开后的集合数用作服务端 offset。
 

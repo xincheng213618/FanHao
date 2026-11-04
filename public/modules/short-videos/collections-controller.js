@@ -13,6 +13,7 @@ const COLLECTION_PAGE_SIZE = 48;
 
 export function createShortVideoCollectionsController(dependencies) {
   const {
+    activateCardCovers,
     api,
     createIcon,
     ensureListCards,
@@ -24,6 +25,7 @@ export function createShortVideoCollectionsController(dependencies) {
     loadFeed,
     pushRoute,
     replaceRoute,
+    releaseCardCovers,
     render,
     setMainHeader,
     showToast,
@@ -431,17 +433,22 @@ export function createShortVideoCollectionsController(dependencies) {
     layout.className = "short-video-home-layout";
     const main = document.createElement("section");
     main.className = "short-video-home-main";
-    layout.append(renderSidebar(), main);
+    const sidebar = renderSidebar();
+    layout.append(sidebar, main);
     shell.append(layout);
 
     const data = state.shortVideo.collectionData;
+    const mount = { shell, main, owner: captureViewOwner({ video: true }), data, videos: [], cards: new Map(),
+      grid: null, more: null, empty: null, loading: false };
     const header = document.createElement("header");
     header.className = "short-video-collection-page-header";
     const back = document.createElement("button");
     back.type = "button";
     back.className = "short-video-collection-back";
     back.textContent = "返回短视频";
-    back.addEventListener("click", returnToFeed);
+    back.addEventListener("click", () => {
+      if (shell.isConnected && ownsView(mount.owner)) returnToFeed();
+    });
     const copy = document.createElement("div");
     const title = document.createElement("h2");
     title.textContent = data?.collection?.name || "我的清单";
@@ -454,16 +461,21 @@ export function createShortVideoCollectionsController(dependencies) {
     rename.type = "button";
     rename.textContent = "重命名";
     rename.disabled = !data?.collection?.id;
-    rename.addEventListener("click", renameActiveCollection);
+    rename.addEventListener("click", () => { if (ownsCollectionMount(mount)) renameActiveCollection(); });
     const removeCollection = document.createElement("button");
     removeCollection.type = "button";
     removeCollection.className = "is-danger";
     removeCollection.textContent = "删除清单";
     removeCollection.disabled = !data?.collection?.id;
-    removeCollection.addEventListener("click", deleteActiveCollection);
+    removeCollection.addEventListener("click", () => { if (ownsCollectionMount(mount)) deleteActiveCollection(); });
     actions.append(rename, removeCollection);
     header.append(back, copy, actions);
     main.append(header);
+    Object.assign(mount, { title, meta, back });
+    const sidebarRow = [...sidebar.querySelectorAll(".short-video-collection-sidebar-item")]
+      .find(button => button.dataset.collectionId === data?.collection?.id);
+    mount.sidebarName = sidebarRow?.querySelector("span");
+    mount.sidebarCount = sidebarRow?.querySelector("small");
 
     if (state.shortVideo.collectionLoading && !data) {
       const status = document.createElement("div");
@@ -504,68 +516,128 @@ export function createShortVideoCollectionsController(dependencies) {
     const grid = document.createElement("div");
     grid.className = "short-video-grid short-video-collection-grid";
     const videos = Array.isArray(data?.videos) ? data.videos : [];
-    if (!videos.length) {
-      const empty = document.createElement("div");
-      empty.className = "short-video-empty";
-      empty.textContent = "这个清单还没有视频";
-      grid.append(empty);
-    }
-    const pageOwner = captureViewOwner({ video: true });
-    videos.forEach((video, index) => {
-      const card = getListCards()?.renderVideoCard(video, index);
-      if (!card) return;
-      card.dataset.collectionVideoId = video.id;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "short-video-collection-remove";
-      remove.dataset.videoId = video.id;
-      remove.textContent = "移出清单";
-      remove.addEventListener("click", () => removeVideo(video, remove));
-      card.append(remove);
-      card.querySelector(".short-video-thumb-open")?.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!shell.isConnected || !ownsView(pageOwner)) return;
-        const button = event.currentTarget;
-        if (button.disabled) return;
-        button.disabled = true;
-        button.setAttribute("aria-busy", "true");
-        openCollectionVideo(video).catch((error) => {
-          if (shell.isConnected && ownsView(pageOwner) && error?.name !== "AbortError") showToast(error?.message || "清单视频读取失败");
-        }).finally(() => {
-          if (button.isConnected) { button.disabled = false; button.removeAttribute("aria-busy"); }
-        });
-      }, { capture: true });
-      grid.append(card);
-    });
+    mount.grid = grid;
+    videos.forEach((video, index) => appendCollectionCard(mount, video, index));
+    mount.videos = videos;
     main.append(grid);
-    if (data?.hasMore) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "short-video-collection-load-more";
-      more.textContent = "加载更多";
-      more.addEventListener("click", async () => {
-        const owner = captureViewOwner({ video: true });
-        if (!ownsView(owner) || !more.isConnected || more.disabled) return;
-        more.disabled = true;
-        try {
-          await loadCollection(state.shortVideo.collectionId, { append: true });
-          if (ownsView(owner) && more.isConnected) render();
-        } catch (error) {
-          if (!ownsView(owner) || !more.isConnected) return;
-          showToast(error?.message || "加载更多失败");
-          more.disabled = false;
-        }
-      });
-      main.append(more);
-    }
+    syncCollectionControls(mount);
     return shell;
   }
 
-  async function removeVideo(video, button) {
-    const collectionId = state.shortVideo.collectionId;
-    const owner = captureViewOwner({ video: true }), data = state.shortVideo.collectionData;
-    if (!ownsView(owner) || data?.collection?.id !== collectionId || button.disabled) return;
+  function ownsCollectionMount(mount) {
+    return Boolean(mount.shell.isConnected && ownsView(mount.owner)
+      && state.shortVideo.collectionData?.collection?.id === mount.owner.collectionId);
+  }
+
+  function currentCollectionCard(mount, record) {
+    if (!ownsCollectionMount(mount) || mount.cards.get(record.id) !== record || record.card.parentElement !== mount.grid) return null;
+    // loadCollection replaces the envelope on append. Retained controls read
+    // that latest window, while detached/replaced records cannot act on it.
+    return state.shortVideo.collectionData.videos?.find(video => String(video.id) === record.id && video === record.video) || null;
+  }
+
+  function appendCollectionCard(mount, video, index) {
+    const card = getListCards()?.renderVideoCard(video, index);
+    if (!card) return;
+    const record = { id: String(video.id), video, card };
+    mount.cards.set(record.id, record);
+    card.dataset.collectionVideoId = video.id;
+    card.addEventListener("click", event => {
+      if (currentCollectionCard(mount, record)) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "short-video-collection-remove";
+    remove.dataset.videoId = video.id;
+    remove.textContent = "移出清单";
+    record.remove = remove;
+    remove.addEventListener("click", () => removeVideo(mount, record));
+    card.append(remove);
+    card.querySelector(".short-video-thumb-open")?.addEventListener("click", event => {
+      event.preventDefault(); event.stopImmediatePropagation();
+      const current = currentCollectionCard(mount, record), button = event.currentTarget;
+      if (!current || button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      openCollectionVideo(current).catch(error => {
+        if (currentCollectionCard(mount, record) && error?.name !== "AbortError") showToast(error?.message || "清单视频读取失败");
+      }).finally(() => {
+        if (currentCollectionCard(mount, record)) { button.disabled = false; button.removeAttribute("aria-busy"); }
+      });
+    }, { capture: true });
+    mount.grid.append(card);
+    activateCardCovers?.([card]);
+  }
+
+  function syncCollectionControls(mount) {
+    const data = mount.data;
+    mount.title.textContent = data?.collection?.name || "我的清单";
+    mount.meta.textContent = `${Math.max(0, Number(data?.total || 0))} 条 · 按加入时间排列`;
+    const summary = state.shortVideo.collections.find(collection => collection.id === mount.owner.collectionId);
+    if (mount.sidebarName) mount.sidebarName.textContent = summary?.name || "";
+    if (mount.sidebarCount) mount.sidebarCount.textContent = String(Math.max(0, Number(summary?.itemCount || 0)));
+    if (!mount.videos.length && !mount.empty) {
+      mount.empty = document.createElement("div");
+      mount.empty.className = "short-video-empty";
+      mount.empty.textContent = "这个清单还没有视频";
+      mount.grid.append(mount.empty);
+    } else if (mount.videos.length && mount.empty) {
+      mount.empty.remove(); mount.empty = null;
+    }
+    if (data?.hasMore && !mount.more) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "short-video-collection-load-more";
+      more.addEventListener("click", async () => {
+        if (!ownsCollectionMount(mount) || mount.more !== more || !more.isConnected || more.disabled || mount.loading) return;
+        const focused = document.activeElement === more;
+        mount.loading = true;
+        syncCollectionControls(mount);
+        try {
+          const data = await loadCollection(mount.owner.collectionId, { append: true });
+          if (data && ownsCollectionMount(mount) && !appendMountedCollectionVideos(mount, data)) render();
+        } catch (error) {
+          if (!ownsCollectionMount(mount) || !more.isConnected) return;
+          showToast(error?.message || "加载更多失败");
+        } finally {
+          mount.loading = false;
+          if (ownsCollectionMount(mount)) {
+            syncCollectionControls(mount);
+            if (focused && (document.activeElement === more || document.activeElement === document.body)) {
+              const target = mount.more || mount.grid.lastElementChild?.querySelector(".short-video-thumb-open") || mount.back;
+              target.focus({ preventScroll: true });
+            }
+          }
+        }
+      });
+      mount.more = more;
+      mount.main.append(more);
+    }
+    if (mount.more && !data?.hasMore) { mount.more.remove(); mount.more = null; }
+    if (mount.more) {
+      mount.more.disabled = mount.loading;
+      mount.more.textContent = mount.loading ? "加载中…" : "加载更多";
+      if (mount.loading) mount.more.setAttribute("aria-busy", "true");
+      else mount.more.removeAttribute("aria-busy");
+    }
+  }
+
+  function appendMountedCollectionVideos(mount, data) {
+    if (!ownsCollectionMount(mount) || data !== state.shortVideo.collectionData || !Array.isArray(data.videos)
+      || mount.videos.length > data.videos.length || mount.videos.some((video, index) => data.videos[index] !== video)) return false;
+    for (let index = mount.videos.length; index < data.videos.length; index++) appendCollectionCard(mount, data.videos[index], index);
+    mount.data = data;
+    mount.videos = data.videos;
+    syncCollectionControls(mount);
+    return true;
+  }
+
+  async function removeVideo(mount, record) {
+    const video = currentCollectionCard(mount, record), button = record.remove;
+    if (!video || button.disabled) return;
+    const collectionId = mount.owner.collectionId, data = state.shortVideo.collectionData;
+    const focused = record.card.contains(document.activeElement);
     button.disabled = true;
     try {
       await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(video.id)}`, {
@@ -574,12 +646,28 @@ export function createShortVideoCollectionsController(dependencies) {
       invalidateCollection(collectionId);
       pruneCollectionVideos(collectionId, new Set([String(video.id)]), data);
       const collection = state.shortVideo.collections.find((item) => item.id === collectionId);
-      if (collection) collection.itemCount = data.total;
-      if (ownsView(owner) && button.isConnected !== false) { showToast("已移出清单"); render(); }
+      const latest = state.shortVideo.collectionData?.collection?.id === collectionId ? state.shortVideo.collectionData : data;
+      if (collection) collection.itemCount = latest.total;
+      if (!ownsCollectionMount(mount) || !button.isConnected) return;
+      const restoreFocus = record.card.contains(document.activeElement) || (focused && document.activeElement === document.body);
+      const neighbor = record.card.nextElementSibling || record.card.previousElementSibling;
+      releaseCardCovers?.([record.card]);
+      record.card.remove();
+      mount.cards.delete(record.id);
+      mount.videos = mount.videos.filter(item => String(item.id) !== record.id);
+      showToast("已移出清单");
+      if (!appendMountedCollectionVideos(mount, latest)) { render(); return; }
+      if (restoreFocus) {
+        const remove = neighbor?.querySelector(".short-video-collection-remove");
+        const target = remove && !remove.disabled ? remove
+          : neighbor?.querySelector(".short-video-thumb-open") || (mount.more?.disabled ? null : mount.more) || mount.back;
+        target.focus({ preventScroll: true });
+      }
     } catch (error) {
-      if (!ownsView(owner) || button.isConnected === false) return;
+      if (!currentCollectionCard(mount, record)) return;
       showToast(error?.message || "移出清单失败");
       button.disabled = false;
+      if (focused && document.activeElement === document.body) button.focus({ preventScroll: true });
     }
   }
 

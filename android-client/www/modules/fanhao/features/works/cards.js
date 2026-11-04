@@ -1,6 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
-import { imageUrlForWork } from "../../../../js/image.js?v=assets-22080e82f167";
-import { getWorkSource } from "../../../../js/work-source.js?v=assets-22080e82f167";
+import { imageUrlForWork } from "../../../../js/image.js?v=assets-eb78be0b425d";
+import { getWorkSource } from "../../../../js/work-source.js?v=assets-eb78be0b425d";
 import {
   compactWorkCardTitle,
   compactWorkCode,
@@ -14,8 +14,8 @@ import {
   workGridMeta,
   workGridPerson,
   workGridRankBadge
-} from "./card-presentation.js?v=assets-22080e82f167";
-import { createWorkCoverLoader } from "./cover-loader.js?v=assets-22080e82f167";
+} from "./card-presentation.js?v=assets-eb78be0b425d";
+import { createWorkCoverLoader } from "./cover-loader.js?v=assets-eb78be0b425d";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
   const coverLoader = createWorkCoverLoader({ getActiveUrl });
@@ -124,14 +124,14 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     root.addEventListener("click", (event) => {
       const card = event.target?.closest?.(".work-card");
       if (!card || !root.contains(card)) return;
+      const work = cardWorks.get(card);
+      if (!work) return;
       const person = event.target?.closest?.(".work-person[data-person-id], .work-card-grid-person[data-person-id]");
       if (person && card.contains(person)) {
-        const work = cardWorks.get(card);
         showView("personDetail", { personId: person.dataset.personId, scope: personScopeForWork(work) }, { push: true });
         return;
       }
-      const work = cardWorks.get(card);
-      if (work) openWorkCard(work);
+      openWorkCard(work);
     });
 
     root.addEventListener("keydown", (event) => {
@@ -156,6 +156,11 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
 
   return {
     createWorkCard,
+    updateWorkCard: (card, work) => cardWorks.has(card) && cardWorks.set(card, work),
+    releaseWorkCard(card) {
+      cardWorks.delete(card);
+      delete card.dataset.workDetailId;
+    },
     createChip,
     displayPersonName,
     progressPercent,

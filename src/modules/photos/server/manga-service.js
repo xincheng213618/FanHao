@@ -8,6 +8,10 @@ import { streamStoredZip } from "./stored-zip-stream.js";
 const imageDimensionCache = new Map();
 const MANGA_JOB_HISTORY_SCHEMA_VERSION = 1;
 const MAX_MANGA_JOB_HISTORY = 50;
+const MANGA_METADATA_CACHE_MAX_ENTRIES = 2048;
+const MANGA_METADATA_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const MANGA_METADATA_CACHE_MAX_ENTRY_BYTES = 256 * 1024;
+const mangaCatalogMetadataFields = ["description", "author", "status", "cover_url", "cover_path", "region"];
 
 function readImageDimensions(filePath) {
   if (!filePath) return null;
@@ -157,35 +161,56 @@ function cleanComicTitle(value, fallback) {
   return String(quoted || title || fallback).replace(/\s*[-–—]\s*(?:色漫天堂|禁漫岛|污污漫畫|汙汙漫畫).*$/i, "").trim();
 }
 
-function metadataForCache(cacheDir, dbComic = null) {
-  const catalog = readJsonFile(path.join(cacheDir, "catalog.json"), {});
+function readMangaMetadataInputs(cacheDir) {
+  let catalog = {}, cacheable = true;
+  try { catalog = JSON.parse(fs.readFileSync(path.join(cacheDir, "catalog.json"), "utf8")); } catch { cacheable = false; }
+  // Keep null/primitives and unusual field values: the existing DB short
+  // circuits still own their conversion and exception behavior.
+  if (catalog && typeof catalog === "object") {
+    catalog = Object.fromEntries(mangaCatalogMetadataFields.map(key => [key, catalog[key]]));
+  }
   let html = "";
-  try { html = fs.readFileSync(path.join(cacheDir, "catalog.html"), "utf8"); } catch {}
-  const description = String(dbComic?.description || catalog.description || matchValue(html, [
+  try { html = fs.readFileSync(path.join(cacheDir, "catalog.html"), "utf8"); } catch { cacheable = false; }
+  return { catalog, html: parseMangaHtmlMetadata(html), cacheable };
+}
+
+function parseMangaHtmlMetadata(html) {
+  const description = matchValue(html, [
     /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i,
     /<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i,
     /(?:简介|剧情)\s*[：:]\s*([\s\S]{1,500}?)(?:<\/li>|<\/div>)/i
-  ])).replace(/^《[^》]+》在线阅读，剧情介绍：?/, "").trim();
-  const author = String(dbComic?.author || catalog.author || matchValue(html, [
+  ]);
+  const author = matchValue(html, [
     /sp-book-author[^>]*>\s*作者\s*[：:]\s*([\s\S]*?)<\/p>/i,
     /作者\s*[：:]\s*[\s\S]{0,180}?<a[^>]*>([\s\S]*?)<\/a>/i,
     /video-info-itemtitle[^>]*>\s*作者\s*[：:]\s*<\/span>[\s\S]{0,160}?<div[^>]*>([\s\S]*?)<\/div>/i
-  ])).trim();
-  const status = String(dbComic?.publication_status || dbComic?.status_text || catalog.status || matchValue(html, [
+  ]);
+  const status = matchValue(html, [
     /(?:状态|狀態)\s*[：:]\s*<span[^>]*>([\s\S]*?)<\/span>/i,
     /状态\s*[：:]\s*<\/em>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
     /video-info-itemtitle[^>]*>\s*更新\s*[：:]\s*<\/span>[\s\S]{0,120}?<div[^>]*>([\s\S]*?)<\/div>/i
-  ])).trim();
-  const coverUrl = String(dbComic?.cover_url || catalog.cover_url || matchValue(html, [
+  ]);
+  const coverUrl = matchValue(html, [
     /sp-book-cover[\s\S]{0,500}?data-src=["']([^"']+)["']/i,
     /hl-dc-pic[\s\S]{0,500}?data-original=["']([^"']+)["']/i,
     /module-item-cover[\s\S]{0,500}?data-original=["']([^"']+)["']/i,
     /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i
-  ])).trim();
+  ]);
   const tagBlock = /<div[^>]+class=["'][^"']*sp-book-tags[^"']*["'][^>]*>([\s\S]*?)<\/div>/i.exec(html)?.[1]
     || /(?:TAG|分类|分類)\s*[：:]([\s\S]{0,600}?)(?:<\/li>|<\/div>\s*<div)/i.exec(html)?.[1]
     || "";
   const tags = [...tagBlock.matchAll(/<a[^>]*>([\s\S]*?)<\/a>/gi)].map((match) => decodeHtml(match[1])).filter(Boolean);
+  return { description, author, status, coverUrl, tags };
+}
+
+function metadataForCache(cacheDir, dbComic = null, readInputs = readMangaMetadataInputs) {
+  const { catalog, html } = readInputs(cacheDir);
+  const description = String(dbComic?.description || catalog.description || html.description)
+    .replace(/^《[^》]+》在线阅读，剧情介绍：?/, "").trim();
+  const author = String(dbComic?.author || catalog.author || html.author).trim();
+  const status = String(dbComic?.publication_status || dbComic?.status_text || catalog.status || html.status).trim();
+  const coverUrl = String(dbComic?.cover_url || catalog.cover_url || html.coverUrl).trim();
+  const tags = html.tags;
   const localCover = String(dbComic?.cover_path || catalog.cover_path || "").trim();
   return {
     author,
@@ -197,6 +222,63 @@ function metadataForCache(cacheDir, dbComic = null) {
     status,
     tags: [...new Set(tags)]
   };
+}
+
+function createMangaMetadataInputCache() {
+  const entries = new Map();
+  let retainedBytes = 0;
+  function drop(key) {
+    const previous = entries.get(key);
+    if (previous) retainedBytes -= previous.bytes;
+    entries.delete(key);
+  }
+  function signature(cacheDir) {
+    return JSON.stringify(["catalog.json", "catalog.html"].map(name => {
+      const file = path.resolve(cacheDir, name), stat = fs.statSync(file, { bigint: true });
+      if (!stat.isFile()) throw new Error("Manga metadata source is not a file");
+      return [file, stat.dev, stat.ino, stat.birthtimeNs, stat.ctimeNs, stat.mtimeNs, stat.size].map(String);
+    }));
+  }
+  function detach(value) {
+    // JSON string roundtrips preserve lone surrogates while severing a small
+    // regex match from a potentially huge HTML source's backing storage.
+    return typeof value === "string" ? JSON.parse(JSON.stringify(value)) : value;
+  }
+  function retainedInputs(inputs) {
+    const raw = inputs.catalog;
+    if (raw && typeof raw === "object" && Object.values(raw).some(value => value !== null && typeof value === "object")) return null;
+    const catalog = raw && typeof raw === "object"
+      ? Object.fromEntries(mangaCatalogMetadataFields.map(key => [key, detach(raw[key])])) : detach(raw);
+    return { catalog, html: { description: detach(inputs.html.description), author: detach(inputs.html.author),
+      status: detach(inputs.html.status), coverUrl: detach(inputs.html.coverUrl), tags: [...new Set(inputs.html.tags)].map(detach) }, cacheable: true };
+  }
+  function read(cacheDir) {
+    const key = path.resolve(cacheDir);
+    let before;
+    try { before = signature(key); } catch { drop(key); return readMangaMetadataInputs(cacheDir); }
+    const cached = entries.get(key);
+    if (cached?.signature === before) {
+      entries.delete(key); entries.set(key, cached);
+      return cached.inputs;
+    }
+    drop(key);
+    const inputs = readMangaMetadataInputs(cacheDir);
+    if (!inputs.cacheable) return inputs;
+    try {
+      if (signature(key) !== before) return inputs;
+      const retained = retainedInputs(inputs);
+      if (!retained) return inputs;
+      // Retain only projected inputs, including paths/signatures in the text
+      // estimate. No source HTML, catalog chapter arrays or merged DB DTOs.
+      const bytes = 1024 + 64 * retained.html.tags.length + 2 * (key.length + before.length + JSON.stringify(retained).length);
+      if (bytes > MANGA_METADATA_CACHE_MAX_ENTRY_BYTES || bytes > MANGA_METADATA_CACHE_MAX_BYTES) return inputs;
+      while (entries.size && (entries.size >= MANGA_METADATA_CACHE_MAX_ENTRIES || retainedBytes + bytes > MANGA_METADATA_CACHE_MAX_BYTES)) drop(entries.keys().next().value);
+      entries.set(key, { signature: before, inputs: retained, bytes });
+      retainedBytes += bytes;
+      return retained;
+    } catch { return inputs; }
+  }
+  return read;
 }
 
 function readJsonFile(filePath, fallback = null) {
@@ -255,6 +337,7 @@ export function createMangaService({
   serveWholeFile
 }) {
   const database = createMangaDatabaseReader({ dbPath: databasePath });
+  const metadataInputs = createMangaMetadataInputCache();
   const resolvedDatabasePath = path.resolve(databasePath || path.join(root, "manga.sqlite"));
   const updateJobs = new Map();
   const jobsById = new Map();
@@ -880,8 +963,7 @@ export function createMangaService({
     return buildDirectoryLookup().dirs.slice();
   }
 
-  function idForDir(dirPath) {
-    const dbComic = database.comic(databaseKey(dirPath));
+  function idForDir(dirPath, dbComic = database.comic(databaseKey(dirPath))) {
     return stableMangaId(sourceUrlForCache(dirPath, dbComic), dirPath);
   }
 
@@ -1294,11 +1376,12 @@ export function createMangaService({
   }
 
   function publicSummary(cacheDir) {
-    const id = idForDir(cacheDir);
-    const dirName = path.basename(cacheDir);
     const dbComic = database.comic(databaseKey(cacheDir));
-    const metadata = metadataForCache(cacheDir, dbComic);
-    const dbCover = dbComic ? database.firstImage(databaseKey(cacheDir)) : null;
+    const id = idForDir(cacheDir, dbComic);
+    const dirName = path.basename(cacheDir);
+    const metadata = metadataForCache(cacheDir, dbComic, metadataInputs);
+    const dbCover = dbComic && !metadata.localCover && !metadata.coverUrl
+      ? database.firstImage(databaseKey(cacheDir)) : null;
     if (dbComic) {
       return {
         id,
@@ -1403,12 +1486,14 @@ export function createMangaService({
     const summary = publicSummary(cacheDir);
     const dbChapters = database.chapters(databaseKey(cacheDir));
     if (dbChapters.length) {
+      const createdAt = String(database.comic(databaseKey(cacheDir))?.created_at || "").trim();
+      const chapters = dbChapters.map(chapterFromDatabase);
+      const covers = database.detailFirstImages(databaseKey(cacheDir), chapters.map(chapter => chapter.index));
       return {
         ...summary,
-        createdAt: String(database.comic(databaseKey(cacheDir))?.created_at || "").trim(),
-        chapters: dbChapters.map((row, index) => {
-          const chapter = chapterFromDatabase(row);
-          const coverImage = database.firstImage(databaseKey(cacheDir), chapter.index);
+        createdAt,
+        chapters: chapters.map((chapter, index) => {
+          const coverImage = covers ? covers[index] : database.firstImage(databaseKey(cacheDir), chapter.index);
           return publicChapterSummary(summary.id, chapter, index, imageFromDatabase(coverImage));
         })
       };
@@ -1572,7 +1657,7 @@ export function createMangaService({
 
   function resolveLocalCover(cacheDir) {
     const dbComic = database.comic(databaseKey(cacheDir));
-    const metadata = metadataForCache(cacheDir, dbComic);
+    const metadata = metadataForCache(cacheDir, dbComic, metadataInputs);
     if (metadata.localCover) {
       const configured = safeChildPath(cacheDir, metadata.localCover);
       if (safeStat(configured)?.isFile()) return configured;

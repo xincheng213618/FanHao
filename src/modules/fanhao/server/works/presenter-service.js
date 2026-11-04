@@ -29,6 +29,7 @@ export function createWorkPresenterService({
   withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
   workInfoReadCacheable = () => true,
   workInfoFacetRow = () => null,
+  workInfoDetailFacetRow = workInfoFacetRow,
   workInfoDetailRow
 }) {
   const personFallbackAvatarCache = new Map();
@@ -177,6 +178,7 @@ export function createWorkPresenterService({
 
   function publicWork(work, includeFiles = false, options = {}) {
     const markers = localWorkMarkers(work);
+    const readFacetRow = options.detailFacets === true ? workInfoDetailFacetRow : workInfoFacetRow;
     if (work.missingLocal) {
       // Missing-local works have no filesystem fallback. Their cached SQL cover is
       // list-critical data, even when the rest of the person page stays lightweight.
@@ -210,7 +212,7 @@ export function createWorkPresenterService({
         canGenerateCover: false,
         modifiedAt: work.modifiedAt || "",
         infoSummary,
-        traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: workInfoFacetRow(work.id)?.trait_tags || [] }),
+        traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: readFacetRow(work.id)?.trait_tags || [] }),
         availability: publicWorkAvailability(work, infoSummary),
         favorite: false,
         progress: null,
@@ -265,7 +267,7 @@ export function createWorkPresenterService({
       canGenerateCover: !manualCover && !work.coverId && !cachedCover && videos.length > 0,
       modifiedAt: work.modifiedAt,
       infoSummary,
-      traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: workInfoFacetRow(work.id)?.trait_tags || [] }),
+      traits: deriveWorkTraits(work, { ...(infoSummary || {}), trait_tags: readFacetRow(work.id)?.trait_tags || [] }),
       availability: publicWorkAvailability(work, infoSummary),
       favorite: Boolean(favorite),
       favoriteFolderId: favorite?.folderId || "",

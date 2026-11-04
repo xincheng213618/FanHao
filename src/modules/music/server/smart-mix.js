@@ -1,6 +1,7 @@
 // Smart-mix definitions and SQL predicates for music.
 
 import { REDISCOVER_DAYS } from "./constants.js";
+import { trackOrderSql } from "./helpers.js";
 
 const STATE_DRIVEN_SMART_MIXES = new Set(["recent", "topplayed", "favorites", "toprated", "rediscover"]);
 const METADATA_ONLY_SMART_MIXES = new Set(["newest", "hires", "lyrics", "longform"]);
@@ -91,7 +92,7 @@ export const SMART_MIXES = [
     name: "长曲沉浸",
     description: "5 分钟以上的长曲，按时长优先。",
     badge: "5min+",
-    order: "t.duration_ms DESC, t.title COLLATE NOCASE ASC",
+    order: trackOrderSql("duration"),
     limit: 160
   },
   {

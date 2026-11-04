@@ -1,5 +1,5 @@
-import { fetchJson } from "../../js/api.js?v=assets-22080e82f167";
-import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-22080e82f167";
+import { fetchJson } from "../../js/api.js?v=assets-eb78be0b425d";
+import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-eb78be0b425d";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 const AUTHORITATIVE_REFRESH_ATTEMPTS = 3;

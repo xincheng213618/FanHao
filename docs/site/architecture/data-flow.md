@@ -2,8 +2,15 @@
 title: 数据与请求流
 description: 从客户端请求追踪到模块存储、worker、下载管理器和媒体响应。
 status: maintained
-verified_at: 2026-10-11
+verified_at: 2026-11-05
 sources:
+  - android-client/www/modules/fanhao/work-views.js
+  - android-client/www/modules/fanhao/features/works/cards.js
+  - android-client/www/modules/fanhao/android-module.js
+  - android-client/www/js/auto-load.js
+  - tests/verify_android_work_list_rendering.mjs
+  - src/modules/fanhao/server/collections/account-user-state-service.js
+  - tests/verify_account_state_revision_read.mjs
   - src/modules/media/server/gallery-metadata-service.js
   - src/modules/short-videos/server/navigation-queries.js
   - src/bootstrap/server-config.js
@@ -150,7 +157,7 @@ module-registry.js：依次调用模块 API 路由
 | 音乐目录和状态 | `data/music.sqlite` | 音乐存储 |
 | 短视频目录和用户状态 | `data/short-videos.sqlite` | 短视频存储 |
 | 下载队列与下载记录 | 下载管理器自身的 `data/douyin_downloads.sqlite` | 独立下载管理器 |
-| 番号收藏、播放等状态 | `data/user-state.json` | 对应用户状态服务 |
+| 番号收藏、播放等状态 | 访客 `data/user-state.json`；登录账号 `data/account-user-state.sqlite` | 对应用户状态服务 |
 | 本地媒体内容 | 配置的库根目录 | 文件系统；数据库保存索引与映射 |
 | 行情 | 外部行情来源与服务内缓存 | 行情服务，不是本地媒体数据库 |
 
@@ -181,7 +188,7 @@ module-registry.js：依次调用模块 API 路由
 
 列表缓存和临时观看覆盖服务于响应速度，SQLite 状态仍需单独核实。对写入失败的验证应覆盖实际回执与重试结果，而不只是检查界面是否变色。阅读列表、观看历史、搜索及观看统计的查询与计算复用见[列表、搜索与统计](./list-queries.md)。
 
-番号核心库的部分缓存采用表数据戳，依赖集合在 `cache-contracts.js` 声明。修改写入路径时，需要检查受影响表和缓存失效调用；重启进程后“恢复正常”并不能证明失效契约正确。
+番号核心库的部分缓存采用表数据戳，依赖集合在 `cache-contracts.js` 声明。修改写入路径时，需要检查受影响表和缓存失效调用；重启进程后“恢复正常”并不能证明失效契约正确。登录账号的个人状态缓存最多保留 32 个账号；原始建表结构在新同步执行轮次先检查持久版本，未变时不把整份 JSON 传入 JavaScript，版本变化后重新读取同一行的版本与正文；其他旧结构及临时同名对象沿用完整读取。写入仍按版本检测冲突并在失败时回滚内存状态；访客沿用原状态服务。
 
 片商与番号前缀目录共同依赖作品、厂商、系列、对应关系、外部链接和本地作品表。新增七张依赖表的数据戳只读取连接身份、SQLite `data_version` 和无行的表存在性检查，避免冷请求扫描关系表；这也识别其他连接提交的同时间戳更新，并兼容缺少 `updated_at` 的旧表。主线程切到持久 Worker 时安全失效一次，同一 Worker 后续读取复用；同连接写入仍须显式失效，外部提交由既有后台刷新发现。
 
@@ -213,7 +220,7 @@ module-registry.js：依次调用模块 API 路由
 
 媒体 ID 查找随索引或数组替换重建映射。相册映射由扫描索引的所有者维护，加载新快照、重扫、失效或相册服务成功停止时释放；同 ID 保留首项，记录仍按每次请求构造响应。未注入查找能力的相册服务沿用数组扫描，保留自定义数组原位变更行为。两类查找均保留原记录引用，来源、路径、归档签名及封面数据库校验照常执行。
 
-Web 与 Android 图库的普通平铺列表、Web 电视剧与西方人物书架在同一筛选、布局和顺序下翻页时保留已有卡片、图片节点、封面 observer 和焦点，仅追加新 ID 或更新内容变化的卡片；Android 影视内联搜索按钮也保留焦点。加载和错误局部更新控件；重排、缺少稳定 ID、分组或 Android 瀑布流列数变化时仍重建列表。两端按原始偏移推进，列表版本变化后补齐已显示范围；影视版本按相关元数据表记录，独立视频封面缓存写入不触发补齐，旧库及契约损坏时回退保守检查。服务端短期计算缓存和 Android 聚合账号归属见[图库列表与分页](./gallery-lists.md)。
+Web 与 Android 图库的普通平铺列表、Web 电视剧与西方人物书架在同一筛选、布局和顺序下翻页时保留已有卡片、图片节点、封面 observer 和焦点，仅追加新 ID 或更新内容变化的卡片；Android 影视内联搜索按钮也保留焦点。加载和错误局部更新控件；重排、缺少稳定 ID、分组或 Android 瀑布流列数变化时仍重建列表。两端按原始偏移推进，列表版本变化后补齐已显示范围；影视版本按相关元数据表记录，独立视频封面缓存写入不触发补齐，旧库及契约损坏时回退保守检查。Android 番号片库仍请求从零开始的累计前缀以刷新旧数据；旧可见前缀的内容与顺序一致时只追加新卡，变化、重复或缺少稳定 ID 时完整重建。续页失败保留已显示内容，纯失败重试沿用目标 limit；离页释放列表和自动加载观察器。服务端短期计算缓存和 Android 聚合账号归属见[图库列表与分页](./gallery-lists.md)。
 
 支持相应 CSS 的浏览器在影视海报模式下延后屏幕外文字区域的布局。文字区域沿用现有截断行数，固定为 91px，窄屏为 111.2px，避免同一节点切换屏宽时沿用旧高度；修改文字行数或字号时须同步核对占位。海报比例、封面加载、按钮焦点和列表模式保持原有行为；此优化减少布局开销，不减少 DOM 创建。
 

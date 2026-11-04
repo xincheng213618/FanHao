@@ -56,6 +56,9 @@ async function fixture({ entry = entrySource, controller = controllerSource } = 
   delete globalThis[key];
   const context = capture.context;
   context.renderListShell = () => { writes.push("render"); mounted = true; };
+  // This suite replaces the DOM renderer; its mounted boundary must also
+  // represent the author view used by dispatch/receipt ownership checks.
+  context.isAuthorIndexMounted = () => mounted;
   context.appendListVideos = (rows) => writes.push({ append: rows.map((row) => row.id) });
   context.refreshVideoCards = (row) => writes.push({ refresh: row.id });
   context.setListLoadingMore = (...args) => writes.push({ loadingMore: args });

@@ -97,7 +97,7 @@
         };
         document.addEventListener("DOMContentLoaded", renderStartupNotice, { once: true });
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-a6283233aace";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-e79e7ff84cfd";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -340,7 +340,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-a6283233aace");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-e79e7ff84cfd");
         shortVideoModulePromise.catch(() => window.__fanhaoReportStartupFailure?.());
         await window.__fanhaoStylesReady;
         try {

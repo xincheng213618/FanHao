@@ -43,21 +43,26 @@ export function createArchiveImageService(options) {
   function indexRow(database, source) {
     return databaseOperation(database, db => db.prepare("SELECT * FROM photo_set_image_indexes WHERE archive_path = ?").get(source.archivePath)) || null;
   }
-  function rowStamp(row) {
-    // Native rows contain plain data. Keep the original metadata key order,
-    // but compare the already immutable JSON text without escaping it again.
+  function nativeIndexRowDescriptors(row) {
     if (row && typeof row === "object" && !types.isProxy(row) && !types.isBoxedPrimitive(row)
       && Object.getPrototypeOf(row) === null && !Object.hasOwn(row, "toJSON")) {
       const descriptors = Object.getOwnPropertyDescriptors(row);
       const images = descriptors.images_json;
-      if (images?.enumerable && typeof images.value === "string" && Reflect.ownKeys(descriptors).every(key => {
+      if (images?.enumerable && Reflect.ownKeys(descriptors).every(key => {
         const descriptor = descriptors[key];
         const valueType = typeof descriptor.value;
         return typeof key === "string" && descriptor.enumerable && "value" in descriptor
           && (descriptor.value === null || valueType === "string" || valueType === "number");
-      })) {
-        return { metadata: JSON.stringify(Object.assign(Object.create(null), row, { images_json: null })), images: images.value };
-      }
+      })) return descriptors;
+    }
+    return null;
+  }
+  function rowStamp(row) {
+    // Native rows contain plain data. Keep the original metadata key order,
+    // but compare the already immutable JSON text without escaping it again.
+    const native = nativeIndexRowDescriptors(row);
+    if (native && typeof native.images_json.value === "string") {
+      return { metadata: JSON.stringify(Object.assign(Object.create(null), row, { images_json: null })), images: native.images_json.value };
     }
     return row ? JSON.stringify(row) : "missing";
   }
@@ -74,7 +79,12 @@ export function createArchiveImageService(options) {
   }
   function indexAuthority(source) {
     let db;
-    try { db = options.getImageGalleryDb(); return { db, stamp: rowStamp(indexRow(db, source)), valid: true }; }
+    try {
+      db = options.getImageGalleryDb();
+      const row = indexRow(db, source);
+      const native = Boolean(nativeIndexRowDescriptors(row));
+      return { db, stamp: rowStamp(row), native, valid: true };
+    }
     catch { return { db, valid: false }; }
   }
   function authorityCurrent(source, authority, context) {
@@ -94,7 +104,10 @@ export function createArchiveImageService(options) {
           images_json=excluded.images_json,indexer_version=excluded.indexer_version,indexed_at=excluded.indexed_at,
           updated_at=excluded.updated_at,archive_identity=excluded.archive_identity`)
           .run(source.archivePath, source.archiveSize, source.archiveMtimeMs, payload.imageCount, JSON.stringify(payload.images), ARCHIVE_IMAGE_INDEXER_VERSION, now, now, source.archiveIdentity));
-        authority.stamp = rowStamp(indexRow(authority.db, source));
+        const row = indexRow(authority.db, source);
+        const native = Boolean(nativeIndexRowDescriptors(row));
+        authority.stamp = rowStamp(row);
+        authority.native = native;
       } catch (error) { warn("[archive-image-index-cache]", error.message || error); return; }
     }
     const bytes = Buffer.byteLength(JSON.stringify(payload));
@@ -121,13 +134,29 @@ export function createArchiveImageService(options) {
       const source = await signature(archivePath);
       if (!source) return { imageCount: 0, images: [] };
       if (!context.isCurrent()) throw archiveStoppedError();
-      const key = source.archiveIdentity, authority = indexAuthority(source), cached = listCache.get(key);
-      let payload;
-      if (cached && Date.now() - cached.createdAt < (options.listCacheTtlMs || 60_000) && authorityCurrent(source, cached.authority, context)) payload = cached.payload;
+      const key = source.archiveIdentity, cached = listCache.get(key);
+      let authority = indexAuthority(source), payload;
+      const sameNativeAuthority = context.isCurrent() && authority.valid && authority.native && cached?.authority.native
+        && authority.db === cached.authority.db && rowStampsMatch(authority.stamp, cached.authority.stamp);
+      if (cached && Date.now() - cached.createdAt < (options.listCacheTtlMs || 60_000)
+        && (sameNativeAuthority || authorityCurrent(source, cached.authority, context))) {
+        payload = cached.payload;
+        // A fallback may have validated a different row than the initial read.
+        // An initially failed read still prevents admission, as before.
+        if (authority.valid) authority = cached.authority;
+      }
       if (!payload && authority.valid) {
         const row = indexRow(authority.db, source);
+        const native = Boolean(nativeIndexRowDescriptors(row));
         if (row?.archive_identity === key && Number(row.indexer_version) === ARCHIVE_IMAGE_INDEXER_VERSION) {
-          try { const images = JSON.parse(row.images_json || "[]"); if (Array.isArray(images)) payload = { images, imageCount: Number(row.image_count || images.length) }; } catch {}
+          try {
+            const images = JSON.parse(row.images_json || "[]");
+            if (Array.isArray(images)) {
+              payload = { images, imageCount: Number(row.image_count || images.length) };
+              // Bind a parsed native list to the row that supplied its images.
+              if (native) authority = { db: authority.db, stamp: rowStamp(row), native: true, valid: true };
+            }
+          } catch {}
         }
       }
       const persisted = Boolean(payload);

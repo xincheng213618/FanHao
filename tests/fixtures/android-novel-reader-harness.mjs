@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { readFileSync } from "node:fs";
 import { reconcileLocalNovelEntry } from "../../android-client/www/js/novel-chapter-identity.js";
+
+const collectionDependencies = [
+  ["account-owner.js", "captureAccountOwner, isAccountOwnerCurrent"],
+  ["auto-load.js", "enhanceAutoLoadMore"]
+].map(([file, exports]) => {
+  const source = readFileSync(new URL(`../../android-client/www/js/${file}`, import.meta.url), "utf8");
+  assert(!/^import /m.test(source), "the dependency fixture must handle any new imports explicitly");
+  return `(function () { ${source.replace(/^export /gm, "")}\nreturn { ${exports} }; })()`;
+});
 
 export function deferred() {
   let resolve;
@@ -100,6 +110,9 @@ class FakeElement extends Events {
       node = node.parentNode;
     }
     return false;
+  }
+  get parentElement() {
+    return this.parentNode instanceof FakeElement && this.parentNode.tagName !== "#FRAGMENT" ? this.parentNode : null;
   }
   append(...children) {
     for (const child of children.flat()) {
@@ -356,6 +369,9 @@ export function createReaderHarness(productionSource, { historical = null, defer
       return wait.promise;
     }
   });
+  // Execute the complete imported owners in this isolated realm; DOM, clocks
+  // and transport remain the same explicit fixture boundaries.
+  for (const dependency of collectionDependencies) Object.assign(sandbox, vm.runInContext(dependency, sandbox));
   vm.runInContext(source, sandbox, { filename: historical ? "novel-reader-historical-control.js" : "novel-views.js" });
   const els = Object.fromEntries(["viewContent", "viewKicker", "viewTitle", "viewMeta"].map((name) => [name, document.createElement("div")]));
   document.body.append(...Object.values(els));

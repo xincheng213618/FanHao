@@ -1,6 +1,6 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-22080e82f167";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-22080e82f167";
-import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-22080e82f167";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-eb78be0b425d";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-eb78be0b425d";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-eb78be0b425d";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -93,7 +93,14 @@ export function createAndroidModule({ host }) {
       route("search", (params, guard) => workViews.renderSearchResults(params, guard)),
       route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, params.scope, guard)),
       route("workDetail", (params, guard) => detailViews.renderWorkDetail(params.workId, guard))
-    ],
+    ].map((entry) => ({
+      ...entry,
+      render(params, guard) {
+        workViews.releaseAllWorks();
+        return entry.render(params, guard);
+      }
+    })),
+    deactivate: () => workViews.releaseAllWorks(),
     handleBack: () => detailViews.handleBack?.() === true,
     search,
     renderChrome: (context) => renderFanhaoChrome(context, host, { peopleViews, workViews }),

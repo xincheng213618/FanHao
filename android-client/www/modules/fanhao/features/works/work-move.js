@@ -1,5 +1,5 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-22080e82f167";
-import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=assets-22080e82f167";
+import { fetchJson } from "../../../../js/api.js?v=assets-eb78be0b425d";
+import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=assets-eb78be0b425d";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
 

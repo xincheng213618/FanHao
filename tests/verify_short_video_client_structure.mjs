@@ -212,6 +212,9 @@ async function verifyAndroidAuthorAccountRequests() {
     },
     getActiveUrl: () => "http://127.0.0.1:29998",
     listState,
+    // This request-contract fixture replaces rendering with a no-op. The
+    // author rendering fixture separately verifies actual mount ownership.
+    isAuthorIndexMounted: () => true,
     renderListShell() {},
     showView() {},
     shortVideoToast() {}

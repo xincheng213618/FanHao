@@ -9,6 +9,12 @@ import {
   validGalleryMetadataClock
 } from "../../../../lib/gallery-metadata-revision.js";
 
+const movieListTextColumns = new Set(("media_id category movie_title douban_id douban_url douban_title original_title aka_json official_site year "
+  + "rating_stars_json rating_better_than_json directors_json writers_json genres_json actors_json countries_json languages_json pubdate "
+  + "release_dates_json episode_duration durations_json imdb_id info_json json_ld_json summary cover_url cover_mime source detail_source status error fetched_at updated_at").split(" "));
+const movieListOtherColumns = { rating: "REAL", rating_count: "INTEGER", season_count: "INTEGER", episode_count: "INTEGER", cover_blob: "BLOB", cover_bytes: "INTEGER" };
+const movieListHeadColumns = new Set("media_id status movie_title douban_title aka_json year rating rating_count genres_json season_count episode_count episode_duration info_json json_ld_json updated_at cover_blob".split(" "));
+
 function safeJsonArray(value) {
   try {
     const parsed = JSON.parse(value || "[]");
@@ -89,6 +95,7 @@ export function createGalleryMetadataService({
   let connectionSequence = 0;
   let unavailableSequence = 0;
   const bulkFailureEpochs = { movie: 0, tv: 0 };
+  let movieListReadSequence = 0;
 
   function readWithFinalizedRecovery(db, states, read) {
     try {
@@ -251,6 +258,99 @@ export function createGalleryMetadataService({
     }
   }
 
+  // This optional read belongs to one uncached list request. Raw/publication
+  // APIs and their bulk-failure epochs remain the fallback for every failure.
+  function beginMovieListRead() {
+    let db, savepoint, active = false;
+    function release() {
+      if (!active) return;
+      active = false;
+      try { db.exec(`RELEASE SAVEPOINT ${savepoint}`); }
+      catch (error) {
+        try { db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`); db.exec(`RELEASE SAVEPOINT ${savepoint}`); }
+        catch {
+          // No caller transaction existed when this read started.
+          if (db.isOpen && db.isTransaction) db.exec("ROLLBACK");
+        }
+        throw error;
+      }
+    }
+    try {
+      db = getImageGalleryDb();
+      if (types.isProxy(db) || !(db instanceof DatabaseSync) || !db.isOpen || db.isTransaction !== false) return null;
+      savepoint = `movie_list_read_${++movieListReadSequence}`;
+      db.exec(`SAVEPOINT ${savepoint}`); active = true;
+      const schema = db.prepare(`SELECT
+        (SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = 'movie_metadata' COLLATE NOCASE) AS declaration,
+        EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name = 'movie_metadata' COLLATE NOCASE) AS shadowed`).get();
+      if (schema?.shadowed !== 0 || typeof schema.declaration !== "string"
+        || !/^CREATE\s+TABLE\s+movie_metadata\s*\(\s*media_id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(schema.declaration)
+        || /WITHOUT\s+ROWID/iu.test(schema.declaration)) { release(); return null; }
+      // table_info deliberately remains unchanged for the raw API. This
+      // stronger optional proof also sees generated columns that can shadow
+      // _rowid_ without appearing in that original projection.
+      const columnInfo = db.prepare('PRAGMA main.table_xinfo("movie_metadata")').all();
+      if (columnInfo.length !== movieListTextColumns.size + Object.keys(movieListOtherColumns).length
+        || !columnInfo.every(column => Number(column.hidden) === 0 && String(column.type).trim().toUpperCase()
+          === (movieListTextColumns.has(column.name) ? "TEXT" : movieListOtherColumns[column.name])
+          && Number(column.pk) === (column.name === "media_id" ? 1 : 0))) { release(); return null; }
+      metadataStatement("movie_metadata", false, "", db);
+      const table = metadataProjections.get(db).tables.get("movie_metadata");
+      if (table.columns.some((name, index) => name !== columnInfo[index].name)) { release(); return null; }
+      const quote = name => `"${name.replaceAll('"', '""')}"`;
+      const cover = `CASE typeof("cover_blob") WHEN 'blob' THEN 1 WHEN 'text' THEN length("cover_blob") > 0 WHEN 'integer' THEN "cover_blob" != 0 WHEN 'real' THEN "cover_blob" != 0 ELSE NULL END AS "cover_blob"`;
+      const projection = table.columns.map(name => name === "cover_blob" ? cover
+        : movieListHeadColumns.has(name) || !movieListTextColumns.has(name) ? quote(name)
+          // Preserve native INTEGER decoding even for dynamically typed TEXT
+          // cells. An unsafe unused value must still invalidate the whole map.
+          : `CASE typeof(${quote(name)}) WHEN 'integer' THEN ${quote(name)} ELSE NULL END AS ${quote(name)}`);
+      const locator = `CAST(_rowid_ AS TEXT) AS "__movie_list_rowid"`;
+      table.movieListHead ||= db.prepare(`SELECT ${projection.join(", ")}, ${locator} FROM "movie_metadata"`);
+      const rows = table.movieListHead.all(), byId = new Map(rows.map(row => [row.media_id, row]));
+      // Native TEXT decoding can collapse distinct keys (NUL/invalid UTF-8).
+      // Keep the original bulk traversal's last-wins behavior in that case.
+      if (byId.size !== rows.length) { release(); return null; }
+      const addresses = new WeakMap();
+      return {
+        rows: byId,
+        publicHead(row) {
+          if (row?.status !== "ok" || movieMetadataHasTvEvidence(row)) return null;
+          const value = {
+            movieTitle: row.movie_title || "", title: row.douban_title || row.movie_title || "",
+            aliases: safeJsonArray(row.aka_json), year: row.year || "",
+            rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
+            ratingCount: Number(row.rating_count || 0), genres: safeJsonArray(row.genres_json),
+            coverUrl: row.cover_blob ? movieCoverUrl(row.media_id, row.updated_at || "") : ""
+          };
+          addresses.set(value, row.__movie_list_rowid);
+          return value;
+        },
+        hydrate(items) {
+          const ids = [...new Set(items.map(item => addresses.get(item.movieMetadata)).filter(value => value !== undefined))];
+          if (!ids.length) return;
+          const fullProjection = table.columns.map(name => name === "cover_blob" ? cover : quote(name));
+          const fullRows = db.prepare(`SELECT ${fullProjection.join(", ")}, ${locator} FROM "movie_metadata" WHERE _rowid_ IN (${ids.map(() => "?").join(", ")})`)
+            .all(...ids.map(value => BigInt(value)));
+          const byAddress = new Map(fullRows.map(row => [row.__movie_list_rowid, row]));
+          if (byAddress.size !== ids.length) throw new Error("Movie list snapshot changed before hydration");
+          for (const item of items) {
+            const address = addresses.get(item.movieMetadata);
+            if (address !== undefined) {
+              item.movieMetadata = publicMovie(byAddress.get(address));
+              // The original list exposes this same array at both levels;
+              // structuredClone also preserves that within-response alias.
+              item.genres = item.movieMetadata.genres;
+            }
+          }
+        },
+        release
+      };
+    } catch {
+      release();
+      return null;
+    }
+  }
+
   function movieRow(mediaId, options = {}) {
     if (!mediaId) return null;
     try {
@@ -370,6 +470,7 @@ export function createGalleryMetadataService({
   }
 
   return {
+    beginMovieListRead,
     listRevision,
     movieRow,
     movieRowsMap,

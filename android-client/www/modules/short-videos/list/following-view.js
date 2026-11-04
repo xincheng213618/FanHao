@@ -1,4 +1,4 @@
-import { FOLLOWING_AUTHOR_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort } from "../shared.js?v=assets-22080e82f167";
+import { FOLLOWING_AUTHOR_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort } from "../shared.js?v=assets-eb78be0b425d";
 
 export function renderFollowingAuthorTools({ listState, onChange }) {
   const data = listState.data || {};
@@ -24,11 +24,11 @@ export function renderFollowingAuthorTools({ listState, onChange }) {
   }
   select.value = normalizeFollowingAuthorSort(listState.authorSort);
   select.addEventListener("change", () => {
-    onChange({
+    if (onChange({
       source: "following",
       author: "all",
       authorSort: normalizeFollowingAuthorSort(select.value)
-    });
+    }) === false) return;
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   });
 
@@ -40,11 +40,11 @@ export function renderFollowingAuthorTools({ listState, onChange }) {
   filter.setAttribute("aria-pressed", String(unlikedOnly));
   filter.textContent = `只看未点赞 ${formatCount(data.unlikedTotal || 0)}`;
   filter.addEventListener("click", () => {
-    onChange({
+    if (onChange({
       source: "following",
       author: "all",
       authorFilter: unlikedOnly ? "all" : "unliked"
-    });
+    }) === false) return;
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   });
 

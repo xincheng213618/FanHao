@@ -801,7 +801,7 @@ assert(androidWorkCardPresentation.includes("function extractLeadingWorkCode(val
 assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
 assert(androidWorkViews.includes("progressiveWorkListRenderer.render(grid, visible"), "Android work lists must expose the first card batch before building the remaining page");
 assert(!androidWorkViews.includes("for (const work of visible) grid.append"), "Android work lists must not synchronously build the full first page");
-assert(androidWorkViews.includes("() => loadMore && container.append(loadMore)"), "Android auto-load must wait until progressive work rendering reaches the active list end");
+assert(androidWorkViews.includes("if (loadMore) container.append(loadMore);") && androidWorkViews.includes("renderOptions.onComplete?.();"), "Android auto-load and its completion hook must wait until progressive work rendering reaches the active list end");
 assert(!androidWorkViews.includes("els.viewContent.append(createLoadMoreButton"), "Android callers must not attach auto-load before progressive work rendering completes");
 assert(androidWorkViews.includes("requireScrollIntent: true"), "Android FanHao pagination must require fresh downward scroll intent");
 assert(androidWorkViews.includes("hasServerMore: works.length < total") && androidWorkViews.includes("total,"), "Android combined filters must retain the server-filtered continuation total");

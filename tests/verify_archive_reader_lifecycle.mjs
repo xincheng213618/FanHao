@@ -251,7 +251,7 @@ async function verifyPhotoDetailPaging() {
   assert.equal(after.copied, 48, "deep page only copies its 48 visible image references");
   assert.equal(after.copies, 1);
   for (const result of [before, after]) {
-    assert.equal(result.reads, 3, "all database authority fences remain");
+    assert.equal(result.reads, 2, "native warm paging reuses the initial index snapshot and retains the final authority fence");
     assert.equal(result.stats, 2, "both source identity fences remain");
     assert.equal(result.parses, 0, "warm paging retains parsed metadata");
     assert.equal(result.serializations, 1, "mutable archive cache still refreshes its complete byte weight");
@@ -354,7 +354,10 @@ async function verifyIndexStampWork() {
   async function equal(left,right,options,label) {
     const before=await read(left,options),after=await read(right,options);
     assert.deepEqual(after.response,before.response,label);assert.equal(stringify(after.response),stringify(before.response),label+" JSON");
-    for(const name of ["reads","readBytes","stats","helpers","parses"])assert.equal(after[name],before[name],label+"/"+name);
+    for(const name of ["stats","helpers","parses"])assert.equal(after[name],before[name],label+"/"+name);
+    const reusedNativeSnapshot=before.reads===3&&after.reads===2&&before.parses===0&&after.parses===0&&before.helpers===0&&after.helpers===0;
+    assert.equal(after.reads,before.reads-Number(reusedNativeSnapshot),label+"/native snapshot read reduction");
+    assert.equal(after.readBytes,reusedNativeSnapshot?before.readBytes*2/3:before.readBytes,label+"/exact native JSON transfer");
     assert.equal(after.cache.listEntries,before.cache.listEntries,label+"/entries");assert.equal(after.cache.listCacheBytes,before.cache.listCacheBytes,label+"/bytes");oracles++;
     return {before,after};
   }
@@ -462,6 +465,9 @@ async function verifyIndexStampWork() {
     for(const target of [previous,current]){target.state.rowTransform=null;target.archive.clearListCache();}
     for(const target of [previous,current]){target.state.statError=held;await assert.rejects(read(target,{imageLimit:1}),error=>error===held);target.state.statError=null;oracles++;errorOracles++;}
     for(const stage of ["authority","cached"]){
+      // The second-read fault targets the legacy validation fallback. Native
+      // warm validation now reuses read one, so ordinal two is its final fence.
+      for(const target of [previous,current])target.state.rowTransform=stage==="cached"?row=>({...row}):null;
       await equal(previous,current,{imageLimit:1},"error warm");
       for(const target of [previous,current]){
         target.state.beforeRead=state=>{
@@ -507,7 +513,9 @@ async function verifyIndexStampWork() {
     // Pure rowStamp equivalence additionally covers string escaping, native
     // scalar canonicalization, unusual providers, getters and key order.
     const oldStampFunction=new Function(previousBlock+"\nreturn rowStamp;")();
-    const stampFunctions=new Function("types",currentBlock+"\nreturn {rowStamp,rowStampsMatch};")(types);
+    const nativeHelper=source.slice(source.indexOf("  function nativeIndexRowDescriptors("),source.indexOf("  function rowStamp("));
+    assert(nativeHelper.includes("return null;"),"native row qualification remains in the actual owner");
+    const stampFunctions=new Function("types",nativeHelper+currentBlock+"\nreturn {rowStamp,rowStampsMatch};")(types);
     const row=(value,extra=1)=>Object.assign(Object.create(null),{archive_path:"private",images_json:value,extra});
     const values=[null,undefined,0,1,NaN,Infinity,"","[]"," \0\n\"\\","😀","\ud800",new Uint8Array([]),new Uint8Array([1,2])];
     let pureOracles=0;
@@ -568,10 +576,10 @@ async function verifyIndexStampWork() {
     // Every complete response, legacy/native type, mutation, error and owner
     // comparison precedes the whole former source's real serialization budget.
     assert.equal(payloadBudget.before.rowStringifyInputBytes,3*distributions.find(item=>item.count===20000).jsonBytes);
-    assert.equal(payloadBudget.after.reads,3,"index authority retains every row read");
+    assert.equal(payloadBudget.after.reads,2,"native warm authority reuses its initial snapshot and still validates final admission");
     assert.equal(payloadBudget.after.stats,2,"index authority retains both physical source fences");
     assert.equal(payloadBudget.after.parses,0,"a warm list still reuses parsed images");
-    assert.equal(payloadBudget.after.stringifyCalls,payloadBudget.before.stringifyCalls,"payload cache weight serialization remains");
+    assert.equal(payloadBudget.after.stringifyCalls,payloadBudget.before.stringifyCalls-1,"one index stamp is avoided; mutable payload cache weight serialization remains");
     assert.equal(payloadBudget.after.cache.listCacheBytes,payloadBudget.before.cache.listCacheBytes,"the existing 16 MiB cache budget is unchanged");
     assert.equal(payloadBudget.after.rowStringifyInputBytes,0,"archive index authority images JSON serialization budget");
     scenarios++;

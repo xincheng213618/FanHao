@@ -4,6 +4,12 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const MAX_CACHED_ACCOUNTS = 32;
+// Preserve the original CREATE text so existing tables qualify for narrow reads.
+const ACCOUNT_STATE_TABLE_SQL = `CREATE TABLE account_user_state (
+          account_id TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL CHECK(revision >= 1),
+          state_json TEXT NOT NULL
+        )`;
 
 // The scope carries a trusted account id, never a mutable state or a credential.
 // Callers must finish a state mutation and save synchronously, after reading the
@@ -26,11 +32,7 @@ export function createAccountUserStateService({ dbPath, legacyStateService }) {
       const version = Number(connection.prepare("PRAGMA user_version").get().user_version);
       if (version > 1) throw new Error("Account personal state schema is newer than this server");
       if (version < 1) connection.exec(`
-        CREATE TABLE account_user_state (
-          account_id TEXT PRIMARY KEY,
-          revision INTEGER NOT NULL CHECK(revision >= 1),
-          state_json TEXT NOT NULL
-        );
+        ${ACCOUNT_STATE_TABLE_SQL};
         PRAGMA user_version = 1;
       `);
       connection.exec("COMMIT");
@@ -109,7 +111,24 @@ export function createAccountUserStateService({ dbPath, legacyStateService }) {
     }
     let entry = entries.get(owner);
     if (!entry || entry.tick !== tick) {
-      const row = database().prepare("SELECT revision, state_json FROM account_user_state WHERE account_id = ?").get(owner);
+      const connection = database();
+      // Only omit bodies for our original table definition; other schemas keep
+      // their original evaluation. Check live schema without another cache.
+      // INTEGER values still cross the native boundary to retain range errors.
+      let row = connection.prepare(entry
+        ? `WITH body_policy AS MATERIALIZED (SELECT
+            NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name = 'account_user_state' COLLATE NOCASE)
+            AND EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name = 'account_user_state' COLLATE NOCASE AND type = 'table' AND sql = ?)
+            AS omit_body)
+            SELECT revision, CASE WHEN body_policy.omit_body
+            THEN CASE typeof(state_json) WHEN 'integer' THEN state_json ELSE NULL END
+            ELSE state_json END AS state_json,
+            CASE WHEN body_policy.omit_body THEN typeof(state_json) != 'integer' ELSE 0 END AS omit_body
+            FROM account_user_state CROSS JOIN body_policy WHERE account_id = ?`
+        : "SELECT revision, state_json FROM account_user_state WHERE account_id = ?").get(...(entry ? [ACCOUNT_STATE_TABLE_SQL, owner] : [owner]));
+      if (entry && row?.omit_body && Number(row.revision || 0) !== entry.revision) {
+        row = connection.prepare("SELECT revision, state_json FROM account_user_state WHERE account_id = ?").get(owner);
+      }
       if (!entry || Number(row?.revision || 0) !== entry.revision) {
         const loaded = decodeRow(row);
         const value = entry?.state || {};

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createImageQueryCache } from "./image-query-cache.js";
+import { types } from "node:util";
+import { createImageQueryCache, IMAGE_QUERY_CACHE_MAX_ROWS } from "./image-query-cache.js";
 
 const imageNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const imageSearchFieldNames = ["title", "person", "collection", "category", "folder", "metadata"];
@@ -179,7 +180,11 @@ export function createImageLibraryService({
       }
     }
     const seriesKey = galleryMediaSeriesKey(item, sourceSeriesKey, tvSeries, derivationCaches);
-    const movieMetadata = item?.mediaKind === "movie" ? metadataService.publicMovie(movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id, { forPublication: true })) : null;
+    let movieMetadata = null;
+    if (item?.mediaKind === "movie") {
+      const row = movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id, { forPublication: true });
+      movieMetadata = derivationState?.movieListRead ? derivationState.movieListRead.publicHead(row) : metadataService.publicMovie(row);
+    }
     const movieCoverUrl = movieMetadata?.coverUrl || "";
     const fallbackCoverUrl = item.mediaKind === "movie" || isEpisodicMediaKind(item.mediaKind) ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
     return {
@@ -335,13 +340,21 @@ export function createImageLibraryService({
     const index = getImageLibraryIndex(options);
     const sourceStampBefore = listSourceStamp(index, mode);
     let mangaSourceRevision = "";
-    const cacheEligible = cachePreparedQueries && ["movie", "tv", "anime", "media"].includes(mode)
-      && typeof getImageLibraryRevision === "function" && typeof metadataService.listRevision === "function";
+    const cacheEligible = cachePreparedQueries && ["photo", "western", "movie", "tv", "anime", "media"].includes(mode)
+      && typeof getImageLibraryRevision === "function"
+      && (["photo", "western"].includes(mode) || typeof metadataService.listRevision === "function");
     const queryCacheKey = JSON.stringify([mode, query, sort, photoView, tvView, category, mediaKind, subCategory, person, date, collection, seriesKey]);
     if (options.refresh || !cacheEligible) preparedQueries.clear();
     const prepared = cacheEligible && !options.refresh ? preparedQueries.get(queryCacheKey, sourceStampBefore) : null;
     if (prepared) {
       const cachedItems = prepared.items.slice(offset, offset + limit);
+      // Numbered photo subjects are display-only. The retained query keeps
+      // them deferred, just as the uncached catalog does below.
+      if (mode === "photo") cachedItems.forEach((item, index) => {
+        if (item.type === "photo" && item.albumNumber) cachedItems[index] = {
+          ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle)
+        };
+      });
       const response = structuredClone({ ...prepared.header, count: cachedItems.length, total: prepared.items.length,
         limit, offset, nextOffset: offset + cachedItems.length, listRevision: "", items: cachedItems });
       const sourceStampAfter = listSourceStamp(index, mode);
@@ -349,155 +362,217 @@ export function createImageLibraryService({
       response.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, "");
       return response;
     }
-    let mediaItems = [];
-    if (!["photo", "manga"].includes(mode)) {
-      const kinds = mode === "media" ? ["movie", "tv", "anime"] : [mode];
-      const rawItems = mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], kinds);
-      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
-      const movieMetadataById = rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
-      const publicTvSeriesByKey = new Map();
-      // Only pure string derivations are shared within this list read. Field
-      // conversion and metadata key generation still run for every item.
-      const derivationState = { caches: null };
-      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));
+    const rawItems = !["photo", "manga"].includes(mode)
+      ? mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], mode === "media" ? ["movie", "tv", "anime"] : [mode]) : [];
+    let movieListRead = null, optionalFailure = false;
+    if (mode === "movie" && !query && movieListExceedsCache(rawItems, { category, person }, limit, offset)) {
+      try { movieListRead = metadataService.beginMovieListRead?.() || null; } catch { /* Optional proof/read: retain the original bulk path. */ }
     }
-
-    let source = [];
-    let facetsSource = [];
-    let photoSubCategoryFacetsSource = [];
-    let photoFacets = null;
-    let collectionSummary = null;
-    let seriesSummary = null;
-    let sourceIsSorted = false;
-    if (mode === "photo") {
-      const catalog = preparedPhotoCatalog(index);
-      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
-      const filteredPhotoSets = defaultPhotoFilters && !collection
-        ? catalog.items
-        : filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
-      photoFacets = preparedPhotoFacets(catalog, category);
-      if (collection) {
-        const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all", date: "all" });
-        collectionSummary = photoCollectionSummary(collectionItems, collection);
-        photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
-      }
-      source = photoView === "collections" && !collection
-        ? defaultPhotoFilters
-          ? preparedPhotoCollectionCategories(catalog)
-          : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
-        : defaultPhotoFilters && !collection && !query
-          ? preparedPhotoSortedItems(catalog, sort)
-          : filteredPhotoSets;
-      sourceIsSorted = photoView === "albums" && defaultPhotoFilters && !collection && !query;
-    } else if (mode === "manga") {
-      const mangaSourceHash = createHash("sha256");
-      source = mangaService.cacheDirs().map((cacheDir) => {
-        const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
-        mangaSourceHash.update(JSON.stringify(item)).update("\0");
-        return item;
-      });
-      mangaSourceRevision = mangaSourceHash.digest("hex");
-    } else if (mode === "media") {
-      const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-      const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-      const animeSource = mediaItemsByKind(mediaItems, "anime").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-      const episodicSource = [...tvSource, ...animeSource];
-      const episodicGroups = tvSeriesGroups(episodicSource);
-      const episodicSeriesSource = episodicGroups.map(publicTvSeriesListItem).filter(Boolean);
-      const screenWorksSource = [...movieSource, ...episodicSeriesSource];
-      facetsSource = screenWorksSource;
-      if (seriesKey) {
-        const categorySource = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
-        source = categorySource.filter((item) => item.seriesKey === seriesKey);
-        seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesKey === seriesKey) || null);
-      } else if (person !== "all") {
-        source = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
-        seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesName === person && (mediaKind === "all" || group.mediaKind === mediaKind)) || null);
-      } else {
-        source = filterMediaItemsForList(screenWorksSource, { category, person, mediaKind });
-      }
-    } else if (["western", "movie", "tv"].includes(mode)) {
-      const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
-      const categorySource = filterMediaItemsForList(mediaSource, { category, person });
-      if (mode === "tv") {
-        const groups = tvSeriesGroups(mediaSource);
-        const tvSeriesSource = groups.map(publicTvSeriesListItem);
-        facetsSource = tvSeriesSource;
-        if (seriesKey) {
-          source = categorySource.filter((item) => item.seriesKey === seriesKey);
-          seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesKey === seriesKey) || null);
-        } else if (person !== "all") {
-          source = categorySource;
-          seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesName === person) || null);
-        } else if (tvView === "episodes") {
-          source = categorySource;
-        } else {
-          source = category === "all" ? tvSeriesSource : tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
-        }
-      } else if (mode === "western") {
-        facetsSource = mediaSource;
-        source = person === "all" ? westernPersonGroups(categorySource).map(publicWesternPersonListItem) : categorySource;
-      } else {
-        facetsSource = mediaSource;
-        source = categorySource;
-      }
+    if (!movieListRead) return buildItems(null);
+    let response, failure = null;
+    try { response = buildItems(movieListRead); }
+    catch (error) { failure = { error, optional: optionalFailure }; }
+    finally {
+      try { movieListRead.release(); }
+      catch (error) { failure ||= { error, optional: true }; }
     }
-
-    const searchSpec = createImageSearchQuery(query);
-    const searchResults = searchSpec ? searchImageLibraryItems(source, searchSpec) : null;
-    const filtered = searchResults ? searchResults.map((result) => result.item) : source;
-    const sorted = sort === "relevance" && searchResults
-      ? [...searchResults].sort(compareImageSearchResults).map((result) => result.item)
-      : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);
-    const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
-    const items = sorted.slice(offset, offset + limit).map((item) => {
-      const match = searchResultsByItem?.get(item);
-      if (item.type === "photo" && item.albumNumber) {
-        item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
-      }
-      return match ? { ...item, matchFields: match.matchFields } : item;
-    });
-    const response = {
-      schemaVersion: 1,
-      mode,
-      mediaKind: mode === "media" ? mediaKind : "all",
-      query,
-      sort,
-      photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
-      tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
-      category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
-      subCategory: mode === "photo" ? subCategory : "",
-      person: ["photo", "western", "media", "tv"].includes(mode) ? person : "",
-      date: mode === "photo" ? date : "",
-      collection: mode === "photo" ? collection : "",
-      collectionSummary,
-      searchTerms: searchSpec?.terms || [],
-      seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
-      seriesSummary,
-      facets: mode === "photo" ? photoFacets || photoLibraryFacets(facetsSource, photoSubCategoryFacetsSource) : mediaLibraryFacets(facetsSource),
-      stats: {
-        ratedCount: sorted.filter((item) => Number(item?.rating || item?.movieMetadata?.rating || item?.tvSeries?.rating || 0) > 0).length,
-        totalBytes: sorted.reduce((sum, item) => sum + Number(item?.size || 0), 0)
-      },
-      count: items.length,
-      total: sorted.length,
-      limit,
-      offset,
-      nextOffset: offset + items.length,
-      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),
-      scannedAt: mode === "manga" ? latestUpdatedAt(source, index.scannedAt || "") : index.scannedAt || "",
-      items
-    };
-    if (!cacheEligible) return response;
-    // Retain field insertion order when replacing the pagination values.
-    const { items: _items, ...header } = response;
-    if (!options.refresh) preparedQueries.set(queryCacheKey, sourceStampBefore, { header,
-      items: searchResultsByItem ? sorted.map(item => ({ ...item, matchFields: searchResultsByItem.get(item).matchFields })) : sorted });
-    const detached = structuredClone(response);
+    if (failure) {
+      // Reuse this request's index, filters and refresh result. Only the new
+      // read/hydration path is retried; ordinary item/conversion errors escape.
+      if (failure.optional) return buildItems(null);
+      throw failure.error;
+    }
+    // An external WAL writer may commit while our read snapshot is pinned.
+    // Check after releasing it before authorizing the next page's revision.
     const sourceStampAfter = listSourceStamp(index, mode);
     if (sourceStampBefore !== sourceStampAfter) preparedQueries.clear();
-    detached.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, mangaSourceRevision);
-    return detached;
+    response.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, mangaSourceRevision);
+    return response;
+
+    function buildItems(movieListRead) {
+      let mediaItems = [];
+      if (!["photo", "manga"].includes(mode)) {
+        const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
+        const movieMetadataById = movieListRead ? movieListRead.rows : rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
+        const publicTvSeriesByKey = new Map();
+        // Only pure string derivations are shared within this list read. Field
+        // conversion and metadata key generation still run for every item.
+        const derivationState = { caches: null, movieListRead };
+        mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));
+      }
+
+      let source = [];
+      let facetsSource = [];
+      let photoSubCategoryFacetsSource = [];
+      let photoFacets = null;
+      let collectionSummary = null;
+      let seriesSummary = null;
+      let sourceIsSorted = false;
+      if (mode === "photo") {
+        const catalog = preparedPhotoCatalog(index);
+        const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
+        const filteredPhotoSets = defaultPhotoFilters && !collection
+          ? catalog.items
+          : filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
+        photoFacets = preparedPhotoFacets(catalog, category);
+        if (collection) {
+          const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all", date: "all" });
+          collectionSummary = photoCollectionSummary(collectionItems, collection);
+          photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
+        }
+        source = photoView === "collections" && !collection
+          ? defaultPhotoFilters
+            ? preparedPhotoCollectionCategories(catalog)
+            : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
+          : defaultPhotoFilters && !collection && !query
+            ? preparedPhotoSortedItems(catalog, sort)
+            : filteredPhotoSets;
+        sourceIsSorted = photoView === "albums" && defaultPhotoFilters && !collection && !query;
+      } else if (mode === "manga") {
+        const mangaSourceHash = createHash("sha256");
+        source = mangaService.cacheDirs().map((cacheDir) => {
+          const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
+          mangaSourceHash.update(JSON.stringify(item)).update("\0");
+          return item;
+        });
+        mangaSourceRevision = mangaSourceHash.digest("hex");
+      } else if (mode === "media") {
+        const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+        const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+        const animeSource = mediaItemsByKind(mediaItems, "anime").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+        const episodicSource = [...tvSource, ...animeSource];
+        const episodicGroups = tvSeriesGroups(episodicSource);
+        const episodicSeriesSource = episodicGroups.map(publicTvSeriesListItem).filter(Boolean);
+        const screenWorksSource = [...movieSource, ...episodicSeriesSource];
+        facetsSource = screenWorksSource;
+        if (seriesKey) {
+          const categorySource = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
+          source = categorySource.filter((item) => item.seriesKey === seriesKey);
+          seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesKey === seriesKey) || null);
+        } else if (person !== "all") {
+          source = filterMediaItemsForList(episodicSource, { category, person, mediaKind });
+          seriesSummary = publicTvSeriesListItem(episodicGroups.find((group) => group.seriesName === person && (mediaKind === "all" || group.mediaKind === mediaKind)) || null);
+        } else {
+          source = filterMediaItemsForList(screenWorksSource, { category, person, mediaKind });
+        }
+      } else if (["western", "movie", "tv"].includes(mode)) {
+        const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
+        const categorySource = filterMediaItemsForList(mediaSource, { category, person });
+        if (mode === "tv") {
+          const groups = tvSeriesGroups(mediaSource);
+          const tvSeriesSource = groups.map(publicTvSeriesListItem);
+          facetsSource = tvSeriesSource;
+          if (seriesKey) {
+            source = categorySource.filter((item) => item.seriesKey === seriesKey);
+            seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesKey === seriesKey) || null);
+          } else if (person !== "all") {
+            source = categorySource;
+            seriesSummary = publicTvSeriesListItem(groups.find((group) => group.seriesName === person) || null);
+          } else if (tvView === "episodes") {
+            source = categorySource;
+          } else {
+            source = category === "all" ? tvSeriesSource : tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
+          }
+        } else if (mode === "western") {
+          facetsSource = mediaSource;
+          source = person === "all" ? westernPersonGroups(categorySource).map(publicWesternPersonListItem) : categorySource;
+        } else {
+          facetsSource = mediaSource;
+          source = categorySource;
+        }
+      }
+
+      const searchSpec = createImageSearchQuery(query);
+      const searchResults = searchSpec ? searchImageLibraryItems(source, searchSpec) : null;
+      const filtered = searchResults ? searchResults.map((result) => result.item) : source;
+      const sorted = sort === "relevance" && searchResults
+        ? [...searchResults].sort(compareImageSearchResults).map((result) => result.item)
+        : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);
+      const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
+      const items = sorted.slice(offset, offset + limit).map((item) => {
+        const match = searchResultsByItem?.get(item);
+        if (item.type === "photo" && item.albumNumber) {
+          item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
+        }
+        return match ? { ...item, matchFields: match.matchFields } : item;
+      });
+      if (movieListRead) {
+        try {
+          // A retained query must always contain complete metadata. The light
+          // rows are only allowed on a plan already refused by the row budget.
+          if (sorted.length <= IMAGE_QUERY_CACHE_MAX_ROWS) throw new Error("Movie list no longer exceeds the prepared-query budget");
+          movieListRead.hydrate(items);
+        } catch (error) { optionalFailure = true; throw error; }
+      }
+      const response = {
+        schemaVersion: 1,
+        mode,
+        mediaKind: mode === "media" ? mediaKind : "all",
+        query,
+        sort,
+        photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
+        tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
+        category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
+        subCategory: mode === "photo" ? subCategory : "",
+        person: ["photo", "western", "media", "tv"].includes(mode) ? person : "",
+        date: mode === "photo" ? date : "",
+        collection: mode === "photo" ? collection : "",
+        collectionSummary,
+        searchTerms: searchSpec?.terms || [],
+        seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
+        seriesSummary,
+        facets: mode === "photo" ? photoFacets || photoLibraryFacets(facetsSource, photoSubCategoryFacetsSource) : mediaLibraryFacets(facetsSource),
+        stats: {
+          ratedCount: sorted.filter((item) => Number(item?.rating || item?.movieMetadata?.rating || item?.tvSeries?.rating || 0) > 0).length,
+          totalBytes: sorted.reduce((sum, item) => sum + Number(item?.size || 0), 0)
+        },
+        count: items.length,
+        total: sorted.length,
+        limit,
+        offset,
+        nextOffset: offset + items.length,
+        listRevision: movieListRead ? "" : publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),
+        scannedAt: mode === "manga" ? latestUpdatedAt(source, index.scannedAt || "") : index.scannedAt || "",
+        items
+      };
+      if (!cacheEligible) return response;
+      // Retain field insertion order when replacing the pagination values.
+      const { items: _items, ...header } = response;
+      if (!options.refresh) preparedQueries.set(queryCacheKey, sourceStampBefore, { header,
+        items: searchResultsByItem ? sorted.map(item => ({ ...item, matchFields: searchResultsByItem.get(item).matchFields })) : sorted });
+      const detached = structuredClone(response);
+      if (!movieListRead) {
+        const sourceStampAfter = listSourceStamp(index, mode);
+        if (sourceStampBefore !== sourceStampAfter) preparedQueries.clear();
+        detached.listRevision = publicListRevision(sourceStampBefore, sourceStampAfter, mode, mangaSourceRevision);
+      }
+      return detached;
+    }
+  }
+
+  function movieListExceedsCache(rawItems, filters, limit, offset) {
+    if (rawItems.length <= IMAGE_QUERY_CACHE_MAX_ROWS) return false;
+    let count = 0;
+    try {
+      for (const item of rawItems) {
+        if (!item || types.isProxy(item) || ![Object.prototype, null].includes(Object.getPrototypeOf(item))) return false;
+        const values = {};
+        for (const name of ["category", "site", "kindLabel", "personName", "seriesName"]) {
+          const descriptor = Object.getOwnPropertyDescriptor(item, name);
+          if (descriptor && (!Object.hasOwn(descriptor, "value") || descriptor.value !== null
+            && !["undefined", "string", "number", "boolean"].includes(typeof descriptor.value))) return false;
+          values[name] = descriptor?.value;
+        }
+        const category = String(values.category || values.site || values.kindLabel || "").trim();
+        const person = String(values.personName || "").trim() || String(values.seriesName || "").trim();
+        if (filters.category !== "all" && filters.category !== "__fanhao_media_kind_movie__" && category !== filters.category) continue;
+        if (filters.person !== "all" && person !== filters.person) continue;
+        count++;
+      }
+    } catch { return false; }
+    // Reading almost the entire result twice costs more than the original
+    // bulk publication. Small UI pages and large filtered categories qualify.
+    return count > IMAGE_QUERY_CACHE_MAX_ROWS && Math.max(0, Math.min(limit, count - offset)) <= count / 2;
   }
 
   function normalizePhotoLibraryView(value) {

@@ -109,7 +109,7 @@ test("a schema upgrade immediately before the read snapshot is rejected without 
   DatabaseSync.prototype.exec = function(statement, ...args) {
     if (armed && statement === "BEGIN") {
       armed = false;
-      sql(dbPath, db => db.prepare("UPDATE novel_meta SET value = '6' WHERE key = 'schema_version'").run());
+      sql(dbPath, db => db.prepare("UPDATE novel_meta SET value = '7' WHERE key = 'schema_version'").run());
     }
     return original.call(this, statement, ...args);
   };
@@ -323,11 +323,11 @@ for (const fault of ["identity", "future"]) test(`Python refuses ${fault} before
 });
 
 const mutants = [
-  { name: "replace UUID on every initialization", test: "new empty library", edits: [['if (existingIdentity && Number(metaValue(db, "schema_version")) === 5) return;', ""], ["if (!existingIdentity) {", "if (true) {"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]] },
+  { name: "replace UUID on every initialization", test: "new empty library", edits: [['if (existingIdentity && Number(metaValue(db, "schema_version")) === 6) return;', ""], ["if (existingIdentity && lockedVersion >= 5) {", "if (false) {"], ["if (!existingIdentity) {", "if (true) {"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]] },
   { name: "book DTO omits realm", test: "every public book", edits: [['...(sourceRealm ? { sourceRealm } : {}),', "/* no realm */"]] },
   { name: "progress ignores realm precondition", test: "wrong realm cannot write", edits: [["if (body.sourceRealm !== undefined && body.sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },
   { name: "delete ignores realm precondition", test: "wrong realm cannot delete", edits: [["if (sourceRealm !== undefined && sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },
-  { name: "future-version protection removed", test: "future schema is refused", edits: [['if (version > 5) throw new Error("小说库来自更新版本，当前程序不能修改");', "/* no future-version guard */"]] }
+  { name: "future-version protection removed", test: "future schema is refused", edits: [['if (version > 6) throw new Error("小说库来自更新版本，当前程序不能修改");', "/* no future-version guard */"]] }
 ];
 
 let passed = 0, negatives = 0;
@@ -360,7 +360,7 @@ try {
     negatives++; console.log(`CONTROL rejected ${mutant.name}`);
   }
   let alteredPython = scannerSource;
-  for (const [from, to] of [["if not identity:\n", "if True:\n"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]]) {
+  for (const [from, to] of [["if version and int(version[0] or 0) == 6:", "if False:"], ["if version and int(version[0] or 0) >= 5:", "if False:"], ["if not identity:\n", "if True:\n"], ["ON CONFLICT(key) DO NOTHING", "ON CONFLICT(key) DO UPDATE SET value = excluded.value"]]) {
     // Preserve the working tree's native newline style when constructing a mutant.
     const needle = from.includes("\n") && alteredPython.includes("\r\n") ? from.replaceAll("\n", "\r\n") : from;
     const replacement = to.includes("\n") && alteredPython.includes("\r\n") ? to.replaceAll("\n", "\r\n") : to;

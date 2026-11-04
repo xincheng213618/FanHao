@@ -1,27 +1,27 @@
-import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-22080e82f167";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-eb78be0b425d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { absoluteUrl } from "../../js/image.js?v=assets-22080e82f167";
+import { absoluteUrl } from "../../js/image.js?v=assets-eb78be0b425d";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-22080e82f167";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-22080e82f167";
-import { createMusicSheets } from "./music-sheets.js?v=assets-22080e82f167";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-22080e82f167";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-22080e82f167";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-22080e82f167";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-22080e82f167";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-22080e82f167";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-22080e82f167";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-22080e82f167";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-22080e82f167";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-22080e82f167";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-22080e82f167";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-eb78be0b425d";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-eb78be0b425d";
+import { createMusicSheets } from "./music-sheets.js?v=assets-eb78be0b425d";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-eb78be0b425d";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-eb78be0b425d";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-eb78be0b425d";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-eb78be0b425d";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-eb78be0b425d";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-eb78be0b425d";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-eb78be0b425d";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-eb78be0b425d";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-eb78be0b425d";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-eb78be0b425d";
 import { createMusicControlFocus } from "./music-control-focus.js";
-import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-22080e82f167";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-22080e82f167";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-22080e82f167";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-22080e82f167";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-22080e82f167";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-22080e82f167";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-eb78be0b425d";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-eb78be0b425d";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-eb78be0b425d";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-eb78be0b425d";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-eb78be0b425d";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-eb78be0b425d";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -80,9 +80,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-22080e82f167";
+} from "./music-state.js?v=assets-eb78be0b425d";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-22080e82f167";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-eb78be0b425d";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -217,6 +217,7 @@ export function createMusicViews(deps) {
   let lyricRaf = 0;
   let progressBindings = [];
   const mountedTrackLists = new WeakMap();
+  let mountedQueueList = null;
   let playbackRowsGeneration = 0;
   let playbackRowsKey = "";
   let currentLyricIndex = -1;
@@ -237,6 +238,7 @@ export function createMusicViews(deps) {
   let moduleActive = false;
   let musicRenderGeneration = 0;
   let playlistMutationGeneration = 0;
+  const playlistOrderWrites = new Map();
   let openTrackGeneration = 0;
   let pendingTrackSelection = 0;
   const trackPreferenceBindings = new WeakMap();
@@ -1119,6 +1121,7 @@ export function createMusicViews(deps) {
     currentLyricIndex = -1;
     if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
     lyricRaf = 0;
+    mountedQueueList = null;
     els.viewContent.innerHTML = "";
     const shell = document.createElement("section");
     const searchFocused = Boolean(state.searchOpen || state.query);
@@ -3588,7 +3591,13 @@ export function createMusicViews(deps) {
       && els.viewContent.querySelector(".music-mobile-full-player .music-mobile-queue-sheet") === sheet;
     const dismiss = origin => closeQueueSheet(origin, sheet);
     const close = symbolButton("close", () => dismiss(close), false, "ghost music-mobile-sheet-close", "关闭队列");
-    head.append(heading, close);
+    const status = document.createElement("small");
+    status.className = "music-mobile-queue-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.textContent = state.status;
+    status.hidden = !state.status;
+    head.append(heading, close, status);
     attachSheetDismissSwipe(head, isCurrent, dismiss);
 
     const toolbar = document.createElement("div");
@@ -3619,6 +3628,10 @@ export function createMusicViews(deps) {
 
     const list = document.createElement("div");
     list.className = "music-mobile-queue-list";
+    const sourceUrl = getActiveUrl(), accountOwner = captureAccountOwner(sourceUrl), generation = musicRenderGeneration;
+    mountedQueueList = { list, status, count: meta, save, manage, clear, close, queue: state.queue,
+      isCurrent: () => isCurrent() && getActiveUrl() === sourceUrl
+        && isAccountOwnerCurrent(accountOwner) && musicRenderGeneration === generation };
     if (!state.queue.length) {
       list.append(messageBox("队列里还没有歌曲"));
     } else {
@@ -3684,15 +3697,21 @@ export function createMusicViews(deps) {
     const active = state.current?.id === track.id;
     const row = document.createElement("div");
     row.className = `music-mobile-queue-item${active ? " active" : ""}`;
+    row.dataset.trackId = String(track.id || "");
+    const mounted = mountedQueueList;
+    const isCurrent = () => {
+      const position = state.queue.indexOf(track);
+      return mounted === mountedQueueList && mounted?.isCurrent() && mounted.queue === state.queue
+        && position >= 0 && mounted.list.children[position] === row && state.queue[position] === track;
+    };
     row.setAttribute("role", "button");
     row.setAttribute("tabindex", "0");
     row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
     const number = document.createElement("span");
     number.className = "music-mobile-queue-index";
+    number.setAttribute("aria-hidden", "true");
     if (active && state.playing) {
       number.append(renderPlayingBars());
-    } else {
-      number.textContent = String(index + 1).padStart(2, "0");
     }
     if (active) row.dataset.current = "true";
     const text = document.createElement("span");
@@ -3710,12 +3729,12 @@ export function createMusicViews(deps) {
     if (state.queueManageOpen) {
       row.classList.add("is-managing");
       actions.append(
-        queueActionButton("arrow-upward", "上移", () => moveQueueTrack(track.id, -1), index <= 0),
-        queueActionButton("arrow-downward", "下移", () => moveQueueTrack(track.id, 1), index >= state.queue.length - 1),
-        queueActionButton("close", "移出队列", () => removeTrackFromQueue(track.id), active)
+        queueActionButton("arrow-upward", "上移", () => { if (isCurrent()) moveQueueTrack(track.id, -1); }, index <= 0),
+        queueActionButton("arrow-downward", "下移", () => { if (isCurrent()) moveQueueTrack(track.id, 1); }, index >= state.queue.length - 1),
+        queueActionButton("close", "移出队列", () => { if (isCurrent()) removeTrackFromQueue(track.id); }, active)
       );
     } else {
-      actions.append(queueActionButton("close", "移出队列", () => removeTrackFromQueue(track.id), active));
+      actions.append(queueActionButton("close", "移出队列", () => { if (isCurrent()) removeTrackFromQueue(track.id); }, active));
       const handle = document.createElement("img");
       handle.className = "music-mobile-queue-handle";
       handle.src = "./assets/icons/music-drag-handle.svg?v=20260730-music-palette-ui-42";
@@ -3725,7 +3744,8 @@ export function createMusicViews(deps) {
     }
     row.append(number, text, duration, actions);
     const play = () => {
-      if (active) {
+      if (!isCurrent()) return;
+      if (state.current?.id === track.id) {
         state.queueOpen = false;
         state.queueManageOpen = false;
         renderShell();
@@ -3735,6 +3755,7 @@ export function createMusicViews(deps) {
     };
     row.addEventListener("click", play);
     row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       play();
@@ -3746,7 +3767,7 @@ export function createMusicViews(deps) {
     return symbolButton(name, (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (disabled) return;
+      if (event.currentTarget.disabled) return;
       action();
     }, disabled, `music-mobile-queue-action${disabled ? " disabled" : ""}`, ariaLabel);
   }
@@ -5025,7 +5046,8 @@ export function createMusicViews(deps) {
   }
 
   function moveQueueTrack(trackId, direction) {
-    const previousQueue = [...(state.queue || [])];
+    if (!moduleActive || captureAccountOwner(getActiveUrl()).owner === "pending") return;
+    const previousQueue = state.queue || [];
     const queue = [...previousQueue];
     const index = queue.findIndex((item) => item.id === trackId);
     const nextIndex = index + direction;
@@ -5036,25 +5058,123 @@ export function createMusicViews(deps) {
     scheduleGaplessPreload();
     rememberPlaybackQueue();
     state.status = `已调整「${item.title || "歌曲"}」顺序`;
-    renderShell();
-    persistPlaylistQueueOrder(queue).catch((error) => {
-      state.queue = previousQueue;
+    if (!replaceMountedQueueOrder(previousQueue, { fromIndex: index, toIndex: nextIndex })) renderShell();
+    refreshQueueOrderStatus();
+    const request = captureQueueOrder(queue, previousQueue);
+    persistPlaylistQueueOrder(request).catch((error) => {
+      if (!request.isCurrent()) return;
+      state.queue = request.rollbackQueue;
       scheduleGaplessPreload();
       rememberPlaybackQueue();
       state.status = error?.message || "歌单顺序保存失败";
-      renderShell();
+      if (!replaceMountedQueueOrder(queue)) renderShell();
+      refreshQueueOrderStatus();
     });
   }
 
+  function replaceMountedQueueOrder(previousQueue, move = null) {
+    const mounted = mountedQueueList, queue = state.queue;
+    if (!mounted?.isCurrent() || mounted.queue !== previousQueue
+      || previousQueue.length !== queue.length || mounted.list.children.length !== queue.length) return false;
+    const indices = move ? [move.fromIndex, move.toIndex]
+      : queue.flatMap((track, index) => track !== previousQueue[index] ? [index] : []);
+    if (move && (!Number.isInteger(move.fromIndex) || !Number.isInteger(move.toIndex)
+      || Math.abs(move.fromIndex - move.toIndex) !== 1
+      || queue[move.fromIndex] !== previousQueue[move.toIndex] || queue[move.toIndex] !== previousQueue[move.fromIndex])) return false;
+    for (const index of indices) {
+      const row = mounted.list.children[index];
+      if (!row?.classList.contains("music-mobile-queue-item") || row.dataset.trackId !== String(previousQueue[index]?.id || "")) return false;
+    }
+    const focused = document.activeElement;
+    const focusedRow = indices.map(index => mounted.list.children[index]).find(row => row.contains(focused));
+    const focusId = focusedRow?.dataset.trackId;
+    const action = focused?.classList.contains("music-mobile-queue-action") ? focused.getAttribute("aria-label") : "";
+    const top = mounted.list.scrollTop;
+    let targetRow = null;
+    mounted.queue = queue;
+    for (const index of indices) {
+      const row = renderQueueItem(queue[index], index);
+      mounted.list.children[index].replaceWith(row);
+      if (row.dataset.trackId === focusId) targetRow = row;
+    }
+    if (targetRow) {
+      const requested = action ? targetRow.querySelector(`[aria-label="${action}"]`) : null;
+      const fallback = action ? targetRow.querySelector(action === "上移" ? '[aria-label="下移"]' : '[aria-label="上移"]') : null;
+      (requested && !requested.disabled ? requested : fallback && !fallback.disabled ? fallback : targetRow).focus({ preventScroll: true });
+    }
+    mounted.list.scrollTop = top;
+    return true;
+  }
+
+  function refreshQueueOrderStatus({ playlistChanged = false } = {}) {
+    if (els.viewMeta) els.viewMeta.textContent = state.status || musicMeta(state.data);
+    if (els.viewTitle) els.viewTitle.textContent = musicTitle();
+    const mounted = mountedQueueList;
+    if (mounted?.isCurrent()) {
+      mounted.status.textContent = state.status;
+      mounted.status.hidden = !state.status;
+    }
+    if (playlistChanged) {
+      const identity = els.viewContent?.querySelector(".music-mobile-playlist-hero .music-mobile-playlist-identity");
+      const playlist = selectedPlaylist() || state.playlist || {};
+      if (identity) {
+        identity.querySelector("strong").textContent = playlist.name || "未命名歌单";
+        identity.querySelector("small").textContent = `我的歌单 · ${formatNumber(playlist.trackCount ?? state.data?.tracks?.length ?? 0)} 首本地歌曲`;
+        identity.querySelector("em").textContent = playlist.description || "把喜欢的歌收在一起";
+      }
+    }
+  }
+
   function removeTrackFromQueue(trackId) {
-    if (!trackId || state.current?.id === trackId) return;
+    if (!moduleActive || captureAccountOwner(getActiveUrl()).owner === "pending" || !trackId || state.current?.id === trackId) return;
     const queue = state.queue || [];
-    const removed = queue.find((item) => item.id === trackId);
+    const index = queue.findIndex((item) => item.id === trackId);
+    if (index < 0) return;
+    const removed = queue[index];
     state.queue = queue.filter((item) => item.id !== trackId);
     scheduleGaplessPreload();
     rememberPlaybackQueue();
     state.status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
-    renderShell();
+    if (!removeMountedQueueTrack(queue, index)) renderShell();
+    refreshQueueOrderStatus();
+  }
+
+  function removeMountedQueueTrack(previousQueue, index) {
+    const mounted = mountedQueueList, queue = state.queue;
+    // Without a selected song the player previews queue[0]. A changed preview
+    // needs the existing full render to rebind its track-specific actions.
+    if (!mounted?.isCurrent() || mounted.queue !== previousQueue || (!state.current && index === 0)
+      || queue.length !== previousQueue.length - 1 || mounted.list.children.length !== previousQueue.length) return false;
+    const removed = mounted.list.children[index], focused = document.activeElement;
+    if (!removed?.classList.contains("music-mobile-queue-item") || removed.dataset.trackId !== String(previousQueue[index]?.id || "")) return false;
+    const restoreFocus = removed.contains(focused);
+    const action = focused?.classList.contains("music-mobile-queue-action") ? focused.getAttribute("aria-label") : "";
+    const top = mounted.list.scrollTop;
+    removed.remove();
+    mounted.queue = queue;
+    if (!queue.length) mounted.list.append(messageBox("队列里还没有歌曲"));
+    const first = queue.length ? mounted.list.children[0] : null, last = queue.length ? mounted.list.children[queue.length - 1] : null;
+    for (const row of new Set([first, last])) {
+      if (!row) continue;
+      for (const [label, disabled] of [["上移", row === first], ["下移", row === last]]) {
+        const button = row.querySelector(`[aria-label="${label}"]`);
+        if (button) { button.disabled = disabled; button.classList.toggle("disabled", disabled); }
+      }
+    }
+    mounted.count.textContent = `${formatNumber(queue.length)} 首`;
+    mounted.save.disabled = !queue.length;
+    mounted.manage.disabled = queue.length <= 1;
+    mounted.clear.disabled = queueRemovableCount() <= 0;
+    const toggle = els.viewContent?.querySelector(".music-mobile-full-queue");
+    if (toggle) toggle.disabled = !queue.length;
+    if (restoreFocus) {
+      const row = mounted.list.children[Math.min(index, queue.length - 1)];
+      const requested = action ? row?.querySelector(`[aria-label="${action}"]`) : null;
+      const fallback = action ? [...(row?.querySelectorAll(".music-mobile-queue-action") || [])].find(button => !button.disabled) : null;
+      (requested && !requested.disabled ? requested : fallback || row || mounted.close).focus({ preventScroll: true });
+    }
+    mounted.list.scrollTop = top;
+    return true;
   }
 
   function clearQueueExceptCurrent() {
@@ -5081,18 +5201,79 @@ export function createMusicViews(deps) {
     return uniqueTrackIds(state.queue || []);
   }
 
-  async function persistPlaylistQueueOrder(queue = state.queue || []) {
+  function captureQueueOrder(queue, rollbackQueue) {
+    const sourceUrl = getActiveUrl(), accountOwner = captureAccountOwner(sourceUrl);
+    const generation = musicRenderGeneration, mutation = playlistMutationGeneration;
+    const selection = openTrackGeneration, session = playReportSession;
+    const route = JSON.stringify(musicRouteParams());
+    return { queue, rollbackQueue, sourceUrl, accountOwner,
+      canSend: () => moduleActive && getActiveUrl() === sourceUrl
+        && musicRenderGeneration === generation && isAccountOwnerCurrent(accountOwner),
+      isCurrent: () => moduleActive && state.queue === queue && getActiveUrl() === sourceUrl
+        && isAccountOwnerCurrent(accountOwner) && musicRenderGeneration === generation
+        && playlistMutationGeneration === mutation && openTrackGeneration === selection
+        && playReportSession === session && JSON.stringify(musicRouteParams()) === route };
+  }
+
+  function restoreQueueOrder(confirmed, members) {
+    const current = new Map(members.map(track => [track.id, track]));
+    const known = new Set(confirmed.map(track => track.id));
+    const ordered = confirmed.filter(track => current.has(track.id)).map(track => current.get(track.id));
+    let index = 0;
+    // Restore ordering only: retain current track objects and new members' slots.
+    return members.map(track => known.has(track.id) ? ordered[index++] : track);
+  }
+
+  function writePlaylistQueueOrder(playlistId, trackIds, request) {
+    const { sourceUrl, accountOwner } = request;
+    const key = JSON.stringify([sourceUrl, accountOwner.owner, accountOwner.revision, playlistId]);
+    let writes = playlistOrderWrites.get(key);
+    if (!writes) {
+      if (playlistOrderWrites.size >= 8) return Promise.reject(new Error("歌单排序保存繁忙，请稍后重试"));
+      writes = { active: null, pending: null, confirmed: request.rollbackQueue };
+      playlistOrderWrites.set(key, writes);
+    }
+    return new Promise((resolve, reject) => {
+      const job = { request, trackIds, resolve, reject };
+      if (writes.active) {
+        // A full order supersedes earlier unsent adjustments, never an accepted PUT.
+        writes.pending?.resolve(null);
+        writes.pending = job;
+      } else void send(job);
+    });
+
+    async function send(job) {
+      writes.active = job;
+      try {
+        if (!job.request.canSend()) throw new Error("页面或账号已切换，请重新操作");
+        const data = await fetchJson(sourceUrl, `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/order`, {
+          method: "PUT", body: { trackIds: job.trackIds }, timeoutMs: 0, accountScope: accountOwner
+        });
+        writes.confirmed = job.request.queue;
+        job.resolve(data);
+      } catch (error) {
+        job.request.rollbackQueue = restoreQueueOrder(writes.confirmed, job.request.rollbackQueue);
+        job.reject(error);
+      } finally {
+        const next = writes.pending;
+        writes.pending = null;
+        if (next) void send(next);
+        else playlistOrderWrites.delete(key);
+      }
+    }
+  }
+
+  async function persistPlaylistQueueOrder(request) {
     const playlistId = state.mode === "playlist" ? String(state.playlistId || "").trim() : "";
     if (!playlistId) return null;
-    const trackIds = uniqueTrackIds(queue);
+    const trackIds = uniqueTrackIds(request.queue);
     if (!trackIds.length) return null;
-    const data = await putJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/order`, {
-      trackIds
-    });
+    const data = await writePlaylistQueueOrder(playlistId, trackIds, request);
+    if (!data || !request.isCurrent()) return data;
     state.playlist = data.playlist || state.playlist;
     if (state.data?.playlist?.id === playlistId) state.data.playlist = data.playlist || state.data.playlist;
     state.status = "歌单顺序已保存";
-    renderShell();
+    refreshQueueOrderStatus({ playlistChanged: true });
     return data;
   }
 
@@ -6048,6 +6229,7 @@ export function createMusicViews(deps) {
 
   function deactivate() {
     controlFocus.cancel();
+    mountedQueueList = null;
     miniFullscreenSession = null;
     playbackSettingsSession = null;
     routeControlFocus = null;

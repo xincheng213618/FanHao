@@ -2763,6 +2763,15 @@
   font-weight: 850;
 }
 
+.music-mobile-queue-status {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-height: 4.5em;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .music-mobile-queue-head-actions {
   display: flex;
   align-items: center;
@@ -2822,6 +2831,7 @@
 }
 
 .music-mobile-queue-list {
+  counter-reset: music-queue-position;
   display: grid;
   align-content: start;
   gap: 2px;
@@ -2836,6 +2846,7 @@
 }
 
 .music-mobile-queue-item {
+  counter-increment: music-queue-position;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 42px auto;
   gap: 8px;
@@ -2863,6 +2874,10 @@
 
 .music-mobile-queue-item.active .music-mobile-queue-index {
   color: var(--green);
+}
+
+.music-mobile-queue-index:empty::before {
+  content: counter(music-queue-position, decimal-leading-zero);
 }
 
 .music-mobile-queue-actions {

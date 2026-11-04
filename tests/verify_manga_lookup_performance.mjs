@@ -37,7 +37,7 @@ const diagnose = process.argv.includes("--diagnose");
 const legacyRef = "1f6ddf213f0fbab4d417fdf61636b957d1909338";
 const factory = legacy ? await legacyFactory() : forceUncachedFirstImages ? (await uncachedFirstImageModules()).factory : currentFactory;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-lookups-"));
-const collector = fs.readFileSync(path.resolve(import.meta.dirname, "manga_collector.py"), "utf8");
+const collector = fs.readFileSync(path.resolve(import.meta.dirname, "../tools/manga_collector.py"), "utf8");
 const schema = /    schema = """([\s\S]*?)    """/.exec(collector)?.[1];
 assert.ok(schema?.includes("CREATE TABLE IF NOT EXISTS manga_comics"), "use the actual collector schema");
 const ownedDirectories = [];
@@ -167,7 +167,8 @@ async function uncachedFirstImageModules() {
   const sourcePath = path.resolve(import.meta.dirname, "../src/modules/photos/server/manga-service.js");
   const reader = fs.readFileSync(readerPath, "utf8").replaceAll("\r\n", "\n");
   const start = reader.indexOf("  function firstImage(");
-  const end = reader.indexOf("\n  return { chapter", start);
+  const nextMethod = reader.indexOf("\n  function ", start + 1);
+  const end = nextMethod >= 0 ? nextMethod : reader.indexOf("\n  return { chapter", start);
   assert(start >= 0 && end > start, "locate the complete current firstImage method");
   const actual = reader.slice(start, end).trimEnd();
   const restored = reader.replace(actual, ORIGINAL_FIRST_IMAGE);
@@ -183,6 +184,10 @@ async function uncachedFirstImageModules() {
 async function verifyFirstImageStatements() {
   const fixture = fresh("chapter-statements", { wal: true });
   const dir = addBook(fixture, 1);
+  // Exercise the per-chapter compatibility lane. Canonical collector tables
+  // use the independent detail batch gate; extra columns keep firstImage()
+  // responsible for this complete response and its existing compile budget.
+  fixture.db.exec("ALTER TABLE manga_images ADD COLUMN fixture_statement_lane TEXT");
   fixture.db.exec("BEGIN IMMEDIATE");
   try {
     const chapter = fixture.db.prepare("INSERT INTO manga_chapters(cache_key,chapter_index,title,image_count,downloaded_count) VALUES (?,?,?,30,1)");
@@ -208,8 +213,8 @@ async function verifyFirstImageStatements() {
   assert(initial.chapters[28].coverUrl.endsWith("/29/29"));
   const before = await measure("uncached-1000-chapter-detail", () => previousService.publicDetail(dir));
   const after = await measure("reused-1000-chapter-detail", () => fixture.service.publicDetail(dir));
-  assert.equal(before.prepares, 1005, "the old reader compiles each cover query");
-  assert.equal(after.prepares, 4, "firstImage statement budget must leave only four unrelated SELECT compilations");
+  assert.equal(before.prepares - after.prepares, 1001, "the old firstImage mechanism compiles the comic cover and all 1000 chapter covers");
+  assert(after.prepares <= 3, "firstImage reuse leaves at most three unrelated point/directory SELECT compilations");
   assert.equal(after.sqlReads, before.sqlReads, "prepared statements must not cache row results");
   assert.equal(after.statCalls, before.statCalls, "prepared statements must retain every source-file check");
 
@@ -257,14 +262,22 @@ async function repeatedChapterSummaryModules() {
   const servicePath = path.resolve(import.meta.dirname, "../src/modules/photos/server/manga-service.js");
   const routesPath = path.resolve(import.meta.dirname, "../src/modules/photos/server/routes.js");
   const service = fs.readFileSync(servicePath, "utf8").replaceAll("\r\n", "\n");
+  // Keep this older gate sensitive to duplicate summaries: the file-input
+  // cache has its own production-factory suite and would hide both HTML reads.
+  const cacheBinding = "const metadataInputs = createMangaMetadataInputCache();";
+  assert.equal(service.split(cacheBinding).length, 2);
+  const uncachedService = service.replace(cacheBinding, "const metadataInputs = readMangaMetadataInputs;");
   const currentChapter = "  function publicChapter(cacheDir, requestedIndex, manga = publicSummary(cacheDir)) {";
   const oldChapter = "  function publicChapter(cacheDir, requestedIndex) {\n    const manga = publicSummary(cacheDir);";
   assert.equal(service.split(currentChapter).length, 2);
-  const previousService = service.replace(currentChapter, oldChapter);
-  assert.equal(previousService.replace(oldChapter, currentChapter), service, "the service oracle restores only the former chapter signature and summary call");
+  const previousService = uncachedService.replace(currentChapter, oldChapter);
+  assert.equal(previousService.replace(oldChapter, currentChapter), uncachedService, "both sides bypass only file-input reuse; the oracle restores only the former chapter signature and summary call");
   const moduleSource = previousService.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
     "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href));
   const previousFactory = (await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"))).createMangaService;
+  const uncachedModule = uncachedService.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
+    "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href));
+  const uncachedFactory = (await import("data:text/javascript;base64," + Buffer.from(uncachedModule).toString("base64"))).createMangaService;
   const route = fs.readFileSync(routesPath, "utf8").replaceAll("\r\n", "\n");
   const currentCall = "    const comic = cacheDir ? mangaService.publicSummary(cacheDir) : null;\n    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic) : null;";
   const oldCall = "    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;";
@@ -273,7 +286,7 @@ async function repeatedChapterSummaryModules() {
   assert.equal(route.split(currentCall).length, 2); assert.equal(route.split(currentSend).length, 2);
   const previousRoute = route.replace(currentCall, oldCall).replace(currentSend, oldSend);
   assert.equal(previousRoute.replace(oldCall, currentCall).replace(oldSend, currentSend), route, "the route oracle restores only repeated summary work");
-  return { factory: previousFactory, route: (await import("data:text/javascript;base64," + Buffer.from(previousRoute).toString("base64"))).routePhotosApi };
+  return { factory: previousFactory, uncachedFactory, route: (await import("data:text/javascript;base64," + Buffer.from(previousRoute).toString("base64"))).routePhotosApi };
 }
 
 async function verifyChapterSummaryReuse() {
@@ -346,7 +359,7 @@ async function verifyChapterSummaryReuse() {
     }
     const options = { root: fixture.root, databasePath: source === "sqlite" ? fixture.dbPath : "", mimeTypes: {}, normalizeExt: path.extname,
       safeStat(file) { try { return fs.statSync(file); } catch { return null; } } };
-    fixture.service = currentFactory(options); fixture.previous = previous.factory(options);
+    fixture.service = previous.uncachedFactory(options); fixture.previous = previous.factory(options);
     fixture.id = fixture.previous.publicSummary(fixture.dir).id;
     assert.equal(fixture.service.publicSummary(fixture.dir).id, fixture.id);
     for (const index of [1, fixture.chapters[Math.floor(total / 2)].index, fixture.chapters.at(-1).index, 2, "invalid"]) await compare(fixture, index);
@@ -362,7 +375,7 @@ async function verifyChapterSummaryReuse() {
     assert.equal(after.htmlReads, 1, "negative control: a chapter route must read catalog HTML only once");
     assert.equal(before.htmlReads, 2, "the old oracle demonstrates the repeated summary");
     assert.equal(after.jsonReads, before.jsonReads - (source === "sqlite" ? 1 : 4));
-    assert.equal(after.sqlReads, before.sqlReads - (source === "sqlite" ? 3 : 0));
+    assert.equal(after.sqlReads, before.sqlReads - (source === "sqlite" ? 2 : 0), "a reused summary saves its single comic row and fallback cover read");
     assert(after.metadataBytes < before.metadataBytes);
     console.log(JSON.stringify({ check: "manga-chapter-summary-reuse", source, chapters: total,
       beforeMedianMs: +median(beforeSamples).toFixed(3), afterMedianMs: +median(afterSamples).toFixed(3),
@@ -393,7 +406,7 @@ async function verifyChapterSummaryReuse() {
   });
   assert.deepEqual(events, ["lookup", "summary", "chapter", "cache", "send"], "summary remains before chapter reads, using the same canonical identity within one request");
   console.log(JSON.stringify({ check: "manga-chapter-summary-contract", completeResponseOracles: oracles, standaloneDefaults: true,
-    sparseAndMissingChapters: true, missingDirectoryAndManifest: true, malformedJson: true, externalWrites: true, responseIsolation: true, identityAndOrder: true, noPersistentCache: true }));
+    sparseAndMissingChapters: true, missingDirectoryAndManifest: true, malformedJson: true, externalWrites: true, responseIsolation: true, identityAndOrder: true, chapterSummaryReuseIsRequestLocal: true, fileInputCacheBypassedForThisGate: true }));
   checks++;
 }
 

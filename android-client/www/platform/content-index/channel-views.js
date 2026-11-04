@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-22080e82f167";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-22080e82f167";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-22080e82f167";
+import { fetchJson } from "../../js/api.js?v=assets-eb78be0b425d";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-eb78be0b425d";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-eb78be0b425d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -455,6 +455,7 @@ export function createChannelViews(context) {
   let channelRequestGeneration = 0;
   let channelRequestController = null;
   let channelRenderingKey = "";
+  let channelRenderScope = null;
   let mountedChannelList = null;
   let channelMetaHeader = null;
   let mangaAddOpen = false;
@@ -481,6 +482,76 @@ export function createChannelViews(context) {
   const mangaUpdateJobs = new Map();
   const mangaUpdatePolls = new Map();
   let mangaReaderProgressTracker = null;
+
+  function ownsChannelMount(mounted) {
+    return Boolean(mounted && mounted === mountedChannelList && !mounted.life.signal.aborted
+      && mounted.list?.isConnected && mounted.list.parentElement === els.viewContent
+      && mounted.key === channelRenderingKey && mounted.activeUrl === getActiveUrl()
+      && isAccountOwnerCurrent(mounted.accountScope) && mounted.guard());
+  }
+
+  function retireChannelMount(mounted = mountedChannelList) {
+    if (!mounted || mounted !== mountedChannelList) return;
+    mountedChannelList = null;
+    mounted.life.abort();
+    mounted.moreLife?.abort();
+    mounted.guard.signal?.removeEventListener("abort", mounted.onAbort);
+    mounted.list = mounted.more = null;
+    mounted.rows = mounted.controls = [];
+    for (const observer of previewImageObservers.values()) observer.disconnect();
+    previewImageObservers = new Map();
+  }
+
+  function preserveChannelMount(mounted, retain = true) {
+    if (!retain) {
+      if (mounted?.handoff) {
+        mounted.handoff = false;
+        if (!mounted.guard()) retireChannelMount(mounted);
+      }
+      return false;
+    }
+    if (!ownsChannelMount(mounted)) return false;
+    mounted.handoff = true;
+    return true;
+  }
+
+  function adoptChannelMount(scope) {
+    const mounted = mountedChannelList;
+    if (!mounted) return;
+    if (mounted.key !== scope.key || mounted.activeUrl !== scope.activeUrl || !isAccountOwnerCurrent(mounted.accountScope)
+      || !mounted.list?.isConnected || !mounted.handoff && !mounted.guard()) {
+      retireChannelMount(mounted);
+      return;
+    }
+    mounted.handoff = false;
+    mounted.guard.signal?.removeEventListener("abort", mounted.onAbort);
+    mounted.guard = scope.guard;
+    mounted.guard.signal?.addEventListener("abort", mounted.onAbort, { once: true });
+  }
+
+  function bindChannelControls(node, mounted) {
+    const guard = (event) => {
+      if (ownsChannelMount(mounted) && mounted.controls.includes(node) && node.parentElement === els.viewContent) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    node.addEventListener("click", guard, { capture: true });
+    node.addEventListener("change", guard, { capture: true });
+  }
+
+  function channelCardOptions(mounted, index) {
+    return { index, isCurrent: (node) => ownsChannelMount(mounted) && mounted.nodes.has(node) && mounted.list.contains(node) };
+  }
+
+  function restoreChannelMoreFocus(mounted) {
+    if (!mounted?.restoreMoreFocus || !ownsChannelMount(mounted)) return;
+    if (document.activeElement === document.body) {
+      const target = mounted.more || mounted.rows.at(-1)?.node;
+      if (!target?.isConnected || target.disabled) return;
+      target.focus({ preventScroll: true });
+    }
+    mounted.restoreMoreFocus = false;
+  }
 
   function isMangaTaskScopeCurrent(scope) {
     return Boolean(scope && scope === mangaTaskScope && getActiveUrl() === scope.activeUrl
@@ -556,6 +627,8 @@ export function createChannelViews(context) {
     }
     const pageKey = channelPageKey(normalizedMode, filters, activeUrl);
     channelRenderingKey = pageKey;
+    channelRenderScope = { key: pageKey, activeUrl, accountScope: startedAccount, guard: isActive };
+    adoptChannelMount(channelRenderScope);
     const currentPage = channelPageState?.key === pageKey ? channelPageState.data : null;
     const retryPage = currentPage && channelPageState.retry?.targetLimit === limit ? channelPageState.retry : null;
     const basePage = retryPage ? retryPage.base : currentPage;
@@ -619,6 +692,7 @@ export function createChannelViews(context) {
           if (!prepared || prepared.owner === "pending" || !isAccountOwnerCurrent(prepared)) throw new Error("请先确认登录账号");
         }
         accountScope = prepared;
+        channelRenderScope.accountScope = prepared;
         // Capture once before cache/page awaits. Merged prefixes lose the API
         // payload's WeakMap owner and must not adopt a later login or cache epoch.
         cacheFence = captureCachedJsonFence(activeUrl, accountScope);
@@ -670,7 +744,7 @@ export function createChannelViews(context) {
           retry: { offset, limit: requestLimit, targetLimit: limit, base: basePage } };
         renderChannelData(normalizedMode, displayedData, displayedCache, {
           status: "error",
-          retry: () => isCurrent() ? renderCurrentViewPreservingScroll() : undefined
+          retry: (options = {}) => isCurrent() ? renderCurrentViewPreservingScroll(options) : undefined
         });
         return;
       }
@@ -858,6 +932,9 @@ export function createChannelViews(context) {
     const query = String(data.query || "").trim();
     const photoView = String(data.photoView || "") === "collections" ? "collections" : "albums";
     const seriesKey = String(data.seriesKey || "").trim();
+    const restoreMoreFocus = Boolean(mountedChannelList?.restoreMoreFocus
+      || mountedChannelList?.more && (document.activeElement === mountedChannelList.more
+        || document.activeElement === document.body && mountedChannelList.focusedMore === mountedChannelList.more));
     resetPreviewImageObserver();
     const retainedActions = mode === "manga" && retainMangaLibraryActions();
     if (!retainedActions) els.viewContent.innerHTML = "";
@@ -876,25 +953,41 @@ export function createChannelViews(context) {
       return;
     }
 
+    const keys = items.map(channelItemKey);
+    const mounted = mode !== "manga" && photoView !== "collections" && keys.every(Boolean) && new Set(keys).size === keys.length
+      ? { ...channelRenderScope, mode, life: new AbortController(), moreLife: null, more: null, focusedMore: null,
+        restoreMoreFocus, handoff: false, nodes: new WeakSet(), list: null, controls, rows: [],
+        layout: channelListLayout(mode, data), controlsSignature: channelControlsSignature(data) } : null;
+    const createCard = (item, index) => {
+      const node = createChannelCard(mode, item, mounted ? channelCardOptions(mounted, index) : { index });
+      mounted?.nodes.add(node);
+      return node;
+    };
     let list;
     if (mode === "photo" && photoView !== "collections") {
-      list = createPhotoMasonryList(items);
+      list = createPhotoMasonryList(items, createCard);
     } else {
       const grid = document.createElement("div");
       const mediaLayout = ["movie", "tv", "anime", "media"].includes(mode) ? (seriesKey || data.tvView === "episodes" ? " media-episode-list" : " media-poster-grid") : "";
       grid.className = `channel-list ${mode}-list${mode === "photo" ? " photo-catalog-grid" : ""}${mediaLayout}`;
-      items.forEach((item, index) => grid.append(createChannelCard(mode, item, { index })));
+      items.forEach((item, index) => grid.append(createCard(item, index)));
       list = grid;
     }
     els.viewContent.append(list);
-    const keys = items.map(channelItemKey);
-    if (mode !== "manga" && photoView !== "collections" && keys.every(Boolean) && new Set(keys).size === keys.length) {
+    if (mounted) {
       const nodes = mode === "photo"
         ? items.map((_item, index) => list.children[index % list.children.length].children[Math.floor(index / list.children.length)])
         : [...list.children];
-      mountedChannelList = { key: channelRenderingKey, mode, list, controls,
-        layout: channelListLayout(mode, data), controlsSignature: channelControlsSignature(data),
-        rows: items.map((item, index) => ({ key: keys[index], item, signature: JSON.stringify(item), node: nodes[index] })) };
+      mounted.list = list;
+      mounted.rows = items.map((item, index) => ({ key: keys[index], item, signature: JSON.stringify(item), node: nodes[index] }));
+      mounted.onAbort = () => { if (!mounted.handoff) retireChannelMount(mounted); };
+      mounted.guard.signal?.addEventListener("abort", mounted.onAbort, { once: true });
+      mountedChannelList = mounted;
+      for (const node of controls) bindChannelControls(node, mounted);
+      document.addEventListener("focusin", (event) => {
+        mounted.focusedMore = event.target === mounted.more ? event.target : null;
+        if (!mounted.focusedMore) mounted.restoreMoreFocus = false;
+      }, { signal: mounted.life.signal });
     }
     renderChannelPaging(mode, data, paging, pendingCategoryGroups);
   }
@@ -930,7 +1023,7 @@ export function createChannelViews(context) {
   function refreshChannelList(mode, data, paging = {}) {
     const mounted = mountedChannelList;
     const items = data.items || [];
-    if (!mounted || mounted.key !== channelRenderingKey || mounted.mode !== mode || !mounted.list.isConnected
+    if (!ownsChannelMount(mounted) || mounted.mode !== mode
       || mounted.layout !== channelListLayout(mode, data) || items.length < mounted.rows.length) return false;
     if (mode === "photo" && mounted.list.children.length !== 2) return false;
     const keys = items.map(channelItemKey);
@@ -942,8 +1035,10 @@ export function createChannelViews(context) {
       if (previous?.item === items[index]) continue;
       const signature = JSON.stringify(items[index]);
       if (previous?.signature === signature) { previous.item = items[index]; continue; }
-      const node = createChannelCard(mode, items[index], { index });
+      const node = createChannelCard(mode, items[index], channelCardOptions(mounted, index));
+      mounted.nodes.add(node);
       if (previous) {
+        mounted.nodes.delete(previous.node);
         const focused = previous.node === document.activeElement || previous.node.contains(document.activeElement);
         for (const target of previous.node.querySelectorAll("[data-preview-url]")) {
           for (const observer of previewImageObservers.values()) observer.unobserve(target);
@@ -968,6 +1063,7 @@ export function createChannelViews(context) {
         replacement?.focus({ preventScroll: true });
       }
       mounted.controls = controls;
+      for (const node of controls) bindChannelControls(node, mounted);
       mounted.controlsSignature = controlsSignature;
     }
     renderChannelPaging(mode, data, paging);
@@ -975,9 +1071,17 @@ export function createChannelViews(context) {
   }
 
   function renderChannelPaging(mode, data, paging = {}, pendingCategoryGroups = false) {
+    const mounted = ownsChannelMount(mountedChannelList) ? mountedChannelList : null;
+    if (mounted) {
+      mounted.restoreMoreFocus ||= Boolean(mounted.more && (document.activeElement === mounted.more
+        || document.activeElement === document.body && mounted.focusedMore === mounted.more));
+      mounted.moreLife?.abort();
+      mounted.moreLife = new AbortController();
+    }
     els.viewContent.querySelectorAll(":scope > .channel-more").forEach(node => node.remove());
     const items = data.items || [];
     const total = Number(data.total ?? items.length);
+    let more = null;
     if (paging.status === "loading") {
       const pending = document.createElement("button");
       pending.type = "button";
@@ -986,13 +1090,24 @@ export function createChannelViews(context) {
       pending.setAttribute("aria-live", "polite");
       pending.textContent = "正在接着加载";
       els.viewContent.append(pending);
+      more = pending;
     } else if (paging.status === "error") {
-      els.viewContent.append(createLoadMoreButton("加载失败，点击重试", paging.retry, { auto: false }));
+      more = createLoadMoreButton("加载失败，点击重试", () => {
+        if (mounted && (!ownsChannelMount(mounted) || mounted.more !== more)) return;
+        return paging.retry({ preserveChannelList: mounted ? (retain) => preserveChannelMount(mounted, retain) : null });
+      }, { auto: false, signal: mounted?.moreLife.signal });
+      els.viewContent.append(more);
     } else if ((data.hasMore !== false && Number(data.rawLoaded ?? items.length) < total) || pendingCategoryGroups || (mode === "photo" && data.photoView === "collections" && items.length < total)) {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(items.length)} / ${formatNumber(total)}`, () => {
+      more = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(items.length)} / ${formatNumber(total)}`, () => {
+        if (mounted && (!ownsChannelMount(mounted) || mounted.more !== more)) return;
         increaseChannelLimit(48);
-        return renderCurrentViewPreservingScroll();
-      }, { requireScrollIntent: mode === "photo" }));
+        return renderCurrentViewPreservingScroll({ preserveChannelList: mounted ? (retain) => preserveChannelMount(mounted, retain) : null });
+      }, { requireScrollIntent: mode === "photo", signal: mounted?.moreLife.signal });
+      els.viewContent.append(more);
+    }
+    if (mounted) {
+      mounted.more = more;
+      restoreChannelMoreFocus(mounted);
     }
   }
 
@@ -1012,6 +1127,7 @@ export function createChannelViews(context) {
     card.className = `channel-card ${mode}`;
     if (mode === "photo") card.classList.add(photoCollection ? "photo-collection-card" : "photo-album-card");
     card.addEventListener("click", () => {
+      if (options.isCurrent && !options.isCurrent(card)) return;
       if (photoCollection) {
         updateChannelParams({ photoView: "albums", collection: item.collectionId || item.id, person: "", query: "", sort: "updated" }, { push: true, skipHistory: false, replaceHistory: false });
         return;
@@ -1115,7 +1231,7 @@ export function createChannelViews(context) {
     return card;
   }
 
-  function createPhotoMasonryList(items = []) {
+  function createPhotoMasonryList(items = [], createCard = (item, index) => createChannelCard("photo", item, { index })) {
     const wrap = document.createElement("div");
     wrap.className = "photo-masonry-list";
 
@@ -1126,7 +1242,7 @@ export function createChannelViews(context) {
     }
 
     items.forEach((item, index) => {
-      columns[index % columns.length].append(createChannelCard("photo", item, { index }));
+      columns[index % columns.length].append(createCard(item, index));
     });
     return wrap;
   }
@@ -1154,6 +1270,7 @@ export function createChannelViews(context) {
     const existing = previewImageObservers.get(key);
     if (existing) return existing;
     const observer = new IntersectionObserver((entries) => {
+      if (previewImageObservers.get(key) !== observer) return;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         const target = entry.target;
@@ -1179,7 +1296,7 @@ export function createChannelViews(context) {
   }
 
   function resetPreviewImageObserver() {
-    mountedChannelList = null;
+    retireChannelMount();
     for (const observer of previewImageObservers.values()) observer.disconnect();
     previewImageObservers = new Map();
     if (photoDetailImageObserver) {
@@ -1196,11 +1313,7 @@ export function createChannelViews(context) {
     channelRequestGeneration += 1;
     channelRequestController?.abort();
     channelRequestController = null;
-    if (mountedChannelList) {
-      for (const observer of previewImageObservers.values()) observer.disconnect();
-      previewImageObservers = new Map();
-      mountedChannelList = null;
-    }
+    retireChannelMount();
   }
 
   function createChannelQueryRow(channel, query, terms = [], sort = "") {
@@ -2337,6 +2450,7 @@ export function createChannelViews(context) {
       loadingText: "正在接着加载",
       retryText: "加载停住了，点一下重试",
       auto: options.auto,
+      signal: options.signal,
       requireScrollIntent: options.requireScrollIntent === true
     });
   }

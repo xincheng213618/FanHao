@@ -2,9 +2,11 @@
 title: 音乐查询与分页
 description: 音乐联想、歌词分页、歌手缓存、专辑列表与播放汇总的查询边界。
 status: maintained
-verified_at: 2026-10-05
+verified_at: 2026-11-05
 sources:
   - src/modules/music/server/store.js
+  - src/modules/music/server/schema.js
+  - src/modules/music/server/helpers.js
   - src/modules/music/server/lyrics-search.js
   - src/modules/music/server/facets.js
   - src/modules/music/server/facet-cache.js
@@ -12,6 +14,7 @@ sources:
   - src/modules/music/server/smart-mix.js
   - src/modules/music/server/serializers.js
   - tests/verify_music_lyric_search.mjs
+  - tests/verify_music_duration_sort.mjs
   - tests/verify_music_active_catalogue.mjs
   - tests/verify_music_facet_cache.mjs
   - tests/verify_music_summary_reuse.mjs
@@ -25,6 +28,14 @@ sources:
 直接命中的最多五张专辑，以及候选歌曲关联的专辑，复用普通列表的九字段投影与旧库缺列回退。联想卡片省去未使用的简介和来源路径读取；歌曲选择、歌手查询、直接匹配、合并顺序、拼音回退与公开数量限制保持，专辑详情仍返回完整简介。
 
 正常表结构的私有样本中，八张关联专辑和五张直接命中专辑各有 512 KiB 简介时，冷、暖联想请求的简介读取均从 6.5 MiB 减至零，语句准备与执行次数保持。零简介、8 KiB 简介、重复关联、缺项、旧列类型与缺列回退另有完整响应、SQL 参数及查询计划对照；旧库回退仍读取简介，不承诺所有资料分布都更快。
+
+## 时长排序
+
+Web、Android 的时长排序按时长降序、标题 `NOCASE` 升序，完全并列时按歌曲 ID 的 `BINARY` 升序。列表、相邻歌曲和“长曲沉浸”共用这条规则；ID 末级排序明确了此前依赖查询计划的并列顺序。
+
+初始化沿用 `CREATE INDEX IF NOT EXISTS`，为具备所需列的 `main.music_tracks` 增加对应排序索引，避免先关联整库再临时排序。缺列旧库跳过此索引；不替换已有同名索引，真实建索引错误仍会抛出。播放进度、收藏和评分写入状态表，不维护这个曲目索引；扫描导入与曲目更新会承担额外索引写入。
+
+`npm run verify:music-duration-sort` 对照同一明确排序的无索引结果，核对过滤、分页、相邻歌曲、原生异常与初始化边界；旧排序只有未并列部分作完整旧响应对照。该专项纳入 `verify:music-scale`，只使用临时 SQLite 和合成元数据。
 
 ## 歌词分页
 

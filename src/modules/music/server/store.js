@@ -613,28 +613,30 @@ export function createMusicStore(options = {}) {
   function listTracks(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const database = dbOrOpen();
-    const resolvedSearch = resolveTrackSearch(database, params, catalogFilter(params));
-    const filter = resolvedSearch.filter;
-    const smartMix = findSmartMix(filter.smartId);
-    const sort = normalizeTrackSort(params.get("sort"));
-    const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_PAGE_LIMIT);
-    const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
-    const rank = filter.q && !smartMix && !params.has("sort")
-      ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.searchTerm) : searchRankSql(filter.q))
-      : { sql: "", args: [] };
-    const order = smartMix ? smartMix.order : rank.sql || trackOrderSql(sort);
-    const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
-    const searchJoin = musicSearchIndexJoin(filter.searchKind);
-    const total = resolvedSearch.total;
-    const indexedPlayedPage = sort === "played" && !smartMix && !rank.sql;
-    // Pin ID selection and state hydration to the same WAL snapshot while a
-    // progress writer or scanner may be publishing on another connection.
-    if (indexedPlayedPage) database.exec("SAVEPOINT music_played_page");
-    let rows;
+    // Search counts, ID selection, hydration and the response's uncached reads
+    // share one WAL snapshot. Cached summary/facet values keep their existing
+    // lifetimes; a writer cannot make an already-empty page become nonempty.
+    database.exec("SAVEPOINT music_track_page");
     try {
+      const resolvedSearch = resolveTrackSearch(database, params, catalogFilter(params));
+      const filter = resolvedSearch.filter;
+      const smartMix = findSmartMix(filter.smartId);
+      const sort = normalizeTrackSort(params.get("sort"));
+      const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_PAGE_LIMIT);
+      const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+      const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
+      const rank = filter.q && !smartMix && !params.has("sort")
+        ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.searchTerm) : searchRankSql(filter.q))
+        : { sql: "", args: [] };
+      const order = smartMix ? smartMix.order : rank.sql || trackOrderSql(sort);
+      const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
+      const searchJoin = musicSearchIndexJoin(filter.searchKind);
+      const total = resolvedSearch.total;
+      const emptyPage = total === 0 || (offset >= total && trackCountBoundsPageRows(database));
+      const indexedPlayedPage = sort === "played" && !smartMix && !rank.sql;
+      let rows;
       const playedIds = indexedPlayedPage
-        ? playedTrackPageIds(database, filter, limit, offset)
+        ? playedTrackPageIds(database, emptyPage ? { ...filter, trackWhere: `${filter.trackWhere} AND 0` } : filter, limit, offset)
         : null;
       rows = prepareTrackList(database,
         `
@@ -646,7 +648,7 @@ export function createMusicStore(options = {}) {
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
         LEFT JOIN music_track_state s ON s.track_id = t.id
-        ${playedIds ? `WHERE t.id IN (${playedIds.map(() => "?").join(", ")})` : where}
+        ${playedIds ? `WHERE t.id IN (${playedIds.map(() => "?").join(", ")})` : `${where}${emptyPage ? " AND 0" : ""}`}
         ${playedIds ? "" : `ORDER BY ${order}`}
         LIMIT ? OFFSET ?
       `
@@ -656,40 +658,61 @@ export function createMusicStore(options = {}) {
         const positions = new Map(playedIds.map((id, index) => [id, index]));
         rows.sort((left, right) => positions.get(left.id) - positions.get(right.id));
       }
+      const matchQuery = resolvedSearch.correctedQuery || filter.searchTerm || filter.q;
+      const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
+      return {
+        tracks: rows
+          .map(publicTrack)
+          .map((track) => decorateTrackSearchMatch(track, matchQuery, matchContext)),
+        total: Number(total || 0),
+        limit,
+        offset,
+        hasMore: offset + rows.length < Number(total || 0),
+        query: filter.q,
+        artistId: filter.artistId,
+        albumId: filter.albumId,
+        genre: filter.genre,
+        language: filter.language,
+        favorite: filter.favorite,
+        lyrics: filter.lyrics,
+        minRating: filter.minRating,
+        quality: filter.quality,
+        searchMode: filter.searchKind,
+        correctedQuery: resolvedSearch.correctedQuery,
+        smartId: filter.smartId,
+        smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
+        sort,
+        relevance: Boolean(rank.sql),
+        summary: summary(),
+        languages: languageFacet(database),
+        artists: artistFacet(database, filter.language, filter.artistId),
+        albums: albumFacet(database, filter.artistId, filter.genre, filter.language, filter.albumId),
+        genres: genreFacet(database, filter.artistId)
+      };
     } finally {
-      if (indexedPlayedPage) database.exec("RELEASE music_played_page");
+      database.exec("RELEASE music_track_page");
     }
-    const matchQuery = resolvedSearch.correctedQuery || filter.searchTerm || filter.q;
-    const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
-    return {
-      tracks: rows
-        .map(publicTrack)
-        .map((track) => decorateTrackSearchMatch(track, matchQuery, matchContext)),
-      total: Number(total || 0),
-      limit,
-      offset,
-      hasMore: offset + rows.length < Number(total || 0),
-      query: filter.q,
-      artistId: filter.artistId,
-      albumId: filter.albumId,
-      genre: filter.genre,
-      language: filter.language,
-      favorite: filter.favorite,
-      lyrics: filter.lyrics,
-      minRating: filter.minRating,
-      quality: filter.quality,
-      searchMode: filter.searchKind,
-      correctedQuery: resolvedSearch.correctedQuery,
-      smartId: filter.smartId,
-      smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
-      sort,
-      relevance: Boolean(rank.sql),
-      summary: summary(),
-      languages: languageFacet(database),
-      artists: artistFacet(database, filter.language, filter.artistId),
-      albums: albumFacet(database, filter.artistId, filter.genre, filter.language, filter.albumId),
-      genres: genreFacet(database, filter.artistId)
-    };
+  }
+
+  function trackCountBoundsPageRows(database) {
+    // Legacy key affinities or collations may multiply a LEFT JOIN that COUNT
+    // legitimately omits. Only the normal, single-column BINARY text keys can
+    // prove a nonzero count bounds that page. Other schemas retain their SQL.
+    try {
+      const declarations = new Map(database.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name IN ('music_tracks', 'music_artists', 'music_albums', 'music_track_state')")
+        .all().map(row => [row.name, row.sql]));
+      const textPrimaryKeys = ["music_tracks", "music_artists", "music_albums", "music_track_state"].every(table => {
+        const key = table === "music_track_state" ? "track_id" : "id";
+        return new RegExp(`^\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"?${table}"?\\s*\\(\\s*"?${key}"?\\s+TEXT\\s+PRIMARY\\s+KEY\\s*,`, "iu").test(declarations.get(table) || "");
+      });
+      if (!textPrimaryKeys) return false;
+      // A NUMERIC reference can equate separate TEXT keys such as '1'/'01'.
+      // Inspect native declarations instead of searching later DDL text.
+      const trackColumns = database.prepare("PRAGMA table_info(music_tracks)").all();
+      return ["artist_id", "album_id"].every(key => trackColumns.some(column => column.name === key && column.type.toUpperCase() === "TEXT"));
+    } catch {
+      return false;
+    }
   }
 
   function searchLyrics(urlOrOptions = {}) {
@@ -730,7 +753,16 @@ export function createMusicStore(options = {}) {
     const searchJoin = musicSearchIndexJoin(filter.searchKind);
     const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
     const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
-    return Number(database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t ${searchJoin} ${stateJoin} ${where}`).get(...filter.trackArgs)?.count || 0);
+    // Positive state predicates cannot match a track without a state row.
+    // Probe at most 1025 rows before choosing that smaller driver; dense state,
+    // searches and indexed catalogue subsets retain their existing plan.
+    const requiresState = filter.favorite || filter.minRating > 0 || smartMixRequiresState({ id: filter.smartId });
+    const sparseState = requiresState && !filter.q && !filter.artistId && !filter.albumId && !filter.genre && !filter.language
+      && Number(database.prepare("SELECT COUNT(*) AS count FROM (SELECT 1 FROM music_track_state LIMIT 1025)").get()?.count || 0) <= 1024;
+    const from = sparseState
+      ? "music_track_state s CROSS JOIN music_tracks t ON s.track_id = t.id"
+      : `music_tracks t ${searchJoin} ${stateJoin}`;
+    return Number(database.prepare(`SELECT COUNT(*) AS count FROM ${from} ${where}`).get(...filter.trackArgs)?.count || 0);
   }
 
   function trackDetail(trackId, urlOrOptions = {}) {

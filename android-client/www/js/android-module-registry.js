@@ -1,4 +1,5 @@
 const ENTRY_ROOT = "./modules/";
+const MODULE_IMPORT_BATCH_SIZE = 7;
 const FALLBACK_MODULES = Object.freeze([
   fallback("fanhao", "番号", 10, "people", "fanhao"),
   fallback("photos", "图库", 20, "channel", "photo", { channel: "photo" }),
@@ -40,23 +41,45 @@ export function mergeAndroidModuleCatalog(remoteModules = []) {
 
 export async function loadAndroidModules(definitions, host) {
   const modules = [];
+  let batch = [];
   for (const definition of definitions) {
     const surface = definition?.client?.android;
     if (!surface?.entry) continue;
+    let imported;
     try {
       const entryUrl = androidEntryUrl(surface.entry, host.clientVersion);
-      const namespace = await import(entryUrl);
-      if (typeof namespace.createAndroidModule !== "function") {
-        throw new Error(`Android module '${definition.id}' does not export createAndroidModule()`);
-      }
-      const instance = await namespace.createAndroidModule({ definition, host });
-      modules.push(normalizeModule(instance, definition));
+      // Observe every rejection immediately, including modules consumed after
+      // a slower import or asynchronous factory earlier in this batch.
+      imported = import(entryUrl).then(namespace => ({ namespace }), error => ({ error }));
     } catch (error) {
-      host.onModuleError?.(definition, error);
-      console.error(`[android-module:${definition.id}]`, error);
+      imported = Promise.resolve({ error });
+    }
+    batch.push({ definition, imported });
+    if (batch.length === MODULE_IMPORT_BATCH_SIZE) {
+      await createBatch(batch);
+      batch = [];
     }
   }
+  await createBatch(batch);
   return createRegistry(modules);
+
+  async function createBatch(entries) {
+    for (const { definition, imported } of entries) {
+      try {
+        const loaded = await imported;
+        if (Object.hasOwn(loaded, "error")) throw loaded.error;
+        const namespace = loaded.namespace;
+        if (typeof namespace.createAndroidModule !== "function") {
+          throw new Error(`Android module '${definition.id}' does not export createAndroidModule()`);
+        }
+        const instance = await namespace.createAndroidModule({ definition, host });
+        modules.push(normalizeModule(instance, definition));
+      } catch (error) {
+        host.onModuleError?.(definition, error);
+        console.error(`[android-module:${definition.id}]`, error);
+      }
+    }
+  }
 }
 
 function androidEntryUrl(entry, clientVersion) {

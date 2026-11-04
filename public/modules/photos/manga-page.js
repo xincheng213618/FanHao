@@ -268,9 +268,10 @@ export function createMangaPage(deps) {
   async function openRouteTarget(route = {}) {
     ensureState();
     if (route.mangaComicId && route.mangaChapterIndex) {
+      const coldEntry = !currentReaderView(readerView) && !currentDetailView(detailView);
       const owner = beginReaderRequest("chapter", route.mangaComicId);
       const comic = await openComic(route.mangaComicId, { skipRoute: true, render: false }, owner);
-      if (comic && readerRequestCurrent(owner)) await openChapter(route.mangaChapterIndex, { skipRoute: true, restorePosition: true }, owner);
+      if (comic && readerRequestCurrent(owner)) await openChapter(route.mangaChapterIndex, { skipRoute: true, restorePosition: true, coldEntry }, owner);
       return;
     }
     if (route.mangaComicId) {
@@ -582,7 +583,9 @@ export function createMangaPage(deps) {
       restorePosition: Boolean(options.restorePosition), phase: "loading", view: currentChapterSource(source) ? source : null };
     state.manga.loading = true;
     state.manga.status = "正在读取章节";
-    if (read.view) syncChapterReadFeedback(); else renderView();
+    if (read.view) syncChapterReadFeedback();
+    else if (options.coldEntry) els.workGrid.replaceChildren(renderStatus());
+    else renderView();
     read.promise = (async () => {
       try {
         const data = await api(`/api/manga/${encodeURIComponent(comic.id)}/chapters/${encodeURIComponent(String(chapterIndex))}`, { signal: owner.controller.signal });
@@ -605,7 +608,8 @@ export function createMangaPage(deps) {
         read.message = error.message || "章节读取失败";
         state.manga.status = read.message;
         state.manga.loading = false;
-        syncChapterReadFeedback();
+        if (options.coldEntry && !read.view) renderView();
+        else syncChapterReadFeedback();
       } finally {
         if (readerRequestCurrent(owner)) {
           state.manga.loading = false;

@@ -33,7 +33,7 @@ assert.ok(clientSource.includes('["books", "书库"], ["mine", "我的"], ["rank
 assert.ok(!clientSource.includes('["authors", "作者"]') && !clientSource.includes('["search", "搜索"]'), "author index and standalone search must not remain as navigation destinations");
 assert.ok(clientSource.includes('search.className = "novel-section-search"') && clientSource.includes('input.setAttribute("aria-label", "搜索小说")'), "novel navigation must expose a direct search field");
 assert.ok(clientSource.includes('renderHomeLoading("正在读取小说书库")'), "novel section loading must keep the home shell instead of replacing it with a bare loading state");
-assert.match(clientSource, /function renderHomeLoading\(message\)[\s\S]*?shell\.append\(renderNovelMenu\(\)\)/, "novel section loading must preserve the top menu");
+assert.match(clientSource, /function renderHomeLoading\(message(?:, target = els\.workGrid)?\)[\s\S]*?shell\.append\(renderNovelMenu\(\)\)/, "novel section loading must preserve the top menu");
 assert.ok(routerSource.includes('/novels/authors/${encodeRouteSegment(route.novelAuthor)}'), "author profiles must use standalone paths");
 assert.ok(clientSource.includes("new IntersectionObserver"), "novel lists must continue loading near the bottom");
 assert.ok(clientSource.includes('table.className = "novel-ranking-table"'), "rankings must use a compact list table");

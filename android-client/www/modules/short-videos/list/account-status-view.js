@@ -1,4 +1,4 @@
-import { normalizeAuthorAccountStatus } from "../shared.js?v=assets-22080e82f167";
+import { normalizeAuthorAccountStatus } from "../shared.js?v=assets-eb78be0b425d";
 
 let authorStatusDescriptionSerial = 0;
 

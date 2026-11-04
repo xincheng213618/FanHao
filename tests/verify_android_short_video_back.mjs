@@ -92,7 +92,11 @@ async function fixture({ code = moduleSource, source = "all", view = "shortVideo
   delete globalThis[key];
   const context = capture.context;
   // Rendering is a layout boundary; data/loading and request generations are real.
+  let mounted = false;
+  context.isAuthorIndexMounted = () => mounted && document.body.contains(content);
+  context.releaseAuthorIndex = () => { mounted = false; };
   context.renderListShell = () => {
+    mounted = true;
     writes.push("render");
     if (!content.querySelector(".short-video-mobile-list")) {
       const grid = document.createElement("div"); grid.className = "short-video-mobile-list"; content.append(grid);

@@ -183,6 +183,8 @@ export function createShortVideoPage(deps) {
   let authorPanelTileMap = null;
   let shortVideoAdjacentRequestId = 0;
   let shortVideoListRequestId = 0;
+  let acceptedAuthorScope = null;
+  let failedAuthorScope = null;
   let searchUsersGeneration = 0;
   let shortVideoOpenRequestId = 0;
   let shortVideoOpenReadController = null;
@@ -275,6 +277,8 @@ export function createShortVideoPage(deps) {
     state
   });
   const collectionsController = createShortVideoCollectionsController({
+    activateCardCovers: nodes => activateShortVideoCoverNodes(nodes),
+    releaseCardCovers: nodes => releaseShortVideoCoverNodes(nodes),
     interactionState: shortVideoInteractionState,
     api,
     createIcon,
@@ -314,6 +318,8 @@ export function createShortVideoPage(deps) {
     openShortVideoAuthorPage,
     renderAuthorDetailHome,
     renderAuthorIndex,
+    reconcileAuthorIndex,
+    releaseAuthorIndex,
     renderAuthorIndexCard,
     renderAuthorSignature,
     renderAuthorWorkspaceToolbar,
@@ -330,6 +336,11 @@ export function createShortVideoPage(deps) {
     authorProfileLineText,
     authorScopeId,
     cacheShortVideoAuthorMention,
+    captureAuthorIndexOwner: () => {
+      const view = shortVideoHomePresentation, scope = shortVideoListScope();
+      return { isCurrent: () => !shortVideoPageSuspended && shortVideoHomePresentation === view && isMountedShortVideoHomeControl(view?.content)
+        && scope === shortVideoListScope() };
+    },
     clearShortVideoDeleteSelection,
     createAuthorFollowButton,
     createIcon,
@@ -339,6 +350,7 @@ export function createShortVideoPage(deps) {
     formatNumber,
     getShortVideoListCards: () => shortVideoListCards,
     loadVideos,
+    needsAuthorFirstPageRetry: () => needsAuthorFirstPageRetry() && failedAuthorScope === shortVideoListScope(),
     openAuthorDouyinLink, runShortVideoLocalAction,
     profileNumber,
     pushRoute,
@@ -374,6 +386,8 @@ export function createShortVideoPage(deps) {
   });
   const {
     activateCovers: activateShortVideoCovers,
+    activateCoversForNodes: activateShortVideoCoverNodes,
+    releaseCoversForNodes: releaseShortVideoCoverNodes,
     attach: attachShortVideoWindow,
     render: renderShortVideoWindow,
     reset: resetShortVideoWindow,
@@ -643,6 +657,11 @@ export function createShortVideoPage(deps) {
       state.shortVideo.source || "liked", state.shortVideo.authorSort || "", state.shortVideo.authorFilter || ""]);
   }
 
+  function needsAuthorFirstPageRetry() {
+    return isShortVideoAuthorIndexPage() && acceptedAuthorScope !== null
+      && acceptedAuthorScope !== shortVideoListScope();
+  }
+
   function invalidateShortVideoListWork() {
     collectionsController.cancelReads?.();
     shortVideoListRequestId += 1;
@@ -686,6 +705,7 @@ export function createShortVideoPage(deps) {
 
   function handleShortVideoListFailure(error, owner) {
     if (!ownsShortVideoListOwner(owner)) return staleShortVideoListResult(owner);
+    if (owner.authorIndex && !owner.append && needsAuthorFirstPageRetry()) failedAuthorScope = owner.scope;
     state.shortVideo.loading = false;
     state.shortVideo.loadingMore = false;
     state.shortVideo.authorLoadingMore = false;
@@ -699,7 +719,7 @@ export function createShortVideoPage(deps) {
   async function loadVideos(options = {}) {
     ensureState();
     syncAuthorCollectorRouteLifecycle(state.shortVideo.current ? "" : state.shortVideo.authorPage);
-    const append = Boolean(options.append);
+    const append = Boolean(options.append && !needsAuthorFirstPageRetry());
     if (!append && !options.keepCurrent) {
       cancelShortVideoNavigation();
       shortVideoOpenRequestId += 1;
@@ -712,8 +732,12 @@ export function createShortVideoPage(deps) {
       ensureShortVideoListCards().catch((error) => console.warn(error));
     }
     if (isShortVideoAuthorIndexPage()) {
-      if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
-      if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => { renderStats(); renderView(); }, () => { shortVideoListRequestId += 1; shortVideoOpenRequestId += 1; })) return;
+      if (options.append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore
+        || !needsAuthorFirstPageRetry() && !state.shortVideo.authorHasMore)) return;
+      if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => {
+        acceptedAuthorScope = shortVideoListScope(); failedAuthorScope = null;
+        renderStats(); renderView();
+      }, () => { shortVideoListRequestId += 1; shortVideoOpenRequestId += 1; })) return;
       const requestId = ++shortVideoListRequestId;
       const owner = captureShortVideoListOwner(requestId, append, true);
       state.shortVideo.current = null;
@@ -737,7 +761,7 @@ export function createShortVideoPage(deps) {
         }
       }
       state.shortVideo.status = append ? "" : "正在读取作者";
-      if (!preserveHomeDuringLoad) renderView();
+      if (!preserveHomeDuringLoad) renderView({ appendAuthors: append });
       const params = new URLSearchParams({
         limit: String(AUTHOR_PAGE_SIZE),
         offset: String(append ? state.shortVideo.authors.length : 0)
@@ -768,7 +792,9 @@ export function createShortVideoPage(deps) {
         state.shortVideo.authors = merged;
       } else {
         state.shortVideo.authors = nextAuthors;
+        acceptedAuthorScope = shortVideoListScope();
       }
+      failedAuthorScope = null;
       state.shortVideo.authorTotal = Math.max(0, Number(data.total || 0));
       state.shortVideo.authorScopeTotal = Math.max(0, Number(data.scopeTotal || data.total || 0));
       state.shortVideo.authorUnlikedTotal = Math.max(0, Number(data.unlikedTotal || 0));
@@ -778,7 +804,7 @@ export function createShortVideoPage(deps) {
       state.shortVideo.authorLoadingMore = false;
       state.shortVideo.status = "";
       renderStats();
-      if (!shortVideoListHasViewer()) renderView();
+      if (!shortVideoListHasViewer()) renderView({ appendAuthors: append });
       loadShortVideoSummary().catch(handleSummaryLoadError);
       if (!options.skipRoute && !shortVideoListHasViewer()) {
         const writer = options.replaceRoute ? replaceRoute : pushRoute;
@@ -1311,7 +1337,7 @@ export function createShortVideoPage(deps) {
     return true;
   }
 
-  function refreshShortVideoHome() {
+  function refreshShortVideoHome(options = {}) {
     const view = shortVideoHomePresentation;
     if (!view || !isMountedShortVideoHomeControl(view.content) || view.scope !== shortVideoHomeScope()
       || view.deleteMode !== state.shortVideo.deleteMode) return false;
@@ -1354,11 +1380,11 @@ export function createShortVideoPage(deps) {
       const count = view.workspace.querySelector(".short-video-author-workspace-tab small");
       if (count) count.textContent = state.shortVideo.loading ? "…" : formatNumber(author.count || data.total || 0);
     }
-    renderShortVideoHomeResults(view, data);
+    renderShortVideoHomeResults(view, data, options);
     return true;
   }
 
-  function renderView() {
+  function renderView(options = {}) {
     ensureState();
     if (!els.workGrid) return;
     syncShortVideoNativePlaybackModes();
@@ -1366,7 +1392,8 @@ export function createShortVideoPage(deps) {
     stopShortVideoSoundPreview({ restorePlayback: false });
     cancelShortVideoAutoNext();
     cancelShortVideoBrowseGestures();
-    if (refreshShortVideoHome()) return;
+    if (refreshShortVideoHome(options)) return;
+    releaseAuthorIndex();
     shortVideoHomePresentation = null;
     resetShortVideoWindow();
     clearPendingPlayerClick();
@@ -1510,13 +1537,14 @@ export function createShortVideoPage(deps) {
     renderShortVideoHomeResults(view, data);
   }
 
-  function renderShortVideoHomeResults(view, data) {
+  function renderShortVideoHomeResults(view, data, options = {}) {
     const { content, controls, workspace } = view;
+    const retainedAuthors = options.appendAuthors && isShortVideoAuthorIndexPage() ? reconcileAuthorIndex(content) : null;
     for (const child of [...content.children]) {
-      if (!controls.has(child)) child.remove();
+      if (!controls.has(child) && child !== retainedAuthors) child.remove();
     }
     if (isShortVideoAuthorIndexPage()) {
-      content.append(renderAuthorIndex());
+      if (!retainedAuthors) content.append(renderAuthorIndex());
       return;
     }
     if (workspace) content.insertBefore(renderAuthorDetailHome(data), workspace);
@@ -7876,9 +7904,10 @@ export function createShortVideoPage(deps) {
     if (preservedHome) {
       preservedHome.removeAttribute("aria-busy");
       showBrowserToast(state.shortVideo.status);
+      if (needsAuthorFirstPageRetry() && failedAuthorScope === shortVideoListScope()) renderView();
       return;
     }
-    renderView();
+    renderView({ appendAuthors: isShortVideoAuthorIndexPage() && !needsAuthorFirstPageRetry() });
   }
 
   function handleSummaryLoadError(error) {

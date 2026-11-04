@@ -16,7 +16,7 @@ function take(name) {
   assert(start != null, name);
   return source.slice(start, source.indexOf("\n  }", start) + 4);
 }
-const names = ["shortVideoNavigationScope", "shortVideoFeedParams", "shortVideoListScope", "invalidateShortVideoListWork",
+const names = ["shortVideoNavigationScope", "shortVideoFeedParams", "shortVideoListScope", "needsAuthorFirstPageRetry", "invalidateShortVideoListWork",
   "captureShortVideoListOwner", "ownsShortVideoListOwner", "shortVideoListHasViewer", "staleShortVideoListResult", "handleShortVideoListFailure",
   "loadVideos", "loadSearchUsers", "openVideo", "refreshShortVideoHome", "renderView", "applyRouteState", "openRouteTarget"];
 const implementation = names.map(take).join("\n");
@@ -45,9 +45,11 @@ function fixture({ code = implementation, authorIndex = false, authorPage = "" }
     document: { documentElement: { dataset: {}, classList: { remove() {} } }, activeElement: null },
     window: { scrollY: 0, scrollTo() {}, history: { length: 1 }, requestAnimationFrame: callback => { frames.push(callback); return frames.length; } },
     // This VM has no mounted home DOM; the actual retention helper takes its null-view fallback.
-    shortVideoHomePresentation: null, els: { workGrid: root }, shortVideoListRequestId: 0, searchUsersGeneration: 0, shortVideoOpenRequestId: 0,
+    shortVideoHomePresentation: null, acceptedAuthorScope: null, failedAuthorScope: null,
+    els: { workGrid: root }, shortVideoListRequestId: 0, searchUsersGeneration: 0, shortVideoOpenRequestId: 0,
     shortVideoOpeningId: "", shortVideoOpenError: "", shortVideoOpenReadController: null, shortVideoListCards: {}, initialVideoLimit: 36, appendVideoLimit: 48, AUTHOR_PAGE_SIZE: 36,
     ensureState() {}, syncAuthorCollectorRouteLifecycle() {}, cancelAuthorCollectorPolling() {}, cancelShortVideoNavigation() {},
+    releaseAuthorIndex() {}, // This fixture has no mounted author DOM to retire.
     preserveShortVideoHomeDuringLoad: () => true,
     isShortVideoAuthorIndexPage: () => ["authors", "following"].includes(state.shortVideo.source) && !state.shortVideo.authorPage,
     restoreSavedAuthorIndexWindow: () => false, shortVideoAuthorFilterValue: author => author.id,

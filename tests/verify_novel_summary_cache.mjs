@@ -18,6 +18,12 @@ let external = null;
 let readingWork = null;
 let authorWork = null;
 DatabaseSync.prototype.prepare = function (sql) {
+  const recentProbe = [
+    "PRAGMA table_info(novel_books)",
+    "PRAGMA table_info(novel_reading_state)",
+    "SELECT (SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = 'novel_books' COLLATE NOCASE) AS books_sql, EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')) AS shadowed",
+    "SELECT COUNT(*) AS count, COUNT(DISTINCT updated_at) AS timestamps FROM (SELECT updated_at FROM novel_reading_state LIMIT 1025)"
+  ].includes(sql.replace(/\s+/g, " ").trim());
   const aggregate = /COUNT\(DISTINCT NULLIF|GROUP BY COALESCE\(category|GROUP BY source_root/.test(sql);
   if (aggregate) aggregates += 1;
   const count = /SELECT COUNT\(\*\) AS count FROM (?:novel_books b|novel_reading_state rs CROSS JOIN novel_books b)/u.test(sql);
@@ -42,11 +48,13 @@ DatabaseSync.prototype.prepare = function (sql) {
     return (...parameters) => {
       if (readingWork && ["get", "all"].includes(key)) {
         readingWork[key]++;
+        if (recentProbe) readingWork.recentProbes++;
         if (count) readingWork.countQueries++;
         if (page) readingWork.pageQueries++;
       }
       if (authorWork && ["get", "all"].includes(key)) {
         authorWork[key]++;
+        if (recentProbe) authorWork.recentProbes++;
         if (aggregate) authorWork.aggregates++;
       }
       return value.apply(target, parameters);
@@ -707,7 +715,7 @@ async function verifyAuthorSummaryCache({ memory = false } = {}) {
     return wal && zeroWal ? { ...stat, size: 0n } : stat;
   };
   const observed = (target, method, ...args) => {
-    authorWork = { get: 0, all: 0, aggregates: 0 };
+    authorWork = { get: 0, all: 0, aggregates: 0, recentProbes: 0 };
     try { return { response: target[method](...args), work: { ...authorWork } }; }
     finally { authorWork = null; }
   };
@@ -868,9 +876,9 @@ async function verifyAuthorSummaryCache({ memory = false } = {}) {
     writer.exec(stateSchema);
     storageEpoch++;
     equivalent();
-    mutate("UPDATE novel_meta SET value='6' WHERE key='schema_version'");
+    mutate("UPDATE novel_meta SET value='7' WHERE key='schema_version'");
     sameError("listAuthors", urlFor());
-    mutate("UPDATE novel_meta SET value='5' WHERE key='schema_version'");
+    mutate("UPDATE novel_meta SET value='6' WHERE key='schema_version'");
     equivalent();
     mutate("UPDATE novel_meta SET value='invalid' WHERE key='library_id'");
     sameError("listAuthors", urlFor());
@@ -902,7 +910,8 @@ async function verifyAuthorSummaryCache({ memory = false } = {}) {
     assert.equal(coldWork.aggregates, 3, "a cold authors page still reads all three static aggregates");
     for (const work of warmWork) {
       assert.equal(work.aggregates, 0, "unchanged authors pages must reuse the existing static summary");
-      assert.ok(work.get + work.all <= 15, "warm author-page SQLite reads remain fixed");
+      assert.equal(work.recentProbes, 4, "recent-reading eligibility has a fixed four-read budget");
+      assert.ok(work.get + work.all - work.recentProbes <= 15, "warm author-page reads retain their original budget besides recent-reading probes");
     }
     assert.equal(mixedWork.aggregates, 0, "authors pages preserve a shared warmed summary for other readers");
     for (const failed of failedProbeWork) {
@@ -946,7 +955,7 @@ async function verifyReadingCount() {
   const current = factory({ dbPath: readingPath }), previous = previousFactory({ dbPath: readingPath });
   let writer;
   function measure(target, url) {
-    readingWork = { visits: 0, get: 0, all: 0, countQueries: 0, pageQueries: 0 };
+    readingWork = { visits: 0, get: 0, all: 0, countQueries: 0, pageQueries: 0, recentProbes: 0 };
     try { const result = target.listBooks(url); return { result, ...readingWork }; }
     finally { readingWork = null; }
   }
@@ -991,7 +1000,10 @@ async function verifyReadingCount() {
       assert.equal(old.visits, 17513, "the restored driver really visits the full active book population");
       assert.ok(actual.visits <= 121, "reading count visits at most the 121 state candidates instead of 18,000 books");
       assert.equal(actual.countQueries, 1); assert.equal(actual.pageQueries, 1);
-      assert.ok(actual.get + actual.all <= 16, "metadata/revision/summary reads stay fixed rather than adding a query per returned book");
+      // These tied timestamps reject both the page and summary optimizations
+      // after their four-read qualification, before the page's extra DDL read.
+      assert.equal(actual.recentProbes, 8, "page and recent-reading eligibility each use four reads for ties");
+      assert.ok(actual.get + actual.all - actual.recentProbes <= 16, "metadata/revision/summary reads keep their original budget besides recent-reading probes");
       assert.equal(actual.result.total, 116, "all retained state statuses count, excluding missing books and an orphan");
       visits.push({ limit, previous: old.visits, current: actual.visits, sqlReads: actual.get + actual.all });
     }

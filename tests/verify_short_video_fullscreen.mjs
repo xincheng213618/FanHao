@@ -269,6 +269,7 @@ function pageFixture() {
     ensureState() {}, releaseUnusedShortVideoPreloads() {}, cancelShortVideoNavigation() {}, flushActiveShortVideoWatch() {}, setBodyClass() {}, renderStats() {},
     cancelShortVideoPanelLoading() {}, stopShortVideoSoundPreview() {}, cancelShortVideoAutoNext() {}, cancelShortVideoBrowseGestures() {},
     resetShortVideoWindow() {}, clearPendingPlayerClick() {}, disposeShortVideoMedia() {},
+    releaseAuthorIndex() {}, // No author-index DOM is mounted in this native-mode fixture.
     clearAuthorPanelCaches() {},
     transcodeManagementPage: { stop() {}, render() {} }, renderLikeDistributionPage() {}, renderHome() {},
     renderBrowser() { browserPresent = true; }, renderBrowserLoading() {}, pushRoute() {},

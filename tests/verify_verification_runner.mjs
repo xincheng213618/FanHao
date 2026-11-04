@@ -486,6 +486,38 @@ assert.equal(android.unknownSourceFiles.length, 0);
 const androidNovel = selectScripts(['android-client/www/modules/novels/mobile-refinements.css']);
 assert(androidNovel.scripts.includes('verify:android-novels'));
 assert(!androidNovel.scripts.includes('verify:android-client'));
+assert.deepEqual(selectScripts(['tests/verify_android_novel_catalog_filter.mjs']).scripts, ['verify:android-novel-catalog-filter', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_android_novel_list_rendering.mjs']).scripts, ['verify:android-novel-list-rendering', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-novel-list-rendering'], 'node tests/verify_android_novel_list_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'], ['verify:android-novels'],
+  ...['modules/novels/novel-views.js', 'modules/novels/android-module.js'].map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_novel_list_rendering.mjs').length, 1,
+    'Android novel list rendering runs once through existing client and novel owners');
+}
+assert.deepEqual(selectScripts(['tests/verify_android_short_video_author_rendering.mjs']).scripts, ['verify:android-short-video-author-rendering', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_android_work_list_rendering.mjs']).scripts, ['verify:android-work-list-rendering', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-work-list-rendering'], 'node tests/verify_android_work_list_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'],
+  ...['modules/fanhao/work-views.js', 'modules/fanhao/features/works/cards.js', 'modules/fanhao/android-module.js', 'js/auto-load.js']
+    .map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_work_list_rendering.mjs').length, 1,
+    'Android work list DOM reuse runs once through its existing client and owner gates');
+}
+assert.equal(webPackageScripts['verify:android-short-video-author-rendering'], 'node tests/verify_android_short_video_author_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:short-video-client'],
+  selectScripts(['android-client/www/modules/short-videos/list/controller.js']).scripts,
+  selectScripts(['android-client/www/modules/short-videos/list/view.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_short_video_author_rendering.mjs').length, 1,
+    'author page rendering runs once through the existing short-video client gate');
+}
+assert.equal(webPackageScripts['verify:android-novel-catalog-filter'], 'node tests/verify_android_novel_catalog_filter.mjs');
+const localCatalogFilterCommand = 'node tests/verify_android_novel_catalog_filter.mjs';
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-novel-ui'], ['verify:android-novels'],
+  selectScripts(['android-client/www/modules/novels/novel-views.js']).scripts,
+  selectScripts(['tests/verify_android_novel_catalog_filter.mjs']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === localCatalogFilterCommand).length, 1,
+    'local catalog filtering runs exactly once through its existing Android novel UI parent');
+}
 
 const nativeShortVideo = selectScripts([
   'android-client/android/app/src/main/java/local/fanhao/library/NativeShortVideoActivity.java',
@@ -536,6 +568,61 @@ assert(selectScripts(['src/modules/novels/server/store.js']).scripts.includes('v
 assert(selectScripts(['src/modules/music/server/runtime.js']).scripts.includes('verify:music-cover-async'));
 assert.deepEqual(selectScripts(['tests/verify_work_facets.mjs']).scripts, ['verify:work-facets', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_work_cache_budget.mjs']).scripts, ['verify:work-cache-budget', 'verify:work-facets', 'verify:code-prefixes', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_collection_query_reuse.mjs']).scripts, ['verify:collection-query-cache', 'verify:work-cache-budget', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_collection_history_window.mjs']).scripts, ['verify:collection-history-window', 'verify:collection-query-cache', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_work_detail_facet_read.mjs']).scripts,
+  ['verify:work-detail-facets', 'verify:work-info-cache', 'verify:work-detail-cache', 'verify:imports']);
+assert.equal(webPackageScripts['verify:work-detail-facets'], 'node tests/verify_work_detail_facet_read.mjs');
+assert.deepEqual(selectScripts(['tests/verify_work_facet_tags.mjs']).scripts, ['verify:work-facet-tags', 'verify:imports']);
+assert.deepEqual(selectScripts(['lib/info-metadata.js']).scripts,
+  ['verify:metadata', 'verify:work-info-cache', 'verify:work-traits', 'verify:imports']);
+assert.equal(webPackageScripts['verify:work-facet-tags'], 'node tests/verify_work_facet_tags.mjs');
+for (const entries of [FULL_SCRIPTS, ['verify:work-info-cache'], ['verify:work-cache-budget'],
+  selectScripts(['lib/info-metadata.js']).scripts,
+  selectScripts(['src/modules/fanhao/server/works/work-info-service.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_work_facet_tags.mjs').length, 1,
+    'facet tag parsing runs once through metadata and work-info owners');
+}
+for (const owner of ['work-info-service', 'presenter-service', 'work-detail-service']) {
+  assert.deepEqual(selectScripts([`src/modules/fanhao/server/works/${owner}.js`]).scripts,
+    ['verify:work-info-cache', 'verify:work-detail-cache', 'verify:fanhao', 'verify:works-performance', 'verify:imports']);
+}
+for (const entries of [FULL_SCRIPTS, ['verify:work-info-cache'], ['verify:work-cache-budget'],
+  ...['work-info-service', 'presenter-service', 'work-detail-service'].map(owner => selectScripts([`src/modules/fanhao/server/works/${owner}.js`]).scripts),
+  selectScripts(['server.js']).scripts, selectScripts(['tests/verify_work_detail_facet_read.mjs']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_work_detail_facet_read.mjs').length, 1,
+    'detail facet reads run once through the work-info budget and owning sources');
+}
+assert.deepEqual(selectScripts(['tests/verify_account_state_revision_read.mjs']).scripts,
+  ['verify:account-state-revision', 'verify:account-folders', 'verify:imports']);
+assert.deepEqual(selectScripts(['src/modules/fanhao/server/collections/account-user-state-service.js']).scripts,
+  ['verify:account-folders', 'verify:imports']);
+assert.equal(webPackageScripts['verify:account-state-revision'], 'node tests/verify_account_state_revision_read.mjs');
+for (const entries of [FULL_SCRIPTS, ['verify:accounts'], ['verify:account-folders'],
+  selectScripts(['src/modules/fanhao/server/collections/account-user-state-service.js']).scripts,
+  selectScripts(['tests/verify_account_state_revision_read.mjs']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_account_state_revision_read.mjs').length, 1,
+    'account revision body budget runs once through its existing personal-state gate');
+}
+assert.deepEqual(selectScripts(['src/modules/fanhao/server/playback/playback-progress-service.js']).scripts,
+  ['verify:collection-history-window', 'verify:fanhao', 'verify:works-performance', 'verify:mutation-auth', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_music_state_filter.mjs']).scripts, ['verify:music-state-filter', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_music_empty_pages.mjs']).scripts, ['verify:music-empty-pages', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_music_duration_sort.mjs']).scripts, ['verify:music-duration-sort', 'verify:music-scale', 'verify:imports']);
+assert.equal(webPackageScripts['verify:music-duration-sort'], 'node tests/verify_music_duration_sort.mjs');
+for (const entries of [FULL_SCRIPTS, ['verify:music-scale'],
+  ...['schema', 'helpers', 'smart-mix'].map(name => selectScripts([`src/modules/music/server/${name}.js`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_music_duration_sort.mjs').length, 1,
+    'duration order and index owners retain their focused gate once');
+}
+for (const [parent, command] of [
+  ['verify:work-cache-budget', 'node tests/verify_collection_query_reuse.mjs'],
+  ['verify:collection-query-cache', 'node tests/verify_collection_history_window.mjs'],
+  ['verify:music-scale', 'node tests/verify_music_state_filter.mjs'],
+  ['verify:music-scale', 'node tests/verify_music_empty_pages.mjs'],
+]) {
+  assert(expandCommands([parent], webPackageScripts).includes(command), `${parent} retains ${command}`);
+}
 assert.deepEqual(selectScripts(['tests/verify_code_prefix_cache_budget.mjs']).scripts, ['verify:code-prefixes', 'verify:work-cache-budget', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/diagnose_work_cache_heap.mjs']).scripts, ['verify:work-cache-budget', 'verify:work-facets', 'verify:code-prefixes', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_file_stream_lifecycle.mjs']).scripts, ['verify:file-streams', 'verify:imports']);
@@ -544,7 +631,48 @@ assert.deepEqual(selectScripts(['lib/cover-frame.js']).scripts, ['verify:work-co
 assert.deepEqual(selectScripts(['tests/verify_gallery_cover_async.mjs']).scripts, ['verify:gallery-cover-async', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_image_query_correctness.mjs']).scripts, ['verify:image-query', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/diagnose_image_query_cpu.mjs']).scripts, ['verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_movie_cold_projection.mjs']).scripts, ['verify:movie-cold-projection', 'verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/fixtures/image-library-legacy-source-adapter.mjs']).scripts, ['verify:image-library', 'verify:imports']);
+assert.equal(webPackageScripts['verify:movie-cold-projection'], 'node tests/verify_movie_cold_projection.mjs');
+for (const entries of [FULL_SCRIPTS, ['verify:image-query'], ['verify:image-library'],
+  selectScripts(['src/modules/media/server/gallery-metadata-service.js']).scripts,
+  selectScripts(['src/modules/content-index/server/image-library-service.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_movie_cold_projection.mjs').length, 1,
+    'movie cold projection runs once through its original query and service gates');
+}
 assert.deepEqual(selectScripts(['tests/verify_image_query_cache.mjs']).scripts, ['verify:image-query-cache', 'verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_western_image_query_cache.mjs']).scripts, ['verify:western-query-cache', 'verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_photo_query_cache.mjs']).scripts, ['verify:photo-query-cache', 'verify:image-query', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_novel_recent_reading.mjs']).scripts, ['verify:novel-recent-reading', 'verify:novel-summary-cache', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_novel_author_index.mjs']).scripts, ['verify:novel-author-index', 'verify:novel-author-index-migration', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_novel_author_index_migration.mjs']).scripts, ['verify:novel-author-index-migration', 'verify:novels', 'verify:imports']);
+for (const [script, file] of [['verify:novel-author-index', 'verify_novel_author_index'], ['verify:novel-author-index-migration', 'verify_novel_author_index_migration']]) {
+  assert.equal(webPackageScripts[script], `node tests/${file}.mjs`);
+  for (const entries of [FULL_SCRIPTS, ['verify:novel-summary-cache'],
+    selectScripts(['src/modules/novels/server/store.js']).scripts,
+    selectScripts(['tools/rescan_novel_library.py']).scripts]) {
+    assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === `node tests/${file}.mjs`).length, 1,
+      'novel author query and migration checks run once through the owning source gates');
+  }
+}
+assert.equal(expandCommands(['verify:novels'], webPackageScripts).filter(command => command === 'node tests/verify_novel_author_index_migration.mjs').length, 1,
+  'novel write and identity checks retain schema migration coverage');
+assert.deepEqual(selectScripts(['tests/verify_novel_reading_page.mjs']).scripts, ['verify:novel-reading-page', 'verify:novel-summary-cache', 'verify:imports']);
+for (const [parent, script, file] of [['verify:image-query-cache', 'verify:western-query-cache', 'verify_western_image_query_cache'], ['verify:image-query-cache', 'verify:photo-query-cache', 'verify_photo_query_cache'], ['verify:archive-images', 'verify:archive-list-authority', 'verify_archive_list_authority'], ['verify:novel-summary-cache', 'verify:novel-recent-reading', 'verify_novel_recent_reading'], ['verify:novel-summary-cache', 'verify:novel-reading-page', 'verify_novel_reading_page']]) {
+  assert.equal(webPackageScripts[script], `node tests/${file}.mjs`);
+  assert(expandCommands([parent], webPackageScripts).includes(`node tests/${file}.mjs`), 'the parent retains its focused query gate');
+  assert.equal(expandCommands(FULL_SCRIPTS, webPackageScripts).filter(command => command === `node tests/${file}.mjs`).length, 1, 'each focused query gate runs once in full verification');
+}
+assert.equal(expandCommands(selectScripts(['src/modules/novels/server/store.js']).scripts, webPackageScripts)
+  .filter(command => command === 'node tests/verify_novel_reading_page.mjs').length, 1,
+  'the novel store retains its reading page gate once');
+assert.deepEqual(selectScripts(['tests/verify_android_module_loading.mjs']).scripts, ['verify:android-module-loading', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-module-loading'], 'node tests/verify_android_module_loading.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'],
+  selectScripts(['android-client/www/js/android-module-registry.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_module_loading.mjs').length, 1,
+    'the Android shell retains its bounded module import gate once');
+}
 assert.deepEqual(selectScripts(['tests/verify_video_probe_cache.mjs']).scripts, ['verify:video-probe-cache', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_video_probe_lifecycle.mjs']).scripts, ['verify:video-probe-cache', 'verify:imports']);
 assert(selectScripts(['src/platform/server/video-probe-task-pool.js']).scripts.includes('verify:video-probe-cache'));
@@ -561,6 +689,13 @@ assert.deepEqual(selectScripts(['tests/verify_media_stream_lifecycle.mjs']).scri
 assert(selectScripts(['src/platform/server/remote-image-warm-queue.js']).scripts.includes('verify:media-images'));
 assert(selectScripts(['public/modules/content-index/gallery-page.js']).scripts.includes('verify:photo-reader-browser'));
 assert(selectScripts(['public/modules/content-index/gallery-renderer.js']).scripts.includes('verify:photo-reader-browser'));
+assert.deepEqual(selectScripts(['tests/verify_gallery_reader_progress.mjs']).scripts, ['verify:gallery-reader-progress', 'verify:imports']);
+assert.equal(webPackageScripts['verify:gallery-reader-progress'], 'node tests/verify_gallery_reader_progress.mjs');
+for (const entries of [FULL_SCRIPTS, WEB_SCRIPTS, ['verify:photo-reader-browser'],
+  selectScripts(['public/modules/content-index/gallery-renderer.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_gallery_reader_progress.mjs').length, 1,
+    'reader progress runs once through the existing gallery browser gate');
+}
 for (const file of ['public/modules/content-index/gallery-page.js', 'public/modules/content-index/gallery-renderer.js']) {
   assert(selectScripts([file]).scripts.includes('verify:gallery-rendering'));
   assert(selectScripts([file]).scripts.includes('verify:browser-behavior'));
@@ -700,6 +835,14 @@ assert.deepEqual(selectScripts(['tests/verify_music_library_recovery.mjs']).scri
 assert.deepEqual(selectScripts(['tests/verify_music_track_context.mjs']).scripts, ['verify:music-track-context-browser', 'verify:imports']);
 assert.deepEqual(selectScripts(['public/modules/novels/list-return.js']).scripts, ['verify:novels', 'verify:novel-summary-cache', 'verify:novel-list-return-browser', 'verify:novel-reader-browser', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_android_channel_rendering.mjs']).scripts, ['verify:android-channel-rendering', 'verify:photo-search', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_android_channel_paging_mount.mjs']).scripts, ['verify:android-channel-paging-mount', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-channel-paging-mount'], 'node tests/verify_android_channel_paging_mount.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'], ['verify:android-channel-rendering'],
+  ...['app.js', 'platform/content-index/channel-views.js', 'modules/media/android-module.js', 'modules/photos/android-module.js']
+    .map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_channel_paging_mount.mjs').length, 1,
+    'actual Android channel mount reuse runs once through its existing owner and client gates');
+}
 for (const name of ['image_cache', 'cache_stats']) {
   assert.deepEqual(selectScripts([`tests/verify_android_${name}.mjs`]).scripts, ['verify:android-cache', 'verify:imports']);
 }
@@ -715,6 +858,37 @@ for (const file of ['public/modules/content-index/catalog.css', 'public/modules/
 }
 assert.deepEqual(selectScripts(['tests/verify_short_video_quality_queries.mjs']).scripts, ['verify:short-video-quality', 'verify:short-video-store', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_short_video_store.mjs']).scripts, ['verify:short-video-store', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_short_video_collection_rendering.mjs']).scripts, ['verify:short-video-collection-rendering', 'verify:short-video-playback', 'verify:imports']);
+assert.equal(webPackageScripts['verify:short-video-collection-rendering'], 'node tests/verify_short_video_collection_rendering.mjs');
+assert(WEB_SCRIPTS.includes('verify:short-video-collection-rendering'));
+assert.equal(expandCommands(FULL_SCRIPTS, webPackageScripts).filter(command => command === 'node tests/verify_short_video_collection_rendering.mjs').length, 1);
+for (const file of ['collections-controller.js', 'list-cards.js', 'list-window.js', 'short-video-page.js', 'styles/list.css']) {
+  const scripts = selectScripts([`public/modules/short-videos/${file}`]).scripts;
+  assert(scripts.includes('verify:short-video-collection-rendering'));
+  assert(scripts.includes('verify:short-video-playback'), 'focused browser selection preserves the module lifecycle gates');
+}
+assert(!selectScripts(['src/modules/short-videos/server/store.js']).scripts.includes('verify:short-video-collection-rendering'), 'backend edits retain their existing verification selection');
+assert.deepEqual(selectScripts(['tests/verify_web_short_video_author_rendering.mjs']).scripts, ['verify:short-video-author-rendering', 'verify:short-video-playback', 'verify:imports']);
+assert.equal(webPackageScripts['verify:short-video-author-rendering'], 'node tests/verify_web_short_video_author_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, WEB_SCRIPTS]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_web_short_video_author_rendering.mjs').length, 1,
+    'Web author rendering runs once in each browser verification entry');
+}
+for (const file of ['author-pages.js', 'list-cards.js', 'short-video-page.js']) {
+  const scripts = selectScripts([`public/modules/short-videos/${file}`]).scripts;
+  assert(scripts.includes('verify:short-video-author-rendering'));
+  assert(scripts.includes('verify:short-video-playback'), 'Web author owners retain their existing lifecycle gates');
+}
+for (const file of ['src/modules/short-videos/server/store.js', 'android-client/www/modules/short-videos/list/view.js']) {
+  assert(!selectScripts([file]).scripts.includes('verify:short-video-author-rendering'), 'server and Android changes keep their independent gates');
+}
+assert.deepEqual(selectScripts(['tests/verify_short_video_collection_projection.mjs']).scripts, ['verify:short-video-collection-projection', 'verify:short-video-collections', 'verify:imports']);
+assert.equal(webPackageScripts['verify:short-video-collection-projection'], 'node tests/verify_short_video_collection_projection.mjs');
+assert(expandCommands(['verify:short-video-collections'], webPackageScripts).includes('node tests/verify_short_video_collection_projection.mjs'), 'collections retain their metadata projection gate');
+assert.equal(expandCommands(FULL_SCRIPTS, webPackageScripts).filter(command => command === 'node tests/verify_short_video_collection_projection.mjs').length, 1, 'collection projection runs once through its parent');
+for (const file of ['src/modules/short-videos/server/collections-repository.js', 'src/modules/short-videos/server/collection-video-projection.js']) {
+  assert(expandCommands(selectScripts([file]).scripts, webPackageScripts).includes('node tests/verify_short_video_collection_projection.mjs'), 'both projection owners retain the parent verification policy');
+}
 for (const file of ['sources', 'lifecycle']) {
   assert.deepEqual(selectScripts([`tests/verify_short_video_image_${file}.mjs`]).scripts, ['verify:short-video-images', 'verify:short-video-store', 'verify:short-video-runtime', 'verify:imports']);
 }
@@ -852,6 +1026,34 @@ for (const file of ['verify_web_player_lifecycle', 'verify_web_player_plyr', 've
   assert.equal(fullCommands.filter(command => command === `node tests/${file}.mjs`).length, 1, 'focused Web browser checks must run once in full verification');
 }
 assert.deepEqual(selectScripts(['tests/verify_manga_lookup_performance.mjs']).scripts, ['verify:manga-lookup', 'verify:manga', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_manga_metadata_file_cache.mjs']).scripts, ['verify:manga-metadata-cache', 'verify:manga', 'verify:imports']);
+assert.equal(webPackageScripts['verify:manga-metadata-cache'], 'node tests/verify_manga_metadata_file_cache.mjs');
+assert(expandCommands(['verify:manga-lookup'], webPackageScripts).includes('node tests/verify_manga_metadata_file_cache.mjs'), 'manga lookup retains its file metadata cache gate');
+assert.equal(fullCommands.filter(command => command === 'node tests/verify_manga_metadata_file_cache.mjs').length, 1, 'manga file cache runs once through its lookup parent');
+for (const file of ['tests/verify_manga_comic_statement_cache.mjs', 'tests/fixtures/manga-comic-reader-before-cache.txt']) {
+  assert.deepEqual(selectScripts([file]).scripts, ['verify:manga-comic-statements', 'verify:manga-summary-reads', 'verify:imports']);
+}
+assert.deepEqual(selectScripts(['tests/verify_manga_summary_read_budget.mjs']).scripts, ['verify:manga-summary-reads', 'verify:manga', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_manga_detail_first_images.mjs']).scripts,
+  ['verify:manga-detail-first-images', 'verify:manga', 'verify:imports']);
+assert.equal(webPackageScripts['verify:manga-detail-first-images'], 'node tests/verify_manga_detail_first_images.mjs');
+assert.deepEqual(selectScripts(['tests/verify_manga_cold_entry.mjs']).scripts, ['verify:manga-cold-entry', 'verify:imports']);
+assert.equal(webPackageScripts['verify:manga-cold-entry'], 'node tests/verify_manga_cold_entry.mjs');
+for (const entries of [FULL_SCRIPTS, WEB_SCRIPTS, ['verify:manga-reader-browser'],
+  selectScripts(['public/modules/photos/manga-page.js']).scripts]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_manga_cold_entry.mjs').length, 1,
+    'manga cold entry runs once through the reader and owning source');
+}
+for (const entries of [FULL_SCRIPTS, ['verify:manga-lookup'],
+  ...['manga-service', 'manga-database'].map(owner => selectScripts([`src/modules/photos/server/${owner}.js`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_manga_detail_first_images.mjs').length, 1,
+    'manga detail first images run once through lookup and the owning sources');
+}
+for (const [script, file] of [['verify:manga-comic-statements', 'verify_manga_comic_statement_cache'], ['verify:manga-summary-reads', 'verify_manga_summary_read_budget']]) {
+  assert.equal(webPackageScripts[script], `node tests/${file}.mjs`);
+  assert(expandCommands(['verify:manga-lookup'], webPackageScripts).includes(`node tests/${file}.mjs`));
+  assert.equal(fullCommands.filter(command => command === `node tests/${file}.mjs`).length, 1, 'manga lookup retains each independent performance gate once');
+}
 for (const file of ['src/modules/photos/server/manga-service.js', 'src/modules/photos/server/manga-database.js']) {
   assert.deepEqual(selectScripts([file]).scripts, ['verify:manga', 'verify:manga-lookup', 'verify:image-library', 'verify:gallery-rendering', 'verify:android-channel-rendering', 'verify:imports']);
 }
@@ -867,6 +1069,8 @@ for (const file of ['tests/verify_music_summary_reuse.mjs', 'tests/verify_music_
 }
 assert.deepEqual(selectScripts(['tests/verify_studio_cache_dependencies.mjs']).scripts, ['verify:studio-cache', 'verify:fanhao', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_android_music_list_rendering.mjs']).scripts, ['verify:android-music-rendering', 'verify:android-music', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_android_music_queue_rendering.mjs']).scripts, ['verify:android-music-queue', 'verify:android-music-playlists', 'verify:imports']);
+assert(expandCommands(['verify:android-music-rendering'], webPackageScripts).includes('node tests/verify_android_music_queue_rendering.mjs'), 'the Android rendering gate retains queue rendering checks');
 for (const name of ['catalogue', 'playback', 'transition', 'history', 'playlist']) {
   assert.deepEqual(selectScripts([`tests/verify_android_music_${name}_requests.mjs`]).scripts, ['verify:android-music', 'verify:android-music-rendering', 'verify:imports']);
 }
@@ -932,6 +1136,11 @@ for (const file of ['src/modules/novels/server/store.js', 'src/modules/novels/se
 assert(selectScripts(['src/platform/server/archive-task-pool.js']).scripts.includes('verify:archive-images'));
 assert(selectScripts(['src/platform/server/image-reader-cache-service.js']).scripts.includes('verify:archive-images'));
 assert.deepEqual(selectScripts(['tests/verify_archive_reader_lifecycle.mjs']).scripts, ['verify:archive-images', 'verify:gallery-db', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_archive_list_authority.mjs']).scripts, ['verify:archive-list-authority', 'verify:gallery-db', 'verify:imports']);
+for (const [file, command] of [['src/platform/server/archive-image-service.js', 'node tests/verify_archive_list_authority.mjs'], ['src/modules/content-index/server/image-library-service.js', 'node tests/verify_photo_query_cache.mjs']]) {
+  assert.equal(expandCommands(selectScripts([file]).scripts, webPackageScripts).filter(item => item === command).length, 1,
+    'the owning service retains its focused gate exactly once');
+}
 assert.deepEqual(selectScripts(['tests/fixtures/archive_image_helper_fixture.mjs']).scripts, ['verify:archive-images', 'verify:gallery-db', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_web_gallery_requests.mjs']).scripts, ['verify:photo-reader-browser', 'verify:gallery-image-retry', 'verify:gallery-page-jump', 'verify:gallery-reader-width', 'verify:gallery-visible-loading', 'verify:gallery-image-pan', 'verify:gallery-fullscreen-browser', 'verify:gallery-catalog-recovery-browser', 'verify:gallery-summary-recovery-browser', 'verify:photo-reader', 'verify:gallery-keyboard-pan-browser', 'verify:gallery-zoom-anchor-browser', 'verify:gallery-range-metadata-browser', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/diagnose_web_gallery_navigation.mjs']).scripts, ['verify:photo-reader-browser', 'verify:gallery-image-retry', 'verify:gallery-page-jump', 'verify:gallery-reader-width', 'verify:gallery-visible-loading', 'verify:gallery-image-pan', 'verify:gallery-fullscreen-browser', 'verify:gallery-catalog-recovery-browser', 'verify:gallery-summary-recovery-browser', 'verify:photo-reader', 'verify:gallery-keyboard-pan-browser', 'verify:gallery-zoom-anchor-browser', 'verify:gallery-range-metadata-browser', 'verify:imports']);

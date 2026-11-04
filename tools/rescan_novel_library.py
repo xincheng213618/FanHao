@@ -29,6 +29,77 @@ DEFAULT_ROOTS = [
 ]
 MAX_CHAPTER_CHARS = 12000
 LIBRARY_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+AUTHOR_INDEX_NAME = "idx_novel_books_author_updated"
+AUTHOR_INDEX_SQL = """CREATE INDEX IF NOT EXISTS main.idx_novel_books_author_updated
+  ON novel_books(TRIM(COALESCE(author, '')), updated_at ASC, title COLLATE NOCASE DESC)
+  WHERE status = 'ok' AND author COLLATE BINARY <> ''"""
+# Match the Node initializer's original v5 declarations and index set. Custom
+# schemas remain readable without installing an index that changes their plan.
+AUTHOR_INDEX_TABLES = {
+    "novel_books": """CREATE TABLE novel_books (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, author TEXT, category TEXT,
+        source_root TEXT NOT NULL, source_path TEXT NOT NULL UNIQUE,
+        relative_path TEXT NOT NULL, file_name TEXT NOT NULL, size_bytes INTEGER,
+        mtime_ms INTEGER, encoding TEXT, char_count INTEGER, chapter_count INTEGER,
+        first_chapter_id TEXT, latest_chapter_id TEXT, latest_chapter_title TEXT,
+        summary TEXT, tags_json TEXT, status TEXT NOT NULL DEFAULT 'ok', error TEXT,
+        updated_at TEXT NOT NULL, catalog_revision TEXT,
+        legacy_write_allowed INTEGER NOT NULL DEFAULT 1)""",
+    "novel_reading_state": """CREATE TABLE novel_reading_state (
+        book_id TEXT PRIMARY KEY, chapter_id TEXT, chapter_index INTEGER,
+        scroll_ratio REAL DEFAULT 0, updated_at TEXT NOT NULL, catalog_revision TEXT,
+        status TEXT NOT NULL DEFAULT 'unresolved', reason TEXT NOT NULL DEFAULT 'legacy_unverified',
+        anchor_json TEXT, candidate_json TEXT)""",
+}
+AUTHOR_INDEX_ORIGINAL_INDEXES = {
+    "idx_novel_books_title": "CREATE INDEX idx_novel_books_title ON novel_books(title)",
+    "idx_novel_books_author": "CREATE INDEX idx_novel_books_author ON novel_books(author)",
+    "idx_novel_books_category": "CREATE INDEX idx_novel_books_category ON novel_books(category)",
+    "idx_novel_books_updated": "CREATE INDEX idx_novel_books_updated ON novel_books(updated_at)",
+    "sqlite_autoindex_novel_books_1": None,
+    "sqlite_autoindex_novel_books_2": None,
+    "sqlite_autoindex_novel_reading_state_1": None,
+}
+
+
+def _compact_schema_sql(sql):
+    if not isinstance(sql, str):
+        return sql
+    # Keep identifier/keyword boundaries as well as complete quoted tokens.
+    return re.findall(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|<>|!=|<=|>=|==|\|\||[^\s]", sql)
+
+
+def _install_author_index(conn: sqlite3.Connection) -> None:
+    objects = conn.execute("""
+        SELECT 'main' AS schema_name, type, name, tbl_name, sql FROM main.sqlite_schema
+        WHERE tbl_name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')
+          OR name = 'idx_novel_books_author_updated' COLLATE NOCASE
+        UNION ALL
+        SELECT 'temp' AS schema_name, type, name, tbl_name, sql FROM temp.sqlite_schema
+        WHERE name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')
+    """).fetchall()
+    found = set()
+    own_index = False
+    for schema_name, object_type, name, table_name, sql in objects:
+        if schema_name != "main" or name in found:
+            return
+        found.add(name)
+        if name in AUTHOR_INDEX_TABLES:
+            if object_type != "table" or table_name != name or _compact_schema_sql(sql) != _compact_schema_sql(AUTHOR_INDEX_TABLES[name]):
+                return
+        elif name in AUTHOR_INDEX_ORIGINAL_INDEXES:
+            expected_table = "novel_reading_state" if name == "sqlite_autoindex_novel_reading_state_1" else "novel_books"
+            if object_type != "index" or table_name != expected_table or _compact_schema_sql(sql) != _compact_schema_sql(AUTHOR_INDEX_ORIGINAL_INDEXES[name]):
+                return
+        elif name == AUTHOR_INDEX_NAME:
+            expected = AUTHOR_INDEX_SQL.replace("IF NOT EXISTS main.", "")
+            if object_type != "index" or table_name != "novel_books" or _compact_schema_sql(sql) != _compact_schema_sql(expected):
+                return
+            own_index = True
+        else:
+            return
+    if len(found) == len(AUTHOR_INDEX_TABLES) + len(AUTHOR_INDEX_ORIGINAL_INDEXES) + int(own_index):
+        conn.execute(AUTHOR_INDEX_SQL)
 
 
 @dataclass
@@ -335,7 +406,7 @@ def _validate_library_metadata(conn: sqlite3.Connection):
                 raise ValueError("小说库版本标记无效，未修改原库") from error
             if parsed_version < 0:
                 raise ValueError("小说库版本标记无效，未修改原库")
-            if parsed_version > 5:
+            if parsed_version > 6:
                 raise ValueError("小说库来自更新版本，当前程序不能修改")
         identity = conn.execute("SELECT value FROM novel_meta WHERE key = 'library_id'").fetchone()
         if identity and (not isinstance(identity[0], str) or not LIBRARY_ID_PATTERN.fullmatch(identity[0])):
@@ -344,11 +415,24 @@ def _validate_library_metadata(conn: sqlite3.Connection):
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    _validate_library_metadata(conn)
+    identity = _validate_library_metadata(conn)
+    version = conn.execute("SELECT value FROM novel_meta WHERE key = 'schema_version'").fetchone() if identity else None
+    if version and int(version[0] or 0) == 6:
+        return
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("BEGIN IMMEDIATE")
     identity = _validate_library_metadata(conn)
+    if identity:
+        version = conn.execute("SELECT value FROM novel_meta WHERE key = 'schema_version'").fetchone()
+        if version and int(version[0] or 0) >= 5:
+            # v5 already has its chapter identities. Do not rerun historical
+            # DDL on custom v5 tables merely to add an optional query index.
+            if int(version[0] or 0) < 6:
+                _install_author_index(conn)
+                conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '6')")
+            conn.commit()
+            return
     # Fixed internal DDL only; executescript would implicitly commit this lock.
     schema = """
         CREATE TABLE IF NOT EXISTS novel_meta (
@@ -428,8 +512,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     identity = conn.execute("SELECT value FROM novel_meta WHERE key = 'library_id'").fetchone()
     if not identity or not isinstance(identity[0], str) or not LIBRARY_ID_PATTERN.fullmatch(identity[0]):
         raise ValueError("小说库缺少有效的持久来源身份")
-    if not schema_version or int(schema_version[0] or 0) < 5:
-        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '5')")
+    _install_author_index(conn)
+    if not schema_version or int(schema_version[0] or 0) < 6:
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '6')")
     # The callers start their own replacement transaction immediately below.
     # Commit this one-time durable initialization independently of that import.
     conn.commit()

@@ -161,6 +161,10 @@ export function ensureSchema(db, options = {}) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_language_album_sort ON music_tracks(language, status, album_title COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_artist_sort ON music_tracks(status, display_artist COLLATE NOCASE, album_title COLLATE NOCASE, track_no, title COLLATE NOCASE);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_title_sort ON music_tracks(status, title COLLATE NOCASE, display_artist COLLATE NOCASE);");
+  const durationSortColumns = new Set(db.prepare("PRAGMA main.table_info(music_tracks)").all().map(column => String(column.name).toLowerCase()));
+  if (["status", "duration_ms", "title", "id"].every(column => durationSortColumns.has(column))) {
+    db.exec("CREATE INDEX IF NOT EXISTS main.idx_music_tracks_duration_sort ON music_tracks(status, duration_ms DESC, title COLLATE NOCASE ASC, id COLLATE BINARY ASC);");
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_albums_track_count ON music_albums(track_count DESC, title COLLATE NOCASE);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_artists_track_count ON music_artists(track_count DESC, name COLLATE NOCASE);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_track_state_rating ON music_track_state(rating, updated_at);");

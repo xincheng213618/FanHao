@@ -16,11 +16,115 @@ const LIBRARY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9
 const PROGRESS_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const PROGRESS_SESSION_LIMIT = 8192;
 const PROGRESS_BOOK_SESSION_LIMIT = 32;
+const AUTHOR_INDEX_NAME = "idx_novel_books_author_updated";
+const AUTHOR_INDEX_SQL = `CREATE INDEX IF NOT EXISTS main.idx_novel_books_author_updated
+  ON novel_books(TRIM(COALESCE(author, '')), updated_at ASC, title COLLATE NOCASE DESC)
+  WHERE status = 'ok' AND author COLLATE BINARY <> ''`;
+// These are the declarations produced by both original version-5 initializers,
+// including the columns appended by the chapter-identity migration.
+const AUTHOR_INDEX_TABLES = new Map([
+  ["novel_books", `CREATE TABLE novel_books (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, author TEXT, category TEXT,
+    source_root TEXT NOT NULL, source_path TEXT NOT NULL UNIQUE,
+    relative_path TEXT NOT NULL, file_name TEXT NOT NULL, size_bytes INTEGER,
+    mtime_ms INTEGER, encoding TEXT, char_count INTEGER, chapter_count INTEGER,
+    first_chapter_id TEXT, latest_chapter_id TEXT, latest_chapter_title TEXT,
+    summary TEXT, tags_json TEXT, status TEXT NOT NULL DEFAULT 'ok', error TEXT,
+    updated_at TEXT NOT NULL, catalog_revision TEXT,
+    legacy_write_allowed INTEGER NOT NULL DEFAULT 1)`],
+  ["novel_reading_state", `CREATE TABLE novel_reading_state (
+    book_id TEXT PRIMARY KEY, chapter_id TEXT, chapter_index INTEGER,
+    scroll_ratio REAL DEFAULT 0, updated_at TEXT NOT NULL, catalog_revision TEXT,
+    status TEXT NOT NULL DEFAULT 'unresolved', reason TEXT NOT NULL DEFAULT 'legacy_unverified',
+    anchor_json TEXT, candidate_json TEXT)`]
+]);
+const AUTHOR_INDEX_ORIGINAL_INDEXES = new Map([
+  ["idx_novel_books_title", "CREATE INDEX idx_novel_books_title ON novel_books(title)"],
+  ["idx_novel_books_author", "CREATE INDEX idx_novel_books_author ON novel_books(author)"],
+  ["idx_novel_books_category", "CREATE INDEX idx_novel_books_category ON novel_books(category)"],
+  ["idx_novel_books_updated", "CREATE INDEX idx_novel_books_updated ON novel_books(updated_at)"],
+  ["sqlite_autoindex_novel_books_1", null],
+  ["sqlite_autoindex_novel_books_2", null],
+  ["sqlite_autoindex_novel_reading_state_1", null]
+]);
+function compactSchemaSql(sql) {
+  if (typeof sql !== "string") return sql;
+  // Formatting may vary, but identifier/keyword boundaries and quoted tokens
+  // must remain distinct (status TEXT is not a legacy statusTEXT column).
+  return JSON.stringify(sql.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|<>|!=|<=|>=|==|\|\||[^\s]/gu) || []);
+}
+function hasStandardAuthorIndexSchema(database, { allowMissingIndex = false } = {}) {
+  const objects = database.prepare(`
+    SELECT 'main' AS schema_name, type, name, tbl_name, sql FROM main.sqlite_schema
+    WHERE tbl_name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')
+      OR name = 'idx_novel_books_author_updated' COLLATE NOCASE
+    UNION ALL
+    SELECT 'temp' AS schema_name, type, name, tbl_name, sql FROM temp.sqlite_schema
+    WHERE name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')
+  `).all();
+  let ownIndex = false;
+  const found = new Set();
+  for (const object of objects) {
+    if (object.schema_name !== "main" || found.has(object.name)) return false;
+    found.add(object.name);
+    if (AUTHOR_INDEX_TABLES.has(object.name)) {
+      if (object.type !== "table" || object.tbl_name !== object.name
+        || compactSchemaSql(object.sql) !== compactSchemaSql(AUTHOR_INDEX_TABLES.get(object.name))) return false;
+    } else if (AUTHOR_INDEX_ORIGINAL_INDEXES.has(object.name)) {
+      const table = object.name === "sqlite_autoindex_novel_reading_state_1" ? "novel_reading_state" : "novel_books";
+      if (object.type !== "index" || object.tbl_name !== table
+        || compactSchemaSql(object.sql) !== compactSchemaSql(AUTHOR_INDEX_ORIGINAL_INDEXES.get(object.name))) return false;
+    } else if (object.name === AUTHOR_INDEX_NAME) {
+      const expected = AUTHOR_INDEX_SQL.replace("IF NOT EXISTS main.", "");
+      if (object.type !== "index" || object.tbl_name !== "novel_books"
+        || compactSchemaSql(object.sql) !== compactSchemaSql(expected)) return false;
+      ownIndex = true;
+    } else return false;
+  }
+  return found.size === AUTHOR_INDEX_TABLES.size + AUTHOR_INDEX_ORIGINAL_INDEXES.size + Number(ownIndex)
+    && (ownIndex || allowMissingIndex);
+}
+function installAuthorIndex(database) {
+  if (hasStandardAuthorIndexSchema(database, { allowMissingIndex: true })) database.exec(AUTHOR_INDEX_SQL);
+}
 export const NOVEL_WRITE_METHODS = Object.freeze(["saveProgress", "updateBookMetadata", "uploadBook", "reimportBook", "importCollectedBook", "deleteBook", "reimportLocalBook"]);
 const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index AS progress_chapter_index,
   s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
   s.catalog_revision AS progress_revision, s.status AS progress_status,
   s.reason AS progress_reason, s.anchor_json AS progress_anchor, s.candidate_json AS progress_candidate`;
+
+function canDriveRecentReadingFromState(database) {
+  try {
+    const books = database.prepare("PRAGMA table_info(novel_books)").all();
+    const states = database.prepare("PRAGMA table_info(novel_reading_state)").all();
+    const singleTextKey = (columns, name) => {
+      const keys = columns.filter((column) => Number(column.pk) > 0);
+      return keys.length === 1 && keys[0].name === name && Number(keys[0].pk) === 1
+        && String(keys[0].type).trim().toUpperCase() === "TEXT";
+    };
+    if (!singleTextKey(books, "id") || !singleTextKey(states, "book_id")) return false;
+    const schema = database.prepare(`
+      SELECT
+        (SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = 'novel_books' COLLATE NOCASE) AS books_sql,
+        EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE IN ('novel_books', 'novel_reading_state')) AS shadowed
+    `).get();
+    // Only the project's original first-column declaration proves the join's
+    // BINARY id comparison agrees with its unique key. A legacy table-level
+    // PK may override a NOCASE column and allow multiple books per state.
+    if (schema?.shadowed !== 0 || typeof schema.books_sql !== "string"
+      || !/^CREATE\s+TABLE\s+novel_books\s*\(\s*id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(schema.books_sql)) return false;
+    // Distinct timestamps make the existing ORDER BY independent of join
+    // traversal. Keep its original plan for NULLs, ties and dense state.
+    const sample = database.prepare(`
+      SELECT COUNT(*) AS count, COUNT(DISTINCT updated_at) AS timestamps
+      FROM (SELECT updated_at FROM novel_reading_state LIMIT 1025)
+    `).get();
+    return Number.isInteger(sample?.count) && sample.count <= 1024 && sample.timestamps === sample.count;
+  } catch {
+    // Probe failures retain the original query and its own error behavior.
+    return false;
+  }
+}
 
 export function createNovelStore(options = {}) {
   const dbPath = options.dbPath;
@@ -117,12 +221,13 @@ export function createNovelStore(options = {}) {
   function summaryFromDb(database) {
     const sourceRealm = sourceRealmFromDb(database);
     const summaryStatic = staticSummaryFromDb(database, sourceRealm);
+    const recentJoin = canDriveRecentReadingFromState(database) ? "CROSS JOIN" : "JOIN";
     const recent = database
       .prepare(
         `
         SELECT b.*, ${PROGRESS_COLUMNS}
         FROM novel_reading_state s
-        JOIN novel_books b ON b.id = s.book_id
+        ${recentJoin} novel_books b ON b.id = s.book_id
         WHERE b.status = 'ok'
         ORDER BY s.updated_at DESC
         LIMIT 6
@@ -219,6 +324,10 @@ export function createNovelStore(options = {}) {
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
       const conditions = ["b.status = 'ok'"];
       const params = [];
+      let indexedAuthor = false;
+      if (author) {
+        try { indexedAuthor = hasStandardAuthorIndexSchema(database); } catch {}
+      }
       if (readingOnly) conditions.push("EXISTS (SELECT 1 FROM novel_reading_state rs WHERE rs.book_id = b.id)");
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
@@ -226,6 +335,7 @@ export function createNovelStore(options = {}) {
       }
       if (author) {
         conditions.push("TRIM(COALESCE(b.author, '')) = ?");
+        if (indexedAuthor) conditions.push("b.author COLLATE BINARY <> ''");
         params.push(author);
       }
       if (query) {
@@ -241,17 +351,31 @@ export function createNovelStore(options = {}) {
         conditions.push(`(${parts.join(" OR ")})`);
       }
       const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-      const order = bookOrderSql(sort);
+      // Stabilize the standard producer's previous rowid tie order only in the
+      // qualified author path. Other and legacy queries retain their old order.
+      const order = bookOrderSql(sort) + (indexedAuthor ? (sort === "updated" ? ", b.rowid DESC" : ", b.rowid ASC") : "");
       const countFrom = readingOnly
         ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
         : "novel_books b";
       const countRow = database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...params);
+      let stateDrivenPage = false;
+      if (readingOnly && sort === "progress" && Number(countRow?.count || 0) > offset
+        && canDriveRecentReadingFromState(database)) {
+        try {
+          // The original page compares s.book_id on the left. Its collation,
+          // as well as the books key, must prove one matching row per key.
+          const declaration = database.prepare("SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = 'novel_reading_state' COLLATE NOCASE").get();
+          stateDrivenPage = /^CREATE\s+TABLE\s+novel_reading_state\s*\(\s*book_id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(declaration?.sql || "");
+        } catch {}
+      }
+      const pageFrom = stateDrivenPage
+        ? "novel_reading_state s CROSS JOIN novel_books b ON s.book_id = b.id"
+        : "novel_books b LEFT JOIN novel_reading_state s ON s.book_id = b.id";
       const rows = database
         .prepare(
           `
           SELECT b.*, ${PROGRESS_COLUMNS}
-          FROM novel_books b
-          LEFT JOIN novel_reading_state s ON s.book_id = b.id
+          FROM ${pageFrom}
           ${where}${Number(countRow?.count || 0) <= offset ? " AND 0" : ""}
           ${order}
           LIMIT ? OFFSET ?
@@ -896,10 +1020,19 @@ function ensureSchema(db) {
   db.exec("PRAGMA busy_timeout = 5000");
   // A current library needs no DDL or writer lock just to read a chapter.
   // Keep checking each newly opened connection so external upgrades are seen.
-  if (existingIdentity && Number(metaValue(db, "schema_version")) === 5) return;
+  if (existingIdentity && Number(metaValue(db, "schema_version")) === 6) return;
   db.exec("PRAGMA journal_mode = WAL");
   inTransaction(db, "BEGIN IMMEDIATE", () => {
   validateExistingLibraryMetadata(db); // The writer lock may have waited behind an upgrade.
+  const lockedVersion = Number(metaValue(db, "schema_version") || 0);
+  if (existingIdentity && lockedVersion >= 5) {
+    sourceRealmFromDb(db);
+    if (lockedVersion < 6) {
+      installAuthorIndex(db);
+      db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '6')").run();
+    }
+    return;
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS novel_meta (
       key TEXT PRIMARY KEY,
@@ -976,7 +1109,8 @@ function ensureSchema(db) {
     db.prepare("INSERT INTO novel_meta (key, value) VALUES ('library_id', ?) ON CONFLICT(key) DO NOTHING").run(crypto.randomUUID());
   }
   sourceRealmFromDb(db);
-  if (schemaVersion < 5) db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '5')").run();
+  installAuthorIndex(db);
+  if (schemaVersion < 6) db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '6')").run();
   });
 }
 
@@ -986,7 +1120,7 @@ function validateExistingLibraryMetadata(db) {
   if (versionRow) {
     const version = Number(versionRow.value);
     if (!Number.isInteger(version) || version < 0) throw new Error("小说库版本标记无效，未修改原库");
-    if (version > 5) throw new Error("小说库来自更新版本，当前程序不能修改");
+    if (version > 6) throw new Error("小说库来自更新版本，当前程序不能修改");
   }
   const identity = db.prepare("SELECT value FROM novel_meta WHERE key = 'library_id'").get();
   if (identity && (typeof identity.value !== "string" || !LIBRARY_ID_PATTERN.test(identity.value))) {

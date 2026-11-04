@@ -157,7 +157,7 @@ function pageBridge(f) {
   const env = vm.createContext({ state: f.state, els: { workGrid: f.root }, document: f.document, transcodeManagementPage: f.wrapper,
     shortVideoHomePresentation: null, ensureState() {}, invalidateShortVideoListWork() {}, syncShortVideoNativePlaybackModes() {}, cancelShortVideoPanelLoading() {},
     stopShortVideoSoundPreview() {}, cancelShortVideoAutoNext() {}, cancelShortVideoBrowseGestures() {}, resetShortVideoWindow() {}, clearPendingPlayerClick() {},
-    releaseUnusedShortVideoPreloads() {}, disposeShortVideoMedia, setBodyClass() {}, renderHome() {}, renderStats() {}, shortVideoOpeningId: "",
+    releaseUnusedShortVideoPreloads() {}, releaseAuthorIndex() {}, disposeShortVideoMedia, setBodyClass() {}, renderHome() {}, renderStats() {}, shortVideoOpeningId: "",
     renderBrowser() {
       current = new Element("video"); Object.assign(current, { src: "/fixture/A", currentTime: 7.9682, paused: true, muted: false, pauses: 0, loads: 0 });
       current.pause = () => { current.pauses++; current.paused = true; }; current.load = () => current.loads++;

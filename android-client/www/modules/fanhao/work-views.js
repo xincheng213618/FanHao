@@ -1,22 +1,23 @@
-import { fetchJson } from "../../js/api.js?v=assets-22080e82f167";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-22080e82f167";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-22080e82f167";
+import { fetchJson } from "../../js/api.js?v=assets-eb78be0b425d";
+import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-eb78be0b425d";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-eb78be0b425d";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=assets-22080e82f167";
-import { createWorkCards } from "./features/works/cards.js?v=assets-22080e82f167";
-import { workCollectionPath } from "./features/works/collection-request.js?v=assets-22080e82f167";
-import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-22080e82f167";
-import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-22080e82f167";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-22080e82f167";
-import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-22080e82f167";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-22080e82f167";
-import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-22080e82f167";
-import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-22080e82f167";
-import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-22080e82f167";
-import { createFanhaoSearchPage } from "./search-page.js?v=assets-22080e82f167";
-import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-22080e82f167";
-import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-22080e82f167";
-import { createCategoryViews } from "./features/categories/category-views.js?v=assets-22080e82f167";
+import { createWorkListState } from "../../js/work-filtering.js?v=assets-eb78be0b425d";
+import { createWorkCards } from "./features/works/cards.js?v=assets-eb78be0b425d";
+import { workCollectionPath } from "./features/works/collection-request.js?v=assets-eb78be0b425d";
+import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-eb78be0b425d";
+import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-eb78be0b425d";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-eb78be0b425d";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-eb78be0b425d";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-eb78be0b425d";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-eb78be0b425d";
+import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-eb78be0b425d";
+import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-eb78be0b425d";
+import { createFanhaoSearchPage } from "./search-page.js?v=assets-eb78be0b425d";
+import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-eb78be0b425d";
+import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-eb78be0b425d";
+import { createCategoryViews } from "./features/categories/category-views.js?v=assets-eb78be0b425d";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
@@ -48,6 +49,7 @@ export function createWorkViews(context) {
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
+  let mountedAllWorks = null;
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
   let activeSearchCategory = "censored";
   const searchPage = createFanhaoSearchPage({
@@ -196,6 +198,7 @@ export function createWorkViews(context) {
   }
 
   async function renderAllWorks(params = {}, isActive = () => true) {
+    releaseAllWorks();
     if (String(params.favorite || "") === "1") {
       leaveRankingSort();
       return favoriteViews.render(params, isActive);
@@ -207,56 +210,274 @@ export function createWorkViews(context) {
     els.viewMeta.textContent = "正在加载";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载作品</div>`;
 
-    const limit = getWorksLimit();
-    const serverFilter = workListState.getServerFilterMode();
-    const serverSort = workListState.getServerSortMode();
-    const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
     const activeUrl = getActiveUrl();
-    let renderedCache = false;
-
-    const applyWorksHeader = (data, cacheEntry = null) => {
-      const works = data.works || [];
-      const total = Number(data.total || works.length);
-      const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
+    const owner = {
+      activeUrl, account: captureAccountOwner(activeUrl), isActive,
+      params: JSON.stringify(getCurrentParams()), filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode(),
+      life: new AbortController(), moreLife: null, data: null, visible: [], records: [],
+      grid: null, controls: null, more: null, pending: null, retryLimit: null, request: 0, moreStep: 48, moreText: "",
+      focusedMore: null, restoreMoreFocus: false, scrollRestore: null
     };
-
-    const renderWorksData = (data, cacheEntry = null) => {
-      const works = data.works || [];
-      const total = Number(data.total || works.length);
-      applyWorksHeader(data, cacheEntry);
-      els.viewContent.innerHTML = "";
-      renderWorks(works, "资料库里还没有作品。", {
-        compactMeta: true,
-        compactSummary: true,
-        coverGrid: true,
-        facets: data.facets,
-        ...serverContinuationOptions(works, total)
-      });
+    mountedAllWorks = owner;
+    owner.onAbort = () => releaseAllWorks(owner);
+    isActive.signal?.addEventListener("abort", owner.onAbort, { once: true });
+    const cancelScrollRestore = (event) => {
+      if (event.type === "keydown" && (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey
+        || !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+        || event.target?.isContentEditable || event.target?.closest?.("input, textarea, select, [role='textbox']"))) return;
+      owner.scrollRestore = null;
     };
+    for (const type of ["wheel", "touchmove", "pointerdown"]) window.addEventListener(type, cancelScrollRestore, { passive: true, signal: owner.life.signal });
+    window.addEventListener("keydown", cancelScrollRestore, { signal: owner.life.signal });
+    document.addEventListener("focusin", (event) => {
+      owner.focusedMore = event.target === owner.more?.querySelector("button") ? event.target : null;
+      if (!owner.focusedMore) {
+        owner.restoreMoreFocus = false;
+        cancelScrollRestore(event);
+      }
+    }, { signal: owner.life.signal });
+    owner.pending = loadAllWorks(owner, getWorksLimit(), true);
+    return owner.pending;
+  }
 
+  function ownsAllWorks(owner) {
+    return owner === mountedAllWorks && !owner.life.signal.aborted && owner.isActive()
+      && owner.activeUrl === getActiveUrl() && isAccountOwnerCurrent(owner.account)
+      && getCurrentView() === "works" && JSON.stringify(getCurrentParams()) === owner.params
+      && workListState.getServerFilterMode() === owner.filter && workListState.getServerSortMode() === owner.sort;
+  }
+
+  function retireAllWorksPresentation(owner) {
+    owner.moreLife?.abort();
+    progressiveWorkListRenderer.cancel();
+    workDetailDataService.cancelHover();
+    workCards.resetCoverLoading();
+    for (const record of owner.records) workCards.releaseWorkCard(record.card);
+    owner.records = [];
+    owner.visible = [];
+    owner.data = null;
+    owner.grid = owner.controls = owner.more = null;
+    owner.moreText = "";
+  }
+
+  function releaseAllWorks(owner = mountedAllWorks) {
+    if (!owner || owner !== mountedAllWorks) return;
+    mountedAllWorks = null;
+    owner.life.abort();
+    owner.isActive.signal?.removeEventListener("abort", owner.onAbort);
+    retireAllWorksPresentation(owner);
+    owner.focusedMore = null;
+    owner.restoreMoreFocus = false;
+    owner.scrollRestore = null;
+  }
+
+  function applyAllWorksHeader(data, cacheEntry = null) {
+    const works = data.works || [];
+    const total = Number(data.total || works.length);
+    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+    els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
+  }
+
+  function allWorksOptions(owner, data) {
+    const works = data.works || [];
+    return {
+      compactMeta: true, compactSummary: true, coverGrid: true, facets: data.facets,
+      total: Number(data.total || works.length), hasServerMore: works.length < Number(data.total || works.length),
+      onLoadMore: () => loadMoreAllWorks(owner),
+      onVisibleMore: () => loadMoreAllWorks(owner),
+      moreOptions: { signal: owner.moreLife.signal, getIdleText: () => owner.moreText },
+      createControls(source, list, options) {
+        const controls = workListState.createWorkControls(source, list, {
+          ...options,
+          onFilterChange(value) {
+            if (ownsAllWorks(owner) && owner.controls === controls && controls.isConnected) workListState.setFilterMode(value);
+          }
+        });
+        owner.controls = controls;
+        return controls;
+      },
+      onCardCreated(card, work, index) {
+        const current = owner.visible[index] || work;
+        workCards.updateWorkCard(card, current);
+        owner.records[index] = { card };
+      },
+      onComplete() {
+        restoreAllWorksScroll(owner);
+        syncAllWorksMore(owner);
+        restoreAllWorksFocus(owner);
+      }
+    };
+  }
+
+  function syncAllWorksMore(owner) {
+    if (!ownsAllWorks(owner) || !owner.more?.isConnected) return;
+    const button = owner.more.querySelector("button");
+    if (button) {
+      button.disabled = Boolean(owner.pending);
+      button.textContent = owner.pending ? "正在接着加载" : owner.moreText;
+    }
+  }
+
+  function mountAllWorks(owner, data, cacheEntry = null) {
+    if (owner.grid?.isConnected && owner.scrollRestore === null) owner.scrollRestore = window.scrollY;
+    const restoreFocus = owner.restoreMoreFocus || allWorksMoreHasFocus(owner);
+    retireAllWorksPresentation(owner);
+    owner.restoreMoreFocus = restoreFocus;
+    owner.data = data;
+    owner.moreLife = new AbortController();
+    els.viewContent.innerHTML = "";
+    const rendered = renderWorks(data.works || [], "资料库里还没有作品。", allWorksOptions(owner, data));
+    if (rendered) {
+      owner.grid = rendered.grid;
+      owner.more = rendered.more;
+      owner.visible = rendered.visible;
+      owner.moreStep = rendered.visible.length < rendered.listCount ? 40 : 48;
+      owner.moreText = `向下滑动继续加载 ${formatNumber(rendered.visible.length)} / ${formatNumber(rendered.visible.length < rendered.listCount ? rendered.listCount : Number(data.total || (data.works || []).length))}`;
+      if (owner.records.length === owner.visible.length) restoreAllWorksScroll(owner);
+    } else {
+      owner.scrollRestore = null;
+    }
+    applyAllWorksHeader(data, cacheEntry);
+    syncAllWorksMore(owner);
+  }
+
+  function restoreAllWorksScroll(owner) {
+    if (owner.scrollRestore === null || !ownsAllWorks(owner) || !owner.grid?.isConnected) return;
+    const top = owner.scrollRestore;
+    owner.scrollRestore = null;
+    window.scrollTo({ top, behavior: "auto" });
+  }
+
+  function allWorksMoreHasFocus(owner) {
+    const button = owner.more?.querySelector("button");
+    return Boolean(button && (document.activeElement === button
+      || document.activeElement === document.body && owner.focusedMore === button));
+  }
+
+  function restoreAllWorksFocus(owner) {
+    if (!owner.restoreMoreFocus || !ownsAllWorks(owner)) return;
+    if (!owner.more && owner.records.length !== owner.visible.length) return;
+    if (document.activeElement === document.body) {
+      const target = owner.more?.querySelector("button") || owner.records.at(-1)?.card;
+      if (!target?.isConnected || target.disabled) return;
+      target.focus({ preventScroll: true });
+    }
+    owner.restoreMoreFocus = false;
+  }
+
+  function sameWorkData(left, right) {
+    try { return JSON.stringify(left) === JSON.stringify(right); }
+    catch { return false; }
+  }
+
+  function appendMountedAllWorks(owner, data, cacheEntry = null) {
+    if (!ownsAllWorks(owner) || !owner.grid?.isConnected || owner.grid.parentElement !== els.viewContent) return false;
+    const works = data.works || [];
+    const list = workListState.visibleWorks(works);
+    const visible = list.slice(0, getWorksLimit());
+    const needsMore = visible.length < list.length || works.length < Number(data.total || works.length);
+    if (needsMore && (!owner.more || owner.moreLife.signal.aborted
+      || owner.records.length === owner.visible.length && !owner.more.isConnected)) return false;
+    if (!needsMore && owner.more && !owner.more.isConnected) return false;
+    const keys = new Set();
+    for (const work of visible) {
+      const id = work?.id == null ? "" : String(work.id);
+      if (!id || keys.has(id)) return false;
+      keys.add(id);
+    }
+    if (visible.length < owner.visible.length || owner.visible.some((work, index) =>
+      String(work?.id) !== String(visible[index]?.id) || !sameWorkData(work, visible[index]))) return false;
+    const start = owner.visible.length;
+    if (visible.length > start && (owner.records.length !== start || owner.grid.children.length !== start)) return false;
+    if (owner.records.some((record, index) => record.card.parentElement !== owner.grid || owner.grid.children[index] !== record.card)) return false;
+
+    const controlsUnchanged = sameWorkData(owner.data, data);
+    const options = allWorksOptions(owner, data);
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < owner.records.length; index++) workCards.updateWorkCard(owner.records[index].card, visible[index]);
+    for (let index = start; index < visible.length; index++) {
+      const card = workCards.createWorkCard(visible[index], options);
+      owner.records[index] = { card };
+      fragment.append(card);
+    }
+    owner.grid.append(fragment);
+    owner.visible = visible;
+    owner.data = data;
+    owner.moreStep = visible.length < list.length ? 40 : 48;
+    owner.moreText = `向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(visible.length < list.length ? list.length : Number(data.total || works.length))}`;
+    if (!controlsUnchanged && owner.controls?.isConnected) {
+      const old = owner.controls;
+      const focus = [...old.querySelectorAll("button")].indexOf(document.activeElement);
+      const scroll = old.querySelector(".work-filter-strip")?.scrollLeft || 0;
+      const controls = options.createControls(works, list, options);
+      old.replaceWith(controls);
+      const strip = controls.querySelector(".work-filter-strip");
+      if (strip) strip.scrollLeft = scroll;
+      if (focus >= 0 && document.activeElement === document.body) controls.querySelectorAll("button")[focus]?.focus({ preventScroll: true });
+    }
+    if (visible.length >= list.length && works.length >= Number(data.total || works.length)) {
+      const focused = allWorksMoreHasFocus(owner);
+      owner.moreLife.abort();
+      owner.more?.remove();
+      owner.more = null;
+      owner.restoreMoreFocus = focused;
+      restoreAllWorksFocus(owner);
+    }
+    applyAllWorksHeader(data, cacheEntry);
+    syncAllWorksMore(owner);
+    return true;
+  }
+
+  function loadMoreAllWorks(owner) {
+    if (!ownsAllWorks(owner) || !owner.grid?.isConnected || !owner.more?.isConnected) return;
+    if (owner.pending) return owner.pending;
+    owner.restoreMoreFocus = allWorksMoreHasFocus(owner);
+    if (owner.retryLimit === null) {
+      increaseWorksLimit(owner.moreStep);
+      owner.retryLimit = getWorksLimit();
+    }
+    owner.pending = loadAllWorks(owner, owner.retryLimit, false);
+    syncAllWorksMore(owner);
+    return owner.pending;
+  }
+
+  async function loadAllWorks(owner, limit, initial) {
+    const request = ++owner.request;
+    const current = () => ownsAllWorks(owner) && owner.request === request;
+    const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(owner.sort)}&filter=${encodeURIComponent(owner.filter)}`;
+    let accepted = false;
+    const publish = (data, cacheEntry = null) => {
+      if (!current()) return;
+      if (!appendMountedAllWorks(owner, data, cacheEntry)) mountAllWorks(owner, data, cacheEntry);
+      accepted = true;
+      owner.retryLimit = null;
+    };
     try {
-      const result = await pageDataService.load(activeUrl, path, {
-        signal: isActive.signal,
-        isActive,
+      const result = await pageDataService.load(owner.activeUrl, path, {
+        signal: owner.life.signal,
+        isActive: current,
         signature: workDataSignature,
         onCached(data, cacheEntry) {
-          renderedCache = true;
-          renderWorksData(data, cacheEntry);
+          publish(data, cacheEntry);
         }
       });
-      if (!result || !isActive()) return;
-      if (result.unchanged) {
-        applyWorksHeader(result.data);
-        return;
-      }
-      renderWorksData(result.data);
+      // Even the old coarse signature's unchanged response may contain a new
+      // cover/person record. Validate the complete fresh prefix before reuse.
+      if (result && current()) publish(result.data);
     } catch (error) {
-      if (!isActive()) return;
-      if (renderedCache) {
+      if (!current()) return;
+      if (accepted) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存作品。", "quiet", false);
-      } else {
+      } else if (initial) {
         renderMessage(error.message, "error");
+      } else {
+        throw error;
+      }
+    } finally {
+      if (current()) {
+        owner.pending = null;
+        syncAllWorksMore(owner);
+        restoreAllWorksFocus(owner);
       }
     }
   }
@@ -652,8 +873,12 @@ export function createWorkViews(context) {
     const list = listState.visibleWorks(source, renderOptions);
     const visible = list.slice(0, getWorksLimit());
     container.querySelector(".loading-row")?.remove();
+    let controls = null;
     if (renderOptions.hideControls !== true) {
-      container.append(listState.createWorkControls(source, list, renderOptions));
+      controls = renderOptions.createControls
+        ? renderOptions.createControls(source, list, renderOptions)
+        : listState.createWorkControls(source, list, renderOptions);
+      container.append(controls);
     }
 
     if (!list.length) {
@@ -667,13 +892,22 @@ export function createWorkViews(context) {
     let loadMore = null;
     if (visible.length < list.length) {
       loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
+        if (renderOptions.onVisibleMore) return renderOptions.onVisibleMore();
         increaseWorksLimit(40);
         return renderCurrentViewPreservingScroll();
-      });
+      }, renderOptions.moreOptions);
     } else if (renderOptions.hasServerMore && typeof renderOptions.onLoadMore === "function") {
-      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(renderOptions.total || visible.length)}`, renderOptions.onLoadMore);
+      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(renderOptions.total || visible.length)}`, renderOptions.onLoadMore, renderOptions.moreOptions);
     }
-    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, renderOptions), () => loadMore && container.append(loadMore));
+    progressiveWorkListRenderer.render(grid, visible, (work, index) => {
+      const card = workCards.createWorkCard(work, renderOptions);
+      renderOptions.onCardCreated?.(card, work, index);
+      return card;
+    }, () => {
+      if (loadMore) container.append(loadMore);
+      renderOptions.onComplete?.();
+    });
+    return { grid, controls, visible, more: loadMore, listCount: list.length };
   }
   function activeWorkListState() {
     return getCurrentView() === "works" && String(getCurrentParams()?.favorite || "") === "1"
@@ -681,7 +915,7 @@ export function createWorkViews(context) {
       : workListState;
   }
 
-  function createLoadMoreButton(text, handler) {
+  function createLoadMoreButton(text, handler, options = {}) {
     const wrap = document.createElement("div");
     wrap.className = "load-more";
     const button = document.createElement("button");
@@ -692,7 +926,8 @@ export function createWorkViews(context) {
       idleText: text,
       loadingText: "正在接着加载",
       retryText: "加载停住了，点一下重试",
-      requireScrollIntent: true
+      requireScrollIntent: true,
+      ...options
     });
   }
   function renderMessage(message, tone = "quiet", replace = true) {
@@ -707,6 +942,7 @@ export function createWorkViews(context) {
   }
   return {
     renderAllWorks,
+    releaseAllWorks,
     renderCategories,
     renderStudios,
     renderStudioDetail,

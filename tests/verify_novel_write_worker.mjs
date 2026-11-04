@@ -147,7 +147,7 @@ try {
   assert.equal(reader.writeIdentity(), replacementRealm);
   const receiptDb = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    assert.equal(receiptDb.prepare("SELECT value FROM novel_meta WHERE key='schema_version'").get().value, "5");
+    assert.equal(receiptDb.prepare("SELECT value FROM novel_meta WHERE key='schema_version'").get().value, "6");
     assert.equal(receiptDb.prepare("SELECT COUNT(*) AS count FROM novel_write_receipts").get().count, 1, "Python scanning preserves explicit receipts, while confirmed private receipts are released");
   } finally { receiptDb.close(); }
   await writer.start();

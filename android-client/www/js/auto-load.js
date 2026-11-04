@@ -19,6 +19,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
   if (!button || typeof handler !== "function") return node;
 
   const idleText = options.idleText || button.textContent || "继续向下滑动加载";
+  const currentIdleText = () => options.getIdleText?.() || idleText;
   const loadingText = options.loadingText || "正在加载更多";
   const retryText = options.retryText || "加载失败，点一下重试";
   let loading = false;
@@ -27,16 +28,19 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
 
   node.classList.add("auto-load-trigger");
   node.dataset.autoLoad = "ready";
-  button.textContent = idleText;
+  button.textContent = currentIdleText();
   button.setAttribute("aria-live", "polite");
 
   const dispose = () => {
     cleanup();
     cleanup = () => {};
+    options.signal?.removeEventListener("abort", dispose);
   };
+  if (options.signal?.aborted) return node;
+  options.signal?.addEventListener("abort", dispose, { once: true });
 
   const setReady = () => {
-    if (!node.isConnected) {
+    if (options.signal?.aborted || !node.isConnected) {
       dispose();
       return;
     }
@@ -44,7 +48,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
     node.classList.remove("auto-loading");
     node.dataset.autoLoad = "ready";
     button.disabled = false;
-    button.textContent = idleText;
+    button.textContent = currentIdleText();
     if (options.auto !== false) {
       for (const delay of AUTO_LOAD_RECHECK_DELAYS) window.setTimeout(scheduleCheck, delay);
     }
@@ -52,7 +56,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
 
   const run = async (event = null) => {
     event?.preventDefault();
-    if (loading || !node.isConnected) return;
+    if (loading || options.signal?.aborted || !node.isConnected) return;
     if (options.requireScrollIntent === true) {
       scrollGestureConsumed = true;
       scheduleScrollGestureRelease();
@@ -67,7 +71,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
       await Promise.resolve(handler());
       setReady();
     } catch (error) {
-      if (node.isConnected) {
+      if (!options.signal?.aborted && node.isConnected) {
         loading = false;
         node.classList.remove("auto-loading");
         node.dataset.autoLoad = "error";
@@ -92,8 +96,8 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
   let touchScrolling = false;
 
   const check = () => {
-    if (!node.isConnected) {
-      cleanup();
+    if (options.signal?.aborted || !node.isConnected) {
+      dispose();
       return;
     }
     if (requireScrollIntent && Date.now() > userScrollIntentUntil) return;
@@ -106,7 +110,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
   };
 
   scheduleCheck = () => {
-    if (scheduled) return;
+    if (scheduled || options.signal?.aborted) return;
     scheduled = true;
     window.requestAnimationFrame(() => {
       scheduled = false;

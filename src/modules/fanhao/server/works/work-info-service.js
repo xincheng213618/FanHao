@@ -1,9 +1,13 @@
 import { workInfoDetailQuery } from "./work-info-detail-query.js";
-import { parseInfoMetadata } from "../../../../../lib/info-metadata.js";
+import { parseInfoMetadataTags } from "../../../../../lib/info-metadata.js";
+import { DatabaseSync } from "node:sqlite";
+import { isProxy } from "node:util/types";
 
 const DETAIL_BATCH_SIZE = 200;
 const DETAIL_CACHE_MAX_ENTRIES = 2048;
 const DETAIL_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const DETAIL_FACET_MAX_ENTRIES = 64;
+const DETAIL_FACET_MAX_BYTES = 2 * 1024 * 1024;
 
 function detailRowWeight(row) {
   // Bound retained payloads, including raw metadata text, with a conservative
@@ -28,6 +32,7 @@ export function createWorkInfoService({
   let workInfoCache = null;
   let workInfoDetailCache = null;
   let workInfoFacetCache = null;
+  let workInfoDetailFacetCache = null;
   let detailBatch = null;
   let detailBatchCleanupScheduled = false;
   let readScope = null;
@@ -264,21 +269,41 @@ export function createWorkInfoService({
   function facetRowsById() {
     const stamp = getStamp();
     if (workInfoFacetCache?.stamp === stamp) return workInfoFacetCache.rows;
+    return readFacetRowsById(stamp);
+  }
 
+  function readFacetRowsById(stamp, suppliedOwner) {
     const rows = new Map();
-    let owner;
+    let owner = suppliedOwner;
     try {
-      owner = getCoreDb();
+      owner ??= getCoreDb();
       const failed = indexFailure("facets", stamp, owner);
       if (failed) return failed.rows;
-      // Older catalogs and isolated consumers may omit these optional metadata
-      // columns. Only a confirmed missing-column error permits a projection
-      // downgrade; busy, closed or missing-table failures still reach read status.
-      const metadataColumns = new Set(["fields_json", "javdb_tags_json"]);
-      let statement;
-      while (!statement) {
-        try {
-          statement = owner.prepare(`
+      for (const row of facetStatement(owner).all()) {
+        const compact = compactFacetRow(row);
+        rows.set(compact.work_id, compact);
+      }
+    } catch (error) {
+      console.warn("[core-work-info-facets]", error.message);
+      markReadFailure();
+      const fallback = workInfoFacetCache?.rows || rows;
+      rememberIndexFailure("facets", stamp, owner, fallback);
+      return fallback;
+    }
+
+    workInfoFacetCache = { stamp, rows };
+    return rows;
+  }
+
+  function facetStatement(owner, point = false) {
+    // Older catalogs and isolated consumers may omit these optional metadata
+    // columns. Only a confirmed missing-column error permits a projection
+    // downgrade; busy, closed or missing-table failures still reach read status.
+    const metadataColumns = new Set(["fields_json", "javdb_tags_json"]);
+    let statement;
+    while (!statement) {
+      try {
+        statement = owner.prepare(`
           SELECT
             CAST(w.id AS TEXT) AS work_id,
             w.code,
@@ -295,42 +320,142 @@ export function createWorkInfoService({
               FROM local_works lw
               WHERE lw.work_id = w.id
             )
+            ${point ? "AND w.id = ?" : ""}
           `);
-        } catch (error) {
-          const missing = /no such column:\s+(?:w\.)?(fields_json|javdb_tags_json)\b/i.exec(String(error?.message || ""))?.[1];
-          if (!missing || !metadataColumns.delete(missing)) throw error;
-        }
+      } catch (error) {
+        const missing = /no such column:\s+(?:w\.)?(fields_json|javdb_tags_json)\b/i.exec(String(error?.message || ""))?.[1];
+        if (!missing || !metadataColumns.delete(missing)) throw error;
       }
-      for (const row of statement.all()) {
-        const { fields_json, javdb_tags_json, ...compact } = row;
-        const fields = Object.create(null);
-        for (const field of parseJsonArray(fields_json)) {
-          const key = String(field?.label || field?.name || field?.key || "").trim();
-          if (!key || field?.value === null || field?.value === undefined) continue;
-          fields[key] = Object.hasOwn(fields, key) ? [fields[key], field.value].flat() : field.value;
-        }
-        // Reuse the sidecar parser's field aliases and list syntax. Retain just
-        // the small tag array, never the complete fields payload or raw text.
-        compact.trait_tags = uniqueTextArray([
-          ...parseInfoMetadata(JSON.stringify(fields)).tags,
-          ...parseJsonTextArray(javdb_tags_json)
-        ], { maxLength: 80, maxItems: 128 });
-        rows.set(compact.work_id, compact);
-      }
-    } catch (error) {
-      console.warn("[core-work-info-facets]", error.message);
-      markReadFailure();
-      const fallback = workInfoFacetCache?.rows || rows;
-      rememberIndexFailure("facets", stamp, owner, fallback);
-      return fallback;
     }
+    return statement;
+  }
 
-    workInfoFacetCache = { stamp, rows };
-    return rows;
+  function compactFacetRow(row) {
+    const { fields_json, javdb_tags_json, ...compact } = row;
+    const fields = Object.create(null);
+    for (const field of parseJsonArray(fields_json)) {
+      const key = String(field?.label || field?.name || field?.key || "").trim();
+      if (!key || field?.value === null || field?.value === undefined) continue;
+      fields[key] = Object.hasOwn(fields, key) ? [fields[key], field.value].flat() : field.value;
+    }
+    // Reuse the sidecar parser's field aliases and list syntax. Retain just
+    // the small tag array; flatten its strings so slices cannot retain raw text.
+    compact.trait_tags = uniqueTextArray([
+      ...parseInfoMetadataTags(JSON.stringify(fields)),
+      ...parseJsonTextArray(javdb_tags_json)
+    ], { maxLength: 80, maxItems: 128 }).map(tag =>
+      typeof tag === "string" ? JSON.parse(JSON.stringify(tag)) : tag);
+    return compact;
   }
 
   function facetRow(workId) {
     return facetRowsById().get(String(workId || "")) || null;
+  }
+
+  function supportsDetailFacet(owner) {
+    if (isProxy(owner) || Object.getPrototypeOf(owner) !== DatabaseSync.prototype) return false;
+    try {
+      const tables = owner.prepare("PRAGMA table_list").all().filter(row =>
+        (row.schema === "main" || row.schema === "temp") && ["works", "local_works"].includes(row.name.toLowerCase()));
+      if (tables.length !== 2 || tables.some(row => row.schema !== "main" || row.type !== "table")) return false;
+      const columns = owner.prepare("PRAGMA main.table_xinfo(works)").all();
+      const keys = columns.filter(column => column.pk);
+      if (keys.length !== 1 || keys[0].name.toLowerCase() !== "id"
+        || keys[0].type.toUpperCase() !== "INTEGER" || keys[0].hidden) return false;
+      // INTEGER PRIMARY KEY DESC and WITHOUT ROWID have a separate PK index.
+      // Their CAST keys can collide; retain the original whole-map last-wins.
+      return !owner.prepare("PRAGMA main.index_list(works)").all().some(index => index.origin === "pk");
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberDetailFacet(cache, id, row) {
+    const bytes = detailRowWeight(row) + id.length * 2 + 64
+      + (row?.trait_tags || []).reduce((size, tag) => size + 32 + (typeof tag === "string" ? tag.length * 2 : DETAIL_FACET_MAX_BYTES + 1), 0);
+    if (bytes > DETAIL_FACET_MAX_BYTES) return;
+    const previous = cache.rows.get(id);
+    if (previous) { cache.bytes -= previous.bytes; cache.rows.delete(id); }
+    cache.rows.set(id, { row, bytes });
+    cache.bytes += bytes;
+    while (cache.rows.size > DETAIL_FACET_MAX_ENTRIES || cache.bytes > DETAIL_FACET_MAX_BYTES) {
+      const oldest = cache.rows.keys().next().value;
+      cache.bytes -= cache.rows.get(oldest).bytes;
+      cache.rows.delete(oldest);
+    }
+  }
+
+  function detailFacetRow(workId) {
+    // Complex keys retain the old lookup/coercion order. Do not normalize '01'
+    // or '1.0' into the integer key '1': the public index uses exact JS Map keys.
+    if ((workId !== null && typeof workId === "object") || typeof workId === "function") return facetRow(workId);
+    const id = String(workId || "");
+    if (!/^(?:0|-?[1-9]\d*)$/.test(id) || id.length > 20
+      || BigInt(id) < -9223372036854775808n || BigInt(id) > 9223372036854775807n) return facetRow(workId);
+    const stamp = getStamp();
+    if (workInfoFacetCache?.stamp === stamp) return workInfoFacetCache.rows.get(id) || null;
+    let owner;
+    let ownsSnapshot = false;
+    let callerTransaction = false;
+    let cache, compact, readError;
+    try {
+      owner = getCoreDb();
+      const failed = indexFailure("facets", stamp, owner) || indexFailure(`detail-facets:${id}`, stamp, owner);
+      if (failed) return failed.rows.get(id) || null;
+      callerTransaction = !isProxy(owner) && Object.getPrototypeOf(owner) === DatabaseSync.prototype && owner.isTransaction;
+      cache = workInfoDetailFacetCache;
+      if (cache?.stamp !== stamp || cache.owner !== owner) {
+        cache = workInfoDetailFacetCache = { stamp, owner, rows: new Map(), bytes: 0 };
+      }
+      const cached = cache.rows.get(id);
+      if (cached && !callerTransaction) {
+        rememberDetailFacet(cache, id, cached.row);
+        return cached.row;
+      }
+      if (!isProxy(owner) && Object.getPrototypeOf(owner) === DatabaseSync.prototype && !owner.isTransaction) {
+        owner.exec("SAVEPOINT fanhao_detail_facet");
+        ownsSnapshot = true;
+      }
+      const eligible = supportsDetailFacet(owner);
+      const row = eligible ? facetStatement(owner, true).all(id)[0] : null;
+      if (ownsSnapshot) {
+        owner.exec("RELEASE SAVEPOINT fanhao_detail_facet");
+        ownsSnapshot = false;
+      }
+      if (!eligible) return readFacetRowsById(stamp, owner).get(id) || null;
+      compact = row ? compactFacetRow(row) : null;
+      // Only the requested record participates in detail read failures. Normal
+      // lists still use the complete facet index and its original failure rules.
+    } catch (error) {
+      readError = error;
+      console.warn("[core-work-info-facets]", error.message);
+      markReadFailure();
+      const row = workInfoFacetCache?.rows.get(id) || null;
+      rememberIndexFailure(`detail-facets:${id}`, stamp, owner, new Map([[id, row]]));
+      return row;
+    } finally {
+      if (ownsSnapshot && owner.isTransaction) {
+        try { owner.exec("ROLLBACK TO SAVEPOINT fanhao_detail_facet; RELEASE SAVEPOINT fanhao_detail_facet"); }
+        catch (cleanupError) {
+          markReadFailure();
+          try {
+            owner.exec("ROLLBACK TO SAVEPOINT fanhao_detail_facet");
+            owner.exec("RELEASE SAVEPOINT fanhao_detail_facet");
+          } catch (retryError) {
+            throw new AggregateError([readError, cleanupError, retryError].filter(Boolean), "Detail facet read rollback failed; transaction state is uncertain");
+          }
+        }
+      }
+    }
+    try {
+      if (!callerTransaction && getStamp() === stamp) rememberDetailFacet(cache, id, compact);
+      else markReadFailure();
+    } catch {
+      // The row is already complete. A failed admission-stamp probe only makes
+      // this response non-cacheable; it must not replace healthy data.
+      markReadFailure();
+    }
+    return compact;
   }
 
   function row(workId) {
@@ -425,6 +550,7 @@ export function createWorkInfoService({
     workInfoCache = null;
     workInfoDetailCache = null;
     workInfoFacetCache = null;
+    workInfoDetailFacetCache = null;
     detailBatch = null;
   }
 
@@ -433,6 +559,7 @@ export function createWorkInfoService({
     workInfoCache = value;
     workInfoDetailCache = null;
     workInfoFacetCache = null;
+    workInfoDetailFacetCache = null;
     detailBatch = null;
   }
 
@@ -444,6 +571,7 @@ export function createWorkInfoService({
     firstPresentText,
     firstPresentValue,
     detailRow,
+    detailFacetRow,
     facetRow,
     facetRowsById,
     publicMetadata,

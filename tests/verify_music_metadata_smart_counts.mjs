@@ -44,7 +44,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
     this.function("fixture_state_probe", value => { if (measurement?.database === this) measurement.stateProbes++; return value; });
   }
   const text = sql.replace(/\s+/gu, " ").trim();
-  const count = /^SELECT COUNT\(\*\) AS count FROM music_tracks t\b/u.test(text);
+  const count = /^SELECT COUNT\(\*\) AS count FROM music_(?:tracks t|track_state s)\b/u.test(text);
   const page = /^SELECT t\.\*,/u.test(text) && /\bLIMIT \? OFFSET \?/u.test(text);
   if (measurement?.database === this) {
     if (count) {
@@ -84,7 +84,7 @@ try {
       compare(current, previous, "detail", id, { limit: "1", offset });
     }
     const filtered = measure(current, "tracks", id, { favorite: "yes", minRating: "4" });
-    assert.ok(filtered.countSql.some(sql => sql.includes("LEFT JOIN music_track_state s")), "favorite/rating filters still require the state join");
+    assert.ok(filtered.countSql.some(sql => /LEFT JOIN music_track_state s|FROM music_track_state s CROSS JOIN/u.test(sql)), "favorite/rating counts still use the state rows");
     assert.ok(filtered.result.total > 0, "state-filtered controls must include real matching rows");
     assert.ok(filtered.result.tracks.every(track => track.favorite && track.rating >= 4));
   }

@@ -2,7 +2,7 @@
 title: 网页交互验证
 description: 按网页搜索、设置、播放、阅读和工具交互选择私有浏览器与合成数据验证。
 status: maintained
-verified_at: 2026-10-30
+verified_at: 2026-11-05
 sources:
   - public/index.html
   - tests/verify_web_bootstrap_recovery.mjs
@@ -17,6 +17,10 @@ sources:
   - tests/verify_verification_runner.mjs
   - tests/verify_browser_behavior.mjs
   - public/modules/short-videos/short-video-page.js
+  - tests/verify_short_video_collection_rendering.mjs
+  - tests/verify_web_short_video_author_rendering.mjs
+  - public/modules/content-index/gallery-renderer.js
+  - tests/verify_gallery_reader_progress.mjs
   - public/modules/short-videos/filter-controls.js
   - tools/build_short_video_web.mjs
   - tests/verify_short_video_list_lifecycle.mjs
@@ -263,7 +267,7 @@ sources:
 | `npm run verify:manga-add-draft-browser` | 漫画添加表单在同列表的后台更新和排序后保留未提交 URL、选区、IME 状态与原生焦点；保留完整表单祖先链，自己的提交/运行/失败回执仍更新按钮和状态，旧表单不能触发新路由或漫画的请求。 | 实际漫画宿主、私有 Chromium、原生 Tab/ShiftTab/Enter 与合成添加/更新回执；5 正向与 3 行为负控，旧书库输入 6+3、跳页 7+3 及完整漫画 125 场景通过。整包发现的旧滚轮测试改为等待本场景新图片请求，保留滚动与让位断言；未实际采集站点或操作正式漫画。 |
 | `npm run verify:manga-directory-return-browser` | 从阅读器返回目录时，按漫画与真实章节索引定位刚读的话并标记当前项；键盘返回将焦点交回章节按钮，指针返回保留原生焦点策略。显式打开详情仍从顶部开始，旧阅读控件不能覆盖新漫画或章节，后台重绘不重复抢滚动。 | 实际漫画宿主、私有 Chromium、1000 话合成目录与原生键盘/指针；5 正向与 3 行为负控、完整漫画 129 场景通过。320px 返回第 777 话时当前项在视口内可点击；未使用真实漫画或正式服务。 |
 | `npm run verify:music-load-more-keyboard-browser` | 歌曲、歌手和专辑的加载更多按钮在忙碌时保留原生焦点并阻止重复请求，连续空格不会意外播放；追加后交给首条真正新增结果，失败原位重试。搜索去重替换旧组代表时按歌曲组身份定位，重复页与末页保留键盘出口，新焦点、滚动、账号和导航优先。 | 实际音乐模块、私有 Chromium、原生 Space/Tab/Enter、320px 可见性与命中检查、合成 API 和受控 Audio；13 项正向与 5 个行为负控、旧追加 36 项和失败恢复 35+8 通过。等待期间真实滚轮的位置保留覆盖整体重绘路径；布局产生的 scroll 事件不当作用户输入。未实际解码音频或操作正式音乐库。 |
-| `npm run verify:web-core`（预览：`npm run verify:web-core -- --plan`） | 主资料库网页核心回归按 18 个入口执行相对导入、runner 自测、网页综合、共同启动恢复与番号列表、独立播放器/Plyr、图库、漫画、小说、音乐、TXT/五子棋/2048 工具和人物资料的现有完整父 fixture，公共叶子命令去重。 | 默认执行 21 条去重命令，前项失败即停止。不启动正式服务，不执行 Android 界面/构建或缓存同步，默认 daily/changed/full/Android 规则保留。范围为主资料库网页核心流程；共同 HTML 的短视频入口分支仅验证启动协议，独立短视频业务及完整后端/权限/跨端回归继续使用对应入口。需要私有 Chrome/Edge 及 TXT 门禁的 Python，受控媒体与实际解码的边界仍按各脚本记录。 |
+| `npm run verify:web-core`（预览：`npm run verify:web-core -- --plan`） | 主资料库网页核心回归按 20 个入口执行相对导入、runner 自测、网页综合、共同启动恢复与番号列表、独立播放器/Plyr、图库（含阅读进度专项）、漫画、小说、音乐、TXT/五子棋/2048 工具和人物资料的现有完整父 fixture，公共叶子命令去重。 | 默认执行 24 条去重命令，前项失败即停止。不启动正式服务，不执行 Android 界面/构建或缓存同步，默认 daily/changed/full/Android 规则保留。范围为主资料库网页核心流程；共同 HTML 的短视频启动协议、Web 清单与作者分页已纳入；完整短视频业务及后端/权限/跨端回归继续使用对应入口。需要私有 Chrome/Edge 及 TXT 门禁的 Python，受控媒体与实际解码的边界仍按各脚本记录。 |
 | `npm run verify:novel-import-navigation-browser` | 批量 TXT 导入按原编码和上传规则继续，回包只更新上传页的回执与按钮，不再打断其它书籍的阅读、选区或导航。确认写入使来源列表缓存失效；同账号批次单飞，账号切换停止尚未投递的文件。返回上传页按需只读刷新过期统计并原位更新，旧统计不能覆盖新页面或较新结果，成功读取清除旧统计错误；读取期间又确认新文件时丢弃旧统计并重读，避免只保留过期标记而不更新数字。 | 当前小说宿主、真实 file input 和合成 TXT/API；14 正向与 6 行为负控，涵盖忽略/尊重 abort 两种传输。覆盖两文件后台导入、正文/Range/scroll/URL、来源重读、管理子页焦点、重复失败/成功、账号更替、已提交结果与统计错误区分；旧编码 8+3 和身份 VM 7+3 通过。回执仅存本页状态，未改后端；完整小说 312 场景通过；未读取用户文件或操作正式书库。 |
 | `npm run verify:fanhao-people-index-browser` | 人物索引追加直接使用当前列表快照，避免每页重新筛整库；保持旧卡片、焦点和既有性别过滤。新数组或人物范围重建快照，旧按钮、已排队观察器和定时器不能追加或干扰新范围，离开时清理追加调度。 | 实际 FanHao shell、390px 私有 Chromium 和 10000 人合成库；3 正向与 3 行为负控。每次追加 48 卡的 actorProfile 属性检查从 10096 次降为 96 次，连续三页一致，无额外目录 GET；覆盖主/欧美切换和 Back，IO/计时器投递受控，不将属性计数解释为网络或硬件时延。原请求生命周期、73+4 分页、11+2 回执及启动恢复 12+5 通过；全项目结构入口目前停在 Android 作品操作栏布局断言，未计为通过。 |
 | `npm run verify:music-compact-rows-browser` | 560px 以下歌曲行将操作移至第二行，让序号、歌名和时长拥有独立空间，三个操作提供至少 44px 触摸区域；保留原 DOM、鼠标/键盘和操作事件，桌面沿用原布局。 | 当前宿主与真实组件、私有 Chromium/模拟触摸；6 正向与 2 CSS 行为负控、旧行键盘 4 场景通过。320px 歌名列从 20px 增至 202px，390px 为 272px，覆盖短/长标题、真实 hit-test、三种操作及 Enter 不冒泡；小屏行高及 content-visibility 占位均为 104px，768px 保留原 52px。未验证真实触屏设备。 |

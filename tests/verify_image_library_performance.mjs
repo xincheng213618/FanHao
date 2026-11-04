@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
 import { createGalleryMetadataService } from "../src/modules/media/server/gallery-metadata-service.js";
+import { sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-source-adapter.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const servicePath = path.join(root, "src", "modules", "content-index", "server", "image-library-service.js");
@@ -27,7 +28,10 @@ assert(functionSource(serviceSource, "preparedPhotoCollectionCategories", "prepa
 const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
 const webGalleryPage = fs.readFileSync(path.join(root, "public", "modules", "content-index", "gallery-page.js"), "utf8");
 assert(androidApp.includes('const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary?cache=0";'), "Android must skip an unused image-reader cache summary");
-assert(webGalleryPage.includes('const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";'), "Web image-library mode must continue to request its cache summary");
+const readSummaryEndpoint = new Function("isImageLibraryMode", `${functionSource(webGalleryPage, "summaryEndpoint", "getSummaryReadFailure")}\nreturn summaryEndpoint();`);
+assert.equal(readSummaryEndpoint(() => true), "/api/image-library/summary", "Web image-library mode must continue to request its cache summary");
+assert.equal(readSummaryEndpoint(() => false), "/api/image-library/summary?cache=0", "other Web modes must keep skipping the unused cache summary");
+assert(webGalleryPage.includes('const endpoint = options.refresh ? "/api/image-library/rescan" : summaryEndpoint();'), "normal summary reads must use the endpoint selector");
 
 verifyPhotoPersonFacetBoundaries(createTestableImageLibraryService);
 verifyPreparedPhotoSortCache(createTestableImageLibraryService);
@@ -74,7 +78,7 @@ console.log(
 console.log("image-library-performance: ok");
 
 function legacyServiceModuleUrl(source) {
-  let legacySource = previousSearchSource(source);
+  let legacySource = previousSearchSource(sourceBeforeMovieColdScope(source));
   legacySource = replaceOnce(legacySource, '    const sourceStampBefore = listSourceStamp(index, mode);\n    let mangaSourceRevision = "";\n', "", "restore list reads before revision probes");
   legacySource = replaceOnce(legacySource, '      nextOffset: offset + items.length,\n      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),\n', "", "restore response before additive pagination fields");
   legacySource = replaceOnce(legacySource, `      const mangaSourceHash = createHash("sha256");
@@ -603,9 +607,9 @@ async function verifyTvNormalizationWork() {
 
 `;
   let previousWideSource = replaceSection(privateSource, "  function publicGalleryMediaItem(", "  function mediaFacets(", previousWidePublic, "restore the complete eager publication function");
-  previousWideSource = replaceOnce(previousWideSource, `      const derivationState = { caches: null };
-      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));`, `      const derivationCaches = { titles: new Map(), names: new Map() };
-      mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationCaches));`, "restore eager request-local maps");
+  previousWideSource = replaceOnce(previousWideSource, `        const derivationState = { caches: null, movieListRead };
+        mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));`, `        const derivationCaches = { titles: new Map(), names: new Map() };
+        mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationCaches));`, "restore eager request-local maps");
   const measuredSource = process.argv.includes("--legacy-tv-normalization") ? previousSource
     : process.argv.includes("--legacy-wide-tv-normalization") ? previousWideSource : privateSource;
   const measuredFactory = await load(measuredSource);
@@ -803,7 +807,7 @@ async function verifyTvNormalizationWork() {
     const allocationResults = [];
     let capturedState = null, captureCalls = 0;
     let capturedSource = measuredSource;
-    const lazyMarker = "      const derivationState = { caches: null };";
+    const lazyMarker = "        const derivationState = { caches: null, movieListRead };";
     const eagerMarker = "      const derivationCaches = { titles: new Map(), names: new Map() };";
     const contextMarker = capturedSource.includes(lazyMarker) ? lazyMarker
       : capturedSource.includes(eagerMarker) ? eagerMarker : null;

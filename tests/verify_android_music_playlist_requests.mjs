@@ -9,6 +9,57 @@ import { captureAccountOwner, setAccountOwner } from "../android-client/www/js/a
 const viewUrl = new URL("../android-client/www/modules/music/music-views.js", import.meta.url);
 const viewSource = fs.readFileSync(viewUrl, "utf8").replace(/\r\n/g, "\n");
 const originals = Object.fromEntries(["window", "document", "localStorage", "fetch", "Audio", "__musicPlaylistFixture"].map(key => [key, globalThis[key]]));
+// The preceding local-removal kernel retained all surviving elements but
+// validated and relabelled every later DOM row. Keep that actual algorithm for
+// the DOM-work negative control; restoring a full-page render would miss it.
+const previousQueueRemovalHelper = [
+  "  function removeMountedQueueTrack(previousQueue, index) {",
+  "    const mounted = mountedQueueList, queue = state.queue;",
+  "    // Without a selected song the player previews queue[0]. A changed preview",
+  "    // needs the existing full render to rebind its track-specific actions.",
+  "    if (!mounted?.isCurrent() || mounted.queue !== previousQueue || (!state.current && index === 0)",
+  "      || queue.length !== previousQueue.length - 1 || mounted.list.children.length !== previousQueue.length) return false;",
+  "    for (let position = index; position < previousQueue.length; position++) {",
+  "      const row = mounted.list.children[position];",
+  "      if (!row?.classList.contains(\"music-mobile-queue-item\") || row.dataset.trackId !== String(previousQueue[position]?.id || \"\")",
+  "        || Number(row.dataset.trackIndex) !== position || (position > index && queue[position - 1] !== previousQueue[position])) return false;",
+  "    }",
+  "    const removed = mounted.list.children[index], focused = document.activeElement;",
+  "    const restoreFocus = removed.contains(focused);",
+  "    const action = focused?.classList.contains(\"music-mobile-queue-action\") ? focused.getAttribute(\"aria-label\") : \"\";",
+  "    const top = mounted.list.scrollTop;",
+  "    removed.remove();",
+  "    mounted.queue = queue;",
+  "    if (!queue.length) mounted.list.append(messageBox(\"队列里还没有歌曲\"));",
+  "    for (let position = index; position < queue.length; position++) {",
+  "      const row = mounted.list.children[position], number = row.querySelector(\".music-mobile-queue-index\");",
+  "      row.dataset.trackIndex = String(position);",
+  "      if (number && !number.querySelector(\".music-mobile-playing-bars\")) number.textContent = String(position + 1).padStart(2, \"0\");",
+  "    }",
+  "    for (const row of new Set(queue.length ? [mounted.list.children[0], mounted.list.children[queue.length - 1]] : [])) {",
+  "      if (!row) continue;",
+  "      const position = Number(row.dataset.trackIndex);",
+  "      for (const [label, disabled] of [[\"上移\", position === 0], [\"下移\", position === queue.length - 1]]) {",
+  "        const button = row.querySelector(`[aria-label=\"${label}\"]`);",
+  "        if (button) { button.disabled = disabled; button.classList.toggle(\"disabled\", disabled); }",
+  "      }",
+  "    }",
+  "    mounted.count.textContent = `${formatNumber(queue.length)} 首`;",
+  "    mounted.save.disabled = !queue.length;",
+  "    mounted.manage.disabled = queue.length <= 1;",
+  "    mounted.clear.disabled = queueRemovableCount() <= 0;",
+  "    const toggle = els.viewContent?.querySelector(\".music-mobile-full-queue\");",
+  "    if (toggle) toggle.disabled = !queue.length;",
+  "    if (restoreFocus) {",
+  "      const row = mounted.list.children[Math.min(index, queue.length - 1)];",
+  "      const requested = action ? row?.querySelector(`[aria-label=\"${action}\"]`) : null;",
+  "      const fallback = action ? [...(row?.querySelectorAll(\".music-mobile-queue-action\") || [])].find(button => !button.disabled) : null;",
+  "      (requested && !requested.disabled ? requested : fallback || row || mounted.close).focus({ preventScroll: true });",
+  "    }",
+  "    mounted.list.scrollTop = top;",
+  "    return true;",
+  "  }"
+].join("\n");
 const copy = value => JSON.parse(JSON.stringify(value));
 const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
 let cases = 0, selectedCase = "", fixtureId = 0;
@@ -17,7 +68,7 @@ async function importFactory(source = viewSource) {
   const hook = "  installLifecycle();";
   assert.equal(source.split(hook).length, 2);
   const instrumented = source.replace(hook, `
-  globalThis.__musicPlaylistFixture = { state, renderShell, openTrack, appendTrackToQueue,
+  globalThis.__musicPlaylistFixture = { state, renderShell, openTrack, appendTrackToQueue, moveQueueTrack, removeTrackFromQueue,
     removeTrackFromCurrentPlaylist, editCurrentPlaylist, deleteCurrentPlaylist,
     createPlaylistFromPrompt, saveQueueAsPlaylist, addTrackToPlaylist,
     activate() { moduleActive = true; } };
@@ -60,7 +111,8 @@ function fixture(createMusicViews) {
   document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   document.createTextNode = text => { const node = document.createElement("span"); node.textContent = text; return node; };
   const requests = [], calls = [], storage = new Map(), clocks = new Map();
-  let sourceUrl = `http://music-playlist-${++fixtureId}.fixture.invalid:29998`, timerId = 0;
+  const originalSourceUrl = `http://music-playlist-${++fixtureId}.fixture.invalid:29998`;
+  let sourceUrl = originalSourceUrl, timerId = 0;
   const fetch = (url, options = {}) => {
     assert(/^http:\/\/music-playlist-\d+(?:-other)?\.fixture\.invalid:29998\/api\//.test(String(url)), "only synthetic HTTP is allowed");
     return new Promise((resolve, reject) => requests.push({ url: String(url), options, signal: options.signal,
@@ -95,6 +147,7 @@ function fixture(createMusicViews) {
   audit.renderShell();
   return { music, audit, state: audit.state, document, els, requests, calls, storage, current, other, playlist,
     setSource() { sourceUrl = sourceUrl.replace(".fixture", "-other.fixture"); },
+    restoreSource() { sourceUrl = originalSourceUrl; },
     switchAccount(transition) {
       const previous = captureAccountOwner(sourceUrl);
       setAccountOwner(sourceUrl, "pending");
@@ -222,8 +275,352 @@ async function assertRetiredAddition(createMusicViews, kind, transition, failure
   assert.equal(f.calls.length, navigation, "retired addition cannot navigate to its playlist");
 }
 
+function queueOrderFixture(createMusicViews) {
+  const f = fixture(createMusicViews);
+  f.state.queue = [f.current, f.other, { id: "third-fixture", title: "Third fixture" }];
+  return f;
+}
+
+const queueIds = f => f.state.queue.map(track => track.id);
+
+async function assertCoalescedQueueOrder(createMusicViews) {
+  const f = queueOrderFixture(createMusicViews);
+  f.audit.moveQueueTrack(f.other.id, -1);
+  for (let index = 0; index < 101; index++) f.audit.moveQueueTrack("third-fixture", index % 2 ? 1 : -1);
+  await settle();
+  assert.equal(f.requests.length, 1, "rapid queue adjustments keep one physical write in flight");
+  const expected = queueIds(f);
+  f.requests[0].resolve(writeResult(f)); await settle();
+  assert.equal(f.requests.length, 2, "only the latest unsent full order is persisted");
+  assert.deepEqual(JSON.parse(f.requests[1].options.body).trackIds, expected);
+  f.requests[1].resolve(writeResult(f)); await settle();
+  assert.deepEqual(queueIds(f), expected); assert.equal(f.state.status, "歌单顺序已保存");
+  assert.equal(f.state.current, f.current); assert.equal(f.state.playing, true);
+}
+
+async function assertRetiredQueueOrder(createMusicViews, transition, failure) {
+  const f = queueOrderFixture(createMusicViews);
+  f.audit.moveQueueTrack(f.other.id, -1); await settle();
+  const request = f.requests[0];
+  if (transition === "queue") f.audit.appendTrackToQueue({ id: "new-member", title: "New member" });
+  else await retireAddition(f, transition);
+  const snapshot = copy(f.state), shell = f.els.viewContent.children[0], count = f.requests.length;
+  assert.equal(request.signal.aborted, false, "an accepted order PUT survives UI transitions");
+  if (failure) request.reject(new Error("Retired queue order failure"));
+  else request.resolve(writeResult(f));
+  await settle();
+  assert.deepEqual(copy(f.state), snapshot, `retired order after ${transition} cannot replace state`);
+  assert.equal(f.els.viewContent.children[0], shell, "retired order cannot repaint");
+  assert.equal(f.requests.length, count, "retired order must not refresh another catalogue");
+}
+
+async function assertQueueOrderSurfaceChange(createMusicViews, control, failure) {
+  const f = queueOrderFixture(createMusicViews), original = queueIds(f);
+  Object.assign(f.state, { fullscreen: true, queueOpen: true, queueManageOpen: true, repeat: "all" });
+  f.audit.renderShell(); f.audit.moveQueueTrack(f.other.id, -1); await settle();
+  const ordered = queueIds(f), shell = f.els.viewContent.children[0];
+  const button = f.document.querySelector(control === "repeat" ? ".music-mobile-queue-mode"
+    : '.music-mobile-queue-tool[aria-label="完成整理"]');
+  assert(button, "the real queue control must be mounted"); button.click();
+  assert.notEqual(f.els.viewContent.children[0], shell, "the real handler repaints the shell");
+  const repeat = f.state.repeat, managing = f.state.queueManageOpen;
+  if (failure) f.requests[0].reject(new Error("Surface order failure")); else f.requests[0].resolve(writeResult(f));
+  await settle();
+  assert.deepEqual(queueIds(f), failure ? original : ordered, "a surface repaint does not retire queue ordering");
+  assert.equal(f.state.status, failure ? "Surface order failure" : "歌单顺序已保存");
+  assert.equal(f.state.repeat, repeat); assert.equal(f.state.queueManageOpen, managing);
+  assert.equal(f.state.fullscreen, true); assert.equal(f.state.queueOpen, true);
+}
+
+function mountedQueueFixture(createMusicViews, count = 300, { currentIndex = 0, managing = true } = {}) {
+  const f = queueOrderFixture(createMusicViews);
+  f.state.queue = [f.current, f.other, ...Array.from({ length: Math.max(0, count - 2) }, (_, index) => ({ id: `queue-${index}`, title: `Queue ${index}` }))].slice(0, count);
+  Object.assign(f.state, { fullscreen: true, queueOpen: true, queueManageOpen: managing,
+    current: currentIndex === null ? null : f.state.queue[currentIndex] }); f.audit.renderShell();
+  const list = f.document.querySelector(".music-mobile-full-player .music-mobile-queue-list"); list.scrollTop = 137;
+  const createElement = f.document.createElement;
+  let created = 0;
+  f.document.createElement = (...args) => { created++; return createElement(...args); };
+  return { ...f, list, created: () => created,
+    shell: f.els.viewContent.children[0], full: f.document.querySelector(".music-mobile-full-player"),
+    mini: f.document.querySelector(".music-mobile-mini-player") };
+}
+
+function assertQueueMounted(f) {
+  assert.equal(f.els.viewContent.children[0], f.shell);
+  assert.equal(f.document.querySelector(".music-mobile-full-player"), f.full);
+  assert.equal(f.document.querySelector(".music-mobile-mini-player"), f.mini);
+  assert.equal(f.document.querySelector(".music-mobile-full-player .music-mobile-queue-list"), f.list);
+  assert.equal(f.list.scrollTop, 137);
+}
+
+async function assertLocalQueueMove(createMusicViews, count) {
+  const f = mountedQueueFixture(createMusicViews, count); f.state.mode = "library";
+  const original = [...f.list.children], up = original[1].querySelector('[aria-label="上移"]');
+  up.focus(); up.click(); await settle();
+  assertQueueMounted(f);
+  assert.equal(original.filter(row => !row.isConnected).length, 2, "an adjacent move retires only two queue rows");
+  assert(f.created() <= 32, "adjacent movement has a constant element-creation budget");
+  assert.equal(f.document.activeElement, f.list.children[0].querySelector('[aria-label="下移"]'), "boundary focus follows the moved song to the enabled direction");
+  assert.equal(f.list.children[0].dataset.trackId, f.other.id); assert.equal(f.list.children[1].dataset.trackId, f.current.id);
+  assert.equal(f.list.children[0].querySelector('[aria-label="上移"]').disabled, true);
+  assert.equal(f.list.children[1].querySelector('[aria-label="上移"]').disabled, false);
+  const queue = f.state.queue; up.click(); original[1].click(); await settle();
+  assert.equal(f.state.queue, queue, "retired row and child controls cannot operate the current queue");
+  const later = original[6].querySelector('[aria-label="上移"]'); later.focus(); later.click(); await settle();
+  assert.notEqual(f.state.queue, queue, "an unaffected row keeps working through the shared mounted-list owner");
+  assert.equal(f.state.queue[5].id, original[6].dataset.trackId);
+  assertQueueMounted(f); assert.equal(f.requests.length, 0);
+}
+
+async function assertLocalQueueRemoval(createMusicViews, count, removes) {
+  const f = mountedQueueFixture(createMusicViews, count); f.state.mode = "library";
+  const original = [...f.list.children], removed = new Set();
+  const playing = original[0].querySelector(".music-mobile-playing-bars");
+  for (let index = 0; index < removes; index++) {
+    const row = f.list.children[1], button = row.querySelector('[aria-label="移出队列"]');
+    removed.add(row); button.focus(); button.click(); await settle();
+    assertQueueMounted(f); assert.equal(f.document.activeElement, f.list.children[1].querySelector('[aria-label="移出队列"]'));
+    assert.equal(f.state.queue.length, count - index - 1);
+    assert.equal(f.document.querySelector(".music-mobile-queue-heading small").textContent, `${count - index - 1} 首`);
+    const queue = f.state.queue; button.click(); row.click(); await settle();
+    assert.equal(f.state.queue, queue, "the removed row and control cannot remove another song or start playback");
+  }
+  assert.equal(f.created(), 0, "removing a queue member creates no replacement elements");
+  assert(original.filter(row => !removed.has(row)).every(row => row.isConnected), "all surviving rows stay mounted");
+  assert.equal(f.list.children[0].querySelector(".music-mobile-playing-bars"), playing);
+  for (const [index, row] of [...f.list.children].entries()) {
+    assert.equal(row.dataset.trackId, f.state.queue[index].id);
+    assert.equal(row.dataset.trackIndex, undefined, "queue positions are derived rather than rewritten after removal");
+    const number = row.querySelector(".music-mobile-queue-index");
+    assert.equal(number.getAttribute("aria-hidden"), "true", "visual counters and playing bars do not repeat the row's accessible name");
+    if (index) assert.equal(number.textContent, "", "the browser CSS counter owns visual numbering");
+  }
+  const shifted = original[removes + 2], oldPosition = f.state.queue.findIndex(track => track.id === shifted.dataset.trackId);
+  shifted.querySelector('[aria-label="上移"]').click(); await settle();
+  assert.equal(f.state.queue[oldPosition - 1].id, shifted.dataset.trackId, "surviving shifted rows operate at their current position");
+  assertQueueMounted(f); assert.equal(f.requests.length, 0);
+}
+
+async function measureQueueRemovalDomWork(createMusicViews, count, removes) {
+  const f = mountedQueueFixture(createMusicViews, count); f.state.mode = "library";
+  const calls = { listReads: 0, listWrites: 0, rowQueries: 0, rowIdentityReads: 0, indexWrites: 0, numberWrites: 0 };
+  let tracking = false, children = f.list.children;
+  const originals = [...children];
+  Object.defineProperty(f.list, "children", { configurable: true,
+    get() { if (tracking) calls.listReads++; return children; },
+    set(value) { if (tracking) calls.listWrites++; children = value; } });
+  for (const row of originals) {
+    const data = row.dataset;
+    row.dataset = new Proxy(data, {
+      get(target, key) { if (tracking && key === "trackId") calls.rowIdentityReads++; return Reflect.get(target, key); },
+      set(target, key, value) { if (tracking && key === "trackIndex") calls.indexWrites++; return Reflect.set(target, key, value); }
+    });
+    // Count production calls on a row, not this DOM double's recursive selector
+    // engine (native querySelector does not call descendants' JS methods).
+    const query = row.querySelector;
+    row.querySelector = function(...args) { if (tracking) calls.rowQueries++; return query.apply(this, args); };
+    const number = row.querySelector(".music-mobile-queue-index");
+    const text = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(number), "textContent");
+    Object.defineProperty(number, "textContent", { configurable: true,
+      get() { return text.get.call(this); },
+      set(value) { if (tracking) calls.numberWrites++; text.set.call(this, value); } });
+  }
+  for (let index = 0; index < removes; index++) {
+    const button = f.list.children[1].querySelector('[aria-label="移出队列"]');
+    button.focus(); tracking = true;
+    try { button.click(); await settle(); } finally { tracking = false; }
+  }
+  assertQueueMounted(f); assert.equal(f.created(), 0, "both current and preceding local kernels create no elements");
+  assert.equal(f.state.queue.length, count - removes);
+  assert.equal(originals.filter(row => !row.isConnected).length, removes, "the measured path retains surviving rows");
+  return calls;
+}
+
+async function assertQueueRemovalDomBudget(createMusicViews, count, removes) {
+  const calls = await measureQueueRemovalDomWork(createMusicViews, count, removes);
+  assert.equal(calls.indexWrites + calls.numberWrites, 0, "removing a song performs no tail index/number DOM writes");
+  assert(calls.rowIdentityReads <= removes * 4, "removal validates a constant number of row identities");
+  assert(calls.rowQueries <= removes * 20 && calls.listReads <= removes * 40, "removal DOM reads stay independent of queue length: " + JSON.stringify(calls));
+  return calls;
+}
+
 try {
   const createMusicViews = await importFactory();
+  await runCase("queue order: rapid adjustments coalesce writes", () => assertCoalescedQueueOrder(createMusicViews));
+  for (const count of [300, 1000]) await runCase(`queue order: ${count} mounted songs move with constant DOM work`,
+    () => assertLocalQueueMove(createMusicViews, count));
+  for (const count of [300, 1000]) for (const removes of [1, 10]) await runCase(`queue removal: ${count} songs ${removes} removals retain every surviving row`,
+    () => assertLocalQueueRemoval(createMusicViews, count, removes));
+  const removalDomWork = [];
+  for (const count of [300, 1000]) for (const removes of [1, 10]) await runCase(`queue removal: ${count} songs ${removes} removals have constant DOM reads and writes`, async () => {
+    removalDomWork.push({ count, removes, ...await assertQueueRemovalDomBudget(createMusicViews, count, removes) });
+  });
+  console.log(JSON.stringify({ queueRemovalDomWork: removalDomWork }));
+  await runCase("queue removal: first and last boundaries and toolbar state update without replacing rows", async () => {
+    const f = mountedQueueFixture(createMusicViews, 3, { currentIndex: 1 }); f.state.mode = "library";
+    const [first, current, last] = [...f.list.children];
+    first.querySelector('[aria-label="移出队列"]').click(); await settle(); assertQueueMounted(f);
+    assert.equal(f.list.children[0], current); assert.equal(current.querySelector('[aria-label="上移"]').disabled, true);
+    assert.equal(current.querySelector('[aria-label="移出队列"]').disabled, true);
+    const queue = f.state.queue; f.audit.removeTrackFromQueue(f.state.current.id); current.querySelector('[aria-label="移出队列"]').click();
+    assert.equal(f.state.queue, queue, "the actual operation also protects the current song");
+    last.querySelector('[aria-label="移出队列"]').focus(); last.querySelector('[aria-label="移出队列"]').click(); await settle();
+    assertQueueMounted(f); assert.deepEqual([...f.list.children], [current]);
+    assert.equal(current.querySelector('[aria-label="下移"]').disabled, true);
+    assert.equal(f.document.querySelector('[aria-label="完成整理"]').disabled, true);
+    assert.equal(f.document.querySelector('[aria-label="清空其他歌曲"]').disabled, true);
+    assert.equal(f.document.querySelector('[aria-label="存为歌单"]').disabled, false);
+    assert.equal(f.document.activeElement, current, "removing the last removable member leaves focus on the protected current row");
+    assert.equal(f.created(), 0);
+  });
+  for (const managing of [false, true]) await runCase(`queue removal: ${managing ? "managed" : "normal"} mode retains a later unaffected focus`, async () => {
+    const f = mountedQueueFixture(createMusicViews, 20, { managing });
+    const focused = f.list.children[10].querySelector('[aria-label="移出队列"]'); focused.focus();
+    f.audit.removeTrackFromQueue(f.state.queue[3].id); await settle();
+    assertQueueMounted(f); assert.equal(f.document.activeElement, focused); assert.equal(f.list.children[9], focused.closest(".music-mobile-queue-item"));
+    assert.equal(f.created(), 0); assert.equal(f.requests.length, 0);
+  });
+  for (const transition of ["source", "account pending", "deactivate"]) await runCase(`queue removal: ${transition} retires old row actions`, async () => {
+    const f = mountedQueueFixture(createMusicViews), row = f.list.children[2], button = row.querySelector('[aria-label="移出队列"]');
+    if (transition === "source") f.setSource(); else if (transition === "deactivate") f.music.deactivate(); else f.switchAccount(transition);
+    const queue = f.state.queue; button.click(); row.click(); await settle(); assert.equal(f.state.queue, queue); assert.equal(f.requests.length, 0);
+  });
+  await runCase("queue removal: an unselected preview change rebinds player actions through the existing full render", async () => {
+    const f = mountedQueueFixture(createMusicViews, 3, { currentIndex: null }), next = f.state.queue[1];
+    const row = f.list.children[0], button = row.querySelector('[aria-label="移出队列"]');
+    button.click(); await settle();
+    assert.equal(f.state.current, null); assert.equal(f.state.queue[0], next);
+    assert.notEqual(f.document.querySelector(".music-mobile-full-player"), f.full);
+    assert.equal(f.document.querySelector(".music-mobile-full-track-info strong").textContent, next.title);
+    const queue = f.state.queue; row.click(); button.click(); await settle(); assert.equal(f.state.queue, queue); assert.equal(f.requests.length, 0);
+  });
+  await runCase("queue removal: emptying the queue preserves an outside current song and focuses the sheet close", async () => {
+    const f = mountedQueueFixture(createMusicViews, 1);
+    f.state.current = f.other; f.audit.renderShell();
+    const list = f.document.querySelector(".music-mobile-full-player .music-mobile-queue-list");
+    const full = f.document.querySelector(".music-mobile-full-player"), mini = f.document.querySelector(".music-mobile-mini-player"), before = f.created();
+    const remove = list.children[0].querySelector('[aria-label="移出队列"]'); remove.focus(); remove.click(); await settle();
+    assert.equal(f.state.current, f.other); assert.deepEqual(f.state.queue, []);
+    assert.equal(f.document.querySelector(".music-mobile-full-player"), full); assert.equal(f.document.querySelector(".music-mobile-mini-player"), mini);
+    assert.equal(f.document.querySelector(".music-mobile-full-player .music-mobile-queue-list"), list);
+    assert.equal(list.textContent, "队列里还没有歌曲"); assert.equal(f.created() - before, 1, "only the empty-state element is created");
+    assert.equal(f.document.activeElement, f.document.querySelector('[aria-label="关闭队列"]'));
+    for (const label of ["存为歌单", "完成整理", "清空其他歌曲"]) assert.equal(f.document.querySelector(`[aria-label="${label}"]`).disabled, true);
+    assert.equal(f.document.querySelector(".music-mobile-full-queue").disabled, true); assert.equal(f.requests.length, 0);
+  });
+  await runCase("queue order: acknowledgement preserves the mounted player and updates visible playlist metadata", async () => {
+    const f = mountedQueueFixture(createMusicViews);
+    f.list.children[1].querySelector('[aria-label="上移"]').click(); await settle();
+    const before = f.created(), rows = [...f.list.children], focused = f.list.children[4].querySelector('[aria-label="上移"]');
+    focused.focus();
+    f.requests[0].resolve({ playlist: { ...f.playlist, name: "Acknowledged name", description: "Acknowledged description", trackCount: 300 } });
+    await settle(); assertQueueMounted(f); assert.deepEqual([...f.list.children], rows);
+    assert.equal(f.created(), before, "an acknowledgement creates no player, queue or metadata elements");
+    assert.equal(f.document.activeElement, focused, "an acknowledgement cannot reclaim focus");
+    assert.match(f.document.querySelector(".music-mobile-playlist-identity").textContent, /Acknowledged name.*300.*Acknowledged description/);
+    assert.equal(f.document.querySelector(".music-mobile-queue-status").textContent, "歌单顺序已保存");
+  });
+  await runCase("queue order: current failed movement rolls back locally and preserves a later focus", async () => {
+    const f = mountedQueueFixture(createMusicViews), original = queueIds(f);
+    f.list.children[1].querySelector('[aria-label="上移"]').click(); await settle();
+    const rows = [...f.list.children], focused = rows[5].querySelector('[aria-label="上移"]'); focused.focus();
+    f.requests[0].reject(new Error("Controlled queue save failure")); await settle();
+    assert.deepEqual(queueIds(f), original); assertQueueMounted(f);
+    assert.equal(rows.filter(row => !row.isConnected).length, 2);
+    assert.equal(f.document.activeElement, focused, "rollback leaves an unaffected user's new focus alone");
+    assert.equal(f.document.querySelector(".music-mobile-queue-status").textContent, "Controlled queue save failure");
+  });
+  await runCase("queue order: child keyboard events cannot activate the surrounding play row", async () => {
+    const f = mountedQueueFixture(createMusicViews);
+    const row = f.list.children[1], child = row.querySelector('[aria-label="上移"]');
+    for (const key of ["Enter", " "]) {
+      const event = { type: "keydown", target: child, key, bubbles: true, defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; } };
+      child.dispatchEvent(event); assert.equal(event.defaultPrevented, false, "the child button retains native keyboard activation");
+    }
+    assert.equal(f.requests.length, 0); assert.equal(f.state.queueOpen, true); assert.equal(f.state.current, f.current);
+  });
+  for (const control of ["repeat", "finish managing"]) for (const failure of [false, true]) {
+    await runCase(`queue order: ${control} preserves current ${failure ? "failure rollback" : "acknowledgement"}`,
+      () => assertQueueOrderSurfaceChange(createMusicViews, control, failure));
+  }
+  await runCase("queue order: a failed earlier order cannot roll back a later successful order", async () => {
+    const f = queueOrderFixture(createMusicViews);
+    f.audit.moveQueueTrack(f.other.id, -1); f.audit.moveQueueTrack("third-fixture", -1); await settle();
+    const latestQueue = f.state.queue;
+    f.requests[0].reject(new Error("Earlier order failure")); await settle();
+    assert.equal(f.state.queue, latestQueue); assert.equal(f.requests.length, 2);
+    f.requests[1].resolve(writeResult(f)); await settle();
+    assert.equal(f.state.queue, latestQueue); assert.equal(f.state.status, "歌单顺序已保存");
+  });
+  for (const firstSucceeds of [false, true]) await runCase(`queue order: failed latest order restores ${firstSucceeds ? "confirmed" : "initial"} ordering and current members`, async () => {
+    const f = queueOrderFixture(createMusicViews), added = { id: "added-member", title: "Added fixture" };
+    f.audit.moveQueueTrack(f.other.id, -1); await settle();
+    f.audit.appendTrackToQueue(added);
+    // Keep a new member between old members; rollback must preserve its slot.
+    const member = f.state.queue.pop(); f.state.queue.splice(1, 0, member);
+    f.audit.moveQueueTrack("third-fixture", -1); await settle();
+    const latestObjects = new Map(f.state.queue.map(track => [track.id, track]));
+    latestObjects.get(f.other.id).title = "Updated after reordering";
+    assert.equal(f.requests.length, 1);
+    if (firstSucceeds) f.requests[0].resolve(writeResult(f)); else f.requests[0].reject(new Error("First order failure"));
+    await settle(); assert.equal(f.requests.length, 2);
+    f.requests[1].reject(new Error("Latest order failure")); await settle();
+    assert.deepEqual(queueIds(f), firstSucceeds
+      ? [f.other.id, added.id, f.current.id, "third-fixture"]
+      : [f.current.id, added.id, f.other.id, "third-fixture"]);
+    for (const track of f.state.queue) assert.equal(track, latestObjects.get(track.id), "rollback keeps live objects");
+    assert.equal(f.state.status, "Latest order failure"); assert.equal(f.els.viewMeta.textContent, "Latest order failure");
+    f.audit.moveQueueTrack("third-fixture", -1); await settle(); assert.equal(f.requests.length, 3, "failure releases the write slot for retry");
+    f.requests[2].resolve(writeResult(f)); await settle(); assert.equal(f.state.status, "歌单顺序已保存");
+  });
+  for (const transition of ["route", "same route", "selection", "source", "deactivate", "account pending", "account", "account round trip", "queue"]) {
+    for (const failure of [false, true]) await runCase(`queue order: ${transition} retires late ${failure ? "failure" : "success"}`,
+      () => assertRetiredQueueOrder(createMusicViews, transition, failure));
+  }
+  await runCase("queue order: a pending old-account adjustment is never sent using the new account", async () => {
+    const f = queueOrderFixture(createMusicViews);
+    f.audit.moveQueueTrack(f.other.id, -1); f.audit.moveQueueTrack("third-fixture", -1); await settle();
+    assert.equal(f.requests.length, 1); f.switchAccount("account round trip");
+    const snapshot = copy(f.state); f.requests[0].resolve(writeResult(f)); await settle();
+    assert.equal(f.requests.length, 1); assert.deepEqual(copy(f.state), snapshot);
+    assert.equal(f.requests[0].signal.aborted, false);
+  });
+  await runCase("queue order: a source change cancels unsent adjustments and preserves an accepted PUT", async () => {
+    const f = queueOrderFixture(createMusicViews);
+    f.audit.moveQueueTrack(f.other.id, -1); f.audit.moveQueueTrack("third-fixture", -1); await settle();
+    f.setSource(); const snapshot = copy(f.state);
+    f.requests[0].resolve(writeResult(f)); await settle(); assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0].signal.aborted, false); assert.deepEqual(copy(f.state), snapshot);
+  });
+  await runCase("queue order: returning to the original source does not revive a retired pending order", async () => {
+    const f = queueOrderFixture(createMusicViews);
+    f.audit.moveQueueTrack(f.other.id, -1); f.audit.moveQueueTrack("third-fixture", -1); await settle();
+    f.setSource(); await f.renderRoute("playlist", f.playlist.id);
+    f.restoreSource(); await f.renderRoute("playlist", f.playlist.id);
+    const snapshot = copy(f.state), count = f.requests.length;
+    f.requests[0].resolve(writeResult(f)); await settle(); assert.equal(f.requests.length, count);
+    assert.deepEqual(copy(f.state), snapshot); assert.equal(f.requests[0].signal.aborted, false);
+  });
+  await runCase("queue order: distinct playlist capacity is bounded and released", async () => {
+    const f = queueOrderFixture(createMusicViews);
+    for (let index = 0; index < 9; index++) {
+      f.state.playlistId = `bounded-${index}`; f.state.queue = [f.current, f.other];
+      f.audit.moveQueueTrack(f.other.id, -1); await settle();
+    }
+    assert.equal(f.requests.length, 8); assert.deepEqual(queueIds(f), [f.current.id, f.other.id]);
+    assert.match(f.state.status, /繁忙/);
+    f.requests[0].resolve(writeResult(f)); await settle();
+    f.audit.moveQueueTrack(f.other.id, -1); await settle(); assert.equal(f.requests.length, 9);
+    for (const request of f.requests.slice(1)) request.resolve(writeResult(f)); await settle();
+    assert.equal(f.state.status, "歌单顺序已保存");
+  });
+  await runCase("queue order: a local non-playlist queue is reordered without a write", async () => {
+    const f = queueOrderFixture(createMusicViews); f.state.mode = "library";
+    f.audit.moveQueueTrack(f.other.id, -1); await settle();
+    assert.deepEqual(queueIds(f), [f.other.id, f.current.id, "third-fixture"]); assert.equal(f.requests.length, 0);
+  });
   for (const kind of ["create", "create-with-track", "create-current", "save", "add", "add-current"]) {
     for (const transition of ["route", "same route", "selection", "source", "deactivate", "account pending", "account round trip"]) {
       for (const failure of [false, true]) await runCase(`${kind}: stale POST ${failure ? "failure" : "success"} after ${transition}`,
@@ -376,7 +773,32 @@ try {
     assert.notEqual(source, viewSource); const mutant = await importFactory(source);
     await assert.rejects(() => assertRetiredAddition(mutant, "add", "reopen sheet"), /retired addition cannot refresh a new catalogue/);
   });
-  console.log(`Android music playlist request verification passed (${cases} scenarios, including 5 negative controls; ${fixtureId} controlled fixtures).`);
+  await runCase("negative control: parallel queue orders exceed the bounded write budget", async () => {
+    const source = viewSource.replace("if (writes.active) {", "if (false) {"); assert.notEqual(source, viewSource);
+    await assert.rejects(() => importFactory(source).then(assertCoalescedQueueOrder), /one physical write in flight/);
+  });
+  await runCase("negative control: unguarded queue acknowledgement repaints a different source", async () => {
+    const source = viewSource.replace("if (!data || !request.isCurrent()) return data;", "if (!data) return data;");
+    assert.notEqual(source, viewSource); const mutant = await importFactory(source);
+    await assert.rejects(() => assertRetiredQueueOrder(mutant, "source", false), /retired order after source/);
+  });
+  await runCase("negative control: the preceding local removal still exceeds tail DOM budgets", async () => {
+    const start = viewSource.indexOf("  function removeMountedQueueTrack(previousQueue, index) {");
+    const end = viewSource.indexOf("\n  function clearQueueExceptCurrent()", start);
+    assert(start >= 0 && end > start);
+    const rowKey = '    row.dataset.trackId = String(track.id || "");\n    const mounted = mountedQueueList;';
+    assert.equal(viewSource.split(rowKey).length, 2);
+    // The preceding kernel validates its original data index before rewriting
+    // it. Restore that initial field only for compatibility with the old kernel.
+    const source = (viewSource.slice(0, start) + previousQueueRemovalHelper + "\n" + viewSource.slice(end))
+      .replace(rowKey, rowKey.replace("\n", '\n    row.dataset.trackIndex = String(index);\n'));
+    const mutant = await importFactory(source);
+    const calls = await measureQueueRemovalDomWork(mutant, 1000, 1);
+    assert.equal(calls.indexWrites, 998); assert.equal(calls.numberWrites, 998);
+    console.log(JSON.stringify({ precedingLocalQueueRemovalDomWork: calls }));
+    await assert.rejects(() => assertQueueRemovalDomBudget(mutant, 1000, 1), /no tail index\/number DOM writes/);
+  });
+  console.log(`Android music playlist request verification passed (${cases} scenarios, including 8 negative controls; ${fixtureId} controlled fixtures).`);
 } catch (error) {
   console.error(`${selectedCase || "fixture setup"}: ${error.name}: ${error.message}`); process.exitCode = 1;
 } finally {

@@ -12,13 +12,14 @@ import { createGalleryMediaService } from "../src/modules/media/server/gallery-m
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createMangaService } from "../src/modules/photos/server/manga-service.js";
+import { sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-source-adapter.mjs";
 
 // Current production code versus the previous eager/N+1/grouping algorithms,
 // restored in memory. All rows and SQLite state are private synthetic doubles.
 const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n")
   .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href));
 export function previousQuerySource(current) {
-  let previous = current
+  let previous = sourceBeforeMovieColdScope(current)
     .replaceAll("metadataService.tvSeriesRow(sourceSeriesKey, { forPublication: true })", "metadataService.tvSeriesRow(sourceSeriesKey)")
     .replaceAll("metadataService.movieRow(item.id, { forPublication: true })", "metadataService.movieRow(item.id)");
   const replace = (from, to) => { assert.ok(previous.includes(from), "previous query marker must exist"); previous = previous.replace(from, to); };
@@ -47,14 +48,12 @@ export function previousQuerySource(current) {
   replace('return imageNameCollator.compare(left, right);', 'return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });');
   replace('tvMetadataByKey ? tvMetadataByKey.get(sourceSeriesKey) : metadataService.tvSeriesRow(sourceSeriesKey)', 'tvMetadataByKey?.get(sourceSeriesKey) || metadataService.tvSeriesRow(sourceSeriesKey)');
   replace('movieMetadataById ? movieMetadataById.get(item.id) : metadataService.movieRow(item.id)', 'movieMetadataById?.get(item.id) || metadataService.movieRow(item.id)');
-  replace(`      const kinds = mode === "media" ? ["movie", "tv", "anime"] : [mode];
-      const rawItems = mediaItemsByKinds(Array.isArray(index.mediaItems) ? index.mediaItems : [], kinds);
-      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
-      const movieMetadataById = rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
+  replace(`      const tvMetadataByKey = rawItems.some((item) => isEpisodicMediaKind(item.mediaKind)) ? metadataService.tvSeriesRowsMap({ forPublication: true }) : new Map();
+      const movieMetadataById = movieListRead ? movieListRead.rows : rawItems.some((item) => item.mediaKind === "movie") ? metadataService.movieRowsMap() : new Map();
       const publicTvSeriesByKey = new Map();
       // Only pure string derivations are shared within this list read. Field
       // conversion and metadata key generation still run for every item.
-      const derivationState = { caches: null };
+      const derivationState = { caches: null, movieListRead };
       mediaItems = rawItems.map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById, publicTvSeriesByKey, derivationState));`, `      const tvMetadataByKey = metadataService.tvSeriesRowsMap();
       const movieMetadataById = metadataService.movieRowsMap();
       mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));`);

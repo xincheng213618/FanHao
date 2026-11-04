@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { createMusicProgressSession, createMusicPlayedReport, musicProgressBody } from "../public/modules/music/progress-session.js";
 import { createMusicApi } from "../public/modules/music/api.js";
 import { captureMusicProgressOwner, sendMusicProgress } from "../android-client/www/modules/music/progress-transport.js";
+import { createMusicTrackPreferences } from "../android-client/www/modules/music/music-track-preferences.js";
 import { setAccountOwner } from "../android-client/www/js/account-owner.js";
 
 test("capture ordering remains attached to the owner that measured the position", () => {
@@ -114,7 +115,8 @@ function clientFixture(platform, { modern = true, playId = 1 } = {}) {
   const events = {}, media = {};
   const base = "http://scope-a.invalid:19101";
   const deps = { claims, reads, saved, playedRecords, leave, audioAttempts, loaded, retired, fades, events, media,
-    createMusicProgressSession, createMusicPlayedReport, captureMusicProgressOwner, CLOCK, ID, modern, playId, base };
+    createMusicProgressSession, createMusicPlayedReport, captureMusicProgressOwner, CLOCK, ID, modern, playId, base,
+    createTrackPreferences: () => createMusicTrackPreferences({ send: () => assert.fail("progress fixture must not send preference writes") }) };
   const common = `
     const {claims,reads,saved,playedRecords,leave,audioAttempts,loaded,retired,fades,events,media,
       createMusicProgressSession,createMusicPlayedReport,captureMusicProgressOwner,CLOCK,ID,modern,playId,base}=deps;
@@ -151,6 +153,9 @@ function clientFixture(platform, { modern = true, playId = 1 } = {}) {
     "currentProgressRecord", "cancelProgressClock", "refreshProgressClock", "seekToLyric",
     "installMediaSessionHandlers", "setMediaAction", "seekRelative", "installLifecycle"];
   const androidSetup = `
+    const trackPreferences=deps.createTrackPreferences();
+    // No fullscreen or search surface is mounted in this progress fixture.
+    let miniFullscreenSession=null,pendingSearchFocus=null;
     const window={addEventListener(name,callback){events[name]=callback;}};
     const navigator={mediaSession:{setActionHandler(name,callback){media[name]=callback;}}};
     const els={viewContent:{querySelector(){return null;}}};

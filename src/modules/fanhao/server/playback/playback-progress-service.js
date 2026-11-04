@@ -79,12 +79,33 @@ export function createPlaybackProgressService({
   }
 
   function historyEntries(options = {}) {
+    return selectHistoryEntries(options).entries;
+  }
+
+  function historySnapshot(options = {}) {
+    return selectHistoryEntries(options, true);
+  }
+
+  function selectHistoryEntries(options, timed = false) {
     const days = Number(options.days || 0);
-    const cutoff = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+    const observedAt = days > 0 || timed ? Date.now() : 0;
+    const windowMs = days * 24 * 60 * 60 * 1000;
+    const cutoff = days > 0 ? observedAt - windowMs : 0;
     const entries = cachedHistoryEntries();
     const matched = cutoff ? entries.filter((entry) => entry.updatedTime >= cutoff) : entries;
     const limit = Number(options.limit || 0);
-    return limit > 0 ? matched.slice(0, limit) : matched.slice();
+    // The source is ordered newest first. Expire on the first source member
+    // leaving, even if a later filter or limit hides it. The legacy zero-cutoff
+    // branch includes every entry and can change on the very next clock tick.
+    let expiresAt = Infinity;
+    if (days > 0) {
+      if (cutoff === 0) expiresAt = observedAt;
+      else if (matched.length) expiresAt = matched.at(-1).updatedTime + windowMs;
+      // Approaching the zero-cutoff tick can temporarily re-include older rows.
+      // Date.now uses integer milliseconds; never reuse across that special tick.
+      if (observedAt < windowMs) expiresAt = Math.min(expiresAt, Math.ceil(windowMs) - 1);
+    }
+    return { entries: limit > 0 ? matched.slice(0, limit) : matched.slice(), observedAt, expiresAt };
   }
 
   function cachedHistoryEntries() {
@@ -237,6 +258,7 @@ export function createPlaybackProgressService({
     getVideoProgress,
     getWorkProgress,
     historyEntries,
+    historySnapshot,
     historyWorks,
     saveVideoProgress,
     userStateSummary

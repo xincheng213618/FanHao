@@ -211,7 +211,7 @@ test("v4 migration preserves raw columns/IDs/bodies and labels prior progress un
     const migrated=createNovelStore({dbPath}).bookDetail(detail.book.id), after=snapshot(dbPath);
     for(const table of before) {
       const current=after.find(t=>t.name===table.name); assert(current);
-      if(table.name==="novel_meta") { assert.equal(current.rows.find(r=>r.key==="schema_version").value,"5"); continue; }
+      if(table.name==="novel_meta") { assert.equal(current.rows.find(r=>r.key==="schema_version").value,"6"); continue; }
       assert.deepEqual(current.rows.map(row=>Object.fromEntries(Object.keys(table.rows[0]||{}).map(key=>[key,row[key]]))),table.rows.map(row=>({...row})));
     }
     assert.equal(migrated.book.progress,null); assert.equal(migrated.book.progressRecovery.reason,"legacy_unverified");
@@ -248,16 +248,16 @@ test("Node and Python revalidate metadata after a real interleaved upgrade wins 
     const {store,dbPath}=fresh();store.importCollectedBook(collected(base));
     downgradeToV4(dbPath); // Initialization now needs a writer lock only for migration.
     sql(dbPath, db => db.prepare("DELETE FROM novel_meta WHERE key='library_id'").run());
-    const expected=snapshot(dbPath);expected.find(t=>t.name==="novel_meta").rows.find(r=>r.key==="schema_version").value="6";
+    const expected=snapshot(dbPath);expected.find(t=>t.name==="novel_meta").rows.find(r=>r.key==="schema_version").value="7";
     if(language==="Node") {
       const original=DatabaseSync.prototype.exec;let armed=true;
       DatabaseSync.prototype.exec=function(statement,...args){
-        if(armed&&statement==="BEGIN IMMEDIATE"){armed=false;sql(dbPath,db=>db.prepare("UPDATE novel_meta SET value='6' WHERE key='schema_version'").run());}
+        if(armed&&statement==="BEGIN IMMEDIATE"){armed=false;sql(dbPath,db=>db.prepare("UPDATE novel_meta SET value='7' WHERE key='schema_version'").run());}
         return original.call(this,statement,...args);
       };
       try{assert.throws(()=>factory({dbPath}).summary(),/更新版本/);assert.equal(armed,false);}finally{DatabaseSync.prototype.exec=original;}
     } else {
-      const output=python("import sqlite3,sys; sys.path.insert(0,'tools'); from rescan_novel_library import ensure_schema\nclass Interleaved(sqlite3.Connection):\n armed=True\n def execute(self,statement,*args):\n  if self.armed and statement=='BEGIN IMMEDIATE':\n   self.armed=False; w=sqlite3.connect(sys.argv[1]); w.execute(\"UPDATE novel_meta SET value='6' WHERE key='schema_version'\"); w.commit(); w.close()\n  return super().execute(statement,*args)\nc=sqlite3.connect(sys.argv[1],factory=Interleaved)\ntry: ensure_schema(c)\nexcept ValueError as e:\n assert '更新版本' in str(e); print('expected-future-rejection')\nfinally: c.close()",[dbPath]);
+      const output=python("import sqlite3,sys; sys.path.insert(0,'tools'); from rescan_novel_library import ensure_schema\nclass Interleaved(sqlite3.Connection):\n armed=True\n def execute(self,statement,*args):\n  if self.armed and statement=='BEGIN IMMEDIATE':\n   self.armed=False; w=sqlite3.connect(sys.argv[1]); w.execute(\"UPDATE novel_meta SET value='7' WHERE key='schema_version'\"); w.commit(); w.close()\n  return super().execute(statement,*args)\nc=sqlite3.connect(sys.argv[1],factory=Interleaved)\ntry: ensure_schema(c)\nexcept ValueError as e:\n assert '更新版本' in str(e); print('expected-future-rejection')\nfinally: c.close()",[dbPath]);
       assert(output.includes("expected-future-rejection"));
     }
     assert.deepEqual(snapshot(dbPath),expected);

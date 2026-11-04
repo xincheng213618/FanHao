@@ -793,6 +793,7 @@ const workPresenterService = createWorkPresenterService({
   publicWorkInfoSummary,
   uniqueTextArray,
   workInfoDetailRow,
+  workInfoDetailFacetRow,
   workInfoFacetRow
 });
 const adminScriptService = createAdminScriptService({
@@ -1776,6 +1777,10 @@ function workInfoReadCacheable() {
 
 function workInfoFacetRow(workId) {
   return workInfoService.facetRow(workId);
+}
+
+function workInfoDetailFacetRow(workId) {
+  return workInfoService.detailFacetRow(workId);
 }
 
 function workInfoDetailRow(workId, options) {

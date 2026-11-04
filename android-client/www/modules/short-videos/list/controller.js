@@ -1,4 +1,4 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-22080e82f167";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-eb78be0b425d";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -6,10 +6,17 @@ export function createShortVideoListController(context = {}) {
   let listRequestGeneration = 0;
   let listAppendRequestId = 0;
   let listAppendRevision = 0;
+  let listRenderGuard = null;
+  let acceptedListScope = null;
   let nativeOpenOwner = null;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
+  const appendListAuthors = (...args) => context.appendListAuthors?.(...args);
+  const setAuthorIndexLoading = (...args) => context.setAuthorIndexLoading?.(...args);
+  const releaseAuthorIndex = (...args) => context.releaseAuthorIndex?.(...args);
+  const isAuthorIndexMounted = (...args) => context.isAuthorIndexMounted?.(...args);
+  const hasAuthorIndexShell = (...args) => context.hasAuthorIndexShell?.(...args);
   const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
   const setListRefreshing = (...args) => context.setListRefreshing?.(...args);
@@ -23,6 +30,31 @@ export function createShortVideoListController(context = {}) {
     listState.loading = false;
     listState.loadingMore = false;
     listState.allowLoadMore = false;
+    listRenderGuard = null;
+    releaseAuthorIndex();
+  }
+
+  function captureListRenderOwner() {
+    const generation = listRequestGeneration;
+    const baseUrl = getActiveUrl();
+    const scope = listScopeKey(baseUrl);
+    return { isCurrent: () => generation === listRequestGeneration
+      && baseUrl === getActiveUrl() && scope === listScopeKey(baseUrl)
+      && (!listRenderGuard || listRenderGuard()) };
+  }
+
+  function listDataScope(baseUrl = getActiveUrl()) {
+    return JSON.stringify([baseUrl, listScopeKey(baseUrl)]);
+  }
+
+  function needsFirstPageRetry() {
+    // Legacy hosts may seed data before the first successful controller read.
+    return Boolean(listState.data) && acceptedListScope !== null
+      && acceptedListScope !== listDataScope();
+  }
+
+  function needsAuthorIndexRetry() {
+    return isAuthorIndexView() && needsFirstPageRetry();
   }
 
   function cancelShortVideoNativeOpen(preserveOwner = null) {
@@ -86,14 +118,20 @@ export function createShortVideoListController(context = {}) {
   }
 
   async function loadList(renderGuard = null, options = {}) {
-    const append = Boolean(options.append);
-    const preserveShell = Boolean(options.preserveShell && !append);
-    if (append && (listState.loading || listState.loadingMore || !listState.data?.hasMore)) return;
+    const retryFirstPage = Boolean(options.append && needsFirstPageRetry());
+    const append = Boolean(options.append && !retryFirstPage);
+    const preserveShell = Boolean((options.preserveShell || retryFirstPage) && !append);
+    const preservedAuthorIndex = preserveShell && hasAuthorIndexShell();
+    const authorIndex = isAuthorIndexView();
+    if (options.append && (listState.loading || listState.loadingMore || !retryFirstPage && !listState.data?.hasMore)) return;
+    if (options.append && authorIndex && !isAuthorIndexMounted()) return;
+    const inheritedRenderGuard = renderGuard || listRenderGuard;
     const requestGeneration = append ? listRequestGeneration : ++listRequestGeneration;
+    if (!append) listRenderGuard = retryFirstPage ? inheritedRenderGuard : renderGuard;
     const appendRequestId = append ? ++listAppendRequestId : 0;
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
-    const authorIndex = isAuthorIndexView();
+    const requestRenderGuard = renderGuard || listRenderGuard;
     const appendedVideos = [];
     if (listState.query) params.set("q", listState.query);
     if (authorIndex) {
@@ -118,7 +156,8 @@ export function createShortVideoListController(context = {}) {
     }
     if (append) {
       listState.loadingMore = true;
-      if (!authorIndex) setListLoadingMore(true);
+      if (authorIndex) setAuthorIndexLoading(true);
+      else setListLoadingMore(true);
     } else {
       listState.allowLoadMore = false;
       listState.loading = true;
@@ -131,8 +170,10 @@ export function createShortVideoListController(context = {}) {
     const requestScope = listScopeKey(requestUrl);
     const isCurrentRequest = () => requestGeneration === listRequestGeneration
       && (!append || appendRequestId === listAppendRequestId)
+      && requestUrl === getActiveUrl()
       && requestScope === listScopeKey(getActiveUrl())
-      && (!renderGuard || renderGuard());
+      && (!requestRenderGuard || requestRenderGuard())
+      && (!append || !authorIndex || isAuthorIndexMounted());
     try {
       const primaryResult = api.fetchCachedRevalidated && !append
         ? await api.fetchCachedRevalidated(requestUrl, requestPath, {
@@ -154,11 +195,13 @@ export function createShortVideoListController(context = {}) {
         primaryResult.revalidation.then((freshData) => {
           if (!isCurrentRequest()) return;
           const renderMode = applyRevalidatedListData(freshData, authorIndex, revalidationContext);
+          acceptedListScope = listDataScope(requestUrl);
           if (renderMode === "full") renderListShell();
         }).catch(() => {});
       }
       if (!isCurrentRequest()) return;
       applyLoadedListData(data, { append, authorIndex, appendedVideos });
+      acceptedListScope = listDataScope(requestUrl);
       if (append) listAppendRevision += 1;
       // Enqueue author hints after the video page: both queries share the
       // catalogue worker, so starting authors first would delay the first page.
@@ -180,6 +223,9 @@ export function createShortVideoListController(context = {}) {
         renderListShell();
       }).catch(() => {});
       if (append && !authorIndex) appendListVideos(appendedVideos);
+      else if (append && authorIndex) {
+        if (!appendListAuthors()) renderListShell();
+      }
       else renderListShell();
     } catch (error) {
       if (!isCurrentRequest()) return;
@@ -188,8 +234,14 @@ export function createShortVideoListController(context = {}) {
       const message = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
       listState.status = preserveShell ? "" : message;
       if (append && !authorIndex) setListLoadingMore(false, listState.status);
+      else if (append && authorIndex) {
+        if (!setAuthorIndexLoading(false)) renderListShell();
+      }
       else if (preserveShell) {
         setListRefreshing(false);
+        // The preserved author controls were retired when navigation began.
+        // A failed refresh needs a fresh mount for the retained data.
+        if (authorIndex || preservedAuthorIndex) renderListShell();
         shortVideoToast(`${message}，已保留当前内容`);
       } else renderListShell();
     }
@@ -368,7 +420,7 @@ export function createShortVideoListController(context = {}) {
 
   function appendVisibleAuthors(force = false) {
     if (!isAuthorIndexView()) return;
-    if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
+    if (listState.loading || listState.loadingMore || !listState.data?.hasMore && !needsAuthorIndexRetry()) return;
     if (!force) {
       const doc = document.documentElement;
       const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
@@ -555,6 +607,8 @@ export function createShortVideoListController(context = {}) {
   return {
     cancelShortVideoListRequests,
     cancelShortVideoNativeOpen,
+    captureListRenderOwner,
+    needsAuthorIndexRetry,
     applyListParams,
     loadList,
     sortedAuthorFacets,

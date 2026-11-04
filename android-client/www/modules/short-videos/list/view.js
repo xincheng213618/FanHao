@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-22080e82f167";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-eb78be0b425d";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=assets-22080e82f167";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-22080e82f167";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-22080e82f167";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-22080e82f167";
+import { DEFAULT_SORT, initials } from "../shared.js?v=assets-eb78be0b425d";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-eb78be0b425d";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-eb78be0b425d";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-eb78be0b425d";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -16,6 +16,7 @@ export function createShortVideoListView(context = {}) {
   const cancelSearchSuggestions = (...args) => context.cancelSearchSuggestions(...args);
   const isAuthorFeedView = (...args) => context.isAuthorFeedView(...args);
   const isAuthorIndexView = (...args) => context.isAuthorIndexView(...args);
+  const needsAuthorIndexRetry = (...args) => context.needsAuthorIndexRetry?.(...args);
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
   const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
   const resetListLoadMoreObserver = (...args) => context.resetListLoadMoreObserver(...args);
@@ -24,9 +25,13 @@ export function createShortVideoListView(context = {}) {
   const sortedAuthorFacets = (...args) => context.sortedAuthorFacets(...args);
   const submitSearch = (...args) => context.submitSearch(...args);
   const updateListParams = (...args) => context.updateListParams(...args);
+  const captureListRenderOwner = (...args) => context.captureListRenderOwner(...args);
+  const shortVideoAuthorFilterValue = (...args) => context.shortVideoAuthorFilterValue(...args);
   let searchSuggestionTimer = 0;
+  let mountedAuthorIndex = null;
 
   function renderListShell() {
+    releaseAuthorIndex();
     els.viewContent.innerHTML = "";
     resetListLoadMoreObserver();
     const shell = document.createElement("section");
@@ -47,12 +52,20 @@ export function createShortVideoListView(context = {}) {
     const toolbar = listState.searchPage ? null : renderListToolbar();
     if (toolbar) shell.append(toolbar);
     if (isAuthorIndexView()) {
+      const mount = { shell, owner: captureListRenderOwner(), records: new Map(), reusable: true };
+      mountedAuthorIndex = mount;
       if (listState.source === "following") {
-        shell.append(renderFollowingAuthorTools({ listState, onChange: updateListParams }));
+        mount.tools = renderFollowingAuthorTools({ listState, onChange: patch => {
+          if (!ownsAuthorIndex(mount)) return false;
+          return updateListParams(patch);
+        } });
       } else {
-        shell.append(renderAuthorAccountStatusTools({ listState, formatNumber: formatCompact, onChange: updateListParams }));
+        mount.tools = renderAuthorAccountStatusTools({ listState, formatNumber: formatCompact, onChange: patch => {
+          if (!ownsAuthorIndex(mount)) return false;
+          return updateListParams(patch);
+        } });
       }
-      shell.append(renderAuthorIndex());
+      shell.append(mount.tools, renderAuthorIndex(mount));
       els.viewContent.append(shell);
       return;
     }
@@ -475,9 +488,126 @@ export function createShortVideoListView(context = {}) {
     });
   }
 
-  function renderAuthorIndex() {
+  function releaseAuthorIndex() {
+    mountedAuthorIndex = null;
+  }
+
+  function ownsAuthorIndex(mount) {
+    return mountedAuthorIndex === mount && mount.shell.isConnected
+      && mount.wrap?.parentNode === mount.shell && mount.owner.isCurrent() && isAuthorIndexView();
+  }
+
+  function isAuthorIndexMounted() {
+    return Boolean(mountedAuthorIndex && ownsAuthorIndex(mountedAuthorIndex));
+  }
+
+  function hasAuthorIndexShell() {
+    return Boolean(els.viewContent.querySelector(".short-video-mobile-author-index"));
+  }
+
+  function syncAuthorIndexMore(mount) {
+    const focused = mount.more && (document.activeElement === mount.more
+      || mount.moreHadFocus && document.activeElement === document.body);
+    mount.moreHadFocus = false;
+    const retryFirstPage = needsAuthorIndexRetry();
+    if (retryFirstPage || mount.records.size && (listState.data?.hasMore || listState.loadingMore)) {
+      if (!mount.more) {
+        const more = mount.more = document.createElement("button");
+        more.type = "button";
+        more.className = "short-video-mobile-author-index-more";
+        more.addEventListener("click", () => {
+          if (ownsAuthorIndex(mount) && !more.disabled) appendVisibleAuthors(true);
+        });
+      }
+      mount.more.disabled = Boolean(listState.loadingMore);
+      mount.more.textContent = listState.loadingMore ? "正在加载更多作者" : retryFirstPage ? "重试读取作者" : "继续加载更多作者";
+      if (mount.wrap.children[mount.wrap.children.length - 1] !== mount.more) mount.wrap.append(mount.more);
+      if (focused && !listState.loadingMore) mount.more.focus({ preventScroll: true });
+    } else if (mount.more) {
+      mount.more.remove();
+      mount.more = null;
+      if (focused) [...mount.records.values()].at(-1)?.card.querySelector("button")?.focus({ preventScroll: true });
+    }
+  }
+
+  function setAuthorIndexLoading(loading) {
+    const mount = mountedAuthorIndex;
+    if (!mount || !ownsAuthorIndex(mount)) return false;
+    if (mount.more) {
+      if (loading) mount.moreHadFocus = document.activeElement === mount.more;
+      mount.more.disabled = Boolean(loading);
+      mount.more.textContent = loading ? "正在加载更多作者" : needsAuthorIndexRetry() ? "重试读取作者" : "继续加载更多作者";
+      if (!loading) {
+        if (mount.moreHadFocus && document.activeElement === document.body) mount.more.focus({ preventScroll: true });
+        mount.moreHadFocus = false;
+      }
+    }
+    return true;
+  }
+
+  function syncAuthorIndexCounts(mount) {
+    const data = listState.data || {};
+    const count = value => Math.max(0, Number(value || 0)).toLocaleString("zh-CN");
+    if (listState.source === "following") {
+      const summary = mount.tools.querySelector(".short-video-mobile-following-summary");
+      summary.querySelector("strong").textContent = `关注 ${count(data.scopeTotal || data.total || 0)}`;
+      summary.querySelector("small").textContent = `未点赞 ${count(data.unlikedTotal || 0)}`;
+      mount.tools.querySelector(".short-video-mobile-following-filter").textContent = `只看未点赞 ${count(data.unlikedTotal || 0)}`;
+    } else {
+      const total = Math.max(0, Number(data.total || 0));
+      const scopeTotal = Math.max(total, Number(data.scopeTotal || 0));
+      const bannedTotal = Math.max(0, Number(data.bannedTotal || 0));
+      mount.tools.querySelector("small").textContent = listState.authorAccountStatus === "banned"
+        ? `已封禁 ${formatCompact(total)} / 全部 ${formatCompact(scopeTotal)} 位作者`
+        : data.hasMore ? `已显示 ${formatCompact(data.authors?.length || 0)} / ${formatCompact(total)} 位作者`
+          : `${formatCompact(total || data.authors?.length || 0)} 位作者`;
+      mount.tools.querySelector("select").children[1].textContent = `已封禁 (${formatCompact(bannedTotal)})`;
+    }
+    const searchMeta = mount.shell.querySelector(".short-video-search-result-meta");
+    if (searchMeta) searchMeta.textContent = listState.searchTab === "authors"
+      ? `${formatCompact(data.total || 0)} 位相关用户` : `${formatCompact(data.total || 0)} 条相关内容`;
+  }
+
+  function appendListAuthors() {
+    const mount = mountedAuthorIndex;
+    if (!mount || !mount.reusable || !ownsAuthorIndex(mount)) return false;
+    const authors = sortedAuthorFacets(), keys = new Set();
+    const ordered = [];
+    for (const author of authors) {
+      const key = shortVideoAuthorFilterValue(author);
+      const record = mount.records.get(key);
+      // Ambiguous initial keys or replaced records use the ordinary full render.
+      if (!key || keys.has(key) || record && record.author !== author) return false;
+      keys.add(key);
+      ordered.push({ key, author, record });
+    }
+    if ([...mount.records.keys()].some(key => !keys.has(key))) return false;
+    const focused = mount.wrap.contains(document.activeElement) ? document.activeElement : null;
+    const records = new Map();
+    for (const entry of ordered) {
+      const record = entry.record || { author: entry.author, card: renderAuthorIndexCard(entry.author, mount) };
+      records.set(entry.key, record);
+    }
+    for (const [key, record] of mount.records) if (!records.has(key)) record.card.remove();
+    if (records.size) mount.empty?.remove();
+    for (const [index, record] of [...records.values()].entries()) {
+      const current = mount.wrap.children[index];
+      if (current !== record.card) {
+        if (current) current.before(record.card);
+        else mount.wrap.append(record.card);
+      }
+    }
+    mount.records = records;
+    if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+    syncAuthorIndexCounts(mount);
+    syncAuthorIndexMore(mount);
+    return true;
+  }
+
+  function renderAuthorIndex(mount = null) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-mobile-author-index";
+    if (mount) mount.wrap = wrap;
     const authors = sortedAuthorFacets();
     if (listState.loading && !(listState.data?.authors || []).length) {
       for (let index = 0; index < 9; index += 1) {
@@ -491,7 +621,7 @@ export function createShortVideoListView(context = {}) {
     if (!authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-author-index-status";
-      status.textContent = listState.query
+      status.textContent = needsAuthorIndexRetry() ? "读取失败，请重试读取作者" : listState.query
         ? listState.source === "authors" && listState.authorAccountStatus === "banned"
           ? `没有匹配“${listState.query}”的已封禁作者`
           : `没有匹配“${listState.query}”的作者`
@@ -503,10 +633,20 @@ export function createShortVideoListView(context = {}) {
               ? "没有已封禁的作者"
               : "还没有作者数据";
       wrap.append(status);
+      if (mount) { mount.empty = status; syncAuthorIndexMore(mount); }
       return wrap;
     }
-    for (const author of authors) wrap.append(renderAuthorIndexCard(author));
-    if (listState.data?.hasMore || listState.loadingMore) {
+    for (const author of authors) {
+      const card = renderAuthorIndexCard(author, mount);
+      wrap.append(card);
+      if (mount) {
+        const key = shortVideoAuthorFilterValue(author);
+        if (mount.records.has(key)) mount.reusable = false;
+        mount.records.set(key, { author, card });
+      }
+    }
+    if (mount) syncAuthorIndexMore(mount);
+    else if (listState.data?.hasMore || listState.loadingMore) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "short-video-mobile-author-index-more";
@@ -518,9 +658,10 @@ export function createShortVideoListView(context = {}) {
     return wrap;
   }
 
-  function renderAuthorIndexCard(author = {}) {
+  function renderAuthorIndexCard(author = {}, mount = null) {
     const card = document.createElement("article");
     card.className = "short-video-mobile-author-card";
+    card.dataset.authorKey = shortVideoAuthorFilterValue(author);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-mobile-author-card-main";
@@ -552,7 +693,11 @@ export function createShortVideoListView(context = {}) {
       button.append(meta);
     }
     appendAuthorAccountStatus(button, author);
-    bindReliableTap(button, () => openShortVideoAuthor(author));
+    bindReliableTap(button, () => {
+      if (mount && (!ownsAuthorIndex(mount) || card.parentNode !== mount.wrap
+        || !(listState.data?.authors || []).includes(author))) return;
+      return openShortVideoAuthor(author);
+    });
     card.append(button);
     return card;
   }
@@ -604,6 +749,11 @@ export function createShortVideoListView(context = {}) {
   return {
     renderListShell,
     appendListVideos,
+    appendListAuthors,
+    setAuthorIndexLoading,
+    releaseAuthorIndex,
+    isAuthorIndexMounted,
+    hasAuthorIndexShell,
     setListLoadingMore,
     setListRefreshing,
     renderListToolbar,

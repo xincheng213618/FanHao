@@ -23,8 +23,40 @@ const snapshots = [
 });
 const absolute = (source, path) => source.replace(/from "(\.\/[^"]+)"/gu, (_, value) => `from ${JSON.stringify(new URL(value, path).href)}`);
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+// The projection oracle keeps the hash-pinned former wide-row owner. Adapt
+// only its independent listTracks snapshot/empty-page kernel to today's page
+// lifetime, restoring t.* and the native prepare there. All other historical
+// functions and the wide-row lyric implementation stay in the captured owner.
+// Empty-page compatibility and snapshot races have their own dedicated fixture.
+const currentSource = readFileSync(storePath, "utf8").replaceAll("\r\n", "\n");
+function trackPageKernel(source) {
+  const start = source.indexOf("  function listTracks(urlOrOptions = {}) {"), end = source.indexOf("  function searchLyrics(", start);
+  assert(start >= 0 && end > start, "one bounded listTracks page kernel");
+  const kernel = source.slice(start, end);
+  assert.equal(source.split(kernel).length, 2, "page adapter replaces one complete kernel");
+  return kernel;
+}
+const currentKernel = trackPageKernel(currentSource), historicalKernel = trackPageKernel(snapshots[0]);
+const kernelFunctions = text => [...text.matchAll(/^  function (\w+)\(/gmu)].map(match => match[1]);
+assert.deepEqual(kernelFunctions(currentKernel), ["listTracks", "trackCountBoundsPageRows"], "the adapter admits only the page owner and its eligibility proof");
+assert.deepEqual(kernelFunctions(historicalKernel), ["listTracks"], "the pinned historical replacement contains only the page owner");
+assert.match(currentKernel, /function trackCountBoundsPageRows\(database\)/, "include the current nonzero-page eligibility proof with its page owner");
+const wideChanges = [
+  ["rows = prepareTrackList(database,", "rows = database\n      .prepare("],
+  ["SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name", "SELECT t.*, a.name AS artist_name"]
+];
+let wideKernel = currentKernel;
+for (const [projected, wide] of wideChanges) {
+  assert.equal(wideKernel.split(projected).length, 2, "adapt only one track-page projection/prepare slot");
+  wideKernel = wideKernel.replace(projected, wide);
+}
+let restoredKernel = wideKernel;
+for (const [projected, wide] of wideChanges.toReversed()) restoredKernel = restoredKernel.replace(wide, projected);
+assert.equal(restoredKernel, currentKernel, "page adapter preserves every current SQL predicate, binding and snapshot byte outside the wide projection");
+const historicalStore = snapshots[0].replace(historicalKernel, wideKernel);
+assert.equal(historicalStore.replace(wideKernel, historicalKernel), snapshots[0], "the adapted owner round-trips to the complete pinned historical snapshot");
 const oldLyricUrl = moduleUrl(absolute(snapshots[1], lyricPath));
-const oldStoreUrl = moduleUrl(absolute(snapshots[0].replace("from " + JSON.stringify("./lyrics-search.js"), `from ${JSON.stringify(oldLyricUrl)}`), storePath));
+const oldStoreUrl = moduleUrl(absolute(historicalStore.replace("from " + JSON.stringify("./lyrics-search.js"), `from ${JSON.stringify(oldLyricUrl)}`), storePath));
 const { createMusicStore: previousStore } = await import(oldStoreUrl);
 const subject = negative ? previousStore : createMusicStore;
 const prepare = DatabaseSync.prototype.prepare, originalNow = Date.now;
