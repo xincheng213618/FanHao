@@ -1,6 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
-import { imageUrlForWork } from "../../../../js/image.js?v=assets-eb78be0b425d";
-import { getWorkSource } from "../../../../js/work-source.js?v=assets-eb78be0b425d";
+import { imageUrlForWork } from "../../../../js/image.js?v=assets-b266fc766a5d";
+import { getWorkSource } from "../../../../js/work-source.js?v=assets-b266fc766a5d";
 import {
   compactWorkCardTitle,
   compactWorkCode,
@@ -14,8 +14,8 @@ import {
   workGridMeta,
   workGridPerson,
   workGridRankBadge
-} from "./card-presentation.js?v=assets-eb78be0b425d";
-import { createWorkCoverLoader } from "./cover-loader.js?v=assets-eb78be0b425d";
+} from "./card-presentation.js?v=assets-b266fc766a5d";
+import { createWorkCoverLoader } from "./cover-loader.js?v=assets-b266fc766a5d";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
   const coverLoader = createWorkCoverLoader({ getActiveUrl });

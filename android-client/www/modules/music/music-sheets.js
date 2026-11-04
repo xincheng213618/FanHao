@@ -18,7 +18,7 @@ import {
   writeShufflePreference,
   writeVersionPreferencesPreference,
   writeVersionStrategyPreference
-} from "./music-state.js?v=assets-eb78be0b425d";
+} from "./music-state.js?v=assets-b266fc766a5d";
 
 export function createMusicSheets(deps) {
   const {

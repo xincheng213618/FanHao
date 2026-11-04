@@ -1,27 +1,27 @@
-import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-eb78be0b425d";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-b266fc766a5d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { absoluteUrl } from "../../js/image.js?v=assets-eb78be0b425d";
+import { absoluteUrl } from "../../js/image.js?v=assets-b266fc766a5d";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-eb78be0b425d";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-eb78be0b425d";
-import { createMusicSheets } from "./music-sheets.js?v=assets-eb78be0b425d";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-eb78be0b425d";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-eb78be0b425d";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-eb78be0b425d";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-eb78be0b425d";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-eb78be0b425d";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-eb78be0b425d";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-eb78be0b425d";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-eb78be0b425d";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-eb78be0b425d";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-eb78be0b425d";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-b266fc766a5d";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-b266fc766a5d";
+import { createMusicSheets } from "./music-sheets.js?v=assets-b266fc766a5d";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-b266fc766a5d";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-b266fc766a5d";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-b266fc766a5d";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-b266fc766a5d";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-b266fc766a5d";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-b266fc766a5d";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-b266fc766a5d";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-b266fc766a5d";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-b266fc766a5d";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-b266fc766a5d";
 import { createMusicControlFocus } from "./music-control-focus.js";
-import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-eb78be0b425d";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-eb78be0b425d";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-eb78be0b425d";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-eb78be0b425d";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-eb78be0b425d";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-eb78be0b425d";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-b266fc766a5d";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-b266fc766a5d";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-b266fc766a5d";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-b266fc766a5d";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-b266fc766a5d";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-b266fc766a5d";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -80,9 +80,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-eb78be0b425d";
+} from "./music-state.js?v=assets-b266fc766a5d";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-eb78be0b425d";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-b266fc766a5d";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;

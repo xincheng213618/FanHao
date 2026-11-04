@@ -181,6 +181,7 @@ const RULES = [
   [/^tests\/verify_android_bottom_layout(?:_metrics)?\.mjs$/, ['verify:android-bottom-layout', 'verify:imports']],
   [/^tests\/verify_android_gallery_mobile_layout\.mjs$/, ['verify:android-gallery-layout', 'verify:imports']],
   [/^tests\/verify_android_manga_mobile_layout\.mjs$/, ['verify:android-manga-layout', 'verify:imports']],
+  [/^tests\/verify_android_manga_detail_rendering\.mjs$/, ['verify:android-manga-detail-rendering', 'verify:imports']],
   [/^tests\/verify_android_novel_mobile_layout\.mjs$/, ['verify:android-novel-layout', 'verify:imports']],
   [/^tests\/(?:serve_android_gallery_navigation_fixture\.mjs|fixtures\/android-gallery-navigation-browser\.(?:html|mjs))$/, ['verify:android-gallery-layout', 'verify:android-bottom-layout', 'verify:android-manga-layout', 'verify:android-novel-layout', 'verify:imports']],
   [/^tests\/verify_android_fanhao_player_(?:requests|lifecycle)\.mjs$/, ['verify:android-fanhao-player', 'verify:imports']],

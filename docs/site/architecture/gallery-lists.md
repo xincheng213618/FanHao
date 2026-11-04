@@ -7,7 +7,9 @@ sources:
   - public/modules/photos/manga-page.js
   - tests/verify_manga_cold_entry.mjs
   - android-client/www/app.js
+  - android-client/www/js/auto-load.js
   - tests/verify_android_channel_paging_mount.mjs
+  - tests/verify_android_manga_detail_rendering.mjs
   - src/modules/content-index/server/image-library-service.js
   - src/modules/content-index/server/image-library-index-service.js
   - src/modules/content-index/server/image-query-cache.js
@@ -129,6 +131,14 @@ Android 普通列表追加保留旧条目引用，相同引用的已挂载项跳
 实际 Android 宿主仅为当前来源、账号、路由和已挂载列表发起的续页保留内容，再交给上述列表复用逻辑。重新进入页面、切换筛选或账号仍按原流程重建；旧控件与迟到响应不得取得新页面归属。`verify:android-channel-paging-mount` 从完整应用入口核对卡片创建预算、原请求序列、封面、滚动、焦点和失败恢复，不以自定义宿主代替实际接线。
 
 Android 相册瀑布流沿用条目索引与列数分配，追加到既有列。列数变化、重排、删除、缺少稳定 ID 或客户端分组时仍使用完整重建。漫画分组与相册集合展开保留原有完整渲染规则，不把展开后的集合数用作服务端 offset。
+
+## Android 漫画详情续页
+
+漫画详情的“更多章节”仍按原接口重新读取完整书籍资料，沿用网络环境决定的首次与追加范围。同一详情挂载内，完整书籍、有效更新任务和当前漫画阅读进度保持时，仅追加新显示的章节卡，保留简介展开、封面与已有节点。资料或进度变化时完整重绘，异步等待期间用户移动后的当前滚动位置用于恢复。
+
+续页归属于原路由、服务地址、账号和详情挂载。离页、换书、重新进入或切换账号后，旧控件与迟到响应不能修改新详情；原章节和下载链接被重新挂回也不能恢复操作归属。纯读取失败保留当前目录并暂停自动加载，手动重试使用原目标范围；已接受缓存后网络失败继续沿用原离线提示。
+
+`verify:android-manga-detail-rendering` 使用完整 Android 入口、冻结的旧宿主与图库实现，以及合成章节响应，对照完整目录数据、原请求序列、失败恢复、滚动、焦点和节点创建量。该专项随 `verify:android-manga-layout` 运行，不连接真实书库或启动采集。
 
 ## Android 本地缓存
 

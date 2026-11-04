@@ -19,7 +19,7 @@ const legacyAggregate = process.argv.includes("--legacy-aggregate-cache"), legac
 const legacyPreparation = process.argv.includes("--legacy-account-preparation");
 const legacyFingerprints = process.argv.includes("--legacy-item-fingerprints");
 let source = fs.readFileSync(path.join(androidRoot, "platform/content-index/channel-views.js"), "utf8");
-const returnMarker = "    deactivate: () => { cancelChannelRequest();";
+const returnMarker = "    deactivate: () => {";
 assert.equal(source.split(returnMarker).length, 2);
 source = source.replace(returnMarker, "    diagnostics: () => ({ state: channelPageState, mounted: mountedChannelList }),\n" + returnMarker);
 if (legacyRender) {

@@ -100,6 +100,7 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
       dispose();
       return;
     }
+    if (options.canAutoLoad?.() === false) return;
     if (requireScrollIntent && Date.now() > userScrollIntentUntil) return;
     if (requireScrollIntent && touchScrolling) return;
     const rect = node.getBoundingClientRect();

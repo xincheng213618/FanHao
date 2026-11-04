@@ -1,8 +1,8 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=assets-eb78be0b425d";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-b266fc766a5d";
 import { formatNumber } from "../../../../js/format.js";
-import { createWorkListState } from "../../../../js/work-filtering.js?v=assets-eb78be0b425d";
-import { workCollectionPath } from "./collection-request.js?v=assets-eb78be0b425d";
-import { createFavoriteFolderFeature } from "./favorite-folders.js?v=assets-eb78be0b425d";
+import { createWorkListState } from "../../../../js/work-filtering.js?v=assets-b266fc766a5d";
+import { workCollectionPath } from "./collection-request.js?v=assets-b266fc766a5d";
+import { createFavoriteFolderFeature } from "./favorite-folders.js?v=assets-b266fc766a5d";
 
 export function createFavoriteWorkViews(context) {
   const listState = createWorkListState({

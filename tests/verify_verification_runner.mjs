@@ -837,6 +837,14 @@ assert.deepEqual(selectScripts(['public/modules/novels/list-return.js']).scripts
 assert.deepEqual(selectScripts(['tests/verify_android_channel_rendering.mjs']).scripts, ['verify:android-channel-rendering', 'verify:photo-search', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_android_channel_paging_mount.mjs']).scripts, ['verify:android-channel-paging-mount', 'verify:imports']);
 assert.equal(webPackageScripts['verify:android-channel-paging-mount'], 'node tests/verify_android_channel_paging_mount.mjs');
+assert.deepEqual(selectScripts(['tests/verify_android_manga_detail_rendering.mjs']).scripts, ['verify:android-manga-detail-rendering', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-manga-detail-rendering'], 'node tests/verify_android_manga_detail_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'], ['verify:android-photos'], ['verify:android-manga-layout'],
+  ...['app.js', 'js/auto-load.js', 'platform/content-index/channel-views.js', 'modules/photos/android-module.js']
+    .map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_manga_detail_rendering.mjs').length, 1,
+    'actual Android manga detail reuse runs once through its existing owner and client gates');
+}
 for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'], ['verify:android-channel-rendering'],
   ...['app.js', 'platform/content-index/channel-views.js', 'modules/media/android-module.js', 'modules/photos/android-module.js']
     .map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {

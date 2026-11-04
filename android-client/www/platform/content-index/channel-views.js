@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-eb78be0b425d";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-eb78be0b425d";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-eb78be0b425d";
+import { fetchJson } from "../../js/api.js?v=assets-b266fc766a5d";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-b266fc766a5d";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-b266fc766a5d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -482,6 +482,7 @@ export function createChannelViews(context) {
   const mangaUpdateJobs = new Map();
   const mangaUpdatePolls = new Map();
   let mangaReaderProgressTracker = null;
+  let mountedMangaDetail = null;
 
   function ownsChannelMount(mounted) {
     return Boolean(mounted && mounted === mountedChannelList && !mounted.life.signal.aborted
@@ -589,6 +590,7 @@ export function createChannelViews(context) {
   }
 
   async function renderChannel(params = {}, isActive = () => true) {
+    releaseMangaDetail();
     const generation = ++channelRequestGeneration;
     channelRequestController?.abort();
     const controller = new AbortController();
@@ -2447,6 +2449,8 @@ export function createChannelViews(context) {
     button.textContent = text;
     return enhanceAutoLoadMore(button, handler, {
       idleText: text,
+      getIdleText: options.getIdleText,
+      canAutoLoad: options.canAutoLoad,
       loadingText: "正在接着加载",
       retryText: "加载停住了，点一下重试",
       auto: options.auto,
@@ -2465,6 +2469,7 @@ export function createChannelViews(context) {
   }
 
   async function renderPhotoDetail(id, isActive = () => true) {
+    releaseMangaDetail();
     cancelChannelRequest();
     resetMangaReaderProgressTracker();
     const albumId = String(id || "").trim();
@@ -2876,6 +2881,7 @@ export function createChannelViews(context) {
   }
 
   async function renderMediaDetail(id, initialMode = "", isActive = () => true) {
+    releaseMangaDetail();
     cancelChannelRequest();
     resetMangaReaderProgressTracker();
     const mediaId = String(id || "").trim();
@@ -3466,7 +3472,82 @@ export function createChannelViews(context) {
     return `/api/gallery-media/${encodeURIComponent(String(id || ""))}`;
   }
 
-  async function renderMangaDetail(id, isActive = () => true) {
+  function ownsMangaDetail(owner, presentation = false) {
+    return Boolean(owner && owner === mountedMangaDetail && !owner.life.signal.aborted && owner.guard()
+      && owner.activeUrl === getActiveUrl() && (!owner.accountReady || isAccountOwnerCurrent(owner.account))
+      && (!presentation || owner.list?.isConnected && owner.list.parentElement === els.viewContent));
+  }
+
+  function retireMangaDetailPresentation(owner) {
+    owner.moreLife?.abort();
+    owner.list = owner.more = owner.summary = owner.notice = null;
+    owner.comic = null;
+    owner.signature = "";
+    owner.nodes = new WeakSet();
+  }
+
+  function releaseMangaDetail(owner = mountedMangaDetail) {
+    if (!owner || owner !== mountedMangaDetail) return;
+    mountedMangaDetail = null;
+    owner.life.abort();
+    owner.guard.signal?.removeEventListener("abort", owner.onAbort);
+    retireMangaDetailPresentation(owner);
+  }
+
+  function restoreMangaDetailFocus(owner) {
+    if (!ownsMangaDetail(owner) || !owner.restoreFocus) return;
+    if (document.activeElement === document.body) {
+      const target = owner.more || [...(owner.list?.querySelectorAll("button:not(:disabled)") || [])].at(-1)
+        || owner.summary?.querySelector("button:not(:disabled), a");
+      if (!target?.isConnected || target.disabled) return;
+      target.focus({ preventScroll: true });
+    }
+    owner.restoreFocus = false;
+  }
+
+  function syncMangaDetailMore(owner) {
+    if (!ownsMangaDetail(owner) || !owner.more?.isConnected) return;
+    owner.more.disabled = Boolean(owner.pending);
+    owner.more.textContent = owner.pending ? "正在接着加载" : owner.retry ? "加载停住了，点一下重试" : owner.moreText;
+  }
+
+  async function loadMoreMangaDetail(owner) {
+    if (!ownsMangaDetail(owner, true) || !owner.more?.isConnected) return;
+    if (owner.pending) return owner.pending;
+    owner.restoreFocus = document.activeElement === owner.more
+      || document.activeElement === document.body && owner.focusedMore === owner.more;
+    if (!owner.retry) increaseChannelLimit(40);
+    owner.retry = false;
+    owner.notice?.remove();
+    owner.notice = null;
+    const pending = renderMangaDetail(owner.id, owner.guard, owner);
+    owner.pending = pending;
+    syncMangaDetailMore(owner);
+    try { await pending; }
+    finally {
+      owner.pending = false;
+      syncMangaDetailMore(owner);
+      restoreMangaDetailFocus(owner);
+    }
+  }
+
+  async function renderMangaDetail(id, isActive = () => true, continuation = null) {
+    let owner = continuation;
+    if (!owner) {
+      releaseMangaDetail();
+      owner = { id: String(id || "").trim(), activeUrl: getActiveUrl(), guard: isActive,
+        account: captureAccountOwner(getActiveUrl()), accountReady: false, life: new AbortController(),
+        list: null, more: null, summary: null, comic: null, signature: "", pending: false, retry: false, restoreFocus: false };
+      mountedMangaDetail = owner;
+      owner.onAbort = () => releaseMangaDetail(owner);
+      isActive.signal?.addEventListener("abort", owner.onAbort, { once: true });
+      document.addEventListener("focusin", (event) => {
+        owner.focusedMore = event.target === owner.more ? event.target : null;
+        if (!owner.focusedMore) owner.restoreFocus = false;
+      }, { signal: owner.life.signal });
+    } else if (!ownsMangaDetail(owner, true)) return;
+    isActive = () => ownsMangaDetail(owner);
+    isActive.signal = owner.guard.signal;
     cancelChannelRequest();
     resetMangaReaderProgressTracker();
     const mangaId = String(id || "").trim();
@@ -3476,10 +3557,15 @@ export function createChannelViews(context) {
     let renderedSignature = "";
 
     setActiveBottom("photo");
-    els.viewKicker.textContent = "韩漫";
-    els.viewTitle.textContent = "漫画详情";
-    els.viewMeta.textContent = "正在读取";
-    els.viewContent.replaceChildren(createMangaLoading("正在读取漫画"));
+    if (!continuation) {
+      els.viewKicker.textContent = "韩漫";
+      els.viewTitle.textContent = "漫画详情";
+      els.viewMeta.textContent = "正在读取";
+      els.viewContent.replaceChildren(createMangaLoading("正在读取漫画"));
+    }
+    const acceptAccount = (data) => {
+      if (!owner.accountReady) { owner.account = accountPayloadOwner(data) || captureAccountOwner(activeUrl); owner.accountReady = true; }
+    };
 
     if (!mangaId) {
       renderMessage("漫画 ID 无效。", "error");
@@ -3495,18 +3581,20 @@ export function createChannelViews(context) {
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isActive()) return;
     if (cached?.payload?.comic) {
+      acceptAccount(cached.payload);
       renderedCache = true;
       renderedSignature = mangaRenderSignature(cached.payload.comic, cached.payload.update);
-      renderMangaComic(cached.payload.comic, cached, cached.payload.update);
+      renderMangaComic(cached.payload.comic, cached, cached.payload.update, owner);
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 10000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
+      acceptAccount(data);
       const nextSignature = mangaRenderSignature(data.comic, data.update);
       if (!renderedCache || nextSignature !== renderedSignature) {
-        renderMangaComic(data.comic, null, data.update);
+        renderMangaComic(data.comic, null, data.update, owner);
       } else {
         const chapters = Array.isArray(data.comic?.chapters) ? data.comic.chapters : [];
         els.viewMeta.textContent = `${formatNumber(chapters.length || data.comic?.chapterCount || 0)} 话 · ${formatNumber(data.comic?.imageCount || 0)} 张`;
@@ -3517,8 +3605,19 @@ export function createChannelViews(context) {
       if (!isActive()) return;
       if (renderedCache) {
         prependMangaCacheNotice("电脑端暂时未连接，当前书籍资料和目录来自手机缓存。");
+      } else if (continuation) {
+        owner.retry = true;
+        prependMangaCacheNotice(mangaDetailFailureMessage(error));
       } else {
         renderMangaDetailFailure(error);
+      }
+      if (continuation) {
+        const notice = els.viewContent.querySelector(".manga-cache-notice");
+        owner.notice = notice;
+        notice?.addEventListener("click", (event) => {
+          if (ownsMangaDetail(owner) && owner.notice === notice && notice.parentElement === els.viewContent) return;
+          event.preventDefault(); event.stopImmediatePropagation();
+        }, { capture: true });
       }
     } finally {
       window.clearTimeout(slowTimer);
@@ -3555,7 +3654,20 @@ export function createChannelViews(context) {
     }
   }
 
-  function renderMangaComic(comic = {}, cacheEntry = null, update = null) {
+  function appendMountedMangaDetail(owner, comic, signature, visible) {
+    if (!ownsMangaDetail(owner, true) || !signature || owner.signature !== signature
+      || visible.length < owner.list.children.length || visible.length < (comic.chapters || []).length && !owner.more?.isConnected) return false;
+    const start = owner.list.children.length;
+    for (let index = start; index < visible.length; index++) owner.list.append(createMangaChapterButton(comic, visible[index], owner));
+    owner.comic = comic;
+    owner.moreText = `向下滑动继续显示章节 ${formatNumber(visible.length)} / ${formatNumber(comic.chapters.length)}`;
+    if (visible.length >= comic.chapters.length) { owner.moreLife?.abort(); owner.more?.remove(); owner.more = null; }
+    syncMangaDetailMore(owner);
+    return true;
+  }
+
+  function renderMangaComic(comic = {}, cacheEntry = null, update = null, owner = mountedMangaDetail) {
+    if (owner && !ownsMangaDetail(owner)) return;
     ensureMangaTaskScope();
     const chapters = Array.isArray(comic.chapters) ? comic.chapters : [];
     const visible = chapters.slice(0, getChannelLimit());
@@ -3563,13 +3675,25 @@ export function createChannelViews(context) {
     const currentUpdate = update
       ? rememberMangaUpdateJob({ ...update, comicId: comic.id })
       : mangaUpdateJobs.get(comic.id) || { status: "idle" };
+    const signature = mangaRenderSignature(comic, currentUpdate, readMangaReadingProgress(comic.id));
 
     els.viewKicker.textContent = "韩漫";
     els.viewTitle.textContent = "书籍详情";
     els.viewMeta.textContent = `${formatNumber(chapters.length || comic.chapterCount || 0)} 话 · ${formatNumber(comic.imageCount || 0)} 张${suffix}`;
-    els.viewContent.innerHTML = "";
     recordMangaRecent(comic);
-    els.viewContent.append(createMangaSummary(comic, currentUpdate));
+    if (owner && appendMountedMangaDetail(owner, comic, signature, visible)) return;
+    const top = owner?.list?.isConnected ? window.scrollY : null;
+    if (owner) retireMangaDetailPresentation(owner);
+    els.viewContent.innerHTML = "";
+    const summary = createMangaSummary(comic, currentUpdate);
+    if (owner) {
+      owner.summary = summary;
+      summary.addEventListener("click", (event) => {
+        if (ownsMangaDetail(owner) && owner.summary === summary && summary.isConnected) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+      }, { capture: true });
+    }
+    els.viewContent.append(summary);
 
     if (!visible.length) {
       renderMessage("这部漫画暂时没有章节。", "quiet", false);
@@ -3578,6 +3702,7 @@ export function createChannelViews(context) {
 
     const list = document.createElement("div");
     list.className = "manga-chapter-list";
+    if (owner) { owner.list = list; owner.comic = comic; owner.signature = signature; owner.moreLife = new AbortController(); }
     const section = document.createElement("div");
     section.className = "manga-section-title";
     const sectionTitle = document.createElement("strong");
@@ -3585,15 +3710,22 @@ export function createChannelViews(context) {
     const sectionMeta = document.createElement("span");
     sectionMeta.textContent = `${formatNumber(chapters.length || comic.chapterCount || 0)} 话`;
     section.append(sectionTitle, sectionMeta);
-    visible.forEach((chapter) => list.append(createMangaChapterButton(comic, chapter)));
+    visible.forEach((chapter) => list.append(createMangaChapterButton(comic, chapter, owner)));
     els.viewContent.append(section, list);
 
     if (visible.length < chapters.length) {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续显示章节 ${formatNumber(visible.length)} / ${formatNumber(chapters.length)}`, () => {
+      const text = `向下滑动继续显示章节 ${formatNumber(visible.length)} / ${formatNumber(chapters.length)}`;
+      const more = createLoadMoreButton(text, () => {
+        if (owner) return loadMoreMangaDetail(owner);
         increaseChannelLimit(40);
         return renderCurrentViewPreservingScroll();
-      }));
+      }, owner ? { signal: owner.moreLife.signal, canAutoLoad: () => !owner.retry,
+        getIdleText: () => owner.retry ? "加载停住了，点一下重试" : owner.moreText } : {});
+      if (owner) { owner.more = more; owner.moreText = text; }
+      els.viewContent.append(more);
     }
+    if (top !== null && ownsMangaDetail(owner, true)) window.scrollTo({ top, behavior: "auto" });
+    syncMangaDetailMore(owner);
   }
 
   function createMangaSummary(comic = {}, update = {}) {
@@ -3892,9 +4024,15 @@ export function createChannelViews(context) {
     return status || "";
   }
 
-  function createMangaChapterButton(comic, chapter = {}) {
+  function createMangaChapterButton(comic, chapter = {}, owner = null) {
     const card = document.createElement("article");
     card.className = "manga-chapter-card";
+    if (owner) owner.nodes.add(card);
+    const current = () => !owner || ownsMangaDetail(owner, true) && owner.nodes.has(card) && card.parentElement === owner.list;
+    card.addEventListener("click", (event) => {
+      if (current()) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
 
     const button = document.createElement("button");
     button.type = "button";
@@ -3936,6 +4074,7 @@ export function createChannelViews(context) {
   }
 
   async function renderMangaChapter(id, chapterIndex, isActive = () => true) {
+    releaseMangaDetail();
     cancelChannelRequest();
     const previousPosition = resetMangaReaderProgressTracker();
     const mangaId = String(id || "").trim();
@@ -4556,7 +4695,7 @@ export function createChannelViews(context) {
   }
 
   return {
-    deactivate: () => { cancelChannelRequest(); cancelPhotoViewerRequest(); resetPreviewImageObserver(); resetMangaReaderProgressTracker(); },
+    deactivate: () => { releaseMangaDetail(); cancelChannelRequest(); cancelPhotoViewerRequest(); resetPreviewImageObserver(); resetMangaReaderProgressTracker(); },
     renderChannel,
     renderPhotoDetail,
     renderMangaDetail,

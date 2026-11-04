@@ -67,6 +67,7 @@ sources:
   - tests/verify_android_novel_categories.mjs
   - tests/verify_android_novel_mobile_layout.mjs
   - tests/verify_android_manga_mobile_layout.mjs
+  - tests/verify_android_manga_detail_rendering.mjs
   - tests/verify_android_gallery_mobile_layout.mjs
   - tests/verify_android_gallery_navigation.mjs
   - tests/fixtures/android-gallery-navigation-harness.mjs
@@ -469,7 +470,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:android-music-back` | 音乐弹层、全屏、搜索到根目录的分层返回，保留播放与目录上下文；迷你播放器打开与队列入口、焦点往返、手势取消及旧控件失效；播放设置真实入口、关闭与焦点恢复，评分已发写入和关闭交错；歌曲及播放设置控件关闭、重开、切歌或停用后的归属。 | 完整音乐页面、实际模块/注册表/返回分发及受控 Audio、API 和时钟；不代表真机系统返回与真实音频验收。 |
 | `npm run verify:android-bottom-layout` | 底部导航实际高度同步、隐藏启动和恢复、旧回调释放及无观察器回退；导航、迷你播放器、内容末项和分类菜单的间距、命中与原生Tab焦点避让；三个分类菜单的键盘打开、方向键、Escape、页面NativeBack入口、焦点往返及长按点击抑制。 | 真实共享高度模块与受控观察器/时钟；完整 Android 入口、真实导航和 CSS、私有 Chromium 与合成只读目录。字体放大是渲染压力，安全区由浏览器环境覆盖，返回调用实际页面dispatcher；不代表 Android 真机验收。已纳入 Android 总入口，图库导航VM另查真实事件接线及返回优先级。 |
 | `npm run verify:android-gallery-layout` | 影视详情长片名、剧名与文件信息的完整阅读和换行，图库合集返回入口的点按区域及真实返回行为。 | 完整 Android 入口、真实模块与样式、私有 Chromium 和隔离的合成只读目录；覆盖窄屏与短横屏。已纳入 Android 总入口及媒体、图片域；不连接真实媒体、数据库或原生播放，不代表 Android 真机验收。 |
-| `npm run verify:android-manga-layout` | 漫画详情简介、长标题、章节切换与恢复；添加区与下载记录的焦点、触点和文字换行；提交中的只读链接、失败提示关联、编辑清错及重新采集。 | 完整 Android 入口、真实模块与样式、私有 Chromium，分两次独立进程运行常规布局和恢复流程，保持每个夹具12运行上限。恢复场景只对白名单合成链接返回内存503或完成回执，不启动采集；其他场景继续拒绝写入。不连接真实业务服务、媒体或数据库，不代表 Android 真机验收。 |
+| `npm run verify:android-manga-layout` | 漫画详情续页节点复用、原 GET 和完整目录对照；简介、长标题、章节切换与恢复；添加区与下载记录的焦点、触点和文字换行；提交中的只读链接、失败提示关联、编辑清错及重新采集。 | 完整 Android 入口、真实模块与样式、私有 Chromium；续页专项对照冻结旧实现，常规布局和恢复流程分别使用独立进程，保持每个夹具12运行上限。恢复场景只对白名单合成链接返回内存503或完成回执，不启动采集；其他场景继续拒绝写入。不连接真实业务服务、媒体或数据库，不代表 Android 真机验收。 |
 | `npm run verify:android-novel-layout`、`npm run verify:android-novel-catalog-filter`、`npm run verify:android-novel-list-rendering` | 小说长查询、分类横滚、触点、详情全文和目录错误提示；电脑书库与搜索续页核对卡片复用、最新动作绑定、同目标重试及缓存/来源/账号归属；本地目录同词同序暖分页复用筛选，更新回调包括同数组更新均失效；保持搜索、反序、页码、高亮、远程分页及控件归属。 | 布局使用完整 Android 入口、样式、私有 Chromium和合成只读目录；8本书库及独立4本详情，窄屏、短横屏、有无ResizeObserver，每夹具至多12次运行。筛选专项使用完整当前工厂、固定旧实现与受控DOM/存储，万章目录暖翻段预算及恢复重复筛选的负控；仍逐段创建分段选项和80行按钮，不把VM时间视为设备提速。不连接真实服务、书库或数据库，不代表 Android 真机验收。 |
 | `node tests/verify_browser_behavior.mjs --android-manga` | 定向执行既有漫画新增流程、任务提示和阅读进度配置；保留延迟图片、缓存更新、用户移动、恢复阅读及页面生命周期回归。 | 默认随机端口的自有 fixture 服务、临时数据和私有 Chromium；可选服务地址环境变量仅供受控夹具，不得指向真实服务。完整浏览器入口仍包含同一组场景。 |
 | `npm run verify:android-media-viewer` | 全屏图片加载和失败重试、切图及关闭重开后的迟到回调、同图补齐保留节点；触摸翻页、滑动和按压定位，窄屏与横屏重试按钮。 | 当前查看器与完整 Android CSS、私有 Chromium、合成 SVG 和门控响应；三类回退开关分别验证加载、回调归属和按压定位，不能代替 Android 真机图片解码与手势验收。 |

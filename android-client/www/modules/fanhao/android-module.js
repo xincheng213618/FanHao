@@ -1,6 +1,6 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-eb78be0b425d";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-eb78be0b425d";
-import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-eb78be0b425d";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-b266fc766a5d";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-b266fc766a5d";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-b266fc766a5d";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({

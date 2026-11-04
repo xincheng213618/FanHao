@@ -1,8 +1,8 @@
 import {
   appendCollectionCursorBoundary,
   removeCollectionCursorBoundaryVideo
-} from "./cursor-boundaries.js?v=assets-eb78be0b425d";
-import { retryShortVideoCollectionRequest } from "./request.js?v=assets-eb78be0b425d";
+} from "./cursor-boundaries.js?v=assets-b266fc766a5d";
+import { retryShortVideoCollectionRequest } from "./request.js?v=assets-b266fc766a5d";
 
 const COLLECTION_PAGE_LIMIT = 48;
 
