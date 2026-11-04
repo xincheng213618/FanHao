@@ -347,6 +347,7 @@ sources:
   - tests/verify_novel_collection_worker.mjs
   - tests/verify_novel_reimport_async.mjs
   - tests/verify_douyin_manager_latest_requests.mjs
+  - tests/verify_download_manager_player_order.mjs
   - src/modules/short-videos/download-manager/tests/test_manager_link_cursor.py
   - src/modules/short-videos/download-manager/tests/test_manager_profile_snapshot.py
   - .github/workflows/application-checks.yml
@@ -494,7 +495,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:novel-credentials-async` | 登录凭据检测的主线程响应、取消、超时、输出限制、来源变化与停机。 | 临时假凭据、受控子进程及本机 Node 子进程/动态 HTTP；不启动 Python 检测器或访问外站。 |
 | `npm run verify:novel-collection-worker` | 小说采集后台的锁等待、RPC 容量、子进程所有权、入库标识持久化、不确定任务的重试/历史清理保护与停机。 | 临时 SQLite、真实/受控 Worker、本机受控子进程和动态 HTTP；不运行真实采集或访问外站。 |
 | `npm run verify:novel-reimport-async` | 本地 TXT 只读解析与统一写入、解码和元数据兼容、章节与进度、回执恢复、来源冲突、取消和停机。 | 合成 TXT、实际 Python 和临时 SQLite、真实/受控 Worker 与子进程；不会导入实际资料或操作正式服务。 |
-| `npm run verify:douyin-manager` | 下载队列停止、数据库连接释放、作者汇总/分页/刷新候选的一致快照、游标分页、已加载行更新、请求竞态与深页索引。 | 临时 SQLite、独立子进程、动态 HTTP fixture 与无头浏览器；不启动或停止正式 8765 服务。 |
+| `npm run verify:douyin-manager` | 下载队列停止、数据库连接释放、作者汇总/分页/刷新候选的一致快照、游标分页、已加载行更新、请求竞态与深页索引；共享播放器清单及邻居排序的精确部分索引、完整响应和初始化幂等。 | 临时 SQLite、独立子进程、动态 HTTP fixture 与无头浏览器；播放查询专项使用完整 Python 工厂与空占位媒体，记录排序计划、索引空间和写入代价。不启动或停止正式 8765 服务。 |
 
 下载链接游标以首屏 ID 水位和已下载时间排序边界限制后续页，每次请求使用短 WAL 快照；它不会冻结整个翻页过程。新增链接或移到已消费边界之前的记录在主动刷新后出现，后台按已加载 ID 更新状态。fixture 分别验证这一边界、旧 offset 接口兼容，以及已下载深页使用表达式索引而不做临时排序。
 

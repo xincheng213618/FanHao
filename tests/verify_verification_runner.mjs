@@ -545,6 +545,13 @@ assert(selectScripts(['src/modules/short-videos/download-manager/manager_core/li
 assert(selectScripts(['src/modules/short-videos/server/store.js']).scripts.includes('verify:short-video-sync'));
 assert(selectScripts(['tests/verify_short_video_incremental_sync.mjs']).scripts.includes('verify:short-video-sync'));
 assert.deepEqual(downloader.scripts, ['verify:douyin-manager', 'verify:imports'], "independent downloader changes must not run unrelated short-video/Android suites");
+assert.deepEqual(selectScripts(['tests/verify_download_manager_player_order.mjs']).scripts, ['verify:download-manager-player-order', 'verify:imports']);
+assert.equal(webPackageScripts['verify:download-manager-player-order'], 'node tests/verify_download_manager_player_order.mjs');
+for (const entries of [FULL_SCRIPTS, ['verify:douyin-manager'],
+  ...['database', 'read_models'].map(name => selectScripts([`src/modules/short-videos/download-manager/manager_core/${name}.py`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_download_manager_player_order.mjs').length, 1,
+    'download-manager player queries run once through their migration and independent manager gates');
+}
 assert.deepEqual(selectScripts(['tests/verify_douyin_manager_latest_requests.mjs']).scripts, downloader.scripts);
 assert.deepEqual(selectScripts(['src/modules/short-videos/download-manager/tests/test_manager_profile_snapshot.py']).scripts, downloader.scripts);
 assert(selectScripts(['src/modules/short-videos/server/runtime.js']).scripts.includes('verify:short-video-runtime'), "main-service short videos retain their wider lifecycle gates");

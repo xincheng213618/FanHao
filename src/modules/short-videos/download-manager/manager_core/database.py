@@ -655,6 +655,17 @@ def migrate_link_preview_columns(conn: sqlite3.Connection) -> None:
         "COALESCE(downloaded_at, last_started_at, last_seen_at) DESC, id DESC) "
         "WHERE status='downloaded'"
     )
+    # The shared player excludes articles and gives missing times an empty-string
+    # fallback. Keep that exact expression so its count and ordered pages can use
+    # the narrow index without reading every work's metadata row.
+    player_columns = {str(row["name"]).lower() for row in conn.execute("PRAGMA main.table_info(links)")}
+    if "kind" in player_columns:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS main.idx_links_shared_player_order ON links(status, "
+            "COALESCE(downloaded_at, last_started_at, last_seen_at, '') DESC, id DESC) "
+            "WHERE status='downloaded' AND COALESCE(media_type, '') <> 'article' "
+            "AND COALESCE(kind, '') <> 'article'"
+        )
 
 
 def migrate_link_profile_presence_columns(conn: sqlite3.Connection) -> None:

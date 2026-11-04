@@ -157,6 +157,7 @@ const RULES = [
   [/^android-client\/android\/app\/src\/main\/java\/.*(Photo|Gallery|Vision|Camera)/i, [...ANDROID_DOMAIN_BASE, 'verify:android-photos']],
   [/^android-client\//, ANDROID_SCRIPTS],
   [/^src\/modules\/short-videos\/download-manager\/(?:manager_core\/(?:database|library_sync)\.py|tests\/test_manager_library_sync\.py)$/, ['verify:douyin-manager', 'verify:short-video-sync', 'verify:imports']],
+  [/^tests\/verify_download_manager_player_order\.mjs$/, ['verify:download-manager-player-order', 'verify:imports']],
   [/^(src\/modules\/short-videos\/download-manager\/|tests\/verify_douyin_(?:download_manager|manager)_.*\.(?:mjs|ps1)$)/, ['verify:douyin-manager', 'verify:imports']],
   [/^tests\/verify_fanhao_local_marker_updates\.mjs$/, ['verify:fanhao-requests', 'verify:fanhao-favorite-browser', 'verify:imports']],
   [/^tests\/verify_(?:fanhao_requests|fanhao_collection_paging|fanhao_person_delete_refresh|work_sorting|code_prefix_catalog)\.mjs$/, ['verify:fanhao-requests', 'verify:work-sorting', 'verify:code-prefixes', 'verify:imports']],
