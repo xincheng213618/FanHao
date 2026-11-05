@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-b266fc766a5d";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-b266fc766a5d";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-b266fc766a5d";
+import { fetchJson } from "../../js/api.js?v=assets-8af3642624a3";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8af3642624a3";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8af3642624a3";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";

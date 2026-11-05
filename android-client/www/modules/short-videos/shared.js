@@ -9,7 +9,7 @@ import {
   normalizeShortVideoSort,
   normalizeShortVideoSortForSource,
   normalizeShortVideoSource
-} from "../../js/short-video-route-contract.js?v=assets-b266fc766a5d";
+} from "../../js/short-video-route-contract.js?v=assets-8af3642624a3";
 
 export const DEFAULT_LIMIT = 12;
 export const AUTHOR_INITIAL_COUNT = 24;

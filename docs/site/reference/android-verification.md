@@ -2,7 +2,7 @@
 title: Android 验证环境与边界
 description: 准备 Android 客户端检查依赖，区分受控浏览器、宿主 JVM、APK 构建和真机验收。
 status: maintained
-verified_at: 2026-10-28
+verified_at: 2026-11-05
 sources:
   - package.json
   - android-client/package.json
@@ -32,6 +32,8 @@ sources:
   - tests/verify_android_novel_categories.mjs
   - tests/verify_android_music_search_filters.mjs
   - tests/verify_android_music_list_rendering.mjs
+  - tests/verify_android_music_fullscreen_rendering.mjs
+  - android-client/www/modules/music/music-views.js
   - tests/verify_android_music_back.mjs
   - android-client/www/modules/music/music-playlist-view.js
   - android-client/www/modules/music/music-library-sort.js
@@ -93,8 +95,12 @@ Android 客户端检查同时包含源码核对、受控页面和宿主 JVM fixt
 | `npm run verify:android-photo-categories` | 执行当前照片模块和共享操作弹层，检查固定/动态分类、当前选择、快捷标签与菜单路由一致，以及关闭与焦点恢复；DOM 与路由受控，菜单高度、长名称与窄屏布局另用浏览器检查。 |
 | `npm run verify:android-novel-categories` | 执行当前小说模块，检查分类重绘后显露当前选项且不触发页面纵向滚动；受控几何不替代实际长标签、窄屏和横向滑动验收。 |
 | `npm run verify:android-music-search-filters` | 执行当前音乐工厂，检查综合页仍生效的歌曲筛选可见、可清除，保留关键词与搜索范围；DOM 与接口受控，触控区、菜单换行及窄屏布局另用浏览器检查。 |
-| `npm run verify:android-music-rendering` | 私有浏览器执行实际音乐模块与完整 CSS；检查列表、搜索、播放器归属、详情长文与44px操作，包含管理弹层、排序固定标题、完整筛选标签和原生排序入口。路由接回场景验证菜单真实请求，音频为受控替身，不代表真机或原生选择器弹出层验收。 |
+| `npm run verify:android-music-rendering` | 私有浏览器执行实际音乐模块与完整 CSS；检查列表、搜索、播放器归属、详情长文与44px操作，包含管理弹层、排序固定标题、完整筛选标签和原生排序入口。全屏专项对照冻结完整实现、后台行与播放器状态，并检查切换时后台歌曲零重建预算。路由接回场景验证菜单真实请求，音频为受控替身，不代表真机或原生选择器弹出层验收。 |
 | `npm run verify:android-music-back` | 执行实际音乐模块及 JavaScript 返回分发；含歌单管理弹层、排序/筛选关闭后焦点恢复、离页后旧控件失效，以及编辑/删除仍进入原提示流程。延迟焦点检查保留来源与账户边界；DOM、音频与确认结果受控，不执行实际写入，不代表真机返回键验收。 |
+
+普通全屏打开、迷你播放器队列入口和真正关闭全屏时，同一当前路由、来源、账号和挂载内的后台音乐页面保留节点，只增删全屏播放器。换曲、资料、筛选、评分、歌单或睡眠计时触发的普通刷新继续更新后台；过期页面和已退役的全屏控件不能因重新挂回而取得操作归属。
+
+`verify:android-music-fullscreen-rendering` 使用实际 Android 入口与冻结的完整旧实现，对照后台行、全屏文本与控件、音频对象和位置、焦点、滚动及请求序列；它随返回和渲染父门禁执行。歌曲行创建量是确定性预算，耗时仅描述私有 Chromium 与受控音频条件。
 
 `node tests/serve_android_gallery_navigation_fixture.mjs` 提供真实 Android 页面和完整 CSS 的只读合成预览，启动器包含以下场景：
 

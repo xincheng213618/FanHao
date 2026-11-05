@@ -211,6 +211,7 @@ const RULES = [
   [/^tests\/verify_music_(?:summary_reuse|active_catalogue)\.mjs$/, ['verify:music-summary-cache', 'verify:music-scale', 'verify:imports']],
   [/^tests\/verify_studio_cache_dependencies\.mjs$/, ['verify:studio-cache', 'verify:fanhao', 'verify:imports']],
   [/^tests\/verify_android_music_list_rendering\.mjs$/, ['verify:android-music-rendering', 'verify:android-music', 'verify:imports']],
+  [/^tests\/verify_android_music_fullscreen_rendering\.mjs$/, ['verify:android-music-fullscreen-rendering', 'verify:imports']],
   [/^tests\/verify_android_music_queue_rendering\.mjs$/, ['verify:android-music-queue', 'verify:android-music-playlists', 'verify:imports']],
   [/^tests\/verify_android_music_(?:catalogue|playback|transition|history|playlist)_requests\.mjs$/, ['verify:android-music', 'verify:android-music-rendering', 'verify:imports']],
   [/^tests\/verify_android_media_viewer\.mjs$/, ['verify:android-media-viewer', 'verify:imports']],

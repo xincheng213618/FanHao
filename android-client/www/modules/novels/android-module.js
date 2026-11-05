@@ -1,5 +1,5 @@
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-b266fc766a5d";
-import { createNovelViews } from "./novel-views.js?v=assets-b266fc766a5d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8af3642624a3";
+import { createNovelViews } from "./novel-views.js?v=assets-8af3642624a3";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({

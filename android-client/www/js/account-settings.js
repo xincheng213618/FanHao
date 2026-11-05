@@ -1,6 +1,6 @@
 import { mountAccountPanel } from "../platform/accounts/account-ui.js";
 import { authenticateAccount, clearServerSession, serverOrigin } from "./server-auth.js";
-import { fetchJson } from "./api.js?v=assets-b266fc766a5d";
+import { fetchJson } from "./api.js?v=assets-8af3642624a3";
 
 export function createAccountSettings(root, { serverUrl, onSignedIn, onSignedOut }) {
   const origin = serverOrigin(serverUrl);

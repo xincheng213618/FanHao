@@ -79,6 +79,14 @@ async function importFactory(source = viewSource, sheetsCode = null, focusCode =
   return (await import(importUrl(exposed, viewUrl))).createMusicViews;
 }
 
+function withoutMusicSurfaceGuard(source) {
+  // These historical negative controls restore missing retirement across both
+  // the original handler boundary and the additional mounted-surface defence.
+  const boundary = "  function guardMusicSurface(node, current) {\n";
+  assert.equal(source.split(boundary).length, 2, "one actual surface guard is disabled only in retirement mutants");
+  return source.replace(boundary, `${boundary}    return; // fixture: restore the missing surface retirement guard\n`);
+}
+
 function fixture(createMusicViews, { code = moduleSource, view = "music", stack = true, routeNavigation = false, allowRestoreAudio = false } = {}) {
   const document = globalThis.document = createNavigationFixtureDocument();
   const prototype = Object.getPrototypeOf(document.body);
@@ -313,6 +321,8 @@ function playlistManagementFixture(createMusicViews, { playing = false } = {}) {
 
 function libraryControlFixture(createMusicViews, kind, options = {}) {
   const f = fixture(createMusicViews, options), s = f.audit.state;
+  const previousAccountOwner = captureAccountOwner(f.host.getActiveUrl()).owner;
+  if (options.initialAccountOwner) setAccountOwner(f.host.getActiveUrl(), options.initialAccountOwner);
   const track = { id: "fixture-library-playing", title: "Synthetic library song", artistId: "fixture-library-artist", albumId: "fixture-library-album",
     artist: "Synthetic artist", album: "Synthetic album", durationMs: 120000, positionMs: 37500, streamUrl: "", downloadUrl: "" };
   const audioCalls = [], audio = { paused: false, currentTime: 37.5, duration: 120, volume: 0.63, src: "fixture:library-playing",
@@ -337,7 +347,7 @@ function libraryControlFixture(createMusicViews, kind, options = {}) {
     assert.equal(f.audit.getAudio(), audio); assert.equal(audio.currentTime, 37.5); assert.equal(audio.src, "fixture:library-playing");
     assert.equal(audio.volume, 0.63); assert.equal(audio.paused, false); assert.deepEqual(audioCalls, []);
   };
-  return { ...f, s, track, audio, selector, overlaySelector, trigger, open, playbackUnchanged };
+  return { ...f, s, track, audio, selector, overlaySelector, trigger, open, playbackUnchanged, previousAccountOwner };
 }
 
 function fire(node, type, values = {}) {
@@ -801,7 +811,7 @@ async function assertPlaybackSettingsInvalidScope(createMusicViews) {
     assert.deepEqual(f.persistence(), stored); assert.equal(f.writes().length, writes);
     if (dismissal === "button") userClick(panel.close); else assert.equal(f.back(), true, "Back can dismiss a mounted panel whose source/account is invalid");
     f.flushFrames();
-    assert.equal(f.sheet(), null, "visible settings remains dismissible after source/account changes without a render");
+    assert(f.sheet() === null, "visible settings remains dismissible after source/account changes without a render");
     assert.equal(f.s.fullscreen, true); assert.equal(f.document.activeElement, f.document.body,
       "dismissing an invalid-scope panel does not restore focus under the replacement scope");
     assert.equal(f.writes().length, writes); f.stable();
@@ -1054,8 +1064,9 @@ async function assertAsyncControlInterrupted(createMusicViews, kind, interaction
 }
 
 async function assertAsyncControlRetired(createMusicViews, kind, transition, failure) {
-  const f = asyncControlFixture(createMusicViews, kind), sourceUrl = f.host.getActiveUrl(), previousOwner = captureAccountOwner(sourceUrl).owner;
-  if (transition === "account round trip") setAccountOwner(sourceUrl, "account:asyncFocusA");
+  const f = asyncControlFixture(createMusicViews, kind, {
+    initialAccountOwner: transition === "account round trip" ? "account:asyncFocusA" : null
+  }), sourceUrl = f.host.getActiveUrl(), previousOwner = f.previousAccountOwner;
   try {
     const action = await f.start(), following = [];
     const params = { mode: "library", dashboard: "0", ...(f.search ? { query: "same query", searchScope: "songs" } : {}) };
@@ -1106,9 +1117,10 @@ async function assertAsyncControlSequence(createMusicViews, kind, ordering, oldF
 }
 
 async function assertRetiredLibraryFocus(createMusicViews, kind, transition, neutralFocus = false) {
-  const f = libraryControlFixture(createMusicViews, kind);
-  const sourceUrl = f.host.getActiveUrl(), previousOwner = captureAccountOwner(sourceUrl).owner;
-  if (transition === "account round trip") setAccountOwner(sourceUrl, "account:focusA");
+  const f = libraryControlFixture(createMusicViews, kind, {
+    initialAccountOwner: transition === "account round trip" ? "account:focusA" : null
+  });
+  const sourceUrl = f.host.getActiveUrl(), previousOwner = f.previousAccountOwner;
   try {
     f.open(); assert.equal(f.back(), true);
     const queuedTrigger = f.document.querySelector(f.selector);
@@ -1561,7 +1573,7 @@ try {
   await runCase("negative control: unguarded old track action can still mutate queue", async () => {
     const source = sheetsSource.replace("trackActionHandler(sheet, action)", "action");
     assert.notEqual(source, sheetsSource);
-    const mutant = await importFactory(viewSource, source);
+    const mutant = await importFactory(withoutMusicSurfaceGuard(viewSource), source);
     const f = trackActionFixture(mutant), action = f.button("加入队列");
     assert.equal(f.back(), true); action.click();
     assert.throws(() => assert.deepEqual(f.s.queue.map(track => track.id), [f.current.id]), /deep-equal/);
@@ -1615,7 +1627,7 @@ try {
   await runCase("negative control: unguarded retired playback controls can change the active session", async () => {
     const boundary = "return isMountedPlaybackSettingsSession(session) && playbackSettingsOwnerCurrent(session);";
     assert.equal(viewSource.split(boundary).length, 2);
-    const mutant = await importFactory(viewSource.replace(boundary, "return true;"));
+    const mutant = await importFactory(withoutMusicSurfaceGuard(viewSource.replace(boundary, "return true;")));
     await assert.rejects(() => assertPlaybackSettingsRetired(mutant), /retired settings controls cannot change current music state/);
     console.log("Playback settings retired negative control: correctly rejected old controls changing the active session.");
   });
@@ -1629,7 +1641,7 @@ try {
   await runCase("negative control: detached mini controls without exact mounted identity can operate the current player", async () => {
     const boundary = 'moduleActive && !state.fullscreen && player.isConnected\n      && els.viewContent.querySelector(".music-mobile-mini-player") === player';
     assert.equal(viewSource.split(boundary).length, 2);
-    const mutant = await importFactory(viewSource.replace(boundary, "moduleActive && !state.fullscreen"));
+    const mutant = await importFactory(withoutMusicSurfaceGuard(viewSource.replace(boundary, "moduleActive && !state.fullscreen")));
     await assert.rejects(() => assertMiniPlayerRetired(mutant), /retired mini callbacks and gesture tails cannot change/);
     console.log("Mini mounted negative control: correctly rejected detached controls operating the current player.");
   });

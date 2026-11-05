@@ -1,4 +1,4 @@
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-b266fc766a5d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8af3642624a3";
 
 export function createMusicPlaylistView(deps) {
   const {

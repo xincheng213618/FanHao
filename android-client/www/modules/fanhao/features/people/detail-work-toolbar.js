@@ -1,5 +1,5 @@
 import { formatNumber } from "../../../../js/format.js";
-import { openFanhaoSheet } from "../../sheet.js?v=assets-b266fc766a5d";
+import { openFanhaoSheet } from "../../sheet.js?v=assets-8af3642624a3";
 
 export function createPersonDetailWorkToolbar(options = {}) {
   const filterOptions = normalizeOptions(options.filterOptions);

@@ -1084,6 +1084,13 @@ for (const file of ['tests/verify_music_summary_reuse.mjs', 'tests/verify_music_
 }
 assert.deepEqual(selectScripts(['tests/verify_studio_cache_dependencies.mjs']).scripts, ['verify:studio-cache', 'verify:fanhao', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_android_music_list_rendering.mjs']).scripts, ['verify:android-music-rendering', 'verify:android-music', 'verify:imports']);
+assert.deepEqual(selectScripts(['tests/verify_android_music_fullscreen_rendering.mjs']).scripts, ['verify:android-music-fullscreen-rendering', 'verify:imports']);
+assert.equal(webPackageScripts['verify:android-music-fullscreen-rendering'], 'node tests/verify_android_music_fullscreen_rendering.mjs');
+for (const entries of [FULL_SCRIPTS, ANDROID_SCRIPTS, ['verify:android-client'], ['verify:android-music'], ['verify:android-music-back'], ['verify:android-music-rendering'],
+  ...['app.js', 'modules/music/music-views.js', 'modules/music/android-module.js'].map(file => selectScripts([`android-client/www/${file}`]).scripts)]) {
+  assert.equal(expandCommands(entries, webPackageScripts).filter(command => command === 'node tests/verify_android_music_fullscreen_rendering.mjs').length, 1,
+    'actual music fullscreen rendering runs once through its Android shell and music owner gates');
+}
 assert.deepEqual(selectScripts(['tests/verify_android_music_queue_rendering.mjs']).scripts, ['verify:android-music-queue', 'verify:android-music-playlists', 'verify:imports']);
 assert(expandCommands(['verify:android-music-rendering'], webPackageScripts).includes('node tests/verify_android_music_queue_rendering.mjs'), 'the Android rendering gate retains queue rendering checks');
 for (const name of ['catalogue', 'playback', 'transition', 'history', 'playlist']) {

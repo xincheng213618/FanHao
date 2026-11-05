@@ -300,6 +300,7 @@ sources:
   - tests/verify_music_empty_pages.mjs
   - tests/verify_studio_cache_dependencies.mjs
   - tests/verify_android_music_list_rendering.mjs
+  - tests/verify_android_music_fullscreen_rendering.mjs
   - tests/verify_android_music_queue_rendering.mjs
   - tests/verify_android_music_catalogue_requests.mjs
   - tests/verify_android_music_playback_requests.mjs
@@ -481,7 +482,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:android-manga-tasks` | 漫画添加、更新、轮询与详情刷新等待期间的服务器和账号切换，任务列表、重试及清理确认的归属；同 ID 新任务与旧监控结束的交错，删除确认与返回只作用于原详情。 | 当前完整图库工厂、真实账号与缓存 fence 及受控请求、时钟、DOM 和弹窗；旧方法负控应失败，已接受任务继续执行，不发起实际采集、清理或删除。 |
 | `npm run verify:android-music-history`、`npm run verify:android-music-playlists` | 清空历史、新建/编辑/删除歌单、保存队列与加入/移出歌曲的回执及目录刷新，和新导航、选歌、关闭重开弹层交错；连续排序合并写入、确认顺序回滚和容量释放；当前失败可重试，过期回调保留新页面与队列。 | 当前完整音乐工厂、操作组件及受控 API、Audio、DOM 和时钟；保留已发写入，待办受来源、账号及页面归属约束，负控验证归属守卫，不操作真实歌单或历史记录。 |
 | `npm run verify:android-music` | 音频 Blob 生命周期、翻页与后台歌单请求归属；单曲详情、音频和播放 Promise 乱序，以及首屏恢复、自动衔接与最新选歌的交错；收藏与评分的来源、账号归属和字段写入顺序，已接受写入与离页、连续操作、迟到读取及恢复记录的交错。 | 实际客户端模块或未改写逻辑的函数体、受控 API 与 Audio；不访问真实音乐或数据库，不证明真实音频解码。 |
-| `npm run verify:android-music-rendering`、`npm run verify:android-music-queue` | 歌曲翻页保留 DOM、重试、取消、去重和播放标记；屏幕外布局、滚动、焦点、封面懒加载；长歌名、44px操作、匹配及版本标记、更多菜单和键盘激活；迷你播放器入口、全屏焦点往返及深列表位置；播放设置、评分、Tab/Escape和失败反馈；后台歌单及首屏恢复归属；中文组合输入和搜索焦点；排序和筛选乱序回执；300/1000首队列相邻排序仅重建两行，单曲移出仅删除目标行并同步禁用和计数，CSS counter显示序号，保持播放器、滚动和焦点，覆盖空态、预览、回执、回滚与旧控件失效。 | 当前音乐页与完整 CSS、私有 Chromium、合成 API、受控 Audio、请求和输入事件；队列专项纳入渲染入口，旧全量重绘负控须超出元素预算，上轮局部重编号负控须超出DOM变更与读取预算，真实布局文本核对01/99/100/1000；同步生成缓存引用，计时仅作诊断，不证明真机播放、TalkBack 或 Android 输入法兼容性。 |
+| `npm run verify:android-music-rendering`、`npm run verify:android-music-queue` | 歌曲翻页保留 DOM、重试、取消、去重和播放标记；屏幕外布局、滚动、焦点、封面懒加载；长歌名、44px操作、匹配及版本标记、更多菜单和键盘激活；迷你播放器入口、全屏焦点往返及深列表位置；同一挂载的全屏展示切换保留后台歌曲，按完整旧实现核对状态和零重建预算；播放设置、评分、Tab/Escape和失败反馈；后台歌单及首屏恢复归属；中文组合输入和搜索焦点；排序和筛选乱序回执；300/1000首队列相邻排序仅重建两行，单曲移出仅删除目标行并同步禁用和计数，CSS counter显示序号，保持播放器、滚动和焦点，覆盖空态、预览、回执、回滚与旧控件失效。 | 当前音乐页与完整 CSS、私有 Chromium、合成 API、受控 Audio、请求和输入事件；全屏专项随返回和渲染入口执行，队列专项纳入渲染入口，旧全量重绘负控须超出元素预算，上轮局部重编号负控须超出DOM变更与读取预算，真实布局文本核对01/99/100/1000；同步生成缓存引用，计时仅作诊断，不证明真机播放、TalkBack 或 Android 输入法兼容性。 |
 | `npm run verify:music-playback` | 旧播放 Promise 的成功/拒绝、换源与同源重载、当前拒绝与重试、暂停、睡眠定时和迟到媒体事件。 | 实际音乐页/播放器源码与受控 Audio、DOM 和时钟；不读取音频文件，不证明真实解码或音频设备播放。 |
 | `npm run verify:music-requests` | 列表、单曲、旁栏与上次歌曲恢复的请求归属；清空历史、启动扫描及歌单创建/导入/编辑/增删的写入和后续刷新与新导航、选歌交错；同歌单排序保留一个在途和一个最新待办、最多八个活跃歌单槽，确认顺序回滚保留当前成员与对象，覆盖账号切换和容量背压；缓存失效、当前/过期错误及忙碌状态。 | 实际音乐 actions 源码、受控 API、播放器、状态和存储；导航取消读取但保留已发写入，不使用真实数据库、扫描或媒体。排序尚无确认基线的新成员，失败时保留末次排序前的局部位置。 |
 | `npm run verify:music-progress` | 两端写入合并、普通及退出容量、账号归属和实际回执；服务端持久顺序、播放去重、预留复用、过期、回拨、竞争及迁移。 | 当前 Web/Android 写入与传输源码、实际 store/routes 和临时 SQLite；显式跳转及无缝切歌使用受控音频与请求，不证明 Android 真机播放。 |

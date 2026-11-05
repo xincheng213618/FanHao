@@ -1,27 +1,27 @@
-import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-b266fc766a5d";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-8af3642624a3";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { absoluteUrl } from "../../js/image.js?v=assets-b266fc766a5d";
+import { absoluteUrl } from "../../js/image.js?v=assets-8af3642624a3";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-b266fc766a5d";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-b266fc766a5d";
-import { createMusicSheets } from "./music-sheets.js?v=assets-b266fc766a5d";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-b266fc766a5d";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-b266fc766a5d";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-b266fc766a5d";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-b266fc766a5d";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-b266fc766a5d";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-b266fc766a5d";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-b266fc766a5d";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-b266fc766a5d";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-b266fc766a5d";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-b266fc766a5d";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-8af3642624a3";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-8af3642624a3";
+import { createMusicSheets } from "./music-sheets.js?v=assets-8af3642624a3";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-8af3642624a3";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-8af3642624a3";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-8af3642624a3";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-8af3642624a3";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-8af3642624a3";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-8af3642624a3";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-8af3642624a3";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-8af3642624a3";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-8af3642624a3";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-8af3642624a3";
 import { createMusicControlFocus } from "./music-control-focus.js";
-import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-b266fc766a5d";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-b266fc766a5d";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-b266fc766a5d";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-b266fc766a5d";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-b266fc766a5d";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-b266fc766a5d";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-8af3642624a3";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-8af3642624a3";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-8af3642624a3";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-8af3642624a3";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-8af3642624a3";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-8af3642624a3";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -80,9 +80,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-b266fc766a5d";
+} from "./music-state.js?v=assets-8af3642624a3";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-b266fc766a5d";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-8af3642624a3";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -246,6 +246,9 @@ export function createMusicViews(deps) {
   let trackPreferenceError = null;
   let playbackSettingsSession = null;
   let miniFullscreenSession = null;
+  let mountedMusicShell = null;
+  let mountedFullPlayer = null;
+  let musicRenderGuard = null;
   const trackPreferences = createMusicTrackPreferences({
     send: (owner, id, field, value) => fetchMusicApiJson(owner.sourceUrl,
       `/api/music/tracks/${encodeURIComponent(id)}/${field}`, {
@@ -534,6 +537,7 @@ export function createMusicViews(deps) {
   }
 
   async function renderMusicList(params = {}, renderGuard = null) {
+    musicRenderGuard = renderGuard;
     const focusIntent = routeControlFocus;
     routeControlFocus = null;
     controlFocus.retain(focusIntent);
@@ -1122,6 +1126,7 @@ export function createMusicViews(deps) {
     if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
     lyricRaf = 0;
     mountedQueueList = null;
+    mountedMusicShell = mountedFullPlayer = null;
     els.viewContent.innerHTML = "";
     const shell = document.createElement("section");
     const searchFocused = Boolean(state.searchOpen || state.query);
@@ -1182,6 +1187,12 @@ export function createMusicViews(deps) {
     if (state.trackActionId) shell.append(renderTrackActionsBackdrop(), renderTrackActionsSheet());
     if (state.playlistActionTrackId) shell.append(renderPlaylistActionsBackdrop(), renderPlaylistActionsSheet());
     els.viewContent.append(shell);
+    const owner = { shell, generation: musicRenderGeneration, sourceUrl: getActiveUrl(),
+      account: captureAccountOwner(getActiveUrl()), route: JSON.stringify(musicRouteParams()), guard: musicRenderGuard };
+    mountedMusicShell = owner;
+    guardMusicSurface(shell, () => ownsMusicShell(owner));
+    const full = shell.querySelector(".music-mobile-full-player");
+    if (full) bindMountedFullPlayer(full, owner);
     document.body.classList.toggle("music-player-open", state.fullscreen);
     document.body.classList.toggle("music-search-open", searchFocused);
     document.body.classList.toggle("music-library-filter-open", state.libraryFiltersOpen);
@@ -1194,6 +1205,63 @@ export function createMusicViews(deps) {
     if (state.pendingCurrentReveal && !state.loading && !state.fullscreen) {
       schedulePendingCurrentReveal();
     }
+  }
+
+  function ownsMusicShell(owner) {
+    return Boolean(owner && owner === mountedMusicShell && moduleActive
+      && owner.generation === musicRenderGeneration
+      && owner.shell.isConnected && owner.shell.parentElement === els.viewContent
+      && els.viewContent.querySelector(".music-mobile-shell") === owner.shell);
+  }
+
+  function guardMusicSurface(node, current) {
+    const guard = (event) => {
+      if (current()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    for (const type of ["click", "change", "input", "keydown", "wheel", "touchstart", "touchmove", "touchend", "pointerdown", "pointermove", "pointerup"]) {
+      node.addEventListener(type, guard, { capture: true });
+    }
+  }
+
+  function bindMountedFullPlayer(full, owner) {
+    const mounted = { full, owner };
+    mountedFullPlayer = mounted;
+    guardMusicSurface(full, () => mountedFullPlayer === mounted && ownsMusicShell(owner)
+      && state.fullscreen && full.isConnected && full.parentElement === owner.shell);
+  }
+
+  function reuseMountedMusicBackground() {
+    const owner = mountedMusicShell;
+    if (!ownsMusicShell(owner) || (owner.guard && !owner.guard()) || owner.guard?.signal?.aborted
+      || owner.sourceUrl !== getActiveUrl() || !isAccountOwnerCurrent(owner.account)
+      || owner.route !== JSON.stringify(musicRouteParams())
+      || state.searchOpen || state.query || state.libraryFiltersOpen || state.sortSheetOpen
+      || state.historyActionsOpen || state.settingsOpen || state.trackActionId || state.playlistActionTrackId) return false;
+    const mounted = mountedFullPlayer;
+    if (state.fullscreen ? Boolean(mounted || owner.shell.querySelector(".music-mobile-full-player"))
+      : !mounted || mounted.owner !== owner || !mounted.full.isConnected || mounted.full.parentElement !== owner.shell) return false;
+    playbackSettingsSession = null;
+    currentLyricIndex = -1;
+    if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
+    lyricRaf = 0;
+    mountedQueueList = null;
+    if (state.fullscreen) {
+      const full = renderFullPlayer();
+      owner.shell.append(full);
+      bindMountedFullPlayer(full, owner);
+    } else {
+      mounted.full.remove();
+      mountedFullPlayer = null;
+      progressBindings = progressBindings.filter(binding => Object.values(binding).some(node => node?.isConnected));
+    }
+    document.body.classList.toggle("music-player-open", state.fullscreen);
+    els.viewTitle.textContent = musicTitle();
+    els.viewMeta.textContent = state.status || musicMeta(state.data);
+    updatePlaybackUi();
+    if (state.fullscreen) updateLyricHighlight(true);
+    return true;
   }
 
   function renderSearchSurface() {
@@ -4237,7 +4305,7 @@ export function createMusicViews(deps) {
     state.fullPanel = "cover";
     state.lyricFollowPaused = false;
     state.fullscreen = true;
-    renderShell();
+    if (!reuseMountedMusicBackground()) renderShell();
     if (focus) finishMiniFullscreenFocus(focus.intent, focus.session, true);
   }
 
@@ -4252,7 +4320,7 @@ export function createMusicViews(deps) {
     state.playlistSheetOpen = false;
     state.sleepSheetOpen = false;
     state.playbackSheetOpen = false;
-    renderShell();
+    if (!reuseMountedMusicBackground()) renderShell();
     if (focus) finishMiniFullscreenFocus(focus.intent, focus.session, true);
   }
 
@@ -4351,7 +4419,7 @@ export function createMusicViews(deps) {
     state.sleepSheetOpen = false;
     state.playbackSheetOpen = false;
     miniFullscreenSession = null;
-    renderShell();
+    if (!reuseMountedMusicBackground()) renderShell();
     if (intent) finishMiniFullscreenFocus(intent, session, false);
     return true;
   }
@@ -6230,6 +6298,9 @@ export function createMusicViews(deps) {
   function deactivate() {
     controlFocus.cancel();
     mountedQueueList = null;
+    mountedMusicShell = mountedFullPlayer = null;
+    musicRenderGuard = null;
+    progressBindings = [];
     miniFullscreenSession = null;
     playbackSettingsSession = null;
     routeControlFocus = null;

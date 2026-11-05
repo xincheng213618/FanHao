@@ -22,12 +22,14 @@ class Events {
   }
   dispatchEvent(event) {
     event.target ||= this;
+    event.stopImmediatePropagation ||= function () { this.stopped = true; this.immediateStopped = true; };
     const path = [];
     for (let node = this; node; node = node.parentNode) path.push(node);
     const invoke = (node, capture) => {
       event.currentTarget = node;
       for (const [index, handler] of (node.listeners.get(event.type) || []).entries()) {
         if (node.listenerCaptures.get(event.type)?.[index] === capture) handler(event);
+        if (event.immediateStopped) break;
       }
     };
     for (const node of [...path].reverse()) { invoke(node, true); if (event.stopped) return !event.defaultPrevented; }
