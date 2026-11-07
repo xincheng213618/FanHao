@@ -19,13 +19,21 @@ export async function bootStandaloneApp() {
   const api = createApiClient({ isAndroidClient });
   const state = createStandaloneState(initialRoute.view);
   const els = createElementIndex();
-  const pages = await loadCurrentModule(initialRoute.view);
+  const overview = initialRoute.view === "gallery" && initialRoute.galleryMode === "photo" && !initialRoute.galleryAlbumId
+    ? beginPhotoOverview(api) : null;
+  const pages = await loadCurrentModule(initialRoute.view).catch(error => {
+    overview?.controller.abort();
+    throw error;
+  });
   const startupRoute = normalizeRoute(routeFromUrl());
   if (startupRoute.view !== initialRoute.view) {
+    overview?.controller.abort();
     window.location.replace(window.location.href);
     return;
   }
-  const host = createHost({ api, els, initialParams, pages, state });
+  const startupOverview = startupRoute.view === "gallery" && startupRoute.galleryMode === "photo" ? overview : null;
+  if (!startupOverview) overview?.controller.abort();
+  const host = createHost({ api, els, initialParams, pages, state, startupOverview });
 
   prepareClientShell();
   document.documentElement.classList.toggle("android-client", isAndroidClient);
@@ -37,6 +45,15 @@ export async function bootStandaloneApp() {
   host.applyRoute(startupRoute);
   await host.waitForRoute();
   document.documentElement.classList.remove("app-module-loading");
+}
+
+function beginPhotoOverview(api) {
+  const endpoint = "/api/image-library/summary?mode=photo";
+  const controller = new AbortController();
+  const read = api(endpoint, { method: "GET", signal: controller.signal });
+  // The gallery owns the outcome once its module is ready.
+  void read.catch(() => {});
+  return { endpoint, controller, read };
 }
 
 async function loadCurrentModule(view) {
@@ -67,7 +84,7 @@ async function loadCurrentModule(view) {
   return { createPage: module.createToolsPage, view };
 }
 
-function createHost({ api, els, initialParams, pages, state }) {
+function createHost({ api, els, initialParams, pages, state, startupOverview }) {
   let page = null;
   let galleryRenderer = null;
   let routeApplication = Promise.resolve();
@@ -101,6 +118,7 @@ function createHost({ api, els, initialParams, pages, state }) {
     });
     page = pages.createPage({
       ...shared,
+      startupOverview,
       clearPersonSelection: () => {
         state.selectedPersonId = null;
         state.selectedPerson = null;

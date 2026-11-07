@@ -3,6 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
 
+const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">
+  <rect width="300" height="450" fill="#ececf1"/>
+  <text x="150" y="225" fill="#555a91" font-size="15" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">暂无封面</text>
+</svg>`;
+
 function archiveMemberBaseName(memberPath) {
   const parts = String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean);
   return parts.pop() || "";
@@ -29,6 +34,7 @@ export function createPhotoSetService({
   normalizeExt,
   notFound,
   photoSetById,
+  publishedPhotoSetById,
   safeChildPath,
   safeStat,
   serveArchiveMemberImage
@@ -41,7 +47,7 @@ export function createPhotoSetService({
     db.exec("PRAGMA busy_timeout = 0");
     try { return operation(db); } finally { db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(previous || 0))}`); }
   }
-  const albumStamp = value => JSON.stringify([value?.id, value?.sourceRoot, value?.relativePath, value?.updatedAt]);
+  const albumStamp = value => JSON.stringify([value?.id, value?.sourceRoot, value?.relativePath, value?.updatedAt, value?.size, value?.archiveIdentity]);
   const rowStamp = value => JSON.stringify(value && { ...value, cover_blob: null });
   function rowSnapshot(value) {
     let blob = value?.cover_blob ? Buffer.from(value.cover_blob) : null;
@@ -98,10 +104,6 @@ export function createPhotoSetService({
     }
   }
 
-  function archiveImageMime(memberPath) {
-    return mimeTypes[normalizeExt(memberPath)] || "application/octet-stream";
-  }
-
   function coverHintScore(image) {
     const baseName = archiveMemberBaseName(image?.path || image?.name || "");
     const stem = fileBase(baseName).toLowerCase();
@@ -137,39 +139,14 @@ export function createPhotoSetService({
     const stat = await fs.promises.stat(filePath);
     if (!context.isCurrent()) throw archiveStoppedError();
     const sourceBytes = stat.size || Number(image?.bytes || 0);
-    const mime = archiveImageMime(image?.path || image?.name || "");
-    if (isExplicitCover && sourceBytes > 0 && sourceBytes <= coverMaxBytes) {
-      return {
-        blob: await readCoverFile(filePath, context),
-        mime,
-        sourceBytes
-      };
-    }
-
+    // Explicit cover files still win selection, but every stored cover goes
+    // through the same box scale so cards never ship multi-megapixel blobs.
     const blob = await compressImageFileToJpeg(filePath, { signal: context.signal, waitForCloseOnAbort: true });
     return {
       blob,
       mime: "image/jpeg",
       sourceBytes
     };
-  }
-
-  async function readCoverFile(filePath, context) {
-    const handle = await fs.promises.open(filePath, "r");
-    try {
-      const stat = await handle.stat();
-      if (!context.isCurrent()) throw archiveStoppedError();
-      if (!stat.isFile() || stat.size > coverMaxBytes) throw new Error("封面超过大小限制");
-      const buffer = Buffer.alloc(stat.size);
-      let offset = 0;
-      while (offset < buffer.length) {
-        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
-        if (!context.isCurrent()) throw archiveStoppedError();
-        if (!bytesRead) break;
-        offset += bytesRead;
-      }
-      return buffer.subarray(0, offset);
-    } finally { await handle.close(); }
   }
 
   function coverMatches(row, signature) {
@@ -280,7 +257,14 @@ export function createPhotoSetService({
     return coverRow(album, database);
   }
 
-  async function generateCover(album, context) {
+  function matchesPublishedArchive(album, signature) {
+    if (!signature.archiveIdentity || signature.archivePath !== archivePath(album)) return false;
+    if (album.archiveIdentity) return album.archiveIdentity === signature.archiveIdentity;
+    // Legacy JSON snapshots have a path, size and ISO mtime, but no file identity.
+    return Number(album.size) === signature.archiveSize && Date.parse(album.updatedAt) === Math.trunc(signature.archiveMtimeMs);
+  }
+
+  async function generateCover(album, context, published) {
     const captured = authority(album, context);
     const targetArchivePath = archivePath(album);
     const signature = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
@@ -288,6 +272,9 @@ export function createPhotoSetService({
       const error = new Error("图包压缩文件不存在");
       error.statusCode = 404;
       throw error;
+    }
+    if (published && !matchesPublishedArchive(album, signature)) {
+      throw Object.assign(new Error("图包已变更，请刷新图库索引"), { statusCode: 404 });
     }
 
     if (!captured.current()) throw archiveStoppedError();
@@ -404,32 +391,22 @@ export function createPhotoSetService({
     } finally { res.removeListener?.("close",disconnect); }
   }
 
-  async function serveCover(res, albumId) {
-    const album = byId(albumId);
-    if (!album) {
-      notFound(res);
+  function serveUnavailableCover(res, fallback, cacheable) {
+    if (!fallback) return notFound(res);
+    const cacheControl = cacheable ? "private, max-age=60" : "no-store";
+    if (fallback === "empty") {
+      res.writeHead(204, { "Cache-Control": cacheControl });
+      res.end();
       return;
     }
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": cacheControl
+    });
+    res.end(unavailableCover);
+  }
 
-    if (res.destroyed || res.writableEnded) return;
-    const controller = new AbortController(), disconnect = () => { if (!res.writableEnded) controller.abort(); };
-    res.once?.("close", disconnect);
-    let row;
-    try { row = await coverPool.run(`cover:${albumId}`, context => generateCover(album, context), { signal: controller.signal }); }
-    catch (error) {
-      if (!res.destroyed && !res.writableEnded && !controller.signal.aborted) {
-        console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
-        if (error.statusCode === 503) { res.writeHead(503); res.end("图片封面正在准备或停止，请稍后重试"); } else notFound(res);
-      }
-      return;
-    } finally { res.removeListener?.("close", disconnect); }
-    if (res.destroyed || res.writableEnded || controller.signal.aborted || !coverPool.isAccepting()) return;
-
-    if (!row?.cover_blob) {
-      notFound(res);
-      return;
-    }
-
+  function serveCoverBlob(res, row) {
     const buffer = Buffer.from(row.cover_blob);
     res.writeHead(200, {
       "Content-Type": row.cover_mime || "image/jpeg",
@@ -438,6 +415,51 @@ export function createPhotoSetService({
       "Content-Disposition": "inline"
     });
     res.end(buffer);
+  }
+
+  async function serveCover(res, albumId, { fallback = false } = {}) {
+    const published = publishedPhotoSetById?.(albumId);
+    const album = published === undefined ? byId(albumId) : published;
+    if (!album) {
+      serveUnavailableCover(res, fallback, false);
+      return;
+    }
+
+    if (res.destroyed || res.writableEnded) return;
+    if (published && coverPool.isAccepting()) {
+      const cached = coverRow(album);
+      if (cached && Number(cached.generator_version) === coverGeneratorVersion && matchesPublishedArchive(album, {
+        archivePath: cached.archive_path, archiveSize: Number(cached.archive_size),
+        archiveMtimeMs: Number(cached.archive_mtime_ms), archiveIdentity: cached.archive_identity
+      })) {
+        if (cached.status === "ok" && cached.cover_blob) return serveCoverBlob(res, cached);
+        if (cached.status === "error") return serveUnavailableCover(res, fallback, true);
+      }
+    }
+    const controller = new AbortController(), disconnect = () => { if (!res.writableEnded) controller.abort(); };
+    res.once?.("close", disconnect);
+    let row;
+    try { row = await coverPool.run(`cover:${albumId}`, context => generateCover(album, context, Boolean(published)), { signal: controller.signal }); }
+    catch (error) {
+      if (!res.destroyed && !res.writableEnded && !controller.signal.aborted) {
+        console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
+        if (error.statusCode === 503) {
+          res.writeHead(503);
+          res.end("图片封面正在准备或停止，请稍后重试");
+        } else {
+          serveUnavailableCover(res, fallback, error.statusCode === 404);
+        }
+      }
+      return;
+    } finally { res.removeListener?.("close", disconnect); }
+    if (res.destroyed || res.writableEnded || controller.signal.aborted || !coverPool.isAccepting()) return;
+
+    if (!row?.cover_blob) {
+      serveUnavailableCover(res, fallback, false);
+      return;
+    }
+
+    serveCoverBlob(res, row);
   }
 
   return {

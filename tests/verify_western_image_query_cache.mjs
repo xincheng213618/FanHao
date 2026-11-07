@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
+import { createGalleryIndexSource } from "./fixtures/gallery-index-source.mjs";
 import { IMAGE_QUERY_CACHE_MAX_AGE_MS, IMAGE_QUERY_CACHE_MAX_ROWS, IMAGE_QUERY_CACHE_MAX_BYTES } from "../src/modules/content-index/server/image-query-cache.js";
 
 const args = process.argv.slice(2);
@@ -28,9 +25,6 @@ const metricName = "__fanhaoWesternQueryFixtureMetrics";
 assert.equal(globalThis[metricName], undefined, "fixture metric owner is private");
 globalThis[metricName] = newMetrics();
 const originalNow = Date.now;
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-western-query-cache-"));
-const indexFiles = new Set();
-let sequence = 0;
 let comparisons = 0;
 
 try {
@@ -46,10 +40,6 @@ try {
 } finally {
   Date.now = originalNow;
   delete globalThis[metricName];
-  // Only these private index files can be written by refresh. No configured
-  // media roots, real service, database or recursive cleanup is involved.
-  for (const file of indexFiles) if (fs.existsSync(file)) fs.unlinkSync(file);
-  fs.rmdirSync(temporary);
 }
 
 function replaceOnce(source, original, replacement) {
@@ -98,16 +88,9 @@ function item(i, overrides = {}) {
 }
 
 function fixture(items, { factory = testedFactory, revision = true, metadataRevision = false } = {}) {
-  const options = { archiveExts: new Set([".zip"]), directVideoExts: new Set([".mp4"]), galleryMediaSources: [], photoSetRoots: [], videoExts: new Set([".mp4"]) };
-  const indexPath = path.join(temporary, `index-${++sequence}.json`);
-  indexFiles.add(indexPath);
-  const snapshot = mediaItems => ({ schemaVersion: CURRENT_INDEX_SCHEMA, parserVersion: PARSER_VERSION,
-    cacheIdentity: imageLibraryCacheIdentity(options), scannedAt: "2026-01-01T00:00:00.000Z", photoSets: [], mediaItems });
+  const snapshot = mediaItems => ({ scannedAt: "2026-01-01T00:00:00.000Z", photoSets: [], mediaItems });
   const state = { persisted: snapshot(items), metadataRevision: 1, metadataCalls: 0, forbidMetadata: true, afterProbe: null };
-  const owner = createImageLibraryIndexService({ ...options, imageLibraryIndexPath: indexPath,
-    ensureDataDir() {}, readJsonFile: () => state.persisted, safeStat: () => null,
-    isExcludedDirName: () => false, isVideo: value => String(value).endsWith(".mp4"), normalizeExt: value => path.extname(value),
-    createId: (prefix, key) => `${prefix}:${key}`, photoSetCoverUrl: () => "" });
+  const owner = createGalleryIndexSource(() => state.persisted);
   const metadataRead = result => { state.metadataCalls++; assert.equal(state.forbidMetadata, false, "Western never reads movie/TV metadata"); return result; };
   const metadataService = {
     tvSeriesRowsMap: () => metadataRead(new Map()), movieRowsMap: () => metadataRead(new Map()),

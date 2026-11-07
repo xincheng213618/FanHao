@@ -100,6 +100,8 @@ const sharedWorkSorter = createWorkSorter({
 const { createImageGalleryDbService } = withGallery ? await import("./src/modules/content-index/server/image-gallery-db-service.js") : {};
 const { createImageLibraryIndexService } = withGallery ? await import("./src/modules/content-index/server/image-library-index-service.js") : {};
 const { createImageLibraryService } = withGallery ? await import("./src/modules/content-index/server/image-library-service.js") : {};
+const { createPhotoLibraryStore } = withGallery ? await import("./src/modules/content-index/server/photo-library-store.js") : {};
+const { createPhotoPublisherStore } = withGallery ? await import("./src/modules/content-index/server/photo-publisher-store.js") : {};
 const { createGalleryMediaService } = withGallery ? await import("./src/modules/media/server/gallery-media-service.js") : {};
 const { createGalleryMetadataService } = withGallery ? await import("./src/modules/media/server/gallery-metadata-service.js") : {};
 const { createMangaService } = withGallery ? await import("./src/modules/photos/server/manga-service.js") : {};
@@ -139,7 +141,6 @@ const {
   IMAGE_GALLERY_COVER_BOX_SIZE,
   IMAGE_GALLERY_COVER_MAX_BYTES,
   IMAGE_GALLERY_DB_PATH,
-  IMAGE_LIBRARY_INDEX_PATH,
   IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
   IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO,
   IMAGE_READER_CACHE_DIR,
@@ -214,22 +215,6 @@ const mangaService = withGallery ? createMangaService({
   serveArchiveMemberImage,
   serveWholeFile
 }) : null;
-const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
-  archiveExts: ARCHIVE_EXTS,
-  createId,
-  directVideoExts: DIRECT_VIDEO_EXTS,
-  ensureDataDir,
-  galleryMediaSources: GALLERY_MEDIA_SOURCES,
-  imageLibraryIndexPath: IMAGE_LIBRARY_INDEX_PATH,
-  isExcludedDirName,
-  isVideo,
-  normalizeExt,
-  photoSetCoverUrl,
-  photoSetRoots: PHOTO_SET_ROOTS,
-  readJsonFile,
-  safeStat,
-  videoExts: VIDEO_EXTS
-}) : null;
 const imageGalleryDbService = withGallery ? createImageGalleryDbService({
   dbPath: IMAGE_GALLERY_DB_PATH,
   ensureDataDir
@@ -238,6 +223,33 @@ const getImageGalleryDb = () => {
   if (!imageGalleryDbService) throw new Error("Gallery storage is disabled in this product");
   return imageGalleryDbService.getDb();
 };
+const photoPublisherStore = withGallery ? createPhotoPublisherStore({ getDb: getImageGalleryDb }) : null;
+const photoLibraryStore = withGallery ? createPhotoLibraryStore({
+  getDb: getImageGalleryDb,
+  archiveExts: ARCHIVE_EXTS,
+  photoSetRoots: PHOTO_SET_ROOTS,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  galleryMediaSources: GALLERY_MEDIA_SOURCES,
+  videoExts: VIDEO_EXTS,
+  project: (index, locales) => createImageLibraryService({
+    photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
+    photoSetService: { coverUrl: photoSetCoverUrl }
+  }).projectPhotoIndex(index, locales)
+}) : null;
+const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
+  archiveExts: ARCHIVE_EXTS,
+  createId,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  galleryMediaSources: GALLERY_MEDIA_SOURCES,
+  isExcludedDirName,
+  isVideo,
+  normalizeExt,
+  photoLibraryStore,
+  photoSetCoverUrl,
+  photoSetRoots: PHOTO_SET_ROOTS,
+  safeStat,
+  videoExts: VIDEO_EXTS
+}) : null;
 const photoSetService = withGallery ? createPhotoSetService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
   archiveImageSignature,
@@ -251,6 +263,7 @@ const photoSetService = withGallery ? createPhotoSetService({
   getImageGalleryDb,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
   photoSetById: imageLibraryIndexService.photoSetById,
+  publishedPhotoSetById: imageLibraryIndexService.publishedPhotoSetById,
   listArchiveImages,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -341,12 +354,14 @@ const imageLibraryService = withGallery ? createImageLibraryService({
   cachePreparedQueries: true,
   clampInteger,
   galleryMediaRootStatuses: imageLibraryIndexService.galleryMediaRootStatuses,
-  getImageLibraryIndex: imageLibraryIndexService.getIndex,
-  getImageLibraryRevision: imageLibraryIndexService.listRevision,
+  getImageLibraryIndex: imageLibraryIndexService.getMediaIndex,
+  getImageLibraryRevision: imageLibraryIndexService.mediaListRevision,
   imageReaderCacheStatus: imageReaderCacheService.status,
   mangaService,
   maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT,
   metadataService: galleryMetadataService,
+  photoLibraryStore,
+  photoPublisherStore,
   photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
   photoSetRootStatuses: imageLibraryIndexService.photoSetRootStatuses,
   photoSetService
@@ -408,7 +423,8 @@ const galleryMediaService = withGallery ? createGalleryMediaService({
   ffmpegPath: FFMPEG_PATH,
   ffprobePath: FFPROBE_PATH,
   getImageGalleryDb,
-  getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  getImageLibraryIndex: imageLibraryIndexService.getMediaIndex,
+  getLinkedVideoById: photoPublisherStore.videoById,
   mediaStreamService,
   normalizeExt,
   notFound,

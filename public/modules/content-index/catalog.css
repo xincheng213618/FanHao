@@ -302,7 +302,7 @@ body.gallery-view .gallery-browse-shell .gallery-controls {
 }
 
 .gallery-browse-shell .gallery-photo-catalog-card:hover { border-color: #b9bbd7; box-shadow: 0 6px 18px rgba(35, 35, 55, .07); transform: translateY(-2px); }
-.gallery-browse-shell .gallery-photo-catalog-card .gallery-card-cover { aspect-ratio: 5 / 6; background: #eeedf1; }
+.gallery-browse-shell .gallery-photo-catalog-card .gallery-card-cover { background: #ececf1; }
 .gallery-browse-shell .gallery-photo-catalog-card .gallery-card-badges span { border-radius: 5px; background: rgba(30, 31, 43, .8); padding: 5px 8px; font-weight: 550; font-size: 11px; box-shadow: none; }
 .gallery-browse-shell .gallery-photo-catalog-card .gallery-card-body { align-content: start; min-height: 80px; padding: 13px 12px; gap: 7px; text-align: left; }
 .gallery-browse-shell .gallery-photo-catalog-card .gallery-card-body strong { color: var(--gallery-ink); font-size: 14px; font-weight: 650; min-height: 0; line-height: 1.5; text-align: left; }

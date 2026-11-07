@@ -9,8 +9,7 @@ import { createImageGalleryDbService } from "../src/modules/content-index/server
 import { GALLERY_METADATA_CLOCK_TABLE, GALLERY_METADATA_CLOCK_TRIGGERS } from "../lib/gallery-metadata-revision.js";
 import { createGalleryMetadataService } from "../src/modules/media/server/gallery-metadata-service.js";
 import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
-import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
+import { createGalleryIndexSource } from "./fixtures/gallery-index-source.mjs";
 import { createMangaService } from "../src/modules/photos/server/manga-service.js";
 import { sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-source-adapter.mjs";
 
@@ -70,8 +69,8 @@ export function previousQuerySource(current) {
         item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
       }
 `, "");
-  replace('normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) ? photoAlbumSubject', 'normalizedMode === "photo" ? photoAlbumSubject');
-  replace('publicImageLibraryListItem(item, "photo", { deferPhotoSubject: true })', 'publicImageLibraryListItem(item, "photo")');
+  replace('const compact = Boolean(collection) || date === "all" && (photoView === "collections" || !query);', 'const compact = false;');
+  replace('const options = { deferPhotoSubject: true, compact };', 'const options = { compact };');
   return previousSearchSource(previous);
 }
 
@@ -760,18 +759,9 @@ function verifyImagePaginationContract() {
   };
   const ids = response => response.items.map(item => item.id);
   try {
-    const indexPath = path.join(temporary, "index.json");
-    const indexOptions = {
-      archiveExts: new Set([".zip"]), directVideoExts: new Set([".mp4"]), galleryMediaSources: [], photoSetRoots: [], videoExts: new Set([".mp4"]),
-      createId: (_prefix, value) => value, ensureDataDir() {}, imageLibraryIndexPath: indexPath,
-      isExcludedDirName: () => false, isVideo: () => false, normalizeExt: value => path.extname(value).toLowerCase(), photoSetCoverUrl: id => `/cover/${id}`,
-      readJsonFile(file, fallback) { try { assert.ok(owned(file)); return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } },
-      safeStat(file) { assert.ok(owned(file)); try { return fs.statSync(file); } catch { return null; } }
-    };
-    let persisted = { schemaVersion: CURRENT_INDEX_SCHEMA, parserVersion: PARSER_VERSION, cacheIdentity: imageLibraryCacheIdentity(indexOptions), scannedAt: "same-scan-time",
+    let persisted = { scannedAt: "same-scan-time",
       photoSets: Array.from({ length: 100 }, (_, index) => ({ id: `I${index + 1}`, title: `相册 ${index + 1}`, updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - index)).toISOString(), size: 1 })), mediaItems: [] };
-    writeJson(indexPath, persisted);
-    const indexOwner = createImageLibraryIndexService(indexOptions);
+    const indexOwner = createGalleryIndexSource(() => persisted);
     let indexReads = 0;
     const indexDeps = { ...deps, getImageLibraryIndex: options => { indexReads += 1; return indexOwner.getIndex(options); }, getImageLibraryRevision: indexOwner.listRevision };
     const photoLibrary = createImageLibraryService(indexDeps);
@@ -782,7 +772,7 @@ function verifyImagePaginationContract() {
     assert.deepEqual(ids(second), Array.from({ length: 24 }, (_, index) => `I${index + 25}`));
     assert.equal(indexReads, 2, "ending revision checks must not fetch or rescan the index");
     persisted = { ...persisted, photoSets: persisted.photoSets.map(item => item.id === "I24" ? { ...item, updatedAt: "2020-01-01" } : item) };
-    writeJson(indexPath, persisted); indexOwner.invalidate();
+    indexOwner.invalidate();
     const movedPage = request(photoLibrary, "mode=photo&limit=24&offset=24");
     assert.notEqual(movedPage.listRevision, first.listRevision, "same-count/same-scannedAt index replacement changes the revision");
     assert.ok(![...ids(first), ...ids(movedPage)].includes("I25"), "the actual service reproduces the old offset omission before a client reload");
@@ -796,8 +786,8 @@ function verifyImagePaginationContract() {
     assert.equal(request(photoLibrary, "mode=photo&limit=50000").limit, 12000, "production item limits stay compatible");
     const refresh = request(photoLibrary, "mode=photo&limit=24");
     indexOwner.getIndex({ refresh: true });
-    assert.notEqual(request(photoLibrary, "mode=photo&limit=24").listRevision, refresh.listRevision, "an actual rescan publishes a new epoch even for equal empty scans");
-    writeJson(indexPath, persisted); indexOwner.invalidate();
+    assert.notEqual(request(photoLibrary, "mode=photo&limit=24").listRevision, refresh.listRevision, "publication changes the revision even for an empty snapshot");
+    indexOwner.invalidate();
 
     const galleryPath = path.join(temporary, "gallery.sqlite");
     const gallery = createImageGalleryDbService({ dbPath: galleryPath, ensureDataDir() {} });

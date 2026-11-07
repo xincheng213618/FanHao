@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import os
 import random
 import re
 import sqlite3
@@ -25,8 +26,7 @@ from douban_movie_match import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
-INDEX_PATH = DATA_DIR / "image-library-index.json"
-DB_PATH = DATA_DIR / "image-gallery.sqlite"
+DB_PATH = Path(os.environ.get("FANHAO_DATA_DIR") or DATA_DIR) / "image-gallery.sqlite"
 DEFAULT_COOKIE_FILE = DATA_DIR / "douban-cookie.txt"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -89,11 +89,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def read_json(path: Path, fallback):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return fallback
+def read_published_movies(conn: sqlite3.Connection) -> dict:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='gallery_media_library_snapshot'"
+    ).fetchone()
+    if table is None:
+        raise RuntimeError("图库尚未发布影视索引，请先刷新图库索引")
+    rows = conn.execute("""
+        SELECT item.data_json FROM gallery_media_library_snapshot AS snapshot
+        LEFT JOIN gallery_media_library_items AS item ON item.media_kind = 'movie'
+        WHERE snapshot.id = 1 ORDER BY item.position
+    """).fetchall()
+    if not rows:
+        raise RuntimeError("图库尚未发布影视索引，请先刷新图库索引")
+    return {"mediaItems": [json.loads(row[0]) for row in rows if row[0] is not None]}
 
 
 def clean_movie_query_title(value: str) -> str:
@@ -744,10 +753,10 @@ def run(args, *, conn=None, index=None, cookie_state=None, context=None, page=No
         return {**stats, "exitCode": 1}
     with ExitStack() as resources:
         if conn is None:
-            cookie_state = read_cookie_state(args.cookie_file)
-            index = read_json(INDEX_PATH, {})
-            conn = sqlite3.connect(DB_PATH, timeout=30)
+            conn = sqlite3.connect(f"{DB_PATH.resolve().as_uri()}?mode=rw", uri=True, timeout=30)
             resources.callback(conn.close)
+            index = read_published_movies(conn)
+            cookie_state = read_cookie_state(args.cookie_file)
         conn.row_factory = sqlite3.Row
         ensure_db(conn)
         existing = existing_rows(conn)

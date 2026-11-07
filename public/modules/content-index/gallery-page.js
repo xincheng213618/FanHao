@@ -1,3 +1,5 @@
+import { PHOTO_CATALOG_LOCALE } from "./photo-catalog.js?v=20260810-photo-catalog-01";
+
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const IMAGE_LIBRARY_PAGE_LIMIT = 5000;
 const IMAGE_LIBRARY_REBASE_ATTEMPTS = 3;
@@ -32,6 +34,8 @@ export function createGalleryPage(deps) {
   let librarySummaryTimer = 0;
   let librarySummaryRequest = null;
   let librarySummaryFailure = null;
+  let loadedSummaryEndpoint = "";
+  let startupOverview = deps.startupOverview || null;
   let readerGeneration = 0;
   let readerOwner = null;
   let readerStatusRequest = null;
@@ -144,6 +148,7 @@ export function createGalleryPage(deps) {
   }
 
   function summaryEndpoint() {
+    if (state.gallery.mode === "photo") return "/api/image-library/summary?mode=photo";
     return isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";
   }
 
@@ -168,29 +173,34 @@ export function createGalleryPage(deps) {
       if (librarySummaryRequest.endpoint === endpoint || options.refresh || librarySummaryRequest.endpoint === "/api/image-library/rescan") return librarySummaryRequest.promise;
       librarySummaryRequest.controller.abort();
     }
-    if (state.gallery.data && !options.refresh && !options.reload && !librarySummaryRequest) {
+    if (state.gallery.data && (!loadedSummaryEndpoint || loadedSummaryEndpoint === endpoint)
+      && !options.refresh && !options.reload && !librarySummaryRequest) {
       setLibraryStatus(state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status);
       refreshGalleryAfterLibraryChange({ preserveScroll: true });
       return;
     }
-    const request = { endpoint, controller: new AbortController(), promise: null };
+    const early = startupOverview?.endpoint === endpoint ? startupOverview : null;
+    if (!early) startupOverview?.controller.abort();
+    startupOverview = null;
+    const request = { endpoint, controller: early?.controller || new AbortController(), promise: null };
     librarySummaryRequest = request;
     state.gallery.loading = true;
     setLibraryStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
-    request.promise = readLibrarySummary(request, options);
+    request.promise = readLibrarySummary(request, options, early?.read);
     refreshGalleryAfterLibraryChange({ preserveScroll: true, summaryChanged: true });
     return request.promise;
   }
 
-  async function readLibrarySummary(request, options) {
+  async function readLibrarySummary(request, options, earlyRead) {
     const isCurrent = () => librarySummaryRequest === request && !request.controller.signal.aborted;
     try {
-      const data = await api(request.endpoint, {
+      const data = await (earlyRead || api(request.endpoint, {
         method: options.refresh ? "POST" : "GET",
         signal: request.controller.signal
-      });
+      }));
       if (!isCurrent()) return null;
       state.gallery.data = data;
+      loadedSummaryEndpoint = request.endpoint;
       state.gallery.cache = data.cache || null;
       state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
       librarySummaryFailure = null;
@@ -235,7 +245,7 @@ export function createGalleryPage(deps) {
   }
 
   function imageLibraryListPath(options = {}) {
-    const collectionIndex = state.gallery.mode === "photo" && !state.gallery.photoCollection && state.gallery.photoView === "collections";
+    const photoView = state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections";
     const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && (state.gallery.seriesKey || state.gallery.person && state.gallery.person !== "all");
     const query = String(state.gallery.query || "").trim();
     const params = new URLSearchParams({
@@ -246,7 +256,11 @@ export function createGalleryPage(deps) {
     });
     if (query) params.set("q", query);
     if (state.gallery.mode === "photo") {
-      params.set("photoView", state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections");
+      params.set("photoView", photoView);
+      if (photoView === "collections" && !query) {
+        params.set("collectionPage", "1");
+        params.set("collectionLocale", PHOTO_CATALOG_LOCALE);
+      }
       if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
       if (state.gallery.subCategory && state.gallery.subCategory !== "all") params.set("subCategory", state.gallery.subCategory);
       if (state.gallery.person && state.gallery.person !== "all") params.set("person", state.gallery.person);
@@ -278,6 +292,7 @@ export function createGalleryPage(deps) {
   }
 
   function sameImageLibraryRevision(left, right) {
+    if ((left?.collectionPage === true) !== (right?.collectionPage === true)) return false;
     const leftRevision = String(left?.listRevision || "");
     const rightRevision = String(right?.listRevision || "");
     if (leftRevision || rightRevision) return Boolean(leftRevision && leftRevision === rightRevision);
@@ -369,6 +384,7 @@ export function createGalleryPage(deps) {
       state.gallery.list = {
         ...(currentList || {}),
         ...data,
+        collectionPage: data.collectionPage === true,
         items,
         count: items.length,
         limit: items.length,

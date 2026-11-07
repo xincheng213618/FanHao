@@ -12,6 +12,9 @@ sources:
   - src/modules/fanhao/server/collections/account-user-state-service.js
   - tests/verify_account_state_revision_read.mjs
   - src/modules/media/server/gallery-metadata-service.js
+  - src/modules/content-index/server/photo-library-store.js
+  - tools/rescan_image_library.mjs
+  - tools/import_gallery_index.mjs
   - src/modules/short-videos/server/navigation-queries.js
   - src/bootstrap/server-config.js
   - src/platform/server/http-app.js
@@ -151,7 +154,7 @@ module-registry.js：依次调用模块 API 路由
 | --- | --- | --- |
 | 人物、作品和关系 | `data/fanhao-core-v2.sqlite` | 番号模块核心库服务 |
 | 核心图片存储 | `data/fanhao-core-images.sqlite`，可配置 | 核心图片存储服务与使用它的业务流程 |
-| 图库索引与影视元数据 | `data/image-library-index.json`、`data/image-gallery.sqlite` | `content-index` 及图库/影视业务 |
+| 图库索引与影视元数据 | `data/image-gallery.sqlite` | `content-index` 及图库/影视业务。后台重扫在一个事务内发布所选范围。 |
 | 小说正文与阅读状态 | `data/novels.sqlite` | 小说存储 |
 | 小说采集任务 | `data/novel-collection.sqlite` 和任务输出目录 | 小说采集服务 |
 | 音乐目录和状态 | `data/music.sqlite` | 音乐存储 |

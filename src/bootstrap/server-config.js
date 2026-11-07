@@ -46,7 +46,6 @@ export function createServerConfig({
     PHOTO_SET_ROOTS: parsePhotoSetRoots(env),
     GALLERY_MEDIA_SOURCES: galleryMediaSources(env),
     WESTERN_LIBRARY_ROOTS: parseRootList(env.FANHAO_WESTERN_ROOTS, "R:\\"),
-    IMAGE_LIBRARY_INDEX_PATH: path.join(DATA_DIR, "image-library-index.json"),
     USER_STATE_PATH: path.join(DATA_DIR, "user-state.json"),
     CORE_DB_PATH: env.FANHAO_CORE_DB || path.join(DATA_DIR, "fanhao-core-v2.sqlite"),
     CORE_IMAGE_DB_PATH: env.FANHAO_CORE_IMAGE_DB || path.join(DATA_DIR, "fanhao-core-images.sqlite"),

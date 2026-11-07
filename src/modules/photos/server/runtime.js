@@ -17,7 +17,10 @@ export function createPhotosRuntime(deps) {
 
     const photoSetCoverMatch = /^\/media\/gallery-cover\/([^/]+)$/.exec(url.pathname);
     if (photoSetCoverMatch && req.method === "GET") {
-      await deps.photoSetService.serveCover(res, decodeURIComponent(photoSetCoverMatch[1]));
+      const fallback = url.searchParams.get("fallback");
+      await deps.photoSetService.serveCover(res, decodeURIComponent(photoSetCoverMatch[1]), {
+        fallback: fallback === "empty" ? "empty" : fallback === "1"
+      });
       return true;
     }
 

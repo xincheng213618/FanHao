@@ -1,4 +1,5 @@
 const photoTitleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+export const PHOTO_CATALOG_LOCALE = photoTitleCollator.resolvedOptions().locale;
 
 export const PHOTO_COLLECTION_SORT_OPTIONS = [
   ["updated", "最近更新"],

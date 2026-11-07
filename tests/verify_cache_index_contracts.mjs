@@ -5,6 +5,9 @@ import path from "node:path";
 import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "../src/modules/fanhao/server/library/cache-contracts.js";
 import { createPeopleScopeService } from "../src/modules/fanhao/server/people/people-scope-service.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
+import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
+import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
+import { createPhotoLibraryStore } from "../src/modules/content-index/server/photo-library-store.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
@@ -101,6 +104,7 @@ scopeRevision = "merge-2";
 assert.notEqual(scope.cacheKey(), firstScopeKey, "merge revision must participate in the scope cache identity");
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-index-contract-"));
+const galleryDb = createImageGalleryDbService({ dbPath: path.join(tempDir, "gallery.sqlite"), ensureDataDir() {} });
 try {
   const rootA = path.join(tempDir, "root-a");
   const rootB = path.join(tempDir, "root-b");
@@ -108,26 +112,31 @@ try {
   fs.mkdirSync(rootB, { recursive: true });
   fs.writeFileSync(path.join(rootA, "a.zip"), "a");
   fs.writeFileSync(path.join(rootB, "b.zip"), "b");
-  const indexPath = path.join(tempDir, "index.json");
-  const serviceFor = (photoSetRoots, archiveExts = new Set([".zip"])) => createImageLibraryIndexService({
+  const serviceFor = (photoSetRoots, archiveExts = new Set([".zip"]), photoLibraryStore) => createImageLibraryIndexService({
     archiveExts, createId: (prefix, value) => `${prefix}:${value}`,
-    directVideoExts: new Set([".mp4"]), ensureDataDir() {}, galleryMediaSources: [], imageLibraryIndexPath: indexPath,
+    directVideoExts: new Set([".mp4"]), galleryMediaSources: [], photoLibraryStore,
     isExcludedDirName: () => false, isVideo: () => false, normalizeExt: (value) => path.extname(value).toLowerCase(),
-    photoSetCoverUrl: () => "", photoSetRoots, readJsonFile: (filePath, fallback) => {
-      try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return fallback; }
-    }, safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } }, videoExts: new Set([".mp4"])
+    photoSetCoverUrl: () => "", photoSetRoots,
+    safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } }, videoExts: new Set([".mp4"])
   });
-  const first = serviceFor([rootA]).getIndex();
+  const project = createImageLibraryService({ photoCollectionRootValue: "__root__", photoSetService: { coverUrl: () => "" } }).projectPhotoIndex;
+  const storeFor = (photoSetRoots, archiveExts = [".zip"]) => createPhotoLibraryStore({
+    getDb: galleryDb.getDb, photoSetRoots, archiveExts, project
+  });
+  const first = serviceFor([rootA]).scanImageLibrary();
   assert.equal(first.schemaVersion, CURRENT_INDEX_SCHEMA);
   assert.equal(first.parserVersion, PARSER_VERSION);
   assert.equal(first.photoSets[0].title, "a");
-  fs.writeFileSync(indexPath, JSON.stringify({ ...first, schemaVersion: CURRENT_INDEX_SCHEMA - 1, photoSets: [{ title: "stale" }] }));
-  assert.equal(serviceFor([rootA]).getIndex().photoSets[0].title, "a", "old schemas must be rejected instead of being partially reused");
-  assert.equal(serviceFor([rootB]).getIndex().photoSets[0].title, "b", "different configured roots must reject the persisted index");
-  assert.equal(serviceFor([rootA], new Set([".cbz"])).getIndex().photoSets.length, 0, "archive extension changes must reject cached parser output");
-  fs.writeFileSync(indexPath, JSON.stringify({ ...first, parserVersion: PARSER_VERSION - 1, photoSets: [{ title: "stale" }] }));
-  assert.equal(serviceFor([rootA]).getIndex().photoSets[0].title, "a", "a parser version bump must re-list the index");
+  const store = storeFor([rootA]);
+  store.publish(first);
+  assert.equal(serviceFor([rootA], undefined, store).getIndex().photoSets[0].title, "a");
+  assert.equal(storeFor([rootB]).index(), null, "different configured roots reject the published index");
+  assert.equal(storeFor([rootA], [".cbz"]).index(), null, "archive extension changes reject cached parser output");
+  galleryDb.getDb().prepare("UPDATE photo_library_snapshot SET identity=json_set(identity,'$.parserVersion',?) WHERE id=1").run(PARSER_VERSION - 1);
+  assert.equal(store.index(), null, "an older parser publication is rejected");
+  assert.deepEqual(serviceFor([rootA], undefined, store).getIndex().photoSets, [], "an invalid snapshot waits for a background publication");
   console.log("cache-index-contracts: ok");
 } finally {
+  galleryDb.close();
   removeVerifiedTempDir(tempDir);
 }

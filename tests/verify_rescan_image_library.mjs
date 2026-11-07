@@ -5,11 +5,14 @@ import path from "node:path";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { createServerConfig } from "../src/bootstrap/server-config.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
 import { createPhotoSetService } from "../src/modules/photos/server/photo-set-service.js";
 import { createPhotosRuntime } from "../src/modules/photos/server/runtime.js";
+import { galleryMediaSources } from "../src/platform/server/root-config.js";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,14 +33,16 @@ try {
   fs.writeFileSync(path.join(animeRoot, "示例动漫", "第1话.mp4"), "fixture");
   const env = {
     ...process.env,
+    FANHAO_LOAD_ENV: "0",
+    FANHAO_PRODUCT: "suite",
     FANHAO_DATA_DIR: dataDir,
     FANHAO_PHOTO_SET_ROOTS: photoRoot,
     FANHAO_MOVIE_ROOTS: movieRoot,
     FANHAO_TV_ROOTS: tvRoot,
     FANHAO_ANIME_ROOTS: animeRoot
   };
-  const run = () => spawnSync(process.execPath, ["tools/rescan_image_library.mjs", "--scope", "all"], {
-    cwd: repoRoot, encoding: "utf8", env, windowsHide: true
+  const run = (scope = "all", overrides = {}) => spawnSync(process.execPath, ["tools/rescan_image_library.mjs", "--scope", scope], {
+    cwd: repoRoot, encoding: "utf8", env: { ...env, ...overrides }, windowsHide: true
   });
   const firstRun = run();
   assert.equal(firstRun.status, 0, firstRun.stderr || firstRun.stdout);
@@ -51,32 +56,142 @@ try {
   assert.equal(progress.at(-1).percent, 100);
   assert.equal(progress.at(-1).photoSets, 1);
   const indexPath = path.join(dataDir, "image-library-index.json");
-  const first = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-  assert.equal(first.schemaVersion, CURRENT_INDEX_SCHEMA);
-  assert.equal(first.parserVersion, PARSER_VERSION);
+  assert.equal(fs.existsSync(indexPath), false, "a fresh scan never writes a JSON index");
+  const first = readPublication(dataDir);
+  assert.ok(first.photoRevision);
+  assert.equal(first.mediaRevision, first.photoRevision, "an all-scope scan publishes both together");
   assert.deepEqual(first.photoSets.map((item) => item.title), ["fixture"]);
   assert.deepEqual(first.mediaItems.map((item) => [item.mediaKind, item.title]), [["anime", "第1话"], ["movie", "fixture"]]);
   assert.equal(first.mediaItems.find((item) => item.mediaKind === "anime")?.seriesName, "示例动漫");
-  fs.writeFileSync(indexPath, JSON.stringify({ ...first, cacheIdentity: "wrong", photoSets: [{ title: "stale" }] }));
-  const secondRun = run();
+  fs.writeFileSync(indexPath, "stale and invalid JSON");
+  const secondRun = run("photo");
   assert.equal(secondRun.status, 0, secondRun.stderr || secondRun.stdout);
-  const second = JSON.parse(fs.readFileSync(indexPath, "utf8"));
-  assert.deepEqual(second.photoSets.map((item) => item.title), ["fixture"], "rescan must reject an incompatible persisted index");
-  assert.equal(second.mediaItems.filter((item) => item.mediaKind === "anime").length, 1);
-  await verifyPhotoSetLookup(photoRoot, dataDir);
+  const second = readPublication(dataDir);
+  assert.deepEqual(second.photoSets, first.photoSets);
+  assert.notEqual(second.photoRevision, first.photoRevision);
+  assert.deepEqual(second.mediaItems, first.mediaItems);
+  assert.equal(second.mediaRevision, first.mediaRevision, "a photo scan leaves the published media scope intact");
+  assert.equal(fs.readFileSync(indexPath, "utf8"), "stale and invalid JSON", "a scan ignores old JSON entirely");
+  verifyExplicitImport({ tempDir, env, run, first });
+  const detachedRoot = path.join(tempDir, "detached-photos");
+  const detachedData = path.join(tempDir, "detached-data");
+  fs.mkdirSync(detachedRoot);
+  const detachedConfig = { FANHAO_PHOTO_SET_ROOTS: detachedRoot, FANHAO_DATA_DIR: detachedData };
+  const connected = run("photo", detachedConfig);
+  assert.equal(connected.status, 0, connected.stderr || connected.stdout);
+  const prior = readPublication(detachedData);
+  fs.rmdirSync(detachedRoot);
+  const disconnected = run("photo", detachedConfig);
+  assert.notEqual(disconnected.status, 0);
+  assert.match(disconnected.stderr, /原图库目录暂不可用/);
+  assert.deepEqual(readPublication(detachedData), prior);
+  await verifyPhotoSetLookup(photoRoot);
+  verifyScanCollation({ photoRoot, movieRoot, dataDir, env, run });
   console.log("rescan-image-library: ok");
 } finally {
   removeVerifiedTempDir(tempDir);
 }
 
-async function verifyPhotoSetLookup(photoRoot, dataDir) {
+function readPublication(dataDir) {
+  const db = new DatabaseSync(path.join(dataDir, "image-gallery.sqlite"), { readOnly: true });
+  try {
+    const rows = table => db.prepare(`SELECT data_json FROM ${table} ORDER BY position`).all().map(row => JSON.parse(row.data_json));
+    return {
+      photoRevision: db.prepare("SELECT revision FROM photo_library_snapshot WHERE id=1").get()?.revision,
+      mediaRevision: db.prepare("SELECT revision FROM gallery_media_library_snapshot WHERE id=1").get()?.revision,
+      photoSets: rows("photo_library_archives"), mediaItems: rows("gallery_media_library_items")
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function verifyExplicitImport({ tempDir, env, run, first }) {
+  const target = path.join(tempDir, "import-data");
+  const overrides = { FANHAO_DATA_DIR: target };
+  const scanned = run("photo", overrides);
+  assert.equal(scanned.status, 0, scanned.stderr || scanned.stdout);
+  const prior = readPublication(target);
+  const config = createServerConfig({ env: { ...env, ...overrides } });
+  const legacy = {
+    schemaVersion: CURRENT_INDEX_SCHEMA, parserVersion: PARSER_VERSION,
+    cacheIdentity: imageLibraryCacheIdentity({ archiveExts: config.ARCHIVE_EXTS, photoSetRoots: config.PHOTO_SET_ROOTS,
+      directVideoExts: config.DIRECT_VIDEO_EXTS, galleryMediaSources: config.GALLERY_MEDIA_SOURCES, videoExts: config.VIDEO_EXTS }),
+    scannedAt: "2026-10-01T00:00:00Z", roots: [], mediaRoots: [],
+    photoSets: [{ ...first.photoSets[0], title: "Superseded fixture" }], mediaItems: first.mediaItems
+  };
+  const source = path.join(tempDir, "explicit-legacy.json");
+  const importIndex = () => spawnSync(process.execPath, ["tools/import_gallery_index.mjs", source], {
+    cwd: repoRoot, encoding: "utf8", env: { ...env, ...overrides }, windowsHide: true
+  });
+  fs.writeFileSync(source, JSON.stringify({ ...legacy, schemaVersion: CURRENT_INDEX_SCHEMA - 1 }));
+  const wrong = importIndex();
+  assert.notEqual(wrong.status, 0, "old schema files cannot be imported");
+  assert.deepEqual(readPublication(target), prior);
+  const bytes = JSON.stringify(legacy);
+  fs.writeFileSync(source, bytes);
+  const result = importIndex();
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(result.stdout), { importedPhotos: false, importedMedia: true, photoSets: 1, mediaItems: 2 });
+  const imported = readPublication(target);
+  assert.equal(imported.photoRevision, prior.photoRevision);
+  assert.deepEqual(imported.photoSets, prior.photoSets);
+  assert.deepEqual(imported.mediaItems, legacy.mediaItems);
+  assert.equal(fs.readFileSync(source, "utf8"), bytes, "explicit import leaves the source available for operator verification");
+  const again = importIndex();
+  assert.equal(again.status, 0, again.stderr || again.stdout);
+  assert.deepEqual(JSON.parse(again.stdout), { importedPhotos: false, importedMedia: false, photoSets: 1, mediaItems: 2 });
+  assert.deepEqual(readPublication(target), imported);
+}
+
+function verifyScanCollation({ photoRoot, movieRoot, dataDir, env, run }) {
+  const oldCompare = (left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+  assert.equal(oldCompare("第02话", "第2话"), 0);
+  assert.equal(oldCompare("Épisode 03", "Episode 3"), 0);
+  const stamp = new Date("2020-01-01T00:00:00Z");
+  const newer = new Date("2020-02-01T00:00:00Z");
+  function expectedTitles(root, extension) {
+    for (const title of ["第10话", "第02话", "第2话", "第1话", "Épisode 03", "Episode 3", "第99话"]) {
+      const file = path.join(root, title + extension);
+      fs.writeFileSync(file, "synthetic sort fixture");
+      fs.utimesSync(file, stamp, title === "第99话" ? newer : stamp);
+    }
+    fs.utimesSync(path.join(root, "fixture" + extension), stamp, stamp);
+    return fs.readdirSync(root).sort(oldCompare)
+      .map(name => ({ title: path.parse(name).name, updatedAt: fs.statSync(path.join(root, name)).mtimeMs }))
+      .sort((a, b) => b.updatedAt - a.updatedAt || oldCompare(a.title, b.title)).map(item => item.title);
+  }
+  const photos = expectedTitles(photoRoot, ".zip");
+  const movies = expectedTitles(movieRoot, ".mp4");
+  const service = createImageLibraryIndexService({
+    archiveExts: new Set([".zip"]), directVideoExts: new Set([".mp4"]), galleryMediaSources: galleryMediaSources(env),
+    photoSetRoots: [photoRoot], videoExts: [".mp4"], createId: (prefix, value) => `${prefix}_${value}`,
+    normalizeExt: path.extname, isExcludedDirName: () => false, isVideo: name => name.endsWith(".mp4"),
+    photoSetCoverUrl: id => id, safeStat: file => fs.statSync(file, { throwIfNoEntry: false })
+  });
+  function assertOrder(index) {
+    assert.deepEqual(index.photoSets.map(item => item.title), photos);
+    assert.deepEqual(index.mediaItems.filter(item => item.mediaKind === "movie").map(item => item.title), movies);
+  }
+  assertOrder(service.scanImageLibrary());
+  const all = run();
+  assert.equal(all.status, 0, all.stderr || all.stdout);
+  const fullIndex = readPublication(dataDir);
+  assertOrder(fullIndex);
+  const partial = run("movie");
+  assert.equal(partial.status, 0, partial.stderr || partial.stdout);
+  const mergedIndex = readPublication(dataDir);
+  assert.notEqual(mergedIndex.mediaRevision, fullIndex.mediaRevision);
+  assert.deepEqual({ ...mergedIndex, mediaRevision: fullIndex.mediaRevision }, fullIndex, "a scoped movie rescan preserves photos, other media kinds and tied order");
+}
+
+async function verifyPhotoSetLookup(photoRoot) {
   const serverSource = fs.readFileSync(path.join(repoRoot, "server.js"), "utf8").replaceAll("\r\n", "\n");
   const serviceAssembly = serverSource.match(/const photoSetService = withGallery \? createPhotoSetService\(\{[\s\S]+?\}\) : null;/u)?.[0];
   const runtimeAssembly = serverSource.match(/\n      photos: \{([\s\S]+?)\n      \},\n      media:/u)?.[1];
   assert(serviceAssembly && runtimeAssembly, "execute the actual server photo service and runtime dependency assembly");
   const imageRows = Array.from({ length: 20 }, (_, index) => ({ path: `page-${index + 1}.jpg`, name: `Page ${index + 1}`, bytes: 10 }));
   const configuration = { archiveExts: new Set([".zip"]), directVideoExts: new Set([".mp4"]), galleryMediaSources: [], photoSetRoots: [photoRoot], videoExts: [".mp4"] };
-  const identity = imageLibraryCacheIdentity(configuration);
   function response() {
     const res = new EventEmitter();
     Object.assign(res, { destroyed: false, writableEnded: false, status: null, headers: null, body: null });
@@ -85,17 +200,23 @@ async function verifyPhotoSetLookup(photoRoot, dataDir) {
     return res;
   }
   function fixture(indexed) {
-    const counts = { elements: 0, persistedReads: 0, lookupCalls: 0, signatures: 0, dbReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
-    const raw = Array.from({ length: 12000 }, (_, index) => ({ id: `album-${index}`, title: `Synthetic album ${index}`, sourceRoot: photoRoot, relativePath: `${index}.zip`, updatedAt: "before", imageCount: 20, coverUrl: "" }));
+    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
+    const raw = Array.from({ length: 12000 }, (_, index) => ({ id: `album-${index}`, title: `Synthetic album ${index}`, sourceRoot: photoRoot, relativePath: `${index}.zip`, updatedAt: "before", imageCount: 20, size: 32, archiveIdentity: "synthetic", coverUrl: "" }));
     raw[0].id = "duplicate"; raw[1].id = "duplicate"; raw[2].id = 123;
     const counted = rows => new Proxy(rows, { get(target, key, receiver) { if (typeof key === "string" && /^\d+$/u.test(key)) counts.elements++; return Reflect.get(target, key, receiver); } });
-    let persisted = { schemaVersion: CURRENT_INDEX_SCHEMA, parserVersion: PARSER_VERSION, cacheIdentity: identity, photoSets: counted(raw), mediaItems: [], scannedAt: "synthetic" };
-    const owner = createImageLibraryIndexService({ ...configuration, imageLibraryIndexPath: path.join(dataDir, `lookup-${indexed}.json`),
-      ensureDataDir() {}, createId: (_prefix, value) => value, normalizeExt: value => path.extname(value).toLowerCase(),
-      isExcludedDirName: () => false, isVideo: () => false, photoSetCoverUrl: id => `/media/gallery-cover/${encodeURIComponent(id)}`,
-      readJsonFile: () => { counts.persistedReads++; return persisted; }, safeStat: target => fs.statSync(target, { throwIfNoEntry: false }) });
-    const lookup = owner.photoSetById, release = owner.clearPhotoSetLookup;
-    owner.photoSetById = indexed ? id => { counts.lookupCalls++; return lookup(id); } : undefined;
+    const source = { photoSets: counted(raw), mediaItems: [], scannedAt: "synthetic" };
+    const rows = new Map();
+    for (const row of raw) if (!rows.has(row.id)) rows.set(row.id, row);
+    const photoLibraryStore = indexed ? {
+      byId(id) { counts.lookupCalls++; return rows.get(id) || null; },
+      index: () => assert.fail("point lookups must not materialize the photo index")
+    } : undefined;
+    const owner = createImageLibraryIndexService({ ...configuration, photoLibraryStore });
+    if (!indexed) {
+      owner.photoSetById = undefined;
+      owner.getIndex = () => source;
+    }
+    const release = owner.clearPhotoSetLookup;
     owner.clearPhotoSetLookup = () => { counts.releases++; release(); };
     const db = { prepare() { return { get(id) { counts.dbReads++; const album = raw.find(value => value.id === id); return {
       album_id: id, archive_path: path.resolve(album.sourceRoot, album.relativePath), archive_size: 32, archive_mtime_ms: 1,
@@ -117,7 +238,7 @@ async function verifyPhotoSetLookup(photoRoot, dataDir) {
     };
     vm.runInNewContext(serviceAssembly.replace("const photoSetService =", "globalThis.photoSetService ="), context);
     vm.runInNewContext(`globalThis.runtime = createPhotosRuntime({${runtimeAssembly}});`, context);
-    return { counts, raw, counted, owner, lookup, context, service: context.photoSetService, runtime: context.runtime, setPersisted(value) { persisted = value; } };
+    return { counts, raw, owner, context, service: context.photoSetService, runtime: context.runtime };
   }
   const results = [];
   for (const indexed of [false, true]) {
@@ -133,9 +254,9 @@ async function verifyPhotoSetLookup(photoRoot, dataDir) {
         const res = response(); assert.equal(await f.runtime.routeMedia({ method: "GET" }, res, new URL(`http://fixture/media/gallery-cover/${id}`)), true);
         responses.push({ status: res.status, headers: res.headers, body: Buffer.from(res.body).toString("hex") });
       }
-      assert.equal(f.counts.elements, indexed ? 12000 : 612000, "actual production owner getter must index once instead of scanning every image and cover authority lookup");
-      assert.equal(f.counts.lookupCalls, indexed ? 51 : 0, "every detail, image and cover authority read uses the injected production capability");
-      assert.equal(f.counts.persistedReads, 1); assert.equal(f.counts.imageLists, 32); assert.equal(f.counts.signatures, 12); assert.equal(f.counts.dbReads, 24);
+      assert.equal(f.counts.elements, indexed ? 0 : 612000, "published detail, image and cover reads do not materialize archive rows");
+      assert.equal(f.counts.lookupCalls, indexed ? 39 : 0, "one point lookup serves each indexed detail, image and warm cover request");
+      assert.equal(f.counts.imageLists, 32); assert.equal(f.counts.signatures, indexed ? 0 : 12); assert.equal(f.counts.dbReads, indexed ? 6 : 24);
       console.log(`photo-set lookup ${indexed ? "indexed" : "fallback"}: ${f.counts.elements} elements, ${f.counts.lookupCalls} owner lookups, 39 actual runtime responses`);
       results.push(responses);
       assert.equal(f.service.byId("duplicate").title, "Synthetic album 0"); assert.equal(f.service.byId("123"), null); assert.equal(f.service.byId(""), null);
@@ -148,14 +269,7 @@ async function verifyPhotoSetLookup(photoRoot, dataDir) {
         vm.runInNewContext(`globalThis.photoDeps = {${runtimeAssembly}};`, disabledContext);
         assert.equal(disabledContext.photoSetService, null);
         assert.equal(disabledContext.photoDeps.releasePhotoSetLookup, undefined, "a product without gallery must not dereference its disabled index owner while assembling dependencies");
-        const beforeRelease = f.counts.elements; await f.runtime.stop(); assert.equal(f.counts.releases, 1);
-        f.lookup(id); assert.equal(f.counts.elements, beforeRelease + 12000, "successful runtime stop releases the owner lookup");
-        const refreshed = f.owner.getIndex({ refresh: true }); assert.equal(refreshed.photoSets.length, 1);
-        assert.equal(f.lookup(id), null, "scan refresh cannot retain IDs from an older snapshot");
-        const replacement = { ...refreshed, photoSets: f.counted([{ id: "replacement", title: "Replacement" }]) };
-        f.setPersisted(replacement); f.owner.invalidate(); assert.equal(f.lookup("replacement").title, "Replacement"); assert.equal(f.lookup(id), null);
-        replacement.photoSets = f.counted([{ id: "new-array", title: "New array" }]);
-        assert.equal(f.lookup("replacement"), null); assert.equal(f.lookup("new-array").title, "New array");
+        await f.runtime.stop(); assert.equal(f.counts.releases, 1);
       } else {
         const snapshot = f.owner.getIndex();
         snapshot.photoSets[0] = { id: "new-id", title: "Same-array replacement" };
@@ -170,5 +284,5 @@ async function verifyPhotoSetLookup(photoRoot, dataDir) {
   let releases = 0;
   const failedRuntime = createPhotosRuntime({ photoSetService: { stop: async () => { throw new Error("held physical cover owner"); } }, releasePhotoSetLookup: () => { releases++; } });
   await assert.rejects(failedRuntime.stop(), /held physical cover owner/u); assert.equal(releases, 0, "failed stop retains the lookup until authority owners drain");
-  console.log("photo-set owner lookup: production assembly, invalidation, refresh, stop, duplicate/type/DTO and mutable fallback checks passed");
+  console.log("photo-set owner lookup: production assembly, point reads, warm covers, stop, duplicate/type/DTO and mutable fallback checks passed");
 }

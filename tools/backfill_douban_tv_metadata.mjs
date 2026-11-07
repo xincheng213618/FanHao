@@ -3,13 +3,12 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { canonicalDoubanSubjectUrl, cleanMovieSearchTitle, chooseMovieMetadata } from "../lib/douban-movie-match.js";
+import { createPhotoLibraryStore } from "../src/modules/content-index/server/photo-library-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.join(REPO_ROOT, "data");
-const INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
-const DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 const DEFAULT_COOKIE_FILE = path.join(DATA_DIR, "douban-cookie.txt");
 
 const USER_AGENT =
@@ -110,12 +109,17 @@ function createRequest(options, injected = {}) {
   };
 }
 
-function readJson(filePath, fallback = null) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return fallback;
-  }
+function readPublishedMedia(db, config) {
+  const snapshotTable = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='gallery_media_library_snapshot'").get();
+  if (!snapshotTable) return null;
+  return createPhotoLibraryStore({
+    getDb: () => db,
+    archiveExts: config.ARCHIVE_EXTS,
+    photoSetRoots: config.PHOTO_SET_ROOTS,
+    directVideoExts: config.DIRECT_VIDEO_EXTS,
+    galleryMediaSources: config.GALLERY_MEDIA_SOURCES,
+    videoExts: config.VIDEO_EXTS
+  }).mediaIndex();
 }
 
 function resolveRepoPath(value) {
@@ -916,11 +920,14 @@ export async function run(options = {}, injected = {}) {
   options = { ...parseArgs([]), ...options, kind: normalizeKind(options.kind) };
   const request = createRequest(options, injected);
   const log = injected.log || console.log;
-  const cookieState = injected.cookieState ?? readDoubanCookie(options);
-  options.cookie = cookieState.cookie;
-  const index = injected.index ?? readJson(INDEX_PATH, {});
-  const db = injected.db ?? new DatabaseSync(DB_PATH);
+  const storage = injected.db ? null : (await import("../src/bootstrap/server-config.js")).createServerConfig();
+  if (storage && !fs.existsSync(storage.IMAGE_GALLERY_DB_PATH)) throw new Error("图库数据库不存在，请先刷新图库索引");
+  const db = injected.db ?? new DatabaseSync(storage.IMAGE_GALLERY_DB_PATH);
   try {
+    const index = injected.index ?? readPublishedMedia(db, storage);
+    if (!index) throw new Error("当前图库尚未发布兼容的影视索引，请先刷新图库索引");
+    const cookieState = injected.cookieState ?? readDoubanCookie(options);
+    options.cookie = cookieState.cookie;
     ensureSchema(db);
     const config = metadataConfig(options.kind);
     const existing = existingRows(db, options.kind);

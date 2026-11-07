@@ -27,7 +27,9 @@
 
 ## 数据与验证
 
-默认索引路径为 `data/image-library-index.json`；图片读取缓存由平台服务管理，图库数据库默认是 `data/image-gallery.sqlite`。具体路径和缓存边界见 [数据布局](../data-layout.md)。
+套图与影视索引存入 `data/image-gallery.sqlite`。图片读取缓存由平台服务管理，具体路径和缓存边界见[数据布局](../data-layout.md)。
+
+旧索引可运行 `node tools/import_gallery_index.mjs '.\旧图库索引.json'` 一次性导入。命令会写入缺失的 SQLite 快照，核对导入结果后可将旧文件移出原位置。
 
 修改索引字段、分页或客户端复用逻辑时运行：
 

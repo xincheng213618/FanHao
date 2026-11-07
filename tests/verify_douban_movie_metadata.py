@@ -298,14 +298,14 @@ test("default request pacing is at least five seconds", default_pacing)
 
 
 def partial_injection():
-    original = (collector.read_cookie_state, collector.read_json, sqlite3.connect, collector.sync_playwright)
+    original = (collector.read_cookie_state, collector.read_published_movies, sqlite3.connect, collector.sync_playwright)
     calls = []
 
     def forbidden(*unused, **ignored):
         calls.append("external-access")
         raise AssertionError("real resource access forbidden")
 
-    collector.read_cookie_state = collector.read_json = sqlite3.connect = collector.sync_playwright = forbidden
+    collector.read_cookie_state = collector.read_published_movies = sqlite3.connect = collector.sync_playwright = forbidden
     try:
         for key in ["conn", "index", "cookie_state", "context", "page"]:
             for omitted in [True, False]:
@@ -318,7 +318,7 @@ def partial_injection():
                 assert "同时提供" in str(error)
         eq(calls, [])
     finally:
-        collector.read_cookie_state, collector.read_json, sqlite3.connect, collector.sync_playwright = original
+        collector.read_cookie_state, collector.read_published_movies, sqlite3.connect, collector.sync_playwright = original
 test("partial injection rejects before DB/cookie/browser access", partial_injection)
 
 

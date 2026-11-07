@@ -1,31 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageLibraryIndexMatches } from "./image-library-index-contract.js";
+import { archiveDiskSignature } from "../../../platform/server/archive-image-service.js";
+import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "./image-library-index-contract.js";
 
 export function createImageLibraryIndexService({
   archiveExts,
   createId,
   directVideoExts,
-  ensureDataDir,
   galleryMediaSources,
-  imageLibraryIndexPath,
   isExcludedDirName,
   isVideo,
   normalizeExt,
   photoSetCoverUrl,
+  photoLibraryStore,
   photoSetRoots,
-  readJsonFile,
   safeStat,
   videoExts = []
 }) {
   let cache = null;
   let photoSetLookup = null;
+  let combinedIndex = null;
+  const emptyMediaIndex = { scannedAt: "", mediaRoots: [], mediaItems: [] };
   const revisionRealm = randomUUID();
   let publicationRevision = 0;
 
   function listRevision() {
+    if (photoLibraryStore) return JSON.stringify([photoLibraryStore.revision(), photoLibraryStore.mediaRevision()]);
     return `${revisionRealm}:${publicationRevision}`;
+  }
+
+  function mediaListRevision() {
+    return photoLibraryStore ? photoLibraryStore.mediaRevision() : listRevision();
   }
   const cacheIdentity = imageLibraryCacheIdentity({ archiveExts, directVideoExts, galleryMediaSources, photoSetRoots, videoExts });
 
@@ -147,6 +153,7 @@ export function createImageLibraryIndexService({
       archiveExt: normalizeExt(filePath).slice(1),
       size: stat?.size || 0,
       updatedAt,
+      archiveIdentity: archiveDiskSignature(filePath, stat)?.archiveIdentity || "",
       imageCount: null,
       coverUrl: photoSetCoverUrl(id, updatedAt)
     };
@@ -364,37 +371,30 @@ export function createImageLibraryIndexService({
     };
   }
 
-  function loadCache() {
-    if (cache) return cache;
-    const cached = readJsonFile(imageLibraryIndexPath, null);
-    if (imageLibraryIndexMatches(cached, cacheIdentity)) {
-      clearPhotoSetLookup();
-      cache = cached;
-      publicationRevision += 1;
-      return cache;
-    }
-    return null;
-  }
-
-  function saveCache(index) {
-    ensureDataDir();
-    fs.writeFileSync(imageLibraryIndexPath, JSON.stringify(index, null, 2), "utf8");
-  }
-
   function getIndex(options = {}) {
-    if (!options.refresh) {
-      const cached = loadCache();
-      if (cached) return cached;
+    if (photoLibraryStore) {
+      const photo = photoLibraryStore.index();
+      const media = getMediaIndex();
+      if (combinedIndex && combinedIndex.photo === photo && combinedIndex.media === media) return combinedIndex.value;
+      const value = { ...media, scannedAt: media.scannedAt || photo?.scannedAt || "",
+        roots: photo?.roots || [], photoSets: photo?.photoSets || [] };
+      combinedIndex = { photo, media, value };
+      return value;
     }
+    if (cache && !options.refresh) return cache;
     clearPhotoSetLookup();
     cache = scanImageLibrary();
     publicationRevision += 1;
-    saveCache(cache);
     return cache;
+  }
+
+  function getMediaIndex(options) {
+    return photoLibraryStore ? photoLibraryStore.mediaIndex() || emptyMediaIndex : getIndex(options);
   }
 
   function invalidate() {
     cache = null;
+    combinedIndex = null;
     publicationRevision += 1;
     clearPhotoSetLookup();
   }
@@ -406,6 +406,7 @@ export function createImageLibraryIndexService({
   function photoSetById(id) {
     const target = String(id || "");
     if (!target) return null;
+    if (photoLibraryStore) return publishedPhotoSetById(target) ?? null;
     const index = getIndex();
     const albums = index.photoSets;
     if (photoSetLookup?.index !== index || photoSetLookup.albums !== albums) {
@@ -418,13 +419,25 @@ export function createImageLibraryIndexService({
     return photoSetLookup.byId.get(target) || null;
   }
 
+  function publishedPhotoSetById(id) {
+    return photoLibraryStore?.byId(id);
+  }
+
+  function getPhotoSets() {
+    return photoLibraryStore ? photoLibraryStore.index()?.photoSets || [] : getIndex().photoSets;
+  }
+
   return {
     galleryMediaRootStatuses,
     clearPhotoSetLookup,
     getIndex,
+    getMediaIndex,
+    getPhotoSets,
     invalidate,
     listRevision,
+    mediaListRevision,
     photoSetById,
+    publishedPhotoSetById,
     photoSetRootStatuses,
     scanImageLibrary
   };

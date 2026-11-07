@@ -134,6 +134,45 @@ function ensureColumn(db, table, column, definition) {
 
 function ensureSchema(db) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS photo_library_snapshot (
+      id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, revision TEXT NOT NULL,
+      scanned_at TEXT NOT NULL, roots_json TEXT NOT NULL, overview_json TEXT NOT NULL,
+      facets_json TEXT NOT NULL, scopes_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS photo_library_archives (
+      id TEXT PRIMARY KEY NOT NULL, position INTEGER NOT NULL UNIQUE,
+      collection_id TEXT NOT NULL, data_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_photo_library_archive_collection ON photo_library_archives(collection_id, position);
+    CREATE TABLE IF NOT EXISTS photo_library_collections (
+      category TEXT NOT NULL, sort TEXT NOT NULL, locale TEXT NOT NULL, position INTEGER NOT NULL,
+      data_json TEXT NOT NULL,
+      PRIMARY KEY(category, sort, locale, position)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS photo_publishers (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, code TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS photo_publisher_members (
+      publisher_id TEXT NOT NULL REFERENCES photo_publishers(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK(kind IN ('collection', 'video')),
+      target_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL,
+      PRIMARY KEY(publisher_id, kind, target_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_photo_publisher_members_target ON photo_publisher_members(kind, target_id);
+    CREATE TABLE IF NOT EXISTS photo_publisher_video_items (
+      id TEXT PRIMARY KEY NOT NULL, data_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS gallery_media_library_snapshot (
+      id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, revision TEXT NOT NULL,
+      scanned_at TEXT NOT NULL, roots_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS gallery_media_library_items (
+      id TEXT PRIMARY KEY NOT NULL, position INTEGER NOT NULL UNIQUE,
+      media_kind TEXT NOT NULL, data_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_gallery_media_library_kind ON gallery_media_library_items(media_kind, position);
+
     CREATE TABLE IF NOT EXISTS photo_set_covers (
       album_id TEXT PRIMARY KEY,
       archive_path TEXT NOT NULL,

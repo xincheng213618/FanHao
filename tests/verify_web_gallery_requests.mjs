@@ -73,12 +73,91 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    for (const publisher of [{ id: 'bololi', name: '菠萝社', code: 'BoLoli' }, null]) {
+      await run(`photo collection detail paints metadata before overview and covers with ${publisher ? 'publisher' : 'category'} breadcrumb`, async () => {
+        const category = '[XIUREN] 秀人网';
+        const previewTitle = 'NO.010 目录合集';
+        const title = '合成详情合集';
+        const collection = `V:\\图库卷|${category}/${previewTitle}`;
+        const categoryValue = publisher ? 'publisher:bololi' : category;
+        const isItems = url => url.pathname === '/api/image-library/items';
+        const overview = hold(isSummary);
+        const detail = hold(url => isItems(url) && url.searchParams.get('collection') === collection, '', {
+          items: [
+            { ...listItem('detail-pending'), title: '封面加载中的套图', albumSubject: '封面加载中的套图', personName: '合成人物', archiveDate: '2026-10-05', size: 2048,
+              coverUrl: '/media/gallery-cover/detail-pending?v=fixture' },
+            { ...listItem('detail-missing'), title: '没有封面的套图', coverUrl: '/media/gallery-cover/detail-missing?v=fixture' }
+          ],
+          count: 2, total: 2, facets: {},
+          collectionSummary: { title, category, publisher, rootLabel: 'V:\\图库卷', largeCategoryTitle: `V:\\图库卷 / ${category}`, count: 2, size: 4096, imageCount: 20000 }
+        });
+        const parent = hold(url => isItems(url) && url.searchParams.get('category') === categoryValue && !url.searchParams.has('collection'));
+        const page = await newPage({ real: true, route: `/photo/collection/${encodeURIComponent(collection)}`, waitReady: false });
+        const coverRequests = new Map();
+        let releaseCovers;
+        const coversPending = new Promise(resolve => { releaseCovers = resolve; });
+        try {
+          await page.route('**/media/gallery-cover/detail-*', async route => {
+            const url = new URL(route.request().url());
+            coverRequests.set(url.pathname, url.searchParams);
+            await coversPending;
+            if (url.pathname.endsWith('/detail-missing')) await route.fulfill({ status: 204 });
+            else await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' });
+          });
+          await Promise.all([requested(overview), requested(detail)]);
+          const heading = page.locator('.gallery-collection-hero-copy > strong');
+          const breadcrumb = page.locator('.gallery-collection-breadcrumb');
+          await heading.waitFor({ state: 'visible' });
+          assert.equal(await heading.innerText(), previewTitle);
+          assert.deepEqual(await breadcrumb.locator('button').allTextContents(), ['图库', '秀人网']);
+          assert.equal(await breadcrumb.locator('strong').innerText(), previewTitle);
+          assert.doesNotMatch(await breadcrumb.innerText(), /V:|图库卷/);
+          assert.equal(overview.closed, false, 'detail request starts while overview remains pending');
+
+          await settle(page, detail);
+          const pending = page.locator('[data-gallery-album-id="detail-pending"]');
+          const missing = page.locator('[data-gallery-album-id="detail-missing"]');
+          await pending.waitFor({ state: 'visible' });
+          await until(() => coverRequests.size === 2, 'both visible covers must start without waiting for either response');
+          assert.equal(await heading.innerText(), title);
+          assert.match(await page.locator('.gallery-collection-hero-copy').innerText(), /2 期.*4\.00 KB.*20,000 张/);
+          assert.match(await pending.locator('.gallery-card-body').innerText(), /封面加载中的套图[\s\S]*合成人物[\s\S]*2026-10-05/);
+          assert.equal(await pending.locator('img').evaluate(img => img.complete), false);
+          assert.equal(await missing.locator('img').evaluate(img => img.complete), false);
+          assert([...coverRequests.values()].every(params => params.get('fallback') === 'empty' && params.get('v') === 'fixture'));
+          assert.deepEqual(await breadcrumb.locator('button').allTextContents(), ['图库', publisher?.name || '秀人网']);
+          assert.equal(await breadcrumb.locator('strong').innerText(), title);
+          assert.doesNotMatch(await breadcrumb.innerText(), /V:|图库卷/);
+          assert.equal(overview.closed, false, 'the detail and card metadata render with the overview held');
+          if (publisher) {
+            await pending.locator('img').evaluate(img => { window.__collectionCover = img; });
+            await settle(page, overview);
+            assert(await pending.locator('img').evaluate(img => img === window.__collectionCover && !img.complete),
+              'the late overview keeps the live card and its pending cover');
+          }
+
+          releaseCovers();
+          await missing.locator('img').waitFor({ state: 'detached' });
+          assert.equal(await missing.locator('.gallery-card-body strong').innerText(), '没有封面的套图');
+          assert.match(await missing.locator('.gallery-card-cover').evaluate(cover => getComputedStyle(cover, '::after').content), /^(?:none|normal|"")$/);
+
+          await breadcrumb.getByRole('button', { name: publisher?.name || '秀人网' }).click();
+          await page.waitForURL(url => url.searchParams.get('category') === categoryValue);
+          if (!publisher) await settle(page, overview);
+          await requested(parent);
+          assert.equal(new URL(parent.url, base).searchParams.get('category'), categoryValue);
+        } finally { releaseCovers(); releaseSummaryGates(overview, detail, parent); await page.close(); }
+      });
+    }
     await run('summary recovery: a cold failure exposes an actionable read-only retry', async () => {
-      const failed = hold((url, method) => method === 'GET' && url.pathname === '/api/image-library/summary' && url.search === '', 'Synthetic cold summary unavailable');
+      const failed = hold(isSummary, 'Synthetic cold summary unavailable');
       const beforeItems = countRequests(url => url.pathname === '/api/image-library/items'), methodStart = apiMethods.length;
       const page = await newPage({ real: true, route: '/photo', waitReady: false });
       try {
-        await requested(failed); await settle(page, failed);
+        await requested(failed);
+        await page.waitForFunction(() => document.documentElement.dataset.appModule === 'standalone'
+          && !document.documentElement.classList.contains('app-module-loading'));
+        await settle(page, failed);
         const actual = { body: await page.locator('.gallery-list-state').allTextContents(), retries: await page.locator('.gallery-list-state button').count(),
           items: countRequests(url => url.pathname === '/api/image-library/items') - beforeItems, api: apiMethods.slice(methodStart) };
         console.log('GALLERY_COLD_SUMMARY_FAILURE', JSON.stringify(actual));
@@ -1618,7 +1697,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
   function hold(match, error = "", body = null) {
     let release, requestedResolve; const value = { match, error, body, used: false, closed: false, promise: new Promise(resolve => { release = resolve; }), requested: new Promise(resolve => { requestedResolve = resolve; }), release, requestedResolve }; held.add(value); return value;
   }
-  function isSummary(url, method = 'GET') { return method === 'GET' && url.pathname === '/api/image-library/summary' && url.search === ''; }
+  function isSummary(url, method = 'GET') { return method === 'GET' && url.pathname === '/api/image-library/summary' && ['', '?mode=photo'].includes(url.search); }
   function releaseSummaryGates(...gates) { for (const gate of gates) { if (!gate.used) held.delete(gate); gate.release(); } }
   function assertReadOnly(start) { assert(apiMethods.slice(start).every(request => request.method === 'GET' && !request.url.includes('/rescan')), 'summary recovery must use read-only APIs and never scan or write the library'); }
   async function coldSummaryPage(route = '/photo?photoView=albums') {

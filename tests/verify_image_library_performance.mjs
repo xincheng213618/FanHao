@@ -19,7 +19,7 @@ const index = createProductionShapeIndex();
 
 assert(!serviceSource.includes("collections: photoCollectionGroups(items)"), "prepared photo catalog must not retain an unused collection list");
 assert(serviceSource.includes("function preparedPhotoCollectionCategories(catalog)"), "collection categories must remain lazy");
-assert(serviceSource.includes("const archiveDate = normalizedMode === \"photo\" ? photoArchiveDate(photoTitle) : \"\";"), "photo archive dates must be parsed once per list item");
+assert(serviceSource.includes("const archiveDate = normalizedMode === \"photo\" && !compact ? photoArchiveDate(photoTitle) : \"\";"), "photo archive dates must be parsed once for full list items");
 assert(serviceSource.includes("archiveMonth: archiveDate.slice(0, 7)"), "photo archive month must derive from the parsed date");
 assert(serviceSource.includes("!deferPhotoSubject || !albumNumber") && serviceSource.includes("albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle)"), "numbered album subjects must hydrate only the returned page while unnumbered facets remain eager");
 assert(!serviceSource.includes("catalog.collections"), "no photo catalog consumer may read the removed collection list");
@@ -29,9 +29,10 @@ assert(functionSource(serviceSource, "preparedPhotoCollectionCategories", "prepa
 const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
 const webGalleryPage = fs.readFileSync(path.join(root, "public", "modules", "content-index", "gallery-page.js"), "utf8");
 assert(androidApp.includes('const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary?cache=0";'), "Android must skip an unused image-reader cache summary");
-const readSummaryEndpoint = new Function("isImageLibraryMode", `${functionSource(webGalleryPage, "summaryEndpoint", "getSummaryReadFailure")}\nreturn summaryEndpoint();`);
-assert.equal(readSummaryEndpoint(() => true), "/api/image-library/summary", "Web image-library mode must continue to request its cache summary");
-assert.equal(readSummaryEndpoint(() => false), "/api/image-library/summary?cache=0", "other Web modes must keep skipping the unused cache summary");
+const readSummaryEndpoint = new Function("state", "isImageLibraryMode", `${functionSource(webGalleryPage, "summaryEndpoint", "getSummaryReadFailure")}\nreturn summaryEndpoint();`);
+assert.equal(readSummaryEndpoint({ gallery: { mode: "photo" } }, () => true), "/api/image-library/summary?mode=photo");
+assert.equal(readSummaryEndpoint({ gallery: { mode: "manga" } }, () => true), "/api/image-library/summary", "manga continues to request its cache summary");
+assert.equal(readSummaryEndpoint({ gallery: { mode: "media" } }, () => false), "/api/image-library/summary?cache=0", "other Web modes must keep skipping the unused cache summary");
 assert(webGalleryPage.includes('const endpoint = options.refresh ? "/api/image-library/rescan" : summaryEndpoint();'), "normal summary reads must use the endpoint selector");
 
 verifyPhotoPersonFacetBoundaries(createTestableImageLibraryService);
@@ -91,11 +92,26 @@ function legacyServiceModuleUrl(source) {
       mangaSourceRevision = mangaSourceHash.digest("hex");`, '      source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));', "restore manga source before incremental revision hashing");
   legacySource = replaceOnce(legacySource, 'return imageNameCollator.compare(left, right);', 'return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });', "restore per-comparison locale construction");
   legacySource = replaceOnce(legacySource, "    let sourceIsSorted = false;\n", "", "remove cached-sort state");
-  legacySource = replaceOnce(legacySource, `      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
-      const filteredPhotoSets = defaultPhotoFilters && !collection
-        ? catalog.items
-        : filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
-`, "      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });\n", "restore unconditional photo filtering");
+  legacySource = replaceOnce(legacySource, `      const compact = Boolean(collection) || date === "all" && (photoView === "collections" || !query);
+      const catalog = preparedPhotoCatalog(index, compact);
+      compactAlbumRows = catalog.compact && !collection && photoView === "albums";
+      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
+      const collectionItems = collection ? preparedPhotoCollectionAlbums(catalog, collection) : null;
+      const albums = collectionItems || catalog.items;
+      const filteredPhotoSets = defaultPhotoFilters ? albums : filterPhotoSetsForList(albums, { category, subCategory, person, date });
+      if (collectionItems) {
+        collectionSummary = photoCollectionSummary(collectionItems, collection);
+        photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
+      } else photoFacets = preparedPhotoFacets(catalog, category);
+`, `      const catalog = preparedPhotoCatalog(index);
+      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
+      photoFacets = preparedPhotoFacets(catalog, category);
+      if (collection) {
+        const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all", date: "all" });
+        collectionSummary = photoCollectionSummary(collectionItems, collection);
+        photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
+      }
+`, "restore full catalog construction and unconditional photo filtering");
   legacySource = replaceOnce(legacySource, `      source = photoView === "collections" && !collection
         ? defaultPhotoFilters
           ? preparedPhotoCollectionCategories(catalog)
@@ -126,11 +142,14 @@ function legacyServiceModuleUrl(source) {
   }
 
   function photoAlbumNumber(value) {`, "restore archive month parser");
-  legacySource = replaceOnce(legacySource, `    const archiveDate = normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "";
-    const albumNumber = normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "";
+  legacySource = replaceOnce(legacySource, `    const archiveDate = normalizedMode === "photo" && !compact ? photoArchiveDate(photoTitle) : "";
+    const albumNumber = photoRow?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
     // Unnumbered subjects participate in the person facet guard. Numbered
     // subjects are display-only and can be derived for the returned page.
-    const albumSubject = normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
+    let albumSubject = "";
+    if (normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
+      albumSubject = photoRow?.personName && !albumNumber ? photoRow.albumSubject : photoAlbumSubject(photoTitle, item, collectionTitle);
+    }
 `, "", "restore inline photo list parsing");
   legacySource = replaceOnce(legacySource, `      if (item.type === "photo" && item.albumNumber) {
         item = { ...item, albumSubject: photoAlbumSubject(item.title, item, item.collectionTitle) };
@@ -168,7 +187,6 @@ function legacyServiceModuleUrl(source) {
       sortedItems: new Map()
 `, `      index,
       items,
-      collections: photoCollectionGroups(items).map(publicPhotoCollectionListItem),
       collectionCategories: photoCollectionCategoryGroups(items).map(publicPhotoCollectionCategoryListItem),
       categories: facetCounts(items, "category"),
       people: photoPersonFacets(items, 20),

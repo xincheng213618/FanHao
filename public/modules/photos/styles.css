@@ -212,12 +212,33 @@ body.gallery-view .gallery-photo-shell .gallery-photo-controls {
 }
 
 .gallery-photo-shell .gallery-photo-catalog-card .gallery-card-cover {
-  aspect-ratio: 5 / 6;
-  background: #efede8;
+  aspect-ratio: 2 / 3;
+  background: #ececf1;
 }
 
 .gallery-photo-shell .gallery-photo-catalog-card .gallery-card-cover img {
   object-fit: cover;
+}
+
+.gallery-publisher-videos {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--gallery-line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.gallery-publisher-videos > summary {
+  cursor: pointer;
+  color: var(--gallery-accent-strong);
+  font-weight: 650;
+}
+
+.gallery-publisher-videos > ul {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding-inline-start: 22px;
 }
 
 .gallery-photo-shell .gallery-photo-catalog-card .gallery-card-badges {

@@ -13,13 +13,13 @@ import { createImageReaderCacheService } from "../src/platform/server/image-read
 import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
 import { createPhotoSetService } from "../src/modules/photos/server/photo-set-service.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createServerHost } from "../src/platform/server/server-host.js";
 import { createFileServer } from "../src/platform/server/file-server.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import { types } from "node:util";
 import { routePhotosApi } from "../src/modules/photos/server/routes.js";
+import { createPhotosRuntime } from "../src/modules/photos/server/runtime.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-archive-lifecycle-"));
@@ -593,8 +593,9 @@ async function verifyPhotoAuthority() {
     const dbA = galleryDb(), dbB = galleryDb(); let currentDb = dbA;
     let album = { id:"album",sourceRoot:temporary,relativePath:"photo.zip",updatedAt:"before" };
     const configuration = { archiveExts:new Set([".zip"]),directVideoExts:new Set(),galleryMediaSources:[],photoSetRoots:[],videoExts:[] };
-    let imageIndex = { schemaVersion:CURRENT_INDEX_SCHEMA,parserVersion:PARSER_VERSION,cacheIdentity:imageLibraryCacheIdentity(configuration),photoSets:[album],mediaItems:[] };
-    const owner = createImageLibraryIndexService({ ...configuration,readJsonFile:()=>imageIndex,imageLibraryIndexPath:path.join(temporary,"authority-index.json") });
+    let imageIndex = { photoSets:[album],mediaItems:[] };
+    const owner = createImageLibraryIndexService({ ...configuration,
+      photoLibraryStore:{ byId:id=>imageIndex.photoSets.find(row=>row.id===id) || null } });
     let lookupCalls = 0;
     let identity = "original", calls = 0; const final = gate(); let finalStarted = false;
     const service = createPhotoSetService({ archiveImageExts:new Set([".jpg"]),coverGeneratorVersion:2,coverHints:new Set(["cover"]),coverMaxBytes:1024,
@@ -603,7 +604,7 @@ async function verifyPhotoAuthority() {
       photoSetById:indexed?id=>{lookupCalls++;return owner.photoSetById(id);}:undefined,
       safeChildPath:(root,relative)=>path.join(root,relative),normalizeExt:value=>path.extname(value).toLowerCase(),fileBase:value=>path.parse(value).name,
       safeStat:()=>assert.fail("cover pipeline must not stat synchronously"),mimeTypes:{".jpg":"image/jpeg"},listArchiveImages:async()=>[{path:"cover.jpg",bytes:3}],
-      extractArchiveMemberToCache:async (_source,_member,target)=>fs.promises.writeFile(target,"AAA"),compressImageFileToJpeg:()=>assert.fail("explicit small cover should retain bytes"),
+      extractArchiveMemberToCache:async (_source,_member,target)=>fs.promises.writeFile(target,"AAA"),compressImageFileToJpeg:async target=>fs.promises.readFile(target),
       notFound:res=>{res.writeHead(404);res.end("missing");} }); services.push(service);
     const res=response(); const job=service.serveCover(res,"album"); await until(()=>finalStarted,`photo ${mode} final signature`);
     if(mode==="source")identity="replacement";
@@ -698,7 +699,8 @@ async function verifyPhotoAuthorityBytes() {
       },
       listArchiveImages: () => generation ? [{ path: "cover.jpg", bytes: 3 }] : absent ? [] : assert.fail("matching cached cover must not relist"),
       extractArchiveMemberToCache: async (_archive, _member, target) => { fs.writeFileSync(target, "AAA"); },
-      compressImageFileToJpeg: () => assert.fail("small explicit synthetic cover must not compress"),
+      // Explicit covers are box-scaled like any other; the stub keeps the bytes.
+      compressImageFileToJpeg: async target => fs.readFileSync(target),
       notFound: res => { res.writeHead(404); res.end("missing"); }
     });
     const results = [], logs = []; let row;
@@ -927,7 +929,7 @@ async function verifyPhotoCoverSelection() {
     console.log("photo-cover-selection: " + directOracles + " selector and " + ownerOracles + " complete owner oracles passed");
     for (const { kind, old, current } of budgets) {
       assert.equal(old.counters.records, 50_000, "old selector must create every score record");
-      assert.equal(current.calls.fileBase, 50_000); assert.equal(current.calls.normalizeExt, 50_003);
+      assert.equal(current.calls.fileBase, 50_000); assert.equal(current.calls.normalizeExt, 50_002); // explicit covers no longer derive a raw MIME
       if (kind === "many") assert(old.counters.comparisons >= 49_999, "old mixed-hint source must perform real sorting");
       assert(current.counters.records <= 64, "cover selector score-record allocation budget: observed " + current.counters.records);
       assert.equal(current.counters.sorts, 0, "cover selector must not sort score records");
@@ -987,6 +989,38 @@ async function verifyWarmCoverIdentity() {
       archiveImageSignature:async archivePath=>({archivePath,archiveSize:7,archiveMtimeMs:123.125,archiveIdentity:++calls===1?"old":"new"}),notFound:res=>res.end("missing"),listArchiveImages:()=>assert.fail("matching cached row must not relist")});services.push(service);
     const res=response();await service.serveCover(res,"cached");assert.equal(calls,2);assert.equal(res.statusCode,503);assert.notEqual(res.body?.toString(),"OLD");assert.equal(database.prepare("SELECT archive_identity FROM photo_set_covers").get().archive_identity,"old");await service.stop();scenarios++;
   }
+}
+
+async function verifyPhotoCardCoverFallback() {
+  const database = galleryDb();
+  const album = { id: "empty", sourceRoot: temporary, relativePath: "empty.zip" };
+  let archiveReads = 0;
+  const photoSetService = createPhotoSetService({
+    coverGeneratorVersion: 2,
+    getImageGalleryDb: () => database,
+    getImageLibraryIndex: () => ({ photoSets: [album] }),
+    safeChildPath: path.join,
+    archiveImageSignature: async archivePath => archiveDiskSignature(archivePath, stat()),
+    listArchiveImages: async () => { archiveReads += 1; return []; },
+    notFound(res) { res.writeHead(404); res.end(); }
+  });
+  services.push(photoSetService);
+  const runtime = createPhotosRuntime({ photoSetService });
+  const requestCover = async query => {
+    const res = response();
+    res.writeHead = (code, headers) => { res.statusCode = code; res.headers = headers; };
+    const url = new URL(`/media/gallery-cover/${album.id}${query}`, "http://fixture");
+    assert.equal(await runtime.routeMedia({ method: "GET" }, res, url), true);
+    return res;
+  };
+  const card = await requestCover("?v=fixture&fallback=1");
+  assert.equal(card.statusCode, 200);
+  assert.match(card.headers["Content-Type"], /^image\/svg\+xml/);
+  assert.match(card.body, /暂无封面/);
+  assert.equal((await requestCover("?v=fixture")).statusCode, 404);
+  assert.equal(archiveReads, 1, "cached failure should not re-open the archive");
+  await runtime.stop();
+  scenarios++;
 }
 
 async function verifyLateTargetJunction() {
@@ -1249,7 +1283,7 @@ function cleanupOwnedRoot() {
 
 try {
   if (!inlineCase) {
-    await verifyBoundedPool();await verifyChildCloseOwnership();await verifyIndexAuthority();await verifyOldSchemaAndZipIdentity();await verifyPhotoAuthority();await verifyPhotoAuthorityBytes();await verifyPhotoCoverSelection();await verifyAsyncInventory();await verifyCacheInterleavingAndLinks();await verifyWarmCoverIdentity();await verifyLateTargetJunction();await verifyHostDrain();
+    await verifyBoundedPool();await verifyChildCloseOwnership();await verifyIndexAuthority();await verifyOldSchemaAndZipIdentity();await verifyPhotoAuthority();await verifyPhotoAuthorityBytes();await verifyPhotoCoverSelection();await verifyAsyncInventory();await verifyCacheInterleavingAndLinks();await verifyWarmCoverIdentity();await verifyPhotoCardCoverFallback();await verifyLateTargetJunction();await verifyHostDrain();
   }
   if (!inlineCase) await verifyIndexStampWork();
   if (!inlineCase || inlineCase === "photo-detail-paging") await verifyPhotoDetailPaging();

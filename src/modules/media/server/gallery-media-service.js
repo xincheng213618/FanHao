@@ -12,6 +12,7 @@ export function createGalleryMediaService({
   ffprobePath,
   getImageGalleryDb,
   getImageLibraryIndex,
+  getLinkedVideoById,
   mediaStreamService,
   normalizeExt,
   notFound,
@@ -51,7 +52,7 @@ export function createGalleryMediaService({
       for (const item of items) if (!byId.has(item.id)) byId.set(item.id, item);
       mediaLookup = { index, items, byId };
     }
-    return mediaLookup.byId.get(target) || null;
+    return mediaLookup.byId.get(target) ?? getLinkedVideoById?.(target) ?? null;
   }
 
   function mediaPath(item) {

@@ -6,8 +6,7 @@ import { performance } from "node:perf_hooks";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
 import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
 import { createGalleryMetadataService } from "../src/modules/media/server/gallery-metadata-service.js";
-import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
+import { createGalleryIndexSource } from "./fixtures/gallery-index-source.mjs";
 import { createImageQueryCache, IMAGE_QUERY_CACHE_MAX_BYTES } from "../src/modules/content-index/server/image-query-cache.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
@@ -36,14 +35,11 @@ try {
   for (let i = 0; i < 6000; i += 1) insertMovie.run(`M${i}`, `电影 ${i}`, `元数据电影 ${i}`, 10 - i % 90 / 10, "ok", "same", `${2000 + i % 25}`, '["剧情"]', "{}", "{}");
   for (const kind of ["tv", "anime"]) for (let i = 0; i < 250; i += 1) insertTv.run(`${kind === "anime" ? "动漫:" : ""}cat${i % 5}|剧集 ${i}`, `剧集 ${i}`, `可信剧集 ${i}`, 10 - i % 90 / 10, "ok", "same", `${2000 + i % 25}`, '["剧情"]');
   db.exec("COMMIT");
-  const ownerOptions = { archiveExts: new Set([".zip"]), directVideoExts: new Set([".mp4"]), videoExts: [".mp4"], galleryMediaSources: [], photoSetRoots: [] };
-  let persisted = { schemaVersion: CURRENT_INDEX_SCHEMA, parserVersion: PARSER_VERSION, cacheIdentity: imageLibraryCacheIdentity(ownerOptions), scannedAt: "same", photoSets: [], mediaItems: [
+  let persisted = { scannedAt: "same", photoSets: [], mediaItems: [
     ...Array.from({ length: 6000 }, (_, i) => ({ id: `M${i}`, mediaKind: "movie", title: `电影 ${i}`, category: `cat${i % 5}`, size: i + 1, playable: true, updatedAt: `2026-10-${String(i % 25 + 1).padStart(2, "0")}` })),
     ...["tv", "anime"].flatMap(kind => Array.from({ length: 6000 }, (_, i) => ({ id: `${kind}${i}`, mediaKind: kind, title: `第 ${i % 24 + 1} 集`, seriesName: `剧集 ${Math.floor(i / 24)}`, category: `cat${Math.floor(i / 24) % 5}`, size: i + 1, playable: true, updatedAt: "2026-10-04" })))
   ] };
-  const owner = createImageLibraryIndexService({ ...ownerOptions, createId: (_prefix, key) => key, ensureDataDir() {},
-    imageLibraryIndexPath: path.join(temporary.tempDir, "index.json"), isExcludedDirName: () => false, isVideo: () => false,
-    normalizeExt: value => path.extname(value), photoSetCoverUrl: () => "", readJsonFile: () => persisted, safeStat: () => null });
+  const owner = createGalleryIndexSource(() => persisted);
   let counts = freshCounts(), failBulk = false, duringPublication = null, afterProbe = null;
   const observed = new WeakMap();
   const observedDb = () => {

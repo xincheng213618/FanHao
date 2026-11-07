@@ -40,7 +40,7 @@ Windows 下推荐使用自带脚本：
 | `metadata-backfill` | 作品资料 / 封面补全 | JavDB | 对本地作品补 JavDB 资料、评分、封面。 |
 | `batch-import-actors` | 批量导入演员资料 | JavDB | 按本地人物搜索并缓存 JavDB 头像、别名、映射。 |
 | `ranking-cache` | 排行榜缓存 | 缓存 | 抓取 JavDB 排行榜写入本地缓存。 |
-| `image-library-rescan` | 刷新图库索引 | 图库 | 重建套图 / 电影 / 电视剧索引（只更新 `image-library-index.json`）；欧美由核心番号库扫描。 |
+| `image-library-rescan` | 刷新图库索引 | 图库 | 扫描所选套图或影视范围，事务更新 `image-gallery.sqlite` 中的索引。欧美由核心番号库扫描。 |
 | `tuimzz-photo-sync` | 检查微密圈套图更新 | 图库 | 对照 tuimzz 与 `T:\微密圈`，生成需要更新、本地缺失和百度云链接报告；不下载、不解压。 |
 | `tuimzz-photo-import` | 导入微密圈下载 | 图库 | 预检并把明确编号的 7z 下载转换成无密码 RAR；默认 dry-run，保留全部下载原件。 |
 | `core-local-scan` | 核心本地扫描 | 本地 | 把本地根目录按人物 / 作品写入核心 SQLite。 |

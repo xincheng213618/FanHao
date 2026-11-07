@@ -34,7 +34,7 @@ Web 页面复用 `public/modules/content-index/` 的图库控制器；套图特�
 
 - `PHOTO_SET_ROOTS`：套图根目录。
 - `MANGA_LIBRARY_ROOT`：韩漫根目录。
-- `data/image-library-index.json`：共用索引。
+- `data/image-gallery.sqlite` 保存套图扫描索引、图片清单和封面缓存。
 - `data/image-reader-cache/`：图片读取缓存。
 
 路径可通过环境变量覆盖，默认值见 [项目配置](../configuration.md)。

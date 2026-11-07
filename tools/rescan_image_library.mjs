@@ -3,13 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { galleryMediaSources, parsePhotoSetRoots } from "../src/platform/server/root-config.js";
-import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageLibraryIndexMatches } from "../src/modules/content-index/server/image-library-index-contract.js";
+import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
+import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
+import { createPhotoLibraryStore } from "../src/modules/content-index/server/photo-library-store.js";
+import { archiveDiskSignature } from "../src/platform/server/archive-image-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.resolve(process.env.FANHAO_DATA_DIR || path.join(REPO_ROOT, "data"));
-const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
+const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 
 const EXCLUDED_DIRS = new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]);
 const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
@@ -17,6 +20,7 @@ const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
 const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "movie", "tv", "anime"]);
+const indexNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function emitProgress(progress = {}) {
   console.log(`IMAGE_LIBRARY_PROGRESS ${JSON.stringify(progress)}`);
@@ -35,14 +39,6 @@ function safeStat(filePath) {
     return fs.statSync(filePath);
   } catch {
     return null;
-  }
-}
-
-function readJsonFile(filePath, fallback = null) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return fallback;
   }
 }
 
@@ -179,7 +175,12 @@ function inferPhotoSetPerson(parts, title) {
 function walkMatchingFiles(rootPath, predicate, label) {
   const results = [];
   const root = path.resolve(rootPath);
-  if (!safeStat(root)?.isDirectory()) return results;
+  const strict = label === "photo";
+  const rootStat = strict ? fs.statSync(root) : safeStat(root);
+  if (!rootStat?.isDirectory()) {
+    if (strict) throw new Error(`图库目录不可用 ${root}`);
+    return results;
+  }
   const stack = [root];
   let visitedDirs = 0;
   while (stack.length) {
@@ -188,7 +189,8 @@ function walkMatchingFiles(rootPath, predicate, label) {
     let entries = [];
     try {
       entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       continue;
     }
 
@@ -199,7 +201,8 @@ function walkMatchingFiles(rootPath, predicate, label) {
         try {
           const lstat = fs.lstatSync(fullPath);
           if (lstat.isSymbolicLink()) continue;
-        } catch {
+        } catch (error) {
+          if (strict) throw error;
           continue;
         }
         stack.push(fullPath);
@@ -212,7 +215,7 @@ function walkMatchingFiles(rootPath, predicate, label) {
       console.log(`[${label}] visited ${visitedDirs.toLocaleString()} dirs, found ${results.length.toLocaleString()} files`);
     }
   }
-  results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  results.sort(indexNameCollator.compare);
   return results;
 }
 
@@ -222,7 +225,9 @@ function photoSetCoverUrl(albumId, updatedAt = "") {
 }
 
 function publicPhotoSetArchive(filePath, rootPath) {
-  const stat = safeStat(filePath);
+  const stat = fs.statSync(filePath);
+  const signature = archiveDiskSignature(filePath, stat);
+  if (!signature) throw new Error(`扫描期间图包已变更 ${filePath}`);
   const relativePath = path.relative(rootPath, filePath);
   const dirParts = path
     .dirname(relativePath)
@@ -245,6 +250,7 @@ function publicPhotoSetArchive(filePath, rootPath) {
     archiveExt: normalizeExt(filePath).slice(1),
     size: stat?.size || 0,
     updatedAt,
+    archiveIdentity: signature.archiveIdentity,
     imageCount: null,
     coverUrl: photoSetCoverUrl(id, updatedAt)
   };
@@ -325,8 +331,9 @@ function mediaRootStatuses(sources) {
   );
 }
 
-function scanPhotoSetLibrary(photoRoots) {
+function scanPhotoSetLibrary(photoRoots, previousRoots) {
   const roots = rootStatuses(photoRoots);
+  const available = new Set(previousRoots.filter(root => root.exists).map(root => path.resolve(root.root).toLowerCase()));
   const albums = [];
   const seen = new Set();
   for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
@@ -343,6 +350,7 @@ function scanPhotoSetLibrary(photoRoots) {
       message: `正在扫描 ${root.label}`
     });
     if (!root.exists) {
+      if (available.has(path.resolve(root.root).toLowerCase())) throw new Error(`原图库目录暂不可用 ${root.root}`);
       console.log(`[photo] missing ${root.root}`);
       emitProgress({
         phase: "photo-root-complete",
@@ -376,7 +384,7 @@ function scanPhotoSetLibrary(photoRoots) {
   }
   albums.sort((a, b) => {
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    return timeDiff || indexNameCollator.compare(a.title, b.title);
   });
   return { roots, photoSets: albums };
 }
@@ -405,7 +413,7 @@ function scanGalleryMediaLibrary(sources) {
   items.sort((a, b) => {
     if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    return timeDiff || indexNameCollator.compare(a.title, b.title);
   });
   return { mediaRoots: roots, mediaItems: items };
 }
@@ -414,98 +422,68 @@ function sortGalleryMediaItems(items) {
   return (items || []).slice().sort((a, b) => {
     if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    return timeDiff || indexNameCollator.compare(a.title, b.title);
   });
 }
 
-function writeIndex(index) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tempPath = path.join(DATA_DIR, `image-library-index.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(tempPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
-  fs.renameSync(tempPath, IMAGE_LIBRARY_INDEX_PATH);
-}
-
-function buildIndex(options) {
-  const photoRoots = parsePhotoSetRoots(process.env);
-  const mediaSources = galleryMediaSources(process.env);
-  const cacheIdentity = imageLibraryCacheIdentity({
-    archiveExts: ARCHIVE_EXTS,
-    directVideoExts: DIRECT_VIDEO_EXTS,
-    galleryMediaSources: mediaSources,
-    photoSetRoots: photoRoots,
-    videoExts: VIDEO_EXTS
-  });
-  const cached = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, null);
-  const existing = imageLibraryIndexMatches(cached, cacheIdentity) ? cached : {};
-
-  const scanPhoto = options.scope === "all" || options.scope === "photo";
-  const scanMedia = options.scope === "all" || options.scope === "media" || ["movie", "tv", "anime"].includes(options.scope);
-  const selectedMediaSources = ["movie", "tv", "anime"].includes(options.scope)
-    ? mediaSources.filter((source) => source.kind === options.scope)
-    : mediaSources;
-  const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots) : {
-    roots: existing.roots || rootStatuses(photoRoots),
-    photoSets: Array.isArray(existing.photoSets) ? existing.photoSets : []
-  };
-  let media;
-  if (scanMedia) {
-    const scannedMedia = scanGalleryMediaLibrary(selectedMediaSources);
-    if (["movie", "tv", "anime"].includes(options.scope)) {
-      media = {
-        mediaRoots: mediaRootStatuses(mediaSources),
-        mediaItems: sortGalleryMediaItems([
-          ...(Array.isArray(existing.mediaItems) ? existing.mediaItems.filter((item) => item.mediaKind !== options.scope) : []),
-          ...scannedMedia.mediaItems
-        ])
-      };
-    } else {
-      media = scannedMedia;
-    }
-  } else {
-    media = {
-      mediaRoots: existing.mediaRoots || mediaRootStatuses(mediaSources),
-      mediaItems: Array.isArray(existing.mediaItems) ? existing.mediaItems : []
-    };
-  }
-
+function scanScopedMediaLibrary(sources, kind, previousIndex) {
+  if (!kind) return scanGalleryMediaLibrary(sources);
+  const selectedSources = sources.filter((source) => source.kind === kind);
+  const scanned = scanGalleryMediaLibrary(selectedSources);
   return {
-    schemaVersion: CURRENT_INDEX_SCHEMA,
-    parserVersion: PARSER_VERSION,
-    cacheIdentity,
-    scannedAt: new Date().toISOString(),
-    roots: photo.roots,
-    photoSets: photo.photoSets,
-    mediaRoots: media.mediaRoots,
-    mediaItems: media.mediaItems
+    mediaRoots: mediaRootStatuses(sources),
+    mediaItems: sortGalleryMediaItems([
+      ...(previousIndex?.mediaItems || []).filter((item) => item.mediaKind !== kind),
+      ...scanned.mediaItems
+    ])
   };
 }
 
 const startedAt = Date.now();
-const options = parseArgs(process.argv.slice(2));
-console.log(`[image-library] scope=${options.scope}`);
-console.log(`[image-library] cache=${IMAGE_LIBRARY_INDEX_PATH}`);
+const { scope } = parseArgs(process.argv.slice(2));
+const scanPhoto = scope === "all" || scope === "photo";
+const scanMedia = scope !== "photo";
+const mediaKind = ["movie", "tv", "anime"].includes(scope) ? scope : "";
+const photoRoots = parsePhotoSetRoots(process.env);
+const mediaSources = galleryMediaSources(process.env);
+const galleryDb = createImageGalleryDbService({
+  dbPath: IMAGE_GALLERY_DB_PATH,
+  ensureDataDir: () => fs.mkdirSync(DATA_DIR, { recursive: true })
+});
+const libraryStore = createPhotoLibraryStore({
+  getDb: galleryDb.getDb,
+  archiveExts: ARCHIVE_EXTS,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  galleryMediaSources: mediaSources,
+  photoSetRoots: photoRoots,
+  videoExts: VIDEO_EXTS,
+  project: createImageLibraryService({ photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
+    photoSetService: { coverUrl: photoSetCoverUrl } }).projectPhotoIndex
+});
+
+console.log(`[image-library] scope=${scope}`);
+console.log(`[image-library] sqlite=${IMAGE_GALLERY_DB_PATH}`);
 emitProgress({ phase: "start", percent: 1, message: "正在准备图库扫描" });
-const index = buildIndex(options);
-emitProgress({
-  phase: "write",
-  percent: 94,
-  itemCount: (index.photoSets || []).length,
-  message: "正在写入图库索引"
-});
-writeIndex(index);
-emitProgress({
-  phase: "complete",
-  percent: 100,
-  photoSets: (index.photoSets || []).length,
-  itemCount: (index.photoSets || []).length,
-  message: "图库索引刷新完成"
-});
-console.log(
-  [
+try {
+  const expectedRevision = scanPhoto ? libraryStore.revision() : undefined;
+  const expectedMediaRevision = scanMedia ? libraryStore.mediaRevision() : undefined;
+  const previousMedia = mediaKind ? libraryStore.mediaIndex() : null;
+  const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots, libraryStore.summary()?.photoRoots || []) : null;
+  const media = scanMedia ? scanScopedMediaLibrary(mediaSources, mediaKind, previousMedia) : null;
+  const index = { ...photo, ...media, scannedAt: new Date().toISOString() };
+  const photoCount = photo?.photoSets.length ?? 0;
+  const mediaCount = media?.mediaItems.length ?? 0;
+  const itemCount = scanPhoto ? photoCount : mediaCount;
+
+  emitProgress({ phase: "write", percent: 94, itemCount, message: "正在写入图库索引" });
+  libraryStore.publish(index, { expectedRevision, expectedMediaRevision, photo: scanPhoto, media: scanMedia });
+  emitProgress({ phase: "complete", percent: 100, photoSets: photoCount, itemCount, message: "图库索引刷新完成" });
+  console.log([
     `[image-library] done in ${Math.round((Date.now() - startedAt) / 1000)}s`,
-    `photoSets=${(index.photoSets || []).length.toLocaleString()}`,
-    `mediaItems=${(index.mediaItems || []).length.toLocaleString()}`,
-    `size=${fs.statSync(IMAGE_LIBRARY_INDEX_PATH).size.toLocaleString()} bytes`,
+    ...(scanPhoto ? [`photoSets=${photoCount.toLocaleString()}`] : []),
+    ...(scanMedia ? [`mediaItems=${mediaCount.toLocaleString()}`] : []),
     `host=${os.hostname()}`
-  ].join(" ")
-);
+  ].join(" "));
+} finally {
+  galleryDb.close();
+}

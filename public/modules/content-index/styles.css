@@ -1078,8 +1078,12 @@ body.gallery-view .gallery-controls {
   line-height: 1;
 }
 
+.gallery-collection-card .gallery-card-cover,
+.gallery-photo-album-card .gallery-card-cover {
+  aspect-ratio: 2 / 3;
+}
+
 .gallery-collection-card .gallery-card-cover {
-  aspect-ratio: 4 / 3;
   background: #f0ede7;
 }
 
