@@ -78,6 +78,7 @@ const STANDALONE_PAGE_FILES = new Map([
   ["/fanhao/duplicates", "/modules/fanhao/duplicates/index.html"],
   ["/fanhao/taste", "/modules/fanhao/taste/index.html"],
   ["/fanhao/file-workflows", "/modules/fanhao/file-workflows/index.html"],
+  ["/photo/analysis", "/modules/photos/analysis/index.html"],
   ["/disk-usage", "/modules/fanhao/disk-usage/index.html"],
   ["/system-control", "/modules/system/computer-control/index.html"]
 ]);

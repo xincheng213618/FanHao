@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>套图分析 · FanHao</title>
+  <link rel="stylesheet" href="/modules/photos/analysis/analysis.css?v=20261108-analysis-01">
+  <script type="module" src="/modules/photos/analysis/analysis.js?v=20261108-analysis-01"></script>
+</head>
+<body>
+  <main class="analysis">
+    <header class="analysis-bar">
+      <a class="analysis-back" href="/photo/collections">← 图库</a>
+      <h1>套图分析</h1>
+      <p id="analysis-summary" class="analysis-summary" role="status">正在统计…</p>
+    </header>
+
+    <form id="analysis-filters" class="analysis-tools" role="search">
+      <input name="q" type="search" placeholder="筛选合集" aria-label="筛选合集">
+      <select name="show" aria-label="显示范围">
+        <option value="all">全部合集</option>
+        <option value="missing">有缺期</option>
+        <option value="duplicates">有疑似重复</option>
+        <option value="unnumbered">无期号</option>
+      </select>
+      <select name="sort" aria-label="排序">
+        <option value="count">期数最多</option>
+        <option value="missing">缺期最多</option>
+        <option value="duplicates">重复占用最大</option>
+        <option value="size">容量最大</option>
+        <option value="coverage">期号覆盖最低</option>
+      </select>
+      <span id="analysis-count" class="analysis-count"></span>
+    </form>
+
+    <div class="analysis-table" role="table" aria-label="合集分析">
+      <div class="analysis-row analysis-head" role="row">
+        <span role="columnheader">合集</span>
+        <span role="columnheader">期数</span>
+        <span role="columnheader">容量</span>
+        <span role="columnheader">期号范围</span>
+        <span role="columnheader">期号覆盖</span>
+        <span role="columnheader">缺期</span>
+        <span role="columnheader">疑似重复</span>
+      </div>
+      <div id="analysis-rows"></div>
+    </div>
+    <button id="analysis-more" class="analysis-more" type="button" hidden>显示更多</button>
+  </main>
+</body>
+</html>

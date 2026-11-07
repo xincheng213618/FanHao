@@ -407,8 +407,34 @@ function createPhotoCategoryStrip(options = {}) {
 
 function galleryBrowseDescription() {
   return state.gallery.mode === "photo"
-    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期套图，按合集与分类浏览` : "按合集与分类浏览套图"
+    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期` : ""
     : "电影、电视剧与动漫";
+}
+
+function createGalleryBrowseTitle() {
+  const wrapper = document.createElement("div");
+  wrapper.className = "gallery-browse-header gallery-browse-inline-title";
+  const title = document.createElement("h1");
+  title.textContent = "套图";
+  const count = document.createElement("p");
+  count.textContent = galleryBrowseDescription();
+  wrapper.append(title, count);
+  return wrapper;
+}
+
+function createGalleryBrowseNav() {
+  const isPhoto = state.gallery.mode === "photo";
+  const nav = document.createElement("nav");
+  nav.className = "gallery-browse-nav";
+  nav.setAttribute("aria-label", "资料库导航");
+  for (const [label, href, active] of [["套图", "/photo/collections", isPhoto], ["影视", "/media", !isPhoto], ["韩漫", "/manga", false]]) {
+    const link = document.createElement("a");
+    link.textContent = label;
+    link.href = href;
+    if (active) link.setAttribute("aria-current", "page");
+    nav.append(link);
+  }
+  return nav;
 }
 
 function createGalleryBrowseHeader() {
@@ -759,6 +785,12 @@ function renderGalleryControls(options = {}) {
     if (state.gallery.mode === "photo") {
       controls.classList.add("gallery-photo-controls");
       searchRow.classList.add("gallery-photo-primary-row");
+      const analysis = document.createElement("a");
+      analysis.className = "text-button";
+      analysis.href = "/photo/analysis";
+      analysis.textContent = "分析";
+      analysis.title = "期号覆盖、缺期和重复";
+      maintenance.prepend(analysis);
       search.placeholder = "搜索标题、人物、合集";
       const searchBox = document.createElement("div");
       searchBox.className = "gallery-media-search-box";
@@ -768,20 +800,21 @@ function renderGalleryControls(options = {}) {
       submit.textContent = "搜索";
       submit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
       searchBox.append(search, submit);
+      // One toolbar row: title, search, view, sort, actions and module nav.
       searchRow.append(
+        createGalleryBrowseTitle(),
         createGalleryFilterField("搜索", searchBox, "gallery-search-field gallery-photo-search-field"),
-        maintenance
+        createGalleryControlGroup("浏览", photoViews, "gallery-photo-view-switch"),
+        createGalleryControlGroup("排序", sort, "gallery-photo-sort"),
+        maintenance,
+        createGalleryBrowseNav()
       );
 
       hierarchy.classList.add("gallery-photo-secondary-row");
       // Inside a collection, its breadcrumb owns navigation. Its local facets
       // must not be presented as the categories or totals of the whole library.
       if (state.gallery.photoCollection) hierarchy.classList.add("gallery-photo-collection-controls");
-      hierarchy.append(
-        ...(!state.gallery.photoCollection ? [createPhotoCategoryStrip(options)] : []),
-        createGalleryControlGroup("浏览", photoViews, "gallery-photo-view-switch"),
-        createGalleryControlGroup("排序", sort, "gallery-photo-sort")
-      );
+      if (!state.gallery.photoCollection) hierarchy.append(createPhotoCategoryStrip(options));
     } else {
       searchRow.append(createGalleryFilterField("搜索", search, "gallery-search-field"));
       hierarchy.append(createGalleryControlGroup("内容", createGalleryImageModuleSwitch()), maintenance);
@@ -2646,22 +2679,10 @@ function renderPagedPhotoCollectionPage(container, list) {
   ].filter(Boolean).join(" · ");
   text.append(eyebrow, title, meta);
 
-  const actions = document.createElement("div");
-  actions.className = "gallery-collection-actions";
-  const back = document.createElement("button");
-  back.type = "button";
-  back.className = "gallery-collection-action";
-  back.textContent = "← 全部合集";
-  back.addEventListener("click", () => leavePhotoCollection("collections"));
-  const all = document.createElement("button");
-  all.type = "button";
-  all.className = "gallery-collection-action";
-  all.textContent = "全部套图";
-  all.addEventListener("click", () => leavePhotoCollection("albums"));
-  actions.append(back, all);
-  bar.append(text, actions);
+  // The breadcrumb and the toolbar view switch already navigate away; the
+  // header row holds the collection name, its totals and its filters.
+  bar.append(text);
   page.append(bar);
-  page.append(createPhotoCollectionHealth(state.gallery.photoCollection));
 
   const filters = document.createElement("div");
   filters.className = "gallery-collection-filters";
@@ -2675,7 +2696,7 @@ function renderPagedPhotoCollectionPage(container, list) {
   filterMeta.setAttribute("role", "status");
   filterMeta.textContent = state.gallery.photoDate !== "all" || state.gallery.person !== "all"
     ? `筛选出 ${formatNumber(list.total || 0)} 期`
-    : `共 ${formatNumber(list.total || 0)} 期`;
+    : "";
   filterCopy.append(filterMeta);
   if (dateFacets.length) {
     filters.append(createPhotoCollectionFilter("日期", "全部日期", dateFacets, state.gallery.photoDate, (value) => {
@@ -2690,8 +2711,8 @@ function renderPagedPhotoCollectionPage(container, list) {
     }));
   }
   if (filterCount) {
-    filters.append(filterCopy);
-    page.append(filters);
+    filters.prepend(filterCopy);
+    bar.append(filters);
   }
 
   const grid = renderPagedPhotoCards(items, { collection: true });
@@ -2701,142 +2722,6 @@ function renderPagedPhotoCollectionPage(container, list) {
   if (!items.length) renderPagedImageLibraryMessage(page, "当前合集没有匹配的套图");
   appendPagedGalleryMore(page, list, "套图");
   container.append(page);
-}
-
-const photoCollectionHealthCache = new Map();
-
-function photoCollectionHealthRequest(collectionId) {
-  const key = `${collectionId}\n${state.gallery.data?.scannedAt || ""}`;
-  let request = photoCollectionHealthCache.get(key);
-  if (!request) {
-    request = fetch(`/api/image-library/photo-collection-health?${new URLSearchParams({ collection: collectionId })}`)
-      .then(async (response) => {
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error || "合集体检读取失败");
-        return body;
-      });
-    request.catch(() => photoCollectionHealthCache.delete(key));
-    if (photoCollectionHealthCache.size > 24) photoCollectionHealthCache.clear();
-    photoCollectionHealthCache.set(key, request);
-  }
-  return request;
-}
-
-function formatIssueRange(prefix, range) {
-  return range.length === 1 || range[0] === range[1] ? `${prefix}${range[0]}` : `${prefix}${range[0]}–${range[1]}`;
-}
-
-function createPhotoCollectionHealth(collectionId) {
-  const section = document.createElement("section");
-  section.className = "gallery-collection-health";
-  section.setAttribute("aria-label", "合集体检");
-  section.setAttribute("aria-busy", "true");
-  const stats = document.createElement("dl");
-  stats.className = "gallery-collection-health-stats";
-  const placeholder = document.createElement("p");
-  placeholder.className = "gallery-collection-health-note";
-  placeholder.textContent = "正在检查期号和重复…";
-  section.append(placeholder);
-  if (!collectionId) return section;
-
-  photoCollectionHealthRequest(collectionId).then((health) => {
-    section.removeAttribute("aria-busy");
-    placeholder.remove();
-    const family = health.numbering?.[0] || null;
-    const stat = (label, value, detail = "", tone = "") => {
-      const item = document.createElement("div");
-      if (tone) item.dataset.tone = tone;
-      const term = document.createElement("dt");
-      term.textContent = label;
-      const description = document.createElement("dd");
-      description.textContent = value;
-      item.append(term, description);
-      if (detail) {
-        const small = document.createElement("small");
-        small.textContent = detail;
-        item.append(small);
-      }
-      stats.append(item);
-    };
-    stat("有期号", `${formatNumber(health.numbered || 0)} / ${formatNumber(health.total || 0)}`,
-      health.total ? `${Math.round((health.numbered / health.total) * 100)}% 可按期号核对` : "");
-    if (family) {
-      stat("期号范围", formatIssueRange(family.prefix, [family.min, family.max]), `本地 ${formatNumber(family.count)} 期`);
-      stat("缺期", family.missing ? `${formatNumber(family.missing)} 期` : "无",
-        family.missing ? "按本地首末期号推算" : "本地期号连续", family.missing ? "warn" : "ok");
-    } else {
-      stat("期号范围", "—", "这个合集主要按日期命名");
-    }
-    stat("疑似重复", health.duplicateGroupCount ? `${formatNumber(health.duplicateGroupCount)} 组` : "无",
-      health.duplicateGroupCount ? `多出约 ${formatBytes(health.duplicateReclaimableBytes)}` : "同期号只有一份",
-      health.duplicateGroupCount ? "warn" : "ok");
-    section.append(stats);
-
-    if (family?.missing) section.append(createHealthDetails(`缺少的期号 · ${formatNumber(family.missing)}`, () => {
-      const list = document.createElement("ul");
-      list.className = "gallery-collection-missing";
-      for (const range of family.missingRanges) {
-        const item = document.createElement("li");
-        item.textContent = formatIssueRange(family.prefix, range);
-        list.append(item);
-      }
-      if (family.truncated) {
-        const item = document.createElement("li");
-        item.className = "is-more";
-        item.textContent = "仅显示前 120 段";
-        list.append(item);
-      }
-      return list;
-    }));
-
-    if (health.duplicateGroupCount) section.append(createHealthDetails(`疑似重复 · ${formatNumber(health.duplicateGroupCount)} 组`, () => {
-      const wrapper = document.createElement("div");
-      const list = document.createElement("ol");
-      list.className = "gallery-collection-duplicates";
-      for (const group of health.duplicates) {
-        const item = document.createElement("li");
-        const heading = document.createElement("strong");
-        heading.textContent = group.label;
-        const rows = document.createElement("ul");
-        for (const [index, entry] of group.items.entries()) {
-          const row = document.createElement("li");
-          const link = document.createElement("a");
-          link.href = entry.routePath || "#";
-          link.textContent = entry.title;
-          const meta = document.createElement("span");
-          meta.textContent = [formatBytes(entry.size), entry.imageCount ? `${formatNumber(entry.imageCount)} 张` : "", index === 0 ? "最大" : ""]
-            .filter(Boolean).join(" · ");
-          row.append(link, meta);
-          rows.append(row);
-        }
-        item.append(heading, rows);
-        list.append(item);
-      }
-      const note = document.createElement("p");
-      note.className = "gallery-collection-health-note";
-      note.textContent = health.duplicates.length < health.duplicateGroupCount
-        ? `按期号或同日同标题判断，只做提示，不会删除文件。显示多出空间最大的 ${health.duplicates.length} 组。`
-        : "按期号或同日同标题判断，只做提示，不会删除文件。";
-      wrapper.append(list, note);
-      return wrapper;
-    }));
-  }).catch((error) => {
-    section.removeAttribute("aria-busy");
-    placeholder.textContent = error.message || "合集体检读取失败";
-  });
-  return section;
-}
-
-function createHealthDetails(label, build) {
-  const details = document.createElement("details");
-  details.className = "gallery-collection-health-details";
-  const summary = document.createElement("summary");
-  summary.textContent = label;
-  details.append(summary);
-  details.addEventListener("toggle", () => {
-    if (details.open && details.childElementCount === 1) details.append(build());
-  });
-  return details;
 }
 
 function leavePhotoCollection(photoView) {
@@ -4957,7 +4842,8 @@ function renderGalleryView(options = {}) {
   const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all" && !state.gallery.media;
   if (["photo", "media", "movie"].includes(state.gallery.mode) && !imageReaderOpen && !state.gallery.media && !seriesPageOpen) {
     shell.classList.add("gallery-browse-shell");
-    shell.append(createGalleryBrowseHeader());
+    // Photo browsing carries its title inside the single toolbar row.
+    if (state.gallery.mode !== "photo") shell.append(createGalleryBrowseHeader());
   }
   if (state.gallery.mode === "photo" && !imageReaderOpen) {
     shell.classList.add("gallery-photo-shell");

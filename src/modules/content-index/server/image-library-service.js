@@ -1417,9 +1417,48 @@ export function createImageLibraryService({
     return { collection: collectionId, scannedAt: index?.scannedAt || "", ...photoCollectionHealth(albums) };
   }
 
+  let cachedPhotoAnalysis = null;
+
+  function photoLibraryAnalysisPayload(options = {}) {
+    const index = getImageLibraryIndex(options);
+    if (cachedPhotoAnalysis?.index === index) return cachedPhotoAnalysis.payload;
+    const groups = new Map();
+    for (const row of preparedPhotoCatalog(index).items) {
+      if (!row.collectionId) continue;
+      let group = groups.get(row.collectionId);
+      if (!group) groups.set(row.collectionId, group = []);
+      group.push(row);
+    }
+    const collections = [];
+    const totals = { collections: 0, albums: 0, numbered: 0, missing: 0, duplicateGroups: 0, duplicateBytes: 0, size: 0 };
+    for (const [id, rows] of groups) {
+      const albums = rows.map(row => {
+        const archiveDate = photoArchiveDate(row.title);
+        return { id: row.id, title: row.title, size: row.size, imageCount: row.imageCount, archiveDate,
+          albumSubject: archiveDate && !parsePhotoAlbumNumber(row.title) ? photoAlbumSubject(row.title, row, row.collectionTitle) : "" };
+      });
+      const health = photoCollectionHealth(albums);
+      const family = health.numbering[0] || null;
+      const size = rows.reduce((sum, row) => sum + Number(row.size || 0), 0);
+      collections.push({
+        id, title: rows[0].collectionTitle || id, category: rows[0].category || "", count: rows.length, size,
+        numbered: health.numbered, prefix: family?.prefix || "", min: family?.min ?? null, max: family?.max ?? null,
+        missing: family?.missing || 0, duplicateGroups: health.duplicateGroupCount, duplicateBytes: health.duplicateReclaimableBytes
+      });
+      totals.collections++; totals.albums += rows.length; totals.numbered += health.numbered; totals.size += size;
+      totals.missing += family?.missing || 0; totals.duplicateGroups += health.duplicateGroupCount;
+      totals.duplicateBytes += health.duplicateReclaimableBytes;
+    }
+    collections.sort((a, b) => b.count - a.count || a.title.localeCompare(b.title, "zh-CN"));
+    const payload = { scannedAt: index?.scannedAt || "", totals, collections };
+    cachedPhotoAnalysis = { index, payload };
+    return payload;
+  }
+
   return {
     itemsPayload,
     photoCollectionHealthPayload,
+    photoLibraryAnalysisPayload,
     clearPreparedQueries: preparedQueries.clear,
     payload,
     publicGalleryMediaItem,

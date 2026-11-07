@@ -28,6 +28,15 @@ export async function routeContentIndexApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/image-library/photo-analysis" && req.method === "GET") {
+    try {
+      sendJson(res, 200, imageLibraryService.photoLibraryAnalysisPayload());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "套图分析读取失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/image-library/photo-collection-health" && req.method === "GET") {
     try {
       sendJson(res, 200, imageLibraryService.photoCollectionHealthPayload(url.searchParams.get("collection")));
