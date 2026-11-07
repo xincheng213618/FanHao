@@ -19,7 +19,9 @@ const oldSource = execFileSync("git", ["show", "63c5fab243233e142cfd62c4eaf13812
 assert.equal(crypto.createHash("sha256").update(oldSource).digest("hex"), "30bef6e506a38bda3e4ee7eca57b3b9ba435ecbdffaf3d6a4de89b2e2666b4d2", "fixed complete pre-cache owner");
 const currentSource = fs.readFileSync(new URL("image-library-service.js", root), "utf8").replace(/\r\n/g, "\n");
 const metricName = "__fanhaoPhotoQueryFixtureMetrics";
-const oldFactory = await loadFactory(oldSource);
+// Issue-number parsing changed deliberately after the pinned owner. The
+// differential checks caching, so the baseline uses the current parser.
+const oldFactory = await loadFactory(withCurrentAlbumNumbers(oldSource));
 const currentFactory = await loadFactory(currentSource);
 const testedFactory = args.includes("--disable-photo-cache") ? await loadFactory(disablePhoto(currentSource)) : currentFactory;
 assert.equal(globalThis[metricName], undefined);
@@ -58,6 +60,25 @@ function disablePhoto(source) {
   assert.equal(controlled.replace(replacement, original), source, "negative only disables photo eligibility");
   return controlled;
 }
+function withCurrentAlbumNumbers(source) {
+  source = replaceOnce(source, `  function photoAlbumNumber(value) {
+    const match = String(value || "").match(/\\b(VOL|N[O0])\\.?\\s*(\\d+)\\b/i);
+    if (!match) return "";
+    const prefix = /^VOL$/i.test(match[1]) ? "VOL." : "NO.";
+    return \`\${prefix}\${match[2]}\`;
+  }
+`, `  function photoAlbumNumber(value) {
+    return parsePhotoAlbumNumber(value)?.label || "";
+  }
+`);
+  source = replaceOnce(source, `    const text = stripPhotoAlbumStats(value);
+    const match = text.match(/\\b(?:VOL|N[O0])\\.?\\s*\\d+\\b/i);`, `    const parsedNumber = parsePhotoAlbumNumber(value);
+    const text = parsedNumber?.text ?? stripPhotoAlbumStats(value);
+    const match = parsedNumber ? { index: parsedNumber.index, 0: text.slice(parsedNumber.index, parsedNumber.index + parsedNumber.length) } : null;`);
+  source = replaceOnce(source, `        .replace(/^\\s*[-–—:]\\s*/u, "")`, `        .replace(/^\\s*[-–—:.、#]\\s*/u, "")`);
+  return `import { parsePhotoAlbumNumber } from "./photo-album-number.js";\n${source}`;
+}
+
 async function loadFactory(source) {
   for (const [anchor, metric] of [
     ["  function filterPhotoSetsForList(items, filters = {}) {", "filteredRows += items.length"],

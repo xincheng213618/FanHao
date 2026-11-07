@@ -28,6 +28,14 @@ export async function routeContentIndexApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/image-library/photo-collection-health" && req.method === "GET") {
+    try {
+      sendJson(res, 200, imageLibraryService.photoCollectionHealthPayload(url.searchParams.get("collection")));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "合集体检读取失败" });
+    }
+    return true;
+  }
   if (url.pathname === "/api/image-library/rescan" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     sendJson(res, 409, { error: "图库索引刷新已移到后台作业中心，请启动“刷新图库索引”作业。" });

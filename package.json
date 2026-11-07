@@ -84,7 +84,7 @@
     "verify:library-merge": "node tests/verify_library_merge.mjs && node tests/verify_western_video_scan.mjs && python tests/verify_western_full_scan.py",
     "verify:core-images": "node tests/verify_core_image_store.mjs && python tests/verify_refresh_core_javdb_actor_movies_atomicity.py && node tests/verify_actor_profile_staging_outbox.mjs && node tests/verify_actor_profile_reservation_guards.mjs && node tests/verify_actor_profile_writer_scan.mjs",
     "verify:gallery-db": "node tests/verify_image_gallery_db.mjs",
-    "verify:image-library": "node tests/verify_image_library_service.mjs && node tests/verify_media_metadata_identity.mjs && npm run verify:media-detail-projection && node tests/verify_media_channel_clients.mjs && npm run verify:image-query && npm run verify:image-query-cache && node tests/verify_image_library_performance.mjs && node tests/verify_cache_index_contracts.mjs && node tests/verify_rescan_image_library.mjs",
+    "verify:image-library": "node tests/verify_photo_album_number.mjs && node tests/verify_image_library_service.mjs && node tests/verify_media_metadata_identity.mjs && npm run verify:media-detail-projection && node tests/verify_media_channel_clients.mjs && npm run verify:image-query && npm run verify:image-query-cache && node tests/verify_image_library_performance.mjs && node tests/verify_cache_index_contracts.mjs && node tests/verify_rescan_image_library.mjs",
     "verify:media-detail-projection": "node tests/verify_media_detail_projection.mjs",
     "verify:image-query": "node tests/verify_image_query_correctness.mjs && npm run verify:movie-cold-projection",
     "verify:movie-cold-projection": "node tests/verify_movie_cold_projection.mjs",

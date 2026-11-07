@@ -11,7 +11,8 @@ import { sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-sour
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const servicePath = path.join(root, "src", "modules", "content-index", "server", "image-library-service.js");
 const serviceSource = fs.readFileSync(servicePath, "utf8").replaceAll("\r\n", "\n")
-  .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href));
+  .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href))
+  .replace('"./photo-album-number.js"', JSON.stringify(new URL("../src/modules/content-index/server/photo-album-number.js", import.meta.url).href));
 const { createImageLibraryService: createLegacyImageLibraryService } = await import(legacyServiceModuleUrl(serviceSource));
 const { createImageLibraryService: createTestableImageLibraryService } = await import(testableServiceModuleUrl(serviceSource));
 const index = createProductionShapeIndex();

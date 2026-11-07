@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import { createImageQueryCache, IMAGE_QUERY_CACHE_MAX_ROWS } from "./image-query-cache.js";
+import { parsePhotoAlbumNumber, photoCollectionHealth } from "./photo-album-number.js";
 
 const imageNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const imageSearchFieldNames = ["title", "person", "collection", "category", "folder", "metadata"];
@@ -635,12 +636,8 @@ export function createImageLibraryService({
   }
 
   function photoAlbumNumber(value) {
-    const match = String(value || "").match(/\b(VOL|N[O0])\.?\s*(\d+)\b/i);
-    if (!match) return "";
-    const prefix = /^VOL$/i.test(match[1]) ? "VOL." : "NO.";
-    return `${prefix}${match[2]}`;
+    return parsePhotoAlbumNumber(value)?.label || "";
   }
-
   function escapePhotoAlbumPattern(value) {
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
@@ -652,8 +649,9 @@ export function createImageLibraryService({
   }
 
   function photoAlbumSubject(value, item = {}, collectionTitle = "") {
-    const text = stripPhotoAlbumStats(value);
-    const match = text.match(/\b(?:VOL|N[O0])\.?\s*\d+\b/i);
+    const parsedNumber = parsePhotoAlbumNumber(value);
+    const text = parsedNumber?.text ?? stripPhotoAlbumStats(value);
+    const match = parsedNumber ? { index: parsedNumber.index, 0: text.slice(parsedNumber.index, parsedNumber.index + parsedNumber.length) } : null;
     const personName = String(item?.personName || "").trim();
     const structuralLabels = [
       collectionTitle || item?.collectionTitle,
@@ -671,7 +669,7 @@ export function createImageLibraryService({
         .replace(/(?:^|\s)20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}(?:日)?(?:\s|$)/u, " ")
         .replace(/\s*[-–—:]\s*Collection\s*$/iu, "")
         .replace(/\s+Collection\s*$/iu, "")
-        .replace(/^\s*[-–—:]\s*/u, "")
+        .replace(/^\s*[-–—:.、#]\s*/u, "")
         .replace(/[\s._-]+$/u, "")
         .trim();
       if (personName) {
@@ -1407,8 +1405,21 @@ export function createImageLibraryService({
       .map(({ item }) => item);
   }
 
+  function photoCollectionHealthPayload(collection, options = {}) {
+    const collectionId = String(collection || "").trim();
+    if (!collectionId) throw Object.assign(new Error("缺少合集"), { statusCode: 400 });
+    const index = getImageLibraryIndex(options);
+    const albums = preparedPhotoCatalog(index).items.filter(item => item.collectionId === collectionId).map(item => ({
+      ...item, albumSubject: item.albumSubject || photoAlbumSubject(item.title, item, item.collectionTitle),
+      routePath: imageLibraryItemRoutePath("photo", item.id)
+    }));
+    if (!albums.length) throw Object.assign(new Error("没有找到这个合集"), { statusCode: 404 });
+    return { collection: collectionId, scannedAt: index?.scannedAt || "", ...photoCollectionHealth(albums) };
+  }
+
   return {
     itemsPayload,
+    photoCollectionHealthPayload,
     clearPreparedQueries: preparedQueries.clear,
     payload,
     publicGalleryMediaItem,

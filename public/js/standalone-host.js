@@ -43,7 +43,7 @@ async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
       import("../modules/content-index/gallery-page.js?v=20261004-gallery-reader-owner-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20261004-gallery-reader-owner-01")
+      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-health-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
