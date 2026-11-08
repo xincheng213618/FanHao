@@ -98,7 +98,7 @@ export function createServerConfig({
     IMAGE_READER_LIST_CACHE_TTL_MS: 6 * 60 * 60 * 1000,
     ARCHIVE_IMAGE_EXTS: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]),
     ARCHIVE_EXTS: new Set([".zip", ".cbz", ".rar", ".7z"]),
-    PHOTO_SET_COVER_GENERATOR_VERSION: 2,
+    PHOTO_SET_COVER_GENERATOR_VERSION: 3,
     GALLERY_MEDIA_COVER_GENERATOR_VERSION: 1,
     IMAGE_GALLERY_COVER_MAX_BYTES: 1024 * 1024,
     IMAGE_GALLERY_COVER_BOX_SIZE: 640,
