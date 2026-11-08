@@ -170,6 +170,33 @@ async function verifyOldSchemaAndZipIdentity() {
 }
 
 
+async function verifyPhotoReveal() {
+  const root = path.join(temporary, "reveal-root"), outside = path.join(temporary, "reveal-outside");
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  const file = path.join(root, "Clouds of mystery [1].zip");
+  fs.writeFileSync(file, "fixture");
+  fs.writeFileSync(path.join(outside, "outside.zip"), "outside");
+  fs.symlinkSync(outside, path.join(root, "link"), "junction");
+  const albums = { current: file, missing: path.join(root, "missing.zip"), escape: path.join(root, "link", "outside.zip") };
+  const requests = [];
+  const deps = {
+    requireLocalAdmin: (req, res) => req.allowed || (res.writeHead(403), res.end(), false),
+    photoSetService: { byId: id => albums[id] ? { sourceRoot: root, file: albums[id] } : null, archivePath: album => album.file },
+    schedulePathAction: (target, options) => requests.push({ target, options }),
+    sendJson: (res, status, body) => { res.writeHead(status); res.end(body); },
+    notFound: res => { res.writeHead(404); res.end(); }
+  };
+  for (const [id, allowed, expected] of [["current", true, 200], ["current", false, 403], ["missing", true, 404], ["escape", true, 400], ["%E0", true, 400]]) {
+    const res = response();
+    assert.equal(await routePhotosApi({ method: "POST", allowed }, res, new URL(`http://fixture/api/photo-sets/${id}/reveal`), deps), true);
+    assert.equal(res.statusCode, expected);
+  }
+  assert.deepEqual(requests, [{ target: file, options: { action: "reveal" } }]);
+  fs.unlinkSync(path.join(root, "link"));
+  scenarios++;
+}
+
 async function verifyPhotoDetailPaging() {
   const file = path.join(projectRoot, "src/modules/photos/server/photo-set-service.js");
   const source = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
@@ -1495,6 +1522,7 @@ try {
   }
   if (!inlineCase) await verifyIndexStampWork();
   if (!inlineCase || inlineCase === "photo-detail-paging") await verifyPhotoDetailPaging();
+  if (!inlineCase || inlineCase === "photo-reveal") await verifyPhotoReveal();
   if (!inlineCase || inlineCase === "manual-photo-cover") await verifyManualPhotoCover();
   if (!inlineCase || inlineCase === "photo-archive-video") await verifyPhotoArchiveVideo();
   if (!inlineCase || inlineCase === "photo-archive-video-cover") await verifyPhotoArchiveVideoCover();

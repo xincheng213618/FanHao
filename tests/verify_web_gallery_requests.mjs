@@ -247,7 +247,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
           await until(() => coverRequests.size === 2, 'both visible covers must start without waiting for either response');
           assert.equal(await heading.innerText(), title);
           assert.match(await page.locator('.gallery-collection-hero-copy').innerText(), /2 期.*4\.00 KB.*20,000 张/);
-          assert.match(await pending.locator('.gallery-card-body').innerText(), /封面加载中的套图[\s\S]*合成人物[\s\S]*2026-10-05/);
+          assert.match(await pending.locator('..').innerText(), /封面加载中的套图[\s\S]*合成人物[\s\S]*2026-10-05/);
           assert.equal(await pending.locator('img').evaluate(img => img.complete), false);
           assert.equal(await missing.locator('img').evaluate(img => img.complete), false);
           assert([...coverRequests.values()].every(params => params.get('fallback') === 'empty' && params.get('v') === 'fixture'));
@@ -315,11 +315,11 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await heading.innerText(), '艺图语');
         assert.deepEqual(await page.locator('.gallery-collection-breadcrumb button').allTextContents(), ['图库', '名站套图']);
         const body = card.locator('.gallery-card-body');
+        const metadata = card.locator('..').locator('.gallery-card-date-row');
         assert.equal(await body.locator('strong').innerText(), '冷暖光影');
-        assert.equal(await body.locator('time').innerText(), '2026-10-05');
-        assert.match(await body.innerText(), /夏铃蔓/);
-        assert.doesNotMatch(await body.innerText(), /MB|VOL\.2754/);
-        assert.equal(await body.locator(':scope > *').count(), 2);
+        assert.equal(await metadata.locator('time').innerText(), '2026-10-05');
+        await metadata.getByRole('link', { name: '查看人物 夏铃蔓 的套图' }).waitFor();
+        assert.doesNotMatch(`${await body.innerText()} ${await metadata.innerText()}`, /MB|VOL\.2754/);
         assert.equal(await body.locator('strong').evaluate(node => getComputedStyle(node).textAlign), 'center');
         const issue = card.getByText('VOL.2754', { exact: true });
         const count = card.getByRole('img', { name: '23 张图片' });
@@ -369,6 +369,39 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await settle(page, remove);
         assert.equal(await mark.getAttribute('aria-pressed'), 'false');
       } finally { releaseSummaryGates(save, remove); await page.close(); }
+    });
+    await run('photo metadata links filter albums and reveal opens the current archive', async () => {
+      const items = [
+        { ...listItem('A'), photoSite: 'MetArt', personName: 'Jeff Milton', photoRegion: 'western', archiveDate: '2019-12-18' },
+        { ...listItem('B'), photoSite: 'MetArtX', personName: 'Dakota Pink', photoRegion: 'western', archiveDate: '2019-01-18' }
+      ];
+      collectionShelf = url => {
+        const site = url.searchParams.get('site'), person = url.searchParams.get('person');
+        const matches = items.filter(item => (!site || item.photoSite === site) && (!person || item.personName === person));
+        return { items: matches, count: matches.length, total: matches.length, facets: {} };
+      };
+      const reveal = hold((url, method) => url.pathname === '/api/photo-sets/A/reveal' && method === 'POST', '', { ok: true });
+      const page = await newPage({ real: true, route: '/photo/albums' });
+      try {
+        const site = page.getByRole('link', { name: '查看网站 MetArt 的套图', exact: true });
+        await site.waitFor();
+        assert.equal(await site.evaluate(link => Boolean(link.closest('button'))), false);
+        await site.click();
+        await page.getByRole('heading', { name: 'MetArt · 套图' }).waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('site'), 'MetArt');
+        assert.equal(await page.locator('[data-gallery-album-id="B"]').count(), 0);
+        await page.getByRole('link', { name: '查看人物 Jeff Milton 的套图' }).click();
+        await page.locator('.gallery-person-bar').getByText('Jeff Milton').waitFor();
+        assert(apiMethods.some(({ url }) => new URL(url, base).searchParams.get('person') === 'Jeff Milton'));
+        await page.locator('[data-gallery-album-id="A"]').click();
+        const button = page.getByRole('button', { name: '定位文件' });
+        await button.click();
+        await requested(reveal);
+        assert.equal(await button.isDisabled(), true);
+        await settle(page, reveal);
+        await page.locator('.gallery-photo-reveal-control [role="status"]').filter({ hasText: '已请求定位' }).waitFor();
+        assert.equal(new URL(page.url()).pathname, '/photo/set/A');
+      } finally { releaseSummaryGates(reveal); collectionShelf = null; await page.close(); }
     });
     await run('photo scroll pagination runs while four same-origin covers are pending', async () => {
       const isList = (url, offset) => url.pathname === '/api/image-library/items'

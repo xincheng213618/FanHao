@@ -4,9 +4,10 @@ import { spawn } from "node:child_process";
 export function scheduleLocalPathAction(targetPath, { action = "open", isDirectory = false, warn = console.warn } = {}) {
   setTimeout(() => {
     try {
-      runLocalPathAction(targetPath, { action, isDirectory });
+      const child = runLocalPathAction(targetPath, { action, isDirectory });
+      child.once("error", error => warn("[local-path-action]", error?.message || error));
     } catch (error) {
-      warn("[disk-usage-open]", error?.message || error);
+      warn("[local-path-action]", error?.message || error);
     }
   }, 25);
 }
@@ -15,11 +16,13 @@ export function runLocalPathAction(targetPath, { action = "open", isDirectory = 
   const normalizedAction = action === "reveal" ? "reveal" : "open";
   let command = "";
   let args = [];
+  let windowsVerbatimArguments = false;
 
   if (platform === "win32") {
     if (normalizedAction === "reveal") {
       command = "explorer.exe";
-      args = [`/select,${targetPath}`];
+      args = [`/select,"${targetPath}"`];
+      windowsVerbatimArguments = true;
     } else if (isDirectory) {
       command = "explorer.exe";
       args = [targetPath];
@@ -35,7 +38,8 @@ export function runLocalPathAction(targetPath, { action = "open", isDirectory = 
   const child = spawn(command, args, {
     detached: true,
     stdio: "ignore",
-    windowsHide: true
+    windowsHide: command !== "explorer.exe",
+    windowsVerbatimArguments
   });
   child.unref();
   return child;

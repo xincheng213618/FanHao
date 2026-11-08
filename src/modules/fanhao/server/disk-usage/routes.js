@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { scheduleLocalPathAction } from "./local-actions.js";
+import { scheduleLocalPathAction } from "../../../../platform/server/local-path-action.js";
 
 export function createDiskUsageRoutes({
   getLibrary = () => null,

@@ -265,6 +265,7 @@ assert.deepEqual(mergedEpisodeDetail.items.map((item) => item.id).sort(), ["cros
 
 const westernFixtures = [
   ["western-shaded", "Veronika.Glam", "MetArt.com_19.12.18.Veronika.Glam.Shaded.XXX.IMAGESET-GAGBALL[rarbg]", "Shaded", "MetArt", "2019-12-18", "Veronika Glam"],
+  ["western-metartx", "Dakota Pink", "MetArtX.com 2019-01-18 Dakota Pink - Country Girl", "Country Girl", "MetArtX", "2019-01-18", "Dakota Pink"],
   ["western-ma", "Jeff milton", "MA 130916 Presenting", "Presenting", "MetArt", "2013-09-16", "Jeff Milton"],
   ["western-ra", "Jeff milton", "RA 130803 Walking In My Shoes", "Walking In My Shoes", "RylskyArt", "2013-08-03", "Jeff Milton"],
   ["western-faina", "Faina Bona", "AmourAngels - 2018-05-11 - Faina - Spring Colors (х120) 3840x5760 _by Marita Berg", "Spring Colors", "AmourAngels", "2018-05-11", "Faina Bona"],
@@ -286,6 +287,11 @@ const westernSearch = service.itemsPayload(url({ mode: "photo", photoView: "albu
 assert.deepEqual(westernSearch.items.map(item => item.id), ["western-ra"]);
 const westernCollection = service.itemsPayload(url({ mode: "photo", collection: albums.find(item => item.id === "western-shaded").collectionId, date: "2019-12" }));
 assert.deepEqual(westernCollection.items.map(item => item.title), ["Shaded"]);
+const siteAlbums = service.itemsPayload(url({ mode: "photo", site: "metart", limit: "1", offset: "1" }));
+assert.equal(siteAlbums.total, 2);
+assert.equal(siteAlbums.items[0].photoSite, "MetArt");
+assert.deepEqual(service.itemsPayload(url({ mode: "photo", site: "MetArtX" })).items.map(item => item.id), ["western-metartx"]);
+assert.deepEqual(service.itemsPayload(url({ mode: "photo", person: "Lena Raz" })).items.map(item => item.id), ["western-multiple"]);
 assert.equal(parseWesternPhotoAlbum({ ...westernRows[0], category: "[COS]" }), null);
 assert.equal(parseWesternPhotoAlbum({ ...westernRows[1], title: "Aksiniasem" }), null);
 

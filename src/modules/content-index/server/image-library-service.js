@@ -422,8 +422,9 @@ export function createImageLibraryService({
     const subCategory = String(url.searchParams.get("subCategory") || "all").trim() || "all";
     const person = String(url.searchParams.get("person") || "all").trim() || "all";
     const date = String(url.searchParams.get("date") || "all").trim() || "all";
+    const site = mode === "photo" ? String(url.searchParams.get("site") || "").trim() : "";
     const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
-    let collectionPage = mode === "photo" && photoView === "collections" && !collection && !query
+    let collectionPage = mode === "photo" && photoView === "collections" && !collection && !query && !site
       && url.searchParams.get("collectionPage") === "1";
     const locale = collectionPage ? url.searchParams.get("collectionLocale") || "" : "";
     const collectionLocale = locale.length <= 64 ? locale : "";
@@ -504,14 +505,14 @@ export function createImageLibraryService({
     const index = mode === "photo" ? getPhotoIndex(options, collection) : mode === "manga" ? null : getImageLibraryIndex(options);
     if (peopleView) return photoPeoplePage(index, {
       category, photoSourceCategory, categorySources, categoryScope, browseCategory, browseParent,
-      subCategory, date, collection, query, sort, direction, limit, offset
+      subCategory, date, site, collection, query, sort, direction, limit, offset
     });
     const sourceStampBefore = listSourceStamp(index, mode);
     let mangaSourceRevision = "";
     const cacheEligible = cachePreparedQueries && ["photo", "western", "movie", "tv", "anime", "media"].includes(mode)
       && typeof getImageLibraryRevision === "function"
       && (["photo", "western"].includes(mode) || typeof metadataService.listRevision === "function");
-    const queryCacheKey = JSON.stringify([mode, query, sort, direction, photoView, tvView, category, mediaKind, subCategory, person, date, collection, seriesKey, collectionPage, collectionLocale, photoSourceCategory, categoryDirect, categoryScope]);
+    const queryCacheKey = JSON.stringify([mode, query, sort, direction, photoView, tvView, category, mediaKind, subCategory, person, date, site, collection, seriesKey, collectionPage, collectionLocale, photoSourceCategory, categoryDirect, categoryScope]);
     if (mode !== "manga" && (options.refresh || !cacheEligible)) preparedQueries.clear();
     const prepared = cacheEligible && !options.refresh ? preparedQueries.get(queryCacheKey, sourceStampBefore) : null;
     if (prepared) {
@@ -623,11 +624,11 @@ export function createImageLibraryService({
         const compact = Boolean(collection) || date === "all" && (photoView === "collections" || !query);
         const catalog = preparedPhotoCatalog(index, compact);
         compactAlbumRows = catalog.compact && !collection && photoView === "albums";
-        const defaultPhotoFilters = !categorySources && photoFiltersAreDefault({ category: photoSourceCategory, subCategory, person, date });
+        const defaultPhotoFilters = !categorySources && photoFiltersAreDefault({ category: photoSourceCategory, subCategory, person, date, site });
         const collectionItems = collection ? preparedPhotoCollectionAlbums(catalog, collection) : null;
         const albums = collectionItems || catalog.items;
         const filteredPhotoSets = defaultPhotoFilters ? albums : filterPhotoSetsForList(albums, {
-          category: photoSourceCategory, categorySources, subCategory, person, date
+          category: photoSourceCategory, categorySources, subCategory, person, date, site
         });
         if (collectionItems) {
           collectionSummary = photoCollectionSummary(collectionItems, collection);
@@ -745,6 +746,7 @@ export function createImageLibraryService({
         subCategory: mode === "photo" ? subCategory : "",
         person: ["photo", "western", "media", "tv"].includes(mode) ? person : "",
         date: mode === "photo" ? date : "",
+        ...(site ? { site } : {}),
         collection: mode === "photo" ? collection : "",
         collectionSummary,
         searchTerms: searchSpec?.terms || [],
@@ -831,13 +833,13 @@ export function createImageLibraryService({
 
   function photoPeoplePage(index, options) {
     const { category, photoSourceCategory, categorySources, categoryScope, browseCategory, browseParent,
-      subCategory, date, collection, query, sort, direction, limit, offset } = options;
+      subCategory, date, site, collection, query, sort, direction, limit, offset } = options;
     const catalog = preparedPhotoCatalog(index, date === "all");
-    const key = JSON.stringify([photoSourceCategory, categoryScope, subCategory, date, collection]);
+    const key = JSON.stringify([photoSourceCategory, categoryScope, subCategory, date, site, collection]);
     if (catalog.peopleDirectory?.key !== key) {
       const source = collection ? catalog.items.filter(item => item.collectionId === collection) : catalog.items;
-      const albums = categorySources || !photoFiltersAreDefault({ category: photoSourceCategory, subCategory, date })
-        ? filterPhotoSetsForList(source, { category: photoSourceCategory, categorySources, subCategory, date }) : source;
+      const albums = categorySources || !photoFiltersAreDefault({ category: photoSourceCategory, subCategory, date, site })
+        ? filterPhotoSetsForList(source, { category: photoSourceCategory, categorySources, subCategory, date, site }) : source;
       catalog.peopleDirectory = { key, facets: photoPersonFacets(albums, Number.MAX_SAFE_INTEGER, { includeOrganizedNames: true }) };
     }
     const directory = catalog.peopleDirectory;
@@ -858,6 +860,7 @@ export function createImageLibraryService({
     return {
       schemaVersion: 1, mode: "photo", mediaKind: "all", query, sort, direction, photoView: "people", tvView: "",
       category, subCategory, person: "all", date, collection, collectionSummary: null,
+      ...(site ? { site } : {}),
       searchTerms: searchSpec?.terms || [], seriesKey: "", seriesSummary: null,
       facets: preparedPhotoFacets(catalog, photoSourceCategory), stats: { ratedCount: 0, totalBytes: 0 },
       count: items.length, total: people.length, limit, offset, nextOffset: offset + items.length,
@@ -1078,13 +1081,13 @@ export function createImageLibraryService({
     const shelfPerson = normalizedMode === "photo" && !photoRow ? photoPersonShelfName(item) : "";
     const collectionTitle = photoRow?.collectionTitle ?? (normalizedMode === "photo" ? shelfPerson || photoCollectionDisplayName(collectionDir) : "");
     const boBoSocks = normalizedMode === "photo" && !photoRow && item?.category === BOBO_SOCKS_CATEGORY ? parseBoBoSocksAlbum(photoTitle) : null;
-    const photoPeople = photoRow?.photoPeople ?? boBoSocks?.photoPeople;
+    const photoPeople = western?.photoPeople ?? photoRow?.photoPeople ?? boBoSocks?.photoPeople;
     const personName = western?.personName ?? photoRow?.personName ?? boBoSocks?.personName ?? (shelfPerson || String(item?.personName || "").trim());
     const archiveDate = western?.archiveDate ?? (normalizedMode === "photo" && !compact ? photoArchiveDate(photoTitle) : "");
     const albumNumber = western ? "" : photoRow?.albumNumber ?? boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
     // Unnumbered subjects participate in the person facet guard. Numbered
     // subjects are display-only and can be derived for the returned page.
-    let albumSubject = western?.albumSubject ?? boBoSocks?.albumSubject ?? (photoPeople ? photoRow.albumSubject : "");
+    let albumSubject = western?.albumSubject ?? boBoSocks?.albumSubject ?? (photoPeople ? photoRow?.albumSubject : "");
     if (!western && !photoPeople && normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
       albumSubject = photoRow?.personName && !albumNumber ? photoRow.albumSubject : photoAlbumSubject(photoTitle, item, collectionTitle);
     }
@@ -1566,7 +1569,7 @@ export function createImageLibraryService({
     return (!filters.category || filters.category === "all")
       && (!filters.subCategory || filters.subCategory === "all")
       && (!filters.person || filters.person === "all")
-      && (!filters.date || filters.date === "all");
+      && (!filters.date || filters.date === "all") && !filters.site;
   }
 
   function normalizeImageSearchValue(value) {
@@ -1680,6 +1683,7 @@ export function createImageLibraryService({
   }
 
   function filterPhotoSetsForList(items, filters = {}) {
+    const site = filters.site?.toLowerCase();
     return (items || []).filter((item) => {
       const scope = filters.categorySources;
       if (scope) {
@@ -1690,6 +1694,7 @@ export function createImageLibraryService({
       if (filters.subCategory && filters.subCategory !== "all" && item.subCategory !== filters.subCategory) return false;
       if (filters.person && filters.person !== "all" && item.personName !== filters.person && !item.photoPeople?.includes(filters.person)) return false;
       if (filters.date && filters.date !== "all" && item.archiveMonth !== filters.date && item.archiveDate !== filters.date) return false;
+      if (site && item.photoSite?.toLowerCase() !== site) return false;
       if (filters.collection && photoCollectionValue(item) !== filters.collection) return false;
       return true;
     });

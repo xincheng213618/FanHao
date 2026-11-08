@@ -1,3 +1,7 @@
+import { stat } from "node:fs/promises";
+import { ensureRealPathWithinRoots } from "../../../platform/server/library-path-safety.js";
+import { scheduleLocalPathAction } from "../../../platform/server/local-path-action.js";
+
 export async function routePhotosApi(req, res, url, deps) {
   const {
     catalog,
@@ -13,6 +17,7 @@ export async function routePhotosApi(req, res, url, deps) {
     publicAppConfig,
     readJsonBody,
     requireLocalAdmin,
+    schedulePathAction = scheduleLocalPathAction,
     sendJson,
     startPhotoIndexScan
   } = deps;
@@ -298,6 +303,31 @@ export async function routePhotosApi(req, res, url, deps) {
       if (!controller.signal.aborted) sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "保存套图封面失败" });
     } finally {
       res.removeListener?.("close", disconnect);
+    }
+    return true;
+  }
+
+  const photoRevealMatch = /^\/api\/photo-sets\/([^/]+)\/reveal$/.exec(url.pathname);
+  if (photoRevealMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const album = photoSetService.byId(decodeURIComponent(photoRevealMatch[1]));
+      const archive = album && photoSetService.archivePath(album);
+      if (!archive) {
+        notFound(res);
+        return true;
+      }
+      const target = ensureRealPathWithinRoots(archive, [album.sourceRoot], "套图文件");
+      if (!(await stat(target)).isFile()) {
+        notFound(res);
+        return true;
+      }
+      schedulePathAction(target, { action: "reveal" });
+      sendJson(res, 200, { ok: true });
+    } catch (error) {
+      if (error instanceof URIError) sendJson(res, 400, { error: "套图 ID 无效" });
+      else if (["ENOENT", "ENOTDIR"].includes(error.code)) notFound(res);
+      else sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "无法定位套图文件" });
     }
     return true;
   }

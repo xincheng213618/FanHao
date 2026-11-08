@@ -165,6 +165,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         galleryPerson: state.gallery.person || "all",
         gallerySeriesKey: state.gallery.seriesKey || "",
         galleryPhotoDate: state.gallery.photoDate || "all",
+        galleryPhotoSite: state.gallery.photoSite || "",
         gallerySort: state.gallery.sort || "updated",
         gallerySortDirection: state.gallery.sortDirection || ""
       });

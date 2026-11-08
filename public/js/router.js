@@ -246,6 +246,7 @@ export function normalizeRoute(route = {}) {
     galleryPerson: galleryBrowse ? String(route.galleryPerson || "all").trim() || "all" : "all",
     gallerySeriesKey: galleryBrowse && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
     galleryPhotoDate: galleryBrowse ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
+    galleryPhotoSite: galleryBrowse && galleryMode === "photo" ? String(route.galleryPhotoSite || "").trim() : "",
     gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView, galleryMode === "photo" && galleryPhotoCollection ? "issue" : "updated") : "updated",
     gallerySortDirection: galleryBrowse && galleryMode === "photo" ? normalizeGallerySortDirection(route.gallerySortDirection) : "",
     mangaComicId: view === "manga" ? String(route.mangaComicId || "").trim() : "",
@@ -327,6 +328,7 @@ export function routeUrl(route, options = {}) {
     }
     if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
     if (photo && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
+    if (next.galleryPhotoSite) params.set("site", next.galleryPhotoSite);
     const defaultGallerySort = photo && next.galleryPhotoCollection ? "issue" : photo && (next.galleryPhotoView === "people"
       || (next.galleryPhotoView === "collections" && !next.galleryPhotoCollection && !next.galleryQuery))
       ? "count"
@@ -597,6 +599,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : photoFilter("person") || params.get("person") || "all",
     gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
+    galleryPhotoSite: photo ? params.get("site") || "" : "",
     gallerySort: normalizeGallerySort(params.get("sort")),
     gallerySortDirection: photo ? normalizeGallerySortDirection(params.get("dir")) : "",
     personId: "",

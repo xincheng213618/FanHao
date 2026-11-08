@@ -198,6 +198,7 @@ function galleryImageModuleButton(mode, label) {
     state.gallery.person = "all";
     state.gallery.seriesKey = "";
     state.gallery.photoDate = "all";
+    state.gallery.photoSite = "";
     state.gallery.sort = "updated";
     state.gallery.visibleLimit = 80;
     resetGalleryReader();
@@ -297,6 +298,7 @@ function openPhotoCategory(value) {
   state.gallery.person = "all";
   state.gallery.seriesKey = "";
   state.gallery.photoDate = "all";
+  state.gallery.photoSite = "";
   state.gallery.visibleLimit = 80;
   resetGalleryReader();
   renderGalleryView();
@@ -1080,6 +1082,7 @@ function submitGallerySearch(value, options = {}) {
     state.gallery.photoCollection = null;
     state.gallery.sort = nextQuery ? "updated" : "count";
     state.gallery.photoDate = "all";
+    state.gallery.photoSite = "";
   }
   state.gallery.sortDirection = "";
   state.gallery.category = "all";
@@ -2731,14 +2734,16 @@ function createGalleryCard(item, options = {}) {
   const meta = document.createElement("span");
   meta.textContent = options.meta || "";
   body.append(title);
-  if (options.dateLabel) {
+  if (options.dateLabel || options.metaRow) {
     const row = document.createElement("span");
     row.className = "gallery-card-date-row";
     if (options.meta) row.append(meta);
-    const time = document.createElement("time");
-    time.dateTime = options.dateTime;
-    time.textContent = options.dateLabel;
-    row.append(time);
+    if (options.dateLabel) {
+      const time = document.createElement("time");
+      time.dateTime = options.dateTime;
+      time.textContent = options.dateLabel;
+      row.append(time);
+    }
     body.append(row);
   } else if (options.meta) body.append(meta);
   if (options.extra) {
@@ -3113,8 +3118,22 @@ function appendPhotoCatalogMore(container, shown, total) {
 
 function renderPagedPhotoShelf(container, list) {
   const items = Array.isArray(list.items) ? list.items : [];
-  const header = !state.gallery.query ? createGalleryResultsHeader("全部套图", `${formatNumber(list.total || 0)} 期`) : null;
+  const site = state.gallery.photoSite;
+  const header = !state.gallery.query ? createGalleryResultsHeader(site ? `${site} · 套图` : "全部套图", `${formatNumber(list.total || 0)} 期`) : null;
   if (header) {
+    if (site) {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "text-button gallery-filter-clear";
+      clear.textContent = "清除网站筛选";
+      clear.addEventListener("click", () => {
+        state.gallery.photoSite = "";
+        state.gallery.visibleLimit = 80;
+        renderGalleryView();
+        syncGalleryRoute("replace");
+      });
+      header.firstElementChild.append(clear);
+    }
     header.append(createPhotoSortControls(PHOTO_ALBUM_SORT_OPTIONS, "updated", list));
     container.append(header);
   }
@@ -3128,7 +3147,7 @@ function renderPagedPhotoShelf(container, list) {
   // A person-specific bar contains aggregate metadata; preserve its full fallback.
   if (state.gallery.person === "all") registerGalleryList(grid, list, item => createPagedPhotoCard(item), {
     label: "套图", moreParent: container,
-    focusTarget: (node, previous) => node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card"),
+    focusTarget: photoCardFocusTarget,
     refreshMetadata: next => { if (header) header.querySelector("span").textContent = `${formatNumber(next.total || 0)} 期`; }
   });
 }
@@ -3339,7 +3358,7 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   registerGalleryList(grid, list, item => createPagedPhotoCard(item, { collection: true }), {
     label: "套图", moreParent: page,
     canReuse: next => collectionHeader(next) === header,
-    focusTarget: (node, previous) => node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card")
+    focusTarget: photoCardFocusTarget
   });
 }
 
@@ -3358,6 +3377,7 @@ function leavePhotoCollection(photoView, category = "") {
   }
   state.gallery.person = "all";
   state.gallery.photoDate = "all";
+  state.gallery.photoSite = "";
   if (photoView === "albums") state.gallery.subCategory = "all";
   state.gallery.visibleLimit = 80;
   renderGalleryView();
@@ -3424,16 +3444,42 @@ function renderPagedPhotoCards(items, options = {}) {
   return grid;
 }
 
+function photoAlbumFilterLink(key, value) {
+  const link = document.createElement("a");
+  const params = new URLSearchParams({ [key]: value });
+  const current = new URLSearchParams(window.location.search);
+  for (const option of ["client", "returnTo"]) {
+    if (current.has(option)) params.set(option, current.get(option));
+  }
+  link.href = `/photo/albums?${params}`;
+  link.className = "gallery-photo-card-link";
+  link.textContent = value;
+  link.setAttribute("aria-label", `查看${key === "site" ? "网站" : "人物"} ${value} 的套图`);
+  return link;
+}
+
+function photoCardFocusTarget(node, previous) {
+  if (previous.classList.contains("gallery-photo-card-link")) {
+    const link = [...node.querySelectorAll(".gallery-photo-card-link")].find(item => item.href === previous.href);
+    if (link) return link;
+  }
+  return node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card");
+}
+
 function createPagedPhotoCard(item, options = {}) {
   const collectionView = Boolean(options.collection);
   const collectionPerson = item.photoRegion === "western" ? item.personName : collectionView ? photoAlbumPersonName(item) : "";
   const { albumNumber, title } = photoAlbumCardTitle(item, collectionView);
   const person = collectionView ? collectionPerson : item.personName;
+  const people = item.photoPeople?.length ? item.photoPeople : person && (person !== title || item.photoRegion === "western") ? [person] : [];
+  const match = gallerySearchMatchText(item);
+  const hasLinks = Boolean(item.photoSite || people.length);
   const imageCount = item.contentImageCount ?? knownPhotoCardCounts.get(item);
   const card = createGalleryCard({ ...item, title }, {
     leadingBadge: albumNumber || item.archiveDate,
     queueCover: true,
-    meta: [item.photoSite, person === title ? "" : person, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
+    meta: [item.photoSite, ...people, match].filter(Boolean).join(" · "),
+    metaRow: hasLinks,
     dateLabel: item.archiveDate || formatDateTime(item.updatedAt),
     dateTime: item.archiveDate || item.updatedAt,
     placeholder: collectionView ? "" : "套图",
@@ -3461,7 +3507,25 @@ function createPagedPhotoCard(item, options = {}) {
   }
   const entry = document.createElement("article");
   entry.className = "gallery-photo-album-entry";
-  entry.append(card, createPhotoAlbumMarkButton(item));
+  entry.append(card);
+  if (hasLinks) {
+    const row = card.querySelector(".gallery-card-date-row");
+    const meta = row.querySelector("span");
+    const links = [
+      ...(item.photoSite ? [photoAlbumFilterLink("site", item.photoSite)] : []),
+      ...people.map(name => photoAlbumFilterLink("person", name)),
+      ...(match ? [match] : [])
+    ];
+    meta.replaceChildren();
+    links.forEach((link, index) => {
+      if (index) meta.append(" · ");
+      meta.append(link);
+    });
+    row.classList.add("gallery-photo-card-meta");
+    entry.classList.add("has-photo-links");
+    entry.append(row);
+  }
+  entry.append(createPhotoAlbumMarkButton(item));
   return entry;
 }
 
@@ -3623,6 +3687,7 @@ function renderPhotoPersonBar(container, total) {
   allButton.textContent = "全部套图";
   allButton.addEventListener("click", () => {
     state.gallery.person = "all";
+    state.gallery.photoSite = "";
     state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
@@ -3638,6 +3703,7 @@ function renderPhotoPersonBar(container, total) {
     state.gallery.sort = "count";
     state.gallery.sortDirection = "";
     state.gallery.person = "all";
+    state.gallery.photoSite = "";
     state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
@@ -4088,6 +4154,7 @@ function readerToolbar(title, meta, onBack, options = {}) {
   const actions = document.createElement("div");
   actions.className = "gallery-reader-actions";
   if (options.markAlbum) actions.append(createPhotoAlbumMarkButton(options.markAlbum));
+  if (options.albumId && ["local", "lan"].includes(state.accessMode)) actions.append(createPhotoRevealButton(options.albumId));
   const setFitWidth = (fitWidth) => {
     if (!bar.isConnected || state.activeView !== "gallery" || state.gallery.fitWidth === fitWidth) return;
     const viewer = bar.parentElement?.querySelector(".gallery-reader-images");
@@ -5147,6 +5214,33 @@ function renderPhotoReader(container) {
   }
   renderReaderImages(container, images, options);
   renderPhotoReaderMore(container, album);
+}
+
+function createPhotoRevealButton(albumId) {
+  const control = document.createElement("div");
+  control.className = "gallery-photo-reveal-control";
+  const status = document.createElement("span");
+  status.setAttribute("role", "status");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button gallery-photo-reveal";
+  button.textContent = "定位文件";
+  button.title = "在资源管理器中选中原压缩包";
+  button.addEventListener("click", async () => {
+    if (button.disabled || state.gallery.album?.id !== albumId) return;
+    button.disabled = true;
+    status.textContent = "正在定位…";
+    try {
+      await api(`/api/photo-sets/${encodeURIComponent(albumId)}/reveal`, { method: "POST" });
+      status.textContent = "已请求定位";
+    } catch (error) {
+      status.textContent = error.message || "无法定位套图文件";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  control.append(button, status);
+  return control;
 }
 
 function renderPhotoArchiveVideos(album, onBack) {

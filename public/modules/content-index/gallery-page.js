@@ -78,6 +78,7 @@ export function createGalleryPage(deps) {
     state.gallery.person = route.galleryPerson || "all";
     state.gallery.seriesKey = ["media", "tv"].includes(state.gallery.mode) ? route.gallerySeriesKey || "" : "";
     state.gallery.photoDate = route.galleryPhotoDate || "all";
+    state.gallery.photoSite = route.galleryPhotoSite || "";
     state.gallery.sort = state.gallery.query ? "updated"
       : state.gallery.photoView === "people" ? photoPeopleSort(route.gallerySort)
         : route.gallerySort || (state.gallery.photoCollection ? "issue" : "updated");
@@ -260,6 +261,7 @@ export function createGalleryPage(deps) {
       person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? scope.person || "all" : "",
       seriesKey: ["media", "tv"].includes(state.gallery.mode) ? scope.seriesKey || "" : "",
       date: state.gallery.mode === "photo" ? scope.photoDate || "all" : "",
+      ...(photoView && scope.photoSite ? { site: scope.photoSite } : {}),
       query,
       sort: query ? "relevance" : photoView === "people" ? photoPeopleSort(state.gallery.sort)
         : ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : "",
@@ -292,6 +294,7 @@ export function createGalleryPage(deps) {
       if (scope.subCategory && scope.subCategory !== "all") params.set("subCategory", scope.subCategory);
       if (scope.person && scope.person !== "all") params.set("person", scope.person);
       if (scope.photoDate && scope.photoDate !== "all") params.set("date", scope.photoDate);
+      if (scope.photoSite) params.set("site", scope.photoSite);
       if (scope.photoCollection) params.set("collection", scope.photoCollection);
     } else if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
       if (state.gallery.mode === "media" && scope.mediaKind && scope.mediaKind !== "all") params.set("kind", scope.mediaKind);
