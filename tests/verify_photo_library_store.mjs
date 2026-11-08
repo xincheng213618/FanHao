@@ -3,13 +3,15 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
 import { createImageLibraryService, PHOTO_COLLECTION_SORTS } from "../src/modules/content-index/server/image-library-service.js";
 import { createPhotoLibraryStore } from "../src/modules/content-index/server/photo-library-store.js";
 import { routeContentIndexApi } from "../src/modules/content-index/server/routes.js";
 import { createPhotoSetService } from "../src/modules/photos/server/photo-set-service.js";
-import { safeChildPath } from "../src/platform/server/request-io.js";
+import { routePhotosApi } from "../src/modules/photos/server/routes.js";
+import { readJsonBody, safeChildPath } from "../src/platform/server/request-io.js";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-photo-library-fixture-"));
@@ -44,7 +46,8 @@ const owner = createImageLibraryIndexService({
   safeStat: () => assert.fail("SQLite browse must not scan the source roots")
 });
 const legacy = createImageLibraryService({ ...serviceOptions, getImageLibraryIndex: () => snapshot });
-const sql = createImageLibraryService({ ...serviceOptions, photoLibraryStore: store,
+const sql = createImageLibraryService({ ...serviceOptions, photoLibraryStore: store, cachePreparedQueries: true,
+  getImageLibraryRevision: store.revision,
   getImageLibraryIndex: () => assert.fail("published photo reads must not load the media index") });
 
 function url(pathname, params) {
@@ -71,6 +74,68 @@ function response() {
     writeHead(status, headers) { this.status = status; this.headers = headers; },
     end(body) { this.writableEnded = true; this.body = body; }
   });
+}
+
+async function verifyArchiveMarks(id) {
+  const photoSetService = createPhotoSetService({
+    archiveMarks: store.archiveMarks,
+    archiveImagesPayload: async () => ({ images: [] }),
+    getImageGalleryDb: galleryDb.getDb,
+    photoSetById: owner.photoSetById,
+    safeChildPath,
+    setArchiveMarkedA: store.setArchiveMarkedA
+  });
+  function sendJson(res, status, body) { res.writeHead(status); res.end(body); }
+  async function request(pathname, { method = "GET", body = "", local = true } = {}) {
+    const req = Object.assign(Readable.from([Buffer.from(body)]), { method });
+    const res = response();
+    const handled = await routePhotosApi(req, res, url(pathname), {
+      imageReaderCacheStatus: async () => null, photoSetService, readJsonBody, sendJson,
+      requireLocalAdmin(_req, target) {
+        if (!local) sendJson(target, 403, { error: "fixture forbids non-admin access" });
+        return local;
+      },
+      notFound: target => sendJson(target, 404, { error: "not found" })
+    });
+    assert.equal(handled, true);
+    return res;
+  }
+  const itemPath = `/api/photo-sets/${id}`;
+  const toggle = (body, options) => request(`${itemPath}/mark`, { method: "PUT", body, ...options });
+  const list = () => api("/api/image-library/items", { mode: "photo", photoView: "albums", limit: 1 });
+  const baseline = await list();
+  assert.equal(baseline.items[0].id, id);
+  assert(!Object.hasOwn(baseline.items[0], "markedA"));
+  assert.deepEqual(await list(), baseline);
+  assert.equal((await toggle('{"markedA":true}', { local: false })).status, 403);
+  for (const body of ['{"markedA":"true"}', '{}', '{']) assert.equal((await toggle(body)).status, 400);
+  assert.equal((await request("/api/photo-sets/%FF/mark", { method: "PUT", body: '{"markedA":true}' })).status, 400);
+  for (const markedA of [true, false]) {
+    assert.equal((await request("/api/photo-sets/missing/mark", { method: "PUT", body: JSON.stringify({ markedA }) })).status, 404);
+  }
+  assert(!store.archiveMarks([id]).has(id));
+
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const result = await toggle('{"markedA":true}');
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, { id, markedA: true });
+  }
+  const marked = await list();
+  assert.deepEqual(marked, { ...baseline, items: [{ ...baseline.items[0], markedA: true }] });
+  assert.equal((await request(itemPath)).body.album.markedA, true);
+
+  galleryDb.close();
+  assert.equal((await list()).items[0].markedA, true, "marks persist across a SQLite reopen");
+  const album = owner.photoSetById(id);
+  store.publish({ ...snapshot, photoSets: [album] }, { expectedRevision: store.revision() });
+  assert.equal((await list()).items[0].markedA, true, "publishing a new index keeps the mark");
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const result = await toggle('{"markedA":false}');
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, { id, markedA: false });
+  }
+  assert(!Object.hasOwn((await list()).items[0], "markedA"));
+  assert(!Object.hasOwn((await request(itemPath)).body.album, "markedA"));
 }
 
 try {
@@ -175,8 +240,9 @@ try {
   } finally {
     await covers.stop();
   }
+  await verifyArchiveMarks(album.id);
   assert.equal(fs.readFileSync(jsonPath, "utf8"), "invalid JSON must never be read or overwritten");
-  console.log(`photo-library-sqlite: single source, atomic photo and media publication, ${collectionRows} paged DTOs, indexed lookups and cover reuse passed`);
+  console.log(`photo-library-sqlite: single source, atomic photo and media publication, ${collectionRows} paged DTOs, indexed lookups, cover reuse and durable archive marks passed`);
 } finally {
   galleryDb.close();
   removeVerifiedTempDir(root);

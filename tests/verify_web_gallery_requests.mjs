@@ -142,7 +142,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
           assert.match(await missing.locator('.gallery-card-cover').evaluate(cover => getComputedStyle(cover, '::after').content), /^(?:none|normal|"")$/);
 
           await breadcrumb.getByRole('button', { name: publisher?.name || '秀人网' }).click();
-          await page.waitForURL(url => publisher ? url.pathname === '/photo/categories/bololi' : /^\/photo\/categories\/raw-[A-Za-z0-9_-]+$/.test(url.pathname));
+          await page.waitForURL(url => url.pathname === (publisher ? '/photo/categories/bololi' : '/photo/categories/xiuren'));
           if (!publisher) await settle(page, overview);
           await requested(parent);
           assert.equal(new URL(parent.url, base).searchParams.get('category'), categoryValue);
@@ -155,16 +155,20 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       const category = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('category') === 'catalog:yituyu', '', {
         categoryDirect: true,
         collectionSummary: {
-          title: '艺图语', count: 1,
+          title: '艺图语', count: 3,
           browseCategory: { id: 'yituyu', name: '艺图语' },
           browseParent: { id: 'sites', name: '名站套图' }
         },
         items: [{ ...listItem('yituyu-fixture'), title: '[YITUYU艺图语] VOL.2754 冷暖光影[23P／85.5MB]',
           albumNumber: 'VOL.2754', albumSubject: '冷暖光影', personName: '夏铃蔓', archiveDate: '2026-10-05', size: 89_653_248,
-          contentImageCount: 23,
-          coverUrl: '/media/gallery-cover/yituyu-fixture?v=fixture' }],
-        count: 1, total: 1, facets: {}
+          contentImageCount: 23, coverUrl: '/media/gallery-cover/yituyu-fixture?v=fixture' },
+        { ...listItem('yituyu-fixture-late'), title: '样例人物', personName: '样例人物', archiveDate: '2026-10-04',
+          coverUrl: '/media/gallery-cover/yituyu-fixture-late?v=fixture' },
+        { ...listItem('yituyu-fixture-no-date'), title: '无编号与日期', coverUrl: '' }],
+        count: 3, total: 3, facets: {}
       });
+      const lateCount = hold(url => url.pathname === '/api/image-library/photo-card-counts'
+        && url.searchParams.getAll('ids').includes('yituyu-fixture-late'), '', { counts: { 'yituyu-fixture-late': 17 } });
       const page = await newPage({ real: true, route: path, waitReady: false });
       let coverStarted = false, releaseCover;
       const coverPending = new Promise(resolve => { releaseCover = resolve; });
@@ -190,6 +194,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.match(await body.innerText(), /夏铃蔓/);
         assert.doesNotMatch(await body.innerText(), /MB|VOL\.2754/);
         assert.equal(await body.locator(':scope > *').count(), 2);
+        assert.equal(await body.locator('strong').evaluate(node => getComputedStyle(node).textAlign), 'center');
         const issue = card.getByText('VOL.2754', { exact: true });
         const count = card.getByText('23 张', { exact: true });
         assert(await issue.isVisible() && await count.isVisible(), 'the issue and image count show while the cover is pending');
@@ -198,7 +203,58 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(overview.closed, false);
         assert.equal(await page.evaluate(url => __transport.settled.some(item => item.url === url), overview.url), false);
         assert.equal(page.url(), `${base}${path}`);
-      } finally { releaseCover(); releaseSummaryGates(overview, category); await page.close(); }
+        const lateCard = page.locator('[data-gallery-album-id="yituyu-fixture-late"]');
+        assert.equal(await lateCard.locator('.gallery-card-leading-badge').innerText(), '2026-10-04');
+        assert.equal(await lateCard.locator('.gallery-card-badges span').count(), 1);
+        assert.equal(await page.locator('[data-gallery-album-id="yituyu-fixture-no-date"] .gallery-card-leading-badge').count(), 0);
+        assert.equal(await lateCard.locator('.gallery-card-date-row').innerText(), '2026-10-04');
+        releaseCover();
+        await requested(lateCount);
+        await settle(page, lateCount);
+        await lateCard.getByText('17 张', { exact: true }).waitFor({ state: 'visible' });
+      } finally { releaseCover(); releaseSummaryGates(overview, category, lateCount); await page.close(); }
+    });
+    await run('photo card special mark toggles without opening the album', async () => {
+      const isMark = (url, method) => url.pathname === '/api/photo-sets/A/mark' && method === 'PUT';
+      const save = hold(isMark, '', { id: 'A', markedA: true });
+      const remove = hold(isMark, '', { id: 'A', markedA: false });
+      const page = await newPage({ real: true, route: '/photo/albums' });
+      try {
+        const card = page.locator('[data-gallery-album-id="A"]');
+        const mark = page.locator('.gallery-photo-mark[data-photo-mark-id="A"]');
+        await card.hover();
+        await mark.click();
+        await requested(save);
+        await settle(page, save);
+        assert.equal(await mark.getAttribute('aria-pressed'), 'true');
+        assert.equal(new URL(page.url()).pathname, '/photo/albums');
+        await mark.click();
+        await requested(remove);
+        await settle(page, remove);
+        assert.equal(await mark.getAttribute('aria-pressed'), 'false');
+      } finally { releaseSummaryGates(save, remove); await page.close(); }
+    });
+    await run('photo scroll pagination runs while four same-origin covers are pending', async () => {
+      const isList = (url, offset) => url.pathname === '/api/image-library/items'
+        && url.searchParams.get('q') === 'pressure' && Number(url.searchParams.get('offset')) === offset;
+      const items = Array.from({ length: 80 }, (_, index) => listItem(`pressure-${index}`));
+      const initial = hold(url => isList(url, 0), '', { items, count: 80, total: 81, scannedAt: 'pressure', facets: {} });
+      const next = hold(url => isList(url, 80), '', { items: [listItem('end')], count: 1, total: 81, scannedAt: 'pressure', facets: {} });
+      const covers = items.map(item => hold(url => url.pathname === item.coverUrl));
+      const page = await newPage({ real: true, route: '/photo/albums?q=pressure', waitReady: false });
+      try {
+        await requested(initial);
+        await settle(page, initial);
+        await until(() => covers.filter(gate => gate.used).length >= 4, 'four independent covers should load in parallel');
+        await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight - window.innerHeight - 250));
+        await page.mouse.move(640, 420);
+        await page.mouse.wheel(0, 600);
+        await requested(next, 2000);
+        assert.equal(covers.filter(gate => gate.used).length, 4, 'pending covers leave connections for the list');
+        await settle(page, next);
+        await page.locator('[data-gallery-album-id="end"]').waitFor({ state: 'visible' });
+        assert.equal(await page.locator('.gallery-more').count(), 0);
+      } finally { releaseSummaryGates(initial, next, ...covers); await page.close(); }
     });
     await run('summary recovery: a cold failure exposes an actionable read-only retry', async () => {
       const failed = hold(isSummary, 'Synthetic cold summary unavailable');

@@ -200,6 +200,25 @@ export async function routePhotosApi(req, res, url, deps) {
     return true;
   }
 
+  const photoMarkMatch = /^\/api\/photo-sets\/([^/]+)\/mark$/.exec(url.pathname);
+  if (photoMarkMatch && req.method === "PUT") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req, 1024);
+      if (typeof body?.markedA !== "boolean") {
+        sendJson(res, 400, { error: "markedA 必须是布尔值" });
+        return true;
+      }
+      const result = photoSetService.setArchiveMarkedA(decodeURIComponent(photoMarkMatch[1]), body.markedA);
+      if (result) sendJson(res, 200, result);
+      else notFound(res);
+    } catch (error) {
+      if (error instanceof URIError) sendJson(res, 400, { error: "套图 ID 无效" });
+      else sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "保存套图标记失败" });
+    }
+    return true;
+  }
+
   const photoSetMatch = /^\/api\/photo-sets\/([^/]+)$/.exec(url.pathname);
   if (photoSetMatch && req.method === "GET") {
     const album = photoSetService.byId(decodeURIComponent(photoSetMatch[1]));

@@ -119,14 +119,17 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
       VALUES (1, ?, ?, ?, ?)`).run(mediaIdentity, publication, index.scannedAt || "", JSON.stringify(index.mediaRoots || []));
   }
 
-  function summary() {
-    const state = getDb().prepare(`SELECT scanned_at, roots_json, overview_json
+  function summary({ allCategories = false } = {}) {
+    const state = getDb().prepare(`SELECT scanned_at, roots_json, overview_json${allCategories ? ", facets_json" : ""}
       FROM photo_library_snapshot WHERE id=1 AND identity=?`).get(identity);
-    return state ? {
+    if (!state) return null;
+    const overview = JSON.parse(state.overview_json);
+    if (allCategories) overview.facets.categories = JSON.parse(state.facets_json).categories;
+    return {
       scannedAt: state.scanned_at,
       photoRoots: JSON.parse(state.roots_json),
-      ...JSON.parse(state.overview_json)
-    } : null;
+      ...overview
+    };
   }
 
   function collectionPage({ category, sort, locale, limit, offset }) {
@@ -191,6 +194,33 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     return row.data_json ? JSON.parse(row.data_json) : null;
   }
 
+  function archiveMarks(ids) {
+    if (!ids.length) return new Set();
+    const rows = getDb().prepare(`SELECT mark.album_id FROM json_each(?) requested
+      CROSS JOIN photo_library_archive_marks mark ON mark.album_id=requested.value`);
+    return new Set(rows.all(JSON.stringify(ids)).map(row => row.album_id));
+  }
+
+  function setArchiveMarkedA(id, markedA) {
+    const db = getDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const exists = db.prepare(`SELECT a.id FROM photo_library_snapshot s
+        CROSS JOIN photo_library_archives a ON a.id=? WHERE s.id=1 AND s.identity=?`).get(id, identity);
+      if (exists) {
+        const sql = markedA
+          ? "INSERT OR IGNORE INTO photo_library_archive_marks(album_id) VALUES(?)"
+          : "DELETE FROM photo_library_archive_marks WHERE album_id=?";
+        db.prepare(sql).run(id);
+      }
+      db.exec("COMMIT");
+      return exists ? { id, markedA } : null;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   function contentImageCounts(ids, expectedRevision = null) {
     const counts = new Map();
     const wanted = [...new Set(ids)].filter(id => typeof id === "string" && id.length > 0);
@@ -232,5 +262,5 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
-  return { byId, collectionPage, contentImageCounts, hasSnapshot, index, mediaIndex, mediaRevision, publish, revision, summary };
+  return { archiveMarks, byId, collectionPage, contentImageCounts, hasSnapshot, index, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
 }

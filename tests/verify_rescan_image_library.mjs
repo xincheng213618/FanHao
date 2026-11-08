@@ -200,7 +200,7 @@ async function verifyPhotoSetLookup(photoRoot) {
     return res;
   }
   function fixture(indexed) {
-    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
+    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, markReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
     const raw = Array.from({ length: 12000 }, (_, index) => ({ id: `album-${index}`, title: `Synthetic album ${index}`, sourceRoot: photoRoot, relativePath: `${index}.zip`, updatedAt: "before", imageCount: 20, size: 32, archiveIdentity: "synthetic", coverUrl: "" }));
     raw[0].id = "duplicate"; raw[1].id = "duplicate"; raw[2].id = 123;
     const counted = rows => new Proxy(rows, { get(target, key, receiver) { if (typeof key === "string" && /^\d+$/u.test(key)) counts.elements++; return Reflect.get(target, key, receiver); } });
@@ -224,6 +224,7 @@ async function verifyPhotoSetLookup(photoRoot) {
     }; } }; } };
     const context = {
       withGallery: true, createPhotoSetService, createPhotosRuntime, imageLibraryIndexService: owner,
+      photoLibraryStore: { archiveMarks() { counts.markReads++; return new Set(); } },
       ARCHIVE_IMAGE_EXTS: new Set([".jpg"]), PHOTO_SET_COVER_GENERATOR_VERSION: 2, COVER_HINTS: new Set(), IMAGE_GALLERY_COVER_MAX_BYTES: 1024,
       archiveImageSignature: async archivePath => { counts.signatures++; return { archivePath, archiveSize: 32, archiveMtimeMs: 1, archiveIdentity: "synthetic" }; },
       archiveImagesPayload: async (_archive, options) => ({ images: options.limit ? imageRows.slice(0, options.limit) : imageRows, imageCount: 20 }),
@@ -257,6 +258,7 @@ async function verifyPhotoSetLookup(photoRoot) {
       assert.equal(f.counts.elements, indexed ? 0 : 612000, "published detail, image and cover reads do not materialize archive rows");
       assert.equal(f.counts.lookupCalls, indexed ? 39 : 0, "one point lookup serves each indexed detail, image and warm cover request");
       assert.equal(f.counts.imageLists, 32); assert.equal(f.counts.signatures, indexed ? 0 : 12); assert.equal(f.counts.dbReads, indexed ? 6 : 24);
+      assert.equal(f.counts.markReads, 1);
       console.log(`photo-set lookup ${indexed ? "indexed" : "fallback"}: ${f.counts.elements} elements, ${f.counts.lookupCalls} owner lookups, 39 actual runtime responses`);
       results.push(responses);
       assert.equal(f.service.byId("duplicate").title, "Synthetic album 0"); assert.equal(f.service.byId("123"), null); assert.equal(f.service.byId(""), null);

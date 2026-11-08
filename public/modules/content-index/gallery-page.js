@@ -368,7 +368,7 @@ export function createGalleryPage(deps) {
     if (!listRefreshHandler?.({ loading: true }) && options.renderStart !== false && !hasUnsubmittedGallerySearchDraft()) renderGalleryView({ preserveScroll: true });
 
     try {
-      let data = await api(requestPath, { signal: request.controller.signal });
+      let data = await api(requestPath, { signal: request.controller.signal, ...(state.gallery.mode === "photo" ? { priority: "high" } : {}) });
       if (!isCurrent()) return null;
       const prefixTarget = Math.max(targetCount, rawLoaded);
       const reloadingPrefix = offset === 0 && imageLibraryNextOffset(data, 0) < prefixTarget
@@ -387,6 +387,7 @@ export function createGalleryPage(deps) {
         ...data,
         collectionPage: data.collectionPage === true,
         categoryDirect: data.categoryDirect === true,
+        categoryCoverUrl: data.categoryCoverUrl || "",
         items,
         count: items.length,
         limit: items.length,

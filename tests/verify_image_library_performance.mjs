@@ -145,11 +145,11 @@ function legacyServiceModuleUrl(source) {
 
   function photoAlbumNumber(value) {`, "restore archive month parser");
   legacySource = replaceOnce(legacySource, `    const archiveDate = normalizedMode === "photo" && !compact ? photoArchiveDate(photoTitle) : "";
-    const albumNumber = photoRow?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
+    const albumNumber = photoRow?.albumNumber ?? boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
     // Unnumbered subjects participate in the person facet guard. Numbered
     // subjects are display-only and can be derived for the returned page.
-    let albumSubject = "";
-    if (normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
+    let albumSubject = boBoSocks?.albumSubject ?? (photoPeople ? photoRow.albumSubject : "");
+    if (!photoPeople && normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
       albumSubject = photoRow?.personName && !albumNumber ? photoRow.albumSubject : photoAlbumSubject(photoTitle, item, collectionTitle);
     }
 `, "", "restore inline photo list parsing");
@@ -163,8 +163,8 @@ function legacyServiceModuleUrl(source) {
       albumSubject,
 `, `      archiveDate: normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "",
       archiveMonth: normalizedMode === "photo" ? photoArchiveMonth(photoTitle) : "",
-      albumNumber: normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "",
-      albumSubject: normalizedMode === "photo" ? photoAlbumSubject(photoTitle, { ...item, collectionTitle }) : "",
+      albumNumber: boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : ""),
+      albumSubject: boBoSocks?.albumSubject ?? (normalizedMode === "photo" ? photoAlbumSubject(photoTitle, { ...item, collectionTitle }) : ""),
 `, "restore inline photo response fields");
   const legacyFacet = `  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {
     const counts = new Map();

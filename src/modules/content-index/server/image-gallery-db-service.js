@@ -144,6 +144,10 @@ function ensureSchema(db) {
       collection_id TEXT NOT NULL, data_json TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_photo_library_archive_collection ON photo_library_archives(collection_id, position);
+    CREATE INDEX IF NOT EXISTS idx_photo_library_archive_category ON photo_library_archives(json_extract(data_json, '$.category'), position);
+    CREATE TABLE IF NOT EXISTS photo_library_archive_marks (
+      album_id TEXT PRIMARY KEY NOT NULL
+    ) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS photo_library_collections (
       category TEXT NOT NULL, sort TEXT NOT NULL, locale TEXT NOT NULL, position INTEGER NOT NULL,
       data_json TEXT NOT NULL,
@@ -161,11 +165,59 @@ function ensureSchema(db) {
       ('xiuren', '秀人网', 'sites', '[XIUREN] 秀人网', 0),
       ('yituyu', '艺图语', 'sites', '[YITUYU艺图语]', 1),
       ('mslass', '梦丝女神', 'sites', '[MSLASS梦丝女神]', 2),
-      ('korean-entertainment', '韩国演艺圈', NULL, '韩国演艺圈', 1);
+      ('girlt', '果团网', 'sites', '[Girlt] 果团网', 3),
+      ('qingdouke', '青豆客', 'sites', '[QingDouKe] 青豆客', 4),
+      ('bololi', '菠萝社', 'sites', '[BoLoli]波萝社', 5),
+      ('ugirls', '尤果网', 'sites', '[Ugirls] 尤果网', 6),
+      ('ligui', '丽柜', 'sites', '[Ligui丽柜]', 7),
+      ('iess', '异思趣向', 'sites', '[IESS异思趣向]', 8),
+      ('beautyleg', 'Beautyleg', 'sites', '[Beautyleg]', 9),
+      ('rosi-arts', 'ROSI艺学妹', 'sites', '[ROSI艺学妹]', 10),
+      ('ssa', '丝社', 'sites', '[SSA] 丝社', 11),
+      ('toutiao', '头条女神', 'sites', '[TouTiao] 头条女神', 12),
+      ('emergency-project', '紧急企划', 'sites', '[紧急企划]', 13),
+      ('zhimeng', '织梦映像', 'sites', '织梦映像', 14),
+      ('partycat', '轰趴猫', 'sites', '[Partycat]', 15),
+      ('tuigirl', '推女郎', 'sites', '[TuiGirl] 推女郎', 16),
+      ('slady', '猎女神', 'sites', '[SLADY]猎女神', 17),
+      ('fetish', '恋足恋物', NULL, '恋足恋物', 2),
+      ('bobosocks', '袜啵啵', 'fetish', '[BoBoSocks袜啵啵]', 0),
+      ('japan', '日本', NULL, '日本写真集', 3),
+      ('ys-web', 'YS Web', 'japan', 'YS Web', 0),
+      ('maxi-247', 'Maxi-247', 'japan', 'Maxi-247 - 301 Rei', 1),
+      ('korea', '韩国', NULL, '韩国写真集', 4),
+      ('make-model', 'Make Model', 'korea', '[Make model]', 0),
+      ('korean-entertainment', '韩国演艺圈', 'korea', '韩国演艺圈', 1),
+      ('korean-other', '其他韩国写真', 'korea', '韩国', 2),
+      ('leeheeexpress', 'LeeheeExpress', 'korea', '[LeeheeExpress]', 3),
+      ('street', '精选街拍', NULL, '精选街拍', 5),
+      ('mojing', '魔镜街拍', 'street', '魔镜街拍', 0),
+      ('likes', '我喜欢的', NULL, '我喜欢的', 6),
+      ('miscellaneous', '零散', 'likes', '[零散]', 0);
+    UPDATE photo_browse_categories SET parent_id='korea'
+      WHERE id='korean-entertainment' AND parent_id IS NULL AND source_category='韩国演艺圈';
+
+    CREATE TABLE IF NOT EXISTS photo_category_covers (
+      category_key TEXT PRIMARY KEY NOT NULL,
+      source TEXT NOT NULL CHECK(source IN ('album', 'upload')),
+      version TEXT NOT NULL,
+      album_id TEXT,
+      mime TEXT,
+      image BLOB,
+      CHECK ((source='album' AND album_id IS NOT NULL AND mime IS NULL AND image IS NULL)
+        OR (source='upload' AND album_id IS NULL AND mime IS NOT NULL AND mime IN ('image/jpeg', 'image/png', 'image/webp')
+          AND image IS NOT NULL AND length(image) BETWEEN 1 AND 5242880))
+    );
 
     CREATE TABLE IF NOT EXISTS photo_publishers (
       id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, code TEXT NOT NULL DEFAULT ''
     );
+    -- A publisher can be registered after its browse category is seeded.
+    CREATE TABLE IF NOT EXISTS photo_browse_category_publishers (
+      category_id TEXT PRIMARY KEY REFERENCES photo_browse_categories(id) ON DELETE CASCADE,
+      publisher_id TEXT NOT NULL UNIQUE
+    ) WITHOUT ROWID;
+    INSERT OR IGNORE INTO photo_browse_category_publishers (category_id, publisher_id) VALUES ('bololi', 'bololi');
     CREATE TABLE IF NOT EXISTS photo_publisher_members (
       publisher_id TEXT NOT NULL REFERENCES photo_publishers(id) ON DELETE CASCADE,
       kind TEXT NOT NULL CHECK(kind IN ('collection', 'video')),

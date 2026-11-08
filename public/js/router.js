@@ -9,7 +9,34 @@ const PHOTO_CATEGORY_IDS = new Map([
   ["yituyu", "catalog:yituyu"],
   ["mslass", "catalog:mslass"],
   ["korean-entertainment", "catalog:korean-entertainment"],
+  ["japan", "catalog:japan"],
+  ["korea", "catalog:korea"],
+  ["ys-web", "catalog:ys-web"],
+  ["maxi-247", "catalog:maxi-247"],
+  ["make-model", "catalog:make-model"],
+  ["korean-other", "catalog:korean-other"],
+  ["street", "catalog:street"],
+  ["mojing", "catalog:mojing"],
+  ["fetish", "catalog:fetish"],
+  ["bobosocks", "catalog:bobosocks"],
   ["bololi", "publisher:bololi"],
+  ["girlt", "catalog:girlt"],
+  ["qingdouke", "catalog:qingdouke"],
+  ["ugirls", "catalog:ugirls"],
+  ["ligui", "catalog:ligui"],
+  ["iess", "catalog:iess"],
+  ["beautyleg", "catalog:beautyleg"],
+  ["rosi-arts", "catalog:rosi-arts"],
+  ["ssa", "catalog:ssa"],
+  ["toutiao", "catalog:toutiao"],
+  ["emergency-project", "catalog:emergency-project"],
+  ["zhimeng", "catalog:zhimeng"],
+  ["partycat", "catalog:partycat"],
+  ["tuigirl", "catalog:tuigirl"],
+  ["slady", "catalog:slady"],
+  ["leeheeexpress", "catalog:leeheeexpress"],
+  ["likes", "catalog:likes"],
+  ["miscellaneous", "catalog:miscellaneous"],
   ["cos", "[COS]"]
 ]);
 const PHOTO_CATEGORY_SLUGS = new Map([...PHOTO_CATEGORY_IDS].map(([slug, id]) => [id, slug]));
@@ -18,7 +45,35 @@ const LEGACY_PHOTO_BROWSE_CATEGORIES = new Map([
   ["[XIUREN] 秀人网", "catalog:xiuren"],
   ["[YITUYU艺图语]", "catalog:yituyu"],
   ["[MSLASS梦丝女神]", "catalog:mslass"],
-  ["韩国演艺圈", "catalog:korean-entertainment"]
+  ["恋足恋物", "catalog:fetish"],
+  ["[BoBoSocks袜啵啵]", "catalog:bobosocks"],
+  ["[BoLoli]波萝社", "publisher:bololi"],
+  ["[Girlt] 果团网", "catalog:girlt"],
+  ["[QingDouKe] 青豆客", "catalog:qingdouke"],
+  ["[Ugirls] 尤果网", "catalog:ugirls"],
+  ["[Ligui丽柜]", "catalog:ligui"],
+  ["[IESS异思趣向]", "catalog:iess"],
+  ["[Beautyleg]", "catalog:beautyleg"],
+  ["[ROSI艺学妹]", "catalog:rosi-arts"],
+  ["[SSA] 丝社", "catalog:ssa"],
+  ["[TouTiao] 头条女神", "catalog:toutiao"],
+  ["[紧急企划]", "catalog:emergency-project"],
+  ["织梦映像", "catalog:zhimeng"],
+  ["[Partycat]", "catalog:partycat"],
+  ["[TuiGirl] 推女郎", "catalog:tuigirl"],
+  ["[SLADY]猎女神", "catalog:slady"],
+  ["[LeeheeExpress]", "catalog:leeheeexpress"],
+  ["我喜欢的", "catalog:likes"],
+  ["[零散]", "catalog:miscellaneous"],
+  ["韩国演艺圈", "catalog:korean-entertainment"],
+  ["日本写真集", "catalog:japan"],
+  ["韩国写真集", "catalog:korea"],
+  ["YS Web", "catalog:ys-web"],
+  ["Maxi-247 - 301 Rei", "catalog:maxi-247"],
+  ["[Make model]", "catalog:make-model"],
+  ["韩国", "catalog:korean-other"],
+  ["精选街拍", "catalog:street"],
+  ["魔镜街拍", "catalog:mojing"]
 ]);
 
 const GALLERY_MODE_PATHS = {
@@ -516,7 +571,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     if (section === "categories") {
       const slug = rest[1] || "";
       route.galleryPhotoView = "collections";
-      route.galleryCategory = PHOTO_CATEGORY_IDS.get(slug) || decodePhotoToken(slug) || DEFAULT_GALLERY_PHOTO_CATEGORY;
+      route.galleryCategory = PHOTO_CATEGORY_IDS.get(slug) || normalizePhotoBrowseCategory(decodePhotoToken(slug));
     } else if (section === "collections") {
       route.galleryPhotoView = "collections";
     } else if (section === "albums" && !rest[1]) {
@@ -725,8 +780,9 @@ function routePath(route) {
       if (route.galleryAlbumId) return `${base}/set/${encodeRouteSegment(route.galleryAlbumId)}`;
       if (route.galleryPhotoCollection) return `${base}/collection/${encodePhotoToken(route.galleryPhotoCollection)}`;
       if (route.galleryPhotoView === "collections") {
-        if (route.galleryCategory === DEFAULT_GALLERY_PHOTO_CATEGORY) return `${base}/collections`;
-        return `${base}/categories/${PHOTO_CATEGORY_SLUGS.get(route.galleryCategory) || encodePhotoToken(route.galleryCategory)}`;
+        const category = normalizePhotoBrowseCategory(route.galleryCategory);
+        if (category === DEFAULT_GALLERY_PHOTO_CATEGORY) return `${base}/collections`;
+        return `${base}/categories/${PHOTO_CATEGORY_SLUGS.get(category) || encodePhotoToken(category)}`;
       }
       return `${base}/albums`;
     }

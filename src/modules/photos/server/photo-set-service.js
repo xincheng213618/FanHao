@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
+import { parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
 
 const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">
   <rect width="300" height="450" fill="#ececf1"/>
@@ -18,6 +19,7 @@ function archiveMemberDepth(memberPath) {
 }
 
 export function createPhotoSetService({
+  archiveMarks,
   archiveImageExts,
   archiveImageSignature,
   archiveImagesPayload,
@@ -37,7 +39,8 @@ export function createPhotoSetService({
   publishedPhotoSetById,
   safeChildPath,
   safeStat,
-  serveArchiveMemberImage
+  serveArchiveMemberImage,
+  setArchiveMarkedA
 }) {
   const coverPool = createArchiveTaskPool();
   const coverChildren = new Set();
@@ -350,8 +353,11 @@ export function createPhotoSetService({
     const visibleImages = imageLimit > 0
       ? images.slice(imageOffset, imageOffset + imageLimit)
       : images;
+    const boBoSocks = parseBoBoSocksAlbum(album.title);
     return {
       ...album,
+      ...(boBoSocks ? { ...boBoSocks, archiveTitle: album.title, title: `${boBoSocks.albumNumber} ${boBoSocks.albumSubject}` } : {}),
+      ...(archiveMarks?.([album.id]).has(album.id) ? { markedA: true } : {}),
       imageCount,
       imageOffset,
       imageLimit: imageLimit || images.length,
@@ -468,6 +474,7 @@ export function createPhotoSetService({
     coverUrl,
     imageUrl,
     publicDetail,
+    setArchiveMarkedA,
     serveCover,
     serveImage,
     start: coverPool.start,

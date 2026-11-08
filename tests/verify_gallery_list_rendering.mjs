@@ -246,7 +246,10 @@ try {
       });
       await page.locator('.gallery-reader-back').click(); await frames(page);
       const target = page.locator('.gallery-photo-album-card[data-gallery-album-id="I500"]');
-      assert.equal(await target.evaluate(card => [...card.parentElement.children].indexOf(card)), 299, 'return target follows its id after a refreshed list changes order');
+      assert.equal(await target.evaluate(card => {
+        const entry = card.closest('.gallery-photo-album-entry') || card;
+        return [...entry.parentElement.children].indexOf(entry);
+      }), 299, 'return target follows its id after a refreshed list changes order');
       assert.equal(await target.evaluate(card => {
         const r = card.getBoundingClientRect();
         return r.top >= 0 && r.bottom <= innerHeight && card.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
@@ -322,6 +325,90 @@ try {
       assert.equal(await page.locator('.gallery-search').inputValue(), 'replacement');
       assert.equal(await page.locator('.gallery-photo-album-card').count(), 80);
     } finally { await releaseReturnFrames(page); await page.close(); }
+  });
+  await run('photo category strip resize: one line and only overflow in the menu', async () => {
+    const page = await newPage({ mode: 'photo', controlRoutes: true });
+    const long = '一个只在较宽窗口中才足以完整显示的分类名称';
+    const labels = ['秀人网', '艺图语', 'COS', '模特图', '气质写真', '亚洲摄影', '写真合辑', '精选写真', long, '摄影合集', '高原写真', '户外写真'];
+    const selected = '户外写真';
+    const categories = labels.map((value, index) => ({ value, count: index + 1 }));
+    const read = () => page.locator('.gallery-photo-category-strip').evaluate(strip => {
+      const visible = [...strip.querySelectorAll(':scope > button')];
+      const menu = strip.querySelector('details'), summary = menu?.querySelector('summary');
+      const bounds = strip.getBoundingClientRect();
+      const row = [...visible, ...(summary ? [summary] : [])].map(item => item.getBoundingClientRect());
+      return {
+        featured: visible.map(item => item.firstChild.data), selected: strip.querySelector('button[aria-pressed="true"]')?.firstChild.data,
+        overflow: [...strip.querySelectorAll('.gallery-category-menu-panel button')].map(item => item.firstChild.data),
+        width: bounds.width, count: summary?.textContent ?? '', open: Boolean(menu?.open),
+        activeOverflow: Boolean(summary?.classList.contains('active')), summaryLabel: summary?.getAttribute('aria-label') ?? '',
+        withinRow: row.every(rect => Math.abs(rect.top - row[0].top) <= 1 && rect.right <= bounds.right + 1)
+      };
+    });
+    const assertPartition = value => {
+      assert(value.withinRow, 'the strip, including its disclosure, must fit on one line');
+      assert.equal(value.selected, selected);
+      assert.deepEqual([...value.featured.slice(1), ...value.overflow].sort(), [...labels].sort());
+      assert.equal(value.count, value.overflow.length ? `更多 · ${value.overflow.length} ▾` : '');
+      assert.equal(value.activeOverflow, value.overflow.includes(selected));
+      if (value.activeOverflow) assert.match(value.summaryLabel, /当前分类：户外写真/);
+    };
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await seedPhotoCategories(page, categories, selected);
+      const start = requests.length;
+      const wide = await read();
+      assertPartition(wide);
+      assert.equal(wide.overflow.length, 0);
+      const longButton = page.getByRole('button', { name: `${long}，9 期` });
+      await longButton.focus();
+      await longButton.evaluate(node => { window.__focusedPhotoCategory = node; });
+      await page.setViewportSize({ width: 320, height: 900 });
+      await frames(page);
+      const narrow = await read();
+      assertPartition(narrow);
+      assert(narrow.overflow.includes(long));
+      assert(narrow.open, 'a focused category moved to overflow must stay reachable');
+      assert.equal(await page.evaluate(() => document.activeElement === __focusedPhotoCategory), true);
+      await page.keyboard.press('Escape');
+      assert.equal((await read()).open, false);
+
+      await page.setViewportSize({ width: 690, height: 900 });
+      await frames(page);
+      const medium = await read();
+      assertPartition(medium);
+      assert(medium.featured.length > narrow.featured.length && medium.featured.length > 5, JSON.stringify({ narrow, medium }));
+      assert.deepEqual(medium.featured.slice(0, 4), ['全部大类', '秀人网', '艺图语', 'COS']);
+      assert(medium.overflow.includes(long));
+      await page.locator('.gallery-category-menu summary').click();
+      await longButton.focus();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await frames(page);
+      assert.deepEqual(await read(), wide);
+      assert.equal(await longButton.evaluate(node => node === __focusedPhotoCategory), true, 'resizing reuses category controls across both placements');
+      assert.equal(await page.evaluate(() => document.activeElement === __focusedPhotoCategory), true, 'retiring overflow returns focus with the moved category');
+      assert.equal(requests.slice(start).filter(key => key.startsWith('/api/')).length, 0, 'resizing must not start API reads');
+
+      await page.setViewportSize({ width: 320, height: 900 });
+      await seedPhotoCategories(page, categories, '秀人网');
+      const changedSelection = await read();
+      assert.deepEqual(changedSelection.featured, narrow.featured, 'switching categories does not rearrange the strip');
+      assert.deepEqual(changedSelection.overflow, narrow.overflow);
+      assert.equal(changedSelection.selected, '秀人网');
+      assert.equal(changedSelection.activeOverflow, false);
+
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.evaluate(() => {
+        fixture.state.gallery.data.browseCategories = [
+          { id: 'sites', name: '名站套图', issueCount: 20 },
+          { id: 'bololi', publisherId: 'bololi', parentId: 'sites', name: '菠萝社', issueCount: 6 }
+        ];
+      });
+      await seedPhotoCategories(page, categories, 'publisher:bololi');
+      const taxonomy = await read();
+      assert.equal(taxonomy.selected, '名站套图');
+      assert(![...taxonomy.featured, ...taxonomy.overflow].includes('菠萝社'));
+    } finally { await page.close(); }
   });
   for (const mode of ["photo", "manga", "media", "western", "tv"]) await run(`control construction ${mode}: builds only visible facets and preserves live selects`, async () => {
     const samples = [];
@@ -417,7 +504,7 @@ try {
             assert.equal(sort.disabled, true); assert.equal(sort.value, 'updated'); assert.deepEqual(sort.options.map(option => option.slice(0, 2)), [['updated', '相关性排序']]);
           }
         }
-        if (mode === "photo") assert.equal(await page.locator('.gallery-category-menu-panel button').count(), 1000, "all photo categories must remain available");
+        if (mode === "photo") assert.equal(await page.locator('.gallery-photo-category-strip button').count(), 1001, "all photo categories must remain available once");
         if (repeat === 0 && mode !== 'manga') {
           const target = page.locator(`select[data-gallery-control="${focusKey}"]`);
           const expected = await target.evaluate(select => select.options[select.selectedIndex + 1].value);
@@ -1061,7 +1148,7 @@ async function readPhotoCategoryProbe(page) {
   await frames(page);
   return page.evaluate(() => {
     const record = __categoryLive, current = document.querySelector('.gallery-photo-category-strip'), menu = current.querySelector('details'), panel = menu?.querySelector('.gallery-category-menu-panel');
-    const projection = parent => { const seen = new Map(); return [...(parent?.children || [])].filter(node => node.matches('button')).map(node => { const label = node.getAttribute('aria-label').split('，')[0], occurrence = seen.get(label) || 0; seen.set(label, occurrence + 1); return { key: `${label}:${occurrence}`, label, count: node.querySelector('small')?.textContent ?? null, title: node.title, aria: node.getAttribute('aria-label'), pressed: node.getAttribute('aria-pressed'), active: node.classList.contains('active') }; }); };
+    const projection = parent => { const seen = new Map(); return [...(parent?.children || [])].filter(node => node.matches('button')).map(node => { const label = node.getAttribute('aria-label').split('，')[0], occurrence = seen.get(label) || 0; seen.set(label, occurrence + 1); return { key: `${label}:${occurrence}`, label, count: parent === panel ? node.querySelector('small')?.textContent ?? null : null, title: node.title, aria: node.getAttribute('aria-label'), pressed: node.getAttribute('aria-pressed'), active: node.classList.contains('active') }; }); };
     const retained = (previous, parent) => { const current = projection(parent), nodes = [...(parent?.children || [])].filter(node => node.matches('button')), byKey = new Map(current.map((entry, index) => [entry.key, nodes[index]])); return previous.every(entry => !byKey.has(entry.key) || byKey.get(entry.key) === entry.node); };
     const removedTarget = !record.target.isConnected;
     const rect = record.target.getBoundingClientRect(), bounds = panel?.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
@@ -1081,21 +1168,39 @@ async function readPhotoCategoryProbe(page) {
 }
 function assertPhotoCategoryProjection(value, categories, selected) {
   const facets = categories.filter(item => !['__fanhao_media_kind_movie__', '__fanhao_media_kind_tv__', '__fanhao_media_kind_anime__'].includes(item.value));
-  const featured = facets.slice(0, 4), chosen = facets.find(item => item.value === selected);
-  if (chosen && !featured.includes(chosen)) featured[featured.length - 1] = chosen;
   const number = value => new Intl.NumberFormat('zh-CN').format(value);
   const expected = (item, menu = false) => ({ label: item.value, count: menu ? number(item.count || 0) : null, title: `${item.value} · ${number(item.count)} 期`, aria: `${item.value}，${number(item.count)} 期`, pressed: String(selected === item.value), active: selected === item.value });
   const simplify = ({ key, ...item }) => item;
-  assert.deepEqual(value.featured.map(simplify), [expected({ value: '全部大类', count: facets.reduce((sum, item) => sum + Number(item.count || 0), 0) }), ...featured.map(item => expected(item))].map((item, index) => index ? item : { ...item, pressed: String(selected === 'all'), active: selected === 'all' }), 'photo featured categories must preserve source order, selected promotion and filtered totals');
-  assert.deepEqual(value.buttons.map(simplify), facets.map(item => expected(item, true)), 'all photo category occurrences must preserve labels, counts, aria, order and selection');
+  const all = expected({ value: '全部大类', count: facets.reduce((sum, item) => sum + Number(item.count || 0), 0) });
+  assert.deepEqual(simplify(value.featured[0]), { ...all, pressed: String(selected === 'all'), active: selected === 'all' });
+  if (facets.some(item => item.value === selected)) assert([...value.featured, ...value.buttons].some(item => item.active), 'the active category remains marked in its placement');
+  const featured = value.featured.slice(1), buttons = value.buttons;
+  const titles = list => list.map(item => item.title);
+  assert.deepEqual(titles([...featured, ...buttons]).sort(), titles(facets.map(item => expected(item))).sort(), 'every facet occurrence is shown exactly once');
+  for (const [actual, menu] of [[featured, false], [buttons, true]]) {
+    const expectedEntries = facets.map(item => expected(item, menu));
+    let cursor = 0;
+    for (const item of actual) {
+      const index = expectedEntries.findIndex((entry, index) => index >= cursor && entry.title === item.title);
+      assert(index >= cursor, 'each placement must preserve source order');
+      assert.deepEqual(simplify(item), expectedEntries[index]);
+      cursor = index + 1;
+    }
+  }
 }
 function assertPhotoCategoryRetention(value, categories, selected, { removed = false, unchanged = false } = {}) {
   assert(value.same && value.open && value.ancestors && value.detached === 0 && value.retained && (removed ? value.removedTarget && value.summaryFocus : value.focus && value.blur === 0 && value.targetVisible),
     'background gallery refresh must keep the expanded photo category menu ancestry and focus without transient detach');
   if (unchanged) assert(Math.abs(value.top - value.previousTop) <= 1 && value.previousTop > 100, 'an unchanged category refresh must preserve the far-end menu scroll position');
   assertPhotoCategoryProjection(value, categories, selected);
-  const added = (current, previous) => { const keys = new Set(previous); return current.filter(item => !keys.has(item.key)).length; };
-  assert.deepEqual(value.created, { chips: added(value.featured, value.previousFeatured) + added(value.buttons, value.previousButtons), details: 0, summary: 0, panel: 0, small: added(value.buttons, value.previousButtons) }, 'category refresh may construct only newly introduced featured/menu occurrences');
+  const previous = [...value.previousFeatured, ...value.previousButtons].map(key => key.slice(0, key.lastIndexOf(':')));
+  const added = [...value.featured, ...value.buttons].filter(item => {
+    const index = previous.indexOf(item.label);
+    if (index < 0) return true;
+    previous.splice(index, 1);
+    return false;
+  }).length;
+  assert.deepEqual(value.created, { chips: added, details: 0, summary: 0, panel: 0, small: added }, 'category refresh may construct only newly introduced facet occurrences');
 }
 async function verifyPhotoCategoryControls(page, repeat, facets, gates) {
   const categories = facets.categories, selected = repeat === 1 ? 'category-998' : 'all';
@@ -1123,16 +1228,17 @@ async function verifyPhotoCategoryControls(page, repeat, facets, gates) {
   assert.equal(await page.locator('.gallery-category-menu').count(), 0);
   const refresh = async categories => { const gate = hold(url => url.pathname === '/api/image-library/summary', { totals: { photoSets: 12345 }, facets: { categories, people: [] }, scannedAt: 'category-threshold' }); gates.push(gate); await page.evaluate(() => { window.__categorySummaryRead = fixture.page.loadImageLibrary({ reload: true }); }); await requested(gate); gate.release(); await settled(page, gate); await page.evaluate(() => __categorySummaryRead); };
   await page.evaluate(() => { window.__thresholdStrip = document.querySelector('.gallery-photo-category-strip'); window.__thresholdButtons = [...__thresholdStrip.children]; window.__categoryCreated = []; });
-  const five = [...four, { value: 'threshold-4', count: 5 }]; await refresh(five);
-  assert.equal(await page.locator('.gallery-category-menu').evaluate(menu => menu.open), false, 'a newly required all-categories menu starts closed');
-  assert.deepEqual(await page.evaluate(() => ({ same: __thresholdStrip === document.querySelector('.gallery-photo-category-strip') && __thresholdButtons.every((node, index) => __thresholdStrip.children[index] === node), chips: __categoryCreated.filter(node => node.classList.contains('gallery-category-chip')).length, details: __categoryCreated.filter(node => node.matches('details.gallery-category-menu')).length, summary: __categoryCreated.filter(node => node.matches('.gallery-category-menu > summary')).length, panel: __categoryCreated.filter(node => node.classList.contains('gallery-category-menu-panel')).length, small: __categoryCreated.filter(node => node.matches('.gallery-category-chip > small')).length })), { same: true, chips: 5, details: 1, summary: 1, panel: 1, small: 5 }, 'crossing four to five categories may construct only the newly required menu subtree');
+  const five = [...four, { value: `threshold-4-${'W'.repeat(150)}`, count: 5 }]; await refresh(five);
+  assert.equal(await page.locator('.gallery-category-menu').evaluate(menu => menu.open), false, 'a newly required overflow menu starts closed');
+  assert.deepEqual(await page.evaluate(() => ({ same: __thresholdStrip === document.querySelector('.gallery-photo-category-strip') && __thresholdButtons.every((node, index) => __thresholdStrip.children[index] === node), chips: __categoryCreated.filter(node => node.classList.contains('gallery-category-chip')).length, details: __categoryCreated.filter(node => node.matches('details.gallery-category-menu')).length, summary: __categoryCreated.filter(node => node.matches('.gallery-category-menu > summary')).length, panel: __categoryCreated.filter(node => node.classList.contains('gallery-category-menu-panel')).length, small: __categoryCreated.filter(node => node.matches('.gallery-category-chip > small')).length })), { same: true, chips: 1, details: 1, summary: 1, panel: 1, small: 1 }, 'overflow may construct only the newly required menu subtree and facet');
   await beginPhotoCategoryProbe(page, 'threshold-4'); await refresh(four);
   assert.equal(await page.locator('.gallery-category-menu').count(), 0, 'four categories must retire the unnecessary menu');
   assert.equal(await page.evaluate(() => document.activeElement === __categoryLive.featured[0].node && __categoryLive.strip.isConnected), true, 'removing the focused menu at the four-category boundary must focus the surviving all-category chip');
   assert.equal(await page.evaluate(() => __thresholdButtons.every((node, index) => __thresholdStrip.children[index] === node)), true, 'retiring the menu must preserve the existing featured category controls');
-  const duplicates = [{ value: 'duplicate', count: 1 }, { value: 'duplicate', count: 2 }, { value: 'other-1', count: 3 }, { value: 'other-2', count: 4 }, { value: 'selected-last', count: 5 }, { value: '__fanhao_media_kind_movie__', count: 9000 }];
+  const leading = Array.from({ length: 45 }, (_, index) => ({ value: `t${index}`, count: index + 1 }));
+  const duplicates = [...leading, { value: 'duplicate', count: 1 }, { value: 'duplicate', count: 2 }, { value: 'other-1', count: 3 }, { value: 'other-2', count: 4 }, { value: 'selected-last', count: 5 }, { value: '__fanhao_media_kind_movie__', count: 9000 }];
   await seedPhotoCategories(page, duplicates, 'selected-last'); await beginPhotoCategoryProbe(page, 'duplicate');
-  const updated = duplicates.map((item, index) => ({ ...item, count: index < 2 ? 11 * (index + 1) : item.count })); await refresh(updated);
+  const updated = duplicates.map(item => item.value === 'duplicate' ? { ...item, count: 11 * item.count } : item); await refresh(updated);
   assertPhotoCategoryRetention(await readPhotoCategoryProbe(page), updated, 'selected-last');
   await beginPhotoCategoryProbe(page, 'duplicate');
   const missingSelected = [...updated.filter(item => item.value !== 'selected-last'), { value: 'replacement', count: 6 }]; await refresh(missingSelected);
@@ -1141,7 +1247,7 @@ async function verifyPhotoCategoryControls(page, repeat, facets, gates) {
 
   // A results-only search keeps these controls live. Their click must remain
   // valid even though summary/list registration generations have changed.
-  await page.evaluate(() => { window.__liveCategoryButton = __categoryLive.buttons[0].node; });
+  await page.evaluate(() => { window.__liveCategoryButton = __categoryLive.target; });
   const searchRead = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('q') === 'category-search', body(80, 0, 'photo', { facets: { people: [] } })); gates.push(searchRead);
   await page.locator('.gallery-search').fill('category-search'); await page.locator('.gallery-search').press('Enter'); await requested(searchRead);
   assert.equal(await page.evaluate(() => __liveCategoryButton.isConnected), true, 'results-only search must preserve the live category control owner while its first page is pending');

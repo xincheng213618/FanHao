@@ -98,6 +98,7 @@ const sharedWorkSorter = createWorkSorter({
 // Disabled products are not imported: a FanHao-only installation does not need
 // the photos/media/content-index source trees or their runtime state.
 const { createImageGalleryDbService } = withGallery ? await import("./src/modules/content-index/server/image-gallery-db-service.js") : {};
+const { createPhotoCategoryCoverStore } = withGallery ? await import("./src/modules/content-index/server/photo-category-cover-store.js") : {};
 const { createImageLibraryIndexService } = withGallery ? await import("./src/modules/content-index/server/image-library-index-service.js") : {};
 const { createImageLibraryService } = withGallery ? await import("./src/modules/content-index/server/image-library-service.js") : {};
 const { createPhotoBrowseCategoryStore } = withGallery ? await import("./src/modules/content-index/server/photo-browse-category-store.js") : {};
@@ -238,6 +239,11 @@ const photoLibraryStore = withGallery ? createPhotoLibraryStore({
     photoSetService: { coverUrl: photoSetCoverUrl }
   }).projectPhotoIndex(index, locales)
 }) : null;
+const photoCategoryCoverStore = withGallery ? createPhotoCategoryCoverStore({
+  getDb: getImageGalleryDb,
+  getPhotoRevision: photoLibraryStore.revision,
+  photoSetCoverUrl
+}) : null;
 const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
   archiveExts: ARCHIVE_EXTS,
   createId,
@@ -253,6 +259,7 @@ const imageLibraryIndexService = withGallery ? createImageLibraryIndexService({
   videoExts: VIDEO_EXTS
 }) : null;
 const photoSetService = withGallery ? createPhotoSetService({
+  archiveMarks: photoLibraryStore.archiveMarks,
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
   archiveImageSignature,
   archiveImagesPayload,
@@ -272,7 +279,8 @@ const photoSetService = withGallery ? createPhotoSetService({
   notFound,
   safeChildPath,
   safeStat,
-  serveArchiveMemberImage
+  serveArchiveMemberImage,
+  setArchiveMarkedA: photoLibraryStore.setArchiveMarkedA
 }) : null;
 const galleryMetadataService = withGallery ? createGalleryMetadataService({
   createId,
@@ -363,6 +371,7 @@ const imageLibraryService = withGallery ? createImageLibraryService({
   maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT,
   metadataService: galleryMetadataService,
   photoBrowseCategoryStore,
+  photoCategoryCoverStore,
   photoLibraryStore,
   photoPublisherStore,
   photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
@@ -1229,6 +1238,8 @@ const moduleRegistry = await discoverFanHaoModules({
       }),
       contentIndex: {
         imageLibraryService,
+        photoCategoryCoverStore,
+        photoLibraryStore,
         requireLocalAdmin,
         sendJson
       },

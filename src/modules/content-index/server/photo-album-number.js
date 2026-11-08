@@ -2,6 +2,8 @@
 // display text; `prefix` + `number` identify a numbering family for gap and
 // duplicate checks inside one collection.
 
+export { BOBO_SOCKS_CATEGORY, parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
+
 const PHOTO_STATS_SUFFIX = /\s*[\[(（【][^\]）)】]*(?:\d+\s*[PV]|(?:MB|GB)\b|\d+(?:\.\d+)?\s*[MG]\b)[^\]）)】]*[\])）】]\s*$/iu;
 const YEAR_LIKE = /^(?:19|20)\d{2}$/u;
 const DATE_IN_TEXT = /(?:19|20)\d{2}[.\-_/年]\d{1,2}[.\-_/月]\d{1,2}/u;

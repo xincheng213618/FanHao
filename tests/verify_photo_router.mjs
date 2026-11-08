@@ -11,7 +11,24 @@ for (const [slug, category, legacy] of [
   ["yituyu", "catalog:yituyu", "[YITUYU艺图语]"],
   ["mslass", "catalog:mslass", "[MSLASS梦丝女神]"],
   ["korean-entertainment", "catalog:korean-entertainment", "韩国演艺圈"],
-  ["bololi", "publisher:bololi"],
+  ["fetish", "catalog:fetish", "恋足恋物"],
+  ["bobosocks", "catalog:bobosocks", "[BoBoSocks袜啵啵]"],
+  ["bololi", "publisher:bololi", "[BoLoli]波萝社"],
+  ["girlt", "catalog:girlt", "[Girlt] 果团网"],
+  ["qingdouke", "catalog:qingdouke", "[QingDouKe] 青豆客"],
+  ["japan", "catalog:japan", "日本写真集"],
+  ["korea", "catalog:korea", "韩国写真集"],
+  ["ys-web", "catalog:ys-web", "YS Web"],
+  ["maxi-247", "catalog:maxi-247", "Maxi-247 - 301 Rei"],
+  ["make-model", "catalog:make-model", "[Make model]"],
+  ["street", "catalog:street", "精选街拍"],
+  ["mojing", "catalog:mojing", "魔镜街拍"],
+  ["leeheeexpress", "catalog:leeheeexpress", "[LeeheeExpress]"],
+  ["partycat", "catalog:partycat", "[Partycat]"],
+  ["tuigirl", "catalog:tuigirl", "[TuiGirl] 推女郎"],
+  ["slady", "catalog:slady", "[SLADY]猎女神"],
+  ["likes", "catalog:likes", "我喜欢的"],
+  ["miscellaneous", "catalog:miscellaneous", "[零散]"],
   ["cos", "[COS]"]
 ]) {
   const pathname = `/photo/categories/${slug}`;
@@ -23,13 +40,16 @@ for (const [slug, category, legacy] of [
   assert.equal(normalizePhotoBrowseCategory(legacy), category);
   assert.equal(route.galleryCategory, category);
   assert.equal(routeUrl(route), pathname);
+  assert.equal(routeUrl({ ...shelf, galleryCategory: legacy }), pathname);
+  const opaque = Buffer.from(legacy).toString("base64url");
+  assert.equal(routeUrl(from(`/photo/categories/raw-${opaque}`)), pathname);
   assert.equal(from(`/photo/albums?${query}`).galleryCategory, legacy);
 }
 
 assert.equal(routeUrl(shelf), "/photo/collections");
 assert.equal(from("/photo/collections").galleryCategory, "all");
 assert.equal(from("/photo/categories/raw-_").galleryCategory, "all");
-for (const category of ["其他写真 📷", "xiuren", "raw-Zm9v", "V:\\套图|收藏", "[XIUREN] 秀人网"]) {
+for (const category of ["其他写真 📷", "xiuren", "raw-Zm9v", "V:\\套图|收藏"]) {
   const url = routeUrl({ ...shelf, galleryCategory: category });
   assert.match(url, /^\/photo\/categories\/raw-[A-Za-z0-9_-]+$/);
   assert.equal(from(url).galleryCategory, category);

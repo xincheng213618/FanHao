@@ -38,6 +38,8 @@ const GALLERY_READER_IMAGE_CONCURRENCY = 4;
 const GALLERY_READER_PRELOAD_ABOVE = 900;
 const GALLERY_READER_PRELOAD_BELOW = 1400;
 const GALLERY_READER_ROOT_MARGIN = "900px 0px 1400px 0px";
+const GALLERY_PHOTO_COVER_CONCURRENCY = 4;
+const GALLERY_PHOTO_COUNT_BATCH_SIZE = 24;
 const GALLERY_MORE_AUTO_LOAD_DISTANCE = 1200;
 const GALLERY_MORE_SCROLL_INTENT_MS = 1200;
 const GALLERY_MORE_GESTURE_IDLE_MS = 320;
@@ -60,6 +62,13 @@ export function createGalleryRenderer(deps) {
   } = deps;
 
   let galleryCoverObserver = null;
+  const pendingPhotoCovers = new Set();
+  const activePhotoCovers = new Map();
+  const pendingPhotoCardCounts = new Map();
+  const knownPhotoCardCounts = new WeakMap();
+  const pendingPhotoMarks = new Set();
+  let photoCardCountTimer = 0;
+  let photoCardCountRequest = null;
   let selectedPhotoCollectionCard = null;
   let galleryListRegistration = null;
   let gallerySummaryRegistration = null;
@@ -80,6 +89,8 @@ export function createGalleryRenderer(deps) {
   let galleryListReturnRestore = null;
   const gallerySelectValues = new WeakMap();
   const photoCategoryStrips = new WeakMap();
+  let photoCategoryResizeObserver = null;
+  let photoCategoryMeasure = null;
   let mediaLayout = "posters";
   try {
     if (window.localStorage.getItem("fanhao.media.layout") === "list") mediaLayout = "list";
@@ -297,8 +308,8 @@ function openPhotoCategory(value) {
   syncGalleryRoute();
 }
 
-function updatePhotoCategoryButton(entry, label, count) {
-  const active = (state.gallery.category || "all") === entry.value;
+function updatePhotoCategoryButton(entry, label, count, selected) {
+  const active = selected === entry.value;
   const className = `gallery-category-chip${active ? " active" : ""}`;
   if (entry.button.className !== className) entry.button.className = className;
   if (entry.text.data !== label) entry.text.data = label;
@@ -318,22 +329,27 @@ function updatePhotoCategoryButton(entry, label, count) {
   }
 }
 
-function syncPhotoCategoryButtons(record, container, previous, facets, withCount, first = null, end = null) {
+function syncPhotoCategoryButtons(record, facets) {
   const available = new Map();
-  for (const entry of previous) {
+  for (const entry of record.entries) {
     if (!available.has(entry.value)) available.set(entry.value, { entries: [], next: 0 });
     available.get(entry.value).entries.push(entry);
   }
-  const retained = new Set(), entries = [];
-  let focused = -1;
-  for (const facet of facets) {
+  const entries = facets.map(facet => {
     const matches = available.get(facet.value);
-    const entry = matches?.entries[matches.next++] || createPhotoCategoryButton(record, facet.value, withCount);
-    updatePhotoCategoryButton(entry, facet.label || photoCategoryDisplayName(facet.value), facet.count);
-    if (entry.button === document.activeElement && entry.button.parentElement === container) focused = entries.length;
-    entries.push(entry); retained.add(entry);
-  }
-  for (const entry of previous) if (!retained.has(entry)) { entry.alive = false; entry.button.remove(); }
+    const entry = matches?.entries[matches.next++] || createPhotoCategoryButton(record, facet.value, true);
+    updatePhotoCategoryButton(entry, facet.label || photoCategoryDisplayName(facet.value), facet.count, record.selected);
+    return entry;
+  });
+  const retained = new Set(entries);
+  const obsolete = record.entries.filter(entry => !retained.has(entry));
+  record.entries = entries;
+  return obsolete;
+}
+
+function placePhotoCategoryButtons(container, entries, first = null, end = null) {
+  const active = document.activeElement;
+  const focused = active?.parentElement === container ? entries.findIndex(entry => entry.button === active) : -1;
   const place = (entry, before) => {
     if (entry.button !== before) container.insertBefore(entry.button, before || end);
     return entry.button.nextSibling;
@@ -346,65 +362,131 @@ function syncPhotoCategoryButtons(record, container, previous, facets, withCount
     before = entries[focused].button.nextSibling;
     for (let index = focused + 1; index < entries.length; index++) before = place(entries[index], before);
   }
-  return entries;
+}
+
+function photoCategoryOverflowLabel(count) {
+  return `更多 · ${formatNumber(count)} ▾`;
+}
+
+function fitPhotoCategoryButtons(record, width, active, panel) {
+  const { strip, all, entries } = record;
+  if (!entries.length) return [entries, []];
+  const gap = Number.parseFloat(getComputedStyle(strip).columnGap) || 0;
+  const style = getComputedStyle(all.button);
+  const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const insets = [style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth]
+    .reduce((total, value) => total + (Number.parseFloat(value) || 0), 0);
+  photoCategoryMeasure ||= document.createElement("canvas").getContext("2d");
+  photoCategoryMeasure.font = font;
+  const measure = label => Math.ceil((photoCategoryMeasure.measureText(label).width + insets) * 64) / 64;
+  // The disclosure uses tabular digits, so its width changes only at a digit boundary.
+  const menuWidth = count => measure(photoCategoryOverflowLabel(count).replace(/\d/g, "0")) + gap;
+  const metrics = `${font}|${insets}`;
+  for (const entry of entries) {
+    if (entry.metrics === metrics && entry.measuredLabel === entry.text.data) continue;
+    entry.metrics = metrics;
+    entry.measuredLabel = entry.text.data;
+    entry.width = measure(entry.measuredLabel);
+  }
+  const available = width - all.button.getBoundingClientRect().width;
+  if (entries.reduce((total, entry) => total + gap + entry.width, 0) <= available) return [entries, []];
+
+  const focusedMenuEntry = panel?.contains(active) ? entries.find(entry => entry.button === active) : null;
+  let reserve = menuWidth(entries.length);
+  let visible, hidden;
+  while (true) {
+    let remaining = available - reserve;
+    visible = new Set();
+    // Keep a focused overflow item in its native details while other chips still overflow.
+    for (const entry of entries) {
+      if (entry === focusedMenuEntry || entry.width + gap > remaining) continue;
+      visible.add(entry);
+      remaining -= entry.width + gap;
+    }
+    hidden = entries.filter(entry => !visible.has(entry));
+    const needed = menuWidth(hidden.length);
+    if (needed >= reserve) break;
+    reserve = needed;
+  }
+  return [entries.filter(entry => visible.has(entry)), hidden];
+}
+
+function createPhotoCategoryMenu(record) {
+  const { strip } = record;
+  const details = document.createElement("details");
+  details.className = "gallery-category-menu";
+  const summary = document.createElement("summary");
+  const text = document.createTextNode("");
+  summary.append(text);
+  const panel = document.createElement("div");
+  panel.className = "gallery-category-menu-panel";
+  panel.setAttribute("role", "group");
+  panel.setAttribute("aria-label", "更多套图分类");
+  details.append(summary, panel);
+  strip.append(details);
+  details.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || record.menu?.details !== details || !currentPhotoCategoryStrip(record)) return;
+    details.open = false;
+    summary.focus();
+  });
+  return { details, summary, text, panel };
+}
+
+function layoutPhotoCategoryStrip(record, obsolete = []) {
+  if (!currentPhotoCategoryStrip(record)) return;
+  const { strip } = record, active = document.activeElement, panel = record.menu?.panel;
+  const ownedFocus = strip.contains(active);
+  const focusedMenuButton = panel?.contains(active) && active.matches("button");
+  const focusedTop = focusedMenuButton ? active.getBoundingClientRect().top : 0;
+  record.width = strip.getBoundingClientRect().width;
+  const [visible, hidden] = fitPhotoCategoryButtons(record, record.width, active, panel);
+  if (hidden.length && !record.menu) record.menu = createPhotoCategoryMenu(record);
+  const menu = record.menu;
+  placePhotoCategoryButtons(strip, visible, record.all.button, menu?.details);
+  for (const entry of obsolete) { entry.alive = false; entry.button.remove(); }
+  if (hidden.length) {
+    const label = photoCategoryOverflowLabel(hidden.length);
+    if (menu.text.data !== label) menu.text.data = label;
+    const selected = hidden.find(entry => entry.value === record.selected);
+    const description = `更多分类，${formatNumber(hidden.length)} 个${selected ? `，当前分类：${selected.text.data}` : ""}`;
+    menu.summary.classList.toggle("active", Boolean(selected));
+    if (menu.summary.getAttribute("aria-label") !== description) menu.summary.setAttribute("aria-label", description);
+    placePhotoCategoryButtons(menu.panel, hidden);
+    if (ownedFocus && menu.panel.contains(active)) menu.details.open = true;
+  } else if (menu) {
+    menu.details.remove();
+    record.menu = null;
+  }
+  return () => {
+    if (!currentPhotoCategoryStrip(record)) return;
+    if (ownedFocus && document.activeElement === document.body) {
+      const target = strip.contains(active) ? active : record.menu?.summary || record.all.button;
+      target.focus({ preventScroll: true });
+    }
+    if (focusedMenuButton && record.menu?.panel === panel && document.activeElement === active && panel.contains(active)) {
+      const delta = active.getBoundingClientRect().top - focusedTop;
+      if (delta) panel.scrollTop += delta;
+    }
+  };
 }
 
 function syncPhotoCategoryStrip(record) {
-  const { strip } = record, active = document.activeElement;
-  const ownedFocus = strip.contains(active), panel = record.menu?.panel;
-  const focusedMenuButton = panel?.contains(active) && active.matches("button");
-  const focusedTop = focusedMenuButton ? active.getBoundingClientRect().top : 0;
   const rawFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
   const catalog = (state.gallery.data?.browseCategories || []).filter(entry => entry.issueCount > 0);
   const bySource = new Map(catalog.filter(entry => entry.sourceCategory).map(entry => [entry.sourceCategory, entry]));
-  const activeCategory = catalog.find(entry => state.gallery.category === `catalog:${entry.id}`);
+  const activeValue = state.gallery.category || "all";
+  const activeCategory = catalog.find(entry => activeValue === `catalog:${entry.id}`
+    || entry.publisherId && activeValue === `publisher:${entry.publisherId}`);
+  record.selected = activeCategory?.parentId ? `catalog:${activeCategory.parentId}` : activeValue;
   const facets = [
-    ...catalog.filter(entry => !entry.sourceCategory).map(catalogCategoryFacet),
+    ...catalog.filter(entry => !entry.sourceCategory && !entry.parentId).map(catalogCategoryFacet),
     ...rawFacets.filter(facet => !bySource.get(facet.value)?.parentId).map(facet => {
       const entry = bySource.get(facet.value);
       return entry ? catalogCategoryFacet(entry) : facet;
     })
   ];
-  const featured = facets.slice(0, 4);
-  const selected = activeCategory?.parentId ? catalogCategoryFacet(activeCategory) : facets.find(facet => facet.value === state.gallery.category);
-  if (selected && !featured.includes(selected)) featured[featured.length - 1] = selected;
-  updatePhotoCategoryButton(record.all, "全部大类", rawFacets.reduce((total, facet) => total + Number(facet.count || 0), 0));
-  const needsMenu = facets.length > featured.length;
-  if (needsMenu && !record.menu) {
-    const details = document.createElement("details");
-    details.className = "gallery-category-menu";
-    const summary = document.createElement("summary");
-    const text = document.createTextNode(""); summary.append(text);
-    const nextPanel = document.createElement("div");
-    nextPanel.className = "gallery-category-menu-panel";
-    nextPanel.setAttribute("role", "group");
-    nextPanel.setAttribute("aria-label", "全部套图分类");
-    record.menu = { details, summary, text, panel: nextPanel, entries: [] };
-    details.append(summary, nextPanel); strip.append(details);
-    details.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !details.isConnected || !strip.contains(details) || record.menu?.details !== details || !currentPhotoCategoryStrip(record)) return;
-      details.open = false;
-      summary.focus();
-    });
-  } else if (!needsMenu && record.menu) {
-    for (const entry of record.menu.entries) entry.alive = false;
-    record.menu.details.remove(); record.menu = null;
-  }
-  record.featured = syncPhotoCategoryButtons(record, strip, record.featured, featured, false, record.all.button, record.menu?.details || null);
-  if (record.menu) {
-    const text = `全部分类 · ${formatNumber(facets.length)}`;
-    if (record.menu.text.data !== text) record.menu.text.data = text;
-    record.menu.entries = syncPhotoCategoryButtons(record, record.menu.panel, record.menu.entries, facets, true);
-  }
-  return () => {
-    if (!currentPhotoCategoryStrip(record)) return;
-    if (ownedFocus && !active.isConnected && document.activeElement === document.body) {
-      (record.menu?.summary || record.all.button).focus({ preventScroll: true });
-    } else if (focusedMenuButton && record.menu?.panel === panel && document.activeElement === active && panel.contains(active)) {
-      const delta = active.getBoundingClientRect().top - focusedTop;
-      if (delta) panel.scrollTop += delta;
-    }
-  };
+  updatePhotoCategoryButton(record.all, "全部大类", rawFacets.reduce((total, facet) => total + Number(facet.count || 0), 0), record.selected);
+  return layoutPhotoCategoryStrip(record, syncPhotoCategoryButtons(record, facets));
 }
 
 function catalogCategoryFacet(entry) {
@@ -423,11 +505,33 @@ function createPhotoCategoryStrip(options = {}) {
   const strip = document.createElement("div");
   strip.className = "gallery-category-strip gallery-photo-category-strip";
   strip.setAttribute("role", "group"); strip.setAttribute("aria-label", "套图大类");
-  const next = { strip, featured: [], menu: null };
+  const next = { strip, entries: [], menu: null, width: 0 };
   next.all = createPhotoCategoryButton(next, "all", false); strip.append(next.all.button);
+  strip.addEventListener("focusout", event => {
+    if (!next.menu?.panel.contains(event.target)) return;
+    queueMicrotask(() => {
+      if (document.activeElement !== event.target) layoutPhotoCategoryStrip(next)?.();
+    });
+  });
   photoCategoryStrips.set(strip, next);
   syncPhotoCategoryStrip(next);
   return strip;
+}
+
+function observePhotoCategoryStrip(strip) {
+  const record = photoCategoryStrips.get(strip);
+  if (!record) return;
+  layoutPhotoCategoryStrip(record)?.();
+  if (typeof ResizeObserver !== "function") return;
+  photoCategoryResizeObserver = new ResizeObserver(([entry], observer) => {
+    if (!strip.isConnected) {
+      observer.disconnect();
+      if (photoCategoryResizeObserver === observer) photoCategoryResizeObserver = null;
+      return;
+    }
+    if (entry.contentRect.width !== record.width) layoutPhotoCategoryStrip(record)?.();
+  });
+  photoCategoryResizeObserver.observe(strip);
 }
 
 function galleryBrowseDescription() {
@@ -938,6 +1042,8 @@ function activeGallerySearchValue() {
 }
 
 function resetGalleryRenderedState() {
+  photoCategoryResizeObserver?.disconnect();
+  photoCategoryResizeObserver = null;
   galleryListReturnRestore?.abort();
   galleryListReturnRestore = null;
   galleryReaderWidthRestore = null;
@@ -952,6 +1058,12 @@ function resetGalleryRenderedState() {
   activeGalleryReaderImageLoads = 0;
   galleryReaderStartupFigure = null;
   galleryReaderRegistration = null;
+  resetGalleryPhotoCovers();
+  pendingPhotoCardCounts.clear();
+  window.clearTimeout(photoCardCountTimer);
+  photoCardCountTimer = 0;
+  photoCardCountRequest?.abort();
+  photoCardCountRequest = null;
   for (const image of els.workGrid.querySelectorAll(".gallery-photo-catalog-card img[src]")) {
     if (!image.complete) image.removeAttribute("src");
   }
@@ -1039,10 +1151,7 @@ function renderGalleryResults(options = {}) {
 
 function currentGalleryCategoryFacets() {
   const facets = state.gallery.data?.facets || {};
-  if (state.gallery.mode === "photo") {
-    const list = currentImageLibraryList();
-    return (list?.categoryDirect ? facets.categories : list?.facets?.categories) || facets.categories || [];
-  }
+  if (state.gallery.mode === "photo") return facets.categories || [];
   const listFacets = currentImageLibraryList()?.facets || {};
   const kind = galleryMediaKindForMode(state.gallery.mode);
   if (kind === "media") {
@@ -1843,30 +1952,82 @@ function activateGalleryLazyImages(root, options = {}) {
   if (galleryCoverObserver && !options.append) {
     galleryCoverObserver.disconnect();
     galleryCoverObserver = null;
+    resetGalleryPhotoCovers();
   }
   const images = [...root.querySelectorAll("img[data-gallery-src]")];
   if (!images.length) return;
   if (!("IntersectionObserver" in window)) {
     for (const image of images) {
-      image.src = image.dataset.gallerySrc;
-      delete image.dataset.gallerySrc;
+      if (image.dataset.galleryPhotoCover) pendingPhotoCovers.add(image);
+      else loadGalleryCover(image);
     }
+    queueMicrotask(drainGalleryPhotoCovers);
     return;
   }
   if (!galleryCoverObserver) galleryCoverObserver = new IntersectionObserver(
     (entries, observer) => {
       if (observer !== galleryCoverObserver) return;
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
         const image = entry.target;
-        image.src = image.dataset.gallerySrc;
-        delete image.dataset.gallerySrc;
-        observer.unobserve(image);
+        if (image.dataset.galleryPhotoCover) {
+          if (entry.isIntersecting) pendingPhotoCovers.add(image);
+          else pendingPhotoCovers.delete(image);
+        } else if (entry.isIntersecting) {
+          loadGalleryCover(image);
+          observer.unobserve(image);
+        }
       }
+      drainGalleryPhotoCovers();
     },
     { rootMargin: "600px 0px" }
   );
   for (const image of images) galleryCoverObserver.observe(image);
+}
+
+function loadGalleryCover(image) {
+  const src = image.dataset.gallerySrc;
+  if (!src) return;
+  delete image.dataset.gallerySrc;
+  image.src = src;
+}
+
+function drainGalleryPhotoCovers() {
+  // On HTTP/1.1, a burst of covers can occupy the browser's connection pool.
+  // Keep connections available for pagination and other interactive requests.
+  for (const image of pendingPhotoCovers) {
+    if (activePhotoCovers.size >= GALLERY_PHOTO_COVER_CONCURRENCY) break;
+    pendingPhotoCovers.delete(image);
+    if (!image.isConnected || !image.dataset.gallerySrc) continue;
+    galleryCoverObserver?.unobserve(image);
+    const release = () => {
+      image.removeEventListener("load", settle);
+      image.removeEventListener("error", settle);
+      activePhotoCovers.delete(image);
+    };
+    const settle = () => {
+      release();
+      drainGalleryPhotoCovers();
+    };
+    activePhotoCovers.set(image, release);
+    image.addEventListener("load", settle);
+    image.addEventListener("error", settle);
+    image.loading = "eager";
+    image.fetchPriority = "low";
+    loadGalleryCover(image);
+  }
+}
+
+function resetGalleryPhotoCovers() {
+  pendingPhotoCovers.clear();
+  for (const image of activePhotoCovers.keys()) cancelGalleryPhotoCover(image);
+}
+
+function cancelGalleryPhotoCover(image) {
+  pendingPhotoCovers.delete(image);
+  const release = activePhotoCovers.get(image);
+  if (!release) return;
+  release();
+  if (!image.complete) image.removeAttribute("src");
 }
 
 function galleryListItemKey(item) {
@@ -2041,10 +2202,13 @@ function refreshGalleryList(options = {}) {
     if (previous && (previous.item === item || JSON.stringify(previous.item) === JSON.stringify(item))) { previous.item = item; continue; }
     const node = registration.createItem(item, index);
     if (previous) {
-      const focused = previous.node.contains(document.activeElement);
-      for (const image of previous.node.querySelectorAll("img")) galleryCoverObserver?.unobserve(image);
+      const focused = previous.node.contains(document.activeElement) ? document.activeElement : null;
+      for (const image of previous.node.querySelectorAll("img")) {
+        galleryCoverObserver?.unobserve(image);
+        cancelGalleryPhotoCover(image);
+      }
       previous.node.replaceWith(node);
-      if (focused) node.focus({ preventScroll: true });
+      if (focused) (registration.options.focusTarget?.(node, focused) || node).focus({ preventScroll: true });
     } else registration.grid.append(node);
     registration.entries.set(key, { item, node });
     activateGalleryLazyImages(node, { append: true });
@@ -2372,6 +2536,7 @@ function createGalleryCard(item, options = {}) {
     img.alt = "";
     img.loading = "lazy";
     img.decoding = "async";
+    if (options.queueCover) img.dataset.galleryPhotoCover = "1";
     if (item.coverUrl.startsWith("/media/gallery-cover/")) {
       const url = new URL(item.coverUrl, window.location.origin);
       url.searchParams.set("fallback", options.coverFallback || "1");
@@ -2642,7 +2807,7 @@ function renderPagedPhotoCollectionsShelf(container, list) {
     clear.className = "text-button gallery-filter-clear";
     clear.textContent = list.browseParent?.name || "查看全部分类";
     clear.addEventListener("click", () => openPhotoCategory(list.browseParent ? `catalog:${list.browseParent.id}` : "all"));
-    header.append(clear);
+    header.append(clear, createPhotoCategoryCoverButton(state.gallery.category, category, list.categoryCoverUrl));
   }
   container.append(header);
   renderPhotoPublisherVideos(container, list.relatedVideos);
@@ -2662,6 +2827,38 @@ function renderPagedPhotoCollectionsShelf(container, list) {
   } else {
     appendPhotoCatalogMore(container, visibleItems.length, items.length);
   }
+}
+
+function createPhotoCategoryCoverButton(category, name, coverUrl) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button gallery-filter-clear gallery-photo-category-cover-settings";
+  button.textContent = "设置封面";
+  if (coverUrl) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.src = coverUrl;
+    image.addEventListener("error", () => image.remove(), { once: true });
+    button.prepend(image);
+  }
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const { openPhotoCategoryCoverDialog } = await import("./photo-category-cover-dialog.js");
+      if (!button.isConnected) return;
+      openPhotoCategoryCoverDialog({ api, category, name, onSaved: () => {
+        const current = state.gallery.photoCollection ? `collection:${state.gallery.photoCollection}` : state.gallery.category;
+        if (state.activeView === "gallery" && state.gallery.mode === "photo" && current === category) {
+          void getGalleryPage().loadImageLibraryItems?.({ force: true, renderStart: false });
+        }
+      } });
+    } catch (error) {
+      setGalleryStatus(error.message || "封面设置加载失败");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
 }
 
 function renderPhotoPublisherVideos(container, videos) {
@@ -2693,11 +2890,12 @@ function createPhotoCollectionCard(collection, publisher) {
     { title, coverUrl: collection.coverUrl || "" },
     {
       badges: count ? [`${formatNumber(count)} 期`] : [],
+      queueCover: true,
       meta: [categoryLabel === title ? "" : categoryLabel, formatBytes(collection.size)].filter(Boolean).join(" · "),
       placeholder: "暂无封面",
       onOpen: () => {
         if (collection.browseCategoryId) {
-          openPhotoCategory(`catalog:${collection.browseCategoryId}`);
+          openPhotoCategory(collection.browsePublisherId ? `publisher:${collection.browsePublisherId}` : `catalog:${collection.browseCategoryId}`);
           window.scrollTo({ top: 0, behavior: "smooth" });
           return;
         }
@@ -2748,6 +2946,7 @@ function renderPagedPhotoShelf(container, list) {
   // A person-specific bar contains aggregate metadata; preserve its full fallback.
   if (state.gallery.person === "all") registerGalleryList(grid, list, item => createPagedPhotoCard(item), {
     label: "套图", moreParent: container,
+    focusTarget: (node, previous) => node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card"),
     refreshMetadata: next => { if (header) header.querySelector("span").textContent = `${formatNumber(next.total || 0)} 期`; }
   });
 }
@@ -2779,7 +2978,7 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   libraryCrumb.textContent = "图库";
   libraryCrumb.addEventListener("click", () => leavePhotoCollection("collections", list?.categoryDirect ? "all" : ""));
   breadcrumb.append(libraryCrumb);
-  const parent = list?.categoryDirect ? summary.browseParent : summary.browseCategory;
+  const parent = list?.categoryDirect ? summary.browseParent : publisher ? null : summary.browseCategory;
   if (parent || !list?.categoryDirect && (publisher || summary.category)) {
     const largeCrumb = document.createElement("button");
     largeCrumb.type = "button";
@@ -2816,6 +3015,10 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   // The breadcrumb and the toolbar view switch already navigate away; the
   // header row holds the collection name, its totals and its filters.
   bar.append(text);
+  if (list && (list.categoryDirect || state.gallery.photoCollection)) {
+    const coverKey = list.categoryDirect ? state.gallery.category : `collection:${state.gallery.photoCollection}`;
+    bar.append(createPhotoCategoryCoverButton(coverKey, titleLabel, list.categoryCoverUrl));
+  }
   page.append(bar);
 
   if (!list) {
@@ -2922,8 +3125,8 @@ function photoAlbumPersonName(item = {}) {
 function photoAlbumCardTitle(item, collectionView) {
   const title = String(item.title || "").trim()
     .replace(/\s*\[[^\]]*(?:\d+\s*[PV]|(?:MB|GB)\b|\d+(?:\.\d+)?\s*[MG]\b)[^\]]*\]\s*$/iu, "").trim();
-  const sequence = title.match(/\b(VOL|N[O0])\.?\s*(\d+)\b/i);
-  const albumNumber = String(item.albumNumber || (sequence ? `${/^VOL$/i.test(sequence[1]) ? "VOL." : "NO."}${sequence[2]}` : "")).trim();
+  const albumNumber = String(item.albumNumber || "").trim();
+  const sequence = albumNumber ? title.match(/\b(?:VOL|N[O0])\.?\s*\d+\b/i) : null;
   const meaningfulPerson = photoAlbumPersonName(item);
   const fallbackSubject = sequence
     ? title.slice(Number(sequence.index || 0) + sequence[0].length).trim()
@@ -2948,10 +3151,13 @@ function createPagedPhotoCard(item, options = {}) {
   const collectionView = Boolean(options.collection);
   const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
   const { albumNumber, title } = photoAlbumCardTitle(item, collectionView);
+  const person = collectionView ? collectionPerson : item.personName;
+  const imageCount = item.contentImageCount ?? knownPhotoCardCounts.get(item);
   const card = createGalleryCard({ ...item, title }, {
-    leadingBadge: albumNumber,
-    badges: Number.isSafeInteger(item.contentImageCount) ? [`${formatNumber(item.contentImageCount)} 张`] : [],
-    meta: [collectionView ? collectionPerson : item.personName, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
+    leadingBadge: albumNumber || item.archiveDate,
+    queueCover: true,
+    badges: Number.isSafeInteger(imageCount) ? [`${formatNumber(imageCount)} 张`] : [],
+    meta: [person === title ? "" : person, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
     dateLabel: item.archiveDate || formatDateTime(item.updatedAt),
     dateTime: item.archiveDate || item.updatedAt,
     placeholder: collectionView ? "" : "套图",
@@ -2964,7 +3170,112 @@ function createPagedPhotoCard(item, options = {}) {
   card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
   card.dataset.galleryAlbumId = String(item.id);
   if (title) card.title = title;
-  return card;
+  if (!Number.isSafeInteger(imageCount) && item.coverUrl?.startsWith("/media/gallery-cover/")) {
+    card.querySelector("img")?.addEventListener("load", () => {
+      if (!card.isConnected) return;
+      pendingPhotoCardCounts.set(item.id, { item, card });
+      schedulePhotoCardCounts();
+    }, { once: true });
+  }
+  const entry = document.createElement("article");
+  entry.className = "gallery-photo-album-entry";
+  entry.append(card, createPhotoAlbumMarkButton(item));
+  return entry;
+}
+
+function updatePhotoAlbumMarkButton(button, marked, pending) {
+  button.disabled = pending;
+  button.setAttribute("aria-pressed", String(marked));
+  button.title = marked ? "取消特别标记 [A]" : "特别标记 [A]";
+  button.setAttribute("aria-label", button.title);
+}
+
+function createPhotoAlbumMarkButton(album) {
+  const button = document.createElement("button");
+  const id = String(album.id);
+  button.type = "button";
+  button.className = "text-button gallery-photo-mark";
+  button.dataset.photoMarkId = id;
+  button.textContent = "[A]";
+  updatePhotoAlbumMarkButton(button, album.markedA === true, pendingPhotoMarks.has(id));
+  button.addEventListener("click", async () => {
+    if (pendingPhotoMarks.has(id)) return;
+    let marked = button.getAttribute("aria-pressed") === "true";
+    pendingPhotoMarks.add(id);
+    updatePhotoAlbumMarkButton(button, marked, true);
+    try {
+      const result = await api(`/api/photo-sets/${encodeURIComponent(id)}/mark`, { method: "PUT", body: { markedA: !marked } });
+      marked = result.markedA === true;
+      const current = state.gallery.album;
+      if (current?.id === id) current.markedA = marked;
+      const item = state.gallery.list?.items?.find(value => value.id === id);
+      if (item) item.markedA = marked;
+    } catch (error) {
+      setGalleryStatus(error.message || "特别标记保存失败");
+    } finally {
+      pendingPhotoMarks.delete(id);
+      for (const control of els.workGrid.querySelectorAll(".gallery-photo-mark")) {
+        if (control.dataset.photoMarkId === id) updatePhotoAlbumMarkButton(control, marked, false);
+      }
+    }
+  });
+  return button;
+}
+
+function schedulePhotoCardCounts() {
+  if (photoCardCountTimer || photoCardCountRequest || !pendingPhotoCardCounts.size) return;
+  photoCardCountTimer = window.setTimeout(() => {
+    photoCardCountTimer = 0;
+    void readPhotoCardCounts();
+  }, 120);
+}
+
+async function readPhotoCardCounts() {
+  const entries = [];
+  const params = new URLSearchParams();
+  let encodedLength = 0;
+  for (const [id, entry] of pendingPhotoCardCounts) {
+    if (entries.length === GALLERY_PHOTO_COUNT_BATCH_SIZE) break;
+    const length = encodeURIComponent(id).length + 5;
+    if (entries.length && encodedLength + length > 6500) break;
+    pendingPhotoCardCounts.delete(id);
+    if (!entry.card.isConnected) continue;
+    entries.push([id, entry]);
+    params.append("ids", id);
+    encodedLength += length;
+  }
+  if (!params.size) { schedulePhotoCardCounts(); return; }
+  const controller = new AbortController();
+  photoCardCountRequest = controller;
+  try {
+    const { counts } = await api(`/api/image-library/photo-card-counts?${params}`, { signal: controller.signal });
+    if (photoCardCountRequest !== controller) return;
+    for (const [id, { item, card }] of entries) {
+      const count = counts?.[id];
+      if (!Number.isSafeInteger(count) || count < 0) continue;
+      knownPhotoCardCounts.set(item, count);
+      if (card.isConnected) appendPhotoCardCount(card, count);
+    }
+  } catch { /* A missing count can be recovered from the next list read. */ }
+  finally {
+    if (photoCardCountRequest === controller) {
+      photoCardCountRequest = null;
+      schedulePhotoCardCounts();
+    }
+  }
+}
+
+function appendPhotoCardCount(card, count) {
+  const cover = card.querySelector(".gallery-card-cover");
+  let badges = cover.querySelector(".gallery-card-badges");
+  if (!badges) {
+    badges = document.createElement("div");
+    badges.className = "gallery-card-badges";
+    cover.append(badges);
+  }
+  const badge = document.createElement("span");
+  badge.textContent = `${formatNumber(count)} 张`;
+  badges.append(badge);
 }
 
 function createPagedMangaCard(item, index) {
@@ -3503,6 +3814,7 @@ function readerToolbar(title, meta, onBack, options = {}) {
 
   const actions = document.createElement("div");
   actions.className = "gallery-reader-actions";
+  if (options.markAlbum) actions.append(createPhotoAlbumMarkButton(options.markAlbum));
   const setFitWidth = (fitWidth) => {
     if (!bar.isConnected || state.activeView !== "gallery" || state.gallery.fitWidth === fitWidth) return;
     const viewer = bar.parentElement?.querySelector(".gallery-reader-images");
@@ -4431,6 +4743,7 @@ function renderPhotoReader(container) {
     state.gallery.album = null;
   }, {
     albumId: album.id,
+    markAlbum: album,
     totalCount,
     onOpen: openPager
   }));
@@ -5009,6 +5322,7 @@ function renderGalleryView(options = {}) {
   renderGalleryContent(content);
   shell.append(content);
   els.workGrid.append(shell);
+  observePhotoCategoryStrip(shell.querySelector(".gallery-photo-category-strip"));
   if (searchValueToRestore !== null) restoreGallerySearchFocus();
   restoreGalleryScrollPosition(scrollAnchor);
 }
