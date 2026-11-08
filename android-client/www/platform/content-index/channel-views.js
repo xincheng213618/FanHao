@@ -2140,7 +2140,7 @@ export function createChannelViews(context) {
   function channelCardLabel(mode, item) {
     if (mode === "photo" && item.type === "photoCollection") return [item.category, item.rootLabel].filter(Boolean).join(" · ") || "合集";
     if (mode === "manga") return [item.category, chapterProgressText(item)].filter(Boolean).join(" · ") || "漫画";
-    if (mode === "photo") return [item.category, item.personName].filter(Boolean).join(" · ") || "套图";
+    if (mode === "photo") return [item.photoSite || item.category, item.personName, item.photoRegion === "western" ? item.archiveDate : ""].filter(Boolean).join(" · ") || "套图";
     if (mode === "media" && item.type === "tvSeries") return ["电视剧", item.category, item.year].filter(Boolean).join(" · ");
     if (mode === "media" && item.type === "movie") return ["电影", item.category, item.year].filter(Boolean).join(" · ");
     if (mode === "media" && item.type === "tv") return [item.tvSeries?.title || item.seriesName, item.category].filter(Boolean).slice(0, 2).join(" · ") || "电视剧";
@@ -2178,7 +2178,7 @@ export function createChannelViews(context) {
   function photoAlbumCardTitle(item = {}) {
     const raw = String(item.title || "").replace(/\s+/g, " ").trim();
     const person = String(item.personName || "").replace(/[[\]]/g, "").trim();
-    if (!raw || !person) return raw || "套图";
+    if (item.photoRegion === "western" || !raw || !person) return raw || "套图";
     return raw
       .replace(new RegExp(`^${escapeRegExp(person)}\\s*[–—-]\\s*`, "i"), "")
       .replace(new RegExp(`^${escapeRegExp(person)}\\s+`, "i"), "")
@@ -2608,7 +2608,7 @@ export function createChannelViews(context) {
     const images = Array.isArray(album.images) ? album.images : [];
     const totalImages = Number(album.imageCount || images.length || 0);
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-    els.viewKicker.textContent = [album.category, album.personName].filter(Boolean).join(" · ") || "套图";
+    els.viewKicker.textContent = [album.photoSite || album.category, album.personName, album.archiveDate].filter(Boolean).join(" · ") || "套图";
     els.viewTitle.textContent = "套图详情";
     els.viewMeta.textContent = `${formatNumber(totalImages)} 张 · ${formatBytes(album.size)}${suffix}`;
   }
@@ -2660,7 +2660,7 @@ export function createChannelViews(context) {
     title.textContent = album.title || album.personName || album.subCategory || album.category || "套图";
 
     const subtitle = document.createElement("small");
-    subtitle.textContent = [album.personName, album.category].filter(Boolean).join(" · ");
+    subtitle.textContent = [album.personName, album.photoSite || album.category, album.archiveDate].filter(Boolean).join(" · ");
     main.append(title);
     if (subtitle.textContent) main.append(subtitle);
 
@@ -4858,7 +4858,7 @@ export function createChannelViews(context) {
       type: "photo",
       label: "套图",
       title: album.title || album.personName || "套图详情",
-      subtitle: [album.category, album.personName].filter(Boolean).join(" · "),
+      subtitle: [album.photoSite || album.category, album.personName, album.archiveDate].filter(Boolean).join(" · "),
       meta: [
         album.imageCount !== null && album.imageCount !== undefined ? `${formatNumber(album.imageCount)} 张` : "",
         formatBytes(album.size)

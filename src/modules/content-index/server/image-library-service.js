@@ -3,6 +3,7 @@ import { types } from "node:util";
 import { createImageQueryCache, IMAGE_QUERY_CACHE_MAX_COMPACT_PHOTO_ROWS, IMAGE_QUERY_CACHE_MAX_ROWS } from "./image-query-cache.js";
 import { BOBO_SOCKS_CATEGORY, parseBoBoSocksAlbum, parsePhotoAlbumNumber, photoCollectionHealth } from "./photo-album-number.js";
 import { PHOTO_PERSON_SHELF_CATEGORY, photoPersonShelfName } from "../../../../lib/photo-person-shelf.js";
+import { parseWesternPhotoAlbum } from "../../../../lib/western-photo-album.js";
 
 export const PHOTO_COLLECTION_SORTS = ["updated", "count", "size", "title"];
 
@@ -1069,19 +1070,22 @@ export function createImageLibraryService({
     const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
     const movieMetadata = item?.movieMetadata || null;
     const movieTitle = normalizedMode === "movie" ? moviePrimaryDisplayTitle(item, movieMetadata) : "";
-    const photoTitle = photoRow?.title ?? String(item?.title || item?.dirName || "").trim();
+    const rawPhotoTitle = photoRow?.archiveTitle ?? photoRow?.title ?? String(item?.title || item?.dirName || "").trim();
+    const western = normalizedMode === "photo" ? (photoRow?.photoRegion === "western" ? photoRow : parseWesternPhotoAlbum(item)) : null;
+    const photoTitle = western?.albumSubject ?? rawPhotoTitle;
+    const photoSource = western ? { archiveTitle: rawPhotoTitle, photoSite: western.photoSite, photoRegion: "western" } : null;
     const collectionDir = normalizedMode === "photo" && !photoRow ? photoCollectionDir(item) : "";
     const shelfPerson = normalizedMode === "photo" && !photoRow ? photoPersonShelfName(item) : "";
     const collectionTitle = photoRow?.collectionTitle ?? (normalizedMode === "photo" ? shelfPerson || photoCollectionDisplayName(collectionDir) : "");
     const boBoSocks = normalizedMode === "photo" && !photoRow && item?.category === BOBO_SOCKS_CATEGORY ? parseBoBoSocksAlbum(photoTitle) : null;
     const photoPeople = photoRow?.photoPeople ?? boBoSocks?.photoPeople;
-    const personName = photoRow?.personName ?? boBoSocks?.personName ?? (shelfPerson || String(item?.personName || "").trim());
-    const archiveDate = normalizedMode === "photo" && !compact ? photoArchiveDate(photoTitle) : "";
-    const albumNumber = photoRow?.albumNumber ?? boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
+    const personName = western?.personName ?? photoRow?.personName ?? boBoSocks?.personName ?? (shelfPerson || String(item?.personName || "").trim());
+    const archiveDate = western?.archiveDate ?? (normalizedMode === "photo" && !compact ? photoArchiveDate(photoTitle) : "");
+    const albumNumber = western ? "" : photoRow?.albumNumber ?? boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "");
     // Unnumbered subjects participate in the person facet guard. Numbered
     // subjects are display-only and can be derived for the returned page.
-    let albumSubject = boBoSocks?.albumSubject ?? (photoPeople ? photoRow.albumSubject : "");
-    if (!photoPeople && normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
+    let albumSubject = western?.albumSubject ?? boBoSocks?.albumSubject ?? (photoPeople ? photoRow.albumSubject : "");
+    if (!western && !photoPeople && normalizedMode === "photo" && (!deferPhotoSubject || !albumNumber) && (!compact || personName)) {
       albumSubject = photoRow?.personName && !albumNumber ? photoRow.albumSubject : photoAlbumSubject(photoTitle, item, collectionTitle);
     }
     const id = photoRow?.id ?? String(item?.id || "");
@@ -1101,6 +1105,7 @@ export function createImageLibraryService({
     if (compact) {
       return { id, title: photoTitle, category, subCategory, personName, rootLabel, size, updatedAt, albumNumber, albumSubject,
         imageCount, collectionId, collectionTitle, coverUrl, tvSeries, movieMetadata, albumCount, rating, year,
+        ...(western ? { ...photoSource, archiveDate } : {}),
         ...(photoPeople ? { photoPeople } : {}) };
     }
     const displayTitle =
@@ -1117,6 +1122,7 @@ export function createImageLibraryService({
       category,
       subCategory,
       personName,
+      ...photoSource,
       ...(photoPeople ? { photoPeople } : {}),
       seriesName: String(item?.seriesName || "").trim(),
       seriesKey: String(item?.seriesKey || "").trim(),
@@ -1603,6 +1609,9 @@ export function createImageLibraryService({
       category: normalizeImageSearchValue(item?.category),
       folder: normalizeImageSearchValue(item?.subCategory),
       metadata: normalizeImageSearchValue([
+        item?.archiveTitle,
+        item?.photoSite,
+        item?.photoRegion === "western" ? item.archiveDate : "",
         item?.seriesName,
         item?.rootLabel,
         item?.ext,
@@ -1945,9 +1954,11 @@ export function createImageLibraryService({
     const totals = { collections: 0, albums: 0, numbered: 0, missing: 0, duplicateGroups: 0, duplicateBytes: 0, size: 0 };
     for (const [id, rows] of groups) {
       const albums = rows.map(row => {
-        const archiveDate = photoArchiveDate(row.title);
+        const archiveDate = row.archiveDate || photoArchiveDate(row.title);
         return { id: row.id, title: row.title, size: row.size, imageCount: row.imageCount, archiveDate,
-          albumSubject: archiveDate && !parsePhotoAlbumNumber(row.title) ? photoAlbumSubject(row.title, row, row.collectionTitle) : "" };
+          photoSite: row.photoSite,
+          albumSubject: row.photoRegion === "western" ? row.albumSubject
+            : archiveDate && !parsePhotoAlbumNumber(row.title) ? photoAlbumSubject(row.title, row, row.collectionTitle) : "" };
       });
       const health = photoCollectionHealth(albums);
       const family = health.numbering[0] || null;

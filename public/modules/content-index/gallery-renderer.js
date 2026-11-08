@@ -3426,14 +3426,14 @@ function renderPagedPhotoCards(items, options = {}) {
 
 function createPagedPhotoCard(item, options = {}) {
   const collectionView = Boolean(options.collection);
-  const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
+  const collectionPerson = item.photoRegion === "western" ? item.personName : collectionView ? photoAlbumPersonName(item) : "";
   const { albumNumber, title } = photoAlbumCardTitle(item, collectionView);
   const person = collectionView ? collectionPerson : item.personName;
   const imageCount = item.contentImageCount ?? knownPhotoCardCounts.get(item);
   const card = createGalleryCard({ ...item, title }, {
     leadingBadge: albumNumber || item.archiveDate,
     queueCover: true,
-    meta: [person === title ? "" : person, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
+    meta: [item.photoSite, person === title ? "" : person, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
     dateLabel: item.archiveDate || formatDateTime(item.updatedAt),
     dateTime: item.archiveDate || item.updatedAt,
     placeholder: collectionView ? "" : "套图",
@@ -5062,8 +5062,8 @@ function photoReaderMeta(album) {
   const visibleCount = images.length;
   const videoCount = album.videos?.length || 0;
   return [
-    album.category,
-    album.subCategory,
+    album.photoSite || album.category,
+    album.photoRegion === "western" ? album.archiveDate : album.subCategory,
     album.personName,
     !totalCount && videoCount ? "" : visibleCount < totalCount
       ? `已显示 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)} 张`

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
+import { parseWesternPhotoAlbum } from "../lib/western-photo-album.js";
 
 const photoSets = [
   photo("a1", "分类 A", "文件夹一", "人物甲", "合集一/001.zip", 100, "2026-07-01T00:00:00.000Z"),
@@ -261,6 +262,32 @@ assert.equal(conservativeTvWorks.items.filter((item) => item.seriesName.startsWi
 
 const mergedEpisodeDetail = service.itemsPayload(url({ mode: "tv", seriesKey: mergedCrossDirectoryWork.seriesKey, limit: "20" }));
 assert.deepEqual(mergedEpisodeDetail.items.map((item) => item.id).sort(), ["cross-a", "cross-b"], "a merged TV work must still open every original episode file");
+
+const westernFixtures = [
+  ["western-shaded", "Veronika.Glam", "MetArt.com_19.12.18.Veronika.Glam.Shaded.XXX.IMAGESET-GAGBALL[rarbg]", "Shaded", "MetArt", "2019-12-18", "Veronika Glam"],
+  ["western-ma", "Jeff milton", "MA 130916 Presenting", "Presenting", "MetArt", "2013-09-16", "Jeff Milton"],
+  ["western-ra", "Jeff milton", "RA 130803 Walking In My Shoes", "Walking In My Shoes", "RylskyArt", "2013-08-03", "Jeff Milton"],
+  ["western-faina", "Faina Bona", "AmourAngels - 2018-05-11 - Faina - Spring Colors (х120) 3840x5760 _by Marita Berg", "Spring Colors", "AmourAngels", "2018-05-11", "Faina Bona"],
+  ["western-multiple", "Faina Bona", "SexArt - 2019-07-23 - Faina.Bona.And.Lena.Raz.Girls.Day.XXX.iMAGESET-YAPG[rarbg]", "Girls Day", "SexArt", "2019-07-23", "Faina Bona & Lena Raz"],
+  ["western-date-first", "Gloria Sol", "2016-01-19 [Watch4Beauty] - Sophia - Casting (x115)", "Casting", "Watch4Beauty", "2016-01-19", "Sophia"],
+  ["western-atk", "Alecia Fox pic", "[ATKHairy.com] Lissa - Hairy Fun 04.01.2017 345980 (x183)", "Hairy Fun", "ATKHairy", "2017-04-01", "Lissa"]
+];
+const westernRows = westernFixtures.map(([id, folder, title]) => ({
+  ...photo(id, "我喜欢的", folder, folder, `我喜欢的/${folder}/${title}.rar`, 100, "2026-07-01T00:00:00.000Z"), title
+}));
+imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets: [...photoSets, ...westernRows], mediaItems: [] };
+const albums = service.itemsPayload(url({ mode: "photo", photoView: "albums", limit: "30" })).items;
+for (const [id, , archiveTitle, title, photoSite, archiveDate, personName] of westernFixtures) {
+  const item = albums.find(album => album.id === id);
+  assert.deepEqual([item.title, item.albumSubject, item.photoSite, item.archiveDate, item.personName, item.archiveTitle, item.albumNumber],
+    [title, title, photoSite, archiveDate, personName, archiveTitle, ""]);
+}
+const westernSearch = service.itemsPayload(url({ mode: "photo", photoView: "albums", q: "RylskyArt 2013-08-03" }));
+assert.deepEqual(westernSearch.items.map(item => item.id), ["western-ra"]);
+const westernCollection = service.itemsPayload(url({ mode: "photo", collection: albums.find(item => item.id === "western-shaded").collectionId, date: "2019-12" }));
+assert.deepEqual(westernCollection.items.map(item => item.title), ["Shaded"]);
+assert.equal(parseWesternPhotoAlbum({ ...westernRows[0], category: "[COS]" }), null);
+assert.equal(parseWesternPhotoAlbum({ ...westernRows[1], title: "Aksiniasem" }), null);
 
 console.log("image-library-service: ok");
 

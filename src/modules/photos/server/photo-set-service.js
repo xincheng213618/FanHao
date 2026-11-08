@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
 import { parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
 import { photoPersonShelfName } from "../../../../lib/photo-person-shelf.js";
+import { parseWesternPhotoAlbum } from "../../../../lib/western-photo-album.js";
 import { officialPhotoCoverRevision, photoCoverHintScore } from "./photo-cover-source.js";
 
 const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">
@@ -480,6 +481,7 @@ export function createPhotoSetService({
       FROM photo_set_covers WHERE album_id=? AND official_source IS NOT NULL AND member_path IS NULL AND status='ok'`).get(album.id));
     const officialRevision = officialPhotoCoverRevision(official);
     const shelfPerson = photoPersonShelfName(album);
+    const western = parseWesternPhotoAlbum(album);
     return {
       ...album,
       ...(shelfPerson ? { personName: shelfPerson } : {}),
@@ -487,6 +489,7 @@ export function createPhotoSetService({
       ...(manual ? publicCoverOverride(album, override) : officialRevision
         ? { coverUrl: versionedCoverUrl(album.coverUrl, officialRevision) } : {}),
       ...(boBoSocks ? { ...boBoSocks, archiveTitle: album.title, title: `${boBoSocks.albumNumber} ${boBoSocks.albumSubject}` } : {}),
+      ...(western ? { ...western, title: western.albumSubject } : {}),
       ...(archiveMarks?.([album.id]).has(album.id) ? { markedA: true } : {}),
       imageCount,
       imageOffset,

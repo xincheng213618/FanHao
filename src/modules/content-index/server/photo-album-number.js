@@ -127,7 +127,7 @@ export function photoCollectionHealth(items = []) {
       family.count++;
       key = `n:${familyKey}:${parsed.number}`;
     } else if (item.archiveDate && item.albumSubject) {
-      key = `d:${item.archiveDate}:${String(item.albumSubject).normalize("NFKC").toLowerCase().replace(/\s+/gu, "")}`;
+      key = `d:${item.photoSite || ""}:${item.archiveDate}:${String(item.albumSubject).normalize("NFKC").toLowerCase().replace(/\s+/gu, "")}`;
     }
     if (!key) continue;
     let group = groups.get(key);
