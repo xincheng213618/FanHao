@@ -845,22 +845,12 @@ export function createMangaPage(deps) {
     });
     page.append(controls);
 
-    const heading = document.createElement("section");
     if (searching) {
+      const heading = document.createElement("section");
       heading.className = "manga-search-results";
       heading.innerHTML = `<h1>搜索结果</h1><p>“${escapeHtml(state.manga.query)}”${state.manga.data ? ` · ${formatNumber(comics.length)} 部漫画` : ""}</p>`;
-    } else {
-      heading.className = "manga-library-hero";
-      heading.innerHTML = `
-        <div>
-          <p class="manga-kicker">LOCAL COMIC LIBRARY</p>
-          <h1>把漫画当作一本书来管理</h1>
-          <p>封面、作品资料、章节目录与下载统一归档，阅读器只在选中章节后打开。</p>
-        </div>
-        <div class="manga-hero-count"><strong>${formatNumber(state.manga.data?.comics?.length || 0)}</strong><span>本地作品</span></div>
-      `;
+      page.append(heading);
     }
-    page.append(heading);
 
     if (state.manga.addOpen || state.manga.addJob) {
       const addPanel = document.createElement("form");
@@ -958,19 +948,21 @@ export function createMangaPage(deps) {
     card.className = "manga-card";
     card.dataset.comicId = String(comic.id);
     const cover = coverMarkup(comic, comic.title, { lazy: true });
+    const chapterCount = `${formatNumber(comic.chapterCount)} 话`;
     card.innerHTML = `
-      <button class="manga-card-open" type="button" aria-label="查看《${escapeAttr(comic.title)}》详情">
-        <span class="manga-card-cover">${cover}<span class="manga-card-site">${escapeHtml(siteLabel(comic.site))}</span></span>
+      <button class="manga-card-open" type="button" aria-label="查看《${escapeAttr(comic.title)}》详情" aria-description="${chapterCount}">
+        <span class="manga-card-cover">
+          ${cover}<span class="manga-card-site">${escapeHtml(siteLabel(comic.site))}</span><span class="manga-card-chapters">${chapterCount}</span>
+        </span>
         <span class="manga-card-body">
           <strong>${escapeHtml(comic.title)}</strong>
           <span>${escapeHtml(comic.author || "作者待补充")}</span>
-          <small>${formatNumber(comic.chapterCount)} 话 · ${formatNumber(comic.imageCount)} 张</small>
         </span>
       </button>
     `;
     const button = card.querySelector("button"), body = card.querySelector(".manga-card-body");
     const record = { card, button, cover: card.querySelector(".manga-card-cover"), site: card.querySelector(".manga-card-site"),
-      title: body.querySelector("strong"), author: body.querySelector("span"), counts: body.querySelector("small"), coverUrl: String(comic.coverUrl || "") };
+      title: body.querySelector("strong"), author: body.querySelector("span"), chapters: card.querySelector(".manga-card-chapters"), coverUrl: String(comic.coverUrl || "") };
     button.addEventListener("click", () => {
       const id = card.dataset.comicId;
       if (!currentLibraryView(view) || view.cards.get(id) !== record || card.parentElement !== view.grid
@@ -985,9 +977,11 @@ export function createMangaPage(deps) {
 
   function updateComicCard(record, comic) {
     const title = String(comic.title || ""), label = `查看《${title}》详情`;
+    const chapterCount = `${formatNumber(comic.chapterCount)} 话`;
     if (record.button.getAttribute("aria-label") !== label) record.button.setAttribute("aria-label", label);
+    if (record.button.getAttribute("aria-description") !== chapterCount) record.button.setAttribute("aria-description", chapterCount);
     for (const [node, value] of [[record.title, title], [record.author, String(comic.author || "作者待补充")],
-      [record.site, siteLabel(comic.site)], [record.counts, `${formatNumber(comic.chapterCount)} 话 · ${formatNumber(comic.imageCount)} 张`]]) {
+      [record.site, siteLabel(comic.site)], [record.chapters, chapterCount]]) {
       if (node.textContent !== value) node.textContent = value;
     }
     const coverUrl = String(comic.coverUrl || "");
@@ -1067,7 +1061,7 @@ export function createMangaPage(deps) {
     const comic = state.manga.comic;
     const page = document.createElement("div");
     page.className = "manga-detail";
-    page.append(renderMangaHeader("detail"), renderDetailHero(comic));
+    const header = renderMangaHeader("detail");
     const catalog = document.createElement("section");
     catalog.className = "manga-catalog";
     catalog.innerHTML = `
@@ -1076,33 +1070,25 @@ export function createMangaPage(deps) {
     const form = document.createElement("form");
     form.className = "manga-directory-search";
     form.setAttribute("role", "search");
-    const label = document.createElement("label");
-    label.textContent = "查找章节";
-    const input = document.createElement("input");
-    input.type = "search";
-    input.className = "manga-directory-search-input";
-    input.placeholder = "输入章节标题或话数";
-    input.setAttribute("aria-label", "查找漫画章节");
-    input.autocomplete = "off";
-    label.append(input);
-    const clear = document.createElement("button");
-    clear.type = "button";
-    clear.className = "manga-directory-search-clear";
-    clear.textContent = "清除";
-    const count = document.createElement("p");
-    count.className = "manga-directory-search-count";
-    count.setAttribute("role", "status");
+    form.innerHTML = `
+      <input type="search" class="manga-directory-search-input" placeholder="查找章节" aria-label="查找漫画章节" autocomplete="off">
+      <span class="manga-directory-search-count" role="status"></span>
+      <button type="button" data-action="previous-match" aria-label="上一条匹配" title="上一条匹配"></button>
+      <button type="button" data-action="next-match" aria-label="下一条匹配" title="下一条匹配"></button>
+      <button type="button" class="manga-directory-search-clear" aria-label="清除章节搜索" title="清除章节搜索">×</button>
+    `;
+    const input = form.querySelector("input"), count = form.querySelector("[role=status]");
+    const [previous, next, clear] = form.querySelectorAll("button");
     const empty = document.createElement("p");
     empty.className = "manga-directory-search-empty";
     empty.setAttribute("role", "status");
     empty.textContent = "没有匹配的章节，试试其他标题或话数。";
     empty.hidden = true;
-    form.append(label, clear, count);
     const list = document.createElement("div");
     list.className = "manga-chapter-list";
-    catalog.append(form, empty, list);
-    page.append(catalog);
-    const view = { page, catalog, form, input, count, empty, list, rows: new Map(), comicId: comic.id,
+    catalog.append(empty, list);
+    page.append(header, form, renderDetailHero(comic), catalog);
+    const view = { page, catalog, count, previous, next, empty, list, match: null, rows: new Map(), comicId: comic.id,
       generation: readerGeneration, query: "", composing: false, candidateSubmit: false, observer: null };
     detailView = view;
     const commit = () => {
@@ -1110,6 +1096,8 @@ export function createMangaPage(deps) {
       const query = normalizeChapterQuery(input.value);
       if (query === view.query) return;
       view.query = query;
+      view.match?.classList.remove("is-search-match");
+      view.match = null;
       filterChapterCatalog(view);
     };
     const focusFirst = () => {
@@ -1119,6 +1107,19 @@ export function createMangaPage(deps) {
       first.focus({ preventScroll: true });
       first.scrollIntoView({ block: "center", behavior: "instant" });
     };
+    const moveMatch = (direction) => {
+      if (!currentDetailView(view) || !view.query || view.composing) return;
+      const matches = [...list.children].filter(row => !row.hidden);
+      if (!matches.length) return;
+      let index = matches.indexOf(view.match);
+      if (index < 0 && direction < 0) index = 0;
+      view.match?.classList.remove("is-search-match");
+      view.match = matches[(index + direction + matches.length) % matches.length];
+      view.match.classList.add("is-search-match");
+      view.match.scrollIntoView({ block: "center", behavior: "instant" });
+    };
+    previous.addEventListener("click", () => moveMatch(-1));
+    next.addEventListener("click", () => moveMatch(1));
     input.addEventListener("compositionstart", () => { if (currentDetailView(view)) { view.composing = true; view.candidateSubmit = false; } });
     input.addEventListener("compositionend", () => { view.composing = false; commit(); });
     input.addEventListener("input", commit);
@@ -1147,9 +1148,9 @@ export function createMangaPage(deps) {
     updateChapterCatalog(view);
     if (typeof ResizeObserver === "function") {
       view.observer = new ResizeObserver(() => {
-        if (currentDetailView(view)) form.style.top = `${page.querySelector(".manga-header").getBoundingClientRect().height}px`;
+        if (currentDetailView(view)) form.style.top = `${header.getBoundingClientRect().height + 6}px`;
       });
-      view.observer.observe(page.querySelector(".manga-header"));
+      view.observer.observe(header);
     }
     return page;
   }
@@ -1257,8 +1258,20 @@ export function createMangaPage(deps) {
       if (visible) matches++;
       if (!visible && button.hasAttribute("aria-current")) currentHidden = true;
     }
-    const text = `匹配 ${formatNumber(matches)} / 共 ${formatNumber(view.rows.size)} 话${currentHidden ? " · 当前阅读章节不在匹配结果中" : ""}`;
+    const matched = formatNumber(matches), total = formatNumber(view.rows.size);
+    const text = `${matched} / ${total}`;
     if (view.count.textContent !== text) view.count.textContent = text;
+    const description = `匹配 ${matched} / 共 ${total} 话${currentHidden ? " · 当前阅读章节不在匹配结果中" : ""}`;
+    if (view.count.title !== description) {
+      view.count.title = description;
+      view.count.setAttribute("aria-label", description);
+    }
+    const disableNavigation = !view.query || matches === 0;
+    view.previous.disabled = view.next.disabled = disableNavigation;
+    if (view.match && (view.match.hidden || view.match.parentElement !== view.list)) {
+      view.match.classList.remove("is-search-match");
+      view.match = null;
+    }
     if (view.empty.hidden !== (matches > 0)) view.empty.hidden = matches > 0;
   }
 

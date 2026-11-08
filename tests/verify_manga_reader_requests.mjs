@@ -312,7 +312,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await page.evaluate(() => {
           const focused = document.activeElement, cards = [...document.querySelectorAll('.manga-card')], covers = cards.map(card => card.querySelector('img'));
           window.__shelfPoll = { focused, cards, covers, ancestors: [], blur: 0, addedCards: new Set(), removedCards: new Set(), scroll: scrollY };
-          const fields = new Set(cards.flatMap(card => [...card.querySelectorAll('.manga-card-body > *, .manga-card-site')]));
+          const fields = new Set(cards.flatMap(card => [...card.querySelectorAll('.manga-card-body > *, .manga-card-site, .manga-card-chapters')]));
           const coverFrames = new Set(cards.map(card => card.querySelector('.manga-card-cover')));
           const text = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
           const select = Element.prototype.querySelector;
@@ -376,9 +376,11 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         comicSnapshots.set('C', libraryComics[0]);
         await publishLibraryCardPoll(page, poll, 'metadata fields published');
         assert.deepEqual(await card.evaluate(card => ({ title: card.querySelector('.manga-card-body strong').textContent, author: card.querySelector('.manga-card-body > span').textContent,
-          counts: card.querySelector('.manga-card-body small').textContent, site: card.querySelector('.manga-card-site').textContent, label: card.querySelector('button').getAttribute('aria-label') })),
-          { title: 'Comic C revised', author: 'New synthetic author', counts: '42 话 · 126 张', site: 'NEW-SITE', label: '查看《Comic C revised》详情' },
-          'accepted library metadata must update every visible comic-card field and its accessible name');
+          chapters: card.querySelector('.manga-card-cover .manga-card-chapters').textContent, site: card.querySelector('.manga-card-site').textContent,
+          label: card.querySelector('button').getAttribute('aria-label'), description: card.querySelector('button').getAttribute('aria-description') })),
+          { title: 'Comic C revised', author: 'New synthetic author', chapters: '42 话', site: 'NEW-SITE', label: '查看《Comic C revised》详情', description: '42 话' },
+          'accepted library metadata must update every visible comic-card field and its accessible name and description');
+        assert.doesNotMatch(await card.textContent(), /126\s*张/);
         assert.equal(await card.evaluate(card => card === __shelfMetadata.card && card.querySelector('button') === __shelfMetadata.button && card.querySelector('.manga-cover-placeholder') === __shelfMetadata.placeholder
           && __shelfMetadata.placeholder.querySelector('small').textContent === 'Comic C revised' && __shelfMetadata.ancestors.every(node => node.isConnected) && document.activeElement === __shelfMetadata.button), true,
           'same-url metadata must preserve the existing failed-cover fallback, focused button and complete card ancestry');
@@ -625,14 +627,28 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       comicSnapshots.set('C', searchableCatalogComic('C'));
       const page = await newPage({ real: true, route: '/manga/C' });
       try {
-        await detailTitle(page, 'Comic C'); await page.setViewportSize({ width: 320, height: 740 });
+        await detailTitle(page, 'Comic C');
+        assert.equal(await page.locator('.manga-directory-search').evaluate(form => {
+          const search = form.getBoundingClientRect();
+          const title = document.querySelector('.manga-detail-copy h1').getBoundingClientRect();
+          const metadata = document.querySelector('.manga-meta-list').getBoundingClientRect();
+          return search.left > title.left && Math.abs(search.right - metadata.right) <= 2 && search.bottom <= metadata.top;
+        }), true, 'desktop chapter search must occupy the right side of the title area');
+        await page.setViewportSize({ width: 320, height: 740 });
         const input = page.locator('.manga-directory-search-input'); await input.fill('alpha');
         const reads = countRequests(url => url.pathname.startsWith('/api/'));
-        await input.press('Tab'); assert.equal(await page.locator('.manga-directory-search-clear').evaluate(node => node === document.activeElement), true);
+        const previous = page.locator('.manga-directory-search [data-action="previous-match"]');
+        const next = page.locator('.manga-directory-search [data-action="next-match"]');
+        const selectedMatch = page.locator('.manga-chapter-row.is-search-match');
+        await input.press('Tab'); assert.equal(await previous.evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Space'); assert.equal(await selectedMatch.getAttribute('data-chapter-index'), '128');
+        await page.keyboard.press('Tab'); assert.equal(await next.evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Space'); assert.equal(await selectedMatch.getAttribute('data-chapter-index'), '127');
+        await page.keyboard.press('Tab'); assert.equal(await page.locator('.manga-directory-search-clear').evaluate(node => node === document.activeElement), true);
         assert.equal(await page.locator('.manga-directory-search-clear').evaluate(node => { const rect = node.getBoundingClientRect(); return rect.height >= 44 && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === node; }), true,
           'the new directory clear control must remain a visible 44px target at 320px');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-        await page.keyboard.press('Shift+Tab'); assert.equal(await input.evaluate(node => node === document.activeElement), true);
+        await input.focus();
         await input.press('Enter');
         const button = page.locator('.manga-chapter-row[data-chapter-index="127"] button');
         assert.equal(await button.evaluate(node => node === document.activeElement), true, 'explicit directory Enter must focus the first matching available chapter');
@@ -1327,6 +1343,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       const page = await newPage({ real: true });
       try {
         await page.locator('.manga-card').first().waitFor();
+        assert.equal(await page.locator('.manga-library-controls + .manga-card-grid').count(), 1, 'the library controls must lead directly into the comic shelf');
         const input = page.locator('.manga-library-controls input[type="search"]');
         const add = page.locator('.manga-library-controls [data-action="add"]');
         await add.click();
@@ -1338,7 +1355,6 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await results.waitFor();
         assert.equal(new URL(page.url()).pathname, '/manga/search');
         assert.equal(new URL(page.url()).searchParams.get('q'), 'Comic C');
-        assert.equal(await page.locator('.manga-library-hero').count(), 0);
         assert.equal(await add.isVisible(), false);
         assert.equal(await page.locator('.manga-add-panel').isVisible(), false);
         const additions = countRequests(url => url.pathname === '/api/manga/add');
@@ -1357,7 +1373,8 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert.equal(await page.locator('.manga-add-panel input').inputValue(), 'https://example.invalid/shelf/retained-draft');
         await page.goBack(); await results.waitFor();
         assert.equal(new URL(page.url()).pathname, '/manga/search');
-        await page.goBack(); await page.locator('.manga-library-hero').waitFor();
+        await page.goBack(); await add.waitFor();
+        assert.equal(await results.count(), 0);
         assert.equal(new URL(page.url()).pathname, '/manga');
         assert.equal(await input.inputValue(), '');
       } finally { await page.close(); }
