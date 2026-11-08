@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { chromium } from "playwright-core";
 
 // Complete real Android launcher/app/modules/cascade. Synthetic list and
-// metadata-only detail/catalogue GETs; no reader text, downloads or write flows.
+// metadata-only detail/catalogue GETs plus one synthetic reader response.
 const root = path.resolve(import.meta.dirname, "..");
 const executablePath = [process.env.CHROME_PATH, "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"].filter(Boolean).find(file => fs.existsSync(file));
 assert(executablePath, "Chrome or Edge required for the actual Android novel shell");
@@ -17,6 +17,8 @@ const rotationOnly = process.argv.includes("--rotation-only") || legacyResize ||
 const legacyMetadata = process.argv.includes("--legacy-detail-metadata");
 const legacyCatalogError = process.argv.includes("--legacy-catalog-error");
 const detailOnly = process.argv.includes("--detail-only") || legacyMetadata || legacyCatalogError;
+const baselineDetailActions = process.argv.includes("--baseline-detail-actions");
+const measureDetailActions = baselineDetailActions || process.argv.includes("--measure-detail-actions");
 const caseFilter = process.argv.find(value => value.startsWith("--case="))?.slice(7) || "";
 const longQuery = "SyntheticNovelSearchQueryWithoutWordBreaksForCheckingNarrowScreenEmptyStateAndRetry";
 const service = spawn(process.execPath, ["tests/serve_android_gallery_navigation_fixture.mjs"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
@@ -111,13 +113,14 @@ try {
   for (const noRO of [false, true]) await run(`rotation: ${noRO ? "window resize fallback" : "native ResizeObserver"} reveals the selected category only after width changes`, async () => {
     await verifyRotation(noRO);
   });
+  if (!legacyMetadata && !legacyCatalogError) await run("detail: reading actions and catalogue load independently", verifyDetailActionTiming);
   assert(checks > 0); assert.deepEqual(faults, []);
   console.log(JSON.stringify({ result: "PASS", scenarios: checks, profiles, frozenRuns,
-    boundary: "Actual Chromium full shell; synthetic list/bookMeta/catalogue GETs only; no reader text, authors, downloads, writes, real novels/database or native-device claim" }, null, 2));
+    boundary: "Actual Chromium full shell; synthetic list/bookMeta/catalogue/chapter GETs only; no downloads, writes, real novels/database or native-device claim" }, null, 2));
 } finally {
   await browser?.close(); service.kill("SIGTERM"); await Promise.race([serviceExit, new Promise(resolve => setTimeout(resolve, 3000))]);
 }
-async function launch(viewport, { noRO = false, detailScene = false } = {}) {
+async function launch(viewport, { noRO = false, detailScene = false, prepare, fixtureRunId } = {}) {
   const page = await browser.newPage({ viewport }); reads.set(page, []); apiReads.set(page, []);
   if (noRO) await page.addInitScript(() => { window.ResizeObserver = undefined; });
   page.on("pageerror", error => faults.push(error.message));
@@ -162,9 +165,14 @@ async function launch(viewport, { noRO = false, detailScene = false } = {}) {
     body = body.replace(marker, legacyMetadata ? marker.replace(" overflow-wrap: anywhere;", "") : "/* catalogue error wrapping omitted */");
     await route.fulfill({ response, body });
   });
-  await page.goto(origin);
+  await prepare?.(page);
+  if (!fixtureRunId) await page.goto(origin);
   const initial = novelResponse(page, () => true);
-  await page.getByRole("button", { name: detailScene ? "小说详情与章节目录（长书名、简介与分页）" : "小说分类测试（8个书库分类，含长名称）", exact: true }).click();
+  if (fixtureRunId) {
+    await page.goto(`${origin}/run/${fixtureRunId}/www/index.html#novels`);
+  } else {
+    await page.getByRole("button", { name: detailScene ? "小说详情与章节目录（长书名、简介与分页）" : "小说分类测试（8个书库分类，含长名称）", exact: true }).click();
+  }
   await page.waitForURL(url => url.pathname.startsWith("/run/"));
   const runId = new URL(page.url()).pathname.split("/")[2], frozen = (await (await page.request.get(`${origin}/fixture/requests?run=${runId}`)).json()).runs[0];
   frozenRuns.push({ runId, scenario: frozen.scenario, files: frozen.files.filter(file => ["app.js", "modules/novels/styles.css", "modules/novels/mobile-refinements.css", "modules/novels/novel-views.js", "modules/novels/android-module.js"].includes(file.name)).map(file => ({ name: file.name, sha256: file.servedSha256 })) });
@@ -301,6 +309,109 @@ async function detailTargets(page) {
     assert(control.rect.height >= 44 && control.rect.width >= 44, `detail/catalogue controls keep 44px targets: ${JSON.stringify(control)}`);
     assert(control.rect.left >= -1 && control.rect.right <= control.width + 1, `detail/catalogue controls remain horizontally visible: ${JSON.stringify(control)}`);
   }
+}
+async function verifyDetailActionTiming() {
+  const bookId = "fixture-novel-detail-cn";
+  const metaPath = `/api/novels/${bookId}`;
+  const delayMs = 225;
+  const chapterIndex = 137, chapterId = `${bookId}-chapter-${chapterIndex}`;
+  const chapterPath = `${metaPath}/chapters/${chapterIndex}`;
+  const body = "用于测量续读实际正文的合成内容。";
+  const actionSamples = [], bodySamples = [];
+  // The fixture keeps at most twelve source snapshots. Each newPage still
+  // starts with a fresh context and its own browser storage.
+  let fixtureRunId;
+  for (const resume of [false, true]) {
+    const repetitions = measureDetailActions ? 3 : 1;
+    for (let iteration = 0; iteration < repetitions; iteration++) {
+      let catalogueStarted = 0, catalogueReleased = false, meta;
+      let releaseCatalogue;
+      const catalogueGate = new Promise(resolve => { releaseCatalogue = resolve; });
+      const page = await launch({ width: 390, height: 844 }, { detailScene: true, fixtureRunId, prepare: async page => {
+        if (baselineDetailActions) await page.route(url => url.pathname.endsWith("/modules/novels/novel-views.js"), async route => {
+          const response = await route.fetch();
+          let body = await response.text();
+          const marker = "const replaceDetail = renderedCache || !normalizeSourceRealm(book.sourceRealm) || !book.catalogRevision;";
+          assert.equal(body.split(marker).length, 2, "the comparison changes only whether the actual metadata mount waits for the catalogue");
+          body = body.replace(marker, "const replaceDetail = true;");
+          await route.fulfill({ response, body });
+        });
+        await page.route(url => url.pathname === `${metaPath}/catalog`, async route => {
+          catalogueStarted++;
+          if (measureDetailActions) await new Promise(resolve => setTimeout(resolve, delayMs));
+          else await catalogueGate;
+          catalogueReleased = true;
+          await route.continue();
+        });
+        if (!resume) return;
+        await page.route(url => url.pathname === metaPath && url.searchParams.get("catalog") === "0", async route => {
+          const response = await route.fetch();
+          meta = await response.json();
+          meta.book.progress = { status: "resolved", chapterId, chapterIndex, catalogRevision: meta.catalogRevision,
+            scrollRatio: 0, updatedAt: meta.book.updatedAt };
+          await route.fulfill({ response, json: meta });
+        });
+        await page.route(url => url.pathname === chapterPath, async route => {
+          const url = new URL(route.request().url());
+          assert.equal(route.request().method(), "GET");
+          assert.deepEqual(Object.fromEntries(url.searchParams), { chapterId, catalogRevision: meta.catalogRevision, sourceRealm: meta.sourceRealm });
+          await route.fulfill({ json: { sourceRealm: meta.sourceRealm, catalogRevision: meta.catalogRevision, book: meta.book,
+            chapter: { id: chapterId, bookId, index: chapterIndex, title: "合成续读章", content: body, charCount: body.length }, prev: null, next: null } });
+        });
+      } });
+      try {
+        fixtureRunId ||= new URL(page.url()).pathname.split("/")[2];
+        const book = initialData.get(page).books.find(book => book.id === bookId);
+        const card = page.getByRole("button", { name: `查看《${book.title}》详情`, exact: true });
+        const read = page.locator(".novel-mobile-detail-actions .primary");
+        await card.evaluate((node, resume) => node.addEventListener("click", () => {
+          const start = performance.now();
+          const observer = new MutationObserver(() => {
+            const read = document.querySelector(".novel-mobile-detail-actions .primary");
+            if (read && !read.disabled && !window.detailActionTiming) window.detailActionTiming = performance.now() - start;
+            if (!resume) { if (window.detailActionTiming) observer.disconnect(); return; }
+            if (!document.querySelector(".novel-reader-content p")) return;
+            window.detailBodyTiming = performance.now() - start;
+            observer.disconnect();
+          });
+          observer.observe(document.getElementById("viewContent"), { childList: true, subtree: true });
+        }, { once: true, capture: true }), resume);
+        const catalogue = resume ? null : catalogueResponse(page, bookId);
+        const requested = page.waitForRequest(request => new URL(request.url()).pathname === `${metaPath}/catalog`);
+        await card.click();
+        await requested;
+        await read.waitFor();
+        assert.equal(!catalogueReleased, !baselineDetailActions, "enabled action and held directory GET are independent");
+        assert.equal(await read.textContent(), resume ? "继续阅读" : "开始阅读");
+        if (!measureDetailActions) assert.equal(await page.locator("#novelDetailCatalog .novel-reader-catalog-loading").textContent(), "正在读取章节目录…");
+        if (resume) {
+          const cancelled = baselineDetailActions ? null : page.waitForEvent("requestfailed", { predicate: request => new URL(request.url()).pathname === `${metaPath}/catalog` });
+          await read.click({ force: true });
+          await page.locator(".novel-reader-content").getByText(body, { exact: true }).waitFor();
+          assert.equal(!catalogueReleased, !baselineDetailActions, "actual chapter body can render while the catalogue response is held");
+          if (cancelled) assert.match((await cancelled).failure().errorText, /ERR_ABORTED/);
+          assert.equal(await page.locator("#novelDetailCatalog").count(), 0, "the old directory cannot replace the reader");
+          bodySamples.push(await page.evaluate(() => window.detailBodyTiming));
+        } else {
+          const mounted = await read.elementHandle();
+          releaseCatalogue();
+          const result = await catalogue;
+          await catalogueRendered(page, result.payload);
+          assert.equal(await mounted.evaluate(node => node.isConnected), true, "directory load preserves the already mounted action");
+        }
+        assert.equal(catalogueStarted, 1);
+        const count = pathname => apiReads.get(page).filter(url => new URL(url).pathname === pathname).length;
+        assert.equal(count(metaPath), 1);
+        assert.equal(count(`${metaPath}/catalog`), 1);
+        assert.equal(count(chapterPath), resume ? 1 : 0);
+        if (!resume) actionSamples.push(await page.evaluate(() => window.detailActionTiming));
+      } finally { releaseCatalogue(); await page.close(); }
+    }
+  }
+  assert([...actionSamples, ...bodySamples].every(Number.isFinite));
+  const median = samples => samples.toSorted((a, b) => a - b)[Math.floor(samples.length / 2)];
+  profiles.push({ case: "detail-action-timing", baseline: baselineDetailActions, delayMs: measureDetailActions ? delayMs : null, actionSamples, bodySamples,
+    medianActionMs: median(actionSamples), medianBodyMs: median(bodySamples), metadataGets: 1, catalogueGets: 1, resumeChapterGets: 1 });
 }
 async function verifyDetails(viewport) {
   const page = await launch(viewport, { detailScene: true });

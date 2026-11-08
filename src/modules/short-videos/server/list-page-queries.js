@@ -4,6 +4,9 @@ import {
   shortVideoFtsMatchQuery,
   shortVideoMediaWhere
 } from "./query-contract.js";
+import { hasCanonicalShortVideoCatalogViews, hasCanonicalShortVideoSearchIndex } from "./schema.js";
+
+const RELATED_TAG_CANDIDATE_LIMIT = 1024;
 
 export function indexedAuthorVideoScope(authorValue) {
   const author = String(authorValue || "").trim();
@@ -40,9 +43,89 @@ export function shortQueryVideoPageEligible(filter, sort) {
     && ["published", "publishedAsc"].includes(sort);
 }
 
+export function indexedRelatedCandidates(database, { currentTags, authorSecUid, id, candidateLimit, candidateColumns, affinity, affinityArgs }) {
+  if (!authorSecUid || !currentTags.length) return null;
+  const phrases = currentTags.map(tag => /^[A-Za-z0-9\p{Script=Han}]+$/u.test(tag) ? shortVideoFtsMatchQuery(tag) : "");
+  if (phrases.some(phrase => !phrase)) return null;
+  try {
+    const schemaVersion = database.prepare("PRAGMA main.schema_version");
+    const verifiedVersion = schemaVersion.get()?.schema_version;
+    if (!Number.isInteger(verifiedVersion) || !hasCanonicalShortVideoSearchIndex(database)) return null;
+    // Every LIKE match for these literal tags is in the trigram candidates.
+    // Author matches only need their own top K before the final top K merge.
+    const rows = database.prepare(`
+      WITH tag_ids AS MATERIALIZED (
+        SELECT video_id AS id FROM short_video_search WHERE short_video_search MATCH ?
+        LIMIT ${RELATED_TAG_CANDIDATE_LIMIT + 1}
+      ), tag_count AS MATERIALIZED (SELECT COUNT(*) AS total FROM tag_ids), scoped AS MATERIALIZED (
+        SELECT id FROM tag_ids
+        UNION
+        SELECT id FROM (
+          SELECT id FROM short_videos INDEXED BY idx_short_videos_author_published
+          WHERE author_sec_uid = ? AND visibility = 'local_only' AND id <> ?
+          ORDER BY published_at DESC, liked_at DESC, id DESC LIMIT ?
+        )
+      ), candidates AS MATERIALIZED (
+        SELECT ${candidateColumns}
+        FROM tag_count CROSS JOIN scoped
+        CROSS JOIN short_videos v ON v.id = scoped.id
+        LEFT JOIN short_video_stats s ON s.video_id = v.id
+        WHERE tag_count.total <= ${RELATED_TAG_CANDIDATE_LIMIT}
+          AND v.visibility = 'local_only' AND v.id <> ? AND (${affinity.join(" OR ")})
+        ORDER BY v.published_at DESC, v.liked_at DESC, v.id DESC LIMIT ?
+      )
+      SELECT tag_count.total, candidates.* FROM tag_count LEFT JOIN candidates ON TRUE
+      ORDER BY candidates.published_at DESC, candidates.liked_at DESC, candidates.id DESC
+    `).all(`tags_text: (${phrases.join(" OR ")})`, authorSecUid, id, candidateLimit, id, ...affinityArgs, candidateLimit);
+    if (rows[0].total > RELATED_TAG_CANDIDATE_LIMIT) return null;
+    // Another connection may change the index or triggers after the proof.
+    if (schemaVersion.get()?.schema_version !== verifiedVersion) return null;
+    return rows[0].id === null ? [] : rows;
+  } catch {
+    return null;
+  }
+}
+
 export function createShortVideoListPageQueries({ listVideoColumns }) {
   if (!String(listVideoColumns || "").trim()) {
     throw new Error("short-video list page queries require listVideoColumns");
+  }
+
+  function prepareQualityCount(database, sql, preferCovering) {
+    const original = database.prepare(sql);
+    if (!preferCovering) return original;
+    // The media/visibility/pixels index can count this scope without visiting
+    // catalogue rows. Keep the original preparation and its schema errors.
+    try { return database.prepare(sql.replace("INDEXED BY idx_short_videos_actual_pixels", "")); }
+    catch { return original; }
+  }
+
+  function publishedQualityPrefix(database, qualityWhere, orderBy, limit, offset) {
+    const sql = `WITH prefix AS MATERIALIZED (
+      SELECT v.id, v.published_at, v.liked_at, (${qualityWhere}) AS matches_quality
+      FROM short_videos v INDEXED BY idx_short_videos_media_published
+      WHERE v.visibility = 'local_only' AND v.media_type = 'video'
+      ORDER BY ${orderBy} LIMIT 1024
+    )
+    SELECT v.id FROM prefix v WHERE v.matches_quality
+    ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+    let statement;
+    try {
+      const source = database.prepare(`SELECT sql FROM main.sqlite_schema
+        WHERE type = 'table' AND name = 'short_videos'
+          AND NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name = 'short_videos' COLLATE NOCASE)`).get();
+      if (!/^CREATE\s+TABLE\s+short_videos\s*\(\s*id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(source?.sql || "")) return null;
+      const plan = database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(limit, offset);
+      const prefix = plan.find(row => row.detail === "MATERIALIZE prefix");
+      const input = plan.filter(row => row.parent === prefix?.id);
+      if (input.length !== 1 || !input[0].detail.includes("USING INDEX idx_short_videos_media_published (media_type=? AND visibility=?)")) return null;
+      statement = database.prepare(sql);
+    } catch {
+      return null;
+    }
+    const rows = statement.all(limit, offset);
+    // A full page proves that the sorted prefix reached the requested rank.
+    return rows.length === limit ? rows : null;
   }
 
   function fastHistoryVideoPage(database, filter, sort, limit, offset) {
@@ -70,15 +153,17 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       whereParts.push(shortVideoMediaWhere(filter.media, "v."));
     }
     const where = whereParts.join(" AND ");
+    // A selective media or quality index can put videos first. Let SQLite
+    // look up each watch-history row by user and video in that case.
     const total = Number(database.prepare(`
       SELECT COUNT(*) AS count
-      FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
+      FROM short_video_watch_history w
       JOIN short_videos v ON v.id = w.video_id
       WHERE ${where}
     `).get(...args)?.count || 0);
     const ids = database.prepare(`
       SELECT v.id
-      FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
+      FROM short_video_watch_history w
       JOIN short_videos v ON v.id = w.video_id
       WHERE ${where}
       ORDER BY w.last_watched_at DESC, v.published_at DESC, v.id DESC
@@ -131,6 +216,87 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       total,
       rows: ids.length ? orderedCatalogRows(database, ids) : []
     };
+  }
+
+  function fastFtsPublishedRows(database, filter, sort, total, limit, offset) {
+    if (total < 4096 || filter.source !== "all" || sort !== "published" || !shortVideoFtsMatchQuery(filter.q)
+      || filter.topic || filter.soundKey || filter.author || filter.media !== "all"
+      || filter.quality !== "all" || filter.deleted !== "all") return null;
+
+    const args = [...filter.args, limit, offset];
+    const ranked = `SELECT id AS rank_id, published_at AS rank_published, liked_at AS rank_liked
+      FROM short_video_catalog WHERE ${filter.where}
+      ORDER BY published_at DESC, liked_at DESC, id DESC LIMIT ? OFFSET ?`;
+    database.exec("SAVEPOINT short_video_fts_page");
+    try {
+      const statement = prepareRankedFtsPage(database, ranked, args);
+      return statement?.all(...args) ?? null;
+    } finally {
+      database.exec("RELEASE short_video_fts_page");
+    }
+  }
+
+  function prepareRankedFtsPage(database, ranked, args) {
+    try {
+      if (!hasCanonicalShortVideoCatalogViews(database)) return null;
+      const scans = database.prepare(`EXPLAIN QUERY PLAN ${ranked}`).all(...args)
+        .map(row => row.detail).filter(detail => /^(?:SCAN|SEARCH) /u.test(detail));
+      // SQLite can omit the view joins only when they cannot multiply rows.
+      if (scans.length !== 2 || !scans.some(detail => /^(?:SCAN|SEARCH) v\b/u.test(detail))
+        || !scans.some(detail => detail.startsWith("SCAN short_video_search VIRTUAL TABLE INDEX"))) return null;
+      return database.prepare(`WITH fts_page AS MATERIALIZED (${ranked})
+        SELECT ${listVideoColumns}
+        FROM fts_page CROSS JOIN short_video_catalog ON short_video_catalog.id = fts_page.rank_id
+        ORDER BY fts_page.rank_published DESC, fts_page.rank_liked DESC, fts_page.rank_id DESC`);
+    } catch {
+      return null;
+    }
+  }
+
+  function fastTopicSoundLikesRows(database, filter, sort, total, limit, offset) {
+    if (total < 4096 || filter.source !== "all" || sort !== "likes" || filter.q || filter.author
+      || filter.deleted !== "all" || (!filter.topic && !filter.soundKey)) return null;
+    try { database.exec("SAVEPOINT short_video_topic_sound_page"); }
+    catch { return null; }
+    const args = [...filter.args, limit, offset];
+    let readFailed = false;
+    try {
+      const statement = prepareTopicSoundLikesPage(database, filter, args);
+      return statement?.all(...args) ?? null;
+    } catch (error) {
+      readFailed = true;
+      throw error;
+    } finally {
+      try { database.exec("RELEASE short_video_topic_sound_page"); }
+      catch (error) { if (!readFailed) throw error; }
+    }
+  }
+
+  function prepareTopicSoundLikesPage(database, filter, args) {
+    try {
+      if (!hasCanonicalShortVideoCatalogViews(database)) return null;
+      const stats = database.prepare(`SELECT sql FROM main.sqlite_schema
+        WHERE type = 'table' AND name = 'short_video_stats'`).get();
+      if (!/^CREATE\s+TABLE\s+short_video_stats\s*\(\s*video_id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(stats?.sql || "")) return null;
+      const ranked = `SELECT id AS rank_id, digg_count AS rank_likes, liked_at AS rank_liked
+        FROM short_video_catalog WHERE ${filter.where}
+        ORDER BY digg_count DESC, liked_at DESC, id DESC LIMIT ? OFFSET ?`;
+      const scans = database.prepare(`EXPLAIN QUERY PLAN ${ranked}`).all(...args)
+        .map(row => row.detail).filter(detail => /^(?:SCAN|SEARCH) /u.test(detail));
+      // The projected view must contain one video and its optional metrics.
+      // SQLite leaves any other join in this plan if it could duplicate a row.
+      if (scans.length !== 2 + Number(Boolean(filter.topic)) + Number(Boolean(filter.soundKey))
+        || !scans.some(detail => /^(?:SCAN|SEARCH) v\b/u.test(detail))
+        || !scans.includes("SEARCH s USING INDEX sqlite_autoindex_short_video_stats_1 (video_id=?) LEFT-JOIN")
+        || (filter.topic && !scans.some(detail => detail.startsWith("SEARCH short_video_topics ")))
+        || (filter.soundKey && !scans.some(detail => detail.startsWith("SEARCH short_video_sounds ")))) return null;
+      return database.prepare(`WITH topic_sound_page AS MATERIALIZED (${ranked})
+        SELECT ${listVideoColumns}
+        FROM topic_sound_page CROSS JOIN short_video_catalog ON short_video_catalog.id = topic_sound_page.rank_id
+        ORDER BY topic_sound_page.rank_likes DESC, topic_sound_page.rank_liked DESC, topic_sound_page.rank_id DESC`);
+    } catch {
+      return null;
+    }
   }
 
   function encodeShortVideoListCursor(sort, row = {}, total = 0, seen = 0) {
@@ -224,16 +390,9 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       )`);
     }
     if (sort === "likes" && listCursor) {
-      whereParts.push(`(
-        v.digg_count < ?
-        OR (v.digg_count = ? AND v.liked_at < ?)
-        OR (v.digg_count = ? AND v.liked_at = ? AND v.id < ?)
-      )`);
-      args.push(
-        listCursor.likes,
-        listCursor.likes, listCursor.likedAt,
-        listCursor.likes, listCursor.likedAt, listCursor.id
-      );
+      // Match the descending index keys so SQLite can seek to the cursor.
+      whereParts.push("(v.digg_count, v.liked_at, v.id) < (?, ?, ?)");
+      args.push(listCursor.likes, listCursor.likedAt, listCursor.id);
     }
     const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
     const indexHint = qualityWhere
@@ -251,15 +410,17 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
                   ? "INDEXED BY idx_short_videos_liked_sort_all"
                   : "INDEXED BY idx_short_videos_liked_sort"
                 : "";
+    const publishedQuality = Boolean(qualityWhere) && filter.quality !== "unknown" && filter.source === "all"
+      && filter.media === "video" && !filter.includePending && sort === "published";
     const total = listCursor
       ? listCursor.total
       : Number.isFinite(totalOverride)
       ? Number(totalOverride)
-      : Number(database.prepare(`
+      : Number(prepareQualityCount(database, `
         SELECT COUNT(*) AS count
         FROM short_videos v ${indexHint}
         ${where}
-      `).get(...args)?.count || 0);
+      `, publishedQuality).get(...args)?.count || 0);
     const remaining = listCursor ? Math.max(0, listCursor.total - listCursor.seen) : limit;
     if (listCursor && remaining <= 0) {
       return { total, rows: [], hasMore: false, nextCursor: "" };
@@ -272,13 +433,16 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     const pageIndexHint = !indexHint && filter.source === "all" && sort === "published"
       ? "INDEXED BY idx_short_videos_published"
       : indexHint;
-    const ids = database.prepare(`
+    const prefixRows = publishedQuality && total >= 4096 && effectiveOffset + queryLimit <= 512
+      ? publishedQualityPrefix(database, qualityWhere, orderBy, queryLimit, effectiveOffset) : null;
+    const pageRows = prefixRows ?? database.prepare(`
       SELECT v.id
       FROM short_videos v ${pageIndexHint}
       ${where}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
-    `).all(...args, queryLimit, effectiveOffset).map((row) => String(row.id || "")).filter(Boolean);
+    `).all(...args, queryLimit, effectiveOffset);
+    const ids = pageRows.map((row) => String(row.id || "")).filter(Boolean);
     const hasExtraRow = listCursor && ids.length > requestedRows;
     const pageIds = ids.slice(0, requestedRows);
     if (!pageIds.length) return { total, rows: [], hasMore: false, nextCursor: "" };
@@ -437,9 +601,11 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     authorVideoCount,
     decodeShortVideoListCursor,
     fastFilteredVideoPage,
+    fastFtsPublishedRows,
     fastHistoryVideoPage,
     fastPublishedVideoPage,
     fastShortQueryVideoPage,
+    fastTopicSoundLikesRows,
     fastSourceTotalCacheKey,
     shortVideoRelationshipTotal
   };

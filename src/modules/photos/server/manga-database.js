@@ -3,7 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // Current table definition from tools/manga_collector.py. Other schemas keep
-// the existing per-chapter reader, including ordering and failure isolation.
+// the existing point reader, including ordering and failure isolation.
 const MANGA_IMAGES_TABLE_SQL = `CREATE TABLE manga_images (
         cache_key TEXT NOT NULL,
         chapter_index INTEGER NOT NULL,
@@ -120,6 +120,40 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     }
   }
 
+  function comicSummaries(cacheKeys) {
+    if (!cacheKeys.length) return [];
+    if (cacheKeys.length > 10000) return null;
+    const database = open();
+    if (!database) return null;
+    try {
+      // Qualify the indexed key and read the requested rows in one snapshot.
+      // Legacy duplicate keys and TEMP shadows stay on the point reader.
+      const rows = database.prepare(`
+        WITH policy AS MATERIALIZED (
+          SELECT EXISTS (
+            SELECT 1 FROM pragma_table_info('manga_comics', 'main')
+            WHERE name = 'cache_key' AND upper(type) = 'TEXT' AND pk = 1
+          ) AND NOT EXISTS (
+            SELECT 1 FROM pragma_table_info('manga_comics', 'main') WHERE pk > 1
+          ) AND NOT EXISTS (
+            SELECT 1 FROM temp.sqlite_schema WHERE name = 'manga_comics' COLLATE NOCASE
+          ) AS eligible
+        ), requested(ordinal, cache_key) AS (VALUES ${cacheKeys.map((_key, index) => `(${index}, ?)`).join(",")})
+        SELECT requested.ordinal AS __summary_ordinal, comic.*
+        FROM policy CROSS JOIN requested
+        LEFT JOIN main.manga_comics AS comic ON comic.cache_key = requested.cache_key
+        WHERE policy.eligible
+        ORDER BY requested.ordinal
+      `).all(...cacheKeys);
+      if (rows.length !== cacheKeys.length || rows.some((row, index) => row.__summary_ordinal !== index
+          || (row.cache_key !== null && row.cache_key !== cacheKeys[index]))) return null;
+      return rows.map(row => row.cache_key === null ? null : row);
+    } catch {
+      // Retry individually so a malformed or unavailable row cannot hide a healthy comic.
+      return null;
+    }
+  }
+
   function lookupStamp() {
     const database = open();
     if (!database) return null;
@@ -203,8 +237,22 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
   function detailFirstImages(cacheKey, chapterIndexes) {
     if (typeof cacheKey !== "string" || !Array.isArray(chapterIndexes) || !chapterIndexes.length
       || chapterIndexes.length > 10000 || !chapterIndexes.every(index => typeof index === "number" && Number.isFinite(index))) return null;
+    return batchFirstImages(chapterIndexes, cacheKey);
+  }
+
+  function summaryFirstImages(cacheKeys) {
+    if (!cacheKeys.length) return [];
+    if (cacheKeys.length > 10000) return null;
+    return batchFirstImages(cacheKeys);
+  }
+
+  function batchFirstImages(values, cacheKey) {
     const database = open();
     if (!database) return null;
+    const byChapter = cacheKey !== undefined;
+    const match = byChapter
+      ? "picked.cache_key = ? AND picked.chapter_index = requested.value"
+      : "picked.cache_key = requested.value";
     try {
       // Eligibility and rows share this statement's read snapshot. The exact
       // producer DDL proves a real, unshadowed rowid and unique BINARY keys.
@@ -216,31 +264,29 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
           ) AND NOT EXISTS (
             SELECT 1 FROM temp.sqlite_schema WHERE name = 'manga_images' COLLATE NOCASE
           ) AS eligible
-        ), parameters(cache_key) AS (VALUES (?)),
-        requested(ordinal, chapter_index) AS (VALUES ${chapterIndexes.map((_index, ordinal) => `(${ordinal}, ?)`).join(",")})
-        SELECT body_policy.eligible AS __detail_eligible, requested.ordinal AS __detail_ordinal, image.*
-        FROM requested CROSS JOIN body_policy CROSS JOIN parameters
+        ), requested(ordinal, value) AS (VALUES ${values.map((_value, ordinal) => `(${ordinal}, ?)`).join(",")})
+        SELECT body_policy.eligible AS __first_image_eligible, requested.ordinal AS __first_image_ordinal, image.*
+        FROM requested CROSS JOIN body_policy
         LEFT JOIN manga_images AS image ON body_policy.eligible AND image.rowid = (
           SELECT picked.rowid FROM manga_images AS picked
-          WHERE picked.cache_key = parameters.cache_key AND picked.chapter_index = requested.chapter_index
-            AND picked.local_path IS NOT NULL AND picked.local_path <> ''
-          ORDER BY picked.image_index LIMIT 1
+          WHERE ${match} AND picked.local_path IS NOT NULL AND picked.local_path <> ''
+          ORDER BY picked.chapter_index, picked.image_index LIMIT 1
         )
         ORDER BY requested.ordinal
-      `).all(MANGA_IMAGES_TABLE_SQL, cacheKey, ...chapterIndexes);
-      if (rows.length !== chapterIndexes.length
-        || rows.some((row, ordinal) => row.__detail_eligible !== 1 || row.__detail_ordinal !== ordinal)) return null;
+      `).all(MANGA_IMAGES_TABLE_SQL, ...values, ...(byChapter ? [cacheKey] : []));
+      if (rows.length !== values.length
+        || rows.some((row, ordinal) => row.__first_image_eligible !== 1 || row.__first_image_ordinal !== ordinal)) return null;
       return rows.map(row => {
-        delete row.__detail_eligible;
-        delete row.__detail_ordinal;
+        delete row.__first_image_eligible;
+        delete row.__first_image_ordinal;
         return row.cache_key === null ? null : row;
       });
     } catch {
-      // A bad selected row must not hide healthy chapters. The caller retries
-      // through firstImage(), whose established catch boundary is per chapter.
+      // A bad selected row must not hide other covers. The caller retries
+      // through firstImage(), whose established catch boundary is per lookup.
       return null;
     }
   }
 
-  return { chapter, chapters, comic, comics, firstImage, detailFirstImages, image, images, lookupStamp, status };
+  return { chapter, chapters, comic, comics, comicSummaries, firstImage, detailFirstImages, summaryFirstImages, image, images, lookupStamp, status };
 }

@@ -1,6 +1,10 @@
 export async function routePhotosApi(req, res, url, deps) {
   const {
+    catalog,
+    catalogIntake,
     cleanupImageReaderCache,
+    coverWarmJob,
+    getPhotoIndexScan,
     imageLibraryService,
     imageReaderCacheStatus,
     mangaService,
@@ -9,8 +13,68 @@ export async function routePhotosApi(req, res, url, deps) {
     publicAppConfig,
     readJsonBody,
     requireLocalAdmin,
-    sendJson
+    sendJson,
+    startPhotoIndexScan
   } = deps;
+
+  const coverWarmMatch = /^\/api\/photo-cover-warm(?:\/(start|pause|resume))?$/.exec(url.pathname);
+  if (coverWarmJob && coverWarmMatch && req.method === (coverWarmMatch[1] ? "POST" : "GET")) {
+    if (!requireLocalAdmin(req, res)) return true;
+    const action = coverWarmMatch[1];
+    try {
+      sendJson(res, 200, action ? coverWarmJob.change(action) : coverWarmJob.status());
+    } catch (error) {
+      if (!error.statusCode) throw error;
+      sendJson(res, error.statusCode, { error: error.message });
+    }
+    return true;
+  }
+
+  if (getPhotoIndexScan && url.pathname === "/api/photo-maintenance/index" && ["GET", "POST"].includes(req.method)) {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const starting = req.method === "POST";
+      sendJson(res, starting ? 202 : 200, { task: starting ? startPhotoIndexScan() : getPhotoIndexScan() });
+    } catch (error) {
+      if (!error.statusCode) throw error;
+      sendJson(res, error.statusCode, { error: error.message });
+    }
+    return true;
+  }
+
+  if (catalog && url.pathname === "/api/photo-catalog" && req.method === "GET") {
+    const filters = Object.fromEntries(["q", "category", "collection", "person", "scope", "sort", "limit", "offset"]
+      .map((key) => [key, url.searchParams.get(key)]));
+    sendJson(res, 200, catalog.list(filters));
+    return true;
+  }
+
+  if (catalog && url.pathname === "/api/photo-catalog/stats" && req.method === "GET") {
+    sendJson(res, 200, catalog.stats());
+    return true;
+  }
+
+  const catalogDetailMatch = /^\/api\/photo-catalog\/([^/]+)$/.exec(url.pathname);
+  if (catalog && catalogDetailMatch && req.method === "GET") {
+    const work = catalog.detail(decodeURIComponent(catalogDetailMatch[1]));
+    if (work) sendJson(res, 200, { work });
+    else notFound(res);
+    return true;
+  }
+
+  const intakeMatch = /^\/api\/photo-catalog\/intake\/(options|preview|commit)$/.exec(url.pathname);
+  if (catalogIntake && intakeMatch && req.method === (intakeMatch[1] === "options" ? "GET" : "POST")) {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const action = intakeMatch[1];
+      const result = action === "options" ? catalogIntake.options() : await catalogIntake[action](await readJsonBody(req));
+      sendJson(res, 200, result);
+    } catch (error) {
+      if (!error.statusCode) throw error;
+      sendJson(res, error.statusCode, { error: error.message });
+    }
+    return true;
+  }
 
   if (url.pathname === "/api/image-reader/cache" && req.method === "GET") {
     sendJson(res, 200, { cache: await imageReaderCacheStatus(), config: publicAppConfig() });
@@ -30,7 +94,7 @@ export async function routePhotosApi(req, res, url, deps) {
       exists: status.exists,
       database: mangaService.databaseStatus(),
       cache: await imageReaderCacheStatus(),
-      comics: mangaService.cacheDirs().map(mangaService.publicSummary)
+      comics: mangaService.publicSummaries?.() ?? mangaService.cacheDirs().map(mangaService.publicSummary)
     });
     return true;
   }
@@ -175,8 +239,9 @@ export async function routePhotosApi(req, res, url, deps) {
   const mangaChapterMatch = /^\/api\/manga\/([^/]+)\/chapters\/([^/]+)$/.exec(url.pathname);
   if (mangaChapterMatch && req.method === "GET") {
     const cacheDir = mangaService.cacheById(decodeURIComponent(mangaChapterMatch[1]));
-    const comic = cacheDir ? mangaService.publicSummary(cacheDir) : null;
-    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic) : null;
+    const manifestContext = {};
+    const comic = cacheDir ? mangaService.publicSummary(cacheDir, manifestContext) : null;
+    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic, manifestContext) : null;
     if (!cacheDir || !chapter) {
       notFound(res);
       return true;
@@ -194,7 +259,7 @@ export async function routePhotosApi(req, res, url, deps) {
       totals: payload.totals,
       facets: payload.facets,
       cache: payload.cache,
-      photoSets: payload.photoSets,
+      photoSets: photoSetService.withCoverOverrides?.(payload.photoSets) ?? payload.photoSets,
       mediaItems: payload.mediaItems
     });
     return true;
@@ -215,6 +280,24 @@ export async function routePhotosApi(req, res, url, deps) {
     } catch (error) {
       if (error instanceof URIError) sendJson(res, 400, { error: "套图 ID 无效" });
       else sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "保存套图标记失败" });
+    }
+    return true;
+  }
+
+  const photoCoverMatch = /^\/api\/photo-sets\/([^/]+)\/cover$/.exec(url.pathname);
+  if (photoCoverMatch && req.method === "PUT") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const controller = new AbortController();
+    const disconnect = () => { if (!res.writableEnded) controller.abort(); };
+    res.once?.("close", disconnect);
+    try {
+      const body = await readJsonBody(req, 24 * 1024);
+      const cover = await photoSetService.setCover(decodeURIComponent(photoCoverMatch[1]), body || {}, { signal: controller.signal });
+      if (!controller.signal.aborted) sendJson(res, 200, cover);
+    } catch (error) {
+      if (!controller.signal.aborted) sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "保存套图封面失败" });
+    } finally {
+      res.removeListener?.("close", disconnect);
     }
     return true;
   }

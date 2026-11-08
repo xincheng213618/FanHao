@@ -7,6 +7,7 @@ import { runGalleryReaderFixture } from "./verify_web_gallery_requests.mjs";
 // src/complete on a distant or empty image cannot satisfy this fixture.
 const source = fs.readFileSync(new URL("../public/modules/content-index/gallery-renderer.js", import.meta.url), "utf8");
 assert.equal((await runGalleryReaderFixture({ casePattern: "reader loading reaches visible images" })).checks, 2);
+assert.equal((await runGalleryReaderFixture({ casePattern: "reader loading discards queued images" })).checks, 2);
 const marker = '    img.loading = "eager";';
 assert.equal(source.split(marker).length, 2, "negative must target the application queue's native-loading decision");
 await assert.rejects(() => runGalleryReaderFixture({
@@ -14,4 +15,11 @@ await assert.rejects(() => runGalleryReaderFixture({
   sourceOverrides: { "/modules/content-index/gallery-renderer.js": source.replace(marker, '    img.loading = "lazy";') }
 }), { name: "AssertionError", message: /long scrolling must decode an actually visible image/ });
 console.log("PASS negative control detects queue slots blocked by native lazy loading");
-console.log("Gallery visible loading passed (2 browser cases and 1 behavior negative control)");
+const retire = "if (pending && !pending.keepQueued) {";
+assert.equal(source.split(retire).length, 2, "negative must target queued preload retirement");
+await assert.rejects(() => runGalleryReaderFixture({
+  casePattern: "reader loading discards queued images after fast jumps observer",
+  sourceOverrides: { "/modules/content-index/gallery-renderer.js": source.replace(retire, "if (false) {") }
+}), { name: "AssertionError", message: /leaving a preload window must discard its unstarted full-size requests/ });
+console.log("PASS negative control detects abandoned queued image requests");
+console.log("Gallery visible loading passed (4 browser cases and 2 behavior negative controls)");

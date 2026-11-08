@@ -1,0 +1,59 @@
+:root {
+  color-scheme: light;
+  font: 15px/1.55 system-ui, "Microsoft YaHei", sans-serif;
+  color: #252733;
+  background: #f5f2ec;
+  --accent: #50569d;
+  --muted: #5d6071;
+}
+
+body { margin: 0; }
+a { color: var(--accent); }
+p { margin: 0; color: var(--muted); }
+[hidden] { display: none !important; }
+
+.maintenance {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: clamp(20px, 4vw, 48px);
+  display: grid;
+  gap: 16px;
+}
+
+.maintenance h1 { margin: 8px 0 2px; font-size: 1.8rem; }
+.maintenance h2 { margin: 0; font-size: 1.1rem; }
+
+.maintenance-panel {
+  display: grid;
+  gap: 10px;
+  padding: clamp(12px, 3vw, 20px);
+  border: 1px solid #dedde5;
+  border-radius: 12px;
+  background: #fffdfa;
+  overflow-wrap: anywhere;
+}
+
+.maintenance-panel-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.maintenance-panel-header span { color: var(--muted); }
+
+.maintenance-button {
+  margin-inline-start: auto;
+  padding: 6px 12px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.maintenance-button:disabled { opacity: .65; cursor: default; }
+.maintenance progress { width: 100%; accent-color: var(--accent); }
+.maintenance pre { max-height: 16rem; overflow: auto; white-space: pre-wrap; }

@@ -644,7 +644,10 @@ try {
   assert.match(androidClient, /function searchPlaylistMatches\(query = state\.query\)[\s\S]*?state\.playlists[\s\S]*?state\.smartPlaylists[\s\S]*?description\.includes\(needle\)/, "Android playlist search should rank both user and smart playlists by name and description");
   assert.match(androidClient, /function renderPlaylistSearchResults\(options = \{\}\)[\s\S]*?renderPlaylistSearchCard[\s\S]*?switchSearchScope\("playlists"\)/, "Android playlist matches should render in unified previews and a full dedicated scope");
   assert.match(androidClient, /function openPlaylistSearchMatch\(match\)[\s\S]*?mode: match\.kind === "smart" \? "smart" : "playlist"[\s\S]*?resetSearch: true/, "Android playlist search results should open the matching smart or user playlist directly");
-  assert.match(androidClient, /function loadLyricSearchResults\(renderGuard = null, options = \{\}\)[\s\S]*?\/api\/music\/lyrics\/search[\s\S]*?function renderLyricSearchResults\(options = \{\}\)/, "Android music search should load and render timed lyric matches");
+  assert.match(androidClient, /function fetchSearchLyrics\(requestUrl, query, limit, offset, signal\)[\s\S]*?return fetchJson\(requestUrl, `\/api\/music\/lyrics\/search\?/,
+    "Android lyric search transport should still call the timed lyrics endpoint");
+  assert.match(androidClient, /function loadLyricSearchResults\(renderGuard = null, options = \{\}\)[\s\S]*?await \(options\.request \|\| fetchSearchLyrics\(requestUrl, query, limit, offset, signal\)\)[\s\S]*?function renderLyricSearchResults\(options = \{\}\)/,
+    "Android music search should load and render timed lyric matches");
   assert.match(androidClient, /const lyricOnlySearch = unifiedSearch && state\.searchScope === "lyrics"[\s\S]*?await loadLyricSearchResults\(renderGuard, \{ limit: 40 \}\)/, "Restored lyric routes should not wait on an irrelevant general track search");
   assert.match(androidClient, /function renderLyricSearchMatch\(match\)[\s\S]*?music-mobile-lyric-search-context[\s\S]*?formatClock\(match\.timeMs\)/, "Android lyric results should show surrounding context and the matched timestamp");
   assert.match(androidClient, /function openLyricSearchMatch\(match\)[\s\S]*?seekMs:[\s\S]*?openLyrics: true/, "Android lyric matches should open playback at the matched line");

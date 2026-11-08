@@ -1,10 +1,10 @@
-import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-8af3642624a3";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8af3642624a3";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-8af3642624a3";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8af3642624a3";
-import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8af3642624a3";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-8faf7a80cb7b";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8faf7a80cb7b";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8faf7a80cb7b";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";
@@ -128,7 +128,8 @@ export function createNovelViews(context) {
     releaseNovelCollection(novelPage);
     closeLocalRecovery(false);
     const page = { kind, routeGuard, sourceUrl: getActiveUrl(), issue: null, retryBusy: false, localData: null, remoteData: null, remoteCache: null };
-    page.isActive = () => novelPage === page && routeGuard() && page.sourceUrl === getActiveUrl();
+    page.isActive = () => novelPage === page && routeGuard() && page.sourceUrl === getActiveUrl()
+      && (!page.accountScope || isAccountOwnerCurrent(page.accountScope));
     page.isActive.signal = routeGuard.signal;
     novelPage = page;
     return page;
@@ -399,6 +400,20 @@ export function createNovelViews(context) {
     return renderNovelCollection(isActive);
   }
 
+  function readNovelCollectionRemote(baseUrl, path, signal, accountScope) {
+    const cached = readCachedJson(baseUrl, path).catch(() => null);
+    // The fresh read can settle before local or cached data is ready to merge.
+    const fresh = fetchJson(baseUrl, path, { timeoutMs: 16000, signal, accountScope }).then(
+      data => ({ data }), error => ({ error })
+    );
+    return { cached, fresh };
+  }
+
+  function ownsNovelPayload(data) {
+    const owner = accountPayloadOwner(data);
+    return !owner || isAccountOwnerCurrent(owner);
+  }
+
   async function renderNovelCollection(isActive = () => true) {
     const page = beginNovelPage(isActive, "collection");
     page.remoteStatus = "loading";
@@ -413,6 +428,8 @@ export function createNovelViews(context) {
 
     const path = novelListPath();
     const activeUrl = getActiveUrl();
+    if (!isActive()) return;
+    const remote = listState.source === "local" ? null : readNovelCollectionRemote(activeUrl, path, isActive.signal);
     let renderedCache = false;
     const refreshLocal = async () => {
       const data = await loadLocalListData();
@@ -430,10 +447,10 @@ export function createNovelViews(context) {
     }
     if (!isActive()) return;
     renderNovelListData(mergeNovelListData({}, page.localData));
-    if (listState.source === "local") return;
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    if (!remote) return;
+    const cached = await remote.cached;
     if (!isActive()) return;
-    if (cached?.payload?.books && canUseRemotePayload(activeUrl, cached.payload)) {
+    if (cached?.payload?.books && ownsNovelPayload(cached.payload) && canUseRemotePayload(activeUrl, cached.payload)) {
       rememberRemoteSourceRealm(activeUrl, cached.payload, { cached: true });
       renderedCache = true;
       page.remoteData = cached.payload; page.remoteCache = cached;
@@ -441,8 +458,11 @@ export function createNovelViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
+      const result = await remote.fresh;
       if (!isActive()) return;
+      if ("error" in result) throw result.error;
+      const { data } = result;
+      if (!ownsNovelPayload(data)) return;
       rememberRemoteSourceRealm(activeUrl, data);
       writeCachedJson(activeUrl, path, data).catch(() => {});
       page.remoteData = data; page.remoteCache = null; page.remoteStatus = "loaded";
@@ -622,6 +642,7 @@ export function createNovelViews(context) {
     page.collectionPending = request;
     syncNovelCollectionMore(mount);
     try {
+      const remote = readNovelCollectionRemote(page.sourceUrl, path, page.isActive.signal, account);
       try {
         const local = await loadLocalListData();
         if (!current()) return;
@@ -633,14 +654,16 @@ export function createNovelViews(context) {
         recordLocalLibraryError(page, error, page.refreshLocal);
       }
       if (!current()) return;
-      const cached = await readCachedJson(page.sourceUrl, path).catch(() => null);
+      const cached = await remote.cached;
       if (!current()) return;
       if (cached?.payload?.books && canUseRemotePayload(page.sourceUrl, cached.payload)) {
         rememberRemoteSourceRealm(page.sourceUrl, cached.payload, { cached: true });
         publish(cached.payload, cached);
       }
-      const data = await fetchJson(page.sourceUrl, path, { timeoutMs: 16000, signal: page.isActive.signal, accountScope: account });
+      const result = await remote.fresh;
       if (!current()) return;
+      if ("error" in result) throw result.error;
+      const { data } = result;
       rememberRemoteSourceRealm(page.sourceUrl, data);
       writeCachedJson(page.sourceUrl, path, data).catch(() => {});
       publish(data);
@@ -2062,7 +2085,9 @@ export function createNovelViews(context) {
     let sourceRealm = await readRemoteSourceRealm(activeUrl);
     const cached = await readCachedJson(activeUrl, fullDetailPath).catch(() => null);
     if (!isActive()) return;
-    if (matchesRemotePayload(cached?.payload, bookId) && canUseRemotePayload(activeUrl, cached.payload)) {
+    if (matchesRemotePayload(cached?.payload, bookId) && canUseRemotePayload(activeUrl, cached.payload)
+      && ownsNovelPayload(cached.payload)) {
+      page.accountScope = accountPayloadOwner(cached.payload) || captureAccountOwner(activeUrl);
       sourceRealm = rememberRemoteSourceRealm(activeUrl, cached.payload, { cached: true });
       renderedCache = true;
       renderNovelDetailData(cached.payload, cached);
@@ -2074,14 +2099,17 @@ export function createNovelViews(context) {
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
       if (!isActive() || page.preferRecoveredLocal) return;
+      const account = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
+      if (!isAccountOwnerCurrent(account)) return;
       if (!matchesRemotePayload(data, bookId)) throw new Error("返回的小说与请求不一致");
+      page.accountScope = account;
       const nextRealm = rememberRemoteSourceRealm(activeUrl, data);
       if (nextRealm !== sourceRealm) { renderedCache = false; cachedRemoteEntry = null; }
       sourceRealm = nextRealm;
       writeCachedJson(activeUrl, path, data).catch(() => {});
       await readOptionalLocalSummary(remoteCacheIdFromSourceId(bookId, sourceRealm), page);
       if (!isActive() || page.preferRecoveredLocal) return;
-      await renderRemoteNovelDetailMeta(data, isActive);
+      await renderRemoteNovelDetailMeta(data, isActive, renderedCache);
     } catch (error) {
       if (!isActive() || page.preferRecoveredLocal) return;
       if (renderedCache) {
@@ -2128,9 +2156,12 @@ export function createNovelViews(context) {
     }
   }
 
-  async function renderRemoteNovelDetailMeta(data = {}, isActive = () => true) {
+  async function renderRemoteNovelDetailMeta(data = {}, isActive = () => true, renderedCache = false) {
     const book = markRemoteBookWithCache(data.book || {});
-    const sameDetailBook = String(detailState.book?.id || "") === String(book.id || "")
+    const previousOrigin = remoteBookOrigins.get(detailState.book);
+    const sameDetailBook = previousOrigin?.sourceUrl === getActiveUrl()
+      && isAccountOwnerCurrent(previousOrigin.page?.accountScope)
+      && String(detailState.book?.id || "") === String(book.id || "")
       && detailState.book?.sourceRealm === book.sourceRealm
       && detailState.book?.catalogRevision === book.catalogRevision;
     const fallbackChapters = sameDetailBook
@@ -2148,10 +2179,20 @@ export function createNovelViews(context) {
     catalogState.total = Number(book.chapterCount || data.chapterTotal || 0);
     catalogState.filteredTotal = catalogState.total;
     catalogState.offset = 0;
+    // A verified snapshot can open the reader without a catalogue page. Keep
+    // an already visible legacy cache and wait for unbound server responses.
+    const replaceDetail = renderedCache || !normalizeSourceRealm(book.sourceRealm) || !book.catalogRevision;
+    if (!replaceDetail) {
+      renderNovelDetailData({ book, chapters: fallbackChapters }, null, {
+        remotePaged: true,
+        catalogLoading: true,
+        catalog: { total: catalogState.total, filteredTotal: catalogState.filteredTotal }
+      });
+    }
     await loadRemoteDetailCatalogPage({
       anchor: book.progress?.chapterIndex || 1,
       isActive,
-      replaceDetail: true,
+      replaceDetail,
       render: true
     });
   }
@@ -2227,6 +2268,7 @@ export function createNovelViews(context) {
     const browser = createCatalogBrowser(book, chapters, {
       meta,
       serverPaged: remotePaged,
+      loading: options.catalogLoading,
       loadPage: loadRemoteDetailCatalogPage,
       anchorIndex: book.progress?.chapterIndex || 1,
       ownAction: createDetailCatalogActionOwner(catalog)
@@ -2270,6 +2312,7 @@ export function createNovelViews(context) {
     const cachedRemote = isCachedRemoteBookForUi(book);
     const panel = document.createElement("section");
     panel.className = "novel-mobile-detail-hero";
+    const ownAction = createDetailActionOwner(panel, book);
     panel.append(createCover(book, "large"));
 
     const body = document.createElement("div");
@@ -2301,14 +2344,14 @@ export function createNovelViews(context) {
         }
       : null;
     if (progressChapter) {
-      reading.append(createMobileChapterShortcut("上次读到", book, progressChapter, false));
+      reading.append(createMobileChapterShortcut("上次读到", book, progressChapter, false, ownAction));
     } else {
       const unread = document.createElement("small");
       unread.textContent = "还没有阅读记录";
       reading.append(unread);
     }
     if (latestChapter && Number(latestChapter.index) !== Number(progressChapter?.index)) {
-      reading.append(createMobileChapterShortcut("最新章节", book, latestChapter, true));
+      reading.append(createMobileChapterShortcut("最新章节", book, latestChapter, true, ownAction));
     }
 
     const actions = document.createElement("div");
@@ -2319,16 +2362,16 @@ export function createNovelViews(context) {
     read.textContent = readableBookForReader(book).progressRecovery ? "选择续读位置" : cachedRemote
       ? (book.progress ? "继续离线" : "离线阅读")
       : (book.progress ? "继续阅读" : "开始阅读");
-    read.addEventListener("click", () => openReader(book, 1));
+    read.addEventListener("click", ownAction(() => openReader(book, 1)));
     const download = document.createElement("button");
     download.type = "button";
     download.textContent = book.local || book.cachedLocal ? "导出TXT" : "下载TXT";
-    download.addEventListener("click", () => downloadBook(book.cachedLocalId || book.id));
-    const contents = actionButton("查看目录", () => {
+    download.addEventListener("click", ownAction(() => downloadBook(book.cachedLocalId || book.id)));
+    const contents = actionButton("查看目录", ownAction(() => {
       const catalog = document.getElementById("novelDetailCatalog");
       catalog?.scrollIntoView({ behavior: "auto", block: "start" });
       catalog?.focus({ preventScroll: true });
-    });
+    }));
     actions.append(read, contents);
     const tools = document.createElement("details");
     tools.className = "novel-mobile-book-tools";
@@ -2343,23 +2386,21 @@ export function createNovelViews(context) {
       remove.type = "button";
       remove.className = "danger";
       remove.textContent = cachedRemote ? "移除缓存" : "移除本地";
-      remove.addEventListener("click", () => removeLocalBook(book));
+      remove.addEventListener("click", ownAction(() => removeLocalBook(book)));
       toolsActions.append(remove);
     } else {
       const cache = document.createElement("button");
       cache.type = "button";
       cache.textContent = book.cachedLocal ? "更新缓存" : cachingBookId === book.id ? "缓存中" : "缓存整本";
       cache.disabled = Boolean(cachingBookId);
-      cache.addEventListener("click", () => {
-        cacheBookFromList(book);
-      });
+      cache.addEventListener("click", ownAction(() => cacheBookFromList(book)));
       toolsActions.append(cache);
       if (book.cachedLocal) {
         const removeCache = document.createElement("button");
         removeCache.type = "button";
         removeCache.className = "danger";
         removeCache.textContent = "移除缓存";
-        removeCache.addEventListener("click", () => removeCachedRemoteBook(book));
+        removeCache.addEventListener("click", ownAction(() => removeCachedRemoteBook(book)));
         toolsActions.append(removeCache);
       }
     }
@@ -2369,7 +2410,16 @@ export function createNovelViews(context) {
     return panel;
   }
 
-  function createMobileChapterShortcut(label, book, chapter, exactChapter) {
+  function createDetailActionOwner(panel, book) {
+    const page = novelPage;
+    const operation = !isLocalBookId(book.id) && captureRemoteOperation(book);
+    return (handler) => (...args) => {
+      if ((page && !page.isActive()) || (operation && !operation.isActive()) || !els.viewContent.contains(panel)) return;
+      return handler(...args);
+    };
+  }
+
+  function createMobileChapterShortcut(label, book, chapter, exactChapter, ownAction) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-mobile-chapter-shortcut";
@@ -2378,7 +2428,7 @@ export function createNovelViews(context) {
     const title = document.createElement("strong");
     title.textContent = `${formatNumber(chapter.index)} · ${chapter.title}`;
     button.append(caption, title);
-    button.addEventListener("click", () => openReader(book, chapter.index, { exactChapter, chapter }));
+    button.addEventListener("click", ownAction(() => openReader(book, chapter.index, { exactChapter, chapter })));
     return button;
   }
 
@@ -2387,6 +2437,7 @@ export function createNovelViews(context) {
     const previous = recovery.previous || {};
     const panel = document.createElement("section");
     panel.className = "novel-mobile-summary-panel novel-progress-recovery";
+    const ownAction = createDetailActionOwner(panel, book);
     panel.setAttribute("role", "status");
     const title = document.createElement("strong");
     title.textContent = "续读位置待确认";
@@ -2400,9 +2451,9 @@ export function createNovelViews(context) {
     panel.append(title, text);
     const candidate = recovery.candidate;
     if (candidate?.chapterId && candidate.catalogRevision === book.catalogRevision) {
-      const button = actionButton(`查看候选：${candidate.title || `第 ${candidate.chapterIndex} 章`}（从章首）`, () =>
+      const button = actionButton(`查看候选：${candidate.title || `第 ${candidate.chapterIndex} 章`}（从章首）`, ownAction(() =>
         openReader(book, candidate.chapterIndex, { exactChapter: true,
-          chapter: { id: candidate.chapterId, index: candidate.chapterIndex } }));
+          chapter: { id: candidate.chapterId, index: candidate.chapterIndex } })));
       panel.append(button);
     }
     const hint = document.createElement("small");
@@ -2450,7 +2501,7 @@ export function createNovelViews(context) {
     let preparedLocal = null;
     const ownAction = options.ownAction || (handler => handler);
     let serverPaged = Boolean(options.serverPaged);
-    let loading = false, error = "";
+    let loading = Boolean(options.loading), error = "";
     const loadPage = options.loadPage || loadRemoteReaderCatalogPage;
     prepareCatalogState(book, source, book?.progress?.chapterIndex || readerState.chapter?.index || 1);
     const shell = document.createElement("div");
@@ -3332,7 +3383,7 @@ export function createNovelViews(context) {
     const bookId = String(book.id || "");
     if (!bookId) return;
     const requestId = ++detailCatalogRequestId;
-    const isActive = options.isActive || (() => true);
+    const isActive = options.isActive || operation.page?.isActive || (() => true);
     const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
     const isCurrent = () => isActive() && operation.isActive() && requestId === detailCatalogRequestId
       && bookId === String(detailState.book?.id || "") && book.sourceRealm === detailState.book?.sourceRealm
@@ -3981,7 +4032,7 @@ export function createNovelViews(context) {
     const version = localBookReadVersions.get(bookId) || 0;
     const progressVersion = localBookProgressVersions.get(bookId) || 0;
     let data;
-    try { data = await readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), anchor); }
+    try { data = await readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), { ...anchor, includeCatalog: false }); }
     catch (error) {
       if (!isActive() || version !== (localBookReadVersions.get(bookId) || 0)) return;
       els.viewMeta.textContent = "本机库未能读取，章节是否存在尚未确认";

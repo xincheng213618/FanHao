@@ -203,6 +203,42 @@ async function verify() {
     assert.deepEqual(f.state.searchAuthors, []); cases += 1;
   }
 
+  for (const timing of ["before", "during", "metrics"]) {
+    const f = await fixture(), fresh = deferred();
+    const initial = page(["A", "B"], "all", { offset: 0 });
+    const opening = f.views.renderSearch({ source: "all", query: "query", searchTab: "videos" });
+    f.requests.at(-1).resolve({ data: initial, revalidation: fresh.promise });
+    await opening;
+    if (timing === "before") {
+      fresh.resolve(page(["A", "B", "C"], "all", { offset: 0 }));
+      await settle();
+    }
+    const offset = timing === "before" ? 3 : 2;
+    const append = f.context.loadList(null, { append: true });
+    const request = f.requests.at(-1);
+    assert.equal(new URL(request.args[1], request.args[0]).searchParams.get("offset"), String(offset));
+    if (timing === "during") {
+      fresh.resolve(page(["changed-prefix"], "all", { offset: 0 }));
+      await settle();
+      assert.deepEqual(f.state.data.videos.map(row => row.id), ["A", "B"], "an in-flight raw offset retains its accepted search prefix");
+      assert.equal(f.state.loadingMore, true);
+    } else if (timing === "metrics") {
+      fresh.resolve({ ...initial, videos: [{ ...initial.videos[0], stats: { likes: 99 } }, initial.videos[1]] });
+      await settle();
+      assert.equal(f.state.data.videos[0].stats.likes, 99, "compatible metric revalidation still applies during continuation");
+    }
+    request.resolve(page(["B", "tail"], "all", { offset }));
+    await append;
+    assert.deepEqual(f.state.data.videos.map(row => row.id), timing === "before" ? ["A", "B", "C", "tail"] : ["A", "B", "tail"]);
+    const final = f.context.loadList(null, { append: true });
+    const finalRequest = f.requests.at(-1);
+    assert.equal(new URL(finalRequest.args[1], finalRequest.args[0]).searchParams.get("offset"), String(offset + 2));
+    finalRequest.resolve(page([], "all", { offset: offset + 2, hasMore: false }));
+    await final;
+    assert.equal(f.state.data.hasMore, false);
+    cases += 1;
+  }
+
   for (const staleFailure of [false, true]) {
     for (const refreshFailure of [false, true]) {
       const f = await fixture(); await f.load("all", ["preserved"]);

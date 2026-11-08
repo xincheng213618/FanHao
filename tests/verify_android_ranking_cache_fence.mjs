@@ -44,6 +44,8 @@ function harness(name, keys = ["y2025", "y2024"]) {
   setAccountOwner(origin, "account:alpha");
   const calls = [];
   const rendered = [];
+  const controls = [];
+  let sourceUrl = origin, rerenders = 0;
   let folderName = "旧收藏夹";
   const folder = () => ({ id: "later", name: folderName, count: 1, createdAt: "2026-01-01" });
   const folders = () => [{ id: "default", name: "默认收藏", count: 0, createdAt: "2026-01-01" }, folder()];
@@ -65,8 +67,11 @@ function harness(name, keys = ["y2025", "y2024"]) {
   const node = () => ({ textContent: "", innerHTML: "", setAttribute() {}, removeAttribute() {} });
   const controller = createRankingViews({
     els: { viewKicker: node(), viewTitle: node(), viewMeta: node(), viewContent: node(), rankingsCount: node() },
-    getActiveUrl: () => origin, refreshChrome() {}, renderCurrentView() {}, renderCurrentViewPreservingScroll() {},
-    renderMessage() {}, setActiveBottom() {}, renderWorks: works => rendered.push(structuredClone(works)),
+    getActiveUrl: () => sourceUrl, refreshChrome() {}, renderCurrentView() { rerenders += 1; }, renderCurrentViewPreservingScroll() {},
+    renderMessage() {}, setActiveBottom() {}, renderWorks(works, _message, options) {
+      rendered.push(structuredClone(works));
+      controls.push(options);
+    },
     workListState: { getSortMode: () => "updated", getSortOptions: () => [], setSortMode() {} }
   });
   const favoriteFolders = createFavoriteFolderFeature({ getActiveUrl: () => origin });
@@ -85,7 +90,8 @@ function harness(name, keys = ["y2025", "y2024"]) {
       `missing current ${key} cached folder name: ${expectedName}`);
     await tick();
   }
-  return { origin, controller, rendered, take, summary, cachedTop,
+  return { origin, controller, rendered, controls, take, summary, cachedTop,
+    requests: () => calls.length, rerenders: () => rerenders, setSource(value) { sourceUrl = value; },
     rename: value => favoriteFolders.renameFolder("later", value) };
 }
 
@@ -170,5 +176,36 @@ function harness(name, keys = ["y2025", "y2024"]) {
   assert.equal(h.rendered.at(-1)[0].favoriteFolderName, "新收藏夹");
 }
 
-console.log("android-ranking-cache-fence: passed (actual controllers, delayed summary/top writes, valid cache reuse, invalidated year selection/warming, late-response memory provenance)");
+{
+  const h = harness("ranking-filter-ownership", ["y2025"]);
+  const guard = () => true;
+  guard.signal = new AbortController().signal;
+  const render = h.controller.renderRankings(guard);
+  (await h.take("/api/rankings")).reply(h.summary("active"));
+  (await h.take("/api/rankings/top", "y2025")).reply(top("y2025", "旧收藏夹"));
+  await render;
+
+  const old = h.controls.at(-1), reads = h.requests();
+  old.onFilterChange("favorite");
+  const current = h.controls.at(-1);
+  assert.equal(current.filterMode, "favorite");
+  assert.notEqual(current, old);
+  assert.equal(h.requests(), reads);
+  old.onFilterChange("all");
+  assert.equal(h.controls.at(-1), current, "retired controls cannot repaint the mounted filter");
+
+  h.setSource("http://other-ranking-filter.fixture");
+  current.onFilterChange("all");
+  assert.equal(h.controls.at(-1), current, "source changes retire old mounted filters");
+  h.setSource(h.origin);
+  await h.rename("新收藏夹");
+  current.onFilterChange("all");
+  assert.equal(h.rerenders(), 1, "an invalidated response fence requires the normal refresh");
+  assert.equal(h.controls.at(-1), current, "invalidated data must not be repainted locally");
+  setAccountOwner(h.origin, "account:beta");
+  current.onFilterChange("playable");
+  assert.equal(h.rerenders(), 1, "a retired account's filter cannot start another route");
+}
+
+console.log("android-ranking-cache-fence: passed (delayed summary/top writes, valid cache reuse, invalidated year selection/warming, late-response memory provenance, mounted filter ownership)");
 console.log("Boundary: synthetic HTTP/DOM and fake-indexeddb only; no real service, browser, account database or media was used.");

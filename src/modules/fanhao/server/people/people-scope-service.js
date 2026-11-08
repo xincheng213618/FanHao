@@ -3,6 +3,7 @@ export function createPeopleScopeService({
   getRevision = () => "",
   isMainExcludedWork = () => false,
   mergedPersonRecord,
+  mergedPersonRecords,
   pathWithinRoot,
   sourcePathToAbsolute,
   mainExcludedRoots = [],
@@ -91,8 +92,8 @@ export function createPeopleScopeService({
     // sourced only from an excluded media root, use that trusted person source
     // to exclude every linked work even if the old work path cannot be decoded.
     const mainExcludedPersonIds = new Set();
-    for (const person of library.people) {
-      const merged = mergedPersonRecord(person);
+    const mergedPeople = mergedPersonRecords?.(library.people) || library.people.map((person) => mergedPersonRecord(person));
+    for (const merged of mergedPeople) {
       const paths = [merged?.relativePath, ...(merged?.sourcePaths || [])].filter(Boolean);
       const hasMainExcludedPath = paths.some((sourcePath) => sourcePathWithinAnyRoot(sourcePath, mainExcludedRoots));
       const hasMainEligiblePath = paths.some((sourcePath) => !sourcePathWithinAnyRoot(sourcePath, mainExcludedRoots));
@@ -115,8 +116,7 @@ export function createPeopleScopeService({
     const mainPersonIds = new Set();
     const knownPersonIds = new Set();
     const seen = new Set();
-    for (const person of library.people) {
-      const merged = mergedPersonRecord(person);
+    for (const merged of mergedPeople) {
       const personId = String(merged?.id || "");
       if (!personId || seen.has(personId)) continue;
       seen.add(personId);
@@ -149,8 +149,10 @@ export function createPeopleScopeService({
   }
 
   function personMatches(person, scope) {
-    const normalizedScope = normalize(scope);
-    const scopeIndex = index();
+    return personMatchesInScope(person, normalize(scope), index());
+  }
+
+  function personMatchesInScope(person, normalizedScope, scopeIndex) {
     const personId = String(person?.id || "");
     if (personId && scopeIndex.knownPersonIds.has(personId)) {
       return normalizedScope === "western"
@@ -164,8 +166,10 @@ export function createPeopleScopeService({
   }
 
   function workMatches(work, scope) {
-    const normalizedScope = normalize(scope);
-    const scopeIndex = index();
+    return workMatchesInScope(work, normalize(scope), index());
+  }
+
+  function workMatchesInScope(work, normalizedScope, scopeIndex) {
     const workId = String(work?.id || "");
     if (normalizedScope === "main") {
       if (workId && scopeIndex.knownWorkIds.has(workId)) return !scopeIndex.mainExcludedWorkIds.has(workId);
@@ -175,6 +179,13 @@ export function createPeopleScopeService({
       return scopeIndex.westernWorkIds.has(workId);
     }
     return workInRoots(work, westernRoots);
+  }
+
+  // A synchronous batch shares one index revision. Empty batches do not load it.
+  function matcher(matches, scope) {
+    const normalizedScope = normalize(scope);
+    let scopeIndex;
+    return (entry) => matches(entry, normalizedScope, scopeIndex ??= index());
   }
 
   function workMatchesDirect(work, scope) {
@@ -195,10 +206,12 @@ export function createPeopleScopeService({
     normalize,
     personHasNonWesternLocalSource,
     personInRoots,
+    personMatcher: (scope) => matcher(personMatchesInScope, scope),
     personMatches,
     sourcePathInWesternRoots,
     sourcePathWithinAnyRoot,
     workInRoots,
+    workMatcher: (scope) => matcher(workMatchesInScope, scope),
     workMatches,
     workMatchesDirect
   };

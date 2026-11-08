@@ -9,7 +9,7 @@ import { auditPersonIdentities } from "../tools/audit_person_identities.mjs";
 import { createPersonMergeService } from "../src/modules/fanhao/server/people/person-merge-service.js";
 import { createActorProfileService } from "../src/modules/fanhao/server/people/actor-profile-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
-import { canonicalPersonId, ensurePersonIdentitySchema, findPersonByIdentity, mergePersonIdentities, previewPersonMerge, personLocations, bindPersonLocation } from "../src/modules/fanhao/server/people/person-identity.js";
+import { canonicalPersonId, createCanonicalPersonReader, ensurePersonIdentitySchema, findPersonByIdentity, mergePersonIdentities, previewPersonMerge, personLocations, bindPersonLocation } from "../src/modules/fanhao/server/people/person-identity.js";
 
 const serverSource = readFileSync(new URL("../server.js", import.meta.url), "utf8");
 const legacySearchSort = process.argv.includes("--legacy-search-sort");
@@ -67,8 +67,11 @@ function createSearchFixture(rows, redirects = []) {
   let stamp = 1;
   let sorting = false;
   let sortReadError = null;
+  let identityBulkError = null;
   let displayReads = new Map();
   let sortIdentityGets = 0;
+  let identityGets = 0;
+  let pointSearchNames = false;
   const people = rows.map((row) => ({
     id: String(row.id), name: row.name, relativePath: `synthetic/${row.id}`,
     sourcePaths: [`synthetic/${row.id}`], works: [`work-${row.id}`],
@@ -83,14 +86,18 @@ function createSearchFixture(rows, redirects = []) {
       const statement = currentDb.prepare(sql);
       return {
         get(...args) {
-          if (sorting) {
-            if (sortReadError) throw sortReadError;
-            if (sql === "SELECT target_id FROM person_redirects WHERE source_id = ?"
-              || sql === "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?") sortIdentityGets += 1;
+          if (sorting && sortReadError) throw sortReadError;
+          if (sql === "SELECT target_id FROM person_redirects WHERE source_id = ?"
+            || sql === "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?") {
+            identityGets += 1;
+            if (sorting) sortIdentityGets += 1;
           }
           return statement.get(...args);
         },
-        all: (...args) => statement.all(...args)
+        all(...args) {
+          if (identityBulkError && sql === "SELECT source_id, target_id FROM main.person_redirects") throw identityBulkError;
+          return statement.all(...args);
+        }
       };
     }
   };
@@ -106,37 +113,53 @@ function createSearchFixture(rows, redirects = []) {
     actorProfileAliases: context.actorProfileAliases, actorProfileRow: (id) => profile.row(id),
     getLibrary: () => library, getStamp: () => String(stamp),
     resolveCanonicalId: (id) => canonicalPersonId(measuredDb, id),
+    createCanonicalIdReader: () => createCanonicalPersonReader(measuredDb),
     normalizePersonSearchValue: context.normalizePersonSearchValue,
     normalizeSourcePath: context.normalizeSourcePath,
     preferredPersonDisplayName: context.preferredPersonDisplayName, uniquePersonNames: context.uniquePersonNames
   });
-  Object.assign(context, {
-    actorProfileSearchNames: (person) => merge.searchNames(person),
-    mergedPersonRecord: (person) => merge.record(person), mergedPersonMembers: (id) => merge.members(id),
-    actorProfileDisplayName(person) {
+  function measureDisplayName(readName) {
+    return (person) => {
       displayReads.set(person, (displayReads.get(person) || 0) + 1);
       sorting = true;
-      try { return merge.displayName(person); } finally { sorting = false; }
-    }
+      try { return readName(person); } finally { sorting = false; }
+    };
+  }
+  const pointReader = { searchNames: merge.searchNames, record: merge.record, members: merge.members,
+    displayName: measureDisplayName(merge.displayName) };
+  Object.assign(context, {
+    actorProfileService: { createRowReader: () => pointSearchNames ? null : profile.createRowReader() },
+    personMergeService: {
+      createSearchReader(readRow) {
+        if (!readRow) return pointReader;
+        const reader = merge.createSearchReader(readRow);
+        return { ...reader, displayName: measureDisplayName(reader.displayName) };
+      }
+    },
+    actorProfileDisplayName: pointReader.displayName
   });
   const source = serverFunction("searchPeople");
-  const currentComparator = "displayNameForSort(a).localeCompare(displayNameForSort(b)";
-  const oldComparator = "actorProfileDisplayName(a).localeCompare(actorProfileDisplayName(b)";
+  const currentComparator = "compareDisplayNames(displayNameForSort(a), displayNameForSort(b))";
+  const oldComparator = 'actorProfileDisplayName(a).localeCompare(actorProfileDisplayName(b), undefined, { numeric: true, sensitivity: "base" })';
+  const previousComparator = oldComparator.replaceAll("actorProfileDisplayName(", "displayNameForSort(");
   assert(source.includes(currentComparator), "search sort negative control must target the current comparator");
   const oldSource = source.replace(currentComparator, oldComparator);
   vm.runInContext(legacySearchSort ? oldSource : source, context);
   vm.runInContext(oldSource.replace("function searchPeople(", "function oldSearchPeople("), context);
+  vm.runInContext(source.replace(currentComparator, previousComparator).replace("function searchPeople(", "function pointSearchPeople("), context);
   profile.rowsById();
   merge.maps();
   return {
-    run(query, old = false) {
+    run(query, old = false, pointNames = false) {
       displayReads = new Map();
       sortIdentityGets = 0;
-      const payload = context[old ? "oldSearchPeople" : "searchPeople"](query);
+      identityGets = 0;
+      pointSearchNames = pointNames;
+      const payload = context[old ? "oldSearchPeople" : pointNames ? "pointSearchPeople" : "searchPeople"](query);
       return {
         payload: JSON.parse(JSON.stringify(payload)), json: JSON.stringify(payload),
         displayReadCount: [...displayReads.values()].reduce((sum, count) => sum + count, 0),
-        maxPersonReads: Math.max(0, ...displayReads.values()), sortIdentityGets
+        maxPersonReads: Math.max(0, ...displayReads.values()), sortIdentityGets, identityGets
       };
     },
     rename(personId, displayName) {
@@ -156,6 +179,7 @@ function createSearchFixture(rows, redirects = []) {
       currentDb.exec("INSERT INTO person_redirects VALUES(1,2,'fixture','v1'),(2,1,'fixture','v1')");
     },
     failSortRead(error) { sortReadError = error; },
+    failIdentityBatch(error) { identityBulkError = error; },
     close() { for (const connection of databases) connection.close(); }
   };
 }
@@ -168,13 +192,23 @@ function verifySearchDisplayNameReuse() {
   const redirects = rows.filter((row) => row.id % 10 === 0).map((row) => [row.id, row.id - 1]);
   let fixture = createSearchFixture(rows, redirects);
   try {
+    for (const query of ["Match", "Exact Alias", "Match-Person 16", "[Exact Alias]", "名字不存在"]) {
+      const before = fixture.run(query, false, true);
+      const after = fixture.run(query);
+      assert.equal(after.json, before.json, `${query}: batched name reads must preserve the full result`);
+      assert(after.identityGets < 12, `${query}: scans, merge lookups and sorting must share bounded identity reads`);
+      if (query === "名字不存在") {
+        assert(before.identityGets >= rows.length * 8, "the point-read oracle must scan the same people");
+        console.log(`person-search-names: people=${rows.length}, point=${before.identityGets}, batched=${after.identityGets}`);
+      }
+    }
     for (const [query, expectedPeople] of [["Match", 3600], ["Exact Alias", 400]]) {
       const before = fixture.run(query, true);
       const after = fixture.run(query);
       assert.equal(after.json, before.json, `${query}: complete actual search response must retain the old order and fields`);
       assert.equal(after.displayReadCount, expectedPeople, `${query}: tie sorting must read each participating person once`);
       assert.equal(after.maxPersonReads, 1, `${query}: exact/fuzzy must share a request-local object cache`);
-      assert.equal(after.sortIdentityGets, expectedPeople * 2, `${query}: each displayed name keeps its real schema/redirect checks`);
+      assert.equal(after.sortIdentityGets, 0, `${query}: sorting must use the same profile and identity snapshot`);
       assert(before.displayReadCount > expectedPeople * 5, `${query}: old comparator must reproduce repeated actual profile reads`);
       console.log(`person-search-sort: query=${query}, old-display-reads=${before.displayReadCount}, current=${after.displayReadCount}, old-identity-gets=${before.sortIdentityGets}, current=${after.sortIdentityGets}`);
     }
@@ -229,8 +263,14 @@ function verifySearchDisplayNameReuse() {
     assert.deepEqual(after.payload.fuzzy.map((person) => person.id), ["1", "2", "3"]);
     const readError = Object.assign(new Error("private fixture sort read failure"), { code: "FIXTURE_SQL_READ" });
     fixture.failSortRead(readError);
-    for (const old of [true, false]) assert.throws(() => fixture.run("Match", old), (error) => error === readError);
+    assert.throws(() => fixture.run("Match", false, true), (error) => error === readError);
+    assert.equal(fixture.run("Match").json, after.json, "batched sorting no longer depends on point reads");
     fixture.failSortRead(null);
+    fixture.failIdentityBatch(readError);
+    const fallback = fixture.run("Match");
+    assert.equal(fallback.json, after.json, "unavailable redirect snapshots must fall back to point reads");
+    assert(fallback.identityGets > after.identityGets);
+    fixture.failIdentityBatch(null);
     fixture.makeCycle();
     for (const old of [true, false]) assert.throws(() => fixture.run("Match", old), {
       code: "PERSON_REDIRECT_CYCLE", message: "人物合并关系存在循环"

@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-8af3642624a3";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-8faf7a80cb7b";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=assets-8af3642624a3";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-8af3642624a3";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-8af3642624a3";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-8af3642624a3";
+import { DEFAULT_SORT, initials } from "../shared.js?v=assets-8faf7a80cb7b";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-8faf7a80cb7b";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-8faf7a80cb7b";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-8faf7a80cb7b";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -18,6 +18,7 @@ export function createShortVideoListView(context = {}) {
   const isAuthorIndexView = (...args) => context.isAuthorIndexView(...args);
   const needsAuthorIndexRetry = (...args) => context.needsAuthorIndexRetry?.(...args);
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
+  const loadList = (...args) => context.loadList(...args);
   const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
   const resetListLoadMoreObserver = (...args) => context.resetListLoadMoreObserver(...args);
   const openShortVideoAuthor = (...args) => context.openShortVideoAuthor(...args);
@@ -98,19 +99,23 @@ export function createShortVideoListView(context = {}) {
     const grid = shell?.querySelector(".short-video-mobile-grid");
     if (!shell || !grid || isAuthorIndexView()) return renderListShell();
     grid.querySelector(".short-video-mobile-empty")?.remove();
+    if (listState.searchPage && videos.length) shell.querySelector(".short-video-mobile-status")?.remove();
     for (const video of videos) grid.append(renderCard(video));
     syncListLoadMoreSentinel(shell);
   }
 
-  function setListLoadingMore(loading, message = "") {
-    const shell = els.viewContent.querySelector(".short-video-mobile-list");
-    const sentinel = shell?.querySelector(".short-video-mobile-load-more");
+  function setListLoadingMore(loading, message = "", sentinel = els.viewContent.querySelector(".short-video-mobile-load-more")) {
     if (!sentinel) return;
     resetListLoadMoreObserver();
     sentinel.classList.toggle("is-loading", Boolean(loading));
-    sentinel.textContent = loading ? "正在加载" : String(message || "");
-    sentinel.toggleAttribute("aria-hidden", !sentinel.textContent);
-    if (!loading && listState.data?.hasMore) observeListLoadMore(sentinel);
+    if (listState.searchPage) {
+      sentinel.setAttribute("aria-disabled", String(Boolean(loading)));
+      sentinel.textContent = loading ? "正在加载" : message ? `${message} · 点击重试` : "加载更多";
+    } else {
+      sentinel.textContent = loading ? "正在加载" : String(message || "");
+      sentinel.toggleAttribute("aria-hidden", !sentinel.textContent);
+    }
+    if (!loading && listState.data?.hasMore && !(listState.searchPage && message)) observeListLoadMore(sentinel);
   }
 
   function setListRefreshing(refreshing) {
@@ -127,14 +132,28 @@ export function createShortVideoListView(context = {}) {
   }
 
   function syncListLoadMoreSentinel(shell) {
-    resetListLoadMoreObserver();
-    shell?.querySelector(".short-video-mobile-load-more")?.remove();
-    if (!shell || !listState.data?.hasMore) return;
-    const sentinel = document.createElement("div");
-    sentinel.className = "short-video-mobile-load-more";
-    sentinel.setAttribute("aria-hidden", "true");
-    shell.append(sentinel);
-    observeListLoadMore(sentinel);
+    let sentinel = shell.querySelector(".short-video-mobile-load-more");
+    if (!listState.data?.hasMore) {
+      resetListLoadMoreObserver();
+      if (sentinel && listState.searchPage && sentinel === document.activeElement) {
+        shell.querySelector(".short-video-mobile-card-wrap:last-child .short-video-mobile-card")?.focus({ preventScroll: true });
+      }
+      sentinel?.remove();
+      return;
+    }
+    if (!sentinel) {
+      sentinel = document.createElement(listState.searchPage ? "button" : "div");
+      sentinel.className = "short-video-mobile-load-more";
+      if (listState.searchPage) {
+        sentinel.type = "button";
+        const owner = captureListRenderOwner();
+        sentinel.addEventListener("click", () => {
+          if (sentinel.isConnected && owner.isCurrent()) void loadList(null, { append: true });
+        });
+      }
+      shell.append(sentinel);
+    }
+    setListLoadingMore(false, "", sentinel);
   }
 
   function renderDedicatedSearchHeader() {
@@ -377,6 +396,14 @@ export function createShortVideoListView(context = {}) {
     return meta;
   }
 
+  function updateSearchAuthorMatches() {
+    const shell = els.viewContent.querySelector(".short-video-mobile-list");
+    const meta = shell?.querySelector(".short-video-search-result-meta");
+    if (!meta) return;
+    shell.querySelector(".short-video-search-authors")?.remove();
+    if (listState.searchAuthors.length) meta.after(renderSearchAuthorMatches());
+  }
+
   function renderSearchAuthorMatches() {
     const section = document.createElement("section");
     section.className = "short-video-search-authors";
@@ -510,7 +537,7 @@ export function createShortVideoListView(context = {}) {
       || mount.moreHadFocus && document.activeElement === document.body);
     mount.moreHadFocus = false;
     const retryFirstPage = needsAuthorIndexRetry();
-    if (retryFirstPage || mount.records.size && (listState.data?.hasMore || listState.loadingMore)) {
+    if (retryFirstPage || (mount.records.size || listState.searchPage) && (listState.data?.hasMore || listState.loadingMore)) {
       if (!mount.more) {
         const more = mount.more = document.createElement("button");
         more.type = "button";
@@ -530,13 +557,15 @@ export function createShortVideoListView(context = {}) {
     }
   }
 
-  function setAuthorIndexLoading(loading) {
+  function setAuthorIndexLoading(loading, message = "") {
     const mount = mountedAuthorIndex;
     if (!mount || !ownsAuthorIndex(mount)) return false;
     if (mount.more) {
       if (loading) mount.moreHadFocus = document.activeElement === mount.more;
       mount.more.disabled = Boolean(loading);
-      mount.more.textContent = loading ? "正在加载更多作者" : needsAuthorIndexRetry() ? "重试读取作者" : "继续加载更多作者";
+      mount.more.textContent = loading ? "正在加载更多作者"
+        : needsAuthorIndexRetry() ? "重试读取作者"
+          : message ? `${message} · 点击重试` : "继续加载更多作者";
       if (!loading) {
         if (mount.moreHadFocus && document.activeElement === document.body) mount.more.focus({ preventScroll: true });
         mount.moreHadFocus = false;
@@ -756,6 +785,7 @@ export function createShortVideoListView(context = {}) {
     hasAuthorIndexShell,
     setListLoadingMore,
     setListRefreshing,
+    updateSearchAuthorMatches,
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,

@@ -197,6 +197,9 @@ function createRuntime(fixture) {
       workImages.invalidate();
       const row = actorProfiles.row(String(personId));
       const snapshot = actorProfiles.publicSnapshot(row);
+      const readRow = actorProfiles.createRowReader();
+      assert.deepEqual(actorProfiles.publicSnapshot(readRow(String(personId))), snapshot,
+        "the list read must see the same profile and avatar at each publication boundary");
       const avatarRow = workImages.corePersonAvatarRow(personId);
       return {
         profileJson: JSON.stringify(snapshot.profile),

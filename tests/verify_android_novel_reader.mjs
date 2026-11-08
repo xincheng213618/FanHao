@@ -423,7 +423,7 @@ test("local details and reader catalog use metadata without any body API", async
   assert.deepEqual(h.storageCalls.map((call) => call.kind), ["catalog"]);
   assert(!Object.hasOwn(h.api.__test.localBooks.get("local:a"), "chapters"));
   await h.api.renderNovelReader("local:a", 1);
-  h.state.chapters = [];
+  assert.equal(h.state.chapters.length, 0, "chapter entry must leave the full catalog for the drawer");
   h.storageCalls.length = 0;
   await h.api.__test.loadReaderCatalog();
   assert.deepEqual(h.storageCalls.map((call) => call.kind), ["catalog"]);
@@ -438,7 +438,7 @@ test("local reader holds one chapter body while neighbors and cache remain metad
   assert(h.state.chapter.content.includes("chapter 1"));
   assert.equal(h.state.prev, null);
   assert(!Object.hasOwn(h.state.next, "content"));
-  assert(h.state.chapters.every((chapter) => !Object.hasOwn(chapter, "content")));
+  assert.equal(h.state.chapters.length, 0);
   const summary = h.api.__test.localBooks.get("local:a");
   assert(!Object.hasOwn(summary, "chapter") && !Object.hasOwn(summary, "chapters"), "reader cached a body-bearing DTO");
 }, mutate("localBooks.set(summary.book.id, summary);", "localBooks.set(summary.book.id, entry);"));

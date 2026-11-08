@@ -34,6 +34,11 @@ DATE_PREFIX_REGEX = re.compile(r"^(\d{6})_(\d{2})-([0-9A-Za-z]+)$")
 ALNUM_HYPHEN_REGEX = re.compile(r'^\d+[A-Za-z]+-\d+$')
 SUFFIX_CLEAN_REGEX = re.compile(r'(\.part\d+|_\d+k|_\d+)', re.IGNORECASE)
 MULTI_PREFIX_PATTERN = re.compile(r'^(?:\[[^\[\]]+\](?:[._-])?)+')
+EDITION_MARKERS = {'LTX', 'UC', 'U', 'C'}
+# Markers count only as leading bracket tags ([LTX][UC]) or as separate tokens right after a code
+# (ABC-123-C, ABC-123.restored.LTX-UC); title words such as "Cカップ" or "U-15" are ignored.
+LEADING_TAG_PATTERN = re.compile(r'\[([^\[\]]+)\][._-]?')
+CODE_TAIL_PATTERN = re.compile(r'(?<![A-Z0-9])[A-Z]{2,}\d*[-_]?\d{2,}([^\s\[\]()（）]*)', re.IGNORECASE)
 REQUEST_TIMEOUT = 15
 ROOT_DIR = 'D:\\'
 OUTPUT_DIR = None
@@ -137,6 +142,28 @@ def extract_multi_prefix(name: str) -> Tuple[str, str]:
     if remainder.startswith(' '):
         remainder = remainder.lstrip()
     return prefix, remainder
+
+def extract_name_markers(original_name: str, filenames: Optional[List[str]] = None) -> str:
+    """Keep manual [A] first; collect edition markers before filenames are replaced."""
+    names = [original_name, *(filenames or [])]
+    markers: Set[str] = set()
+    for name in names:
+        position = 0
+        while (tag := LEADING_TAG_PATTERN.match(name, position)):
+            markers.add(tag.group(1).upper())
+            position = tag.end()
+        for match in CODE_TAIL_PATTERN.finditer(name):
+            markers.update(token.upper() for token in re.split(r'[-_.]', match.group(1)))
+    markers &= EDITION_MARKERS
+    prefix = '[A]' if any(name.startswith('[A]') for name in names) else ''
+    # LTX is a separate edition for now; it does not add U by itself.
+    if 'LTX' in markers:
+        prefix += '[LTX]'
+    has_u = 'U' in markers or 'UC' in markers
+    has_c = 'C' in markers or 'UC' in markers
+    if has_u or has_c:
+        prefix += '[' + ('U' if has_u else '') + ('C' if has_c else '') + ']'
+    return prefix
 
 def http_get(url: str, retries: int = 3, backoff: float = 5.0) -> Optional[requests.Response]:
     for attempt in range(1, retries + 1):
@@ -406,7 +433,9 @@ class VideoOrganizer:
         is_vr = self._is_vr(meta, original_folder)
         actor_folder = os.path.join(self.vr_path if is_vr else self.output, actor)
 
-        prefix, _ = extract_multi_prefix(original_name)
+        # Escape literal brackets in directories such as [A] and [UC].
+        mp4_files = glob.glob(os.path.join(glob.escape(full_path), '*.mp4'))
+        prefix = extract_name_markers(original_name, [os.path.basename(path) for path in mp4_files])
         video_folder_name = f"{prefix}{meta.title}" if prefix else meta.title
         video_folder = os.path.join(actor_folder, video_folder_name)
 
@@ -417,7 +446,6 @@ class VideoOrganizer:
         os.makedirs(actor_folder, exist_ok=True)
         os.makedirs(video_folder, exist_ok=True)
 
-        mp4_files = glob.glob(os.path.join(full_path, '*.mp4'))
         if len(mp4_files) == 1:
             mp4_file = mp4_files[0]
             new_mp4_name = os.path.join(full_path, meta.title + '.mp4')

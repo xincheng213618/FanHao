@@ -9,6 +9,7 @@ sources:
   - src/bootstrap/server-config.js
   - src/platform/server/auth.js
   - lib/admin-script-registry.js
+  - tools/sync_photo_official_covers.mjs
   - src/modules/system/server/admin-task-service.js
   - src/modules/system/server/admin/routes.js
   - docs/data-layout.md
@@ -87,6 +88,18 @@ Get-Content -LiteralPath ".\logs\fanhao.out.log" -Tail 60
 运行写入作业前记录目标根目录、数据库、参数、预期条数和恢复方式。
 先对临时 fixture 验证；若脚本支持预览，再检查预览结果。
 删除、移动、批量同步、清缓存和资料回填应分别授权，不能用一次模糊的“维护”覆盖全部操作。
+
+### 同步套图官网封面
+
+在管理脚本的「图库 → 同步套图官网封面」填入本地人物合集链接和 MetArt 官网人物页。也可以从项目根目录运行：
+
+```powershell
+npm run photo:sync-official-covers -- --collection '<本地合集链接或 ID>' --model '<MetArt 人物页或标识>'
+```
+
+默认只预览，确认待补项后勾选「下载并写回」，或在命令末尾加 `--apply`。脚本用合集名核对人物；套图按站点、人物、发布日期和标题匹配。已有手选封面和包内封面会保留。未找到匹配或无法核实图包内容的条目会标明原因并跳过；`archive-index-required` 表示需要先在图库打开相应套图，建立图片清单后再跑。
+
+写入的是图库 SQLite 中的头像、封面和来源记录。图包本身不改动，重复运行会跳过已导入的图片。脚本仅下载公开 JPG，不需要官网账号。需要代理时可配置 Node 的 `HTTPS_PROXY` 与 `NODE_USE_ENV_PROXY=1`（Node 24.5 或以上）。如果旧版本页面仍显示已缓存的套图首图，可强制刷新页面。
 
 ## 数据保护与恢复
 

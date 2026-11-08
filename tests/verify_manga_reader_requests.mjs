@@ -62,7 +62,8 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       if (gate) {
         gate.used = true; gate.url = key; res.once("close", () => { gate.closed = true; });
         gate.requestedResolve(); await gate.promise;
-        if (gate.error) { sendJson(res, { error: gate.error }, 503); return; }
+        if (gate.error) { sendJson(res, { error: gate.error }, gate.status); return; }
+        if (gate.body) { sendJson(res, gate.body); return; }
       }
       if (url.pathname === "/probe") { sendText(res, harness(), "text/html; charset=utf-8"); return; }
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
@@ -96,6 +97,107 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    await run('cold chapter direct route overlaps catalog and image metadata', async () => {
+      const detailPath = '/api/manga/C', chapterPath = `${detailPath}/chapters/1`;
+      const { chapters, ...summary } = currentComic('C');
+      const detail = hold(url => url.pathname === detailPath);
+      const pages = hold(url => url.pathname === chapterPath, '', { comic: summary, chapter: chapter('C', 1) });
+      const before = countRequests(url => url.pathname === detailPath || url.pathname === chapterPath);
+      const delay = 300;
+      for (const gate of [detail, pages]) gate.requested.then(() => setTimeout(gate.release, delay));
+      const page = await newPage({ real: true, route: '/manga/C/read/1', waitReady: false });
+      try {
+        const visibleAt = await (await page.waitForFunction(() => {
+          const image = document.querySelector('.manga-reader-pages img');
+          if (!image?.complete || !image.naturalWidth || getComputedStyle(image).visibility !== 'visible') return null;
+          const rect = image.getBoundingClientRect();
+          return rect.bottom > 0 && rect.top < innerHeight ? performance.now() : null;
+        })).jsonValue();
+        const timing = await page.evaluate(({ detailPath, chapterPath, visibleAt }) => {
+          const entries = performance.getEntriesByType('resource');
+          const resource = pathname => entries.find(entry => new URL(entry.name).pathname === pathname);
+          const detail = resource(detailPath), pages = resource(chapterPath);
+          return { chapterStartMs: Math.round(pages.startTime - detail.startTime), detailEndMs: Math.round(detail.responseEnd - detail.startTime),
+            firstImageMs: Math.round(visibleAt - detail.startTime) };
+        }, { detailPath, chapterPath, visibleAt });
+        console.log('MEASURE cold manga chapter image', JSON.stringify({ delay, ...timing }));
+        assert.equal(countRequests(url => url.pathname === detailPath || url.pathname === chapterPath) - before, 2);
+        assert.equal(await progress(page, 'C'), 1);
+        assert(timing.chapterStartMs < timing.detailEndMs, 'the direct chapter read must begin while its comic metadata is pending');
+      } finally { detail.release(); pages.release(); await page.close(); }
+    });
+    for (const error of ['', 'Synthetic early chapter failure']) await run(`cold chapter early ${error ? 'failure' : 'success'} waits for catalog ownership`, async () => {
+      const detail = hold(url => url.pathname === '/api/manga/C');
+      const isChapter = url => url.pathname === '/api/manga/C/chapters/1';
+      const pages = hold(isChapter, error), before = countRequests(isChapter);
+      const page = await newPage({ real: true, route: '/manga/C/read/1', waitReady: false });
+      try {
+        await Promise.all([requested(detail), requested(pages)]);
+        await settle(page, pages);
+        assert.equal(await page.locator('.manga-reader, .manga-chapter-feedback').count(), 0);
+        assert.equal(await progress(page, 'C'), null);
+        await settle(page, detail);
+        if (error) {
+          await detailTitle(page, 'Comic C');
+          const feedback = page.locator('.manga-chapter-feedback');
+          assert.match(await feedback.textContent(), /Synthetic early chapter failure/);
+          assert.equal(await progress(page, 'C'), null);
+          await feedback.locator('[data-action="retry-chapter"]').click();
+        }
+        await readerTitle(page, 'Comic C', 'Chapter 1');
+        assert.equal(await progress(page, 'C'), 1);
+        assert.equal(countRequests(isChapter) - before, error ? 2 : 1);
+      } finally { detail.release(); pages.release(); await page.close(); }
+    });
+    await run('cold chapter detail failure aborts the pending image metadata', async () => {
+      const detail = hold(url => url.pathname === '/api/manga/C', 'Synthetic cold comic detail failure');
+      const pages = hold(url => url.pathname === '/api/manga/C/chapters/1');
+      const page = await newPage({ real: true, ignoreAbort: false, route: '/manga/C/read/1', waitReady: false });
+      try {
+        await Promise.all([requested(detail), requested(pages)]);
+        await settle(page, detail);
+        await until(() => pages.closed, 'failed comic detail must abort the actual pending chapter transport');
+        await page.getByText('Synthetic cold comic detail failure', { exact: true }).waitFor();
+        assert.equal(await page.locator('.manga-reader').count(), 0);
+        assert.equal(await progress(page, 'C'), null);
+      } finally { detail.release(); pages.release(); await page.close(); }
+    });
+    for (const missing of [false, true]) await run(`cold chapter newer catalog replaces ${missing ? 'an early 404' : 'outdated early pages'}`, async () => {
+      const newer = { ...currentComic('C'), updatedAt: '2026-09-02T00:00:00Z' };
+      const { chapters, ...summary } = newer;
+      const detail = hold(url => url.pathname === '/api/manga/C', '', { comic: newer });
+      const isChapter = url => url.pathname === '/api/manga/C/chapters/1';
+      const older = missing ? hold(isChapter, 'Synthetic early missing chapter', null, 404)
+        : hold(isChapter, '', { comic: { ...summary, updatedAt: '2026-09-01T00:00:00Z' }, chapter: { ...chapter('C', 1), title: 'Obsolete chapter' } });
+      const fresh = hold(isChapter, '', { comic: summary, chapter: chapter('C', 1) });
+      const before = countRequests(isChapter);
+      const page = await newPage({ real: true, route: '/manga/C/read/1', waitReady: false });
+      try {
+        await Promise.all([requested(detail), requested(older)]);
+        await settle(page, older);
+        await settle(page, detail);
+        await requested(fresh);
+        assert.equal(await page.locator('.manga-reader').count(), 0);
+        assert.equal(await progress(page, 'C'), null);
+        await settle(page, fresh);
+        await readerTitle(page, 'Comic C', 'Chapter 1');
+        assert.equal(await progress(page, 'C'), 1);
+        assert.equal(countRequests(isChapter) - before, 2);
+      } finally { detail.release(); older.release(); fresh.release(); await page.close(); }
+    });
+    await run('cold chapter optimization keeps same-document navigation scoped', async () => {
+      const page = await newPage({ real: true, route: '/manga/C' });
+      const detail = hold(url => url.pathname === '/api/manga/C');
+      const pages = hold(url => url.pathname === '/api/manga/C/chapters/1');
+      try {
+        await detailTitle(page, 'Comic C');
+        await navigateRoute(page, '/manga/C/read/1');
+        await requested(detail); await tick(page);
+        assert.equal(pages.used, false, 'same-document chapter routes retain the existing comic-to-chapter order');
+        await settle(page, detail); await requested(pages); await settle(page, pages);
+        await readerTitle(page, 'Comic C', 'Chapter 1');
+      } finally { detail.release(); pages.release(); await page.close(); }
+    });
     await run('library covers: first viewport decodes visible covers while deferring the distant shelf', async () => {
       libraryComics = libraryCoverShelf('Cover');
       const isCover = url => /^\/synthetic\/Cover\d{4}\/cover\.svg$/.test(url.pathname);
@@ -210,6 +312,20 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await page.evaluate(() => {
           const focused = document.activeElement, cards = [...document.querySelectorAll('.manga-card')], covers = cards.map(card => card.querySelector('img'));
           window.__shelfPoll = { focused, cards, covers, ancestors: [], blur: 0, addedCards: new Set(), removedCards: new Set(), scroll: scrollY };
+          const fields = new Set(cards.flatMap(card => [...card.querySelectorAll('.manga-card-body > *, .manga-card-site')]));
+          const coverFrames = new Set(cards.map(card => card.querySelector('.manga-card-cover')));
+          const text = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+          const select = Element.prototype.querySelector;
+          __shelfPoll.fieldReads = __shelfPoll.coverLookups = 0;
+          Object.defineProperty(Node.prototype, 'textContent', { ...text, get() {
+            if (fields.has(this)) __shelfPoll.fieldReads++;
+            return text.get.call(this);
+          } });
+          Element.prototype.querySelector = function (selector) {
+            if (coverFrames.has(this)) __shelfPoll.coverLookups++;
+            return select.call(this, selector);
+          };
+          __shelfPoll.restore = () => { Object.defineProperty(Node.prototype, 'textContent', text); Element.prototype.querySelector = select; };
           for (let node = focused; node; node = node.parentElement) __shelfPoll.ancestors.push(node);
           focused.addEventListener('blur', () => __shelfPoll.blur++);
           window.__shelfObserver = new MutationObserver(records => { for (const record of records) for (const [nodes, set] of [[record.addedNodes, __shelfPoll.addedCards], [record.removedNodes, __shelfPoll.removedCards]]) {
@@ -224,11 +340,12 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await page.waitForFunction(() => document.querySelector('.manga-job-progress strong')?.textContent === 'Synthetic add polling advanced');
         const actual = await page.evaluate(() => {
           __shelfObserver.disconnect();
+          __shelfPoll.restore();
           return { cards: document.querySelectorAll('.manga-card').length, retained: __shelfPoll.cards.filter(card => card.isConnected).length,
             retainedCovers: __shelfPoll.covers.filter(image => image?.isConnected).length, ancestorsConnected: __shelfPoll.ancestors.every(node => node.isConnected),
             focused: document.activeElement === __shelfPoll.focused, active: document.activeElement?.tagName, blur: __shelfPoll.blur,
             createdElements: __fitCreated.total, addedCards: __shelfPoll.addedCards.size, removedCards: __shelfPoll.removedCards.size,
-            scrollBefore: __shelfPoll.scroll, scrollAfter: scrollY };
+            scrollBefore: __shelfPoll.scroll, scrollAfter: scrollY, fieldReads: __shelfPoll.fieldReads, coverLookups: __shelfPoll.coverLookups };
         });
         console.log('MANGA_LIBRARY_CARD_POLL', JSON.stringify({ elapsedToPoll, additionalLibraryReads: countRequests(url => url.pathname === '/api/manga') - libraryReads, ...actual }));
         assert.equal(actual.retained, 1000, 'an unchanged library poll must retain every existing comic card');
@@ -236,6 +353,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert.equal(actual.addedCards, 0, 'an unchanged library poll must not construct new comic cards');
         assert.equal(actual.retainedCovers, 1000); assert.equal(actual.scrollAfter, actual.scrollBefore);
         assert(actual.createdElements < 60, 'an unchanged thousand-card poll must do bounded construction outside the retained cards');
+        assert.deepEqual([actual.fieldReads, actual.coverLookups], [0, 0], 'an unchanged shelf snapshot must not rescan mounted comic metadata or covers');
       } finally { poll.release(); await page.close(); libraryComics = null; addJobResponse = null; }
     });
     await run('library cards: fresh metadata patches visible fields and preserves same-url cover fallbacks', async () => {
@@ -602,6 +720,54 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         } finally { update.release(); detail?.release(); library?.release(); comicSnapshots.delete('C'); await page.close(); }
       }
     });
+    await run('directory search: update progress leaves the mounted directory untouched', async () => {
+      const original = catalogComic('C', Array.from({ length: 2000 }, (_, index) => index + 1));
+      comicSnapshots.set('C', original);
+      const page = await newPage({ real: true, route: '/manga/C' });
+      const match = (url, req) => req.method === 'GET' && url.pathname === '/api/manga/C/update';
+      const post = hold((url, req) => req.method === 'POST' && url.pathname === '/api/manga/C/update', '', { job: { status: 'running', progressPercent: 5 } });
+      const polls = [25, 50, 75].map(progressPercent => hold(match, '', { job: { status: 'running', progressPercent } }));
+      const complete = hold(match, '', { job: { status: 'complete' } });
+      try {
+        await detailTitle(page, 'Comic C');
+        await page.evaluate(() => {
+          const directory = document.querySelector('.manga-chapter-list'), hero = document.querySelector('.manga-detail-hero');
+          const originalFetch = window.fetch;
+          window.__pollSamples = [];
+          let start = null;
+          window.fetch = async (url, options) => {
+            const response = await originalFetch(url, options);
+            if (new URL(url, location.href).pathname === '/api/manga/C/update' && (options?.method || 'GET') === 'GET') {
+              const json = response.json.bind(response);
+              response.json = async () => { const data = await json(); start = performance.now(); return data; };
+            }
+            return response;
+          };
+          const observer = new MutationObserver(records => {
+            if (start == null || !records.some(record => hero.contains(record.target))) return;
+            const elapsedMs = performance.now() - start;
+            const directoryMutations = records.filter(record => directory.contains(record.target)).length;
+            __pollSamples.push({ elapsedMs, directoryMutations });
+            start = null;
+          });
+          const options = { subtree: true, childList: true, attributes: true };
+          observer.observe(directory, options);
+          observer.observe(hero, options);
+        });
+        await page.locator('[data-action="update"]').click(); await requested(post); await settle(page, post);
+        for (const [index, poll] of polls.entries()) {
+          await requested(poll); await settle(page, poll);
+          assert.equal(await page.getByRole('progressbar').getAttribute('aria-valuenow'), String((index + 1) * 25));
+        }
+        const samples = await page.evaluate(() => __pollSamples);
+        console.log(`MANGA_DIRECTORY_POLL_MEASUREMENT ${JSON.stringify(samples)}`);
+        assert.equal(samples.length, polls.length);
+        assert(samples.every(sample => sample.directoryMutations === 0), 'update progress polls must leave the mounted chapter directory untouched');
+        comicSnapshots.set('C', { ...original, chapters: original.chapters.map(chapter => chapter.index === 2000 ? { ...chapter, title: 'Changed after update' } : chapter) });
+        await requested(complete); await settle(page, complete);
+        await page.locator('.manga-chapter-row[data-chapter-index="2000"]').getByText('Changed after update').waitFor();
+      } finally { for (const gate of [post, ...polls, complete]) gate.release(); comicSnapshots.delete('C'); await page.close(); }
+    });
     await run('directory search: retired controls cannot alter a new route or reader', async () => {
       for (const destination of ['/manga/D', '/manga/C/read/2', '/manga']) {
         comicSnapshots.set('C', searchableCatalogComic('C'));
@@ -823,6 +989,8 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
     });
     await run('reader page navigation: a long chapter exposes a reachable current-page jump control', async () => {
       readerImageCount = 1000; readerImageDimensions = { width: 800, height: 1400 };
+      const isChapterImage = url => /^\/synthetic\/C\/1\//.test(url.pathname);
+      const imageReadsBeforeOpen = countRequests(isChapterImage);
       const page = await newPage({ real: true, route: '/manga/C/read/1' });
       try {
         await readerTitle(page, 'Comic C', 'Chapter 1'); await fitImagesReady(page);
@@ -839,7 +1007,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await page.waitForFunction(() => document.querySelector('.manga-page-indicator')?.dataset.page === '500');
         await page.evaluate(() => { window.__jumpReader = document.querySelector('.manga-reader'); window.__jumpImages = [...document.querySelectorAll('.manga-reader-image img')]; __fitCreated.total = __fitCreated.images = 0; });
         const reads = countRequests(url => url.pathname.startsWith('/api/'));
-        const imageReads = countRequests(url => /^\/synthetic\/C\/1\//.test(url.pathname));
+        const imageReads = countRequests(isChapterImage) - imageReadsBeforeOpen;
         await page.locator('.manga-page-indicator').click();
         const input = page.locator('.manga-page-jump input'); await input.fill('1000'); await input.press('Enter');
         await page.waitForFunction(() => document.querySelector('.manga-page-indicator')?.dataset.page === '1000');
@@ -848,7 +1016,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
           'exact page navigation must retain the current reader and all original image nodes');
         assert.equal(countRequests(url => url.pathname.startsWith('/api/')), reads, 'page navigation is local and must not refetch the chapter or catalog');
         assert.equal(await page.locator('.manga-page-indicator').evaluate(button => button === document.activeElement), true);
-        const requestsAfterJump = countRequests(url => /^\/synthetic\/C\/1\//.test(url.pathname));
+        const requestsAfterJump = countRequests(isChapterImage) - imageReadsBeforeOpen;
         assert(requestsAfterJump < 30, 'jumping in a thousand-page chapter must keep native image loading near the visible pages');
         console.log(JSON.stringify({ mode: 'manga-page-jump-1000', apiReads: countRequests(url => url.pathname.startsWith('/api/')) - reads,
           initialImageReads: imageReads, imageReadsAfterJump: requestsAfterJump, images: readerImageCount, retained: true }));
@@ -1153,6 +1321,66 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert.equal(await page.locator('.manga-card').count(), 2);
         assert.equal(await input.evaluate(input => input === document.activeElement && input.value === ''), true);
         assert.equal(countRequests(url => url.pathname === '/api/manga'), reads, 'local query and sorting must not issue another library request');
+      } finally { await page.close(); }
+    });
+    await run('manga search results: canonical submission, browser Back, and local clear', async () => {
+      const page = await newPage({ real: true });
+      try {
+        await page.locator('.manga-card').first().waitFor();
+        const input = page.locator('.manga-library-controls input[type="search"]');
+        const add = page.locator('.manga-library-controls [data-action="add"]');
+        await add.click();
+        await page.locator('.manga-add-panel input').fill('https://example.invalid/shelf/retained-draft');
+        const reads = countRequests(url => url.pathname === '/api/manga');
+        const before = await input.evaluate(node => { window.__mangaSearchInput = node; return window.__documentToken; });
+        await input.fill('Comic C'); await input.press('Enter');
+        const results = page.locator('.manga-search-results');
+        await results.waitFor();
+        assert.equal(new URL(page.url()).pathname, '/manga/search');
+        assert.equal(new URL(page.url()).searchParams.get('q'), 'Comic C');
+        assert.equal(await page.locator('.manga-library-hero').count(), 0);
+        assert.equal(await add.isVisible(), false);
+        assert.equal(await page.locator('.manga-add-panel').isVisible(), false);
+        const additions = countRequests(url => url.pathname === '/api/manga/add');
+        await page.locator('.manga-add-panel').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        await tick(page);
+        assert.equal(countRequests(url => url.pathname === '/api/manga/add'), additions, 'hidden browse controls cannot submit from search results');
+        assert.match(await results.textContent(), /Comic C.*1 部漫画/);
+        assert.deepEqual(await page.locator('.manga-card').evaluateAll(cards => cards.map(card => card.dataset.comicId)), ['C']);
+        assert.equal(await input.evaluate((node, token) => node === __mangaSearchInput && node === document.activeElement && __documentToken === token, before), true);
+        assert.equal(countRequests(url => url.pathname === '/api/manga'), reads);
+
+        await page.locator('[data-action="clear-search"]').click();
+        assert.equal(new URL(page.url()).pathname, '/manga');
+        assert.equal(new URL(page.url()).searchParams.has('q'), false);
+        assert.equal(await page.locator('.manga-card').count(), 2);
+        assert.equal(await page.locator('.manga-add-panel input').inputValue(), 'https://example.invalid/shelf/retained-draft');
+        await page.goBack(); await results.waitFor();
+        assert.equal(new URL(page.url()).pathname, '/manga/search');
+        await page.goBack(); await page.locator('.manga-library-hero').waitFor();
+        assert.equal(new URL(page.url()).pathname, '/manga');
+        assert.equal(await input.inputValue(), '');
+      } finally { await page.close(); }
+    });
+    await run('manga search results: direct entry and Back from comic detail preserve search context', async () => {
+      const page = await newPage({ real: true, route: '/manga/search?q=Comic%20D&sort=title' });
+      try {
+        const results = page.locator('.manga-search-results');
+        await page.locator('.manga-card-open').click(); await detailTitle(page, 'Comic D');
+        const detail = new URL(page.url());
+        assert.equal(detail.pathname, '/manga/D');
+        assert.equal(detail.searchParams.get('q'), 'Comic D');
+        assert.equal(detail.searchParams.get('sort'), 'title');
+        await page.goBack(); await results.waitFor();
+        assert.equal(new URL(page.url()).pathname, '/manga/search');
+        const input = page.locator('.manga-library-controls input[type="search"]');
+        assert.equal(await input.inputValue(), 'Comic D');
+        await input.fill('No matching synthetic manga'); await input.press('Enter');
+        assert.equal(await page.locator('.manga-card').count(), 0);
+        assert.match(await page.locator('.manga-empty').textContent(), /试试其他书名、作者或标签/);
+        await input.fill(''); await input.press('Enter');
+        assert.equal(new URL(page.url()).pathname, '/manga');
+        assert.equal(new URL(page.url()).searchParams.get('sort'), 'title');
       } finally { await page.close(); }
     });
     for (const destination of ['comic', 'route', 'view']) await run(`library filter controls: detached controls cannot change a new ${destination}`, async () => {
@@ -2016,9 +2244,9 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
     assert.equal(after.buttonText, fit ? '原始宽度' : '适应宽度'); assert.equal(after.preference, fit ? '1' : '0');
     assert.notEqual(await page.locator('.manga-reader-pages img').first().evaluate(image => image.getBoundingClientRect().width), width);
   }
-  function hold(match, error = "") {
+  function hold(match, error = "", body = null, status = 503) {
     let release, requestedResolve;
-    const gate = { match, error, used: false, closed: false, promise: new Promise(resolve => { release = resolve; }), requested: new Promise(resolve => { requestedResolve = resolve; }), release, requestedResolve };
+    const gate = { match, error, body, status, used: false, closed: false, promise: new Promise(resolve => { release = resolve; }), requested: new Promise(resolve => { requestedResolve = resolve; }), release, requestedResolve };
     held.add(gate); return gate;
   }
   async function requested(gate, timeout = 5000) {

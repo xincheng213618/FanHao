@@ -47,21 +47,6 @@
 .fanhao-navigation-dialog .fanhao-nav-management { margin-top: 8px; }
 .toolbar-controls[hidden] { display: none; }
 body.people-index-view .toolbar { padding: 20px 0 18px; }
-.person-index-body { width: 100%; gap: 6px; align-content: start; }
-.person-index-name {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  width: 100%;
-  min-height: 2.7em;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: 15px;
-  line-height: 1.35;
-  font-weight: 600;
-}
-.person-index-card { gap: 12px; padding: 10px; }
 .person-detail-view .toolbar-title { display: block; }
 .person-detail-view .toolbar-title .eyebrow,
 .person-detail-view .toolbar-title h2 { display: none; }

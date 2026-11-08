@@ -60,7 +60,7 @@ async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
       import("../modules/content-index/gallery-page.js?v=20261004-gallery-reader-owner-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-toolbar-02")
+      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-cover-warm-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -90,6 +90,9 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
   let routeApplication = Promise.resolve();
   let routeWork = Promise.resolve();
   let routeOwner = null;
+  let photoListRestore = null;
+  let nextPhotoListParent = null;
+  let photoListBackPending = false;
 
   const shared = {
     api,
@@ -114,6 +117,8 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     galleryRenderer = pages.createRenderer({
       ...shared,
       getGalleryPage: () => page,
+      goBackToPhotoList,
+      rememberPhotoListPosition,
       includesText
     });
     page = pages.createPage({
@@ -126,6 +131,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         state.personWorksTotal = 0;
         state.personWorksFacets = null;
       },
+      galleryListRoute: () => routeUrl(currentRouteSnapshot({ galleryMediaId: "" }), { initialParams }),
       galleryModeLabel: galleryRenderer.modeLabel,
       normalizeUiConfig,
       renderGalleryStats: galleryRenderer.renderStats,
@@ -159,7 +165,8 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         galleryPerson: state.gallery.person || "all",
         gallerySeriesKey: state.gallery.seriesKey || "",
         galleryPhotoDate: state.gallery.photoDate || "all",
-        gallerySort: state.gallery.sort || "updated"
+        gallerySort: state.gallery.sort || "updated",
+        gallerySortDirection: state.gallery.sortDirection || ""
       });
     } else if (state.activeView === "manga") {
       Object.assign(route, {
@@ -201,6 +208,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
 
   function writeRoute(overrides = {}, mode = "push") {
     if (!state.routeReady || !window.history?.pushState) return;
+    photoListRestore?.abort();
     if (["gallery", "manga", "music", "novels"].includes(state.activeView)) {
       routeOwner?.supersede();
       routeOwner = null;
@@ -212,11 +220,39 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     const url = routeUrl(next, { initialParams });
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
     const historyState = { standaloneRoute: true, ...next };
-    if (mode === "replace" || url === currentUrl) {
+    const replacing = mode === "replace" || url === currentUrl;
+    const previous = window.history.state;
+    if (next.view === "gallery" && next.galleryMode === "photo") {
+      const samePhotoTarget = next.galleryAlbumId ? Boolean(previous?.galleryAlbumId)
+        : !previous?.galleryAlbumId && next.galleryPhotoCollection === previous?.galleryPhotoCollection
+          && next.galleryCategory === previous?.galleryCategory;
+      const parent = replacing ? samePhotoTarget && previous?.photoListParent : nextPhotoListParent;
+      if (parent) historyState.photoListParent = parent;
+      if (replacing && url === currentUrl && previous?.photoListPosition) historyState.photoListPosition = previous.photoListPosition;
+    }
+    nextPhotoListParent = null;
+    if (replacing) {
       window.history.replaceState(historyState, "", url);
     } else {
       window.history.pushState(historyState, "", url);
     }
+  }
+
+  function rememberPhotoListPosition(position) {
+    const entry = window.history.state;
+    if (entry?.view !== "gallery" || entry.galleryMode !== "photo" || entry.galleryAlbumId) return;
+    window.history.replaceState({ ...entry, photoListPosition: position }, "");
+    nextPhotoListParent = { category: entry.galleryCategory, collection: entry.galleryPhotoCollection };
+  }
+
+  function goBackToPhotoList(category = "") {
+    const parent = window.history.state?.photoListParent;
+    if (!parent || (category && (parent.collection || parent.category !== category))) return false;
+    if (!photoListBackPending) {
+      photoListBackPending = true;
+      window.history.back();
+    }
+    return true;
   }
 
   function pushRoute(overrides = {}) {
@@ -234,10 +270,12 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     else pushRoute(options.routeOverrides || {});
   }
 
-  function applyRoute(route) {
+  function applyRoute(route, photoListPosition = null, focusPhotoListCard = false) {
+    photoListRestore?.abort();
     const next = normalizeRoute(route);
-    routeOwner?.supersede();
-    const owner = { supersede: null };
+    const previousOwner = routeOwner;
+    previousOwner?.supersede();
+    const owner = { initialEntry: !previousOwner, supersede: null, photoListPosition, focusPhotoListCard };
     const superseded = new Promise(resolve => { owner.supersede = resolve; });
     routeOwner = owner;
     // These reader pages own cancellation and stale-response checks. Apply their
@@ -275,14 +313,19 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     try {
       syncBodyClasses();
       if (state.activeView === "gallery") {
-        page.applyRouteState(next);
+        const position = next.galleryMode === "photo" && !next.galleryAlbumId ? owner.photoListPosition : null;
+        page.applyRouteState(next, position);
         syncBodyClasses();
         page.enter({ skipRoute: true });
+        if (position) {
+          photoListRestore = new AbortController();
+          galleryRenderer.restorePhotoHistoryPosition(position, photoListRestore, owner.focusPhotoListCard);
+        }
         await page.openRouteTarget(next);
       } else if (state.activeView === "manga") {
         page.applyRouteState(next);
         page.enter({ skipRoute: true, deferInitialLoad: true });
-        await page.openRouteTarget(next);
+        await page.openRouteTarget(next, { initialEntry: owner.initialEntry });
       } else if (state.activeView === "novels") {
         page.applyRouteState(next);
         page.enter({ skipRoute: true, deferInitialLoad: true });
@@ -312,8 +355,11 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
   }
 
   function installHistory() {
-    window.addEventListener("popstate", () => {
-      applyRoute(routeFromUrl()).catch(renderFatalError);
+    window.addEventListener("popstate", event => {
+      const focusPhotoListCard = photoListBackPending;
+      photoListBackPending = false;
+      nextPhotoListParent = null;
+      applyRoute(routeFromUrl(), event.state?.photoListPosition, focusPhotoListCard).catch(renderFatalError);
     });
   }
 
@@ -372,6 +418,7 @@ function createStandaloneState(view) {
       seriesKey: "",
       photoDate: "all",
       sort: view === "gallery" ? "count" : "updated",
+      sortDirection: "",
       visibleLimit: 80,
       loading: false,
       data: null,

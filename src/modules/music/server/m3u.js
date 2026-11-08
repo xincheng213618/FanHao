@@ -44,19 +44,24 @@ export function parseM3u(content = "") {
 }
 
 
-export function createM3uTrackMatcher(db) {
-  const rows = db.prepare("SELECT id, source_path, relative_path, file_name FROM music_tracks WHERE status = 'ok'").all();
+export function createM3uTrackMatcher(db, requestedEntries = null, baseDir = "") {
+  // A bounded import still checks every active row for duplicate keys. Its
+  // lookup maps only need keys that can be used by the requested entries.
+  const wanted = Array.isArray(requestedEntries) && requestedEntries.length <= MAX_LIMIT
+    ? requestedM3uKeys(requestedEntries, baseDir) : null;
+  const query = db.prepare("SELECT id, source_path, relative_path, file_name FROM music_tracks WHERE status = 'ok'");
+  const rows = wanted ? query.iterate() : query.all();
   const byAbsolute = new Map();
   const byRelative = new Map();
   const byFileName = new Map();
   for (const row of rows) {
-    addUnique(byAbsolute, normalizeM3uPathKey(row.source_path), row);
-    addUnique(byRelative, normalizeM3uPathKey(row.relative_path), row);
-    addUnique(byFileName, normalizeM3uPathKey(row.file_name), row);
+    rememberM3uKey(byAbsolute, row.source_path, row, wanted?.absolute);
+    rememberM3uKey(byRelative, row.relative_path, row, wanted?.relative);
+    rememberM3uKey(byFileName, row.file_name, row, wanted?.fileName);
   }
   return {
-    match(entry, baseDir = "") {
-      const candidates = m3uCandidateKeys(entry, baseDir);
+    match(entry, directory = baseDir) {
+      const candidates = m3uCandidateKeys(entry, directory);
       for (const key of candidates.absolute) {
         const match = byAbsolute.get(key);
         if (match) return match;
@@ -72,6 +77,23 @@ export function createM3uTrackMatcher(db) {
       return null;
     }
   };
+}
+
+function requestedM3uKeys(entries, baseDir) {
+  const wanted = { absolute: new Set(), relative: new Set(), fileName: new Set() };
+  for (const entry of entries) {
+    const candidates = m3uCandidateKeys(entry, baseDir);
+    for (const scope of ["absolute", "relative", "fileName"]) {
+      for (const key of candidates[scope]) wanted[scope].add(key);
+    }
+  }
+  return wanted;
+}
+
+function rememberM3uKey(map, value, row, wanted) {
+  if (wanted?.size === 0) return;
+  const key = normalizeM3uPathKey(value);
+  if (!wanted || wanted.has(key)) addUnique(map, key, row);
 }
 
 

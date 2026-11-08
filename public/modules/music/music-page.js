@@ -173,9 +173,11 @@ export function createMusicPage(deps) {
     refreshQueueSurface,
     refreshCurrentTrackSurfaces,
     refreshLibrarySidebars,
+    refreshSidebarPlaylists,
     refreshPlaylistDialog,
     refreshMusicLibraryContent,
     appendLibraryTrackPage,
+    appendSearchTrackPage,
     appendArtistPage,
     appendAlbumPage,
     restoreMusicPanelScroll,
@@ -468,6 +470,7 @@ export function createMusicPage(deps) {
     if (lyricRaf) window.cancelAnimationFrame(lyricRaf);
     lyricRaf = 0;
     player.stopVisualizer();
+    player.setVisualizerCanvas(null);
     clearFavoriteFeedbackPosition();
     els.workGrid.innerHTML = "";
 
@@ -694,11 +697,7 @@ export function createMusicPage(deps) {
     side.dataset.musicSidebarKey = musicSidebarRenderKey();
     if (!embedded) side.id = "music-library-drawer";
     side.setAttribute("aria-label", "音乐资料库");
-    const navigationAction = action => () => {
-      if (!side.isConnected || state.activeView !== "music") return;
-      if (embedded) action();
-      else closeLibraryDrawerBefore(action);
-    };
+    const navigationAction = action => sidebarNavigationAction(side, action);
     const filterButton = (id, label, count, active, action) => h.filterButton(id, label, count, active, navigationAction(action));
     const browseButton = (label, meta, action) => h.sidebarBrowseButton(label, meta, navigationAction(action));
     const drawerHeader = document.createElement("div");
@@ -734,21 +733,11 @@ export function createMusicPage(deps) {
 
     const smartList = document.createElement("div");
     smartList.className = "music-playlist-list";
-    for (const smart of state.music.smartPlaylists || []) {
-      smartList.append(filterButton(smart.id, smart.name, smart.trackCount, state.music.mode === "smart" && state.music.activeSmartPlaylistId === smart.id, () => actions.selectMusicMode("smart", { smartId: smart.id })));
-    }
-    if (!(state.music.smartPlaylists || []).length) {
-      const empty = document.createElement("div");
-      empty.className = "music-sidebar-empty";
-      empty.textContent = "刷新后自动生成";
-      smartList.append(empty);
-    }
+    smartList.append(renderSidebarPlaylistRows(side, "smartPlaylists"));
 
     const playlists = document.createElement("div");
     playlists.className = "music-playlist-list";
-    for (const playlist of state.music.playlists || []) {
-      playlists.append(filterButton(playlist.id, playlist.name, playlist.trackCount, state.music.mode === "playlist" && state.music.activePlaylistId === playlist.id, () => actions.selectMusicMode("playlist", { playlistId: playlist.id })));
-    }
+    playlists.append(renderSidebarPlaylistRows(side, "playlists"));
     const createPlaylistButton = document.createElement("button");
     createPlaylistButton.type = "button";
     createPlaylistButton.className = "music-create-playlist";
@@ -836,6 +825,10 @@ export function createMusicPage(deps) {
 
     const smartSection = h.sidebarSection("智能歌单", smartList, { open: state.music.mode === "smart", meta: formatNumber((state.music.smartPlaylists || []).length) });
     const playlistSection = h.sidebarSection("歌单", playlists, { open: state.music.mode === "playlist", meta: formatNumber((state.music.playlists || []).length) });
+    smartSection.dataset.musicSidebarPlaylists = "smartPlaylists";
+    smartSection.dataset.musicSidebarPlaylistKey = musicSidebarItemsKey(state.music.smartPlaylists);
+    playlistSection.dataset.musicSidebarPlaylists = "playlists";
+    playlistSection.dataset.musicSidebarPlaylistKey = musicSidebarItemsKey(state.music.playlists);
     const languageSection = h.sidebarSection("语种", languageList, { open: state.music.language !== "all", meta: state.music.language === "all" ? "全部" : state.music.language });
     const genreSection = h.sidebarSection("风格", genreList, { open: state.music.mode === "library" && state.music.genre !== "all", meta: state.music.genre === "all" ? formatNumber((state.music.genres || []).length) : state.music.genre });
     const artistSection = h.sidebarSection("歌手", artistList, { open: state.music.mode === "artists" || (state.music.mode === "library" && state.music.artistId !== "all"), meta: formatNumber(state.music.artists?.length || 0) });
@@ -844,10 +837,54 @@ export function createMusicPage(deps) {
     return side;
   }
 
-  function musicSidebarRenderKey() {
-    const summary = state.music.summary || state.music.data?.summary || {};
-    const totals = summary.totals || {};
-    const itemKey = (items, limit = items?.length || 0) => (items || [])
+  function sidebarNavigationAction(side, action) {
+    return () => {
+      if (!side.isConnected || state.activeView !== "music") return;
+      if (side.classList.contains("embedded")) action();
+      else closeLibraryDrawerBefore(action);
+    };
+  }
+
+  function renderSidebarPlaylistRows(side, kind) {
+    const smart = kind === "smartPlaylists", mode = smart ? "smart" : "playlist";
+    const activeId = smart ? state.music.activeSmartPlaylistId : state.music.activePlaylistId;
+    const rows = document.createDocumentFragment();
+    for (const { id, name, trackCount } of state.music[kind] || []) {
+      const action = sidebarNavigationAction(side, () => actions.selectMusicMode(mode, smart ? { smartId: id } : { playlistId: id }));
+      const row = h.filterButton(id, name, trackCount, state.music.mode === mode && activeId === id, action);
+      row.dataset.musicSidebarPlaylistId = id;
+      rows.append(row);
+    }
+    if (smart && !rows.childElementCount) {
+      const empty = document.createElement("div");
+      empty.className = "music-sidebar-empty";
+      empty.textContent = "刷新后自动生成";
+      rows.append(empty);
+    }
+    return rows;
+  }
+
+  function refreshSidebarPlaylists(kind) {
+    if (state.activeView !== "music") return;
+    const renderKey = musicSidebarItemsKey(state.music[kind]);
+    for (const section of els.workGrid?.querySelectorAll(`[data-music-sidebar-playlists="${kind}"]`) || []) {
+      if (section.dataset.musicSidebarPlaylistKey === renderKey) continue;
+      const list = section.querySelector(".music-playlist-list");
+      const focused = document.activeElement;
+      const focusedId = list.contains(focused) ? focused.dataset.musicSidebarPlaylistId : undefined;
+      const rows = renderSidebarPlaylistRows(section.closest(".music-sidebar"), kind);
+      const replacement = focusedId === undefined ? null
+        : [...rows.children].find(row => row.dataset.musicSidebarPlaylistId === focusedId) || section.querySelector("summary");
+      for (const row of list.querySelectorAll("[data-music-sidebar-playlist-id], .music-sidebar-empty")) row.remove();
+      list.prepend(rows);
+      section.querySelector("summary > span").textContent = formatNumber(state.music[kind].length);
+      section.dataset.musicSidebarPlaylistKey = renderKey;
+      replacement?.focus({ preventScroll: true });
+    }
+  }
+
+  function musicSidebarItemsKey(items, limit = items?.length || 0) {
+    return (items || [])
       .slice(0, limit)
       .map((item) => [
         item.id || item.name || item.title || "",
@@ -858,6 +895,11 @@ export function createMusicPage(deps) {
         Number(item.albumCount || 0)
       ].join(":"))
       .join("|");
+  }
+
+  function musicSidebarRenderKey() {
+    const summary = state.music.summary || state.music.data?.summary || {};
+    const totals = summary.totals || {};
     return JSON.stringify([
       state.music.mode,
       state.music.favorite,
@@ -873,12 +915,10 @@ export function createMusicPage(deps) {
       Number(totals.albums || 0),
       Number(totals.plays || 0),
       Number(summary.recent?.length || 0),
-      itemKey(state.music.smartPlaylists),
-      itemKey(state.music.playlists),
-      itemKey(state.music.languages),
-      itemKey(state.music.genres, 24),
-      itemKey(state.music.artists, 8),
-      itemKey(state.music.albums, 6)
+      musicSidebarItemsKey(state.music.languages),
+      musicSidebarItemsKey(state.music.genres, 24),
+      musicSidebarItemsKey(state.music.artists, 8),
+      musicSidebarItemsKey(state.music.albums, 6)
     ]);
   }
 
@@ -1361,6 +1401,22 @@ export function createMusicPage(deps) {
     if (more) fragment.append(more);
     table.append(fragment);
     restoreMusicInputFocus(table.closest(".music-track-panel"), focus?.more ? focus : null);
+    return true;
+  }
+
+  function appendSearchTrackPage(tracks, previousCount) {
+    const panel = els.workGrid?.querySelector?.('.music-track-panel[data-music-list-mode="library"]');
+    if (!panel || panel.dataset.musicListQuery !== state.music.query || !previousCount || tracks.length < previousCount) return false;
+    const more = panel.querySelector(".music-load-more");
+    const heading = panel.querySelector(".music-panel-heading > span > small");
+    if (!heading || !isListOwnerCurrent(listMoreRecords.get(more)?.owner)) return false;
+    const rows = musicListItems(panel);
+    // A cross-page duplicate can replace a visible group or update its metadata.
+    if (rows.length !== previousCount || rows.some((row, index) => listResultRecords.get(row) !== tracks[index])) return false;
+    if (!appendLibraryTrackPage(tracks.slice(previousCount), previousCount)) return false;
+    heading.textContent = actions.currentMusicMeta();
+    refreshLibrarySidebars();
+    setTrackOpeningState(state.music.openingTrackId);
     return true;
   }
 
@@ -1866,6 +1922,8 @@ export function createMusicPage(deps) {
       if (!queue.length) list.append(h.emptyQueueRow("队列为空")); else appendQueueRows(list, queue);
       updateQueueHead(view);
     }
+    view.renderedQueue = queue;
+    view.renderedCurrentId = state.music.current?.id;
   }
 
   function appendQueueSearchTail(view, matches, limit) {
@@ -1958,6 +2016,32 @@ export function createMusicPage(deps) {
       currentRow.querySelector('[aria-label="上移"]').disabled = index === 0;
       currentRow.querySelector('[aria-label="下移"]').disabled = index === queue.length - 1;
     }
+    const view = queueViews.get(panel);
+    if (view) view.renderedQueue = queue;
+    return true;
+  }
+
+  function updateQueueCurrentRow(view) {
+    const previousId = view.renderedCurrentId, currentId = state.music.current?.id;
+    // Membership, ordering and metadata updates replace the queue array.
+    if (view.renderedQueue !== state.music.queue || view.model.query || !currentId) return false;
+    const mountedRows = id => (musicTrackElementMap.get(id) || []).filter(row => row.parentElement === view.list);
+    const previous = mountedRows(previousId), current = mountedRows(currentId);
+    // A current song outside the visible prefix has a separate row and label.
+    // Let the normal renderer update that tail when playback crosses the prefix.
+    if (current.length !== 1 || previous.length !== (previousId ? 1 : 0)
+        || previous[0]?.hasAttribute("data-queue-context-current")) return false;
+    const remove = row => row?.querySelector('[aria-label="移出队列"]');
+    const previousRemove = remove(previous[0]), currentRemove = remove(current[0]);
+    if (!currentRemove || (previousId && !previousRemove)) return false;
+    if (previousId !== currentId) {
+      previous[0]?.classList.remove("active");
+      if (previousRemove) previousRemove.disabled = false;
+      current[0].classList.add("active");
+      currentRemove.disabled = true;
+    }
+    view.renderedCurrentId = currentId;
+    updateQueueHead(view);
     return true;
   }
 
@@ -1976,10 +2060,13 @@ export function createMusicPage(deps) {
     if (!focused || !panel?.contains(focused)) return context;
     const row = focused.closest(".music-queue-row");
     if (row) {
-      const rows = [...list.querySelectorAll(".music-queue-row")];
-      const index = rows.indexOf(row);
+      const adjacentRow = side => {
+        let adjacent = row[side];
+        while (adjacent && !adjacent.classList.contains("music-queue-row")) adjacent = adjacent[side];
+        return adjacent;
+      };
       context.focus = {
-        tracks: [row, rows[index + 1], rows[index - 1]].filter(Boolean).map(item => item.dataset.musicTrackId),
+        tracks: [row, adjacentRow("nextElementSibling"), adjacentRow("previousElementSibling")].filter(Boolean).map(item => item.dataset.musicTrackId),
         action: focused.classList.contains("music-queue-play") ? "play" : focused.getAttribute("aria-label")
       };
     } else if (focused.dataset.musicQueueAction) {
@@ -2026,7 +2113,7 @@ export function createMusicPage(deps) {
     const queuePanel = nowPanel.querySelector(".music-queue"), view = queueViews.get(queuePanel);
     if (queueViewCurrent(view)) {
       refreshNowSummaryKeepingQueue(nowPanel);
-      refreshQueueRows(view);
+      if (!updateQueueCurrentRow(view)) refreshQueueRows(view);
       restoreQueueContext(queuePanel, context);
       playerBar.replaceWith(renderPlayerBar());
       pruneDetachedPlaybackControls(); updatePlaybackUi();
@@ -2092,7 +2179,9 @@ export function createMusicPage(deps) {
     if (currentIndex >= DESKTOP_QUEUE_PREVIEW_LIMIT) {
       shownIndexes.add(currentIndex);
       list.append(h.emptyQueueRow(`当前播放在第 ${formatNumber(currentIndex + 1)} 首`));
-      list.append(createQueueRow(queue[currentIndex], currentIndex, list));
+      const currentRow = createQueueRow(queue[currentIndex], currentIndex, list);
+      currentRow.dataset.queueContextCurrent = "true";
+      list.append(currentRow);
     }
     const hiddenCount = queue.length - shownIndexes.size;
     if (hiddenCount > 0) list.append(h.emptyQueueRow(`还有 ${formatNumber(hiddenCount)} 首未显示，点“全部”查看`));
@@ -2784,21 +2873,18 @@ export function createMusicPage(deps) {
 
   function refreshLibrarySidebars() {
     if (state.activeView !== "music") return;
+    const sides = els.workGrid?.querySelectorAll(".music-sidebar");
+    if (!sides?.length) return;
     const renderKey = musicSidebarRenderKey();
-    const embedded = els.workGrid?.querySelector?.(".music-sidebar.embedded");
-    if (embedded && embedded.dataset.musicSidebarKey !== renderKey) {
-      const scrollTop = embedded.scrollTop;
-      const next = renderSidebar({ embedded: true });
-      embedded.replaceWith(next);
+    for (const side of sides) {
+      if (side.dataset.musicSidebarKey === renderKey) continue;
+      const scrollTop = side.scrollTop;
+      const next = renderSidebar({ embedded: side.classList.contains("embedded") });
+      side.replaceWith(next);
       next.scrollTop = scrollTop;
     }
-    const drawer = els.workGrid?.querySelector?.(".music-sidebar:not(.embedded)");
-    if (drawer && drawer.dataset.musicSidebarKey !== renderKey) {
-      const scrollTop = drawer.scrollTop;
-      const next = renderSidebar();
-      drawer.replaceWith(next);
-      next.scrollTop = scrollTop;
-    }
+    refreshSidebarPlaylists("playlists");
+    refreshSidebarPlaylists("smartPlaylists");
   }
 
   function findKnownTrack(trackId) {

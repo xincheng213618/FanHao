@@ -59,6 +59,52 @@ export function prepareAlbumFacet(db, sql) {
   }
 }
 
+export function readUpdatedAlbumPage(db, originalSql, order, limit, offset) {
+  db.exec("SAVEPOINT music_updated_album_page");
+  try {
+    let statement;
+    try {
+      const schema = db.prepare(`SELECT
+        (SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = 'music_artists' COLLATE NOCASE) AS artists,
+        EXISTS(SELECT 1 FROM pragma_table_list('music_albums') WHERE schema = 'main' AND type = 'table' AND wr = 0) AS album_table,
+        EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE IN ('music_albums', 'music_artists')) AS shadowed`).get();
+      const columns = db.prepare("PRAGMA main.table_xinfo(music_albums)").all();
+      if (schema?.album_table !== 1 || schema.shadowed !== 0
+        || !/^CREATE\s+TABLE\s+music_artists\s*\(\s*id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(schema.artists || "")
+        || !columns.some(column => column.name === "artist_id" && column.type.toUpperCase() === "TEXT")
+        || columns.some(column => column.name.toLowerCase() === "_rowid_")) return null;
+
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${originalSql}`).all(limit, offset);
+      if (plan.length !== 3 || !plan[1].detail.endsWith(" LEFT-JOIN") || plan[2].detail !== "USE TEMP B-TREE FOR ORDER BY") return null;
+      let ties = "al._rowid_ ASC";
+      if (plan[0].detail === "SCAN al USING INDEX idx_music_albums_artist") {
+        const keys = db.prepare("PRAGMA main.index_xinfo(idx_music_albums_artist)").all();
+        if (keys.length !== 3 || keys[0].name !== "artist_id" || keys[1].name !== "title" || keys[2].cid !== -1
+          || keys.some(key => key.coll !== "BINARY" || key.desc !== 0)) return null;
+        ties = `al.artist_id COLLATE BINARY ASC, al.title COLLATE BINARY ASC, ${ties}`;
+      } else if (plan[0].detail !== "SCAN al") return null;
+
+      // The former temp sort breaks ties in album scan order. Reproduce that
+      // order explicitly, using sequential reads and deferring artist lookup.
+      const pageOrder = `${order}, ${ties}`;
+      statement = db.prepare(`WITH page AS MATERIALIZED (
+        SELECT al._rowid_ AS album_rowid FROM music_albums al NOT INDEXED
+        ORDER BY ${pageOrder} LIMIT ? OFFSET ?
+      )
+      SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
+      FROM page CROSS JOIN music_albums al ON al._rowid_ = page.album_rowid
+      LEFT JOIN music_artists a ON a.id = al.artist_id
+      ORDER BY ${pageOrder}`);
+    } catch {
+      // Unrecognized or unavailable plans retain the original preparation.
+      return null;
+    }
+    return statement.all(limit, offset);
+  } finally {
+    db.exec("RELEASE music_updated_album_page");
+  }
+}
+
 export function albumFacet(db, artistId = "", genre = "", language = "", selectedAlbumId = "") {
   const args = [];
   const where = [];

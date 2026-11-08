@@ -3,7 +3,7 @@ import path from "node:path";
 import { ARCHIVE_IMAGE_INDEXER_VERSION } from "../../../platform/server/archive-image-service.js";
 import { safeChildPath } from "../../../platform/server/request-io.js";
 import { imageLibraryCacheIdentity } from "./image-library-index-contract.js";
-import { PHOTO_COLLECTION_SORTS } from "./image-library-service.js";
+import { PHOTO_COLLECTION_SORTS, photoShelfCollectionScope, photoSortIsReversed } from "./image-library-service.js";
 
 const defaultLocale = new Intl.Collator().resolvedOptions().locale;
 const collectionLocales = ["zh-CN", "en-US"];
@@ -36,6 +36,7 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
   const mediaIdentity = imageLibraryCacheIdentity({ directVideoExts, galleryMediaSources, videoExts });
   let cachedIndex = null;
   let cachedCollection = null;
+  let cachedCategory = null;
   let cachedMedia = null;
 
   function header(db) {
@@ -132,7 +133,7 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     };
   }
 
-  function collectionPage({ category, sort, locale, limit, offset }) {
+  function collectionPage({ category, sort, direction, locale, limit, offset, excludedSubCategories = [] }) {
     if (!PHOTO_COLLECTION_SORTS.includes(sort)) return null;
     let resolvedLocale = defaultLocale;
     try { if (locale) resolvedLocale = new Intl.Collator(locale).resolvedOptions().locale; }
@@ -142,16 +143,50 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
       const state = header(db);
       if (!state) return null;
       const args = [category, sort, resolvedLocale];
-      const items = db.prepare(`SELECT data_json FROM photo_library_collections WHERE category=? AND sort=? AND locale=?
-        AND position>=? ORDER BY position LIMIT ?`).all(...args, offset, limit).map(row => JSON.parse(row.data_json));
       const scopes = JSON.parse(state.scopes_json);
       const scope = Object.hasOwn(scopes, category) ? scopes[category] : null;
-      const counts = scope?.counts[sort];
+      let counts = scope?.counts[sort];
+      const reverse = photoSortIsReversed(sort, direction);
+      const source = "FROM photo_library_collections WHERE category=? AND sort=? AND locale=?";
+      let rows;
+      if (excludedSubCategories.length) {
+        const remaining = `${source} AND coalesce(json_extract(data_json, '$.subCategory'), '') NOT IN (SELECT value FROM json_each(?))`;
+        const scopeArgs = [...args, JSON.stringify(excludedSubCategories)];
+        counts = db.prepare(`SELECT count(*) total, sum(json_extract(data_json, '$.size')) totalBytes,
+          sum(json_extract(data_json, '$.albumCount')) albumCount ${remaining}`).get(...scopeArgs);
+        rows = db.prepare(`SELECT data_json ${remaining} ORDER BY position ${reverse ? "DESC" : "ASC"} LIMIT ? OFFSET ?`)
+          .all(...scopeArgs, limit, offset);
+      } else {
+        const position = reverse ? (counts?.total || 0) - offset - 1 : offset;
+        const positionOrder = reverse ? "position<=? ORDER BY position DESC" : "position>=? ORDER BY position";
+        rows = db.prepare(`SELECT data_json ${source} AND ${positionOrder} LIMIT ?`).all(...args, position, limit);
+      }
+      const items = rows.map(row => JSON.parse(row.data_json));
       return {
-        scannedAt: state.scanned_at, listRevision: state.revision, total: counts?.total || 0, items,
-        facets: { ...JSON.parse(state.facets_json), subCategories: scope?.subCategories || [] },
+        scannedAt: state.scanned_at, listRevision: excludedSubCategories.length ? `${state.revision}:${JSON.stringify(excludedSubCategories)}` : state.revision,
+        total: counts?.total || 0, items,
+        facets: { ...JSON.parse(state.facets_json), subCategories: (scope?.subCategories || [])
+          .filter(entry => !excludedSubCategories.includes(entry.value)) },
         stats: { ratedCount: 0, totalBytes: counts?.totalBytes || 0, albumCount: counts?.albumCount || 0 }
       };
+    });
+  }
+
+  function coverWarmPlan() {
+    return readSnapshot(db => {
+      if (!header(db)) return null;
+      const groups = new Map(db.prepare(`SELECT json_extract(data_json, '$.id') AS id,
+        json_extract(data_json, '$.title') AS title FROM photo_library_collections
+        WHERE category='all' AND sort='count' AND locale='zh-CN' ORDER BY position`).all()
+        .map(({ id, title }) => [id, { title, albums: [] }]));
+      for (const row of db.prepare(`SELECT id, collection_id, json_extract(data_json, '$.subCategory') AS sub_category,
+        json_extract(data_json, '$.category') AS category FROM photo_library_archives ORDER BY position`).iterate()) {
+        if (!groups.has(row.collection_id)) {
+          groups.set(row.collection_id, { title: row.sub_category || row.category || "未归类套图", albums: [] });
+        }
+        groups.get(row.collection_id).albums.push(row.id);
+      }
+      return [...groups.values()].filter(group => group.albums.length);
     });
   }
 
@@ -161,16 +196,38 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
       if (!state) return null;
       const cached = collectionId ? cachedCollection : cachedIndex;
       if (cached?.revision === state.revision && cached.collectionId === collectionId) return cached;
-      const rows = collectionId
+      const shelf = photoShelfCollectionScope(collectionId);
+      const rows = shelf ? db.prepare(`SELECT data_json FROM photo_library_archives
+        WHERE json_extract(data_json, '$.category')=? AND json_extract(data_json, '$.subCategory')=?
+          AND json_extract(data_json, '$.sourceRoot')=? ORDER BY position`).all(shelf.category, shelf.subCategory, shelf.sourceRoot)
+        : collectionId
         ? db.prepare("SELECT data_json FROM photo_library_archives WHERE collection_id=? ORDER BY position").all(collectionId)
         : db.prepare("SELECT data_json FROM photo_library_archives ORDER BY position").all();
       const value = {
         revision: state.revision, collectionId, scannedAt: state.scanned_at, roots: JSON.parse(state.roots_json),
-        photoSets: rows.map(row => JSON.parse(row.data_json))
+        photoSets: rows.map(row => {
+          const album = JSON.parse(row.data_json);
+          return shelf ? { ...album, collectionId } : album;
+        })
       };
       if (collectionId) cachedCollection = value;
       else cachedIndex = value;
       return value;
+    });
+  }
+
+  function indexForCategory(category) {
+    return readSnapshot(db => {
+      const state = header(db);
+      if (!state) return null;
+      if (cachedCategory?.revision === state.revision && cachedCategory.category === category) return cachedCategory;
+      const photoSets = db.prepare(`SELECT data_json FROM photo_library_archives
+        WHERE json_extract(data_json, '$.category')=? ORDER BY position`).all(category).map(row => JSON.parse(row.data_json));
+      const scopes = JSON.parse(state.scopes_json);
+      const subCategories = Object.hasOwn(scopes, category) ? scopes[category].subCategories : [];
+      cachedCategory = { category, revision: state.revision, scannedAt: state.scanned_at, photoSets,
+        facets: { ...JSON.parse(state.facets_json), subCategories } };
+      return cachedCategory;
     });
   }
 
@@ -262,5 +319,5 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
-  return { archiveMarks, byId, collectionPage, contentImageCounts, hasSnapshot, index, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
+  return { archiveMarks, byId, collectionPage, contentImageCounts, coverWarmPlan, hasSnapshot, index, indexForCategory, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
 }

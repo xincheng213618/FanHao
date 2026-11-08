@@ -1,6 +1,6 @@
 // 播放引擎：独占 <audio> 元素、WebAudio 可视化、MediaSession、进度跳转、睡眠定时。
 // 这是音乐模块里唯一允许直接创建/操作 audio 的地方。
-// 通过 callbacks 把“UI 更新”回交给组合根（music-page.js），自身不持有任何 DOM 渲染状态。
+// 除频谱绘制外，UI 更新通过 callbacks 回交给组合根（music-page.js）。
 
 import { normalizePlaybackSpeed } from "../format.js";
 import { MUSIC_VISUALIZER_FRAME_MS } from "../constants.js";
@@ -29,6 +29,9 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
   let audioSource = null;
 
   let visualizerCanvas = null;
+  let visualizerObserver = null;
+  let visualizerSize = null;
+  let visualizerSurface = null;
   let visualizerRaf = 0;
   let visualizerBins = null;
   let visualizerLastFrameAt = 0;
@@ -234,7 +237,25 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   // ---- 可视化 ----
   function setVisualizerCanvas(canvas) {
+    if (visualizerCanvas === canvas) return;
+    visualizerObserver?.disconnect();
+    visualizerObserver = null;
     visualizerCanvas = canvas;
+    visualizerSize = null;
+    visualizerSurface = null;
+    if (!canvas || typeof window.ResizeObserver !== "function") return;
+
+    const observer = new window.ResizeObserver((entries) => {
+      if (visualizerObserver !== observer || !canvas.isConnected) return;
+      // The border box includes the compact stage's canvas padding.
+      const box = entries[0]?.borderBoxSize;
+      const bounds = Array.isArray(box) ? box[0] : box;
+      if (!bounds) return;
+      visualizerSize = { width: bounds.inlineSize, height: bounds.blockSize };
+      if (!visualizerRaf && !document.hidden) drawVisualizer();
+    });
+    visualizerObserver = observer;
+    observer.observe(canvas, { box: "border-box" });
   }
 
   function startVisualizer() {
@@ -271,34 +292,39 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
   function drawVisualizer() {
     const canvas = visualizerCanvas;
     if (activeView() !== "music" || !canvas?.isConnected) return;
-    const rect = canvas.getBoundingClientRect();
+    const rect = visualizerSize || canvas.getBoundingClientRect();
     const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     const width = Math.max(1, Math.round(rect.width * ratio));
     const height = Math.max(1, Math.round(rect.height * ratio));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
+    let surface = visualizerSurface;
+    if (!surface || surface.width !== width || surface.height !== height || surface.cssWidth !== rect.width) {
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      const barCount = Math.min(72, Math.max(36, Math.floor(rect.width / 13)));
+      const gap = Math.max(3, width * 0.0038);
+      const barWidth = Math.max(2, (width - gap * (barCount - 1)) / barCount);
+      const gradient = context.createLinearGradient(0, height, 0, 0);
+      gradient.addColorStop(0, "rgba(24, 213, 125, 0.08)");
+      gradient.addColorStop(0.4, "rgba(24, 213, 125, 0.8)");
+      gradient.addColorStop(1, "rgba(88, 241, 166, 1)");
+      visualizerSurface = surface = { width, height, cssWidth: rect.width, context, barCount, gap, barWidth, gradient };
     }
-    const context = canvas.getContext("2d");
-    if (!context) return;
+    const { context, barCount, gap, barWidth, gradient } = surface;
     context.clearRect(0, 0, width, height);
     if (audioAnalyser && (!visualizerBins || visualizerBins.length !== audioAnalyser.frequencyBinCount)) {
       visualizerBins = new Uint8Array(audioAnalyser.frequencyBinCount);
     }
     const bins = audioAnalyser ? visualizerBins : null;
     if (bins) audioAnalyser.getByteFrequencyData(bins);
-    const barCount = Math.min(72, Math.max(36, Math.floor(rect.width / 13)));
-    const gap = Math.max(3, width * 0.0038);
-    const barWidth = Math.max(2, (width - gap * (barCount - 1)) / barCount);
-    const gradient = context.createLinearGradient(0, height, 0, 0);
-    gradient.addColorStop(0, "rgba(24, 213, 125, 0.08)");
-    gradient.addColorStop(0.4, "rgba(24, 213, 125, 0.8)");
-    gradient.addColorStop(1, "rgba(88, 241, 166, 1)");
     context.fillStyle = gradient;
+    const idle = audio && !audio.paused ? 0.08 : 0.025;
     for (let index = 0; index < barCount; index += 1) {
       const sourceIndex = bins ? Math.min(bins.length - 1, Math.floor((index / barCount) * bins.length * 0.78)) : 0;
       const level = bins ? bins[sourceIndex] / 255 : 0;
-      const idle = audio && !audio.paused ? 0.08 : 0.025;
       const barHeight = Math.max(2 * ratio, (idle + level * 0.92) * height);
       const x = index * (barWidth + gap);
       context.fillRect(x, height - barHeight, barWidth, barHeight);

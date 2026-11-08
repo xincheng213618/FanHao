@@ -23,7 +23,7 @@ export function parseLibraryRoots(env = process.env) {
   const baseRaw =
     env.LIBRARY_ROOTS ||
     env.LIBRARY_ROOT ||
-    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
+    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\;V:\\缓存\\";
   const raw = [baseRaw, env.FANHAO_WESTERN_ROOTS || "R:\\"].filter(Boolean).join(";");
   const roots = raw
     .split(/[;,|]/)

@@ -16,7 +16,7 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     const generation = generations.get(key) || 0;
     if (options.reuseWarmed) {
       const warmedResult = warmedResults.get(key);
-      if (warmedResult?.expiresAt > Date.now()) {
+      if (warmedResult?.expiresAt > Date.now() && isAccountOwnerCurrent(warmedResult.scope)) {
         warmedResults.delete(key);
         return Promise.resolve(warmedResult.data);
       }
@@ -32,6 +32,7 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     }
     const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal, accountScope: scope })
       .then((data) => {
+        if (options.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
         if (!isAccountOwnerCurrent(scope)) throw accountChangedError();
         if ((generations.get(key) || 0) === generation) writeCachedJson(activeUrl, path, data).catch(() => {});
         return data;
@@ -43,22 +44,32 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     return promise;
   }
 
-  function warm(activeUrl, paths = []) {
+  function warm(activeUrl, paths = [], { signal } = {}) {
+    if (signal?.aborted) return Promise.resolve([]);
+    const scope = captureAccountOwner(activeUrl);
     const requests = [];
     for (const path of paths) {
       const key = requestKey(activeUrl, path);
-      if (warmed.has(key)) continue;
+      if (warmed.has(key) || signal && inflight.has(key)) continue;
       const generation = generations.get(key) || 0;
       warmed.add(key);
-      const request = fetch(activeUrl, path).then((data) => {
+      const pending = fetch(activeUrl, path, { signal, accountScope: scope });
+      const cancel = () => {
         if ((generations.get(key) || 0) !== generation) return;
-        warmedResults.set(key, { data, expiresAt: Date.now() + WARMED_RESULT_TTL_MS });
+        if (inflight.get(key) === pending) inflight.delete(key);
+        warmed.delete(key);
+        warmedResults.delete(key);
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      const request = pending.then((data) => {
+        if (signal?.aborted || (generations.get(key) || 0) !== generation) return;
+        warmedResults.set(key, { data, scope, expiresAt: Date.now() + WARMED_RESULT_TTL_MS });
         while (warmedResults.size > WARMED_RESULT_LIMIT) {
           warmedResults.delete(warmedResults.keys().next().value);
         }
       }).catch(() => {
-        if ((generations.get(key) || 0) === generation) warmed.delete(key);
-      });
+        if (!signal?.aborted && (generations.get(key) || 0) === generation) warmed.delete(key);
+      }).finally(() => signal?.removeEventListener("abort", cancel));
       requests.push(request);
     }
     return Promise.all(requests);

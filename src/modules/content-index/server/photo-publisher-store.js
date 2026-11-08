@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PHOTO_COLLECTION_SORTS } from "./image-library-service.js";
+import { PHOTO_COLLECTION_SORTS, photoSortIsReversed } from "./image-library-service.js";
 
 const collectionLocales = ["zh-CN", "en-US"];
 const defaultLocale = new Intl.Collator().resolvedOptions().locale;
@@ -39,19 +39,27 @@ export function createPhotoPublisherStore({ getDb }) {
     return label ? { ...publisher, collectionLabel: label } : publisher;
   }
 
-  function readPublisherPage(id, { sort = "updated", locale, limit = 80, offset = 0 } = {}) {
+  function collectionIds(ids) {
+    return getDb().prepare(`SELECT DISTINCT member.target_id FROM json_each(?) requested
+      CROSS JOIN photo_publisher_members AS member ON member.publisher_id=requested.value
+      WHERE member.kind='collection' ORDER BY member.target_id`).all(JSON.stringify(ids)).map(row => row.target_id);
+  }
+
+  function readPublisherPage(id, { sort = "updated", direction, locale, limit = 80, offset = 0 } = {}) {
     const db = getDb();
     return readSnapshot(db, () => {
       const row = db.prepare("SELECT id, name, code FROM photo_publishers WHERE id=?").get(id);
       if (!row) return null;
       const publisher = { ...row };
-      const args = [id, PHOTO_COLLECTION_SORTS.includes(sort) ? sort : "updated", projectionLocale(locale)];
+      const projectionSort = PHOTO_COLLECTION_SORTS.includes(sort) ? sort : "updated";
+      const args = [id, projectionSort, projectionLocale(locale)];
       const { total, totalBytes, albumCount, membership } = db.prepare(`SELECT count(*) AS total,
         coalesce(sum(json_extract(collection.data_json, '$.size')), 0) AS totalBytes,
         coalesce(sum(json_extract(collection.data_json, '$.albumCount')), 0) AS albumCount,
         json_group_array(json_array(member.target_id, member.label, member.position) ORDER BY member.target_id) AS membership
         ${collectionMembership}`).get(...args);
-      const order = sort === "curated" ? "member.position, collection.position" : "collection.position";
+      const order = sort === "curated" ? "member.position, collection.position"
+        : photoSortIsReversed(projectionSort, direction) ? "collection.position DESC" : "collection.position";
       const items = db.prepare(`SELECT collection.data_json, member.label ${collectionMembership}
         ORDER BY ${order} LIMIT ? OFFSET ?`).all(...args, limit, offset).map(({ data_json, label }) => {
         const item = JSON.parse(data_json);
@@ -109,5 +117,5 @@ export function createPhotoPublisherStore({ getDb }) {
     }
   }
 
-  return { publisherForCollection, readPublisherPage, savePublisher, videoById };
+  return { collectionIds, publisherForCollection, readPublisherPage, savePublisher, videoById };
 }

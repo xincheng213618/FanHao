@@ -1,7 +1,7 @@
-import { fetchJson } from "../../js/api.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
 import { formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups } from "./track-versions.js?v=assets-8af3642624a3";
-import { writeSearchHistoryPreference } from "./music-state.js?v=assets-8af3642624a3";
+import { buildTrackVersionGroups } from "./track-versions.js?v=assets-8faf7a80cb7b";
+import { writeSearchHistoryPreference } from "./music-state.js?v=assets-8faf7a80cb7b";
 
 const SEARCH_DEBOUNCE_MS = 280;
 const SEARCH_SUGGESTION_DEBOUNCE_MS = 90;

@@ -11,6 +11,8 @@ import { buildMusicIdentityKnowledge, isUnknownMusicArtist, resolveMusicTrackIde
 import { buildArtistLanguageConsensus, musicLanguageForArtist, musicLanguageFromPath } from "./language.js";
 import { insertMusicPhoneticSearchRow, insertMusicShortSearchRow, MUSIC_PHONETIC_INDEX_VERSION } from "./search.js";
 
+const scanFileCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export function loadManagedMusicCatalogs(scanRoots = []) {
   const result = new Map();
   const candidates = [];
@@ -96,7 +98,7 @@ export function scanMusicRoots(scanRoots, options = {}) {
     }
     if (limit > 0 && files.length >= limit) break;
   }
-  files.sort((a, b) => a.filePath.localeCompare(b.filePath, undefined, { numeric: true, sensitivity: "base" }));
+  files.sort((a, b) => scanFileCollator.compare(a.filePath, b.filePath));
 
   const identitySeeds = files.map(({ root, filePath }) => {
     const relativePath = path.relative(root, filePath);
@@ -114,6 +116,7 @@ export function scanMusicRoots(scanRoots, options = {}) {
 
   const now = new Date().toISOString();
   const dirCache = new Map();
+  const lyricIndexes = new WeakMap();
   const artistMap = new Map();
   const albumMap = new Map();
   const tracks = [];
@@ -162,7 +165,7 @@ export function scanMusicRoots(scanRoots, options = {}) {
       relativePath
     });
     const albumFiles = cachedDirEntries(dirCache, albumDir);
-    const lrcPath = managed?.lrcPath || findCompanionLyric(albumFiles, albumDir, filePath);
+    const lrcPath = managed?.lrcPath || findCompanionLyric(albumFiles, albumDir, filePath, lyricIndexes);
     const lyricText = lrcPath ? readSmallText(lrcPath, MAX_LYRIC_BYTES) : "";
     const parsedLyrics = parseLrc(lyricText);
 
@@ -671,9 +674,21 @@ export function findAlbumIntro(files, dir, albumTitle) {
 }
 
 
-export function findCompanionLyric(files, dir, audioPath) {
+export function findCompanionLyric(files, dir, audioPath, indexes = new WeakMap()) {
   const base = path.basename(audioPath, path.extname(audioPath)).toLowerCase();
-  const exact = files.find((name) => path.extname(name).toLowerCase() === ".lrc" && path.basename(name, path.extname(name)).toLowerCase() === base);
+  let namesByStem = indexes.get(files);
+  if (!namesByStem) {
+    namesByStem = new Map();
+    for (const name of files) {
+      const extension = path.extname(name);
+      if (extension.toLowerCase() !== ".lrc") continue;
+      const stem = path.basename(name, extension).toLowerCase();
+      // A case-folded collision keeps the first directory entry, like find().
+      if (!namesByStem.has(stem)) namesByStem.set(stem, name);
+    }
+    indexes.set(files, namesByStem);
+  }
+  const exact = namesByStem.get(base);
   return exact ? path.join(dir, exact) : "";
 }
 

@@ -1,4 +1,4 @@
-import { getTrackVersionInfo } from "./track-versions.js?v=assets-8af3642624a3";
+import { getTrackVersionInfo } from "./track-versions.js?v=assets-8faf7a80cb7b";
 
 export const DEFAULT_MODE = "library";
 export const DEFAULT_SORT = "album";

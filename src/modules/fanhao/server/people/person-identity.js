@@ -101,17 +101,49 @@ export function ensurePersonIdentitySchema(db) {
 }
 
 export function canonicalPersonId(db, personId) {
-  let id = Number(personId);
-  if (!Number.isSafeInteger(id) || id <= 0) return "";
+  const id = positivePersonId(personId);
+  if (!id) return "";
   if (!hasIdentityTable(db, "person_redirects")) return String(id);
-  const seen = new Set();
+  return followPersonRedirects(id, (sourceId) => readIdentityStatement(db, "SELECT target_id FROM person_redirects WHERE source_id = ?", sourceId));
+}
+
+function positivePersonId(personId) {
+  const id = Number(personId);
+  return Number.isSafeInteger(id) && id > 0 ? id : 0;
+}
+
+function followPersonRedirects(id, rowForId) {
+  let seen;
   while (true) {
-    if (seen.has(id)) throw identityError("人物合并关系存在循环", "PERSON_REDIRECT_CYCLE");
-    seen.add(id);
-    const row = readIdentityStatement(db, "SELECT target_id FROM person_redirects WHERE source_id = ?", id);
+    if (seen?.has(id)) throw identityError("人物合并关系存在循环", "PERSON_REDIRECT_CYCLE");
+    const row = rowForId(id);
     if (!row) return String(id);
+    (seen ??= new Set()).add(id);
     id = Number(row.target_id);
   }
+}
+
+// Catalogue reads resolve many IDs synchronously against one SQLite snapshot.
+// Unusual schemas and read failures retain the existing point lookup behavior.
+export function createCanonicalPersonReader(db) {
+  const lookup = (personId) => canonicalPersonId(db, personId);
+  const redirects = new Map();
+  if (hasIdentityTable(db, "person_redirects")) {
+    try {
+      if (db.prepare("SELECT 1 FROM temp.sqlite_schema WHERE name = 'person_redirects' COLLATE NOCASE").get()) return lookup;
+      for (const row of db.prepare("SELECT source_id, target_id FROM main.person_redirects").all()) {
+        if (!Number.isSafeInteger(row.source_id) || redirects.has(row.source_id)) return lookup;
+        redirects.set(row.source_id, row);
+      }
+    } catch {
+      return lookup;
+    }
+  }
+  const rowForId = (id) => redirects.get(id);
+  return (personId) => {
+    const id = positivePersonId(personId);
+    return id ? followPersonRedirects(id, rowForId) : "";
+  };
 }
 
 export function personIdentityMembers(db, personId) {

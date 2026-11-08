@@ -166,7 +166,7 @@ export function createMusicActions({ state, api, player, view, router, showError
         : music().data?.rawLoaded ?? music().data?.tracks?.length ?? 0;
   }
 
-  function collapseSearchAppend(request, previousRawTracks, incomingTracks, mergedRawTracks) {
+  function collapseSearchPage(request, previousRawTracks, incomingTracks, mergedRawTracks) {
     let account;
     try { account = captureWebAccount(); } catch {
       searchDuplicateSession = null;
@@ -293,6 +293,7 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function performMusicLoad(request, options, appendScrollTop) {
     const { controller, append, artistMode, albumMode, background } = request;
     const signal = controller.signal;
+    const deferSideLists = !append && !background && (artistMode || albumMode || music().mode === "library");
     if (background) {
       const hadLoading = music().loading || music().loadingMore;
       music().loading = false;
@@ -353,7 +354,7 @@ export function createMusicActions({ state, api, player, view, router, showError
         music().mode = "library";
         data = await api.getTracks(params, signal);
       }
-      await listsPromise;
+      if (!deferSideLists) await listsPromise;
     } catch (error) {
       if (options.canReportFailure && !options.canReportFailure()) {
         // This maintenance read still finishes its own loading lifecycle, but
@@ -399,9 +400,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     const previousRawTracks = append ? music().data?.rawTracks || music().data?.tracks || [] : [];
     const mergedRawTracks = append ? [...previousRawTracks, ...incomingTracks] : incomingTracks;
     const searching = music().mode === "library" && Boolean(music().query);
+    const previousSearchCount = searching && append ? music().data?.tracks?.length || 0 : 0;
     if (!searching) searchDuplicateSession = null;
     const mergedTracks = searching
-      ? (append ? collapseSearchAppend(request, previousRawTracks, incomingTracks, mergedRawTracks) : collapseDuplicateTracks(mergedRawTracks))
+      ? collapseSearchPage(request, previousRawTracks, incomingTracks, mergedRawTracks)
       : mergedRawTracks;
     const previousArtists = append && artistMode ? music().data?.artists || [] : [];
     const mergedArtists = artistMode ? (append ? [...previousArtists, ...(data.artists || [])] : data.artists || []) : data.artists;
@@ -439,7 +441,9 @@ export function createMusicActions({ state, api, player, view, router, showError
         ? view.appendArtistPage(data.artists || [], previousArtists.length)
         : albumMode
           ? view.appendAlbumPage(data.albums || [], previousAlbums.length)
-          : !music().query && Boolean(music().current) && view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length)
+          : Boolean(music().current) && (searching
+            ? view.appendSearchTrackPage?.(mergedTracks, previousSearchCount)
+            : !music().query && view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length))
     );
     const restoreAllowed = !background && (options.restoreLast === true || (!options.keepCurrent && options.restoreLast !== false));
     if (!artistMode && !albumMode && restoreAllowed && isForegroundCurrent(request)) await restoreLastTrack(request);
@@ -449,7 +453,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
     lastAcceptedListRead = { generation: request.generation, navigation: request.navigation,
       selection: request.selection, account: request.account };
-    finishMusicLoad(request);
+    finishMusicLoad(request, deferSideLists);
     if (background) return;
     if (!isForegroundCurrent(request)) {
       // Picking a song changes playback ownership, but this request still owns
@@ -468,8 +472,11 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
   }
 
-  function finishMusicLoad(request) {
+  function finishMusicLoad(request, keepSideLists = false) {
     if (!ownsMusicLoad(request)) return;
+    // Only a successful catalog read can hand pending sidebar reads over to
+    // navigation and per-list ownership after the main request finishes.
+    request.keepSideLists = keepSideLists;
     musicLoadController = null;
     musicLoadRequest = null;
     request.controller.abort();
@@ -487,23 +494,33 @@ export function createMusicActions({ state, api, player, view, router, showError
     return loadSideList("smartPlaylists", "smartPlaylistsLoadedAt", "getSmartPlaylists", signal, owner);
   }
 
+  function isSideListOwnerCurrent(owner) {
+    if (!owner || ownsMusicLoad(owner)) return true;
+    if (!owner.keepSideLists) return false;
+    try {
+      const account = captureWebAccount();
+      return account.revision === owner.account.revision && (!owner.account.owner || account.owner === owner.account.owner);
+    } catch { return false; }
+  }
+
   async function loadSideList(kind, loadedAt, method, signal, owner) {
     ensureMusicState(state);
     sideListRequests[kind]?.controller.abort();
     const controller = new AbortController();
     const request = { controller, generation: ++sideListGenerations[kind], navigation: navigationGeneration };
     sideListRequests[kind] = request;
-    const abort = () => controller.abort();
+    const abort = () => { if (!owner?.keepSideLists) controller.abort(); };
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
     const isCurrent = () => !controller.signal.aborted && request.navigation === navigationGeneration
       && request.generation === sideListGenerations[kind] && sideListRequests[kind] === request
-      && (!owner || ownsMusicLoad(owner));
+      && isSideListOwnerCurrent(owner);
     try {
       const data = await api[method](controller.signal);
       if (!isCurrent()) return false;
       music()[kind] = data[kind] || [];
       music()[loadedAt] = Date.now();
+      if (owner?.keepSideLists) view.refreshSidebarPlaylists(kind);
       return true;
     } catch {
       if (!isCurrent()) return false;
@@ -1335,8 +1352,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     const requestedTrackId = music().playlistDialogTrackId;
     const navigation = navigationGeneration;
     const loadedCurrent = await loadPlaylists();
-    if (loadedCurrent && isNavigationCurrent(navigation) && music().playlistDialogOpen
-      && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
+    if (!loadedCurrent || !isNavigationCurrent(navigation)) return;
+    // Opening the dialog can replace a still-pending first-screen sidebar read.
+    view.refreshSidebarPlaylists("playlists");
+    if (music().playlistDialogOpen && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
   }
 
   function closePlaylistDialog() {

@@ -969,7 +969,8 @@ body.short-video-search-page-view .bottom-nav {
   font-weight: 850;
 }
 
-.short-video-mobile-author-index-more {
+.short-video-mobile-author-index-more,
+button.short-video-mobile-load-more {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface-raised);
@@ -1443,7 +1444,15 @@ body.short-video-search-page-view .bottom-nav {
   background: transparent;
 }
 
-.short-video-mobile-load-more:disabled {
+button.short-video-mobile-load-more {
+  width: auto;
+  height: auto;
+  min-height: 44px;
+  margin: 8px 10px 0;
+}
+
+.short-video-mobile-load-more:disabled,
+.short-video-mobile-load-more[aria-disabled="true"] {
   opacity: .62;
 }
 

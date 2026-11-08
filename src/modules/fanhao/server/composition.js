@@ -8,8 +8,8 @@ export function createFanhaoDependencies(deps) {
     subtitles: deps.subtitles,
     duplicates: deps.duplicates,
     diskUsage: deps.diskUsage,
-    catalog: pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]),
-    library: pick(deps, [
+    catalog: { ...pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]), ltx: deps.ltxCatalog },
+    library: { ...pick(deps, [
       "appConfigService",
       "getLastScanError",
       "getLibrary",
@@ -23,7 +23,7 @@ export function createFanhaoDependencies(deps) {
       "requireLocalAdmin",
       "sendJson",
       "userStateSummary"
-    ]),
+    ]), createPublicPersonPresenter: deps.createPublicPersonPresenter },
     settings: pick(deps, ["appConfigService"]),
     userState: { ...pick(deps, [
       "clampInteger",

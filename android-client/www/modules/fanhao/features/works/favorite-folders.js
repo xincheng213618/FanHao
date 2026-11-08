@@ -1,5 +1,5 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-8af3642624a3";
-import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../../../js/api.js?v=assets-8faf7a80cb7b";
+import { clearCachedJsonByPrefixes } from "../../../../js/cache.js?v=assets-8faf7a80cb7b";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 export const FAVORITE_FOLDER_RETRY_DELAYS_MS = Object.freeze([180]);
@@ -32,7 +32,7 @@ export async function retryFavoriteFolderRequest(request, options = {}) {
 
 export function createFavoriteFolderFeature(context = {}) {
   const api = context.api || fetchJson;
-  const clearCache = context.clearCachedJsonByPrefix || clearCachedJsonByPrefix;
+  const clearCachePrefix = context.clearCachedJsonByPrefix;
   let folders = [];
   let listRequest = null;
   let activeBaseUrl = "";
@@ -669,9 +669,14 @@ export function createFavoriteFolderFeature(context = {}) {
   async function invalidatePrefixes(mutation, prefixes, assertCurrent = () => assertMutationCurrent(mutation)) {
     assertCurrent();
     for (const prefix of prefixes) context.pageDataService?.invalidate(mutation.scope, prefix);
-    for (const prefix of prefixes) {
-      assertCurrent();
-      await clearCache(mutation.scope, prefix, { accountScope: mutation.accountScope }).catch(() => {});
+    const options = { accountScope: mutation.accountScope };
+    if (clearCachePrefix) {
+      for (const prefix of prefixes) {
+        assertCurrent();
+        await clearCachePrefix(mutation.scope, prefix, options).catch(() => {});
+      }
+    } else {
+      await clearCachedJsonByPrefixes(mutation.scope, prefixes, options).catch(() => {});
     }
     assertCurrent();
   }

@@ -121,7 +121,7 @@ export async function verifySearchActionsScale() {
     assert.deepEqual(offsets, Array.from({ length: 100 }, (_, index) => index * 120), "actions paging must advance by raw 120-row pages, never merged groups");
     assert(normalizations > 0 && normalizations <= raw.length * 4,
       `actual search actions must reuse their accumulator instead of cold-seeding every append, saw ${normalizations} NFKC calls`);
-    console.log("MUSIC_DEDUP_ACTIONS_SCALE", JSON.stringify({ raw: raw.length, pageSize: 120, requests: offsets.length, keyNormalizations: normalizations, includesFirstAppendSeed: true, outputGroups: state.music.data.tracks.length }));
+    console.log("MUSIC_DEDUP_ACTIONS_SCALE", JSON.stringify({ raw: raw.length, pageSize: 120, requests: offsets.length, keyNormalizations: normalizations, outputGroups: state.music.data.tracks.length }));
   } finally {
     counting = false; String.prototype.normalize = normalize;
     for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
@@ -133,7 +133,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   assert(!(negativeOnly && pattern) && !(pureOnly && pattern) && !(pureOnly && negativeOnly), "--case, --negative-only and --pure-only cannot be combined");
   if (!negativeOnly) {
     if (!pattern) { assert.equal(verifySearchDedupPure().checks, 3); await verifySearchActionsScale(); }
-    if (!pureOnly) { const result = await runMusicReaderFixture({ casePattern: pattern || "search append " }); if (!pattern) assert.equal(result.checks, 6); }
+    if (!pureOnly) { const result = await runMusicReaderFixture({ casePattern: pattern || "search append " }); if (!pattern) assert.equal(result.checks, 7); }
   }
   if (!pattern && !pureOnly) {
     assert.throws(() => verifySearchDedupPure({ scenario: "budget", factory: () => {
@@ -141,6 +141,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     } }), { name: "AssertionError", message: /incremental duplicate keys must normalize only newly ingested raw tracks/ });
     console.log("PASS negative control detects repeated full-prefix collapse");
     const actionPath = "/modules/music/actions.js", source = fs.readFileSync(new URL("../public/modules/music/actions.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+    const appendSearch = "view.appendSearchTrackPage?.(mergedTracks, previousSearchCount)";
+    assert.equal(source.split(appendSearch).length, 2, "search append negative must target the prefix reuse path");
+    await assert.rejects(() => runMusicReaderFixture({ casePattern: "search append preserves a large unchanged result prefix",
+      sourceOverrides: { [actionPath]: source.replace(appendSearch, "false") } }),
+    { name: "AssertionError", message: /a search append with the same accepted result prefix must keep its existing rows/ });
+    console.log("PASS negative control detects missing search result prefix reuse");
     const rawSync = "    if (Array.isArray(music().data?.rawTracks)) {\n      music().data.rawTracks = music().data.rawTracks.map((track) => (track?.id === updated.id ? { ...track, ...updated } : track));\n    }";
     assert.equal(source.split(rawSync).length, 2, "raw-confirmation negative must remove one actual update block");
     await assert.rejects(() => runMusicReaderFixture({ casePattern: "search append confirmed writes", sourceOverrides: { [actionPath]: source.replace(rawSync, "") } }),
@@ -151,5 +157,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       { name: "AssertionError", message: /a fresh accumulator session must contain no groups or member IDs from an earlier search/ });
     console.log("PASS negative control detects globally shared search groups");
   }
-  console.log(`Music search deduplication passed (${pattern ? "selected browser family" : pureOnly ? "4 pure/actions behavior families" : negativeOnly ? "3 independent negative controls" : "4 pure/actions + 6 browser families + 3 independent negative controls"})`);
+  console.log(`Music search deduplication passed (${pattern ? "selected browser family" : pureOnly ? "4 pure/actions behavior families" : negativeOnly ? "4 independent negative controls" : "4 pure/actions + 7 browser families + 4 independent negative controls"})`);
 }

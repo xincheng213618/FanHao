@@ -38,7 +38,7 @@ function factory(source) {
 }
 let subjectSource = currentSource;
 if (args.includes("--legacy-postings")) {
-  const swaps = ["ensureGramIndex", "rarestPosting", "indexedCandidates"].map(name =>
+  const swaps = ["addBigrams", "ensureGramIndex", "rarestPosting", "indexedCandidates"].map(name =>
     [functionSource(currentSource, name, "  "), functionSource(previousSource, name, "  ")]);
   swaps.push(["indexedCandidates(loweredQuery, normalizedQuery, gramIndex)", "indexedCandidates(loweredQuery, normalizedQuery, gramIndex.postings)"]);
   for (const [current, previous] of swaps) {
@@ -131,7 +131,7 @@ const queries = ["", "n", "AA-1", "aa1", "local title", "core title", "person na
   "relative/path", "video name", "video title", "video/path", "image name", "image title", "info name", "info title", "external phrase", "anonymous phrase", "\n\n", "missing phrase"];
 function decoded(index) {
   if (!index) return [];
-  return [...index.postings].map(([gram, posting]) => [gram, index.workIds
+  return [...index.postings].map(([gram, posting]) => [typeof gram === "number" ? String.fromCharCode(gram >>> 16, gram & 0xffff) : gram, index.workIds
     ? (typeof posting === "number" ? [index.workIds[posting]] : [...posting].map(ordinal => index.workIds[ordinal])) : [...posting]]);
 }
 function compareIndexes(current, previous, label) {
@@ -163,7 +163,8 @@ function storage(index) {
 }
 function storageGate(index) {
   assert.ok(index.workIds, "storage gate: one ordinal-to-original-ID table");
-  for (const posting of index.postings.values()) {
+  for (const [gram, posting] of index.postings) {
+    assert.equal(gram, gram | 0, "storage gate: signed integer code-unit pairs");
     assert.ok(typeof posting === "number" || posting instanceof Uint32Array, "storage gate: no retained ordinary posting arrays");
     const ordinals = typeof posting === "number" ? [posting] : posting;
     if (typeof posting !== "number") assert.ok(posting.length >= 2, "singleton grams allocate no typed array");
@@ -238,10 +239,12 @@ try {
       [0, work("zero", { id: 0, title: "qz", directoryName: "", personName: "", personId: null, relativePath: "", videos: [], images: [], infos: [] })],
       ["0", work("zero-string", { id: "0" })], ["not-the-work-id", work("1")],
       ["duplicate-a", work("duplicate", { title: "Duplicate first title" })], ["duplicate-b", work("duplicate", { title: "Duplicate second title" })],
-      ["", work("empty-id", { id: "" })], [null, work("null-id", { id: null })], [undefined, work("undefined-id", { id: undefined })]
+      ["", work("empty-id", { id: "" })], [null, work("null-id", { id: null })], [undefined, work("undefined-id", { id: undefined })],
+      ["utf16", work("utf16", { title: "Code units \0x \udc28a \uffffb 𐐀" })]
     ]);
     const edges = pair(0, edgeWorks);
-    compare(edges, [...queries, "qz", "q-z", "duplicate first", "duplicate second", "zero-string"], "zero ordinals, normalized-only match, mixed IDs, distinct map keys, duplicate IDs");
+    compare(edges, [...queries, "qz", "q-z", "duplicate first", "duplicate second", "zero-string", "\0x", "\udc28a", "\uffffb"],
+      "zero ordinals, normalized-only match, mixed IDs, duplicate IDs and UTF-16 code-unit edges");
     const zeroMatcher = edges.current.service.createMatcher("qz"), normalizedZeroMatcher = edges.current.service.createMatcher("q-z");
     assert.equal(zeroMatcher(edges.current.library.worksById.get(0)), true, "first-work singleton ordinal zero stays searchable");
     assert.equal(normalizedZeroMatcher(edges.current.library.worksById.get(0)), true, "normalized posting ordinal zero is not missing");

@@ -18,6 +18,7 @@ from person_identity import bind_location, canonical_person_id, has_table, locat
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "data" / "fanhao-core-v2.sqlite"
+VR_CACHE_ROOT = Path("V:/缓存")
 
 BASE_ROOTS = [
     Path("G:/"),
@@ -29,6 +30,7 @@ BASE_ROOTS = [
     Path("V:/[A]"),
     Path("V:/[A1]"),
     Path("V:/AV"),
+    VR_CACHE_ROOT,
 ]
 WESTERN_ROOTS = [Path(item) for item in os.environ.get("FANHAO_WESTERN_ROOTS", "R:/").replace("|", ";").split(";") if item.strip()]
 ROOTS = [*BASE_ROOTS, *WESTERN_ROOTS]
@@ -615,7 +617,9 @@ def ensure_work_person(conn: sqlite3.Connection, work_id: int, person_id: int, w
     )
 
 
-def choose_existing_work(indexes: dict, person_id: int, work: ScannedWork, distinct_work: bool = False) -> tuple[int | None, int | None, str]:
+def choose_existing_work(
+    indexes: dict, person_id: int, work: ScannedWork, distinct_work: bool = False, *, relink: bool = True
+) -> tuple[int | None, int | None, str]:
     claimed_ids: set[int] = indexes["claimed_local_work_ids"]
     claimed_work_ids: set[int] = indexes["claimed_work_ids"]
     source_video = work.videos[0] if work.videos else None
@@ -647,6 +651,8 @@ def choose_existing_work(indexes: dict, person_id: int, work: ScannedWork, disti
         ]
         candidate = choose_local_candidate(candidates, work)
     if candidate:
+        if not relink:
+            return int(candidate["work_id"]), None, ""
         claimed_ids.add(int(candidate["id"]))
         if distinct_work:
             claimed_work_ids.add(int(candidate["work_id"]))
@@ -744,6 +750,8 @@ def scan_all(
         processed_people = 0
         for root in available_roots:
             root_nested = nested_roots - {path_key(root)}
+            is_vr_cache = path_key(root) == path_key(VR_CACHE_ROOT)
+            unassigned_dir = root / "noactor"
             for person_dir in direct_child_dirs(root, root_nested):
                 processed_people += 1
                 if limit_people and processed_people > limit_people:
@@ -751,9 +759,14 @@ def scan_all(
                 if processed_person_dirs is not None:
                     processed_person_dirs.append(person_dir)
                 stats["person_dirs_seen"] += 1
-                person_source = clean_path(person_dir)
-                person_id = upsert_person(conn, people, person_dir.name, person_source, write, stats)
-                works = scan_person(person_dir, available_roots)
+                actor_dir = person_dir
+                if is_vr_cache and normalize_code(person_dir.name) == person_dir.name.upper() and unassigned_dir.is_dir():
+                    actor_dir = unassigned_dir
+                    work = scan_work(actor_dir, person_dir, person_dir.name, walk_files(person_dir), available_roots)
+                    works = [work] if work else []
+                else:
+                    works = scan_person(person_dir, available_roots)
+                person_id = upsert_person(conn, people, actor_dir.name, clean_path(actor_dir), write, stats)
                 person_scanned_paths: set[str] = set()
                 for work in works:
                     stats["works_seen"] += 1
@@ -761,7 +774,7 @@ def scan_all(
                     scanned_paths.add(work_path_key)
                     person_scanned_paths.add(work_path_key)
                     work_id, local_work_id, old_path = choose_existing_work(
-                        indexes, person_id, work, distinct_work=is_single_video_person(person_dir)
+                        indexes, person_id, work, distinct_work=is_single_video_person(person_dir), relink=not is_vr_cache
                     )
                     if not work_id:
                         work_id = create_work(conn, work, write, stats)

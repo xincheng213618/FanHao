@@ -36,11 +36,18 @@ if (!caseOption) {
       failure: /loading the next queue page must leave focus at its first appended song/
     },
     {
-      name: "current song summary refresh",
-      casePattern: "long queue playing a later song preserves queue context 1440px ignore-abort",
-      marker: 'refreshQueueRows(view);\n      restoreQueueContext(queuePanel, context);\n      playerBar.replaceWith(renderPlayerBar());',
-      replacement: 'refreshQueueRows(view);\n      playerBar.replaceWith(renderPlayerBar());',
-      failure: /starting another queue song must preserve its keyboard focus/
+      name: "focused remove control during track switch",
+      casePattern: "long queue track switch restores focus when removal becomes disabled",
+      marker: 'restoreQueueContext(queuePanel, context);\n      playerBar.replaceWith(renderPlayerBar());',
+      replacement: 'playerBar.replaceWith(renderPlayerBar());',
+      failure: /track switches must move focus from the newly disabled remove action/
+    },
+    {
+      name: "retained rows during track switch",
+      casePattern: "long queue track switch retains mounted rows at scale",
+      marker: "if (!updateQueueCurrentRow(view)) refreshQueueRows(view);",
+      replacement: "refreshQueueRows(view);",
+      failure: /track switches must retain the existing queue rows/
     },
     {
       name: "unplayed queue summary refresh",

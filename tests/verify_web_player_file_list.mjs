@@ -6,12 +6,14 @@ import { runWebPlayerFixture } from "./verify_web_player_lifecycle.mjs";
 // Media events and list snapshots are synthetic; no real video is decoded.
 for (const realPlyr of [false, true]) {
   const result = await runWebPlayerFixture({ realPlyr, casePattern: "file list " });
-  assert.equal(result.checks, 3);
+  assert.equal(result.checks, 4);
 }
 const source = fs.readFileSync(new URL("../public/js/player-page.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 for (const negative of [
-  { name: "file row reuse", marker: "if (!reusable) {", replacement: "if (true) {", pattern: "file list switching", realPlyr: true,
-    failure: /choosing one file must preserve all 1000 existing file rows/ },
+  { name: "file row reuse", marker: "if (!reusable) {", replacement: "if (true) {", pattern: "file list snapshot", realPlyr: true,
+    failure: /same-order metadata refresh must retain file rows/ },
+  { name: "selection-only file refresh", marker: "updateRenderedFileSelection(currentWork);", replacement: "renderFiles(currentWork);", pattern: "file list switching", realPlyr: true,
+    failure: /file switching must update only the outgoing and incoming rows/ },
   { name: "refreshed file descriptor", marker: "row.video = video;", replacement: "", pattern: "file list snapshot",
     failure: /a retained file button must prepare its refreshed descriptor/ },
   { name: "retired row ownership", marker: "if (renderedFilesWork !== work || currentWork !== work || button.parentElement !== els.files\n            || !(work.videos || []).includes(row.video)) return;", replacement: "", pattern: "file list snapshot",
@@ -22,4 +24,4 @@ for (const negative of [
     sourceOverride: source.replace(negative.marker, negative.replacement) }), { name: "AssertionError", message: negative.failure });
   console.log(`PASS negative control detects missing ${negative.name}`);
 }
-console.log("Player file list passed (6 browser cases + 3 independent negative controls)");
+console.log("Player file list passed (8 browser cases + 4 independent negative controls)");

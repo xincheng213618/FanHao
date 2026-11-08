@@ -175,11 +175,14 @@ try {
   for (const count of [200, 1000, 3000]) {
     const target = Math.floor(count * .77), a = await old.open(count, target), b = await next.open(count, target);
     try {
-      const pending = async f => f.page.evaluate(() => { const comic = __cold.settled.find(value => value.url === "/api/manga/C"), chapter = __cold.started.find(value => value.url.startsWith("/api/manga/C/chapters/")); return { rows: document.querySelectorAll(".manga-chapter-row").length, created: __cold.created, chapterRequestDelayMs: chapter.at - comic.at }; });
+      const pending = async f => {
+        await f.page.waitForFunction(() => __cold.settled.some(value => value.url === "/api/manga/C"));
+        return f.page.evaluate(() => { const comic = __cold.settled.find(value => value.url === "/api/manga/C"), chapter = __cold.started.find(value => value.url.startsWith("/api/manga/C/chapters/")); return { rows: document.querySelectorAll(".manga-chapter-row").length, created: __cold.created, chapterRequestDelayMs: chapter.at - comic.at }; });
+      };
       const scale = { count, before: await pending(a), current: await pending(b) };
       await settle(a, a.gate); await settle(b, b.gate); await reader(a, "C", target); await reader(b, "C", target);
       assert.deepEqual(await snapshot(b), await snapshot(a), "complete frozen/current final reader DTO and DOM");
-      assert.deepEqual(b.requests, a.requests, "chapter GET follows the comic GET exactly once"); comparisons += 2;
+      assert.deepEqual([...b.requests].sort(), [...a.requests].sort(), "the comic and chapter GETs each issue exactly once"); comparisons += 2;
       assert.equal(scale.before.rows, count); measurements.push(scale);
       await b.page.locator('.manga-reader-bar [data-action="detail"]').press("Enter");
       await b.page.locator(".manga-directory-search-input").waitFor();

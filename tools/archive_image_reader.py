@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+VIDEO_EXTS = {".mp4", ".m4v", ".webm"}
 RAR_EXTS = {".rar"}
 ZIP_EXTS = {".zip", ".cbz"}
 
@@ -70,14 +71,18 @@ def default_unrar_path():
     return next((item for item in candidates if item and Path(item).exists()), "")
 
 
-def list_zip(archive_path):
+def is_video_member(name):
+    return not any(char in name for char in "*?") and Path(name).suffix.lower() in VIDEO_EXTS
+
+
+def list_zip(archive_path, accepts=is_image_member):
     images = []
     with zipfile.ZipFile(archive_path) as archive:
         for info in archive.infolist():
             if info.is_dir():
                 continue
             safe_name = safe_member_name(info.filename)
-            if not safe_name or not is_image_member(safe_name):
+            if not safe_name or not accepts(safe_name):
                 continue
             images.append(
                 {
@@ -91,7 +96,7 @@ def list_zip(archive_path):
     return images
 
 
-def list_rar(archive_path, unrar_path):
+def list_rar(archive_path, unrar_path, accepts=is_image_member):
     if not unrar_path:
         raise RuntimeError("UnRAR.exe not found")
     cmd = [unrar_path, "lb", "-scu", "-p-", "-cfg-", str(archive_path)]
@@ -107,7 +112,7 @@ def list_rar(archive_path, unrar_path):
     images = []
     for line in output.splitlines():
         safe_name = safe_member_name(line)
-        if not safe_name or not is_image_member(safe_name):
+        if not safe_name or not accepts(safe_name):
             continue
         images.append({"path": safe_name, "name": Path(safe_name).name, "bytes": 0, "compressedBytes": 0})
     images.sort(key=lambda item: natural_key(item["path"]))
@@ -130,6 +135,68 @@ def list_archive(archive_path, limit=0, unrar_path=""):
     if limit and limit > 0:
         images = images[:limit]
     return {"ok": True, "archiveType": archive_type, "imageCount": total, "images": images}
+
+
+def list_videos(archive_path, unrar_path=""):
+    archive_path = Path(archive_path)
+    ext = archive_path.suffix.lower()
+    if ext in ZIP_EXTS:
+        videos = list_zip(archive_path, is_video_member)
+    elif ext in RAR_EXTS:
+        videos = list_rar(archive_path, unrar_path or default_unrar_path(), is_video_member)
+    else:
+        raise RuntimeError(f"unsupported archive: {ext}")
+    return {"ok": True, "videos": videos}
+
+
+def copy_video(source, target, max_bytes):
+    total = 0
+    while chunk := source.read(1024 * 1024):
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError("视频超出读取缓存容量")
+        target.write(chunk)
+    if not total:
+        raise RuntimeError("视频文件为空")
+    return total
+
+
+def extract_video(archive_path, member, output_path, max_bytes, unrar_path=""):
+    archive_path = Path(archive_path)
+    normalized = safe_member_name(member)
+    if not normalized or not is_video_member(normalized) or max_bytes < 1:
+        raise RuntimeError("unsafe or unsupported video member")
+    ext = archive_path.suffix.lower()
+    # The Node archive owner publishes or removes this private staging file.
+    if ext in ZIP_EXTS:
+        with zipfile.ZipFile(archive_path) as archive:
+            info = next((item for item in archive.infolist()
+                         if not item.is_dir() and safe_member_name(item.filename) == normalized), None)
+            if info is None:
+                raise RuntimeError("archive member not found")
+            if info.file_size > max_bytes:
+                raise RuntimeError("视频超出读取缓存容量")
+            with archive.open(info) as source, Path(output_path).open("xb") as target:
+                size = copy_video(source, target, max_bytes)
+    elif ext in RAR_EXTS:
+        unrar = unrar_path or default_unrar_path()
+        if not unrar:
+            raise RuntimeError("UnRAR.exe not found")
+        pattern = normalized.replace("/", "\\")
+        with Path(output_path).open("xb") as target, subprocess.Popen(
+            [unrar, "p", "-inul", "-p-", "-cfg-", "--", str(archive_path), pattern],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        ) as process:
+            try:
+                size = copy_video(process.stdout, target, max_bytes)
+            except BaseException:
+                process.kill()
+                raise
+            if process.wait() != 0:
+                raise RuntimeError("RAR 视频解压失败")
+    else:
+        raise RuntimeError(f"unsupported archive: {ext}")
+    return {"ok": True, "bytes": size}
 
 
 def atomic_output_path(output_path):
@@ -225,12 +292,27 @@ def main():
     extract_parser.add_argument("output")
     extract_parser.add_argument("--unrar", default="")
 
+    videos_parser = subparsers.add_parser("list-videos")
+    videos_parser.add_argument("archive")
+    videos_parser.add_argument("--unrar", default="")
+
+    video_parser = subparsers.add_parser("extract-video")
+    video_parser.add_argument("archive")
+    video_parser.add_argument("member")
+    video_parser.add_argument("output")
+    video_parser.add_argument("max_bytes", type=int)
+    video_parser.add_argument("--unrar", default="")
+
     args = parser.parse_args()
     try:
         if args.command == "list":
             json_exit(list_archive(args.archive, limit=args.limit, unrar_path=args.unrar))
         if args.command == "extract":
             json_exit(extract_archive(args.archive, args.member, args.output, unrar_path=args.unrar))
+        if args.command == "list-videos":
+            json_exit(list_videos(args.archive, unrar_path=args.unrar))
+        if args.command == "extract-video":
+            json_exit(extract_video(args.archive, args.member, args.output, args.max_bytes, unrar_path=args.unrar))
     except Exception as error:
         json_exit({"ok": False, "error": str(error)}, code=1)
 

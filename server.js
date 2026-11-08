@@ -35,7 +35,7 @@ import { createPeopleScopeService } from "./src/modules/fanhao/server/people/peo
 import { createPersonLibraryService } from "./src/modules/fanhao/server/people/person-library-service.js";
 import { createPersonListService } from "./src/modules/fanhao/server/people/person-list-service.js";
 import { createPersonMergeService } from "./src/modules/fanhao/server/people/person-merge-service.js";
-import { bindPersonLocation, canonicalPersonId } from "./src/modules/fanhao/server/people/person-identity.js";
+import { bindPersonLocation, canonicalPersonId, createCanonicalPersonReader } from "./src/modules/fanhao/server/people/person-identity.js";
 import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createCodePrefixService } from "./src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { createRankingService } from "./src/modules/fanhao/server/catalog/ranking-service.js";
@@ -76,6 +76,7 @@ import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/platform
 import { createServerHost } from "./src/platform/server/server-host.js";
 import { createStaticFileServer } from "./src/platform/server/static-files.js";
 import { createVideoProbeCacheService } from "./src/platform/server/video-probe-cache-service.js";
+import { classifyIntakeAds, fetchIntakeMetadata, probeIntakeVideo } from "./src/modules/fanhao/server/workflows/intake-files.js";
 import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
 
 const product = SERVER_CONFIG.PRODUCT;
@@ -263,11 +264,13 @@ const photoSetService = withGallery ? createPhotoSetService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
   archiveImageSignature,
   archiveImagesPayload,
+  archiveVideosPayload,
   compressImageFileToJpeg,
   coverGeneratorVersion: PHOTO_SET_COVER_GENERATOR_VERSION,
   coverHints: COVER_HINTS,
   coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
   extractArchiveMemberToCache,
+  extractArchiveVideoCover,
   fileBase,
   getImageGalleryDb,
   getImageLibraryIndex: imageLibraryIndexService.getIndex,
@@ -280,6 +283,7 @@ const photoSetService = withGallery ? createPhotoSetService({
   safeChildPath,
   safeStat,
   serveArchiveMemberImage,
+  serveArchiveMemberVideo,
   setArchiveMarkedA: photoLibraryStore.setArchiveMarkedA
 }) : null;
 const galleryMetadataService = withGallery ? createGalleryMetadataService({
@@ -343,9 +347,12 @@ const imageReaderCacheService = createImageReaderCacheService({
 });
 archiveImageService = createArchiveImageService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
+  archiveVideoExts: DIRECT_VIDEO_EXTS,
+  archiveVideoMaxBytes: () => Math.floor(appConfigService.imageReaderCacheMaxBytes() * IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO),
   coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
   coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
   ffmpegPath: FFMPEG_PATH,
+  ffprobePath: FFPROBE_PATH,
   getImageGalleryDb,
   helperPath: ARCHIVE_READER_HELPER_PATH,
   imageReaderCacheService,
@@ -358,6 +365,7 @@ archiveImageService = createArchiveImageService({
   safeStat,
   sendText,
   serveInlineFile,
+  serveRangedFile,
   warn: console.warn
 });
 const imageLibraryService = withGallery ? createImageLibraryService({
@@ -618,6 +626,7 @@ const studioService = createStudioService({
 });
 const personMergeService = createPersonMergeService({
   resolveCanonicalId: (id) => hasCoreDb() ? canonicalPersonId(getCoreDb(), id) : id,
+  createCanonicalIdReader: () => hasCoreDb() ? createCanonicalPersonReader(getCoreDb()) : null,
   actorMovieRows,
   actorProfileAliases,
   actorProfileRow,
@@ -635,6 +644,7 @@ const peopleScopeService = createPeopleScopeService({
   isMainExcludedWork: isAnimeWork,
   mainExcludedRoots: GALLERY_MEDIA_SOURCES.filter((source) => source.kind === "anime").flatMap((source) => source.roots || []),
   mergedPersonRecord,
+  mergedPersonRecords: personMergeService.records,
   pathWithinRoot: (...args) => pathWithinRoot(...args),
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
   westernRoots: WESTERN_LIBRARY_ROOTS
@@ -798,6 +808,7 @@ const workPresenterService = createWorkPresenterService({
   withWorkInfoReadStatus,
   workInfoReadCacheable,
   actorProfileRow,
+  createActorProfileSnapshotReader,
   dbBoolOrNull,
   displayPersonForWork,
   displayWorkTitle,
@@ -1094,6 +1105,19 @@ const moduleRegistry = await discoverFanHaoModules({
         }
       },
       fanhao: createFanhaoDependencies({
+        ltxCatalog: {
+          snapshotPath: path.join(DATA_DIR, "ltx-catalog.json"),
+          getDb: () => hasCoreDb() ? getCoreDb() : null,
+          incomingRoots: SERVER_CONFIG.MEDIA_INTAKE_ROOTS,
+          libraryRoots: LIBRARY_ROOTS,
+          requireLocalAdmin,
+          coverUrl: (value) => {
+            try {
+              const cover = new URL(value);
+              return cover.protocol === "https:" && isAllowedRemoteImageUrl(cover) ? proxiedRemoteImageUrl(cover.href) : "";
+            } catch { return ""; }
+          }
+        },
         taste: { dbPath: CORE_DB_PATH, requireLocalAdmin, sendJson },
         duplicates: { dbPath: CORE_DB_PATH, roots: [...LIBRARY_ROOTS, ...WESTERN_LIBRARY_ROOTS],
           resolveWork: resolveLibraryWorkByPublicId, resolveVideo: resolveVideoFileByPublicId,
@@ -1105,7 +1129,17 @@ const moduleRegistry = await discoverFanHaoModules({
         workflows: {
           dataDir: DATA_DIR, roots: SERVER_CONFIG.FILE_WORKFLOW_ROOTS,
           indexedPaths: () => getCoreDb().prepare("SELECT file_path FROM local_files").all().map((row) => row.file_path),
-          requireLocalAdmin, readJsonBody, sendJson
+          requireLocalAdmin, requestAccess: (req) => requestAccess(req), readJsonBody, sendJson,
+          intake: {
+            getDb: getCoreDb, sourceRoots: SERVER_CONFIG.MEDIA_INTAKE_ROOTS, libraryRoots: LIBRARY_ROOTS,
+            relativeFromRoot: (...args) => relativeFromRoot(...args), onIndexChanged: refreshLibrary,
+            markFavorite: (id) => workLocalMutationService.setWorkLocalMarker(String(id), "A", true),
+            probeVideo: (file) => probeIntakeVideo(FFPROBE_PATH, file),
+            classifyAds: (unnumbered, numbered) => classifyIntakeAds(PYTHON_PATH, path.join(PROJECT_ROOT, "tools", "clean.py"), unnumbered, numbered),
+            fetchMetadata: (code) => fetchIntakeMetadata({ python: PYTHON_PATH,
+              script: path.join(PROJECT_ROOT, "tools", "lookup_intake_metadata.py"),
+              profile: JAVDB_115_COOKIE_PROFILE_DIR, cwd: PROJECT_ROOT }, code)
+          }
         },
         diskUsage: {
           cacheDir: path.join(DATA_DIR, "disk-usage"),
@@ -1198,6 +1232,7 @@ const moduleRegistry = await discoverFanHaoModules({
         prewarmRemoteImagesForWorks,
         prewarmVideoProbesForWorks,
         publicActorProfile,
+        createPublicPersonPresenter: workPresenterService.createPersonPresenter,
         publicPerson,
         publicWork,
         publicWorkAvailability,
@@ -1240,21 +1275,35 @@ const moduleRegistry = await discoverFanHaoModules({
         imageLibraryService,
         photoCategoryCoverStore,
         photoLibraryStore,
+        photoSetService,
         requireLocalAdmin,
         sendJson
       },
       photos: {
         appConfigService,
         cleanupImageReaderCache: imageReaderCacheService.cleanup,
+        getImageGalleryDb,
+        getPhotoCoverWarmPlan: photoLibraryStore?.coverWarmPlan,
+        getPhotoSets: () => imageLibraryIndexService.getPhotoSets(),
         imageLibraryService,
         imageReaderCacheStatus: imageReaderCacheService.statusAsync,
         mangaService,
         notFound,
         photoSetService,
+        getPhotoIndexScan: () => {
+          const scans = adminTaskService.list().filter(task => task.scriptId === "image-library-rescan");
+          const latest = scans.find(task => task.status === "running" || task.status === "stopping") || scans[0];
+          return latest ? adminTaskService.publicTask(latest) : null;
+        },
+        startPhotoIndexScan: () => adminTaskOrchestrationService.runScriptPayload({
+          scriptId: "image-library-rescan", options: { scope: "photo" }
+        }).task,
         releasePhotoSetLookup: imageLibraryIndexService?.clearPhotoSetLookup,
         publicAppConfig: appConfigService.publicConfig,
         readJsonBody,
         requireLocalAdmin,
+        resolvePersonId: (personId) => resolveLibraryPersonByPublicId(personId),
+        serveStatic,
         sendJson
       },
       media: {
@@ -1529,10 +1578,6 @@ function actorProfileJavdbRefs(personOrRow) {
   }
 }
 
-function actorProfileDisplayName(person) {
-  return personMergeService.displayName(person);
-}
-
 function actorProfileSearchNames(person) {
   return personMergeService.searchNames(person);
 }
@@ -1545,6 +1590,7 @@ function isBracketedSearch(value) {
 function searchPeople(rawQuery) {
   const query = String(rawQuery || "").trim();
   if (!query) return { exact: [], fuzzy: [], people: [] };
+  if (!library.people.length) return { exact: [], fuzzy: [], matchedPersonIds: [], people: [] };
 
   const exactName = normalizePersonSearchValue(query);
   const normalizedQuery = normalizeSearchValue(query);
@@ -1556,19 +1602,20 @@ function searchPeople(rawQuery) {
   const exactCanonicalIds = new Set();
   const fuzzyCanonicalIds = new Set();
   const lowerQuery = query.toLowerCase();
+  const reader = personMergeService.createSearchReader(actorProfileService.createRowReader());
 
   const addPersonMatch = (list, canonicalIds, person) => {
-    const merged = mergedPersonRecord(person);
+    const merged = reader.record(person);
     if (!merged || canonicalIds.has(merged.id)) return;
     canonicalIds.add(merged.id);
     list.push(merged);
   };
 
   for (const person of library.people) {
-    const names = actorProfileSearchNames(person);
+    const names = reader.searchNames(person);
     if (names.some((name) => normalizePersonSearchValue(name) === exactName)) {
       exactSourceIds.add(person.id);
-      for (const member of mergedPersonMembers(person.id)) exactSourceIds.add(member.id);
+      for (const member of reader.members(person.id)) exactSourceIds.add(member.id);
       addPersonMatch(exact, exactCanonicalIds, person);
       continue;
     }
@@ -1581,18 +1628,19 @@ function searchPeople(rawQuery) {
       return lowerName.includes(lowerQuery) || (normalizedQuery.length >= 2 && normalizedName.includes(normalizedQuery));
     })) {
       fuzzySourceIds.add(person.id);
-      for (const member of mergedPersonMembers(person.id)) fuzzySourceIds.add(member.id);
+      for (const member of reader.members(person.id)) fuzzySourceIds.add(member.id);
       addPersonMatch(fuzzy, fuzzyCanonicalIds, person);
     }
   }
 
   const displayNames = new Map();
   const displayNameForSort = (person) => {
-    if (!displayNames.has(person)) displayNames.set(person, actorProfileDisplayName(person));
+    if (!displayNames.has(person)) displayNames.set(person, reader.displayName(person));
     return displayNames.get(person);
   };
+  const compareDisplayNames = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare;
   const sortPeople = (people) =>
-    people.sort((a, b) => b.workCount - a.workCount || displayNameForSort(a).localeCompare(displayNameForSort(b), undefined, { numeric: true, sensitivity: "base" }));
+    people.sort((a, b) => b.workCount - a.workCount || compareDisplayNames(displayNameForSort(a), displayNameForSort(b)));
 
   sortPeople(exact);
   sortPeople(fuzzy);
@@ -1682,6 +1730,13 @@ function publicActorProfile(row) {
 
 function publicActorProfileSnapshot(row) {
   return actorProfileService.publicSnapshot(row);
+}
+
+function createActorProfileSnapshotReader() {
+  const readRow = actorProfileService.createRowReader();
+  let readAliases;
+  const readAliasNames = (id) => (readAliases ??= personMergeService.createAliasNameReader(readRow))(id);
+  return (id) => actorProfileService.publicSnapshot(readRow(id), readAliasNames);
 }
 
 function normalizeSourcePath(value) {
@@ -2284,6 +2339,10 @@ async function archiveImagesPayload(archivePath, options = {}) {
   return archiveImageService.archiveImagesPayload(archivePath, options);
 }
 
+function archiveVideosPayload(archivePath, options) {
+  return archiveImageService.archiveVideosPayload(archivePath, options);
+}
+
 function archiveImageSignature(archivePath, request = {}) {
   return archiveImageService.archiveSignature(archivePath, request);
 }
@@ -2302,6 +2361,14 @@ async function compressImageFileToJpeg(filePath, request = {}) {
 
 async function serveArchiveMemberImage(res, options) {
   return archiveImageService.serveArchiveMemberImage(res, options);
+}
+
+function serveArchiveMemberVideo(req, res, options) {
+  return archiveImageService.serveArchiveMemberVideo(req, res, options);
+}
+
+function extractArchiveVideoCover(options) {
+  return archiveImageService.extractArchiveVideoCover(options);
 }
 function photoSetCoverUrl(albumId, updatedAt = "") {
   if (!albumId) return "";

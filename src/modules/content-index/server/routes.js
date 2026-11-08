@@ -4,7 +4,7 @@ import { PHOTO_CATEGORY_COVER_MAX_BYTES, PHOTO_CATEGORY_COVER_ROUTE } from "./ph
 const categoryCoverBodyLimit = 4 * Math.ceil(PHOTO_CATEGORY_COVER_MAX_BYTES / 3) + 1024;
 
 export async function routeContentIndexApi(req, res, url, deps) {
-  const { imageLibraryService, photoCategoryCoverStore, photoLibraryStore, requireLocalAdmin, sendJson } = deps;
+  const { imageLibraryService, photoCategoryCoverStore, photoLibraryStore, photoSetService, requireLocalAdmin, sendJson } = deps;
 
   if (url.pathname === "/api/image-library/photo-card-counts" && req.method === "GET") {
     const ids = [...new Set(url.searchParams.getAll("ids"))];
@@ -81,7 +81,12 @@ export async function routeContentIndexApi(req, res, url, deps) {
 
   if (url.pathname === "/api/image-library/items" && req.method === "GET") {
     try {
-      sendJson(res, 200, imageLibraryService.itemsPayload(url));
+      const payload = imageLibraryService.itemsPayload(url);
+      if (payload.mode === "photo" && photoSetService) {
+        const { items, collectionSummary } = payload;
+        const covers = photoSetService.withCoverOverrides(collectionSummary ? [...items, collectionSummary] : items);
+        sendJson(res, 200, collectionSummary ? { ...payload, items: covers.slice(0, -1), collectionSummary: covers.at(-1) } : { ...payload, items: covers });
+      } else sendJson(res, 200, payload);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "频道列表读取失败" });
     }

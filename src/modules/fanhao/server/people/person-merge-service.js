@@ -5,6 +5,7 @@ export function createPersonMergeService({
   getLibrary,
   getStamp,
   resolveCanonicalId = (id) => id,
+  createCanonicalIdReader,
   normalizePersonSearchValue,
   normalizeSourcePath,
   personHasVrMergeContent,
@@ -16,12 +17,17 @@ export function createPersonMergeService({
   let personRecordCacheStamp = "";
 
   function maps() {
-    const stamp = getStamp();
+    return mapsForStamp(getStamp());
+  }
+
+  function mapsForStamp(stamp, resolve) {
     if (personMergeCache?.stamp === stamp) return personMergeCache.maps;
+    const people = getLibrary().people;
+    const canonicalForId = resolve || (people.length ? batchCanonicalId() : canonicalId);
     const aliasToCanonical = new Map();
     const groupsByCanonical = new Map();
-    for (const person of getLibrary().people) {
-      const canonical = canonicalId(person.id);
+    for (const person of people) {
+      const canonical = canonicalForId(person.id);
       aliasToCanonical.set(String(person.id), canonical);
       if (!groupsByCanonical.has(canonical)) groupsByCanonical.set(canonical, []);
       groupsByCanonical.get(canonical).push(String(person.id));
@@ -37,17 +43,41 @@ export function createPersonMergeService({
     return String(resolveCanonicalId(String(personId || "")));
   }
 
+  function batchCanonicalId() {
+    const resolve = createCanonicalIdReader?.() || resolveCanonicalId;
+    return (personId) => String(resolve(String(personId || "")));
+  }
+
   function members(personId) {
     const library = getLibrary();
-    const canonicalPersonId = canonicalId(personId);
-    const ids = maps().groupsByCanonical.get(canonicalPersonId) || [canonicalPersonId];
+    return membersForId(library, canonicalId(personId), maps().groupsByCanonical);
+  }
+
+  function membersForId(library, canonicalPersonId, groups) {
+    const ids = groups.get(canonicalPersonId) || [canonicalPersonId];
     return ids.map((id) => library.peopleById.get(id)).filter(Boolean);
   }
 
   function aliasNames(personId) {
+    return aliasNamesForId(getLibrary(), canonicalId(personId), actorProfileRow, members);
+  }
+
+  function createAliasNameReader(readRow) {
+    const { library, resolve, canonicalMembers } = createMergeReader();
+    return (id) => aliasNamesForId(library, resolve(id), readRow, canonicalMembers);
+  }
+
+  function createMergeReader() {
+    const stamp = getStamp();
     const library = getLibrary();
-    const canonicalPersonId = canonicalId(personId);
-    const canonicalRow = actorProfileRow(canonicalPersonId);
+    const resolve = batchCanonicalId();
+    let groups;
+    const canonicalMembers = (id) => membersForId(library, id, groups ??= mapsForStamp(stamp, resolve).groupsByCanonical);
+    return { stamp, library, resolve, canonicalMembers };
+  }
+
+  function aliasNamesForId(library, canonicalPersonId, readRow, readMembers) {
+    const canonicalRow = readRow(canonicalPersonId);
     const primary = new Set(
       uniquePersonNames([
         library.peopleById.get(canonicalPersonId)?.name,
@@ -56,8 +86,8 @@ export function createPersonMergeService({
       ]).map(normalizePersonSearchValue)
     );
     const names = [];
-    for (const person of members(canonicalPersonId)) {
-      const row = actorProfileRow(person.id);
+    for (const person of readMembers(canonicalPersonId)) {
+      const row = readRow(person.id);
       names.push(person.name, row?.person_name, row?.display_name, ...actorProfileAliases(row));
     }
     return uniquePersonNames(names).filter((name) => {
@@ -69,15 +99,25 @@ export function createPersonMergeService({
   function record(person) {
     if (!person) return null;
     const stamp = getStamp();
+    return recordAtStamp(person, getLibrary(), stamp, canonicalId, members);
+  }
+
+  function records(people) {
+    if (!people.length) return [];
+    const { stamp, library, resolve, canonicalMembers } = createMergeReader();
+    const readMembers = (id) => canonicalMembers(resolve(id));
+    return people.map((person) => person ? recordAtStamp(person, library, stamp, resolve, readMembers) : null);
+  }
+
+  function recordAtStamp(person, library, stamp, resolve, readMembers) {
     if (personRecordCacheStamp !== stamp) {
       personRecordCacheStamp = stamp;
       personRecordCache.clear();
     }
-    const library = getLibrary();
-    const canonicalPersonId = canonicalId(person.id);
+    const canonicalPersonId = resolve(person.id);
     if (personRecordCache.has(canonicalPersonId)) return personRecordCache.get(canonicalPersonId);
     const canonical = library.peopleById.get(canonicalPersonId) || person;
-    const mergedMembers = members(canonicalPersonId);
+    const mergedMembers = readMembers(canonicalPersonId);
     if (mergedMembers.length <= 1) {
       personRecordCache.set(canonicalPersonId, canonical);
       return canonical;
@@ -131,19 +171,39 @@ export function createPersonMergeService({
   }
 
   function displayName(person) {
-    const row = person?.id ? actorProfileRow(person.id) : null;
+    return displayNameForPerson(person, actorProfileRow);
+  }
+
+  function displayNameForPerson(person, readRow) {
+    const row = person?.id ? readRow(person.id) : null;
     return row ? preferredPersonDisplayName(row, person?.name || "") : person?.name || "";
   }
 
   function searchNames(person) {
+    return searchNamesForPerson(person, actorProfileRow, aliasNames);
+  }
+
+  function createSearchReader(readRow) {
+    const { stamp, library, resolve, canonicalMembers } = createMergeReader();
+    const readMembers = (id) => canonicalMembers(resolve(id));
+    const readAliases = (id) => aliasNamesForId(library, resolve(id), readRow, canonicalMembers);
+    return {
+      displayName: (person) => displayNameForPerson(person, readRow),
+      members: readMembers,
+      record: (person) => recordAtStamp(person, library, stamp, resolve, readMembers),
+      searchNames: (person) => searchNamesForPerson(person, readRow, readAliases)
+    };
+  }
+
+  function searchNamesForPerson(person, readRow, readAliases) {
     if (!person) return [];
-    const row = actorProfileRow(person.id);
+    const row = readRow(person.id);
     return uniquePersonNames([
       person.name,
       row?.person_name,
       row?.display_name,
       ...actorProfileAliases(row),
-      ...aliasNames(person.id)
+      ...readAliases(person.id)
     ]);
   }
 
@@ -161,12 +221,15 @@ export function createPersonMergeService({
   return {
     aliasNames,
     canonicalId,
+    createAliasNameReader,
+    createSearchReader,
     displayName,
     displayPersonForWork,
     invalidate,
     maps,
     members,
     record,
+    records,
     searchNames
   };
 }

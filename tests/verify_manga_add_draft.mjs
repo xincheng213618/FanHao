@@ -24,7 +24,7 @@ for (const negative of [
   },
   {
     name: "retired add form ownership",
-    marker: 'const currentAdd = () => addPanel.isConnected && currentLibraryView(libraryView)\n        && addPanel.closest(".manga-library") === libraryView.page && libraryView.page.querySelector(".manga-add-panel") === addPanel;',
+    marker: 'const currentAdd = () => !state.manga.query && addPanel.isConnected && currentLibraryView(libraryView)\n        && addPanel.closest(".manga-library") === libraryView.page && libraryView.page.querySelector(".manga-add-panel") === addPanel;',
     replacement: "const currentAdd = () => true;",
     casePattern: "library add draft: retired form cannot submit or close a new comic",
     failure: /retired add controls must not submit their draft into a newer view or comic/

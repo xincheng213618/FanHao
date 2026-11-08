@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#172e29"><title>视频洗版工作台 · FanHao</title>
+  <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/modules/fanhao/file-workflows/styles.css">
+  <link rel="stylesheet" href="/modules/fanhao/file-workflows/intake.css?v=4">
+</head>
+<body>
+  <main id="bench" class="bench" data-view="drop">
+    <div id="dropArea" class="drop">
+      <div class="drop-card">
+        <strong>把视频或文件夹拖到这里</strong>
+        <div class="drop-controls">
+          <span>在本机定位 · 不上传视频</span>
+          <div class="actions"><button id="pickFiles" type="button">选择视频</button><button id="pickFolder" type="button">选择文件夹</button></div>
+          <form class="path-form"><input aria-label="视频或文件夹完整路径" required autocomplete="off" placeholder="或粘贴视频或文件夹的完整路径"><button type="submit">加入</button></form>
+          <button class="open-history link-button" type="button">迁移记录</button>
+        </div>
+      </div>
+    </div>
+    <input id="filePicker" type="file" multiple hidden><input id="folderPicker" type="file" webkitdirectory multiple hidden>
+
+    <aside class="side">
+      <div class="side-head">
+        <h2>待核对 <span id="queueCount" class="badge">0</span></h2>
+        <div class="side-tools"><button id="addFiles" type="button" title="选择视频">+ 视频</button><button id="addFolder" type="button" title="选择文件夹">+ 目录</button></div>
+      </div>
+      <form class="path-form"><input aria-label="视频或文件夹完整路径" required autocomplete="off" placeholder="粘贴路径后回车"></form>
+      <div id="queue" class="queue"></div>
+      <section id="tasksPanel" class="tasks" aria-label="执行队列" hidden>
+        <h3>执行队列 <span id="doneCount"></span></h3>
+        <div id="tasks" class="task-list"></div>
+      </section>
+      <button class="open-history link-button" type="button">迁移记录</button>
+    </aside>
+
+    <section class="compare" aria-label="新旧文件对照">
+      <p id="compareEmpty" class="compare-empty">选中左侧待办开始对照。</p>
+      <div id="compareBody" class="compare-body" hidden>
+        <header class="compare-head">
+          <form id="codeForm" class="code-form"><input id="code" aria-label="番号" maxlength="40" autocomplete="off"><button type="submit">重新匹配</button></form>
+          <div id="workMetadata" class="work-info"></div>
+        </header>
+        <div class="compare-scroll">
+          <div class="compare-tools"><div id="versions" class="versions"></div><button id="openBoth" type="button">同时打开两份</button></div>
+          <table id="compareTable" class="cmp"></table>
+          <p id="noExisting" class="no-existing" hidden>未找到同番号的馆藏视频。</p>
+          <div id="newWork" class="new-work" hidden>
+            <div class="new-work-head"><h3>新番号入库</h3><button id="fetchMeta" type="button">用 115Chrome 查资料</button></div>
+            <label for="actorTarget">归档人物和目录</label><select id="actorTarget"></select>
+          </div>
+        </div>
+        <footer class="compare-foot">
+          <fieldset class="tags"><legend>入库标记</legend><label><input id="tagLtx" type="checkbox" checked>LTX</label><label><input id="tagU" type="checkbox">U 无码</label><label><input id="tagC" type="checkbox">C 中字</label><label><input id="tagA" type="checkbox">[A] 喜欢</label><span id="qualityTag" class="badge" hidden></span></fieldset>
+          <div class="foot-actions"><button type="button" id="discardBoth" class="danger" hidden>两份都删除</button><button type="button" id="discard" class="danger">丢弃源视频</button><button type="button" id="keep">两份都保留</button><button type="button" id="replace" class="primary">替换所选馆藏</button><button type="button" id="addNew" class="primary">作为新番号入库</button></div>
+          <p id="actionHint" class="action-hint" hidden></p>
+        </footer>
+      </div>
+    </section>
+  </main>
+
+  <div id="unmatched" class="unmatched" hidden></div>
+  <p id="notice" class="toast" role="status" aria-live="polite" hidden></p>
+
+  <dialog id="markLibrary" aria-labelledby="markTitle"><form method="dialog">
+    <h2 id="markTitle">修改馆藏标记</h2><p id="markName" class="confirm-paths"></p>
+    <fieldset class="tags"><legend>追加标记</legend><label><input id="markLtx" type="checkbox">LTX</label><label><input id="markU" type="checkbox">U 无码</label><label><input id="markC" type="checkbox">C 中字</label></fieldset>
+    <div class="actions"><button value="cancel">返回核对</button><button id="markPreview" value="preview" class="primary">预览重命名</button></div>
+  </form></dialog>
+  <dialog id="confirm"><form method="dialog"><h2 id="confirmTitle">确认操作</h2><p id="confirmText"></p><dl id="confirmPaths" class="confirm-paths"></dl><fieldset id="discardReasonFields" class="discard-reasons" hidden><legend>丢弃记录（可选）</legend><div id="discardChoices" class="discard-controls"></div><label><input id="discardLtx" type="checkbox"> 待丢弃的是 LTX</label></fieldset><div class="actions"><button id="confirmBack" value="cancel">返回核对</button><button id="confirmRun" value="run" class="primary">确认提交</button></div></form></dialog>
+  <dialog id="history" class="history-dialog">
+    <div class="history-head"><h2>迁移记录</h2><div class="job-actions"><button id="discardStatsToggle" type="button" aria-expanded="false">丢弃统计</button><form method="dialog"><button>关闭</button></form></div></div>
+    <div id="jobs" class="job-list"></div>
+    <section id="discardStats" hidden>
+      <div class="discard-controls"><label for="discardFilter">原因</label><select id="discardFilter"></select><label><input id="onlyLtx" type="checkbox"> 只看 LTX</label></div>
+      <p id="discardSummary" class="queue-empty" aria-live="polite"></p>
+      <div id="discardRecords" class="job-list"></div>
+      <div id="discardPagination" class="discard-controls" hidden><button id="discardPrev" type="button">上一页</button><span id="discardPage"></span><button id="discardNext" type="button">下一页</button></div>
+    </section>
+  </dialog>
+  <script type="module" src="/modules/fanhao/file-workflows/intake.js?v=17"></script>
+</body>
+</html>

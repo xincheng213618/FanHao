@@ -18,10 +18,9 @@ const beforeSource = execFileSync("git", ["show", `63c5fab243233e142cfd62c4eaf13
 assert.equal(crypto.createHash("sha256").update(beforeSource).digest("hex"), "1e5c4b9cf39924d46ce2e036e4facd0bbe70bf1e7fd0778b7cd2ba58d1da2982", "fixed complete original renderer");
 let currentSource = fs.readFileSync(path.join(project, owner), "utf8").replace(/\r\n/g, "\n");
 if (args.includes("--linear-progress")) {
-  const start = currentSource.indexOf("    // Reader figures occupy consecutive rows."), endMarker = "    const current = figures[Math.min(start, figures.length - 1)];";
-  const end = currentSource.indexOf(endMarker, start);
-  assert(start >= 0 && end > start, "one binary selection boundary");
-  currentSource = currentSource.slice(0, start) + "    const current = figures.find((figure) => figure.getBoundingClientRect().bottom >= readingLine) || figures.at(-1);" + currentSource.slice(end + endMarker.length);
+  const binary = "const current = firstGalleryReaderFigureAtLine(figures, readingLine) || figures.at(-1);";
+  assert.equal(currentSource.split(binary).length, 2, "one binary selection boundary");
+  currentSource = currentSource.replace(binary, "const current = figures.find((figure) => figure.getBoundingClientRect().bottom >= readingLine) || figures.at(-1);");
 }
 if (args.includes("--repeat-progress-writes")) for (const [checked, unconditional] of [
   ["if (progress.dataset.currentIndex !== indexValue) progress.dataset.currentIndex = indexValue;", "progress.dataset.currentIndex = indexValue;"],

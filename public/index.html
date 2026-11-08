@@ -97,13 +97,16 @@
         };
         document.addEventListener("DOMContentLoaded", renderStartupNotice, { once: true });
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-e79e7ff84cfd";
-        if (shortVideoEntry) {
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-79411853f648";
+        const preloadEntryModule = (href) => {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
-          modulePreload.href = shortVideoModuleUrl;
+          modulePreload.href = href;
           modulePreload.fetchPriority = "high";
           document.head.append(modulePreload);
+        };
+        if (shortVideoEntry) {
+          preloadEntryModule(shortVideoModuleUrl);
           window.__fanhaoShortVideoModuleUrl = shortVideoModuleUrl;
         }
         const shortVideoStyleUrls = [
@@ -123,7 +126,7 @@
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01",
-          "/modules/fanhao/work-cards.css?v=20261023-traits-01",
+          "/modules/fanhao/work-cards.css?v=20261106-card-cover-01",
           "/modules/system/admin.css?v=20260727-hidden-overlays-01",
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02",
@@ -204,6 +207,13 @@
         window.__fanhaoEnsureShortVideoViewerStyles = () => loadStyleUrls(shortVideoViewerStyleUrls);
         window.__fanhaoStylesReady = loadStyleUrls(styleUrls)
           .finally(() => document.documentElement.classList.remove("app-styles-loading"));
+        if (standaloneStyleEntry) {
+          preloadEntryModule("/standalone-app.js?v=20261108-photo-cover-warm-01");
+        } else if (!shortVideoEntry) {
+          // The shell imports the core dynamically, so preload both module URLs.
+          preloadEntryModule("/fanhao-app.js?v=20261106-card-cover-01");
+          preloadEntryModule("/app.js?v=20261106-card-cover-01");
+        }
       })();
     </script>
   </head>
@@ -250,10 +260,12 @@
             <h3 id="fanhaoBrowseLabel">资料浏览</h3>
             <a class="view-tab active" href="/fanhao" data-view="people" data-people-scope="main" aria-current="page">人物</a>
             <a class="view-tab" href="/fanhao/codes" data-view="codes">番号</a>
+            <a class="view-tab" href="/fanhao?classification=ltx" data-work-classifications>分类</a>
             <a class="view-tab" href="/fanhao/studios" data-view="studios">厂商</a>
           </div>
           <div class="fanhao-nav-group" role="group" aria-labelledby="fanhaoDiscoverLabel">
             <h3 id="fanhaoDiscoverLabel">专题与发现</h3>
+            <a class="view-tab fanhao-side-link" href="/fanhao/ltx">LTX 资源库</a>
             <a class="view-tab" href="/fanhao/codes?prefix=FC2&amp;family=1" data-view="codes" data-code-prefix="FC2" data-code-family="true">FC2</a>
             <a class="view-tab" href="/fanhao/vr" data-view="vr">VR</a>
             <a class="view-tab" href="/western" data-view="people" data-people-scope="western">欧美</a>
@@ -270,6 +282,7 @@
             <a class="view-tab fanhao-side-link" href="/disk-usage">存储空间</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/duplicates">重复文件比对</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows">整理与迁移</a>
+            <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows/intake">视频洗版</a>
           </div>
         </nav>
       </aside>
@@ -283,7 +296,7 @@
           </div>
           <label class="search-box work-search">
             <span aria-hidden="true">⌕</span>
-            <input id="workSearch" type="search" placeholder="全库搜索 · 番号 / 标题 / 人物" autocomplete="off" aria-label="全库搜索番号、标题、人物、类别或片商" />
+            <input id="workSearch" type="search" placeholder="全库搜索 · 番号 / 标题 / 人物 / 分类" autocomplete="off" aria-label="全库搜索番号、标题、人物、类别或片商" />
           </label>
           <div class="toolbar-controls">
             <label class="toggle-control" title="包含资料库已收录但没有本地记录的作品">
@@ -340,7 +353,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-e79e7ff84cfd");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-79411853f648");
         shortVideoModulePromise.catch(() => window.__fanhaoReportStartupFailure?.());
         await window.__fanhaoStylesReady;
         try {
@@ -353,7 +366,7 @@
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
         try {
-          await import("/standalone-app.js?v=20261004-reader-navigation-owner-06");
+          await import("/standalone-app.js?v=20261108-photo-cover-warm-01");
         } catch {
           window.__fanhaoReportStartupFailure?.();
         } finally {
@@ -362,7 +375,7 @@
       } else {
         await window.__fanhaoStylesReady;
         try {
-          await import("/fanhao-app.js?v=20261023-person-aliases-01");
+          await import("/fanhao-app.js?v=20261106-card-cover-01");
         } catch {
           window.__fanhaoReportStartupFailure?.();
         } finally {

@@ -10,7 +10,11 @@ function traitsForName(name, extra = {}) {
   return deriveWorkTraits({ videos: [{ name }], ...extra });
 }
 function activeFlags(traits) {
-  return Object.keys(traits.flags).filter((key) => traits.flags[key]).sort();
+  return Object.keys(traits.flags).filter((key) => traits.flags[key] && !key.startsWith("format")).sort();
+}
+
+function versionBadges(traits) {
+  return traits.editions.map(({ key }) => key).filter((key) => !key.startsWith("format"));
 }
 
 check("merge real source fields and aliases without changing inputs", () => {
@@ -39,11 +43,11 @@ check("case folding, width folding and whitespace normalize deduplication", () =
   assert.deepEqual(deriveWorkTraits({ tags: ["ol", "ｏｌ", "Ol"] }).tags, ["OL"]);
 });
 
-for (const name of ["MIDA-744-U.mp4", "ABF-158-UN.mkv", "MIDA-744UC.mp4", "MIDA-744U.mp4", "www.example.test@MIDA-744U.mp4", "[example.test]MIDA-744UC-1080P.mp4", "sample_UN_1080P.mkv", "MIDA-744.uncensored.mp4"]) {
+for (const name of ["MIDA-744-U.mp4", "ABF-158-UN.mkv", "MIDA-744U.mp4", "MIDA-744UC.mp4", "www.example.test@MIDA-744U.mp4", "sample_UN.mkv", "MIDA-744.uncensored.mp4"]) {
   check(`explicit uncensored name: ${name}`, () => {
     const traits = traitsForName(name);
     assert.deepEqual(activeFlags(traits), ["uncensored"]);
-    assert.deepEqual(traits.editions.map(({ key }) => key), ["uncensored"]);
+    assert.deepEqual(versionBadges(traits), ["uncensored"]);
     assert.match(traits.editions[0].evidence[0], /文件名/);
   });
 }
@@ -57,7 +61,7 @@ for (const name of ["MIDA-744-无码破解.mp4", "MIDA-744-AI去碼.mp4", "MIDA-
     const traits = traitsForName(name);
     assert.equal(traits.flags.uncensoredAi, true);
     assert.equal(traits.flags.uncensored, true);
-    assert.deepEqual(traits.editions.map(({ key }) => key), ["uncensoredAi"]);
+    assert.deepEqual(versionBadges(traits), ["uncensoredAi"]);
     assert.equal(matchesWorkTraitFilter(traits, "uncensored"), true);
   });
 }
@@ -81,14 +85,38 @@ check("never inspect synopsis, title, ancestor path or video path for edition wo
 
 check("only last directory/file component is used", () => {
   assert.deepEqual(activeFlags(deriveWorkTraits({ directoryName: "G:\\uncensored\\MIDA-744" })), []);
-  assert.deepEqual(activeFlags(deriveWorkTraits({ directoryName: "G:\\plain\\MIDA-744-UC\\" })), ["uncensored"]);
+  assert.deepEqual(activeFlags(deriveWorkTraits({ directoryName: "G:\\plain\\MIDA-744-UC\\" })), ["subtitled", "uncensored"]);
   assert.deepEqual(activeFlags(deriveWorkTraits({ videos: [{ name: "/uncensored/4K/MIDA-744.mp4" }] })), []);
 });
 
 check("mixed copies preserve all positive evidence but only one uncensored badge", () => {
   const traits = deriveWorkTraits({ directoryName: "MIDA-744", videos: [{ name: "MIDA-744.mp4" }, { name: "MIDA-744U-C.mp4" }, { name: "MIDA-744-4K-AI去码.mp4" }] });
   assert.deepEqual(activeFlags(traits), ["quality4k", "subtitled", "uncensored", "uncensoredAi"]);
-  assert.deepEqual(traits.editions.map(({ key }) => key), ["uncensoredAi", "subtitled", "quality4k"]);
+  assert.deepEqual(versionBadges(traits), ["uncensoredAi", "subtitled", "quality4k"]);
+});
+
+check("compact version suffixes are independent from measured resolution and container", () => {
+  const work = { directoryName: "[A].[4K].ABC-123", videos: [
+    { name: "ABC-123 title-LTXC-4K.mkv", width: 1920, height: 1080 },
+    { name: "ABC-123-UC.wmv", width: 1280, height: 720 }
+  ] };
+  const traits = deriveWorkTraits(work);
+  assert.deepEqual(activeFlags(traits), ["ltx", "quality1080p", "quality720p", "subtitled", "uncensored"]);
+  assert.equal(traits.flags.formatMkv, true);
+  assert.equal(traits.flags.formatWmv, true);
+  assert.equal(traits.flags.quality4k, false);
+  assert.deepEqual(activeFlags(traitsForName("ABC-123-LTX.mp4")), ["ltx"]);
+  assert.deepEqual(activeFlags(traitsForName("ABC-123_LTXrestored.mp4")), ["ltx"]);
+  assert.deepEqual(activeFlags(traitsForName("ABC-123UC-1080p.mp4")), ["quality1080p", "uncensored"]);
+  assert.deepEqual(activeFlags(traitsForName("ABC-123-UC-1080p.mp4")), ["quality1080p", "subtitled", "uncensored"]);
+  assert.deepEqual(activeFlags(deriveWorkTraits({ directoryName: "[A][LTX][UC]ABC-123" })), ["ltx", "subtitled", "uncensored"]);
+  assert.deepEqual(activeFlags(traitsForName("ABC-123_restored.mp4")), []);
+  assert.equal(deriveWorkTraits({ ...work, relativePath: "V:/[A]/ABC-123" }).flags.quality1080p, false);
+  assert.equal(traitsForName("DSVR-123-4K.mp4").flags.quality4k, false);
+  assert.equal(traitsForName("GOPJ-123-4K.mp4").flags.quality4k, false);
+  assert.equal(traitsForName("ABC-123-4K.mp4", { tags: ["ＶＲ"] }).flags.quality4k, false);
+  assert.equal(deriveWorkTraits({ videos: [{ name: "ABC-123-4K.mp4", width: 3840, height: 1200 }] }).flags.quality4k, false);
+  assert.equal(deriveWorkTraits({ videos: [{ name: "ABC-123.mp4", width: 4096, height: 1716 }] }).flags.quality4k, true);
 });
 
 check("metadata edition labels are evidence, not genre chips or visual verification", () => {

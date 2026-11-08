@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { createMusicControlFocus } from "../android-client/www/modules/music/music-control-focus.js";
 import { createMusicTrackPreferences } from "../android-client/www/modules/music/music-track-preferences.js";
-import { captureAccountOwner } from "../android-client/www/js/account-owner.js";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../android-client/www/js/account-owner.js";
 
 // Actual Android page function bodies with controlled transport, Audio and RAF.
 // This fixture does not start a server, read a library or decode media. Blob
@@ -21,7 +21,7 @@ function replaceOnce(source, before, after) {
 function selectionLegacy(source) {
   for (const [before, after] of [
     ["loadMusic(isListCurrent)", "loadMusic(isCurrent)"],
-    ["if (!isCurrent() || openTrackGeneration !== initialSelection || playReportSession !== initialPlaybackSession) return;", "if (!isCurrent()) return;"],
+    ["if (!isListCurrent()) return;", "if (!isCurrent()) return;"],
     ["if (!isCurrent() || openTrackGeneration !== restoringSelection) return;", "if (!isCurrent()) return;"],
     ["const isCurrent = () => generation === openTrackGeneration && getActiveUrl() === activeUrl", "const isCurrent = () => getActiveUrl() === activeUrl"],
     ["if (pendingTrackSelection === generation) pendingTrackSelection = 0;", "pendingTrackSelection = 0;"],
@@ -89,7 +89,8 @@ function fixture(source, { restore = false } = {}) {
   trackPreferences.preparePayload({ track: state.current, tracks: state.queue }, trackPreferences.owner(url));
   let context;
   const bindings = {
-    state, outgoing, incoming, console, URLSearchParams, encodeURIComponent, trackPreferences, captureAccountOwner,
+    state, outgoing, incoming, console, URLSearchParams, encodeURIComponent, trackPreferences,
+    accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner,
     DEFAULT_SORT: "updated", document: { body: { dataset: {} } },
     window: { performance: { now: () => 10 }, requestAnimationFrame: callback => { frames.push(callback); return frames.length; } },
     els: { viewTitle: {}, viewMeta: {}, viewKicker: {}, viewContent: {} },
@@ -131,6 +132,7 @@ function fixture(source, { restore = false } = {}) {
   context = vm.createContext(bindings);
   vm.runInContext(`
     let moduleActive=false, musicRenderGeneration=0, openTrackGeneration=0, pendingTrackSelection=0, routeControlFocus=null;
+    let trackAudioPreparation=null, mountedSearchController=null;
     let playReportSession=0, currentPlaybackUrl="http://synthetic.invalid";
     let gaplessPreloadAudio=incoming, gaplessPreloadTrackId="A", gaplessPreloadActiveUrl=currentPlaybackUrl;
     let audio=outgoing, gaplessHandoffPending=false, progressSession=null, progressClaimRequired=false, playedReport=null;

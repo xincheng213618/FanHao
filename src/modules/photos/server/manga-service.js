@@ -11,6 +11,12 @@ const MAX_MANGA_JOB_HISTORY = 50;
 const MANGA_METADATA_CACHE_MAX_ENTRIES = 2048;
 const MANGA_METADATA_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const MANGA_METADATA_CACHE_MAX_ENTRY_BYTES = 256 * 1024;
+const MANGA_MANIFEST_SUMMARY_CACHE_LIMIT = 2048;
+const MANGA_NAVIGATION_CACHE_MIN_CHAPTERS = 128;
+const MANGA_NAVIGATION_CACHE_MAX_CHAPTERS = 10000;
+const MANGA_NAVIGATION_CACHE_MAX_TEXT_UNITS = 256 * 1024;
+const MANGA_IMAGE_CHAPTER_CACHE_MAX_IMAGES = 512;
+const MANGA_IMAGE_CHAPTER_CACHE_MAX_TEXT_UNITS = 128 * 1024;
 const mangaCatalogMetadataFields = ["description", "author", "status", "cover_url", "cover_path", "region"];
 
 function readImageDimensions(filePath) {
@@ -289,6 +295,44 @@ function readJsonFile(filePath, fallback = null) {
   }
 }
 
+function readMangaManifest(cacheDir, context) {
+  // publicSummary is also used directly as an Array.map callback.
+  const shared = context && typeof context === "object" ? context : null;
+  if (shared && Object.hasOwn(shared, "manifest")) return shared.manifest;
+  const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
+  if (shared) shared.manifest = manifest;
+  return manifest;
+}
+
+function manifestFileStamp(filePath) {
+  try {
+    const stat = fs.statSync(filePath, { bigint: true });
+    return stat.isFile() ? `${stat.dev}:${stat.ino}:${stat.birthtimeNs}:${stat.ctimeNs}:${stat.mtimeNs}:${stat.size}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function retainManifestImageChapter(chapter) {
+  if (!Array.isArray(chapter?.images) || chapter.images.length > MANGA_IMAGE_CHAPTER_CACHE_MAX_IMAGES) return null;
+  const { html_path } = chapter;
+  if (html_path && typeof html_path === "object") return null;
+  let textUnits = typeof html_path === "string" ? html_path.length : 0;
+  if (textUnits > MANGA_IMAGE_CHAPTER_CACHE_MAX_TEXT_UNITS) return null;
+  const images = [];
+  for (const image of chapter.images) {
+    const { index, local_path, content_type } = image ?? {};
+    for (const field of [index, local_path, content_type]) {
+      if (field && typeof field === "object") return null;
+      if (typeof field === "string") textUnits += field.length;
+    }
+    if (textUnits > MANGA_IMAGE_CHAPTER_CACHE_MAX_TEXT_UNITS) return null;
+    images.push({ index, local_path, content_type });
+  }
+  // Sever short strings from the full manifest's backing storage.
+  return structuredClone({ html_path, images });
+}
+
 function safeChildPath(rootDir, relativePath) {
   const root = path.resolve(rootDir);
   const normalizedRelative = String(relativePath || "").replace(/[\\/]+/g, path.sep);
@@ -347,6 +391,9 @@ export function createMangaService({
   let lastJobHistorySave = 0;
   let storageSnapshot = null;
   let directoryLookup = null;
+  let chapterNavigationCache = null;
+  let manifestImageChapterCache = null;
+  const manifestSummaries = new Map();
 
   restoreJobHistory();
 
@@ -833,8 +880,7 @@ export function createMangaService({
     const now = Date.now();
     if (!force && storageSnapshot && now - storageSnapshot.cachedAt < 15000) return storageSnapshot.payload;
     const status = rootStatus();
-    const directories = cacheDirs();
-    const summaries = directories.map(publicSummary);
+    const summaries = publicSummaries();
     const trashItems = trashEntries();
     const trash = trashItems.reduce((total, item) => {
       total.bytes += item.bytes;
@@ -1375,13 +1421,87 @@ export function createMangaService({
     return `/media/manga/${encodeURIComponent(mangaId)}/${encodeURIComponent(String(chapterNumber))}/${encodeURIComponent(String(imageIndex))}`;
   }
 
-  function publicSummary(cacheDir) {
+  function summarizeManifest(manifest) {
+    const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
+    const summary = { chapterCount: chapters.length, doneChapterCount: 0, imageCount: 0, downloadedCount: 0, failedCount: 0,
+      coverChapter: 0, coverImage: 0, createdAt: manifest.created_at };
+    for (let index = 0; index < chapters.length; index += 1) {
+      const chapter = chapters[index];
+      const stats = chapterImageStats(chapter);
+      summary.imageCount += stats.imageCount;
+      summary.downloadedCount += stats.downloadedCount;
+      summary.failedCount += stats.failedCount;
+      if (["done", "repaired"].includes(String(chapter?.status || "").toLowerCase())) summary.doneChapterCount += 1;
+      if (!summary.coverChapter) {
+        const image = firstImage(chapter);
+        if (image) {
+          summary.coverChapter = chapterIndex(chapter, index);
+          summary.coverImage = Number(image.index || 1);
+        }
+      }
+    }
+    return summary;
+  }
+
+  function readManifestSummary(cacheDir, context) {
+    // Chapter/detail reads must build the summary and body from the same manifest.
+    if (context && typeof context === "object") return summarizeManifest(readMangaManifest(cacheDir, context));
+    const file = path.join(cacheDir, "manifest.json");
+    const stamp = manifestFileStamp(file);
+    const cached = manifestSummaries.get(file);
+    manifestSummaries.delete(file);
+    if (stamp && cached?.stamp === stamp) {
+      manifestSummaries.set(file, cached);
+      return cached.summary;
+    }
+    const unreadable = Symbol();
+    const manifest = readJsonFile(file, unreadable);
+    if (manifest === unreadable) return summarizeManifest({});
+    const summary = summarizeManifest(manifest);
+    const { createdAt } = summary;
+    if (stamp && file.length <= 2048 && (createdAt == null || typeof createdAt !== "object")
+        && (typeof createdAt !== "string" || createdAt.length <= 128) && manifestFileStamp(file) === stamp) {
+      // Keep only scalar facts. Detach short strings from the parsed file.
+      if (manifestSummaries.size >= MANGA_MANIFEST_SUMMARY_CACHE_LIMIT) manifestSummaries.delete(manifestSummaries.keys().next().value);
+      manifestSummaries.set(file, { stamp, summary: structuredClone(summary) });
+    }
+    return summary;
+  }
+
+  function publicSummary(cacheDir, manifestContext = null) {
     const dbComic = database.comic(databaseKey(cacheDir));
-    const id = idForDir(cacheDir, dbComic);
+    return summaryForComic(cacheDir, dbComic, manifestContext);
+  }
+
+  function publicSummaries() {
+    const directories = cacheDirs();
+    const rows = database.comicSummaries?.(directories.map(databaseKey));
+    if (!rows) return directories.map(publicSummary);
+    const coversPending = [];
+    const summaries = directories.map((directory, index) =>
+      summaryForComic(directory, rows[index], null, undefined, key => {
+        coversPending.push({ key, index });
+        return null;
+      }));
+    if (coversPending.length) {
+      const covers = database.summaryFirstImages(coversPending.map(({ key }) => key));
+      for (const [ordinal, { key, index }] of coversPending.entries()) {
+        const cover = covers ? covers[ordinal] : database.firstImage(key);
+        summaries[index].coverUrl = firstImageCoverUrl(summaries[index].id, cover);
+      }
+    }
+    return summaries;
+  }
+
+  function firstImageCoverUrl(id, image) {
+    return image ? imageUrl(id, Number(image.chapter_index || 1), Number(image.image_index || 1)) : "";
+  }
+
+  function summaryForComic(cacheDir, dbComic, manifestContext, id = idForDir(cacheDir, dbComic), readFirstImage = database.firstImage) {
     const dirName = path.basename(cacheDir);
     const metadata = metadataForCache(cacheDir, dbComic, metadataInputs);
     const dbCover = dbComic && !metadata.localCover && !metadata.coverUrl
-      ? database.firstImage(databaseKey(cacheDir)) : null;
+      ? readFirstImage(databaseKey(cacheDir)) : null;
     if (dbComic) {
       return {
         id,
@@ -1403,31 +1523,12 @@ export function createMangaService({
         failedCount: Number(dbComic.failed_count || 0),
         coverUrl: metadata.localCover
           ? `/media/manga-cover/${encodeURIComponent(id)}`
-          : metadata.coverUrl || (dbCover
-          ? imageUrl(id, Number(dbCover.chapter_index || 1), Number(dbCover.image_index || 1))
-          : "")
+          : metadata.coverUrl || firstImageCoverUrl(id, dbCover)
       };
     }
     const catalog = readJsonFile(path.join(cacheDir, "catalog.json"), {});
-    const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
-    const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
-    let imageTotal = 0;
-    let downloadedTotal = 0;
-    let failedTotal = 0;
-    let doneChapterTotal = 0;
-    let coverUrl = "";
-
-    for (let index = 0; index < chapters.length; index += 1) {
-      const chapter = chapters[index];
-      const stats = chapterImageStats(chapter);
-      imageTotal += stats.imageCount;
-      downloadedTotal += stats.downloadedCount;
-      failedTotal += stats.failedCount;
-      if (["done", "repaired"].includes(String(chapter?.status || "").toLowerCase())) doneChapterTotal += 1;
-      if (!coverUrl && firstImage(chapter)) {
-        coverUrl = imageUrl(id, chapterIndex(chapter, index), Number(firstImage(chapter)?.index || 1));
-      }
-    }
+    const manifest = readManifestSummary(cacheDir, manifestContext);
+    const coverUrl = manifest.coverChapter ? imageUrl(id, manifest.coverChapter, manifest.coverImage) : "";
 
     return {
       id,
@@ -1441,12 +1542,12 @@ export function createMangaService({
       region: metadata.region,
       category: metadata.category,
       tags: metadata.tags,
-      updatedAt: String(catalog.updated_at || manifest.created_at || "").trim(),
-      chapterCount: chapters.length,
-      doneChapterCount: doneChapterTotal,
-      imageCount: imageTotal,
-      downloadedCount: downloadedTotal,
-      failedCount: failedTotal,
+      updatedAt: String(catalog.updated_at || manifest.createdAt || "").trim(),
+      chapterCount: manifest.chapterCount,
+      doneChapterCount: manifest.doneChapterCount,
+      imageCount: manifest.imageCount,
+      downloadedCount: manifest.downloadedCount,
+      failedCount: manifest.failedCount,
       coverUrl: metadata.localCover
         ? `/media/manga-cover/${encodeURIComponent(id)}`
         : metadata.coverUrl || coverUrl
@@ -1483,7 +1584,8 @@ export function createMangaService({
   }
 
   function publicDetail(cacheDir) {
-    const summary = publicSummary(cacheDir);
+    const manifestContext = {};
+    const summary = publicSummary(cacheDir, manifestContext);
     const dbChapters = database.chapters(databaseKey(cacheDir));
     if (dbChapters.length) {
       const createdAt = String(database.comic(databaseKey(cacheDir))?.created_at || "").trim();
@@ -1498,7 +1600,7 @@ export function createMangaService({
         })
       };
     }
-    const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
+    const manifest = readMangaManifest(cacheDir, manifestContext);
     const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
     return {
       ...summary,
@@ -1507,7 +1609,7 @@ export function createMangaService({
     };
   }
 
-  function findChapter(cacheDir, requestedIndex, downloadContext = null) {
+  function findChapter(cacheDir, requestedIndex, { downloadContext = null, manifestContext = null, cacheImageChapter = false } = {}) {
     const dbChapter = database.chapter(databaseKey(cacheDir), requestedIndex);
     if (dbChapter) {
       return {
@@ -1517,10 +1619,16 @@ export function createMangaService({
         fromDatabase: true
       };
     }
-    if (downloadContext?.chapters) return downloadContext.chapters.get(Number(requestedIndex)) || null;
-    const detail = readJsonFile(path.join(cacheDir, "manifest.json"), {});
-    const chapters = Array.isArray(detail.chapters) ? detail.chapters : [];
     const target = Number(requestedIndex);
+    return cacheImageChapter
+      ? findCachedManifestImageChapter(cacheDir, target)
+      : findManifestChapter(cacheDir, target, downloadContext, manifestContext);
+  }
+
+  function findManifestChapter(cacheDir, target, downloadContext = null, manifestContext = null) {
+    if (downloadContext?.chapters) return downloadContext.chapters.get(target) || null;
+    const detail = readMangaManifest(cacheDir, manifestContext);
+    const chapters = Array.isArray(detail.chapters) ? detail.chapters : [];
     if (downloadContext) {
       downloadContext.chapters = new Map();
       for (let index = 0; index < chapters.length; index += 1) {
@@ -1541,16 +1649,74 @@ export function createMangaService({
     return null;
   }
 
-  function publicChapter(cacheDir, requestedIndex, manga = publicSummary(cacheDir)) {
-    const found = findChapter(cacheDir, requestedIndex);
+  function findCachedManifestImageChapter(cacheDir, target) {
+    const file = path.join(cacheDir, "manifest.json");
+    const stamp = manifestFileStamp(file);
+    const cached = manifestImageChapterCache;
+    if (stamp && cached?.file === file && cached.stamp === stamp && cached.found.chapterIndex === target) return cached.found;
+    manifestImageChapterCache = null;
+    const found = findManifestChapter(cacheDir, target);
+    if (!stamp || !found) return found;
+    const chapter = retainManifestImageChapter(found.chapter);
+    if (chapter && manifestFileStamp(file) === stamp) {
+      manifestImageChapterCache = { file, stamp, found: { ...found, chapter } };
+    }
+    return found;
+  }
+
+  function chapterNavigation(cacheDir, found, chapterCount, manifestContext) {
+    const cacheKey = databaseKey(cacheDir);
+    const stamp = found.fromDatabase && chapterCount >= MANGA_NAVIGATION_CACHE_MIN_CHAPTERS
+      && chapterCount <= MANGA_NAVIGATION_CACHE_MAX_CHAPTERS ? database.lookupStamp() : null;
+    let chapters;
+    let positions;
+    if (stamp && chapterNavigationCache?.cacheKey === cacheKey && chapterNavigationCache.stamp === stamp) {
+      ({ chapters, positions } = chapterNavigationCache);
+    } else if (found.fromDatabase) {
+      if (chapterNavigationCache?.cacheKey === cacheKey) chapterNavigationCache = null;
+      // Keep the full-row read as the fallback authority and retain only the
+      // scalar fields publicChapterNavigationItem needs for the two neighbors.
+      chapters = database.chapters(cacheKey).map(row => ({
+        index: Number(row.chapter_index || 0),
+        title: String(row.title || ""),
+        status: String(row.status || ""),
+        image_count: Number(row.image_count || 0),
+        downloaded_count: Number(row.downloaded_count || 0)
+      }));
+      if (stamp && chapters.length >= MANGA_NAVIGATION_CACHE_MIN_CHAPTERS && chapters.length <= MANGA_NAVIGATION_CACHE_MAX_CHAPTERS
+        && chapters.reduce((units, chapter) => units + chapter.title.length + chapter.status.length, 0) <= MANGA_NAVIGATION_CACHE_MAX_TEXT_UNITS
+        && stamp === database.lookupStamp()) {
+        positions = new Map();
+        chapters.forEach((chapter, index) => {
+          // The old search selects the first normalized index, even if a
+          // legacy row uses an ordinal fallback or shares another row's index.
+          const key = chapterIndex(chapter, index);
+          if (!positions.has(key)) positions.set(key, index);
+        });
+        chapterNavigationCache = { cacheKey, stamp, chapters, positions };
+      }
+    } else {
+      const manifest = readMangaManifest(cacheDir, manifestContext);
+      chapters = Array.isArray(manifest?.chapters) ? manifest.chapters : [];
+    }
+    const chapterList = chapters.length ? chapters : [found.chapter];
+    const chapterPosition = Math.max(0, positions ? positions.get(found.chapterIndex) ?? 0
+      : chapterList.findIndex((chapter, index) => chapterIndex(chapter, index) === found.chapterIndex));
+    return {
+      position: chapterPosition + 1,
+      total: chapterList.length,
+      previous: chapterPosition > 0 ? publicChapterNavigationItem(chapterList[chapterPosition - 1], chapterPosition - 1) : null,
+      next: chapterPosition + 1 < chapterList.length
+        ? publicChapterNavigationItem(chapterList[chapterPosition + 1], chapterPosition + 1) : null
+    };
+  }
+
+  function publicChapter(cacheDir, requestedIndex, manga, manifestContext = {}) {
+    if (manga === undefined) manga = publicSummary(cacheDir, manifestContext);
+    const found = findChapter(cacheDir, requestedIndex, { manifestContext });
     if (!found) return null;
     const cacheKey = databaseKey(cacheDir);
-    const manifest = found.fromDatabase ? null : readJsonFile(path.join(cacheDir, "manifest.json"), {});
-    const storedChapters = found.fromDatabase
-      ? database.chapters(cacheKey).map(chapterFromDatabase)
-      : Array.isArray(manifest?.chapters) ? manifest.chapters : [];
-    const chapterList = storedChapters.length ? storedChapters : [found.chapter];
-    const chapterPosition = Math.max(0, chapterList.findIndex((chapter, index) => chapterIndex(chapter, index) === found.chapterIndex));
+    const navigation = chapterNavigation(cacheDir, found, manga.chapterCount, manifestContext);
     const images = found.fromDatabase
       ? database.images(cacheKey, found.chapterIndex).map(imageFromDatabase)
       : Array.isArray(found.chapter.images) ? found.chapter.images : [];
@@ -1578,14 +1744,7 @@ export function createMangaService({
           url: imageUrl(manga.id, found.chapterIndex, resolvedImageIndex)
         };
       }),
-      navigation: {
-        position: chapterPosition + 1,
-        total: chapterList.length,
-        previous: chapterPosition > 0 ? publicChapterNavigationItem(chapterList[chapterPosition - 1], chapterPosition - 1) : null,
-        next: chapterPosition >= 0 && chapterPosition + 1 < chapterList.length
-          ? publicChapterNavigationItem(chapterList[chapterPosition + 1], chapterPosition + 1)
-          : null
-      }
+      navigation
     };
   }
 
@@ -1602,7 +1761,7 @@ export function createMangaService({
         imageIndex: Number(dbImage.image_index || imageIndex)
       };
     }
-    const found = findChapter(cacheDir, chapterNumber);
+    const found = findChapter(cacheDir, chapterNumber, { cacheImageChapter: true });
     if (!found) return null;
     const images = Array.isArray(found.chapter.images) ? found.chapter.images : [];
     const targetImageIndex = Number(imageIndex);
@@ -1693,7 +1852,7 @@ export function createMangaService({
   }
 
   function chapterDownloadRecord(cacheDir, requestedIndex, downloadContext = null) {
-    const found = findChapter(cacheDir, requestedIndex, downloadContext);
+    const found = findChapter(cacheDir, requestedIndex, { downloadContext });
     if (!found) return null;
     // Downloads need the stored image paths, not reader navigation, covers or
     // image dimensions. Keep the manifest snapshot local to this download.
@@ -1813,6 +1972,10 @@ export function createMangaService({
   return {
     cacheById,
     cacheDirs,
+    clearReaderLookupCaches() {
+      chapterNavigationCache = null;
+      manifestImageChapterCache = null;
+    },
     clearFinishedJobs,
     imageUrl,
     jobStatus,
@@ -1821,6 +1984,7 @@ export function createMangaService({
     publicChapter,
     publicDetail,
     publicSummary,
+    publicSummaries,
     purgeTrash,
     restoreTrashEntry,
     rootStatus,

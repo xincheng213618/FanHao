@@ -162,6 +162,14 @@ export function createShortVideoNavigationQueries({
       { expression: "v.published_at", value: row.published_at, direction: "DESC" },
       { expression: "v.id", value: row.id, direction: "DESC" }
     ], movingNext) : null;
+    const watchedBoundary = nullablePublication ? row.last_watched_at : lastWatchedAt;
+    const rangeArgs = [];
+    // Give SQLite a seek on the covering history index. Keep the inclusive
+    // boundary so the existing cursor still resolves publication and ID ties.
+    if (watchedBoundary != null) {
+      whereParts.push(`w.last_watched_at ${operator}= ?`);
+      rangeArgs.push(watchedBoundary);
+    }
     const ids = database.prepare(`
       SELECT v.id
       FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
@@ -177,6 +185,7 @@ export function createShortVideoNavigationQueries({
         v.id ${sortDirection}
       LIMIT ?
     `).all(
+      ...rangeArgs,
       ...(cursor ? cursor.args : [lastWatchedAt, lastWatchedAt, publishedAt, lastWatchedAt, publishedAt, currentId]),
       Math.max(1, Number(limit || 1))
     ).map((item) => String(item.id || "")).filter(Boolean);

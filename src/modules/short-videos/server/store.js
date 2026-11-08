@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { localImageDiskIdentity } from "../../../platform/server/local-image-read-queue.js";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
-import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory, searchAuthorFacet } from "./author-facets.js";
+import { authorFacet, followingAuthorFacet, parseAuthorProfileHistory, prepareAuthorMentionQuery, searchAuthorFacet } from "./author-facets.js";
 import { ensureAuthorFacetIndex } from "./author-facet-index.js";
 import { createShortVideoAuthorCleanupService } from "./author-cleanup-service.js";
 import { createShortVideoAuthorDeleteService } from "./author-delete-service.js";
@@ -28,7 +28,7 @@ import {
   normalizedDouyinShareUrl,
   normalizedDouyinUserUrl
 } from "./import-item-mapper.js";
-import { createShortVideoListPageQueries } from "./list-page-queries.js";
+import { createShortVideoListPageQueries, indexedRelatedCandidates } from "./list-page-queries.js";
 import { shortVideoLibraryInsights } from "./library-insights.js";
 import { createShortVideoNavigationQueries } from "./navigation-queries.js";
 import {
@@ -155,9 +155,11 @@ const {
   authorVideoCount,
   decodeShortVideoListCursor,
   fastFilteredVideoPage,
+  fastFtsPublishedRows,
   fastHistoryVideoPage,
   fastPublishedVideoPage,
   fastShortQueryVideoPage,
+  fastTopicSoundLikesRows,
   fastSourceTotalCacheKey,
   shortVideoRelationshipTotal
 } = createShortVideoListPageQueries({ listVideoColumns: LIST_VIDEO_COLUMNS });
@@ -764,7 +766,7 @@ export function createShortVideoStore(options = {}) {
           mention, mention, mention, mention, mention, normalizedMention,
           mention, mention, mention, mention, mention, normalizedMention
         ];
-    const row = database.prepare(`
+    const sql = `
       SELECT
         users.id,
         users.sec_uid AS secUid,
@@ -803,7 +805,9 @@ export function createShortVideoStore(options = {}) {
         AND ${matchSql}
       ${orderSql}
       LIMIT 1
-    `).get(...queryArgs);
+    `;
+    const statement = exactSecUid ? database.prepare(sql) : prepareAuthorMentionQuery(database, sql, countSql, queryArgs);
+    const row = statement.get(...queryArgs);
     if (!row?.secUid) return null;
     if (exactSecUid) row.count = authorVideoCount(database, row.secUid);
     return {
@@ -1141,7 +1145,8 @@ function summary() {
     } else if (fastPage) {
       rows = fastPage.rows;
     } else {
-      rows = database.prepare(`
+      rows = fastTopicSoundLikesRows(database, filter, sort, total, limit, offset)
+        ?? fastFtsPublishedRows(database, filter, sort, total, limit, offset) ?? database.prepare(`
           SELECT ${LIST_VIDEO_COLUMNS}
           FROM short_video_catalog
           ${where}
@@ -1946,7 +1951,9 @@ function summary() {
     const candidateLimit = Math.min(720, Math.max(144, limit * 14));
     let candidates = [];
     if (affinity.length) {
-      candidates = database.prepare(`
+      candidates = indexedRelatedCandidates(database, {
+        currentTags, authorSecUid, id: current.id, candidateLimit, candidateColumns, affinity, affinityArgs
+      }) ?? database.prepare(`
         SELECT ${candidateColumns}
         FROM short_videos v
         LEFT JOIN short_video_stats s ON s.video_id = v.id

@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
 import { createWorkSorter } from "../src/modules/fanhao/server/works/work-sorter.js";
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
-import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
+import { deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits } from "../lib/work-traits.js";
 import { parseInfoMetadata } from "../lib/info-metadata.js";
 const clampInteger = (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback)));
 const legacyMissingPrefixCache = process.argv.includes("--legacy-missing-prefix-cache");
@@ -471,13 +471,13 @@ function personContextQuery() {
   let sharedBudget;
   const factory = new Function("classifyWorkCategory", "normalizeWorkCategory", "summarizeWorkCategories", "WORK_CATEGORY_OPTIONS",
     "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode",
-    "deriveWorkTraits", "matchesWorkTraitFilter", "summarizeWorkTraits", source + "\nreturn createWorkQueryService;")(
+    "deriveWorkTraits", "isTraitFilter", "matchesWorkTraitFilter", "mediaClassificationSearch", "summarizeWorkTraits", source + "\nreturn createWorkQueryService;")(
     classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS, createWorkSorter,
     (...args) => {
       const value = createWeightedCacheBudget(...args);
       if (args[0] === 4_000_000) sharedBudget = value;
       return value;
-    }, normalizeWorkSortMode, deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits);
+    }, normalizeWorkSortMode, deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits);
   let classifications = 0;
   const classification = createWorkClassificationService({ appConfigService: { current: () => ({}) } });
   const filter = classification.filterForRequest;

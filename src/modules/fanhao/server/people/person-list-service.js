@@ -23,11 +23,14 @@ export function createPersonListService({
     if (cached) return cached;
     const candidates = [];
     const seen = new Set();
-    for (const person of library.people) {
-      const merged = personMergeService.record(person);
+    const matchesScope = peopleScopeService.personMatcher?.(normalizedScope)
+      || ((person) => peopleScopeService.personMatches(person, normalizedScope));
+    const mergedPeople = personMergeService.records?.(library.people)
+      || library.people.map((person) => personMergeService.record(person));
+    for (const merged of mergedPeople) {
       if (!merged || seen.has(merged.id)) continue;
       seen.add(merged.id);
-      if (!peopleScopeService.personMatches(merged, normalizedScope)) continue;
+      if (!matchesScope(merged)) continue;
       candidates.push({ person: merged, known: Number(merged.workCount || 0) > 0 || Boolean(actorProfileRow(merged.id)) });
     }
     const pending = candidates.filter(candidate => !candidate.known);

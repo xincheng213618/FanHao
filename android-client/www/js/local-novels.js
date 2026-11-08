@@ -1,4 +1,4 @@
-import { reconcileLocalNovelEntry, safeLocalProgressRecovery } from "./novel-chapter-identity.js?v=assets-8af3642624a3";
+import { reconcileLocalNovelEntry, safeLocalProgressRecovery } from "./novel-chapter-identity.js?v=assets-8faf7a80cb7b";
 
 const LOCAL_NOVEL_DB_NAME = "fanhao-local-novels";
 const LOCAL_NOVEL_DB_VERSION = 3;
@@ -65,21 +65,33 @@ export async function readLocalNovelCatalog(bookId) {
   });
 }
 
-export async function readLocalNovelChapter(bookId, chapterIndex, { chapterId, catalogRevision } = {}) {
+export async function readLocalNovelChapter(bookId, chapterIndex, { chapterId, catalogRevision, includeCatalog = true } = {}) {
   const id = String(bookId || "");
   const index = Number(chapterIndex);
   if (!id || !Number.isInteger(index) || index < 1) return null;
   const db = await openLocalNovelDb();
   return runTransaction(db, [BOOK_STORE, CHAPTER_STORE, BODY_STORE, PROGRESS_STORE], "readonly", (transaction, watch, setResult) => {
+    const chapterStore = transaction.objectStore(CHAPTER_STORE);
+    const bookChapters = chapterStore.index("bookId");
+    const chapterKey = [id, index];
+    // Neighbor cursors preserve navigation across non-consecutive chapter indices.
+    const chapterReads = includeCatalog ? { chapters: bookChapters.getAll(id) } : {
+      count: bookChapters.count(id),
+      chapter: chapterStore.get(chapterKey),
+      prev: chapterStore.openCursor(IDBKeyRange.bound([id], chapterKey, false, true), "prev"),
+      next: chapterStore.openCursor(IDBKeyRange.bound(chapterKey, [id, Infinity], true, false))
+    };
     collectRequests(watch, {
       book: transaction.objectStore(BOOK_STORE).get(id),
       progress: transaction.objectStore(PROGRESS_STORE).get(id),
-      chapters: transaction.objectStore(CHAPTER_STORE).index("bookId").getAll(id),
-      body: transaction.objectStore(BODY_STORE).get([id, index])
+      ...chapterReads,
+      body: transaction.objectStore(BODY_STORE).get(chapterKey)
     }, (rows) => {
       const summary = summaryFromRows(rows.book, rows.progress);
       if (!summary) { setResult(null); return; }
-      const chapters = catalogFromRows(rows.book, rows.chapters);
+      const chapters = includeCatalog ? catalogFromRows(rows.book, rows.chapters) : catalogFromRows(
+        rows.book, [rows.prev?.value, rows.chapter, rows.next?.value].filter(Boolean), { count: rows.count }
+      );
       const position = chapters.findIndex((chapter) => chapter.index === index);
       if (position < 0 || !bodyMatches(rows.body, rows.book, chapters[position])
         || (chapterId !== undefined && chapters[position].id !== chapterId)
@@ -87,7 +99,7 @@ export async function readLocalNovelChapter(bookId, chapterIndex, { chapterId, c
       setResult({
         book: summary.book,
         chapter: { ...rows.body.extra, ...chapters[position], content: rows.body.content },
-        chapters,
+        chapters: includeCatalog ? chapters : [],
         prev: position > 0 ? chapters[position - 1] : null,
         next: position < chapters.length - 1 ? chapters[position + 1] : null,
         generation: summary.generation
@@ -611,8 +623,8 @@ function summaryFromRows(metadata, progressRow) {
   };
 }
 
-function catalogFromRows(metadata, rows, { legacy = false } = {}) {
-  if (rows.length !== metadata.book.chapterCount || rows.some((row) => row.bookId !== metadata.id || row.generation !== metadata.generation)
+function catalogFromRows(metadata, rows, { legacy = false, count = rows.length } = {}) {
+  if (count !== metadata.book.chapterCount || rows.some((row) => row.bookId !== metadata.id || row.generation !== metadata.generation)
     || (!legacy && (rows.some(row => typeof row.id !== "string" || !row.id) || new Set(rows.map(row => row.id)).size !== rows.length))) {
     throw new Error("本地小说目录不完整，请重新导入");
   }

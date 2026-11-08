@@ -265,13 +265,20 @@ export function createMangaPage(deps) {
     state.manga.sort = ["updated", "title", "chapters"].includes(route.mangaSort) ? route.mangaSort : "updated";
   }
 
-  async function openRouteTarget(route = {}) {
+  async function openRouteTarget(route = {}, { initialEntry = false } = {}) {
     ensureState();
     if (route.mangaComicId && route.mangaChapterIndex) {
       const coldEntry = !currentReaderView(readerView) && !currentDetailView(detailView);
       const owner = beginReaderRequest("chapter", route.mangaComicId);
-      const comic = await openComic(route.mangaComicId, { skipRoute: true, render: false }, owner);
-      if (comic && readerRequestCurrent(owner)) await openChapter(route.mangaChapterIndex, { skipRoute: true, restorePosition: true, coldEntry }, owner);
+      const detail = openComic(route.mangaComicId, { skipRoute: true, render: false }, owner);
+      const earlyController = initialEntry && typeof globalThis.AbortSignal?.any === "function" ? new AbortController() : null;
+      // Hold either outcome until the authoritative comic detail has arrived.
+      const earlyChapter = earlyController ? readChapter(route.mangaComicId, route.mangaChapterIndex,
+        AbortSignal.any([owner.controller.signal, earlyController.signal])).then(data => ({ data }), error => ({ error })) : null;
+      const comic = await detail;
+      if (comic?.id === owner.comicId && readerRequestCurrent(owner)) {
+        await openChapter(route.mangaChapterIndex, { skipRoute: true, restorePosition: true, coldEntry }, owner, earlyChapter);
+      } else earlyController?.abort();
       return;
     }
     if (route.mangaComicId) {
@@ -570,7 +577,11 @@ export function createMangaPage(deps) {
     }
   }
 
-  async function openChapter(chapterIndex, options = {}, owner) {
+  function readChapter(comicId, chapterIndex, signal) {
+    return api(`/api/manga/${encodeURIComponent(comicId)}/chapters/${encodeURIComponent(String(chapterIndex))}`, { signal });
+  }
+
+  async function openChapter(chapterIndex, options = {}, owner, earlyChapter = null) {
     const comic = state.manga.comic;
     if (!comic) return;
     if (!owner && chapterRead?.phase === "loading" && readerRequestCurrent(chapterRead.owner)
@@ -588,7 +599,17 @@ export function createMangaPage(deps) {
     else renderView();
     read.promise = (async () => {
       try {
-        const data = await api(`/api/manga/${encodeURIComponent(comic.id)}/chapters/${encodeURIComponent(String(chapterIndex))}`, { signal: owner.controller.signal });
+        const result = earlyChapter ? await earlyChapter : null;
+        if (!readerRequestCurrent(owner)) return null;
+        if (result && "error" in result) {
+          const appearedInCatalog = result.error?.status === 404 && comic.chapters?.some(chapter =>
+            Number(chapter.index) === Number(chapterIndex) && chapterAvailable(chapter));
+          if (!appearedInCatalog) throw result.error;
+        }
+        const earlyData = result?.data;
+        // A comic update during startup can leave the earlier chapter snapshot stale.
+        const olderSnapshot = earlyData && Date.parse(earlyData.comic?.updatedAt) < Date.parse(comic.updatedAt);
+        const data = earlyData && !olderSnapshot ? earlyData : await readChapter(comic.id, chapterIndex, owner.controller.signal);
         if (!readerRequestCurrent(owner) || state.manga.comic?.id !== comic.id) return null;
         // Flush the visible source chapter before changing its identity.
         readerPosition?.retain();
@@ -641,8 +662,17 @@ export function createMangaPage(deps) {
     const busy = Boolean(current && read.phase === "loading");
     refreshReaderChapterNavigation();
     if (currentDetailView(view)) {
-      for (const record of view.rows.values()) setChapterButtonBusy(record.button, busy && !read.restorePosition && Number(record.chapter.index) === Number(read.index));
-      setChapterButtonBusy(view.page.querySelector('[data-action="read"]'), busy && read.restorePosition && Number(detailReadIndex(state.manga.comic)) === Number(read.index));
+      let button;
+      if (busy) {
+        const index = Number(read.index);
+        if (!read.restorePosition) button = view.rows.get(String(index))?.button;
+        else if (Number(detailReadIndex(state.manga.comic)) === index) button = view.page.querySelector('[data-action="read"]');
+      }
+      if (view.busyButton !== button) {
+        setChapterButtonBusy(view.busyButton, false);
+        setChapterButtonBusy(button, true);
+        view.busyButton = button;
+      }
     }
     if (!current) { view.feedback?.remove(); view.feedback = null; return; }
     if (!view.feedback) {
@@ -715,7 +745,8 @@ export function createMangaPage(deps) {
     const controls = current?.querySelector(".manga-library-controls");
     const view = libraryView;
     if (!controls || !currentLibraryView(view) || view.page !== current) return false;
-    const comics = filteredComics();
+    const shelf = libraryShelf(view.shelf);
+    const { comics } = shelf;
     const next = renderLibrary({ includeCards: false, comics });
     const children = [...next.children];
     const replacement = next.querySelector(".manga-library-controls");
@@ -724,13 +755,15 @@ export function createMangaPage(deps) {
     if (add?.dataset.addViewKey && add.dataset.addViewKey === nextAdd?.dataset.addViewKey) retained.set(nextAdd, add);
     const nextGrid = next.querySelector(".manga-card-grid");
     if (nextGrid) {
-      if (view.grid?.parentElement === current) retained.set(nextGrid, view.grid);
+      const retainGrid = view.grid?.parentElement === current;
+      if (retainGrid) retained.set(nextGrid, view.grid);
       else view.grid = nextGrid;
-      updateLibraryCards(view, comics);
+      if (!retainGrid || view.shelf !== shelf) updateLibraryCards(view, comics);
     } else {
       view.cards.clear();
       view.grid = null;
     }
+    view.shelf = shelf;
     // Keep the whole live form/ancestor chain connected. Even a temporary move
     // would blur a native select or interrupt an active IME composition.
     const keep = new Set(retained.values());
@@ -741,64 +774,93 @@ export function createMangaPage(deps) {
       if (live) cursor = live.nextSibling;
       else current.insertBefore(child, cursor);
     }
+    const searching = next.classList.contains("manga-search-page");
+    current.classList.toggle("manga-search-page", searching);
+    controls.querySelector('[data-action="add"]').hidden = searching;
+    controls.querySelector('[data-action="clear-search"]').hidden = !searching;
     controls.querySelector("select").value = state.manga.sort;
     return true;
   }
 
-  function renderLibrary({ includeCards = true, comics = filteredComics() } = {}) {
+  function renderLibrary({ includeCards = true, comics = [] } = {}) {
     const page = document.createElement("div");
+    const searching = Boolean(state.manga.query);
     page.className = "manga-library";
+    page.classList.toggle("manga-search-page", searching);
     page.dataset.readerGeneration = String(readerGeneration);
-    const view = includeCards ? { page, generation: readerGeneration, grid: null, cards: new Map() } : null;
-    if (view) libraryView = view;
-    page.append(renderMangaHeader("library"));
-
-    const hero = document.createElement("section");
-    hero.className = "manga-library-hero";
-    hero.innerHTML = `
-      <div>
-        <p class="manga-kicker">LOCAL COMIC LIBRARY</p>
-        <h1>把漫画当作一本书来管理</h1>
-        <p>封面、作品资料、章节目录与下载统一归档，阅读器只在选中章节后打开。</p>
-      </div>
-      <div class="manga-hero-count"><strong>${formatNumber(state.manga.data?.comics?.length || 0)}</strong><span>本地作品</span></div>
-    `;
-    page.append(hero);
+    const view = includeCards ? { page, generation: readerGeneration, grid: null, cards: new Map(), shelf: libraryShelf() } : null;
+    if (view) {
+      libraryView = view;
+      comics = view.shelf.comics;
+    }
+    page.append(renderMangaHeader(searching ? "search" : "library"));
 
     const controls = document.createElement("form");
     controls.className = "manga-library-controls";
+    controls.setAttribute("role", "search");
     const current = () => page.isConnected && state.activeView === "manga" && !state.manga.comic && !state.manga.chapter
       && page.dataset.readerGeneration === String(readerGeneration);
     controls.innerHTML = `
       <label class="manga-search"><span>搜索</span><input type="search" value="${escapeAttr(state.manga.query)}" placeholder="书名、作者、标签" autocomplete="off"></label>
       <label class="manga-sort"><span>排序</span><select><option value="updated">最近更新</option><option value="title">书名</option><option value="chapters">章节最多</option></select></label>
       <button type="submit">查找漫画</button>
-      <button class="manga-add-toggle" type="button" data-action="add">添加漫画</button>
+      <button class="manga-add-toggle" type="button" data-action="add" ${searching ? "hidden" : ""}>添加漫画</button>
+      <button class="manga-search-back" type="button" data-action="clear-search" ${searching ? "" : "hidden"}>返回书库</button>
     `;
-    controls.querySelector("select").value = state.manga.sort;
-    controls.addEventListener("submit", (event) => {
-      event.preventDefault();
+    const input = controls.querySelector("input"), sort = controls.querySelector("select");
+    sort.value = state.manga.sort;
+    const commitQuery = () => {
       if (!current()) return;
       retireLibraryComicRead();
-      state.manga.query = controls.querySelector("input").value.trim();
-      state.manga.sort = controls.querySelector("select").value;
+      state.manga.query = input.value.trim();
+      state.manga.sort = sort.value;
       renderView();
       pushRoute({ mangaQuery: state.manga.query, mangaSort: state.manga.sort });
+    };
+    controls.addEventListener("submit", (event) => {
+      event.preventDefault();
+      commitQuery();
     });
-    controls.querySelector("select").addEventListener("change", () => {
+    input.addEventListener("search", () => {
+      if (state.manga.query && !input.value.trim()) commitQuery();
+    });
+    controls.querySelector('[data-action="clear-search"]').addEventListener("click", () => {
+      if (!current() || !state.manga.query) return;
+      input.value = "";
+      commitQuery();
+      input.focus({ preventScroll: true });
+    });
+    sort.addEventListener("change", () => {
       if (!current()) return;
       retireLibraryComicRead();
-      state.manga.sort = controls.querySelector("select").value;
+      state.manga.sort = sort.value;
       renderView();
       pushRoute({ mangaSort: state.manga.sort });
     });
     controls.querySelector('[data-action="add"]').addEventListener("click", () => {
-      if (!current()) return;
+      if (!current() || state.manga.query) return;
       state.manga.addOpen = true;
       renderView();
       document.querySelector(".manga-add-panel input")?.focus();
     });
     page.append(controls);
+
+    const heading = document.createElement("section");
+    if (searching) {
+      heading.className = "manga-search-results";
+      heading.innerHTML = `<h1>搜索结果</h1><p>“${escapeHtml(state.manga.query)}”${state.manga.data ? ` · ${formatNumber(comics.length)} 部漫画` : ""}</p>`;
+    } else {
+      heading.className = "manga-library-hero";
+      heading.innerHTML = `
+        <div>
+          <p class="manga-kicker">LOCAL COMIC LIBRARY</p>
+          <h1>把漫画当作一本书来管理</h1>
+          <p>封面、作品资料、章节目录与下载统一归档，阅读器只在选中章节后打开。</p>
+        </div>
+        <div class="manga-hero-count"><strong>${formatNumber(state.manga.data?.comics?.length || 0)}</strong><span>本地作品</span></div>
+      `;
+    }
+    page.append(heading);
 
     if (state.manga.addOpen || state.manga.addJob) {
       const addPanel = document.createElement("form");
@@ -807,7 +869,7 @@ export function createMangaPage(deps) {
       const addedComic = state.manga.data?.comics?.find((comic) => comic.id === state.manga.addJob?.comicId);
       const progress = jobProgressMarkup(state.manga.addJob);
       if (!addRunning) addPanel.dataset.addViewKey = JSON.stringify([state.manga.addUrl, state.manga.addJob?.id || "", progress, state.manga.addError, addedComic?.id || ""]);
-      const currentAdd = () => addPanel.isConnected && currentLibraryView(libraryView)
+      const currentAdd = () => !state.manga.query && addPanel.isConnected && currentLibraryView(libraryView)
         && addPanel.closest(".manga-library") === libraryView.page && libraryView.page.querySelector(".manga-add-panel") === addPanel;
       addPanel.innerHTML = `
         <div class="manga-add-panel-head"><div><p class="manga-kicker">ADD TO LIBRARY</p><h2>添加新的漫画</h2></div><button type="button" data-action="close" ${addRunning ? "disabled" : ""}>关闭</button></div>
@@ -845,7 +907,8 @@ export function createMangaPage(deps) {
     } else if (!state.manga.loading) {
       const empty = document.createElement("div");
       empty.className = "manga-empty";
-      empty.innerHTML = `<strong>没有匹配的漫画</strong><span>检查采集器是否已生成 manifest.json 与 manga.sqlite。</span>`;
+      empty.innerHTML = searching ? `<strong>没有匹配的漫画</strong><span>试试其他书名、作者或标签。</span>`
+        : `<strong>书库暂时为空</strong><span>检查采集器是否已生成 manifest.json 与 manga.sqlite。</span>`;
       page.append(empty);
     }
     return page;
@@ -1130,10 +1193,13 @@ export function createMangaPage(deps) {
 
   function updateChapterCatalog(view) {
     const comic = state.manga.comic;
+    const chapters = comic.chapters;
     const currentChapter = directoryReturn?.comicId === comic.id && directoryReturn.generation === readerGeneration
       ? Number(directoryReturn.chapterIndex) : null;
+    // Update polling changes the job status while the chapter array remains authoritative.
+    if (view.catalogChapters === chapters && view.catalogCurrentChapter === currentChapter) return;
     const wanted = [];
-    for (const chapter of comic.chapters || []) {
+    for (const chapter of chapters || []) {
       const key = String(Number(chapter.index));
       let record = view.rows.get(key);
       if (!record) {
@@ -1143,7 +1209,7 @@ export function createMangaPage(deps) {
         button.type = "button";
         button.append(document.createElement("span"), document.createElement("strong"), document.createElement("small"));
         row.append(button);
-        record = { row, button, chapter };
+        record = { row, button };
         view.rows.set(key, record);
         button.addEventListener("click", () => {
           if (!currentDetailView(view) || view.rows.get(key) !== record || row.hidden) return;
@@ -1151,7 +1217,6 @@ export function createMangaPage(deps) {
           if (chapterAvailable(current)) void openChapter(current.index);
         });
       }
-      record.chapter = chapter;
       record.searchText = normalizeChapterQuery(`${chapter.index} ${chapter.title || ""}`);
       const available = chapterAvailable(chapter);
       const { row, button } = record;
@@ -1178,6 +1243,8 @@ export function createMangaPage(deps) {
     reconcileChapterNodes(view.list, wanted);
     view.catalog.querySelector(".manga-section-head > span").textContent = `${formatNumber(wanted.length)} 话`;
     filterChapterCatalog(view);
+    view.catalogChapters = chapters;
+    view.catalogCurrentChapter = currentChapter;
   }
 
   function normalizeChapterQuery(value) { return String(value || "").normalize("NFKC").toLocaleLowerCase().trim(); }
@@ -1607,15 +1674,18 @@ export function createMangaPage(deps) {
     return [comic.title, comic.author, comic.description, ...(comic.tags || [])].join(" ").normalize("NFKC").toLowerCase().includes(query);
   }
 
-  function filteredComics() {
+  function libraryShelf(previous) {
+    const source = state.manga.data?.comics;
     const query = state.manga.query.trim().normalize("NFKC").toLowerCase();
-    const list = [...(state.manga.data?.comics || [])].filter(comic => matchesComicQuery(comic, query));
-    list.sort((a, b) => {
-      if (state.manga.sort === "title") return String(a.title).localeCompare(String(b.title), "zh-CN");
-      if (state.manga.sort === "chapters") return Number(b.chapterCount || 0) - Number(a.chapterCount || 0);
+    const sort = state.manga.sort;
+    if (previous && previous.source === source && previous.query === query && previous.sort === sort) return previous;
+    const comics = (source || []).filter(comic => matchesComicQuery(comic, query));
+    comics.sort((a, b) => {
+      if (sort === "title") return String(a.title).localeCompare(String(b.title), "zh-CN");
+      if (sort === "chapters") return Number(b.chapterCount || 0) - Number(a.chapterCount || 0);
       return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
     });
-    return list;
+    return { source, query, sort, comics };
   }
 
   function renderStatus() {

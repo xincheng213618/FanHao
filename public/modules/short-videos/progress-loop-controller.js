@@ -20,9 +20,9 @@ export function createShortVideoProgressLoop({
     String(player.dataset?.shortVideoWarmScheduleToken || ""),
     String(player.dataset?.shortVideoPlaybackIntentGeneration || "0")
   ]);
-  const usable = player => Boolean(player && isConnected() && player.isConnected !== false
+  const usable = player => Boolean(player && player.isConnected !== false
     && !player.classList?.contains?.("is-ghost") && !player.paused && !player.ended && !player.error);
-  const owns = owner => Boolean(!disposed && current === owner && owner.player === getPlayer()
+  const owns = owner => Boolean(!disposed && current === owner && isConnected() && owner.player === getPlayer()
     && usable(owner.player) && owner.identity === identity(owner.player));
   const clearFrame = owner => {
     const frame = owner?.frame;
@@ -37,7 +37,8 @@ export function createShortVideoProgressLoop({
     clearFrame(previous);
   }
   const schedule = owner => {
-    if (!owns(owner) || owner.frame) return;
+    // The caller has already checked the live player and its identity.
+    if (owner.frame) return;
     const player = owner.player;
     const native = typeof player.requestVideoFrameCallback === "function";
     const frame = {
@@ -55,14 +56,15 @@ export function createShortVideoProgressLoop({
       }
       owner.frame = null;
       const timestamp = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-      if (owner.lastAt === null || timestamp < owner.lastAt || timestamp - owner.lastAt >= interval) {
+      const shouldPaint = owner.lastAt === null || timestamp < owner.lastAt || timestamp - owner.lastAt >= interval;
+      if (shouldPaint) {
         owner.lastAt = timestamp;
         onProgress(player, timestamp);
       }
       // onProgress may synchronously stop/dispose, replace the media or call
       // sync itself. Only the surviving owner may keep the single frame chain.
       if (current !== owner || disposed) return;
-      if (!owns(owner)) {
+      if (shouldPaint && !owns(owner)) {
         stop();
         sync();
         return;
@@ -89,9 +91,10 @@ export function createShortVideoProgressLoop({
       stop();
       return;
     }
-    if (!current || !owns(current)) {
+    const playerIdentity = identity(player);
+    if (!current || current.player !== player || current.identity !== playerIdentity) {
       stop();
-      current = { player, identity: identity(player), frame: null, lastAt: null };
+      current = { player, identity: playerIdentity, frame: null, lastAt: null };
     }
     schedule(current);
   }

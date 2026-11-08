@@ -1,4 +1,5 @@
 import {
+  cachedPublicPeople,
   prewarmLibraryPeoplePayloads,
   routeLibraryApi,
   routeLibraryMutationApi,
@@ -7,6 +8,7 @@ import {
 import { publicPersonListItem } from "../people/person-list-presenter.js";
 
 const PERSON_INDEX_COVER_PREWARM_LIMIT = 64;
+const personNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function normalizedSourcePath(value) {
   return String(value || "").replaceAll("\\", "/").toLowerCase();
@@ -40,21 +42,19 @@ function personSourcePriority(person) {
 export function personIndexCoverFiles(deps, limit = PERSON_INDEX_COVER_PREWARM_LIMIT) {
   const library = deps.getLibrary();
   const people = deps.personListService.mainLibraryPeople("main");
-  const visible = people
-    .map((person) => ({
-      person,
-      item: publicPersonListItem(deps.publicPerson(person, { skipFallbackAvatar: true }))
-    }))
-    .filter(({ item }) => item && item.actorProfile?.gender !== "male")
-    .sort((a, b) => (
-      personSourcePriority(a.item) - personSourcePriority(b.item)
-      || displayPersonName(a.item).localeCompare(displayPersonName(b.item), undefined, { numeric: true, sensitivity: "base" })
-    ))
-    .slice(0, Math.max(0, Math.floor(Number(limit) || 0)));
+  const items = typeof deps.peopleScopeService?.cacheKey === "function"
+    ? cachedPublicPeople(people, "main", { ...deps, library })
+    : people.map(person => publicPersonListItem(deps.publicPerson(person, { skipFallbackAvatar: true })));
+  const visible = [];
+  for (const [index, item] of items.entries()) {
+    if (!item || item.actorProfile?.gender === "male") continue;
+    visible.push({ person: people[index], item, priority: personSourcePriority(item), name: displayPersonName(item) });
+  }
+  visible.sort((a, b) => a.priority - b.priority || personNameCollator.compare(a.name, b.name));
 
   const files = [];
   const seen = new Set();
-  for (const { person, item } of visible) {
+  for (const { person, item } of visible.slice(0, Math.max(0, Math.floor(Number(limit) || 0)))) {
     if (!String(item.avatarUrl || "").startsWith("/media/person/")) continue;
     const file = person.coverId ? library.filesById.get(person.coverId) : null;
     if (!file || file.type !== "image" || seen.has(file.id || file.path)) continue;

@@ -664,15 +664,7 @@
     flex: 1 1 100%;
   }
 
-  .person-index-card {
-    grid-template-columns: none;
-    min-height: 162px;
-    gap: 8px;
-    padding: 9px;
-  }
-
   .person-index-avatar {
-    width: 100%;
     font-size: 16px;
   }
 

@@ -1,11 +1,49 @@
-export const EDITION_FILTERS = [
+const VERSION_FILTERS = [
   ["uncensored", "无码"],
   ["uncensoredAi", "无码破解"],
   ["subtitled", "中字"],
-  ["quality4k", "4K"]
+  ["ltx", "LTX"]
 ];
+const QUALITY_FILTERS = [["quality4k", "4K"], ["quality1080p", "1080p"], ["quality720p", "720p"]];
+const FORMAT_FILTERS = [["formatMp4", "MP4"], ["formatMkv", "MKV"], ["formatWmv", "WMV"]];
+export const EDITION_FILTERS = [...VERSION_FILTERS, ...QUALITY_FILTERS, ...FORMAT_FILTERS];
+const CLASSIFICATION_LABELS = new Map([["ltx", "LTX"], ...[...QUALITY_FILTERS, ...FORMAT_FILTERS].map(([, label]) => [label.toLowerCase(), label])]);
 
 const editionLabels = new Map(EDITION_FILTERS);
+
+export function classificationQuery(key, query = "") {
+  const normalized = String(key || "").toLowerCase();
+  return CLASSIFICATION_LABELS.has(normalized) ? `class:${normalized}${query ? ` ${query}` : ""}` : "";
+}
+
+export function parseClassificationQuery(value) {
+  const match = /^class:(\S+)(?:\s+([\s\S]+))?$/i.exec(String(value || "").trim());
+  const key = match?.[1].toLowerCase();
+  const label = CLASSIFICATION_LABELS.get(key);
+  return label ? { key, label, query: match[2] || "" } : null;
+}
+
+function classificationHref(key) {
+  const params = new URLSearchParams(globalThis.location?.search || "");
+  const target = new URLSearchParams({ classification: key });
+  for (const name of ["client", "returnTo"]) if (params.has(name)) target.set(name, params.get(name));
+  return `/fanhao?${target}`;
+}
+
+export function createClassificationNav(active) {
+  const nav = document.createElement("nav");
+  nav.className = "work-classification-nav";
+  nav.setAttribute("aria-label", "媒体分类");
+  for (const [key, label] of CLASSIFICATION_LABELS) {
+    const link = document.createElement("a");
+    link.className = `browse-trait-chip${active === key ? " active" : ""}`;
+    link.href = classificationHref(key);
+    link.textContent = label;
+    if (active === key) link.setAttribute("aria-current", "page");
+    nav.append(link);
+  }
+  return nav;
+}
 
 export function tagFilterValue(name) {
   return `tag:${encodeURIComponent(String(name || "").trim())}`;
@@ -104,55 +142,10 @@ export function createBrowseTraitControls({ facets, filters = [], toggle, loaded
     row.append(heading, list);
     root.append(row);
   }
-  addRow("版本 / 画质", EDITION_FILTERS.filter(([key]) => editions.has(key))
-    .map(([key, name]) => ({ ...editions.get(key), name, value: key })));
+  for (const [label, options] of [["版本", VERSION_FILTERS], ["分辨率", QUALITY_FILTERS], ["格式", FORMAT_FILTERS]]) {
+    addRow(label, options.filter(([key]) => editions.has(key))
+      .map(([key, name]) => ({ ...editions.get(key), name, value: key })));
+  }
   addRow("内容标签", [...tags.values()].map((item) => ({ ...item, value: tagFilterValue(item.name) })));
-  return root;
-}
-
-export function createWorkEditionBadges(work) {
-  const editions = (work?.traits?.editions || []).filter((item) => editionLabels.has(item.key));
-  const unique = new Map(editions.map((item) => [item.key, item]));
-  if (unique.has("uncensoredAi")) unique.delete("uncensored");
-  if (!unique.size) return null;
-  const root = document.createElement("div");
-  root.className = "work-edition-badges";
-  for (const [key, name] of EDITION_FILTERS) {
-    if (!unique.has(key)) continue;
-    const item = unique.get(key);
-    const badge = document.createElement("span");
-    badge.className = `work-edition-badge edition-${key}`;
-    badge.textContent = name;
-    const evidence = (Array.isArray(item.evidence) ? item.evidence : []).filter((value) => typeof value === "string" && value.trim());
-    badge.title = `${name} · 识别依据：${evidence.length ? evidence.join("；") : "资料标记"}。标记来自文件或资料线索，未核验视频画面。`;
-    badge.setAttribute("aria-label", badge.title);
-    root.append(badge);
-  }
-  return root;
-}
-
-export function createWorkTagButtons(work, { filters = [], toggle }) {
-  const names = [...new Set((work?.traits?.tags || []).filter((name) => typeof name === "string" && name.trim()))].slice(0, 3);
-  if (!names.length) return null;
-  const root = document.createElement("div");
-  root.className = "work-tag-buttons";
-  for (const name of names) {
-    const value = tagFilterValue(name);
-    const active = filters.includes(value);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `work-tag-button${active ? " active" : ""}`;
-    button.textContent = name;
-    button.dataset.workFilter = value;
-    button.title = `筛选标签：${name}`;
-    button.setAttribute("aria-label", button.title);
-    button.setAttribute("aria-pressed", String(active));
-    button.addEventListener("pointerdown", (event) => event.stopPropagation());
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggle(value);
-    });
-    root.append(button);
-  }
   return root;
 }

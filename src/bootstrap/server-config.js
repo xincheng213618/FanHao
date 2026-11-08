@@ -41,6 +41,7 @@ export function createServerConfig({
     PUBLIC_DIR: path.join(projectRoot, "public"),
     DATA_DIR,
     FILE_WORKFLOW_ROOTS: parseRootList(env.FANHAO_WORKFLOW_ROOTS, parseLibraryRoots(env).join(";")),
+    MEDIA_INTAKE_ROOTS: parseRootList(env.FANHAO_INTAKE_ROOTS, process.platform === "win32" ? "D:\\" : ""),
     MANGA_LIBRARY_ROOT,
     MANGA_DATABASE_PATH: env.FANHAO_MANGA_DATABASE || path.join(MANGA_LIBRARY_ROOT, "manga.sqlite"),
     PHOTO_SET_ROOTS: parsePhotoSetRoots(env),

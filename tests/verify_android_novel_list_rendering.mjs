@@ -24,8 +24,10 @@ for (const [url, hash] of Object.entries(hashes)) {
   assert.equal(createHash("sha256").update(frozen[url]).digest("hex"), hash, `fixed complete ${url}`);
   current[url] = fs.readFileSync(path.join(www, url), "utf8").replaceAll("\r\n", "\n");
 }
-assert.ok(process.argv.slice(2).every(value => value === "--legacy-dom-reuse" || value.startsWith("--case=")));
+assert.ok(process.argv.slice(2).every(value => ["--legacy-dom-reuse", "--entry-overlap", "--entry-baseline-only"].includes(value) || value.startsWith("--case=")));
 const negative = process.argv.includes("--legacy-dom-reuse");
+const entryBaselineOnly = process.argv.includes("--entry-baseline-only");
+const entryOverlap = entryBaselineOnly || process.argv.includes("--entry-overlap");
 const casePattern = process.argv.find(value => value.startsWith("--case="))?.slice(7) || "";
 if (negative) {
   const marker = "  function appendMountedNovelCollection(mount, data) {";
@@ -52,7 +54,10 @@ function startup() {
   const create = document.createElement;
   document.createElement = function (...args) { __novelAudit.elements++; return create.apply(this, args); };
   const fetch = window.fetch.bind(window);
-  window.fetch = (input, options = {}) => fetch(input, __novelAudit.ignoreAbort ? { ...options, signal: undefined } : options);
+  window.fetch = (input, options = {}) => {
+    if (window.__novelEntryProbe && new URL(input, location.href).pathname === "/api/novels") __novelEntryProbe.events.push(["network", performance.now()]);
+    return fetch(input, __novelAudit.ignoreAbort ? { ...options, signal: undefined } : options);
+  };
   const scroll = window.scrollTo;
   window.scrollTo = function (...args) { __novelAudit.scrollWrites.push(args); return scroll.apply(this, args); };
 }
@@ -74,6 +79,27 @@ function instrument(source, url) {
   assert.equal(source.split(card).length, 2);
   source = source.replace(card, `${card}\n    window.__novelAudit.cardBooks.set(card, book);`);
   if (source.includes("  const novelCardRecords = new WeakMap();")) source = source.replace("  const novelCardRecords = new WeakMap();", "  const novelCardRecords = new WeakMap();\n  window.__novelAudit.records = novelCardRecords;");
+  if (entryOverlap) {
+    const imports = 'import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson }';
+    assert.equal(source.split(imports).length, 2);
+    source = source.replace(imports, 'import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson as readCachedJsonActual, writeCachedJson }');
+    const local = "  async function loadLocalListData() {";
+    assert.equal(source.split(local).length, 2);
+    source = source.replace(local, `${local}\n    await delayShelfRead("local", 240);`);
+    const render = "  function renderNovelListData(data = {}, cacheEntry = null) {";
+    assert.equal(source.split(render).length, 2);
+    source = source.replace(render, `${render}\n    if (novelPage?.remoteStatus === "loaded" && !cacheEntry) requestAnimationFrame(() => __novelEntryProbe.events.push(["fresh-visible", performance.now()]));`);
+    source += `
+async function delayShelfRead(type, delay) {
+  __novelEntryProbe.events.push([type, performance.now()]);
+  await new Promise(resolve => setTimeout(resolve, delay));
+  __novelEntryProbe.events.push([type + "-ready", performance.now()]);
+}
+async function readCachedJson(base, path, ...rest) {
+  if (path.startsWith("/api/novels?")) await delayShelfRead("cache", 150);
+  return readCachedJsonActual(base, path, ...rest);
+}`;
+  }
   return source;
 }
 async function surface(sources) {
@@ -118,6 +144,7 @@ async function surface(sources) {
         else failures.push(`unexpected API ${apiPath}`);
         const gate = f.holds.find(gate => !gate.used && gate.match(url));
         if (gate) { gate.used = true; held.add(gate); gate.requested(); await gate.promise; held.delete(gate); if (gate.error) return send(JSON.stringify({ error: gate.error }), "application/json", 503); }
+        if (f.entryOverlap && apiPath === "/api/novels") await new Promise(resolve => setTimeout(resolve, 180));
         send(JSON.stringify(payload)); return;
       }
       if (url.pathname === "/favicon.ico") return send("", "image/x-icon", 204);
@@ -131,9 +158,11 @@ async function surface(sources) {
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const result = { base, async open(count = 240) {
-    const id = `case-${++sequence}`, f = { id, books: pool(count), realm, requests: [], holds: [] };
+  const result = { base, async open(count = 240, prepareBooks) {
+    const id = `case-${++sequence}`, f = { id, books: pool(count), realm, requests: [], holds: [], entryOverlap };
+    prepareBooks?.(f.books);
     cases.set(id, f); f.context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, extraHTTPHeaders: { "X-Fixture-Case": id } });
+    if (entryOverlap) await f.context.addInitScript(() => { window.__novelEntryProbe = { events: [] }; });
     f.page = await f.context.newPage(); f.page.on("pageerror", error => failures.push(error.message));
     await f.page.route(new RegExp(`^https?://(?!127\\.0\\.0\\.1:${server.address().port}(?:/|$))`), route => route.abort());
     await f.page.goto(base, { waitUntil: "networkidle" }); await ready(f.page, Math.min(80, count)); return f;
@@ -248,7 +277,9 @@ async function localReadRecovery(surface) {
   } finally { await f.context.close(); }
 }
 async function nativeSurface(surface) {
-  const f = await surface.open(160);
+  const f = await surface.open(160, ([first]) => {
+    first.progress = { chapterIndex: 7, chapterId: `${first.id}-c7`, scrollRatio: 0.4, catalogRevision: first.catalogRevision };
+  });
   try {
     await f.page.locator(".novel-mobile-load-more").scrollIntoViewIfNeeded(); await frames(f.page);
     await f.page.locator(".novel-mobile-load-more").focus();
@@ -273,7 +304,9 @@ async function nativeSurface(surface) {
     if (!negative) assert.equal(after.writes, 0, "stable append does not write window scroll");
     await f.page.locator(".novel-mobile-book-read").first().click();
     await f.page.waitForFunction(() => __novelAudit.host.navigation.currentView() === "novelReader");
-    assert.equal(await f.page.evaluate(() => __novelAudit.host.navigation.currentParams().id), "book-00000");
+    const params = await f.page.evaluate(() => __novelAudit.host.navigation.currentParams());
+    assert.equal(params.id, "book-00000");
+    assert.equal(params.chapterIndex, "7", "the separate reading control must open the saved chapter");
   } finally { await f.context.close(); }
 }
 async function seedCache(f, limit, books, total = f.books.length) {
@@ -395,20 +428,62 @@ async function accountChange(surface) {
     gate.release(); await frames(f.page); compare(await snapshot(f.page), state, "old account cannot publish into the new account realm");
   } finally { for (const gate of f.holds) gate.release(); await f.context.close(); }
 }
+async function entryTiming(surface, previous) {
+  const f = await surface.open(160);
+  const phases = async () => f.page.evaluate(() => Object.fromEntries(__novelEntryProbe.events));
+  const timing = (events) => ({ startSkewMs: Math.round(Math.max(events.local, events.cache, events.network) - Math.min(events.local, events.cache, events.network)),
+    remoteBeforeLocalReady: events.network < events["local-ready"], cacheBeforeLocalReady: events.cache < events["local-ready"] });
+  try {
+    const initial = await phases();
+    assert(Number.isFinite(initial["fresh-visible"]), "fresh shelf rendered an actual frame");
+    const entry = { ...timing(initial), firstFreshMs: Math.round(initial["fresh-visible"] - Math.min(initial.local, initial.cache, initial.network)) };
+    const moreStarted = performance.now();
+    await f.page.evaluate(() => { __novelEntryProbe.events.length = 0; document.querySelector(".novel-mobile-load-more").click(); });
+    await ready(f.page, 160);
+    const next = { ...timing(await phases()), moreReadyMs: Math.round(performance.now() - moreStarted) };
+    assert.deepEqual(listRequests(f).map(request => request.rows), [80, 160]);
+    for (const result of [entry, next]) {
+      assert.equal(result.remoteBeforeLocalReady, !previous);
+      assert.equal(result.cacheBeforeLocalReady, !previous);
+    }
+    if (!previous) {
+      const requests = listRequests(f).length;
+      await f.page.locator(".novel-mobile-shelf-toolbar button").filter({ hasText: "手机离线" }).click();
+      await f.page.waitForFunction(() => __novelAudit.read().page?.localData && __novelAudit.read().listState.source === "local");
+      assert.equal(listRequests(f).length, requests, "the pure local shelf must not dispatch a remote read");
+    }
+    return { entry, next };
+  } finally { await f.context.close(); }
+}
+
 try {
   browser = await chromium.launch({ headless: true, executablePath });
-  const oldSurface = await surface(frozen), nextSurface = await surface(current);
-  let createdCards, groups = 0;
-  for (const [name, run] of [
-    ["scale", async () => { createdCards = await scale(oldSurface, nextSurface); }],
-    ["fallbacks", () => fallbacks(oldSurface, nextSurface)], ["failure", () => failureRecovery(nextSurface)], ["local-read", () => localReadRecovery(nextSurface)],
-    ["native", () => nativeSurface(nextSurface)], ["cache", () => cachedRefresh(nextSurface)],
-    ["intent", () => fallbackIntent(nextSurface)], ["retirement", () => retirement(nextSurface)], ["account", () => accountChange(nextSurface)]
-  ]) if (!casePattern || name.includes(casePattern)) { await run(); groups++; console.log(`PASS ${name}`); }
-  assert.ok(groups > 0, "case selector must execute an actual-entry group");
-  assert.deepEqual(failures, []);
-  if (createdCards !== undefined) assert.equal(createdCards, 1600, "only the newly accepted eighty cards are constructed");
-  console.log(`Android novel list rendering passed (${groups} actual-entry groups, ${comparisons} complete oracle comparisons; synthetic data only)`);
+  if (entryOverlap) {
+    const url = "/modules/novels/novel-views.js";
+    const original = execFileSync("git", ["show", `f110040d02b1eb579461248da9960e97370fa4d2:android-client/www${url}`], { cwd: project, encoding: "utf8" });
+    let restored = current[url];
+    for (const [start, end] of [["  async function renderNovelCollection(", "  function novelCollectionScope("], ["  async function loadMoreNovelCollection(", "  function renderNovelListData("]]) {
+      const first = restored.indexOf(start), stop = restored.indexOf(end, first), oldFirst = original.indexOf(start), oldStop = original.indexOf(end, oldFirst);
+      assert(first >= 0 && oldFirst >= 0 && stop > first && oldStop > oldFirst);
+      restored = restored.slice(0, first) + original.slice(oldFirst, oldStop) + restored.slice(stop);
+    }
+    console.log(JSON.stringify({ mode: "previous", ...await entryTiming(await surface({ ...current, [url]: restored }), true) }));
+    if (!entryBaselineOnly) console.log(JSON.stringify({ mode: "current", ...await entryTiming(await surface(current), false) }));
+    assert.deepEqual(failures, []);
+  } else {
+    const oldSurface = await surface(frozen), nextSurface = await surface(current);
+    let createdCards, groups = 0;
+    for (const [name, run] of [
+      ["scale", async () => { createdCards = await scale(oldSurface, nextSurface); }],
+      ["fallbacks", () => fallbacks(oldSurface, nextSurface)], ["failure", () => failureRecovery(nextSurface)], ["local-read", () => localReadRecovery(nextSurface)],
+      ["native", () => nativeSurface(nextSurface)], ["cache", () => cachedRefresh(nextSurface)],
+      ["intent", () => fallbackIntent(nextSurface)], ["retirement", () => retirement(nextSurface)], ["account", () => accountChange(nextSurface)]
+    ]) if (!casePattern || name.includes(casePattern)) { await run(); groups++; console.log(`PASS ${name}`); }
+    assert.ok(groups > 0, "case selector must execute an actual-entry group");
+    assert.deepEqual(failures, []);
+    if (createdCards !== undefined) assert.equal(createdCards, 1600, "only the newly accepted eighty cards are constructed");
+    console.log(`Android novel list rendering passed (${groups} actual-entry groups, ${comparisons} complete oracle comparisons; synthetic data only)`);
+  }
 } finally {
   await browser?.close();
   for (const owner of surfaces) await owner.close();

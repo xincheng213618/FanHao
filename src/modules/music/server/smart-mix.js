@@ -21,6 +21,7 @@ export const SMART_MIXES = [
     description: "按最近播放时间自动更新，适合继续刚才的听歌顺序。",
     badge: "继续听",
     order: "s.last_played_at DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC",
+    uniqueStateOrder: "s.last_played_at",
     limit: 120
   },
   {
@@ -29,6 +30,7 @@ export const SMART_MIXES = [
     description: "按播放次数自动整理，保留真正反复听过的歌曲。",
     badge: "常听",
     order: "COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC",
+    uniqueStateOrder: "COALESCE(s.last_played_at, '')",
     limit: 200
   },
   {
@@ -53,6 +55,7 @@ export const SMART_MIXES = [
     description: "所有已收藏歌曲，按最近收藏或更新靠前。",
     badge: "收藏",
     order: "s.updated_at DESC, t.title COLLATE NOCASE ASC",
+    uniqueStateOrder: "s.updated_at",
     limit: 200
   },
   {
@@ -61,6 +64,7 @@ export const SMART_MIXES = [
     description: "4 星及以上歌曲，按评分和更新时间排序。",
     badge: "4★+",
     order: "COALESCE(s.rating, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC",
+    uniqueStateOrder: "s.updated_at",
     limit: 200
   },
   {
@@ -101,6 +105,7 @@ export const SMART_MIXES = [
     description: "收藏或听过、但最近 30 天没有播放的歌曲。",
     badge: "重温",
     order: "COALESCE(s.last_played_at, '') ASC, COALESCE(s.updated_at, '') DESC, t.title COLLATE NOCASE ASC",
+    uniqueStateOrder: "COALESCE(s.updated_at, '')",
     limit: 160
   }
 ];

@@ -67,6 +67,31 @@ export function authorFacet(db) {
   return queryAuthorFacet(db);
 }
 
+export function prepareAuthorMentionQuery(db, originalSql, originalCount, args) {
+  const indexedSql = originalSql.replace(originalCount, `(
+    (SELECT COUNT(*) FROM short_videos videos
+      WHERE videos.visibility = 'local_only' AND videos.owner_user_id = users.id)
+    + (SELECT COUNT(*) FROM short_videos videos
+      WHERE videos.visibility = 'local_only' AND COALESCE(videos.owner_user_id, '') = ''
+        AND videos.author_sec_uid = users.sec_uid AND (videos.owner_user_id = users.id) IS NOT TRUE)
+  )`);
+  try {
+    const plan = sql => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args);
+    const indexedPlan = plan(indexedSql);
+    const seeks = indexedPlan.filter(({ detail }) => detail.startsWith("SEARCH videos USING") && !detail.includes("AUTOMATIC"));
+    const userOrder = rows => rows.filter(row => row.parent === 0
+      && /^(?:(?:SCAN|SEARCH) users\b|USE TEMP B-TREE)/u.test(row.detail)).map(row => row.detail).join("\n");
+    const order = userOrder(indexedPlan);
+    // Keep legacy scans and preserve the native traversal of tied users.
+    if (seeks.some(({ detail }) => detail.includes("owner_user_id=?"))
+      && seeks.some(({ detail }) => detail.includes("author_sec_uid=?"))
+      && /^(?:SCAN|SEARCH) users\b/u.test(order) && order === userOrder(plan(originalSql))) return db.prepare(indexedSql);
+  } catch {
+    // The optional plan keeps the original preparation as its fallback.
+  }
+  return db.prepare(originalSql);
+}
+
 export function searchAuthorFacet(db, query) {
   const value = String(query || "").trim().slice(0, 120);
   if (!value) return [];

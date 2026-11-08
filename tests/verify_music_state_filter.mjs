@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
 import { createMusicStore } from "../src/modules/music/server/store.js";
+import { routeMusicApi } from "../src/modules/music/server/routes.js";
 import { MUSIC_FACET_CACHE } from "../src/modules/music/server/constants.js";
 
 // Restore only the former COUNT implementation. The actual page query, ties,
@@ -153,12 +156,180 @@ try {
     assert.throws(() => current.store.listTracks(url("favorite=1")), caught => caught === error);
     failure = null;
   }
+  await verifySparseFavoriteRoutes();
   console.log(JSON.stringify({ ok: true, responseOracles, tracks: 100000, metrics,
     scope: "COUNT only; complete legacy responses and page order retained; no real media or services" }, null, 2));
 } finally {
   measuring = null; failure = null;
   try { for (const owner of owners) await owner.store.stop(); }
   finally { DatabaseSync.prototype.prepare = originalPrepare; Date.now = originalNow; }
+}
+
+async function verifySparseFavoriteRoutes() {
+  const serializersUrl = new URL("./serializers.js", sourceUrl);
+  const serializers = fs.readFileSync(serializersUrl, "utf8").replaceAll("\r\n", "\n");
+  const oldAdjacent = serializers.replace("readSparseFavoriteAlbumRows(db, filter, order, sql, args) ?? ", "");
+  const oldPage = source.replace(/^      if \(offset < total && !playedIds\) rows = readSparseFavoriteAlbumRows\([^\n]+\);\n/mu, "");
+  assert.notEqual(oldAdjacent, serializers);
+  assert.notEqual(oldPage, source);
+  const module = text => "data:text/javascript;base64," + Buffer.from(text.replace(/from "(\.\.?\/[^"]+)"/gu,
+    (_, relative) => "from " + JSON.stringify(new URL(relative, sourceUrl).href))).toString("base64");
+  const { createMusicStore: beforeFactory } = await import(module(oldPage.replace('"./serializers.js"', JSON.stringify(module(oldAdjacent)))));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-music-favorite-page-"));
+  const dbPath = path.join(directory, "catalogue.sqlite");
+  const opened = [];
+  let writer, inspect = false, fault = null, interleave = null;
+  function connect(factory) {
+    const store = factory({ dbPath, roots: [] });
+    const owner = { store };
+    opened.push(owner);
+    const prepare = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.prepare = function (sql, ...args) { owner.db = this; return prepare.call(this, sql, ...args); };
+    try { assert.equal(store.progressClock("initialize"), null); } finally { DatabaseSync.prototype.prepare = prepare; }
+    const db = owner.db, nativePrepare = db.prepare.bind(db), nativeExec = db.exec.bind(db);
+    db.exec = sql => {
+      if (fault === "savepoint" && sql.startsWith("SAVEPOINT music_sparse_favorite_album")) throw new Error("fixture savepoint unavailable");
+      return nativeExec(sql);
+    };
+    db.prepare = sql => {
+      if (fault === "probe" && sql.startsWith("EXPLAIN QUERY PLAN") && sql.includes("ORDER BY t.album_title")) throw new Error("fixture plan unavailable");
+      const statement = nativePrepare(sql);
+      if (!(inspect || fault || interleave) || !sql.includes("ORDER BY t.album_title")
+        || !sql.includes("COALESCE(s.favorite, 0) = 1") || sql.startsWith("EXPLAIN")) return statement;
+      return new Proxy(statement, { get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (key !== "all") return typeof value === "function" ? value.bind(target) : value;
+        return (...args) => {
+          owner.selected = sql.includes("t._rowid_ ASC");
+          if (fault === "read") throw new Error("fixture queue read failed");
+          if (owner.selected && interleave) { const write = interleave; interleave = null; write(); }
+          owner.plan = nativePrepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => row.detail);
+          return target.all(...args);
+        };
+      } });
+    };
+    return owner;
+  }
+  async function route(owner, endpoint, expected = 200) {
+    const response = {};
+    assert(await routeMusicApi({ method: "GET" }, response, new URL(`http://fixture/api/music/${endpoint}`), {
+      musicStore: owner.store,
+      sendJson: (res, status, body) => Object.assign(res, { status, body }),
+      notFound: res => { res.status = 404; }
+    }));
+    assert.equal(response.status, expected);
+    return response;
+  }
+  try {
+    const before = connect(beforeFactory), after = connect(createMusicStore);
+    writer = new DatabaseSync(dbPath);
+    writer.exec(`PRAGMA synchronous=OFF; BEGIN IMMEDIATE;
+      WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+      INSERT INTO music_tracks(id,artist_id,album_id,title,display_artist,album_title,track_no,disc_no,genre,language,
+        source_root,source_path,relative_path,file_name,ext,updated_at)
+      SELECT printf('t-%06d',i),'a','al','Title '||i%20,'Artist',CASE WHEN i%3=0 THEN 'Album' ELSE 'album' END,
+        i%24,i%2,'Rock','其他','root','synthetic/'||i,'relative/'||i,'Track-'||i||'.mp3','.mp3','fixture' FROM n ORDER BY i DESC;
+      INSERT INTO music_artists(id,name,source_root,source_path,relative_path,track_count,updated_at)
+        VALUES('a','Artist','root','path','relative',100000,'fixture');
+      INSERT INTO music_albums(id,artist_id,title,source_root,source_path,relative_path,track_count,updated_at)
+        VALUES('al','a','Album','root','album','relative',100000,'fixture');
+      INSERT INTO music_track_state(track_id,favorite,updated_at)
+        SELECT id,CASE WHEN CAST(substr(id,3) AS INTEGER)%419=0 THEN 1 ELSE 0 END,'fixture'
+        FROM music_tracks WHERE CAST(substr(id,3) AS INTEGER)%3=0 OR CAST(substr(id,3) AS INTEGER)%419=0 ORDER BY id;
+      INSERT INTO music_track_state(track_id,favorite,updated_at) VALUES('orphan',1,'fixture');
+      COMMIT`);
+    const page = "tracks?favorite=1&limit=48";
+    const detail = "tracks/t-041900?favorite=1";
+    const unrelated = "tracks/t-041901?favorite=1";
+    inspect = true;
+    for (const endpoint of [page, page + "&offset=193", detail, unrelated]) {
+      assert.deepEqual(await route(after, endpoint), await route(before, endpoint));
+      assert.equal(after.selected, true);
+      assert(after.plan.some(line => line.includes("idx_music_track_state_favorite (favorite=?)")));
+      assert(before.plan.some(line => line === "SEARCH t USING INDEX idx_music_tracks_album_sort (status=?)"));
+    }
+    assert.equal((await route(after, "tracks/missing?favorite=1", 404)).status, 404);
+    assert.deepEqual(await route(after, page + "&offset=9007199254740991"), await route(before, page + "&offset=9007199254740991"));
+    assert.deepEqual(await route(after, page + "&artist=a"), await route(before, page + "&artist=a"));
+    assert.equal(after.selected, false);
+    for (fault of ["probe", "savepoint"]) {
+      assert.deepEqual(await route(after, detail), await route(before, detail));
+      assert.equal(after.selected, false);
+      assert.equal(after.db.isTransaction, false);
+    }
+    const log = console.error;
+    try {
+      console.error = () => {}; fault = "read";
+      for (const endpoint of [page, detail]) {
+        assert.deepEqual(await route(after, endpoint, 500), await route(before, endpoint, 500));
+        assert.equal(after.db.isTransaction, false);
+      }
+    } finally { console.error = log; fault = null; inspect = false; }
+    const diagnostics = {};
+    for (const [name, endpoint] of [["list", page], ["detail", detail]]) {
+      const samples = [[], []];
+      for (let pair = 0; pair < 5; pair++) {
+        const replies = [];
+        for (const mode of pair % 2 ? [1, 0] : [0, 1]) {
+          const start = performance.now(); replies[mode] = await route([before, after][mode], endpoint);
+          samples[mode].push(performance.now() - start);
+        }
+        assert.deepEqual(replies[0], replies[1]);
+      }
+      diagnostics[name] = samples.map(values => +values.sort((a, b) => a - b)[2].toFixed(2));
+    }
+    const pinned = await route(before, detail);
+    assert(pinned.body.prevId || pinned.body.nextId);
+    interleave = () => writer.exec("UPDATE music_track_state SET favorite=0 WHERE track_id='t-041900'");
+    assert.deepEqual(await route(after, detail), pinned);
+    assert.equal(interleave, null);
+    const committed = await route(after, detail);
+    assert.deepEqual(committed, await route(before, detail));
+    assert.equal(committed.body.prevId, ""); assert.equal(committed.body.nextId, "");
+    inspect = true;
+    for (const count of [1024, 1025]) {
+      writer.exec(`UPDATE music_track_state SET favorite=0;
+        UPDATE music_track_state SET favorite=1 WHERE track_id IN (
+          SELECT track_id FROM music_track_state WHERE track_id<>'orphan' ORDER BY track_id LIMIT ${count})`);
+      assert.deepEqual(await route(after, page), await route(before, page));
+      assert.equal(after.selected, count === 1024);
+    }
+    writer.exec(`UPDATE music_track_state SET favorite=0;
+      UPDATE music_track_state SET favorite=1 WHERE CAST(substr(track_id,3) AS INTEGER)%419=0;
+      ALTER TABLE music_tracks ADD COLUMN _rowid_ TEXT GENERATED ALWAYS AS (id) VIRTUAL`);
+    for (const endpoint of [page, detail]) {
+      assert.deepEqual(await route(after, endpoint), await route(before, endpoint));
+      assert.equal(after.selected, false);
+    }
+    writer.exec("ALTER TABLE music_tracks DROP COLUMN _rowid_");
+    const trackSchema = writer.prepare("SELECT sql FROM sqlite_schema WHERE name = 'music_tracks'").get().sql;
+    const indexes = writer.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='music_tracks' AND sql IS NOT NULL").all();
+    writer.exec(`ALTER TABLE music_tracks RENAME TO fixture_old_tracks;
+      ${trackSchema.replace("artist_id TEXT NOT NULL", "artist_id INTEGER NOT NULL")};
+      INSERT INTO music_tracks SELECT * FROM fixture_old_tracks WHERE id='t-041900';
+      DROP TABLE fixture_old_tracks;
+      ${indexes.map(index => index.sql).join(";")};
+      UPDATE music_tracks SET artist_id=1;
+      INSERT INTO music_artists(id,name,source_root,source_path,relative_path,updated_at)
+        VALUES('1','Numeric Artist','root','numeric','numeric','fixture'),('01','Padded Artist','root','padded','padded','fixture')`);
+    const numeric = await route(after, page);
+    assert.deepEqual(numeric, await route(before, page));
+    assert.equal(after.selected, false);
+    assert.equal(numeric.body.tracks.length, 2);
+    console.log(JSON.stringify({ check: "music-sparse-favorite-queue", tracks: 100000, medianRouteMs: diagnostics,
+      reversedRowidTies: true, boundedFavorites: true, concurrentQueueSnapshot: true }));
+  } finally {
+    writer?.close();
+    for (const { store } of opened) store.invalidate();
+    const owned = fs.realpathSync(directory);
+    assert.equal(path.dirname(owned), fs.realpathSync(os.tmpdir()));
+    assert(path.basename(owned).startsWith("fanhao-music-favorite-page-"));
+    for (const item of fs.readdirSync(owned, { withFileTypes: true })) {
+      assert(item.isFile());
+      fs.unlinkSync(path.join(owned, item.name));
+    }
+    fs.rmdirSync(owned);
+  }
 }
 
 function open(factory) {

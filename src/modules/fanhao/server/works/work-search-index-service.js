@@ -186,8 +186,9 @@ export function createWorkSearchIndexService({
 
   function addBigrams(target, value) {
     const text = String(value || "");
+    // Pack the two UTF-16 code units without allocating a substring per gram.
     for (let index = 0; index + 1 < text.length; index += 1) {
-      target.add(text.slice(index, index + 2));
+      target.add((text.charCodeAt(index) << 16) | text.charCodeAt(index + 1));
     }
   }
 
@@ -252,7 +253,7 @@ export function createWorkSearchIndexService({
     let rarest;
     let rarestLength = Infinity;
     for (let index = 0; index + 1 < text.length; index += 1) {
-      const posting = postings.get(text.slice(index, index + 2));
+      const posting = postings.get((text.charCodeAt(index) << 16) | text.charCodeAt(index + 1));
       if (posting === undefined) return [];
       const length = typeof posting === "number" ? 1 : posting.length;
       if (length < rarestLength) {

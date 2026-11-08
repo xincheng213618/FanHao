@@ -47,10 +47,11 @@ import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/pla
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { createCoreLibrarySyncService } from "../src/modules/fanhao/server/library/core-library-sync-service.js";
 import { personIndexCoverFiles } from "../src/modules/fanhao/server/library/runtime.js";
+import { routeLibraryReadApi } from "../src/modules/fanhao/server/library/routes.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage, portraitUrlForPerson } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
-import { filterPeopleForIndex, isBrowsableAuthor, normalizePeopleFilter, shouldUseCompactPeopleLayout } from "../android-client/www/modules/fanhao/people-views.js";
+import { createPeopleViews, filterPeopleForIndex, isBrowsableAuthor, normalizePeopleFilter, shouldUseCompactPeopleLayout } from "../android-client/www/modules/fanhao/people-views.js";
 import { buildFanhaoSearchSuggestions, localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridPerson, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
@@ -170,9 +171,9 @@ assert(!adminPageSource.startsWith("import ") && adminPageSource.includes('impor
 assert(!adminHtmlSource.includes('/modules/system/access-analytics.css') && adminPageSource.includes('loadStylesheet("/modules/system/access-analytics.css?v=20260815-admin-lazy-load-01")'), "section-specific admin styles must load with their owning section");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20261023-person-aliases-01'), "FanHao shell changes must refresh the browser entry");
-assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20261023-traits-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20261023-person-aliases-01'), "FanHao shell changes must refresh the app module");
+assert(indexHtml.includes('/fanhao-app.js?v=20261106-card-cover-01'), "FanHao shell changes must refresh the browser entry");
+assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20261106-card-cover-01'), "viewport rendering styles must use a fresh browser URL");
+assert(fanhaoEntry.includes('app.js?v=20261106-card-cover-01'), "FanHao shell changes must refresh the app module");
 assert(webApp.includes('await bootApp().catch') && webApp.includes('classList.remove("app-module-loading")'), "FanHao must reveal the page only after its initial route is rendered");
 assert(webApp.includes('index.js?v=20261023-traits-01'), "browse changes must refresh the FanHao module barrel");
 assert.deepEqual(nextBrowseFilters(["localOnly", "favorite"], "missingLocal"), ["favorite", "missingLocal"], "changing availability must replace a contradictory scope while retaining personal filters");
@@ -254,10 +255,11 @@ assert(!webApp.includes("WORK_AUTO_LOAD_RECHECK_DELAYS"), "work rendering must n
 assert(!webApp.includes("workLoadMoreObserver"), "work continuation observers must stay scoped to their rendered sentinel");
 assert(webApp.includes("const moduleNavigationPromise = initializeModuleNavigation();"), "FanHao startup must begin module navigation without blocking the first route");
 const startupCollectionPrefetch = "collectionPage.prefetch(initialRoute.view, { retainFailureForActivation: true });";
+const startupRouteRead = "const routePromise = applyRoute(initialRoute);";
 assert(webApp.includes(startupCollectionPrefetch), "direct collection routes must start their data request before library hydration and retain its result for activation");
-assert(webApp.indexOf(startupCollectionPrefetch) < webApp.indexOf("await applyRoute(initialRoute);"), "collection and library startup requests must overlap");
+assert(webApp.includes(startupRouteRead) && webApp.indexOf(startupCollectionPrefetch) < webApp.indexOf(startupRouteRead), "collection and library startup requests must overlap");
 assert(!webApp.includes("await initializeModuleNavigation();"), "FanHao startup must not serialize module discovery ahead of the first library request");
-assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf("await applyRoute(initialRoute);"), "module discovery and route data must start concurrently");
+assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf(startupRouteRead), "module discovery and route data must start concurrently");
 assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must still observe module-navigation completion");
 assert.match(webApp, /els\.productTabs = renderWebModuleNavigation\(els\.productNav, modules\);\s*syncNavigationState\(state\.activeView\);/, "dynamic module navigation must restore the current route state after replacing its links");
 assert(!webApp.includes('button.setAttribute("aria-pressed", String(active));\n    if (active) button.setAttribute("aria-current", "page");'), "module links must expose current-page state without button-only aria-pressed semantics");
@@ -297,7 +299,7 @@ assert(webApp.includes("const searchRequests = createSearchRequestService({"), "
 assert(searchRequestSource.includes("const request = requests.begin()"), "search and load-more requests must replace stale work");
 assert(searchRequestSource.includes("return request.isCurrent() ? data : null"), "stale search responses must not overwrite current navigation");
 assert(searchRequestSource.includes("const prefetchCache = createPrefetchCache(") && searchRequestSource.includes("consumePrefetch(target.key, request.signal)"), "Web search submit must consume cancellable input-time request warmups");
-assert(webApp.includes("searchRequests.prefetch(query)"), "Web search input must prepare the likely first page before Enter");
+assert(webApp.includes("searchRequests.prefetch(scopedWorkSearch(query))") && webApp.includes("loadSearchResults(scopedWorkSearch(value), options)"), "Web search input and submit must share the same scoped search so the likely first page can be prepared before Enter");
 let resolveSearchPrefetch;
 const searchRequestPaths = [];
 const pendingSearchPrefetch = new Promise((resolve) => {
@@ -715,8 +717,11 @@ assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings
 advisories.check(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views are over 750 lines; review their responsibilities");
 advisories.check(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards are over 320 lines; review their responsibilities");
 advisories.check(lines("android-client/www/modules/fanhao/features/works/card-presentation.js") <= 140, "FanHao Android card presentation helpers are over 140 lines; review their responsibilities");
-assert(androidApp.includes(".sort(peopleViews.sortPeople)") && !androidApp.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android home must reuse the author index ordering supported by compact person-list fields");
-assert(androidPeopleViews.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize portrait-only person-list avatar URLs");
+assert(androidApp.includes("const compare = peopleViews.sortPeople;") && !androidApp.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android home must reuse the author index ordering supported by compact person-list fields");
+assert(createPeopleViews({}).sortPeople(
+  { name: "Portrait", avatarUrl: "/media/core-image/portrait" },
+  { name: "Fallback", workCount: 20, avatarUrl: "/media/person/48/cover" }
+) < 0, "Android people sorting must prioritize a portrait-only person-list avatar over a work-cover fallback");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/person/48/cover" }), "", "Android author cards must not present a work-cover fallback as a portrait");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/image/fallback", avatarImage: { source: "work_cover" } }), "", "Android author cards must reject explicitly sourced work-cover fallbacks");
 assert.equal(portraitUrlForPerson({ coverId: "work-cover-without-avatar" }), "", "Android author cards must not infer a portrait from a generic work cover id");
@@ -865,7 +870,7 @@ assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkView
 assert(!androidWorkViews.includes("warmCatalogSibling") && androidWorkPageDataService.includes("const inflight = new Map()"), "removing the standalone VR page must also remove its sibling prewarm request");
 assert(androidWorkViews.includes("pageDataService.load(activeUrl, path") && androidWorkViews.includes("warmStudioDetail(studio.id)"), "Android studio navigation must share touch warmups with its live detail request");
 assert(androidWorkViews.includes('button.addEventListener("pointerdown", warmDetail'), "Android studio cards and series chips must begin loading on touch press");
-assert(androidFanhaoModule.includes("prepare(query, context = {})") && androidWorkViews.includes("searchDataService.warm(query, activeSearchCategory)"), "Android search input must warm the exact mode-scoped page consumed by navigation");
+assert(androidFanhaoModule.includes("prepare(query, context = {})") && androidWorkViews.includes("searchDataService.warm(query, activeSearchCategory, { limit, signal })") && androidFanhaoSearchPage.includes("RESULT_WARM_IDLE_MS"), "Android search prewarms the mode-scoped initial page only after bounded suggestions and sustained idle");
 assert(androidApp.includes("activeSearchController()?.prepare?.(query, searchContext())"), "Android shared search shell must debounce module-owned preparation");
 assert(androidWorkCards.includes("const cardWorks = new WeakMap()") && androidWorkCards.includes("cardWorks.set(card, work)"), "Android work cards must retain navigation records without attaching them to global state");
 assert(androidWorkViews.includes("roots: [els.viewContent, els.continuePreview]") && androidWorkDetailDataService.includes("function bindContainer(container)"), "Android work-card surfaces must share delegated interaction listeners");
@@ -1461,12 +1466,13 @@ assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info d
 assert(workQueryServiceSource.includes('normalizeWorkCategory(url.searchParams.get("category"))') && workQueryServiceSource.includes("categorySummaryItems(stamp)"), "work list responses must carry the selected category and all four category counts");
 assert(workQueryServiceSource.includes("categorySummaryForWorks") && workQueryServiceSource.includes("summarizeWorkCategories(works"), "actor filmographies must reuse the authoritative work category classifier");
 assert(workQueryServiceSource.includes("const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset])") && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages must preserve field boundaries and source partitions must use versioned bounded caches");
-assert(workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, \"western\") })"), "western-root membership must feed the shared work category classifier");
+assert(workQueryServiceSource.includes('const matchesWestern = workMatcher("western")')
+  && workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: matchesWestern(work) })"), "western-root membership must feed the shared work category classifier");
 assert(workQueryServiceSource.includes("peopleScopeService.workMatchesDirect?.(work, \"western\")") && peopleScopeServiceSource.includes("function workMatchesDirect(work, scope)"), "small result category summaries must avoid building the full scope index");
 assert(personDetailServiceSource.includes("lightweightInfo: true") && personDetailServiceSource.includes('includeCoreCovers: scope === "western"') && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path while Western pages retain cached covers");
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
-assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
+assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item, stamp))"), "server work queries must apply combined filter chips before pagination");
 assert(studioService.indexOf("cachedFilteredStudioWorks(workSet, filter, url)") >= 0 && studioService.indexOf("cachedFilteredStudioWorks(workSet, filter, url)") < studioService.indexOf("cachedSortedStudioWorks(filteredWorkSet, sort)"), "studio filters must run before sorting and pagination");
 assert(studioService.includes("detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url)"), "studio page caches must distinguish active server filters");
 assert(workFilterServiceSource.includes("requested.every((item) => matches(work, item))"), "shared server work filtering must support combined-filter semantics");
@@ -1645,7 +1651,7 @@ assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao 
 for (const source of [server, workQueryServiceSource]) {
   assert(source.includes("createWorkSorter({") && source.includes("sharedWorkSorter(works, sort"), "both server adapters must use the shared work ordering verified by verify_work_sorting.mjs");
 }
-assert(workQueryServiceSource.includes('sort === "progress" ? `${currentStamp()}:${userStateStamp()}`'), "progress-sorted work caches must follow playback state changes");
+assert(workQueryServiceSource.includes('sort === "progress" ? `${workStamp}:${userStateStamp()}`'), "progress-sorted work caches must follow playback state changes");
 assert(workFilterServiceSource.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
 assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
 assert(workSearchIndexServiceSource.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the normalization hot path");
@@ -1698,6 +1704,45 @@ assert.deepEqual(
   ["cover-a1", "cover-a2"],
   "people-cover warming must match the first desktop page while skipping male entries and actor avatars"
 );
+let sharedCoverPeople = [{ id: "cover-person-a", name: "Artist 2", relativePath: "G:/A", coverId: "cover-a1" }];
+let sharedCoverStamp = "cover-first";
+let sharedCoverBatches = 0;
+let sharedCoverPresentations = 0;
+const sharedCoverLibrary = { filesById: peopleIndexFilesById, scannedAt: "cover-sharing-fixture" };
+const sharedCoverDeps = {
+  library: sharedCoverLibrary, getLibrary: () => sharedCoverLibrary, getLastScanError: () => null,
+  peoplePayloadStamp: () => sharedCoverStamp,
+  peopleScopeService: { normalize: () => "main", cacheKey: () => "cover-sharing-scope", personMatches: () => true },
+  personListService: { mainLibraryPeople: () => sharedCoverPeople },
+  createPublicPersonPresenter() {
+    sharedCoverBatches += 1;
+    return (person, options) => {
+      assert.equal(options.skipFallbackAvatar, true);
+      sharedCoverPresentations += 1;
+      return person;
+    };
+  },
+  requestAccess: () => ({}), userStateSummary: () => ({}), appConfigService: { publicConfig: () => ({}) },
+  sendJson: (response, status, body) => Object.assign(response, { status, body })
+};
+async function readSharedCoverPeople() {
+  const response = {};
+  assert(await routeLibraryReadApi({ method: "GET" }, response, new URL("http://fixture/api/library"), sharedCoverDeps));
+  assert.equal(response.status, 200);
+  return response.body.people;
+}
+assert.deepEqual(personIndexCoverFiles(sharedCoverDeps).map(file => file.id), ["cover-a1"]);
+assert.equal((await readSharedCoverPeople())[0].isWestern, true, "a cover-first warmup must preserve published scope fields");
+assert.equal(sharedCoverPresentations, 1, "the first route reuses the cover warmup's projection");
+sharedCoverStamp = "list-first";
+assert.equal((await readSharedCoverPeople())[0].id, "cover-person-a");
+assert.deepEqual(personIndexCoverFiles(sharedCoverDeps).map(file => file.id), ["cover-a1"]);
+assert.equal(sharedCoverPresentations, 2, "cover warming reuses an already published projection");
+sharedCoverPeople = [{ id: "cover-person-b", name: "Artist 10", relativePath: "F:/B", coverId: "cover-f" }];
+assert.deepEqual(personIndexCoverFiles(sharedCoverDeps).map(file => file.id), ["cover-f"], "an equal-size replacement source cannot inherit the prior projection");
+assert.equal((await readSharedCoverPeople())[0].id, "cover-person-b");
+assert.equal(sharedCoverPresentations, 3);
+assert.equal(sharedCoverBatches, 3, "each new list projection takes one profile snapshot reader");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -2197,6 +2242,8 @@ assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalida
 
 let personMergeStamp = "merge-v1";
 let mergedPersonWorkLookupCount = 0;
+let personMergePointReads = 0;
+let personMergeBatchReads = 0;
 class CountingMergedWorkMap extends Map {
   get(key) {
     mergedPersonWorkLookupCount += 1;
@@ -2215,7 +2262,14 @@ const personMergeLibrary = {
   ])
 };
 const cachedPersonMergeService = createPersonMergeService({
-  resolveCanonicalId: (id) => id === "merge-b" ? "merge-a" : id,
+  resolveCanonicalId(id) {
+    personMergePointReads += 1;
+    return id === "merge-b" ? "merge-a" : id;
+  },
+  createCanonicalIdReader() {
+    personMergeBatchReads += 1;
+    return (id) => id === "merge-b" ? "merge-a" : id;
+  },
   actorMovieRows: () => [],
   actorProfileAliases: () => [],
   actorProfileRow: (personId) => ({ javdb_actor_id: personId ? "actor-one" : "" }),
@@ -2232,6 +2286,17 @@ const firstMergedPersonLookupCount = mergedPersonWorkLookupCount;
 assert.equal(firstMergedPersonRecord.works.length, 3, "merged person records must still combine every member work");
 assert.equal(cachedPersonMergeService.record(mergedPersonB), firstMergedPersonRecord, "aliases must reuse the canonical merged person record");
 assert.equal(mergedPersonWorkLookupCount, firstMergedPersonLookupCount, "repeated merged person presentation must avoid rescanning every member work");
+const pointReadsBeforeBatch = personMergePointReads;
+const batchReadsBefore = personMergeBatchReads;
+const batchPeople = cachedPersonMergeService.records([mergedPersonA, mergedPersonB]);
+assert.strictEqual(batchPeople[0], firstMergedPersonRecord);
+assert.strictEqual(batchPeople[1], firstMergedPersonRecord);
+assert.equal(personMergePointReads, pointReadsBeforeBatch, "bulk records avoid live per-person lookups");
+assert.equal(personMergeBatchReads, batchReadsBefore + 1, "the whole batch shares one identity reader");
+const readMergedAliases = cachedPersonMergeService.createAliasNameReader(() => null);
+assert.deepEqual(readMergedAliases(mergedPersonA.id), ["Merge B"]);
+assert.deepEqual(readMergedAliases(mergedPersonB.id), ["Merge B"]);
+assert.equal(personMergePointReads, pointReadsBeforeBatch, "merged aliases share the list's identity snapshot");
 personMergeStamp = "merge-v2";
 cachedPersonMergeService.record(mergedPersonA);
 assert(mergedPersonWorkLookupCount > firstMergedPersonLookupCount, "person merge data changes must rebuild cached records");

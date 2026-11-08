@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { extractWorkCodes, normalizeWorkCode, workCodeKey } from "../lib/code-parser.js";
+import { extractWorkCodes, normalizeWorkCode, parseWorkCode, workCodeKey } from "../lib/code-parser.js";
 
 const CASES = [
   {
@@ -182,6 +182,13 @@ for (const [index, testCase] of CASES.entries()) {
   assertEqual(`${testCase.name} Python key`, py.key, testCase.key);
   assertEqual(`${testCase.name} JS/Python parity`, js, py);
 }
+
+const tiedCodes = "A ABC-123 DEF-456";
+assertEqual("equal scores preserve candidate order", extractWorkCodes(tiedCodes), ["ABC-123", "DEF-456"]);
+assertEqual("a later special code wins by score", parseWorkCode("ABC-123 FC2-PPV-123456"),
+  { code: "FC2-PPV-123456", key: "fc2ppv123456", type: "fc2", index: 8, score: 158 });
+assertEqual("a subsequent parse starts every pattern at the beginning", parseWorkCode(tiedCodes),
+  { code: "ABC-123", key: "abc123", type: "standard", index: 2, score: 130 });
 
 if (failures.length) {
   console.error(`code parser verification failed (${failures.length})`);

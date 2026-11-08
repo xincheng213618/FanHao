@@ -4,6 +4,7 @@ const PERSON_FALLBACK_AVATAR_BATCH_SIZE = 48;
 
 export function createWorkPresenterService({
   actorProfileRow,
+  createActorProfileSnapshotReader,
   dbBoolOrNull,
   displayPersonForWork,
   displayWorkTitle,
@@ -120,8 +121,15 @@ export function createWorkPresenterService({
   }
 
   function publicPerson(person, options = {}) {
-    const profileRow = actorProfileRow(person.id);
-    const snapshot = publicActorProfileSnapshot(profileRow);
+    return personWithSnapshot(person, options, publicActorProfileSnapshot(actorProfileRow(person.id)));
+  }
+
+  function createPersonPresenter() {
+    const readSnapshot = createActorProfileSnapshotReader();
+    return (person, options = {}) => personWithSnapshot(person, options, readSnapshot(person.id));
+  }
+
+  function personWithSnapshot(person, options, snapshot) {
     const actorProfile = snapshot.profile;
     const avatar = snapshot.avatar;
     const fallbackAvatar = avatar?.avatarUrl || actorProfile?.avatarUrl || options.skipFallbackAvatar ? null : publicPersonFallbackAvatar(person);
@@ -287,6 +295,7 @@ export function createWorkPresenterService({
   }
 
   return {
+    createPersonPresenter,
     publicMediaFile,
     publicPerson,
     publicPersonFallbackAvatar,

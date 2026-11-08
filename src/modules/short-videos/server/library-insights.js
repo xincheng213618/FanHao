@@ -12,7 +12,10 @@ function rate(numerator, denominator) {
 
 function median(values) {
   if (!values.length) return 0;
-  const sorted = [...values].sort((left, right) => left - right);
+  // Preserve the legacy comparator's ordering for NaN and signed zero.
+  const sorted = values.some(value => Number.isNaN(value) || Object.is(value, -0))
+    ? [...values].sort((left, right) => left - right)
+    : Float64Array.from(values).sort();
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
@@ -20,7 +23,6 @@ function median(values) {
 function localLibraryRows(database) {
   return database.prepare(`
     SELECT
-      v.id,
       TRIM(COALESCE(v.author_sec_uid, '')) AS sec_uid,
       TRIM(COALESCE(v.author_name, '')) AS author_name,
       CASE WHEN v.is_liked = 1 THEN 1 ELSE 0 END AS liked,
@@ -43,12 +45,18 @@ function localLibraryRows(database) {
       ON w.video_id = v.id AND w.local_user_id = ?
     WHERE v.visibility = 'local_only'
       AND v.media_type = 'video'
-  `).all(LOCAL_SHORT_VIDEO_USER_ID).map((row) => ({
-    ...row,
-    authorKey: String(row.sec_uid || "").trim()
-      ? `sec:${String(row.sec_uid).trim()}`
-      : `name:${String(row.author_name || "").trim().toLocaleLowerCase()}`
-  }));
+  `).all(LOCAL_SHORT_VIDEO_USER_ID).map(({
+    sec_uid, author_name, liked, size_bytes, duration_ms, actual_width, actual_height, probe_error,
+    likes, comments, collects, shares, plays, progress_ms, completed_count, last_watched_at
+  }) => {
+    const secUid = String(sec_uid || "").trim();
+    // Use one consistent object shape for all the downstream passes.
+    return {
+      sec_uid, author_name, liked, size_bytes, duration_ms, actual_width, actual_height, probe_error,
+      likes, comments, collects, shares, plays, progress_ms, completed_count, last_watched_at,
+      authorKey: secUid ? `sec:${secUid}` : `name:${String(author_name || "").trim().toLocaleLowerCase()}`
+    };
+  });
 }
 
 function authorEfficiency(libraryRows) {

@@ -200,7 +200,7 @@ async function verifyPhotoSetLookup(photoRoot) {
     return res;
   }
   function fixture(indexed) {
-    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, markReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
+    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, coverOverrideReads: 0, markReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
     const raw = Array.from({ length: 12000 }, (_, index) => ({ id: `album-${index}`, title: `Synthetic album ${index}`, sourceRoot: photoRoot, relativePath: `${index}.zip`, updatedAt: "before", imageCount: 20, size: 32, archiveIdentity: "synthetic", coverUrl: "" }));
     raw[0].id = "duplicate"; raw[1].id = "duplicate"; raw[2].id = 123;
     const counted = rows => new Proxy(rows, { get(target, key, receiver) { if (typeof key === "string" && /^\d+$/u.test(key)) counts.elements++; return Reflect.get(target, key, receiver); } });
@@ -218,7 +218,9 @@ async function verifyPhotoSetLookup(photoRoot) {
     }
     const release = owner.clearPhotoSetLookup;
     owner.clearPhotoSetLookup = () => { counts.releases++; release(); };
-    const db = { prepare() { return { get(id) { counts.dbReads++; const album = raw.find(value => value.id === id); return {
+    const db = { prepare(sql) { return { get(id) {
+      if (sql.includes("FROM photo_set_cover_overrides")) { counts.coverOverrideReads++; return undefined; }
+      counts.dbReads++; const album = raw.find(value => value.id === id); return {
       album_id: id, archive_path: path.resolve(album.sourceRoot, album.relativePath), archive_size: 32, archive_mtime_ms: 1,
       archive_identity: "synthetic", generator_version: 2, cover_mime: "image/jpeg", cover_blob: Buffer.from("SYNTHETIC_COVER"), status: "ok"
     }; } }; } };
@@ -258,7 +260,7 @@ async function verifyPhotoSetLookup(photoRoot) {
       assert.equal(f.counts.elements, indexed ? 0 : 612000, "published detail, image and cover reads do not materialize archive rows");
       assert.equal(f.counts.lookupCalls, indexed ? 39 : 0, "one point lookup serves each indexed detail, image and warm cover request");
       assert.equal(f.counts.imageLists, 32); assert.equal(f.counts.signatures, indexed ? 0 : 12); assert.equal(f.counts.dbReads, indexed ? 6 : 24);
-      assert.equal(f.counts.markReads, 1);
+      assert.equal(f.counts.coverOverrideReads, 7); assert.equal(f.counts.markReads, 1);
       console.log(`photo-set lookup ${indexed ? "indexed" : "fallback"}: ${f.counts.elements} elements, ${f.counts.lookupCalls} owner lookups, 39 actual runtime responses`);
       results.push(responses);
       assert.equal(f.service.byId("duplicate").title, "Synthetic album 0"); assert.equal(f.service.byId("123"), null); assert.equal(f.service.byId(""), null);

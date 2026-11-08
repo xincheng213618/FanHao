@@ -10,6 +10,7 @@ const DEFAULT_LIMIT = 5000;
 const MAX_LIMIT = 5000;
 const MAX_CHAPTER_CHARS = 12000;
 const MAX_UPLOAD_TEXT_CHARS = 50 * 1024 * 1024;
+const MAX_CATALOG_SEARCH_MATCHES = 20000;
 const UPLOAD_SOURCE_ROOT = "上传";
 const COLLECTION_SOURCE_ROOT = "网页采集";
 const LIBRARY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -17,6 +18,7 @@ const PROGRESS_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const PROGRESS_SESSION_LIMIT = 8192;
 const PROGRESS_BOOK_SESSION_LIMIT = 32;
 const AUTHOR_INDEX_NAME = "idx_novel_books_author_updated";
+const MAX_AUTHOR_PROFILE_INDEX_ROWS = 8192;
 const AUTHOR_INDEX_SQL = `CREATE INDEX IF NOT EXISTS main.idx_novel_books_author_updated
   ON novel_books(TRIM(COALESCE(author, '')), updated_at ASC, title COLLATE NOCASE DESC)
   WHERE status = 'ok' AND author COLLATE BINARY <> ''`;
@@ -87,6 +89,10 @@ function hasStandardAuthorIndexSchema(database, { allowMissingIndex = false } = 
 function installAuthorIndex(database) {
   if (hasStandardAuthorIndexSchema(database, { allowMissingIndex: true })) database.exec(AUTHOR_INDEX_SQL);
 }
+function canUseAuthorIndex(database) {
+  try { return hasStandardAuthorIndexSchema(database); }
+  catch { return false; }
+}
 export const NOVEL_WRITE_METHODS = Object.freeze(["saveProgress", "updateBookMetadata", "uploadBook", "reimportBook", "importCollectedBook", "deleteBook", "reimportLocalBook"]);
 const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index AS progress_chapter_index,
   s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
@@ -133,9 +139,10 @@ export function createNovelStore(options = {}) {
   let summaryStaticCache = null;
   let readStorageStamp = null;
   let readStorageStampOptional = false;
+  let readSummaryCacheStable = false;
   let writeOperationActive = false;
 
-  function storageStamp() {
+  function storageStamp(optional = readStorageStampOptional) {
     const stamp = (filePath, ignoreEmpty = false) => {
       try {
         const stat = fs.statSync(filePath, { bigint: true });
@@ -148,9 +155,9 @@ export function createNovelStore(options = {}) {
     };
     try {
       const value = `${stamp(dbPath)}|${stamp(`${dbPath}-wal`, true)}`;
-      return readStorageStampOptional && value === "|" ? null : value;
+      return optional && value === "|" ? null : value;
     } catch (error) {
-      if (readStorageStampOptional) return null;
+      if (optional) return null;
       throw error;
     }
   }
@@ -187,16 +194,27 @@ export function createNovelStore(options = {}) {
   }
 
   function withReadDb(callback, { cacheSummary = false } = {}) {
+    let openingStamp = null;
+    let openingError;
+    if (cacheSummary) {
+      try { openingStamp = storageStamp(cacheSummary === "optional"); }
+      catch (error) { openingError = error; }
+    }
     return withDb((database) => {
       // Capture before BEGIN's first read. A writer can commit while this
       // snapshot is open; never associate its newer file stamp with old rows.
       readStorageStampOptional = cacheSummary === "optional";
       try {
+        if (openingError) throw openingError;
         readStorageStamp = cacheSummary ? storageStamp() : null;
+        // The opened connection and the cached summary must still refer to
+        // the same files if the library was replaced during connection setup.
+        readSummaryCacheStable = readStorageStamp !== null && readStorageStamp === openingStamp;
         return inReadSnapshot(database, callback);
       } finally {
         readStorageStamp = null;
         readStorageStampOptional = false;
+        readSummaryCacheStable = false;
       }
     }, { changesCatalog: false });
   }
@@ -218,9 +236,9 @@ export function createNovelStore(options = {}) {
     return withReadDb((database) => summaryFromDb(database), { cacheSummary: true });
   }
 
-  function summaryFromDb(database) {
+  function summaryFromDb(database, cached = null) {
     const sourceRealm = sourceRealmFromDb(database);
-    const summaryStatic = staticSummaryFromDb(database, sourceRealm);
+    const summaryStatic = cached ?? staticSummaryFromDb(database, sourceRealm);
     const recentJoin = canDriveRecentReadingFromState(database) ? "CROSS JOIN" : "JOIN";
     const recent = database
       .prepare(
@@ -244,13 +262,14 @@ export function createNovelStore(options = {}) {
     };
   }
 
-  function staticSummaryFromDb(database, sourceRealm) {
+  function staticSummaryFromDb(database, sourceRealm, { cachedOnly = false } = {}) {
     const scannedAt = metaValue(database, "scanned_at");
     const dataVersion = database.prepare("PRAGMA data_version").get().data_version;
     const schemaVersion = metaValue(database, "schema_version");
     const stamp = `${readStorageStamp}:${dataVersion}:${sourceRealm}:${schemaVersion}:${scannedAt}`;
-    const storageUnchanged = readStorageStamp !== null && storageStamp() === readStorageStamp;
+    const storageUnchanged = readSummaryCacheStable && storageStamp() === readStorageStamp;
     if (storageUnchanged && summaryStaticCache?.stamp === stamp) return summaryStaticCache.value;
+    if (cachedOnly) return null;
     const totals =
       database
         .prepare(
@@ -309,7 +328,7 @@ export function createNovelStore(options = {}) {
     return value;
   }
 
-  function listBooks(url, existingDatabase = null) {
+  function listBooks(url, existingDatabase = null, authorIndexAvailable = null) {
     const run = existingDatabase
       ? callback => callback(existingDatabase)
       : callback => withReadDb(callback, { cacheSummary: true });
@@ -324,10 +343,7 @@ export function createNovelStore(options = {}) {
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
       const conditions = ["b.status = 'ok'"];
       const params = [];
-      let indexedAuthor = false;
-      if (author) {
-        try { indexedAuthor = hasStandardAuthorIndexSchema(database); } catch {}
-      }
+      const indexedAuthor = Boolean(author) && (authorIndexAvailable ?? canUseAuthorIndex(database));
       if (readingOnly) conditions.push("EXISTS (SELECT 1 FROM novel_reading_state rs WHERE rs.book_id = b.id)");
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
@@ -357,7 +373,14 @@ export function createNovelStore(options = {}) {
       const countFrom = readingOnly
         ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
         : "novel_books b";
-      const countRow = database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...params);
+      let cachedSummary = null;
+      if (!query && !author && !readingOnly && category === "all" && summaryStaticCache && readSummaryCacheStable) {
+        // The static summary counts the same active books in this snapshot.
+        try { cachedSummary = staticSummaryFromDb(database, sourceRealm, { cachedOnly: true }); }
+        catch {}
+      }
+      const countRow = cachedSummary ? { count: cachedSummary.totals.books }
+        : database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...params);
       let stateDrivenPage = false;
       if (readingOnly && sort === "progress" && Number(countRow?.count || 0) > offset
         && canDriveRecentReadingFromState(database)) {
@@ -382,7 +405,7 @@ export function createNovelStore(options = {}) {
         `
         )
         .all(...params, limit, offset);
-      const summary = summaryFromDb(database);
+      const summary = summaryFromDb(database, cachedSummary);
       return {
         sourceRealm,
         listRevision: listRevision(sourceRealm),
@@ -463,7 +486,22 @@ export function createNovelStore(options = {}) {
     const requestUrl = new URL(url.toString());
     requestUrl.searchParams.set("author", author);
     return withReadDb((database) => {
-      const page = listBooks(requestUrl, database);
+      const indexedAuthor = canUseAuthorIndex(database);
+      const page = listBooks(requestUrl, database, indexedAuthor);
+      const authorWhere = "status = 'ok' AND TRIM(COALESCE(author, '')) = ?";
+      // An unfiltered page already counted this author's whole profile. Use
+      // that count to bound the cost of restoring table order.
+      const profileIndexLimit = Math.min(MAX_AUTHOR_PROFILE_INDEX_ROWS, page.summary.totals.books / 8);
+      const indexedProfile = indexedAuthor && page.author === author
+        && !page.query && !page.readingOnly && page.category === "all" && page.total <= profileIndexLimit;
+      // Select the author's index range, then restore table order before SUM
+      // so legacy numeric values retain the original accumulation behavior.
+      const profileSource = indexedProfile ? `(
+        SELECT author, chapter_count, char_count, size_bytes, updated_at
+        FROM novel_books
+        WHERE ${authorWhere} AND author COLLATE BINARY <> ''
+        ORDER BY rowid
+      )` : `novel_books WHERE ${authorWhere}`;
       const row = database
         .prepare(
           `
@@ -474,8 +512,7 @@ export function createNovelStore(options = {}) {
             COALESCE(SUM(char_count), 0) AS char_count,
             COALESCE(SUM(size_bytes), 0) AS size_bytes,
             COALESCE(MAX(updated_at), '') AS updated_at
-          FROM novel_books
-          WHERE status = 'ok' AND TRIM(COALESCE(author, '')) = ?
+          FROM ${profileSource}
           GROUP BY TRIM(author)
         `
         )
@@ -690,7 +727,9 @@ export function createNovelStore(options = {}) {
         where.push("(title LIKE ? ESCAPE '\\' COLLATE NOCASE OR CAST(chapter_index AS TEXT) LIKE ? ESCAPE '\\')");
         params.push(pattern, pattern);
       }
-      const filteredTotal = Number(
+      const selected = query && book.chapterCount >= 4096 && book.chapterCount <= MAX_CATALOG_SEARCH_MATCHES
+        ? readCatalogSearchPage(database, where, params, order === "desc" ? "DESC" : "ASC", all, requestedLimit, requestedOffset) : null;
+      const filteredTotal = selected?.total ?? Number(
         database.prepare(`SELECT COUNT(*) AS count FROM novel_chapters WHERE ${where.join(" AND ")}`).get(...params)?.count || 0
       );
       if (filteredTotal === 0) where.push("0");
@@ -703,7 +742,7 @@ export function createNovelStore(options = {}) {
       }
       const lastPageOffset = filteredTotal > 0 ? Math.floor((filteredTotal - 1) / limit) * limit : 0;
       offset = Math.max(0, Math.min(lastPageOffset, offset));
-      const rows = database
+      const rows = selected?.rows ?? database
         .prepare(
           `
           SELECT id, book_id, chapter_index, title, '' AS content, char_count, updated_at
@@ -1320,6 +1359,48 @@ function chapterList(db, bookId) {
     .map((row) => publicChapter(row, false));
 }
 
+function readCatalogSearchPage(database, where, params, direction, all, limit, offset) {
+  const predicate = where.join(" AND ");
+  const prefixLimit = !all && offset + limit <= 256 ? (offset + limit) * 2 : 0;
+  let prefix, search;
+  try {
+    const declaration = database.prepare(`SELECT sql FROM main.sqlite_schema
+      WHERE type = 'table' AND name = 'novel_chapters' COLLATE NOCASE
+        AND NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name = 'novel_chapters' COLLATE NOCASE)`).get();
+    // Both catalogue producers use this rowid table and one ordinal per book.
+    const sql = declaration?.sql?.replace(/\s+/gu, " ");
+    if (sql !== "CREATE TABLE novel_chapters ( id TEXT PRIMARY KEY, book_id TEXT NOT NULL, chapter_index INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, char_count INTEGER NOT NULL, updated_at TEXT NOT NULL, UNIQUE(book_id, chapter_index) )") return null;
+    if (prefixLimit) prefix = database.prepare(`WITH prefix AS MATERIALIZED (
+      SELECT id, book_id, chapter_index, title, char_count, updated_at
+      FROM novel_chapters WHERE book_id = ? ORDER BY chapter_index ${direction} LIMIT ?
+    ) SELECT id, book_id, chapter_index, title, char_count, updated_at
+      FROM prefix WHERE ${where[1]} ORDER BY chapter_index ${direction} LIMIT ? OFFSET ?`);
+    search = database.prepare(`WITH matched AS MATERIALIZED (
+      SELECT _rowid_ AS chapter_rowid, chapter_index FROM novel_chapters WHERE ${predicate}
+      LIMIT ${MAX_CATALOG_SEARCH_MATCHES + 1}
+    ), totals AS MATERIALIZED (SELECT COUNT(*) AS total FROM matched), page AS MATERIALIZED (
+      SELECT chapter_rowid FROM matched ORDER BY chapter_index ${direction}
+      LIMIT (SELECT CASE WHEN total > ${MAX_CATALOG_SEARCH_MATCHES} THEN 0 WHEN ? THEN MAX(total, 1) ELSE ? END FROM totals)
+      OFFSET (SELECT CASE WHEN ? THEN 0 ELSE MIN(?, (MAX(total - 1, 0) / CAST(? AS INTEGER)) * ?) END FROM totals)
+    ) SELECT totals.total, page.chapter_rowid IS NOT NULL AS has_chapter,
+      c.id, c.book_id, c.chapter_index, c.title, c.char_count, c.updated_at
+      FROM totals LEFT JOIN page ON TRUE LEFT JOIN novel_chapters c ON c._rowid_ = page.chapter_rowid
+      ORDER BY c.chapter_index ${direction}`);
+  } catch {
+    return null;
+  }
+  if (prefix) {
+    const rows = prefix.all(params[0], prefixLimit, ...params.slice(1), limit, offset);
+    if (rows.length === limit) {
+      const total = database.prepare(`SELECT COUNT(*) AS count FROM novel_chapters WHERE ${predicate}`).get(...params).count;
+      return { total, rows };
+    }
+  }
+  const rows = search.all(...params, Number(all), limit, Number(all), offset, limit, limit);
+  const { total, has_chapter: hasChapter } = rows[0];
+  return total <= MAX_CATALOG_SEARCH_MATCHES ? { total, rows: hasChapter ? rows : [] } : null;
+}
+
 function uploadBookIntoDb(database, body = {}) {
   const fileName = safeFileName(body.fileName || body.file_name || body.name || "上传小说.txt");
   const text = normalizeUploadText(body.text ?? body.content ?? decodeBase64Text(body.contentBase64 ?? body.content_base64));
@@ -1685,17 +1766,51 @@ function importCollectedBookIntoDb(database, body = {}) {
 
 function prepareChapterReplacement(database, bookId, incomingChapters) {
   const book = database.prepare("SELECT catalog_revision FROM novel_books WHERE id = ?").get(bookId);
-  const oldChapters = database.prepare("SELECT id, chapter_index AS 'index', title, content FROM novel_chapters WHERE book_id = ? ORDER BY chapter_index").all(bookId);
+  const chapters = database.prepare("SELECT id, chapter_index AS 'index', title, content FROM novel_chapters WHERE book_id = ? ORDER BY chapter_index");
   const row = database.prepare("SELECT * FROM novel_reading_state WHERE book_id = ?").get(bookId);
+  const oldChapters = compactOldChapterSnapshot(database, chapters, bookId, incomingChapters, row?.chapter_id);
+  const previousChapter = row && oldChapters.find(chapter => chapter.id === row.chapter_id);
   const revision = crypto.randomUUID();
   const progress = row ? {
     status: row.status, reason: row.reason, chapterId: row.chapter_id, chapterIndex: row.chapter_index,
     scrollRatio: row.scroll_ratio, catalogRevision: row.catalog_revision,
     ...(row.anchor_json ? { previous: JSON.parse(row.anchor_json) } : {}),
-    ...(oldChapters.find(chapter => chapter.id === row.chapter_id) ? { title: oldChapters.find(chapter => chapter.id === row.chapter_id).title } : {})
+    ...(previousChapter ? { title: previousChapter.title } : {})
   } : null;
   const result = reconcileChapters({ oldChapters, incomingChapters, oldRevision: book?.catalog_revision, newRevision: revision, progress });
   return { ...result, revision, existed: Boolean(book) };
+}
+
+function compactOldChapterSnapshot(database, chapters, bookId, incomingChapters, anchorId) {
+  let anchor;
+  if (typeof anchorId === "string" && anchorId) {
+    try {
+      anchor = database.prepare("SELECT id, content FROM novel_chapters WHERE book_id = ? AND id = ?").get(bookId, anchorId);
+    } catch {
+      return chapters.all(bookId);
+    }
+  }
+  const anchorBody = anchor && anchor.id === anchorId ? anchor.content : undefined;
+  const snapshot = [];
+  let incomingBodies;
+  let anchorMismatch = false;
+  for (const chapter of chapters.iterate(bookId)) {
+    // Native SQL comparison can differ from decoded JavaScript text on old
+    // data. Keep the original snapshot when the point read cannot prove it.
+    if (chapter.id === anchorId && chapter.content !== anchorBody) {
+      anchorMismatch = true;
+      break;
+    }
+    // Reconciliation only compares old bodies against incoming ones and the
+    // progress anchor. Share those exact strings and retain invalid values
+    // for the original validator. Other bodies cannot affect the result.
+    if (typeof chapter.content === "string") {
+      incomingBodies ??= new Map(incomingChapters.map(({ content }) => [content, content]));
+      chapter.content = chapter.content === anchorBody ? anchorBody : incomingBodies.get(chapter.content) ?? "";
+    }
+    snapshot.push(chapter);
+  }
+  return anchorMismatch ? chapters.all(bookId) : snapshot;
 }
 
 function finishChapterReplacement(database, bookId, replacement) {

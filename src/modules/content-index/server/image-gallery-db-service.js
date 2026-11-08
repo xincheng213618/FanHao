@@ -132,12 +132,21 @@ function ensureColumn(db, table, column, definition) {
   }
 }
 
+// The official-cover CLI also uses this migration against older gallery databases.
+export function ensureOfficialPhotoCoverColumns(db) {
+  ensureColumn(db, "photo_set_covers", "official_source", "TEXT");
+  ensureColumn(db, "photo_category_covers", "official_source", "TEXT");
+}
+
 function ensureSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS photo_library_snapshot (
       id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, revision TEXT NOT NULL,
       scanned_at TEXT NOT NULL, roots_json TEXT NOT NULL, overview_json TEXT NOT NULL,
       facets_json TEXT NOT NULL, scopes_json TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS photo_cover_warm_job (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS photo_library_archives (
       id TEXT PRIMARY KEY NOT NULL, position INTEGER NOT NULL UNIQUE,
@@ -180,8 +189,18 @@ function ensureSchema(db) {
       ('partycat', '轰趴猫', 'sites', '[Partycat]', 15),
       ('tuigirl', '推女郎', 'sites', '[TuiGirl] 推女郎', 16),
       ('slady', '猎女神', 'sites', '[SLADY]猎女神', 17),
-      ('fetish', '恋足恋物', NULL, '恋足恋物', 2),
+      ('senluo', '森萝财团', 'sites', '', 18),
+      ('fzhly', '风之领域', 'sites', '', 19),
+      ('mtcos', '喵糖映画', 'sites', '', 20),
+      ('qinglan', '轻兰映画', 'sites', '', 21),
+      ('tuwan', '兔玩映画', 'sites', '', 22),
+      ('snzx', '少女秩序', 'sites', '', 23),
+      ('yaojing', '妖精视觉', 'sites', '', 24),
+      ('galli', '嘉丽', 'sites', '', 25),
+      ('kitty-wawa', '袜小喵', 'sites', '', 26),
+      ('fetish', '丝袜恋足', NULL, '恋足恋物', 2),
       ('bobosocks', '袜啵啵', 'fetish', '[BoBoSocks袜啵啵]', 0),
+      ('lady-antebellum', '战前女神', 'fetish', '', 1),
       ('japan', '日本', NULL, '日本写真集', 3),
       ('ys-web', 'YS Web', 'japan', 'YS Web', 0),
       ('maxi-247', 'Maxi-247', 'japan', 'Maxi-247 - 301 Rei', 1),
@@ -193,9 +212,31 @@ function ensureSchema(db) {
       ('street', '精选街拍', NULL, '精选街拍', 5),
       ('mojing', '魔镜街拍', 'street', '魔镜街拍', 0),
       ('likes', '我喜欢的', NULL, '我喜欢的', 6),
-      ('miscellaneous', '零散', 'likes', '[零散]', 0);
+      ('miscellaneous', '零散', 'likes', '[零散]', 0),
+      ('portraits', '人物', NULL, '[]', 7),
+      ('loli-series', '萝莉系列', NULL, '萝莉系列', 8),
+      ('niche', '小众系列', NULL, '小众系列', 9);
     UPDATE photo_browse_categories SET parent_id='korea'
       WHERE id='korean-entertainment' AND parent_id IS NULL AND source_category='韩国演艺圈';
+    UPDATE photo_browse_categories SET name='丝袜恋足'
+      WHERE id='fetish' AND name='恋足恋物';
+
+    CREATE TABLE IF NOT EXISTS photo_browse_category_folders (
+      category_id TEXT PRIMARY KEY NOT NULL REFERENCES photo_browse_categories(id) ON DELETE CASCADE,
+      source_category TEXT NOT NULL, sub_category TEXT NOT NULL,
+      UNIQUE(source_category, sub_category)
+    ) WITHOUT ROWID;
+    INSERT OR IGNORE INTO photo_browse_category_folders (category_id, source_category, sub_category) VALUES
+      ('senluo', '萝莉系列', '森萝财团'),
+      ('fzhly', '萝莉系列', '风之领域'),
+      ('mtcos', '萝莉系列', '喵糖映画'),
+      ('qinglan', '萝莉系列', '轻兰映画'),
+      ('tuwan', '萝莉系列', '兔玩映画'),
+      ('snzx', '萝莉系列', '少女秩序'),
+      ('yaojing', '萝莉系列', '妖精视觉'),
+      ('galli', '小众系列', '[GALLI嘉丽]舞蹈生日记'),
+      ('kitty-wawa', '恋足恋物', 'kittyWawa袜小喵'),
+      ('lady-antebellum', '萝莉系列', '[战前女神]');
 
     CREATE TABLE IF NOT EXISTS photo_category_covers (
       category_key TEXT PRIMARY KEY NOT NULL,
@@ -259,6 +300,17 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_photo_set_covers_archive_path ON photo_set_covers(archive_path);
     CREATE INDEX IF NOT EXISTS idx_photo_set_covers_status ON photo_set_covers(status);
     CREATE INDEX IF NOT EXISTS idx_photo_set_covers_updated_at ON photo_set_covers(updated_at);
+    CREATE TABLE IF NOT EXISTS photo_set_cover_overrides (
+      album_id TEXT PRIMARY KEY,
+      archive_path TEXT NOT NULL,
+      archive_size INTEGER NOT NULL,
+      archive_mtime_ms REAL NOT NULL,
+      archive_identity TEXT NOT NULL,
+      member_path TEXT NOT NULL,
+      image_index INTEGER NOT NULL,
+      cover_blob BLOB NOT NULL,
+      revision TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS photo_set_image_indexes (
       archive_path TEXT PRIMARY KEY,
       archive_size INTEGER,
@@ -384,6 +436,7 @@ function ensureSchema(db) {
       ensureColumn(db, table, column, definition);
     }
   }
+  ensureOfficialPhotoCoverColumns(db);
   // Older or malformed optional clock state keeps the conservative reader
   // fallback; it must not make the established metadata schema unavailable.
   ensureGalleryMetadataClocks(db);

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
+import { routeNovelApi } from "../src/modules/novels/server/routes.js";
 import { createNovelWriteWorkerClient } from "../src/modules/novels/server/write-worker-client.js";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-novel-summary-"));
@@ -14,6 +15,7 @@ const replacement = createNovelStore({ dbPath: replacementPath });
 const originalPrepare = DatabaseSync.prototype.prepare;
 let aggregates = 0;
 let beforeQuery = null;
+let beforeBookPage = null;
 let external = null;
 let readingWork = null;
 let authorWork = null;
@@ -34,6 +36,11 @@ DatabaseSync.prototype.prepare = function (sql) {
     callback();
   }
   const page = /FROM novel_books b\s+LEFT JOIN novel_reading_state s/u.test(sql);
+  if (beforeBookPage && page) {
+    const callback = beforeBookPage;
+    beforeBookPage = null;
+    callback();
+  }
   if (readingWork && count) {
     this.function("fixture_reading_book_visit", value => { if (readingWork) readingWork.visits++; return value; });
     // Keep the indexed/original status predicate and observe actual SQLite
@@ -95,7 +102,7 @@ try {
   assert.ok(externallyUpdated.categories.some((item) => item.name === "外部分类"));
   assert.equal(externallyUpdated.totals.chapters, 8);
   assert.equal(aggregates, 12, "external storage edits must be noticed even without a scanned_at change");
-  beforeQuery = () => external.exec(`UPDATE novel_books SET category = '快照后分类' WHERE id = '${first.book.id}'; INSERT OR REPLACE INTO novel_meta (key,value) VALUES ('scanned_at','new-scan');`);
+  beforeBookPage = () => external.exec(`UPDATE novel_books SET category = '快照后分类' WHERE id = '${first.book.id}'; INSERT OR REPLACE INTO novel_meta (key,value) VALUES ('scanned_at','new-scan');`);
   const snapshot = store.listBooks(url);
   assert.ok(snapshot.summary.categories.some((item) => item.name === "外部分类"), "the response must keep the snapshot pinned before an external commit");
   assert.notEqual(snapshot.summary.scannedAt, "new-scan");
@@ -124,7 +131,9 @@ try {
   await verifyReadingCount();
   await verifyAuthorSummaryCache();
   await verifyCatalogEmptySearch();
-  console.log("novel-summary-cache: ok (deduplicated aggregates, author pages/optional probes, empty catalog search, progress, local/external writes, snapshots, reopen, database replacement, pagination revisions and actual write Worker)");
+  await verifyCatalogSearchPage();
+  await verifyBookListSummaryCount();
+  console.log("novel-summary-cache: ok (deduplicated aggregates, author pages/optional probes, catalog search, progress, local/external writes, snapshots, reopen, database replacement, pagination revisions and actual write Worker)");
 } finally {
   DatabaseSync.prototype.prepare = originalPrepare;
   store.invalidate();
@@ -270,6 +279,274 @@ async function verifyPaginationRevision() {
   }
 }
 
+async function verifyBookListSummaryCount() {
+  const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
+  const source = fs.readFileSync(sourceUrl, "utf8");
+  const baselineSource = source.replace(
+    'if (!query && !author && !readingOnly && category === "all" && summaryStaticCache && readSummaryCacheStable)',
+    "if (false)"
+  );
+  assert.notEqual(baselineSource, source);
+  const { createNovelStore: baselineFactory } = await import("data:text/javascript;base64," + Buffer.from(
+    baselineSource.replace(/from "(\.\/[^"]+)"/gu, (_, relative) => "from " + JSON.stringify(new URL(relative, sourceUrl).href))
+  ).toString("base64"));
+  const fixturePath = path.join(temporary, "book-list-count.sqlite");
+  const baseline = baselineFactory({ dbPath: fixturePath });
+  const actual = createNovelStore({ dbPath: fixturePath });
+  baseline.bookMeta("missing");
+  const inheritedPrepare = DatabaseSync.prototype.prepare;
+  let writer, probe;
+  const read = async (owner, query = {}, failAt = null) => {
+    const response = {};
+    const counts = { scans: 0, staticReads: 0 };
+    probe = { counts, failAt };
+    try {
+      assert(await routeNovelApi({ method: "GET" }, {}, new URL("http://fixture/api/novels?" + new URLSearchParams(query)), {
+        novelStore: owner,
+        sendJson(_res, status, body) { Object.assign(response, { status, body }); }
+      }));
+      return { response, counts };
+    } finally { probe = null; }
+  };
+  DatabaseSync.prototype.prepare = function (sql, ...args) {
+    if (probe) {
+      if (sql.includes("COUNT(DISTINCT NULLIF")) probe.counts.staticReads++;
+      const operation = sql.startsWith("SELECT COUNT(*) AS count FROM novel_books b ") ? "count"
+        : /FROM novel_books b\s+LEFT JOIN novel_reading_state s/u.test(sql) ? "page"
+        : sql === "PRAGMA data_version" ? "probe" : null;
+      if (operation === "count") probe.counts.scans++;
+      if (operation && operation === probe.failAt) {
+        probe.failAt = null;
+        throw new Error("synthetic book list read failed");
+      }
+    }
+    return inheritedPrepare.call(this, sql, ...args);
+  };
+  const match = async (query, scans, staticReads = 0) => {
+    const before = await read(baseline, query);
+    const after = await read(actual, query);
+    assert.deepEqual(after.response, before.response);
+    assert.equal(after.response.status, 200);
+    assert.equal(before.counts.scans, 1);
+    assert.deepEqual(after.counts, { scans, staticReads });
+    return after.response;
+  };
+  try {
+    writer = new DatabaseSync(fixturePath);
+    writer.prepare(`WITH RECURSIVE rows(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM rows WHERE i < 50000)
+      INSERT INTO novel_books(id,title,author,category,source_root,source_path,relative_path,file_name,
+        size_bytes,char_count,chapter_count,summary,tags_json,status,updated_at,catalog_revision)
+      SELECT 'id-'||i,'Book '||i,'Author '||(i%2000),CASE WHEN i%53=0 THEN 'Sparse' ELSE 'Main' END,
+        'synthetic','upload://'||i,'x','x.txt',1024,200,20,?,'[]',
+        CASE WHEN i%17=0 THEN 'error' ELSE 'ok' END,printf('%08d',i),'fixture' FROM rows
+    `).run("合成简介".repeat(250));
+    writer.close();
+    writer = null;
+    const first = { limit: 48 };
+    const cold = await match(first, 1, 1);
+    assert.equal(cold.body.total, 47059);
+    await match(first, 0);
+    await match({ ...first, offset: cold.body.total }, 0);
+    const outOfRange = await match({ ...first, offset: Number.MAX_SAFE_INTEGER }, 0);
+    assert.equal(outOfRange.body.nextOffset, Number.MAX_SAFE_INTEGER);
+    assert.deepEqual(outOfRange.body.books, []);
+    await match({ ...first, q: "Book 20" }, 1);
+    await match({ ...first, author: "Author 1" }, 1);
+    await match({ ...first, category: "Sparse" }, 1);
+    const pageFault = await read(actual, first, "page");
+    assert.deepEqual(pageFault.response, (await read(baseline, first, "page")).response);
+    assert.deepEqual(pageFault.response, { status: 500, body: { error: "synthetic book list read failed" } });
+    const probeFault = await read(actual, first, "probe");
+    assert.deepEqual(probeFault.response, cold);
+    assert.equal(probeFault.counts.scans, 1);
+    const originalStat = fs.statSync;
+    let openingStampChanged = false;
+    fs.statSync = function (file, options) {
+      const info = originalStat.call(this, file, options);
+      if (openingStampChanged || file !== fixturePath || !options?.bigint) return info;
+      openingStampChanged = true;
+      return { ...info, ino: info.ino + 1n };
+    };
+    try {
+      const openingRace = await read(actual, first);
+      assert.equal(openingStampChanged, true);
+      assert.deepEqual(openingRace.response, cold);
+      assert.deepEqual(openingRace.counts, { scans: 1, staticReads: 1 });
+    } finally { fs.statSync = originalStat; }
+    // The next stable request can safely cache again.
+    await match(first, 1, 1);
+    await match(first, 0);
+
+    for (const [name, query] of [["first", first], ["deep", { ...first, offset: 2400 }]]) {
+      const owners = [baseline, actual];
+      const samples = [[], []];
+      for (let pair = 0; pair < 5; pair++) {
+        const replies = [];
+        for (const mode of pair % 2 ? [1, 0] : [0, 1]) {
+          const start = performance.now();
+          replies[mode] = (await read(owners[mode], query)).response;
+          samples[mode].push(performance.now() - start);
+        }
+        assert.deepEqual(replies[0], replies[1]);
+      }
+      const [before, after] = samples.map(values => values.sort((a, b) => a - b)[2].toFixed(2));
+      console.log(`novel-list-count 50000 books ${name}: ${before} -> ${after} ms (5 paired route reads)`);
+    }
+
+    writer = new DatabaseSync(fixturePath);
+    beforeBookPage = () => writer.exec("UPDATE novel_books SET status = 'error' WHERE id = 'id-50000'");
+    const concurrent = await read(actual, first);
+    assert.equal(beforeBookPage, null);
+    assert.deepEqual(concurrent.counts, { scans: 0, staticReads: 0 });
+    assert.notEqual(concurrent.response.body.listRevision, cold.body.listRevision);
+    assert.deepEqual({ ...concurrent.response.body, listRevision: cold.body.listRevision }, cold.body);
+    const updated = await match(first, 1, 1);
+    assert.equal(updated.body.total, cold.body.total - 1);
+    assert.ok(updated.body.books.every(item => item.id !== "id-50000"));
+
+    // Simulate an older, additive-compatible producer without the optional author index.
+    writer.exec(`DROP INDEX idx_novel_books_author_updated;
+      ALTER TABLE novel_books ADD COLUMN legacy_catalog_tag TEXT;
+      UPDATE novel_meta SET value = '5' WHERE key = 'schema_version'`);
+    writer.close();
+    writer = null;
+    assert.deepEqual((await read(actual, first, "count")).response, (await read(baseline, first, "count")).response);
+    await match(first, 1, 1);
+    await match(first, 0);
+  } finally {
+    beforeBookPage = null;
+    DatabaseSync.prototype.prepare = inheritedPrepare;
+    writer?.close();
+    baseline.invalidate();
+    actual.invalidate();
+  }
+}
+
+async function verifyCatalogSearchPage() {
+  const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
+  const source = fs.readFileSync(sourceUrl, "utf8");
+  const baselineSource = source.replace(
+    "const selected = query && book.chapterCount >= 4096 && book.chapterCount <= MAX_CATALOG_SEARCH_MATCHES",
+    "const selected = false"
+  );
+  assert.notEqual(baselineSource, source);
+  const { createNovelStore: baselineFactory } = await import("data:text/javascript;base64," + Buffer.from(
+    baselineSource.replace(/from "(\.\/[^"]+)"/gu, (_, relative) => "from " + JSON.stringify(new URL(relative, sourceUrl).href))
+  ).toString("base64"));
+  const catalogPath = path.join(temporary, "wide-catalog.sqlite");
+  const baseline = baselineFactory({ dbPath: catalogPath });
+  const actual = createNovelStore({ dbPath: catalogPath });
+  const book = baseline.uploadBook({ fileName: "wide-catalog.txt", text: "第一章 合成\n合成正文。" }).book;
+  const writer = new DatabaseSync(catalogPath);
+  const inheritedPrepare = DatabaseSync.prototype.prepare;
+  let probe;
+  const read = async (target, query, id = book.id, failAt = "") => {
+    const response = {};
+    const queries = [];
+    probe = { queries, failAt };
+    try {
+      const url = new URL(`http://fixture/api/novels/${id}/catalog?${new URLSearchParams(query)}`);
+      assert.equal(await routeNovelApi({ method: "GET" }, {}, url, {
+        novelStore: target,
+        sendJson(_res, status, body) { Object.assign(response, { status, body }); },
+        notFound() { response.status = 404; }
+      }), true);
+      return { response, queries };
+    } finally {
+      probe = null;
+    }
+  };
+  DatabaseSync.prototype.prepare = function (sql, ...args) {
+    let operation = "";
+    if (sql.startsWith("WITH matched AS MATERIALIZED")) operation = "combined";
+    else if (sql.startsWith("WITH prefix AS MATERIALIZED")) operation = "prefix";
+    else if (sql.startsWith("SELECT COUNT(*) AS count FROM novel_chapters WHERE")) operation = "count";
+    else if (/SELECT id, book_id, chapter_index, title, '' AS content/u.test(sql)) operation = "page";
+    const statement = inheritedPrepare.call(this, sql, ...args);
+    if (!probe || !operation) return statement;
+    return new Proxy(statement, { get(target, key) {
+      if (key !== "all" && key !== "get") return Reflect.get(target, key, target);
+      return (...parameters) => {
+        probe.queries.push(operation);
+        if (probe.failAt === operation) throw new Error("synthetic chapter read failed");
+        return target[key](...parameters);
+      };
+    } });
+  };
+  const sparse = { q: "needle", limit: 120 };
+  const dense = { q: "chapter", limit: 20 };
+  const deep = { q: "chapter", limit: 120, offset: 15000 };
+  const equivalent = async (query, expectedOperations, id) => {
+    const before = await read(baseline, query, id);
+    const after = await read(actual, query, id);
+    assert.deepEqual(after.response, before.response, JSON.stringify(query));
+    assert.deepEqual(after.queries, expectedOperations, JSON.stringify(query));
+    return after.response;
+  };
+  try {
+    const body = "合成正文".repeat(1200);
+    writer.exec("BEGIN; DELETE FROM novel_chapters");
+    const insert = writer.prepare("INSERT INTO novel_chapters(id,book_id,chapter_index,title,content,char_count,updated_at) VALUES(?,?,?,?,?,?,?)");
+    for (let index = 1; index <= 16000; index++) {
+      const suffix = index % 149 === 0 ? " Needle" : index === 7 ? " %_\\" : "";
+      insert.run(`chapter-${index}`, book.id, index, `Chapter ${index}${suffix}`, body, body.length, "2026");
+    }
+    writer.prepare("UPDATE novel_books SET chapter_count = 16000 WHERE id = ?").run(book.id);
+    writer.exec("UPDATE novel_chapters SET _rowid_ = 9007199254740993 WHERE id = 'chapter-149'; COMMIT");
+    const sparsePage = await equivalent(sparse, ["prefix", "combined"]);
+    assert.equal(sparsePage.body.filteredTotal, 107);
+    assert.equal(sparsePage.body.chapters[0].id, "chapter-149");
+    await equivalent({ ...sparse, order: "desc", limit: 20, offset: 27 }, ["prefix", "combined"]);
+    await equivalent(dense, ["prefix", "count"]);
+    await equivalent(deep, ["combined"]);
+    await equivalent({ q: "149", all: 1, order: "desc" }, ["combined"]);
+    await equivalent({ q: "%_\\", limit: 20, offset: Number.MAX_SAFE_INTEGER }, ["combined"]);
+    await equivalent({ q: "unmatched" }, ["prefix", "combined"]);
+    await equivalent({ ...sparse, all: 1 }, ["combined"]);
+    await equivalent({ anchor: 149, limit: 20 }, ["count", "page"]);
+    assert.equal((await equivalent({ ...sparse, catalogRevision: "stale" }, [])).status, 409);
+    assert.equal((await equivalent({ ...sparse, sourceRealm: "elsewhere" }, [])).status, 409);
+    assert.equal((await equivalent(sparse, [], "missing")).status, 404);
+    const oldFault = await read(baseline, deep, book.id, "page");
+    const newFault = await read(actual, deep, book.id, "combined");
+    assert.deepEqual(newFault.response, oldFault.response);
+    assert.deepEqual(newFault.response, { status: 500, body: { error: "synthetic chapter read failed" } });
+
+    for (const [name, query] of [["sparse", sparse], ["dense shallow", dense], ["dense deep", deep]]) {
+      const samples = { baseline: [], actual: [] };
+      for (let pair = 0; pair < 5; pair++) {
+        const order = pair % 2 ? ["actual", "baseline"] : ["baseline", "actual"];
+        const results = {};
+        for (const mode of order) {
+          const start = performance.now();
+          results[mode] = (await read(mode === "actual" ? actual : baseline, query)).response;
+          samples[mode].push(performance.now() - start);
+        }
+        assert.deepEqual(results.actual, results.baseline);
+      }
+      const median = values => values.sort((a, b) => a - b)[2].toFixed(2);
+      console.log(`novel-catalog-search 16000 chapters ${name}: ${median(samples.baseline)} -> ${median(samples.actual)} ms (5 paired route reads)`);
+    }
+
+    // A stale book count cannot make a dense candidate allocate more than the bounded match set.
+    writer.exec("BEGIN");
+    const insertWithRowid = writer.prepare("INSERT INTO novel_chapters(_rowid_,id,book_id,chapter_index,title,content,char_count,updated_at) VALUES(?,?,?,?,?,?,?,?)");
+    for (let index = 16001; index <= 20001; index++) {
+      insertWithRowid.run(index, `chapter-${index}`, book.id, index, `Chapter ${index}`, "合成", 2, "2026");
+    }
+    writer.exec("COMMIT");
+    await equivalent(deep, ["combined", "count", "page"]);
+    writer.exec("ALTER TABLE novel_chapters ADD COLUMN _rowid_ TEXT GENERATED ALWAYS AS (title) VIRTUAL");
+    await equivalent(sparse, ["count", "page"]);
+    await equivalent(deep, ["count", "page"]);
+  } finally {
+    DatabaseSync.prototype.prepare = inheritedPrepare;
+    writer.close();
+    baseline.invalidate();
+    actual.invalidate();
+  }
+}
+
 async function verifyCatalogEmptySearch({ memory = false } = {}) {
   const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
   const source = fs.readFileSync(sourceUrl, "utf8").replaceAll("\r\n", "\n");
@@ -344,20 +621,23 @@ async function verifyCatalogEmptySearch({ memory = false } = {}) {
   const start = source.indexOf("  function catalog(");
   const end = source.indexOf("  function saveProgress(", start);
   const currentCatalog = source.slice(start, end);
+  // Isolate the older zero-count change from the wide-book query planner.
+  const zeroCatalog = currentCatalog.replace(/^      const selected = query[^\n]+\n[^\n]+\n/mu, "")
+    .replace("selected?.total ?? ", "").replace("selected?.rows ?? ", "");
+  const zeroSource = source.replace(currentCatalog, zeroCatalog);
   const addition = '      if (filteredTotal === 0) where.push("0");\n';
   const limitLine = "      const limit = all ? Math.max(1, filteredTotal) : requestedLimit;";
-  assert.equal(previousCatalog.replace(limitLine, addition + limitLine), currentCatalog,
+  assert.equal(previousCatalog.replace(limitLine, addition + limitLine), zeroCatalog,
     "the complete previous catalog method differs only by the zero-count predicate");
-  const previousSource = source.replace(currentCatalog, previousCatalog);
-  assert.equal(previousSource.replace(previousCatalog, currentCatalog), source);
+  const previousSource = zeroSource.replace(zeroCatalog, previousCatalog);
+  assert.equal(previousSource.replace(previousCatalog, zeroCatalog), zeroSource);
   const factory = async text => {
     if (memory) text = text.replace("const candidate = new DatabaseSync(dbPath);", "const candidate = globalThis.__novelCatalogFixtureDb;");
     text = text.replace(/from "(\.\/[^"]+)"/gu, (_, relative) => "from " + JSON.stringify(new URL(relative, sourceUrl).href));
     return (await import("data:text/javascript;base64," + Buffer.from(text).toString("base64"))).createNovelStore;
   };
   const previousFactory = await factory(previousSource);
-  const underTestFactory = process.argv.includes("--legacy-catalog-zero")
-    ? previousFactory : memory ? await factory(source) : createNovelStore;
+  const underTestFactory = process.argv.includes("--legacy-catalog-zero") ? previousFactory : await factory(zeroSource);
   const catalogPath = memory ? ":memory:" : path.join(temporary, "catalog.sqlite");
   const priorMemoryOwner = globalThis.__novelCatalogFixtureDb;
   const memoryDb = memory ? new DatabaseSync(":memory:") : null;
@@ -941,13 +1221,12 @@ async function verifyReadingCount() {
   const source = fs.readFileSync(sourceUrl, "utf8").replaceAll("\r\n", "\n");
   const countBlock = `      const countFrom = readingOnly
         ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
-        : "novel_books b";
-      const countRow = database.prepare(\`SELECT COUNT(*) AS count FROM \${countFrom} \${where}\`).get(...params);`;
+        : "novel_books b";`;
   assert.equal(source.split(countBlock).length, 2);
   // The former count driver is the only restored code. The actual factory,
   // schema, predicates, rows/order, transaction and revision remain real.
   const previousSource = source.replace(countBlock,
-    "      const countRow = database.prepare(`SELECT COUNT(*) AS count FROM novel_books b ${where}`).get(...params);")
+    '      const countFrom = "novel_books b";')
     .replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, sourceUrl).href)}`);
   const { createNovelStore: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(previousSource).toString("base64")}`);
   const factory = process.argv.includes("--legacy-reading-count") ? previousFactory : createNovelStore;

@@ -19,8 +19,10 @@ let coverUrlCalls = 0;
 let cacheStatusCalls = 0;
 let mangaCount = 0;
 let mangaItems = [];
+let mangaRevision = "manga-v1";
 let photoRootStatus = "ready";
 let imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets, mediaItems: [] };
+let imageIndexReads = 0;
 let tvMetadata = new Map();
 
 const service = createImageLibraryService({
@@ -29,13 +31,14 @@ const service = createImageLibraryService({
     return Math.min(max, Math.max(min, Number.isFinite(parsed) ? parsed : fallback));
   },
   galleryMediaRootStatuses: () => [],
-  getImageLibraryIndex: () => imageIndex,
+  getImageLibraryIndex: () => { imageIndexReads++; return imageIndex; },
   imageReaderCacheStatus: () => {
     cacheStatusCalls += 1;
     return { root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 };
   },
   mangaService: {
     cacheDirs: () => mangaItems.length ? mangaItems : Array.from({ length: mangaCount }, (_, index) => `manga-${index}`),
+    listRevision: () => mangaRevision,
     publicSummary: (value) => value,
     rootStatus: () => ({ root: "", exists: false })
   },
@@ -82,8 +85,20 @@ mangaItems = [
   { id: "manga-old", title: "旧漫画", updatedAt: "2026-08-28T10:00:00.000Z" },
   { id: "manga-new", title: "新漫画", updatedAt: "2026-08-30T04:13:31+08:00" }
 ];
+const readsBeforeManga = imageIndexReads;
 const mangaList = service.itemsPayload(url({ mode: "manga", limit: "20" }));
 assert.equal(mangaList.scannedAt, "2026-08-30T04:13:31+08:00", "manga lists must report the latest comic update instead of the unrelated image-library scan time");
+const imageIndexBeforeManga = imageIndex;
+imageIndex = { ...imageIndex, scannedAt: "2026-10-01T00:00:00.000Z" };
+const mangaNextPage = service.itemsPayload(url({ mode: "manga", offset: "1", limit: "1" }));
+assert.equal(mangaNextPage.listRevision, mangaList.listRevision, "a newer gallery index cannot invalidate manga pagination");
+assert.equal(mangaNextPage.scannedAt, mangaList.scannedAt);
+assert.deepEqual(mangaNextPage.items, mangaList.items.slice(1));
+mangaRevision = "manga-v2";
+const mangaRefresh = service.itemsPayload(url({ mode: "manga", limit: "20" }), { refresh: true });
+assert.notEqual(mangaRefresh.listRevision, mangaList.listRevision, "manga publication still advances pagination revision");
+assert.equal(imageIndexReads, readsBeforeManga, "manga paging and refresh never read the gallery index");
+imageIndex = imageIndexBeforeManga;
 photoSets.pop();
 imageIndex = { ...imageIndex, photoSets };
 

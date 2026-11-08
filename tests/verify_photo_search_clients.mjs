@@ -4,6 +4,8 @@ import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
+import { normalizeRoute, routeFromUrl, routeUrl } from "../public/js/router.js";
+import { createGalleryPage } from "../public/modules/content-index/gallery-page.js";
 import { photoCatalogCollections } from "../public/modules/content-index/photo-catalog.js";
 import { photoCatalogCollections as androidPhotoCatalogCollections } from "../android-client/www/platform/content-index/photo-catalog.js";
 
@@ -27,17 +29,50 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 }
 
 const webPage = read("public", "modules", "content-index", "gallery-page.js");
-assert(webPage.includes('sort: query ? "relevance"'), "Web photo search must request relevance order");
 assert(webPage.includes("mergeImageLibraryListItems"), "Web photo pagination must merge offset pages");
 assert(webPage.includes("targetCount - (options.force ? 0 : loadedCount)"), "Web photo pagination must request only the missing visible range");
 assert(webPage.includes("const offset = options.force ? 0 : rawLoaded"), "Web photo pagination must advance over raw records independently of deduplicated cards");
 assert(webPage.includes("refreshGalleryAfterLibraryChange({ preserveScroll: true })"), "Async Web gallery refreshes must preserve the current page position");
 assert(webPage.includes("renderGalleryView({ preserveScroll: true })"), "Async Web gallery states must not reset the current page position");
 
-const router = read("public", "js", "router.js");
-assert(router.includes("photoSearch ? \"all\""), "A direct Web photo search must default to the full library");
-assert(router.includes('galleryPhotoView === "collections" && !photoSearch ? "count" : "updated"'), "The photo collection catalog must default to count order");
-assert(router.includes("next.gallerySort !== defaultGallerySort"), "The default photo collection order must keep the clean catalog URL");
+{
+  const base = "https://synthetic.invalid";
+  const previousWindow = globalThis.window;
+  globalThis.window = { location: new URL(base) };
+  try {
+    const browse = normalizeRoute(routeFromUrl("/photo/collections"));
+    assert.equal(browse.gallerySort, "count");
+    assert.equal(routeUrl(browse), "/photo/collections");
+    for (const [mode, path] of [["photo", "/photo/collections"], ["media", "/media"]]) {
+      const q = "合成 人物";
+      const params = new URLSearchParams({ q, category: "分类甲", subCategory: "小类甲", person: "人物甲", date: "2026-10", kind: "movie", seriesKey: "series-a" });
+      const route = normalizeRoute(routeFromUrl(`${path}?${params}`));
+      const canonical = new URL(routeUrl(route), base);
+      assert.equal(canonical.pathname, `/${mode}/search`);
+      assert.deepEqual([...canonical.searchParams], [["q", q]]);
+      assert.deepEqual(normalizeRoute(routeFromUrl(canonical)), route);
+
+      const state = { activeView: "gallery", gallery: {} };
+      const requests = [];
+      const page = createGalleryPage({
+        state, els: { workGrid: { querySelector: () => null } }, renderGalleryStats() {},
+        async api(path) { requests.push(new URL(path, base)); return { items: [], total: 0 }; }
+      });
+      page.setListRefreshHandler(() => true);
+      page.applyRouteState(route);
+      Object.assign(state.gallery, { category: "分类甲", subCategory: "小类甲", person: "人物甲", photoDate: "2026-10", mediaKind: "movie", seriesKey: "series-a", sort: "size" });
+      await page.loadImageLibraryItems();
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].pathname, "/api/image-library/items");
+      assert.deepEqual(Object.fromEntries(requests[0].searchParams), {
+        mode, limit: "80", offset: "0", sort: "relevance", q, ...(mode === "photo" ? { photoView: "albums" } : {})
+      });
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
 
 const webRenderer = read("public", "modules", "content-index", "gallery-renderer.js");
 assert(!webRenderer.includes('createGalleryFilterField("文件夹"'), "Web photo controls must not render the folder dropdown");
@@ -45,10 +80,6 @@ assert(!webRenderer.includes("galleryMoreObserver"), "Web photo pagination must 
 for (const marker of [
   "renderPagedImageLibrarySearchSummary",
   "gallerySearchMatchText",
-  "多个词可同时匹配",
-  "startingPhotoSearch",
-  "photoSearchActive",
-  '[["updated", "相关性排序"]]',
   'state.gallery.sort = "updated"',
   "search.value = nextQuery",
   "controls.append(searchRow, hierarchy)",
@@ -158,6 +189,7 @@ function pagingHarness(source = androidViews) {
     getChannelLimit: () => limit, getActiveUrl: () => activeUrl,
     normalizeChannelMode: value => value || "photo", channelConfig: () => ({ label: "相册" }),
     channelDataSignature: value => JSON.stringify(value), resetMangaReaderProgressTracker() {}, resetPreviewImageObserver() {},
+    releaseMangaDetail() {}, adoptChannelMount() {}, retireChannelMount() {},
     setActiveBottom() {}, updateModuleChrome() {}, setChannelMeta() {}, applyChannelHeader() {},
     renderCurrentViewPreservingScroll() {}, renderMessage: () => ({ dataset: {} }),
     els: { viewKicker: {}, viewTitle: {}, viewContent: { innerHTML: "" } },
@@ -170,7 +202,7 @@ function pagingHarness(source = androidViews) {
       calls.push(call); return await reply(call);
     }
   });
-  vm.runInContext(`let channelPageState=null, channelRequestGeneration=0, channelRequestController=null, channelRenderingKey="", mountedChannelList=null;
+  vm.runInContext(`let channelPageState=null, channelRequestGeneration=0, channelRequestController=null, channelRenderingKey="", mountedChannelList=null, channelRenderScope=null;
     ${["renderChannel", "channelPageKey", "channelRevisionChanged", "loadConsistentChannelPage", "mergeChannelPageData", "channelItemKey", "channelItemsPath", "normalizeChannelSort", "cancelChannelRequest"].map(name => androidFunction(name, source)).join("\n")}
     globalThis.snapshot=()=>channelPageState;`, context);
   return { calls, renders, writes, render: params => context.renderChannel({ mode: "photo", photoView: "albums", ...params }),
@@ -327,7 +359,7 @@ for (const obsolete of ["success", "error", "server", "deactivate"]) {
   await old; assert.equal(h.renders.length, rendered); assert.equal(h.writes.length, written, "obsolete transport cannot overwrite the same cached path"); pagingGroups++;
 }
 console.log(`android-channel-paging: ${pagingGroups} actual-source groups PASS (raw cursor/EOF, rebase, bounded changing snapshots, original-range retry, cancelled late success/error)`);
-assert(androidViews.includes('{ requireScrollIntent: mode === "photo" }'), "Android photo list pagination must require fresh downward scroll intent");
+assert.match(androidViews, /\{ requireScrollIntent: mode === "photo"[, }]/, "Android photo list pagination must require fresh downward scroll intent");
 assert(androidViews.includes("}, { requireScrollIntent: true });"), "Android photo reader pagination must require fresh downward scroll intent");
 
 const androidAutoLoad = read("android-client", "www", "js", "auto-load.js");

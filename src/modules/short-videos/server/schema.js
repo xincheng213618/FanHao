@@ -292,13 +292,8 @@ function ensureShortVideoTopics(db) {
   }
 }
 
-export function ensureShortVideoSearchIndex(db) {
-  db.exec(`
-    DROP TRIGGER IF EXISTS short_video_search_ai;
-    DROP TRIGGER IF EXISTS short_video_search_ad;
-    DROP TRIGGER IF EXISTS short_video_search_au;
-    DROP TABLE IF EXISTS short_video_search;
-    CREATE VIRTUAL TABLE short_video_search USING fts5(
+const SHORT_VIDEO_SEARCH_DEFINITIONS = new Map([
+  ["short_video_search", `CREATE VIRTUAL TABLE short_video_search USING fts5(
       video_id UNINDEXED,
       media_type UNINDEXED,
       visibility UNINDEXED,
@@ -311,8 +306,8 @@ export function ensureShortVideoSearchIndex(db) {
       aweme_id,
       tags_text,
       tokenize = 'trigram'
-    );
-    CREATE TRIGGER short_video_search_ai AFTER INSERT ON short_videos BEGIN
+    )`],
+  ["short_video_search_ai", `CREATE TRIGGER short_video_search_ai AFTER INSERT ON short_videos BEGIN
       INSERT INTO short_video_search(
         rowid, video_id, media_type, visibility, published_at, author_sec_uid, tags_json,
         title, description, author_name, aweme_id, tags_text
@@ -320,11 +315,11 @@ export function ensureShortVideoSearchIndex(db) {
         new.rowid, new.id, new.media_type, new.visibility, new.published_at, new.author_sec_uid, new.tags_json,
         new.title, new.description, new.author_name, new.aweme_id, new.tags_text
       );
-    END;
-    CREATE TRIGGER short_video_search_ad AFTER DELETE ON short_videos BEGIN
+    END`],
+  ["short_video_search_ad", `CREATE TRIGGER short_video_search_ad AFTER DELETE ON short_videos BEGIN
       DELETE FROM short_video_search WHERE rowid = old.rowid;
-    END;
-    CREATE TRIGGER short_video_search_au
+    END`],
+  ["short_video_search_au", `CREATE TRIGGER short_video_search_au
     AFTER UPDATE OF
       id, media_type, visibility, published_at, author_sec_uid, tags_json,
       title, description, author_name, aweme_id, tags_text
@@ -337,7 +332,16 @@ export function ensureShortVideoSearchIndex(db) {
         new.rowid, new.id, new.media_type, new.visibility, new.published_at, new.author_sec_uid, new.tags_json,
         new.title, new.description, new.author_name, new.aweme_id, new.tags_text
       );
-    END;
+    END`]
+]);
+
+export function ensureShortVideoSearchIndex(db) {
+  db.exec(`
+    DROP TRIGGER IF EXISTS short_video_search_ai;
+    DROP TRIGGER IF EXISTS short_video_search_ad;
+    DROP TRIGGER IF EXISTS short_video_search_au;
+    DROP TABLE IF EXISTS short_video_search;
+    ${[...SHORT_VIDEO_SEARCH_DEFINITIONS.values()].join(";\n")};
     INSERT INTO short_video_search(
       rowid, video_id, media_type, visibility, published_at, author_sec_uid, tags_json,
       title, description, author_name, aweme_id, tags_text
@@ -347,6 +351,20 @@ export function ensureShortVideoSearchIndex(db) {
       title, description, author_name, aweme_id, tags_text
     FROM short_videos;
   `);
+}
+
+export function hasCanonicalShortVideoSearchIndex(db) {
+  const rows = db.prepare(`SELECT name, sql FROM main.sqlite_schema
+    WHERE name IN ('short_videos', 'short_video_stats', 'short_video_search', 'short_video_search_ai', 'short_video_search_ad',
+      'short_video_search_au', 'idx_short_videos_author_published')
+      AND NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE
+        IN ('short_videos', 'short_video_stats', 'short_video_search'))`).all();
+  const normalize = sql => sql?.replace(/\s+/gu, " ").trim();
+  const byName = new Map(rows.map(row => [row.name, normalize(row.sql)]));
+  return /^CREATE TABLE short_videos \( id TEXT PRIMARY KEY,/u.test(byName.get("short_videos") || "")
+    && /^CREATE TABLE short_video_stats \( video_id TEXT PRIMARY KEY,/u.test(byName.get("short_video_stats") || "")
+    && byName.get("idx_short_videos_author_published") === "CREATE INDEX idx_short_videos_author_published ON short_videos(author_sec_uid, visibility, published_at, liked_at, id)"
+    && [...SHORT_VIDEO_SEARCH_DEFINITIONS].every(([name, sql]) => byName.get(name) === normalize(sql));
 }
 
 function ensureShortVideoSounds(db) {
@@ -511,12 +529,7 @@ function migrateShortVideoCoverSources(db) {
   `).run(now);
 }
 
-export function recreateShortVideoCatalogView(db) {
-  const recommendationScoreSql = SHORT_VIDEO_RECOMMENDATION_SCORE_SQL;
-  db.exec(`
-    DROP VIEW IF EXISTS short_video_catalog;
-    DROP VIEW IF EXISTS short_video_catalog_base;
-    CREATE VIEW short_video_catalog_base AS
+const SHORT_VIDEO_CATALOG_BASE_SQL = `CREATE VIEW short_video_catalog_base AS
     SELECT
       v.id,
       v.aweme_id,
@@ -591,7 +604,7 @@ export function recreateShortVideoCatalogView(db) {
       COALESCE(user_collect.source, '') AS user_collect_source,
       COALESCE(user_dislike.active, 0) AS user_dislike_active,
       COALESCE(user_dislike.source, '') AS user_dislike_source,
-      ${recommendationScoreSql} AS recommendation_score,
+      ${SHORT_VIDEO_RECOMMENDATION_SCORE_SQL} AS recommendation_score,
       COALESCE(watch_history.progress_ms, 0) AS watch_progress_ms,
       COALESCE(watch_history.completed_count, 0) AS watch_completed_count,
       COALESCE(watch_history.last_watched_at, '') AS last_watched_at,
@@ -655,15 +668,33 @@ export function recreateShortVideoCatalogView(db) {
     LEFT JOIN short_video_assets ffmpeg_cover_asset ON ffmpeg_cover_asset.video_id = v.id AND ffmpeg_cover_asset.asset_type = 'ffmpeg_cover'
     LEFT JOIN short_video_assets legacy_cover_asset ON legacy_cover_asset.video_id = v.id AND legacy_cover_asset.asset_type = 'cover'
     LEFT JOIN short_video_assets music_asset ON music_asset.video_id = v.id AND music_asset.asset_type = 'music'
-    LEFT JOIN short_video_sounds sound_index ON sound_index.video_id = v.id;
+    LEFT JOIN short_video_sounds sound_index ON sound_index.video_id = v.id`;
 
-    CREATE VIEW short_video_catalog AS
+const SHORT_VIDEO_CATALOG_SQL = `CREATE VIEW short_video_catalog AS
     SELECT
       short_video_catalog_base.*,
       1 AS recommendation_author_rank,
       recommendation_score AS recommendation_order_score
-    FROM short_video_catalog_base;
+    FROM short_video_catalog_base`;
+
+export function recreateShortVideoCatalogView(db) {
+  db.exec(`
+    DROP VIEW IF EXISTS short_video_catalog;
+    DROP VIEW IF EXISTS short_video_catalog_base;
+    ${SHORT_VIDEO_CATALOG_BASE_SQL};
+    ${SHORT_VIDEO_CATALOG_SQL};
   `);
+}
+
+export function hasCanonicalShortVideoCatalogViews(db) {
+  const definitions = db.prepare(`SELECT name, sql FROM main.sqlite_schema
+    WHERE name IN ('short_videos', 'short_video_catalog_base', 'short_video_catalog')
+      AND NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE
+        IN ('short_videos', 'short_video_catalog_base', 'short_video_catalog', 'short_video_search'))`).all();
+  const byName = new Map(definitions.map(({ name, sql }) => [name, sql]));
+  return byName.get("short_video_catalog_base") === SHORT_VIDEO_CATALOG_BASE_SQL
+    && byName.get("short_video_catalog") === SHORT_VIDEO_CATALOG_SQL
+    && /^CREATE\s+TABLE\s+short_videos\s*\(\s*id\s+TEXT\s+PRIMARY\s+KEY\s*,/iu.test(byName.get("short_videos") || "");
 }
 
 export function refreshShortVideoRelationshipFlags(db, videoId = "") {

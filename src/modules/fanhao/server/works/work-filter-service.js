@@ -1,4 +1,4 @@
-import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
+import { deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
 
 export function createWorkFilterService({
   favoriteStateService = { isFavoriteWork: () => false },
@@ -14,7 +14,7 @@ export function createWorkFilterService({
   }
 
   function matches(work, filter) {
-    if (String(filter).startsWith("tag:") || ["uncensored", "uncensoredAi", "subtitled", "quality4k"].includes(filter)) {
+    if (isWorkTraitFilter(filter)) {
       return matchesWorkTraitFilter(traits(work), filter) === true;
     }
     switch (filter) {

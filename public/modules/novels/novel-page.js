@@ -79,6 +79,7 @@ export function createNovelPage(deps) {
   let uploadJob = null;
   const chapterCache = new Map();
   const chapterRequests = new Map();
+  const catalogSearchIndexes = new WeakMap();
   const readerFullscreen = createNovelReaderFullscreen({
     isReader: () => state.activeView === "novels" && Boolean(state.novel?.chapter),
     captureReader: () => {
@@ -3052,6 +3053,27 @@ export function createNovelPage(deps) {
     return wrap;
   }
 
+  function matchingCatalogChapters(source, query) {
+    if (!query) return source;
+    // Accepted catalog reads replace the array, so cached titles belong to one snapshot.
+    let search = catalogSearchIndexes.get(source);
+    if (!search) {
+      search = { entries: source.map(chapter => ({
+        chapter, title: String(chapter.title || "").toLowerCase(), index: String(chapter.index || "")
+      })), query: "", matches: [] };
+      catalogSearchIndexes.set(source, search);
+    }
+    if (search.query !== query) {
+      const matches = [];
+      for (const entry of search.entries) {
+        if (entry.title.includes(query) || entry.index.includes(query)) matches.push(entry.chapter);
+      }
+      search.query = query;
+      search.matches = matches;
+    }
+    return search.matches;
+  }
+
   function createCatalogBrowser(chapters, options = {}) {
     const source = Array.isArray(chapters) ? chapters : [];
     const owner = navigationId;
@@ -3099,28 +3121,28 @@ export function createNovelPage(deps) {
     locate.hidden = sourceAnchor < 0;
     pagination.hidden = source.length <= NOVEL_CATALOG_PAGE_SIZE;
     pagination.append(previous, pageInput, pageCountLabel, next, locate);
-    let searchIndex = null;
     if (options.compact && !state.novel.catalogQuery && sourceAnchor >= 0) {
       const anchorPosition = state.novel.catalogDescending ? source.length - sourceAnchor - 1 : sourceAnchor;
       state.novel.catalogPage = Math.floor(anchorPosition / NOVEL_CATALOG_PAGE_SIZE);
     }
 
     function refresh({ locateCurrent = false } = {}) {
-      const query = String(state.novel.catalogQuery || "").trim().toLocaleLowerCase("zh-Hans-CN");
-      const visible = query
-        ? (searchIndex ||= source.map(chapter => ({ chapter, title: String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN"), index: String(chapter.index || "") })))
-          .filter(entry => entry.title.includes(query) || entry.index.includes(query)).map(entry => entry.chapter)
-        : [...source];
-      if (state.novel.catalogDescending) visible.reverse();
+      // Chinese uses the default Unicode lowercase rules.
+      const query = String(state.novel.catalogQuery || "").trim().toLowerCase();
+      const visible = matchingCatalogChapters(source, query);
+      const descending = state.novel.catalogDescending;
       const filteredTotal = visible.length;
       const pageCount = Math.max(1, Math.ceil(filteredTotal / NOVEL_CATALOG_PAGE_SIZE));
       if (locateCurrent) {
-        const position = visible.findIndex(chapter => Number(chapter.index) === anchorIndex);
-        state.novel.catalogPage = Math.floor(Math.max(0, position) / NOVEL_CATALOG_PAGE_SIZE);
+        const position = sourceAnchor < 0 ? 0 : descending ? source.length - sourceAnchor - 1 : sourceAnchor;
+        state.novel.catalogPage = Math.floor(position / NOVEL_CATALOG_PAGE_SIZE);
       }
       state.novel.catalogPage = Math.min(pageCount - 1, Math.max(0, Math.floor(Number(state.novel.catalogPage) || 0)));
       const offset = state.novel.catalogPage * NOVEL_CATALOG_PAGE_SIZE;
-      const pageChapters = visible.slice(offset, offset + NOVEL_CATALOG_PAGE_SIZE);
+      const end = filteredTotal - offset;
+      const pageChapters = descending
+        ? visible.slice(Math.max(0, end - NOVEL_CATALOG_PAGE_SIZE), end).reverse()
+        : visible.slice(offset, offset + NOVEL_CATALOG_PAGE_SIZE);
       pageInput.value = String(state.novel.catalogPage + 1);
       pageInput.max = String(pageCount);
       pageInput.disabled = pageCount <= 1;

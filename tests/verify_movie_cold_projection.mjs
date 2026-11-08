@@ -114,7 +114,7 @@ function environment({ count = 24, heavyBytes = 0, cache = false, connectionKind
   let indexReads = 0;
   const deps = metadata => ({ maxItemLimit: 12000, clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number.parseInt(value, 10) || fallback)),
     getImageLibraryIndex: () => { indexReads++; return index; }, getImageLibraryRevision: () => 1, metadataService: metadata, cachePreparedQueries: cache,
-    photoSetService: { coverUrl: () => "" }, mangaService: { cacheDirs: () => [], rootStatus: () => ({}) },
+    photoSetService: { coverUrl: () => "" }, mangaService: { cacheDirs: () => [], publicSummary: (value) => value, rootStatus: () => ({}) },
     photoSetRootStatuses: () => [], galleryMediaRootStatuses: () => [], imageReaderCacheStatus: () => ({}) });
   const compose = owners => {
     const metadata = owners.metadata({ createId: (_prefix, key) => key, getImageGalleryDb: () => connection || active, notFound() {} });
@@ -136,6 +136,7 @@ function normalized(payload) {
 }
 function compare(env, params = {}, label = "complete DTO and wire") {
   const expected = normalized(env.before.library.itemsPayload(request(params))), actual = normalized(env.after.library.itemsPayload(request(params)));
+  if (params.mode === "manga") expected.scannedAt = ""; // Empty manga has no update time of its own.
   assert.deepEqual(actual, expected, label); assert.equal(JSON.stringify(actual), JSON.stringify(expected), `${label} serialized order`);
   for (const item of actual.items) if (item.movieMetadata) assert.equal(item.genres, item.movieMetadata.genres, "same-item genres retains the established array alias");
   assert(!actual?.then, "the established API remains synchronous"); comparisons++; return actual;

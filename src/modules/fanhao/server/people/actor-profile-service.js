@@ -1,5 +1,5 @@
 import { hasActorProfilePublicationReadModel } from "./actor-profile-publication-schema.js";
-import { canonicalPersonId, hasIdentityTable } from "./person-identity.js";
+import { canonicalPersonId, createCanonicalPersonReader, hasIdentityTable } from "./person-identity.js";
 
 const PUBLISHED_PROFILE_ROWS_SQL = `
   WITH avatar_candidates AS (
@@ -112,7 +112,10 @@ export function createActorProfileService({
   let actorProfileCache = null;
 
   function rowsById() {
-    const stamp = getStamp();
+    return rowsAtStamp(getStamp());
+  }
+
+  function rowsAtStamp(stamp) {
     if (actorProfileCache?.stamp === stamp) return actorProfileCache.rows;
 
     const rows = new Map();
@@ -199,15 +202,16 @@ export function createActorProfileService({
         rows.set(String(row.core_person_id), { ...row, person_id: String(row.core_person_id) });
       }
       if (hasIdentityTable(db, "person_redirects")) {
+        const resolve = createCanonicalPersonReader(db);
         for (const redirect of db.prepare("SELECT source_id, target_id FROM person_redirects ORDER BY source_id").all()) {
           const source = rows.get(String(redirect.source_id));
-          const target = rows.get(canonicalPersonId(db, redirect.target_id));
+          const target = rows.get(resolve(redirect.target_id));
           if (target && !target.avatar_candidate_present && source?.avatar_candidate_present) {
             for (const [key, value] of Object.entries(source)) if (key.startsWith("avatar_")) target[key] = value;
             target.avatar_owner_id = source.avatar_owner_id || source.core_person_id;
           }
         }
-        for (const [id] of rows) if (canonicalPersonId(db, id) !== id) rows.delete(id);
+        for (const [id] of rows) if (resolve(id) !== id) rows.delete(id);
       }
     } catch (error) {
       console.warn("[core-actor-profile]", error.message);
@@ -220,6 +224,15 @@ export function createActorProfileService({
 
   function row(personId) {
     return rowsById().get(canonicalPersonId(getCoreDb(), personId)) || null;
+  }
+
+  function createRowReader() {
+    const stamp = getStamp();
+    const rows = rowsAtStamp(stamp);
+    // Retry a failed refresh through the existing point reader.
+    if (actorProfileCache?.stamp !== stamp) return row;
+    const resolve = createCanonicalPersonReader(getCoreDb());
+    return (personId) => rows.get(resolve(personId)) || null;
   }
 
   function avatarForProfileRow(profileRow) {
@@ -246,10 +259,10 @@ export function createActorProfileService({
     };
   }
 
-  function publicProfile(profileRow) {
+  function publicProfile(profileRow, readAliasNames = mergedPersonAliasNames) {
     if (!profileRow) return null;
 
-    const aliases = uniquePersonNames([...actorProfileAliases(profileRow), ...mergedPersonAliasNames(profileRow.person_id)]);
+    const aliases = uniquePersonNames([...actorProfileAliases(profileRow), ...readAliasNames(profileRow.person_id)]);
     const displayName = preferredPersonDisplayName(profileRow, profileRow.person_name);
     const avatar = avatarForProfileRow(profileRow);
     const avatarUrl = avatar?.avatarUrl || "";
@@ -277,10 +290,10 @@ export function createActorProfileService({
     };
   }
 
-  function publicSnapshot(profileRow) {
+  function publicSnapshot(profileRow, readAliasNames) {
     return {
       avatar: avatarForProfileRow(profileRow),
-      profile: publicProfile(profileRow)
+      profile: publicProfile(profileRow, readAliasNames)
     };
   }
 
@@ -289,6 +302,7 @@ export function createActorProfileService({
   }
 
   return {
+    createRowReader,
     invalidate,
     publicProfile,
     publicSnapshot,

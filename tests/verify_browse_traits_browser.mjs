@@ -4,23 +4,34 @@ import path from "node:path";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { mediaClassificationSearch } from "../lib/work-traits.js";
 
 const root = fileURLToPath(new URL("../public/", import.meta.url));
 const specialTag = '剧情,组合/"[]<img>';
 const tags = ["单体作品", "美少女电影", specialTag, ...Array.from({ length: 15 }, (_, i) => `资料标签 ${i}`)];
+const fixtureClassifications = [["ltx", "LTX"], ["quality1080p", "1080p"], ["formatMkv", "MKV"]];
 const requests = [];
 let legacyCollections = false;
 const works = Array.from({ length: 96 }, (_, id) => ({
   id: `trait-${id}`, title: `ZZZ-${100 + id} 测试作品`, personId: "trait-person", videoCount: 1, playableCount: 1,
   favorite: id >= 70, infoCount: 1, modifiedAt: "2026-10-23", infoSummary: { rating: 4, releaseDate: "2026-10-23" },
+  progress: id === 80 ? { percent: 42 } : null,
   availability: { hasMagnet: true, hasSubtitles: true },
   traits: {
     tags: id >= 70 ? tags : ["单体作品"],
-    flags: { uncensored: id >= 80, uncensoredAi: false, subtitled: false, quality4k: false },
+    flags: { uncensored: id >= 80, uncensoredAi: false, subtitled: false, quality4k: false,
+      ...Object.fromEntries(fixtureClassifications.map(([key]) => [key, id === 95])) },
     editions: id >= 80 ? [{ key: "uncensored", label: "无码", evidence: ["文件名：ZZZ-U.mp4"] }] : []
   }
 }));
+for (const [key, label] of fixtureClassifications) {
+  works.at(-1).traits.editions.push({ key, label, evidence: ["fixture"] });
+}
 const person = { id: "trait-person", name: "标签测试人物", workCount: works.length, videoCount: works.length, sourceCount: 1 };
+const remoteWorks = [true, false].map((hasMagnet) => ({
+  ...works[0], id: hasMagnet ? "remote-magnet" : "remote-no-magnet", missingLocal: true,
+  videoCount: 0, playableCount: 0, availability: { hasMagnet }, javdbUrl: "/fixture-javdb/source"
+}));
 const studios = [
   { id: "alpha", name: "Alpha Studio", localWorkCount: 4, logoUrl: "/fixture-logo.svg" },
   { id: "beta", name: "Beta Studio", localWorkCount: 96 },
@@ -42,13 +53,15 @@ function matches(work, filter) {
   if (filter.startsWith("tag:")) return work.traits.tags.includes(decodeURIComponent(filter.slice(4)));
   if (filter === "favorite") return work.favorite;
   if (filter === "hasMagnet") return work.availability.hasMagnet;
-  if (["uncensored", "uncensoredAi", "subtitled", "quality4k"].includes(filter)) return work.traits.flags[filter];
+  if (Object.hasOwn(work.traits.flags, filter)) return work.traits.flags[filter];
   return true;
 }
 
 function paged(url, extra = {}) {
   const filters = (url.searchParams.get("filter") || "all").split(",");
-  const selected = works.filter((work) => filters.every((filter) => matches(work, filter)));
+  const classification = url.pathname === "/api/search" && mediaClassificationSearch(url.searchParams.get("q"));
+  const selected = works.filter((work) => filters.every((filter) => matches(work, filter)) && (!classification
+    || (work.traits.flags[classification.key] && (!classification.query || work.title.includes(classification.query)))));
   const offset = Number(url.searchParams.get("offset")) || 0;
   const limit = Number(url.searchParams.get("limit")) || 64;
   return { ...extra, total: selected.length, facets: { all: works.length }, traitFacets: traitFacets(selected), works: selected.slice(offset, offset + limit) };
@@ -62,7 +75,9 @@ const server = createServer((req, res) => {
     if (url.pathname === "/api/modules") data = { modules: [] };
     if (url.pathname === "/api/library") data = { scope: "main", people: [person], access: { mode: "local" }, totals: {}, user: {} };
     if (url.pathname === "/api/people/trait-person") data = paged(url, { person });
-    if (url.pathname === "/api/search") data = paged(url, { people: [] });
+    if (url.pathname === "/api/search") data = url.searchParams.get("q") === "remote-fixture"
+      ? { people: [], works: remoteWorks, total: remoteWorks.length }
+      : paged(url, { people: [] });
     if (url.pathname === "/api/code-prefixes") data = { prefixes: [{ prefix: "ZZZ", localCount: 96 }], localWorkCount: 96 };
     if (url.pathname === "/api/code-prefixes/ZZZ") data = paged(url, { codePrefix: { prefix: "ZZZ", localCount: 96 } });
     if (url.pathname === "/api/studios") data = { makers: studios };
@@ -80,6 +95,9 @@ const server = createServer((req, res) => {
   if (url.pathname === "/fixture-logo.svg") {
     res.writeHead(200, { "Content-Type": "image/svg+xml" });
     res.end('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect fill="#e4efe9" width="120" height="120"/><text x="60" y="70" text-anchor="middle">Alpha</text></svg>'); return;
+  }
+  if (url.pathname === "/fixture-javdb/source") {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }); res.end("Synthetic source"); return;
   }
   const pathname = /^\/fanhao(?:\/|$)/.test(url.pathname) ? "/index.html" : url.pathname;
   const target = path.resolve(root, `.${pathname}`);
@@ -116,13 +134,13 @@ try {
   assert.equal(await cardId(), "trait-80");
   const combined = requests.findLast((url) => url.pathname === "/api/people/trait-person");
   assert.deepEqual(combined.searchParams.get("filter").split(","), [`tag:${encodeURIComponent("美少女电影")}`, "uncensored"]);
-  assert.match(await page.locator(".work-edition-badge").first().getAttribute("title"), /文件名.*未核验视频画面/);
-  assert.equal(await page.locator(".work-tag-buttons").first().locator("button").count(), 3);
-  assert.match(await page.locator(".info-chip.magnet").first().getAttribute("title"), /未验证当前下载可用性/);
-  assert.equal(await page.locator(".edition-subtitled").count(), 0, "subtitle magnets must not become local subtitle badges");
+  const localCard = page.locator('.work-card[data-work-id="trait-80"]');
+  assert.equal(await localCard.locator(".work-edition-badges, .work-tag-buttons, .info-chip, .progress-track").count(), 0,
+    "local cards omit editions, tags, magnet and info chips, and viewing progress");
+  assert.match(await localCard.locator(".work-card-facts").innerText(), /2026-10-23/, "local cards still show rating and date");
   const popup = []; page.on("popup", (child) => { popup.push(child); });
-  await page.locator(".work-tag-buttons").first().getByRole("button", { name: `筛选标签：${specialTag}`, exact: true }).click();
   const specialFilter = `tag:${encodeURIComponent(specialTag)}`;
+  await page.locator(`.browse-traits button[data-work-filter="${specialFilter}"]`).click();
   // The tag already exists in the old facets. Wait for the replacement controls
   // to acknowledge selection, rather than observing the outgoing list's text.
   await page.waitForFunction((filter) => [...document.querySelectorAll(".browse-traits button")]
@@ -193,10 +211,55 @@ try {
     await page.getByRole("button", { name: "清除筛选", exact: true }).click();
     await page.waitForFunction(() => document.querySelector(".browse-traits-note")?.textContent.includes("96"));
   }
+  await page.goto(`${address}/fanhao?personId=trait-person`);
+  await traitButton("LTX").click();
+  await page.locator("[data-work-classifications]").click();
+  await page.waitForURL(`${address}/fanhao?classification=ltx`);
+  const classificationNav = page.getByRole("navigation", { name: "媒体分类" });
+  await classificationNav.getByRole("link", { name: "MKV", exact: true }).waitFor();
+  assert.equal(await classificationNav.getByRole("link", { name: "LTX", exact: true }).getAttribute("aria-current"), "page");
+  assert.equal(await page.title(), "LTX 分类 · FanHao");
+  await page.locator(".work-card[data-work-id='trait-95']").waitFor();
+  assert.equal(await page.locator("#missingLocalToggle").isVisible(), false, "local classifications hide the download visibility toggle");
+  assert.equal(await page.getByRole("button", { name: "未下载", exact: true }).count(), 0);
+  const scopedSearch = page.getByRole("searchbox", { name: "在 LTX 分类中搜索番号、标题或人物" });
+  await scopedSearch.fill("ZZZ-195");
+  await scopedSearch.press("Enter");
+  await page.waitForURL(`${address}/fanhao?classification=ltx&q=ZZZ-195`);
+  assert(requests.some((url) => url.pathname === "/api/search" && url.searchParams.get("q") === "class:ltx ZZZ-195"));
+  assert.equal(await page.locator(".work-card").count(), 1);
+  await scopedSearch.press("Escape");
+  await page.waitForURL(`${address}/fanhao?classification=ltx`);
+  if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "classification-desktop.png"), fullPage: false });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "classification must fit at phone width");
+  assert.equal(await page.locator("#workGrid").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length), 2);
+  if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "classification-mobile.png"), fullPage: false });
+  await classificationNav.getByRole("link", { name: "MKV", exact: true }).click();
+  await page.waitForURL(`${address}/fanhao?classification=mkv`);
+  await page.locator(".work-card[data-work-id='trait-95']").waitFor();
+  await page.goBack();
+  await page.waitForURL(`${address}/fanhao?classification=ltx`);
+  await page.locator(".work-card[data-work-id='trait-95']").waitFor();
+  await page.setViewportSize({ width: 1366, height: 900 });
+
+  await page.goto(`${address}/fanhao?q=remote-fixture`);
+  const remoteMagnet = page.locator('.work-card.missing-local[data-work-id="remote-magnet"]');
+  const remoteNoMagnet = page.locator('.work-card.missing-local[data-work-id="remote-no-magnet"]');
+  await remoteMagnet.waitFor();
+  await remoteNoMagnet.waitFor();
+  const magnetCue = remoteMagnet.locator(".info-chip.magnet");
+  assert.equal(await magnetCue.innerText(), "含磁链");
+  assert.match(await magnetCue.getAttribute("title"), /未验证当前下载可用性/);
+  assert.equal(await remoteNoMagnet.locator(".info-chip.magnet").count(), 0, "a gray card without a magnet has no magnet chip");
+  const [sourcePopup] = await Promise.all([page.waitForEvent("popup"), remoteMagnet.locator(".work-card-main").click()]);
+  await sourcePopup.waitForURL(`${address}/fixture-javdb/source`);
+  await sourcePopup.close();
+
   legacyCollections = true;
   await page.goto(`${address}/fanhao/favorites`); await page.locator(".work-card").first().waitFor();
   assert.match(await page.locator(".browse-traits-note").innerText(), /仅统计已加载的 8 部/);
   assert.equal(await page.locator(".browse-traits").getByRole("button", { name: /美少女电影/ }).count(), 0, "another view must not retain prior facets");
   assert.deepEqual(errors, []);
-  console.log("Browse traits browser checks passed: full-result facets, AND request filters across seven paged views, safe tag text, card actions, magnet evidence, clear, keyboard, 390px layout, studio search/sort/logos and old-API loaded-only scope.");
+  console.log("Browse traits browser checks passed: full-result facets, AND request filters across seven paged views, safe tag text, compact cards and remote magnet source, clear, keyboard, 390px layout, classification navigation and scoped search, studio search/sort/logos and old-API loaded-only scope.");
 } finally { await browser?.close(); await new Promise((resolve) => server.close(resolve)); }

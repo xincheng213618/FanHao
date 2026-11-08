@@ -3,7 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
 import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
-import { setAccountOwner } from "../android-client/www/js/account-owner.js";
+import { captureAccountOwner, rememberAccountPayload, setAccountOwner } from "../android-client/www/js/account-owner.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
 import { formatNumber } from "../android-client/www/js/format.js";
 
@@ -27,6 +27,11 @@ const album = (tag = "current", id = "same-album", count = 3) => ({
   id, title: `Synthetic ${tag}`, imageCount: count,
   images: Array.from({ length: count }, (_, i) => ({ index: i + 1, url: `/synthetic/${tag}-${i + 1}.svg` }))
 });
+const indexedAlbum = () => {
+  const value = album();
+  return { ...value, updatedAt: "2026-10-01", imageOffset: 0, imageLimit: 1, imagesTruncated: true,
+    images: value.images.map(image => ({ ...image, url: `/media/gallery/${value.id}/${image.index}` })) };
+};
 
 function oldInput() {
   let input = source;
@@ -69,9 +74,10 @@ function harness(input = source) {
       return true;
     }
   };
+  const window = { history: { back() {} }, navigator: { onLine: true }, requestAnimationFrame() {}, clearTimeout() {} };
   const context = vm.createContext({
     ...channelAccountBoundary, document, console, URL, URLSearchParams, AbortController, absoluteUrl, formatNumber,
-    window: { history: { back() {} }, requestAnimationFrame() {}, clearTimeout() {} },
+    window,
     readCachedJson: async (base, path) => {
       calls.cache.push({ base, path });
       const value = cacheQueue.length ? cacheQueue.shift() : null;
@@ -86,11 +92,11 @@ function harness(input = source) {
       // Deliberately ignore AbortSignal to exercise late responses as well.
       return await (value?.promise || value);
     },
-    writeCachedJson: async (...args) => { calls.writes.push(args); }
+    writeCachedJson: async (...args) => { calls.writes.push(args); return {}; }
   });
   const exposure = /  return \{\r?\n(?=    deactivate:)/;
   assert(exposure.test(input));
-  const executable = input.replace(exposure, "  return {\n    __createPhotoTile: createPhotoTile,\n")
+  const executable = input.replace(exposure, "  return {\n    __createPhotoTile: createPhotoTile,\n    __rememberPhotoViewerRange: rememberPhotoViewerRange,\n")
     .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
   vm.runInContext(executable, context, { filename: "actual-photo-channel-views.js" });
   const factory = context.createChannelViews({
@@ -99,13 +105,21 @@ function harness(input = source) {
     setActiveBottom() {}, renderCurrentView() {}, getMediaViewer: () => viewer
   });
   return {
-    A, B, calls, viewer, factory, cacheQueue, networkQueue,
+    A, B, calls, viewer, factory, cacheQueue, networkQueue, window,
     switchServer(value = B) { activeUrl = value; },
     switchAccount() { setAccountOwner(activeUrl, "account:synthetic", { force: true }); },
-    open(value = album(), { loaded = 1 } = {}) {
+    verify(value, scope = captureAccountOwner(activeUrl)) {
+      const data = rememberAccountPayload({ album: { ...value, images: value.images.slice(0, 1) } }, scope);
+      factory.__rememberPhotoViewerRange(value, data, activeUrl);
+    },
+    mount(value = album(), { loaded = 1 } = {}) {
       const images = value.images.slice(0, loaded);
       const tile = factory.__createPhotoTile(value, images[0], images, { index: 0 });
       document.body.append(tile);
+      return tile;
+    },
+    open(value, options) {
+      const tile = this.mount(value, options);
       tile.click();
       return tile;
     }
@@ -114,6 +128,86 @@ function harness(input = source) {
 
 const tests = [];
 const test = (name, run, oldFails = false) => tests.push({ name, run, oldFails });
+test("fresh numbered photo prefix opens the full viewer without cache or HTTP", async input => {
+  const h = harness(input), value = indexedAlbum();
+  h.verify(value); h.open(value); await flush();
+  assert.deepEqual(h.viewer.current.items.map(item => item.url), value.images.map(image => h.A + image.url));
+  assert(h.viewer.current.items.every(item => item.title === value.title));
+  assert.equal(h.calls.cache.length, 0); assert.equal(h.calls.fetch.length, 0);
+  const [base, path, payload, options] = h.calls.writes[0];
+  assert.equal(base, h.A);
+  assert.equal(path, `android:photo-viewer-range/${value.id}`);
+  assert.deepEqual(plain(payload), { id: value.id, total: value.imageCount, updatedAt: value.updatedAt });
+  assert.equal(options.fence.account.origin, h.A);
+  h.open(value); await flush();
+  assert.equal(h.calls.writes.length, 1, "reopening the same live detail does not rewrite the descriptor");
+});
+for (const mode of ["cached-only", "offline", "legacy-url", "noncontiguous", "changed-stamp", "large-count", "retired-payload"]) {
+  test(`numbered photo viewer preserves hydration for ${mode}`, async input => {
+    const h = harness(input), value = indexedAlbum();
+    if (mode === "legacy-url") value.images[0].url = "/legacy/first";
+    if (mode === "noncontiguous") value.images[0] = value.images[1];
+    if (mode === "large-count") value.imageCount = 10001;
+    if (mode === "offline") h.window.navigator.onLine = false;
+    const scope = captureAccountOwner(h.A);
+    if (mode === "retired-payload") h.switchAccount();
+    if (mode !== "cached-only") h.verify(value, scope);
+    if (mode === "changed-stamp") value.updatedAt = "2026-10-02";
+    h.networkQueue.push(new Error("Synthetic unavailable"));
+    h.open(value);
+    assert.equal(h.viewer.current.items.length, 1);
+    await flush();
+    assert.equal(h.viewer.current.items.length, 1);
+    assert.equal(h.calls.cache.length, ["legacy-url", "noncontiguous", "large-count"].includes(mode) ? 1 : 2);
+    assert.equal(h.calls.fetch.length, 1);
+  });
+}
+for (const mode of ["descriptor", "full-legacy", "stale-descriptor"]) {
+  test(`numbered photo viewer uses the expected cached source for ${mode}`, async input => {
+    const h = harness(input), value = indexedAlbum();
+    const complete = album("full-cached");
+    const descriptor = { id: value.id, total: value.imageCount, updatedAt: mode === "stale-descriptor" ? "older" : value.updatedAt };
+    h.cacheQueue.push(mode === "full-legacy" ? { payload: { album: complete } } : null, { payload: descriptor });
+    if (mode === "stale-descriptor") h.networkQueue.push(new Error("Synthetic unavailable"));
+    h.open(value); await flush();
+    assert.equal(h.calls.fetch.length, mode === "stale-descriptor" ? 1 : 0);
+    assert.deepEqual(h.viewer.current.items.map(item => item.url),
+      (mode === "full-legacy" ? complete.images : mode === "descriptor" ? value.images : value.images.slice(0, 1))
+        .map(image => h.A + image.url));
+  });
+}
+test("a complete legacy cache renders while the separate descriptor lookup is pending", async input => {
+  const h = harness(input), value = indexedAlbum(), index = deferred(), complete = album("full-cached");
+  h.cacheQueue.push({ payload: { album: complete } }, index);
+  h.open(value); await flush();
+  assert.deepEqual(h.viewer.current.items.map(item => item.url), complete.images.map(image => h.A + image.url));
+  index.resolve(null);
+});
+for (const boundary of ["account", "server"]) {
+  test(`late cached range cannot hydrate after a ${boundary} change`, async input => {
+    const h = harness(input), value = indexedAlbum(), index = deferred();
+    h.cacheQueue.push(null, index);
+    h.open(value); await flush();
+    if (boundary === "account") h.switchAccount();
+    else h.switchServer();
+    index.resolve({ payload: { id: value.id, total: value.imageCount, updatedAt: value.updatedAt } });
+    await flush();
+    assert.equal(h.viewer.current.items.length, 1);
+    assert.equal(h.calls.fetch.length, 0);
+  });
+}
+for (const boundary of ["account", "server"]) {
+  test(`retired ${boundary} tile cannot start a viewer or hydration`, async input => {
+    const h = harness(input), value = indexedAlbum();
+    h.verify(value);
+    const tile = h.mount(value);
+    if (boundary === "account") h.switchAccount();
+    else h.switchServer();
+    tile.click(); await flush();
+    assert.equal(h.viewer.current, null);
+    assert.equal(h.calls.cache.length, 0); assert.equal(h.calls.fetch.length, 0);
+  });
+}
 test("current network hydration preserves source, title, account and cache ownership", async input => {
   const h = harness(input), value = album();
   h.networkQueue.push({ album: value }); h.open(value); await flush();

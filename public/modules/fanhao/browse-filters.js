@@ -14,9 +14,10 @@ export function createBrowseFilterControls({ options, filters, includeMissing, t
   root.className = "browse-filter-controls stat-filter-list";
   root.setAttribute("role", "group");
   root.setAttribute("aria-label", "作品筛选");
-  const selectedScope = WORK_SCOPE_FILTERS.find((value) => filters.includes(value))
-    || (includeMissing ? "all" : "localOnly");
   const labels = new Map(options);
+  const scopes = WORK_SCOPE_FILTERS.filter((value) => labels.has(value));
+  const selectedScope = scopes.find((value) => filters.includes(value))
+    || (includeMissing ? "all" : "localOnly");
   function chip(value, scope = false) {
     const active = scope ? selectedScope === value : filters.includes(value);
     const button = document.createElement("button");
@@ -36,7 +37,7 @@ export function createBrowseFilterControls({ options, filters, includeMissing, t
     group.append(...values.map((value) => chip(value, scope)));
     return group;
   }
-  root.append(row("作品范围", WORK_SCOPE_FILTERS, true));
+  root.append(row("作品范围", scopes, true));
   const advanced = options.map(([value]) => value)
     .filter((value) => !WORK_SCOPE_FILTERS.includes(value) && !COMMON_FILTERS.includes(value));
   root.append(...[...COMMON_FILTERS, ...advanced].map((value) => chip(value)));

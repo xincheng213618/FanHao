@@ -70,6 +70,12 @@ test("v2 upgrade keeps CURRENT layered text and unique IDs, not legacy books con
   assert.equal(summary.book.progressRecovery.previous.chapterId, null); assert.ok(summary.book.catalogRevision);
   const db = await h.open(3); assert.equal(db.version, 3); assert.ok(db.transaction("chapterMetadata").objectStore("chapterMetadata").indexNames.contains("chapterId")); db.close();
   h.forceClose(); await new Promise(resolve => setTimeout(resolve, 0)); const reopened = await h.api.readLocalNovelEntry("local-1"); assert.deepEqual(plain(reopened), plain(full));
+  const selected = reopened.chapters[1];
+  const reader = await h.api.readLocalNovelChapter("local-1", selected.index, { chapterId: selected.id, catalogRevision: reopened.book.catalogRevision, includeCatalog: false });
+  assert.deepEqual(plain(reader.chapter), plain(selected));
+  assert.equal(reader.prev.id, reopened.chapters[0].id);
+  assert.equal(reader.next.id, reopened.chapters[2].id);
+  assert.equal(reader.chapters.length, 0);
 });
 test("malformed v2 body aborts upgrade and preserves every original store", async h => {
   await h.seedV2(); const db = await h.open(2), tx = db.transaction("chapterBodies", "readwrite");

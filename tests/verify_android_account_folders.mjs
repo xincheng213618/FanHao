@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
-import { indexedDB } from "fake-indexeddb";
+import { IDBIndex, indexedDB } from "fake-indexeddb";
 import { createFavoriteFolderFeature } from "../android-client/www/modules/fanhao/features/works/favorite-folders.js";
 import { captureAccountOwner, setAccountOwner } from "../android-client/www/js/account-owner.js";
 import * as cache from "../android-client/www/js/cache.js";
@@ -210,6 +210,65 @@ const defaults = count => folder("default", "默认收藏", count);
   const clear = cache.clearCachedJsonByPrefix(origin, "/api/favorites", { accountScope: captureAccountOwner(origin) });
   setAccountOwner(origin, "account:beta"); await clear;
   assert.equal((await cache.readCachedJson(origin, "/api/favorites")).payload.owner, "beta", "an IndexedDB wait cannot clear the next account");
+}
+{
+  const origin = "http://folder-cache-batch.fixture";
+  const paths = ["/api/works/synthetic", "/api/history?synthetic=1", "/api/music/tracks"];
+  const seed = async (owner) => {
+    setAccountOwner(origin, owner);
+    for (const path of paths) await cache.writeCachedJson(origin, path, { owner, path }, { fence: cache.captureCachedJsonFence(origin) });
+  };
+  await seed("account:alpha");
+  await seed("account:beta");
+  setAccountOwner(origin, "account:alpha");
+  const fence = cache.captureCachedJsonFence(origin);
+  const foreignScope = setAccountOwner("http://folder-cache-other-source.fixture", "account:alpha");
+  await cache.clearCachedJsonByPrefixes(origin, ["/api/works", "/api/history"], { accountScope: foreignScope });
+  assert.equal(cache.isCachedJsonFenceCurrent(fence), true, "a foreign source scope does not invalidate this cache");
+  const currentScope = captureAccountOwner(origin);
+  const clear = cache.clearCachedJsonByPrefixes(origin, [" /api/works ", "/api/works/synthetic", "/api/history", "", "/api/history"],
+    { accountScope: currentScope });
+  assert.equal(cache.isCachedJsonFenceCurrent(fence), false, "a batch fences pending writes at entry");
+  assert.equal(await cache.writeCachedJson(origin, paths[0], { stale: true }, { fence }), null);
+  await clear;
+  assert.equal(await cache.readCachedJson(origin, paths[0]), null);
+  assert.equal(await cache.readCachedJson(origin, paths[1]), null);
+  assert.equal((await cache.readCachedJson(origin, paths[2])).payload.owner, "account:alpha");
+  setAccountOwner(origin, "account:beta");
+  for (const path of paths) assert.equal((await cache.readCachedJson(origin, path)).payload.owner, "account:beta");
+
+  await seed("account:alpha");
+  const getAll = IDBIndex.prototype.getAll;
+  IDBIndex.prototype.getAll = function (query, ...args) {
+    const request = getAll.call(this, query, ...args);
+    if (query === origin && this.name === "baseUrl" && this.objectStore.transaction.mode === "readwrite") {
+      request.addEventListener("success", () => setAccountOwner(origin, "account:beta"), { once: true });
+    }
+    return request;
+  };
+  try {
+    await cache.clearCachedJsonByPrefixes(origin, ["/api/works", "/api/history"], { accountScope: captureAccountOwner(origin) });
+  } finally {
+    IDBIndex.prototype.getAll = getAll;
+  }
+  for (const path of paths) assert.equal((await cache.readCachedJson(origin, path)).payload.owner, "account:beta");
+  setAccountOwner(origin, "account:alpha");
+  for (const path of paths) assert.equal((await cache.readCachedJson(origin, path)).payload.owner, "account:alpha",
+    "an account switch during the batch scan must retire every pending delete");
+}
+{
+  const origin = "http://folder-cache-legacy-guest.fixture", path = "/api/works/legacy";
+  const entry = await cache.writeCachedJson(origin, path, { legacy: true });
+  const request = indexedDB.open("fanhao-android-cache");
+  const db = await new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+  const tx = db.transaction("responses", "readwrite");
+  const { accountOwner, ...legacy } = entry;
+  tx.objectStore("responses").put(legacy);
+  await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error); });
+  db.close();
+  assert.equal((await cache.readCachedJson(origin, path)).payload.legacy, true);
+  await cache.clearCachedJsonByPrefixes(origin, ["/api/history", "/api/works"], { accountScope: captureAccountOwner(origin) });
+  assert.equal(await cache.readCachedJson(origin, path), null, "ownerless legacy entries belong to the guest scope");
 }
 console.log("android-account-folders-state: passed (operation ordering, delete/recreate, object updates, account switch, refresh isolation and scoped cache cleanup)");
 if (process.env.FANHAO_FOLDER_STATE_ONLY === "1") process.exit(0);

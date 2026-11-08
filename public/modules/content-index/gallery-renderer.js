@@ -1,6 +1,7 @@
 import {
   PHOTO_ALBUM_SORT_OPTIONS,
   PHOTO_COLLECTION_SORT_OPTIONS,
+  PHOTO_PEOPLE_SORT_OPTIONS,
   photoCatalogCollections
 } from "./photo-catalog.js?v=20260810-photo-catalog-01";
 
@@ -40,6 +41,15 @@ const GALLERY_READER_PRELOAD_BELOW = 1400;
 const GALLERY_READER_ROOT_MARGIN = "900px 0px 1400px 0px";
 const GALLERY_PHOTO_COVER_CONCURRENCY = 4;
 const GALLERY_PHOTO_COUNT_BATCH_SIZE = 24;
+const PHOTO_CONTROL_ICONS = {
+  search: "M21 21l-4.4-4.4M18 10.5a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z",
+  camera: "M4 7h3l2-3h6l2 3h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Zm12 6.5a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+  updated: "M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+  count: "M4 9h16M4 15h16M10 3 8 21M16 3l-2 18",
+  size: "M4 13h16l-2-7H6Zm0 0v5h16v-5m-3 2.5h1",
+  title: "m3 17 4-10 4 10m-6.5-3h5m4-6h6l-6 8h6",
+  relevance: "m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z"
+};
 const GALLERY_MORE_AUTO_LOAD_DISTANCE = 1200;
 const GALLERY_MORE_SCROLL_INTENT_MS = 1200;
 const GALLERY_MORE_GESTURE_IDLE_MS = 320;
@@ -54,14 +64,18 @@ export function createGalleryRenderer(deps) {
     formatDateTime,
     formatNumber,
     getGalleryPage,
+    goBackToPhotoList,
     includesText,
     openAdminScript,
+    rememberPhotoListPosition,
     resetProgressiveCoverLoading,
     state,
     writeStoredFlag
   } = deps;
 
   let galleryCoverObserver = null;
+  let collectionPeopleScope = "";
+  let pendingPhotoSortFocus = null;
   const pendingPhotoCovers = new Set();
   const activePhotoCovers = new Map();
   const pendingPhotoCardCounts = new Map();
@@ -75,7 +89,7 @@ export function createGalleryRenderer(deps) {
   let gallerySummaryGeneration = 0;
   let galleryReaderObserver = null;
   let galleryReaderScrollCleanup = null;
-  let galleryReaderImageQueue = [];
+  const galleryReaderImageQueue = new Map();
   let activeGalleryReaderImageLoads = 0;
   let galleryReaderImageGeneration = 0;
   let galleryReaderStartupFigure = null;
@@ -87,6 +101,7 @@ export function createGalleryRenderer(deps) {
   let galleryPagerCleanup = null;
   let galleryScrollRestoreGeneration = 0;
   let galleryListReturnRestore = null;
+  let photoHistoryScrollY = null;
   const gallerySelectValues = new WeakMap();
   const photoCategoryStrips = new WeakMap();
   let photoCategoryResizeObserver = null;
@@ -200,29 +215,6 @@ function createGalleryImageModuleSwitch() {
   return row;
 }
 
-function galleryPhotoViewButton(view, label) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `gallery-submode-button${state.gallery.photoView === view ? " active" : ""}`;
-  button.textContent = label;
-  button.setAttribute("aria-pressed", String(state.gallery.photoView === view));
-  button.addEventListener("click", () => {
-    state.gallery.photoView = view;
-    state.gallery.photoCollection = null;
-    if (view === "albums" && state.gallery.sort === "count") state.gallery.sort = "updated";
-    if (view === "collections" && state.gallery.sort === "updated") state.gallery.sort = "count";
-    state.gallery.person = "all";
-    state.gallery.seriesKey = "";
-    state.gallery.subCategory = "all";
-    state.gallery.photoDate = "all";
-    state.gallery.visibleLimit = 80;
-    resetGalleryReader();
-    renderGalleryView();
-    syncGalleryRoute();
-  });
-  return button;
-}
-
 function createGalleryControlGroup(label, control, className = "") {
   const group = document.createElement("div");
   group.className = `gallery-control-group${className ? ` ${className}` : ""}`;
@@ -267,7 +259,7 @@ function photoCategoryDisplayName(value) {
 
 function currentPhotoCategoryStrip(record) {
   const strip = record.strip, controls = strip.closest(".gallery-controls");
-  return strip.isConnected && state.activeView === "gallery" && state.gallery.mode === "photo" && !state.gallery.photoCollection
+  return strip.isConnected && state.activeView === "gallery" && state.gallery.mode === "photo" && !state.gallery.photoCollection && !state.gallery.query
     && !state.gallery.album && !state.gallery.comic && !state.gallery.media
     && controls === els.workGrid.querySelector(".gallery-shell > .gallery-controls")
     && controls?.querySelector(".gallery-photo-category-strip") === strip;
@@ -287,16 +279,18 @@ function createPhotoCategoryButton(record, value, withCount) {
   }
   button.addEventListener("click", () => {
     if (!entry.alive || !button.isConnected || !record.strip.contains(button) || !currentPhotoCategoryStrip(record)) return;
-    if ((state.gallery.category || "all") === entry.value && !state.gallery.photoCollection) return;
+    if ((state.gallery.category || "all") === entry.value && !state.gallery.photoCollection && state.gallery.photoView !== "albums") return;
     openPhotoCategory(entry.value);
   });
   return entry;
 }
 
 function openPhotoCategory(value) {
-  state.gallery.photoView = "collections";
+  collectionPeopleScope = "";
+  if (state.gallery.photoView !== "people" || ["[COS]", "catalog:portraits"].includes(value)) state.gallery.photoView = "collections";
   state.gallery.photoCollection = null;
   state.gallery.sort = "count";
+  state.gallery.sortDirection = "";
   state.gallery.category = value;
   state.gallery.subCategory = "all";
   state.gallery.person = "all";
@@ -534,20 +528,22 @@ function observePhotoCategoryStrip(strip) {
   photoCategoryResizeObserver.observe(strip);
 }
 
-function galleryBrowseDescription() {
-  return state.gallery.mode === "photo"
-    ? state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期` : ""
-    : "电影、电视剧与动漫";
+function galleryPhotoBrowseCount() {
+  return state.gallery.data ? `${formatNumber(state.gallery.data.totals?.photoSets || 0)} 期` : "";
 }
 
 function createGalleryBrowseTitle() {
+  const isPhoto = state.gallery.mode === "photo";
   const wrapper = document.createElement("div");
   wrapper.className = "gallery-browse-header gallery-browse-inline-title";
   const title = document.createElement("h1");
-  title.textContent = "套图";
-  const count = document.createElement("p");
-  count.textContent = galleryBrowseDescription();
-  wrapper.append(title, count);
+  title.textContent = isPhoto ? state.gallery.query ? "套图搜索" : "套图" : state.gallery.query ? "影视搜索" : "影视资料库";
+  wrapper.append(title);
+  if (isPhoto) {
+    const count = document.createElement("p");
+    count.textContent = galleryPhotoBrowseCount();
+    wrapper.append(count);
+  }
   return wrapper;
 }
 
@@ -566,33 +562,6 @@ function createGalleryBrowseNav() {
   return nav;
 }
 
-function createGalleryBrowseHeader() {
-  const isPhoto = state.gallery.mode === "photo";
-  const header = document.createElement("header");
-  header.className = "gallery-browse-header";
-  const copy = document.createElement("div");
-  const eyebrow = document.createElement("span");
-  eyebrow.className = "gallery-browse-eyebrow";
-  eyebrow.textContent = "我的资料库";
-  const title = document.createElement("h1");
-  title.textContent = isPhoto ? "套图图库" : "影视资料库";
-  const description = document.createElement("p");
-  description.textContent = galleryBrowseDescription();
-  copy.append(eyebrow, title, description);
-  const nav = document.createElement("nav");
-  nav.className = "gallery-browse-nav";
-  nav.setAttribute("aria-label", "资料库导航");
-  for (const [label, href, active] of [["套图", "/photo/collections", isPhoto], ["影视", "/media", !isPhoto], ["韩漫", "/manga", false]]) {
-    const link = document.createElement("a");
-    link.textContent = label;
-    link.href = href;
-    if (active) link.setAttribute("aria-current", "page");
-    nav.append(link);
-  }
-  header.append(copy, nav);
-  return header;
-}
-
 function createGalleryResultsHeader(titleText, detailText) {
   const header = document.createElement("div");
   header.className = "gallery-results-header";
@@ -605,6 +574,80 @@ function createGalleryResultsHeader(titleText, detailText) {
   copy.append(title, detail);
   header.append(copy);
   return header;
+}
+
+function photoControlIcon(icon) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", PHOTO_CONTROL_ICONS[icon]);
+  svg.append(path);
+  return svg;
+}
+
+function defaultPhotoSortDirection(sort) {
+  return sort === "title" ? "asc" : "desc";
+}
+
+function createPhotoSortControls(options, fallback, list) {
+  const group = document.createElement("div");
+  group.className = "gallery-photo-sort";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "排序");
+  const relevance = list?.sort === "relevance";
+  const sort = relevance ? "relevance" : options.some(([key]) => key === state.gallery.sort) ? state.gallery.sort : fallback;
+  const direction = list?.direction || state.gallery.sortDirection || defaultPhotoSortDirection(sort);
+  const listKey = getGalleryPage().imageLibraryListKey();
+  for (const [key, label] of relevance ? [["relevance", "相关性排序"]] : options) {
+    const active = key === sort;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "gallery-photo-sort-button";
+    button.dataset.photoSort = key;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-pressed", String(active));
+    button.title = label;
+    button.disabled = relevance;
+    button.append(photoControlIcon(key));
+    if (active && !relevance) {
+      const arrow = document.createElement("span");
+      const directionLabel = direction === "asc" ? "升序" : "降序";
+      arrow.className = "gallery-photo-sort-direction";
+      arrow.textContent = direction === "asc" ? "↑" : "↓";
+      arrow.setAttribute("aria-hidden", "true");
+      button.setAttribute("aria-description", `当前${directionLabel}，再次点击切换`);
+      button.title = `${label} · ${directionLabel}`;
+      button.append(arrow);
+    }
+    button.addEventListener("click", event => {
+      if (!button.isConnected || listKey !== getGalleryPage().imageLibraryListKey()) return;
+      state.gallery.sort = key;
+      state.gallery.sortDirection = active ? direction === "asc" ? "desc" : "asc" : "";
+      state.gallery.visibleLimit = 80;
+      pendingPhotoSortFocus = event.detail === 0 ? { key, listKey: getGalleryPage().imageLibraryListKey() } : null;
+      renderGalleryResults({ preserveScroll: true });
+      syncGalleryRoute();
+    });
+    group.append(button);
+    if (pendingPhotoSortFocus?.key === key && pendingPhotoSortFocus.listKey === listKey) {
+      const pending = pendingPhotoSortFocus;
+      queueMicrotask(() => {
+        if (pendingPhotoSortFocus !== pending || !button.isConnected) return;
+        pendingPhotoSortFocus = null;
+        if (document.activeElement === document.body) button.focus({ preventScroll: true });
+      });
+    }
+  }
+  return group;
 }
 
 function gallerySelectOption(label, value, count) {
@@ -763,13 +806,8 @@ function renderGalleryControls(options = {}) {
   controls.className = "gallery-controls";
   controls.dataset.galleryMode = state.gallery.mode;
   const imageModule = ["photo", "manga"].includes(state.gallery.mode);
+  const searchActive = Boolean(state.gallery.query);
   if (imageModule) controls.classList.add("gallery-image-controls");
-
-  const photoViews = document.createElement("div");
-  photoViews.className = "gallery-submodes";
-  photoViews.setAttribute("role", "group");
-  photoViews.setAttribute("aria-label", "套图浏览方式");
-  photoViews.append(galleryPhotoViewButton("collections", "按合集"), galleryPhotoViewButton("albums", "全部套图"));
 
   const search = document.createElement("input");
   search.type = "search";
@@ -808,7 +846,7 @@ function renderGalleryControls(options = {}) {
   // Only construct selects that this mode mounts. Large facet sets otherwise
   // create hundreds of detached options on every page/summary refresh.
   let category = null;
-  if (mediaModule) {
+  if (mediaModule && !searchActive) {
     const categoryOptions = [gallerySelectOption(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部地区" : "全部片库分区", "all")];
     const categoryFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
     for (const item of categoryFacets) {
@@ -839,7 +877,7 @@ function renderGalleryControls(options = {}) {
   }
 
   let people = null;
-  if (["western", "tv"].includes(state.gallery.mode)) {
+  if (["western", "tv"].includes(state.gallery.mode) && !searchActive) {
     const peopleOptions = [gallerySelectOption(state.gallery.mode === "tv" ? "全部作品" : "全部人物", "all")];
     const peopleFacets = currentGalleryPeopleFacets().slice(0, state.gallery.mode === "tv" ? 1000 : 300);
     for (const item of peopleFacets) {
@@ -863,22 +901,12 @@ function renderGalleryControls(options = {}) {
     });
   }
 
-  const photoSearchActive = state.gallery.mode === "photo" && Boolean(String(state.gallery.query || "").trim());
-  const directCategory = state.gallery.mode === "photo" && currentImageLibraryList()?.categoryDirect === true;
-  const sortOptions = photoSearchActive
-    ? [["updated", "相关性排序"]]
-    : state.gallery.mode === "photo"
-      ? state.gallery.photoView === "collections" && !state.gallery.photoCollection && !directCategory
-        ? PHOTO_COLLECTION_SORT_OPTIONS
-        : PHOTO_ALBUM_SORT_OPTIONS
-      : MEDIA_SORT_OPTIONS;
-  let sortValue = directCategory && state.gallery.sort === "count" ? "updated" : state.gallery.sort;
-  if (!sortOptions.some(([value]) => value === sortValue)) sortValue = state.gallery.sort = "updated";
   let sort = null;
-  if (["photo", "movie", "media"].includes(state.gallery.mode)) {
+  if (state.gallery.mode !== "photo" && !MEDIA_SORT_OPTIONS.some(([value]) => value === state.gallery.sort)) state.gallery.sort = "updated";
+  if (["movie", "media"].includes(state.gallery.mode) && !searchActive) {
     sort = renderGallerySelectControl(controls, options, "sort", {
-      className: "gallery-select gallery-sort-select", label: "排序", disabled: photoSearchActive, value: sortValue || "updated",
-      options: sortOptions.map(([value, label]) => gallerySelectOption(label, value))
+      className: "gallery-select gallery-sort-select", label: "排序", value: state.gallery.sort,
+      options: MEDIA_SORT_OPTIONS.map(([value, label]) => gallerySelectOption(label, value))
     }, select => {
       state.gallery.sort = select.value || "updated";
       state.gallery.visibleLimit = 80;
@@ -888,15 +916,19 @@ function renderGalleryControls(options = {}) {
     });
   }
 
-  const refresh = document.createElement("button");
-  refresh.type = "button";
+  const photoMaintenance = state.gallery.mode === "photo";
+  const refresh = document.createElement(photoMaintenance ? "a" : "button");
   refresh.className = "text-button";
-  const rescanScope = galleryRescanScopeForMode();
   refresh.textContent = imageModule ? "图库维护" : "维护";
-  if (!imageModule) refresh.title = `后台刷新${galleryModeLabel(state.gallery.mode)}索引`;
-  if (imageModule) refresh.title = "打开图库索引与刷新工具";
-  refresh.disabled = state.gallery.loading;
-  refresh.addEventListener("click", () => openAdminScript?.("image-library-rescan", { defaults: { scope: rescanScope } }));
+  if (photoMaintenance) {
+    refresh.href = "/photo/maintenance";
+    refresh.title = "管理套图索引与封面预热";
+  } else {
+    refresh.type = "button";
+    refresh.title = `后台刷新${galleryModeLabel(state.gallery.mode)}索引`;
+    refresh.disabled = state.gallery.loading;
+    refresh.addEventListener("click", () => openAdminScript?.("image-library-rescan", { defaults: { scope: galleryRescanScopeForMode() } }));
+  }
 
   const status = document.createElement("span");
   status.className = "gallery-status";
@@ -922,30 +954,43 @@ function renderGalleryControls(options = {}) {
       analysis.textContent = "分析";
       analysis.title = "期号覆盖、缺期和重复";
       maintenance.prepend(analysis);
-      search.placeholder = "搜索标题、人物、合集";
+      search.placeholder = "搜索标题 / 人物 / 合集";
       const searchBox = document.createElement("div");
-      searchBox.className = "gallery-media-search-box";
+      searchBox.className = "gallery-media-search-box gallery-photo-search-box";
+      const icon = document.createElement("span");
+      icon.className = "gallery-photo-search-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.append(photoControlIcon("search"));
       const submit = document.createElement("button");
       submit.type = "button";
       submit.className = "gallery-media-search-submit";
       submit.textContent = "搜索";
       submit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
-      searchBox.append(search, submit);
-      // One toolbar row: title, search, view, sort, actions and module nav.
+      const shortcut = document.createElement("button");
+      shortcut.type = "button";
+      shortcut.className = "gallery-photo-search-shortcut";
+      shortcut.setAttribute("aria-label", "聚焦搜索");
+      shortcut.title = "按 / 聚焦搜索";
+      const key = document.createElement("kbd");
+      key.textContent = "/";
+      shortcut.append(key);
+      shortcut.addEventListener("click", restoreGallerySearchFocus);
+      searchBox.append(icon, search, shortcut, submit);
+      const searchField = document.createElement("div");
+      searchField.className = "gallery-search-field gallery-photo-search-field";
+      searchField.append(searchBox);
       searchRow.append(
         createGalleryBrowseTitle(),
-        createGalleryFilterField("搜索", searchBox, "gallery-search-field gallery-photo-search-field"),
-        createGalleryControlGroup("浏览", photoViews, "gallery-photo-view-switch"),
-        createGalleryControlGroup("排序", sort, "gallery-photo-sort"),
-        maintenance,
-        createGalleryBrowseNav()
+        searchField
       );
+      if (!searchActive) searchRow.append(maintenance);
+      searchRow.append(createGalleryBrowseNav());
 
       hierarchy.classList.add("gallery-photo-secondary-row");
       // Inside a collection, its breadcrumb owns navigation. Its local facets
       // must not be presented as the categories or totals of the whole library.
       if (state.gallery.photoCollection) hierarchy.classList.add("gallery-photo-collection-controls");
-      if (!state.gallery.photoCollection) hierarchy.append(createPhotoCategoryStrip(options));
+      if (!state.gallery.photoCollection && !searchActive) hierarchy.append(createPhotoCategoryStrip(options));
     } else {
       searchRow.append(createGalleryFilterField("搜索", search, "gallery-search-field"));
       hierarchy.append(createGalleryControlGroup("内容", createGalleryImageModuleSwitch()), maintenance);
@@ -955,9 +1000,14 @@ function renderGalleryControls(options = {}) {
   }
 
   controls.classList.add("gallery-media-controls");
+  const compactMediaBrowse = (["media", "movie"].includes(state.gallery.mode) || searchActive) && !state.gallery.media;
   const searchRow = document.createElement("div");
   searchRow.className = "gallery-media-search-row";
   searchRow.dataset.galleryControlRow = "search";
+  if (compactMediaBrowse) {
+    searchRow.classList.add("gallery-media-primary-row");
+    searchRow.append(createGalleryBrowseTitle());
+  }
   const searchBox = document.createElement("div");
   searchBox.className = "gallery-media-search-box";
   const searchSubmit = document.createElement("button");
@@ -967,11 +1017,18 @@ function renderGalleryControls(options = {}) {
   searchSubmit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
   searchBox.append(search, searchSubmit);
   searchRow.append(createGalleryFilterField("搜索影视", searchBox, "gallery-media-search-field"));
+  if (searchActive) {
+    searchRow.append(createGallerySearchBackButton(), createGalleryBrowseNav());
+    controls.append(searchRow);
+    return controls;
+  }
   if (state.gallery.mode === "media") searchRow.append(createGalleryControlGroup("内容类型", createMovieCategoryStrip()));
 
-  const filterRow = document.createElement("div");
-  filterRow.className = "gallery-media-filter-row";
-  filterRow.dataset.galleryControlRow = "facets";
+  const filterRow = compactMediaBrowse ? searchRow : document.createElement("div");
+  if (!compactMediaBrowse) {
+    filterRow.className = "gallery-media-filter-row";
+    filterRow.dataset.galleryControlRow = "facets";
+  }
   if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
     filterRow.append(createGalleryControlGroup(state.gallery.mode === "tv" ? "地区" : "片库分区", category));
   }
@@ -999,7 +1056,9 @@ function renderGalleryControls(options = {}) {
   maintenance.className = "gallery-maintenance gallery-media-maintenance";
   maintenance.append(refresh, status);
   filterRow.append(maintenance);
-  controls.append(searchRow, filterRow);
+  controls.append(searchRow);
+  if (compactMediaBrowse) searchRow.append(createGalleryBrowseNav());
+  else controls.append(filterRow);
   return controls;
 }
 
@@ -1009,24 +1068,47 @@ function submitGallerySearch(value, options = {}) {
     if (options.restoreFocus) restoreGallerySearchFocus();
     return;
   }
-  const startingPhotoSearch = state.gallery.mode === "photo" && nextQuery && !String(state.gallery.query || "").trim();
+  const wasSearching = Boolean(state.gallery.query);
+  const enteringSearch = !wasSearching && Boolean(nextQuery);
+  const searchPageChanged = wasSearching !== Boolean(nextQuery);
   state.gallery.query = nextQuery;
-  if (startingPhotoSearch) {
-    state.gallery.photoView = "albums";
+  if (state.gallery.mode === "photo") {
+    collectionPeopleScope = "";
+    state.gallery.photoView = nextQuery ? "albums" : "collections";
     state.gallery.photoCollection = null;
-    state.gallery.sort = "updated";
-    state.gallery.category = "all";
-    state.gallery.subCategory = "all";
-    state.gallery.person = "all";
+    state.gallery.sort = nextQuery ? "updated" : "count";
     state.gallery.photoDate = "all";
   }
+  state.gallery.sortDirection = "";
+  state.gallery.category = "all";
+  state.gallery.subCategory = "all";
+  state.gallery.person = "all";
+  state.gallery.seriesKey = "";
+  state.gallery.mediaKind = "all";
   const search = els.workGrid?.querySelector(".gallery-search");
   if (search && search.value !== nextQuery) search.value = nextQuery;
   state.gallery.visibleLimit = 80;
   resetGalleryReader();
-  renderGalleryResults();
-  syncGalleryRoute("replace");
+  if (searchPageChanged) renderGalleryView();
+  else renderGalleryResults();
+  syncGalleryRoute(enteringSearch ? "push" : "replace");
   if (options.restoreFocus) restoreGallerySearchFocus();
+}
+
+function openGalleryMediaGroup({ kind, category, person, seriesKey }) {
+  if (state.gallery.query) {
+    state.gallery.query = "";
+    const search = els.workGrid?.querySelector(".gallery-search");
+    if (search) search.value = "";
+  }
+  state.gallery.mediaKind = kind || state.gallery.mediaKind;
+  state.gallery.category = category || state.gallery.category;
+  state.gallery.person = person || "all";
+  state.gallery.seriesKey = seriesKey || "";
+  state.gallery.visibleLimit = 80;
+  renderGalleryView();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  syncGalleryRoute();
 }
 
 function restoreGallerySearchFocus() {
@@ -1054,7 +1136,7 @@ function resetGalleryRenderedState() {
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
   galleryReaderImageGeneration += 1;
-  galleryReaderImageQueue = [];
+  galleryReaderImageQueue.clear();
   activeGalleryReaderImageLoads = 0;
   galleryReaderStartupFigure = null;
   galleryReaderRegistration = null;
@@ -1118,6 +1200,51 @@ function captureGalleryScrollPosition() {
   };
 }
 
+function capturePhotoListDeparture(event) {
+  const card = event.currentTarget;
+  if (!rememberPhotoListPosition) return;
+  const list = currentImageLibraryList();
+  if (!list) return;
+  rememberPhotoListPosition({
+    ...captureGalleryScrollPosition(), key: list.key, limit: Math.max(list.items.length, Number(list.rawLoaded || 0)),
+    card: card.dataset.photoListCard, cardTop: card.getBoundingClientRect().top,
+    restoreFocus: event.detail === 0 && document.activeElement === card
+  });
+}
+
+function restorePhotoHistoryPosition(position, controller, focusCard = false) {
+  if (position.key !== getGalleryPage().imageLibraryListKey?.()) return;
+  const { signal } = controller;
+  const abort = () => controller.abort();
+  let frame = 0;
+  const restore = () => {
+    frame = 0;
+    if (position.key !== getGalleryPage().imageLibraryListKey?.() || state.gallery.album) { abort(); return; }
+    const list = currentImageLibraryList();
+    if (!list) return;
+    const card = els.workGrid.querySelector(`[data-photo-list-card="${CSS.escape(position.card)}"]`);
+    if (!card && list.hasMore && Number(list.rawLoaded || list.items.length) < position.limit) return;
+    // The mounted card is authoritative if the grid reflowed while away.
+    const top = card ? window.scrollY + card.getBoundingClientRect().top - position.cardTop : position.top;
+    galleryScrollRestoreGeneration += 1;
+    window.scrollTo({ top, left: position.left, behavior: "instant" });
+    photoHistoryScrollY = window.scrollY;
+    if (focusCard && position.restoreFocus) card?.focus({ preventScroll: true });
+    abort();
+  };
+  const schedule = () => { if (!frame) frame = window.requestAnimationFrame(restore); };
+  const observer = new MutationObserver(schedule);
+  observer.observe(els.workGrid, { childList: true, subtree: true });
+  signal.addEventListener("abort", () => {
+    observer.disconnect();
+    window.cancelAnimationFrame(frame);
+  }, { once: true });
+  for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+    document.addEventListener(type, abort, { capture: true, passive: true, signal });
+  }
+  schedule();
+}
+
 function restoreGalleryScrollPosition(anchor) {
   if (!anchor) return;
   const generation = ++galleryScrollRestoreGeneration;
@@ -1146,6 +1273,7 @@ function renderGalleryResults(options = {}) {
   }
   content.innerHTML = "";
   renderGalleryContent(content);
+  observePhotoCategoryStrip(els.workGrid.querySelector(".gallery-photo-category-strip"));
   restoreGalleryScrollPosition(scrollAnchor);
 }
 
@@ -1342,11 +1470,11 @@ function movieListPeopleLine(item) {
 
 function movieListRatingLine(item) {
   const metadata = screenMetadata(item);
-  const rating = Number(metadata.rating || 0);
+  const rating = Number(metadata.rating || item.rating || 0);
   if (Number.isFinite(rating) && rating > 0) {
     return {
       score: rating.toFixed(1),
-      count: metadata.ratingCount ? `${formatNumber(metadata.ratingCount)} 人评价` : ""
+      count: metadata.ratingCount || item.ratingCount
     };
   }
   return null;
@@ -1768,15 +1896,7 @@ function createTvSeriesCard(group) {
       ].filter(Boolean).join(" · "),
       badges: group.tvSeries?.rating ? [`豆瓣 ${Number(group.tvSeries.rating).toFixed(1)}`] : [],
       placeholder: "待补海报",
-      onOpen: () => {
-        state.gallery.category = group.category || state.gallery.category;
-        state.gallery.person = group.title || "all";
-        state.gallery.seriesKey = group.value || "";
-        state.gallery.visibleLimit = 80;
-        renderGalleryView();
-        window.scrollTo({ top: 0, behavior: "smooth" });
-        syncGalleryRoute();
-      }
+      onOpen: () => openGalleryMediaGroup({ category: group.category, person: group.title, seriesKey: group.value })
     }
   );
   card.classList.add("gallery-tv-series-card");
@@ -1890,13 +2010,7 @@ function createWesternPersonCard(group) {
       extra: [categories, group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")].filter(Boolean).join(" · "),
       badges: group.playableCount && group.playableCount !== group.count ? [`可播 ${formatNumber(group.playableCount)}`] : [],
       placeholder: "人物",
-      onOpen: () => {
-        state.gallery.person = group.personName;
-        state.gallery.visibleLimit = 80;
-        renderGalleryView();
-        window.scrollTo({ top: 0, behavior: "smooth" });
-        syncGalleryRoute();
-      }
+      onOpen: () => openGalleryMediaGroup({ person: group.personName })
     }
   );
   card.classList.add("gallery-western-person-card");
@@ -2046,8 +2160,8 @@ function registerGalleryList(grid, list, createItem, options = {}) {
 }
 
 function refreshGalleryControls() {
-  const description = els.workGrid.querySelector(".gallery-browse-header p");
-  if (description) description.textContent = galleryBrowseDescription();
+  const photoCount = els.workGrid.querySelector(".gallery-browse-header p");
+  if (photoCount) photoCount.textContent = galleryPhotoBrowseCount();
   const controls = els.workGrid.querySelector(".gallery-shell > .gallery-controls");
   if (!controls) return;
   if (controls.dataset.galleryMode !== state.gallery.mode) {
@@ -2064,7 +2178,7 @@ function refreshGalleryControls() {
   const newField = replacement.querySelector(".gallery-search")?.closest(".gallery-search-field, .gallery-media-search-field");
   const rows = [...controls.children], nextRows = [...replacement.children];
   const plans = [], reused = new Set();
-  let compatible = Boolean(oldField && newField && rows.length === 2 && nextRows.length === 2);
+  let compatible = Boolean(oldField && newField && rows.length === nextRows.length);
   for (const [index, next] of nextRows.entries()) {
     const row = rows[index], keep = new Map();
     if (!row || row.dataset.galleryControlRow !== next.dataset.galleryControlRow) { compatible = false; break; }
@@ -2100,7 +2214,7 @@ function refreshGalleryControls() {
   for (const { row, next, keep, protectedChildren } of plans) {
     if (row.className !== next.className) row.className = next.className;
     // Only unprotected siblings are replaced. Search fields, native selects,
-    // their labels/groups and both live rows never pass through the blueprint.
+    // their labels/groups and the live rows never pass through the blueprint.
     for (const child of [...row.children]) if (!protectedChildren.has(child)) child.remove();
     let before = row.firstChild;
     for (const child of [...next.children]) {
@@ -2177,19 +2291,21 @@ function refreshGalleryList(options = {}) {
   if (state.activeView !== "gallery" || state.gallery.album || state.gallery.comic || state.gallery.media) return false;
   if (!options.readerActive && refreshGallerySummaryContent(options)) return true;
   const registration = galleryListRegistration, list = currentImageLibraryList();
+  const registered = registration?.grid.isConnected && list && registration.key === list.key;
   if (!options.readerActive && state.gallery.mode === "photo" && (state.gallery.photoCollection || list?.categoryDirect)
     && els.workGrid.querySelector(".gallery-collection-page")) {
-    if (options.listChanged || options.loading === false && !list) {
+    const needsCollectionRender = options.listChanged && (!registered || !registration.options.canReuse?.(list));
+    if (needsCollectionRender || options.loading === false && !list) {
       renderGalleryResults({ preserveScroll: true });
       refreshGalleryControls();
       return true;
     }
-    if (options.summaryChanged) {
+    if (options.summaryChanged && !options.listChanged) {
       refreshGalleryControls();
       return true;
     }
   }
-  if (!registration?.grid.isConnected || !list || registration.key !== list.key) return false;
+  if (!registered) return false;
   if (options.loading !== undefined) { updateGalleryListMore(); return true; }
   const visible = registration.options.visible ? registration.options.visible(list) : list.items || [];
   const keys = visible.map(galleryListItemKey);
@@ -2237,7 +2353,9 @@ function setupGalleryMoreAutoload(button) {
     galleryMoreScrollCleanup = null;
   }
 
-  let scheduled = false;
+  const photoList = state.gallery.mode === "photo" && !state.gallery.album;
+  let frame = 0;
+  let dragCheckTimer = 0;
   let userScrollIntentUntil = 0;
   let lastScrollY = window.scrollY;
   let touchScrolling = false;
@@ -2252,39 +2370,44 @@ function setupGalleryMoreAutoload(button) {
 
   const run = () => {
     if (!button.isConnected || button.disabled || button.dataset.autoloading === "1") return;
-    galleryMoreGestureConsumed = true;
-    scheduleGestureRelease();
+    if (!photoList) {
+      galleryMoreGestureConsumed = true;
+      scheduleGestureRelease();
+    }
     button.dataset.autoloading = "1";
     button.click();
   };
   const check = () => {
-    scheduled = false;
+    frame = 0;
     if (!button.isConnected) {
       cleanup();
       if (galleryMoreScrollCleanup === cleanup) galleryMoreScrollCleanup = null;
       return;
     }
-    if (Date.now() > userScrollIntentUntil) return;
-    if (touchScrolling) return;
+    if (!photoList && (touchScrolling || Date.now() > userScrollIntentUntil)) return;
+    if (photoList && state.gallery.listError && state.gallery.listErrorKey === getGalleryPage().imageLibraryListKey?.()) return;
     const rect = button.getBoundingClientRect();
     if (rect.top > window.innerHeight + GALLERY_MORE_AUTO_LOAD_DISTANCE || rect.bottom < -GALLERY_MORE_AUTO_LOAD_DISTANCE) return;
     userScrollIntentUntil = 0;
     run();
   };
   const scheduleCheck = () => {
-    if (scheduled) return;
-    scheduled = true;
-    window.requestAnimationFrame(check);
+    if (!frame) frame = window.requestAnimationFrame(check);
   };
   const markUserScrollIntent = (event) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
-    if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
+    if (event.type === "keydown") {
+      if (!["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
+      if (event.target?.closest?.("input, textarea, select, [contenteditable]") || event.key === " " && event.target?.closest?.("button, a")) return;
+    }
     if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
-    if (galleryMoreGestureConsumed) {
+    if (!photoList && galleryMoreGestureConsumed) {
       scheduleGestureRelease();
       return;
     }
     userScrollIntentUntil = Date.now() + GALLERY_MORE_SCROLL_INTENT_MS;
+    if (photoList && ["wheel", "keydown"].includes(event.type)) scheduleCheck();
   };
   const handleTouchStart = () => {
     touchScrolling = true;
@@ -2297,8 +2420,20 @@ function setupGalleryMoreAutoload(button) {
     const nextScrollY = window.scrollY;
     const movedDown = nextScrollY > lastScrollY + 1;
     lastScrollY = nextScrollY;
-    if (!movedDown || Date.now() > userScrollIntentUntil) return;
-    scheduleCheck();
+    if (photoList && photoHistoryScrollY !== null) {
+      const restoring = photoHistoryScrollY === nextScrollY;
+      photoHistoryScrollY = null;
+      if (restoring) return;
+    }
+    if (!movedDown) return;
+    if (Date.now() <= userScrollIntentUntil) scheduleCheck();
+    else if (photoList && !dragCheckTimer) {
+      // A native scrollbar drag can deliver only movement, without a wheel event.
+      dragCheckTimer = window.setTimeout(() => {
+        dragCheckTimer = 0;
+        scheduleCheck();
+      }, 120);
+    }
   };
 
   window.addEventListener("wheel", markUserScrollIntent, { passive: true });
@@ -2310,6 +2445,8 @@ function setupGalleryMoreAutoload(button) {
   window.addEventListener("keydown", markUserScrollIntent);
   window.addEventListener("scroll", handleScroll, { passive: true });
   const cleanup = () => {
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(dragCheckTimer);
     window.removeEventListener("wheel", markUserScrollIntent);
     window.removeEventListener("touchstart", handleTouchStart);
     window.removeEventListener("touchmove", markUserScrollIntent);
@@ -2320,6 +2457,19 @@ function setupGalleryMoreAutoload(button) {
     window.removeEventListener("scroll", handleScroll);
   };
   galleryMoreScrollCleanup = cleanup;
+}
+
+function firstGalleryReaderFigureAtLine(figures, line, includeBoundary = true) {
+  // Reader figures occupy consecutive rows. Live geometry accounts for image
+  // loads, width changes and appends without retaining old measurements.
+  let start = 0, end = figures.length;
+  while (start < end) {
+    const middle = Math.floor((start + end) / 2);
+    const bottom = figures[middle].getBoundingClientRect().bottom;
+    if (bottom < line || (!includeBoundary && bottom === line)) start = middle + 1;
+    else end = middle;
+  }
+  return figures[start] || null;
 }
 
 function activateGalleryReaderImages(root) {
@@ -2339,15 +2489,7 @@ function activateGalleryReaderImages(root) {
   const reportProgress = () => {
     progressTicking = false;
     const readingLine = Math.max(1, window.innerHeight * 0.46);
-    // Reader figures occupy consecutive rows. Read live geometry so image
-    // loads, width changes and appended pages need no retained measurements.
-    let start = 0, end = figures.length;
-    while (start < end) {
-      const middle = Math.floor((start + end) / 2);
-      if (figures[middle].getBoundingClientRect().bottom < readingLine) start = middle + 1;
-      else end = middle;
-    }
-    const current = figures[Math.min(start, figures.length - 1)];
+    const current = firstGalleryReaderFigureAtLine(figures, readingLine) || figures.at(-1);
     const currentIndex = Math.max(1, Number(current?.dataset.imageIndex || 1));
     const totalCount = Math.max(currentIndex, Number(root.dataset.totalCount || figures.length));
     const toolbar = root.parentElement?.querySelector(".gallery-reader-toolbar");
@@ -2381,6 +2523,7 @@ function activateGalleryReaderImages(root) {
   let checkNewFigures = null;
   galleryReaderRegistration = {
     root,
+    figures,
     register(newFigures) {
       figures.push(...newFigures);
       if (galleryReaderObserver) for (const figure of newFigures) galleryReaderObserver.observe(figure);
@@ -2397,7 +2540,7 @@ function activateGalleryReaderImages(root) {
   };
   reportProgress();
 
-  for (const figure of figures.slice(0, GALLERY_READER_EAGER_IMAGES)) enqueueGalleryReaderFigure(figure);
+  for (const figure of figures.slice(0, GALLERY_READER_EAGER_IMAGES)) enqueueGalleryReaderFigure(figure, { keepQueued: true });
 
   if ("IntersectionObserver" in window) {
     galleryReaderObserver = new IntersectionObserver(
@@ -2442,27 +2585,29 @@ function activateGalleryReaderImages(root) {
   loadNearViewport();
 }
 
-function enqueueGalleryReaderFigure(figure) {
-  if (!figure?.isConnected || !figure.dataset.gallerySrc || figure.classList.contains("loaded") || figure.dataset.galleryQueued === "1" || figure.dataset.galleryLoading === "1") return;
+function enqueueGalleryReaderFigure(figure, { keepQueued = false } = {}) {
+  if (!figure?.isConnected || !figure.dataset.gallerySrc || figure.classList.contains("loaded") || figure.dataset.galleryLoading === "1") return;
+  const pending = galleryReaderImageQueue.get(figure);
+  if (pending) {
+    pending.keepQueued ||= keepQueued;
+    return;
+  }
   figure.dataset.galleryQueued = "1";
-  galleryReaderImageQueue.push({ figure, generation: galleryReaderImageGeneration });
+  galleryReaderImageQueue.set(figure, { generation: galleryReaderImageGeneration, keepQueued });
   drainGalleryReaderImageQueue();
 }
 
 function drainGalleryReaderImageQueue() {
   const concurrency = galleryReaderStartupFigure ? 1 : GALLERY_READER_IMAGE_CONCURRENCY;
-  while (activeGalleryReaderImageLoads < concurrency && galleryReaderImageQueue.length) {
-    const item = galleryReaderImageQueue.shift();
-    const { figure, generation } = item;
-    if (generation !== galleryReaderImageGeneration || !figure?.isConnected || !figure.dataset.gallerySrc) continue;
+  while (activeGalleryReaderImageLoads < concurrency && galleryReaderImageQueue.size) {
+    const [figure, { generation }] = galleryReaderImageQueue.entries().next().value;
+    galleryReaderImageQueue.delete(figure);
+    delete figure.dataset.galleryQueued;
+    if (generation !== galleryReaderImageGeneration || !figure.isConnected || !figure.dataset.gallerySrc) continue;
     const img = figure.querySelector("img");
-    if (!img || img.hasAttribute("src")) {
-      delete figure.dataset.galleryQueued;
-      continue;
-    }
+    if (!img || img.hasAttribute("src")) continue;
 
     activeGalleryReaderImageLoads += 1;
-    delete figure.dataset.galleryQueued;
     figure.dataset.galleryLoading = "1";
     figure.classList.remove("failed");
     const retry = figure.querySelector(".gallery-reader-retry");
@@ -2515,6 +2660,13 @@ function galleryReaderFigureNearViewport(figure) {
 }
 
 function releaseGalleryReaderFigure(figure) {
+  // Retire viewport preloads before they occupy a fetch slot. Startup pages,
+  // explicit retries and already-started loads keep their existing lifetime.
+  const pending = galleryReaderImageQueue.get(figure);
+  if (pending && !pending.keepQueued) {
+    galleryReaderImageQueue.delete(figure);
+    delete figure.dataset.galleryQueued;
+  }
   if (!figure?.classList?.contains("loaded") || figure.dataset.galleryLoading === "1" || figure.dataset.galleryQueued === "1") return;
   const img = figure.querySelector("img");
   if (!img?.hasAttribute("src")) return;
@@ -2618,7 +2770,8 @@ function renderPagedImageLibrary(container) {
         onAction: () => page.loadImageLibraryItems?.({ force: true })
       });
     } else {
-      renderPagedImageLibraryMessage(container, state.gallery.mode === "manga" ? "正在读取韩漫" : "正在读取套图");
+      const label = state.gallery.mode === "manga" ? "韩漫" : state.gallery.photoView === "people" ? "人物" : "套图";
+      renderPagedImageLibraryMessage(container, `正在读取${label}`);
     }
     if (!currentError && page.imageLibraryListNeedsLoad?.() && !page.isImageLibraryListLoading?.()) {
       void page.loadImageLibraryItems?.({ renderStart: false });
@@ -2635,6 +2788,9 @@ function renderPagedImageLibrary(container) {
   } else if (state.gallery.photoView === "collections") {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoCollectionsShelf(container, list);
+  } else if (state.gallery.photoView === "people") {
+    renderPagedImageLibrarySearchSummary(container, list);
+    renderPagedPhotoPeopleShelf(container, list);
   } else {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoShelf(container, list);
@@ -2751,13 +2907,18 @@ function renderPagedImageLibrarySearchSummary(container, list = {}) {
   ].filter(Boolean).join(" · ");
   copy.append(strong, detail);
 
-  const clear = document.createElement("button");
-  clear.type = "button";
-  clear.className = "text-button";
-  clear.textContent = "清除搜索";
-  clear.addEventListener("click", () => submitGallerySearch("", { restoreFocus: true }));
-  row.append(copy, clear);
+  row.append(copy, createGallerySearchBackButton());
+  if (state.gallery.mode === "photo" && list.sort === "relevance") row.append(createPhotoSortControls([], "updated", list));
   container.append(row);
+}
+
+function createGallerySearchBackButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button gallery-filter-clear";
+  button.textContent = "返回浏览";
+  button.addEventListener("click", () => submitGallerySearch("", { restoreFocus: true }));
+  return button;
 }
 
 function gallerySearchMatchText(item = {}) {
@@ -2793,7 +2954,9 @@ function renderPagedImageLibraryMessage(container, message, options = {}) {
 
 function renderPagedPhotoCollectionsShelf(container, list) {
   const paged = list.collectionPage === true;
-  const items = paged ? list.items : photoCatalogCollections(list.items, state.gallery.sort || "updated");
+  const sort = state.gallery.sort || "updated";
+  const items = paged ? list.items : photoCatalogCollections(list.items, sort);
+  if (!paged && state.gallery.sortDirection && state.gallery.sortDirection !== defaultPhotoSortDirection(sort)) items.reverse();
   const visibleItems = paged ? items : items.slice(0, Math.max(1, Number(state.gallery.visibleLimit || 80)));
   const category = list.browseCategory?.name || list.publisher?.name || (state.gallery.category === "all" ? "全部合集" : photoCategoryDisplayName(state.gallery.category));
   const itemLabel = list.browseCategory && !list.browseCategory.sourceCategory ? "分类" : "合集";
@@ -2809,6 +2972,7 @@ function renderPagedPhotoCollectionsShelf(container, list) {
     clear.addEventListener("click", () => openPhotoCategory(list.browseParent ? `catalog:${list.browseParent.id}` : "all"));
     header.append(clear, createPhotoCategoryCoverButton(state.gallery.category, category, list.categoryCoverUrl));
   }
+  if (itemLabel !== "分类") header.append(createPhotoSortControls(PHOTO_COLLECTION_SORT_OPTIONS, "count", list));
   container.append(header);
   renderPhotoPublisherVideos(container, list.relatedVideos);
   const grid = document.createElement("div");
@@ -2881,6 +3045,15 @@ function renderPhotoPublisherVideos(container, videos) {
   container.append(details);
 }
 
+function createPhotoCatalogLink(collectionId = "", label = "套图资料库") {
+  const link = document.createElement("a");
+  const query = new URLSearchParams({ localCollection: collectionId });
+  link.href = collectionId ? `/photo/catalog?${query}#intake` : "/photo/catalog";
+  link.className = "text-button";
+  link.textContent = label;
+  return link;
+}
+
 function createPhotoCollectionCard(collection, publisher) {
   const collectionId = collection.collectionId || collection.id;
   const count = Number(collection.albumCount || 0);
@@ -2893,10 +3066,11 @@ function createPhotoCollectionCard(collection, publisher) {
       queueCover: true,
       meta: [categoryLabel === title ? "" : categoryLabel, formatBytes(collection.size)].filter(Boolean).join(" · "),
       placeholder: "暂无封面",
-      onOpen: () => {
+      onOpen: (event) => {
+        capturePhotoListDeparture(event);
         if (collection.browseCategoryId) {
           openPhotoCategory(collection.browsePublisherId ? `publisher:${collection.browsePublisherId}` : `catalog:${collection.browseCategoryId}`);
-          window.scrollTo({ top: 0, behavior: "smooth" });
+          window.scrollTo({ top: 0, behavior: "instant" });
           return;
         }
         selectedPhotoCollectionCard = { id: collectionId, title, publisher,
@@ -2904,16 +3078,21 @@ function createPhotoCollectionCard(collection, publisher) {
         if (publisher) state.gallery.category = "all";
         state.gallery.photoView = "collections";
         state.gallery.photoCollection = collectionId;
+        if (!PHOTO_ALBUM_SORT_OPTIONS.some(([value]) => value === state.gallery.sort)) {
+          state.gallery.sort = "updated";
+          state.gallery.sortDirection = "";
+        }
         state.gallery.person = "all";
         state.gallery.photoDate = "all";
         state.gallery.visibleLimit = 80;
         renderGalleryView();
-        window.scrollTo({ top: 0, behavior: "smooth" });
         syncGalleryRoute();
+        window.scrollTo({ top: 0, behavior: "instant" });
       }
     }
   );
   card.classList.add("gallery-collection-card", "gallery-photo-catalog-card");
+  card.dataset.photoListCard = `collection:${collectionId}`;
   card.title = [title, count ? `${formatNumber(count)} 期` : "", formatBytes(collection.size)].filter(Boolean).join(" · ");
   return card;
 }
@@ -2935,7 +3114,10 @@ function appendPhotoCatalogMore(container, shown, total) {
 function renderPagedPhotoShelf(container, list) {
   const items = Array.isArray(list.items) ? list.items : [];
   const header = !state.gallery.query ? createGalleryResultsHeader("全部套图", `${formatNumber(list.total || 0)} 期`) : null;
-  if (header) container.append(header);
+  if (header) {
+    header.append(createPhotoSortControls(PHOTO_ALBUM_SORT_OPTIONS, "updated", list));
+    container.append(header);
+  }
   renderPhotoPersonBar(container, Number(list.total || items.length));
   const grid = renderPagedPhotoCards(items);
   grid.classList.add("gallery-photo-catalog-grid", "gallery-photo-albums-grid");
@@ -2948,6 +3130,46 @@ function renderPagedPhotoShelf(container, list) {
     label: "套图", moreParent: container,
     focusTarget: (node, previous) => node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card"),
     refreshMetadata: next => { if (header) header.querySelector("span").textContent = `${formatNumber(next.total || 0)} 期`; }
+  });
+}
+
+function createPhotoPersonCard(person, open) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "gallery-photo-person-card";
+  const title = document.createElement("strong");
+  title.textContent = person.name || photoPersonDisplayName(person.value);
+  const count = document.createElement("span");
+  count.textContent = `${formatNumber(person.count || 0)} 期`;
+  button.append(title, count);
+  button.addEventListener("click", () => open(person.value));
+  return button;
+}
+
+function renderPagedPhotoPeopleShelf(container, list) {
+  const title = state.gallery.category === "all" ? "全部人物" : `${photoCategoryDisplayName(state.gallery.category)} · 人物`;
+  const header = createGalleryResultsHeader(title, `${formatNumber(list.total)} 位`);
+  header.append(createPhotoSortControls(PHOTO_PEOPLE_SORT_OPTIONS, "count", list));
+  const grid = document.createElement("div");
+  grid.className = "gallery-photo-people-grid";
+  const createCard = person => createPhotoPersonCard(person, value => {
+    state.gallery.photoView = "albums";
+    state.gallery.query = "";
+    state.gallery.person = value;
+    state.gallery.sort = "updated";
+    state.gallery.sortDirection = "";
+    state.gallery.visibleLimit = 80;
+    renderGalleryView();
+    syncGalleryRoute();
+    window.scrollTo({ top: 0 });
+  });
+  for (const person of list.items) grid.append(createCard(person));
+  container.append(header, grid);
+  if (!list.items.length) renderPagedImageLibraryMessage(container, "没有匹配的人物");
+  appendPagedGalleryMore(container, list, "人物");
+  registerGalleryList(grid, list, createCard, {
+    label: "人物", moreParent: container,
+    refreshMetadata: next => { header.querySelector("span").textContent = `${formatNumber(next.total)} 位`; }
   });
 }
 
@@ -2976,7 +3198,9 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   libraryCrumb.type = "button";
   libraryCrumb.className = "text-button";
   libraryCrumb.textContent = "图库";
-  libraryCrumb.addEventListener("click", () => leavePhotoCollection("collections", list?.categoryDirect ? "all" : ""));
+  libraryCrumb.addEventListener("click", () => {
+    if (!goBackToPhotoList?.()) leavePhotoCollection("collections", list?.categoryDirect ? "all" : "");
+  });
   breadcrumb.append(libraryCrumb);
   const parent = list?.categoryDirect ? summary.browseParent : publisher ? null : summary.browseCategory;
   if (parent || !list?.categoryDirect && (publisher || summary.category)) {
@@ -2985,8 +3209,10 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
     largeCrumb.className = "text-button";
     largeCrumb.textContent = parent?.name || publisher?.name || photoCategoryDisplayName(summary.category);
     if (publisher?.code) largeCrumb.title = publisher.code;
-    largeCrumb.addEventListener("click", () => leavePhotoCollection("collections",
-      parent ? `catalog:${parent.id}` : publisher ? `publisher:${publisher.id}` : summary.category));
+    const parentCategory = parent ? `catalog:${parent.id}` : publisher ? `publisher:${publisher.id}` : summary.category;
+    largeCrumb.addEventListener("click", () => {
+      if (!goBackToPhotoList?.(parentCategory)) leavePhotoCollection("collections", parentCategory);
+    });
     breadcrumb.append(largeCrumb);
   }
   const smallCrumb = document.createElement("strong");
@@ -3035,7 +3261,10 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   filterCopy.className = "gallery-collection-filter-copy";
   const dateFacets = Array.isArray(list.facets?.dates) ? list.facets.dates : [];
   const peopleFacets = Array.isArray(list.facets?.people) ? list.facets.people : [];
-  const filterCount = Number(Boolean(dateFacets.length)) + Number(Boolean(peopleFacets.length));
+  const peopleScope = state.gallery.photoCollection || state.gallery.category;
+  const canBrowsePeople = peopleFacets.length > 1 && !["[COS]", "[]"].includes(summary.category);
+  const showingPeople = canBrowsePeople && collectionPeopleScope === peopleScope;
+  const filterCount = Number(Boolean(dateFacets.length) && !showingPeople) + Number(canBrowsePeople) + Number(state.gallery.person !== "all");
   filters.classList.toggle("is-single-filter", filterCount === 1);
   const filterMeta = document.createElement("span");
   filterMeta.setAttribute("role", "status");
@@ -3043,22 +3272,57 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
     ? `筛选出 ${formatNumber(list.total || 0)} 期`
     : "";
   filterCopy.append(filterMeta);
-  if (dateFacets.length) {
+  if (dateFacets.length && !showingPeople) {
     filters.append(createPhotoCollectionFilter("日期", "全部日期", dateFacets, state.gallery.photoDate, (value) => {
       state.gallery.photoDate = value;
       refreshPhotoCollectionFilters();
     }));
   }
-  if (peopleFacets.length) {
-    filters.append(createPhotoCollectionFilter("人物", "全部人物", peopleFacets, state.gallery.person, (value) => {
-      state.gallery.person = value;
+  if (state.gallery.person !== "all") {
+    const selected = document.createElement("button");
+    selected.type = "button";
+    selected.className = "gallery-photo-person-active";
+    const person = photoPersonDisplayName(state.gallery.person);
+    selected.textContent = `${person} ×`;
+    selected.setAttribute("aria-label", `清除人物筛选：${person}`);
+    selected.addEventListener("click", () => {
+      state.gallery.person = "all";
       refreshPhotoCollectionFilters();
-    }));
+    });
+    filters.append(selected);
+  }
+  if (canBrowsePeople) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "gallery-photo-person-toggle";
+    toggle.textContent = showingPeople ? "查看套图" : `按人物 · ${formatNumber(peopleFacets.length)}`;
+    toggle.setAttribute("aria-pressed", String(showingPeople));
+    toggle.addEventListener("click", event => {
+      collectionPeopleScope = showingPeople ? "" : peopleScope;
+      renderGalleryResults({ preserveScroll: true });
+      if (event.detail === 0) els.workGrid.querySelector(".gallery-photo-person-toggle")?.focus();
+    });
+    filters.append(toggle);
   }
   if (filterCount) {
     filters.prepend(filterCopy);
     bar.append(filters);
   }
+
+  if (showingPeople) {
+    const grid = document.createElement("div");
+    grid.className = "gallery-photo-people-grid";
+    grid.setAttribute("aria-label", "当前合集的人物");
+    for (const person of peopleFacets) grid.append(createPhotoPersonCard(person, value => {
+      collectionPeopleScope = "";
+      state.gallery.person = value;
+      refreshPhotoCollectionFilters();
+    }));
+    page.append(grid);
+    container.append(page);
+    return;
+  }
+  if (!state.gallery.query) bar.append(createPhotoSortControls(PHOTO_ALBUM_SORT_OPTIONS, "updated", list));
 
   const items = Array.isArray(list.items) ? list.items : [];
   const grid = renderPagedPhotoCards(items, { collection: true });
@@ -3068,12 +3332,25 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   appendPagedGalleryMore(page, list, "套图");
   container.append(page);
   activateGalleryLazyImages(grid);
+  const collectionHeader = value => JSON.stringify([
+    value.collectionSummary, value.facets, value.total, value.categoryDirect, value.categoryCoverUrl
+  ]);
+  const header = collectionHeader(list);
+  registerGalleryList(grid, list, item => createPagedPhotoCard(item, { collection: true }), {
+    label: "套图", moreParent: page,
+    canReuse: next => collectionHeader(next) === header,
+    focusTarget: (node, previous) => node.querySelector(previous.dataset.photoMarkId ? ".gallery-photo-mark" : ".gallery-card")
+  });
 }
 
 function leavePhotoCollection(photoView, category = "") {
+  collectionPeopleScope = "";
   state.gallery.photoCollection = null;
   state.gallery.photoView = photoView;
-  if (photoView === "collections") state.gallery.sort = "count";
+  if (photoView === "collections") {
+    state.gallery.sort = "count";
+    state.gallery.sortDirection = "";
+  }
   if (category) {
     state.gallery.category = category;
     state.gallery.subCategory = "all";
@@ -3156,21 +3433,26 @@ function createPagedPhotoCard(item, options = {}) {
   const card = createGalleryCard({ ...item, title }, {
     leadingBadge: albumNumber || item.archiveDate,
     queueCover: true,
-    badges: Number.isSafeInteger(imageCount) ? [`${formatNumber(imageCount)} 张`] : [],
     meta: [person === title ? "" : person, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
     dateLabel: item.archiveDate || formatDateTime(item.updatedAt),
     dateTime: item.archiveDate || item.updatedAt,
     placeholder: collectionView ? "" : "套图",
     coverFallback: collectionView ? "empty" : "1",
-    onOpen: event => openPhotoSet(item.id, { listReturn: {
-      albumId: String(item.id), top: event.currentTarget.getBoundingClientRect().top,
-      restoreFocus: event.detail === 0 && document.activeElement === event.currentTarget
-    } })
+    onOpen: event => {
+      capturePhotoListDeparture(event);
+      return openPhotoSet(item.id, { listReturn: {
+        albumId: String(item.id), top: event.currentTarget.getBoundingClientRect().top,
+        restoreFocus: event.detail === 0 && document.activeElement === event.currentTarget
+      } });
+    }
   });
   card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
   card.dataset.galleryAlbumId = String(item.id);
+  card.dataset.photoListCard = `album:${item.id}`;
   if (title) card.title = title;
-  if (!Number.isSafeInteger(imageCount) && item.coverUrl?.startsWith("/media/gallery-cover/")) {
+  if (Number.isSafeInteger(imageCount) && imageCount >= 0) {
+    appendPhotoCardCount(card, imageCount);
+  } else if (item.coverUrl?.startsWith("/media/gallery-cover/")) {
     card.querySelector("img")?.addEventListener("load", () => {
       if (!card.isConnected) return;
       pendingPhotoCardCounts.set(item.id, { item, card });
@@ -3266,16 +3548,13 @@ async function readPhotoCardCounts() {
 }
 
 function appendPhotoCardCount(card, count) {
-  const cover = card.querySelector(".gallery-card-cover");
-  let badges = cover.querySelector(".gallery-card-badges");
-  if (!badges) {
-    badges = document.createElement("div");
-    badges.className = "gallery-card-badges";
-    cover.append(badges);
-  }
+  const value = formatNumber(count);
   const badge = document.createElement("span");
-  badge.textContent = `${formatNumber(count)} 张`;
-  badges.append(badge);
+  badge.className = "gallery-photo-image-count";
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", `${value} 张图片`);
+  badge.append(photoControlIcon("camera"), value);
+  card.querySelector(".gallery-card-cover").append(badge);
 }
 
 function createPagedMangaCard(item, index) {
@@ -3357,6 +3636,7 @@ function renderPhotoPersonBar(container, total) {
   peopleButton.addEventListener("click", () => {
     state.gallery.photoView = "collections";
     state.gallery.sort = "count";
+    state.gallery.sortDirection = "";
     state.gallery.person = "all";
     state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
@@ -3376,14 +3656,8 @@ function createMovieExploreItem(item, index) {
   button.className = "gallery-movie-list-item";
   button.addEventListener("click", () => {
     if (isTvSeriesWork) {
-      state.gallery.mediaKind = item.mediaKind || state.gallery.mediaKind;
-      state.gallery.category = item.category || state.gallery.category;
-      state.gallery.person = item.seriesName || item.title || "all";
-      state.gallery.seriesKey = item.seriesKey || "";
-      state.gallery.visibleLimit = 80;
-      renderGalleryView();
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      syncGalleryRoute();
+      openGalleryMediaGroup({ kind: item.mediaKind, category: item.category,
+        person: item.seriesName || item.title, seriesKey: item.seriesKey });
       return;
     }
     if (["movie", "tv", "anime"].includes(item.mediaKind)) {
@@ -3417,6 +3691,15 @@ function createMovieExploreItem(item, index) {
   kind.textContent = item.mediaKind === "anime" ? "动漫" : item.mediaKind === "tv" ? "电视剧" : "电影";
   poster.append(kind);
 
+  const rating = movieListRatingLine(item);
+  if (rating) {
+    const badge = document.createElement("span");
+    badge.className = "gallery-movie-list-rating";
+    badge.textContent = rating.score;
+    badge.title = `豆瓣 ${rating.score}${rating.count ? ` · ${formatNumber(rating.count)} 人评价` : ""}`;
+    poster.append(badge);
+  }
+
   const copy = document.createElement("div");
   copy.className = "gallery-movie-list-copy";
   const title = document.createElement("strong");
@@ -3424,42 +3707,29 @@ function createMovieExploreItem(item, index) {
   title.textContent = moviePrimaryTitle(item);
   title.title = movieDisplayTitle(item);
 
+  const details = document.createElement("div");
+  details.className = "gallery-movie-list-details";
   const meta = document.createElement("span");
   meta.className = "gallery-movie-list-meta";
   meta.textContent = [metadata.year, (metadata.countries || []).slice(0, 1).join(""), (metadata.genres || []).slice(0, 2).join(" / ")].filter(Boolean).join(" · ") || item.category || "";
   meta.title = movieListMetaLine(item);
+  if (meta.textContent) details.append(meta);
+
+  const episodeCount = Number(item.episodeCount || metadata.episodeCount || 0);
+  const quality = item.mediaKind === "movie" && (item.videoQuality || movieQualityFromList(item));
+  if (quality || (isTvSeriesWork && episodeCount > 0)) {
+    const label = document.createElement("span");
+    label.className = quality ? "gallery-movie-quality" : "gallery-movie-episode-count";
+    label.textContent = quality || `${formatNumber(episodeCount)} 集`;
+    details.append(label);
+  }
 
   const people = document.createElement("span");
   people.className = "gallery-movie-list-people";
   people.textContent = movieListPeopleLine(item);
 
-  const rating = movieListRatingLine(item);
-  const ratingRow = document.createElement("span");
-  ratingRow.className = "gallery-movie-list-rating";
-  if (rating) {
-    const stars = document.createElement("i");
-    stars.textContent = "豆瓣";
-    const score = document.createElement("b");
-    score.textContent = rating.score;
-    ratingRow.append(stars, score);
-    if (rating.count) {
-      const count = document.createElement("em");
-      count.textContent = rating.count;
-      ratingRow.append(count);
-    }
-  } else {
-    ratingRow.textContent = "暂无评分";
-  }
-
-  const local = document.createElement("small");
-  local.textContent = [
-    isTvSeriesWork ? "" : (item.ext || "").toUpperCase(),
-    isTvSeriesWork ? `${formatNumber(item.episodeCount || 0)} 集` : formatBytes(item.size),
-  ].filter(Boolean).join(" · ");
-
-  copy.append(title, meta);
+  copy.append(title, details);
   if (people.textContent) copy.append(people);
-  copy.append(ratingRow, local);
   button.append(poster, copy);
   return button;
 }
@@ -3500,12 +3770,11 @@ function renderMovieShelf(container) {
   main.className = "gallery-movie-explore-main";
   const kindLabel = { movie: "电影", tv: "电视剧", anime: "动漫" }[state.gallery.mediaKind] || "全部作品";
   const heading = state.gallery.query ? `“${state.gallery.query}”的搜索结果` : state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : kindLabel;
-  const stats = currentImageLibraryList()?.stats;
-  const header = createGalleryResultsHeader(heading, [
-    `${formatNumber(total)} 部作品`,
-    stats?.ratedCount ? `${formatNumber(stats.ratedCount)} 部有评分` : "",
-    stats?.totalBytes ? formatBytes(stats.totalBytes) : ""
-  ].filter(Boolean).join(" · "));
+  const summarize = (count, stats) => [
+    `${formatNumber(count)} 部作品`,
+    stats?.ratedCount ? `${formatNumber(stats.ratedCount)} 部有评分` : ""
+  ].filter(Boolean).join(" · ");
+  const header = createGalleryResultsHeader(heading, summarize(total, currentImageLibraryList()?.stats));
   header.classList.add("gallery-movie-explore-header");
   header.append(createMediaLayoutSwitch());
 
@@ -3535,10 +3804,7 @@ function renderMovieShelf(container) {
     items: visible, moreParent: main,
     visible: next => (next.items || []).slice(0, state.gallery.visibleLimit),
     refreshMetadata: next => {
-      header.querySelector("[role=status]").textContent = [
-        `${formatNumber(next.total || 0)} 部作品`, next.stats?.ratedCount ? `${formatNumber(next.stats.ratedCount)} 部有评分` : "",
-        next.stats?.totalBytes ? formatBytes(next.stats.totalBytes) : ""
-      ].filter(Boolean).join(" · ");
+      header.querySelector("[role=status]").textContent = summarize(next.total || 0, next.stats);
     }
   });
 }
@@ -3555,6 +3821,14 @@ function tvEpisodeNumber(item = {}) {
     if (match) return Number.parseInt(match[1], 10);
   }
   return 0;
+}
+
+function movieQualityFromList(item) {
+  // Older list responses only expose the display title and library partitions.
+  const quality = [item.title, item.seriesName, item.subCategory, item.category].join(" ")
+    .match(/(?:^|[^a-z\d])(8K|2160P|4K|UHD|1440P|1080P|FHD|720P|480P)(?=$|[^a-z\d])/i)?.[1]?.toUpperCase();
+  if (quality === "4K" || quality === "2160P") return "UHD";
+  return quality || "";
 }
 
 function tvEpisodeQuality(item = {}) {
@@ -3706,17 +3980,17 @@ async function loadPhotoReaderImages(limit) {
 
 function captureGalleryReaderScrollAnchor(viewer) {
   if (galleryReaderWidthRestore?.viewer === viewer) return galleryReaderWidthRestore.anchor;
-  const figures = [...viewer.querySelectorAll(".gallery-reader-figure[data-image-index]")];
-  const target = figures.find((figure) => figure.getBoundingClientRect().bottom > 0);
-  if (!target) return null;
-  return {
-    index: target.dataset.imageIndex,
-    top: target.getBoundingClientRect().top
-  };
+  const figures = galleryReaderRegistration?.root === viewer ? galleryReaderRegistration.figures
+    : [...viewer.querySelectorAll(".gallery-reader-figure[data-image-index]")];
+  const first = figures[0], firstRect = first?.getBoundingClientRect();
+  if (firstRect?.bottom > 0) return { target: first, top: firstRect.top };
+  const target = firstGalleryReaderFigureAtLine(figures, 0, false);
+  return target ? { target, top: target.getBoundingClientRect().top } : null;
 }
 
 function restoreGalleryReaderScrollAnchor(anchor, viewer) {
-  if (!anchor?.index) return;
+  const target = anchor?.target;
+  if (!target) return;
   const owner = { anchor, viewer, generation: galleryReaderImageGeneration };
   galleryReaderWidthRestore = owner;
   window.requestAnimationFrame(() => {
@@ -3725,9 +3999,7 @@ function restoreGalleryReaderScrollAnchor(anchor, viewer) {
       galleryReaderWidthRestore = null;
       if (owner.generation !== galleryReaderImageGeneration || !viewer.isConnected || state.activeView !== "gallery"
           || els.workGrid.querySelector(".gallery-reader-images") !== viewer) return;
-      const target = [...viewer.querySelectorAll(".gallery-reader-figure[data-image-index]")]
-        .find((figure) => figure.dataset.imageIndex === String(anchor.index));
-      if (!target) return;
+      if (target.parentElement !== viewer) return;
       window.scrollBy({ top: target.getBoundingClientRect().top - Number(anchor.top || 0), behavior: "auto" });
     });
   });
@@ -3791,12 +4063,13 @@ function readerToolbar(title, meta, onBack, options = {}) {
   back.textContent = "返回";
   back.addEventListener("click", () => {
     if (!bar.isConnected || state.activeView !== "gallery") return;
+    if (options.albumId && goBackToPhotoList?.()) return;
     const listReturn = options.albumId ? getGalleryPage().closePhotoSet?.(options.albumId) : null;
     if (!listReturn) resetGalleryReader();
     onBack?.();
     renderGalleryView();
     syncGalleryRoute("replace");
-    if (!restorePhotoListReturn(listReturn)) window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!restorePhotoListReturn(listReturn)) window.scrollTo({ top: 0, behavior: options.albumId ? "instant" : "smooth" });
   });
   const copy = document.createElement("div");
   copy.className = "gallery-reader-title";
@@ -3950,6 +4223,19 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   fullscreen.textContent = "全屏";
   topActions.append(zoomOut, zoomReset, zoomIn, fullscreen);
   top.append(close, heading, topActions, fullscreenStatus);
+  const coverEdit = document.createElement("button");
+  coverEdit.type = "button";
+  coverEdit.className = "gallery-image-pager-button compact";
+  coverEdit.textContent = "编辑封面";
+  coverEdit.setAttribute("aria-controls", "galleryPagerJump");
+  coverEdit.setAttribute("aria-expanded", "false");
+  const coverStatus = document.createElement("span");
+  coverStatus.className = "gallery-image-pager-cover-status";
+  coverStatus.setAttribute("role", "status");
+  if (options.saveCover) {
+    topActions.prepend(coverEdit);
+    top.append(coverStatus);
+  }
 
   const stage = document.createElement("div");
   stage.className = "gallery-image-pager-stage";
@@ -3996,8 +4282,13 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   controlRow.append(prev, counter, range, next);
   const thumbnails = document.createElement("div");
   thumbnails.className = "gallery-image-pager-thumbnails";
-  thumbnails.setAttribute("role", "list");
+  thumbnails.setAttribute("role", "group");
   thumbnails.setAttribute("aria-label", "图片缩略图");
+  const thumbnailTrack = document.createElement("div");
+  thumbnailTrack.className = "gallery-image-pager-thumbnail-track";
+  thumbnails.append(thumbnailTrack);
+  const thumbnailButtons = new Map();
+  let thumbnailSelection = -1;
   const catalog = document.createElement("div");
   catalog.className = "gallery-image-pager-catalog";
   catalog.hidden = true;
@@ -4017,7 +4308,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   jumpPanel.setAttribute("role", "group");
   jumpPanel.setAttribute("aria-label", "跳到指定图片");
   const jumpLabel = document.createElement("label");
-  jumpLabel.textContent = "跳到第几张？";
+  const jumpPrompt = document.createElement("span");
   const jumpInput = document.createElement("input");
   jumpInput.type = "text";
   jumpInput.inputMode = "numeric";
@@ -4026,7 +4317,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   jumpInput.maxLength = 16;
   jumpInput.setAttribute("aria-label", "目标图片序号");
   jumpInput.setAttribute("aria-describedby", "galleryPagerJumpHint galleryPagerJumpError");
-  jumpLabel.append(jumpInput);
+  jumpLabel.append(jumpPrompt, jumpInput);
   const jumpHint = document.createElement("span");
   jumpHint.id = "galleryPagerJumpHint";
   jumpHint.className = "gallery-image-pager-jump-hint";
@@ -4047,6 +4338,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   jumpActions.append(jumpSubmit, jumpCancel);
   jumpPanel.append(jumpLabel, jumpHint, jumpError, jumpActions);
   let jumpComposing = false;
+  let editingCover = false;
+  let coverSaving = false;
   overlay.append(top, stage, controls, imageError, jumpPanel);
 
   const scheduleHide = () => {
@@ -4084,20 +4377,29 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     }
   };
   const closeJump = () => {
+    if (coverSaving) return;
     const ownsFocus = jumpPanel.contains(document.activeElement);
+    const trigger = editingCover ? coverEdit : counter;
     jumpPanel.hidden = true;
     jumpComposing = false;
-    counter.setAttribute("aria-expanded", "false");
-    if (ownsFocus && !abortController.signal.aborted && overlay.isConnected) counter.focus({ preventScroll: true });
+    trigger.setAttribute("aria-expanded", "false");
+    if (ownsFocus && !abortController.signal.aborted && overlay.isConnected) trigger.focus({ preventScroll: true });
     showChrome();
   };
-  const openJump = () => {
-    if (abortController.signal.aborted || !overlay.isConnected) return;
+  const openJump = (forCover = false) => {
+    if (abortController.signal.aborted || !overlay.isConnected || coverSaving) return;
+    editingCover = forCover;
+    jumpPrompt.textContent = forCover ? "用第几张图做封面？" : "跳到第几张？";
+    jumpPanel.setAttribute("aria-label", forCover ? "编辑封面" : "跳到指定图片");
+    jumpInput.enterKeyHint = forCover ? "done" : "go";
+    jumpSubmit.textContent = forCover ? "保存封面" : "跳转";
+    jumpCancel.textContent = forCover ? "取消" : "取消跳转";
     jumpInput.value = String(currentIndex + 1);
     clearJumpError();
     updateJumpBounds();
     jumpPanel.hidden = false;
-    counter.setAttribute("aria-expanded", "true");
+    counter.setAttribute("aria-expanded", String(!forCover));
+    coverEdit.setAttribute("aria-expanded", String(forCover));
     showChrome();
     jumpInput.focus({ preventScroll: true });
     jumpInput.select();
@@ -4169,41 +4471,60 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     showChrome();
   };
   const renderThumbnails = () => {
-    const restoreThumbnailFocus = thumbnails.contains(document.activeElement);
-    thumbnails.innerHTML = "";
-    const windowSize = Math.min(7, list.length);
-    const start = Math.max(0, Math.min(currentIndex - 3, list.length - windowSize));
-    const end = Math.min(list.length, start + windowSize);
-    for (let index = start; index < end; index += 1) {
-      const item = list[index];
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "gallery-image-pager-thumbnail";
-      button.dataset.index = String(index);
-      button.setAttribute("role", "listitem");
-      button.setAttribute("aria-label", `打开第 ${formatNumber(index + 1)} 张`);
-      const thumb = document.createElement("img");
-      thumb.alt = "";
-      thumb.loading = "lazy";
-      thumb.decoding = "async";
-      thumb.src = item.url;
-      const label = document.createElement("span");
-      label.textContent = formatNumber(index + 1);
-      button.append(thumb, label);
-      button.addEventListener("click", () => goTo(index), listenerOptions);
-      thumbnails.append(button);
+    const selectedChanged = thumbnailSelection !== currentIndex;
+    const focused = thumbnailTrack.contains(document.activeElement) ? document.activeElement : null;
+    const step = parseFloat(getComputedStyle(thumbnails).getPropertyValue("--thumbnail-step"));
+    const width = thumbnails.clientWidth;
+    if (!step || !width) return;
+    thumbnailTrack.style.setProperty("--thumbnail-count", String(list.length));
+    if (selectedChanged) {
+      const left = currentIndex * step;
+      if (left < thumbnails.scrollLeft || left + step > thumbnails.scrollLeft + width) {
+        thumbnails.scrollLeft = left - (width - step) / 2;
+      }
+      thumbnailSelection = currentIndex;
     }
-    if (restoreThumbnailFocus) thumbnails.querySelector(`[data-index="${currentIndex}"]`)?.focus({ preventScroll: true });
-  };
-  const updateThumbnails = () => {
-    const buttons = [...thumbnails.querySelectorAll(".gallery-image-pager-thumbnail")];
-    for (const button of buttons) {
-      const index = Number(button.dataset.index || 0);
+    // The full strip can be scrolled independently. Only mount thumbnails in
+    // and around its viewport, retaining the overlapping buttons and focus.
+    const start = Math.max(0, Math.floor(thumbnails.scrollLeft / step) - 1);
+    const end = Math.min(list.length, Math.ceil((thumbnails.scrollLeft + width) / step) + 1);
+    let nextButton = null;
+    for (const [index, button] of thumbnailButtons) {
+      if (index >= start && index < end) continue;
+      if (button === focused && index < list.length && !selectedChanged) {
+        if (index >= end) nextButton = button;
+        continue;
+      }
+      button.remove();
+      thumbnailButtons.delete(index);
+    }
+    for (let index = end - 1; index >= start; index -= 1) {
+      let button = thumbnailButtons.get(index);
+      if (!button) {
+        button = document.createElement("button");
+        button.type = "button";
+        button.className = "gallery-image-pager-thumbnail";
+        button.dataset.index = String(index);
+        button.style.setProperty("--thumbnail-index", String(index));
+        button.setAttribute("aria-label", `打开第 ${formatNumber(index + 1)} 张`);
+        const thumb = document.createElement("img");
+        thumb.alt = "";
+        thumb.loading = "lazy";
+        thumb.decoding = "async";
+        const label = document.createElement("span");
+        label.textContent = formatNumber(index + 1);
+        button.append(thumb, label);
+        thumbnailTrack.insertBefore(button, nextButton);
+        thumbnailButtons.set(index, button);
+      }
+      const thumb = button.firstElementChild;
+      if (thumb.getAttribute("src") !== list[index].url) thumb.src = list[index].url;
       const active = index === currentIndex;
       button.classList.toggle("active", active);
       button.setAttribute("aria-current", active ? "true" : "false");
-      if (active) button.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      nextButton = button;
     }
+    if (selectedChanged && focused) thumbnailButtons.get(currentIndex)?.focus({ preventScroll: true });
   };
   const previewRangeIndex = (index) => {
     const previewIndex = clampPagerIndex(index);
@@ -4249,12 +4570,12 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     sub.textContent = [meta, item.name].filter(Boolean).join(" · ");
     applyZoom(zoomLevel, { preserveScroll: preserveView });
     renderThumbnails();
-    updateThumbnails();
     preloadNeighbor(currentIndex - 1);
     preloadNeighbor(currentIndex + 1);
     showChrome();
   };
   const goTo = (index) => {
+    if (coverSaving) return;
     if (!jumpPanel.hidden) closeJump();
     const nextIndex = clampPagerIndex(index);
     rangeScrubbing = false;
@@ -4271,13 +4592,39 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     currentIndex = nextIndex;
     update();
   };
-  const submitJump = () => {
-    if (abortController.signal.aborted || !overlay.isConnected || jumpPanel.hidden || jumpComposing) return;
+  const submitJump = async () => {
+    if (abortController.signal.aborted || !overlay.isConnected || jumpPanel.hidden || jumpComposing || coverSaving) return;
     const target = jumpTarget();
     if (target == null) {
       jumpInput.setAttribute("aria-invalid", "true");
       jumpError.textContent = jumpHint.textContent;
       jumpInput.focus({ preventScroll: true });
+      return;
+    }
+    if (editingCover) {
+      coverSaving = true;
+      jumpInput.readOnly = true;
+      jumpSubmit.disabled = true;
+      jumpCancel.disabled = true;
+      jumpSubmit.textContent = "正在保存…";
+      try {
+        const image = list[target - 1];
+        const result = await options.saveCover(image, abortController.signal);
+        if (abortController.signal.aborted) return;
+        coverSaving = false;
+        closeJump();
+        coverStatus.textContent = `第 ${formatNumber(result.coverImageIndex)} 张已设为封面`;
+      } catch (error) {
+        if (abortController.signal.aborted) return;
+        jumpError.textContent = error.message || "保存封面失败，请重试";
+        jumpInput.focus({ preventScroll: true });
+      } finally {
+        coverSaving = false;
+        jumpInput.readOnly = false;
+        jumpSubmit.disabled = false;
+        jumpCancel.disabled = false;
+        jumpSubmit.textContent = "保存封面";
+      }
       return;
     }
     closeJump();
@@ -4347,7 +4694,17 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
 
   prev.addEventListener("click", () => goTo(currentIndex - 1), listenerOptions);
   next.addEventListener("click", () => goTo(currentIndex + 1), listenerOptions);
+  thumbnailTrack.addEventListener("click", (event) => {
+    const button = event.target.closest(".gallery-image-pager-thumbnail");
+    if (button) goTo(Number(button.dataset.index));
+  }, listenerOptions);
+  thumbnails.addEventListener("scroll", () => {
+    renderThumbnails();
+    showChrome();
+  }, { ...listenerOptions, passive: true });
+  window.addEventListener("resize", renderThumbnails, listenerOptions);
   counter.addEventListener("click", () => jumpPanel.hidden ? openJump() : closeJump(), listenerOptions);
+  coverEdit.addEventListener("click", () => openJump(true), listenerOptions);
   jumpSubmit.addEventListener("click", submitJump, listenerOptions);
   jumpCancel.addEventListener("click", closeJump, listenerOptions);
   catalogRetry.addEventListener("click", loadCatalog, listenerOptions);
@@ -4519,6 +4876,15 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     else goTo(currentIndex + (dy < 0 ? 1 : -1));
   }, listenerOptions);
   overlay.addEventListener("wheel", (event) => {
+    if (event.ctrlKey || event.metaKey) return;
+    if (thumbnails.contains(event.target)) {
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? thumbnails.clientWidth : 1;
+      if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+        event.preventDefault();
+        thumbnails.scrollLeft += event.deltaY * unit;
+      }
+      return;
+    }
     if (event.target instanceof Element && event.target.closest(".gallery-image-pager-error, .gallery-image-pager-jump")) return;
     if (zoomLevel > 1) return;
     if (Math.abs(event.deltaY) < 18 || Math.abs(event.deltaY) < Math.abs(event.deltaX)) return;
@@ -4635,7 +5001,7 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
   figure.setAttribute("aria-label", figureLabel);
   const openImage = () => {
     if (figure.classList.contains("failed")) {
-      enqueueGalleryReaderFigure(figure);
+      enqueueGalleryReaderFigure(figure, { keepQueued: true });
       return;
     }
     const sourceKey = options.sourceKey || "";
@@ -4649,7 +5015,7 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
       Math.min(currentList.length - 1, fallbackIndex),
       options.title || "",
       options.meta || "",
-      { sourceKey, fullImages: options.fullImages }
+      { sourceKey, fullImages: options.fullImages, saveCover: options.saveCover }
     );
   };
   figure.addEventListener("click", openImage);
@@ -4694,20 +5060,40 @@ function photoReaderMeta(album) {
   const images = Array.isArray(album.images) ? album.images : [];
   const totalCount = Number(album.imageCount || images.length || 0);
   const visibleCount = images.length;
+  const videoCount = album.videos?.length || 0;
   return [
     album.category,
     album.subCategory,
     album.personName,
-    visibleCount < totalCount
+    !totalCount && videoCount ? "" : visibleCount < totalCount
       ? `已显示 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)} 张`
-      : `${formatNumber(totalCount)} 张`
+      : `${formatNumber(totalCount)} 张`,
+    videoCount ? `${formatNumber(videoCount)} 个视频` : ""
   ].filter(Boolean).join(" · ");
 }
 
 function photoReaderOptions(album) {
   const albumId = album.id;
   return { albumId, title: album.title, meta: photoReaderMeta(album), totalCount: Number(album.imageCount || album.images?.length || 0),
-    sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }) };
+    sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }),
+    saveCover: album.coverEditable && ["local", "lan"].includes(state.accessMode) ? (image, signal) => savePhotoReaderCover(albumId, image, signal) : null };
+}
+
+async function savePhotoReaderCover(albumId, image, signal) {
+  const cover = await api(`/api/photo-sets/${encodeURIComponent(albumId)}/cover`, {
+    method: "PUT", body: { imageIndex: image.index, memberPath: image.archivePath }, signal
+  });
+  if (signal.aborted || state.gallery.album?.id !== albumId) return cover;
+  Object.assign(state.gallery.album, cover);
+  const list = state.gallery.list;
+  if (list) {
+    const path = cover.coverUrl.split("?")[0];
+    const updateCover = item => item && (item.id === albumId || item.coverUrl?.split("?")[0] === path)
+      ? { ...item, coverUrl: cover.coverUrl } : item;
+    list.items = list.items?.map(updateCover);
+    list.collectionSummary = updateCover(list.collectionSummary);
+  }
+  return cover;
 }
 
 function appendPhotoReaderImages(album) {
@@ -4734,21 +5120,58 @@ function renderPhotoReader(container) {
   const images = Array.isArray(album.images) ? album.images : [];
   const totalCount = Number(album.imageCount || images.length || 0);
   const meta = photoReaderMeta(album);
-  const sourceKey = album.id ? `photo:${album.id}` : "";
+  const options = photoReaderOptions(album);
   const openPager = (startIndex = 0) => {
     const currentImages = state.gallery.album?.id === album.id ? state.gallery.album.images : images;
-    openGalleryImagePager(currentImages, startIndex, album.title, meta, { sourceKey, fullImages: () => fullPhotoReaderImages(album) });
+    openGalleryImagePager(currentImages, startIndex, album.title, meta, options);
   };
-  container.append(readerToolbar(album.title, meta, () => {
+  const toolbar = readerToolbar(album.title, meta, () => {
     state.gallery.album = null;
   }, {
     albumId: album.id,
     markAlbum: album,
     totalCount,
-    onOpen: openPager
-  }));
-  renderReaderImages(container, images, photoReaderOptions(album));
+    showFit: Boolean(totalCount || !album.videos?.length),
+    onOpen: album.videos?.length && !totalCount ? null : openPager
+  });
+  container.append(toolbar);
+  if (album.videoListError) {
+    const notice = document.createElement("p");
+    notice.className = "empty-state";
+    notice.textContent = "归档视频清单读取失败，可刷新重试。";
+    container.append(notice);
+  }
+  if (album.videos?.length) {
+    container.append(renderPhotoArchiveVideos(album, () => toolbar.querySelector(".gallery-reader-back").click()));
+    if (!totalCount) return;
+  }
+  renderReaderImages(container, images, options);
   renderPhotoReaderMore(container, album);
+}
+
+function renderPhotoArchiveVideos(album, onBack) {
+  const panel = document.createElement("section");
+  panel.className = "gallery-media-player";
+  panel.setAttribute("aria-label", "归档视频");
+  const videos = album.videos;
+  const createPlayer = video => createGalleryMediaPlayer({ ...video, kindLabel: "归档视频" }, null, { deferLoad: true, onBack });
+  let player = createPlayer(videos[0]);
+  if (videos.length > 1) {
+    const label = document.createElement("label");
+    label.className = "gallery-archive-video-selector";
+    label.textContent = "归档视频";
+    const select = document.createElement("select");
+    videos.forEach((video, index) => select.add(new Option(video.title, String(index))));
+    select.addEventListener("change", () => {
+      const next = createPlayer(videos[Number(select.value)]);
+      player.replaceWith(next);
+      player = next;
+    });
+    label.append(select);
+    panel.append(label);
+  }
+  panel.append(player);
+  return panel;
 }
 
 function renderPhotoReaderMore(container, album) {
@@ -4824,17 +5247,17 @@ function renderMangaReader(container) {
   if (chapter) renderReaderImages(container, chapter.images || [], { title: comic.title, meta: chapter.title });
 }
 
-function createGalleryMediaPlayer(media, metadata = null) {
+function createGalleryMediaPlayer(media, metadata = null, { deferLoad = false, onBack } = {}) {
   const shell = document.createElement("div");
   shell.className = "web-player-shell gallery-media-web-player";
 
   const video = document.createElement("video");
   video.className = "video-player";
   video.controls = false;
-  video.preload = "metadata";
+  video.preload = deferLoad ? "none" : "metadata";
   video.playsInline = true;
   if (media.coverUrl) video.poster = media.coverUrl;
-  video.src = media.streamUrl;
+  if (!deferLoad) video.src = media.streamUrl;
 
   const chrome = document.createElement("div");
   chrome.className = "player-chrome";
@@ -4847,6 +5270,7 @@ function createGalleryMediaPlayer(media, metadata = null) {
   back.className = "player-chrome-button player-chrome-back";
   back.textContent = "返回";
   back.addEventListener("click", () => {
+    if (onBack) { onBack(); return; }
     resetGalleryReader();
     renderGalleryView();
     syncGalleryRoute("replace");
@@ -4856,7 +5280,9 @@ function createGalleryMediaPlayer(media, metadata = null) {
   const strong = document.createElement("strong");
   strong.textContent = media.mediaKind === "movie" ? movieDisplayTitle(media) : media.title || "播放";
   const sub = document.createElement("span");
-  sub.textContent = [media.kindLabel, media.category, ["tv", "anime"].includes(media.mediaKind) ? media.seriesName : media.personName, metadata?.rating ? `豆瓣 ${Number(metadata.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+  const description = [media.kindLabel, media.category, ["tv", "anime"].includes(media.mediaKind) ? media.seriesName : media.personName, metadata?.rating ? `豆瓣 ${Number(metadata.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+  sub.textContent = description;
+  if (deferLoad) sub.setAttribute("role", "status");
   title.append(strong, sub);
   top.append(back, title);
 
@@ -4881,7 +5307,7 @@ function createGalleryMediaPlayer(media, metadata = null) {
   seek.setAttribute("aria-label", "播放进度");
   const mode = document.createElement("span");
   mode.className = "player-chrome-mode";
-  mode.textContent = [media.ext, formatBytes(media.size)].filter(Boolean).join(" · ");
+  mode.textContent = [media.ext, !deferLoad || media.size > 0 ? formatBytes(media.size) : ""].filter(Boolean).join(" · ");
   const mute = document.createElement("button");
   mute.type = "button";
   mute.className = "player-chrome-button";
@@ -4894,15 +5320,23 @@ function createGalleryMediaPlayer(media, metadata = null) {
 
   let hideTimer = null;
   let seeking = false;
-  abortController.signal.addEventListener("abort", () => window.clearTimeout(hideTimer), { once: true });
+  abortController.signal.addEventListener("abort", () => {
+    window.clearTimeout(hideTimer);
+    if (deferLoad && video.hasAttribute("src")) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }, { once: true });
   const cleanupObserver = new MutationObserver(() => {
     if (shell.isConnected) return;
     abortController.abort();
     cleanupObserver.disconnect();
   });
-  window.setTimeout(() => {
+  queueMicrotask(() => {
     if (shell.isConnected) cleanupObserver.observe(document.body, { childList: true, subtree: true });
-  }, 0);
+    else abortController.abort();
+  });
   const duration = () => {
     const value = Number(video.duration || 0);
     return Number.isFinite(value) && value > 0 ? value : 0;
@@ -4910,8 +5344,11 @@ function createGalleryMediaPlayer(media, metadata = null) {
   const update = (preview = null) => {
     const total = duration();
     const current = preview ?? Number(video.currentTime || 0);
-    play.textContent = video.paused ? "播放" : "暂停";
-    center.textContent = video.paused ? "播放" : "暂停";
+    const failed = deferLoad && video.error;
+    const loading = deferLoad && video.hasAttribute("src") && video.readyState < 2 && !video.paused;
+    play.textContent = failed ? "重试播放" : video.paused ? "播放" : "暂停";
+    center.textContent = play.textContent;
+    if (deferLoad) sub.textContent = failed ? "归档视频加载失败，可重试。" : loading ? "正在准备视频…" : description;
     mute.textContent = video.muted ? "开声" : "静音";
     time.textContent = total > 0 ? `${formatMediaTime(current)} / ${formatMediaTime(total)}` : formatMediaTime(current);
     seek.disabled = total <= 0;
@@ -4920,6 +5357,7 @@ function createGalleryMediaPlayer(media, metadata = null) {
   };
   const scheduleHide = () => {
     window.clearTimeout(hideTimer);
+    if (deferLoad && (video.paused || video.readyState < 2 || video.error)) return;
     hideTimer = window.setTimeout(() => shell.classList.add("chrome-hidden"), 2500);
   };
   const showChrome = () => {
@@ -4927,8 +5365,12 @@ function createGalleryMediaPlayer(media, metadata = null) {
     scheduleHide();
   };
   const toggle = () => {
-    if (video.paused) video.play().catch(() => {});
-    else video.pause();
+    if (!shell.isConnected) return;
+    if (deferLoad && !video.hasAttribute("src")) video.src = media.streamUrl;
+    if (video.paused || video.error) {
+      if (deferLoad && video.error) video.load();
+      video.play().catch(() => { if (deferLoad && shell.isConnected) { update(); showChrome(); } });
+    } else video.pause();
     update();
     showChrome();
   };
@@ -4962,7 +5404,11 @@ function createGalleryMediaPlayer(media, metadata = null) {
   }, listenerOptions);
   video.addEventListener("timeupdate", () => update(), listenerOptions);
   video.addEventListener("loadedmetadata", () => update(), listenerOptions);
-  video.addEventListener("canplay", () => update(), listenerOptions);
+  video.addEventListener("canplay", () => {
+    update();
+    if (deferLoad) showChrome();
+  }, listenerOptions);
+  if (deferLoad) video.addEventListener("error", () => { update(); showChrome(); }, listenerOptions);
   video.addEventListener("play", () => {
     update();
     showChrome();
@@ -5306,8 +5752,7 @@ function renderGalleryView(options = {}) {
   const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all" && !state.gallery.media;
   if (["photo", "media", "movie"].includes(state.gallery.mode) && !imageReaderOpen && !state.gallery.media && !seriesPageOpen) {
     shell.classList.add("gallery-browse-shell");
-    // Photo browsing carries its title inside the single toolbar row.
-    if (state.gallery.mode !== "photo") shell.append(createGalleryBrowseHeader());
+    if (state.gallery.mode !== "photo") shell.classList.add("gallery-media-browse-shell");
   }
   if (state.gallery.mode === "photo" && !imageReaderOpen) {
     shell.classList.add("gallery-photo-shell");
@@ -5326,6 +5771,14 @@ function renderGalleryView(options = {}) {
   if (searchValueToRestore !== null) restoreGallerySearchFocus();
   restoreGalleryScrollPosition(scrollAnchor);
 }
+  document.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.key !== "/" || event.altKey || event.ctrlKey || event.metaKey || event.isComposing
+      || state.activeView !== "gallery" || state.gallery.mode !== "photo"
+      || event.target?.closest?.("input, textarea, select, [contenteditable], dialog")) return;
+    if (!els.workGrid.querySelector(".gallery-search")) return;
+    event.preventDefault();
+    restoreGallerySearchFocus();
+  });
   return {
     mediaKindForMode: galleryMediaKindForMode,
     modeLabel: galleryModeLabel,
@@ -5337,6 +5790,7 @@ function renderGalleryView(options = {}) {
     renderStats: renderGalleryStats,
     renderView: renderGalleryView,
     resetReader: resetGalleryReader,
+    restorePhotoHistoryPosition,
     setStatus: setGalleryStatus,
     syncRoute: syncGalleryRoute
   };

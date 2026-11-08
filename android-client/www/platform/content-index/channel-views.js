@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-8af3642624a3";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8af3642624a3";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8faf7a80cb7b";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -18,6 +18,7 @@ const CHANNELS = {
 };
 const EAGER_PHOTO_COVER_COUNT = 4;
 const EAGER_PHOTO_DETAIL_IMAGE_COUNT = 4;
+const PHOTO_VIEWER_INDEX_LIMIT = 10000;
 const PHOTO_DETAIL_IMAGE_CONCURRENCY = 4;
 const EAGER_CHANNEL_COVER_COUNT = 14;
 const LAZY_PHOTO_PREVIEW_ROOT_MARGIN = "180px 0px 420px 0px";
@@ -116,6 +117,7 @@ function channelDataSignature(data = {}) {
     mode: data.mode || "",
     query: data.query || "",
     photoView: data.photoView || "",
+    collectionPage: data.collectionPage === true,
     category: data.category || "",
     person: data.person || "",
     collection: data.collection || "",
@@ -135,6 +137,9 @@ function channelDataSignature(data = {}) {
       item.updatedAt || "",
       item.size || 0,
       item.collectionId || "",
+      item.albumCount ?? "",
+      item.catalogCategory || "",
+      item.catalogRootLabel || "",
       item.matchFields || [],
       item.seriesKey || "",
       item.chapterCount ?? "",
@@ -450,7 +455,9 @@ export function createChannelViews(context) {
   let photoDetailImageGeneration = 0;
   let photoDetailStartupImage = null;
   let photoViewerGeneration = 0;
+  const photoViewerRanges = new WeakMap();
   let photoViewerRequestController = null;
+  let nextEpisodeNavigation = null;
   let channelPageState = null;
   let channelRequestGeneration = 0;
   let channelRequestController = null;
@@ -614,7 +621,8 @@ export function createChannelViews(context) {
     const sort = mediaMode && !query && requestedSort === "relevance" ? "updated" : requestedSort;
     const channel = channelConfig(normalizedMode);
     const limit = getChannelLimit();
-    const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort };
+    const collectionPage = normalizedMode === "photo" && photoView === "collections" && !collection && !query;
+    const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort, collectionPage };
     const activeUrl = getActiveUrl();
     const startedAccount = captureAccountOwner(activeUrl);
     let accountScope = null;
@@ -627,7 +635,7 @@ export function createChannelViews(context) {
       if (channelRequestController === controller) channelRequestController = null;
       return;
     }
-    const pageKey = channelPageKey(normalizedMode, filters, activeUrl);
+    const pageKey = channelPageKey(normalizedMode, filters, activeUrl, startedAccount);
     channelRenderingKey = pageKey;
     channelRenderScope = { key: pageKey, activeUrl, accountScope: startedAccount, guard: isActive };
     adoptChannelMount(channelRenderScope);
@@ -643,6 +651,7 @@ export function createChannelViews(context) {
     const offset = retryPage ? retryPage.offset : pageComplete ? 0 : rawLoaded;
     const requestLimit = retryPage ? retryPage.limit : Math.max(1, limit - (pageComplete ? 0 : loadedCount));
     const path = channelItemsPath(normalizedMode, requestLimit, filters, offset);
+    const legacyAppend = collectionPage && offset > 0 && basePage?.collectionPage !== true;
     const loadingMore = Boolean(currentPage && offset > 0);
     const pendingPaging = loadingMore ? { status: "loading" } : {};
     let displayedData = currentPage;
@@ -704,9 +713,21 @@ export function createChannelViews(context) {
         // Keep the existing offline/cache fallback when session preparation fails;
         // an unconfirmed operation cannot publish a complete aggregate cache.
       }
-      let cached = pageComplete && !loadingMore ? null : await readCachedJson(activeUrl, path).catch(() => null);
+      const cachePath = legacyAppend ? channelItemsPath(normalizedMode, requestLimit, filters, offset, false) : path;
+      let cached = pageComplete && !loadingMore ? null : await readCachedJson(activeUrl, cachePath).catch(() => null);
       if (!cached && offset === 0 && requestLimit > 5000 && !pageComplete && isCurrent()) {
         cached = await readCachedJson(activeUrl, channelItemsPath(normalizedMode, 5000, filters, 0)).catch(() => null);
+      }
+      if (collectionPage && cached?.payload && (legacyAppend
+        ? cached.payload.collectionPage === true : !isFlatPhotoCollectionPage(cached.payload))) cached = null;
+      if (!cached && collectionPage && offset === 0 && !pageComplete && isCurrent()) {
+        // Older servers populate the original grouped key. An offset in that
+        // cache counts groups and cannot be used with a flat prefix.
+        cached = await readCachedJson(activeUrl, channelItemsPath(normalizedMode, requestLimit, filters, 0, false)).catch(() => null);
+        if (!cached && requestLimit > 5000 && isCurrent()) {
+          cached = await readCachedJson(activeUrl, channelItemsPath(normalizedMode, 5000, filters, 0, false)).catch(() => null);
+        }
+        if (cached?.payload?.collectionPage === true) cached = null;
       }
       if (!isCurrent()) return;
       if (cached?.payload && !(offset > 0 && channelRevisionChanged(basePage, cached.payload))) {
@@ -726,7 +747,7 @@ export function createChannelViews(context) {
       });
       if (!isCurrent()) return;
       if (cacheFence && (offset === 0 || channelRevisionChanged(basePage, mergedData))) {
-        const aggregatePath = channelItemsPath(normalizedMode, limit, filters, 0);
+        const aggregatePath = channelItemsPath(normalizedMode, limit, filters, 0, mergedData.collectionPage === true);
         writeCachedJson(activeUrl, aggregatePath, mergedData, { fence: cacheFence }).catch(() => {});
       }
       channelPageState = { key: pageKey, data: mergedData };
@@ -775,6 +796,7 @@ export function createChannelViews(context) {
 
   function channelRevisionChanged(existing, incoming) {
     if (!existing || !incoming) return false;
+    if ((existing.collectionPage === true) !== (incoming.collectionPage === true)) return true;
     if (existing.listRevision || incoming.listRevision) return existing.listRevision !== incoming.listRevision;
     const previous = existing.scannedAt || "";
     const next = incoming.scannedAt || "";
@@ -787,14 +809,24 @@ export function createChannelViews(context) {
     let limit = Math.min(5000, request.requestLimit);
     let prefixAttempts = offset === 0 ? 1 : 0;
     let rebuilding = offset === 0;
+    let collectionPage = filters.collectionPage;
     while (request.isCurrent()) {
-      const path = channelItemsPath(mode, limit, filters, offset);
-      const data = await fetchJson(request.activeUrl, path, {
-        timeoutMs: mode === "manga" ? 10000 : 12000, signal: request.signal,
-        ...(request.accountScope ? { accountScope: request.accountScope } : {})
-      });
+      const path = channelItemsPath(mode, limit, filters, offset, collectionPage);
+      let data;
+      try {
+        data = await fetchJson(request.activeUrl, path, {
+          timeoutMs: mode === "manga" ? 10000 : 12000, signal: request.signal,
+          ...(request.accountScope ? { accountScope: request.accountScope } : {})
+        });
+      } catch (error) {
+        if (!collectionPage || ![400, 404, 422, 501].includes(error?.status ?? error?.statusCode) || !request.isCurrent()) throw error;
+        collectionPage = false;
+        continue;
+      }
       if (!request.isCurrent()) return null;
-      writeCachedJson(request.activeUrl, path, data, request.cacheFence ? { fence: request.cacheFence } : {}).catch(() => {});
+      if (data.collectionPage === true && (!collectionPage || !isFlatPhotoCollectionPage(data))) throw new Error("合集目录响应无效，请重新加载");
+      const cachePath = collectionPage && data.collectionPage !== true ? channelItemsPath(mode, limit, filters, offset, false) : path;
+      writeCachedJson(request.activeUrl, cachePath, data, request.cacheFence ? { fence: request.cacheFence } : {}).catch(() => {});
       if (offset > 0 && channelRevisionChanged(base, data)) {
         if (++prefixAttempts > 3) throw new Error("目录正在更新，请重新加载");
         // Offset pages from different snapshots cannot reconstruct a prefix.
@@ -813,6 +845,12 @@ export function createChannelViews(context) {
     return null;
   }
 
+  function isFlatPhotoCollectionPage(data) {
+    return data.collectionPage === true && data.photoView === "collections" && !data.collection
+      && Number.isSafeInteger(data.total) && data.total >= 0 && Array.isArray(data.items)
+      && data.items.every(item => item?.type === "photoCollection" && Boolean(item.collectionId));
+  }
+
   function renderMangaLibraryFailure(error) {
     els.viewMeta.textContent = "读取失败";
     els.viewContent.innerHTML = "";
@@ -824,9 +862,11 @@ export function createChannelViews(context) {
     }));
   }
 
-  function channelPageKey(mode, filters = {}, sourceUrl = getActiveUrl()) {
+  function channelPageKey(mode, filters = {}, sourceUrl = getActiveUrl(), account = captureAccountOwner(sourceUrl)) {
     return JSON.stringify({
       sourceUrl,
+      account: account.owner,
+      accountRevision: account.revision,
       mode,
       query: String(filters.query || "").trim(),
       photoView: filters.photoView || "",
@@ -927,16 +967,19 @@ export function createChannelViews(context) {
     els.viewContent.querySelectorAll(":scope > [data-channel-cache-notice]").forEach(node => node.remove());
     applyChannelHeader(mode, data, cacheEntry);
     if (refreshChannelList(mode, data, paging)) return;
-    const pendingCategoryGroups = mode === "photo" && data.photoView === "collections" && (data.items || []).length < Number(data.total || 0);
+    const pendingCategoryGroups = mode === "photo" && data.photoView === "collections" && data.collectionPage !== true
+      && (data.items || []).length < Number(data.total || 0);
     data = photoCatalogDisplayData(mode, data);
     const channel = channelConfig(mode);
     const items = data.items || [];
     const query = String(data.query || "").trim();
     const photoView = String(data.photoView || "") === "collections" ? "collections" : "albums";
+    const photoAlbums = mode === "photo" && photoView !== "collections";
     const seriesKey = String(data.seriesKey || "").trim();
     const restoreMoreFocus = Boolean(mountedChannelList?.restoreMoreFocus
       || mountedChannelList?.more && (document.activeElement === mountedChannelList.more
         || document.activeElement === document.body && mountedChannelList.focusedMore === mountedChannelList.more));
+    if (mountedChannelList?.collectionPage) retireChannelMount();
     resetPreviewImageObserver();
     const retainedActions = mode === "manga" && retainMangaLibraryActions();
     if (!retainedActions) els.viewContent.innerHTML = "";
@@ -956,8 +999,9 @@ export function createChannelViews(context) {
     }
 
     const keys = items.map(channelItemKey);
-    const mounted = mode !== "manga" && photoView !== "collections" && keys.every(Boolean) && new Set(keys).size === keys.length
-      ? { ...channelRenderScope, mode, life: new AbortController(), moreLife: null, more: null, focusedMore: null,
+    const mounted = mode !== "manga" && (photoView !== "collections" || data.collectionPage === true)
+      && keys.every(Boolean) && new Set(keys).size === keys.length
+      ? { ...channelRenderScope, mode, photoAlbums, collectionPage: data.collectionPage === true, life: new AbortController(), moreLife: null, more: null, focusedMore: null,
         restoreMoreFocus, handoff: false, nodes: new WeakSet(), list: null, controls, rows: [],
         layout: channelListLayout(mode, data), controlsSignature: channelControlsSignature(data) } : null;
     const createCard = (item, index) => {
@@ -966,7 +1010,7 @@ export function createChannelViews(context) {
       return node;
     };
     let list;
-    if (mode === "photo" && photoView !== "collections") {
+    if (photoAlbums) {
       list = createPhotoMasonryList(items, createCard);
     } else {
       const grid = document.createElement("div");
@@ -977,7 +1021,7 @@ export function createChannelViews(context) {
     }
     els.viewContent.append(list);
     if (mounted) {
-      const nodes = mode === "photo"
+      const nodes = photoAlbums
         ? items.map((_item, index) => list.children[index % list.children.length].children[Math.floor(index / list.children.length)])
         : [...list.children];
       mounted.list = list;
@@ -1013,7 +1057,7 @@ export function createChannelViews(context) {
   }
 
   function channelListLayout(mode, data) {
-    return JSON.stringify([mode, data.photoView || "albums", Boolean(data.seriesKey || data.tvView === "episodes")]);
+    return JSON.stringify([mode, data.photoView || "albums", Boolean(data.seriesKey || data.tvView === "episodes"), data.collectionPage === true]);
   }
 
   function channelControlsSignature(data) {
@@ -1027,7 +1071,7 @@ export function createChannelViews(context) {
     const items = data.items || [];
     if (!ownsChannelMount(mounted) || mounted.mode !== mode
       || mounted.layout !== channelListLayout(mode, data) || items.length < mounted.rows.length) return false;
-    if (mode === "photo" && mounted.list.children.length !== 2) return false;
+    if (mounted.photoAlbums && mounted.list.children.length !== 2) return false;
     const keys = items.map(channelItemKey);
     if (!keys.every(Boolean) || new Set(keys).size !== keys.length || mounted.rows.some((row, index) => row.key !== keys[index])) return false;
     for (let index = 0; index < items.length; index += 1) {
@@ -1047,7 +1091,7 @@ export function createChannelViews(context) {
         }
         previous.node.replaceWith(node);
         if (focused) node.focus({ preventScroll: true });
-      } else if (mode === "photo") mounted.list.children[index % mounted.list.children.length].append(node);
+      } else if (mounted.photoAlbums) mounted.list.children[index % mounted.list.children.length].append(node);
       else mounted.list.append(node);
       mounted.rows[index] = { key: keys[index], item: items[index], signature, node };
     }
@@ -1099,7 +1143,8 @@ export function createChannelViews(context) {
         return paging.retry({ preserveChannelList: mounted ? (retain) => preserveChannelMount(mounted, retain) : null });
       }, { auto: false, signal: mounted?.moreLife.signal });
       els.viewContent.append(more);
-    } else if ((data.hasMore !== false && Number(data.rawLoaded ?? items.length) < total) || pendingCategoryGroups || (mode === "photo" && data.photoView === "collections" && items.length < total)) {
+    } else if ((data.hasMore !== false && Number(data.rawLoaded ?? items.length) < total) || pendingCategoryGroups
+      || (mode === "photo" && data.photoView === "collections" && data.collectionPage !== true && items.length < total)) {
       more = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(items.length)} / ${formatNumber(total)}`, () => {
         if (mounted && (!ownsChannelMount(mounted) || mounted.more !== more)) return;
         increaseChannelLimit(48);
@@ -1114,7 +1159,7 @@ export function createChannelViews(context) {
   }
 
   function photoCatalogDisplayData(mode, data) {
-    if (mode !== "photo" || data.photoView !== "collections" || data.collection) return data;
+    if (mode !== "photo" || data.photoView !== "collections" || data.collection || data.collectionPage === true) return data;
     const collections = photoCatalogCollections(data.items, data.sort || "count");
     return { ...data, items: collections.slice(0, getChannelLimit()), total: collections.length };
   }
@@ -2213,7 +2258,7 @@ export function createChannelViews(context) {
     return String(value || "?").trim().slice(0, 2) || "?";
   }
 
-  function channelItemsPath(mode, limit, filters = {}, offset = 0) {
+  function channelItemsPath(mode, limit, filters = {}, offset = 0, collectionPage = filters.collectionPage) {
     const text = String(filters.query || "").trim();
     const mediaMode = ["movie", "tv", "anime", "media"].includes(mode);
     const mediaSort = normalizeChannelSort(filters.sort || (text ? "relevance" : "updated"));
@@ -2228,6 +2273,10 @@ export function createChannelViews(context) {
     if (text) params.set("q", text);
     if (mode === "photo") {
       if (filters.photoView === "collections" && !filters.collection) params.set("photoView", "collections");
+      if (collectionPage && filters.photoView === "collections" && !filters.collection && !text) {
+        params.set("collectionPage", "1");
+        params.set("collectionLocale", new Intl.Collator().resolvedOptions().locale);
+      }
       if (filters.category && filters.category !== "all") params.set("category", filters.category);
       if (filters.person && filters.person !== "all") params.set("person", filters.person);
       if (filters.collection) params.set("collection", filters.collection);
@@ -2475,8 +2524,12 @@ export function createChannelViews(context) {
     const albumId = String(id || "").trim();
     const path = photoDetailPath(albumId, { imageLimit: getPhotoImageLimit() });
     const activeUrl = getActiveUrl();
-    let renderedCache = false;
+    let cachedAlbum = null;
     let renderedCacheSignature = "";
+    const ownsPayload = (payload) => {
+      const account = accountPayloadOwner(payload);
+      return isActive() && getActiveUrl() === activeUrl && (!account || isAccountOwnerCurrent(account));
+    };
 
     setActiveBottom("photo");
     els.viewKicker.textContent = "套图";
@@ -2490,25 +2543,27 @@ export function createChannelViews(context) {
     }
 
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload?.album) {
-      renderedCache = true;
-      renderedCacheSignature = photoAlbumDataSignature(cached.payload.album);
-      renderPhotoAlbum(cached.payload.album, cached);
+    if (!ownsPayload()) return;
+    if (cached?.payload?.album && ownsPayload(cached.payload)) {
+      cachedAlbum = cached.payload.album;
+      renderedCacheSignature = photoAlbumDataSignature(cachedAlbum);
+      renderPhotoAlbum(cachedAlbum, cached);
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 20000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
-      if (renderedCache && photoAlbumDataSignature(data.album) === renderedCacheSignature) {
+      if (!ownsPayload(data)) return;
+      const unchanged = cachedAlbum && photoAlbumDataSignature(data.album) === renderedCacheSignature;
+      rememberPhotoViewerRange(unchanged ? cachedAlbum : data.album, data, activeUrl);
+      if (unchanged) {
         applyPhotoAlbumHeader(data.album);
         return;
       }
       renderPhotoAlbum(data.album);
     } catch (error) {
-      if (!isActive()) return;
-      if (renderedCache) {
+      if (!ownsPayload()) return;
+      if (cachedAlbum) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存套图。", "quiet", false);
       } else {
         renderMessage(error.message || "套图读取失败", "error");
@@ -2626,7 +2681,9 @@ export function createChannelViews(context) {
   }
 
   function createPhotoTile(album, image = {}, sourceImages = [], options = {}) {
-    const imageUrl = absoluteUrl(getActiveUrl(), image.url);
+    const activeUrl = getActiveUrl();
+    const account = captureAccountOwner(activeUrl);
+    const imageUrl = absoluteUrl(activeUrl, image.url);
     const tile = document.createElement("button");
     tile.type = "button";
     tile.className = "photo-preview-tile";
@@ -2674,21 +2731,23 @@ export function createChannelViews(context) {
       loadPhotoDetailImage(img, imageUrl, options.index);
       tile.append(img);
       tile.addEventListener("click", () => {
+        if (getActiveUrl() !== activeUrl || !isAccountOwnerCurrent(account)) return;
         if (img.dataset.photoFailed === "1") {
           retryPhotoDetailImage(img, imageUrl, image.index || options.index + 1, fallback);
           return;
         }
         const viewer = getMediaViewer();
         if (!viewer) return;
-        const fallbackItems = photoViewerItemsFromImages(album, sourceImages);
-        const fallbackIndex = fallbackItems.findIndex((item) => item.url === imageUrl);
+        const indexedItems = photoIndexedViewerItems(album, sourceImages, activeUrl);
+        const items = indexedItems || photoViewerItemsFromImages(album, sourceImages);
+        const index = indexedItems ? image.index - 1 : items.findIndex((item) => item.url === imageUrl);
         const sourceKey = photoViewerSourceKey(album);
         viewer.openImage(imageUrl, img.alt, {
-          items: fallbackItems,
-          index: fallbackIndex >= 0 ? fallbackIndex : Math.max(0, Number(image.index || options.index + 1 || 1) - 1),
+          items,
+          index: index >= 0 ? index : Math.max(0, Number(image.index || options.index + 1 || 1) - 1),
           sourceKey
         });
-        hydratePhotoViewerItems(viewer, album, sourceImages, sourceKey);
+        if (!indexedItems) hydratePhotoViewerItems(viewer, album, sourceImages, sourceKey);
       });
     }
 
@@ -2703,10 +2762,20 @@ export function createChannelViews(context) {
 
     const activeUrl = request.activeUrl;
     const path = photoDetailPath(album.id, { imageLimit: "all" });
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    const range = numberedPhotoViewerRange(album, currentImages);
+    const cachedRead = readCachedJson(activeUrl, path).catch(() => null);
+    const indexedRead = range ? readCachedJson(activeUrl, photoViewerRangeCachePath(album.id)).catch(() => null) : null;
+    const cached = await cachedRead;
     if (!request.isCurrent()) return [];
     if (cached?.payload?.album?.images?.length >= totalImages) {
       return photoViewerItemsFromImages(cached.payload.album, cached.payload.album.images);
+    }
+    if (indexedRead) {
+      const saved = (await indexedRead)?.payload;
+      if (!request.isCurrent()) return [];
+      if (saved?.id === album.id && saved.updatedAt === album.updatedAt && saved.total === range.total) {
+        return photoViewerRangeItems(album, activeUrl, range);
+      }
     }
 
     const data = await fetchJson(activeUrl, path, {
@@ -2715,6 +2784,54 @@ export function createChannelViews(context) {
     if (!request.isCurrent()) return [];
     writeCachedJson(activeUrl, path, data, { fence: request.cacheFence }).catch(() => {});
     return photoViewerItemsFromImages(data.album || album, data.album?.images || currentImages);
+  }
+
+  function rememberPhotoViewerRange(target, data, activeUrl) {
+    const album = data.album;
+    if (album?.imageOffset !== 0 || album.imagesTruncated !== true) return;
+    const range = numberedPhotoViewerRange(album, album.images);
+    if (!range) return;
+    const account = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
+    if (account.owner === "pending" || !isAccountOwnerCurrent(account)) return;
+    photoViewerRanges.set(target, { activeUrl, account, total: range.total, updatedAt: album.updatedAt, saved: false });
+  }
+
+  function photoIndexedViewerItems(album, images, activeUrl) {
+    const fresh = photoViewerRanges.get(album);
+    if (!fresh || fresh.activeUrl !== activeUrl || !isAccountOwnerCurrent(fresh.account) || window.navigator?.onLine === false
+      || fresh.updatedAt !== album.updatedAt) return null;
+    const range = numberedPhotoViewerRange(album, images);
+    if (!range || range.total !== fresh.total) return null;
+    if (!fresh.saved) {
+      fresh.saved = true;
+      const fence = captureCachedJsonFence(activeUrl, fresh.account);
+      const payload = { id: album.id, total: range.total, updatedAt: album.updatedAt };
+      writeCachedJson(activeUrl, photoViewerRangeCachePath(album.id), payload, { fence }).then(
+        entry => { fresh.saved = Boolean(entry); }, () => { fresh.saved = false; }
+      );
+    }
+    return photoViewerRangeItems(album, activeUrl, range);
+  }
+
+  function numberedPhotoViewerRange(album, images) {
+    const total = Number(album.imageCount);
+    if (!album.id || !album.updatedAt || !Array.isArray(images) || !images.length || !Number.isSafeInteger(total)
+      || total <= images.length || total > PHOTO_VIEWER_INDEX_LIMIT) return null;
+    // Current album responses address every image by its one-based position.
+    // Check the visible prefix so older and custom URL schemes still hydrate.
+    const prefix = `/media/gallery/${encodeURIComponent(album.id)}/`;
+    if (!images.every((image, index) => image?.index === index + 1 && image.url === prefix + (index + 1))) return null;
+    return { total, prefix };
+  }
+
+  function photoViewerRangeCachePath(id) {
+    return `android:photo-viewer-range/${encodeURIComponent(id)}`;
+  }
+
+  function photoViewerRangeItems(album, activeUrl, range) {
+    const base = absoluteUrl(activeUrl, range.prefix);
+    const title = album.title || album.personName || album.subCategory || album.category || "套图";
+    return Array.from({ length: range.total }, (_, index) => ({ url: base + (index + 1), title }));
   }
 
   function hydratePhotoViewerItems(viewer, album = {}, sourceImages = [], sourceKey = "") {
@@ -2885,26 +3002,33 @@ export function createChannelViews(context) {
     cancelChannelRequest();
     resetMangaReaderProgressTracker();
     const mediaId = String(id || "").trim();
+    const episodeHint = nextEpisodeNavigation?.id === mediaId ? nextEpisodeNavigation : null;
+    nextEpisodeNavigation = null;
     const path = mediaDetailPath(mediaId);
     const activeUrl = getActiveUrl();
-    const isCurrent = () => isActive() && !isActive.signal?.aborted && getActiveUrl() === activeUrl;
+    let accountScope = null;
+    const isCurrent = () => isActive() && !isActive.signal?.aborted && getActiveUrl() === activeUrl
+      && (!accountScope || isAccountOwnerCurrent(accountScope));
     let playbackRequested = false;
     let progressHandler = null;
+    let confirmEpisodeNav = null;
     // Cache and network renders share one view subscription. Replacing the
     // surface replaces only its handler, not another native listener.
     const progressListenerReady = listenForNativeProgress(isActive.signal, event => {
       if (isCurrent()) progressHandler?.(event);
     });
     const playbackContext = {
-      sourceUrl: activeUrl, isActive: isCurrent, signal: isActive.signal,
+      sourceUrl: activeUrl, isActive: isCurrent, signal: isActive.signal, episodeHint,
       onPlayRequested: () => { playbackRequested = true; },
-      setProgressHandler: handler => { progressHandler = handler; return progressListenerReady; }
+      setProgressHandler: handler => { progressHandler = handler; return progressListenerReady; },
+      setEpisodeConfirmation: handler => { confirmEpisodeNav = handler; }
     };
     const loadingMode = ["western", "media", "movie", "tv", "anime"].includes(normalizeChannelMode(initialMode))
       ? normalizeChannelMode(initialMode)
       : "movie";
     const loadingChannel = channelConfig(loadingMode);
     let renderedCache = false;
+    let renderedCacheSignature = "";
 
     setActiveBottom(loadingMode);
     if (els.contentPanel) els.contentPanel.dataset.channelMode = loadingMode;
@@ -2921,17 +3045,30 @@ export function createChannelViews(context) {
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isCurrent()) return;
     if (String(cached?.payload?.item?.id || "") === mediaId) {
-      renderedCache = true;
-      renderGalleryMedia(cached.payload.item, cached, playbackContext);
+      const cachedScope = accountPayloadOwner(cached.payload) || captureAccountOwner(activeUrl);
+      if (isAccountOwnerCurrent(cachedScope)) {
+        accountScope = cachedScope;
+        renderedCache = true;
+        renderedCacheSignature = JSON.stringify(cached.payload.item);
+        renderGalleryMedia(cached.payload.item, cached, playbackContext);
+      }
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
       if (String(data?.item?.id || "") !== mediaId) throw new Error("媒体信息已变化，请返回列表刷新后重试。");
+      const freshScope = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
+      if (!isAccountOwnerCurrent(freshScope)) return;
       writeCachedJson(activeUrl, path, data).catch(() => {});
       // Once a click owns this detail, even a response arriving after playback
       // settles must not replace its button, error or freshly prepared progress.
       if (!isCurrent() || playbackRequested) return;
+      accountScope = freshScope;
+      if (renderedCache && JSON.stringify(data.item) === renderedCacheSignature) {
+        applyGalleryMediaMeta(data.item);
+        confirmEpisodeNav?.();
+        return;
+      }
       renderGalleryMedia(data.item, null, playbackContext);
     } catch (error) {
       if (!isCurrent() || playbackRequested) return;
@@ -2943,6 +3080,14 @@ export function createChannelViews(context) {
     }
   }
 
+  function applyGalleryMediaMeta(item, cacheEntry = null) {
+    const meta = [item.ext ? item.ext.toUpperCase() : "", formatBytes(item.size), item.exists === false ? "文件不可用" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+    els.viewMeta.textContent = `${meta}${suffix}`;
+  }
+
   function renderGalleryMedia(item = {}, cacheEntry = null, playbackContext = {}) {
     item = normalizeMediaMetadataItem(item);
     const mode = normalizeChannelMode(item.mediaKind || item.type);
@@ -2950,16 +3095,11 @@ export function createChannelViews(context) {
     const bottomMode = mode === "movie" || mode === "tv" || mode === "anime" ? "media" : mode;
     const sourceUrl = playbackContext.sourceUrl || getActiveUrl();
     const streamUrl = mediaPlaybackUrl(sourceUrl, item.streamUrl);
-    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-    const meta = [item.ext ? item.ext.toUpperCase() : "", formatBytes(item.size), item.exists === false ? "文件不可用" : ""]
-      .filter(Boolean)
-      .join(" · ");
-
     setActiveBottom(bottomMode);
     if (els.contentPanel) els.contentPanel.dataset.channelMode = mode;
     els.viewKicker.textContent = [channel.label, item.seriesName || item.category].filter(Boolean).join(" · ");
     els.viewTitle.textContent = mediaDisplayTitle(item, channel);
-    els.viewMeta.textContent = `${meta}${suffix}`;
+    applyGalleryMediaMeta(item, cacheEntry);
     els.viewContent.innerHTML = "";
     recordMediaRecent(item, channel, mode);
 
@@ -3327,7 +3467,11 @@ export function createChannelViews(context) {
       category: item.category || item.tvSeries?.category || "",
       sort: "title"
     };
+    const listKey = channelItemsPath(mode, 1, filters);
+    let hint = playbackContext.episodeHint;
+    if (!hint || hint.listKey !== listKey || hint.sourceUrl !== sourceUrl) hint = null;
     let loading = false;
+    let retryAfterConfirmation = false;
     async function loadEpisodes() {
       if (loading || !isCurrent()) return;
       loading = true;
@@ -3336,17 +3480,38 @@ export function createChannelViews(context) {
       label.textContent = "正在读取集数";
       retry.hidden = true;
       retry.disabled = true;
-      bindEpisodeNavButton(prev, null, isCurrent, mode);
-      bindEpisodeNavButton(next, null, isCurrent, mode);
+      bindEpisodeNavButton(prev, null);
+      bindEpisodeNavButton(next, null);
       let offset = 0, total = null, scanRevision = null, previous = null, current = null;
       const seen = new Set();
-      const complete = (following) => {
+      const complete = (following, data) => {
+        const accountScope = accountPayloadOwner(data) || captureAccountOwner(sourceUrl);
+        const { listRevision, scannedAt } = scanRevision;
+        const canNavigate = () => isCurrent() && isAccountOwnerCurrent(accountScope);
+        const bindNeighbor = (button, episode, position) => bindEpisodeNavButton(button, episode, canNavigate, mode, () => {
+          nextEpisodeNavigation = listRevision ? { id: episode.id, listKey, sourceUrl, accountScope, position, total, listRevision, scannedAt } : null;
+        });
         label.textContent = `第 ${current.position} / ${total} 集`;
         row.dataset.state = "ready";
-        bindEpisodeNavButton(prev, current.previous, isCurrent, mode);
-        bindEpisodeNavButton(next, following, isCurrent, mode);
+        bindNeighbor(prev, current.previous, current.position - 1);
+        bindNeighbor(next, following, current.position + 1);
       };
       try {
+        const candidate = hint;
+        hint = null;
+        if (candidate && isAccountOwnerCurrent(candidate.accountScope)) {
+          // The click provides an ordinal from a verified snapshot. Confirm it
+          // against the current directory before offering either neighbour.
+          const neighbors = await fetchEpisodeNavigationWindow(mode, filters, candidate, playbackContext.signal);
+          if (!isCurrent() || !isAccountOwnerCurrent(candidate.accountScope)) return;
+          if (neighbors) {
+            total = candidate.total;
+            scanRevision = candidate;
+            current = { position: candidate.position, previous: neighbors.previous };
+            complete(neighbors.following, neighbors.data);
+            return;
+          }
+        }
         while (isCurrent()) {
           const data = await fetchJson(sourceUrl, channelItemsPath(mode, pageSize, filters, offset), {
             timeoutMs: 12000, signal: playbackContext.signal, cache: "no-store"
@@ -3356,12 +3521,12 @@ export function createChannelViews(context) {
           if (!Array.isArray(episodes) || episodes.length > pageSize || data.offset !== offset
             || !Number.isSafeInteger(data.total) || data.total < 0 || offset + episodes.length > data.total
             || (!episodes.length && offset < data.total) || (total !== null && data.total !== total)
-            || (scanRevision !== null && String(data.scannedAt || "") !== scanRevision)
+            || (scanRevision !== null && (String(data.scannedAt || "") !== scanRevision.scannedAt || channelRevisionChanged(scanRevision, data)))
             || String(data.seriesKey || "") !== seriesKey) {
             throw new Error("选集目录有变化");
           }
           total = data.total;
-          scanRevision = String(data.scannedAt || "");
+          scanRevision = { scannedAt: String(data.scannedAt || ""), listRevision: data.listRevision };
           for (const episode of episodes) {
             const id = String(episode?.id || "").trim();
             if (!id || seen.has(id) || (episode.seriesKey && episode.seriesKey !== seriesKey)) throw new Error("选集目录有变化");
@@ -3371,19 +3536,19 @@ export function createChannelViews(context) {
             const episode = episodes[index];
             // Stop as soon as the neighbour is known; long series need only
             // bounded pages up to this episode, never a full-library download.
-            if (current) { complete(episode); return; }
+            if (current) { complete(episode, data); return; }
             if (episode.id === item.id) current = { position: offset + index + 1, previous };
             previous = episode;
           }
           offset += episodes.length;
           if (offset >= total) {
             if (!current) throw new Error("当前集不在目录");
-            complete(null);
+            complete(null, data);
             return;
           }
         }
       } catch (error) {
-        if (!isCurrent()) return;
+        if (!isCurrent() || error?.code === "ACCOUNT_CHANGED") return;
         row.dataset.state = "error";
         label.textContent = ["选集目录有变化", "当前集不在目录"].includes(error.message) ? error.message : "集数读取失败";
         retry.hidden = false;
@@ -3391,12 +3556,39 @@ export function createChannelViews(context) {
       } finally {
         loading = false;
         if (isCurrent()) row.removeAttribute("aria-busy");
+        const retryFailedRead = retryAfterConfirmation && row.dataset.state === "error";
+        retryAfterConfirmation = false;
+        if (retryFailedRead) void loadEpisodes();
       }
     }
+    playbackContext.setEpisodeConfirmation?.(() => {
+      if (!isCurrent()) return;
+      // An identical fresh detail confirms the mounted row. Keep its in-flight
+      // scan, but retain one retry if the cached view's first attempt fails.
+      if (loading) retryAfterConfirmation = true;
+      else if (row.dataset.state === "error") void loadEpisodes();
+    });
     retry.addEventListener("click", loadEpisodes);
     // The detail renderer mounts this newly created row synchronously.
     Promise.resolve().then(loadEpisodes);
     return row;
+  }
+
+  async function fetchEpisodeNavigationWindow(mode, filters, hint, signal) {
+    const offset = Math.max(0, hint.position - 2);
+    const limit = Math.min(hint.position + 1, hint.total) - offset;
+    const index = hint.position - 1 - offset;
+    const data = await fetchJson(hint.sourceUrl, channelItemsPath(mode, limit, filters, offset), {
+      timeoutMs: 12000, signal, cache: "no-store", accountScope: hint.accountScope
+    });
+    const episodes = data?.items;
+    if (data?.offset !== offset || data.total !== hint.total || data.seriesKey !== filters.seriesKey
+      || String(data.scannedAt || "") !== hint.scannedAt || channelRevisionChanged(hint, data)
+      || !Array.isArray(episodes) || episodes.length !== limit || episodes[index]?.id !== hint.id) return null;
+    const ids = episodes.map(episode => String(episode?.id || "").trim());
+    if (ids.includes("") || new Set(ids).size !== ids.length
+      || episodes.some(episode => episode.seriesKey && episode.seriesKey !== filters.seriesKey)) return null;
+    return { previous: episodes[index - 1], following: episodes[index + 1], data };
   }
 
   function createEpisodeNavButton(label) {
@@ -3407,7 +3599,7 @@ export function createChannelViews(context) {
     return button;
   }
 
-  function bindEpisodeNavButton(button, episode, isCurrent = () => true, mode = "tv") {
+  function bindEpisodeNavButton(button, episode, isCurrent, mode, beforeNavigate) {
     if (!episode?.id) {
       button.disabled = true;
       button.onclick = null;
@@ -3415,7 +3607,10 @@ export function createChannelViews(context) {
     }
     button.disabled = false;
     button.onclick = () => {
-      if (!button.disabled && isCurrent()) showMediaDetail(episode.id, mode);
+      if (!button.disabled && isCurrent()) {
+        beforeNavigate();
+        showMediaDetail(episode.id, mode);
+      }
     };
   }
 
@@ -4239,6 +4434,16 @@ export function createChannelViews(context) {
     return position?.mangaId === mangaId && Number(position.chapterIndex) === Number(chapterIndex) ? position : null;
   }
 
+  function ensureMangaPageLimit(requiredLimit) {
+    // Slow connections increase the window in small steps; include the target now.
+    while (getMangaImageLimit() < requiredLimit) {
+      const before = getMangaImageLimit();
+      increaseMangaImageLimit(requiredLimit - before);
+      if (getMangaImageLimit() <= before) break;
+    }
+    return Math.max(getMangaImageLimit(), requiredLimit);
+  }
+
   function renderMangaChapterData(mangaId, data = {}, cacheEntry = null, requestedPosition = null, signal = null) {
     const previousPosition = resetMangaReaderProgressTracker();
     const comic = data.comic || {};
@@ -4246,18 +4451,12 @@ export function createChannelViews(context) {
     const images = Array.isArray(chapter.images) ? chapter.images : [];
     const navigation = chapter.navigation || {};
     const position = matchingMangaPosition(previousPosition, mangaId, chapter.index) || requestedPosition;
+    const requestedPage = Math.max(1, Math.floor(Number(position?.pageIndex) || 1));
     const resumeRequest = position ? {
       ...position,
-      pageIndex: Math.min(images.length || 1, Math.max(1, Math.floor(Number(position.pageIndex) || 1)))
+      pageIndex: Math.min(images.length || 1, requestedPage)
     } : null;
-    const requiredLimit = resumeRequest?.pageIndex || 1;
-    // Slow connections increase the window in small steps; include the target now.
-    while (getMangaImageLimit() < requiredLimit) {
-      const before = getMangaImageLimit();
-      increaseMangaImageLimit(requiredLimit - before);
-      if (getMangaImageLimit() <= before) break;
-    }
-    const visible = images.slice(0, Math.max(getMangaImageLimit(), requiredLimit));
+    const visible = images.slice(0, ensureMangaPageLimit(resumeRequest?.pageIndex || 1));
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
     const chapterPositionText = Number(navigation.total || 0) > 0
       ? ` · 第 ${formatNumber(navigation.position)} / ${formatNumber(navigation.total)} 话`
@@ -4280,6 +4479,8 @@ export function createChannelViews(context) {
 
     const list = document.createElement("div");
     list.className = "manga-reader-list";
+    const activeUrl = getActiveUrl();
+    const account = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
     const viewerItems = images
       .map((image) => ({
         url: absoluteUrl(getActiveUrl(), image.url),
@@ -4287,34 +4488,59 @@ export function createChannelViews(context) {
       }))
       .filter((item) => item.url);
     visible.forEach((image, position) => list.append(createMangaPage(mangaId, chapter, image, viewerItems, { position: position + 1 })));
+    let visibleCount = visible.length;
+    let more = null;
+    const ownsReader = () => mangaReaderProgressTracker === tracker && list.isConnected && !signal?.aborted
+      && activeUrl === getActiveUrl() && isAccountOwnerCurrent(account);
+    const appendThrough = (limit) => {
+      const nextLimit = Math.min(images.length, limit);
+      if (nextLimit <= visibleCount) return;
+      const nextPages = images.slice(visibleCount, nextLimit).map((image, offset) =>
+        createMangaPage(mangaId, chapter, image, viewerItems, { position: visibleCount + offset + 1 }));
+      list.append(...nextPages);
+      tracker.observePages(nextPages);
+      visibleCount = nextLimit;
+      const nextMore = visibleCount < images.length ? makeLoadMore() : null;
+      if (nextMore) more?.replaceWith(nextMore);
+      else more?.remove();
+      more = nextMore;
+    };
+    const makeLoadMore = () => createLoadMoreButton(
+      `向下滑动继续显示 ${formatNumber(visibleCount)} / ${formatNumber(images.length)}`, () => {
+        if (!ownsReader()) return;
+        increaseMangaImageLimit(12);
+        appendThrough(Math.max(visibleCount + 12, getMangaImageLimit()));
+      }, { signal }
+    );
+    const resumeMountedPage = (pageIndex) => {
+      if (!ownsReader()) return false;
+      if (cacheEntry && Number(pageIndex) > images.length) {
+        requestMangaResume(mangaId, chapter.index, pageIndex);
+        renderCurrentView();
+        return true;
+      }
+      const target = Math.min(images.length, Math.max(1, Math.floor(Number(pageIndex) || 1)));
+      if (target > visibleCount) appendThrough(ensureMangaPageLimit(target));
+      restoreRequestedMangaPage({ pageIndex: target }, list, tracker);
+      return true;
+    };
     const progress = createMangaReaderProgress(mangaId, comic, chapter, images, navigation, list, {
-      suppressResume: Boolean(resumeRequest)
+      suppressResume: Boolean(resumeRequest),
+      onResume: resumeMountedPage
     });
     els.viewContent.append(progress, list);
-
-    let visibleCount = visible.length;
-    const makeLoadMore = () => {
-      const trigger = createLoadMoreButton(`向下滑动继续显示 ${formatNumber(visibleCount)} / ${formatNumber(images.length)}`, () => {
-        increaseMangaImageLimit(12);
-        const nextLimit = Math.min(images.length, Math.max(visibleCount + 12, getMangaImageLimit()));
-        const nextPages = images.slice(visibleCount, nextLimit).map((image, offset) =>
-          createMangaPage(mangaId, chapter, image, viewerItems, { position: visibleCount + offset + 1 }));
-        list.append(...nextPages);
-        tracker.observePages(nextPages);
-        visibleCount = nextLimit;
-        if (visibleCount < images.length) trigger.replaceWith(makeLoadMore());
-        else trigger.remove();
-      });
-      return trigger;
-    };
     if (visible.length < images.length) {
-      els.viewContent.append(makeLoadMore());
+      more = makeLoadMore();
+      els.viewContent.append(more);
     }
     els.viewContent.append(createMangaChapterNavigation(mangaId, navigation, {
       bottom: true,
       chapterIndex: chapter.index
     }));
-    const tracker = bindMangaReaderProgress(mangaId, comic, chapter, images, navigation, list, progress, { resumeRequest, signal });
+    const tracker = bindMangaReaderProgress(mangaId, comic, chapter, images, navigation, list, progress, {
+      resumeRequest, signal,
+      pendingResumePage: cacheEntry && requestedPage > images.length ? requestedPage : null
+    });
     restoreRequestedMangaPage(resumeRequest, list, tracker);
   }
 
@@ -4393,8 +4619,7 @@ export function createChannelViews(context) {
       resume.className = "manga-reader-resume";
       resume.textContent = `回到第 ${formatNumber(saved.pageIndex)} 张`;
       resume.addEventListener("click", () => {
-        requestMangaResume(mangaId, chapter.index, saved.pageIndex);
-        renderCurrentView();
+        if (resume.isConnected && options.onResume?.(saved.pageIndex)) resume.remove();
       });
       progress.append(resume);
     }
@@ -4413,6 +4638,7 @@ export function createChannelViews(context) {
     let observer = null;
     let disposed = false;
     let restoring = Boolean(options.resumeRequest);
+    let pendingResumePage = options.pendingResumePage;
     let restoreCleanup = () => {};
     const visiblePages = new Map();
 
@@ -4433,6 +4659,7 @@ export function createChannelViews(context) {
       if (disposed || !list.isConnected) return;
       const current = Math.min(total, Math.max(1, Number(pageIndex || 1)));
       if (current === activePage && persist && recordedPage === current) return;
+      if (!restoring && persist && current !== activePage) pendingResumePage = null;
       activePage = current;
       const label = progress?.querySelector("[data-manga-progress-current]");
       const fill = progress?.querySelector("[data-manga-progress-fill]");
@@ -4444,7 +4671,9 @@ export function createChannelViews(context) {
         ? ` · 第 ${formatNumber(navigation.position)} / ${formatNumber(navigation.total)} 话`
         : "";
       els.viewMeta.textContent = `${formatNumber(total)} 张 · 读到第 ${formatNumber(current)} 张${chapterText}`;
-      if (!persist) return;
+      // A short cached chapter may display its last page while the requested
+      // saved page is still unavailable. That temporary anchor is not progress.
+      if (!persist || pendingResumePage) return;
       recordedPage = current;
       pendingProgress = {
         chapterIndex: chapter.index,
@@ -4475,8 +4704,8 @@ export function createChannelViews(context) {
       setRestoring: (value) => { restoring = value; },
       setRestoreCleanup: (cleanup) => { restoreCleanup(); restoreCleanup = cleanup; },
       snapshot: () => ({
-        mangaId, chapterIndex: chapter.index, pageIndex: activePage || 1,
-        offset: !restoring && pages[activePage - 1]?.isConnected
+        mangaId, chapterIndex: chapter.index, pageIndex: pendingResumePage || activePage || 1,
+        offset: !pendingResumePage && !restoring && pages[activePage - 1]?.isConnected
           ? pages[activePage - 1].getBoundingClientRect().top
           : Number(options.resumeRequest?.offset ?? 60)
       }),
@@ -4496,6 +4725,7 @@ export function createChannelViews(context) {
     options.signal?.addEventListener("abort", onAbort, { once: true });
 
     update(options.resumeRequest?.pageIndex || 1, false);
+    if (progress?.querySelector(".manga-reader-resume")) recordedPage = activePage;
     if ("IntersectionObserver" in window) {
       observer = new IntersectionObserver((entries) => {
         if (disposed || !list.isConnected) return;

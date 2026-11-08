@@ -32,6 +32,7 @@ export function createCodePrefixPage(deps) {
   let indexLoadPending = false;
   let indexLoadTimer = null;
   let indexQuery = "";
+  let prefixIndex = null;
   let renderedPrefixes = [];
   let detailPageOwner = null;
 
@@ -55,6 +56,7 @@ export function createCodePrefixPage(deps) {
 
   function invalidateIndex() {
     indexRequests.cancel();
+    prefixIndex = null;
     state.codePrefixes = [];
     state.codePrefixIndexLocalCount = 0;
     state.codePrefixMappedCount = 0;
@@ -238,13 +240,23 @@ export function createCodePrefixPage(deps) {
 
   function renderIndex() {
     if (state.activeView !== "codes" || state.selectedCodePrefix) return;
-    disconnectIndexAutoload();
+    const previous = renderedPrefixes;
     const prefixes = sortedPrefixes();
     renderedPrefixes = prefixes;
     const summary = els.statsRow.querySelector(".code-prefix-index-summary");
-    if (summary) summary.textContent = `${formatNumber(prefixes.length)} / ${formatNumber(state.codePrefixes.length)} 个番号前缀`;
+    const message = `${formatNumber(prefixes.length)} / ${formatNumber(state.codePrefixes.length)} 个番号前缀`;
+    if (summary && summary.textContent !== message) summary.textContent = message;
     const clear = els.statsRow.querySelector(".code-prefix-index-clear");
     if (clear) clear.hidden = !indexQuery;
+    const visibleCount = Math.min(prefixes.length, state.codePrefixVisibleLimit);
+    const body = els.workGrid.querySelector(".code-prefix-table tbody");
+    const sameRows = prefixes === previous || (prefixes.length === previous.length && prefixes.every((item, index) => item === previous[index]));
+    if (visibleCount && body?.children.length === visibleCount && sameRows) {
+      const loader = els.workGrid.querySelector(".code-prefix-index-load-more");
+      if (loader && !indexLoadObserver) observeIndexLoadMore(loader);
+      return;
+    }
+    disconnectIndexAutoload();
     els.workGrid.innerHTML = "";
     if (!prefixes.length) {
       appendEmpty(indexQuery.trim() ? "没有匹配的番号前缀或厂商，试试其他名称。" : "本地资料库里还没有可识别的番号。");
@@ -265,9 +277,9 @@ export function createCodePrefixPage(deps) {
         </tr>
       </thead>
     `;
-    const body = document.createElement("tbody");
-    for (const item of visible) body.append(createPrefixRow(item));
-    table.append(body);
+    const nextBody = document.createElement("tbody");
+    for (const item of visible) nextBody.append(createPrefixRow(item));
+    table.append(nextBody);
     wrap.append(table);
     els.workGrid.append(wrap);
 
@@ -319,13 +331,31 @@ export function createCodePrefixPage(deps) {
   }
 
   function sortedPrefixes() {
-    const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
-    const query = indexQuery.trim().toLocaleLowerCase();
-    return (state.codePrefixes || []).filter(item => !query || [item.prefix, item.maker?.name, ...(item.makers || []).map(maker => maker.name)]
-      .some(value => String(value || "").toLocaleLowerCase().includes(query))).sort((a, b) =>
-      state.codePrefixSortMode === "name"
+    const source = state.codePrefixes || [];
+    const sort = state.codePrefixSortMode;
+    if (prefixIndex?.source !== source) prefixIndex = { source, keys: new WeakMap(), sort: null, ordered: null };
+    if (prefixIndex.sort !== sort || !prefixIndex.ordered) {
+      const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+      prefixIndex.sort = sort;
+      prefixIndex.ordered = [...source].sort((a, b) => sort === "name"
         ? collator.compare(a.prefix, b.prefix) || Number(b.localCount || 0) - Number(a.localCount || 0)
         : Number(b.localCount || 0) - Number(a.localCount || 0) || collator.compare(a.prefix, b.prefix));
+    }
+    const query = indexQuery.trim().toLocaleLowerCase();
+    const { ordered, keys } = prefixIndex;
+    if (!query) return ordered;
+    const matches = ordered.filter(item => {
+      let terms = keys.get(item);
+      if (!terms) {
+        terms = { prefix: String(item.prefix || "").toLocaleLowerCase(), makers: null };
+        keys.set(item, terms);
+      }
+      if (terms.prefix.includes(query)) return true;
+      terms.makers ||= [item.maker?.name, ...(item.makers || []).map(maker => maker.name)]
+        .map(name => String(name || "").toLocaleLowerCase());
+      return terms.makers.some(name => name.includes(query));
+    });
+    return matches.length === ordered.length ? ordered : matches;
   }
 
   function appendIndexLoadMore(visibleCount, totalCount) {

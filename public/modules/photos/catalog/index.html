@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>套图资料库 · FanHao</title>
+  <link rel="stylesheet" href="/modules/photos/catalog/catalog.css">
+  <script type="module" src="/modules/photos/catalog/catalog.js"></script>
+</head>
+<body>
+  <main class="catalog">
+    <header class="catalog-header">
+      <a id="catalog-back" href="/photo">← 图库</a>
+      <div class="page-tabs" aria-label="套图工具">
+        <a href="#directory">资料目录</a>
+        <a href="#intake">入库工作台</a>
+      </div>
+    </header>
+
+    <section id="directory" aria-labelledby="directory-title">
+      <div class="section-heading">
+        <div>
+          <h1 id="directory-title">套图资料库</h1>
+          <p>按分类、合集、人物和期号查找套图。已关联的本地包可以直接阅读。</p>
+        </div>
+        <dl id="catalog-counts" class="catalog-counts" hidden>
+          <div><dt id="local-count-label">有本地包</dt><dd id="local-count">—</dd></div>
+          <div><dt id="source-count-label">有来源</dt><dd id="source-count">—</dd></div>
+        </dl>
+      </div>
+      <div class="catalog-overview" role="region" aria-labelledby="catalog-stats-title">
+        <h2 id="catalog-stats-title">套图目录统计</h2>
+        <p id="catalog-stats-status" class="field-help" role="status">正在读取统计…</p>
+        <dl id="catalog-stats-values" class="catalog-stats-values" hidden></dl>
+        <details id="catalog-stats-categories" hidden>
+          <summary>查看各分类统计</summary>
+          <ul id="catalog-stats-category-list" class="catalog-stats-category-list"></ul>
+        </details>
+      </div>
+      <form id="catalog-filter" class="filters" role="search">
+        <label class="search-field">搜索
+          <span class="input-action"><input name="q" type="search" placeholder="期号、标题、合集或人物"><button type="submit">搜索</button></span>
+        </label>
+        <label>按分类<select name="category"><option value="">全部分类</option></select></label>
+        <label>按合集<select name="collection"><option value="">全部合集</option></select></label>
+        <label>按人物<select name="person"><option value="">全部人物</option></select></label>
+        <label>可用范围<select name="scope"><option value="all">全部</option><option value="local">有本地包</option><option value="source">有来源</option></select></label>
+        <label>排序<select name="sort"><option value="updated">最近更新</option><option value="release">发行日期</option><option value="size">本地大小</option></select></label>
+      </form>
+      <p id="catalog-status" class="status" role="status">正在读取目录…</p>
+      <ul id="catalog-results" class="result-list"></ul>
+      <button id="catalog-more" class="secondary" type="button" hidden>加载更多</button>
+    </section>
+
+    <section id="intake" aria-labelledby="intake-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="intake-title">入库工作台</h2>
+          <p>预览资料后再确认入库。可登记来源或关联图库已扫描的包。</p>
+        </div>
+      </div>
+      <details id="intake-panel">
+        <summary>打开入库工作台</summary>
+        <p id="intake-linked-works" class="field-help" hidden><a href="#directory">查看该合集已登记作品</a></p>
+        <form id="intake-preview-form">
+          <div class="preview-fields">
+            <label>资料来自<select name="mode"><option value="source">来源页面</option><option value="local">本地扫描目录</option><option value="manifest">JSON 清单</option></select></label>
+            <label id="source-field">来源分类或合集 URL<input name="url" type="url" placeholder="https://…" required></label>
+            <label id="local-field" hidden>已扫描合集<select name="localCollectionId" disabled required><option value="">选择合集</option></select></label>
+            <label id="source-local-field">比对本地合集（选填）<select name="sourceLocalCollectionId"><option value="">仅登记来源</option></select></label>
+            <label id="source-query-field" hidden>按包名查找关联候选（选填）<input name="archiveQuery" type="search" disabled></label>
+            <div id="manifest-field" class="manifest-field" hidden>
+              <label>选择清单文件（选填）<input name="manifestFile" type="file" accept=".json,application/json" disabled></label>
+              <label>JSON 清单<textarea name="manifest" rows="5" spellcheck="false" disabled required></textarea></label>
+            </div>
+          </div>
+          <p id="intake-example" class="field-help" hidden></p>
+          <div class="preview-actions">
+            <button id="intake-preview-button" type="submit">生成预览</button>
+            <button id="intake-sample-source" class="secondary" type="button" hidden>浏览 5280k 合集目录</button>
+          </div>
+        </form>
+        <p id="intake-status" class="status" role="status"></p>
+        <form id="intake-confirm-form" hidden>
+          <h3 id="intake-plan-title">待确认</h3>
+          <p id="intake-active-source" class="field-help" hidden></p>
+          <ul id="intake-warnings" class="warnings" hidden></ul>
+          <ul id="intake-source-collections" class="result-list" hidden></ul>
+          <ul id="intake-changes" class="result-list"></ul>
+          <div id="intake-actions" class="confirmation" hidden>
+            <label class="check"><input name="confirmed" type="checkbox">确认将选中的资料写入套图目录</label>
+            <button id="intake-commit-button" type="submit" disabled>确认入库</button>
+          </div>
+          <div id="intake-next" class="confirmation" hidden>
+            <p class="field-help">每批独立确认。加载下一批会替换当前预览。</p>
+            <button id="intake-next-button" class="secondary" type="button">预览下一批</button>
+          </div>
+        </form>
+        <div id="intake-receipt" class="receipt" hidden>
+          <h3>入库回执</h3>
+          <p id="receipt-status" class="status" role="status"></p>
+          <ul id="receipt-results" class="result-list"></ul>
+        </div>
+      </details>
+    </section>
+  </main>
+</body>
+</html>

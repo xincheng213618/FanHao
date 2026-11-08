@@ -95,6 +95,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       button.type = "button";
       button.dataset.galleryMediaType = item?.type === "video" ? "video" : "image";
       button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", "false");
       const mediaLabel = item?.type === "video" ? "视频" : "图片";
       button.setAttribute("aria-label", `查看第 ${index + 1} 项，共 ${images.length} 项，${mediaLabel}`);
       progress.append(button);
@@ -135,6 +136,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
     edgeNext.title = "下一张（→）";
 
     let currentIndex = 0;
+    let committedProgressIndex = -1;
     let requestedIndex = 0;
     let currentReady = false;
     let image = null;
@@ -361,17 +363,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
       loadStatus.setAttribute("aria-hidden", "false");
       loadStatus.classList.add("is-visible", "is-error");
     };
-    const animateImage = (direction) => {
-      window.clearTimeout(animationTimer);
-      if (!image) return;
-      image.classList.remove("is-entering-next", "is-entering-previous");
-      if (!direction || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
-      image.getBoundingClientRect();
-      image.classList.add(direction > 0 ? "is-entering-next" : "is-entering-previous");
-      animationTimer = window.setTimeout(() => {
-        image.classList.remove("is-entering-next", "is-entering-previous");
-      }, 260);
-    };
     const showBoundary = (direction) => {
       window.clearTimeout(boundaryTimer);
       wrap.classList.remove("is-boundary-start", "is-boundary-end");
@@ -380,41 +371,58 @@ export function createShortVideoGalleryPlayer(dependencies) {
         wrap.classList.remove("is-boundary-start", "is-boundary-end");
       }, 280);
     };
-    const syncCommittedUi = (direction = 0) => {
+    const syncCommittedUi = () => {
       const current = images[currentIndex];
       counter.textContent = `${currentIndex + 1}/${images.length}`;
       counter.setAttribute("aria-label", `第 ${currentIndex + 1} 项，共 ${images.length} 项`);
-      counter.classList.remove("is-page-next", "is-page-previous");
-      window.clearTimeout(counterMotionTimer);
-      if (direction && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
-        counter.getBoundingClientRect();
-        counter.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
-        counterMotionTimer = window.setTimeout(() => {
-          counter.classList.remove("is-page-next", "is-page-previous");
-        }, 220);
-      }
       wrap.dataset.galleryIndex = String(currentIndex);
       wrap.classList.toggle("is-gallery-video-item", current?.type === "video");
-      progressButtons.forEach((button, itemIndex) => {
-        const active = itemIndex === currentIndex;
-        button.classList.toggle("active", active);
-        button.classList.toggle("is-past", itemIndex < currentIndex);
-        button.setAttribute("aria-selected", String(active));
-        if (active) button.setAttribute("aria-current", "true");
-        else button.removeAttribute("aria-current");
-      });
+      if (committedProgressIndex !== currentIndex) {
+        const previous = progressButtons[committedProgressIndex], active = progressButtons[currentIndex];
+        if (previous) {
+          previous.classList.remove("active");
+          previous.setAttribute("aria-selected", "false");
+          previous.removeAttribute("aria-current");
+          for (let index = Math.min(committedProgressIndex, currentIndex); index < Math.max(committedProgressIndex, currentIndex); index++) {
+            progressButtons[index].classList.toggle("is-past", index < currentIndex);
+          }
+        }
+        if (active) {
+          active.classList.add("active");
+          active.setAttribute("aria-selected", "true");
+          active.setAttribute("aria-current", "true");
+        }
+        committedProgressIndex = currentIndex;
+      }
       if (current) {
         const backdropUrl = current.posterUrl || current.url;
         stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(backdropUrl)})`);
       }
     };
-    const restartProgressTiming = () => {
+    const restartGalleryAnimations = (direction, animateImage) => {
+      const animatePage = direction && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      if (direction != null) {
+        window.clearTimeout(counterMotionTimer);
+        counter.classList.remove("is-page-next", "is-page-previous");
+        if (animateImage) {
+          window.clearTimeout(animationTimer);
+          image?.classList.remove("is-entering-next", "is-entering-previous");
+        }
+      }
       const activeButton = progressButtons[currentIndex];
-      if (!activeButton) return;
-      activeButton.style.setProperty("--short-video-gallery-media-progress", "0");
-      activeButton.classList.remove("active");
-      activeButton.getBoundingClientRect();
-      activeButton.classList.add("active");
+      if (activeButton) {
+        activeButton.style.setProperty("--short-video-gallery-media-progress", "0");
+        activeButton.classList.remove("active");
+      }
+      // Commit the cleared animation styles together before restarting them.
+      if (activeButton || animatePage) (activeButton || counter).getBoundingClientRect();
+      activeButton?.classList.add("active");
+      if (!animatePage) return;
+      counter.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
+      counterMotionTimer = window.setTimeout(() => counter.classList.remove("is-page-next", "is-page-previous"), 220);
+      if (!animateImage || !image) return;
+      image.classList.add(direction > 0 ? "is-entering-next" : "is-entering-previous");
+      animationTimer = window.setTimeout(() => image.classList.remove("is-entering-next", "is-entering-previous"), 260);
     };
     const syncRequestedUi = () => {
       wrap.dataset.galleryRequestedIndex = String(requestedIndex);
@@ -510,12 +518,12 @@ export function createShortVideoGalleryPlayer(dependencies) {
         advanceFromEntry(entry);
       }, Math.max(0, advanceRemainingMs));
     };
-    const scheduleAdvance = (entry) => {
+    const scheduleAdvance = (entry, { direction, animateImage = true } = {}) => {
       clearAdvance();
       if (!entry) return;
       advanceEntry = entry;
       syncGalleryPlaybackState();
-      restartProgressTiming();
+      restartGalleryAnimations(direction, animateImage);
       startAdvance(entry);
     };
     const pauseAutoAdvance = (reason = "visibility") => {
@@ -669,10 +677,9 @@ export function createShortVideoGalleryPlayer(dependencies) {
       currentIndex = entry.index;
       requestedIndex = entry.index;
       currentReady = true;
-      syncCommittedUi(direction);
+      syncCommittedUi();
       syncRequestedUi();
       hideLoadStatus();
-      if (commitOptions.animate !== false) animateImage(direction);
       applyVideoOrientation(
         stage?.closest?.(".short-video-reel-panel"),
         stage,
@@ -681,7 +688,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       );
       if (ghost) trimImageCache(new Set([currentIndex]));
       else preloadAround(currentIndex, direction);
-      scheduleAdvance(entry);
+      scheduleAdvance(entry, { direction, animateImage: commitOptions.animate !== false });
       if (!direction) maybeShowGalleryGestureHint();
     };
     const show = (index, direction = 0) => {

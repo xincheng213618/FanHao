@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-// Full immutable snapshots of ONE book only. Ordinals, titles and hashes are
-// never chapter identity. Compare exact stored text; do not normalize it here.
+// Complete chapter lists for ONE book only. The store can omit old body text
+// that cannot match an incoming chapter or the progress anchor. Compare all
+// retained bodies exactly. Ordinals, titles and hashes are never identity.
 export function reconcileChapters({ oldChapters, incomingChapters, oldRevision, newRevision, progress = null, allocateId = randomUUID }) {
   const validate = (chapters, old) => {
     if (!Array.isArray(chapters)) throw new TypeError("章节快照必须完整");

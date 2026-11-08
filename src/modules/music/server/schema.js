@@ -6,6 +6,26 @@ import {
   MUSIC_PHONETIC_INDEX_VERSION
 } from "./search.js";
 
+const SHORT_SEARCH_TABLE = `CREATE VIRTUAL TABLE IF NOT EXISTS music_search_short USING fts5(
+      track_id UNINDEXED,
+      title,
+      artist,
+      album,
+      genre,
+      file_name,
+      tokenize='unicode61 remove_diacritics 0'
+    )`;
+const PHONETIC_SEARCH_TABLE = `CREATE VIRTUAL TABLE IF NOT EXISTS music_search_phonetic USING fts5(
+      track_id UNINDEXED,
+      artist_id UNINDEXED,
+      album_id UNINDEXED,
+      title,
+      artist,
+      album,
+      file_name,
+      tokenize='unicode61 remove_diacritics 2'
+    )`;
+
 export function ensureSchema(db, options = {}) {
   if (options.configureConnection !== false) configureMusicDatabase(db, options);
   db.exec(`
@@ -122,29 +142,12 @@ export function ensureSchema(db, options = {}) {
       lyrics,
       tokenize='trigram'
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_short USING fts5(
-      track_id UNINDEXED,
-      title,
-      artist,
-      album,
-      genre,
-      file_name,
-      tokenize='unicode61 remove_diacritics 0'
-    );
+    ${SHORT_SEARCH_TABLE};
     CREATE VIRTUAL TABLE IF NOT EXISTS music_search_short_vocab USING fts5vocab(
       music_search_short,
       'row'
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_phonetic USING fts5(
-      track_id UNINDEXED,
-      artist_id UNINDEXED,
-      album_id UNINDEXED,
-      title,
-      artist,
-      album,
-      file_name,
-      tokenize='unicode61 remove_diacritics 2'
-    );
+    ${PHONETIC_SEARCH_TABLE};
     CREATE VIRTUAL TABLE IF NOT EXISTS music_search_phonetic_vocab USING fts5vocab(
       music_search_phonetic,
       'row'
@@ -191,7 +194,7 @@ function clampBusyTimeout(value) {
 
 export function ensureMusicPhoneticSearchIndex(db) {
   const trackCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_tracks WHERE status = 'ok'").get()?.count || 0);
-  const indexedCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_search_phonetic").get()?.count || 0);
+  const indexedCount = musicSearchRowCount(db, "music_search_phonetic", PHONETIC_SEARCH_TABLE);
   const version = String(db.prepare("SELECT value FROM music_meta WHERE key = 'music_phonetic_index_version'").get()?.value || "");
   if (trackCount === indexedCount && version === MUSIC_PHONETIC_INDEX_VERSION) return;
   const rows = db
@@ -225,7 +228,7 @@ export function ensureColumn(db, tableName, columnName, definition) {
 
 export function ensureMusicShortSearchIndex(db) {
   const trackCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_tracks WHERE status = 'ok'").get()?.count || 0);
-  const indexedCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_search_short").get()?.count || 0);
+  const indexedCount = musicSearchRowCount(db, "music_search_short", SHORT_SEARCH_TABLE);
   if (trackCount === indexedCount) return;
   const rows = db
     .prepare("SELECT id, title, display_artist, album_title, genre, file_name FROM music_tracks WHERE status = 'ok'")
@@ -244,4 +247,19 @@ export function ensureMusicShortSearchIndex(db) {
     db.exec("RELEASE SAVEPOINT rebuild_music_search_short");
     throw error;
   }
+}
+
+function musicSearchRowCount(db, table, declaration) {
+  const original = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`);
+  // With the default internal content table, FTS5 walks these same rows.
+  // Check the definition and count them in a single statement's snapshot.
+  let count;
+  try {
+    count = db.prepare(`SELECT CASE WHEN
+      (SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = ?) = ?
+      AND NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name = ? COLLATE NOCASE)
+      THEN (SELECT COUNT(*) FROM main.${table}_content) END AS count`)
+      .get(table, declaration.replace("IF NOT EXISTS ", ""), table)?.count;
+  } catch {}
+  return Number(count ?? original.get()?.count ?? 0);
 }

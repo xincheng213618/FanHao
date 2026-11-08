@@ -1272,8 +1272,7 @@ body.gallery-view .gallery-controls {
 }
 
 .gallery-movie-list-meta,
-.gallery-movie-list-people,
-.gallery-movie-list-copy small {
+.gallery-movie-list-people {
   display: -webkit-box;
   overflow: hidden;
   color: var(--ink);
@@ -1284,45 +1283,10 @@ body.gallery-view .gallery-controls {
   -webkit-line-clamp: 2;
 }
 
-.gallery-movie-list-people,
-.gallery-movie-list-copy small {
+.gallery-movie-list-people {
   color: var(--muted);
   font-size: 12px;
   -webkit-line-clamp: 1;
-}
-
-.gallery-movie-list-rating {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  min-height: 18px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.gallery-movie-list-rating i {
-  overflow: hidden;
-  max-width: 66px;
-  color: #f5a623;
-  font-style: normal;
-  font-size: 14px;
-  letter-spacing: 1px;
-  white-space: nowrap;
-}
-
-.gallery-movie-list-rating b {
-  color: #f39800;
-  font-size: 13px;
-  font-weight: 760;
-}
-
-.gallery-movie-list-rating em {
-  color: #8c9692;
-  font-style: normal;
-  font-weight: 650;
 }
 
 .gallery-movie-sidebar {
@@ -1623,7 +1587,6 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #050505;
   color: #fff;
-  touch-action: none;
 }
 
 .gallery-image-pager-stage {
@@ -1839,6 +1802,8 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 .gallery-image-pager-button[hidden],
 .gallery-image-pager-fullscreen-status[hidden] { display: none; }
 .gallery-image-pager-fullscreen-status { grid-column: 1 / -1; color: #ffb0a8; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.gallery-image-pager-cover-status { grid-column: 1 / -1; color: #a8e0ce; font-size: 12px; }
+.gallery-image-pager-cover-status:empty { display: none; }
 
 .gallery-image-pager-catalog { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 44px; color: #fff; font-size: 12px; line-height: 1.5; }
 .gallery-image-pager-catalog[hidden] { display: none; }
@@ -1852,21 +1817,30 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
 }
 
 .gallery-image-pager-thumbnails {
-  display: flex;
-  gap: 7px;
+  --thumbnail-step: 61px;
+  --thumbnail-height: 58px;
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+  overflow-anchor: none;
+  overscroll-behavior-x: contain;
   padding: 8px 2px 2px;
-  scroll-behavior: smooth;
+  touch-action: pan-x;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
 }
 
-.gallery-image-pager-thumbnail {
+.gallery-image-pager-thumbnail-track {
   position: relative;
-  flex: 0 0 54px;
-  width: 54px;
-  height: 58px;
+  width: calc(var(--thumbnail-step) * var(--thumbnail-count, 0));
+  height: var(--thumbnail-height);
+}
+
+.gallery-image-pager-thumbnail {
+  position: absolute;
+  inset-inline-start: calc(var(--thumbnail-step) * var(--thumbnail-index));
+  width: calc(var(--thumbnail-step) - 7px);
+  height: var(--thumbnail-height);
   overflow: hidden;
   border: 2px solid transparent;
   border-radius: 8px;
@@ -1974,10 +1948,9 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
     min-width: 68px;
   }
 
-  .gallery-image-pager-thumbnail {
-    flex-basis: 48px;
-    width: 48px;
-    height: 52px;
+  .gallery-image-pager-thumbnails {
+    --thumbnail-step: 55px;
+    --thumbnail-height: 52px;
   }
 }
 
@@ -1985,6 +1958,18 @@ body.gallery-view .gallery-shell.gallery-reader-shell {
   display: grid;
   gap: 14px;
   margin-top: 14px;
+}
+
+.gallery-archive-video-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.gallery-archive-video-selector select {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .gallery-media-web-player {

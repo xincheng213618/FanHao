@@ -194,6 +194,58 @@ test("a source-bound online detail renders a successfully validated catalog", as
   assert(!h.els.viewContent.textContent.includes("目录所属书库已变化"));
   assert.equal(h.fetches.filter((request) => request.path.includes("/catalog")).length, 1);
 });
+test("a detail account change after metadata but before the local lookup cannot expose reading actions", async (h) => {
+  h.setActiveUrl(URL_A); h.setAccount("account:a"); await confirmRealm(h, URL_A, REALM_A);
+  const pending = h.api.renderNovelDetail(ID); await settle();
+  const metadata = h.fetches.at(-1); assert.equal(metadata.path, `/api/novels/${ID}?catalog=0`);
+  const local = h.queueRead(h.api.__test.remoteCacheIdFromSourceId(ID, REALM_A));
+  metadata.wait.resolve(h.ownRemotePayload({ sourceRealm: REALM_A, book: remoteBook() })); await settle();
+  assert.equal(h.fetches.length, 1, "the metadata consumer is still waiting for the local summary");
+  h.setAccount("account:b"); local.resolve(null); await pending;
+  assert.equal(h.els.viewContent.querySelector(".primary"), null);
+  assert.equal(h.fetches.length, 1, "the old owner did not start a directory GET");
+});
+for (const boundary of ["account", "source"]) test(`mounted detail cannot open a reader or publish a late catalog after ${boundary} change`, async (h) => {
+  h.setActiveUrl(URL_A); h.setAccount("account:a");
+  const pending = h.api.renderNovelDetail(ID); await settle();
+  h.fetches.at(-1).wait.resolve(h.ownRemotePayload({ sourceRealm: REALM_A, book: remoteBook() })); await settle();
+  const directory = h.fetches.at(-1); assert.match(directory.path, /\/catalog/);
+  const read = h.els.viewContent.querySelector(".primary"); assert(read, "metadata has already mounted its reading action");
+  const content = h.els.viewContent.textContent;
+  if (boundary === "account") h.setAccount("account:b");
+  else h.setActiveUrl(URL_B);
+  read.click();
+  assert.equal(h.navigations.length, 0);
+  directory.wait.resolve(catalogData()); await pending;
+  assert.equal(h.els.viewContent.textContent, content);
+  assert(!h.cacheCalls.some(call => call.kind === "write" && call.path === directory.path));
+});
+test("catalog 404 leaves the verified detail readable with an inline error", async (h) => {
+  h.setActiveUrl(URL_A);
+  const pending = h.api.renderNovelDetail(ID); await settle();
+  h.fetches.at(-1).wait.resolve({ sourceRealm: REALM_A, book: remoteBook() }); await settle();
+  assert(h.els.viewContent.querySelector(".primary"));
+  h.fetches.at(-1).wait.reject(Object.assign(new Error("fixture directory removed"), { status: 404 })); await pending;
+  const read = h.els.viewContent.querySelector(".primary"); assert(read);
+  assert(h.els.viewContent.textContent.includes("fixture directory removed"));
+  read.click();
+  const [view, route] = h.navigations.at(-1);
+  assert.equal(view, "novelReader");
+  assert.equal(route.chapterIndex, "1"); assert.equal(route.sourceRealm, REALM_A); assert.equal(route.catalogRevision, REVISION);
+});
+test("legacy cached full detail still shows chapters when metadata cannot be fetched offline", async (h) => {
+  h.setActiveUrl(URL_A); h.setAccount("account:a");
+  h.cached.set(h.cacheKey(URL_A, `/api/novels/${ID}`), { updatedAt: "synthetic-cache-time",
+    payload: h.ownRemotePayload({ sourceRealm: REALM_A, book: remoteBook(), chapters: catalogData().chapters }) });
+  const pending = h.api.renderNovelDetail(ID); await settle();
+  const read = h.els.viewContent.querySelector(".primary"); assert(read);
+  assert(h.els.viewContent.textContent.includes("Chapter 2"));
+  h.fetches.at(-1).wait.reject(new Error("synthetic offline")); await pending;
+  assert.equal(h.els.viewContent.querySelector(".primary"), read);
+  assert(h.els.viewContent.textContent.includes("本地缓存详情"));
+  assert(h.els.viewContent.textContent.includes("Chapter 2"));
+  assert.equal(h.fetches.length, 1, "offline legacy cache did not fetch a catalogue");
+});
 test("same URL's late old-realm catalog cannot overwrite newly displayed realm detail", async (h) => {
   h.setActiveUrl(URL_A);
   const first = h.api.renderNovelDetail(ID); await settle();

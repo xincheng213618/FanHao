@@ -27,7 +27,7 @@ const reference = negative.stdout.split(/\r?\n/).find(line => line.startsWith('{
 assert(reference, "reference must report its actual constructor work and diagnostic timing");
 console.log(reference);
 console.log("PASS negative control detects eager unused facet selects/options");
-const detached = run("--legacy-select-detach", "--case=control construction photo");
+const detached = run("--legacy-select-detach", "--case=control construction media");
 assert.notEqual(detached.status, 0, "temporary native select detachment must fail even when focus is restored");
 assert.match(`${detached.stdout}\n${detached.stderr}`, /AssertionError/);
 assert.match(`${detached.stdout}\n${detached.stderr}`, /background gallery refresh must keep native select ancestry and focus without blur/,

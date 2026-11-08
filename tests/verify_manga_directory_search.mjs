@@ -9,11 +9,18 @@ const negativeOnly = process.argv.includes("--negative-only");
 assert(!(negativeOnly && pattern), "--case and --negative-only cannot be combined");
 if (!negativeOnly) {
   const current = await runMangaReaderFixture({ casePattern: pattern || "directory search:" });
-  if (!pattern) assert.equal(current.checks, 6);
+  if (!pattern) assert.equal(current.checks, 7);
 }
 if (!pattern) {
   const source = fs.readFileSync(new URL("../public/modules/photos/manga-page.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   for (const negative of [
+    {
+      name: "retained directory during progress polling",
+      marker: "if (view.catalogChapters === chapters && view.catalogCurrentChapter === currentChapter) return;",
+      replacement: "// Negative control: run the directory update on every poll.",
+      casePattern: "directory search: update progress leaves",
+      failure: /update progress polls must leave the mounted chapter directory untouched/
+    },
     {
       name: "normalized title and chapter identity",
       marker: 'function normalizeChapterQuery(value) { return String(value || "").normalize("NFKC").toLocaleLowerCase().trim(); }',
@@ -49,5 +56,5 @@ if (!pattern) {
     }), { name: "AssertionError", message: negative.failure });
     console.log(`PASS negative control detects missing ${negative.name}`);
   }
-  console.log(`Manga directory search passed (${negativeOnly ? 0 : 6} private Chromium scenarios + 4 independent behavior negative controls; synthetic metadata and composition)`);
+  console.log(`Manga directory search passed (${negativeOnly ? 0 : 7} private Chromium scenarios + 5 independent behavior negative controls; synthetic metadata and composition)`);
 }

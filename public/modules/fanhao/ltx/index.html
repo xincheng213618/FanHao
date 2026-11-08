@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f1013">
+  <meta name="fanhao-ltx" content="1">
+  <title>LTX 资源库 · FanHao</title>
+  <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/modules/fanhao/ltx/source-ui.css">
+  <link rel="stylesheet" href="/modules/fanhao/ltx/styles.css">
+  <script type="module" src="/modules/fanhao/ltx/page.js"></script>
+</head>
+<body>
+  <div id="app" class="ready">
+    <a class="skip" data-v-ff5b15bf href="#catalog">跳到作品</a>
+    <header class="header" data-v-db15c80d data-v-ff5b15bf>
+      <button id="openActors" class="menu-btn" data-v-db15c80d type="button" aria-controls="actor-panel" aria-expanded="false" aria-label="筛选人物"></button>
+      <h1 class="brand" data-v-db15c80d>
+        <a class="home" data-v-db15c80d href="/fanhao/ltx" aria-label="LTX 资源库首页">
+          <span class="mark" data-v-db15c80d>Jasna-LTX</span><span class="name" data-v-db15c80d>资源库</span>
+        </a>
+      </h1>
+      <div class="fanhao-header-search">
+        <div class="search-wrap" data-v-db15c80d>
+          <svg class="search-icon" data-v-db15c80d viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+          <input id="search" class="search" data-v-db15c80d type="search" placeholder="搜索番号 / 标题 / 人物 / 片商 / 分类" aria-label="搜索番号、标题、人物、片商、分类" autocomplete="off">
+          <kbd class="kbd" data-v-db15c80d>/</kbd>
+        </div>
+        <div id="sort" class="sort" data-v-276abc24 data-v-db15c80d role="group" aria-label="排序"></div>
+      </div>
+      <button id="showSelected" class="want" data-v-db15c80d type="button" disabled aria-label="已选链接 0">
+        <span class="label" data-v-db15c80d>已选链接</span><b id="selectedCount" data-v-db15c80d>0</b>
+      </button>
+      <nav class="fanhao-header-links" aria-label="FanHao 工具">
+        <a class="fanhao-pill" href="/fanhao">番号库</a>
+        <a class="fanhao-pill" href="/fanhao/file-workflows/intake">洗版工作站</a>
+        <button id="downloadSettings" class="fanhao-pill fanhao-115" type="button"><span class="fanhao-bridge-dot" aria-hidden="true"></span>下载设置</button>
+      </nav>
+      <button id="syncCatalog" class="fanhao-pill" type="button" title="从 Jasna-LTX 同步最新目录">更新目录</button>
+    </header>
+
+    <div class="layout" data-v-ff5b15bf>
+      <div id="actorScrim" class="scrim" data-v-e8550fad hidden></div>
+      <aside id="actor-panel" class="side" data-v-e8550fad aria-label="人物筛选">
+        <div class="sheet-head" data-v-e8550fad>
+          <b data-v-e8550fad>筛选人物</b>
+          <button id="closeActors" class="close" data-v-e8550fad type="button" aria-label="关闭人物筛选">×</button>
+        </div>
+        <div class="head" data-v-e8550fad>
+          <input id="actorSearch" class="filter" data-v-e8550fad type="search" placeholder="筛选人物" aria-label="筛选人物" autocomplete="off">
+        </div>
+        <nav id="actors" class="actors" data-v-e8550fad aria-label="人物列表"></nav>
+      </aside>
+      <main id="catalog" class="main" data-v-ff5b15bf tabindex="-1">
+        <h2 class="sr-only">LTX 作品目录</h2>
+        <div class="bar" data-v-ff5b15bf>
+          <div id="status" class="status" data-v-ff5b15bf role="group" aria-label="资源确认状态"></div>
+          <label class="tool fanhao-local-filter" data-v-ff5b15bf>
+            <span>本地状态</span>
+            <select id="filter" aria-label="本地状态">
+              <option value="all">全部</option>
+              <option value="present">本地有视频</option>
+              <option value="marked">文件已标 LTX</option>
+              <option value="unmarked">本地有视频，文件未标 LTX</option>
+              <option value="missing">当前未发现视频</option>
+            </select>
+          </label>
+          <button id="actorChip" class="chip" data-v-ff5b15bf type="button" hidden></button>
+          <div class="bar-end" data-v-ff5b15bf>
+            <span id="results" class="result" data-v-ff5b15bf role="status"></span>
+            <span id="snapshot" class="updated" data-v-ff5b15bf>正在读取本地快照…</span>
+            <button id="reload" class="tool" data-v-ff5b15bf type="button">重读本地状态</button>
+          </div>
+        </div>
+        <div id="feedback" class="fanhao-feedback" role="status"></div>
+        <div id="grid" class="grid" data-v-ff5b15bf aria-label="LTX 作品"></div>
+        <div id="empty" class="none" data-v-ff5b15bf hidden><p>没有符合条件的作品。</p></div>
+        <div id="sentinel" class="sentinel" data-v-ff5b15bf></div>
+        <button id="loadMore" class="tool fanhao-more" data-v-ff5b15bf type="button" hidden>加载更多</button>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="linksDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="linksTitle">
+    <div class="inner" data-v-942e16ed>
+      <div class="top" data-v-942e16ed>
+        <h2 id="linksTitle" data-v-942e16ed>完整下载链接</h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭">×</button></form>
+      </div>
+      <p class="note" data-v-942e16ed>可复制完整地址，粘贴到 115 浏览器的地址栏。也可以选中地址后右键「存到 115」。</p>
+      <div id="linksList" class="fanhao-links-list"></div>
+      <p id="dialogStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
+      <div class="actions fanhao-dialog-actions" data-v-942e16ed>
+        <button id="copySelected" class="btn" data-v-942e16ed type="button">复制选中链接</button>
+        <button id="clearSelected" class="btn" data-v-942e16ed type="button">清空勾选</button>
+        <a class="btn" data-v-942e16ed href="https://115.com/?tab=offline&amp;mode=wangpan" target="_blank" rel="noopener noreferrer">打开 115 云下载</a>
+        <button id="addTo115" class="btn primary" data-v-942e16ed type="button">设置 115 下载</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="downloadSettingsDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="downloadSettingsTitle">
+    <div class="inner" data-v-942e16ed>
+      <div class="top" data-v-942e16ed>
+        <h2 id="downloadSettingsTitle" data-v-942e16ed>下载设置</h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭下载设置">×</button></form>
+      </div>
+      <p id="bridgeStatus" class="note fanhao-bridge-status" data-v-942e16ed role="status"></p>
+      <p class="note" data-v-942e16ed>用同一浏览器已登录的 115 账号提交云下载，支持 eD2k 和磁力。</p>
+      <label class="fanhao-directory">保存目录 ID（选填）
+        <input id="downloadDirectory" inputmode="numeric" maxlength="32" pattern="[0-9]*" autocomplete="off" placeholder="在 115 文件夹地址中找到 cid">
+      </label>
+      <p class="note" data-v-942e16ed>在 <a class="link" data-v-942e16ed href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> 安装下方 FanHao 专用脚本，再刷新本页。</p>
+      <p id="settingsStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
+      <div class="actions fanhao-dialog-actions" data-v-942e16ed>
+        <a id="installDownloadScript" class="btn primary" data-v-942e16ed href="/modules/fanhao/ltx/fanhao-ltx-115.user.js" target="_blank" rel="noopener">安装脚本</a>
+        <button id="copyDownloadScript" class="btn" data-v-942e16ed type="button">复制脚本代码</button>
+        <a class="btn" data-v-942e16ed href="https://115.com/?tab=offline&amp;mode=wangpan" target="_blank" rel="noopener noreferrer">打开 115 云下载</a>
+      </div>
+    </div>
+  </dialog>
+  <div id="downloadFeedback" class="fanhao-download-feedback" role="status"></div>
+  <dialog id="coverDialog" class="dialog fanhao-dialog fanhao-cover-dialog" data-v-942e16ed aria-labelledby="coverTitle">
+    <div class="inner" data-v-942e16ed>
+      <div class="top" data-v-942e16ed>
+        <h2 id="coverTitle" data-v-942e16ed></h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭封面">×</button></form>
+      </div>
+      <img id="coverPreview" alt="">
+    </div>
+  </dialog>
+</body>
+</html>

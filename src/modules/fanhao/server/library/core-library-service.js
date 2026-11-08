@@ -25,6 +25,29 @@ export function linkedLocalWorkIdsForPeople(db, personIds = []) {
     .filter(Boolean);
 }
 
+function videoSizeKey(filePath, size, modifiedAt) {
+  return JSON.stringify([filePath, size, modifiedAt]);
+}
+
+function cachedVideoSizes(db) {
+  const sizes = new Map();
+  const columns = new Set(db.prepare("PRAGMA table_info(video_probe_cache)").all().map(({ name }) => name));
+  if (!["file_id", "file_path", "source_size", "source_mtime", "probe_json", "schema_version", "status", "updated_at"]
+    .every((name) => columns.has(name))) return sizes;
+  for (const probe of db.prepare(`
+    SELECT file_path, source_size, source_mtime, json_extract(probe_json, '$.width') AS width,
+      json_extract(probe_json, '$.height') AS height
+    FROM video_probe_cache WHERE schema_version=1 AND status='ok' AND source_mtime LIKE 'library:%'
+      AND json_valid(probe_json) ORDER BY updated_at, file_id
+  `).all()) {
+    if (Number.isSafeInteger(probe.width) && probe.width > 0 && Number.isSafeInteger(probe.height) && probe.height > 0) {
+      // Cache entries can use a runtime video ID rather than the stored file ID.
+      sizes.set(videoSizeKey(probe.file_path, probe.source_size, probe.source_mtime), { width: probe.width, height: probe.height });
+    }
+  }
+  return sizes;
+}
+
 export function createCoreLibraryService({
   chooseCover,
   compareNaturalName,
@@ -257,7 +280,7 @@ export function createCoreLibraryService({
     return people;
   }
 
-  function fileToMediaFile(row) {
+  function fileToMediaFile(row, dimensions) {
     const filePath = String(row.file_path || "");
     const name = String(row.name || path.basename(filePath));
     const type = String(row.file_type || "");
@@ -271,6 +294,7 @@ export function createCoreLibraryService({
       relativePath: String(row.relative_path || relativeFromRoot(filePath)),
       size: Number(row.size || 0),
       modifiedAt: row.modified_at || null,
+      ...dimensions,
       playable: type === "video" ? Boolean(row.playable) : undefined
     };
   }
@@ -309,6 +333,7 @@ export function createCoreLibraryService({
       }
     }
 
+    const videoSizes = cachedVideoSizes(db);
     const filesByLocalWorkId = new Map();
     for (const row of db
       .prepare(
@@ -322,10 +347,13 @@ export function createCoreLibraryService({
       .all()) {
       const localWorkId = String(row.local_work_id || "");
       if (!localWorkId) continue;
+      const dimensions = videoSizes.size && row.file_type === "video"
+        ? videoSizes.get(videoSizeKey(row.file_path, row.size, `library:${row.modified_at}`)) : undefined;
       if (!filesByLocalWorkId.has(localWorkId)) filesByLocalWorkId.set(localWorkId, []);
-      filesByLocalWorkId.get(localWorkId).push(fileToMediaFile(row));
+      filesByLocalWorkId.get(localWorkId).push(fileToMediaFile(row, dimensions));
     }
 
+    const hasMatchMethod = db.prepare("SELECT 1 FROM pragma_table_info('local_works') WHERE name='matched_by'").get();
     const personBuckets = new Map();
     const localRows = db
       .prepare(
@@ -335,6 +363,7 @@ export function createCoreLibraryService({
           lw.work_id AS core_work_id,
           lw.local_path,
           lw.source_mtime,
+          ${hasMatchMethod ? "lw.matched_by" : "NULL"} AS local_match_method,
           fallback_person.id AS fallback_person_id,
           fallback_person.name AS fallback_person_name,
           fallback_person.display_name AS fallback_person_display_name,
@@ -398,7 +427,8 @@ export function createCoreLibraryService({
       if (sourcePath && !bucket.sourcePaths.includes(sourcePath)) bucket.sourcePaths.push(sourcePath);
 
       const files = filesByLocalWorkId.get(String(row.local_work_id)) || [];
-      const videos = files.filter((file) => file.type === "video").sort(compareNaturalName);
+      const videos = files.filter((file) => file.type === "video");
+      if (row.local_match_method !== "intake_ordered") videos.sort(compareNaturalName);
       const images = files.filter((file) => file.type === "image").sort(compareNaturalName);
       const infos = files.filter((file) => file.type === "info").sort(compareNaturalName);
       videos.forEach((video, index) => {

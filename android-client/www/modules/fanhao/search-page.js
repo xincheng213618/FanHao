@@ -1,6 +1,6 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-8af3642624a3";
-import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-8af3642624a3";
+import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-8faf7a80cb7b";
+import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-8faf7a80cb7b";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
 
 const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
@@ -8,6 +8,7 @@ const DEFAULT_SEARCH_TERMS = Object.freeze(["[A]"]);
 const MAX_SEARCH_HISTORY = 8;
 const MAX_AUTHOR_SUGGESTIONS = 12;
 const MAX_LIVE_SUGGESTIONS = 6;
+const RESULT_WARM_IDLE_MS = 550;
 
 export function createFanhaoSearchPage({
   els,
@@ -15,7 +16,7 @@ export function createFanhaoSearchPage({
   showView,
   preserveQuery = () => false,
   getSearchParams = () => ({}),
-  warmSearch,
+  warmSearch = () => {},
   fetchSuggestions = async () => ({ people: [], works: [] }),
   getActiveUrl = () => "",
   getLibrary = () => null
@@ -31,15 +32,14 @@ export function createFanhaoSearchPage({
   function render(query = "") {
     const text = cleanQuery(query);
     activePage?.retire();
-    let prepareTimer = 0, suggestionTimer = 0, blurTimer = 0, suggestionVersion = 0;
-    let suggestionController = null, retired = false;
+    let suggestionTimer = 0, warmTimer = 0, blurTimer = 0, suggestionVersion = 0;
+    let suggestionController = null, warmRequest = null, retired = false;
     const activeUrl = getActiveUrl(), accountScope = captureAccountOwner(activeUrl);
     const page = { isCurrent: () => !retired && activePage === page && head.isConnected
-      && getActiveUrl() === activeUrl && isAccountOwnerCurrent(accountScope), retire() {
+      && getActiveUrl() === activeUrl && isAccountOwnerCurrent(accountScope), retire(committedQuery) {
       retired = true;
-      window.clearTimeout(prepareTimer);
       window.clearTimeout(blurTimer);
-      hideSuggestions();
+      hideSuggestions(committedQuery);
     } };
     activePage = page;
     els.viewContent.className = "content-list fanhao-search-page-content";
@@ -93,24 +93,12 @@ export function createFanhaoSearchPage({
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!page.isCurrent()) return;
-      page.retire();
       submitQuery(input.value);
     });
     input.addEventListener("input", () => {
       if (!page.isCurrent()) return;
       syncClear();
-      window.clearTimeout(prepareTimer);
-      const next = cleanQuery(input.value);
-      if (!next) {
-        hideSuggestions();
-        return;
-      }
-      if (!globalThis.navigator?.connection?.saveData) {
-        prepareTimer = window.setTimeout(() => {
-          if (page.isCurrent() && cleanQuery(input.value) === next) Promise.resolve(warmSearch(next)).catch(() => {});
-        }, 180);
-      }
-      requestSuggestions(next);
+      requestSuggestions(input.value, true);
     });
     input.addEventListener("focus", () => requestSuggestions(input.value));
     input.addEventListener("blur", () => {
@@ -121,7 +109,6 @@ export function createFanhaoSearchPage({
     });
     clear.addEventListener("click", () => {
       if (!page.isCurrent()) return;
-      window.clearTimeout(prepareTimer);
       input.value = "";
       syncClear();
       hideSuggestions();
@@ -138,7 +125,7 @@ export function createFanhaoSearchPage({
     }
     return { input, results };
 
-    function requestSuggestions(value) {
+    function requestSuggestions(value, warmOnIdle = false) {
       const next = cleanQuery(value);
       hideSuggestions();
       if (!next || !page.isCurrent()) return;
@@ -153,6 +140,14 @@ export function createFanhaoSearchPage({
           const data = await fetchSuggestions(next, { signal: controller.signal });
           if (!ownsSuggestions()) return;
           renderSuggestions(buildFanhaoSearchSuggestions(data, MAX_LIVE_SUGGESTIONS), ownsSuggestions);
+          if (warmOnIdle && !globalThis.navigator?.connection?.saveData) {
+            warmTimer = window.setTimeout(() => {
+              if (!ownsSuggestions()) return;
+              const controller = new AbortController();
+              warmRequest = { query: next, controller };
+              Promise.resolve(warmSearch(next, { signal: controller.signal })).catch(() => {});
+            }, RESULT_WARM_IDLE_MS);
+          }
         } catch (error) {
           if (ownsSuggestions() && error?.name !== "AbortError") hideSuggestions();
         } finally {
@@ -201,9 +196,12 @@ export function createFanhaoSearchPage({
       suggestions.hidden = false;
     }
 
-    function hideSuggestions() {
+    function hideSuggestions(committedQuery) {
       suggestionVersion += 1;
       window.clearTimeout(suggestionTimer);
+      window.clearTimeout(warmTimer);
+      if (warmRequest?.query !== committedQuery) warmRequest?.controller.abort();
+      warmRequest = null;
       suggestionController?.abort();
       suggestionController = null;
       suggestions.hidden = true;
@@ -382,7 +380,7 @@ export function createFanhaoSearchPage({
   function submitQuery(value, options = {}) {
     const query = cleanQuery(value);
     if (query && options.remember !== false) rememberSearch(query);
-    if (query) Promise.resolve(warmSearch(query)).catch(() => {});
+    activePage?.retire(query);
     showView("search", { ...getSearchParams(), query }, { skipHistory: true, replaceHistory: true });
   }
 

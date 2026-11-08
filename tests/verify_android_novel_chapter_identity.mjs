@@ -454,7 +454,7 @@ control("opening an unconfirmed recovery reader never auto-saves away the uncert
 for (const mismatch of ["chapter", "revision"]) control(`same ordinal does not restore a modern progress with mismatched ${mismatch}`,
   mutateFunction("progressMatchesChapter", "if (book.catalogRevision) return progress.catalogRevision === book.catalogRevision && progress.chapterId === chapter.id;", "if (book.catalogRevision) return Number(progress.chapterIndex) === Number(chapter.index);"));
 control("local route with stale revision cannot read or save the replacement at the same index",
-  mutateFunction("renderLocalNovelReader", "readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), anchor)", "readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)))"));
+  mutateFunction("renderLocalNovelReader", "readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), { ...anchor, includeCatalog: false })", "readLocalNovelChapter(bookId, Math.max(1, Number(chapterIndex || 1)), { includeCatalog: false })"));
 control("remote exact route rejects revision mismatch at a still-valid ordinal", noRevisionValidation);
 control("remote exact route rejects chapter mismatch at a still-valid ordinal",
   mutateFunction("matchesRemotePayload", "if (anchor.chapterId && data.chapter?.id !== anchor.chapterId) return false;", "// Negative control: ignores requested chapter identity."));

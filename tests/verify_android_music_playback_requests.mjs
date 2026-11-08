@@ -3,7 +3,8 @@ import fs from "node:fs";
 import { createMusicAudioSourceStore } from "../android-client/www/modules/music/music-audio-source.js";
 import { createMusicProgressSession } from "../android-client/www/modules/music/progress-session.js";
 import { captureMusicProgressOwner } from "../android-client/www/modules/music/progress-transport.js";
-import { setAccountOwner } from "../android-client/www/js/account-owner.js";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, registerAccountSessionResolver,
+  rememberAccountPayload, setAccountOwner } from "../android-client/www/js/account-owner.js";
 import { createMusicTrackPreferences } from "../android-client/www/modules/music/music-track-preferences.js";
 
 const sourcePath = new URL("../android-client/www/modules/music/music-views.js", import.meta.url);
@@ -44,7 +45,8 @@ function fixture() {
   setAccountOwner(BASE, "account:playback_fixture_a");
   setAccountOwner(OTHER_BASE, "account:playback_fixture_b");
   const deps = { reads, blobs, plays, renders, remembered, preloads, fades, sourceLoads, audioObjects, frames,
-    createMusicProgressSession, captureMusicProgressOwner, createMusicTrackPreferences, BASE, CLOCK };
+    createMusicProgressSession, captureMusicProgressOwner, createMusicTrackPreferences,
+    accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload, setAccountOwner, BASE, CLOCK };
   const audioSourceStore = createMusicAudioSourceStore({
     fetchImpl(url, options) {
       const request = deferred();
@@ -59,7 +61,8 @@ function fixture() {
   deps.audioSourceStore = audioSourceStore;
   const setup = `
     const {reads,blobs,plays,renders,remembered,preloads,fades,sourceLoads,audioObjects,frames,
-      createMusicProgressSession,captureMusicProgressOwner,createMusicTrackPreferences,audioSourceStore,BASE,CLOCK}=deps;
+      createMusicProgressSession,captureMusicProgressOwner,createMusicTrackPreferences,audioSourceStore,
+      accountPayloadOwner,captureAccountOwner,isAccountOwnerCurrent,prepareAccountOwner,rememberAccountPayload,setAccountOwner,BASE,CLOCK}=deps;
     const old={id:"P",title:"prior",streamUrl:"/media/P",durationMs:200000};
     const neighbour={id:"Q",title:"neighbour",streamUrl:"/media/Q"};
     const primaryData={tracks:[old,neighbour],total:2};
@@ -67,19 +70,21 @@ function fixture() {
       loading:false,status:"",prevId:"",nextId:"",playbackSpeed:1.25,volume:0.8,fadeSeconds:0.25,
       fullscreen:false,fullPanel:"cover",playing:false,playReportedTrackId:"P",lyricFollowPaused:true};
     let selectedUrl=BASE,moduleActive=true,audio=null,openTrackGeneration=0,pendingTrackSelection=0;
+    let trackAudioPreparation=null,gaplessPreloadTrackId="",mountedSearchController=null;
     let playReportSession=7,currentPlaybackUrl=BASE,progressSession=createMusicProgressSession("P",BASE,CLOCK),
       progressClaimRequired=false,playedReport={prior:true},currentLyricIndex=3,gaplessHandoffPending=false;
     let audioLoadHook=null;
     const getActiveUrl=()=>selectedUrl;
     const trackPreferences=createMusicTrackPreferences({send(){throw new Error("Playback-request fixture never sends track preference writes");}});
     trackPreferences.preparePayload({track:state.current,tracks:state.queue},trackPreferences.owner(BASE));
-    const window={requestAnimationFrame(callback){frames.push(callback);}};
+    const window=new EventTarget(), document=new EventTarget();
+    window.requestAnimationFrame=callback=>frames.push(callback);
     const absoluteUrl=(url,path)=>new URL(path,url).href;
     const musicListQuery=()=>"sort=updated&favorite=0";
     const fetchJson=(url,path,options)=>{
       const item=deps.deferred(),owner=trackPreferences.owner(url);
       reads.push(Object.assign(item,{url,path,options}));
-      return item.promise.then(data=>trackPreferences.preparePayload(data,owner));
+      return item.promise.then(data=>trackPreferences.preparePayload(rememberAccountPayload(data,owner.accountScope),owner));
     };
     class Audio {
       constructor(){this.src="";this.paused=true;this.readyState=3;this.currentTime=0;this.duration=200;
@@ -109,7 +114,7 @@ function fixture() {
     const updateLyricHighlight=()=>{};
   `;
   deps.deferred = deferred;
-  let bodies = ["openTrack", "mergeTrackIntoQueue", "loadAudioTrack", "playAudio"]
+  let bodies = ["openTrack", "retireTrackAudioPreparation", "mergeTrackIntoQueue", "loadAudioTrack", "playAudio", "installLifecycle"]
     .map(name => sourceFunction(currentSource, name)).join("\n");
   if (withoutSelectionGuards) {
     // A deliberate in-memory negative control. It preserves source-store slot
@@ -123,14 +128,18 @@ function fixture() {
     state,open:openTrack,load:loadAudioTrack,merge:mergeTrackIntoQueue,play:playAudio,
     inspect:()=>({audio,openTrackGeneration,pendingTrackSelection,playReportSession,currentPlaybackUrl,
       progressSession,progressClaimRequired,playedReport,moduleActive}),
-    source(url){selectedUrl=url;},background(){moduleActive=false;},
+    source(url){selectedUrl=url;window.dispatchEvent(new Event("fanhaoActiveServerChanged"));},
+    account(owner){setAccountOwner(selectedUrl,owner);window.dispatchEvent(new Event("fanhaoAccountOwnerChanged"));},
+    background(){moduleActive=false;},
     session(){playReportSession++;},
+    hint(track,source=selectedUrl){mergeTrackIntoQueue(trackPreferences.preparePayload({track},trackPreferences.owner(source)).track);},
+    gapless(trackId){gaplessPreloadTrackId=trackId;},
     playbackSource(url){currentPlaybackUrl=url;},
     audioLoadHook(callback){audioLoadHook=callback;},
-    dispose(){openTrackGeneration++;playReportSession++;audioSourceStore.cancel("current");
+    dispose(){openTrackGeneration++;playReportSession++;trackAudioPreparation?.controller.abort();audioSourceStore.cancel("current");
       audioLoadHook=null;audioSourceStore.release(audio);}
   }`;
-  const actual = new Function("deps", '"use strict";\n' + setup + "\n" + bodies + "\nreturn " + expose + ";")(deps);
+  const actual = new Function("deps", '"use strict";\n' + setup + "\n" + bodies + "\ninstallLifecycle(); return " + expose + ";")(deps);
   return { ...actual, reads, blobs, plays, renders, remembered, preloads, fades, revoked, sourceLoads, audioObjects, frames,
     close() {
       actual.dispose();
@@ -148,6 +157,12 @@ function metadata(id, label = "fresh") {
   return { track: { id, title: `${id}:${label}`, streamUrl: `/media/${encodeURIComponent(id)}/${label}`, durationMs: 200000,
     positionMs: 42000 }, lyrics: { lines: [{ timeMs: 0, text: `${id}:${label}` }], raw: `${id}:${label}` },
   prevId: `${id}:prev`, nextId: `${id}:next`, serverClockMs: CLOCK };
+}
+
+function hintedMetadata(id) {
+  const data = metadata(id);
+  data.track.streamUrl = `/media/music/${encodeURIComponent(id)}`;
+  return data;
 }
 
 async function startBody(f, index) {
@@ -232,6 +247,161 @@ scenario("invalid-initial-guard-and-empty-id-no-get", () => withFixture(async f 
   const before = snapshot(f);
   await f.open("A", { renderGuard: () => false }); await f.open("   ");
   assert.equal(f.reads.length, 0); assert.equal(f.blobs.length, 0); unchanged(f, before, "invalid initial intent");
+}));
+
+scenario("owned-queue-audio-overlaps-detail-and-waits-for-its-resume", () => withFixture(async f => {
+  const data = hintedMetadata("A");
+  f.hint(data.track);
+  const pending = f.open("A", { seekMs: 12000 });
+  assert.equal(f.reads.length, 1);
+  assert.equal(f.reads[0].options.accountScope, undefined, "detail must retain standard native account preparation");
+  await tick();
+  assert.equal(f.blobs.length, 1, "the owned queue URL is fetched before detail resolves");
+  assert.equal(f.blobs[0].url, BASE + data.track.streamUrl);
+  await releaseBody(f, 0);
+  assert.equal(f.state.current.id, "P");
+  assert.equal(f.plays.length, 0);
+  assert.equal(f.sourceLoads.length, 0, "prefetched bytes never mount before details confirm");
+  f.reads[0].resolve(data);
+  await pending;
+  assert.equal(f.blobs.length, 1);
+  assert.equal(f.plays[0].id, "A");
+  assert.equal(f.inspect().audio.currentTime, 12);
+  assert.equal(f.inspect().progressSession.trackId, "A");
+}));
+
+scenario("early-audio-waits-for-native-account-preparation", () => withFixture(async f => {
+  const data = hintedMetadata("A"), session = deferred();
+  f.hint(data.track);
+  let authenticationSignal;
+  registerAccountSessionResolver((origin, signal) => {
+    assert.equal(origin, BASE);
+    authenticationSignal = signal;
+    return session.promise;
+  });
+  try {
+    const pending = f.open("A");
+    await tick();
+    assert.equal(f.blobs.length, 0, "queued metadata cannot bypass pending native authentication");
+    assert.equal(authenticationSignal, f.reads[0].options.signal);
+    session.resolve(); await tick();
+    assert.equal(f.blobs.length, 1);
+    f.reads[0].resolve(data);
+    await releaseBody(f, 0); await pending;
+    assert.equal(f.plays.length, 1);
+  } finally {
+    registerAccountSessionResolver(null);
+  }
+}));
+
+for (const context of ["foreign-source", "retired-account", "passive-restore", "gapless-candidate"]) {
+  scenario(`preparation-skips-${context}`, () => withFixture(async f => {
+    const data = hintedMetadata("A");
+    f.hint(data.track, context === "foreign-source" ? OTHER_BASE : BASE);
+    if (context === "retired-account") setAccountOwner(BASE, "account:replacement");
+    if (context === "gapless-candidate") f.gapless("A");
+    const pending = f.open("A", { autoplay: context !== "passive-restore" });
+    await tick();
+    assert.equal(f.blobs.length, 0, "no early GET without an eligible playback hint");
+    f.reads[0].resolve(data);
+    await tick(); await releaseBody(f, 0); await pending;
+    assert.equal(f.blobs.length, 1);
+    assert.equal(f.plays.length, context === "passive-restore" ? 0 : 1);
+  }));
+}
+
+scenario("changed-stream-discards-early-body-and-reads-authoritative-url", () => withFixture(async f => {
+  f.hint(hintedMetadata("A").track);
+  const pending = f.open("A");
+  await tick();
+  await startBody(f, 0);
+  const data = metadata("A", "different");
+  f.reads[0].resolve(data); await tick();
+  assert.equal(f.blobs[0].options.signal.aborted, true);
+  assert.equal(f.blobs[1].url, BASE + data.track.streamUrl);
+  await releaseBody(f, 0);
+  assert.equal(f.plays.length, 0);
+  await releaseBody(f, 1); await pending;
+  assert.equal(f.plays.length, 1);
+  assert.equal(f.revoked.length, 0, "discarded early bytes never create an object URL");
+}));
+
+scenario("new-selection-aborts-older-preparation-and-ignores-late-detail", () => withFixture(async f => {
+  const a = hintedMetadata("A"), b = hintedMetadata("B");
+  f.hint(a.track); f.hint(b.track);
+  const older = f.open("A");
+  await tick();
+  await startBody(f, 0);
+  const newer = f.open("B");
+  assert.equal(f.blobs[0].options.signal.aborted, true);
+  assert.equal(f.reads[0].options.signal.aborted, true);
+  f.reads[1].resolve(b);
+  await tick();
+  await releaseBody(f, 1); await newer;
+  await releaseBody(f, 0);
+  f.reads[0].resolve(a); await older;
+  assert.deepEqual(f.plays.map(play => play.id), ["B"]);
+}));
+
+scenario("server-switch-immediately-aborts-preparation-and-return-does-not-revive-it", () => withFixture(async f => {
+  const data = hintedMetadata("A");
+  f.hint(data.track);
+  const pending = f.open("A");
+  await tick(); await startBody(f, 0);
+  f.source(OTHER_BASE);
+  assert.equal(f.blobs[0].options.signal.aborted, true);
+  assert.equal(f.reads[0].options.signal.aborted, true);
+  f.source(BASE);
+  f.reads[0].resolve(data); await releaseBody(f, 0); await pending;
+  assert.equal(f.state.current.id, "P");
+  assert.equal(f.plays.length, 0);
+}));
+
+for (const stage of ["before-detail", "before-body"]) {
+  scenario(`account-switch-${stage}-rejects-prepared-audio`, () => withFixture(async f => {
+    const data = hintedMetadata("A");
+    f.hint(data.track);
+    const pending = f.open("A");
+    await tick();
+    if (stage === "before-detail") await releaseBody(f, 0);
+    else { f.reads[0].resolve(data); await tick(); await startBody(f, 0); }
+    f.account("account:replacement");
+    assert.equal(f.blobs[0].options.signal.aborted, true, "account changes abort the early read immediately");
+    assert.equal(f.reads[0].options.signal.aborted, true);
+    if (stage === "before-detail") f.reads[0].resolve(data);
+    else await releaseBody(f, 0);
+    await pending;
+    assert.equal(f.plays.length, 0);
+    assert.equal(f.blobs.length, 1);
+    assert.equal(f.sourceLoads.filter(load => load.src).length, 0);
+    assert.equal(f.revoked.length, 0);
+  }));
+}
+
+scenario("offline-detail-retires-pending-early-body", () => withFixture(async f => {
+  f.hint(hintedMetadata("A").track);
+  const pending = f.open("A");
+  await tick();
+  await startBody(f, 0);
+  f.reads[0].reject(Error("offline detail")); await pending;
+  assert.equal(f.blobs[0].options.signal.aborted, true);
+  await releaseBody(f, 0);
+  assert.equal(f.state.current.id, "P");
+  assert.equal(f.state.status, "offline detail");
+  assert.equal(f.plays.length, 0);
+}));
+
+scenario("early-audio-failure-allows-one-normal-read-after-detail", () => withFixture(async f => {
+  const data = hintedMetadata("A");
+  f.hint(data.track);
+  const pending = f.open("A");
+  await tick();
+  await releaseBody(f, 0, "error");
+  assert.equal(f.blobs.length, 1);
+  f.reads[0].resolve(data); await tick();
+  assert.equal(f.blobs.length, 2);
+  await releaseBody(f, 1); await pending;
+  assert.deepEqual(f.plays.map(play => play.id), ["A"]);
 }));
 
 for (const outcome of ["success", "error"]) {

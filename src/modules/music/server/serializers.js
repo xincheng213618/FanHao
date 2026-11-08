@@ -5,6 +5,7 @@ import { catalogFilter } from "./query.js";
 import { findSmartMix } from "./smart-mix.js";
 import { musicSearchIndexJoin, musicSearchIndexRank, searchRankSql } from "./search.js";
 import { coverStampFor } from "./scan.js";
+import { readSparseFavoriteAlbumRows } from "./track-query.js";
 
 export function trackRow(db, trackId) {
   return (
@@ -66,20 +67,19 @@ export function adjacentTracks(db, trackId, urlOrOptions = {}) {
     : { sql: "", args: [] };
   const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
   const searchJoin = musicSearchIndexJoin(filter.searchKind);
-  const rows = db
-    .prepare(
-      `
+  const order = smartMix?.order || rank.sql || trackOrderSql(normalizeTrackSort(params.get("sort")));
+  const sql = `
       SELECT t.id
       FROM music_tracks t
       ${searchJoin}
       LEFT JOIN music_artists a ON a.id = t.artist_id
       LEFT JOIN music_track_state s ON s.track_id = t.id
       ${where}
-      ORDER BY ${smartMix?.order || rank.sql || trackOrderSql(normalizeTrackSort(params.get("sort")))}
+      ORDER BY ${order}
       LIMIT 2000
-    `
-    )
-    .all(...filter.trackArgs, ...rank.args);
+    `;
+  const args = [...filter.trackArgs, ...rank.args];
+  const rows = readSparseFavoriteAlbumRows(db, filter, order, sql, args) ?? db.prepare(sql).all(...args);
   const index = rows.findIndex((row) => row.id === trackId);
   return {
     prevId: index > 0 ? rows[index - 1].id : "",

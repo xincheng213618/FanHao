@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
+import { routeNovelApi } from "../src/modules/novels/server/routes.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 assert(process.argv.slice(2).every(value => value === "--disable-author-index"), "known arguments");
@@ -23,6 +24,8 @@ async function factory(source) {
 assert.equal(frozen.split('=== 5) return;').length, 2);
 assert.equal(frozen.split("version > 5").length, 2);
 const beforeFactory = await factory(frozen.replace('=== 5) return;', '=== 6) return;').replace("version > 5", "version > 6"));
+const beforeProfileFactory = await factory(execFileSync("git", ["show", "f110040d02b1eb579461248da9960e97370fa4d2:src/modules/novels/server/store.js"],
+  { cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8" }));
 const currentSource = fs.readFileSync(ownerUrl, "utf8").replace(/\r\n/g, "\n");
 const indexSlot = "database.exec(AUTHOR_INDEX_SQL)";
 assert.equal(currentSource.split(indexSlot).length, 2, "one optional index installation");
@@ -37,13 +40,18 @@ const measurements = [];
 const isPage = sql => /^\s*SELECT b\.\*,[\s\S]*LIMIT \? OFFSET \?/u.test(sql);
 const isProof = sql => sql.includes("AS schema_name") && sql.includes("idx_novel_books_author_updated");
 const isCount = sql => /^SELECT COUNT\(\*\) AS count FROM /u.test(sql);
+const isProfile = sql => /GROUP BY TRIM\(author\)/u.test(sql) && !sql.includes("LIMIT ? OFFSET ?");
 DatabaseSync.prototype.prepare = function(sql, ...rest) {
   if (readerSetup && !pairs.some(pair => pair.writer === this)) { const setup = readerSetup; readerSetup = null; setup(this); }
   if (fault?.phase === "prepare" && fault.matches(sql)) { const error = fault.error; fault = null; throw error; }
-  const originalSql = sql, database = this, page = isPage(sql), count = isCount(sql);
+  const originalSql = sql, database = this, page = isPage(sql), count = isCount(sql), profile = isProfile(sql);
   if (active?.visits && (page || count)) {
     this.function("fixture_author_visit", value => { active[page ? "pageVisits" : "countVisits"]++; return value; });
     sql = sql.replace("b.status = 'ok'", "b.status = 'ok' AND fixture_author_visit(b.status) = 'ok'");
+  }
+  if (active?.visits && profile) {
+    this.function("fixture_profile_visit", value => { active.profileVisits++; return value; });
+    sql = sql.replace("status = 'ok'", "status = 'ok' AND fixture_profile_visit(status) = 'ok'");
   }
   const statement = nativePrepare.call(this, sql, ...rest);
   return new Proxy(statement, { get(target, key) {
@@ -59,6 +67,11 @@ DatabaseSync.prototype.prepare = function(sql, ...rest) {
         const plan = text => nativePrepare.call(database, "EXPLAIN QUERY PLAN " + text).all(...args).map(row => row.detail);
         active.plan = plan(originalSql); active.sql = originalSql;
         assert.deepEqual(plan(sql), active.plan, "visit callback preserves the unmodified native page plan");
+      }
+      if (active && profile && key === "get") {
+        const plan = text => nativePrepare.call(database, "EXPLAIN QUERY PLAN " + text).all(...args).map(row => row.detail);
+        active.profilePlan = plan(originalSql);
+        assert.deepEqual(plan(sql), active.profilePlan, "visit callback preserves the unmodified profile plan");
       }
       if (active && ["get", "all"].includes(key)
         && (/COUNT\(DISTINCT TRIM\(author\)\)/u.test(originalSql) || /GROUP BY TRIM\(author\)/u.test(originalSql))) {
@@ -92,14 +105,16 @@ function seed(target, count = 32) {
   for (let index = 0; index < Math.min(12, count); index++) state.run("b" + index, new Date(Date.UTC(2026, 1, 1, 0, 0, index)).toISOString());
   target.writer.exec("COMMIT");
 }
+function invoke(owner, method, params) {
+  return method === "authorDetail" ? owner.authorDetail(params.author, url(params)) : owner[method](url(params));
+}
 function compare(target, params, label = "complete DTO", method = "listBooks") {
-  const invoke = owner => method === "authorDetail" ? owner.authorDetail(params.author, url(params)) : owner[method](url(params));
-  const old = invoke(target.previous), next = invoke(target.current);
+  const old = invoke(target.previous, method, params), next = invoke(target.current, method, params);
   assert.deepEqual(next, old, label); assert.equal(JSON.stringify(next), JSON.stringify(old), label + " wire order"); responses++; return next;
 }
 function measure(owner, params, visits = false, method = "listBooks") {
-  active = { reads: 0, probes: 0, visits, countVisits: 0, pageVisits: 0 };
-  try { return { result: owner[method](url(params)), ...active }; } finally { active = null; }
+  active = { reads: 0, probes: 0, visits, countVisits: 0, pageVisits: 0, profileVisits: 0 };
+  try { return { result: invoke(owner, method, params), ...active }; } finally { active = null; }
 }
 function sameError(first, second, label) {
   const capture = callback => { try { callback(); } catch (error) { return { name: error.name, message: error.message, code: error.code }; } assert.fail(label + " must fail"); };
@@ -157,6 +172,26 @@ function verifyResponses() {
   // Dynamic stored types retain SQLite's comparison rules; rows remain wide.
   target.writer.prepare("UPDATE novel_books SET title=?,updated_at=? WHERE id='a'").run(Buffer.from([65, 0, 66]), Buffer.from([49, 0, 50]));
   for (const sort of ["updated", "title", "chapters"]) compare(target, { author: "Writer", sort, limit: "4" }, "native BLOB/NUL sort values");
+
+  const aggregate = pair("profile-aggregate-order");
+  const max = 9223372036854775807n;
+  book(aggregate.writer, "first", 1, { updated_at: "a", author: " Writer ", size_bytes: max });
+  book(aggregate.writer, "second", 2, { updated_at: "c", author: Buffer.from("Writer"), size_bytes: -max });
+  book(aggregate.writer, "third", 3, { updated_at: "b", size_bytes: 5 });
+  for (let index = 0; index < 24; index++) book(aggregate.writer, "unrelated-" + index, index, { author: "Other", size_bytes: 0 });
+  const profile = compare(aggregate, { author: "Writer", offset: "3" }, "profile aggregate visits rows in original order", "authorDetail");
+  assert.equal(profile.author.sizeBytes, 5, "index order would overflow before cancellation");
+  assert(measure(aggregate.current, { author: "Writer", offset: "3" }, false, "authorDetail").profilePlan.some(line => line.includes("idx_novel_books_author_updated")));
+  const truncatedAuthor = "x".repeat(79) + "\t";
+  book(aggregate.writer, "truncated-author", 1, { author: truncatedAuthor, size_bytes: 0 });
+  const truncatedParams = { author: truncatedAuthor + "suffix" };
+  const truncated = compare(aggregate, truncatedParams, "profile and page may normalize truncated author differently", "authorDetail");
+  assert.equal(truncated.total, 0);
+  assert.equal(truncated.author.bookCount, 1);
+  assert(!measure(aggregate.current, truncatedParams, false, "authorDetail").profilePlan.some(line => line.includes("idx_novel_books_author_updated")));
+  aggregate.writer.exec("CREATE INDEX fixture_profile_legacy ON novel_books(category)");
+  compare(aggregate, { author: "Writer", offset: "3" }, "legacy profile SQL retains exact aggregation", "authorDetail");
+  assert(!measure(aggregate.current, { author: "Writer", offset: "3" }, false, "authorDetail").profilePlan.some(line => line.includes("idx_novel_books_author_updated")));
 }
 function verifyLegacy() {
   for (const [label, mutate] of [
@@ -198,6 +233,20 @@ function verifyErrorsAndWal() {
     assert.deepEqual(target.current.listBooks(url({ author: "Writer", limit: "8" })), expected, "capability failure retains original successful SQL");
     assert.equal(fault, null); responses++;
   }
+  const profileSnapshot = pair("profile-snapshot"); seed(profileSnapshot);
+  const profileParams = { author: "Sparse", limit: "8" };
+  profileSnapshot.writer.exec("UPDATE novel_books SET author='Sparse' WHERE id='b1'");
+  const expectedProfile = compare(profileSnapshot, profileParams, "author before external write", "authorDetail");
+  fault = { phase: "all", matches: isProof, error: new Error("synthetic profile capability failure") };
+  const failedProof = measure(profileSnapshot.current, profileParams, false, "authorDetail");
+  assert.equal(fault, null);
+  assert.deepEqual(failedProof.result, expectedProfile);
+  assert(!failedProof.profilePlan.some(line => line.includes("idx_novel_books_author_updated")));
+  afterProof = () => profileSnapshot.writer.exec("UPDATE novel_books SET author='Sparse' WHERE id='b2'");
+  const concurrentProfile = invoke(profileSnapshot.current, "authorDetail", profileParams);
+  assert.equal(afterProof, null);
+  assert.deepEqual({ ...concurrentProfile, listRevision: null }, { ...expectedProfile, listRevision: null }, "profile and page share the original WAL snapshot");
+  assert.equal(compare(profileSnapshot, profileParams, "next profile sees external write", "authorDetail").author.bookCount, 2);
   for (const [phase, matches] of [["prepare", isPage], ["all", isPage], ["get", isCount]]) {
     const invoke = owner => { fault = { phase, matches, error: new Error("synthetic native failure") }; return owner.listBooks(url({ author: "Writer", limit: "8" })); };
     sameError(() => invoke(target.previous), () => invoke(target.current), "original SQL " + phase); assert.equal(fault, null);
@@ -225,7 +274,7 @@ function verifyErrorsAndWal() {
 }
 const normalized = value => JSON.parse(JSON.stringify(value, (key, entry) => key === "sourceRealm" ? "server:fixture" : key === "listRevision" ? "revision" : key === "dbPath" ? "fixture.sqlite" : entry));
 const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)];
-function verifyScale() {
+async function verifyScale() {
   const indexed = pair("scale-indexed"), baseline = pair("scale-noindex", withoutIndexFactory);
   const insertTimes = [];
   for (const target of [baseline, indexed]) {
@@ -239,6 +288,7 @@ function verifyScale() {
     }
     target.writer.exec("COMMIT"); insertTimes.push(performance.now() - start); target.current.summary();
   }
+  await verifyProfileScale(indexed);
   for (const author of ["Sparse", "Common"]) for (const offset of ["0", "5"]) {
     const params = { author, limit: "40", offset, sort: "updated" };
     const old = measure(baseline.current, params, true), next = measure(indexed.current, params, true);
@@ -296,10 +346,74 @@ function verifyScale() {
     assert(!result.after.plan.some(line => line.includes("TEMP B-TREE")), "updated author page needs no temporary sort");
   }
 }
+
+async function verifyProfileScale(target) {
+  const previous = beforeProfileFactory({ dbPath: target.dbPath });
+  async function route(owner, author, filters = {}) {
+    const response = {};
+    const requestUrl = new URL(`http://fixture.invalid/api/novels/authors/${encodeURIComponent(author)}?limit=40`);
+    for (const [key, value] of Object.entries(filters)) requestUrl.searchParams.set(key, value);
+    assert(await routeNovelApi({ method: "GET" }, response, requestUrl, {
+      novelStore: owner,
+      sendJson: (res, status, data) => Object.assign(res, { status, data }),
+      notFound: res => Object.assign(res, { status: 404 })
+    }));
+    return response;
+  }
+  try {
+    for (const [author, total] of [["Sparse", 10], ["Common", 1000]]) {
+      const params = { author, limit: "40" };
+      const before = measure(previous, params, true, "authorDetail");
+      const after = measure(target.current, params, true, "authorDetail");
+      assert.deepEqual(after.result, before.result, "complete profile store result from the same native database");
+      assert.equal(before.profileVisits, 100000, "old profile aggregate visits the entire catalogue");
+      assert.equal(after.profileVisits, total, "profile reads only the selected author's indexed candidates");
+      assert.equal(after.probes, 1, "page and profile share one schema proof");
+      assert(after.profilePlan.some(line => line.includes("SEARCH novel_books USING INDEX idx_novel_books_author_updated")));
+      assert.equal(JSON.stringify(await route(target.current, author)), JSON.stringify(await route(previous, author)), "complete author endpoint response equals pre-change owner");
+      const oldMs = [], newMs = [];
+      async function sample(owner, samples) {
+        const start = performance.now();
+        const response = await route(owner, author);
+        samples.push(performance.now() - start);
+        assert.equal(response.status, 200);
+      }
+      for (let round = 0; round < 9; round++) {
+        if (round % 2) await sample(target.current, newMs);
+        await sample(previous, oldMs);
+        if (!(round % 2)) await sample(target.current, newMs);
+      }
+      console.log(JSON.stringify({ check: "novel-author-profile", books: 100000, authorBooks: total,
+        beforeVisits: before.profileVisits, afterVisits: after.profileVisits,
+        beforeMedianMs: +median(oldMs).toFixed(3), afterMedianMs: +median(newMs).toFixed(3) }));
+    }
+    assert.deepEqual(await route(previous, "Absent"), { status: 404 });
+    assert.deepEqual(await route(target.current, "Absent"), { status: 404 });
+    for (const params of [
+      { author: "Other", limit: "40" },
+      { author: "Sparse", limit: "40", q: "", search: " Book " },
+      { author: "Sparse", limit: "40", category: " 分类 " },
+      { author: "Sparse", limit: "40", reading: "YES" }
+    ]) {
+      const before = measure(previous, params, false, "authorDetail");
+      const after = measure(target.current, params, false, "authorDetail");
+      assert.deepEqual(after.result, before.result, "dense or filtered author detail preserves complete response");
+      assert.deepEqual(after.profilePlan, before.profilePlan, "dense or filtered profiles retain the original aggregate plan");
+      const { author, ...filters } = params;
+      assert.equal(JSON.stringify(await route(target.current, author, filters)), JSON.stringify(await route(previous, author, filters)));
+    }
+    const whitespace = { q: "   ", search: "Book", category: " all ", reading: " YES " };
+    const normalized = measure(target.current, { author: "Sparse", limit: "40", ...whitespace }, true, "authorDetail");
+    assert.equal(normalized.profileVisits, 10, "profile eligibility uses the list's normalized filters");
+    assert.equal(JSON.stringify(await route(target.current, "Sparse", whitespace)), JSON.stringify(await route(previous, "Sparse", whitespace)));
+  } finally {
+    previous.invalidate();
+  }
+}
 try {
   verifyResponses(); verifyLegacy(); verifyErrorsAndWal();
   console.log(`Novel author index contracts: ${responses} complete DTO/wire comparisons, ${policyChecks} explicit rowid-policy cases, ${errors} original errors PASS.`);
-  verifyScale();
+  await verifyScale();
   console.log("Novel author index native candidate/ordering budgets PASS.");
 } finally {
   DatabaseSync.prototype.prepare = nativePrepare;

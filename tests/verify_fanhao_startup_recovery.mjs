@@ -20,8 +20,10 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
         current.reads.push(url.search);
         const plan = current.plans.shift() || current.lastPlan || {};
         current.lastPlan = plan; plan.arrived?.(); if (plan.wait) await plan.wait;
+        if (plan.delay) await new Promise(resolve => setTimeout(resolve, plan.delay));
         if (plan.error) { json(res, { error: plan.error }, 503); return; }
-        json(res, { people: [0, 1, 2].map(index => ({ id: `person-${index}`, name: `Synthetic person ${index}`, workCount: 3 })), works: [], totals: {}, user: {}, access: { mode: "local" }, scope: url.searchParams.get("scope") || "main" }); return;
+        const scope = url.searchParams.get("scope") || "main";
+        json(res, { people: [0, 1, 2].map(index => ({ id: `person-${index}`, name: `Synthetic ${scope} person ${index}`, workCount: 3 })), works: [], totals: {}, user: {}, access: { mode: "local" }, scope }); return;
       }
       if (["/api/favorites", "/api/history", "/api/works", "/api/search"].includes(url.pathname)) {
         if (current.collectionError) { json(res, { error: current.collectionError }, 503); return; }
@@ -29,17 +31,100 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
       }
       if (url.pathname.startsWith("/api/")) { json(res, {}); return; }
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
-      if (sourceOverrides[url.pathname] !== undefined) { send(res, sourceOverrides[url.pathname], "text/javascript"); return; }
       const filename = path.resolve(publicRoot, `.${decodeURIComponent(url.pathname)}`);
       assert(filename.startsWith(`${publicRoot}${path.sep}`), "static reads stay in public");
       const target = fs.statSync(filename, { throwIfNoEntry: false })?.isFile() ? filename : path.join(publicRoot, "index.html");
-      send(res, await fs.promises.readFile(target), target.endsWith(".js") ? "text/javascript" : target.endsWith(".css") ? "text/css" : "text/html; charset=utf-8");
+      const type = target.endsWith(".js") ? "text/javascript" : target.endsWith(".css") ? "text/css" : "text/html; charset=utf-8";
+      const asset = current.assets.get(url.pathname);
+      if (asset) {
+        current.assetReads.push(`${url.pathname}${url.search}`);
+        if (!asset.used) {
+          asset.used = true; asset.arrived(); await asset.wait;
+        }
+        if (asset.error) { send(res, asset.error, type, 503); return; }
+      }
+      send(res, sourceOverrides[url.pathname] ?? await fs.promises.readFile(target), type);
     } catch (error) { faults.push(error.message); json(res, { error: error.message }, 500); }
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`, browser = await chromium.launch({ executablePath, headless: true });
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
+    await run("FanHao cold entry overlaps shell and core delivery with styles", async () => {
+      const css = "/modules/fanhao/work-cards.css", shell = "/fanhao-app.js", core = "/app.js", delay = 240;
+      const assets = new Map([css, shell, core].map(asset => [asset, gate()]));
+      for (const asset of assets.values()) asset.requested.then(() => setTimeout(asset.release, delay));
+      const page = await open("/fanhao", [], false, "", { assets, waitUntil: "commit" });
+      try {
+        const at = await firstVisiblePerson(page);
+        const timings = await page.evaluate(({ css, shell, core, at }) => {
+          const entries = performance.getEntriesByType("resource");
+          const resource = path => entries.find(entry => new URL(entry.name).pathname === path);
+          const style = resource(css), start = style.startTime;
+          return { shellStartMs: Math.round(resource(shell).startTime - start), coreStartMs: Math.round(resource(core).startTime - start),
+            styleEndMs: Math.round(style.responseEnd - start), firstCardMs: Math.round(at - start) };
+        }, { css, shell, core, at });
+        console.log("MEASURE FanHao cold scripts", JSON.stringify({ delay, ...timings, assetReads: runtime.assetReads }));
+        assert.equal(await page.locator(".person-index-card").count(), 3);
+        assert.equal(runtime.reads.length, 1);
+        for (const path of [shell, core]) assert.equal(runtime.assetReads.filter(url => url.split("?")[0] === path).length, 1, "preload and import must use one versioned URL");
+        assert(timings.shellStartMs < timings.styleEndMs && timings.coreStartMs < timings.styleEndMs,
+          "both FanHao scripts must begin downloading during style delivery");
+      } finally { for (const asset of assets.values()) asset.release(); await page.close(); }
+    });
+    await run("FanHao downloaded modules wait for a late style failure", async () => {
+      const style = gate(); style.error = "Synthetic unavailable stylesheet";
+      const page = await open("/fanhao", [], false, "", {
+        assets: new Map([["/modules/fanhao/work-cards.css", style]]), waitUntil: "commit"
+      });
+      try {
+        await style.requested;
+        await page.waitForFunction(() => {
+          const paths = performance.getEntriesByType("resource").map(entry => new URL(entry.name).pathname);
+          return paths.includes("/fanhao-app.js") && paths.includes("/app.js");
+        }, null, { timeout: 5000 });
+        assert.equal(await page.evaluate(() => document.documentElement.dataset.appModule || null), null,
+          "downloaded shell and core must wait until stylesheet processing settles before executing");
+        assert.equal(runtime.reads.length, 0);
+        style.release();
+        await firstVisiblePerson(page);
+        const notice = page.locator("#appStartupNotice");
+        assert.equal(await notice.getAttribute("role"), "status");
+        assert.equal(await notice.locator("h2").textContent(), "部分页面样式未加载");
+        assert.equal(await notice.isVisible(), true);
+      } finally { style.release(); await page.close(); }
+    });
+    await run("FanHao unavailable preloaded core retains startup recovery", async () => {
+      const core = gate(); core.error = "Synthetic unavailable core";
+      const page = await open("/fanhao", [], false, "", { assets: new Map([["/app.js", core]]), waitUntil: "commit" });
+      try {
+        await core.requested; core.release();
+        const notice = page.locator('#appStartupNotice[role="alert"]');
+        await notice.waitFor();
+        assert.equal(await notice.locator("h2").textContent(), "页面未能启动");
+        assert.equal(await notice.locator("button").isVisible(), true);
+        await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"));
+        assert.equal(runtime.reads.length, 0);
+      } finally { core.release(); await page.close(); }
+    });
+    await run("western cold entry opens with one scoped library read", async () => {
+      const delay = 300;
+      const page = await open("/western", [{ delay }, { delay }]);
+      try {
+        const visibleAt = await (await page.waitForFunction(() => {
+          const card = document.querySelector(".person-index-card");
+          return card?.textContent.includes("Synthetic western person") && getComputedStyle(card).visibility === "visible" ? performance.now() : null;
+        })).jsonValue();
+        const visibleMs = await page.evaluate(visibleAt => {
+          const first = performance.getEntriesByType("resource").find(entry => new URL(entry.name).pathname === "/api/library");
+          return Math.round(visibleAt - first.startTime);
+        }, visibleAt);
+        console.log("MEASURE western cold people", JSON.stringify({ delay, libraryReads: runtime.reads, visibleMs }));
+        assert.deepEqual(runtime.reads, ["?scope=western"], "western cold entry must read only its requested library scope");
+        assert.equal(await page.locator(".person-index-card").count(), 3);
+        assert.equal(new URL(page.url()).pathname, "/western");
+      } finally { await page.close(); }
+    });
     for (const route of ["/fanhao", "/fanhao/favorites", "/western"]) {
       await run(`${route} startup failure retries in place with keyboard and history`, async () => {
         const message = `Synthetic startup failure ${"long-detail-without-spaces-".repeat(12)}`;
@@ -101,14 +186,14 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
         assert.equal(new URL(page.url()).pathname, "/fanhao/favorites", "back must return to the failed original destination");
       } finally { await page.close(); }
     });
-    await run("western scope failure recovers the requested scope instead of the main cache", async () => {
-      const page = await open("/western", [{}, { error: "Synthetic western scope failure" }]);
+    await run("western scope failure recovers the requested scope", async () => {
+      const page = await open("/western", [{ error: "Synthetic western scope failure" }]);
       try {
         await errorVisible(page, "Synthetic western scope failure");
-        assert.deepEqual(runtime.reads, ["", "?scope=western"]);
+        assert.deepEqual(runtime.reads, ["?scope=western"]);
         runtime.plans = [{}]; await page.locator(".library-retry-button").click();
         await page.locator(".person-index-card").first().waitFor();
-        assert.deepEqual(runtime.reads, ["", "?scope=western", "?scope=western"], "scope recovery must read the failed scope instead of reusing the other scope's library");
+        assert.deepEqual(runtime.reads, ["?scope=western", "?scope=western"], "scope recovery must only retry the failed scope");
         assert.equal(await page.locator("#currentTitle").textContent(), "欧美人物");
         assert.equal(new URL(page.url()).pathname, "/western");
       } finally { await page.close(); }
@@ -137,14 +222,22 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
     assert(checks > 0); assert.deepEqual(faults, []); console.log(`Startup recovery passed (${checks} actual-shell scenarios).`);
     return { checks };
   } finally { for (const pending of held) pending.release(); await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
-  async function open(route, plans, ignoreAbort = false, collectionError = "") {
-    runtime = { plans: [...plans], reads: [], lastPlan: null, collectionError };
+  async function open(route, plans, ignoreAbort = false, collectionError = "", { assets = new Map(), waitUntil = "load" } = {}) {
+    runtime = { plans: [...plans], reads: [], lastPlan: null, collectionError, assets, assetReads: [] };
     const page = await browser.newPage({ viewport: { width: 320, height: 900 } }); page.on("pageerror", error => faults.push(error.message));
     await page.addInitScript(ignoreAbort => { Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } }); if (ignoreAbort) { const read = fetch.bind(window); window.fetch = (url, options = {}) => { const next = { ...options }; if (String(url).startsWith("/api/library")) delete next.signal; return read(url, next); }; } }, ignoreAbort);
-    await page.goto(`${base}${route}`); return page;
+    await page.goto(`${base}${route}`, { waitUntil }); return page;
   }
   function gate() { let arrived, release; const pending = { requested: new Promise(resolve => { arrived = resolve; }), wait: new Promise(resolve => { release = resolve; }), arrived: () => arrived(), release: () => { held.delete(pending); release(); } }; held.add(pending); return pending; }
   async function errorVisible(page, message) { await page.waitForFunction(message => document.querySelector("#workGrid")?.textContent.includes(message), message); await frames(page); }
+  async function firstVisiblePerson(page) {
+    return (await page.waitForFunction(() => {
+      const card = document.querySelector(".person-index-card");
+      if (!card || getComputedStyle(card).visibility !== "visible") return null;
+      const rect = card.getBoundingClientRect();
+      return rect.bottom > 0 && rect.top < innerHeight ? performance.now() : null;
+    })).jsonValue();
+  }
   async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
   async function navigate(page, view) { await page.locator("#fanhaoNavigationButton").click(); await page.locator(`[data-view="${view}"]`).click(); }
   async function surface(page) { return page.evaluate(() => ({ url: location.href, title: document.querySelector("#currentTitle").textContent, grid: document.querySelector("#workGrid").textContent, draft: document.querySelector("#workSearch").value, focus: document.activeElement?.id })); }
@@ -158,6 +251,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (!negativeOnly) await runStartupRecovery({ casePattern: caseOption?.slice(7) || "" });
   if (!caseOption) {
     for (const negative of [
+      { name: "cold FanHao core download overlap", file: "index.html", url: "/fanhao", marker: 'preloadEntryModule("/app.js?v=20261106-card-cover-01");', replacement: "", pattern: "FanHao cold entry overlaps", failure: /both FanHao scripts must begin downloading during style delivery/ },
+      { name: "scoped cold western read", file: "app.js", marker: 'if (next.view !== "people" && next.view !== "search") {', replacement: 'if (next.view !== "search") {', pattern: "western cold entry", failure: /western cold entry must read only its requested library scope/ },
       { name: "initial recovery action", file: "app.js", marker: "if (isCurrent()) renderLibraryReadError(next, error, navigationIntent);", replacement: "if (isCurrent()) renderEmpty(error.message);", pattern: "/fanhao startup failure retries", failure: /a failed initial library read must provide a reachable retry action/ },
       { name: "history after initial failure", file: "app.js", marker: "initializeRouteHistory({ preserveUrl: !applied });", replacement: "if (applied) initializeRouteHistory();", pattern: "failed startup keeps", failure: /navigation after a failed startup must update the URL/ },
       { name: "late failure navigation ownership", file: "app.js", marker: "if (isCurrent()) renderLibraryReadError(next, error, navigationIntent);", replacement: "renderLibraryReadError(next, error, navigationIntent);", pattern: "late failure yields", failure: /a late startup retry must not repaint or refocus a newer view/ },
@@ -166,7 +261,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     ]) {
       const source = fs.readFileSync(path.join(publicRoot, negative.file), "utf8").replaceAll("\r\n", "\n");
       assert.equal(source.split(negative.marker).length - 1, negative.occurrences || 1, `negative must alter the expected owning behavior: ${negative.name}`);
-      await assert.rejects(() => runStartupRecovery({ casePattern: negative.pattern, sourceOverrides: { [`/${negative.file}`]: source.replaceAll(negative.marker, negative.replacement) } }), { name: "AssertionError", message: negative.failure });
+      await assert.rejects(() => runStartupRecovery({ casePattern: negative.pattern, sourceOverrides: { [negative.url || `/${negative.file}`]: source.replaceAll(negative.marker, negative.replacement) } }), { name: "AssertionError", message: negative.failure });
       console.log(`PASS negative control detects missing ${negative.name}`);
     }
   }

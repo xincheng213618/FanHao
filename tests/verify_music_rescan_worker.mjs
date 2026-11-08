@@ -12,10 +12,11 @@ import { createMusicRuntime } from "../src/modules/music/server/runtime.js";
 import { musicPublicError } from "../src/modules/music/server/public-errors.js";
 import { createMusicProgressWriter as createAndroidMusicProgressWriter } from "../android-client/www/modules/music/music-progress-writer.js";
 import { createMusicProgressWriter as createWebMusicProgressWriter } from "../public/modules/music/music-progress-writer.js";
-import { scanMusicRoots, scanSummary, writeScanRecords } from "../src/modules/music/server/scan.js";
+import { findCompanionLyric, scanMusicRoots, scanSummary, writeScanRecords } from "../src/modules/music/server/scan.js";
 import { createMusicScanWorkerClient } from "../src/modules/music/server/scan-worker-client.js";
 import { ensureSchema } from "../src/modules/music/server/schema.js";
 import { createMusicStore } from "../src/modules/music/server/store.js";
+import { routeMusicApi } from "../src/modules/music/server/routes.js";
 
 const failureWorkerUrl = new URL("./fixtures/music_scan_worker_failure.mjs", import.meta.url);
 const databaseLockWorkerUrl = new URL("./fixtures/music_database_lock.mjs", import.meta.url);
@@ -25,7 +26,15 @@ const owned = createOwnedFixtureDirectory();
 let metrics = null;
 
 try {
-  const fixture = createMusicFixture(owned.fixtureDir);
+  await verifyColdCatalogueReads(owned.fixtureDir);
+  if (!process.argv.includes("--cold-only")) await verifyRescanWorker(owned.fixtureDir);
+} finally {
+  owned.cleanup();
+}
+
+async function verifyRescanWorker(baseDir) {
+  const fixture = createMusicFixture(baseDir);
+  verifyFlatDirectoryLyricLookup(fixture.baseDir);
   await verifyLegacyPersistenceEquivalence(fixture);
   await verifyAtomicFailures(fixture);
   await verifyCommittedCrashInvalidatesReaders(fixture);
@@ -41,8 +50,219 @@ try {
   metrics = { ...timing, ...responsiveness };
   verifySourceBoundary();
   console.log(JSON.stringify({ ok: true, ...metrics }, null, 2));
-} finally {
-  owned.cleanup();
+}
+
+async function verifyColdCatalogueReads(baseDir) {
+  const moduleUrl = new URL("../src/modules/music/server/", import.meta.url);
+  const source = name => fs.readFileSync(new URL(name, moduleUrl), "utf8");
+  const asModule = text => "data:text/javascript;base64," + Buffer.from(text
+    .replace(/from "(\.\.?\/[^"\n]+)"/gu, (_, relative) => "from " + JSON.stringify(new URL(relative, moduleUrl).href))).toString("base64");
+  const oldBackfill = source("backfill.js").replace("  if (noMissingTrackGenres(db)) return;", "");
+  assert.notEqual(oldBackfill, source("backfill.js"));
+  const oldCounts = /const indexedCount = musicSearchRowCount\(db, "(music_search_(?:short|phonetic))", (?:SHORT|PHONETIC)_SEARCH_TABLE\);/gu;
+  assert.equal([...source("schema.js").matchAll(oldCounts)].length, 2);
+  const oldSchema = source("schema.js").replace(oldCounts, (_, table) =>
+    `const indexedCount = Number(db.prepare("SELECT COUNT(*) AS count FROM ${table}").get()?.count || 0);`)
+    .replace('"./backfill.js"', JSON.stringify(asModule(oldBackfill)));
+  const { createMusicStore: previous } = await import(asModule(source("store.js")
+    .replace('"./schema.js"', JSON.stringify(asModule(oldSchema)))));
+  const dbPath = path.join(baseDir, "cold-catalogue.sqlite");
+  const options = { dbPath, roots: [] };
+  const bootstrap = createMusicStore(options);
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  const originalNow = Date.now;
+  let writer, active;
+  Date.now = () => 1791800000000;
+  DatabaseSync.prototype.prepare = function (sql, ...args) {
+    const current = active;
+    const ftsVirtual = /^SELECT COUNT\(\*\) AS count FROM music_search_(?:short|phonetic)$/u.test(sql);
+    const ftsContent = sql.startsWith("SELECT CASE WHEN") && sql.includes("_content) END AS count");
+    const genreProbe = sql.startsWith("WITH candidates AS MATERIALIZED");
+    const genreRead = sql.includes("SELECT id, title, display_artist, album_title, file_name, relative_path, genre");
+    const statement = originalPrepare.call(this, sql, ...args);
+    if (!current || !(ftsVirtual || ftsContent || genreProbe || genreRead)) return statement;
+    return new Proxy(statement, { get(target, key) {
+      if (key !== "all" && key !== "get") return Reflect.get(target, key, target);
+      return (...input) => {
+        if (genreRead) current.work.genreReads++;
+        if (ftsVirtual) current.work.virtual++;
+        if (ftsContent) current.work.content++;
+        if (current.failure === "optional" && (genreProbe || ftsContent)
+          || current.failure === "genre" && genreRead) throw new Error("synthetic music startup read failed");
+        const rows = target[key](...input);
+        if (genreProbe) current.work.genres.push([rows.count, rows.missing]);
+        return rows;
+      };
+    } });
+  };
+  async function route(factory, endpoint = "tracks/t-1000", failure = null, routeOptions = options) {
+    const owner = factory(routeOptions);
+    const response = {};
+    const work = { genreReads: 0, virtual: 0, content: 0, genres: [] };
+    active = { failure, work };
+    try {
+      const start = performance.now();
+      assert(await routeMusicApi({ method: "GET" }, response, new URL(`http://fixture/api/music/${endpoint}`), {
+        musicStore: owner,
+        sendJson(res, status, body) { Object.assign(res, { status, body }); },
+        notFound(res) { res.status = 404; }
+      }));
+      return { response, work, elapsed: performance.now() - start };
+    } finally {
+      active = null;
+      owner.invalidate();
+    }
+  }
+  try {
+    bootstrap.summary(); bootstrap.invalidate();
+    writer = new DatabaseSync(dbPath);
+    writer.exec(`BEGIN;
+      INSERT INTO music_artists(id,name,source_root,source_path,relative_path,track_count,updated_at)
+      VALUES('a','Artist','root','path','relative',100000,'fixture');
+      INSERT INTO music_albums(id,artist_id,title,source_root,source_path,relative_path,track_count,updated_at)
+      VALUES('al','a','Album','root','album','relative',100000,'fixture');`);
+    writer.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+      INSERT INTO music_tracks(id,artist_id,album_id,title,display_artist,album_title,track_no,disc_no,genre,language,
+        source_root,source_path,relative_path,file_name,ext,status,updated_at)
+      SELECT 't-'||i,'a','al','Title '||i,'Artist','Album',i%24,i%2,CASE WHEN i%3=0 THEN 'Rock' ELSE 'Pop' END,
+        '其他','root',?||i,?||i,'Track-'||i||'.mp3','.mp3','ok','fixture' FROM n
+    `).run("synthetic/".repeat(9), "relative/".repeat(7));
+    writer.exec(`INSERT INTO music_search_short(track_id,title,artist,album,genre,file_name)
+      SELECT id,title,display_artist,album_title,genre,file_name FROM music_tracks;
+      INSERT INTO music_search_phonetic(track_id,artist_id,album_id,title,artist,album,file_name)
+      SELECT id,artist_id,album_id,title,display_artist,album_title,file_name FROM music_tracks;
+      COMMIT`);
+    writer.close(); writer = null;
+    const stats = {};
+    for (const endpoint of ["tracks/t-1000", "tracks?limit=48"]) {
+      const owners = [previous, createMusicStore], times = [[], []];
+      for (let pair = 0; pair < 5; pair++) {
+        const replies = [];
+        for (const i of pair % 2 ? [1, 0] : [0, 1]) {
+          replies[i] = await route(owners[i], endpoint);
+          times[i].push(replies[i].elapsed);
+        }
+        assert.equal(replies[0].response.status, 200);
+        assert.deepEqual(replies[1].response, replies[0].response);
+        assert.deepEqual(replies[0].work, { genreReads: 1, virtual: 2, content: 0, genres: [] });
+        assert.deepEqual(replies[1].work, { genreReads: 0, virtual: 0, content: 2, genres: [[0, null]] });
+      }
+      stats[endpoint] = times.map(values => +values.sort((a, b) => a - b)[2].toFixed(2));
+    }
+    const optional = await route(createMusicStore, "tracks/t-1000", "optional");
+    assert.deepEqual(optional.response, (await route(previous)).response);
+    assert.deepEqual(optional.work, { genreReads: 1, virtual: 2, content: 2, genres: [] });
+    writer = new DatabaseSync(dbPath);
+    const blank = () => writer.exec(`UPDATE music_tracks SET genre = CASE id WHEN 't-1000' THEN NULL
+      WHEN 't-1001' THEN '' WHEN 't-1002' THEN '   ' ELSE X'2020' END
+      WHERE id IN ('t-1000','t-1001','t-1002','t-1003')`);
+    const repaired = writer.prepare(`SELECT genre, typeof(genre) AS type FROM music_tracks
+      WHERE id IN ('t-1000','t-1001','t-1002','t-1003') ORDER BY id`);
+    blank();
+    const prior = await route(previous);
+    const expectedGenres = repaired.all();
+    blank();
+    const repair = await route(createMusicStore);
+    assert.deepEqual(repair.response, prior.response);
+    assert.deepEqual(repaired.all(), expectedGenres);
+    assert.deepEqual(repair.work.genres, [[4, 1]]);
+    assert.equal(repair.work.genreReads, 1);
+    writer.exec(`UPDATE music_tracks SET genre=' Rock' WHERE CAST(substr(id,3) AS INTEGER) <= 130`);
+    const dense = await route(createMusicStore);
+    assert.deepEqual(dense.response, (await route(previous)).response);
+    assert.deepEqual(dense.work.genres, [[129, 0]]);
+    assert.equal(dense.work.genreReads, 1);
+    writer.exec(`UPDATE music_tracks SET genre='Rock' WHERE genre=' Rock';
+      DROP INDEX idx_music_tracks_genre;
+      CREATE INDEX idx_music_tracks_genre ON music_tracks(genre COLLATE NOCASE);
+      DROP TABLE music_search_short;
+      CREATE VIRTUAL TABLE music_search_short USING fts5(track_id UNINDEXED,title,artist,album,genre,file_name,
+        tokenize='unicode61 remove_diacritics 0',prefix='2');
+      INSERT INTO music_search_short(track_id,title,artist,album,genre,file_name)
+        SELECT id,title,display_artist,album_title,genre,file_name FROM music_tracks`);
+    const legacy = await route(createMusicStore);
+    assert.deepEqual(legacy.response, (await route(previous)).response);
+    assert.deepEqual(legacy.work, { genreReads: 1, virtual: 1, content: 2, genres: [] });
+    const log = console.error;
+    try {
+      console.error = () => {};
+      const currentError = await route(createMusicStore, "tracks/t-1000", "genre");
+      const previousError = await route(previous, "tracks/t-1000", "genre");
+      assert.deepEqual(currentError.response, previousError.response);
+      assert.equal(currentError.response.status, 500);
+    } finally { console.error = log; }
+    writer.close(); writer = null;
+
+    // A partial index still goes through the original rebuild during startup.
+    const repairOptions = { ...options, dbPath: path.join(baseDir, "cold-catalogue-repair.sqlite") };
+    const repairBootstrap = createMusicStore(repairOptions);
+    try { repairBootstrap.summary(); } finally { repairBootstrap.invalidate(); }
+    writer = new DatabaseSync(repairOptions.dbPath);
+    writer.exec(`INSERT INTO music_tracks(id,artist_id,album_id,title,genre,source_root,source_path,relative_path,file_name,ext,updated_at)
+      VALUES('repair','a','al','Synthetic Repair','Rock','fixture','repair','repair','repair.mp3','.mp3','fixture')`);
+    const repairedSearch = await route(createMusicStore, "tracks/repair", null, repairOptions);
+    assert.deepEqual(repairedSearch.response, (await route(previous, "tracks/repair", null, repairOptions)).response);
+    assert.equal(repairedSearch.response.status, 200);
+    for (const table of ["music_search_short", "music_search_phonetic"]) {
+      assert.equal(writer.prepare(`SELECT track_id FROM ${table}`).get()?.track_id, "repair");
+    }
+    console.log(JSON.stringify({ check: "music-cold-catalogue-reads", tracks: 100000, medianMs: stats }));
+  } finally {
+    writer?.close(); bootstrap.invalidate();
+    DatabaseSync.prototype.prepare = originalPrepare;
+    Date.now = originalNow;
+  }
+}
+
+function verifyFlatDirectoryLyricLookup(baseDir) {
+  const root = path.join(baseDir, "flat-managed-library");
+  const album = path.join(root, "Artist", "Singles");
+  fs.mkdirSync(album, { recursive: true });
+  const firstTrack = path.join(album, "Track 1.flac");
+  const managedLyric = path.join(album, "explicit.lrc");
+  const trackCount = 256;
+  fs.writeFileSync(firstTrack, "audio fixture");
+  fs.writeFileSync(managedLyric, "[00:01.00]managed");
+  fs.writeFileSync(path.join(album, "Track 1.LRC"), "[00:01.00]alternate");
+  fs.writeFileSync(path.join(album, "track 2.LRC"), "[00:02.00]companion");
+  createManagedCatalog(root, firstTrack, managedLyric);
+  const catalog = new DatabaseSync(path.join(root, "_目录", "library.sqlite"));
+  try {
+    catalog.exec("BEGIN");
+    const insert = catalog.prepare(`
+      INSERT INTO media
+      SELECT ?, media_type, ?, artist, ?, album, album_artist, ?, disc_number, duration_seconds, codec
+      FROM media WHERE media_id = 'managed-1'
+    `);
+    for (let index = 2; index <= trackCount; index += 1) {
+      const file = path.join(album, `Track ${index}.flac`);
+      fs.writeFileSync(file, "audio fixture");
+      insert.run(String(index), path.relative(root, file), `Track ${index}`, index);
+    }
+    catalog.exec("COMMIT");
+  } finally {
+    catalog.close();
+  }
+
+  const extname = path.extname;
+  let siblingExtensionReads = 0;
+  path.extname = (name) => {
+    if (/^track \d+/iu.test(name)) siblingExtensionReads += 1;
+    return extname(name);
+  };
+  let records;
+  try {
+    records = scanMusicRoots([root], { ffprobePath: path.join(root, "unexpected-probe.exe") });
+  } finally {
+    path.extname = extname;
+  }
+  assert.equal(records.tracks.length, trackCount);
+  assert(records.tracks.every(track => !track.error), "managed fixture tracks must avoid ffprobe");
+  assert.deepEqual(records.tracks.slice(0, 3).map(track => track.fileName), ["Track 1.flac", "Track 2.flac", "Track 3.flac"]);
+  assert.deepEqual(records.lyrics.map(row => path.basename(row.lrcPath)), ["explicit.lrc", "track 2.LRC"]);
+  assert.equal(findCompanionLyric(["track 2.LRC", "Track 2.lrc"], album, path.join(album, "Track 2.flac")),
+    path.join(album, "track 2.LRC"), "first case-folded sibling match must retain directory order");
+  assert(siblingExtensionReads <= 5 * trackCount, `flat managed scan read ${siblingExtensionReads} sibling extensions`);
 }
 
 async function verifyLegacyPersistenceEquivalence(fixture) {

@@ -142,6 +142,11 @@ try {
   fs.writeFileSync(jsonPath, "invalid JSON must never be read or overwritten");
   assert.equal(owner.photoSetById("album-501"), null, "empty SQLite stays empty until a scan or explicit import");
   store.publish(snapshot, { photo: true, media: true, expectedRevision: "", expectedMediaRevision: "" });
+  const warmPlan = store.coverWarmPlan();
+  const warmIds = warmPlan.flatMap(group => group.albums);
+  assert.ok(warmPlan.every(group => group.title && group.albums.length));
+  assert.deepEqual(new Set(warmIds), new Set(snapshot.photoSets.map(album => album.id)));
+  assert.equal(warmIds.length, snapshot.photoSets.length, "the warm plan queues each published album once");
   galleryDb.close();
   assert.equal(store.index().photoSets.length, 2400);
   assert.deepEqual(owner.getMediaIndex().mediaItems, snapshot.mediaItems);

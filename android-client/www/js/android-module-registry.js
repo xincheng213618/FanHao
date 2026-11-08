@@ -14,6 +14,17 @@ export function androidModuleFallbackCatalog() {
   return FALLBACK_MODULES.map((module) => ({ ...module, client: { android: { ...module.client.android } } }));
 }
 
+export function prepareAndroidModuleImports(clientVersion) {
+  const imports = new Map();
+  // Bundled entries initialize views and install listeners in their factories.
+  // Only the account-owned catalogue can select those factories for creation.
+  for (const definition of FALLBACK_MODULES.slice(0, MODULE_IMPORT_BATCH_SIZE)) {
+    const url = androidEntryUrl(definition.client.android.entry, clientVersion);
+    imports.set(url, observeAndroidModuleImport(url));
+  }
+  return imports;
+}
+
 export function mergeAndroidModuleCatalog(remoteModules = []) {
   const remoteById = new Map((Array.isArray(remoteModules) ? remoteModules : []).map((module) => [module?.id, module]));
   const merged = androidModuleFallbackCatalog().map((fallbackModule) => {
@@ -39,7 +50,7 @@ export function mergeAndroidModuleCatalog(remoteModules = []) {
   return merged.sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
 }
 
-export async function loadAndroidModules(definitions, host) {
+export async function loadAndroidModules(definitions, host, preparedImports) {
   const modules = [];
   let batch = [];
   for (const definition of definitions) {
@@ -48,9 +59,7 @@ export async function loadAndroidModules(definitions, host) {
     let imported;
     try {
       const entryUrl = androidEntryUrl(surface.entry, host.clientVersion);
-      // Observe every rejection immediately, including modules consumed after
-      // a slower import or asynchronous factory earlier in this batch.
-      imported = import(entryUrl).then(namespace => ({ namespace }), error => ({ error }));
+      imported = preparedImports?.get(entryUrl) || observeAndroidModuleImport(entryUrl);
     } catch (error) {
       imported = Promise.resolve({ error });
     }
@@ -80,6 +89,12 @@ export async function loadAndroidModules(definitions, host) {
       }
     }
   }
+}
+
+function observeAndroidModuleImport(entryUrl) {
+  // Capture errors at dispatch, including speculative imports not selected by
+  // the catalogue. Selected entries report errors during ordered creation.
+  return import(entryUrl).then(namespace => ({ namespace }), error => ({ error }));
 }
 
 function androidEntryUrl(entry, clientVersion) {

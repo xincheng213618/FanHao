@@ -17,10 +17,10 @@ export function createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageD
     return `/api/fanhao/search?${params}`;
   }
 
-  function warm(query, category = "censored") {
+  function warm(query, category = "censored", { limit = getWorksLimit(), signal } = {}) {
     const text = String(query || "").trim();
     if (!text || globalThis.navigator?.connection?.saveData) return Promise.resolve([]);
-    return pageDataService.warm(getActiveUrl(), [path(text, getWorksLimit(), workListState.getServerFilterMode(), workListState.getServerSortMode(), category)]);
+    return pageDataService.warm(getActiveUrl(), [path(text, limit, workListState.getServerFilterMode(), workListState.getServerSortMode(), category)], { signal });
   }
 
   function suggestions(query, options = {}) {

@@ -2430,7 +2430,9 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
           const chapterRead = hold(url => url.pathname === "/api/novels/A/chapters/9000", "", reply);
           await launchChapter(page, "A", 9000); await requested(chapterRead); await settle(page, chapterRead); await readerTitle(page, "A", 9000);
           const before = await rememberReader(page);
-          const catalog = hold(url => url.pathname === "/api/novels/A/catalog", "", longCatalog());
+          const catalogData = longCatalog();
+          catalogData.chapters[9997].title = "İSTANBUL ΜΆΙΟΣ 附录";
+          const catalog = hold(url => url.pathname === "/api/novels/A/catalog", "", catalogData);
           await page.locator('[data-reader-focus="toolbar-目录"]').click(); await requested(catalog);
           const measured = await measureReaderRender(page, () => settle(page, catalog));
           const buttons = page.locator(".novel-reader-catalog-list .novel-chapter-button");
@@ -2446,12 +2448,19 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
           assert.match(await buttons.first().textContent(), /9,961 · A Chapter 9961/);
           assert.match(await buttons.last().textContent(), /10,000 · Target Chapter 10000/);
           assert.equal(await page.getByRole("button", { name: "下一页目录", exact: true }).isDisabled(), true);
-          await page.locator(".novel-catalog-order").click();
+          const order = page.locator(".novel-catalog-order");
+          const descending = await measureCatalogOrder(order);
           assert.equal(await pageInput.inputValue(), "1");
           assert.match(await buttons.first().textContent(), /10,000 · Target Chapter 10000/);
           const search = page.locator('[data-reader-focus="catalog-search"]');
-          await search.fill("Target");
+          const firstSearch = await measureCatalogSearch(search, "  TARGET  ");
           assert.equal(await buttons.count(), 100, "search must include matches beyond the mounted page");
+          const warmOrder = await measureCatalogOrder(order, "target");
+          assert.match(await buttons.first().textContent(), /100 · Target Chapter 100/);
+          await order.click();
+          await search.fill("İstanbul μάιος 附录");
+          assert.equal(await buttons.count(), 1, "catalog search must retain Unicode case folding and Chinese titles");
+          assert.equal(await buttons.first().getAttribute("data-chapter-index"), "9998");
           await search.fill("no such chapter");
           assert.equal(await buttons.count(), 0);
           assert.equal(await page.locator(".novel-catalog-empty").textContent(), "没有匹配的章节");
@@ -2470,8 +2479,15 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
           await page.locator('[data-reader-focus="toolbar-目录"]').click(); await tick(page);
           assert.equal(await pageInput.inputValue(), "9", "reopening locates the current chapter in the cached descending directory");
 
-          await search.fill("A Chapter 9001");
+          const reopenedSearch = await measureCatalogSearch(search, "A CHAPTER 9001");
           assert.equal(await buttons.count(), 1);
+          console.log(`MEASURE catalog input for 10000 chapters (${transport}): ${JSON.stringify({ firstSearch, reopenedSearch, descending, warmOrder })}`);
+          assert.equal(firstSearch.localeCalls, 0, "chapter search must avoid per-title locale resolution");
+          assert(reopenedSearch.casingCalls < 10, "reopening the same directory must reuse title normalization");
+          assert(descending.maxReversed <= 120, "descending order must reverse only the visible page");
+          assert.equal(warmOrder.matchChecks, 0, "changing order must reuse matches for the same query");
+          await search.fill("9001");
+          assert.equal(await buttons.count(), 1, "catalog search must still match chapter numbers");
           const selectedReply = { ...reply, chapter: chapter("A", 9001) };
           const selected = hold(url => url.pathname === "/api/novels/A/chapters/9001", "", selectedReply);
           await buttons.click(); await requested(selected);
@@ -3592,6 +3608,38 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
 
 async function ready(page) { await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"), null, { timeout: 5000 }); }
 async function tick(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+async function measureCatalogSearch(input, value) {
+  return input.evaluate((search, query) => {
+    const lower = String.prototype.toLowerCase, lowerLocale = String.prototype.toLocaleLowerCase;
+    let casingCalls = 0, localeCalls = 0;
+    String.prototype.toLowerCase = function () { casingCalls += 1; return lower.call(this); };
+    String.prototype.toLocaleLowerCase = function (...args) { casingCalls += 1; localeCalls += 1; return lowerLocale.apply(this, args); };
+    try {
+      search.value = query;
+      const started = performance.now();
+      search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      return { ms: Number((performance.now() - started).toFixed(2)), casingCalls, localeCalls };
+    } finally {
+      String.prototype.toLowerCase = lower;
+      String.prototype.toLocaleLowerCase = lowerLocale;
+    }
+  }, value);
+}
+async function measureCatalogOrder(order, needle = "") {
+  return order.evaluate((button, query) => {
+    const reverse = Array.prototype.reverse, includes = String.prototype.includes;
+    let maxReversed = 0, matchChecks = 0;
+    Array.prototype.reverse = function () { maxReversed = Math.max(maxReversed, this.length); return reverse.call(this); };
+    String.prototype.includes = function (value, position) { if (value === query) matchChecks += 1; return includes.call(this, value, position); };
+    try {
+      button.click();
+      return { maxReversed, matchChecks };
+    } finally {
+      Array.prototype.reverse = reverse;
+      String.prototype.includes = includes;
+    }
+  }, needle);
+}
 async function openCorrection(page) {
   if (!await page.locator(".novel-detail-tools").evaluate(details => details.open)) await page.locator(".novel-detail-tools summary").click();
   await page.getByRole("button", { name: "校正信息", exact: true }).click();

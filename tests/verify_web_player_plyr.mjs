@@ -8,6 +8,12 @@ const caseOption = process.argv.find(value => value.startsWith("--case="));
 await runWebPlayerFixture({ realPlyr: true, casePattern: caseOption?.slice(7) || "real Plyr" });
 
 if (!caseOption) {
+  const html = fs.readFileSync(new URL("../public/player.html", import.meta.url), "utf8");
+  const modulePreload = /<link rel="modulepreload" href="\/js\/player-page\.js\?[^"]+"\s*\/>/;
+  assert.match(html, modulePreload);
+  await assert.rejects(() => runWebPlayerFixture({ realPlyr: true, casePattern: "real Plyr startup", sourceOverrides: { "/player.html": html.replace(modulePreload, "") } }),
+    { name: "AssertionError", message: /player module must request while Plyr is still downloading/ });
+  console.log("PASS real Plyr startup negative detects missing player module preload");
   await runWebPlayerFixture({ realPlyr: true, casePattern: "shortcut help" });
   await runWebPlayerFixture({ realPlyr: true, casePattern: "time jump" });
   await runWebPlayerFixture({ realPlyr: true, casePattern: "time link copying preserves" });

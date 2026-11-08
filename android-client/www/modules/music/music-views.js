@@ -1,27 +1,27 @@
-import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-8af3642624a3";
-import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { absoluteUrl } from "../../js/image.js?v=assets-8af3642624a3";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
+import { absoluteUrl } from "../../js/image.js?v=assets-8faf7a80cb7b";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-8af3642624a3";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-8af3642624a3";
-import { createMusicSheets } from "./music-sheets.js?v=assets-8af3642624a3";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-8af3642624a3";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-8af3642624a3";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-8af3642624a3";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-8af3642624a3";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-8af3642624a3";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-8af3642624a3";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-8af3642624a3";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-8af3642624a3";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-8af3642624a3";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-8af3642624a3";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-8faf7a80cb7b";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-8faf7a80cb7b";
+import { createMusicSheets } from "./music-sheets.js?v=assets-8faf7a80cb7b";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-8faf7a80cb7b";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-8faf7a80cb7b";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-8faf7a80cb7b";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-8faf7a80cb7b";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-8faf7a80cb7b";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-8faf7a80cb7b";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-8faf7a80cb7b";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-8faf7a80cb7b";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-8faf7a80cb7b";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-8faf7a80cb7b";
 import { createMusicControlFocus } from "./music-control-focus.js";
-import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-8af3642624a3";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-8af3642624a3";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-8af3642624a3";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-8af3642624a3";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-8af3642624a3";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-8af3642624a3";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-8faf7a80cb7b";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-8faf7a80cb7b";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-8faf7a80cb7b";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-8faf7a80cb7b";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-8faf7a80cb7b";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-8faf7a80cb7b";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -80,9 +80,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-8af3642624a3";
+} from "./music-state.js?v=assets-8faf7a80cb7b";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-8af3642624a3";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-8faf7a80cb7b";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -241,6 +241,7 @@ export function createMusicViews(deps) {
   const playlistOrderWrites = new Map();
   let openTrackGeneration = 0;
   let pendingTrackSelection = 0;
+  let trackAudioPreparation = null;
   const trackPreferenceBindings = new WeakMap();
   let trackPreferenceUiIntent = 0;
   let trackPreferenceError = null;
@@ -544,6 +545,7 @@ export function createMusicViews(deps) {
     let routeCurrent = () => false;
     try {
       cancelMusicPagination();
+      mountedSearchController?.abort();
       moduleActive = true;
       const generation = ++musicRenderGeneration;
       const activeUrl = getActiveUrl();
@@ -566,17 +568,11 @@ export function createMusicViews(deps) {
       els.viewContent.className = "content-list music-mobile-content";
       renderShell();
       const openedTrackId = String(params.trackId || "").trim();
-      await Promise.all([loadSmartPlaylists(isCurrent), loadPlaylists(isCurrent), loadMusic(isListCurrent)]);
-      if (!isCurrent() || openTrackGeneration !== initialSelection || playReportSession !== initialPlaybackSession) return;
-      if (openedTrackId && state.current?.id !== openedTrackId) {
-        await openTrack(openedTrackId, { autoplay: false, renderGuard: isCurrent });
-        return;
-      }
-      const queueRestore = restorePlaybackQueue(isCurrent);
-      const restoringSelection = openTrackGeneration;
-      await queueRestore;
-      if (!isCurrent() || openTrackGeneration !== restoringSelection) return;
-      await restoreLastTrack(isCurrent);
+      await Promise.all([
+        loadSmartPlaylists(isCurrent),
+        loadPlaylists(isCurrent),
+        loadMusicAndRestorePlayback(openedTrackId, isListCurrent, isCurrent)
+      ]);
     } catch (error) {
       controlFocus.cancel(focusIntent);
       throw error;
@@ -584,6 +580,20 @@ export function createMusicViews(deps) {
       if (routeCurrent()) controlFocus.finish(focusIntent);
       else controlFocus.cancel(focusIntent);
     }
+  }
+
+  async function loadMusicAndRestorePlayback(openedTrackId, isListCurrent, isCurrent) {
+    await loadMusic(isListCurrent);
+    if (!isListCurrent()) return;
+    if (openedTrackId && state.current?.id !== openedTrackId) {
+      await openTrack(openedTrackId, { autoplay: false, renderGuard: isCurrent });
+      return;
+    }
+    const queueRestore = restorePlaybackQueue(isCurrent);
+    const restoringSelection = openTrackGeneration;
+    await queueRestore;
+    if (!isCurrent() || openTrackGeneration !== restoringSelection) return;
+    await restoreLastTrack(isCurrent);
   }
 
   function applyRouteParams(params = {}) {
@@ -631,6 +641,9 @@ export function createMusicViews(deps) {
   async function loadMusic(renderGuard = null) {
     cancelMusicPagination();
     const requestUrl = getActiveUrl();
+    const { mode, query } = state;
+    const isSearchCurrent = () => requestUrl === getActiveUrl() && state.mode === mode && state.query === query
+      && (!renderGuard || renderGuard());
     const unifiedSearch = state.mode === "library" && Boolean(state.query);
     const lyricOnlySearch = unifiedSearch && state.searchScope === "lyrics";
     const playlistOnlySearch = unifiedSearch && state.searchScope === "playlists";
@@ -658,29 +671,35 @@ export function createMusicViews(deps) {
     state.loading = true;
     state.status = "正在读取音乐库";
     renderShell();
+    let sections;
     try {
-      const data = await fetchJson(requestUrl, musicListPath(), {
-        timeoutMs: 18000,
-        signal: renderGuard?.signal
-      });
-      if (renderGuard && !renderGuard()) return;
+      const tracks = fetchJson(requestUrl, musicListPath(), { timeoutMs: 18000, signal: renderGuard?.signal });
+      sections = startComprehensiveSearch(requestUrl, renderGuard?.signal);
+      const data = await tracks;
+      const account = accountPayloadOwner(data) || captureAccountOwner(requestUrl);
+      const isCurrent = () => isSearchCurrent() && isAccountOwnerCurrent(account);
+      isCurrent.signal = renderGuard?.signal;
+      if (!isCurrent()) return;
       applyLoadedMusicData(data);
       els.viewTitle.textContent = musicTitle();
       els.viewMeta.textContent = musicMeta(data);
       renderShell();
       if (unifiedSearch) {
         await Promise.all([
-          loadSearchOverview(renderGuard),
+          loadSearchOverview(isCurrent, { request: sections?.overview, signal: sections?.signal }),
           ["all", "lyrics"].includes(state.searchScope)
-            ? loadLyricSearchResults(renderGuard, { limit: state.searchScope === "lyrics" ? 40 : 4 })
+            ? loadLyricSearchResults(isCurrent, state.searchScope === "lyrics" ? { limit: 40 }
+              : { limit: 4, request: sections?.lyrics, signal: sections?.signal })
             : Promise.resolve()
         ]);
       }
     } catch (error) {
-      if (renderGuard && !renderGuard()) return;
+      if (!isSearchCurrent()) return;
       state.loading = false;
       state.status = error?.message || "音乐库读取失败";
       renderShell();
+    } finally {
+      sections?.release();
     }
   }
 
@@ -703,17 +722,10 @@ export function createMusicViews(deps) {
         : (visibleTracks.length ? "" : focusedLibraryView.emptyMessage());
   }
 
-  async function loadSearchOverview(renderGuard = null, options = {}) {
-    const query = String(state.query || "").trim();
-    if (state.mode !== "library" || !query) {
-      state.searchOverview = emptySearchOverview();
-      return;
-    }
-    const requestUrl = getActiveUrl();
-    const signal = options.signal || renderGuard?.signal;
+  function fetchSearchOverview(requestUrl, query, signal) {
     const artistParams = new URLSearchParams({ limit: "4", q: query, sort: "count" });
     const albumParams = new URLSearchParams({ limit: "6", q: query, sort: "updated" });
-    const [artistResult, albumResult] = await Promise.allSettled([
+    return Promise.allSettled([
       fetchJson(requestUrl, `/api/music/artists?${artistParams}`, {
         timeoutMs: 12000,
         signal
@@ -723,10 +735,44 @@ export function createMusicViews(deps) {
         signal
       })
     ]);
+  }
+
+  function fetchSearchLyrics(requestUrl, query, limit, offset, signal) {
+    const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
+    return fetchJson(requestUrl, `/api/music/lyrics/search?${params}`, { timeoutMs: 12000, signal });
+  }
+
+  function startComprehensiveSearch(requestUrl, routeSignal) {
+    const query = String(state.query || "").trim();
+    if (state.mode !== "library" || state.searchScope !== "all" || !query || routeSignal?.aborted) return null;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const abort = () => controller.abort();
+    routeSignal?.addEventListener("abort", abort, { once: true });
+    const overview = fetchSearchOverview(requestUrl, query, signal);
+    const lyrics = fetchSearchLyrics(requestUrl, query, 4, 0, signal);
+    // A secondary read can settle while the primary songs are still pending.
+    // The consumer handles its error only if the primary result is accepted.
+    lyrics.catch(() => {});
+    return { overview, lyrics, signal, release() {
+      routeSignal?.removeEventListener("abort", abort);
+      abort();
+    } };
+  }
+
+  async function loadSearchOverview(renderGuard = null, options = {}) {
+    const query = String(state.query || "").trim();
+    if (state.mode !== "library" || !query) {
+      state.searchOverview = emptySearchOverview();
+      return;
+    }
+    const requestUrl = getActiveUrl();
+    const signal = options.signal || renderGuard?.signal;
+    const [artistResult, albumResult] = await (options.request || fetchSearchOverview(requestUrl, query, signal));
     if (signal?.aborted || getActiveUrl() !== requestUrl || (renderGuard && !renderGuard())) return;
     if (state.mode !== "library" || state.query !== query) return;
-    const artistData = artistResult.status === "fulfilled" ? artistResult.value : null;
-    const albumData = albumResult.status === "fulfilled" ? albumResult.value : null;
+    const artistData = currentSearchData(artistResult.status === "fulfilled" ? artistResult.value : null);
+    const albumData = currentSearchData(albumResult.status === "fulfilled" ? albumResult.value : null);
     state.searchOverview = {
       loading: false,
       artists: Array.isArray(artistData?.artists) ? artistData.artists : [],
@@ -737,6 +783,11 @@ export function createMusicViews(deps) {
     };
     if (options.mounted) refreshMountedSearchUi();
     else renderShell();
+  }
+
+  function currentSearchData(data) {
+    const account = accountPayloadOwner(data);
+    return !account || isAccountOwnerCurrent(account) ? data : null;
   }
 
   async function loadSearchRecovery(query, signal = null) {
@@ -797,6 +848,7 @@ export function createMusicViews(deps) {
     const limit = Math.max(1, Math.min(100, Number(options.limit || (state.searchScope === "lyrics" ? 40 : 4))));
     const offset = Math.max(0, Number(options.offset || 0));
     const append = Boolean(options.append && offset > 0);
+    const requestUrl = getActiveUrl();
     const ownController = options.signal ? null : new AbortController();
     if (ownController) {
       lyricSearchController?.abort();
@@ -806,11 +858,12 @@ export function createMusicViews(deps) {
     state.lyricSearch = append
       ? { ...state.lyricSearch, loadingMore: true, error: "" }
       : { ...emptyLyricSearch(), loading: true, limit };
-    if (options.mounted) refreshMountedSearchUi();
+    if (options.mounted && !options.request) refreshMountedSearchUi();
+    const isCurrent = () => !signal?.aborted && (!renderGuard || renderGuard())
+      && requestUrl === getActiveUrl() && state.query === query && state.mode === "library";
     try {
-      const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
-      const data = await fetchJson(getActiveUrl(), `/api/music/lyrics/search?${params}`, { timeoutMs: 12000, signal });
-      if (signal?.aborted || (renderGuard && !renderGuard()) || state.query !== query || state.mode !== "library") return;
+      const data = await (options.request || fetchSearchLyrics(requestUrl, query, limit, offset, signal));
+      if (!isCurrent() || !currentSearchData(data)) return;
       const matches = Array.isArray(data?.matches) ? data.matches : [];
       state.lyricSearch = {
         loading: false,
@@ -822,7 +875,7 @@ export function createMusicViews(deps) {
         error: ""
       };
     } catch (error) {
-      if (signal?.aborted) return;
+      if (!isCurrent()) return;
       state.lyricSearch = append
         ? { ...state.lyricSearch, loadingMore: false, error: error?.message || "歌词加载失败" }
         : { ...emptyLyricSearch(), limit, error: error?.message || "歌词搜索失败" };
@@ -846,11 +899,13 @@ export function createMusicViews(deps) {
       const controller = new AbortController();
       mountedSearchController = controller;
       const token = ++mountedSearchToken;
+      const requestUrl = getActiveUrl();
       state.query = value;
       state.searchOpen = true;
       const generation = musicRenderGeneration;
       requestCurrent = () => moduleActive && generation === musicRenderGeneration
-        && token === mountedSearchToken && mountedSearchController === controller && !controller.signal.aborted;
+        && token === mountedSearchToken && mountedSearchController === controller && !controller.signal.aborted
+        && requestUrl === getActiveUrl();
       controlFocus.bind(focusIntent, requestCurrent);
       state.searchOverview = state.mode === "library" && value
         ? { ...emptySearchOverview(), loading: true }
@@ -906,12 +961,14 @@ export function createMusicViews(deps) {
       state.status = "正在搜索本地音乐";
       clearPendingSearchData(value);
       refreshMountedSearchUi();
+      let sections;
       try {
-        const data = await fetchJson(getActiveUrl(), musicListPath(), {
-          timeoutMs: 18000,
-          signal: controller.signal
-        });
-        if (controller.signal.aborted || token !== mountedSearchToken || state.query !== value) return;
+        const tracks = fetchJson(requestUrl, musicListPath(), { timeoutMs: 18000, signal: controller.signal });
+        sections = startComprehensiveSearch(requestUrl, controller.signal);
+        const data = await tracks;
+        const account = accountPayloadOwner(data) || captureAccountOwner(requestUrl);
+        const isCurrent = () => requestCurrent() && state.query === value && isAccountOwnerCurrent(account);
+        if (!isCurrent()) return;
         applyLoadedMusicData(data);
         if (!state.data?.tracks?.length) state.searchRecovery = { ...emptySearchRecovery(), loading: true, query: value };
         els.viewTitle.textContent = musicTitle();
@@ -919,11 +976,12 @@ export function createMusicViews(deps) {
         refreshMountedSearchUi();
         if (state.mode === "library") {
           await Promise.all([
-            loadSearchOverview(null, { signal: controller.signal, mounted: true }),
+            loadSearchOverview(isCurrent, { signal: controller.signal, mounted: true, request: sections?.overview }),
             ["all", "lyrics"].includes(state.searchScope)
-              ? loadLyricSearchResults(null, {
+              ? loadLyricSearchResults(isCurrent, {
                 signal: controller.signal,
                 mounted: true,
+                request: state.searchScope === "all" ? sections?.lyrics : null,
                 limit: state.searchScope === "lyrics" ? 40 : 4
               })
               : Promise.resolve(),
@@ -931,10 +989,12 @@ export function createMusicViews(deps) {
           ]);
         }
       } catch (error) {
-        if (controller.signal.aborted || token !== mountedSearchToken) return;
+        if (!requestCurrent() || state.query !== value) return;
         state.loading = false;
         state.status = error?.message || "音乐搜索失败";
         refreshMountedSearchUi();
+      } finally {
+        sections?.release();
       }
     } catch (error) {
       controlFocus.cancel(focusIntent);
@@ -963,20 +1023,42 @@ export function createMusicViews(deps) {
     if (!id || (options.renderGuard && !options.renderGuard())) return;
     const generation = ++openTrackGeneration;
     pendingTrackSelection = generation;
+    retireTrackAudioPreparation();
     const activeUrl = getActiveUrl();
     let playbackSession = playReportSession;
+    let accountScope = null;
+    let preparation = null;
     const isCurrent = () => generation === openTrackGeneration && getActiveUrl() === activeUrl
-      && playReportSession === playbackSession && (!options.renderGuard || options.renderGuard());
+      && playReportSession === playbackSession && (!options.renderGuard || options.renderGuard())
+      && !preparation?.retired && (!accountScope || isAccountOwnerCurrent(accountScope));
     ensureAudio();
     state.loading = true;
     state.status = "正在打开歌曲";
     renderShell();
     const query = musicListQuery();
     try {
-      const data = await fetchJson(activeUrl, `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
+      // A playback selection can reuse the currently owned queue URL.
+      // Detail still supplies the final stream URL, resume point and play session.
+      const candidate = options.autoplay !== false && !options.renderGuard && gaplessPreloadTrackId !== id
+        ? state.queue.find(track => track.id === id) : null;
+      const owner = trackPreferences.ownerOf(candidate);
+      if (id !== "." && id !== ".." && candidate?.streamUrl === `/media/music/${encodeURIComponent(id)}` && owner?.sourceUrl === activeUrl
+        && owner.accountScope.owner !== "pending" && isAccountOwnerCurrent(owner.accountScope)) {
+        accountScope = owner.accountScope;
+      }
+      const controller = accountScope ? new AbortController() : null;
+      const detail = fetchJson(activeUrl, `/api/music/tracks/${encodeURIComponent(id)}${query ? `?${query}` : ""}`, {
         timeoutMs: 18000,
-        signal: options.renderGuard?.signal
+        signal: controller?.signal || options.renderGuard?.signal
       });
+      if (controller) {
+        const authorized = prepareAccountOwner(activeUrl, { signal: controller.signal }).then(() => isCurrent());
+        const source = audioSourceStore.prepare(absoluteUrl(activeUrl, candidate.streamUrl), controller.signal, authorized);
+        preparation = trackAudioPreparation = { controller, source, accountScope };
+      }
+      const data = await detail;
+      if (!isCurrent()) return;
+      accountScope = accountPayloadOwner(data) || accountScope;
       if (!isCurrent()) return;
       cancelCrossfade();
       gaplessHandoffPending = false;
@@ -1005,7 +1087,9 @@ export function createMusicViews(deps) {
         state.fullscreen = true;
         state.fullPanel = "lyrics";
       }
-      const loaded = await loadAudioTrack(state.current, options.autoplay !== false, isCurrent, activeUrl);
+      const prepared = preparation?.source;
+      if (prepared && prepared.url !== absoluteUrl(activeUrl, state.current?.streamUrl)) preparation.controller.abort();
+      const loaded = await loadAudioTrack(state.current, options.autoplay !== false, isCurrent, activeUrl, prepared);
       if (!loaded || !isCurrent() || state.current?.id !== id) return;
       state.loading = false;
       if (hasRequestedSeek && audio.readyState >= 1) audio.currentTime = requestedSeekMs / 1000;
@@ -1018,8 +1102,17 @@ export function createMusicViews(deps) {
       state.status = error?.message || "歌曲打开失败";
       renderShell();
     } finally {
+      preparation?.controller.abort();
+      if (trackAudioPreparation === preparation) trackAudioPreparation = null;
       if (pendingTrackSelection === generation) pendingTrackSelection = 0;
     }
+  }
+
+  function retireTrackAudioPreparation() {
+    if (!trackAudioPreparation) return;
+    trackAudioPreparation.retired = true;
+    trackAudioPreparation.controller.abort();
+    trackAudioPreparation = null;
   }
 
   function mergeTrackIntoQueue(track) {
@@ -1034,13 +1127,14 @@ export function createMusicViews(deps) {
     state.queue = [track, ...queue];
   }
 
-  async function loadAudioTrack(track, autoplay, guard = () => true, activeUrl = getActiveUrl()) {
+  async function loadAudioTrack(track, autoplay, guard = () => true, activeUrl = getActiveUrl(), prepared = null) {
     if (!track?.streamUrl || !guard()) return false;
     ensureAudio();
     const target = absoluteUrl(activeUrl, track.streamUrl);
     const targetAudio = audio;
     const loaded = await audioSourceStore.load("current", targetAudio, target, {
       clearBefore: true,
+      prepared,
       guard: () => targetAudio === audio && state.current?.id === track.id && guard()
     });
     if (!loaded || !guard()) return false;
@@ -6249,6 +6343,14 @@ export function createMusicViews(deps) {
   }
 
   function installLifecycle() {
+    window.addEventListener("fanhaoActiveServerChanged", () => {
+      retireTrackAudioPreparation();
+      mountedSearchController?.abort();
+    });
+    window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
+      if (event.detail?.current?.origin === captureAccountOwner(getActiveUrl()).origin) mountedSearchController?.abort();
+      if (trackAudioPreparation && !isAccountOwnerCurrent(trackAudioPreparation.accountScope)) retireTrackAudioPreparation();
+    });
     window.addEventListener("fanhaoViewWillRender", () => {
       if (!routeControlFocus) controlFocus.cancel();
       pendingSearchFocus = null;

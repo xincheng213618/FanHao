@@ -1213,7 +1213,9 @@ try {
       const f = fixture(createMusicViews), s = f.audit.state;
       Object.assign(s, source); f.audit.openMusicSearch();
       f.audit.commitMusicSearch("synthetic query"); await settle();
-      assert.equal(f.requests.length, 1, "actual search reached only the controlled transport");
+      const endpoints = source.mode === "library" ? ["tracks", "artists", "albums", "lyrics/search"] : [source.mode];
+      assert.deepEqual(f.requests.map(request => new URL(request.url).pathname), endpoints.map(name => `/api/music/${name}`),
+        "only the current scope's actual search reads reach controlled transport");
       assert.equal(f.back(), true); assert.equal(s.searchReturn, null); assert.equal(s.query, "");
       const [, params, navigation] = f.navigate().at(-1);
       assert.equal(params.mode, source.mode);
@@ -1222,8 +1224,9 @@ try {
       for (const key of ["artistId", "albumId", "genre", "language"]) assert.equal(params[key], source[key]);
       assert.equal(params.query, undefined); assert.equal(params.searchScope, undefined);
       assert.equal(navigation.skipHistory, true); assert.equal(navigation.replaceHistory, true);
-      assert.equal(f.requests[0].signal.aborted, true);
-      f.requests[0].resolve({ tracks: [], artists: [], albums: [], total: 999 }); await settle();
+      assert(f.requests.every(request => request.signal.aborted), "Back aborts all search reads");
+      for (const request of f.requests) request.resolve({ tracks: [], artists: [], albums: [], total: 999 });
+      await settle();
       assert.equal(s.query, ""); assert.equal(s.searchOpen, false);
     }
   });
@@ -1242,9 +1245,11 @@ try {
     f.audit.openMusicSearch(); f.input("needle"); f.elapse(90); await settle();
     assert.equal(f.requests.length, 1); assert(f.requests[0].url.includes("/api/music/suggest?"));
     const mounted = f.audit.refreshMountedSearchResults("needle"); await settle();
-    assert.equal(f.requests.length, 2, "actual mounted search is concurrently in flight");
+    const endpoints = ["suggest", "tracks", "artists", "albums", "lyrics/search"];
+    assert.deepEqual(f.requests.map(request => new URL(request.url).pathname), endpoints.map(name => `/api/music/${name}`),
+      "actual suggestions and all comprehensive search reads are concurrently in flight");
     assert.equal(f.back(), true);
-    assert(f.requests.every(request => request.signal.aborted), "both actual external request signals abort");
+    assert(f.requests.every(request => request.signal.aborted), "all actual external request signals abort");
     const stateAfterBack = copy({ data: s.data, searchSuggestions: s.searchSuggestions, searchSuggestionLoading: s.searchSuggestionLoading,
       searchSuggestionQuery: s.searchSuggestionQuery, status: s.status, query: s.query, searchOpen: s.searchOpen });
     const shellAfterBack = f.els.viewContent.children[0];
@@ -1253,7 +1258,7 @@ try {
     assert.deepEqual(copy({ data: s.data, searchSuggestions: s.searchSuggestions, searchSuggestionLoading: s.searchSuggestionLoading,
       searchSuggestionQuery: s.searchSuggestionQuery, status: s.status, query: s.query, searchOpen: s.searchOpen }), stateAfterBack);
     assert.equal(f.els.viewContent.children[0], shellAfterBack, "late completions cannot repaint the returned catalogue");
-    assert.equal(f.requests.length, 2, "cancelled live-search timer cannot start another request");
+    assert.equal(f.requests.length, endpoints.length, "cancelled live-search timer cannot start another request");
   });
   await runCase("player chevron keeps existing closeFullscreen semantics", () => {
     const f = fixture(createMusicViews), s = f.audit.state;
@@ -1497,9 +1502,9 @@ try {
         activeUrl: f.host.getActiveUrl(), currentTrackId: f.track.id, queue: [f.track]
       }));
       f.audit.renderShell();
-      const action = await f.start(); await f.complete(action); await f.auxiliary(); await settle();
+      const action = await f.start(); await f.complete(action);
       const detail = f.requests.find(request => new URL(request.url).pathname === `/api/music/tracks/${f.track.id}`);
-      assert(detail, "the real no-current route tail automatically restores its saved queue track");
+      assert(detail, "the real no-current route restores its saved queue track before side catalogues settle");
       const loadingTrigger = f.target(); f.flushFrames();
       assert.notEqual(f.document.activeElement, loadingTrigger, "primary list completion must not focus before automatic restoration finishes");
       if (failure) detail.resolve({ error: "Synthetic automatic restoration failure" }, 503);
@@ -1510,7 +1515,9 @@ try {
         assert(audio, "queue restoration reaches only the explicitly controlled synthetic audio boundary");
         audio.resolveAudio(); await settle();
       }
-      await action.route; await settle(); f.flushFrames();
+      f.flushFrames();
+      assert.notEqual(f.document.activeElement, f.target(), "completed playback must still wait for side catalogues before restoring route focus");
+      await f.auxiliary(); await action.route; await settle(); f.flushFrames();
       assert.equal(f.document.activeElement, f.target(), "focus returns to the new sort control after the entire real route tail");
       assert.notEqual(f.target(), loadingTrigger, "automatic restoration performed its later accepted shell render");
       assert.equal(f.s.loading, false); assert.equal(f.s.playing, false, "automatic queue restoration preserves autoplay:false");

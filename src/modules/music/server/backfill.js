@@ -2,14 +2,16 @@ import { metaValue } from "./helpers.js";
 import { musicLanguageFromPath } from "./language.js";
 import { musicGenreForTrack } from "./scan.js";
 
+const MAX_GENRE_PROBE_ROWS = 128;
+
 export function backfillMissingTrackGenres(db) {
-  const rows = db
-    .prepare(`
+  const missing = db.prepare(`
       SELECT id, title, display_artist, album_title, file_name, relative_path, genre
       FROM music_tracks
       WHERE status = 'ok' AND TRIM(COALESCE(genre, '')) = ''
-    `)
-    .all();
+    `);
+  if (noMissingTrackGenres(db)) return;
+  const rows = missing.all();
   if (!rows.length) return;
   const update = db.prepare("UPDATE music_tracks SET genre = ? WHERE id = ? AND TRIM(COALESCE(genre, '')) = ''");
   db.exec("BEGIN IMMEDIATE");
@@ -31,6 +33,28 @@ export function backfillMissingTrackGenres(db) {
       db.exec("ROLLBACK");
     } catch {}
     throw error;
+  }
+}
+
+function noMissingTrackGenres(db) {
+  // SQLite's default TRIM removes ASCII spaces. Every empty result comes
+  // from NULL, text below '!', or a BLOB converted to text by TRIM.
+  const select = `SELECT status = 'ok' AND TRIM(COALESCE(genre, '')) = '' AS missing
+    FROM music_tracks INDEXED BY idx_music_tracks_genre WHERE`;
+  const sql = `WITH candidates AS MATERIALIZED (
+    ${select} genre IS NULL
+    UNION ALL ${select} genre COLLATE BINARY < '!'
+    UNION ALL ${select} genre COLLATE BINARY >= X''
+    LIMIT ${MAX_GENRE_PROBE_ROWS + 1}
+  ) SELECT COUNT(*) AS count, MAX(missing) AS missing FROM candidates`;
+  try {
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all();
+    const searches = plan.filter(row => row.detail.startsWith("SEARCH music_tracks USING INDEX idx_music_tracks_genre (genre"));
+    if (searches.length !== 3) return false;
+    const result = db.prepare(sql).get();
+    return result.count <= MAX_GENRE_PROBE_ROWS && !result.missing;
+  } catch {
+    return false;
   }
 }
 

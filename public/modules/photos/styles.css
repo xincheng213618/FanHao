@@ -162,11 +162,6 @@ body.gallery-view .gallery-photo-shell .gallery-photo-controls {
   color: #fff;
 }
 
-.gallery-photo-view-switch {
-  border-left: 1px solid var(--gallery-line);
-  padding-left: 14px;
-}
-
 .gallery-photo-secondary-row .gallery-submodes {
   min-height: 38px;
   border-radius: 9px;
@@ -329,11 +324,6 @@ body.gallery-view .gallery-photo-shell .gallery-photo-controls {
 
   .gallery-photo-category-strip {
     grid-column: 1 / -1;
-  }
-
-  .gallery-photo-view-switch {
-    border-left: 0;
-    padding-left: 0;
   }
 
   .gallery-photo-shell .gallery-photo-catalog-grid {

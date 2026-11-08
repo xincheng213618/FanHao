@@ -38,6 +38,48 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`, browser = await chromium.launch({ executablePath, headless: true });
   try {
+    await run("prefix search retains an unchanged broad result across input", async () => {
+      const page = await open();
+      try {
+        const input = page.getByRole("searchbox", { name: "搜索番号前缀或厂商" });
+        await input.focus();
+        const measured = await input.evaluate(search => {
+          const grid = document.querySelector("#workGrid"), rows = [...grid.querySelectorAll(".code-prefix-row")];
+          const loader = __prefixObservers.at(-1);
+          const observer = new MutationObserver(() => {});
+          observer.observe(grid, { childList: true, subtree: true });
+          const lowercase = String.prototype.toLocaleLowerCase, sort = Array.prototype.sort;
+          let lowerCalls = 0, sortedItems = 0;
+          String.prototype.toLocaleLowerCase = function (...args) { lowerCalls++; return lowercase.apply(this, args); };
+          Array.prototype.sort = function (...args) { if (this[0]?.prefix) sortedItems += this.length; return sort.apply(this, args); };
+          try {
+            const times = [];
+            for (const value of ["p", "pf", "pfx", "pfx-"]) {
+              search.value = value;
+              const started = performance.now();
+              search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+              times.push(Number((performance.now() - started).toFixed(2)));
+            }
+            const addedRows = observer.takeRecords().flatMap(record => [...record.addedNodes])
+              .reduce((count, node) => count + (node.querySelectorAll?.(".code-prefix-row")?.length || 0), 0);
+            return { lowerCalls, sortedItems, addedRows, times, retained: rows.every(row => row.isConnected),
+              focused: search === document.activeElement, loaderRetained: loader === __prefixObservers.at(-1) && loader.connected };
+          } finally {
+            String.prototype.toLocaleLowerCase = lowercase; Array.prototype.sort = sort; observer.disconnect();
+          }
+        });
+        console.log(`MEASURE prefix search broad input: ${JSON.stringify(measured)}`);
+        assert.deepEqual([measured.sortedItems, measured.addedRows], [0, 0], "unchanged broad input must not re-sort or replace the prefix rows");
+        assert(measured.retained && measured.focused && measured.loaderRetained);
+        assert(measured.lowerCalls <= 1204, "refinements must reuse normalized prefix text");
+        assert.equal(await page.locator(".code-prefix-row").count(), 64);
+        await page.locator(".code-prefix-index-load-more button").click();
+        assert.equal(await page.locator(".code-prefix-row").count(), 128);
+        await input.fill("PFX");
+        assert.equal(await page.locator(".code-prefix-row").count(), 64, "an equivalent query still resets an expanded viewport to its first page");
+        assert.equal(runtime.reads, 1);
+      } finally { await page.close(); }
+    });
     await run("prefix search finds unloaded prefixes and alternate makers locally", async () => {
       const page = await open();
       try {
@@ -152,6 +194,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (!option) {
     const source = fs.readFileSync(path.join(publicRoot, "modules/fanhao/code-prefix-page.js"), "utf8").replaceAll("\r\n", "\n");
     for (const negative of [
+      { name: "unchanged result retention", marker: "if (visibleCount && body?.children.length === visibleCount && sameRows) {", replacement: "if (false) {", pattern: "unchanged broad", failure: /unchanged broad input must not re-sort or replace the prefix rows/ },
       { name: "alternate maker matching", marker: "...(item.makers || []).map(maker => maker.name)", replacement: "...[]", pattern: "prefix search finds", failure: /search must include alternate maker records/ },
       { name: "filtered append source", marker: "const prefixes = renderedPrefixes;", replacement: "const prefixes = state.codePrefixes;", pattern: "prefix search retains", failure: /append must use the filtered index rather than the full catalog/ },
       { name: "pending search control retention", marker: 'const existingControls = els.statsRow.querySelector(".code-prefix-index-controls");', replacement: "const existingControls = null;", pattern: "prefix search preserves", failure: /the first catalog read must preserve the user's newer query, selection and native focus/ },

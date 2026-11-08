@@ -1,11 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { sourceCollection } from "./photo-browse-category-store.js";
+import { photoShelfCollectionScope } from "./image-library-service.js";
 
 export const PHOTO_CATEGORY_COVER_MAX_BYTES = 5 * 1024 * 1024;
 export const PHOTO_CATEGORY_COVER_ROUTE = "/api/image-library/photo-category-cover";
 
 const albumCategory = "json_extract(archive.data_json, '$.category')";
+const albumSubCategory = "json_extract(archive.data_json, '$.subCategory')";
 const archiveTitle = "json_extract(archive.data_json, '$.title')";
+const unassignedFolder = `NOT EXISTS (SELECT 1 FROM photo_browse_category_folders AS assigned
+  WHERE assigned.source_category=${albumCategory} AND assigned.sub_category=${albumSubCategory})`;
 const collectionPrefix = "collection:";
 const pngSignature = Buffer.from("89504e470d0a1a0a", "hex");
 
@@ -70,13 +74,30 @@ function categoryScope(db, key, activePhotoRevision) {
     const id = key.slice("catalog:".length);
     const definition = db.prepare("SELECT source_category FROM photo_browse_categories WHERE id=?").get(id);
     if (!definition) return null;
-    const categories = db.prepare(`WITH RECURSIVE scope(id, source_category) AS (
+    const members = db.prepare(`WITH RECURSIVE scope(id, source_category) AS (
       SELECT id, source_category FROM photo_browse_categories WHERE id=?
       UNION SELECT child.id, child.source_category FROM photo_browse_categories AS child
         JOIN scope ON scope.id=child.parent_id
-    ) SELECT DISTINCT source_category FROM scope WHERE source_category<>''`).all(id).map(row => row.source_category);
-    return { sourceCategory: definition.source_category, where: `${albumCategory} IN (SELECT value FROM json_each(?))`,
-      args: [JSON.stringify(categories)] };
+    ) SELECT scope.source_category AS category, folder.source_category AS folderCategory, folder.sub_category AS subCategory
+      FROM scope LEFT JOIN photo_browse_category_folders AS folder ON folder.category_id=scope.id`).all(id);
+    const categories = members.map(member => member.category).filter(Boolean);
+    const folders = members.filter(member => member.folderCategory).map(member => [member.folderCategory, member.subCategory]);
+    const clauses = [];
+    const args = [];
+    if (categories.length) {
+      clauses.push(`(${albumCategory} IN (SELECT value FROM json_each(?)) AND ${unassignedFolder})`);
+      args.push(JSON.stringify(categories));
+    }
+    if (folders.length === 1) {
+      clauses.push(`(${albumCategory}=? AND ${albumSubCategory}=?)`);
+      args.push(...folders[0]);
+    } else if (folders.length) {
+      clauses.push(`(${albumCategory}, ${albumSubCategory}) IN (SELECT json_extract(value, '$[0]'),
+        json_extract(value, '$[1]') FROM json_each(?))`);
+      args.push(JSON.stringify(folders));
+    }
+    return { sourceCategory: defaultSourceCategory(db, definition.source_category),
+      where: clauses.length ? `(${clauses.join(" OR ")})` : "0", args };
   }
   if (key.startsWith("publisher:")) {
     const id = key.slice("publisher:".length);
@@ -86,11 +107,20 @@ function categoryScope(db, key, activePhotoRevision) {
   }
   if (key.startsWith(collectionPrefix)) {
     const collectionId = key.slice(collectionPrefix.length);
-    if (!activePhotoRevision || !db.prepare(`SELECT 1 FROM photo_library_archives WHERE collection_id=? LIMIT 1`).get(collectionId)) return null;
-    return { collectionId, where: "archive.collection_id=?", args: [collectionId] };
+    const shelf = photoShelfCollectionScope(collectionId);
+    const where = shelf ? `${albumCategory}=? AND ${albumSubCategory}=? AND json_extract(archive.data_json, '$.sourceRoot')=?`
+      : "archive.collection_id=?";
+    const args = shelf ? [shelf.category, shelf.subCategory, shelf.sourceRoot] : [collectionId];
+    if (!activePhotoRevision || !db.prepare(`SELECT 1 FROM photo_library_archives AS archive WHERE ${where} LIMIT 1`).get(...args)) return null;
+    return { collectionId, where, args };
   }
   if (!activePhotoRevision || !db.prepare(`SELECT 1 FROM photo_library_archives AS archive WHERE ${albumCategory}=? LIMIT 1`).get(key)) return null;
-  return { sourceCategory: key, where: `${albumCategory}=?`, args: [key] };
+  return { sourceCategory: defaultSourceCategory(db, key), where: `${albumCategory}=? AND ${unassignedFolder}`, args: [key] };
+}
+
+function defaultSourceCategory(db, category) {
+  return category && !db.prepare("SELECT 1 FROM photo_browse_category_folders WHERE source_category=? LIMIT 1").get(category)
+    ? category : "";
 }
 
 function collectionCoverUrl(db, collectionId, category) {
@@ -194,7 +224,7 @@ export function createPhotoCategoryCoverStore({ getDb, getPhotoRevision, photoSe
         const version = randomUUID();
         db.prepare(`INSERT INTO photo_category_covers(category_key, source, version, album_id, mime, image)
           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(category_key) DO UPDATE SET source=excluded.source,
-          version=excluded.version, album_id=excluded.album_id, mime=excluded.mime, image=excluded.image`)
+          version=excluded.version, album_id=excluded.album_id, mime=excluded.mime, image=excluded.image, official_source=NULL`)
           .run(key, source, version, album?.id ?? null, upload?.mime ?? null, upload?.bytes ?? null);
         settings = album ? { source, coverUrl: album.coverUrl, albumId: album.id }
           : { source, coverUrl: uploadedCoverUrl(key, version) };

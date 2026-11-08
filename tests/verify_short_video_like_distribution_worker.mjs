@@ -4,14 +4,17 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
 
 import { createShortVideoCatalogWorkerClient } from "../src/modules/short-videos/server/catalog-worker-client.js";
 import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
+import { DOWNLOAD_MANAGER_CHANGE_CURSOR } from "../src/modules/short-videos/server/download-manager-change-journal.js";
 import { shortVideoLibraryInsights } from "../src/modules/short-videos/server/library-insights.js";
 import { normalizeShortVideoStatsFilter } from "../src/modules/short-videos/server/stats-query.js";
+import { installFixtureSyncJournal } from "./fixtures/short-video-sync-journal.mjs";
 
 const PRODUCTION_VIDEO_COUNT = 100_000;
 const failureWorkerUrl = new URL("./fixtures/short_video_like_distribution_worker_failure.mjs", import.meta.url);
@@ -224,12 +227,23 @@ async function verifyWatchSinglePass() {
     // Export and observe the private function only in this in-memory module.
     // The production function body and all other phases remain unchanged.
     text = text.replace(watchCall, "() => options.measureWatch ? options.measureWatch(watchInsights, libraryRows) : watchInsights(libraryRows)")
-      + "\nexport { watchInsights };\n";
+      + "\nexport { median, watchInsights };\n";
     text = text.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) => "from " + JSON.stringify(new URL(relative, moduleUrl).href));
     return import("data:text/javascript;base64," + Buffer.from(text).toString("base64"));
   }
   const oldModule = await importMeasured(oldSource);
   const currentModule = await importMeasured(source);
+  const previousInsights = await importMeasured(execFileSync("git", [
+    "show", "f110040d:src/modules/short-videos/server/library-insights.js"
+  ], { cwd: new URL("../", import.meta.url), encoding: "utf8" }));
+  for (const values of [
+    [], [4], [3, 0, 7], [2, 5, 1, 0], [4, Infinity, 0, Infinity],
+    [4, NaN, 0, 1], [0, -0, 0], [1, 1e-300, 0, Number.MAX_VALUE]
+  ]) {
+    const before = [...values];
+    assert.deepEqual(currentModule.median(values), previousInsights.median(values));
+    assert.deepEqual(values, before, "insight medians must preserve source samples");
+  }
   const testedModule = process.argv.includes("--legacy-watch-insights") ? oldModule : currentModule;
   const row = (timestamp, duration = 10000, progress = 3000, completed = 0) => ({
     last_watched_at: timestamp, duration_ms: duration, progress_ms: progress, completed_count: completed
@@ -291,6 +305,8 @@ async function verifyWatchSinglePass() {
           measureWatch(task, rows) { const measured = measureWatchWork(task, rows); currentWork = measured.work; return measured.response; }
         });
         const actual = shortVideoLibraryInsights(database);
+        assert.equal(JSON.stringify(actual), JSON.stringify(previousInsights.shortVideoLibraryInsights(database)),
+          "the complete insight response must match the prior projection and median calculations");
         assert.equal(JSON.stringify(current), JSON.stringify(former), "private 100k actual-schema library insights retain the complete old personal and health response");
         assert.equal(JSON.stringify(actual), JSON.stringify(current), "the measured current module must preserve the actual production response");
         assert.equal(currentWork.rowVisits, current.personal.watch.libraryTotal, "actual SQLite rows must receive exactly one watch pass");
@@ -831,6 +847,14 @@ function createProductionShapeFixture(videoCount) {
     )
   `).run(root, JSON.stringify([importedMediaPath]));
   managerDb.close();
+  installFixtureSyncJournal(managerDbPath);
+  const journal = new DatabaseSync(managerDbPath, { readOnly: true });
+  let generation;
+  try {
+    generation = journal.prepare("SELECT generation FROM library_sync_state WHERE id = 1").get().generation;
+  } finally {
+    journal.close();
+  }
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF; BEGIN IMMEDIATE;");
   const insertVideo = db.prepare(`
@@ -869,6 +893,9 @@ function createProductionShapeFixture(videoCount) {
     }
     const stamp = "2026-08-12T00:00:00.000Z";
     db.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('scanned_at', ?)").run(stamp);
+    // Exercise a new import after the one-time repair of the existing catalog.
+    db.prepare("INSERT INTO short_video_meta (key, value) VALUES (?, ?)").run(DOWNLOAD_MANAGER_CHANGE_CURSOR,
+      JSON.stringify({ sourcePath: managerDbPath, generation, includePosts: true, revision: 0, repaired: true, afterAweme: "" }));
     db.exec("COMMIT");
     return { root, dbPath, coverDbPath, managerDbPath, cacheRoot: path.join(root, "cache"), stamp };
   } catch (error) {

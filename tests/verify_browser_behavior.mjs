@@ -43,7 +43,21 @@ try {
       assert(!suppliedBaseUrl, "short-video control checks require their own private fixture server");
       await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
+      await verifyShortVideoSearchOverlap(browser);
       await verifyShortVideoControlsNegative(browser);
+    } else if (process.argv.includes("--short-video-search-hints")) {
+      assert(!suppliedBaseUrl, "short-video search checks require their own private fixture server");
+      await verifyShortVideoSearchHints(browser);
+      await verifyShortVideoSearchOverlap(browser);
+    } else if (process.argv.includes("--fanhao-rankings-entry")) {
+      assert(!suppliedBaseUrl, "rankings entry checks require their own private fixture server");
+      await verifyFanhaoRankingsEntry(browser);
+      await verifyFanhaoRankingsEntryOwnership(browser);
+      const app = await fs.promises.readFile(path.join(root, "public/app.js"), "utf8");
+      const startup = 'const cancelRankingEntry = initialRoute.view === "rankings" ? rankingPage.prefetchEntry() : null;';
+      assert.equal(app.split(startup).length, 2, "the cold rankings negative must change one startup hook");
+      await assert.rejects(() => verifyFanhaoRankingsEntry(browser, { appSource: app.replace(startup, "const cancelRankingEntry = null;") }),
+        { name: "AssertionError", message: /rankings reads must overlap cold library metadata/ });
     } else if (process.argv.includes("--short-video-search")) {
       await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
@@ -53,6 +67,10 @@ try {
       await verifyWebSurfaceBehavior(browser);
     } else {
     await verifyFanhaoRequestLifecycle(browser);
+    if (process.argv.includes("--fanhao-requests") && !suppliedBaseUrl) {
+      await verifyFanhaoRankingsEntry(browser);
+      await verifyFanhaoRankingsEntryOwnership(browser);
+    }
     if (!process.argv.includes("--fanhao-requests")) {
     await verifyAndroidNavigationRestoration(browser, baseUrl, fixtureApi);
     await verifyAndroidMangaAddLifecycle(browser);
@@ -147,6 +165,195 @@ async function verifyShortVideoSearchHints(browser) {
     release();
     await page.close();
   }
+}
+
+async function verifyShortVideoSearchOverlap(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const requests = { videos: [], users: [] }, errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  let releaseRetired;
+  const retiredReply = new Promise(resolve => { releaseRetired = resolve; });
+  try {
+    await page.addInitScript(() => {
+      const fetch = window.fetch.bind(window);
+      window.__retiredHint = { started: false, aborted: false, settled: false };
+      window.fetch = (url, options = {}) => {
+        const target = new URL(url, location.href);
+        if (target.pathname !== "/api/short-videos/authors" || target.searchParams.get("q") !== "search-retired") return fetch(url, options);
+        __retiredHint.started = true;
+        const { signal, ...ignoringAbort } = options;
+        signal?.addEventListener("abort", () => { __retiredHint.aborted = true; }, { once: true });
+        return fetch(url, ignoringAbort).then(async response => {
+          await response.clone().json();
+          __retiredHint.settled = true;
+          return response;
+        });
+      };
+    });
+    for (const [kind, endpoint] of [["videos", "/api/short-videos"], ["users", "/api/short-videos/authors"]]) {
+      await page.route(url => url.pathname === endpoint, async route => {
+        const url = new URL(route.request().url());
+        const query = url.searchParams.get("q");
+        const read = { start: performance.now(), url };
+        requests[kind].push(read);
+        if (query === "search-retired" && kind === "users") await retiredReply;
+        else if (query === "search-overlap") await new Promise(resolve => setTimeout(resolve, 250));
+        read.release = performance.now();
+        const body = kind === "videos"
+          ? { videos: [fixtureVideo(`${query}-video`)], total: 1, hasMore: false, source: "all", query }
+          : { authors: [{ secUid: `${query}-author`, name: query === "search-overlap" ? "并行用户提示" : query, count: 1 }], total: 1, hasMore: false };
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      });
+    }
+    await page.goto(`${baseUrl}/short-videos?source=all&q=search-overlap`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => {
+      const card = document.querySelector(".short-video-search-user-card");
+      return card?.getBoundingClientRect().height && getComputedStyle(card).visibility === "visible";
+    });
+    assert.deepEqual([requests.videos.length, requests.users.length], [1, 1]);
+    const [videos] = requests.videos, [users] = requests.users;
+    const elapsed = instant => Math.round(instant - videos.start);
+    console.log(`MEASURE short video search overlap: ${JSON.stringify({ usersStartMs: elapsed(users.start), videosReleaseMs: elapsed(videos.release), usersReleaseMs: elapsed(users.release), userCardVisibleMs: elapsed(performance.now()) })}`);
+    assert(users.start < videos.release, "matching users must start before the first video list response");
+    assert.equal(videos.url.searchParams.get("users"), "0");
+    assert.equal(users.url.searchParams.get("q"), "search-overlap");
+    assert.equal(users.url.searchParams.get("limit"), "6");
+    assert.match(await page.locator(".short-video-search-user-card").textContent(), /并行用户提示/);
+    const input = page.locator(shortVideoSearchInput);
+    await input.fill("search-retired"); await input.press("Enter");
+    await page.locator('.short-video-card[data-video-id="search-retired-video"]').waitFor();
+    await page.waitForFunction(() => __retiredHint.started);
+    await input.fill("search-current"); await input.press("Enter");
+    await page.locator(".short-video-search-user-card", { hasText: "search-current" }).waitFor();
+    const currentGrid = await page.locator(".short-video-grid").elementHandle();
+    releaseRetired();
+    await page.waitForFunction(() => __retiredHint.settled);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => __retiredHint.aborted), true, "the obsolete lookup must receive cancellation");
+    assert.equal(await page.locator(".short-video-search-user-card", { hasText: "search-retired" }).count(), 0, "an obsolete reply must not replace current hints even if transport ignores cancellation");
+    assert.equal(await currentGrid.evaluate(grid => grid === document.querySelector(".short-video-grid")), true);
+    assert.deepEqual(errors, []);
+  } finally { releaseRetired(); await page.close(); }
+}
+
+async function verifyFanhaoRankingsEntry(browser, { appSource } = {}) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const paths = ["/api/library", "/api/rankings", "/api/rankings/top"], reads = [], errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  try {
+    if (appSource) await page.route(url => url.pathname === "/app.js", route => route.fulfill({ contentType: "text/javascript", body: appSource }));
+    await page.route(url => paths.includes(url.pathname), async route => {
+      const url = new URL(route.request().url());
+      const read = { url, start: performance.now() };
+      reads.push(read);
+      if (url.pathname !== "/api/rankings") await new Promise(resolve => setTimeout(resolve, 250));
+      const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit") || 0);
+      const rows = Array.from({ length: Math.min(limit, 130 - offset) }, (_, index) => ({
+        id: `cold-rank-${offset + index}`, title: `Synthetic ranked work ${offset + index}`, videoCount: 1, playableCount: 1,
+        ranking: { rankNo: offset + index + 1 }
+      }));
+      const data = url.pathname === "/api/library"
+        ? { scope: "main", access: { mode: "remote", hints: { workPageSize: 40 } }, people: [], works: [], totals: {}, user: {} }
+        : url.pathname === "/api/rankings"
+          ? { lists: [{ key: "y2025", label: "Synthetic annual rankings" }] }
+          : { works: rows, total: 130, rankingTotal: 130, offset, limit, label: "Synthetic annual rankings" };
+      read.release = performance.now();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) });
+    });
+    await page.goto(`${baseUrl}/fanhao/rankings`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => {
+      const card = document.querySelector('.work-card[data-work-id="cold-rank-0"]');
+      return card?.getBoundingClientRect().height && getComputedStyle(card).visibility === "visible";
+    });
+    const library = reads.find(read => read.url.pathname === "/api/library");
+    const summary = reads.find(read => read.url.pathname === "/api/rankings");
+    const top = reads.find(read => read.url.pathname === "/api/rankings/top");
+    const elapsed = instant => Math.round(instant - library.start);
+    console.log(`MEASURE FanHao rankings cold entry: ${JSON.stringify({ libraryReleaseMs: elapsed(library.release), summaryStartMs: elapsed(summary.start), topStartMs: elapsed(top.start), firstCardVisibleMs: elapsed(performance.now()), requestedLimit: top.url.searchParams.get("limit") })}`);
+    assert(top.start < library.release && summary.start < library.release, "rankings reads must overlap cold library metadata");
+    assert.equal(reads.filter(read => read.url.pathname === "/api/rankings/top").length, 1, "cold rankings must consume their first read without refetching");
+    const nextPage = () => reads.find(read => read.url.pathname === "/api/rankings/top" && read.url.searchParams.get("offset") !== "0");
+    for (let attempt = 0; attempt < 30 && !nextPage(); attempt++) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await page.waitForTimeout(40);
+    }
+    assert.equal(nextPage()?.url.searchParams.get("offset"), "40", "the first continuation must start after the accepted library page-size hint");
+    assert.equal(nextPage()?.url.searchParams.get("limit"), "40");
+    await page.locator('.work-card[data-work-id="cold-rank-40"]').waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await page.close(); }
+}
+
+async function verifyFanhaoRankingsEntryOwnership(browser) {
+  for (const outcome of ["library failed", "rankings failed", "left rankings", "viewport widened"]) {
+    const widened = outcome === "viewport widened";
+    const page = await browser.newPage({ viewport: { width: widened ? 390 : 1280, height: 900 } });
+    const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    let release, releaseLibrary;
+    const held = new Promise(resolve => { release = resolve; });
+    const heldLibrary = new Promise(resolve => { releaseLibrary = resolve; });
+    try {
+      await page.addInitScript(() => {
+        const fetch = window.fetch.bind(window);
+        window.__entryRankingReads = [];
+        window.fetch = (input, options = {}) => {
+          const url = new URL(input, location.href);
+          if (!/^\/api\/rankings(?:\/top)?$/.test(url.pathname)) return fetch(input, options);
+          const { signal, ...ignoringAbort } = options;
+          const record = { limit: url.searchParams.get("limit"), aborted: false, settled: false };
+          __entryRankingReads.push(record);
+          signal?.addEventListener("abort", () => { record.aborted = true; }, { once: true });
+          return fetch(input, ignoringAbort).then(async response => {
+            await response.clone().json();
+            record.settled = true;
+            return response;
+          });
+        };
+      });
+      await page.route(url => ["/api/library", "/api/rankings", "/api/rankings/top"].includes(url.pathname), async route => {
+        const { pathname, searchParams } = new URL(route.request().url());
+        const library = pathname === "/api/library", summary = pathname === "/api/rankings";
+        const failed = library ? outcome === "library failed" : !summary && outcome === "rankings failed";
+        if (library) {
+          if (widened) await heldLibrary;
+          else await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        else if (outcome !== "rankings failed") await held;
+        const id = widened && searchParams.get("limit") === "64" ? "widened-ranking-work" : "obsolete-ranking-work";
+        const data = failed ? { error: `Synthetic ${outcome}` } : library
+          ? { scope: "main", access: { mode: "local" }, people: [], works: [], totals: {}, user: {} }
+          : summary ? { lists: [{ key: "y2025", label: "Synthetic annual rankings" }] }
+            : { works: [{ id, title: "Synthetic rank", videoCount: 1 }], total: 1 };
+        await route.fulfill({ status: failed ? 503 : 200, contentType: "application/json", body: JSON.stringify(data) });
+      });
+      await page.goto(`${baseUrl}/fanhao/rankings`, { waitUntil: "domcontentloaded" });
+      if (widened) {
+        await page.waitForFunction(() => __entryRankingReads.some(read => read.limit === "48"));
+        await page.setViewportSize({ width: 1280, height: 900 });
+        releaseLibrary();
+        await page.waitForFunction(() => __entryRankingReads.some(read => read.limit === "64"));
+        assert.equal(await page.evaluate(() => __entryRankingReads.find(read => read.limit === "48").aborted), true,
+          "a cold result smaller than the accepted page size must retire before replacement");
+      } else if (outcome === "left rankings") {
+        await page.getByText("正在加载排行榜", { exact: true }).waitFor();
+        const tab = page.locator('[data-view="favorites"]');
+        if (!await tab.isVisible()) await page.locator("#fanhaoNavigationButton").click();
+        await tab.click();
+        await page.waitForURL("**/fanhao/favorites");
+      } else await page.locator("#workGrid").getByText(`Synthetic ${outcome}`).waitFor();
+      if (!widened && outcome !== "rankings failed") await page.waitForFunction(() => __entryRankingReads.length === 2 && __entryRankingReads.every(read => read.aborted));
+      const routeBefore = page.url();
+      release();
+      await page.waitForFunction(count => __entryRankingReads.length === count && __entryRankingReads.every(read => read.settled), widened ? 4 : 2);
+      if (widened) await page.locator('.work-card[data-work-id="widened-ranking-work"]').waitFor();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('.work-card[data-work-id="obsolete-ranking-work"]').count(), 0);
+      assert.equal(page.url(), routeBefore);
+      assert.deepEqual(errors, []);
+    } finally { release(); releaseLibrary(); await page.close(); }
+  }
+  console.log("FanHao rankings cold entry ownership passed (library failure, ranking failure, late obsolete replies and wider viewport)");
 }
 
 // These profiles exercise the production bundle through the real Web shell.
@@ -3986,9 +4193,10 @@ async function verifyStandaloneStyles(browser) {
     try {
       await page.goto(`${baseUrl}${item.path}`, { waitUntil: "domcontentloaded" });
       await page.locator(item.selector).waitFor({ state: "visible", timeout: 30000 });
-      const styles = await page.evaluate(() => performance.getEntriesByType("resource")
-        .map((entry) => new URL(entry.name).pathname)
-        .filter((pathname) => pathname.endsWith(".css")));
+      const resources = await page.evaluate(() => performance.getEntriesByType("resource")
+        .map((entry) => new URL(entry.name).pathname));
+      const styles = resources.filter(pathname => pathname.endsWith(".css"));
+      assert(!resources.includes("/fanhao-app.js") && !resources.includes("/app.js"), `${item.path} must not warm the FanHao module graph`);
       for (const required of item.required) assert(styles.includes(required), `${item.path} must request ${required}`);
       for (const forbidden of item.forbidden) assert(!styles.includes(forbidden), `${item.path} must not request ${forbidden}`);
     } finally {

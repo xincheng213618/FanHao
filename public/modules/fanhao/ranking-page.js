@@ -25,6 +25,7 @@ export function createRankingPage(deps) {
   } = deps;
   const rankingRequests = createLatestRequestGate();
   let pendingRead = null;
+  let entryRead = null;
   let appendOwner = null;
   let loadedKey = null;
   let pageableTotal = 0;
@@ -32,6 +33,7 @@ export function createRankingPage(deps) {
   function cancelPendingRequests() {
     rankingRequests.cancel();
     pendingRead = null;
+    entryRead = null;
     resetRankingPaging();
   }
 
@@ -44,12 +46,12 @@ export function createRankingPage(deps) {
     state.rankingHasMore = null;
   }
 
-  function beginRead(append = false) {
+  function beginRead(append = false, existing = null) {
     if (!append) {
       resetRankingPaging();
       state.rankingHasMore = false;
     }
-    const request = rankingRequests.begin();
+    const request = existing || rankingRequests.begin();
     pendingRead = request;
     return request;
   }
@@ -71,20 +73,39 @@ export function createRankingPage(deps) {
     syncRouteAfterNavigation(options);
   }
 
+  function prefetchEntry() {
+    const request = rankingRequests.begin();
+    const key = state.selectedRankingKey || "y2025", limit = rankingPageSize();
+    const summary = api("/api/rankings", { signal: request.signal });
+    const page = fetchRankingPage(key, 0, { signal: request.signal });
+    summary.catch(() => {});
+    page.catch(() => {});
+    const entry = { request, key, limit, summary, page };
+    entryRead = entry;
+    return () => {
+      if (entryRead !== entry) return;
+      entryRead = null;
+      if (request.isCurrent()) rankingRequests.cancel();
+    };
+  }
+
   async function loadRankings() {
     if (state.activeView !== "rankings") return;
-    const request = beginRead();
     let key = state.selectedRankingKey || "";
+    const anticipatedKey = key || "y2025", limit = rankingPageSize();
+    const prefetched = entryRead?.request.isCurrent() && entryRead.key === anticipatedKey && entryRead.limit >= limit
+      ? entryRead : null;
+    entryRead = null;
+    const request = beginRead(false, prefetched?.request);
     els.workGrid.innerHTML = `<div class="empty-state">正在加载排行榜</div>`;
     clearPersonSelection();
     state.searchPeople = [];
     setMainHeader("排行榜", "JavDB TOP250 缓存");
 
     try {
-      const anticipatedKey = state.selectedRankingKey || "y2025";
       const [summary, anticipatedData] = await Promise.all([
-        api("/api/rankings", { signal: request.signal }),
-        fetchRankingPage(anticipatedKey, 0, { signal: request.signal })
+        prefetched?.summary || api("/api/rankings", { signal: request.signal }),
+        prefetched?.page || fetchRankingPage(anticipatedKey, 0, { signal: request.signal })
       ]);
       if (!isCurrentRead(request, key)) return;
       state.rankingLists = summary.lists || [];
@@ -96,7 +117,8 @@ export function createRankingPage(deps) {
         ? anticipatedData
         : await fetchRankingPage(key, 0, { signal: request.signal });
       if (!isCurrentRead(request, key)) return;
-      applyRankingPage(data);
+      // Library metadata can lower the initial page size after a cold read starts.
+      applyRankingPage(prefetched && key === anticipatedKey ? trimRankingEntry(data, limit) : data);
     } catch (error) {
       if (!isCurrentRead(request, key)) return;
       hidePersonProfile();
@@ -104,6 +126,11 @@ export function createRankingPage(deps) {
     } finally {
       finishRead(request);
     }
+  }
+
+  function trimRankingEntry(data, limit) {
+    if (!Array.isArray(data?.works) || data.works.length <= limit) return data;
+    return { ...data, works: data.works.slice(0, limit), count: limit, limit };
   }
 
   function rankingPageSize() {
@@ -356,6 +383,7 @@ export function createRankingPage(deps) {
   return {
     cancelPendingRequests,
     enter,
+    prefetchEntry,
     loadMoreRankingWorks,
     loadRankings,
     loadRankingWorks,

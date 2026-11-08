@@ -16,6 +16,7 @@ export function createGalleryPage(deps) {
     clearPersonSelection,
     els,
     formatDateTime,
+    galleryListRoute,
     galleryModeLabel,
     hidePersonProfile,
     normalizeUiConfig,
@@ -62,20 +63,27 @@ export function createGalleryPage(deps) {
     syncRouteAfterNavigation(options);
   }
 
-  function applyRouteState(route) {
+  function applyRouteState(route, listPosition) {
     cancelImageLibraryListRequest();
     state.gallery.mode = route.galleryMode || "photo";
-    state.gallery.photoView = state.gallery.mode === "photo" && route.galleryPhotoView !== "albums" ? "collections" : "albums";
-    state.gallery.photoCollection = route.galleryPhotoCollection || null;
+    state.gallery.photoView = state.gallery.mode !== "photo" ? "albums"
+      : ["albums", "people"].includes(route.galleryPhotoView) ? route.galleryPhotoView : "collections";
+    state.gallery.photoCollection = state.gallery.photoView === "people" ? null : route.galleryPhotoCollection || null;
     state.gallery.query = route.galleryQuery || "";
+    const search = els?.workGrid?.querySelector(".gallery-search");
+    if (search && search.value !== state.gallery.query) search.value = state.gallery.query;
     state.gallery.mediaKind = state.gallery.mode === "media" ? route.galleryMediaKind || "all" : "all";
     state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
     state.gallery.seriesKey = ["media", "tv"].includes(state.gallery.mode) ? route.gallerySeriesKey || "" : "";
     state.gallery.photoDate = route.galleryPhotoDate || "all";
-    state.gallery.sort = route.gallerySort || "updated";
-    state.gallery.visibleLimit = 80;
+    state.gallery.sort = state.gallery.query ? "updated"
+      : state.gallery.photoView === "people" ? photoPeopleSort(route.gallerySort) : route.gallerySort || "updated";
+    state.gallery.sortDirection = !state.gallery.query && state.gallery.mode === "photo" && ["asc", "desc"].includes(route.gallerySortDirection)
+      ? route.gallerySortDirection : "";
+    state.gallery.visibleLimit = listPosition?.key === imageLibraryListKey() && Number.isSafeInteger(listPosition.limit)
+      ? Math.max(80, listPosition.limit) : 80;
     resetReader();
   }
 
@@ -227,27 +235,42 @@ export function createGalleryPage(deps) {
     return ["photo", "manga"].includes(state.gallery.mode);
   }
 
+  function effectivePhotoView(query) {
+    if (state.gallery.mode !== "photo") return "";
+    return query || state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections";
+  }
+
+  function photoPeopleSort(sort) {
+    return sort === "title" ? "title" : "count";
+  }
+
   function imageLibraryListKey() {
     if (!["photo", "manga", "western", "media", "movie", "tv"].includes(state.gallery.mode)) return "";
+    const query = String(state.gallery.query || "").trim();
+    const scope = query ? {} : state.gallery;
+    const photoView = effectivePhotoView(query);
     return JSON.stringify({
       mode: state.gallery.mode,
-      mediaKind: state.gallery.mode === "media" ? state.gallery.mediaKind || "all" : "",
-      photoView: state.gallery.mode === "photo" ? state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections" : "",
-      collection: state.gallery.mode === "photo" ? state.gallery.photoCollection || "" : "",
-      category: state.gallery.mode === "manga" ? "" : state.gallery.category || "all",
-      subCategory: state.gallery.mode === "photo" ? state.gallery.subCategory || "all" : "",
-      person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? state.gallery.person || "all" : "",
-      seriesKey: ["media", "tv"].includes(state.gallery.mode) ? state.gallery.seriesKey || "" : "",
-      date: state.gallery.mode === "photo" ? state.gallery.photoDate || "all" : "",
-      query: state.gallery.query || "",
-      sort: ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : ""
+      mediaKind: state.gallery.mode === "media" ? scope.mediaKind || "all" : "",
+      photoView,
+      collection: state.gallery.mode === "photo" ? scope.photoCollection || "" : "",
+      category: state.gallery.mode === "manga" ? "" : scope.category || "all",
+      subCategory: state.gallery.mode === "photo" ? scope.subCategory || "all" : "",
+      person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? scope.person || "all" : "",
+      seriesKey: ["media", "tv"].includes(state.gallery.mode) ? scope.seriesKey || "" : "",
+      date: state.gallery.mode === "photo" ? scope.photoDate || "all" : "",
+      query,
+      sort: query ? "relevance" : photoView === "people" ? photoPeopleSort(state.gallery.sort)
+        : ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : "",
+      ...(!query && photoView && state.gallery.sortDirection ? { sortDirection: state.gallery.sortDirection } : {})
     });
   }
 
   function imageLibraryListPath(options = {}) {
-    const photoView = state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections";
-    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && (state.gallery.seriesKey || state.gallery.person && state.gallery.person !== "all");
     const query = String(state.gallery.query || "").trim();
+    const scope = query ? {} : state.gallery;
+    const photoView = effectivePhotoView(query);
+    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && (scope.seriesKey || scope.person && scope.person !== "all");
     const params = new URLSearchParams({
       mode: state.gallery.mode,
       limit: String(Math.max(1, Number(options.limit || state.gallery.visibleLimit || 80))),
@@ -257,23 +280,25 @@ export function createGalleryPage(deps) {
     if (query) params.set("q", query);
     if (state.gallery.mode === "photo") {
       params.set("photoView", photoView);
+      if (photoView === "people") params.set("sort", photoPeopleSort(state.gallery.sort));
+      if (!query && state.gallery.sortDirection) params.set("direction", state.gallery.sortDirection);
       if (photoView === "collections" && !query) {
         params.set("collectionPage", "1");
         params.set("collectionLocale", PHOTO_CATALOG_LOCALE);
-        if (state.gallery.category && state.gallery.category !== "all") params.set("categoryContents", "1");
+        if (scope.category && scope.category !== "all") params.set("categoryContents", "1");
       }
-      if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
-      if (state.gallery.subCategory && state.gallery.subCategory !== "all") params.set("subCategory", state.gallery.subCategory);
-      if (state.gallery.person && state.gallery.person !== "all") params.set("person", state.gallery.person);
-      if (state.gallery.photoDate && state.gallery.photoDate !== "all") params.set("date", state.gallery.photoDate);
-      if (state.gallery.photoCollection) params.set("collection", state.gallery.photoCollection);
+      if (scope.category && scope.category !== "all") params.set("category", scope.category);
+      if (scope.subCategory && scope.subCategory !== "all") params.set("subCategory", scope.subCategory);
+      if (scope.person && scope.person !== "all") params.set("person", scope.person);
+      if (scope.photoDate && scope.photoDate !== "all") params.set("date", scope.photoDate);
+      if (scope.photoCollection) params.set("collection", scope.photoCollection);
     } else if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
-      if (state.gallery.mode === "media" && state.gallery.mediaKind && state.gallery.mediaKind !== "all") params.set("kind", state.gallery.mediaKind);
-      if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
-      if (["media", "tv"].includes(state.gallery.mode) && state.gallery.seriesKey) {
-        params.set("seriesKey", state.gallery.seriesKey);
-      } else if (["western", "media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all") {
-        params.set("person", state.gallery.person);
+      if (state.gallery.mode === "media" && scope.mediaKind && scope.mediaKind !== "all") params.set("kind", scope.mediaKind);
+      if (scope.category && scope.category !== "all") params.set("category", scope.category);
+      if (["media", "tv"].includes(state.gallery.mode) && scope.seriesKey) {
+        params.set("seriesKey", scope.seriesKey);
+      } else if (["western", "media", "tv"].includes(state.gallery.mode) && scope.person && scope.person !== "all") {
+        params.set("person", scope.person);
       }
     }
     return `/api/image-library/items?${params.toString()}`;
@@ -485,6 +510,7 @@ export function createGalleryPage(deps) {
   }
 
   function galleryListReturnPath() {
+    if (state.gallery.query && galleryListRoute) return galleryListRoute();
     if (state.gallery.mode === "movie") return "/movies";
     if (state.gallery.mode === "tv") return "/tv";
     if (state.gallery.mode === "media") return "/media";
@@ -492,10 +518,17 @@ export function createGalleryPage(deps) {
   }
 
   async function openPhotoSet(albumId, options = {}) {
+    const replacePending = readerRequestCurrent(readerOwner) && readerOwner.pendingPhotoRoute;
     const owner = beginReaderRequest("photo", albumId);
     if (options.listReturn) owner.listReturn = { ...options.listReturn, key: imageLibraryListKey() };
     setReaderRequestStatus(owner, owner, "正在读取套图");
     try {
+      if (options.listReturn && !options.skipRoute) {
+        // Browser Back must be able to cancel the open before the archive responds.
+        owner.pendingPhotoRoute = true;
+        syncRouteAfterNavigation({ ...options, replaceRoute: options.replaceRoute || replacePending,
+          routeOverrides: { ...options.routeOverrides, galleryAlbumId: albumId } });
+      }
       const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }), { signal: owner.controller.signal });
       if (!readerRequestCurrent(owner)) return null;
       clearReaderState();
@@ -504,8 +537,9 @@ export function createGalleryPage(deps) {
       clearReaderRequestStatus(owner, owner);
       renderGalleryStats();
       renderGalleryView();
-      syncRouteAfterNavigation(options);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      syncRouteAfterNavigation(owner.pendingPhotoRoute ? { skipRoute: true } : options);
+      owner.pendingPhotoRoute = false;
+      window.scrollTo({ top: 0, behavior: "instant" });
       return state.gallery.album;
     } catch (error) {
       if (readerRequestCurrent(owner)) setReaderRequestStatus(owner, owner, error.message || "套图读取失败");

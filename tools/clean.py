@@ -2,7 +2,9 @@ import os
 import re
 import hashlib
 import argparse
+import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -35,6 +37,12 @@ AD_INDICATORS = [
     "twojav.com", "4k2.me", "收藏网址", "最新地址", "最新网址", "美女荷官",
     "杏吧", "直播", "游戏大全", "二维码", "女神在线", "草榴", "1024",
     "2048", "manko.fun", "sex8.cc", "offkab", "tuu32.com",
+]
+INTAKE_AD_INDICATORS = [word for word in AD_INDICATORS if word not in {"直播", "1024", "2048"}] + [
+    "信誉保证服务全球", "社區最新情報", "社区最新情报", "xuu62.com", "美女直播", "妹妹直播",
+]
+INTAKE_PROMO_INDICATORS = [
+    "22hy.cc", "gm85.cc", "369hg.cc", "uuf39.com", "uus75.com", "注册免费送", "註冊免費送",
 ]
 
 # 多分段文件名模式
@@ -445,10 +453,27 @@ def _extract_video_code(name: str) -> Optional[str]:
     return None
 
 
-def _is_ad_file(filename: str) -> bool:
+def _is_ad_file(filename: str, indicators=AD_INDICATORS) -> bool:
     """判断文件名是否包含广告关键字。"""
     lower = filename.lower()
-    return any(indicator in lower for indicator in AD_INDICATORS)
+    return any(indicator in lower for indicator in indicators)
+
+
+def _classify_intake_ads():
+    # This mode receives names only and never scans or modifies the filesystem.
+    payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    unnumbered = payload if isinstance(payload, list) else payload["unnumbered"]
+    numbered = [] if isinstance(payload, list) else payload["numbered"]
+    ads = []
+    for names, indicators in ((unnumbered, INTAKE_AD_INDICATORS), (numbered, ())):
+        for name in names:
+            compact = re.sub(r"\s+", "", name.lower())
+            # A site prefix on a numbered release is provenance, not a promo title.
+            title = re.sub(r"^[\w.-]+\.[a-z]{2,}@", "", compact)
+            if (_is_ad_file(compact, indicators) or _is_ad_file(title, INTAKE_PROMO_INDICATORS)
+                    or ("美女荷官" in title and "vip1196" in title)):
+                ads.append(name)
+    print(json.dumps(ads))
 
 
 def _is_multi_part(files: List[str]) -> bool:
@@ -799,4 +824,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--classify-ad-names"]:
+        _classify_intake_ads()
+    else:
+        main()

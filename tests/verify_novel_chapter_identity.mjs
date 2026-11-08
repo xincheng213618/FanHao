@@ -88,6 +88,102 @@ test("duplicate body/delete do not clamp or recover a ratio", () => {
   }
 });
 
+test("streamed chapter replacement preserves the old snapshot's identity decisions", async () => {
+  const currentRead = "compactOldChapterSnapshot(database, chapters, bookId, incomingChapters, row?.chapter_id)";
+  assert.equal(storeSource.split(currentRead).length, 2);
+  const observerKey = "fanhao.fixture.chapter-snapshot";
+  const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+  const observer = dataUrl(`
+    import { reconcileChapters as reconcile } from ${JSON.stringify(pathToFileURL(coordinatorPath).href)};
+    export function reconcileChapters(input) {
+      globalThis[Symbol.for(${JSON.stringify(observerKey)})]?.(input);
+      return reconcile(input);
+    }
+  `);
+  const storeUrl = pathToFileURL(path.join(root, "src/modules/novels/server/store.js"));
+  async function factory(source) {
+    const module = await import(dataUrl(source.replace(/from "(\.\/[^"\n]+)"/gu,
+      (_match, relative) => `from ${JSON.stringify(relative === "./chapter-identity.js" ? observer : new URL(relative, storeUrl).href)}`)));
+    return module.createNovelStore;
+  }
+  const previous = await factory(storeSource.replace(currentRead, "chapters.all(bookId)"));
+  const current = await factory(storeSource);
+  function normalize(result, old) {
+    const identities = new Map(old.chapters.map(item => [item.id, `old-${item.index}`]));
+    for (const item of result.chapters) if (!identities.has(item.id)) identities.set(item.id, `new-${item.index}`);
+    identities.set(old.catalogRevision, "old-revision"); identities.set(result.catalogRevision, "new-revision");
+    identities.set(result.sourceRealm, "source-realm");
+    return JSON.stringify(result, (_key, value) => identities.get(value) ?? value);
+  }
+  function replace(owner, old, incoming, anchor = null) {
+    const { store, dbPath } = fresh(owner);
+    const now = Date.now;
+    Date.now = () => 1767312000000;
+    try {
+      const first = store.importCollectedBook({ ...collected(old), collectedAt: "2026-01-01T00:00:00Z" });
+      if (anchor) {
+        writeProgress(store, first, 1);
+        sql(dbPath, db => {
+          db.exec("UPDATE novel_reading_state SET updated_at='2026-01-01T00:00:00Z'");
+          if (anchor === "legacy") {
+            db.prepare("UPDATE novel_chapters SET id = ? WHERE id = ?").run("legacy-anchor\0suffix", first.chapters[0].id);
+            db.prepare("UPDATE novel_reading_state SET chapter_id = ?").run("legacy-anchor");
+            first.chapters[0].id = "legacy-anchor";
+          }
+        });
+      }
+      let work;
+      globalThis[Symbol.for(observerKey)] = ({ oldChapters, incomingChapters }) => {
+        const candidates = new Set(incomingChapters.map(item => item.content));
+        work = { oldRows: oldChapters.length, unmatchedChars: oldChapters.reduce((count, item) =>
+          count + (typeof item.content === "string" && !candidates.has(item.content) ? item.content.length : 0), 0) };
+      };
+      const started = performance.now();
+      const next = store.importCollectedBook({ ...collected(incoming), collectedAt: "2026-01-02T00:00:00Z" });
+      const elapsed = performance.now() - started;
+      return { result: normalize(next, first), work, elapsed };
+    } finally {
+      Date.now = now;
+      delete globalThis[Symbol.for(observerKey)]; store.invalidate();
+    }
+  }
+
+  const variants = [
+    [base, [base[1], base[2], base[0]], "resolved"],
+    [base, [chapter("A", "edited"), base[1]], "resolved"],
+    [[base[0], chapter("Duplicate old anchor", base[0].content), base[1]], [chapter("A", "edited"), base[1]], "resolved"],
+    [base, [base[0], chapter("Duplicate incoming", base[0].content), base[1]], "resolved"],
+    [base, [base[0], base[2]], "legacy"],
+    [base, [base[0], base[2]], null]
+  ];
+  for (const [old, incoming, anchor] of variants) {
+    const before = replace(previous, old, incoming, anchor), after = replace(current, old, incoming, anchor);
+    assert.equal(after.result, before.result, "full stored replacement DTO, including all identity and progress fields");
+    assert.equal(after.work.oldRows, before.work.oldRows);
+    if (anchor === "legacy") assert.deepEqual(after.work, before.work, "embedded-NUL IDs retain the full native fallback");
+  }
+  for (const owner of [previous, current]) {
+    const { store, dbPath } = fresh(owner);
+    try {
+      store.importCollectedBook(collected(base));
+      sql(dbPath, db => db.exec("UPDATE novel_chapters SET content = X'00' WHERE chapter_index = 3"));
+      const before = snapshot(dbPath);
+      assert.throws(() => store.importCollectedBook(collected(base)), { name: "TypeError", message: "章节快照损坏" });
+      assert.deepEqual(snapshot(dbPath), before, "invalid old text keeps the original error and rolls back the replacement");
+    } finally { store.invalidate(); }
+  }
+  const count = 1600, shared = "合成正文".repeat(2300);
+  const old = Array.from({ length: count }, (_, i) => chapter(`Chapter ${i}`, `旧${shared}${i}`));
+  const incoming = old.map((item, i) => i % 4 === 0 ? item : chapter(item.title, `新${shared}${i}`));
+  const before = replace(previous, old, incoming, "resolved"), after = replace(current, old, incoming, "resolved");
+  assert.equal(after.result, before.result);
+  assert.equal(after.work.oldRows, count); assert(before.work.unmatchedChars > 11000000);
+  assert.equal(after.work.unmatchedChars, 0, "unrelated bodies are discarded before the coordinator runs");
+  console.log(JSON.stringify({ check: "novel-streamed-replacement", chapters: count, responseOracles: variants.length + 1,
+    beforeUnmatchedChars: before.work.unmatchedChars, afterUnmatchedChars: after.work.unmatchedChars,
+    beforeElapsedMs: +before.elapsed.toFixed(2), afterElapsedMs: +after.elapsed.toFixed(2) }));
+});
+
 test("legacy index clients work initially, but stale/missing revisions and wrong chapter IDs cannot write after replacement", ({factory=createNovelStore}={}) => {
   const {store,dbPath}=fresh(factory), old=store.importCollectedBook(collected(base));
   store.saveProgress(old.book.id,{chapterIndex:2,scrollRatio:0.4});

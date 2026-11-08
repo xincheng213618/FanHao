@@ -1,6 +1,6 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-8af3642624a3";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-8af3642624a3";
-import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-8af3642624a3";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-8faf7a80cb7b";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-8faf7a80cb7b";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-8faf7a80cb7b";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -10,6 +10,7 @@ export function createAndroidModule({ host }) {
     getCurrentParams: host.navigation.currentParams,
     getCurrentView: host.navigation.currentView,
     getWorksLimit: host.limits.getWorks,
+    getSearchFirstLimit: () => host.limits.getInitialWorks?.("search"),
     increaseWorksLimit: host.limits.increaseWorks,
     showView: host.navigation.showView,
     replaceViewParams: host.navigation.replaceViewParams,

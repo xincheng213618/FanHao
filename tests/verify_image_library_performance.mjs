@@ -84,8 +84,9 @@ function legacyServiceModuleUrl(source) {
   legacySource = replaceOnce(legacySource, '    const sourceStampBefore = listSourceStamp(index, mode);\n    let mangaSourceRevision = "";\n', "", "restore list reads before revision probes");
   legacySource = replaceOnce(legacySource, '      nextOffset: offset + items.length,\n      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),\n', "", "restore response before additive pagination fields");
   legacySource = replaceOnce(legacySource, `      const mangaSourceHash = createHash("sha256");
-      source = mangaService.cacheDirs().map((cacheDir) => {
-        const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
+      const summaries = mangaService.publicSummaries?.() ?? mangaService.cacheDirs().map(mangaService.publicSummary);
+      source = summaries.map((summary) => {
+        const item = publicImageLibraryListItem(summary, "manga");
         mangaSourceHash.update(JSON.stringify(item)).update("\\0");
         return item;
       });
@@ -166,10 +167,10 @@ function legacyServiceModuleUrl(source) {
       albumNumber: boBoSocks?.albumNumber ?? (normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : ""),
       albumSubject: boBoSocks?.albumSubject ?? (normalizedMode === "photo" ? photoAlbumSubject(photoTitle, { ...item, collectionTitle }) : ""),
 `, "restore inline photo response fields");
-  const legacyFacet = `  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {
+  const legacyFacet = `  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER, { includeOrganizedNames = false } = {}) {
     const counts = new Map();
     for (const item of items) {
-      const value = photoPersonFacetValue(item);
+      const value = photoPersonFacetValue(item, includeOrganizedNames);
       if (!value) continue;
       counts.set(value, (counts.get(value) || 0) + 1);
     }
@@ -180,7 +181,7 @@ function legacyServiceModuleUrl(source) {
   }
 
 `;
-  legacySource = replaceSection(legacySource, "  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {", "  function photoDateFacets(items = []) {", legacyFacet, "restore full person facet sort");
+  legacySource = replaceSection(legacySource, "  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER, { includeOrganizedNames = false } = {}) {", "  function photoDateFacets(items = []) {", legacyFacet, "restore full person facet sort");
   legacySource = replaceOnce(legacySource, `      index,
       items,
       categories: facetCounts(items, "category"),

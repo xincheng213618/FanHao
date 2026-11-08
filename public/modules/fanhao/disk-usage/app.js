@@ -36,12 +36,14 @@ const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]);
 const MIN_TREEMAP_TILE_AREA = 72;
 const formatter = new Intl.NumberFormat("zh-CN");
+let treemapPresentation = null;
+const highlightedPaths = new Map();
 
 const state = {
   cacheScanId: "",
   contentView: "map",
   drives: [],
-  linkedElements: new Map(),
+  linkedElements: { treemap: new Map(), entries: new Map() },
   pollTimer: null,
   resizeTimer: null,
   searchTimer: null,
@@ -165,7 +167,6 @@ async function loadTree(targetPath, options = {}) {
 }
 
 function renderCurrentView() {
-  state.linkedElements = new Map();
   renderBreadcrumb();
   renderFolderSummary();
   renderTreemap();
@@ -212,25 +213,31 @@ function renderFolderSummary() {
 }
 
 function renderTreemap() {
-  els.treemap.replaceChildren();
+  const tree = state.tree;
+  if (treemapPresentation?.tree !== tree) {
+    clearTreemap();
+    treemapPresentation = { tree, width: 0, height: 0 };
+  }
   if (state.contentView !== "map") return;
-  const children = (state.tree?.children || []).filter((item) => Number(item.size) > 0);
-  if (!state.tree?.cache) {
-    renderTreemapEmpty("尚无磁盘缓存", "选择上方磁盘后点击“手动刷新缓存”。扫描在后台运行，完成前页面仍可正常使用。");
+  const children = tree?.children || [];
+  if (!tree?.cache) {
+    if (!els.treemap.childElementCount) renderTreemapEmpty("尚无磁盘缓存", "选择上方磁盘后点击“手动刷新缓存”。扫描在后台运行，完成前页面仍可正常使用。");
     return;
   }
-  if (!children.length) {
-    renderTreemapEmpty("当前文件夹没有可绘制内容", "空文件夹和 0 字节文件仍会保留在右侧目录列表中。");
+  if (!children.some(item => Number(item.size) > 0)) {
+    if (!els.treemap.childElementCount) renderTreemapEmpty("当前文件夹没有可绘制内容", "空文件夹和 0 字节文件仍会保留在右侧目录列表中。");
     return;
   }
 
-  const bounds = els.treemap.getBoundingClientRect();
-  if (bounds.width < 10 || bounds.height < 10) {
+  const { width, height } = els.treemap.getBoundingClientRect();
+  if (width < 10 || height < 10) {
     requestAnimationFrame(renderTreemap);
     return;
   }
-  const mapBounds = { x: 4, y: 4, width: bounds.width - 8, height: bounds.height - 8 };
-  const layouts = binaryTreemap(prepareTreemapItems(children, mapBounds, state.tree?.node), mapBounds);
+  if (treemapPresentation.width === width && treemapPresentation.height === height) return;
+  if (treemapPresentation.width) clearTreemap();
+  const mapBounds = { x: 4, y: 4, width: width - 8, height: height - 8 };
+  const layouts = binaryTreemap(prepareTreemapItems(children, mapBounds, tree.node), mapBounds);
   const fragment = document.createDocumentFragment();
   for (const layout of layouts) {
     if (layout.width < 2 || layout.height < 2) continue;
@@ -238,6 +245,12 @@ function renderTreemap() {
     fragment.append(shouldRenderGroup(item, layout) ? createTreemapGroup(item, layout, { depth: 1 }) : createTreemapNode(item, layout));
   }
   els.treemap.append(fragment);
+  treemapPresentation = { tree, width, height };
+}
+
+function clearTreemap() {
+  clearLinkedElements(state.linkedElements.treemap);
+  els.treemap.replaceChildren();
 }
 
 function createTreemapGroup(item, layout, options = {}) {
@@ -253,7 +266,7 @@ function createTreemapGroup(item, layout, options = {}) {
   header.type = "button";
   header.className = "treemap-group-header";
   header.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${formatBytes(item.size)}</span>`;
-  installNodeEvents(header, item);
+  installNodeEvents(header, item, state.linkedElements.treemap);
   group.append(header);
 
   const body = document.createElement("div");
@@ -304,7 +317,7 @@ function createTreemapNode(item, layout, options = {}) {
     size.textContent = formatBytes(item.size);
     button.append(size);
   }
-  installNodeEvents(button, item);
+  installNodeEvents(button, item, state.linkedElements.treemap);
   return button;
 }
 
@@ -323,6 +336,7 @@ function renderEntries(items, title) {
   els.entryTitle.textContent = title;
   els.entryCount.textContent = `${formatter.format(items.length)} 项`;
   els.listViewTab.textContent = title === "搜索结果" ? `搜索结果 ${formatter.format(items.length)}` : "目录列表";
+  clearLinkedElements(state.linkedElements.entries);
   els.entryList.replaceChildren();
   if (!items.length) {
     const empty = document.createElement("div");
@@ -345,15 +359,15 @@ function renderEntries(items, title) {
       <span class="entry-main"><span class="entry-name">${escapeHtml(item.name)}</span><span class="entry-meta">${escapeHtml(countLabel)}</span></span>
       <span class="entry-size">${formatBytes(item.size)}</span>`;
     row.title = item.path;
-    installNodeEvents(row, item);
+    installNodeEvents(row, item, state.linkedElements.entries);
     fragment.append(row);
   }
   els.entryList.append(fragment);
 }
 
-function installNodeEvents(element, item) {
+function installNodeEvents(element, item, group) {
   if (item.aggregate) return;
-  registerLinkedElement(element, item);
+  registerLinkedElement(element, item, group);
   element.addEventListener("click", () => activateNode(item));
   element.addEventListener("contextmenu", (event) => {
     event.preventDefault();
@@ -361,17 +375,38 @@ function installNodeEvents(element, item) {
   });
 }
 
-function registerLinkedElement(element, item) {
+function registerLinkedElement(element, item, group) {
   if (item.aggregate || !item.path) return;
   const key = item.path.toLocaleLowerCase("zh-CN");
-  const linked = state.linkedElements.get(key) || [];
+  const linked = group.get(key) || [];
   linked.push(element);
-  state.linkedElements.set(key, linked);
-  const highlight = (active) => linked.forEach((candidate) => candidate.isConnected && candidate.classList.toggle("is-linked", active));
+  group.set(key, linked);
+  if (highlightedPaths.has(key)) element.classList.add("is-linked");
+  const highlight = active => {
+    if (!element.isConnected || !group.get(key)?.includes(element)) return;
+    if (active) highlightedPaths.set(key, group);
+    else highlightedPaths.delete(key);
+    highlightLinkedPath(key, active);
+  };
   element.addEventListener("pointerenter", () => highlight(true));
   element.addEventListener("pointerleave", () => highlight(false));
   element.addEventListener("focus", () => highlight(true));
   element.addEventListener("blur", () => highlight(false));
+}
+
+function highlightLinkedPath(key, active) {
+  for (const group of Object.values(state.linkedElements)) {
+    group.get(key)?.forEach(candidate => candidate.isConnected && candidate.classList.toggle("is-linked", active));
+  }
+}
+
+function clearLinkedElements(group) {
+  for (const [key, owner] of highlightedPaths) {
+    if (owner !== group) continue;
+    highlightedPaths.delete(key);
+    highlightLinkedPath(key, false);
+  }
+  group.clear();
 }
 
 function activateNode(item) {

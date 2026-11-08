@@ -5,6 +5,8 @@ import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { photoCatalogCollections } from "../public/modules/content-index/photo-catalog.js";
+import { sendJson as sendCatalogJson } from "../src/platform/server/responses.js";
 
 // Actual Web host/modules and Chromium; all API responses/images are synthetic.
 // Ignoring AbortSignal deliberately proves ownership independently of transport.
@@ -25,7 +27,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     const result = spawnSync("git", ["show", "HEAD:public/js/standalone-host.js"], { cwd: root, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr); overrides.set("/js/standalone-host.js", result.stdout);
   }
-  let browser = null, checks = 0, fullscreenDenied = false;
+  let browser = null, checks = 0, fullscreenDenied = false, collectionShelf = null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture"), key = `${url.pathname}${url.search}`;
     requests.set(key, (requests.get(key) || 0) + 1);
@@ -56,16 +58,21 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       if (url.pathname === "/api/manga") { sendJson(res, { comics: [manga("C")] }); return; }
       const mediaMatch = /^\/api\/gallery-media\/([^/]+)$/.exec(url.pathname);
       if (mediaMatch) { sendJson(res, { item: { id: mediaMatch[1], title: `Media ${mediaMatch[1]}`, mediaKind: mediaMatch[1] === "Movie" ? "movie" : "western", streamUrl: "" } }); return; }
-      if (url.pathname === "/api/image-library/items") { sendJson(res, { items: [listItem("A"), listItem("B")], count: 2, total: 2, facets: {} }); return; }
+      if (url.pathname === "/api/image-library/items") {
+        if (collectionShelf) sendCatalogJson(res, 200, collectionShelf(url));
+        else sendJson(res, { items: [listItem("A"), listItem("B")], count: 2, total: 2, facets: {} });
+        return;
+      }
       if (url.pathname === "/api/modules") { sendJson(res, { product: { id: "suite" }, modules: [] }); return; }
       if (url.pathname === "/api/image-library/summary") { sendJson(res, { totals: { photoSets: 2, manga: 1 }, facets: {}, scannedAt: "synthetic", cache: null }); return; }
       if (url.pathname.startsWith("/synthetic/")) {
         sendText(res, '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="#729b7c"/></svg>', "image/svg+xml", "public, max-age=86400"); return;
       }
-      if (overrides.has(url.pathname)) { sendText(res, overrides.get(url.pathname), url.pathname.endsWith('.css') ? "text/css" : "text/javascript"); return; }
-      const target = /^\/(?:photo|manga|media|western)(?:\/|$)/.test(url.pathname) ? path.join(publicRoot, "index.html") : path.resolve(publicRoot, url.pathname.replace(/^\/+/, ""));
+      const target = url.pathname === "/photo/maintenance" ? path.join(publicRoot, "modules/photos/maintenance/index.html")
+        : /^\/(?:photo|manga|media|western)(?:\/|$)/.test(url.pathname) ? path.join(publicRoot, "index.html")
+          : path.resolve(publicRoot, url.pathname.replace(/^\/+/, ""));
       assert(target.startsWith(`${publicRoot}${path.sep}`));
-      sendText(res, await fs.promises.readFile(target), target.endsWith(".html") ? "text/html; charset=utf-8" : target.endsWith(".js") ? "text/javascript" : "text/css");
+      sendText(res, overrides.get(url.pathname) ?? await fs.promises.readFile(target), target.endsWith(".html") ? "text/html; charset=utf-8" : target.endsWith(".js") ? "text/javascript" : "text/css");
     } catch (error) { if (!res.destroyed) { res.writeHead(500); res.end(error.message); } }
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -73,6 +80,125 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    await run('photo cover warm progress can pause and resume in standalone maintenance', async () => {
+      const page = await browser.newPage();
+      const actions = [];
+      let status = "running", done = 3;
+      const draining = Promise.withResolvers();
+      try {
+        await page.route(/\/api\/photo-cover-warm(?:\/(?:pause|resume))?$/, async route => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (route.request().method() === "POST") {
+            const action = pathname.split("/").at(-1);
+            actions.push(action);
+            status = action === "pause" ? "pausing" : "running";
+          } else if (status === "pausing") {
+            await draining.promise;
+            status = "paused";
+            done++;
+          }
+          await route.fulfill({ json: {
+            status, total: 10, done, remaining: 10 - done, collectionCount: 2,
+            counts: { cached: 2, generated: done - 2, skipped: 0, missing: 0, failed: 0 },
+            collection: { title: "测试合集", index: 1, done, total: 5 }
+          } });
+        });
+        await page.route('**/api/photo-maintenance/index', route => route.fulfill({ json: {
+          task: route.request().method() === "POST" ? {
+            status: "running", logs: ['IMAGE_LIBRARY_PROGRESS {"percent":5,"message":"正在准备扫描"}']
+          } : null
+        } }));
+        await page.goto(`${base}/photo`, { waitUntil: "domcontentloaded" });
+        const link = page.getByRole("link", { name: "图库维护" });
+        await link.waitFor();
+        const panel = page.getByRole("region", { name: "图片封面预热" });
+        assert.equal(await panel.count(), 0);
+        assert.equal(apiMethods.some(item => item.url === "/api/photo-cover-warm"), false);
+        await link.click();
+        await page.waitForURL(`${base}/photo/maintenance`);
+        await panel.getByText(/合集 1\/2 · 测试合集/).waitFor();
+        assert.equal(await panel.getByRole("progressbar").getAttribute("value"), "3");
+        await panel.getByRole("button", { name: "暂停", exact: true }).click();
+        const pausing = panel.getByRole("button", { name: "正在暂停…" });
+        await pausing.waitFor({ timeout: 5000 });
+        assert.equal(await pausing.isDisabled(), true);
+        draining.resolve();
+        await panel.getByText(/已处理 4 \/ 10 · 剩余 6/).waitFor();
+        await panel.getByRole("button", { name: "继续", exact: true }).click();
+        await panel.getByRole("button", { name: "暂停", exact: true }).waitFor();
+        assert.deepEqual(actions, ["pause", "resume"]);
+        await page.getByRole("button", { name: "刷新套图索引" }).click();
+        await page.getByText("正在刷新 · 正在准备扫描").waitFor();
+        assert.equal(await page.getByRole("progressbar", { name: "套图索引刷新进度" }).getAttribute("value"), "5");
+      } finally {
+        draining.resolve();
+        await page.close();
+      }
+    });
+    await run('photo cold overview delivery overlaps renderer download', async () => {
+      collectionShelf = collectionShelfFixture(12);
+      const rendererPath = '/modules/content-index/gallery-renderer.js', summaryPath = '/api/image-library/summary';
+      const renderer = hold(url => url.pathname === rendererPath), summary = hold(isSummary), delay = 300;
+      const itemPath = '/api/image-library/items', before = apiMethods.length;
+      for (const gate of [renderer, summary]) gate.requested.then(() => setTimeout(gate.release, delay));
+      const page = await newPage({ real: true, route: '/photo?sort=title', waitReady: false });
+      try {
+        const visibleAt = await (await page.waitForFunction(() => {
+          const card = document.querySelector('.gallery-collection-card');
+          if (!card || getComputedStyle(card).visibility !== 'visible') return null;
+          const rect = card.getBoundingClientRect();
+          return rect.bottom > 0 && rect.top < innerHeight ? performance.now() : null;
+        })).jsonValue();
+        const timings = await page.evaluate(({ rendererPath, summaryPath, itemPath, visibleAt }) => {
+          const resources = performance.getEntriesByType('resource');
+          const read = path => resources.find(entry => new URL(entry.name).pathname === path);
+          const renderer = read(rendererPath), summary = read(summaryPath), items = read(itemPath), start = renderer.startTime;
+          return { rendererEndMs: Math.round(renderer.responseEnd - start), summaryStartMs: Math.round(summary.startTime - start),
+            summaryEndMs: Math.round(summary.responseEnd - start), itemsStartMs: Math.round(items.startTime - start), firstCardMs: Math.round(visibleAt - start) };
+        }, { rendererPath, summaryPath, itemPath, visibleAt });
+        const reads = apiMethods.slice(before).filter(item => item.url.startsWith('/api/image-library/'));
+        console.log('MEASURE photo cold overview', JSON.stringify({ delay, ...timings, reads }));
+        assert.equal(await page.locator('.gallery-collection-card').count(), 12);
+        assert.deepEqual(reads.map(item => [item.method, new URL(item.url, base).pathname]), [['GET', summaryPath], ['GET', itemPath]]);
+        assert.equal(reads[0].url, `${summaryPath}?mode=photo`);
+        assert(timings.itemsStartMs >= timings.summaryEndMs, 'list I/O still requires a successful overview');
+        assert(timings.summaryStartMs < timings.rendererEndMs, 'the cold overview must begin before renderer delivery completes');
+      } finally { releaseSummaryGates(renderer, summary); collectionShelf = null; await page.close(); }
+    });
+    await run('photo collection cards are usable while covers are pending', async () => {
+      const shelf = collectionShelfFixture(80);
+      collectionShelf = url => {
+        const payload = shelf(url);
+        for (const item of payload.items) item.coverUrl = `/media/gallery-cover/${encodeURIComponent(item.id)}?v=fixture`;
+        return payload;
+      };
+      const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+      const coverRequests = new Set();
+      let release;
+      const coversPending = new Promise(resolve => { release = resolve; });
+      try {
+        await page.route('**/media/gallery-cover/**', async route => {
+          coverRequests.add(route.request().url());
+          await coversPending;
+          await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' });
+        });
+        await page.goto(`${base}/photo/collections?category=Category+1&sort=title`, { waitUntil: 'domcontentloaded' });
+        const cards = page.locator('.gallery-collection-card');
+        await cards.first().waitFor({ state: 'visible' });
+        await until(() => coverRequests.size > 0, 'viewport covers must start loading');
+        assert.equal(await cards.count(), 8);
+        assert.equal(await cards.first().locator('.gallery-card-cover').evaluate(cover => getComputedStyle(cover).aspectRatio), '2 / 3');
+        const firstCover = cards.first().locator('img');
+        assert.equal(await firstCover.getAttribute('decoding'), 'async');
+        assert.equal(await firstCover.evaluate(img => img.complete), false);
+        assert([...coverRequests].every(url => {
+          const params = new URL(url).searchParams;
+          return params.get('fallback') === '1' && params.get('v') === 'fixture';
+        }));
+        await cards.first().click();
+        await page.waitForURL(url => url.pathname.startsWith('/photo/collection/'));
+      } finally { release(); collectionShelf = null; await page.close(); }
+    });
     for (const publisher of [{ id: 'bololi', name: '菠萝社', code: 'BoLoli' }, null]) {
       await run(`photo collection detail paints metadata before overview and covers with ${publisher ? 'publisher' : 'category'} breadcrumb`, async () => {
         const category = '[XIUREN] 秀人网';
@@ -196,9 +322,15 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await body.locator(':scope > *').count(), 2);
         assert.equal(await body.locator('strong').evaluate(node => getComputedStyle(node).textAlign), 'center');
         const issue = card.getByText('VOL.2754', { exact: true });
-        const count = card.getByText('23 张', { exact: true });
+        const count = card.getByRole('img', { name: '23 张图片' });
         assert(await issue.isVisible() && await count.isVisible(), 'the issue and image count show while the cover is pending');
-        assert((await issue.boundingBox()).x < (await count.boundingBox()).x, 'issue number appears to the left of the image count');
+        assert.equal(await count.innerText(), '23');
+        assert.equal(await count.locator('svg[aria-hidden="true"]').count(), 1);
+        const coverBox = await card.locator('.gallery-card-cover').boundingBox();
+        const countBox = await count.boundingBox();
+        assert.equal(countBox.x + countBox.width, coverBox.x + coverBox.width);
+        assert.equal(countBox.y + countBox.height, coverBox.y + coverBox.height);
+        assert.equal(await count.evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0.56)');
         assert.equal(await card.locator('img').evaluate(img => img.complete), false);
         assert.equal(overview.closed, false);
         assert.equal(await page.evaluate(url => __transport.settled.some(item => item.url === url), overview.url), false);
@@ -206,12 +338,16 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         const lateCard = page.locator('[data-gallery-album-id="yituyu-fixture-late"]');
         assert.equal(await lateCard.locator('.gallery-card-leading-badge').innerText(), '2026-10-04');
         assert.equal(await lateCard.locator('.gallery-card-badges span').count(), 1);
+        assert.equal(await lateCard.locator('.gallery-photo-image-count').count(), 0);
         assert.equal(await page.locator('[data-gallery-album-id="yituyu-fixture-no-date"] .gallery-card-leading-badge').count(), 0);
         assert.equal(await lateCard.locator('.gallery-card-date-row').innerText(), '2026-10-04');
         releaseCover();
         await requested(lateCount);
         await settle(page, lateCount);
-        await lateCard.getByText('17 张', { exact: true }).waitFor({ state: 'visible' });
+        const lateBadge = lateCard.getByRole('img', { name: '17 张图片' });
+        await lateBadge.waitFor({ state: 'visible' });
+        assert.equal(await lateBadge.innerText(), '17');
+        assert.equal(await lateBadge.getAttribute('class'), await count.getAttribute('class'));
       } finally { releaseCover(); releaseSummaryGates(overview, category, lateCount); await page.close(); }
     });
     await run('photo card special mark toggles without opening the album', async () => {
@@ -255,6 +391,392 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.locator('[data-gallery-album-id="end"]').waitFor({ state: 'visible' });
         assert.equal(await page.locator('.gallery-more').count(), 0);
       } finally { releaseSummaryGates(initial, next, ...covers); await page.close(); }
+    });
+    await run('photo cold overview early failure preserves explicit summary recovery', async () => {
+      const renderer = hold(url => url.pathname === '/modules/content-index/gallery-renderer.js');
+      const failure = hold(isSummary, 'Synthetic overview failure during module delivery'), retry = hold(isSummary);
+      const isItems = url => url.pathname === '/api/image-library/items';
+      const items = hold(isItems), before = countRequests(isItems), overviewReads = countRequests(isSummary);
+      const page = await newPage({ real: true, waitReady: false });
+      try {
+        await Promise.all([requested(renderer), requested(failure)]);
+        await settle(page, failure);
+        assert.equal(countRequests(isItems), before);
+        renderer.release();
+        const control = page.locator('.gallery-summary-retry');
+        await control.waitFor();
+        assert.match(await page.locator('.gallery-summary-recovery').innerText(), /Synthetic overview failure during module delivery/);
+        assert.equal(countRequests(isItems), before);
+        assert.equal(countRequests(isSummary) - overviewReads, 1);
+        await control.click(); await requested(retry); await settle(page, retry);
+        await requested(items); await settle(page, items);
+        await page.locator('.gallery-photo-album-card').first().waitFor();
+        assert.equal(countRequests(isItems) - before, 1);
+      } finally { releaseSummaryGates(renderer, failure, retry, items); await page.close(); }
+    });
+    for (const route of ['/photo/set/B', '/media/W']) await run(`photo cold overview respects startup route change to ${route}`, async () => {
+      const samePhoto = route.startsWith('/photo/');
+      const renderer = hold(url => url.pathname === '/modules/content-index/gallery-renderer.js');
+      const summary = hold(isSummary), reader = hold(url => url.pathname === (samePhoto ? '/api/photo-sets/B' : '/api/gallery-media/W'));
+      const isPhotoItems = url => url.pathname === '/api/image-library/items' && url.searchParams.get('mode') === 'photo';
+      const before = countRequests(isPhotoItems), overviewReads = countRequests(isSummary);
+      const page = await newPage({ real: true, waitReady: false, ignoreAbort: false });
+      try {
+        await Promise.all([requested(renderer), requested(summary)]);
+        await navigateRoute(page, route); renderer.release();
+        await requested(reader); await settle(page, reader);
+        await readerTitle(page, samePhoto ? 'Album B' : 'Media W');
+        if (samePhoto) await settle(page, summary);
+        else await until(() => summary.closed, 'leaving photo during module delivery must abort the early overview');
+        assert.equal(countRequests(isPhotoItems), before);
+        assert.equal(countRequests(isSummary) - overviewReads, 1);
+        assert.equal(new URL(page.url()).pathname, route);
+      } finally { releaseSummaryGates(renderer, summary, reader); await page.close(); }
+    });
+    await run('photo cold overview retires when its module fails', async () => {
+      const renderer = hold(url => url.pathname === '/modules/content-index/gallery-renderer.js', 'Synthetic unavailable gallery renderer');
+      const summary = hold(isSummary), isItems = url => url.pathname === '/api/image-library/items';
+      const before = countRequests(isItems);
+      const page = await newPage({ real: true, waitReady: false, ignoreAbort: false });
+      try {
+        await Promise.all([requested(renderer), requested(summary)]);
+        renderer.release();
+        await until(() => summary.closed, 'a failed module must abort its early overview');
+        await page.locator('#appStartupNotice[role="alert"] #appStartupReload').waitFor();
+        assert.equal(countRequests(isItems), before);
+      } finally { releaseSummaryGates(renderer, summary); await page.close(); }
+    });
+    await run('collection shelf cold entry downloads only its visible page', async () => {
+      collectionShelf = collectionShelfFixture(6250);
+      const requestStart = apiMethods.length;
+      const page = await newPage({ real: true, route: '/photo?sort=title', waitReady: false, downloadThroughput: 250_000 });
+      try {
+        const firstVisible = await (await page.waitForFunction(() => {
+          const card = document.querySelector('.gallery-collection-card');
+          return card && getComputedStyle(card).visibility === 'visible' ? performance.now() : null;
+        })).jsonValue();
+        const measured = await page.evaluate(visible => {
+          const response = performance.getEntriesByType('resource').find(entry => new URL(entry.name).pathname === '/api/image-library/items');
+          return { encodedBytes: response.encodedBodySize, decodedBytes: response.decodedBodySize,
+            firstVisibleMs: Math.round(visible - response.startTime), afterResponseMs: Math.round(visible - response.responseEnd) };
+        }, firstVisible);
+        const itemReads = apiMethods.slice(requestStart).filter(item => item.url.startsWith('/api/image-library/items?'));
+        console.log('MEASURE collection shelf cold page', JSON.stringify({ ...measured, downloadBytesPerSecond: 250_000, request: itemReads.at(-1)?.url }));
+        assert.deepEqual(await page.locator('.gallery-collection-card strong').allTextContents(),
+          Array.from({ length: 80 }, (_, index) => `Collection ${index + 1}`), 'the first 80 visible titles must keep their full order');
+        assert.match(await page.locator('.gallery-content').innerText(), /6,250 个合集 · 50,000 期/);
+        assert.equal(itemReads.length, 1, 'cold shelf must reuse one response');
+        assert(measured.decodedBytes < 100_000, 'cold shelf must receive only the flat visible page');
+      } finally { collectionShelf = null; await page.close(); }
+    });
+    await run('collection shelf native load-more covers each item without rebuilding the prefix', async () => {
+      collectionShelf = collectionShelfFixture(167);
+      const page = await newPage({ real: true, route: '/photo?sort=title' });
+      const append = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('offset') === '80');
+      const end = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('offset') === '160');
+      try {
+        const more = page.locator('.gallery-more');
+        await page.evaluate(() => { window.__collectionFirst = document.querySelector('.gallery-collection-card'); });
+        await more.evaluate(button => button.click()); await requested(append);
+        assert.equal(await more.isDisabled(), true);
+        assert.equal(await page.locator('.gallery-collection-card').count(), 80);
+        assert.equal(new URL(append.url, base).searchParams.get('limit'), '80');
+        assert.equal(new URL(append.url, base).searchParams.get('collectionPage'), '1');
+        await settle(page, append);
+        assert.equal(await page.locator('.gallery-collection-card').count(), 160);
+        // Native scrollbar drags can deliver a scroll event without a page wheel event.
+        await more.evaluate(button => window.scrollTo(0, button.getBoundingClientRect().top + scrollY - innerHeight - 500));
+        await requested(end); await settle(page, end);
+        assert.deepEqual(await page.locator('.gallery-collection-card strong').allTextContents(), Array.from({ length: 167 }, (_, index) => `Collection ${index + 1}`));
+        assert.equal(await page.evaluate(() => document.querySelector('.gallery-collection-card') === __collectionFirst), true);
+        assert.equal(await more.count(), 0);
+        assert.match(await page.locator('.gallery-results-header').innerText(), /167 个合集 · 1,336 期/);
+      } finally { releaseSummaryGates(append, end); collectionShelf = null; await page.close(); }
+    });
+    await run('collection shelf sorting, category, detail and search keep their own request shapes', async () => {
+      const shelf = collectionShelfFixture(177);
+      const overview = hold(isSummary, '', { totals: { photoSets: 1416 }, facets: {
+        categories: [{ value: 'Category 1', count: 144 }, { value: 'Category 2', count: 144 }]
+      } });
+      collectionShelf = url => {
+        const params = url.searchParams;
+        if (params.has('collection')) return { items: [listItem('A')], total: 1, facets: {}, collectionSummary: { title: 'Fixture detail' } };
+        if (params.has('q')) return { items: [listItem('B')], total: 1, facets: {}, query: params.get('q') };
+        return shelf(url);
+      };
+      const page = await newPage({ real: true, route: '/photo?sort=title', waitReady: false });
+      const items = url => url.pathname === '/api/image-library/items';
+      const obsolete = hold(url => items(url) && url.searchParams.get('offset') === '80');
+      const sorted = hold(url => items(url) && url.searchParams.get('sort') === 'size');
+      const category = hold(url => items(url) && url.searchParams.get('category') === 'Category 1');
+      const detail = hold(url => items(url) && url.searchParams.has('collection'));
+      const search = hold(url => items(url) && url.searchParams.has('q'));
+      const params = gate => new URL(gate.url, base).searchParams;
+      try {
+        await requested(overview); await settle(page, overview);
+        const cards = page.locator('.gallery-collection-card');
+        await cards.first().waitFor();
+        await page.locator('.gallery-more').click(); await requested(obsolete);
+        await page.locator('.gallery-results-header').getByRole('button', { name: '容量最大' }).click();
+        await requested(sorted);
+        assert.equal(params(sorted).get('offset'), '0');
+        assert.equal(params(sorted).get('collectionPage'), '1');
+        assert.equal(params(sorted).get('collectionLocale'), await page.evaluate(() => new Intl.Collator().resolvedOptions().locale));
+        await settle(page, sorted);
+        await settle(page, obsolete);
+        assert.equal(await cards.count(), 80);
+        assert.match(await cards.first().innerText(), /Collection 177\b/);
+
+        const chips = page.locator('.gallery-photo-category-strip > button');
+        const overviewLabels = await chips.allTextContents();
+        await chips.filter({ hasText: 'Category 1' }).click();
+        await requested(category);
+        assert.equal(params(category).get('offset'), '0');
+        assert.equal(params(category).get('sort'), 'count');
+        assert.equal(params(category).get('collectionPage'), '1');
+        await settle(page, category);
+        assert.equal(await cards.count(), 18);
+        assert.match(await cards.first().innerText(), /Collection 171\b/);
+        assert.deepEqual(await chips.allTextContents(), overviewLabels);
+        assert.match(await page.locator('.gallery-results-header').innerText(), /18 个合集 · 144 期/);
+        assert.equal(await page.getByRole('link', { name: /资料入库/ }).count(), 0, 'collection cards are a single reading action');
+
+        await cards.first().click(); await requested(detail);
+        assert.equal(params(detail).get('photoView'), 'albums');
+        assert.equal(params(detail).get('collection'), 'R|C171');
+        assert.equal(params(detail).has('collectionPage'), false);
+        await settle(page, detail);
+        assert.match(await page.locator('.gallery-collection-hero').innerText(), /Fixture detail/);
+        assert.equal(await page.locator('.gallery-collection-health').count(), 0, 'issue gaps and duplicates live on the analysis page');
+        assert.equal(await page.getByRole('link', { name: '分析', exact: true }).getAttribute('href'), '/photo/analysis');
+
+        const input = page.locator('.gallery-search');
+        await input.fill('Needle'); await input.press('Enter'); await requested(search);
+        assert.equal(params(search).get('q'), 'Needle');
+        assert.equal(params(search).get('sort'), 'relevance');
+        assert.equal(params(search).has('collectionPage'), false);
+        await settle(page, search);
+        assert.match(await page.locator('.gallery-photo-album-card').first().innerText(), /Album B/);
+      } finally { releaseSummaryGates(overview, obsolete, sorted, category, detail, search); collectionShelf = null; await page.close(); }
+    });
+    await run('photo people browse has an inner sort, direction and person drill-down', async () => {
+      const isPeople = url => url.pathname === '/api/image-library/items' && url.searchParams.get('photoView') === 'people';
+      const people = [
+        { type: 'photoPerson', id: '小亭', name: '小亭', value: '小亭', count: 30 },
+        { type: 'photoPerson', id: '小乔', name: '小乔', value: '小乔', count: 26 }
+      ];
+      const result = (items, direction) => ({ items, photoView: 'people', total: items.length, facets: {}, sort: 'count', direction });
+      const initial = hold(isPeople, '', result(people, 'desc'));
+      const ascending = hold(url => isPeople(url) && url.searchParams.get('direction') === 'asc', '', result([...people].reverse(), 'asc'));
+      const person = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('person') === '小亭', '', {
+        items: [{ ...listItem('person-album'), personName: '小亭' }], total: 1, facets: {}, sort: 'updated'
+      });
+      const page = await newPage({ real: true, route: '/photo/people', waitReady: false });
+      try {
+        await requested(initial); await settle(page, initial);
+        await page.waitForURL(url => url.pathname === '/photo/people');
+        assert.equal(await page.locator('.gallery-controls .gallery-photo-sort').count(), 0);
+        const cards = page.locator('.gallery-photo-person-card strong');
+        assert.deepEqual(await cards.allTextContents(), ['小亭', '小乔']);
+        const count = page.locator('.gallery-results-header').getByRole('button', { name: '套图数量' });
+        assert.equal(await count.locator('.gallery-photo-sort-direction').innerText(), '↓');
+        await count.click();
+        await requested(ascending); await settle(page, ascending);
+        assert.equal(new URL(page.url()).searchParams.get('dir'), 'asc');
+        assert.deepEqual(await cards.allTextContents(), ['小乔', '小亭']);
+        assert.equal(await count.locator('.gallery-photo-sort-direction').innerText(), '↑');
+        await page.keyboard.press('/');
+        const input = page.getByRole('searchbox', { name: '搜索套图' });
+        assert(await input.evaluate(node => node === document.activeElement));
+        await page.locator('.gallery-photo-person-card').getByText('小亭').click();
+        await requested(person); await settle(page, person);
+        assert.equal(new URL(page.url()).pathname, '/photo/albums');
+        assert.equal(new URL(person.url, base).searchParams.has('q'), false);
+        await page.locator('[data-gallery-album-id="person-album"]').waitFor();
+      } finally { releaseSummaryGates(initial, ascending, person); await page.close(); }
+    });
+    for (const mode of ['photo', 'media']) await run(`${mode} dedicated search clears browse scope and preserves browser Back`, async () => {
+      const title = '合成搜索结果';
+      const search = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('mode') === mode
+        && url.searchParams.get('q') === '独立搜索', '', {
+        mode, query: '独立搜索', sort: 'relevance', total: 1, facets: {},
+        items: [{ ...listItem('search-hit'), title, type: mode === 'photo' ? 'photo' : 'movie', mediaKind: mode === 'media' ? 'movie' : '' }]
+      });
+      const path = mode === 'photo' ? '/photo/categories/cos' : '/media?kind=tv&category=fixture';
+      const page = await newPage({ real: true, route: path, waitReady: false });
+      try {
+        const input = page.locator('.gallery-search');
+        await input.waitFor();
+        await page.waitForURL(url => mode === 'photo' ? url.pathname === '/photo/categories/cos' : url.searchParams.get('kind') === 'tv');
+        await input.fill('独立搜索'); await input.press('Enter');
+        await requested(search); await settle(page, search);
+        await page.waitForURL(url => url.pathname === `/${mode}/search` && url.searchParams.get('q') === '独立搜索');
+        const params = new URL(search.url, base).searchParams;
+        for (const key of ['category', 'collection', 'person', 'kind', 'seriesKey', 'date']) assert.equal(params.has(key), false);
+        if (mode === 'photo') assert.equal(params.get('photoView'), 'albums');
+        await page.getByText(title, { exact: true }).first().waitFor();
+        assert.equal(await page.locator('.gallery-photo-category-strip, .gallery-photo-view-switch, .gallery-media-kind-switch').count(), 0);
+        await page.goBack();
+        await page.waitForURL(url => mode === 'photo' ? url.pathname === '/photo/categories/cos' : url.searchParams.get('kind') === 'tv');
+        assert.equal(await input.inputValue(), '');
+      } finally { releaseSummaryGates(search); await page.close(); }
+    });
+    await run('photo visible search button opens zero results and restores browsing on Back', async () => {
+      const path = '/photo/collections';
+      const query = '合成无匹配结果';
+      const empty = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('mode') === 'photo'
+        && url.searchParams.get('q') === query, '', { mode: 'photo', query, sort: 'relevance', total: 0, facets: {}, items: [] });
+      collectionShelf = collectionShelfFixture(12);
+      const page = await newPage({ real: true, route: path, waitReady: false });
+      try {
+        const cards = page.locator('.gallery-collection-card');
+        await cards.first().waitFor();
+        assert.equal(await page.locator('.gallery-photo-view-switch').count(), 0);
+        assert.equal(await page.getByRole('button', { name: /^(按合集|全部套图|按人物)$/ }).count(), 0);
+        await page.setViewportSize({ width: 390, height: 844 });
+        const input = page.getByRole('searchbox', { name: '搜索套图' });
+        const submit = page.locator('.gallery-photo-search-box .gallery-media-search-submit');
+        assert(await submit.isVisible());
+        assert.equal(await submit.innerText(), '搜索');
+        await input.fill(query);
+        await submit.click();
+        await requested(empty); await settle(page, empty);
+        await page.waitForURL(url => url.pathname === '/photo/search' && url.searchParams.get('q') === query);
+        assert.equal(new URL(empty.url, base).searchParams.get('sort'), 'relevance');
+        assert.match(await page.locator('.gallery-search-summary').innerText(), /0 个匹配/);
+        await page.getByText('没有匹配的套图', { exact: true }).waitFor();
+        assert(await page.getByRole('button', { name: '返回浏览', exact: true }).isVisible());
+        assert.equal(await page.locator('.gallery-photo-category-strip, .gallery-photo-view-switch').count(), 0);
+        await page.goBack();
+        await page.waitForURL(url => url.pathname === path && !url.searchParams.has('q'));
+        await cards.first().waitFor();
+        assert.equal(await input.inputValue(), '');
+      } finally { releaseSummaryGates(empty); collectionShelf = null; await page.close(); }
+    });
+    await run('media search opens a series episode list and preserves its search on Back', async () => {
+      const title = '合成剧集';
+      const seriesKey = 'fixture-series';
+      const isItems = url => url.pathname === '/api/image-library/items' && url.searchParams.get('mode') === 'media';
+      const results = { mode: 'media', query: title, total: 1, facets: {}, items: [{
+        ...listItem('series-result'), title, type: 'tvSeriesWork', mediaKind: 'tv', seriesName: title, seriesKey
+      }] };
+      const search = hold(url => isItems(url) && url.searchParams.get('q') === title, '', results);
+      const episodes = hold(url => isItems(url) && url.searchParams.get('seriesKey') === seriesKey, '', {
+        mode: 'media', total: 1, facets: {}, items: [{
+          ...listItem('episode-result'), title: 'S01E01', type: 'movie', mediaKind: 'tv', seriesKey
+        }]
+      });
+      const page = await newPage({ real: true, route: `/media/search?q=${encodeURIComponent(title)}`, waitReady: false });
+      try {
+        await requested(search); await settle(page, search);
+        const series = page.locator('.gallery-movie-list-item').filter({ hasText: title });
+        await series.click();
+        await requested(episodes); await settle(page, episodes);
+        const episodeQuery = new URL(episodes.url, base).searchParams;
+        assert.equal(episodeQuery.has('q'), false);
+        assert.equal(episodeQuery.get('kind'), 'tv');
+        await page.waitForURL(url => url.pathname === '/media' && url.searchParams.get('seriesKey') === seriesKey);
+        await page.getByText('选集播放', { exact: true }).waitFor();
+        await page.goBack();
+        await page.waitForURL(url => url.pathname === '/media/search' && url.searchParams.get('q') === title);
+        assert.equal(await page.locator('.gallery-search').inputValue(), title);
+      } finally { releaseSummaryGates(search, episodes); await page.close(); }
+    });
+    await run('photo collection people replace the person dropdown and filter within the collection', async () => {
+      const collection = 'root|test-person-collection';
+      const isCollection = url => url.pathname === '/api/image-library/items' && url.searchParams.get('collection') === collection;
+      const result = {
+        items: [listItem('collection-person-album')], total: 1,
+        collectionSummary: { id: collection, title: '合成人物合集' },
+        facets: { people: [{ value: '小亭', count: 30 }, { value: '小乔', count: 26 }] }, sort: 'updated'
+      };
+      const initial = hold(isCollection, '', result);
+      const chosen = hold(url => isCollection(url) && url.searchParams.get('person') === '小亭', '', result);
+      const page = await newPage({ real: true, route: `/photo/collection/${encodeURIComponent(collection)}`, waitReady: false });
+      try {
+        await requested(initial); await settle(page, initial);
+        assert.equal(await page.locator('.gallery-collection-filters select').count(), 0);
+        await page.locator('.gallery-photo-person-toggle').click();
+        assert.deepEqual(await page.locator('.gallery-photo-person-card strong').allTextContents(), ['小亭', '小乔']);
+        assert.equal(await page.locator('.gallery-photo-album-card').count(), 0);
+        await page.locator('.gallery-photo-person-card').getByText('小亭').click();
+        await requested(chosen); await settle(page, chosen);
+        await page.locator('.gallery-photo-person-active').waitFor();
+        assert.equal(await page.locator('.gallery-photo-person-active').innerText(), '小亭 ×');
+        await page.locator('.gallery-photo-album-card').waitFor();
+      } finally { releaseSummaryGates(initial, chosen); await page.close(); }
+    });
+    for (const downgrade of [false, true]) await run(`collection shelf rebases the prefix on ${downgrade ? 'legacy response shape' : 'source revision'} changes`, async () => {
+      collectionShelf = collectionShelfFixture(170);
+      const page = await newPage({ real: true, route: '/photo?sort=title' });
+      const append = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('offset') === '80');
+      const rebase = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('offset') === '0');
+      try {
+        await page.locator('.gallery-more').click(); await requested(append);
+        collectionShelf = collectionShelfFixture(170, { grouped: downgrade, revision: downgrade ? 'fixture-v1' : 'fixture-v2', first: 1001 });
+        append.release(); await requested(rebase);
+        assert.equal(new URL(rebase.url, base).searchParams.get('limit'), '160');
+        assert.match(await page.locator('.gallery-collection-card').first().innerText(), /Collection 1\b/);
+        assert.equal(await page.locator('.gallery-collection-card').count(), 80);
+        await settle(page, rebase);
+        assert.deepEqual(await page.locator('.gallery-collection-card strong').allTextContents(), Array.from({ length: 160 }, (_, index) => `Collection ${index + 1001}`));
+        assert.match(await page.locator('.gallery-results-header').innerText(), /170 个合集 · 1,360 期/);
+        if (downgrade) {
+          const count = countRequests(url => url.pathname === '/api/image-library/items');
+          await page.locator('.gallery-more').click(); await tick(page);
+          assert.equal(await page.locator('.gallery-collection-card').count(), 170);
+          assert.equal(countRequests(url => url.pathname === '/api/image-library/items'), count, 'legacy grouped shelves must retain local load-more');
+        }
+      } finally { releaseSummaryGates(append, rebase); collectionShelf = null; await page.close(); }
+    });
+    await run('standalone cold entry overlaps module delivery with styles without early boot', async () => {
+      const stylesheet = hold(url => url.pathname === '/modules/content-index/catalog.css');
+      const isEntry = url => url.pathname === '/standalone-app.js';
+      const entry = hold(isEntry);
+      const startEntryCount = countRequests(isEntry);
+      const startSummaryCount = countRequests(isSummary);
+      const delay = 320;
+      const page = await newPage({ real: true, route: '/photo/albums', waitReady: false });
+      entry.requested.then(() => setTimeout(entry.release, delay));
+      try {
+        await requested(stylesheet);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        const beforeStyles = { entry: entry.used, summary: countRequests(isSummary) - startSummaryCount,
+          module: await page.evaluate(() => document.documentElement.dataset.appModule || null) };
+        stylesheet.release();
+        const visibleAt = await (await page.waitForFunction(() => {
+          const card = document.querySelector('.gallery-card');
+          return card && getComputedStyle(card).visibility === 'visible' ? performance.now() : null;
+        })).jsonValue();
+        const timings = await page.evaluate(visibleAt => {
+          const resources = performance.getEntriesByType('resource');
+          const start = resources.find(entry => new URL(entry.name).pathname === '/modules/content-index/catalog.css').startTime;
+          const module = resources.find(entry => new URL(entry.name).pathname === '/standalone-app.js');
+          return { entryStartMs: Math.round(module.startTime - start), visibleMs: Math.round(visibleAt - start) };
+        }, visibleAt);
+        console.log('MEASURE standalone cold photo', JSON.stringify({ delay, beforeStyles, ...timings,
+          entryRequests: countRequests(isEntry) - startEntryCount }));
+        assert.deepEqual(beforeStyles, { entry: true, summary: 0, module: null }, 'the standalone entry must download during style loading and execute after it');
+        assert.equal(countRequests(isEntry) - startEntryCount, 1, 'the production import must reuse the preloaded module URL');
+        assert.equal(await page.locator('#appStartupNotice').count(), 0);
+      } finally { releaseSummaryGates(stylesheet, entry); await page.close(); }
+    });
+    await run('standalone preloaded entry preserves late style failure recovery', async () => {
+      const stylesheet = hold(url => url.pathname === '/modules/content-index/catalog.css', 'Synthetic gallery stylesheet unavailable');
+      const page = await newPage({ real: true, route: '/photo/albums', waitReady: false });
+      try {
+        await requested(stylesheet);
+        await page.waitForFunction(() => performance.getEntriesByType('resource').some(entry =>
+          new URL(entry.name).pathname === '/standalone-app.js'), null, { timeout: 5000 });
+        assert.equal(await page.evaluate(() => document.documentElement.dataset.appModule || null), null,
+          'a downloaded module must wait for the styles outcome before executing');
+        stylesheet.release();
+        await page.locator('.gallery-card').first().waitFor();
+        const notice = page.locator('#appStartupNotice');
+        assert.equal(await notice.getAttribute('role'), 'status');
+        assert.equal(await notice.locator('#appStartupTitle').textContent(), '部分页面样式未加载');
+        assert.equal(await notice.isVisible(), true);
+      } finally { releaseSummaryGates(stylesheet); await page.close(); }
     });
     await run('summary recovery: a cold failure exposes an actionable read-only retry', async () => {
       const failed = hold(isSummary, 'Synthetic cold summary unavailable');
@@ -1059,6 +1581,37 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await viewer.dispose();
       } finally { await page.close(); }
     });
+    for (const observer of [true, false]) await run(`reader loading discards queued images after fast jumps ${observer ? "observer" : "fallback"}`, async () => {
+      const page = await newPage({ real: true, observer });
+      const first = hold(url => url.pathname === "/synthetic/A/1.svg");
+      const abandoned = url => {
+        const index = Number(/^\/synthetic\/A\/(\d+)\.svg$/.exec(url.pathname)?.[1]);
+        return index >= 10 && index < 70;
+      };
+      const before = countRequests(abandoned);
+      const jump = index => page.locator(`.gallery-reader-figure[data-image-index="${index}"]`).evaluate(figure => figure.scrollIntoView({ block: "center", behavior: "instant" }));
+      const figureLoaded = index => page.waitForFunction(index => {
+        const figure = document.querySelector(`.gallery-reader-figure[data-image-index="${index}"]`);
+        const image = figure?.querySelector("img");
+        return figure?.classList.contains("loaded") && image.complete && image.naturalWidth > 0;
+      }, index, { timeout: 5000 });
+      try {
+        await clickAlbum(page, "A"); await readerTitle(page, "Album A"); await requested(first);
+        for (const index of [20, 40, 60, 80]) {
+          await jump(index);
+          await page.waitForFunction(index => document.querySelector(`.gallery-reader-figure[data-image-index="${index}"]`)?.dataset.galleryQueued === "1", index);
+        }
+        assert.equal(countRequests(abandoned), before, "the held startup image must keep the visited windows pending");
+        first.release();
+        await figureLoaded(80);
+        const staleReads = countRequests(abandoned) - before;
+        console.log(`GALLERY_QUEUED_IMAGE_MEASUREMENT ${JSON.stringify({ observer, staleReads })}`);
+        assert.equal(staleReads, 0, "leaving a preload window must discard its unstarted full-size requests");
+        await jump(40);
+        await figureLoaded(40);
+        assert(countRequests(abandoned) > before, "returning to a discarded window must queue and decode its images again");
+      } finally { first.release(); await page.close(); }
+    });
     for (const [count, observer] of [[1000, true], [300, false]]) await run(`reader width ${count} pages preserves images focus and loader ${observer ? "observer" : "fallback"}`, async () => {
       const page = await newPage({ observer });
       try {
@@ -1095,6 +1648,51 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
           assert.equal(after.className.includes(fit ? 'fit-width' : 'natural-width'), true);
           assert(fit ? after.width > before.width : after.width < before.width);
         }
+      } finally { await page.close(); }
+    });
+    await run("reader width deep anchor uses logarithmic geometry", async () => {
+      const page = await newPage(), count = 2400, index = 2000;
+      try {
+        await open(page, "A");
+        await page.evaluate(count => {
+          fixture.state.gallery.album = { ...fixture.state.gallery.album, images: Array.from({ length: count }, (_, offset) => ({
+            index: offset + 1, name: `Synthetic ${offset + 1}`, url: `/synthetic/A/${offset + 1}.svg`
+          })) };
+          fixture.renderer.renderView();
+        }, count);
+        const figure = page.locator(`.gallery-reader-figure[data-image-index="${index}"]`);
+        await figure.evaluate(node => node.scrollIntoView({ block: 'start', behavior: 'instant' }));
+        await page.waitForFunction(index => document.querySelector(`.gallery-reader-figure[data-image-index="${index}"]`)?.classList.contains('loaded'), index);
+        await tick(page);
+        if (timings) {
+          const cdp = await page.context().newCDPSession(page);
+          await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+        }
+        const samples = [];
+        for (const fit of [false, true, false]) {
+          const before = await figure.evaluate(node => {
+            node.scrollIntoView({ block: 'start', behavior: 'instant' });
+            window.scrollBy(0, 150);
+            return node.getBoundingClientRect().top;
+          });
+          const sample = await page.getByRole('button', { name: fit ? '适应宽度' : '原始大小', exact: true }).evaluate(button => {
+            const originalRect = Element.prototype.getBoundingClientRect;
+            let figureReads = 0;
+            Element.prototype.getBoundingClientRect = function (...args) {
+              if (this.classList.contains('gallery-reader-figure')) figureReads++;
+              return originalRect.apply(this, args);
+            };
+            const start = performance.now();
+            try { button.click(); return { figureReads, elapsedMs: performance.now() - start }; }
+            finally { Element.prototype.getBoundingClientRect = originalRect; }
+          });
+          await tick(page);
+          const after = await figure.evaluate(node => node.getBoundingClientRect().top);
+          assert(Math.abs(before - after) < 2, 'width switching must preserve the same deep figure position');
+          samples.push(sample);
+        }
+        console.log(`GALLERY_WIDTH_DEEP ${JSON.stringify({ count, index, cpuRate: timings ? 4 : 1, samples })}`);
+        assert(samples.every(sample => sample.figureReads <= Math.ceil(Math.log2(count)) + 2), 'capturing a deep width anchor must not read the preceding figures');
       } finally { await page.close(); }
     });
     await run("reader width retains a pending startup image and the append queue", async () => {
@@ -1484,6 +2082,114 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(countRequests(url => url.pathname === "/synthetic/A/1.svg"), reads, "closed overlay handlers must not issue another image request");
       } finally { retryRead.release(); broken?.full.release(); await page.close(); }
     });
+    for (const width of [1280, 360]) await run(`pager thumbnail strip scrolls through an entire 83-image album at ${width}px`, async () => {
+      const page = await newPage();
+      await page.setViewportSize({ width, height: 760 });
+      const data = { ...album("A", 0, 83), imageCount: 83 };
+      const initial = hold(url => url.pathname === "/api/photo-sets/A", "", { album: data });
+      try {
+        const opening = open(page, "A"); await requested(initial); initial.release(); await opening;
+        await page.locator(".gallery-reader-open").click();
+        const strip = page.locator(".gallery-image-pager-thumbnails");
+        const counter = page.locator(".gallery-image-pager-counter");
+        await strip.locator('[data-index="0"]').evaluate(button => { fixture.firstThumb = button; });
+        await page.getByRole("button", { name: "下一张", exact: true }).click();
+        assert.equal(await strip.locator('[data-index="0"]').evaluate(button => button === fixture.firstThumb), true);
+        assert(await strip.locator("button").count() < 30, "large strips should mount only nearby thumbnails");
+        if (width === 360) {
+          await dragPager(page, "touch", 0.85, 0.5, 0.15, 0.5, ".gallery-image-pager-thumbnails");
+          await page.waitForFunction(() => document.querySelector(".gallery-image-pager-thumbnails").scrollLeft > 0);
+        }
+        await strip.hover(); await page.mouse.wheel(0, 6000);
+        const last = strip.locator('[data-index="82"]');
+        await last.waitFor();
+        assert.match(await counter.textContent(), /第 2 \/ 83 张/, "scrolling thumbnails does not turn the main page");
+        await last.click();
+        assert.match(await counter.textContent(), /第 83 \/ 83 张/);
+        await strip.hover(); await page.mouse.wheel(0, -6000);
+        await strip.locator('[data-index="0"]').click();
+        assert.match(await counter.textContent(), /第 1 \/ 83 张/);
+      } finally { initial.release(); await page.close(); }
+    });
+    await run("photo archive video mounts the gallery player and fetches only on play", async () => {
+      const page = await newPage();
+      const video = { id: "fixture-video", title: "示例视频.webm", ext: ".webm", streamUrl: "/synthetic/video/first.webm" };
+      const videoOnly = hold(url => url.pathname === "/api/photo-sets/A", "", {
+        album: { ...album("A", 0, 0), imageCount: 0, videos: [video] }
+      });
+      const mixed = hold(url => url.pathname === "/api/photo-sets/B", "", {
+        album: { ...album("B", 0, 2), imageCount: 2, videos: [video, { ...video, id: "second", title: "第二段.webm", streamUrl: "/synthetic/video/second.webm" }] }
+      });
+      const reads = [];
+      try {
+        const recording = fs.readFileSync(new URL("./fixtures/gallery-archive-clip.webm", import.meta.url));
+        await page.route("**/synthetic/video/*.webm", route => {
+          reads.push(new URL(route.request().url()).pathname);
+          return route.fulfill({ contentType: "video/webm", body: recording });
+        });
+        const opening = open(page, "A"); await requested(videoOnly); videoOnly.release(); await opening;
+        const player = page.locator(".gallery-media-web-player");
+        const videoNode = player.locator("video");
+        assert.equal(await page.locator(".gallery-reader-open").count(), 0);
+        assert.equal(await videoNode.getAttribute("src"), null);
+        assert.deepEqual(reads, []);
+        await player.getByRole("button", { name: "播放或暂停" }).click();
+        await page.waitForFunction(() => {
+          const video = document.querySelector(".gallery-media-web-player video");
+          return video?.videoWidth || video?.error;
+        }, null, { timeout: 5000 });
+        const media = await videoNode.evaluate(node => ({ width: node.videoWidth, error: node.error?.message }));
+        assert.equal(media.width, 32, JSON.stringify({ media, reads, bytes: recording.length }));
+        assert(reads.includes(video.streamUrl));
+        await videoNode.evaluate(node => { fixture.retiredVideo = node; });
+        const openingMixed = open(page, "B"); await requested(mixed); mixed.release(); await openingMixed;
+        await page.waitForFunction(() => !fixture.retiredVideo.hasAttribute("src"));
+        assert.equal(await page.locator(".gallery-reader-figure").count(), 2);
+        const before = reads.length;
+        await page.getByRole("combobox", { name: "归档视频", exact: true }).selectOption("1");
+        assert.equal(await videoNode.getAttribute("src"), null);
+        assert.equal(reads.length, before);
+        await player.getByRole("button", { name: "播放或暂停" }).click();
+        await page.waitForFunction(() => document.querySelector(".gallery-media-web-player video")?.videoWidth === 32);
+        assert(reads.includes("/synthetic/video/second.webm"));
+      } finally { videoOnly.release(); mixed.release(); await page.close(); }
+    });
+    await run("pager cover editing saves the requested member and updates the album card", async () => {
+      const page = await newPage({ real: true, route: "/photo?photoView=albums&category=fixture" });
+      const data = { ...album("A", 0, 83), imageCount: 83, coverEditable: true };
+      data.images = data.images.map(image => ({ ...image, archivePath: `photos/${image.index}.jpg` }));
+      const initial = hold(url => url.pathname === "/api/photo-sets/A", "", { album: data });
+      const writes = [];
+      const coverUrl = "/media/gallery-cover/A?cover=fixture-new";
+      await page.route("**/api/photo-sets/A/cover", async route => {
+        writes.push({ method: route.request().method(), body: route.request().postDataJSON() });
+        if (writes.length === 1) await route.fulfill({ status: 409, json: { error: "Synthetic conflict" } });
+        else await route.fulfill({ json: { coverImageIndex: 23, coverUrl } });
+      });
+      try {
+        await clickAlbum(page, "A"); await requested(initial); initial.release(); await readerTitle(page, "Album A");
+        await page.locator(".gallery-reader-figure").first().press("Enter");
+        await page.getByRole("button", { name: "编辑封面", exact: true }).click();
+        const input = page.locator(".gallery-image-pager-jump input");
+        assert.equal(await input.inputValue(), "1");
+        await input.fill("84"); await input.press("Enter");
+        assert.equal(await input.getAttribute("aria-invalid"), "true");
+        assert.equal(writes.length, 0);
+        await input.fill("23"); await input.press("Enter");
+        await page.getByText("Synthetic conflict", { exact: true }).waitFor();
+        assert.equal(await input.inputValue(), "23");
+        await input.press("Enter");
+        await page.getByText("第 23 张已设为封面", { exact: true }).waitFor();
+        assert.deepEqual(writes, Array.from({ length: 2 }, () => ({ method: "PUT", body: { imageIndex: 23, memberPath: "photos/23.jpg" } })));
+        assert.match(await page.locator(".gallery-image-pager-counter").textContent(), /第 1 \/ 83 张/);
+        await page.keyboard.press("Escape");
+        await page.locator(".gallery-reader-open").click();
+        await page.getByRole("button", { name: "编辑封面", exact: true }).waitFor();
+        await page.keyboard.press("Escape");
+        await page.locator(".gallery-reader-back").click();
+        await page.waitForFunction(() => document.querySelector('[data-gallery-album-id="A"] img')?.src.includes('cover=fixture-new'));
+      } finally { initial.release(); await page.close(); }
+    });
     await run("pager keyboard modal focus and opener restoration", async () => {
       const page = await newPage({ real: true });
       const full = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all");
@@ -1674,6 +2380,100 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(new URL(page.url()).pathname, "/photo/collections", "bootstrap must initialize routeReady for the current intent");
       } finally { await page.close(); }
     });
+    for (const inPage of [false, true]) await run(`photo collection ${inPage ? "in-page" : "browser"} back restores deep cards on both levels after a delayed shelf reload`, async () => {
+      const shelf = collectionShelfFixture(172);
+      const albums = Array.from({ length: 172 }, (_, index) => listItem(`A${index}`));
+      collectionShelf = url => {
+        if (!url.searchParams.has("collection")) return shelf(url);
+        const offset = Number(url.searchParams.get("offset")), limit = Number(url.searchParams.get("limit"));
+        return { items: albums.slice(offset, offset + limit), total: albums.length, facets: {},
+          collectionSummary: { title: "Fixture collection" } };
+      };
+      const page = await newPage({ real: true, route: "/photo/collections" });
+      let returned;
+      try {
+        await page.locator(".gallery-more").evaluate(button => button.click());
+        const card = page.locator(".gallery-collection-card").nth(110);
+        await card.waitFor(); await tick(page);
+        await card.evaluate(node => node.scrollIntoView({ block: "center", behavior: "instant" }));
+        const origin = page.url();
+        const top = await card.evaluate(node => node.getBoundingClientRect().top);
+        const collectionBox = await card.boundingBox();
+        await page.mouse.click(collectionBox.x + collectionBox.width / 2, collectionBox.y + collectionBox.height / 2);
+        await page.waitForURL(url => url.pathname.startsWith("/photo/collection/"));
+        const collectionUrl = page.url();
+        assert.equal(await page.evaluate(() => scrollY), 0, "entering a collection must start at the top immediately");
+        await page.locator(".gallery-photo-album-card").first().evaluate(node => { window.__firstCollectionAlbum = node; });
+        await page.locator(".gallery-more").evaluate(button => button.click());
+        const albumCard = page.locator('[data-gallery-album-id="A110"]');
+        await albumCard.waitFor(); await tick(page);
+        assert.equal(await page.evaluate(() => __firstCollectionAlbum === document.querySelector(".gallery-photo-album-card")), true,
+          "loading more albums must retain the existing collection cards");
+        await albumCard.evaluate(node => node.scrollIntoView({ block: "center", behavior: "instant" }));
+        const albumTop = await albumCard.evaluate(node => node.getBoundingClientRect().top);
+        if (inPage) {
+          await albumCard.evaluate(node => node.focus({ preventScroll: true }));
+          await page.keyboard.press("Enter");
+        } else {
+          const box = await albumCard.boundingBox();
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        }
+        await readerTitle(page, "Album A110");
+        assert.equal(await page.evaluate(() => scrollY), 0, "entering an album must start at the top immediately");
+        const albumUrl = page.url();
+        if (inPage) await page.locator(".gallery-reader-back").click();
+        else await page.goBack();
+        await page.waitForURL(collectionUrl);
+        await page.waitForFunction(({ albumTop }) => {
+          const target = document.querySelector('[data-gallery-album-id="A110"]');
+          return target && Math.abs(target.getBoundingClientRect().top - albumTop) <= 3;
+        }, { albumTop }, { timeout: 3500 });
+        if (inPage) assert.equal(await albumCard.evaluate(node => document.activeElement === node), true);
+        returned = hold(url => url.pathname === "/api/image-library/items" && !url.searchParams.has("collection"));
+        if (inPage) await page.locator(".gallery-collection-breadcrumb").getByRole("button", { name: "图库", exact: true }).click();
+        else await page.goBack();
+        await requested(returned);
+        assert.equal(page.url(), origin);
+        await settle(page, returned);
+        await page.waitForFunction(({ top }) => {
+          const target = document.querySelectorAll(".gallery-collection-card")[110];
+          return target && Math.abs(target.getBoundingClientRect().top - top) <= 3;
+        }, { top }, { timeout: 3500 });
+        if (inPage) {
+          await page.goForward(); await page.waitForURL(collectionUrl);
+          await page.goForward(); await page.waitForURL(albumUrl);
+          await readerTitle(page, "Album A110");
+        }
+      } finally { returned?.release(); collectionShelf = null; await page.close(); }
+    });
+    for (const replacePending of [false, true]) await run(`photo collection browser back ${replacePending ? "after selecting a different pending album" : "while an album is still loading"}`, async () => {
+      const shelf = collectionShelfFixture(12);
+      collectionShelf = url => url.searchParams.has("collection")
+        ? { items: [listItem("A"), listItem("B")], total: 2, facets: {}, collectionSummary: { title: "Fixture collection" } }
+        : shelf(url);
+      const page = await newPage({ real: true, route: "/photo/collections" });
+      const first = hold(url => url.pathname === "/api/photo-sets/A");
+      const second = replacePending ? hold(url => url.pathname === "/api/photo-sets/B") : null;
+      try {
+        await page.locator(".gallery-collection-card").first().click();
+        await page.waitForURL(url => url.pathname.startsWith("/photo/collection/"));
+        const collectionUrl = page.url();
+        await clickAlbum(page, "A"); await requested(first);
+        assert.equal(await page.locator(".gallery-reader-title").count(), 0);
+        if (second) { await clickAlbum(page, "B"); await requested(second); }
+        await page.goBack();
+        assert.equal(page.url(), collectionUrl, "browser Back from a pending reader must return to the collection it was opened from");
+        await settle(page, first);
+        if (second) await settle(page, second);
+        await page.locator(".gallery-photo-album-card").first().waitFor();
+        assert.equal(page.url(), collectionUrl);
+        assert.equal(await page.locator(".gallery-reader-title").count(), 0, "the late archive response must not reopen the reader");
+        await page.goForward();
+        await readerTitle(page, replacePending ? "Album B" : "Album A");
+        await page.goBack();
+        assert.equal(page.url(), collectionUrl);
+      } finally { first.release(); second?.release(); collectionShelf = null; await page.close(); }
+    });
     for (const error of ["", "old route error"]) await run(`route initial deep link browser back ${error ? "error" : "success"}`, async () => {
       const old = hold(url => url.pathname === "/api/photo-sets/A", error);
       const page = await newPage({ real: true, route: "/photo/set/A", waitReady: false, initialBack: true });
@@ -1701,37 +2501,42 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       } finally { await page.close(); }
     });
     for (const action of ["list", "search"]) await run(`route boot local ${action} intent`, async () => {
-      const old = hold(url => url.pathname === "/api/photo-sets/A"), page = await newPage({ real: true, route: "/photo/set/A", waitReady: false });
+      const route = action === "list" ? "/photo/set/A?photoView=albums" : "/photo/set/A";
+      const old = hold(url => url.pathname === "/api/photo-sets/A"), page = await newPage({ real: true, route, waitReady: false });
       try {
         await requested(old); await page.locator(".gallery-controls").waitFor({ state: "attached" });
         // The initial loading stylesheet hides the body. Dispatch the actual
         // DOM handlers here without altering that stylesheet; the separate
         // post-boot case below exercises an ordinary visible pointer click.
         await page.evaluate(action => {
-          if (action === "list") [...document.querySelectorAll(".gallery-submode-button")].find(button => button.textContent === "全部套图").click();
+          if (action === "list") document.querySelector(".gallery-photo-category-strip > button").click();
           else { const input = document.querySelector(".gallery-search"); input.value = "B"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
         }, action);
         await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"), null, { timeout: 1500 });
-        assert.equal(new URL(page.url()).pathname, "/photo/albums"); assert.equal(new URL(page.url()).searchParams.get("q"), action === "search" ? "B" : null);
+        const destination = action === "search" ? "/photo/search" : "/photo/collections";
+        assert.equal(new URL(page.url()).pathname, destination); assert.equal(new URL(page.url()).searchParams.get("q"), action === "search" ? "B" : null);
         assert(await page.evaluate(() => __transport.aborted.some(url => url.startsWith("/api/photo-sets/A"))));
-        await settle(page, old); assert.equal(await page.locator(".gallery-reader-title").count(), 0); assert.equal(new URL(page.url()).pathname, "/photo/albums");
+        await settle(page, old); assert.equal(await page.locator(".gallery-reader-title").count(), 0); assert.equal(new URL(page.url()).pathname, destination);
       } finally { await page.close(); }
     });
     await run("route visible local list click", async () => {
       const page = await newPage({ real: true });
       try {
-        const old = hold(url => url.pathname === "/api/photo-sets/A"); await navigateRoute(page, "/photo/set/A"); await requested(old);
-        await page.getByRole("button", { name: "全部套图", exact: true }).click();
-        assert.equal(new URL(page.url()).pathname, "/photo/albums"); await settle(page, old);
-        assert.equal(await page.locator(".gallery-reader-title").count(), 0); assert.equal(new URL(page.url()).pathname, "/photo/albums");
+        const old = hold(url => url.pathname === "/api/photo-sets/A"); await navigateRoute(page, "/photo/set/A?photoView=albums"); await requested(old);
+        await page.getByRole("button", { name: /^全部大类(?:，|$)/ }).click();
+        assert.equal(new URL(page.url()).pathname, "/photo/collections"); await settle(page, old);
+        assert.equal(await page.locator(".gallery-reader-title").count(), 0); assert.equal(new URL(page.url()).pathname, "/photo/collections");
       } finally { await page.close(); }
     });
     for (const target of ["/photo/set/B", "/manga"]) await run(`route module import late startup ${target}`, async () => {
       const module = hold(url => url.pathname === "/modules/content-index/gallery-page.js");
       const firstTarget = hold(url => ["/api/photo-sets/A", "/api/photo-sets/B", "/api/manga"].includes(url.pathname));
-      const before = countRequests(url => url.pathname === "/api/photo-sets/A"), page = await newPage({ real: true, route: "/photo/set/A", waitReady: false });
+      const before = countRequests(url => url.pathname === "/api/photo-sets/A"), summaryReads = countRequests(isSummary);
+      const page = await newPage({ real: true, route: "/photo/set/A", waitReady: false });
       try {
-        await requested(module); await navigateRoute(page, target); module.release();
+        await requested(module);
+        assert.equal(countRequests(isSummary), summaryReads, "a direct album does not prefetch the browse overview");
+        await navigateRoute(page, target); module.release();
         await requested(firstTarget);
         assert.equal(new URL(firstTarget.url, base).pathname, target === "/manga" ? "/api/manga" : "/api/photo-sets/B", "module await must select the latest route's first API request");
         firstTarget.release();
@@ -1822,8 +2627,12 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     const before = await page.evaluate(url => __transport.settled.filter(item => item.url === url).length, gate.url); gate.release();
     await page.waitForFunction(({ url, before }) => __transport.settled.filter(item => item.url === url).length > before, { url: gate.url, before }); await tick(page);
   }
-  async function newPage({ real = false, ignoreAbort = true, observer = true, route = "/photo?photoView=albums", waitReady = true, initialBack = false } = {}) {
+  async function newPage({ real = false, ignoreAbort = true, observer = true, route = "/photo?photoView=albums", waitReady = true, initialBack = false, downloadThroughput = null } = {}) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }); page.on("pageerror", error => faults.push(error.message));
+    if (downloadThroughput) {
+      const session = await page.context().newCDPSession(page);
+      await session.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput, uploadThroughput: -1 });
+    }
     await page.addInitScript(({ ignoreAbort, observer, initialBack }) => {
       const originalFetch = window.fetch.bind(window); window.__transport = { settled: [], aborted: [], lastAlbumJsonAt: 0 };
       window.fetch = async (url, options = {}) => {
@@ -1895,8 +2704,8 @@ async function pagerZoomReady(page) {
       && Math.abs(rect.height - parseFloat(image.style.height)) < 1;
   });
 }
-async function dragPager(page, input, x1, y1, x2, y2) {
-  const box = await page.locator('.gallery-image-pager-stage').boundingBox();
+async function dragPager(page, input, x1, y1, x2, y2, selector = '.gallery-image-pager-stage') {
+  const box = await page.locator(selector).boundingBox();
   const from = { x: box.x + box.width * x1, y: box.y + box.height * y1 };
   const to = { x: box.x + box.width * x2, y: box.y + box.height * y2 };
   if (input === 'mouse') {
@@ -1949,6 +2758,33 @@ async function readerTitle(page, title) { await page.waitForFunction(text => doc
 async function navigateRoute(page, target) { await page.evaluate(url => { history.pushState(null, "", url); dispatchEvent(new PopStateEvent("popstate")); }, target); }
 function sendText(res, body, type, cache = "no-store") { res.writeHead(200, { "Content-Type": type, "Cache-Control": cache }); res.end(body); }
 function sendJson(res, body, status = 200) { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(body)); }
+function collectionShelfFixture(collectionCount, { grouped = false, revision = "fixture-v1", first = 1 } = {}) {
+  const groups = Array.from({ length: Math.min(10, collectionCount) }, (_, index) => {
+    const category = `Category ${index + 1}`;
+    return { id: `R|${category}`, type: "photoCollectionCategory", title: category, category, rootLabel: "R", collections: [] };
+  });
+  for (let index = 0; index < collectionCount; index++) {
+    const group = groups[index % groups.length], n = index + first, id = `R|C${n}`, title = `Collection ${n}`;
+    group.collections.push({ id, type: "photoCollection", title, category: group.category, subCategory: "Portraits", personName: "", seriesName: "",
+      rootLabel: "R", ext: "", size: 1000 + index, updatedAt: "2026-01-01T00:00:00.000Z", imageCount: 64, albumCount: 8,
+      collectionId: id, collectionTitle: title, playable: false, coverUrl: "/synthetic/collection.svg", routePath: `/photo/collection/${encodeURIComponent(id)}` });
+  }
+  for (const group of groups) {
+    group.subCategory = group.collections.map(item => item.title).join(" · ");
+    group.albumCount = group.collections.length * 8;
+    group.collectionCount = group.collections.length;
+  }
+  const facets = { categories: groups.map(group => ({ value: group.category, count: group.albumCount })) };
+  return url => {
+    const params = url.searchParams, category = params.get("category"), limit = Number(params.get("limit") || 80), offset = Number(params.get("offset") || 0);
+    const flat = !grouped && params.get("collectionPage") === "1";
+    const selected = category ? groups.filter(group => group.category === category) : groups;
+    const source = flat ? photoCatalogCollections(selected, params.get("sort")) : selected;
+    const items = source.slice(offset, offset + limit);
+    return { items, facets, limit, offset, count: items.length, total: source.length, nextOffset: offset + items.length, listRevision: revision,
+      ...(flat ? { collectionPage: true, stats: { albumCount: source.reduce((sum, item) => sum + item.albumCount, 0) } } : {}) };
+  };
+}
 function listItem(id) { return { id, type: "photo", title: `Album ${id}`, category: "fixture", imageCount: 10000, coverUrl: `/synthetic/${id}/cover.svg` }; }
 function album(id, offset, limit) { return { ...listItem(id), images: Array.from({ length: Math.min(limit, 10000 - offset) }, (_, i) => ({ index: offset + i + 1, name: `synthetic ${offset + i + 1}`, url: `/synthetic/${id}/${offset + i + 1}.svg` })) }; }
 function manga(id) { return { id, title: `Comic ${id}`, chapters: [1, 2].map(index => ({ index, title: `Chapter ${index}` })) }; }

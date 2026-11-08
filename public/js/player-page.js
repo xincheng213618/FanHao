@@ -70,7 +70,10 @@ const subtitleControls = createSubtitleControls({ api, container: document.query
 
 let currentWork = null;
 let renderedFilesWork = null;
+let renderedFileVideos = null;
 let renderedFileRows = [];
+const renderedFileIndices = new Map();
+let activeFileRow = null;
 let currentVideo = null;
 let currentPlayInfo = null;
 let progressTimer = null;
@@ -534,7 +537,9 @@ function renderFiles(work) {
   if (!reusable) {
     els.files.replaceChildren();
     renderedFilesWork = work;
-    renderedFileRows = videos.map(video => {
+    renderedFileIndices.clear();
+    renderedFileRows = videos.map((video, index) => {
+      if (!renderedFileIndices.has(video.id)) renderedFileIndices.set(video.id, index);
       const button = document.createElement("button");
       button.type = "button";
       button.className = "player-file-button";
@@ -553,22 +558,58 @@ function renderFiles(work) {
   for (let index = 0; index < videos.length; index++) {
     const video = videos[index], row = renderedFileRows[index];
     row.video = video;
-    const active = video.id === currentVideo?.id;
-    row.button.classList.toggle("active", active);
-    if (active) row.button.setAttribute("aria-current", "true");
-    else row.button.removeAttribute("aria-current");
+    setFileRowActive(row, video.id === currentVideo?.id);
     const title = video.name || video.title || "视频";
     const path = `${formatLibraryPath(video.relativePath)}${video.progress?.percent ? ` · ${Math.floor(video.progress.percent)}%` : ""}`;
     if (row.title.textContent !== title) row.title.textContent = title;
     if (row.path.textContent !== path) row.path.textContent = path;
   }
+  renderedFileVideos = work.videos;
+  activeFileRow = renderedFileRows[renderedFileIndices.get(currentVideo?.id)] || null;
   updateFileNavigation();
+}
+
+function setFileRowActive(row, active) {
+  row.button.classList.toggle("active", active);
+  if (active) row.button.setAttribute("aria-current", "true");
+  else row.button.removeAttribute("aria-current");
+}
+
+function updateRenderedFileSelection(work) {
+  // A new descriptor snapshot or duplicate ID still needs the full refresh.
+  if (renderedFilesWork !== work || renderedFileVideos !== work.videos
+      || renderedFileRows.length !== (work.videos?.length || 0)
+      || renderedFileRows.length !== els.files.children.length
+      || renderedFileIndices.size !== renderedFileRows.length) {
+    renderFiles(work);
+    return;
+  }
+  const index = renderedFileIndices.get(currentVideo?.id);
+  const row = renderedFileRows[index] || null;
+  if (row && (row.video !== work.videos[index] || row.button !== els.files.children[index])) {
+    renderFiles(work);
+    return;
+  }
+  if (activeFileRow !== row) {
+    if (activeFileRow) setFileRowActive(activeFileRow, false);
+    if (row) setFileRowActive(row, true);
+    activeFileRow = row;
+  }
+  updateFileNavigation();
+}
+
+function currentFileIndex(videos) {
+  const id = currentVideo?.id;
+  const index = renderedFileIndices.get(id);
+  if (renderedFilesWork === currentWork && renderedFileVideos === currentWork?.videos
+      && index !== undefined && videos[index]?.id === id) return index;
+  return videos.findIndex(video => video.id === id);
 }
 
 function updateFileNavigation() {
   if (!els.fileNavigation) return;
   const videos = currentWork?.videos || [];
-  const index = videos.findIndex(video => video.id === currentVideo?.id);
+  const index = currentFileIndex(videos);
   els.fileNavigation.hidden = videos.length < 2 || index < 0;
   const position = `${Math.max(0, index + 1)} / ${videos.length}`;
   if (els.filePosition.textContent !== position) els.filePosition.textContent = position;
@@ -581,7 +622,7 @@ function updateFileNavigation() {
 
 function playAdjacentFile(offset) {
   const videos = currentWork?.videos || [];
-  const index = videos.findIndex(video => video.id === currentVideo?.id);
+  const index = currentFileIndex(videos);
   const target = index >= 0 ? videos[index + offset] : null;
   if (!target || !els.fileNavigation?.isConnected || els.fileNavigation.hidden) return;
   void playVideo(target);
@@ -603,7 +644,7 @@ async function playVideo(video, options = {}) {
   currentVideo = video;
   subtitleControls.detachMedia();
   updateSubtitleContext(null);
-  renderFiles(currentWork);
+  updateRenderedFileSelection(currentWork);
   updateOpenFileButton();
   updateDeleteLocalButton();
   showNotice("正在准备播放");

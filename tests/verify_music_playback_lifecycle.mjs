@@ -6,7 +6,7 @@ import { createMusicPage } from "../public/modules/music/music-page.js";
 // Real client modules with controlled media/DOM surfaces only. No HTTP, database,
 // media file, browser profile, or running music service is used by this fixture.
 function createFixture(t, { page = false } = {}) {
-  const originals = new Map(["Audio", "window", "document"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const originals = new Map(["Audio", "window", "document", "history"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   t.after(() => {
     for (const [name, descriptor] of originals) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -89,6 +89,7 @@ function createFixture(t, { page = false } = {}) {
     }
   };
   if (page) {
+    globalThis.history ??= { state: null };
     fixture.page = createMusicPage({
       state, els: {}, formatNumber: String, formatBytes: String,
       api: async (path) => {

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
+import { setAccountOwner } from "../android-client/www/js/account-owner.js";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
 
 // Full channel factory, media adapter, shell render-generation methods and real
@@ -14,6 +16,7 @@ import { createImageLibraryService } from "../src/modules/content-index/server/i
 const read = file => fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const source = read("android-client/www/platform/content-index/channel-views.js");
 const mediaSource = read("android-client/www/modules/media/android-module.js"), appSource = read("android-client/www/app.js");
+const measureAdjacent = process.argv.includes("--measure-adjacent-episodes");
 const legacy = JSON.parse(read("tests/fixtures/android-media-episode-navigation-before-fix.json"));
 assert.equal(createHash("sha256").update(JSON.stringify(legacy.sources)).digest("hex"), "24ed3b35c9fbcd227bbe4351cf794d5cf5eea90a7c0ddacdac4bf1d1a72a4d7d");
 for (const entry of Object.values(legacy.sources)) assert.equal(createHash("sha256").update(entry.source).digest("hex"), entry.sha256);
@@ -23,30 +26,38 @@ const A = "https://synthetic-a.invalid", B = "https://synthetic-b.invalid", CATE
 const SERIES_KEY = `${CATEGORY}|${SERIES}`;
 const id = number => `synthetic-episode-${String(number).padStart(4, "0")}`;
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
-function syntheticLibrary(count, metadataCount) {
+function syntheticLibrary(count, metadataCount, mode) {
   let scannedAt = "2026-08-01T00:00:00Z";
-  let items = Array.from({ length: count }, (_, index) => ({ id: id(index + 1), mediaKind: "tv", type: "tv", title: `Episode ${index + 1}`,
+  let items = Array.from({ length: count }, (_, index) => ({ id: id(index + 1), mediaKind: mode, type: mode, title: `Episode ${index + 1}`,
     category: CATEGORY, seriesName: SERIES, size: 2048, ext: "mkv", exists: true, updatedAt: "2026-08-01T00:00:00Z" }));
+  let snapshot = { scannedAt, photoSets: [], mediaItems: items };
+  let metadataRevision = 0;
   const metadata = metadataCount === undefined ? null : { title: SERIES, episodeCount: metadataCount };
   const metadataMap = new Map(metadata ? [[SERIES_KEY, metadata]] : []);
   const service = createImageLibraryService({
     clampInteger(value, fallback, min, max) { const n = Number.parseInt(String(value ?? ""), 10); return Math.min(max, Math.max(min, Number.isFinite(n) ? n : fallback)); },
-    getImageLibraryIndex: () => ({ scannedAt, photoSets: [], mediaItems: items }),
+    cachePreparedQueries: true,
+    getImageLibraryIndex: () => snapshot, getImageLibraryRevision: () => scannedAt,
     maxItemLimit: 12000, galleryMediaRootStatuses: () => [], photoSetRootStatuses: () => [], imageReaderCacheStatus: () => ({}),
     mangaService: { cacheDirs: () => [], publicSummary: value => value, rootStatus: () => ({}) },
     metadataService: { movieRowsMap: () => new Map(), movieRow: () => null, publicMovie: value => value,
       tvSeriesRowsMap: () => metadataMap, tvSeriesRow: key => metadataMap.get(key), publicTvSeries: value => value,
-      tvSeriesKey: (category, title) => `${category}|${title}` },
+      tvSeriesKey: (category, title) => `${category}|${title}`, listRevision: () => metadataRevision },
     photoCollectionRootValue: "synthetic", photoSetService: { coverUrl: () => "" }
   });
   return { service,
-    rescanShift() { items = [...items.slice(1), { ...items[0], id: id(count + 1), title: `Episode ${count + 1}` }]; scannedAt = "2026-08-01T00:01:00Z"; },
+    rescanShift() {
+      items = [...items.slice(1), { ...items[0], id: id(count + 1), title: `Episode ${count + 1}` }];
+      scannedAt = "2026-08-01T00:01:00Z";
+      snapshot = { ...snapshot, scannedAt, mediaItems: items };
+    },
+    bumpMetadataRevision() { metadataRevision++; },
     detail(number) { const row = items.find(value => value.id === id(number)) || { ...items[0], id: id(number) }; return {
     item: { ...service.publicGalleryMediaItem(row), streamUrl: `/media/gallery-video/${encodeURIComponent(row.id)}`, progress: { position: 73, duration: 240 } }
   }; } };
 }
-function harness(input = source, { count = 90, current = 80, metadataCount, cached = false } = {}) {
-  const library = syntheticLibrary(count, metadataCount), document = createNavigationFixtureDocument();
+function harness(input = source, { count = 90, current = 80, metadataCount, cached = false, mode = "tv" } = {}) {
+  const library = syntheticLibrary(count, metadataCount, mode), document = createNavigationFixtureDocument();
   const proto = Object.getPrototypeOf(document.body);
   if (!Object.getOwnPropertyDescriptor(proto, "isConnected")) Object.defineProperty(proto, "isConnected", { get() { return this.ownerDocument.body.contains(this); } });
   if (!Object.getOwnPropertyDescriptor(proto, "childElementCount")) Object.defineProperty(proto, "childElementCount", { get() { return this.children.length; } });
@@ -90,7 +101,7 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
   });
   vm.runInContext(["sameViewParams", "beginViewRender", "invalidateViewRender"].map(name => appFunction(appSource, name)).join("\n"), context);
   vm.runInContext(strip(input), context, { filename: "actual-episode-channel.js" });
-  const trail = JSON.stringify([{ mode: "tv", query: "root query", sort: "rating" }, { mode: "tv", tvView: "episodes", seriesKey: SERIES_KEY, sort: "title" }]);
+  const trail = JSON.stringify([{ mode, query: "root query", sort: "rating" }, { mode, tvView: "episodes", seriesKey: SERIES_KEY, sort: "title" }]);
   const host = { els, normalizeChannelMode: context.normalizeChannelMode, getActiveUrl: () => activeUrl,
     limits: { getChannel: () => 36 }, recent: { record() {} }, favorites: { onChannelFavoriteChange() {} },
     navigation: { currentView: () => context.currentView, currentParams: () => context.currentViewParams,
@@ -103,12 +114,17 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
     queuePage(value) { pageQueue.push(value); }, queueDetail(value) { detailQueue.push(value); }, setSource(value) { activeUrl = value; },
     leave() { context.invalidateViewRender(); context.currentView = "channel"; els.viewContent.textContent = "OTHER PAGE"; },
     abort() { context.activeViewController.abort(); },
-    start(number = currentNumber) { currentNumber = number; context.currentView = "mediaDetail"; context.currentViewParams = { id: id(number), mode: "tv", mediaTrail: trail };
+    start(number = currentNumber) { currentNumber = number; context.currentView = "mediaDetail"; context.currentViewParams = { id: id(number), mode, mediaTrail: trail };
       const guard = context.beginViewRender("mediaDetail", context.currentViewParams); return module.routes.find(route => route.view === "mediaDetail").render(context.currentViewParams, guard); },
     async settle() { for (let index = 0; index < 160; index++) await Promise.resolve(); assert.equal(calls.errors.length, 0, calls.errors[0]?.stack); },
     row: () => els.viewContent.querySelector(".media-episode-nav"), label: () => h.row()?.querySelector(".media-episode-nav-label")?.textContent || "",
     button(text) { return h.row()?.querySelectorAll("button").find(button => button.textContent === text); },
     async click(text) { const button = h.button(text); assert(button, `Actual ${text} button exists`); button.click(); await h.settle(); },
+    async follow(text, number) {
+      const before = calls.nav.length;
+      await h.click(text); assert.equal(calls.nav.length, before + 1); assert.equal(calls.nav.at(-1)?.params.id, id(number));
+      await h.start(number); await h.settle();
+    },
     async retry() { const button = h.row()?.querySelectorAll("button").find(value => /重试|重新/.test(value.textContent)); assert(button, "Actual explicit retry exists"); button.click(); await h.settle(); }
   }; return h;
 }
@@ -217,10 +233,12 @@ for (const invalidation of ["source", "abort", "leave", "detach", "rerender"]) t
   oldHandler(); await h.settle(); assert.equal(h.calls.nav.length, 0, "Retired onclick may not navigate to another episode");
 });
 
-test("cached navigation detached by fresh detail does not continue its obsolete page request", async input => {
+test("cached navigation detached by changed fresh detail does not continue its obsolete page request", async input => {
   const h = harness(input, { count: 800, current: 700, cached: true }), oldPage = deferred(), fresh = deferred(); h.queuePage(oldPage); h.queueDetail(fresh);
   const rendering = h.start(); await h.settle(); const oldRow = h.row(); assert.equal(h.calls.pages.length, 1);
-  fresh.resolve(h.library.detail(700)); await rendering; await h.settle(); const currentRow = h.row(); assert.notEqual(currentRow, oldRow); assert.equal(currentRow.dataset.state, "ready");
+  const detail = h.library.detail(700);
+  fresh.resolve({ ...detail, item: { ...detail.item, relativePath: "updated/synthetic-episode.mkv" } });
+  await rendering; await h.settle(); const currentRow = h.row(); assert.notEqual(currentRow, oldRow); assert.equal(currentRow.dataset.state, "ready");
   const before = h.calls.pages.length; oldPage.resolve(h.calls.pages[0].actual); await h.settle(); assert.equal(h.calls.pages.length, before); assert.equal(h.row(), currentRow);
 });
 
@@ -241,6 +259,87 @@ for (const invalidation of ["source", "abort"]) test(`${invalidation} during the
   delayed.resolve(h.calls.pages[1].actual); await h.settle(); assert.equal(row.dataset.state, "loading"); assert.equal(h.button("下一集").disabled, true);
 });
 
+const pageRanges = (pages) => pages.map(call => [call.params.offset, call.params.limit]);
+async function adjacentEpisodeBudget(input) {
+  const count = 1000, h = harness(input, { count, current: 950 });
+  await h.start(); await h.settle();
+  assert.equal(h.label(), `第 950 / ${count} 集`);
+  const first = h.calls.pages.length;
+  await h.follow("下一集", 951);
+  assert.equal(h.label(), `第 951 / ${count} 集`);
+  const pages = h.calls.pages.slice(first);
+  await h.click("下一集"); assert.equal(h.calls.nav.at(-1).params.id, id(952));
+  await h.follow("上一集", 950);
+  assert.equal(h.label(), `第 950 / ${count} 集`);
+  return { ranges: pageRanges(pages), rows: pages.reduce((sum, page) => sum + page.actual.items.length, 0),
+    jsonBytes: pages.reduce((sum, page) => sum + Buffer.byteLength(JSON.stringify(page.actual)), 0) };
+}
+test("sequential late episodes request only the previous, current and following records", async input => {
+  const sample = await adjacentEpisodeBudget(input);
+  assert.deepEqual(sample.ranges, [["949", "3"]]); assert.equal(sample.rows, 3);
+});
+
+test("adjacent first and last episodes use two-record windows with exact disabled buttons", async input => {
+  const h = harness(input, { count: 3, current: 2 }); await h.start(); await h.settle();
+  await h.follow("上一集", 1); assert.equal(h.label(), "第 1 / 3 集"); assert.equal(h.button("上一集").disabled, true);
+  await h.follow("下一集", 2); await h.follow("下一集", 3);
+  assert.equal(h.label(), "第 3 / 3 集"); assert.equal(h.button("下一集").disabled, true);
+  assert.deepEqual(pageRanges(h.calls.pages), [["0", "240"], ["0", "2"], ["0", "3"], ["1", "2"]]);
+});
+
+test("anime adjacent navigation keeps the media kind and series trail", async input => {
+  const h = harness(input, { count: 300, current: 240, mode: "anime" }); await h.start(); await h.settle();
+  await h.follow("下一集", 241); assert.equal(h.label(), "第 241 / 300 集");
+  assert.deepEqual(pageRanges(h.calls.pages), [["0", "240"], ["240", "240"], ["239", "3"]]);
+  assert.equal(h.calls.pages.at(-1).params.mode, "media"); assert.equal(h.calls.pages.at(-1).params.kind, "anime");
+  assert.equal(h.calls.nav.at(-1).params.mode, "anime"); assert.deepEqual(JSON.parse(h.calls.nav.at(-1).params.mediaTrail), JSON.parse(h.trail));
+});
+
+for (const change of ["rescan", "metadata-only revision", "duplicate row", "wrong target"]) test(`adjacent ${change} falls back to the current directory`, async input => {
+  const h = harness(input, { count: 500, current: 300 }); await h.start(); await h.settle();
+  if (change === "rescan") h.library.rescanShift();
+  if (change === "metadata-only revision") h.library.bumpMetadataRevision();
+  if (change === "duplicate row") h.queuePage(({ actual }) => ({ ...actual, items: [actual.items[1], ...actual.items.slice(1)] }));
+  if (change === "wrong target") h.queuePage(({ actual }) => ({ ...actual, items: [actual.items[1], actual.items[0], actual.items[2]] }));
+  await h.follow("下一集", 301);
+  assert.equal(h.label(), `第 ${change === "rescan" ? 300 : 301} / 500 集`);
+  assert.deepEqual(pageRanges(h.calls.pages.slice(2)), [["299", "3"], ["0", "240"], ["240", "240"]]);
+  await h.click("上一集"); assert.equal(h.calls.nav.at(-1).params.id, id(300));
+  await h.click("下一集"); assert.equal(h.calls.nav.at(-1).params.id, id(302));
+});
+
+test("unversioned directory leaves adjacent navigation on the compatible full scan", async input => {
+  const h = harness(input, { count: 500, current: 300 });
+  const unversioned = ({ actual }) => ({ ...actual, listRevision: undefined });
+  h.queuePage(unversioned); h.queuePage(unversioned);
+  await h.start(); await h.settle(); await h.follow("下一集", 301);
+  assert.equal(h.label(), "第 301 / 500 集");
+  assert.deepEqual(pageRanges(h.calls.pages.slice(2)), [["0", "240"], ["240", "240"]]);
+});
+
+test("a failed adjacent window offers a manual retry from offset zero", async input => {
+  const h = harness(input, { count: 500, current: 300 }); await h.start(); await h.settle();
+  h.queuePage(new Error("Synthetic window failure")); await h.follow("下一集", 301);
+  assert.equal(h.row().dataset.state, "error"); assert.equal(h.button("下一集").disabled, true);
+  assert.deepEqual(pageRanges(h.calls.pages.slice(2)), [["299", "3"]]);
+  await h.retry(); assert.equal(h.label(), "第 301 / 500 集");
+  assert.deepEqual(pageRanges(h.calls.pages.slice(3)), [["0", "240"], ["240", "240"]]);
+});
+
+for (const invalidation of ["source", "account", "route"]) test(`adjacent window ignores a late reply after ${invalidation} changes`, async input => {
+  const h = harness(input, { count: 500, current: 300 }), delayed = deferred(); await h.start(); await h.settle();
+  h.queuePage(delayed); await h.follow("下一集", 301);
+  const row = h.row(), request = h.calls.pages.at(-1);
+  assert.equal(request.params.limit, "3"); assert.equal(row.dataset.state, "loading");
+  try {
+    if (invalidation === "source") h.setSource(B);
+    else if (invalidation === "account") setAccountOwner(A, "account:episode-fixture");
+    else h.leave();
+    delayed.resolve(request.actual); await h.settle();
+    assert.equal(row.dataset.state, "loading"); assert.equal(h.calls.pages.length, 3);
+  } finally { if (invalidation === "account") setAccountOwner(A, "guest"); }
+});
+
 const mutations = [], mutate = (name, scenario, change) => mutations.push({ name, scenario, change });
 const replaceOnce = (value, from, to) => { assert(value.includes(from), `Missing mutation target ${from}`); return value.replace(from, to); };
 const navMutation = change => value => {
@@ -255,32 +354,37 @@ mutate("show seen prefix size rather than server total", "300 episodes at 239 re
 mutate("mistake every page boundary for series ending", "300 episodes at 240 resolve across a 240-item page boundary", navMutation(method => replaceOnce(method, "if (offset >= total)", "if (true)")));
 mutate("forget prior-page last episode", "300 episodes at 241 resolve across a 240-item page boundary", navMutation(method => replaceOnce(method, "for (let index = 0; index < episodes.length; index += 1)", "previous = null;\n          for (let index = 0; index < episodes.length; index += 1)")));
 mutate("ignore ownership after awaiting a neighbor page", "source during the immediate neighbor page cannot mark a retired row ready", navMutation(method => replaceOnce(method, "if (!isCurrent()) return;", "/* mutation: post-request owner unchecked */")));
-mutate("let old enabled onclick navigate", "source rejects an already-enabled old episode onclick", value => replaceOnce(value, "if (!button.disabled && isCurrent()) showMediaDetail", "if (!button.disabled) showMediaDetail"));
+mutate("let old enabled onclick navigate", "source rejects an already-enabled old episode onclick", value => replaceOnce(value, "if (!button.disabled && isCurrent()) {", "if (!button.disabled) {"));
 mutate("remove duplicate-ID fence", "later-page duplicate across pages does not infer a nonexistent ending", navMutation(method => replaceOnce(method, " || seen.has(id)", "")));
 mutate("ignore changed total between pages", "later-page total changed does not infer a nonexistent ending", navMutation(method => replaceOnce(method, " || (total !== null && data.total !== total)", "")));
 mutate("ignore returned directory identity", "wrong series is a visible retryable error, never a false last episode", navMutation(method => replaceOnce(method, '|| String(data.seriesKey || "") !== seriesKey', "|| false")));
-mutate("ignore scan revision while total remains unchanged", "same-total actual rescan between pages rejects skipped neighbor and retry uses the new directory", navMutation(method => replaceOnce(method, '|| (scanRevision !== null && String(data.scannedAt || "") !== scanRevision)', "|| false")));
+mutate("ignore scan revision while total remains unchanged", "same-total actual rescan between pages rejects skipped neighbor and retry uses the new directory", navMutation(method => replaceOnce(method, '|| (scanRevision !== null && (String(data.scannedAt || "") !== scanRevision.scannedAt || channelRevisionChanged(scanRevision, data)))', "|| false")));
 mutate("resume retry at failed offset instead of restarting directory", "later-page network failure does not infer a nonexistent ending", navMutation(method => {
   let changed = replaceOnce(method, "let loading = false;", "let loading = false; let retainedOffset = 0;");
   changed = replaceOnce(changed, "let offset = 0, total", "let offset = retainedOffset, total");
   return replaceOnce(changed, "offset += episodes.length;", "offset += episodes.length; retainedOffset = offset;");
 }));
 mutate("remove load single-flight fence", "repeated failure retries from zero and duplicate retry callbacks remain single-flight", navMutation(method => replaceOnce(method, "if (loading || !isCurrent()) return;", "if (!isCurrent()) return;")));
-mutate("scan past already-known next episode", "exact first/last boundaries and early stop for 1/800", navMutation(method => replaceOnce(method, "if (current) { complete(episode); return; }", "if (current) { complete(episode); continue; }")));
+mutate("scan past already-known next episode", "exact first/last boundaries and early stop for 1/800", navMutation(method => replaceOnce(method, "if (current) { complete(episode, data); return; }", "if (current) { complete(episode, data); continue; }")));
 mutate("allow oversized response pages", "oversized page is a visible retryable error, never a false last episode", navMutation(method => replaceOnce(method, " || episodes.length > pageSize", "")));
 mutate("ignore response offset", "incorrect offset is a visible retryable error, never a false last episode", navMutation(method => replaceOnce(method, " || data.offset !== offset", "")));
 
+if (measureAdjacent) {
+  const previous = execFileSync("git", ["show", "f110040d02b1eb579461248da9960e97370fa4d2:android-client/www/platform/content-index/channel-views.js"],
+    { cwd: new URL("../", import.meta.url), encoding: "utf8" });
+  console.log(JSON.stringify({ previous: await adjacentEpisodeBudget(previous), current: await adjacentEpisodeBudget(source) }));
+}
 let passed = 0, failed = 0, oldRejected = 0, mutantsRejected = 0;
-if (!process.argv.includes("--legacy-only")) for (const test of tests) {
+if (!measureAdjacent && !process.argv.includes("--legacy-only")) for (const test of tests) {
   try { await test.run(source); passed++; console.log(`PASS ${test.name}`); } catch (error) { failed++; console.error(`FAIL ${test.name}\n${error.stack}`); }
 }
-for (const test of tests.slice(0, 4)) {
+for (const test of measureAdjacent ? [] : tests.slice(0, 4)) {
   try { let failure; try { await test.run(legacy.sources.channel.source); } catch (error) { failure = error; }
     assert(failure instanceof assert.AssertionError, `Frozen85 must reject a safety assertion, not setup: ${failure?.stack || "unexpected pass"}`);
     assert.match(failure.message, /fixed.prefix/); oldRejected++; console.log(`REJECT frozen85 ${test.name}`);
   } catch (error) { failed++; console.error(error.stack); }
 }
-if (!process.argv.includes("--legacy-only")) for (const mutation of mutations) {
+if (!measureAdjacent && !process.argv.includes("--legacy-only")) for (const mutation of mutations) {
   try {
     const changed = mutation.change(source); assert.notEqual(changed, source, "Mutant must change production");
     const scenario = tests.find(test => test.name === mutation.scenario); assert(scenario, `Missing scenario ${mutation.scenario}`);

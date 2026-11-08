@@ -34,8 +34,10 @@ try {
     ["partycat", "轰趴猫", "sites", "[Partycat]"],
     ["tuigirl", "推女郎", "sites", "[TuiGirl] 推女郎"],
     ["slady", "猎女神", "sites", "[SLADY]猎女神"],
+    ["fetish", "丝袜恋足", null, "恋足恋物"],
     ["likes", "我喜欢的", null, "我喜欢的"],
-    ["miscellaneous", "零散", "likes", "[零散]"]
+    ["miscellaneous", "零散", "likes", "[零散]"],
+    ["portraits", "人物", null, "[]"]
   ]) assert.deepEqual(store.bySourceCategory(sourceCategory), { id, name, parentId, sourceCategory });
   assert.deepEqual(store.children("japan").items, []);
   assert.deepEqual(store.children("korea").items, []);
@@ -127,9 +129,12 @@ try {
 
   db.exec(`UPDATE photo_library_snapshot SET revision='revision-b';
     UPDATE photo_browse_categories SET name='我的名站' WHERE id='sites';
+    UPDATE photo_browse_categories SET name='恋足恋物' WHERE id='fetish';
     UPDATE photo_browse_categories SET parent_id=NULL, name='我的演艺圈' WHERE id='korean-entertainment';`);
   service.close();
   assert.equal(store.byId("sites").name, "我的名站", "reopening preserves local category definitions");
+  assert.equal(store.byId("fetish").name, "丝袜恋足");
+  assert.equal(store.byId("bobosocks").parentId, "fetish");
   assert.notEqual(store.children("sites").listRevision, first.listRevision);
   assert.equal(store.children("sites").items[0].catalogCategory, "我的名站");
   assert.deepEqual(store.bySourceCategory("韩国演艺圈"), {

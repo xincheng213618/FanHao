@@ -167,6 +167,19 @@ try {
   assert.deepEqual(await json(await fetch(counts), 200), { counts: {} });
   const excessIds = new URLSearchParams(Array.from({ length: 25 }, (_, index) => ["ids", String(index)]));
   await json(await fetch(`${counts}?${excessIds}`), 400);
+
+  const insertFolderAlbum = galleryDb.getDb().prepare("INSERT INTO photo_library_archives VALUES (?, ?, ?, ?)");
+  for (const [position, id, subCategory] of [[100, "rabbit-one", "兔玩映画"], [101, "rabbit-two", "兔玩映画"], [102, "other-folder", "喵写真"]]) {
+    const collectionId = `${fixtureRoot}|萝莉系列/${subCategory}/${id}`;
+    insertFolderAlbum.run(id, position, collectionId, JSON.stringify({ id, sourceRoot: fixtureRoot, category: "萝莉系列", subCategory, title: id }));
+  }
+  const shelf = `collection:shelf:${Buffer.from(JSON.stringify([fixtureRoot, "萝莉系列", "兔玩映画"])).toString("base64url")}`;
+  assert.deepEqual((await get("catalog:tuwan")).choices.map(album => album.id), ["rabbit-one", "rabbit-two"]);
+  assert.deepEqual((await get("catalog:loli-series")).choices.map(album => album.id), ["other-folder"]);
+  assert.deepEqual((await get(shelf)).choices.map(album => album.id), ["rabbit-one", "rabbit-two"]);
+  await put(shelf, { source: "album", albumId: "other-folder" }, 400);
+  const { settings: shelfCover } = await put(shelf, { source: "album", albumId: "rabbit-two" });
+  assert.equal(shelfCover.albumId, "rabbit-two");
   console.log("photo covers: category and collection scopes, authorization, image validation, persistence, revision and card counts verified");
 } finally {
   server.closeAllConnections();

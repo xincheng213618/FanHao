@@ -81,6 +81,8 @@ assert.equal(synchronousStampReads, new Set([...ACTOR_MOVIE_CACHE_TABLES, ...ACT
 console.log(`cache-index-contracts: warm-stamps-5000=${warmStampMs.toFixed(1)}ms, sync-sql=${synchronousStampReads}`);
 
 let scopeRevision = "merge-1";
+let scopeRevisionReads = 0;
+let mergedScopePersonReads = 0;
 const scopeLibrary = {
   scannedAt: "scan-1",
   people: [{ id: "person-1", works: ["work-1"] }],
@@ -89,17 +91,29 @@ const scopeLibrary = {
 };
 const scope = createPeopleScopeService({
   getLibrary: () => scopeLibrary,
-  getRevision: () => scopeRevision,
-  mergedPersonRecord: (person) => person,
+  getRevision: () => { scopeRevisionReads += 1; return scopeRevision; },
+  mergedPersonRecord: (person) => { mergedScopePersonReads += 1; return person; },
   pathWithinRoot: (value, root) => String(value).toLowerCase().startsWith(String(root).toLowerCase()),
   sourcePathToAbsolute: (value) => value,
   westernRoots: ["R:/"]
 });
 const firstScopeKey = scope.cacheKey();
+const work = scopeLibrary.worksById.get("work-1");
+const externalWork = { id: "outside-index", relativePath: "R:/western/other" };
+const matchesWesternWork = scope.workMatcher(" WESTERN ");
+assert.equal(scopeRevisionReads, 1, "creating an unused batch matcher does not build the index");
+assert.deepEqual([work, externalWork, work].map(matchesWesternWork), [false, true, false]);
+assert.equal(scopeRevisionReads, 2, "a bulk scan checks the revision once");
+assert.equal(mergedScopePersonReads, 1, "both index passes reuse the same resolved person record");
+const matchesWesternPerson = scope.personMatcher("western");
+assert.deepEqual([scopeLibrary.people[0], { id: "external", relativePath: "R:/western/person" }].map(matchesWesternPerson), [false, true]);
+assert.equal(scopeRevisionReads, 3, "a person scan checks the revision once");
 assert.equal(scope.workMatches(scopeLibrary.worksById.get("work-1"), "western"), false);
 scopeLibrary.worksById.set("work-1", { id: "work-1", relativePath: "R:/western/item" });
 scope.invalidate();
 assert.equal(scope.workMatches(scopeLibrary.worksById.get("work-1"), "western"), true, "same-count path changes must publish through the cheap explicit revision");
+assert.equal(scope.workMatcher("western")(scopeLibrary.worksById.get("work-1")), true, "a new batch observes scope invalidation");
+assert.equal(scope.personMatcher("western")(scopeLibrary.people[0]), true, "a new batch observes changed work membership of the person");
 scopeRevision = "merge-2";
 assert.notEqual(scope.cacheKey(), firstScopeKey, "merge revision must participate in the scope cache identity");
 

@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-8af3642624a3";
-import { fetchJson } from "./js/api.js?v=assets-8af3642624a3";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-8faf7a80cb7b";
+import { fetchJson } from "./js/api.js?v=assets-8faf7a80cb7b";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-8af3642624a3";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=assets-8af3642624a3";
-import { getElements } from "./js/dom.js?v=assets-8af3642624a3";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-8af3642624a3";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-8af3642624a3";
+import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-8faf7a80cb7b";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-8faf7a80cb7b";
+import { getElements } from "./js/dom.js?v=assets-8faf7a80cb7b";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-8faf7a80cb7b";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-8faf7a80cb7b";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-8af3642624a3";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-8af3642624a3";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-8af3642624a3";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-8af3642624a3";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-8faf7a80cb7b";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-8faf7a80cb7b";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-8faf7a80cb7b";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-8faf7a80cb7b";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-8af3642624a3";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-8af3642624a3";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-8af3642624a3";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-8af3642624a3";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-8faf7a80cb7b";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-8faf7a80cb7b";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-8faf7a80cb7b";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-8faf7a80cb7b";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -49,6 +49,7 @@ window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
   for (const video of document.querySelectorAll("video")) video.pause();
   els.viewContent.replaceChildren();
   els.personPreview.replaceChildren();
+  homePeoplePreviewDirty = false;
   els.continuePreview.replaceChildren();
   renderUserState({ favoriteCount: 0, historyCount: 0 });
   if (event.detail.current.owner === "pending" || accountReloadPending) return;
@@ -125,6 +126,7 @@ const FAST_MANGA_IMAGE_STEP = 80;
 const initialViewState = readInitialViewState();
 const initialSettingsRequested = Boolean(initialViewState.settingsRequested);
 let library = null;
+let homePeoplePreviewDirty = false;
 let libraryLoadPromise = null;
 let libraryLoadGeneration = 0;
 let libraryLoadError = null;
@@ -176,6 +178,7 @@ let imageLibrarySummary = null;
 let novelSummary = null;
 let musicSummary = null;
 let shortVideoSummary = null;
+let homeSummaryGeneration = -1;
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
 let androidUpdateStatus = "checking";
@@ -854,104 +857,37 @@ function setCacheActionsDisabled(disabled) {
   if (els.cleanupReaderCacheButton) els.cleanupReaderCacheButton.disabled = disabled;
 }
 
-async function loadImageLibrarySummary() {
-  if (!els.omniGrid) return false;
+function loadHomeSummaries() {
+  const generation = libraryLoadGeneration;
+  if (!els.omniGrid || homeSummaryGeneration === generation) return;
+  homeSummaryGeneration = generation;
   const requestUrl = activeUrl;
+  const accountScope = captureAccountOwner(requestUrl);
+  const isCurrent = () => generation === libraryLoadGeneration && requestUrl === activeUrl && isAccountOwnerCurrent(accountScope);
   if (!imageLibrarySummary) renderOmniSummary(null, { loading: true });
 
-  const cached = await readCachedJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH).catch(() => null);
-  if (requestUrl !== activeUrl) return false;
-  if (cached?.payload) {
-    imageLibrarySummary = cached.payload;
-    renderOmniSummary(imageLibrarySummary, { cachedAt: cached.updatedAt });
-  }
+  void loadSummary(IMAGE_LIBRARY_SUMMARY_CACHE_PATH, 12000, (value) => { imageLibrarySummary = value; });
+  void loadSummary(NOVEL_SUMMARY_CACHE_PATH, 10000, (value) => { novelSummary = value; });
+  void loadSummary(MUSIC_SUMMARY_CACHE_PATH, 10000, (value) => { musicSummary = value; });
+  void loadSummary(SHORT_VIDEO_SUMMARY_CACHE_PATH, 10000, (value) => { shortVideoSummary = value; });
 
-  try {
-    const summary = await fetchJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH, { timeoutMs: 12000 });
-    if (requestUrl !== activeUrl) return false;
-    imageLibrarySummary = summary;
-    writeCachedJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH, summary).catch(() => {});
-    renderOmniSummary(imageLibrarySummary);
-    return true;
-  } catch (error) {
-    if (requestUrl !== activeUrl) return false;
-    renderOmniSummary(imageLibrarySummary, { error });
-    return false;
-  }
-}
-
-async function loadNovelSummary() {
-  const requestUrl = activeUrl;
-  const cached = await readCachedJson(requestUrl, NOVEL_SUMMARY_CACHE_PATH).catch(() => null);
-  if (requestUrl !== activeUrl) return false;
-  if (cached?.payload) {
-    novelSummary = cached.payload;
-    syncNovelCounts();
-    renderOmniSummary(imageLibrarySummary);
-  }
-
-  try {
-    const summary = await fetchJson(requestUrl, NOVEL_SUMMARY_CACHE_PATH, { timeoutMs: 10000 });
-    if (requestUrl !== activeUrl) return false;
-    novelSummary = summary;
-    writeCachedJson(requestUrl, NOVEL_SUMMARY_CACHE_PATH, summary).catch(() => {});
-    syncNovelCounts();
-    renderOmniSummary(imageLibrarySummary);
-    return true;
-  } catch {
-    if (requestUrl !== activeUrl) return false;
-    syncNovelCounts();
-    return false;
-  }
-}
-
-async function loadMusicSummary() {
-  const requestUrl = activeUrl;
-  const cached = await readCachedJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH).catch(() => null);
-  if (requestUrl !== activeUrl) return false;
-  if (cached?.payload) {
-    musicSummary = cached.payload;
-    syncMusicCounts();
-    renderOmniSummary(imageLibrarySummary);
-  }
-
-  try {
-    const summary = await fetchJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH, { timeoutMs: 10000 });
-    if (requestUrl !== activeUrl) return false;
-    musicSummary = summary;
-    writeCachedJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH, summary).catch(() => {});
-    syncMusicCounts();
-    renderOmniSummary(imageLibrarySummary);
-    return true;
-  } catch {
-    if (requestUrl !== activeUrl) return false;
-    syncMusicCounts();
-    return false;
-  }
-}
-
-async function loadShortVideoSummary() {
-  const requestUrl = activeUrl;
-  const cached = await readCachedJson(requestUrl, SHORT_VIDEO_SUMMARY_CACHE_PATH).catch(() => null);
-  if (requestUrl !== activeUrl) return false;
-  if (cached?.payload) {
-    shortVideoSummary = cached.payload;
-    syncShortVideoCounts();
-    renderOmniSummary(imageLibrarySummary);
-  }
-
-  try {
-    const summary = await fetchJson(requestUrl, SHORT_VIDEO_SUMMARY_CACHE_PATH, { timeoutMs: 10000 });
-    if (requestUrl !== activeUrl) return false;
-    shortVideoSummary = summary;
-    writeCachedJson(requestUrl, SHORT_VIDEO_SUMMARY_CACHE_PATH, summary).catch(() => {});
-    syncShortVideoCounts();
-    renderOmniSummary(imageLibrarySummary);
-    return true;
-  } catch {
-    if (requestUrl !== activeUrl) return false;
-    syncShortVideoCounts();
-    return false;
+  async function loadSummary(path, timeoutMs, setSummary) {
+    const isImageSummary = path === IMAGE_LIBRARY_SUMMARY_CACHE_PATH;
+    const cached = await readCachedJson(requestUrl, path).catch(() => null);
+    if (!isCurrent()) return;
+    if (cached?.payload) {
+      setSummary(cached.payload);
+      renderOmniSummary(imageLibrarySummary, isImageSummary ? { cachedAt: cached.updatedAt } : {});
+    }
+    try {
+      const summary = await fetchJson(requestUrl, path, { timeoutMs });
+      if (!isCurrent()) return;
+      setSummary(summary);
+      writeCachedJson(requestUrl, path, summary).catch(() => {});
+      renderOmniSummary(imageLibrarySummary);
+    } catch (error) {
+      if (isCurrent() && isImageSummary) renderOmniSummary(imageLibrarySummary, { error });
+    }
   }
 }
 
@@ -1434,6 +1370,7 @@ function updateServer(url) {
   if (previousUrl !== activeUrl) {
     settingsSourceRevision += 1;
     retireModePickerSession();
+    window.dispatchEvent(new CustomEvent("fanhaoActiveServerChanged"));
   }
   localStorage.setItem(STORAGE_KEY, activeUrl);
   els.serverUrl.value = activeUrl;
@@ -1737,10 +1674,8 @@ function loadDashboard() {
   setConnection("连接中", true);
   setStatus("正在连接电脑端");
   els.personPreview.innerHTML = `<div class="loading-row">正在读取资料库</div>`;
-  loadImageLibrarySummary();
-  loadNovelSummary();
-  loadMusicSummary();
-  loadShortVideoSummary();
+  homePeoplePreviewDirty = false;
+  if (currentView === "home") loadHomeSummaries();
 
   const request = (async () => {
     let cached = null;
@@ -1768,7 +1703,6 @@ function loadDashboard() {
       setStatus("已连接");
       updateServiceHealth();
       refreshLibraryDependentView();
-      updateCacheStatus();
       return true;
     } catch (error) {
       if (!isCurrent()) return false;
@@ -1781,7 +1715,6 @@ function loadDashboard() {
         refreshLibraryDependentView();
         showAccountLogin(requestUrl, error);
         updateServiceHealth();
-        updateCacheStatus();
         return false;
       }
       const targetMode = connectionModeLabel(requestUrl);
@@ -1798,13 +1731,14 @@ function loadDashboard() {
         refreshLibraryDependentView();
       }
       updateServiceHealth();
-      updateCacheStatus();
       return false;
     }
   })().finally(() => {
     if (isCurrent()) {
       libraryLoadPromise = null;
       syncConnectionControls();
+      // Opening Settings reads the metrics. Refresh them here only while visible.
+      if (els.settingsOverlay && !els.settingsOverlay.hidden) void updateCacheStatus();
     }
   });
   libraryLoadPromise = request;
@@ -1827,7 +1761,6 @@ function refreshLibraryDependentView() {
 function renderDashboard(data) {
   const totals = data.totals || {};
   const user = data.user || {};
-  const people = data.people || [];
 
   els.statRoots.textContent = formatNumber(data.availableRoots?.length || 0);
   els.statPeople.textContent = formatNumber(totals.people);
@@ -1840,12 +1773,24 @@ function renderDashboard(data) {
   syncChannelCounts(imageLibrarySummary);
   syncNovelCounts();
   renderOmniSummary(imageLibrarySummary, { loading: !imageLibrarySummary });
+  homePeoplePreviewDirty = true;
+}
 
-  const previewPeople = people
-    .filter((person) => person?.actorProfile?.gender !== "male")
-    .sort(peopleViews.sortPeople)
-    .slice(0, 10);
+function renderHomePeoplePreview() {
+  if (!homePeoplePreviewDirty || !library || !peopleViews) return;
+  const previewLimit = 10;
+  const compare = peopleViews.sortPeople;
+  const previewPeople = [];
+  for (const person of library.people) {
+    if (person?.actorProfile?.gender === "male") continue;
+    if (previewPeople.length === previewLimit && compare(person, previewPeople.at(-1)) >= 0) continue;
+    const position = previewPeople.findIndex((current) => compare(person, current) < 0);
+    // Equal candidates follow earlier rows, matching the stable full sort.
+    previewPeople.splice(position < 0 ? previewPeople.length : position, 0, person);
+    if (previewPeople.length > previewLimit) previewPeople.pop();
+  }
   peopleViews.renderPreviewPeople(previewPeople);
+  homePeoplePreviewDirty = false;
 }
 
 function renderUserState(user = {}) {
@@ -1927,6 +1872,8 @@ function showHome(options = {}) {
   els.statusCard.hidden = false;
   if (els.omniSection) els.omniSection.hidden = false;
   if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = false;
+  loadHomeSummaries();
+  renderHomePeoplePreview();
   els.previewSection.hidden = false;
   els.contentPanel.hidden = true;
   els.viewBack.hidden = true;
@@ -2440,6 +2387,7 @@ function renderOffline() {
   els.continuePreview.innerHTML = "";
   renderRecentContentPreview();
   els.personPreview.innerHTML = `<div class="loading-row">电脑端服务未连接，可检查地址或 29998 服务。</div>`;
+  homePeoplePreviewDirty = false;
 }
 
 function toggleSettings(force) {
@@ -3145,8 +3093,8 @@ function searchContext() {
   return { view: currentView, params: currentViewParams };
 }
 
-async function initializeAndroidModules(definitions) {
-  androidModuleRegistry = await loadAndroidModules(definitions, createAndroidModuleHost());
+async function initializeAndroidModules(definitions, preparedImports) {
+  androidModuleRegistry = await loadAndroidModules(definitions, createAndroidModuleHost(), preparedImports);
   const fanhaoApi = androidModuleRegistry.get("fanhao")?.api || {};
   const photoApi = androidModuleRegistry.get("photos")?.api || {};
   const mediaApi = androidModuleRegistry.get("media")?.api || {};
@@ -3171,6 +3119,7 @@ function createAndroidModuleHost() {
     normalizeChannelMode,
     limits: Object.freeze({
       getWorks: () => worksLimit,
+      getInitialWorks: defaultWorksLimitForView,
       increaseWorks: (amount) => { worksLimit += worksLimitStepForView(currentView, amount); },
       getPeople: () => peopleLimit,
       increasePeople: (amount) => { peopleLimit += peopleLimitStep(amount); },
@@ -3768,12 +3717,12 @@ async function bootApp() {
   watchAndroidUpdateReturn();
   if (els.appStartupMessage) els.appStartupMessage.textContent = initialSettingsRequested ? "正在打开设置" : routeLoadingCopy().message;
   updateServer(activeUrl);
-  updateCacheStatus();
+  const preparedImports = prepareAndroidModuleImports(CLIENT_VERSION);
   const cachedCatalog = await readCachedJson(activeUrl, MODULE_CATALOG_CACHE_PATH).catch(() => null);
   const modules = cachedCatalog?.payload?.modules
     ? mergeAndroidModuleCatalog(cachedCatalog.payload.modules)
     : androidModuleFallbackCatalog();
-  await initializeAndroidModules(modules);
+  await initializeAndroidModules(modules, preparedImports);
   els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
   bottomLayout.refresh();
   void loadDashboard();

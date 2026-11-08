@@ -22,14 +22,13 @@ const factsPrevious = `  function idForDir(dirPath) {
     return stableMangaId(sourceUrlForCache(dirPath, dbComic), dirPath);
   }`;
 const summaryCurrent = `    const dbComic = database.comic(databaseKey(cacheDir));
-    const id = idForDir(cacheDir, dbComic);
-    const dirName = path.basename(cacheDir);`;
+    return summaryForComic(cacheDir, dbComic, manifestContext);`;
 const summaryPrevious = `    const id = idForDir(cacheDir);
-    const dirName = path.basename(cacheDir);
-    const dbComic = database.comic(databaseKey(cacheDir));`;
+    const dbComic = database.comic(databaseKey(cacheDir));
+    return summaryForComic(cacheDir, dbComic, manifestContext, id);`;
 const coverCurrent = `    const dbCover = dbComic && !metadata.localCover && !metadata.coverUrl
-      ? database.firstImage(databaseKey(cacheDir)) : null;`;
-const coverPrevious = "    const dbCover = dbComic ? database.firstImage(databaseKey(cacheDir)) : null;";
+      ? readFirstImage(databaseKey(cacheDir)) : null;`;
+const coverPrevious = "    const dbCover = dbComic ? readFirstImage(databaseKey(cacheDir)) : null;";
 function restore(text, changes) {
   for (const [current, previous] of changes) {
     assert.equal(text.split(current).length, 2, "a complete current kernel has one owner");
@@ -42,6 +41,10 @@ function restore(text, changes) {
 const repeatedFactsSource = restore(source, [[factsCurrent, factsPrevious], [summaryCurrent, summaryPrevious]]);
 const eagerCoverSource = restore(source, [[coverCurrent, coverPrevious]]);
 const previousSource = restore(repeatedFactsSource, [[coverCurrent, coverPrevious]]);
+const pointCoversSource = restore(source, [[
+  "const covers = database.summaryFirstImages(coversPending.map(({ key }) => key));",
+  "const covers = null; // Use the same comic batch and read covers individually."
+]]);
 const readerUrl = "data:text/javascript;base64," + Buffer.from(oldReader).toString("base64");
 async function factoryFrom(text, previousReader = false) {
   const resolved = text.replace(/from "(\.\.?\/[^"\n]+)"/gu, (_, relative) => "from " + JSON.stringify(
@@ -49,6 +52,7 @@ async function factoryFrom(text, previousReader = false) {
   return (await import("data:text/javascript;base64," + Buffer.from(resolved).toString("base64"))).createMangaService;
 }
 const previousFactory = await factoryFrom(previousSource, true);
+const pointCoversFactory = await factoryFrom(pointCoversSource);
 const controls = {
   "--repeat-comic": await factoryFrom(repeatedFactsSource),
   "--eager-cover": await factoryFrom(eagerCoverSource),
@@ -62,24 +66,28 @@ const dbPath = path.join(root, "private.sqlite"), directories = [], handles = ne
 const saved = { prepare: DatabaseSync.prototype.prepare, get: StatementSync.prototype.get,
   all: StatementSync.prototype.all, stat: fs.statSync };
 const statements = new WeakMap();
-let measuring = null, afterComic = null, fault = null, comparisons = 0, factsChecks = 0;
+let measuring = null, afterComic = null, afterBatch = null, fault = null, comparisons = 0, factsChecks = 0;
 const reports = [];
 DatabaseSync.prototype.prepare = function (sql, ...args) {
   handles.add(this);
-  if (measuring && /^SELECT\b/iu.test(sql.trim())) measuring.prepares++;
+  if (measuring && (/^SELECT\b/iu.test(sql.trim()) || sql.includes("__summary_ordinal") || sql.includes("__first_image_eligible"))) measuring.prepares++;
   const statement = saved.prepare.call(this, sql, ...args);
   statements.set(statement, { sql, db: this }); return statement;
 };
 for (const method of ["get", "all"]) StatementSync.prototype[method] = function (...args) {
   const { sql = "", db } = statements.get(this) || {};
-  const kind = sql.includes("FROM manga_comics WHERE cache_key") ? "comic"
+  const kind = sql.includes("__summary_ordinal") ? "batch" : sql.includes("__first_image_eligible") ? "coverBatch"
+    : sql.includes("FROM manga_comics WHERE cache_key") ? "comic"
     : sql.includes("FROM manga_images WHERE cache_key") ? "cover" : "other";
-  if (measuring && /^SELECT\b/iu.test(sql.trim())) {
+  if (measuring && (/^SELECT\b/iu.test(sql.trim()) || kind === "batch" || kind === "coverBatch")) {
     measuring.reads++; if (kind === "comic") measuring.comics++; if (kind === "cover") measuring.covers++;
+    if (kind === "batch") measuring.batches++;
+    if (kind === "coverBatch") measuring.coverBatches++;
   }
   if (fault?.kind === kind) { fault.calls++; if (fault.remaining-- > 0) throw new Error("controlled " + kind + " read failure"); }
   const result = saved[method].call(this, ...args);
   if (kind === "comic" && afterComic) { const action = afterComic; afterComic = null; action.run(result, db); }
+  if (kind === "batch" && afterBatch) { const action = afterBatch; afterBatch = null; action(); }
   return result;
 };
 fs.statSync = function (file, ...args) {
@@ -117,6 +125,7 @@ try {
   // Exercise contracts using the actual product even during negative controls;
   // those controls must fail the fixed work budgets after behavior is checked.
   const current = service(createMangaService), previous = service(previousFactory), directory = directories[0];
+  verifyBatchedSummary(current, directory);
   verifyCoverSelection(current, previous, directory);
   verifyFreshFacts(current, previous, directory);
   verifyJsonFallback(current, previous, directory);
@@ -133,7 +142,7 @@ try {
     assert.equal(report.current.stats, 3008 + report.expectedCovers, "each real reader still checks its source identity");
   }
 } finally {
-  measuring = null; afterComic = null; fault = null;
+  measuring = null; afterComic = null; afterBatch = null; fault = null;
   DatabaseSync.prototype.prepare = saved.prepare; StatementSync.prototype.get = saved.get; StatementSync.prototype.all = saved.all; fs.statSync = saved.stat;
   for (const database of handles) try { database.close(); } catch {}
   assert.equal(path.dirname(fs.realpathSync(root)), fs.realpathSync(os.tmpdir()));
@@ -171,23 +180,77 @@ function service(create) {
   return create({ root, databasePath: dbPath, mimeTypes: {}, normalizeExt: path.extname,
     safeStat(file) { try { return fs.statSync(file); } catch { return null; } }, spawnProcess() { assert.fail("no collector in fixture"); } });
 }
-function listing(mangaService) {
+function listing(mangaService, useBatch = false) {
   const index = { scannedAt: "fixture", photoSets: [], mediaItems: [] };
   return createImageLibraryService({ cachePreparedQueries: true, getImageLibraryIndex: () => index, getImageLibraryRevision: () => 1,
     maxItemLimit: 12000, clampInteger: (value, fallback, min, max) => value == null ? fallback : Math.max(min, Math.min(max, Number(value))),
-    mangaService, metadataService: { listRevision: () => 1 }, photoSetService: {}, galleryMediaRootStatuses: () => [], photoSetRootStatuses: () => [], imageReaderCacheStatus: () => ({}) });
+    mangaService: useBatch ? mangaService : { ...mangaService, publicSummaries: undefined }, metadataService: { listRevision: () => 1 },
+    photoSetService: {}, galleryMediaRootStatuses: () => [], photoSetRootStatuses: () => [], imageReaderCacheStatus: () => ({}) });
 }
 function page(owner, offset) { return owner.itemsPayload(new URL(`http://fixture/?mode=manga&limit=48&offset=${offset}`)); }
 function withoutRevision({ listRevision: _opaque, ...value }) { return value; }
 function compact({ value: _value, ms, ...work }) { return { ...work, ms: +ms.toFixed(2) }; }
 function sample(read) {
-  measuring = { reads: 0, prepares: 0, comics: 0, covers: 0, stats: 0 }; const start = performance.now();
+  measuring = { reads: 0, prepares: 0, comics: 0, covers: 0, batches: 0, coverBatches: 0, stats: 0 }; const start = performance.now();
   try { return { value: read(), ms: performance.now() - start, ...measuring }; } finally { measuring = null; }
 }
 function compare(current, previous, directory) {
   const before = previous.publicSummary(directory), after = current.publicSummary(directory);
   assert.deepEqual(after, before); assert.equal(JSON.stringify(after), JSON.stringify(before)); comparisons++;
   return after;
+}
+function verifyBatchedSummary(current, directory) {
+  for (const mode of ["metadata", "mixed", "first-image"]) {
+    setCovers(mode);
+    const before = listing(service(pointCoversFactory), true), after = listing(service(createMangaService), true);
+    page(before, 0); page(after, 0);
+    const baselines = [], optimized = [];
+    for (const [round, offset] of [0, 48, 96, 144, 192, 240, 288].entries()) {
+      const readBefore = () => sample(() => page(before, offset));
+      const readAfter = () => sample(() => page(after, offset));
+      const [old, next] = round % 2 ? [readAfter(), readBefore()].reverse() : [readBefore(), readAfter()];
+      assert.equal(JSON.stringify(withoutRevision(next.value)), JSON.stringify(withoutRevision(old.value)));
+      assert.equal(old.comics, 0); assert.equal(next.comics, 0);
+      assert.equal(old.batches, 1); assert.equal(next.batches, 1);
+      assert.equal(old.covers, mode === "metadata" ? 0 : mode === "mixed" ? 500 : 1000);
+      assert.equal(next.covers, 0);
+      assert.equal(next.coverBatches, mode === "metadata" ? 0 : 1);
+      assert.equal(old.stats - next.stats, old.covers - next.coverBatches);
+      comparisons++;
+      baselines.push(old); optimized.push(next);
+    }
+    const median = rows => +rows.map(row => row.ms).sort((a, b) => a - b)[3].toFixed(2);
+    console.log(JSON.stringify({ check: "manga-summary-cover-batch", mode, books: 1000,
+      previous: compact(baselines[0]), current: compact(optimized[0]),
+      medianMs: { previous: median(baselines), current: median(optimized) } }));
+  }
+
+  const findBook = comics => comics.find(comic => comic.dirName === path.basename(directory));
+  const baseline = findBook(current.publicSummaries());
+  afterBatch = () => writer.prepare("UPDATE manga_comics SET title='Batched WAL update' WHERE cache_key=?").run(directory);
+  assert.deepEqual(findBook(current.publicSummaries()), baseline, "one SQL batch uses its original snapshot for every selected row");
+  assert.equal(afterBatch, null);
+  assert.equal(findBook(current.publicSummaries()).title, "Batched WAL update", "the next list observes the new commit");
+  const expected = current.cacheDirs().map(current.publicSummary);
+  fault = { kind: "batch", remaining: 1, calls: 0 };
+  const fallback = sample(() => current.publicSummaries());
+  fault = null;
+  assert.equal(fallback.batches, 1); assert.equal(fallback.comics, 1000);
+  assert.deepEqual(fallback.value, expected, "a failed batch retries the point reader without losing healthy comics");
+  fault = { kind: "coverBatch", remaining: 1, calls: 0 };
+  const coverFallback = sample(() => current.publicSummaries());
+  fault = null;
+  assert.equal(coverFallback.coverBatches, 1); assert.equal(coverFallback.covers, 1000);
+  assert.deepEqual(coverFallback.value, expected, "a failed cover batch keeps every original point fallback");
+  writer.prepare("UPDATE manga_images SET bytes=? WHERE cache_key=?").run(9007199254740993n, directory);
+  try {
+    const pointCovers = current.cacheDirs().map(current.publicSummary);
+    const unsafe = sample(() => current.publicSummaries());
+    assert.equal(unsafe.coverBatches, 1); assert.equal(unsafe.covers, 1000);
+    assert.equal(findBook(unsafe.value).coverUrl, "", "an unsafe row still fails only its own cover");
+    assert.deepEqual(unsafe.value, pointCovers, "a malformed first image cannot suppress other comic covers");
+  } finally { writer.prepare("UPDATE manga_images SET bytes=0 WHERE cache_key=?").run(directory); }
+  factsChecks += 5;
 }
 function verifyCoverSelection(current, previous, directory) {
   const update = writer.prepare("UPDATE manga_comics SET cover_path=?,cover_url=? WHERE cache_key=?");
@@ -236,6 +299,7 @@ function verifyJsonFallback(current, previous, directory) {
   const work = sample(() => current.publicSummary(directory));
   assert.equal(work.comics, 1, "a missing comic row is still a single fact, not a default-parameter reread");
   const result = compare(current, previous, directory); assert.equal(result.author, "Catalog author"); assert.equal(result.chapterCount, 1);
+  assert.deepEqual(current.publicSummaries().find(comic => comic.dirName === result.dirName), result, "a missing batched row uses the current file fallback");
   const file = path.join(directory, "catalog.json");
   const catalog = JSON.parse(fs.readFileSync(file, "utf8")); catalog.author = "Updated JSON author";
   fs.writeFileSync(file, JSON.stringify(catalog)); assert.equal(compare(current, previous, directory).author, "Updated JSON author");
@@ -248,4 +312,7 @@ function verifyDuplicateKeys(current, previous, directory) {
   writer.prepare("INSERT INTO manga_comics(cache_key,dir_name,site,title,source_url) VALUES(?,?,'smtt6','First duplicate','https://synthetic.invalid/first')").run(directory, path.basename(directory));
   writer.prepare("INSERT INTO manga_comics(cache_key,dir_name,site,title,source_url) VALUES(?,?,'smtt6','Second duplicate','https://synthetic.invalid/second')").run(directory, path.basename(directory));
   assert.equal(compare(current, previous, directory).title, "First duplicate", "legacy nonunique cache keys retain native .get first-row behavior");
+  const legacy = sample(() => current.publicSummaries());
+  assert.equal(legacy.batches, 1); assert.equal(legacy.comics, 1000);
+  assert.deepEqual(legacy.value, current.cacheDirs().map(current.publicSummary), "legacy duplicates bypass the batch");
 }

@@ -1,6 +1,6 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=assets-8af3642624a3";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-8faf7a80cb7b";
 import { formatNumber } from "../../../../js/format.js";
-import { createBrandModeSwitch } from "../brands/brand-switch.js?v=assets-8af3642624a3";
+import { createBrandModeSwitch } from "../brands/brand-switch.js?v=assets-8faf7a80cb7b";
 
 const PREFIX_PAGE_SIZE = 64;
 const PREFIX_SORT_STORAGE_KEY = "fanhao.android.codePrefixSort";
@@ -199,32 +199,45 @@ export function createCodePrefixViews(context) {
       .sort((a, b) => prefixSort === "name"
         ? collator.compare(a.prefix, b.prefix) || Number(b.localCount || 0) - Number(a.localCount || 0)
         : Number(b.localCount || 0) - Number(a.localCount || 0) || collator.compare(a.prefix, b.prefix));
-    const visible = filtered.slice(0, visibleLimit);
     container.replaceChildren();
 
     const summary = document.createElement("div");
     summary.className = "code-prefix-mobile-summary";
     summary.innerHTML = `<strong>${formatNumber(filtered.length)}</strong><span>个前缀</span><span>${formatNumber(data.mappedCount || 0)} 个已有厂商对应</span>`;
     container.append(summary);
-    if (!visible.length) {
+    if (!filtered.length) {
       renderMessageInto(container, prefixQuery ? `没有匹配“${prefixQuery}”的番号前缀。` : "还没有可识别的番号前缀。");
       return;
     }
 
     const list = document.createElement("div");
     list.className = "code-prefix-mobile-list";
-    for (const item of visible) list.append(createPrefixCard(item));
+    let renderedCount = 0;
+    const appendVisible = () => {
+      const nextCount = Math.min(filtered.length, visibleLimit);
+      const fragment = document.createDocumentFragment();
+      for (const item of filtered.slice(renderedCount, nextCount)) fragment.append(createPrefixCard(item));
+      list.append(fragment);
+      renderedCount = nextCount;
+    };
+    appendVisible();
     container.append(list);
-    if (visible.length < filtered.length) {
+    if (renderedCount < filtered.length) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "code-prefix-mobile-more";
-      more.textContent = `继续加载 ${formatNumber(visible.length)} / ${formatNumber(filtered.length)}`;
+      const updateMore = () => {
+        if (renderedCount === filtered.length) more.remove();
+        else more.textContent = `继续加载 ${formatNumber(renderedCount)} / ${formatNumber(filtered.length)}`;
+      };
       more.addEventListener("click", () => {
-        visibleLimit += PREFIX_PAGE_SIZE;
-        paintPrefixResults(container, prefixes, data);
+        if (!more.isConnected) return;
+        visibleLimit = renderedCount + PREFIX_PAGE_SIZE;
+        appendVisible();
+        updateMore();
       });
       container.append(more);
+      updateMore();
     }
   }
 

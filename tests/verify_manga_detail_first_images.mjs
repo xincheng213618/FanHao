@@ -45,7 +45,7 @@ const files = new Set(), directories = new Set([root]), handles = new Set(), sta
 const native = { prepare: DatabaseSync.prototype.prepare, get: StatementSync.prototype.get, all: StatementSync.prototype.all, stat: fs.statSync };
 let measuring = null, opening = null, fault = null, afterRead = null, comparisons = 0;
 let latestBulk = null;
-const kindOf = sql => sql.includes("__detail_eligible") ? "bulk"
+const kindOf = sql => sql.includes("__first_image_eligible") ? "bulk"
   : sql.includes("FROM manga_images WHERE cache_key") && sql.includes("chapter_index = ?") && sql.includes("LIMIT 1") ? "point"
   : sql.includes("FROM manga_chapters WHERE cache_key") ? "chapters" : "other";
 DatabaseSync.prototype.prepare = function (sql, ...args) {
@@ -181,7 +181,8 @@ function verifyHealthyAndInputs() {
   typed.db.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES(?,51,8,'numeric-request.png')").run(typed.cacheDir);
   const typedOwner = compare(typed, "detail requests the converted Number chapter indexes, not their raw storage values").actual;
   assert.equal(sample(() => detail(typedOwner, typed)).counts.bulk, 1, "only the images table needs canonical eligibility");
-  assert(latestBulk.args.slice(2).every(index => typeof index === "number"));
+  assert(latestBulk.args.slice(1, -1).every(index => typeof index === "number"));
+  assert.equal(latestBulk.args.at(-1), typed.cacheDir);
   addChapter(typed, "not-a-number");
   compare(typed, "non-finite converted chapter index retains per-chapter fallback");
   assert.equal(sample(() => detail(typedOwner, typed)).counts.bulk, 0);
@@ -239,7 +240,7 @@ function verifyLegacySchemas() {
   const owner = compare(generated, "generated rowid shadow cannot be used as a physical address").actual;
   assert.equal(sample(() => detail(owner, generated)).counts.point, 2);
   const extraAlias = fixture("reserved-alias"); addChapter(extraAlias, 1);
-  extraAlias.db.exec("ALTER TABLE manga_images ADD COLUMN __detail_eligible INTEGER DEFAULT 1");
+  extraAlias.db.exec("ALTER TABLE manga_images ADD COLUMN __first_image_eligible INTEGER DEFAULT 1");
   compare(extraAlias, "unknown columns cannot overwrite the internal policy proof");
 }
 

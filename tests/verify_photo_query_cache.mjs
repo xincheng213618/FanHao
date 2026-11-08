@@ -72,7 +72,8 @@ function withCurrentAlbumNumbers(source) {
     const text = parsedNumber?.text ?? stripPhotoAlbumStats(value);
     const match = parsedNumber ? { index: parsedNumber.index, 0: text.slice(parsedNumber.index, parsedNumber.index + parsedNumber.length) } : null;`);
   source = replaceOnce(source, `        .replace(/^\\s*[-–—:]\\s*/u, "")`, `        .replace(/^\\s*[-–—:.、#]\\s*/u, "")`);
-  return `import { parsePhotoAlbumNumber } from "./photo-album-number.js";\n${source}`;
+  const albumNumberModule = new URL("photo-album-number.js", root).href;
+  return `import { parsePhotoAlbumNumber } from ${JSON.stringify(albumNumberModule)};\n${source}`;
 }
 
 async function loadFactory(source) {

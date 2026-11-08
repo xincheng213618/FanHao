@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Readable } from "node:stream";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createArchiveTaskPool, runArchiveChild } from "../src/platform/server/archive-task-pool.js";
@@ -621,6 +621,203 @@ async function verifyPhotoAuthority() {
     assert.equal(lookupCalls>0,indexed,"cover authority must use the optional owner capability when provided");
     owner.invalidate();
   }
+}
+
+async function verifyPhotoArchiveVideo() {
+  const source = path.join(temporary, "archived-video.zip");
+  const member = "folder/sample.mp4";
+  fs.writeFileSync(source, storedZip(member, "video contents"));
+  const cacheRoot = path.join(temporary, "video-cache");
+  const db = galleryDb();
+  const mimeTypes = { ".mp4": "video/mp4" }, normalizeExt = value => path.extname(value).toLowerCase();
+  const notFound = res => { res.writeHead(404); res.end(); };
+  const sendJson = (res, status, body) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+  const fileServer = createFileServer({ mimeTypes, normalizeExt, notFound });
+  let maxBytes = 100;
+  const archive = archiveService({
+    pythonPath: process.env.PYTHON || "python", helperPath: path.join(projectRoot, "tools/archive_image_reader.py"),
+    getImageGalleryDb: () => db, archiveVideoExts: new Set([".mp4"]), archiveVideoMaxBytes: () => maxBytes,
+    imageReaderCacheService: { rootDir: cacheRoot, touch: async () => {}, scheduleCleanup() {} },
+    serveRangedFile: fileServer.serveRangedFile
+  });
+  const album = { id: "video-album", sourceRoot: temporary, relativePath: path.basename(source) };
+  const photoSetService = createPhotoSetService({
+    getImageGalleryDb: () => db, photoSetById: id => id === album.id ? album : null,
+    safeChildPath: (root, relative) => path.join(root, relative), notFound,
+    archiveImagesPayload: archive.archiveImagesPayload, archiveVideosPayload: archive.archiveVideosPayload,
+    serveArchiveMemberVideo: archive.serveArchiveMemberVideo
+  });
+  services.push(photoSetService);
+  const photos = createPhotosRuntime({ photoSetService, notFound, sendJson, imageReaderCacheStatus: async () => null });
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://fixture");
+    if (!await photos.routeApi(req, res, url) && !await photos.routeMedia(req, res, url)) notFound(res);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const readDetail = async () => {
+    const response = await fetch(`${base}/api/photo-sets/${album.id}?imageLimit=2`);
+    assert.equal(response.status, 200);
+    return (await response.json()).album;
+  };
+  try {
+    const detail = await readDetail();
+    assert.equal(detail.imageCount, 0);
+    assert.equal(detail.videos.length, 1);
+    const [video] = detail.videos;
+    assert.equal(video.title, "sample.mp4");
+    assert(!fs.existsSync(cacheRoot), "listing videos must not extract them");
+    assert.equal((await fetch(`${base}${video.streamUrl.replace(video.id, "a".repeat(32))}`)).status, 404);
+    const first = await fetch(`${base}${video.streamUrl}`, { headers: { Range: "bytes=0-4" } });
+    assert.equal(first.status, 206);
+    assert.equal(first.headers.get("content-type"), "video/mp4");
+    assert.equal(first.headers.get("content-range"), "bytes 0-4/14");
+    assert.equal(await first.text(), "video");
+    const suffix = await fetch(`${base}${video.streamUrl}`, { headers: { Range: "bytes=-8" } });
+    assert.equal(suffix.status, 206);
+    assert.equal(await suffix.text(), "contents");
+    const head = await fetch(`${base}${video.streamUrl}`, { method: "HEAD" });
+    assert.equal(head.headers.get("content-length"), "14");
+    assert.equal((await fetch(`${base}${video.streamUrl}`, { headers: { Range: "bytes=20-" } })).status, 416);
+    fs.writeFileSync(source, storedZip(member, "replacement video contents"));
+    assert.equal((await fetch(`${base}${video.streamUrl}`)).status, 404, "an old source URL cannot switch to replacement bytes");
+    const next = (await readDetail()).videos[0];
+    assert.notEqual(next.streamUrl, video.streamUrl);
+    maxBytes = 5;
+    assert.equal((await fetch(`${base}${next.streamUrl}`)).status, 413);
+    maxBytes = 100;
+    assert.equal(await (await fetch(`${base}${next.streamUrl}`)).text(), "replacement video contents");
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await fileServer.stop();
+  }
+  scenarios++;
+}
+
+async function verifyPhotoArchiveVideoCover() {
+  const source = path.join(temporary, "video-cover.zip");
+  const member = "clip.mp4";
+  fs.writeFileSync(source, storedZip(member, "video contents"));
+  const signature = archiveDiskSignature(source, fs.statSync(source));
+  const album = { id: "video-cover", sourceRoot: temporary, relativePath: path.basename(source), ...signature };
+  const database = galleryDb();
+  database.prepare(`INSERT INTO photo_set_covers
+    (album_id, archive_path, archive_size, archive_mtime_ms, archive_identity, generator_version, status, error, updated_at)
+    VALUES (?, ?, ?, ?, ?, 3, 'error', '图包里没有可用图片', 'legacy')`)
+    .run(album.id, source, signature.archiveSize, signature.archiveMtimeMs, signature.archiveIdentity);
+  const frames = [], jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  let extractions = 0, videoLists = 0;
+  const archive = archiveService({
+    pythonPath: process.env.PYTHON || "python", helperPath: path.join(projectRoot, "tools/archive_image_reader.py"),
+    ffmpegPath: "fixture-ffmpeg", ffprobePath: "fixture-ffprobe", coverBoxSize: 480,
+    getImageGalleryDb: () => database, archiveVideoExts: new Set([".mp4"]), archiveVideoMaxBytes: () => 100,
+    imageReaderCacheService: { rootDir: path.join(temporary, "video-cover-cache"), touch: async () => {}, scheduleCleanup() {} },
+    spawnProcess: (exe, args, options) => {
+      if (exe !== "fixture-ffmpeg" && exe !== "fixture-ffprobe") {
+        if (args.includes("extract-video")) extractions++;
+        if (args.includes("list-videos")) videoLists++;
+        return spawn(exe, args, options);
+      }
+      assert.equal(args[args.indexOf("-f") + 1], "mov", "archive videos use their expected demuxer");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if (exe === "fixture-ffprobe") child.stdout.write('{"format":{"duration":"0.6"}}');
+        else {
+          const seeking = args.includes("-ss");
+          frames.push(seeking);
+          if (!seeking) child.stdout.write(jpeg);
+        }
+        child.emit("close", 0);
+      });
+      return child;
+    }
+  });
+  const notFound = res => { res.writeHead(404); res.end(); };
+  const service = createPhotoSetService({
+    getImageGalleryDb: () => database, photoSetById: () => album, publishedPhotoSetById: () => album,
+    safeChildPath: (root, relative) => path.join(root, relative), notFound, coverGeneratorVersion: 3,
+    archiveImageSignature: archive.archiveSignature, listArchiveImages: archive.listArchiveImages,
+    archiveVideosPayload: archive.archiveVideosPayload, extractArchiveVideoCover: archive.extractArchiveVideoCover
+  });
+  services.push(service);
+  assert.equal(await service.warmImageCover(album.id), "skipped");
+  assert.equal(videoLists, 0, "image prewarming must skip video-only archives before invoking the video path");
+  assert.equal(extractions, 0);
+  const first = response(), concurrent = response();
+  await Promise.all([service.serveCover(first, album.id), service.serveCover(concurrent, album.id)]);
+  assert.equal(first.statusCode, 200, "a legacy missing-image row cannot hide a video-only cover");
+  assert.deepEqual(first.body, jpeg);
+  assert.deepEqual(concurrent.body, jpeg);
+  assert.deepEqual(frames, [true, false], "fall back to the first frame if the preferred seek yields nothing");
+  assert.equal(extractions, 1);
+  assert.equal(await service.warmImageCover(album.id), "cached");
+  const stored = database.prepare("SELECT member_path, source_bytes, status FROM photo_set_covers WHERE album_id=?").get(album.id);
+  assert.equal(stored.status, "ok");
+  assert.equal(stored.member_path, member);
+  assert.equal(stored.source_bytes, 14);
+  const warm = response();
+  await service.serveCover(warm, album.id);
+  assert.deepEqual(warm.body, jpeg);
+  assert.equal(frames.length, 2, "the stored JPEG serves subsequent requests");
+  scenarios++;
+}
+
+async function verifyManualPhotoCover() {
+  const db = galleryDb();
+  const album = { id: "manual-cover", sourceRoot: temporary, relativePath: "manual.zip", archiveIdentity: "original" };
+  const images = [{ path: "cover.jpg" }, { path: "pages/002.jpg" }, { path: "pages/003.jpg" }];
+  let broken = false;
+  const config = {
+    archiveImageExts: new Set([".jpg"]), coverGeneratorVersion: 2, coverHints: new Set(["cover"]), coverMaxBytes: 1024,
+    archiveImageSignature: async archivePath => ({ archivePath, archiveSize: 7, archiveMtimeMs: 123.125, archiveIdentity: album.archiveIdentity }),
+    archiveImagesPayload: async () => ({ images, imageCount: images.length }), listArchiveImages: async () => images,
+    getImageGalleryDb: () => db, photoSetById: id => id === album.id ? album : null, publishedPhotoSetById: () => album,
+    safeChildPath: (root, relative) => path.join(root, relative), normalizeExt: value => path.extname(value), fileBase: value => path.parse(value).name,
+    extractArchiveMemberToCache: async (_source, member, target) => fs.promises.writeFile(target, member),
+    compressImageFileToJpeg: async target => {
+      if (broken) throw new Error("Synthetic compression failure");
+      return fs.promises.readFile(target);
+    },
+    notFound: res => { res.writeHead(404); res.end(); }
+  };
+  const service = createPhotoSetService(config);
+  services.push(service);
+  assert.equal(await service.warmImageCover(album.id), "generated");
+  assert.equal(await service.warmImageCover(album.id), "cached");
+  const request = { imageIndex: 2, memberPath: images[1].path };
+  const url = new URL(`http://fixture/api/photo-sets/${album.id}/cover`);
+  const res = response();
+  assert.equal(await routePhotosApi({ method: "PUT" }, res, url, {
+    requireLocalAdmin: () => true, readJsonBody: async () => request, photoSetService: service,
+    sendJson: (target, status, body) => { target.writeHead(status); target.end(body); }
+  }), true);
+  assert.equal(res.statusCode, 200);
+  const result = res.body;
+  assert.equal(result.coverImageIndex, 2);
+  assert.match(result.coverUrl, /[?&]cover=/);
+  assert.deepEqual(await service.setCover(album.id, request), result, "replaying a saved selection must preserve its revision");
+  await assert.rejects(service.setCover(album.id, { imageIndex: 2, memberPath: images[2].path }), { statusCode: 409 });
+  broken = true;
+  await assert.rejects(service.setCover(album.id, { imageIndex: 3, memberPath: images[2].path }), /Synthetic compression failure/);
+  broken = false;
+  await service.stop();
+
+  const reopened = createPhotoSetService(config);
+  services.push(reopened);
+  const detail = await reopened.publicDetail(reopened.byId(album.id));
+  assert.equal(detail.coverImageIndex, 2);
+  assert.equal(detail.coverUrl, result.coverUrl);
+  assert.deepEqual(detail.images.map(image => image.archivePath), images.map(image => image.path));
+  assert.deepEqual(reopened.withCoverOverrides([{ coverUrl: reopened.byId(album.id).coverUrl }]), [{ coverUrl: result.coverUrl }]);
+  const cover = response();
+  await reopened.serveCover(cover, album.id);
+  assert.equal(cover.body.toString(), images[1].path);
+  album.archiveIdentity = "replacement";
+  const automatic = response();
+  await reopened.serveCover(automatic, album.id);
+  assert.equal(automatic.body.toString(), images[0].path, "an override must be bound to the selected archive version");
+  await reopened.stop();
+  scenarios++;
 }
 
 async function verifyPhotoAuthorityBytes() {
@@ -1287,6 +1484,9 @@ try {
   }
   if (!inlineCase) await verifyIndexStampWork();
   if (!inlineCase || inlineCase === "photo-detail-paging") await verifyPhotoDetailPaging();
+  if (!inlineCase || inlineCase === "manual-photo-cover") await verifyManualPhotoCover();
+  if (!inlineCase || inlineCase === "photo-archive-video") await verifyPhotoArchiveVideo();
+  if (!inlineCase || inlineCase === "photo-archive-video-cover") await verifyPhotoArchiveVideoCover();
   await verifyAsyncInlineOwnership();
   assert(scenarios > 0, `No async inline scenario matched ${inlineCase}`);
   console.log(`archive-reader-lifecycle: ok (${scenarios} scenarios; controlled children/stat, synthetic ZIP, private SQLite)`);

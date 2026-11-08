@@ -123,6 +123,7 @@ function verifyWorkSearchComposition() {
       els: { workSearch: input }, state: {}, navigator,
       window: { clearTimeout, setTimeout(callback) { const id = ++sequence; timers.set(id, callback); return id; } },
       searchRequests: { prefetch(query) { prefetched.push(query); } },
+      scopedWorkSearch(query) { return query; }, // Ordinary search without a classification scope.
       submitWorkSearch(query) { submitted.push(query); }
     });
     vm.runInContext(code, context);
@@ -267,6 +268,7 @@ async function verifySearchPaginationOwnership() {
       rankingPage: { cancelPendingRequests() {} }, studioPage: { cancelPendingRequests() {} }, collectionPage: { cancelPendingRequests() {} },
       navigationSequence: 0,
       beginNavigation(options = {}) { return options.navigationIntent !== undefined ? options.navigationIntent : ++context.navigationSequence; },
+      parseClassificationQuery: () => null,
       syncNavigationState() {}, hidePersonProfile() {}, setMainHeader() {}, selectedWorkFilters: () => [],
       renderSearchStats() {}, renderWorks() {}, syncRouteAfterNavigation() {}, appendLoadedWorkPage() {}, resolveWorkPage,
       resetWorkPaging() { state.workVisibleLimit = 48; },

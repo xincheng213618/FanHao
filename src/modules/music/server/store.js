@@ -24,7 +24,7 @@ import {
 } from "./search.js";
 import { createM3uTrackMatcher, formatM3uPlaylist, parseM3u, playlistTrackIdsFromInput, readM3uInput, safePlaylistFileName } from "./m3u.js";
 import { adjacentTracks, lyricsForTrack, publicAlbum, publicArtist, publicPlaylist, publicReportArtist, publicSmartPlaylist, publicTrack, trackRow } from "./serializers.js";
-import { ARTIST_FACET_COLUMNS, prepareArtistFacet, ALBUM_FACET_COLUMNS, prepareAlbumFacet, albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount, smartMixListCounts } from "./facets.js";
+import { ARTIST_FACET_COLUMNS, prepareArtistFacet, ALBUM_FACET_COLUMNS, prepareAlbumFacet, readUpdatedAlbumPage, albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount, smartMixListCounts } from "./facets.js";
 import { catalogFilter } from "./query.js";
 import { listLyricMatches } from "./lyrics-search.js";
 import { normalizeRoots, rootStatus, safeStoredFile, safeStoredFileAsync } from "./scan.js";
@@ -34,7 +34,8 @@ import { isMusicDatabaseBusyError, musicSchemaBusyError, runMusicWriteTransactio
 import { acceptMusicProgress, musicProgressClock, musicProgressIdentity, musicProgressPreviousSession, reserveMusicProgressSession } from "./progress-receipts.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
 import { playedTrackPageIds } from "./played-track-page.js";
-import { TRACK_LIST_COLUMNS, prepareTrackList } from "./track-query.js";
+import { TRACK_LIST_COLUMNS, prepareTrackList, readSparseFavoriteAlbumRows } from "./track-query.js";
+import { sparseMusicReportRankings } from "./report-rankings.js";
 
 const artistNameCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const ARTIST_BROWSER_COLUMNS = "id,name,language,album_count,track_count,duration_ms,size_bytes";
@@ -79,6 +80,8 @@ export function createMusicStore(options = {}) {
   let schemaReady = false;
   let summaryCache = null;
   let summaryCachedAt = 0;
+  let activeTrackCount = null;
+  let trackCountStampStatement = null;
   const coverFileTasks = new Map();
 
   function database() {
@@ -109,6 +112,8 @@ export function createMusicStore(options = {}) {
     db = null;
     summaryCache = null;
     summaryCachedAt = 0;
+    activeTrackCount = null;
+    trackCountStampStatement = null;
   }
 
   function mutate(operation, invalidatesSummary = true) {
@@ -235,7 +240,8 @@ export function createMusicStore(options = {}) {
         )
         .get()?.count || 0
     );
-    const topArtists = database
+    const rankings = sparseMusicReportRankings(database, trackCountBoundsPageRows);
+    const topArtists = (rankings?.artists ?? database
       .prepare(
         `
         SELECT
@@ -254,9 +260,9 @@ export function createMusicStore(options = {}) {
         LIMIT 8
       `
       )
-      .all()
+      .all())
       .map(publicReportArtist);
-    const topAlbums = prepareAlbumFacet(database,
+    const topAlbums = (rankings?.albums ?? prepareAlbumFacet(database,
         `
         SELECT
           ${ALBUM_FACET_COLUMNS},
@@ -274,7 +280,7 @@ export function createMusicStore(options = {}) {
         LIMIT 8
       `
       )
-      .all()
+      .all())
       .map((row) => ({
         ...publicAlbum(row),
         plays: Number(row.plays || 0),
@@ -579,17 +585,17 @@ export function createMusicStore(options = {}) {
       `
       )
       .get(...albumArgs)?.count || 0);
-    const rows = prepareAlbumFacet(database,
-      `
+    const pageSql = `
         SELECT ${ALBUM_FACET_COLUMNS}, a.name AS artist_name
         FROM music_albums al
         LEFT JOIN music_artists a ON a.id = al.artist_id
         ${where}
         ORDER BY ${order}
         LIMIT ? OFFSET ?
-      `
-      )
-      .all(...albumArgs, limit, offset);
+      `;
+    const rankedPage = !where && sort === "updated" && total >= 4096
+      ? readUpdatedAlbumPage(database, pageSql, order, limit, offset) : null;
+    const rows = rankedPage ?? prepareAlbumFacet(database, pageSql).all(...albumArgs, limit, offset);
     const matchQuery = filter.searchTerm || filter.q;
     const matchContext = matchQuery && rows.length ? createMusicSearchMatchContext(matchQuery) : null;
     return {
@@ -613,12 +619,15 @@ export function createMusicStore(options = {}) {
   function listTracks(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const database = dbOrOpen();
+    // A caller's outer transaction can roll back after this savepoint. A
+    // count from such a snapshot must never enter the connection's cache.
+    const reusableCount = !database.isTransaction;
     // Search counts, ID selection, hydration and the response's uncached reads
     // share one WAL snapshot. Cached summary/facet values keep their existing
     // lifetimes; a writer cannot make an already-empty page become nonempty.
     database.exec("SAVEPOINT music_track_page");
     try {
-      const resolvedSearch = resolveTrackSearch(database, params, catalogFilter(params));
+      const resolvedSearch = resolveTrackSearch(database, params, catalogFilter(params), reusableCount);
       const filter = resolvedSearch.filter;
       const smartMix = findSmartMix(filter.smartId);
       const sort = normalizeTrackSort(params.get("sort"));
@@ -638,8 +647,7 @@ export function createMusicStore(options = {}) {
       const playedIds = indexedPlayedPage
         ? playedTrackPageIds(database, emptyPage ? { ...filter, trackWhere: `${filter.trackWhere} AND 0` } : filter, limit, offset)
         : null;
-      rows = prepareTrackList(database,
-        `
+      const pageSql = `
         SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
@@ -651,9 +659,10 @@ export function createMusicStore(options = {}) {
         ${playedIds ? `WHERE t.id IN (${playedIds.map(() => "?").join(", ")})` : `${where}${emptyPage ? " AND 0" : ""}`}
         ${playedIds ? "" : `ORDER BY ${order}`}
         LIMIT ? OFFSET ?
-      `
-      )
-      .all(...(playedIds || [...filter.trackArgs, ...rank.args]), limit, playedIds ? 0 : offset);
+      `;
+      const pageArgs = [...(playedIds || [...filter.trackArgs, ...rank.args]), limit, playedIds ? 0 : offset];
+      if (offset < total && !playedIds) rows = readSparseFavoriteAlbumRows(database, filter, order, pageSql, pageArgs, prepareTrackList);
+      if (rows == null) rows = prepareTrackList(database, pageSql).all(...pageArgs);
       if (playedIds) {
         const positions = new Map(playedIds.map((id, index) => [id, index]));
         rows.sort((left, right) => positions.get(left.id) - positions.get(right.id));
@@ -719,9 +728,11 @@ export function createMusicStore(options = {}) {
     return listLyricMatches(dbOrOpen(), urlOrOptions);
   }
 
-  function resolveTrackSearch(database, params, initialFilter) {
+  function resolveTrackSearch(database, params, initialFilter, reusableCount) {
     let filter = initialFilter;
-    let total = trackFilterTotal(database, filter);
+    let total = reusableCount && filter.trackWhere === "t.status = 'ok'" && !filter.searchKind && !filter.needsState
+      ? activeTrackTotal(database, filter)
+      : trackFilterTotal(database, filter);
     let correctedQuery = "";
     if (filter.q && total === 0 && filter.searchKind !== "phonetic") {
       const phoneticFilter = catalogFilter(params, { searchKind: "phonetic", searchTerm: filter.q });
@@ -744,6 +755,35 @@ export function createMusicStore(options = {}) {
       }
     }
     return { filter, total, correctedQuery };
+  }
+
+  function activeTrackTotal(database, filter) {
+    let stamp;
+    try {
+      // This read starts the page's WAL snapshot. Include local changes and
+      // schema identity, and leave views or TEMP shadows on the original path.
+      trackCountStampStatement ||= database.prepare(`
+        SELECT data_version, total_changes() AS local_changes,
+               (SELECT schema_version FROM pragma_schema_version()) AS schema_version
+        FROM pragma_data_version()
+        WHERE EXISTS (
+          SELECT 1 FROM main.sqlite_schema
+          WHERE type = 'table' AND name = 'music_tracks' COLLATE NOCASE AND substr(sql, 1, 13) = 'CREATE TABLE '
+        ) AND NOT EXISTS (
+          SELECT 1 FROM temp.sqlite_schema WHERE name = 'music_tracks' COLLATE NOCASE
+        )
+      `);
+      stamp = trackCountStampStatement.get();
+    } catch {
+      trackCountStampStatement = null;
+    }
+    if (stamp && activeTrackCount?.data_version === stamp.data_version
+      && activeTrackCount.local_changes === stamp.local_changes && activeTrackCount.schema_version === stamp.schema_version) {
+      return activeTrackCount.total;
+    }
+    const total = trackFilterTotal(database, filter);
+    activeTrackCount = stamp ? { ...stamp, total } : null;
+    return total;
   }
 
   function trackFilterTotal(database, filter) {
@@ -955,6 +995,32 @@ export function createMusicStore(options = {}) {
     const limit = clampInt(params.get("limit"), mix.limit || DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const database = dbOrOpen();
+    if (!mix.uniqueStateOrder || database.isTransaction) return readSmartPlaylistDetail(database, mix, limit, offset);
+    database.exec("SAVEPOINT music_smart_playlist_page");
+    try {
+      return readSmartPlaylistDetail(database, mix, limit, offset, true);
+    } finally {
+      database.exec("RELEASE music_smart_playlist_page");
+    }
+  }
+
+  function canDriveSmartPlaylistFromState(database, mix, condition) {
+    try {
+      if (!trackCountBoundsPageRows(database) || database.prepare(`SELECT 1 FROM temp.sqlite_schema
+        WHERE name COLLATE NOCASE IN ('music_tracks', 'music_track_state', 'music_artists', 'music_albums') LIMIT 1`).get()) return false;
+      const sample = database.prepare("SELECT COUNT(*) AS count FROM (SELECT 1 FROM music_track_state LIMIT 1025)").get();
+      if (!Number.isInteger(sample?.count) || sample.count > 1024) return false;
+      // Each eligible mix excludes absent state. An unambiguous state sort key
+      // also keeps ties from depending on which table drives the native plan.
+      const order = database.prepare(`SELECT COUNT(*) AS count, COUNT(DISTINCT ${mix.uniqueStateOrder}) AS order_keys
+        FROM music_track_state s WHERE ${condition.where}`).get(...condition.args);
+      return Number.isInteger(order?.count) && order.count === order.order_keys;
+    } catch {
+      return false;
+    }
+  }
+
+  function readSmartPlaylistDetail(database, mix, limit, offset, qualifyState = false) {
     const condition = smartMixCondition(mix);
     const where = `WHERE t.status = 'ok' AND ${condition.where}`;
     const countFrom = smartMixRequiresState(mix)
@@ -963,15 +1029,18 @@ export function createMusicStore(options = {}) {
         ? "music_tracks t"
         : "music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id";
     const total = database.prepare(`SELECT COUNT(*) AS count FROM ${countFrom} ${where}`).get(...condition.args)?.count || 0;
+    const sparseState = qualifyState && canDriveSmartPlaylistFromState(database, mix, condition);
+    const pageFrom = sparseState ? "music_track_state s CROSS JOIN music_tracks t ON t.id = s.track_id" : "music_tracks t";
+    const stateJoin = sparseState ? "" : "LEFT JOIN music_track_state s ON s.track_id = t.id";
     const rows = prepareTrackList(database,
         `
         SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name, al.title AS album_name, al.cover_path,
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
-        FROM music_tracks t
+        FROM ${pageFrom}
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
-        LEFT JOIN music_track_state s ON s.track_id = t.id
+        ${stateJoin}
         ${where}
         ORDER BY ${mix.order}
         LIMIT ? OFFSET ?
@@ -1039,7 +1108,7 @@ export function createMusicStore(options = {}) {
     const name = (requestedName || parsed.name || source.name || "导入歌单").slice(0, 80);
     const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
     const importResult = mutate((database) => {
-      const matcher = createM3uTrackMatcher(database);
+      const matcher = createM3uTrackMatcher(database, parsed.entries, source.baseDir);
       const matched = [];
       const missing = [];
       const seenTrackIds = new Set();

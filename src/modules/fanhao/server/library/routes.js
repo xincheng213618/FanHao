@@ -9,8 +9,6 @@ export async function routeLibraryReadApi(req, res, url, deps) {
     library,
     peopleScopeService,
     personListService,
-    peoplePayloadStamp,
-    publicPerson,
     requestAccess,
     sendJson,
     userStateSummary
@@ -21,14 +19,7 @@ export async function routeLibraryReadApi(req, res, url, deps) {
     const user = userStateSummary();
     const people = personListService.mainLibraryPeople(scope);
     const lastScanError = getLastScanError();
-    const publicPeople = cachedPublicPeople({
-      people,
-      peopleScopeService,
-      publicPerson,
-      scope,
-      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`,
-      westernStamp: peopleScopeService.cacheKey()
-    });
+    const publicPeople = cachedPublicPeople(people, scope, deps);
     sendJson(res, 200, {
       root: library.root,
       roots: library.roots,
@@ -61,15 +52,20 @@ export async function routeLibraryReadApi(req, res, url, deps) {
   return false;
 }
 
-function cachedPublicPeople({ people, peopleScopeService, publicPerson, scope, stamp, westernStamp = "" }) {
+export function cachedPublicPeople(people, scope, { library, peopleScopeService, publicPerson, createPublicPersonPresenter, peoplePayloadStamp }) {
+  const stamp = typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`;
+  const westernStamp = peopleScopeService.cacheKey();
   const cacheKey = `${scope}:${stamp}:${westernStamp}:${people.length}`;
   const cached = libraryPeoplePayloadCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached?.source.deref() === people) return cached.payload;
+  const matchesWestern = peopleScopeService.personMatcher?.("western")
+    || ((person) => peopleScopeService.personMatches(person, "western"));
+  const present = (people.length && createPublicPersonPresenter?.()) || publicPerson;
   const payload = people.map((person) => publicPersonListItem(
-    publicPerson(person, { skipFallbackAvatar: true }),
-    { isWestern: peopleScopeService.personMatches(person, "western") }
+    present(person, { skipFallbackAvatar: true }),
+    { isWestern: matchesWestern(person) }
   ));
-  libraryPeoplePayloadCache.set(cacheKey, payload);
+  libraryPeoplePayloadCache.set(cacheKey, { source: new WeakRef(people), payload });
   while (libraryPeoplePayloadCache.size > 6) {
     const oldest = libraryPeoplePayloadCache.keys().next().value;
     libraryPeoplePayloadCache.delete(oldest);
@@ -78,25 +74,12 @@ function cachedPublicPeople({ people, peopleScopeService, publicPerson, scope, s
 }
 
 export function prewarmLibraryPeoplePayloads(deps, scopes = ["main", "western"]) {
-  const {
-    library,
-    peopleScopeService,
-    personListService,
-    peoplePayloadStamp,
-    publicPerson
-  } = deps;
+  const { peopleScopeService, personListService } = deps;
   const warmed = [];
   for (const requestedScope of scopes) {
     const scope = peopleScopeService.normalize(requestedScope);
     const people = personListService.mainLibraryPeople(scope);
-    cachedPublicPeople({
-      people,
-      peopleScopeService,
-      publicPerson,
-      scope,
-      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`,
-      westernStamp: peopleScopeService.cacheKey()
-    });
+    cachedPublicPeople(people, scope, deps);
     warmed.push({ scope, count: people.length });
   }
   return warmed;

@@ -46,6 +46,59 @@ await check("reader fetches one body; neighboring chapters and TOC remain metada
   const bodies = h.operations.filter(call => call.store === "chapterBodies"); assert.equal(bodies.length, 1); assert.equal(bodies[0].method, "get");
   assert.deepEqual(plain(bodies[0].args[0]), ["local-1", 2]); assert.equal(await h.api.readLocalNovelChapter("wrong-book", 2), null);
 });
+
+await check("bounded chapter reads preserve sparse neighbors, revision and catalog completeness", async h => {
+  const sparse = entry();
+  sparse.chapters.splice(1, 1);
+  await h.api.saveLocalNovelEntry(entry("earlier", "local-0"));
+  await h.api.saveLocalNovelEntry(sparse);
+  await h.api.saveLocalNovelEntry(entry("later", "local-2"));
+  for (const index of [1, 3, 4]) {
+    const full = await h.api.readLocalNovelChapter("local-1", index);
+    h.operations.length = 0;
+    const narrow = await h.api.readLocalNovelChapter("local-1", index, {
+      includeCatalog: false, chapterId: full.chapter.id, catalogRevision: full.book.catalogRevision
+    });
+    assert.deepEqual(plain(narrow), { ...plain(full), chapters: [] });
+    assert(h.operations.every(call => call.method !== "getAll"));
+    assert.equal(h.operations.filter(call => call.store === "chapterBodies").length, 1);
+  }
+  for (const [index, options] of [[2, {}], [3, { chapterId: "stale" }], [3, { catalogRevision: "stale" }]]) {
+    assert.equal(await h.api.readLocalNovelChapter("local-1", index, { ...options, includeCatalog: false }), null);
+  }
+  const db = await h.open(3);
+  try {
+    await new Promise((resolve, reject) => {
+      const write = db.transaction("chapterMetadata", "readwrite");
+      write.oncomplete = resolve;
+      write.onerror = () => reject(write.error);
+      write.objectStore("chapterMetadata").delete(["local-1", 4]);
+    });
+    await assert.rejects(h.api.readLocalNovelChapter("local-1", 1, { includeCatalog: false }), /目录不完整/);
+  } finally { db.close(); }
+});
+
+await check("bounded reads reject stale neighboring metadata and never render a stale selected body", async h => {
+  await h.api.saveLocalNovelEntry(entry());
+  const db = await h.open(3);
+  try {
+    assert.equal(db.transaction("chapterMetadata").objectStore("chapterMetadata").index("chapterId").unique, true);
+    const corruptGeneration = async (name, index) => {
+      const write = db.transaction(name, "readwrite");
+      const done = new Promise((resolve, reject) => { write.oncomplete = resolve; write.onabort = () => reject(write.error); });
+      const store = write.objectStore(name);
+      const row = await requestResult(store.get(["local-1", index]));
+      await requestResult(store.put({ ...row, generation: "stale-generation" }));
+      await done;
+    };
+    await corruptGeneration("chapterMetadata", 4);
+    assert.equal((await h.api.readLocalNovelChapter("local-1", 1, { includeCatalog: false })).chapter.index, 1);
+    await assert.rejects(h.api.readLocalNovelChapter("local-1", 3, { includeCatalog: false }), /目录不完整/);
+    await assert.rejects(h.api.readLocalNovelCatalog("local-1"), /目录不完整/);
+    await corruptGeneration("chapterBodies", 1);
+    assert.equal(await h.api.readLocalNovelChapter("local-1", 1, { includeCatalog: false }), null);
+  } finally { db.close(); }
+});
 const writers = [
   { name: "save entry", method: "put", store: "bookMetadata", run: h => h.api.saveLocalNovelEntry(entry("replacement")) },
   { name: "save progress", method: "put", store: "readingProgress", run: h => h.api.saveLocalNovelProgress("local-1", { chapterIndex: 3, scrollRatio: 0.6 }, { expectedGeneration: h.baselineGeneration }) },

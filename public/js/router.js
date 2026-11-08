@@ -1,3 +1,5 @@
+import { classificationQuery, parseClassificationQuery } from "../modules/fanhao/browse-traits.js?v=20261105-media-classification-01";
+
 export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "manga", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
@@ -34,9 +36,22 @@ const PHOTO_CATEGORY_IDS = new Map([
   ["partycat", "catalog:partycat"],
   ["tuigirl", "catalog:tuigirl"],
   ["slady", "catalog:slady"],
+  ["senluo", "catalog:senluo"],
+  ["fzhly", "catalog:fzhly"],
+  ["mtcos", "catalog:mtcos"],
+  ["qinglan", "catalog:qinglan"],
+  ["tuwan", "catalog:tuwan"],
+  ["snzx", "catalog:snzx"],
+  ["yaojing", "catalog:yaojing"],
+  ["galli", "catalog:galli"],
+  ["kitty-wawa", "catalog:kitty-wawa"],
+  ["lady-antebellum", "catalog:lady-antebellum"],
+  ["loli-series", "catalog:loli-series"],
+  ["niche", "catalog:niche"],
   ["leeheeexpress", "catalog:leeheeexpress"],
   ["likes", "catalog:likes"],
   ["miscellaneous", "catalog:miscellaneous"],
+  ["portraits", "catalog:portraits"],
   ["cos", "[COS]"]
 ]);
 const PHOTO_CATEGORY_SLUGS = new Map([...PHOTO_CATEGORY_IDS].map(([slug, id]) => [id, slug]));
@@ -46,6 +61,9 @@ const LEGACY_PHOTO_BROWSE_CATEGORIES = new Map([
   ["[YITUYU艺图语]", "catalog:yituyu"],
   ["[MSLASS梦丝女神]", "catalog:mslass"],
   ["恋足恋物", "catalog:fetish"],
+  ["丝袜恋足", "catalog:fetish"],
+  ["萝莉系列", "catalog:loli-series"],
+  ["小众系列", "catalog:niche"],
   ["[BoBoSocks袜啵啵]", "catalog:bobosocks"],
   ["[BoLoli]波萝社", "publisher:bololi"],
   ["[Girlt] 果团网", "catalog:girlt"],
@@ -65,6 +83,7 @@ const LEGACY_PHOTO_BROWSE_CATEGORIES = new Map([
   ["[LeeheeExpress]", "catalog:leeheeexpress"],
   ["我喜欢的", "catalog:likes"],
   ["[零散]", "catalog:miscellaneous"],
+  ["[]", "catalog:portraits"],
   ["韩国演艺圈", "catalog:korean-entertainment"],
   ["日本写真集", "catalog:japan"],
   ["韩国写真集", "catalog:korea"],
@@ -127,9 +146,10 @@ const LEGACY_PATH_VIEWS = new Map([
 export function routeFromUrl(url = window.location.href) {
   const parsed = new URL(url, window.location.href);
   const params = parsed.searchParams;
-  const query = params.get("q") || params.get("search") || "";
   const rawView = params.get("view");
   const routePath = normalizeRoutePath(parsed.pathname);
+  const textQuery = params.get("q") || params.get("search") || "";
+  const query = (routePath === "/fanhao" && classificationQuery(params.get("classification"), textQuery)) || textQuery;
   const peopleRoute = peopleRouteFromPath(routePath, params);
   if (peopleRoute) return peopleRoute;
   const mangaRoute = mangaRouteFromPath(routePath, params);
@@ -201,6 +221,9 @@ export function normalizeRoute(route = {}) {
   const searchQuery = String(route.q || "").trim();
   const view = explicitView || (searchQuery ? "search" : "people");
   const galleryMode = view === "gallery" && GALLERY_MODE_NAMES.has(route.galleryMode) ? route.galleryMode : "";
+  const galleryQuery = view === "gallery" ? String(route.galleryQuery || "").trim() : "";
+  const galleryBrowse = view === "gallery" && !galleryQuery;
+  const galleryPhotoView = galleryBrowse && galleryMode === "photo" ? normalizeGalleryPhotoView(route.galleryPhotoView) : "albums";
   const peopleScope = view === "people" && PEOPLE_SCOPE_NAMES.has(route.peopleScope) ? route.peopleScope : "main";
   const codePrefix = view === "codes" ? String(route.codePrefix || "").trim().toUpperCase() : "";
   return {
@@ -209,20 +232,21 @@ export function normalizeRoute(route = {}) {
     peopleScope,
     codePrefix,
     codePrefixFamily: Boolean(codePrefix && route.codePrefixFamily),
-    galleryPhotoView: view === "gallery" && galleryMode === "photo" && route.galleryPhotoView !== "albums" ? "collections" : "albums",
-    galleryPhotoCollection: view === "gallery" ? String(route.galleryPhotoCollection || "").trim() : "",
+    galleryPhotoView,
+    galleryPhotoCollection: galleryBrowse && galleryPhotoView !== "people" ? String(route.galleryPhotoCollection || "").trim() : "",
     galleryAlbumId: view === "gallery" ? String(route.galleryAlbumId || "").trim() : "",
     galleryComicId: view === "gallery" ? String(route.galleryComicId || "").trim() : "",
     galleryChapterIndex: view === "gallery" ? String(route.galleryChapterIndex || "").trim() : "",
     galleryMediaId: view === "gallery" ? String(route.galleryMediaId || "").trim() : "",
-    galleryQuery: view === "gallery" ? String(route.galleryQuery || "").trim() : "",
-    galleryMediaKind: view === "gallery" && galleryMode === "media" ? normalizeGalleryMediaKind(route.galleryMediaKind) : "all",
-    galleryCategory: view === "gallery" ? normalizeGalleryCategory(route) : "all",
-    gallerySubCategory: view === "gallery" ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
-    galleryPerson: view === "gallery" ? String(route.galleryPerson || "all").trim() || "all" : "all",
-    gallerySeriesKey: view === "gallery" && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
-    galleryPhotoDate: view === "gallery" ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
-    gallerySort: view === "gallery" ? normalizeGallerySort(route.gallerySort) : "updated",
+    galleryQuery,
+    galleryMediaKind: galleryBrowse && galleryMode === "media" ? normalizeGalleryMediaKind(route.galleryMediaKind) : "all",
+    galleryCategory: galleryBrowse ? normalizeGalleryCategory(route) : "all",
+    gallerySubCategory: galleryBrowse ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
+    galleryPerson: galleryBrowse ? String(route.galleryPerson || "all").trim() || "all" : "all",
+    gallerySeriesKey: galleryBrowse && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
+    galleryPhotoDate: galleryBrowse ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
+    gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView) : "updated",
+    gallerySortDirection: galleryBrowse && galleryMode === "photo" ? normalizeGallerySortDirection(route.gallerySortDirection) : "",
     mangaComicId: view === "manga" ? String(route.mangaComicId || "").trim() : "",
     mangaChapterIndex: view === "manga" ? String(route.mangaChapterIndex || "").trim() : "",
     mangaQuery: view === "manga" ? String(route.mangaQuery || route.q || "").trim() : "",
@@ -302,13 +326,12 @@ export function routeUrl(route, options = {}) {
     }
     if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
     if (photo && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
-    const defaultGallerySort = photo
-      && next.galleryPhotoView === "collections"
-      && !next.galleryPhotoCollection
-      && !next.galleryQuery
+    const defaultGallerySort = photo && (next.galleryPhotoView === "people"
+      || (next.galleryPhotoView === "collections" && !next.galleryPhotoCollection && !next.galleryQuery))
       ? "count"
       : "updated";
     if (next.gallerySort && next.gallerySort !== defaultGallerySort) params.set("sort", next.gallerySort);
+    if (photo && next.gallerySortDirection) params.set("dir", next.gallerySortDirection);
   } else if (next.view === "manga") {
     if (next.mangaQuery) params.set("q", next.mangaQuery);
     if (next.mangaSort && next.mangaSort !== "updated") params.set("sort", next.mangaSort);
@@ -351,7 +374,11 @@ export function routeUrl(route, options = {}) {
       if (next.musicFavorite) params.set("favorite", "1");
     }
   } else if (next.q) {
-    params.set("q", next.q);
+    const classification = parseClassificationQuery(next.q);
+    if (classification) {
+      params.set("classification", classification.key);
+      if (classification.query) params.set("q", classification.query);
+    } else params.set("q", next.q);
   }
   if (next.workId) params.set("workId", next.workId);
   if (next.videoId) params.set("videoId", next.videoId);
@@ -408,7 +435,6 @@ function writePhotoFilter(params, key, value) {
 function normalizeGalleryCategory(route = {}) {
   const category = String(route.galleryCategory || "").trim();
   if (category) return category;
-  if (route.galleryMode === "photo" && String(route.galleryQuery || "").trim()) return "all";
   return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
 }
 
@@ -449,9 +475,18 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
   };
 }
 
-function normalizeGallerySort(value) {
+function normalizeGalleryPhotoView(value) {
+  return value === "albums" || value === "people" ? value : "collections";
+}
+
+function normalizeGallerySort(value, photoView) {
   const sort = String(value || "updated").trim();
+  if (photoView === "people") return sort === "title" ? "title" : "count";
   return ["updated", "count", "rating", "year", "size", "title"].includes(sort) ? sort : "updated";
+}
+
+function normalizeGallerySortDirection(value) {
+  return value === "asc" || value === "desc" ? value : "";
 }
 
 function normalizeNovelSort(value) {
@@ -536,12 +571,14 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
   }
   if (!galleryMode) return null;
   const photo = galleryMode === "photo";
+  const searchPage = rest.length === 1 && rest[0] === "search";
   const photoFilter = key => photo ? decodePhotoToken(params.get(`${key}Key`)) : "";
   const encodedCategory = photoFilter("category");
   const category = encodedCategory || params.get("category");
   const galleryQuery = params.get("q") || params.get("search") || "";
   const photoSearch = photo && Boolean(String(galleryQuery).trim());
-  const galleryPhotoView = photo && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections";
+  const galleryPhotoView = photo && (photoSearch && !params.has("photoView"))
+    ? "albums" : normalizeGalleryPhotoView(photo ? params.get("photoView") : "");
 
   const route = {
     view: "gallery",
@@ -560,6 +597,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
     gallerySort: normalizeGallerySort(params.get("sort")),
+    gallerySortDirection: photo ? normalizeGallerySortDirection(params.get("dir")) : "",
     personId: "",
     q: "",
     workId: "",
@@ -568,7 +606,9 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
 
   if (photo) {
     const section = rest[0] || "";
-    if (section === "categories") {
+    if (searchPage) {
+      route.galleryPhotoView = photoSearch ? "albums" : "collections";
+    } else if (section === "categories") {
       const slug = rest[1] || "";
       route.galleryPhotoView = "collections";
       route.galleryCategory = PHOTO_CATEGORY_IDS.get(slug) || normalizePhotoBrowseCategory(decodePhotoToken(slug));
@@ -576,6 +616,8 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
       route.galleryPhotoView = "collections";
     } else if (section === "albums" && !rest[1]) {
       route.galleryPhotoView = "albums";
+    } else if (section === "people" && !rest[1]) {
+      route.galleryPhotoView = "people";
     } else if (section === "collection") {
       route.galleryPhotoView = "collections";
       const collection = rest.slice(1).join("/");
@@ -589,13 +631,16 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
       && !route.galleryPhotoCollection && !route.galleryAlbumId) {
       route.galleryCategory = normalizePhotoBrowseCategory(route.galleryCategory);
     }
-    if (!params.get("sort") && route.galleryPhotoView === "collections" && !route.galleryPhotoCollection && !photoSearch) {
+    if (route.galleryPhotoView === "people" && !photoSearch) {
+      route.galleryPhotoCollection = "";
+      route.gallerySort = normalizeGallerySort(params.get("sort"), "people");
+    } else if (!params.get("sort") && route.galleryPhotoView === "collections" && !route.galleryPhotoCollection && !photoSearch) {
       route.gallerySort = "count";
     }
-  } else if (galleryMode === "manga") {
+  } else if (!searchPage && galleryMode === "manga") {
     route.galleryComicId = decodeRouteSegment(rest[0] || "");
     route.galleryChapterIndex = decodeRouteSegment(rest[1] || "");
-  } else if (["western", "media", "movie", "tv"].includes(galleryMode)) {
+  } else if (!searchPage && ["western", "media", "movie", "tv"].includes(galleryMode)) {
     route.galleryMediaId = decodeRouteSegment(rest[0] || "");
   }
 
@@ -605,14 +650,15 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
 function mangaRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   const direct = segments[0] === "manga";
-  const legacy = segments[0] === "photo" && segments[1] === "manga";
+  const legacy = ["photo", "gallery"].includes(segments[0]) && segments[1] === "manga";
   if (!direct && !legacy) return null;
   const rest = segments.slice(direct ? 1 : 2);
+  const searchPage = rest.length === 1 && rest[0] === "search";
   const reader = rest[1] === "read";
   return {
     view: "manga",
     galleryMode: "",
-    mangaComicId: decodeRouteSegment(rest[0] || ""),
+    mangaComicId: searchPage ? "" : decodeRouteSegment(rest[0] || ""),
     mangaChapterIndex: decodeRouteSegment(reader ? rest[2] || "" : legacy ? rest[1] || "" : ""),
     mangaQuery: params.get("q") || params.get("search") || "",
     mangaSort: ["updated", "title", "chapters"].includes(params.get("sort")) ? params.get("sort") : "updated",
@@ -771,14 +817,16 @@ function routePath(route) {
       return `/manga/${encodeRouteSegment(route.mangaComicId)}/read/${encodeRouteSegment(route.mangaChapterIndex)}`;
     }
     if (route.mangaComicId) return `/manga/${encodeRouteSegment(route.mangaComicId)}`;
-    return "/manga";
+    return route.mangaQuery ? "/manga/search" : "/manga";
   }
   if (route.view === "gallery") {
     const mode = route.galleryMode || "photo";
     const base = GALLERY_MODE_PATHS[mode] || "/photo";
     if (mode === "photo") {
       if (route.galleryAlbumId) return `${base}/set/${encodeRouteSegment(route.galleryAlbumId)}`;
+      if (route.galleryQuery) return `${base}/search`;
       if (route.galleryPhotoCollection) return `${base}/collection/${encodePhotoToken(route.galleryPhotoCollection)}`;
+      if (route.galleryPhotoView === "people") return `${base}/people`;
       if (route.galleryPhotoView === "collections") {
         const category = normalizePhotoBrowseCategory(route.galleryCategory);
         if (category === DEFAULT_GALLERY_PHOTO_CATEGORY) return `${base}/collections`;
@@ -790,10 +838,11 @@ function routePath(route) {
       const chapter = route.galleryChapterIndex ? `/${encodeRouteSegment(route.galleryChapterIndex)}` : "";
       return `${base}/${encodeRouteSegment(route.galleryComicId)}${chapter}`;
     }
-    if (mode === "western" && !route.galleryMediaId) return "/gallery/western";
     if (["western", "media", "movie", "tv"].includes(mode) && route.galleryMediaId) {
       return `${base}/${encodeRouteSegment(route.galleryMediaId)}`;
     }
+    if (route.galleryQuery) return `${mode === "movie" ? "/movie" : mode === "manga" ? "/manga" : base}/search`;
+    if (mode === "western") return "/gallery/western";
     return base;
   }
   if (route.view === "novels") {

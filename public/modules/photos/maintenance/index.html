@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>图库维护 · FanHao</title>
+  <link rel="stylesheet" href="/modules/photos/maintenance/maintenance.css">
+  <script type="module" src="/modules/photos/maintenance/maintenance.js"></script>
+</head>
+<body>
+  <main class="maintenance">
+    <header>
+      <a href="/photo">← 返回图库</a>
+      <h1>图库维护</h1>
+      <p>查看封面预热进度和套图索引任务。</p>
+    </header>
+
+    <div id="cover-warm"></div>
+
+    <section class="maintenance-panel" aria-labelledby="scan-title">
+      <div class="maintenance-panel-header">
+        <h2 id="scan-title">套图索引</h2>
+        <button id="scan-start" class="maintenance-button" type="button" disabled>刷新套图索引</button>
+      </div>
+      <p id="scan-status" role="status">正在读取索引任务…</p>
+      <progress id="scan-progress" max="100" aria-label="套图索引刷新进度" hidden></progress>
+      <details id="scan-log" hidden>
+        <summary>任务日志</summary>
+        <pre id="scan-log-text"></pre>
+      </details>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,10 +1,26 @@
-export async function routeFileWorkflows(req, res, url, { service, requireLocalAdmin, readJsonBody, sendJson }) {
+export async function routeFileWorkflows(req, res, url, { service, intake, requireLocalAdmin, requestAccess, readJsonBody, sendJson }) {
   const prefix = "/api/fanhao/file-workflows";
   if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) return false;
   if (!requireLocalAdmin(req, res)) return true;
   try {
     let result, status = 200;
-    if (url.pathname === `${prefix}/config` && req.method === "GET") result = service.config();
+    if (url.pathname.startsWith(`${prefix}/intake/`) && intake) {
+      if (requestAccess(req).mode !== "local") { sendJson(res, 403, { error: "洗版工作台请从服务电脑的 localhost 打开" }); return true; }
+      const route = url.pathname.slice(`${prefix}/intake/`.length);
+      if (route === "config" && req.method === "GET") result = intake.config();
+      else if (route === "jobs" && req.method === "GET") result = { jobs: intake.list() };
+      else if (route === "discard-stats" && req.method === "GET") result = intake.discardStats({
+        reason: url.searchParams.get("reason") || "", ltxOnly: url.searchParams.get("ltx") === "1", page: url.searchParams.get("page")
+      });
+      else if (["scan", "compare", "metadata", "prepare", "open"].includes(route) && req.method === "POST") result = await intake[route](await readJsonBody(req));
+      else {
+        const match = /^jobs\/([0-9a-f-]{36})(?:\/(run|cancel))?$/.exec(route);
+        if (match && !match[2] && req.method === "GET") result = intake.detail(match[1]);
+        else if (match?.[2] === "run" && req.method === "POST") { result = intake.run(match[1], await readJsonBody(req)); status = 202; }
+        else if (match?.[2] === "cancel" && req.method === "POST") result = intake.cancel(match[1]);
+        else { sendJson(res, 404, { error: "洗版接口不存在" }); return true; }
+      }
+    } else if (url.pathname === `${prefix}/config` && req.method === "GET") result = service.config();
     else if (url.pathname === prefix && req.method === "GET") result = { jobs: service.list() };
     else if (url.pathname === `${prefix}/preview` && req.method === "POST") result = { job: await service.preview(await readJsonBody(req)) };
     else {

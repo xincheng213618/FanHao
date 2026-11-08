@@ -1,6 +1,6 @@
 import { formatNumber } from "../../js/format.js";
-import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=assets-8af3642624a3";
-import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=assets-8af3642624a3";
+import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=assets-8faf7a80cb7b";
+import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=assets-8faf7a80cb7b";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
 const PEOPLE_FILTER_STORAGE_KEY = "fanhao.android.peopleFilter";
@@ -40,11 +40,14 @@ export function normalizePeopleFilter(value) {
 }
 
 export function filterPeopleForIndex(people, requestedFilter = "recommended") {
-  if (String(requestedFilter || "").trim().toLowerCase() === "western") {
-    return (people || []).filter(isBrowsableAuthor).filter((person) => person?.isWestern);
-  }
-  const filter = normalizePeopleFilter(requestedFilter);
-  const candidates = (people || []).filter(isBrowsableAuthor);
+  const filter = String(requestedFilter || "").trim().toLowerCase() === "western"
+    ? "western"
+    : normalizePeopleFilter(requestedFilter);
+  return filterBrowsablePeople((people || []).filter(isBrowsableAuthor), filter);
+}
+
+function filterBrowsablePeople(candidates, filter) {
+  if (filter === "western") return candidates.filter((person) => person?.isWestern);
   if (filter === "female") return candidates.filter((person) => person?.actorProfile?.gender === "female");
   if (filter === "male") return candidates.filter((person) => person?.actorProfile?.gender === "male");
   if (filter === "all") return candidates;
@@ -61,6 +64,42 @@ export function shouldUseCompactPeopleLayout(people, scope = "main") {
   if (candidates.length < 6) return false;
   const portraitCount = candidates.filter((person) => Boolean(portraitUrlForPerson(person))).length;
   return portraitCount * 2 < candidates.length;
+}
+
+function createPeopleRanker(people, compare, firstLimit) {
+  if (people.length <= firstLimit) {
+    people.sort(compare);
+    return () => people;
+  }
+  const ranked = [];
+  const heap = people.map((_person, index) => index);
+  // Original positions break ties exactly as a stable sort would.
+  const compareIndices = (a, b) => compare(people[a], people[b]) || a - b;
+
+  function siftDown(parent) {
+    const item = heap[parent];
+    for (let child = parent * 2 + 1; child < heap.length; child = parent * 2 + 1) {
+      if (child + 1 < heap.length && compareIndices(heap[child + 1], heap[child]) < 0) child++;
+      if (compareIndices(item, heap[child]) <= 0) break;
+      heap[parent] = heap[child];
+      parent = child;
+    }
+    heap[parent] = item;
+  }
+
+  for (let index = Math.floor(heap.length / 2) - 1; index >= 0; index--) siftDown(index);
+  return (limit) => {
+    while (ranked.length < limit && heap.length) {
+      const next = heap[0];
+      const last = heap.pop();
+      if (heap.length) {
+        heap[0] = last;
+        siftDown(0);
+      }
+      ranked.push(people[next]);
+    }
+    return ranked;
+  };
 }
 
 export function createPeopleViews(context) {
@@ -140,19 +179,23 @@ export function createPeopleViews(context) {
     const filterMode = scope === "western" ? "western" : getPeopleFilterMode();
     if (restorePeopleIndex(sourcePeople, scope, sortMode, filterMode)) return;
 
-    const people = filterPeopleForIndex(sourcePeople, filterMode).sort((a, b) => comparePeople(a, b, sortMode));
-    const visible = people.slice(0, getPeopleLimit());
+    const candidates = sourcePeople.filter(isBrowsableAuthor);
+    const people = filterBrowsablePeople(candidates, filterMode);
+    const limit = getPeopleLimit();
+    const { compare, validCounts } = peopleIndexComparator(people, sortMode);
+    const rankUntil = createPeopleRanker(people, compare, validCounts ? limit + PEOPLE_PAGE_SIZE : people.length);
+    const visible = rankUntil(limit + PEOPLE_PAGE_SIZE).slice(0, limit);
     indexAvatarLoader.reset();
 
     els.viewKicker.textContent = scope === "western" ? "欧美" : "演员";
     els.viewTitle.textContent = scope === "western" ? "人物" : peopleFilterTitle(filterMode);
     els.viewMeta.textContent = `${formatNumber(people.length)} 位演员 · ${sortDescription(sortMode)}`;
-    const filterStrip = scope === "western" ? null : createPeopleFilterStrip(sourcePeople, filterMode);
+    const filterStrip = scope === "western" ? null : createPeopleFilterStrip(candidates, filterMode, people.length);
     const grid = document.createElement("div");
     grid.className = "people-grid";
     grid.classList.toggle("is-compact", shouldUseCompactPeopleLayout(people, scope));
     appendPeopleCards(grid, visible, indexAvatarLoader, scope);
-    peopleIndexCache = { filterMode, filterStrip, grid, loadMore: null, people, scope, sortMode, sourcePeople };
+    peopleIndexCache = { filterMode, filterStrip, grid, loadMore: null, peopleCount: people.length, rankUntil, scope, sortMode, sourcePeople };
     els.viewContent.replaceChildren(...[filterStrip, grid].filter(Boolean));
     appendPeopleIndexLoadMore(peopleIndexCache);
   }
@@ -163,13 +206,13 @@ export function createPeopleViews(context) {
     syncPeopleLimit(cache.grid.children.length);
     els.viewKicker.textContent = scope === "western" ? "欧美" : "演员";
     els.viewTitle.textContent = scope === "western" ? "人物" : peopleFilterTitle(filterMode);
-    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位演员 · ${sortDescription(sortMode)}`;
+    els.viewMeta.textContent = `${formatNumber(cache.peopleCount)} 位演员 · ${sortDescription(sortMode)}`;
     const nodes = (cache.loadMore ? [cache.filterStrip, cache.grid, cache.loadMore] : [cache.filterStrip, cache.grid]).filter(Boolean);
     els.viewContent.replaceChildren(...nodes);
     return true;
   }
 
-  function createPeopleFilterStrip(sourcePeople, activeFilter) {
+  function createPeopleFilterStrip(candidates, activeFilter, activeCount) {
     const strip = document.createElement("nav");
     strip.className = "people-category-strip";
     strip.setAttribute("aria-label", "演员分类");
@@ -182,7 +225,7 @@ export function createPeopleViews(context) {
       const label = document.createElement("strong");
       label.textContent = option.label;
       const count = document.createElement("span");
-      count.textContent = formatNumber(filterPeopleForIndex(sourcePeople, option.value).length);
+      count.textContent = formatNumber(active ? activeCount : filterBrowsablePeople(candidates, option.value).length);
       button.append(label, count);
       button.addEventListener("click", () => setPeopleFilterMode(option.value));
       strip.append(button);
@@ -197,19 +240,19 @@ export function createPeopleViews(context) {
   }
 
   function appendPeopleIndexLoadMore(cache) {
-    const { grid, people } = cache;
+    const { grid, peopleCount } = cache;
     const visibleCount = grid.children.length;
-    if (visibleCount >= people.length) {
+    if (visibleCount >= peopleCount) {
       cache.loadMore = null;
       return;
     }
 
-    const loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(people.length)}`, () => {
+    const loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(peopleCount)}`, () => {
       const start = grid.children.length;
       syncPeopleLimit(start);
       increasePeopleLimit(PEOPLE_PAGE_SIZE);
-      const nextLimit = Math.min(people.length, getPeopleLimit());
-      appendPeopleCards(grid, people.slice(start, nextLimit), indexAvatarLoader, cache.scope);
+      const nextLimit = Math.min(peopleCount, getPeopleLimit());
+      appendPeopleCards(grid, cache.rankUntil(nextLimit).slice(start, nextLimit), indexAvatarLoader, cache.scope);
       loadMore.remove();
       cache.loadMore = null;
       appendPeopleIndexLoadMore(cache);
@@ -228,6 +271,20 @@ export function createPeopleViews(context) {
 
   function sortPeople(a, b) {
     return comparePeople(a, b, "smart");
+  }
+
+  function peopleIndexComparator(people, mode) {
+    const sortFields = new Map();
+    const usesSourceCount = mode === "sources" || mode === "smart";
+    let validCounts = true;
+    for (const person of people) {
+      sortFields.set(person, { name: displayPersonName(person), visual: Boolean(portraitUrlForPerson(person)) });
+      // Keep the old full-sort result for historical DTOs whose count
+      // subtraction can fall through to a different comparator key.
+      validCounts &&= Number.isFinite(Number(person.workCount || 0))
+        && (!usesSourceCount || Number.isFinite(Number(person.sourceCount || 0)));
+    }
+    return { compare: (a, b) => comparePeople(a, b, mode, sortFields), validCounts };
   }
 
   function getPeopleSortMode() {
@@ -262,26 +319,25 @@ export function createPeopleViews(context) {
     return true;
   }
 
-  function comparePeople(a, b, mode) {
-    const aVisual = portraitUrlForPerson(a) ? 1 : 0;
-    const bVisual = portraitUrlForPerson(b) ? 1 : 0;
-    const byName = () => displayPersonName(a).localeCompare(displayPersonName(b), "zh-Hans-CN");
+  function comparePeople(a, b, mode, sortFields) {
+    const aFields = sortFields?.get(a);
+    const bFields = sortFields?.get(b);
+    const aVisual = aFields?.visual ?? Boolean(portraitUrlForPerson(a));
+    const bVisual = bFields?.visual ?? Boolean(portraitUrlForPerson(b));
+    const byName = () => (aFields?.name ?? displayPersonName(a)).localeCompare(bFields?.name ?? displayPersonName(b), "zh-Hans-CN");
     if (mode === "works") {
-      return authorPriority(b) - authorPriority(a)
-        || (b.workCount || 0) - (a.workCount || 0)
+      return (b.workCount || 0) - (a.workCount || 0)
         || bVisual - aVisual
         || byName();
     }
     if (mode === "sources") {
-      return authorPriority(b) - authorPriority(a)
-        || (b.sourceCount || 0) - (a.sourceCount || 0)
+      return (b.sourceCount || 0) - (a.sourceCount || 0)
         || bVisual - aVisual
         || (b.workCount || 0) - (a.workCount || 0)
         || byName();
     }
     if (mode === "name") {
-      return authorPriority(b) - authorPriority(a)
-        || byName()
+      return byName()
         || (b.workCount || 0) - (a.workCount || 0)
         || bVisual - aVisual;
     }
@@ -289,10 +345,6 @@ export function createPeopleViews(context) {
       || (b.workCount || 0) - (a.workCount || 0)
       || (b.sourceCount || 0) - (a.sourceCount || 0)
       || byName();
-  }
-
-  function authorPriority(person) {
-    return isBrowsableAuthor(person) ? 1 : 0;
   }
 
   function createPersonCard(person, mode, avatarLoader = mode === "preview" ? previewAvatarLoader : indexAvatarLoader, scope = "main") {

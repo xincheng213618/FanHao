@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { archiveDiskSignature } from "../../../platform/server/archive-image-service.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "./image-library-index-contract.js";
 
+const indexNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export function createImageLibraryIndexService({
   archiveExts,
   createId,
@@ -217,7 +219,7 @@ export function createImageLibraryIndexService({
         }
       }
     }
-    results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+    results.sort(indexNameCollator.compare);
     return results;
   }
 
@@ -253,7 +255,7 @@ export function createImageLibraryIndexService({
         }
       }
     }
-    results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+    results.sort(indexNameCollator.compare);
     return results;
   }
 
@@ -324,7 +326,7 @@ export function createImageLibraryIndexService({
     items.sort((a, b) => {
       if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
       const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-      return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+      return timeDiff || indexNameCollator.compare(a.title, b.title);
     });
     return {
       mediaRoots: roots,
@@ -347,7 +349,7 @@ export function createImageLibraryIndexService({
     }
     albums.sort((a, b) => {
       const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-      return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+      return timeDiff || indexNameCollator.compare(a.title, b.title);
     });
     return {
       scannedAt: new Date().toISOString(),

@@ -1254,6 +1254,37 @@ test("direct side list loads have latest request ownership", async t => {
   assert.equal(f.state.music.playlistsLoadedAt, loadedAt);
 });
 
+test("a late catalog sidebar response cannot cross account ownership", async t => {
+  const account = globalThis.__fanhaoWebAccountContext, original = { ...account };
+  const storage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  t.after(() => { Object.assign(account, original); if (storage) Object.defineProperty(globalThis, "localStorage", storage); else delete globalThis.localStorage; });
+  Object.assign(account, { owner: "old-owner", revision: "old-revision", invalid: false });
+  globalThis.localStorage = { getItem: () => account.revision };
+  const f = fixture(t);
+  f.state.music.playlistsLoadedAt = 0;
+  f.state.music.smartPlaylistsLoadedAt = 0;
+  const main = f.actions.loadMusic({ keepCurrent: true });
+  const playlists = f.requests.find(request => request.method === "getPlaylists");
+  const smart = f.requests.find(request => request.method === "getSmartPlaylists");
+  f.requests.find(request => request.method === "getTracks").resolve(listData("first"));
+  await main;
+  assert.equal(f.state.music.data.tracks[0].id, "first");
+  assert.equal(playlists.signal.aborted, false);
+  assert.equal(smart.signal.aborted, false);
+  account.owner = "new-owner";
+  playlists.resolve({ playlists: [{ id: "old" }] });
+  await tick();
+  account.owner = "old-owner";
+  account.revision = "new-revision";
+  smart.resolve({ smartPlaylists: [{ id: "old-smart" }] });
+  await tick();
+  assert.deepEqual(f.state.music.playlists, []);
+  assert.deepEqual(f.state.music.smartPlaylists, []);
+  assert.equal(f.state.music.playlistsLoadedAt, 0);
+  assert.equal(f.state.music.smartPlaylistsLoadedAt, 0);
+  assert.equal(f.events.some(event => event.name === "refreshSidebarPlaylists"), false);
+});
+
 test("a cancelled restore cannot overwrite the chosen track or clear its preference", async t => {
   const f = fixture(t, { mode: "home", saved: { trackId: "saved", track: track("saved") } });
   const loading = f.actions.loadMusic();

@@ -54,9 +54,8 @@ if (legacyReaderReturnIntent) {
 }
 if (legacyEagerControls) {
   for (const marker of [
-    "  if (mediaModule) {",
-    '  if (["western", "tv"].includes(state.gallery.mode)) {',
-    '  if (["photo", "movie", "media"].includes(state.gallery.mode)) {'
+    "  if (mediaModule && !searchActive) {",
+    '  if (["western", "tv"].includes(state.gallery.mode) && !searchActive) {'
   ]) {
     assert.equal(rendererSource.split(marker).length, 2);
     rendererSource = rendererSource.replace(marker, "  if (true) {");
@@ -417,7 +416,8 @@ try {
       const facets = { categories: Array.from({ length: 1000 }, (_, index) => ({ value: `category-${index}`, count: index + 1 })), people: Array.from({ length: 300 }, (_, index) => ({ value: `person-${index}`, count: index + 1 })) };
       const summaryBody = (value, scannedAt = "2026-10-04") => ({ totals: { photoSets: 12345, manga: 5000, movie: 5000 },
         facets: { ...value, media: value, western: value, tv: value }, scannedAt });
-      const pageBody = (offset, value = facets) => mode === "western" ? westernBody(80, offset, { facets: value }) : body(80, offset, mode, { facets: value });
+      const photoSearch = repeat === 2 && mode === "photo";
+      const pageBody = (offset, value = facets) => mode === "western" ? westernBody(80, offset, { facets: value }) : body(80, offset, mode, { facets: value, ...(photoSearch ? { sort: "relevance" } : {}) });
       const summaryFacets = repeat === 2;
       const sourceFacets = summaryFacets ? { people: facets.people } : facets;
       const response = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "80", pageBody(80, sourceFacets));
@@ -441,13 +441,13 @@ try {
         const initial = await page.evaluate(({ data, selected, photoSearch }) => {
           const started = performance.now(); fixture.seed(data, { category: selected ? "category-999" : "all", query: photoSearch ? "server search" : "", sort: "updated" }); document.body.offsetHeight;
           return { ms: performance.now() - started, ...__controlWork, mountedOptions: document.querySelectorAll('.gallery-controls option').length, mountedSelects: document.querySelectorAll('.gallery-controls select').length };
-        }, { data: pageBody(0, sourceFacets), selected: repeat === 1 && mode === "media", photoSearch: repeat === 2 && mode === "photo" });
+        }, { data: pageBody(0, sourceFacets), selected: repeat === 1 && mode === "media", photoSearch });
         // Preserve the original unused-control budget; refresh now has the
         // stronger zero-construction contract below instead of == mounted.
         if (legacyEagerControls) console.log(JSON.stringify({ kind: "gallery-control-construction", mode, reference: true, initial }));
         assert.equal(initial.selects, initial.mountedSelects, "gallery controls must not construct unused facet selects");
         assert.equal(initial.options, initial.mountedOptions, "gallery controls must not construct unused facet options");
-        const focusKey = mode === "western" ? "people" : mode === "photo" ? "sort" : repeat === 1 && mode === "tv" ? "people" : "category";
+        const focusKey = mode === "western" ? "people" : mode === "photo" ? "photo-sort" : repeat === 1 && mode === "tv" ? "people" : "category";
         await beginGalleryControlProbe(page, { focusKey, compose: repeat === 2 });
         const before = await galleryControlProjection(page);
         await page.evaluate(() => document.querySelector('.gallery-more').click()); await requested(response);
@@ -499,13 +499,31 @@ try {
             assert(people.options.some(option => option[0] === 'person-new'));
             assert(!people.options.some(option => option[0] === 'person-299'));
           }
-          if (mode === 'photo' && repeat === 2) {
-            const sort = projection.find(select => select.key === 'sort');
-            assert.equal(sort.disabled, true); assert.equal(sort.value, 'updated'); assert.deepEqual(sort.options.map(option => option.slice(0, 2)), [['updated', '相关性排序']]);
+        }
+        if (mode === "photo") {
+          assert.equal(await page.locator('.gallery-photo-category-strip button').count(), photoSearch ? 0 : 1001, 'category controls belong to the browse surface');
+          assert.equal(await page.locator('.gallery-controls .gallery-photo-sort, .gallery-controls select[data-gallery-control="sort"]').count(), 0);
+          assert.equal(await page.locator('.gallery-results-header .gallery-photo-sort').count(), photoSearch ? 0 : 1);
+          if (photoSearch) assert.equal(new URL(response.url, base).searchParams.get('sort'), 'relevance');
+          if (repeat === 0) {
+            const target = page.locator('.gallery-results-header .gallery-photo-sort-button[data-photo-sort="title"]');
+            const start = requests.length;
+            await target.focus(); await page.keyboard.press('Enter');
+            await page.waitForFunction(() => fixture.state.gallery.sort === 'title' && !fixture.page.isImageLibraryListLoading());
+            assert.equal(await target.getAttribute('aria-pressed'), 'true');
+            assert.equal(await target.locator('.gallery-photo-sort-direction').textContent(), '↑');
+            assert.equal(await target.evaluate(button => document.activeElement === button), true);
+            await page.keyboard.press('Enter');
+            await page.waitForFunction(() => fixture.state.gallery.sortDirection === 'desc' && !fixture.page.isImageLibraryListLoading());
+            assert.equal(await target.locator('.gallery-photo-sort-direction').textContent(), '↓');
+            assert.deepEqual(requests.slice(start).filter(key => key.startsWith('/api/image-library/items')).map(key => {
+              const params = new URL(key, base).searchParams;
+              return [params.get('sort'), params.get('direction')];
+            }), [['title', null], ['title', 'desc']]);
+            assert.equal(await page.evaluate(() => fixture.controlRouteSnapshot().gallerySortDirection), 'desc');
           }
         }
-        if (mode === "photo") assert.equal(await page.locator('.gallery-photo-category-strip button').count(), 1001, "all photo categories must remain available once");
-        if (repeat === 0 && mode !== 'manga') {
+        if (repeat === 0 && mode !== 'manga' && mode !== 'photo') {
           const target = page.locator(`select[data-gallery-control="${focusKey}"]`);
           const expected = await target.evaluate(select => select.options[select.selectedIndex + 1].value);
           const field = focusKey === 'people' ? 'person' : focusKey;
@@ -525,6 +543,9 @@ try {
           assert.equal(routeEvidence.parsed, expected, 'native filtering must serialize the real merged callback route through the actual router');
         }
         if (repeat === 2 && mode === "photo") {
+          await page.locator('.gallery-search').press('Escape');
+          await page.waitForFunction(() => !fixture.state.gallery.query && !fixture.page.isImageLibraryListLoading());
+          assert.equal(new URL(page.url()).pathname, '/photo/collections');
           await page.locator('.gallery-category-menu summary').click();
           await page.locator('.gallery-category-menu-panel button').last().click();
           await page.waitForFunction(() => fixture.state.gallery.category === 'category-new' && !fixture.page.isImageLibraryListLoading());
@@ -838,9 +859,17 @@ try {
         assert.equal(await page.locator('select.gallery-select option[value="late"]').textContent(), "late");
         assert.match(await page.locator('select.gallery-select option[value="late"]').getAttribute("title"), /777/);
       }
-      await page.evaluate(() => { __search.value = 'current'; const field = __search.closest('.gallery-search-field, .gallery-media-search-field'); const button = field.querySelector('button'); if(button)button.click();else __search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})); });
+      await page.evaluate(() => { __search.value = 'current'; const field = __search.closest('.gallery-search-field, .gallery-media-search-field'); const button = field.querySelector('.gallery-media-search-submit'); if(button)button.click();else __search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})); });
       await page.waitForFunction(() => fixture.state.gallery.query === 'current' && !fixture.page.isImageLibraryListLoading());
-      if (mode === "media") { await page.locator('select.gallery-select').first().selectOption('all'); await page.waitForFunction(() => fixture.state.gallery.category === 'all'); }
+      if (mode === "media") {
+        assert.equal(await page.locator('.gallery-controls select').count(), 0);
+        assert.equal(await page.evaluate(() => __select.isConnected), false);
+        const start = requests.length;
+        await page.evaluate(() => { __select.value = 'late'; __select.dispatchEvent(new Event('change', { bubbles: true })); });
+        await frames(page);
+        assert.deepEqual(await page.evaluate(() => [fixture.state.gallery.query, fixture.state.gallery.category]), ['current', 'all']);
+        assert.equal(requests.slice(start).filter(key => key.startsWith('/api/')).length, 0, 'retired browse selects cannot change media search');
+      }
     } finally { summary.release(); await page.close(); }
   });
   await run("summary retained select listeners use the updated control value", async () => {
@@ -934,14 +963,19 @@ try {
       } finally { response.release(); await page.close(); }
     });
     await run(`search focus ${mode}: new control intent survives old submit callbacks`, async () => {
-      const page = await newPage({ mode }), result = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("q") === "FocusTarget", body(0, 0, mode, { total: 0 }));
+      const page = await newPage({ mode, controlRoutes: true }), result = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("q") === "FocusTarget", body(0, 0, mode, { total: 0 }));
       try {
         const search = page.locator(".gallery-search");
         await search.fill("FocusTarget"); await search.press("Enter"); await requested(result);
-        await page.locator("select.gallery-select").first().focus();
+        const path = new URL(page.url());
+        assert.equal(path.pathname, `/${mode}/search`);
+        assert.deepEqual([...path.searchParams], [['q', 'FocusTarget']]);
+        assert.equal(await page.locator('.gallery-controls select, .gallery-photo-category-strip, .gallery-photo-view-switch, .gallery-media-kind-switch').count(), 0);
+        const navigation = page.locator('.gallery-browse-nav a').first();
+        await navigation.focus();
         await page.waitForTimeout(240); await frames(page);
-        assert.equal(await page.evaluate(() => document.activeElement.matches("select.gallery-select")), true,
-          "submitted search must not steal focus from a subsequently selected filter");
+        assert.equal(await navigation.evaluate(link => document.activeElement === link), true,
+          "submitted search must not steal focus from the navigation link");
         result.release(); await settled(page, result);
         assert.equal(await page.evaluate(() => fixture.state.gallery.query), "FocusTarget");
         assert.equal(await page.evaluate(() => document.activeElement.matches(".gallery-search")), false, "late result fallback must not focus the search without search intent");
@@ -1245,18 +1279,36 @@ async function verifyPhotoCategoryControls(page, repeat, facets, gates) {
   assertPhotoCategoryRetention(await readPhotoCategoryProbe(page), missingSelected, 'selected-last');
   await page.evaluate(() => __categoryLive.observer.disconnect());
 
-  // A results-only search keeps these controls live. Their click must remain
-  // valid even though summary/list registration generations have changed.
+  // Search retires the browse controls. Their captured handlers must stay
+  // inert, including while the new request is still pending.
   await page.evaluate(() => { window.__liveCategoryButton = __categoryLive.target; });
   const searchRead = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('q') === 'category-search', body(80, 0, 'photo', { facets: { people: [] } })); gates.push(searchRead);
   await page.locator('.gallery-search').fill('category-search'); await page.locator('.gallery-search').press('Enter'); await requested(searchRead);
-  assert.equal(await page.evaluate(() => __liveCategoryButton.isConnected), true, 'results-only search must preserve the live category control owner while its first page is pending');
+  assert.equal(await page.evaluate(() => __liveCategoryButton.isConnected), false);
+  assert.equal(await page.locator('.gallery-photo-category-strip, .gallery-photo-view-switch').count(), 0);
+  assert.equal(new URL(page.url()).pathname, '/photo/search');
+  assert.equal(new URL(searchRead.url, base).searchParams.has('category'), false);
+  const queryStart = requests.length, searchRoute = await page.evaluate(() => fixture.controlRouteSnapshot());
+  await page.evaluate(() => {
+    __liveCategoryButton.click();
+    __categoryLive.menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await frames(page);
+  assert.deepEqual(await page.evaluate(() => fixture.controlRouteSnapshot()), searchRoute);
+  assert.deepEqual(await page.evaluate(() => [fixture.state.gallery.query, fixture.state.gallery.category]), ['category-search', 'all']);
+  assert.equal(await page.locator('.gallery-search').evaluate(input => input === document.activeElement), true);
+  assert.equal(requests.slice(queryStart).filter(key => key.startsWith('/api/')).length, 0);
+
+  await page.locator('.gallery-search').press('Escape');
+  await page.waitForFunction(() => !fixture.state.gallery.query && !fixture.page.isImageLibraryListLoading());
+  await page.locator('.gallery-category-menu summary').click();
+  const categoryButton = page.locator('.gallery-category-menu-panel button').filter({ hasText: 'duplicate' }).first();
   const requestStart = requests.length, routeStart = await page.evaluate(() => fixture.controlRoutes.length);
-  await page.evaluate(() => __liveCategoryButton.focus()); await page.keyboard.press('Enter');
+  await categoryButton.focus(); await page.keyboard.press('Enter');
   await page.waitForFunction(() => fixture.state.gallery.category === 'duplicate' && !fixture.page.isImageLibraryListLoading());
-  assert(requests.slice(requestStart).some(key => { const url = new URL(key, base); return url.pathname === '/api/image-library/items' && url.searchParams.get('category') === 'duplicate' && url.searchParams.get('q') === 'category-search' && url.searchParams.get('photoView') === 'collections'; }), 'native category Enter after search must request the selected category in the actual current query');
+  assert(requests.slice(requestStart).some(key => { const url = new URL(key, base); return url.pathname === '/api/image-library/items' && url.searchParams.get('category') === 'duplicate' && !url.searchParams.has('q') && url.searchParams.get('photoView') === 'collections'; }), 'native category Enter on the browse surface requests only the selected category');
   const route = await page.evaluate(start => ({ calls: fixture.controlRoutes.slice(start), current: fixture.controlRouteSnapshot(), gallery: { photoView: fixture.state.gallery.photoView, subCategory: fixture.state.gallery.subCategory, person: fixture.state.gallery.person, seriesKey: fixture.state.gallery.seriesKey, photoDate: fixture.state.gallery.photoDate } }), routeStart);
-  assert(route.calls.some(call => call.kind === 'push') && route.current.galleryCategory === 'duplicate' && route.current.galleryQuery === 'category-search', 'native category Enter must serialize the actual current query and selected category through the real router');
+  assert(route.calls.some(call => call.kind === 'push') && route.current.galleryCategory === 'duplicate' && !route.current.galleryQuery, 'native category Enter serializes the selected category through the real router');
   assert.deepEqual(route.gallery, { photoView: 'collections', subCategory: 'all', person: 'all', seriesKey: '', photoDate: 'all' });
   const accepted = await page.evaluate(() => {
     const input = document.querySelector('.gallery-search'); input.focus(); input.value = 'newer category draft'; input.setSelectionRange(2, 8);
@@ -1268,9 +1320,10 @@ async function verifyPhotoCategoryControls(page, repeat, facets, gates) {
   assert.deepEqual(await page.evaluate(() => ({ category: fixture.state.gallery.category, query: fixture.state.gallery.query, photoView: fixture.state.gallery.photoView, key: fixture.state.gallery.list.key, routes: fixture.controlRoutes.length, route: fixture.controlRouteSnapshot() })), accepted, 'late first-search success must preserve the newer category result and actual route');
   assert.equal(await page.evaluate(() => { const saved = __acceptedCategory, input = saved.input; return saved.content === document.querySelector('.gallery-content') && saved.ancestors.every(({ node, parent }) => node.isConnected && node.parentElement === parent) && document.activeElement === input && input.value === 'newer category draft' && input.selectionStart === 2 && input.selectionEnd === 8; }), true, 'late first-search success must preserve the newer category DOM, input selection and focus');
 
-  assert.equal(await page.evaluate(() => { window.__oldCategoryButton = document.querySelector('.gallery-photo-category-strip > button'); window.__oldCategoryMenu = document.querySelector('.gallery-category-menu'); return Boolean(__oldCategoryButton?.isConnected && __oldCategoryMenu?.isConnected); }), true, 'same-mode retirement must capture a real connected category menu and button before navigation');
-  await page.locator('.gallery-photo-view-switch button').last().click();
-  await page.waitForFunction(() => !fixture.page.isImageLibraryListLoading()); await frames(page);
+  assert.equal(await page.evaluate(() => { window.__oldCategoryButton = document.querySelector('.gallery-photo-category-strip button[aria-pressed="true"]'); window.__oldCategoryMenu = document.querySelector('.gallery-category-menu'); return Boolean(__oldCategoryButton?.isConnected && __oldCategoryMenu?.isConnected); }), true, 'same-mode retirement must capture a real connected category menu and button before navigation');
+  await page.getByRole('button', { name: /^全部大类(?:，|$)/ }).click();
+  await page.waitForFunction(() => fixture.state.gallery.category === 'all' && !fixture.page.isImageLibraryListLoading()); await frames(page);
+  assert.equal(await page.evaluate(() => __oldCategoryButton.isConnected), false);
   await page.locator('.gallery-search').focus();
   const before = await page.evaluate(() => ({ gallery: structuredClone({ category: fixture.state.gallery.category, mode: fixture.state.gallery.mode, query: fixture.state.gallery.query, photoView: fixture.state.gallery.photoView }), routes: fixture.controlRoutes.length })), reads = requests.length;
   await page.evaluate(() => { __oldCategoryButton.click(); __oldCategoryMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }); await frames(page);
@@ -1294,10 +1347,12 @@ async function beginGalleryControlProbe(page, { focusKey, compose = false }) {
       search.dispatchEvent(new InputEvent('input', { data: '候选', inputType: 'insertCompositionText', isComposing: true, bubbles: true }));
     }
     const selects = [...controls.querySelectorAll('select')];
-    const target = compose ? search : selects.find(select => select.dataset.galleryControl === focusKey && !select.disabled) || search;
+    const requested = focusKey === 'photo-sort' ? document.querySelector('.gallery-results-header .gallery-photo-sort-button[aria-pressed="true"]:not(:disabled)')
+      : selects.find(select => select.dataset.galleryControl === focusKey && !select.disabled);
+    const target = compose ? search : requested || search;
     target.focus({ preventScroll: true });
     const ancestors = [];
-    for (const control of [search, ...selects]) for (let node = control; node; node = node.parentElement) ancestors.push({ node, parent: node.parentElement });
+    for (const control of new Set([search, ...selects, target])) for (let node = control; node; node = node.parentElement) ancestors.push({ node, parent: node.parentElement });
     const record = window.__controlLive = { controls, search, target, ancestors, selects: selects.map(node => ({ node, options: [...node.options] })), blur: 0, detached: 0, optionRemoved: 0 };
     target.addEventListener('blur', () => record.blur++);
     record.observer = new MutationObserver(records => { for (const mutation of records) for (const removed of mutation.removedNodes) {
@@ -1477,7 +1532,7 @@ const formatter=new Intl.NumberFormat('zh-CN');${formatters}
 const noop=()=>{},state={activeView:'gallery',accessMode:'local',uiConfig:{},gallery:{mode:${JSON.stringify(mode)},photoView:'albums',category:'all',subCategory:'all',person:'all',photoDate:'all',query:'',sort:'updated',mediaKind:'all',seriesKey:'',visibleLimit:${count},fitWidth:true,album:null,comic:null,media:null,data:{totals:{photoSets:5000,manga:5000,movie:5000},facets:{},scannedAt:'initial'},status:''}},els={workGrid:document.querySelector('#workGrid'),statsRow:document.querySelector('#statsRow')};
 const api=async(url,options={})=>{const res=await fetch(url,options),data=await res.json();if(!res.ok)throw new Error(data.error||'controlled synthetic error');return data;};let page;
 const shared={api,state,els,formatNumber,formatBytes,formatDateTime,cancelScheduledWorkRendering:noop,disconnectPeopleIndexAutoload:noop,resetProgressiveCoverLoading:noop,writeStoredFlag:noop,includesText:(text,q)=>String(text).includes(q),openAdminScript:noop};
-${controlRoutes ? `const controlRoutes=[];const syncControlRoute=(kind,overrides)=>{const g=state.gallery;const defaults={view:'gallery',galleryMode:g.mode,galleryPhotoView:g.photoView,galleryPhotoCollection:g.photoCollection||'',galleryAlbumId:g.album?.id||'',galleryComicId:g.comic?.id||'',galleryChapterIndex:String(g.chapter?.index||''),galleryMediaId:g.media?.id||'',galleryQuery:g.query,galleryMediaKind:g.mediaKind,galleryCategory:g.category,gallerySubCategory:g.subCategory,galleryPerson:g.person,gallerySeriesKey:g.seriesKey,galleryPhotoDate:g.photoDate,gallerySort:g.sort};const route=normalizeRoute({...defaults,...overrides});const url=routeUrl(route);controlRoutes.push({kind,overrides:overrides===undefined?null:structuredClone(overrides),route,url});history[kind==='replace'?'replaceState':'pushState'](null,'',url);};` : ''}
+${controlRoutes ? `const controlRoutes=[];const syncControlRoute=(kind,overrides)=>{const g=state.gallery;const defaults={view:'gallery',galleryMode:g.mode,galleryPhotoView:g.photoView,galleryPhotoCollection:g.photoCollection||'',galleryAlbumId:g.album?.id||'',galleryComicId:g.comic?.id||'',galleryChapterIndex:String(g.chapter?.index||''),galleryMediaId:g.media?.id||'',galleryQuery:g.query,galleryMediaKind:g.mediaKind,galleryCategory:g.category,gallerySubCategory:g.subCategory,galleryPerson:g.person,gallerySeriesKey:g.seriesKey,galleryPhotoDate:g.photoDate,gallerySort:g.sort,gallerySortDirection:g.sortDirection||''};const route=normalizeRoute({...defaults,...overrides});const url=routeUrl(route);controlRoutes.push({kind,overrides:overrides===undefined?null:structuredClone(overrides),route,url});history[kind==='replace'?'replaceState':'pushState'](null,'',url);};` : ''}
 const renderer=createGalleryRenderer({...shared,getGalleryPage:()=>page});page=createGalleryPage({...shared,clearPersonSelection:noop,hidePersonProfile:noop,setMainHeader:noop,normalizeUiConfig:value=>value,galleryModeLabel:renderer.modeLabel,renderGalleryStats:renderer.renderStats,renderGalleryView:renderer.renderView,pushRoute:${controlRoutes ? "overrides=>syncControlRoute('push',overrides)" : 'noop'},replaceRoute:${controlRoutes ? "overrides=>syncControlRoute('replace',overrides)" : 'noop'},syncRouteAfterNavigation:noop});
 const seed=(data,options={})=>{Object.assign(state.gallery,options);state.gallery.list={...data,key:page.imageLibraryListKey(),rawLoaded:data.rawLoaded??data.items.length};renderer.renderStats();renderer.renderView();};
 window.fixture={state,page,renderer,seed${controlRoutes ? ',controlRoutes,controlRouteSnapshot:()=>routeFromUrl()' : ''}};seed(${JSON.stringify(seedData)},${JSON.stringify(url.searchParams.has('oracle') ? { sort: seedData.sort || 'updated', person: 'all' } : {})});${url.searchParams.has('empty') ? 'state.gallery.list=null;renderer.renderView();' : ''}

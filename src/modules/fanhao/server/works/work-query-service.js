@@ -1,7 +1,7 @@
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
 import { createWorkSorter } from "./work-sorter.js";
 import { createWeightedCacheBudget, normalizeWorkSortMode } from "./work-cache-budget.js";
-import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
+import { deriveWorkTraits, isWorkTraitFilter as isTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
@@ -171,8 +171,8 @@ export function createWorkQueryService({
     return result;
   }
 
-  function workMatchesFilter(work, filter) {
-    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work), filter) === true;
+  function workMatchesFilter(work, filter, stamp) {
+    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work, stamp), filter) === true;
     switch (filter) {
       case "localOnly":
         return !work.missingLocal;
@@ -187,9 +187,9 @@ export function createWorkQueryService({
       case "info":
         return Boolean(workInfoFacetRow(work.id)) || Number(work.infoCount || 0) > 0;
       case "rated":
-        return workListRating(work) !== null;
+        return workListRating(work, stamp) !== null;
       case "highRating": {
-        const rating = workListRating(work);
+        const rating = workListRating(work, stamp);
         return rating !== null && rating >= 4;
       }
       case "vr":
@@ -214,14 +214,15 @@ export function createWorkQueryService({
   function sortedWorkList(works, sort, options) {
     ensureDerivedCacheStamp();
     sort = normalizeWorkSortMode(sort);
-    const stamp = sort === "progress" ? `${currentStamp()}:${userStateStamp()}` : currentStamp();
+    const workStamp = currentStamp();
+    const stamp = sort === "progress" ? `${workStamp}:${userStateStamp()}` : workStamp;
     const cacheKey = `${sort}:${options.lightweightInfo ? "light" : "full"}`;
     const cachedBySort = sortedWorksCache.get(works);
     const cached = cachedBySort ? derivedBudget.read(cachedBySort, cacheKey) : null;
     if (cached?.stamp === stamp) return cached.works;
 
     const sortStarted = recordPerformanceSpan ? performance.now() : 0;
-    const list = sharedWorkSorter(works, sort, options);
+    const list = sharedWorkSorter(works, sort, { ...options, workStamp });
     const nextCachedBySort = cachedBySort || new Map();
     if (workInfoReadCacheable() && workSearchReadCacheable()) {
       derivedBudget.write(nextCachedBySort, cacheKey, { stamp, works: list }, list.length, SORTED_SOURCE_CACHE_LIMIT);
@@ -244,12 +245,12 @@ export function createWorkQueryService({
     return null;
   }
 
-  function workListRating(work) {
-    return optionalNumber(compactFacetRow(work)?.rating, work.infoSummary?.rating);
+  function workListRating(work, stamp) {
+    return optionalNumber(compactFacetRow(work, stamp)?.rating, work.infoSummary?.rating);
   }
 
   function workSortMetadata(work, options = {}) {
-    const infoRow = options.lightweightInfo ? null : compactFacetRow(work);
+    const infoRow = options.lightweightInfo ? null : compactFacetRow(work, options.workStamp);
     return {
       releaseDate: String(infoRow?.release_date || work.infoSummary?.releaseDate || ""),
       rating: optionalNumber(infoRow?.rating, work.infoSummary?.rating),
@@ -259,8 +260,8 @@ export function createWorkQueryService({
     };
   }
 
-  function lightweightWorkMatchesFilter(work, filter) {
-    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work), filter) === true;
+  function lightweightWorkMatchesFilter(work, filter, stamp) {
+    if (isTraitFilter(filter)) return matchesWorkTraitFilter(traitsForWork(work, stamp), filter) === true;
     switch (filter) {
       case "localOnly": return !work.missingLocal;
       case "missingLocal": return Boolean(work.missingLocal);
@@ -304,7 +305,7 @@ export function createWorkQueryService({
 
     for (const work of works) {
       const missingLocal = Boolean(work.missingLocal);
-      const infoRow = compactFacetRow(work);
+      const infoRow = compactFacetRow(work, stamp);
       const rating = optionalNumber(infoRow?.rating, work.infoSummary?.rating);
       if (Number(work.playableCount || 0) > 0) facets.playable += 1;
       if (infoRow || Number(work.infoCount || 0) > 0) facets.info += 1;
@@ -475,9 +476,11 @@ export function createWorkQueryService({
     if (!matchedWorks) {
       const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
       const filters = requestedFilters(filter);
-      matchedWorks = filters.length
-        ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
-        : visibleWorks;
+      matchedWorks = visibleWorks;
+      if (filters.length) {
+        const stamp = currentStamp();
+        matchedWorks = visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item, stamp)));
+      }
       cacheable = Boolean(filterContext) && filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item));
     }
     const works = sortWorkList(matchedWorks, sort, options);
@@ -593,7 +596,7 @@ export function createWorkQueryService({
       cacheable = scoped.cacheable !== false;
       if (cacheable && workInfoReadCacheable()) writeFilterCache(listSourceCache, scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filters.length
-        ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item))))
+        ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item, stamp))))
         : scopedWorks;
       if (cacheable && workInfoReadCacheable() && filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item))) {
         writeFilterCache(listSourceCache, cacheKey, { stamp: filterStamp, works: filtered });
@@ -612,9 +615,10 @@ export function createWorkQueryService({
       return { works: loaded.sources.get("western") || [], cacheable: loaded.cacheable };
     }
     const loaded = enrichedWorksResult();
+    const matchesScope = workMatcher(scope);
+    const matchesWestern = workMatcher("western");
     return { works: loaded.works.filter((work) =>
-      peopleScopeService.workMatches(work, scope)
-      && (category === "all" || workCategory(work) === category)), cacheable: loaded.cacheable };
+      matchesScope(work) && (category === "all" || workCategory(work, matchesWestern) === category)), cacheable: loaded.cacheable };
   }
 
   function categorySources(stamp = currentStamp()) {
@@ -629,10 +633,12 @@ export function createWorkQueryService({
     if (categorySourcesCache?.stamp === stamp) return { sources: categorySourcesCache.sources, cacheable: true };
     const sources = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, []]));
     const loaded = enrichedWorksResult();
+    const matchesMain = workMatcher("main");
+    const matchesWestern = workMatcher("western");
     measure("category", () => {
       for (const work of loaded.works) {
-        if (!peopleScopeService.workMatches(work, "main")) continue;
-        const category = workCategory(work);
+        if (!matchesMain(work)) continue;
+        const category = workCategory(work, matchesWestern);
         sources.get(category)?.push(work);
       }
     });
@@ -640,8 +646,12 @@ export function createWorkQueryService({
     return { sources, cacheable: loaded.cacheable };
   }
 
-  function workCategory(work) {
-    return classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, "western") });
+  function workMatcher(scope) {
+    return peopleScopeService.workMatcher?.(scope) || ((work) => peopleScopeService.workMatches(work, scope));
+  }
+
+  function workCategory(work, matchesWestern) {
+    return classifyWorkCategory(work, { isWestern: matchesWestern(work) });
   }
 
   function categorySummaryItems(stamp = currentStamp()) {
@@ -805,7 +815,8 @@ export function createWorkQueryService({
 
   function loadSearchSource(rawQuery, timings, mark) {
     ensureDerivedCacheStamp();
-    const stamp = `${currentStamp()}:${peoplePayloadStamp()}`;
+    const workStamp = currentStamp();
+    const stamp = `${workStamp}:${peoplePayloadStamp()}`;
     mark("sourceStamp");
     if (searchSourceCacheStamp !== stamp) {
       searchSourceCacheStamp = stamp;
@@ -817,6 +828,22 @@ export function createWorkQueryService({
       const cached = derivedBudget.read(searchSourceCache, cacheKey);
       timings.sourceCacheHit = true;
       return cached;
+    }
+
+    const classification = mediaClassificationSearch(rawQuery);
+    if (classification) {
+      const nextClassification = mediaClassificationSearch(classification.query, { nested: true });
+      const base = classification.query && !nextClassification
+        ? loadSearchSource(classification.query, timings, mark) : null;
+      const matchesMain = workMatcher("main");
+      const works = (base?.works || allWorks()).filter((work) => !work.missingLocal
+        && matchesMain(work)
+        && matchesWorkTraitFilter(traitsForWork(work, workStamp), classification.key)
+        && (!nextClassification || matchesWorkTraitFilter(traitsForWork(work, workStamp), nextClassification.key)));
+      const source = makeSearchSource(works, [], base?.cacheable !== false);
+      source.cacheable = source.cacheable && workInfoReadCacheable() && workSearchReadCacheable();
+      if (source.cacheable) derivedBudget.write(searchSourceCache, cacheKey, source, works.length, 48);
+      return source;
     }
 
     const query = rawQuery.toLowerCase();
@@ -902,33 +929,35 @@ export function createWorkQueryService({
       ...(fastMissingMatches || []),
       ...rankingMissingMatches,
       ...actorMissingMatches
-    ]).filter((work) => peopleScopeService.workMatches(work, "main"));
+    ]).filter(workMatcher("main"));
     mark("dedupe");
-    const source = {
-      cacheable: rankingResult.cacheable !== false && actorResult.cacheable !== false
-        && actorRowResults.every((result) => result.cacheable !== false),
-      categoryWorks: new Map(),
-      facetsByCategory: new Map(),
-      facetsStamp: userStateStamp(),
-      filteredByMode: new Map(),
-      filteredByModeStamp: userStateStamp(),
-      // Search renders compact person chips (name + work count) and opens the
-      // full person endpoint on selection. Do not synchronously scan every
-      // matched person's works just to synthesize an unused fallback avatar.
-      people: peopleSearch.people.map((person) => publicPerson(person, { skipFallbackAvatar: true })),
-      works: matchedWorks
-    };
+    // Person chips open the full person endpoint on selection.
+    const source = makeSearchSource(matchedWorks,
+      peopleSearch.people.map((person) => publicPerson(person, { skipFallbackAvatar: true })),
+      rankingResult.cacheable !== false && actorResult.cacheable !== false
+        && actorRowResults.every((result) => result.cacheable !== false));
     mark("publicPeople");
     source.cacheable = source.cacheable !== false && workInfoReadCacheable() && workSearchReadCacheable();
     if (source.cacheable) derivedBudget.write(searchSourceCache, cacheKey, source, source.works.length, 48);
     return source;
   }
 
+  function makeSearchSource(works, people, cacheable) {
+    const stamp = userStateStamp();
+    return {
+      works, people, cacheable,
+      categoryWorks: new Map(),
+      facetsByCategory: new Map(), facetsStamp: stamp,
+      filteredByMode: new Map(), filteredByModeStamp: stamp
+    };
+  }
+
   function cachedSearchCategory(source, category) {
     if (category === "all") return source.works;
     const cached = derivedBudget.read(source.categoryWorks, category);
     if (cached) return cached;
-    const filtered = source.works.filter((work) => workCategory(work) === category);
+    const matchesWestern = workMatcher("western");
+    const filtered = source.works.filter((work) => workCategory(work, matchesWestern) === category);
     return derivedBudget.write(source.categoryWorks, category, filtered, filtered.length);
   }
 
@@ -948,7 +977,8 @@ export function createWorkQueryService({
     const filters = requestedFilters(filter);
     if (!filters.length) return categoryWorks;
     const filterKey = `${category}:${filters.join(",")}`;
-    const matchesFilters = (work) => filters.every((item) => lightweightWorkMatchesFilter(work, item));
+    const workStamp = currentStamp();
+    const matchesFilters = (work) => filters.every((item) => lightweightWorkMatchesFilter(work, item, workStamp));
     if (!filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item))) return categoryWorks.filter(matchesFilters);
     const stamp = userStateStamp();
     if (source.filteredByModeStamp !== stamp) {
@@ -984,11 +1014,10 @@ export function createWorkQueryService({
     searchSourceCacheStamp = "";
   }
 
-  function traitsForWork(work) {
-    const stamp = currentStamp();
+  function traitsForWork(work, stamp = currentStamp()) {
     const cached = traitCache.get(work);
     if (cached?.stamp === stamp) return cached.traits;
-    const traits = deriveWorkTraits(work, compactFacetRow(work) || {});
+    const traits = deriveWorkTraits(work, compactFacetRow(work, stamp) || {});
     // Compact prefix DTOs carry complete labels before their detail hydration.
     // Other pending providers must not freeze an incomplete label snapshot.
     if ((!work.missingCodeSearchPending || work.missingCodeSearchTraitsReady)
@@ -1002,14 +1031,13 @@ export function createWorkQueryService({
     const stamp = currentStamp();
     const cached = traitFacetCache.get(works);
     if (cached?.stamp === stamp) return cached.facets;
-    const facets = summarizeWorkTraits(works, traitsForWork);
+    const facets = summarizeWorkTraits(works, (work) => traitsForWork(work, stamp));
     if (workInfoReadCacheable() && workSearchReadCacheable()
       && !works.some((work) => work.missingCodeSearchPending && !work.missingCodeSearchTraitsReady)) traitFacetCache.set(works, { stamp, facets });
     return facets;
   }
 
-  function compactFacetRow(work) {
-    const stamp = currentStamp();
+  function compactFacetRow(work, stamp) {
     const cached = compactFacetCache.get(work);
     if (cached?.stamp === stamp) return cached.row;
     const row = workInfoFacetRow(work.id);
@@ -1050,8 +1078,4 @@ function requestedFilters(value) {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item && item !== "all"))].sort();
-}
-
-function isTraitFilter(value) {
-  return String(value).startsWith("tag:") || ["uncensored", "uncensoredAi", "subtitled", "quality4k"].includes(value);
 }

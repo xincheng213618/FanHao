@@ -126,23 +126,33 @@ async function verifySmartDetailCounts() {
     "    const total = database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id ${where}`).get(...condition.args)?.count || 0;")
     .replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, storeUrl).href)}`);
   const { createMusicStore: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(previousSource).toString("base64")}`);
+  const sparseGate = "const sparseState = qualifyState && canDriveSmartPlaylistFromState(database, mix, condition);";
+  assert.equal(source.split(sparseGate).length, 2);
+  const cataloguePageSource = source.replace(sparseGate, "const sparseState = false;")
+    .replace(/from "(\.\/[^"\n]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, storeUrl).href)}`);
+  const { createMusicStore: cataloguePageFactory } = await import(`data:text/javascript;base64,${Buffer.from(cataloguePageSource).toString("base64")}`);
   const factory = process.argv.includes("--legacy-smart-detail-count") ? previousFactory : createMusicStore;
   const originalPrepare = DatabaseSync.prototype.prepare, originalNow = Date.now;
   const connections = [], privateStores = [];
-  let clock = 1800000000000, measuring = null;
+  let clock = 1800000000000, measuring = null, afterSmartCount = null;
   Date.now = () => clock;
   DatabaseSync.prototype.prepare = function (sql, ...args) {
     if (!connections.includes(this)) {
       connections.push(this);
       this.function("fixture_active_track_visit", value => { if (measuring?.db === this) measuring.visits++; return value; });
+      this.function("fixture_smart_page_visit", value => { if (measuring?.db === this) measuring.pageVisits++; return value; });
     }
     const text = sql.replace(/\s+/gu, " ").trim();
     const count = /^SELECT COUNT\(\*\) AS count FROM music_(tracks|track_state)/u.test(text) && text.includes("WHERE t.status = 'ok' AND");
     const page = (text.startsWith("SELECT t.*,") || text.startsWith(`SELECT ${TRACK_LIST_COLUMNS},`)) && text.includes("WHERE t.status = 'ok' AND");
+    const originalSql = sql;
     if (measuring?.db === this && count) {
       // Retain the original indexed status predicate. The identity callback
       // observes SQLite candidate visits without replacing that index filter.
       sql = sql.replace("t.status = 'ok'", "t.status = 'ok' AND fixture_active_track_visit(t.status) = 'ok'");
+    }
+    if (measuring?.db === this && measuring.observePage && page) {
+      sql = sql.replace("t.status = 'ok'", "t.status = 'ok' AND fixture_smart_page_visit(t.status) = 'ok'");
     }
     const statement = originalPrepare.call(this, sql, ...args);
     if (!measuring || (!count && !page)) return statement;
@@ -153,8 +163,17 @@ async function verifySmartDetailCounts() {
       return (...parameters) => {
         if (measuring?.db === connection && ["get", "all"].includes(key)) {
           measuring.executions.push({ count, parameters });
+          if (measuring.observePage && page && key === "all") {
+            const plan = query => originalPrepare.call(connection, "EXPLAIN QUERY PLAN " + query).all(...parameters).map(row => row.detail);
+            measuring.pagePlan = plan(originalSql);
+            assert.deepEqual(plan(sql), measuring.pagePlan, "the page visit probe preserves SQLite's native plan");
+          }
         }
-        return value.apply(target, parameters);
+        const result = value.apply(target, parameters);
+        if (afterSmartCount?.db === connection && count && key === "get") {
+          const pending = afterSmartCount; afterSmartCount = null; pending.run();
+        }
+        return result;
       };
     } });
   };
@@ -180,8 +199,8 @@ async function verifySmartDetailCounts() {
     MUSIC_FACET_CACHE.delete(db);
     return { store: target, db };
   }
-  function measure(target, mix, url) {
-    measuring = { db: target.db, visits: 0, executions: [] };
+  function measure(target, mix, url, observePage = false) {
+    measuring = { db: target.db, visits: 0, executions: [], observePage, pageVisits: 0 };
     try { const result = target.store.smartPlaylistDetail(mix, url); return { result, ...measuring }; }
     finally { measuring = null; }
   }
@@ -235,10 +254,104 @@ async function verifySmartDetailCounts() {
     }
     metrics.smartDetailCounts.responseOracles = responseOracles;
     scenarios++;
+    await verifySparsePages();
+    publish([1, 2, 3]);
+    database.exec(`DELETE FROM music_track_state;
+      INSERT INTO music_track_state(track_id,favorite,updated_at) VALUES('track-1',1,'one'),('track-2',1,'two'),('track-3',1,'three');`);
+    store.summary();
+    const reader = { store, db: connections.at(-1) };
+    const url = new URL("http://fixture?limit=100");
+    const expected = store.smartPlaylistDetail("favorites", url);
+    afterSmartCount = { db: reader.db, run: () => database.exec("UPDATE music_track_state SET favorite=0 WHERE track_id='track-1'") };
+    assert.deepEqual(measure(reader, "favorites", url).result, expected, "count, eligibility, and rows share one WAL snapshot");
+    assert.equal(afterSmartCount, null);
+    assert.equal(store.smartPlaylistDetail("favorites", url).total, 2, "the following request sees the external commit");
+    assert.equal(reader.db.isTransaction, false);
+    metrics.smartDetailPageSnapshot = true;
+    scenarios++;
   } finally {
-    measuring = null;
+    measuring = null; afterSmartCount = null;
     try { for (const target of privateStores) await target.stop(); }
     finally { DatabaseSync.prototype.prepare = originalPrepare; Date.now = originalNow; }
+  }
+
+  async function verifySparsePages() {
+    const current = open(createMusicStore), previous = open(cataloguePageFactory);
+    for (const { db } of [current, previous]) {
+      db.exec(`WITH RECURSIVE n(x) AS (VALUES(40000) UNION ALL SELECT x+1 FROM n WHERE x<99999)
+        INSERT INTO music_tracks(id,artist_id,album_id,title,album_title,track_no,source_root,source_path,relative_path,file_name,ext,duration_ms,status,updated_at)
+        SELECT 't'||x,'artist','album','Synthetic title '||x,'Album',x,'/synthetic','/synthetic/'||x,x||'.audio',x||'.audio','.audio',1234,'ok','fixture' FROM n;
+        DELETE FROM music_track_state;`);
+      const insert = db.prepare("INSERT INTO music_track_state(track_id,favorite,rating,play_count,last_played_at,updated_at) VALUES(?,1,5,1,?,?)");
+      for (let index = 1; index <= 40; index++) {
+        const timestamp = `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`;
+        insert.run(`t${index * 997}`, timestamp, timestamp);
+      }
+      insert.run("orphan-sparse", "2026-01-02", "2026-01-02");
+    }
+    clock += 6000;
+    current.store.facets(); previous.store.facets();
+    async function route(owner, mix, params = "limit=24") {
+      const response = {};
+      assert(await routeMusicApi({ method: "GET" }, response, new URL(`http://fixture/api/music/smart-playlists/${mix}?${params}`), {
+        musicStore: owner.store, sendJson: (res, status, data) => Object.assign(res, { status, data })
+      }));
+      return response;
+    }
+    const profiles = [];
+    for (const id of stateMixes) {
+      for (const offset of [0, 5, 100]) {
+        const params = `limit=24&offset=${offset}`;
+        assert.equal(JSON.stringify(await route(current, id, params)), JSON.stringify(await route(previous, id, params)), "full sparse page wire response and boundaries");
+      }
+      const before = measure(previous, id, new URL("http://fixture?limit=24"), true);
+      const after = measure(current, id, new URL("http://fixture?limit=24"), true);
+      assert(before.pageVisits >= 98000, "former page drives from the catalogue");
+      assert(after.pageVisits <= 41, "sparse page only visits indexed state candidates");
+      assert(after.pagePlan.some(line => /SCAN s\b/u.test(line)));
+      assert(after.pagePlan.some(line => /SEARCH t USING INDEX sqlite_autoindex_music_tracks_1/u.test(line)));
+      const oldTimes = [], newTimes = [];
+      async function sample(owner, times) {
+        const start = performance.now();
+        const response = await route(owner, id);
+        times.push(performance.now() - start);
+        assert.equal(response.status, 200);
+      }
+      for (let round = 0; round < 7; round++) {
+        if (round % 2) await sample(current, newTimes);
+        await sample(previous, oldTimes);
+        if (!(round % 2)) await sample(current, newTimes);
+      }
+      const median = values => +values.sort((a, b) => a - b)[3].toFixed(3);
+      profiles.push({ id, beforeVisits: before.pageVisits, afterVisits: after.pageVisits,
+        beforeMedianMs: median(oldTimes), afterMedianMs: median(newTimes) });
+    }
+    for (const sql of [
+      "UPDATE music_track_state SET updated_at='tied' WHERE track_id IN ('t997','t1994')",
+      "UPDATE music_track_state SET updated_at=track_id; CREATE TEMP VIEW music_track_state AS SELECT * FROM main.music_track_state",
+      "DROP VIEW temp.music_track_state; INSERT OR REPLACE INTO music_track_state(track_id,favorite,updated_at) SELECT id,1,id FROM music_tracks LIMIT 1025"
+    ]) {
+      for (const { db } of [current, previous]) db.exec(sql);
+      const before = measure(previous, "favorites", new URL("http://fixture?limit=24"), true);
+      const after = measure(current, "favorites", new URL("http://fixture?limit=24"), true);
+      assert.deepEqual(after.result, before.result);
+      assert.deepEqual(after.pagePlan, before.pagePlan, "tie, TEMP and dense states retain the original query plan");
+    }
+    for (const { db } of [current, previous]) {
+      const definition = db.prepare("SELECT sql FROM sqlite_schema WHERE name='music_track_state'").get().sql;
+      assert.match(definition, /updated_at TEXT NOT NULL/u);
+      db.exec(`ALTER TABLE music_track_state RENAME TO old_music_track_state;
+        ${definition.replace("updated_at TEXT NOT NULL", "updated_at TEXT COLLATE NOCASE NOT NULL")};
+        INSERT INTO music_track_state SELECT * FROM old_music_track_state WHERE track_id IN ('t997','t1994');
+        DROP TABLE old_music_track_state;
+        UPDATE music_track_state SET updated_at=CASE track_id WHEN 't997' THEN 'same' ELSE 'SAME' END;`);
+    }
+    const legacyBefore = measure(previous, "favorites", new URL("http://fixture?limit=24"), true);
+    const legacyAfter = measure(current, "favorites", new URL("http://fixture?limit=24"), true);
+    assert.deepEqual(legacyAfter.result, legacyBefore.result);
+    assert.deepEqual(legacyAfter.pagePlan, legacyBefore.pagePlan, "native NOCASE equality also prevents sparse tie reordering");
+    console.log(JSON.stringify({ check: "music-sparse-smart-pages", tracks: 100000, stateRows: 41, profiles, fullRouteOracle: true, fallbackPlans: true }));
+    scenarios++;
   }
 }
 async function verifySmartListCounts() {

@@ -1,6 +1,6 @@
 import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-8af3642624a3";
-import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-8af3642624a3";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-8faf7a80cb7b";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-8faf7a80cb7b";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
 const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;
@@ -11,6 +11,7 @@ export function createShortVideoNativeFeed(context = {}) {
   const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const cancelShortVideoNativeOpen = (...args) => context.cancelShortVideoNativeOpen?.(...args);
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
+  const searchFeedNextOffset = (...args) => context.searchFeedNextOffset?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
 
   // This module lives for the WebView lifetime. A restored player has no old
@@ -65,6 +66,9 @@ export function createShortVideoNativeFeed(context = {}) {
     const end = boundary?.playableEnd ?? Math.min(playableEntries.length, index + 31);
     const start = Math.max(0, index - 20);
     const feedEntries = playableEntries.slice(start, end);
+    const lastEntry = feedEntries.at(-1);
+    const searchOffset = !Array.isArray(options.videos) && lastEntry
+      ? searchFeedNextOffset(lastEntry.item, end === playableEntries.length) : undefined;
     const feedUrl = nativeShortVideoFeedUrl(options);
     const payload = stringifyNativeShortVideoFeed(feedEntries.map(({ item }) => item));
     const cursorAtEnd = boundary?.nextCursor || "";
@@ -77,7 +81,7 @@ export function createShortVideoNativeFeed(context = {}) {
         baseUrl: launchServerBase,
         feedUrl,
         hasMore: hasMoreAtEnd,
-        nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
+        nextOffset: searchOffset ?? (lastEntry ? lastEntry.apiIndex + 1 : videos.length),
         nextCursor: cursorAtEnd,
         startIndex: index - start,
         startId: video.id,

@@ -1,5 +1,5 @@
-import { fetchJson } from "../../js/api.js?v=assets-8af3642624a3";
-import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
+import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 const AUTHORITATIVE_REFRESH_ATTEMPTS = 3;
@@ -63,6 +63,7 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
       const {
         cacheMaxAgeMs = DEFAULT_CACHE_MAX_AGE_MS,
         staleWhileRevalidate = false,
+        forceRefresh = false,
         ...fetchOptions
       } = options || {};
       const cached = await readCachedJson(requestBaseUrl, routePath).catch(() => null);
@@ -71,7 +72,7 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
         && !isStaleResponseEnvelope(cached.payload)
         && updatedAt > 0
         && Date.now() - updatedAt <= Math.max(0, Number(cacheMaxAgeMs || 0));
-      if (fresh) return cached.payload;
+      if (fresh && !forceRefresh) return cached.payload;
 
       const refreshRequest = () => refresh(requestBaseUrl, routePath, fetchOptions);
 

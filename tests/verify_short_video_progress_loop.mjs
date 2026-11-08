@@ -8,6 +8,7 @@ import { createShortVideoProgressLoop } from "../public/modules/short-videos/pro
 function fixture({ native = true, intervalMs = 30, create = createShortVideoProgressLoop } = {}) {
   let sequence = 0, connected = true, current;
   let progressHandler = () => {};
+  const work = { playerReads: 0, identityReads: 0 };
   const frames = new Map(), history = new Map(), cancelled = [], progress = [];
   const register = (kind, player, callback) => {
     const handle = sequence++;
@@ -26,7 +27,11 @@ function fixture({ native = true, intervalMs = 30, create = createShortVideoProg
       dataset: { videoId: id, shortVideoSourceGeneration: "1", shortVideoSlot: "current",
         shortVideoPromotedAt: "1", shortVideoWarmScheduleToken: "1", shortVideoPlaybackIntentGeneration: "0" },
       classList: { contains: name => classes.has(name), add: name => classes.add(name) },
-      getAttribute(name) { return name === "src" ? this.src : null; }
+      getAttribute(name) {
+        if (name !== "src") return null;
+        work.identityReads++;
+        return this.src;
+      }
     };
     if (native) {
       element.requestVideoFrameCallback = callback => register("video", element, callback);
@@ -35,7 +40,7 @@ function fixture({ native = true, intervalMs = 30, create = createShortVideoProg
     return element;
   };
   const a = player("A"), b = player("B"); current = a;
-  const options = { getPlayer: () => current, isConnected: () => connected, intervalMs, requestFrame, cancelFrame,
+  const options = { getPlayer: () => { work.playerReads++; return current; }, isConnected: () => connected, intervalMs, requestFrame, cancelFrame,
     onProgress: (element, timestamp) => { progress.push({ player: element, timestamp }); progressHandler(element, timestamp); } };
   const controller = create(options);
   const pending = () => [...frames.keys()];
@@ -45,11 +50,41 @@ function fixture({ native = true, intervalMs = 30, create = createShortVideoProg
     const frame = frames.get(handle); frames.delete(handle); frame.callback(timestamp);
   };
   const late = (handle, timestamp = 0) => { assert(history.has(handle)); history.get(handle).callback(timestamp); };
-  return { controller, options, a, b, frames, history, cancelled, progress, requestFrame, cancelFrame,
+  return { controller, options, a, b, frames, history, cancelled, progress, work, requestFrame, cancelFrame,
     register, pending, first, fire, late, current: () => current,
     setCurrent: element => { current = element; }, setConnected: value => { connected = value; },
     onProgress: handler => { progressHandler = handler; } };
 }
+
+function measureSteadyState(create = createShortVideoProgressLoop) {
+  const frames = 6000, syncs = 20;
+  return [true, false].map(native => {
+    const f = fixture({ native, create });
+    f.controller.sync();
+    const before = { ...f.work };
+    for (let i = 0; i < frames; i++) f.fire(f.first(), i * (1000 / 60));
+    const frameWork = { playerReads: f.work.playerReads - before.playerReads, identityReads: f.work.identityReads - before.identityReads };
+    const settled = { ...f.work };
+    for (let i = 0; i < syncs; i++) f.controller.sync();
+    const syncWork = { playerReads: f.work.playerReads - settled.playerReads, identityReads: f.work.identityReads - settled.identityReads };
+    assert.equal(f.pending().length, 1, "steady playback must keep a single frame registration");
+    f.controller.dispose();
+    return { native, frames, paints: f.progress.length, syncs, frameWork, syncWork };
+  });
+}
+
+function assertSteadyStateBudget(measurements) {
+  for (const { frames, paints, syncs, frameWork, syncWork } of measurements) {
+    assert.equal(paints, frames / 2, "60 fps input keeps the existing 30 ms progress cadence");
+    assert.deepEqual(frameWork, { playerReads: frames + paints, identityReads: frames + paints },
+      "frame delivery must check ownership once, plus once after each actual progress callback");
+    assert.deepEqual(syncWork, { playerReads: syncs, identityReads: syncs }, "each sync must reuse one live player identity snapshot");
+  }
+}
+
+const steadyState = measureSteadyState();
+console.log(`SHORT_VIDEO_PROGRESS_WORK ${JSON.stringify(steadyState)}`);
+assertSteadyStateBudget(steadyState);
 
 for (const native of [true, false]) {
   const f = fixture({ native });
@@ -193,6 +228,12 @@ for (const action of ["sync", "stop-sync", "replace-sync", "replace", "reload", 
   const create = vm.runInNewContext(`${mutated}\ncreateShortVideoProgressLoop;`);
   assert.throws(() => verifyLatePreviousPlayer(create), error => error.code === "ERR_ASSERTION",
     "negative control: removing the pre-clear frame ownership guard must fail the replacement-handle assertion");
+  const schedule = "if (owner.frame) return;";
+  assert.equal(source.split(schedule).length, 2);
+  const duplicate = source.replace("export function", "function").replace(schedule, "if (!owns(owner) || owner.frame) return;");
+  const createWithDuplicateCheck = vm.runInNewContext(`${duplicate}\ncreateShortVideoProgressLoop;`);
+  assert.throws(() => assertSteadyStateBudget(measureSteadyState(createWithDuplicateCheck)), /frame delivery must check ownership once/,
+    "negative control: restoring redundant scheduled-owner reads must exceed the work budget");
 }
 
 // Exercise the current page's constructor, public sync and disposal wrappers.

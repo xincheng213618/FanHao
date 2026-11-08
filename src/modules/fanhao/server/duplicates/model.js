@@ -167,7 +167,7 @@ function resolution(row) {
 
 function presentedFile(row) {
   const traits = deriveWorkTraits({ videos: [{ name: basename(row.name || row.path) }] });
-  const editionLabels = traits.editions.filter(item => item.key !== "quality4k").map(item => `${item.label}（名称/编号）`);
+  const editionLabels = traits.editions.filter(item => !/^(?:quality|format)/.test(item.key)).map(item => `${item.label}（名称/编号）`);
   if (/(?:^|[^A-Z0-9])CENSORED(?=$|[^A-Z0-9])|有[码碼]/i.test(basename(row.name || row.path))) editionLabels.push("有码（文件名）");
   const number = Number(row.probe?.duration);
   return { ...row, size: safeSize(row.size), editionLabels, resolutionLabel: resolution(row), duration: Number.isFinite(number) && number > 0 ? number : null };

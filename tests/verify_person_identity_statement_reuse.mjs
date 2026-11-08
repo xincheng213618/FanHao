@@ -110,6 +110,37 @@ try {
   assert.equal(missing.next.counts().prepares, 1, "missing identity schema must not eagerly prepare its redirect query");
   missing.exec(`${schema}; INSERT INTO person_redirects VALUES(1,8)`); missing.check(1, "8");
 
+  const snapshot = database();
+  const readBatch = current.createCanonicalPersonReader(snapshot.db);
+  const snapshotReads = snapshot.counts().reads;
+  for (let index = 0; index < 2_000; index++) {
+    assert.equal(readBatch(index % 2 ? "001" : 4), index % 2 ? "3" : "4");
+  }
+  assert.equal(snapshot.counts().reads, snapshotReads, "a batch does not issue one SQLite lookup per person");
+  snapshot.db.exec("UPDATE person_redirects SET target_id=8 WHERE source_id=2");
+  assert.equal(readBatch(1), "3", "the current batch retains its original identity snapshot");
+  assert.equal(current.canonicalPersonId(snapshot.db, 1), "8", "the point lookup still reads the live identity");
+  assert.equal(current.createCanonicalPersonReader(snapshot.db)(1), "8", "the next batch reads the current identity");
+  snapshot.db.exec("UPDATE person_redirects SET target_id=1 WHERE source_id=2");
+  const cycle = current.createCanonicalPersonReader(snapshot.db);
+  assert.deepEqual(outcome(() => cycle(1)), outcome(() => previous.canonicalPersonId(snapshot.db, 1)));
+  assert.equal(cycle(4), "4", "an unrelated redirect cycle does not prevent reading a valid person");
+  snapshot.failRead("sqlite_schema");
+  assert.throws(() => current.createCanonicalPersonReader(snapshot.db), /controlled read failure/);
+
+  for (const setup of [
+    "CREATE TEMP TABLE person_redirects(source_id INTEGER, target_id INTEGER); INSERT INTO temp.person_redirects VALUES(1,7)",
+    "INSERT INTO person_redirects VALUES(9,9223372036854775807)",
+    "DROP TABLE person_redirects; CREATE TABLE person_redirects(source_id TEXT, target_id INTEGER); INSERT INTO person_redirects VALUES('1',7),('1',8)"
+  ]) {
+    const legacy = database();
+    legacy.db.exec(setup);
+    const readLegacy = current.createCanonicalPersonReader(legacy.db);
+    for (const id of [1, 2, 4, 9, "invalid"]) {
+      assert.deepEqual(outcome(() => readLegacy(id)), outcome(() => previous.canonicalPersonId(legacy.db, id)));
+    }
+  }
+
   const invalid = pair();
   for (const id of [null, undefined, "", "abc", 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Symbol("invalid")]) invalid.check(id);
   assert.deepEqual(invalid.next.counts(), { prepares: 0, reads: 0 });

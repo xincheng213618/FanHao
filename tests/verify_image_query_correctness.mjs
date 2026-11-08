@@ -26,8 +26,9 @@ export function previousQuerySource(current) {
   replace('    const sourceStampBefore = listSourceStamp(index, mode);\n    let mangaSourceRevision = "";\n', "");
   replace('      nextOffset: offset + items.length,\n      listRevision: publicListRevision(sourceStampBefore, listSourceStamp(index, mode), mode, mangaSourceRevision),\n', "");
   replace(`      const mangaSourceHash = createHash("sha256");
-      source = mangaService.cacheDirs().map((cacheDir) => {
-        const item = publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga");
+      const summaries = mangaService.publicSummaries?.() ?? mangaService.cacheDirs().map(mangaService.publicSummary);
+      source = summaries.map((summary) => {
+        const item = publicImageLibraryListItem(summary, "manga");
         mangaSourceHash.update(JSON.stringify(item)).update("\\0");
         return item;
       });
@@ -984,14 +985,23 @@ function verifyImagePaginationContract() {
     const manifestChanged = request(mangaLibrary, "mode=manga");
     assert.notEqual(manifestChanged.listRevision, mangaChanged.listRevision); assert.equal(manifestChanged.items[0].imageCount, 7);
     assert.equal(JSON.stringify(legacyListResponse(manifestChanged)), JSON.stringify(previousFactory({ ...indexDeps, mangaService: mangaOwner }).itemsPayload(url("mode=manga"))), "manga revisions preserve actual file-derived legacy responses");
-    let mangaChangedDuringRead = false;
-    const mangaRaceLibrary = createImageLibraryService({ ...indexDeps, mangaService: { ...mangaOwner, publicSummary(directory) {
-      const item = mangaOwner.publicSummary(directory);
-      if (!mangaChangedDuringRead) { mangaChangedDuringRead = true; indexOwner.invalidate(); }
-      return item;
-    } } });
+    let mangaGeneration = 0;
+    let duringMangaRead = () => indexOwner.invalidate();
+    const mangaRaceLibrary = createImageLibraryService({ ...indexDeps, mangaService: { ...mangaOwner,
+      listRevision: () => `${mangaOwner.listRevision()}:${mangaGeneration}`,
+      publicSummaries() {
+        const items = mangaOwner.publicSummaries();
+        const publish = duringMangaRead; duringMangaRead = null; publish?.();
+        return items;
+      }
+    } });
+    const indexReadsBeforeManga = indexReads;
+    const galleryRace = request(mangaRaceLibrary, "mode=manga");
+    assert.equal(request(mangaRaceLibrary, "mode=manga").listRevision, galleryRace.listRevision, "gallery invalidation during publication cannot invalidate manga");
+    assert.equal(indexReads, indexReadsBeforeManga, "opening manga must not load the invalidated gallery index");
+    duringMangaRead = () => { mangaGeneration++; };
     const mangaRace = request(mangaRaceLibrary, "mode=manga");
-    assert.notEqual(request(mangaRaceLibrary, "mode=manga").listRevision, mangaRace.listRevision, "source invalidation during manga publication yields an unstable token");
+    assert.notEqual(request(mangaRaceLibrary, "mode=manga").listRevision, mangaRace.listRevision, "manga invalidation during publication yields an unstable token");
     const collectorSource = fs.readFileSync(new URL("../tools/manga_collector.py", import.meta.url), "utf8");
     const mangaSchema = /    schema = """([\s\S]*?)    """/u.exec(collectorSource)?.[1];
     assert.ok(mangaSchema?.includes("CREATE TABLE IF NOT EXISTS manga_comics"));
@@ -1018,10 +1028,10 @@ function verifyImagePaginationContract() {
       assert.equal(request(sqlMangaLibrary, "mode=manga").listRevision, sqlMangaChanged.listRevision, "the actual collector WAL writer preserves the reader's committed manga version");
     } finally { mangaWriter.exec("ROLLBACK"); }
     let sqlMangaRacePending = true;
-    const sqlMangaRaceLibrary = createImageLibraryService({ ...indexDeps, mangaService: { ...sqlMangaOwner, publicSummary(directory) {
-      const item = sqlMangaOwner.publicSummary(directory);
+    const sqlMangaRaceLibrary = createImageLibraryService({ ...indexDeps, mangaService: { ...sqlMangaOwner, publicSummaries() {
+      const items = sqlMangaOwner.publicSummaries();
       if (sqlMangaRacePending) { sqlMangaRacePending = false; mangaWriter.prepare("UPDATE manga_comics SET title='SQL竞争后漫画' WHERE cache_key=?").run(mangaDirectory); }
-      return item;
+      return items;
     } } });
     const sqlMangaRace = request(sqlMangaRaceLibrary, "mode=manga");
     const sqlMangaAfterRace = request(sqlMangaRaceLibrary, "mode=manga");

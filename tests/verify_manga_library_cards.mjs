@@ -29,6 +29,13 @@ if (!caseOption) {
       failure: /an unchanged thousand-card poll must do bounded construction outside the retained cards/
     },
     {
+      name: "unchanged shelf metadata work",
+      marker: "const shelf = libraryShelf(view.shelf);",
+      replacement: "const shelf = libraryShelf();",
+      casePattern: "library cards: unchanged running",
+      failure: /an unchanged shelf snapshot must not rescan mounted comic metadata or covers/
+    },
+    {
       name: "accepted card metadata updates",
       marker: "} else updateComicCard(record, comic);",
       replacement: "} // Negative control: keep stale fields on an existing card.",
@@ -56,5 +63,5 @@ if (!caseOption) {
     }), { name: "AssertionError", message: negative.failure });
     console.log(`PASS negative control detects missing ${negative.name}`);
   }
-  console.log(`Manga library cards passed (${negativeOnly ? 0 : 8} private Chromium families + 5 independent behavior negative controls; synthetic library/add polling and metadata reads)`);
+  console.log(`Manga library cards passed (${negativeOnly ? 0 : 8} private Chromium families + 6 independent behavior negative controls; synthetic library/add polling and metadata reads)`);
 }

@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { readFileSync } from "node:fs";
 import { normalizeWorkCode, workCodeKey } from "../lib/code-parser.js";
-import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
+import { deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits } from "../lib/work-traits.js";
 import { createActorMovieService } from "../src/modules/fanhao/server/people/actor-movie-service.js";
 import { prewarmLocalMetadataBeforeListen } from "../src/modules/fanhao/server/runtime.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
@@ -314,14 +314,16 @@ function verifySemanticEquivalence() {
 function verifyDirectAndLegacyCandidateCompetition() {
   for (const scenario of [
     { name: "empty-first", code: "DUP-001", legacyCodeSearch: "", directCodeSearch: "dup001", legacyTitle: "legacy empty first" },
-    { name: "uppercase-first", code: "UPC-001", legacyCodeSearch: "UPC001", directCodeSearch: "upc001", legacyTitle: "legacy uppercase first" }
+    { name: "uppercase-first", code: "UPC-001", legacyCodeSearch: "UPC001", directCodeSearch: "upc001", legacyTitle: "legacy uppercase first" },
+    { name: "embedded-nul-first", code: "NUL-001", legacyCodeSearch: "nul001\0older", directCodeSearch: "nul001", legacyTitle: "legacy NUL first" },
+    { name: "canonical-key-with-different-display", code: "CAN-001", legacyDisplayCode: "ALT-001", legacyCodeSearch: "can001", directCodeSearch: "can001", legacyTitle: "canonical indexed first" }
   ]) {
     const db = createFixtureDb();
     try {
       insertActorRow(db, {
         id: 1,
         personId: 1,
-        code: scenario.code,
+        code: scenario.legacyDisplayCode || scenario.code,
         codeSearch: scenario.legacyCodeSearch,
         title: scenario.legacyTitle,
         position: 5
@@ -1213,7 +1215,7 @@ function personSourceFactories(legacy = false, observeBudget = () => {}) {
   }
   const query = new Function("classifyWorkCategory", "normalizeWorkCategory", "summarizeWorkCategories", "WORK_CATEGORY_OPTIONS",
     "createWorkSorter", "createWeightedCacheBudget", "normalizeWorkSortMode",
-    "deriveWorkTraits", "matchesWorkTraitFilter", "summarizeWorkTraits",
+    "deriveWorkTraits", "isTraitFilter", "matchesWorkTraitFilter", "mediaClassificationSearch", "summarizeWorkTraits",
     querySource.replace(/^import .*;\n/gm, "").replace("export function createWorkQueryService", "function createWorkQueryService")
       + "\nreturn createWorkQueryService;")(
     classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS, createWorkSorter,
@@ -1221,7 +1223,7 @@ function personSourceFactories(legacy = false, observeBudget = () => {}) {
       const budget = createWeightedCacheBudget(...args);
       if (args[0] === 4_000_000) observeBudget(budget);
       return budget;
-    }, normalizeWorkSortMode, deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits);
+    }, normalizeWorkSortMode, deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits);
   const person = new Function("normalizePersonWorkYear", "personWorkYearOptions", "worksForPersonYear", "createWeightedCacheBudget",
     personSource.replace(/^import .*;\n/gm, "").replace(/export function /g, "function ") + "\nreturn createPersonDetailService;")(
     normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear, createWeightedCacheBudget);

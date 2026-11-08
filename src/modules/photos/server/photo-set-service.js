@@ -1,18 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
 import { parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
+import { officialPhotoCoverRevision, photoCoverHintScore } from "./photo-cover-source.js";
 
 const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">
   <rect width="300" height="450" fill="#ececf1"/>
   <text x="150" y="225" fill="#555a91" font-size="15" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">暂无封面</text>
 </svg>`;
-
-function archiveMemberBaseName(memberPath) {
-  const parts = String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.pop() || "";
-}
+const missingImageCover = "图包里没有可用图片";
 
 function archiveMemberDepth(memberPath) {
   return String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean).length;
@@ -23,11 +21,13 @@ export function createPhotoSetService({
   archiveImageExts,
   archiveImageSignature,
   archiveImagesPayload,
+  archiveVideosPayload,
   compressImageFileToJpeg,
   coverGeneratorVersion,
   coverHints,
   coverMaxBytes,
   extractArchiveMemberToCache,
+  extractArchiveVideoCover,
   fileBase,
   getImageGalleryDb,
   getImageLibraryIndex,
@@ -40,10 +40,12 @@ export function createPhotoSetService({
   safeChildPath,
   safeStat,
   serveArchiveMemberImage,
+  serveArchiveMemberVideo,
   setArchiveMarkedA
 }) {
   const coverPool = createArchiveTaskPool();
   const coverChildren = new Set();
+  const videoCoversEnabled = Boolean(archiveVideosPayload && extractArchiveVideoCover);
   function withDatabase(db, operation) {
     if (typeof db.exec !== "function") return operation(db);
     const previous = Number(db.prepare("PRAGMA busy_timeout").get().timeout);
@@ -74,6 +76,40 @@ export function createPhotoSetService({
   function coverUrl(albumId, updatedAt = "") {
     const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
     return `/media/gallery-cover/${encodeURIComponent(albumId)}${suffix}`;
+  }
+
+  function versionedCoverUrl(url, revision) {
+    return `${url}${url.includes("?") ? "&" : "?"}cover=${encodeURIComponent(revision)}`;
+  }
+
+  function withCoverOverrides(items) {
+    const coverIds = items.map(item => {
+      const match = /^\/media\/gallery-cover\/([^/?]+)(?:\?|$)/.exec(item?.coverUrl || "");
+      return match ? decodeURIComponent(match[1]) : "";
+    });
+    const ids = [...new Set(coverIds.filter(Boolean))];
+    if (!ids.length) return items;
+    const revisions = withDatabase(getImageGalleryDb(), db => {
+      const result = new Map();
+      for (let start = 0; start < ids.length; start += 200) {
+        const batch = ids.slice(start, start + 200);
+        const placeholders = batch.map(() => "?").join(",");
+        for (const row of db.prepare(`SELECT album_id, official_source FROM photo_set_covers
+          WHERE album_id IN (${placeholders}) AND official_source IS NOT NULL AND member_path IS NULL AND status='ok'`).all(...batch)) {
+          const revision = officialPhotoCoverRevision(row);
+          if (revision) result.set(row.album_id, revision);
+        }
+        for (const row of db.prepare(`SELECT album_id, revision FROM photo_set_cover_overrides WHERE album_id IN (${placeholders})`).all(...batch)) {
+          result.set(row.album_id, row.revision);
+        }
+      }
+      return result;
+    });
+    if (!revisions.size) return items;
+    return items.map((item, index) => {
+      const revision = revisions.get(coverIds[index]);
+      return revision ? { ...item, coverUrl: versionedCoverUrl(item.coverUrl, revision) } : item;
+    });
   }
 
   function archivePath(album) {
@@ -108,17 +144,7 @@ export function createPhotoSetService({
   }
 
   function coverHintScore(image) {
-    const baseName = archiveMemberBaseName(image?.path || image?.name || "");
-    const stem = fileBase(baseName).toLowerCase();
-    const tokens = stem.split(/[\s._\-()[\]{}【】]+/).filter(Boolean);
-    if (!stem) return 0;
-
-    if (stem === "cover" || stem === "封面") return 1000;
-    if (tokens.includes("cover") || tokens.includes("封面")) return 940;
-    if (stem.includes("cover") || stem.includes("封面")) return 880;
-    if (coverHints.has(stem)) return 760;
-    if (tokens.some((token) => coverHints.has(token))) return 700;
-    return 0;
+    return photoCoverHintScore(image?.path || image?.name || "", coverHints, fileBase);
   }
 
   function selectCoverImage(images = []) {
@@ -138,7 +164,7 @@ export function createPhotoSetService({
     return { image: candidates[0], isExplicitCover: false };
   }
 
-  async function coverBlobFromFile(filePath, image, isExplicitCover, context) {
+  async function coverBlobFromFile(filePath, image, context) {
     const stat = await fs.promises.stat(filePath);
     if (!context.isCurrent()) throw archiveStoppedError();
     const sourceBytes = stat.size || Number(image?.bytes || 0);
@@ -160,8 +186,13 @@ export function createPhotoSetService({
       Number(row.archive_size || 0) === signature.archiveSize &&
       Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs &&
       row.archive_identity && row.archive_identity === signature.archiveIdentity &&
-      Number(row.generator_version || 1) === coverGeneratorVersion
+      (officialPhotoCoverRevision(row) || Number(row.generator_version || 1) === coverGeneratorVersion) &&
+      !needsVideoCoverRetry(row)
     );
+  }
+
+  function needsVideoCoverRetry(row) {
+    return videoCoversEnabled && row.status === "error" && row.error === missingImageCover;
   }
 
   function upsertCoverError(album, signature, error, database) {
@@ -186,9 +217,12 @@ export function createPhotoSetService({
             generator_version = excluded.generator_version,
             status = excluded.status,
             error = excluded.error,
+            official_source = NULL,
             generated_at = excluded.generated_at,
             updated_at = excluded.updated_at,
             archive_identity = excluded.archive_identity
+          WHERE NOT (photo_set_covers.official_source IS NOT NULL AND photo_set_covers.member_path IS NULL
+            AND photo_set_covers.status='ok' AND photo_set_covers.archive_identity IS excluded.archive_identity)
           `
         )
         .run(
@@ -235,9 +269,12 @@ export function createPhotoSetService({
           generator_version = excluded.generator_version,
           status = excluded.status,
           error = excluded.error,
+          official_source = NULL,
           generated_at = excluded.generated_at,
           updated_at = excluded.updated_at,
           archive_identity = excluded.archive_identity
+        WHERE NOT (photo_set_covers.official_source IS NOT NULL AND photo_set_covers.member_path IS NULL
+          AND photo_set_covers.status='ok' AND photo_set_covers.archive_identity IS excluded.archive_identity)
         `
       )
       .run(
@@ -267,7 +304,76 @@ export function createPhotoSetService({
     return Number(album.size) === signature.archiveSize && Date.parse(album.updatedAt) === Math.trunc(signature.archiveMtimeMs);
   }
 
-  async function generateCover(album, context, published) {
+  function coverOverride(album, database = getImageGalleryDb?.(), includeBlob = false) {
+    if (!database) return null;
+    const columns = includeBlob ? "*" : "archive_path, archive_size, archive_mtime_ms, archive_identity, member_path, image_index, revision";
+    return withDatabase(database, db => db.prepare(`SELECT ${columns} FROM photo_set_cover_overrides WHERE album_id = ?`).get(album.id));
+  }
+
+  function overrideMatchesAlbum(row, album) {
+    return row && matchesPublishedArchive(album, { archivePath: row.archive_path, archiveSize: row.archive_size,
+      archiveMtimeMs: row.archive_mtime_ms, archiveIdentity: row.archive_identity });
+  }
+
+  function publicCoverOverride(album, row) {
+    return { coverImageIndex: row.image_index, coverUrl: versionedCoverUrl(album.coverUrl, row.revision) };
+  }
+
+  async function setCover(albumId, { imageIndex, memberPath } = {}, { signal } = {}) {
+    if (!Number.isSafeInteger(imageIndex) || imageIndex < 1 || typeof memberPath !== "string" || !memberPath || memberPath.length > 4096) {
+      throw Object.assign(new Error("请选择有效的封面图片"), { statusCode: 400 });
+    }
+    const album = byId(albumId);
+    if (!album) throw Object.assign(new Error("套图不存在"), { statusCode: 404 });
+    const requestKey = JSON.stringify([album.id, imageIndex, memberPath]);
+    return coverPool.run(`cover-edit:${requestKey}`, async context => {
+      const db = getImageGalleryDb();
+      const previous = coverOverride(album, db);
+      const target = archivePath(album);
+      const request = { signal: context.signal, waitForCloseOnAbort: true };
+      const changed = () => Object.assign(new Error("套图或封面已变更，请刷新后重试"), { statusCode: 409 });
+      const signature = await archiveSignature(target, request);
+      if (!signature || !matchesPublishedArchive(album, signature)) throw changed();
+      const images = await listArchiveImages(target, request);
+      const image = images[imageIndex - 1];
+      if (!image?.path || image.path !== memberPath) throw changed();
+      if (previous?.archive_identity === signature.archiveIdentity && previous.member_path === image.path && previous.image_index === imageIndex) {
+        if (!context.isCurrent() || getImageGalleryDb() !== db) throw archiveStoppedError();
+        if (coverOverride(album, db)?.revision !== previous.revision || albumStamp(byId(album.id)) !== albumStamp(album)) throw changed();
+        return publicCoverOverride(album, previous);
+      }
+      const cover = await extractCover(target, image, context);
+      const latest = await archiveSignature(target, request);
+      if (!context.isCurrent() || getImageGalleryDb() !== db) throw archiveStoppedError();
+      if (latest?.archiveIdentity !== signature.archiveIdentity || albumStamp(byId(album.id)) !== albumStamp(album)) throw changed();
+      const revision = randomUUID();
+      const result = withDatabase(db, database => database.prepare(`
+        INSERT INTO photo_set_cover_overrides (album_id, archive_path, archive_size, archive_mtime_ms,
+          archive_identity, member_path, image_index, cover_blob, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(album_id) DO UPDATE SET archive_path=excluded.archive_path, archive_size=excluded.archive_size,
+          archive_mtime_ms=excluded.archive_mtime_ms, archive_identity=excluded.archive_identity, member_path=excluded.member_path,
+          image_index=excluded.image_index, cover_blob=excluded.cover_blob, revision=excluded.revision
+        WHERE photo_set_cover_overrides.revision IS ?
+      `).run(album.id, signature.archivePath, signature.archiveSize, signature.archiveMtimeMs, signature.archiveIdentity,
+        image.path, imageIndex, Buffer.from(cover.blob), revision, previous?.revision ?? null));
+      if (!result.changes) throw changed();
+      return publicCoverOverride(album, { image_index: imageIndex, revision });
+    }, { signal });
+  }
+
+  async function extractCover(target, image, context) {
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-gallery-cover-"));
+    const ext = archiveImageExts.has(normalizeExt(image.path)) ? normalizeExt(image.path) : ".img";
+    const tempPath = path.join(tempDir, `source${ext}`);
+    try {
+      await extractArchiveMemberToCache(target, image.path, tempPath, { signal: context.signal, waitForCloseOnAbort: true });
+      return await coverBlobFromFile(tempPath, image, context);
+    } finally {
+      await removeCoverTemp(tempDir, tempPath);
+    }
+  }
+
+  async function generateCover(album, context, published, imagesOnly = false) {
     const captured = authority(album, context);
     const targetArchivePath = archivePath(album);
     const signature = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
@@ -291,34 +397,40 @@ export function createPhotoSetService({
       throw error;
     }
 
-    const images = await listArchiveImages(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
+    const request = { signal: context.signal, waitForCloseOnAbort: true };
+    const images = await listArchiveImages(targetArchivePath, request);
     const selected = selectCoverImage(images);
-    if (!selected?.image?.path) {
-      const error = new Error("图包里没有可用图片");
+    if (imagesOnly && !selected) return null;
+    let video;
+    if (!selected && videoCoversEnabled) {
+      const payload = await archiveVideosPayload(targetArchivePath, request);
+      if (payload.archiveIdentity !== signature.archiveIdentity || !captured.current()) throw archiveStoppedError();
+      video = payload.videos[0];
+    }
+    const member = selected?.image || video;
+    if (!member?.path) {
+      const error = new Error(videoCoversEnabled ? "图包里没有可用图片或视频" : missingImageCover);
       error.statusCode = 404;
       const latest = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
       if (latest?.archiveIdentity === signature.archiveIdentity && captured.current()) upsertCoverError(album, signature, error, captured.db);
       throw error;
     }
 
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-gallery-cover-"));
-    const tempExt = archiveImageExts.has(normalizeExt(selected.image.path)) ? normalizeExt(selected.image.path) : ".img";
-    const tempPath = path.join(tempDir, `source${tempExt}`);
     try {
-      await extractArchiveMemberToCache(targetArchivePath, selected.image.path, tempPath, { signal: context.signal, waitForCloseOnAbort: true });
-      const cover = await coverBlobFromFile(tempPath, selected.image, selected.isExplicitCover, context);
+      const cover = video
+        ? await extractArchiveVideoCover({ ...request, archivePath: targetArchivePath, archiveIdentity: signature.archiveIdentity, video })
+        : await extractCover(targetArchivePath, member, context);
       const latest = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
       if (!latest || latest.archiveIdentity !== signature.archiveIdentity || !captured.current()) throw archiveStoppedError();
-      return upsertCover(album, signature, selected.image, cover, captured.db);
+      return upsertCover(album, signature, member, cover, captured.db);
     } catch (error) {
-      if (context.isCurrent()) {
+      // A video may be playable again after a transient cache or decoder error.
+      if (!video && context.isCurrent()) {
         const latest = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
         if (latest?.archiveIdentity === signature.archiveIdentity && captured.current()) upsertCoverError(album, signature, error, captured.db);
       }
       error.statusCode = error.statusCode || 500;
       throw error;
-    } finally {
-      await removeCoverTemp(tempDir, tempPath);
     }
   }
 
@@ -342,11 +454,18 @@ export function createPhotoSetService({
     const imageLimit = Number.isFinite(Number(rawImageLimit)) && Number(rawImageLimit) > 0
       ? Math.floor(Number(rawImageLimit))
       : 0;
-    const payload = await archiveImagesPayload(targetArchivePath, {
+    const imageRequest = archiveImagesPayload(targetArchivePath, {
       // The archive cache already owns the full list; copy only the visible page.
       limit: 0,
       signal: options.signal
     });
+    const [payload, videoPayload] = await Promise.all([
+      imageRequest,
+      archiveVideosPayload?.(targetArchivePath, { signal: options.signal }).catch(error => {
+        if (options.signal?.aborted) throw error;
+        return { videos: [], failed: true };
+      })
+    ]);
     const images = Array.isArray(payload.images) ? payload.images : [];
     const fallbackCount = imageLimit > 0 ? Math.min(images.length, imageOffset + imageLimit) : images.length;
     const imageCount = Number(payload.imageCount || fallbackCount || 0);
@@ -354,14 +473,29 @@ export function createPhotoSetService({
       ? images.slice(imageOffset, imageOffset + imageLimit)
       : images;
     const boBoSocks = parseBoBoSocksAlbum(album.title);
+    const override = coverOverride(album);
+    const manual = overrideMatchesAlbum(override, album);
+    const official = !manual && getImageGalleryDb && withDatabase(getImageGalleryDb(), db => db.prepare(`SELECT official_source
+      FROM photo_set_covers WHERE album_id=? AND official_source IS NOT NULL AND member_path IS NULL AND status='ok'`).get(album.id));
+    const officialRevision = officialPhotoCoverRevision(official);
     return {
       ...album,
+      ...(getImageGalleryDb ? { coverEditable: true } : {}),
+      ...(manual ? publicCoverOverride(album, override) : officialRevision
+        ? { coverUrl: versionedCoverUrl(album.coverUrl, officialRevision) } : {}),
       ...(boBoSocks ? { ...boBoSocks, archiveTitle: album.title, title: `${boBoSocks.albumNumber} ${boBoSocks.albumSubject}` } : {}),
       ...(archiveMarks?.([album.id]).has(album.id) ? { markedA: true } : {}),
       imageCount,
       imageOffset,
       imageLimit: imageLimit || images.length,
       imagesTruncated: imageLimit > 0 && imageOffset + visibleImages.length < imageCount,
+      ...(videoPayload ? {
+        videos: videoPayload.videos.map(video => ({
+          id: video.id, title: video.name, ext: video.ext, size: video.size,
+          streamUrl: `/media/gallery-archive-video/${encodeURIComponent(album.id)}/${video.id}`
+        })),
+        ...(videoPayload.failed ? { videoListError: true } : {})
+      } : {}),
       images: visibleImages.map((image, index) => ({
         index: imageOffset + index + 1,
         name: image.name || path.basename(image.path || ""),
@@ -397,6 +531,27 @@ export function createPhotoSetService({
     } finally { res.removeListener?.("close",disconnect); }
   }
 
+  async function serveVideo(req, res, albumId, videoId) {
+    const album = byId(albumId);
+    if (!album || !archiveVideosPayload) { notFound(res); return; }
+    const controller = new AbortController();
+    const disconnect = () => { if (!res.writableEnded) controller.abort(); };
+    res.once("close", disconnect);
+    try {
+      if (res.destroyed || res.writableEnded) return;
+      const target = archivePath(album);
+      const { videos, archiveIdentity } = await archiveVideosPayload(target, { signal: controller.signal });
+      if (controller.signal.aborted || res.destroyed || res.writableEnded) return;
+      const video = videos.find(item => item.id === videoId);
+      if (!video) { notFound(res); return; }
+      await serveArchiveMemberVideo(req, res, { archivePath: target, archiveIdentity, video, signal: controller.signal });
+    } catch (error) {
+      if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) throw error;
+    } finally {
+      res.off("close", disconnect);
+    }
+  }
+
   function serveUnavailableCover(res, fallback, cacheable) {
     if (!fallback) return notFound(res);
     const cacheControl = cacheable ? "private, max-age=60" : "no-store";
@@ -412,18 +567,41 @@ export function createPhotoSetService({
     res.end(unavailableCover);
   }
 
-  function serveCoverBlob(res, row) {
+  function serveCoverBlob(res, row, cacheable = true) {
     const buffer = Buffer.from(row.cover_blob);
     res.writeHead(200, {
       "Content-Type": row.cover_mime || "image/jpeg",
       "Content-Length": buffer.length,
-      "Cache-Control": "public, max-age=86400",
+      "Cache-Control": cacheable ? "public, max-age=86400" : "no-store",
       "Content-Disposition": "inline"
     });
     res.end(buffer);
   }
 
-  async function serveCover(res, albumId, { fallback = false } = {}) {
+  function publishedCover(album) {
+    const cached = coverRow(album);
+    if (cached && (officialPhotoCoverRevision(cached) || Number(cached.generator_version) === coverGeneratorVersion)
+      && !needsVideoCoverRetry(cached) && matchesPublishedArchive(album, {
+      archivePath: cached.archive_path, archiveSize: Number(cached.archive_size),
+      archiveMtimeMs: Number(cached.archive_mtime_ms), archiveIdentity: cached.archive_identity
+    })) return cached;
+    return null;
+  }
+
+  async function warmImageCover(albumId, signal) {
+    if (signal?.aborted || !coverPool.isAccepting()) throw archiveStoppedError();
+    const album = publishedPhotoSetById?.(albumId);
+    if (!album) return "missing";
+    if (overrideMatchesAlbum(coverOverride(album), album)) return "cached";
+    const cached = publishedCover(album);
+    if (cached?.status === "ok" && cached.cover_blob) return "cached";
+    if (cached?.status === "error") return "missing";
+    const row = await coverPool.run(`image-cover:${albumId}`,
+      context => generateCover(album, context, true, true), { signal, waitForCloseOnAbort: true });
+    return row?.cover_blob ? "generated" : "skipped";
+  }
+
+  async function serveCover(res, albumId, { fallback = false, revision = null } = {}) {
     const published = publishedPhotoSetById?.(albumId);
     const album = published === undefined ? byId(albumId) : published;
     if (!album) {
@@ -432,13 +610,14 @@ export function createPhotoSetService({
     }
 
     if (res.destroyed || res.writableEnded) return;
+    if (coverPool.isAccepting()) {
+      const override = coverOverride(album, getImageGalleryDb(), true);
+      if (overrideMatchesAlbum(override, album)) return serveCoverBlob(res, override, override.revision === revision);
+    }
     if (published && coverPool.isAccepting()) {
-      const cached = coverRow(album);
-      if (cached && Number(cached.generator_version) === coverGeneratorVersion && matchesPublishedArchive(album, {
-        archivePath: cached.archive_path, archiveSize: Number(cached.archive_size),
-        archiveMtimeMs: Number(cached.archive_mtime_ms), archiveIdentity: cached.archive_identity
-      })) {
-        if (cached.status === "ok" && cached.cover_blob) return serveCoverBlob(res, cached);
+      const cached = publishedCover(album);
+      if (cached) {
+        if (cached.status === "ok" && cached.cover_blob) return serveCoverBlob(res, cached, (officialPhotoCoverRevision(cached) || null) === revision);
         if (cached.status === "error") return serveUnavailableCover(res, fallback, true);
       }
     }
@@ -465,7 +644,7 @@ export function createPhotoSetService({
       return;
     }
 
-    serveCoverBlob(res, row);
+    serveCoverBlob(res, row, (officialPhotoCoverRevision(row) || null) === revision);
   }
 
   return {
@@ -475,8 +654,12 @@ export function createPhotoSetService({
     imageUrl,
     publicDetail,
     setArchiveMarkedA,
+    setCover,
     serveCover,
     serveImage,
+    serveVideo,
+    warmImageCover,
+    withCoverOverrides,
     start: coverPool.start,
     beginStop: coverPool.beginStop,
     stop: coverPool.stop,

@@ -185,7 +185,7 @@ export function createShortVideoPage(deps) {
   let shortVideoListRequestId = 0;
   let acceptedAuthorScope = null;
   let failedAuthorScope = null;
-  let searchUsersGeneration = 0;
+  let searchUsersRequest = null;
   let shortVideoOpenRequestId = 0;
   let shortVideoOpenReadController = null;
   let shortVideoPlaybackLifecycleGeneration = 0;
@@ -665,7 +665,7 @@ export function createShortVideoPage(deps) {
   function invalidateShortVideoListWork() {
     collectionsController.cancelReads?.();
     shortVideoListRequestId += 1;
-    searchUsersGeneration += 1;
+    cancelSearchUsers();
     shortVideoOpenRequestId += 1;
     shortVideoOpeningId = "";
     shortVideoOpenError = "";
@@ -726,7 +726,7 @@ export function createShortVideoPage(deps) {
       shortVideoOpeningId = "";
       shortVideoOpenError = "";
     }
-    if (!append) searchUsersGeneration += 1;
+    if (!append) cancelSearchUsers();
     const preserveHomeDuringLoad = preserveShortVideoHomeDuringLoad(append);
     if (!append && !shortVideoListCards) {
       ensureShortVideoListCards().catch((error) => console.warn(error));
@@ -872,9 +872,17 @@ export function createShortVideoPage(deps) {
         if (!shortVideoListHasViewer()) renderView();
       }).catch(() => {});
     }
-    const data = await settleShortVideoLoad(api(`/api/short-videos?${params}`), currentRequest)
-      .catch(error => handleShortVideoListFailure(error, owner));
-    if (data === SHORT_VIDEO_LOAD_STALE) return staleShortVideoListResult(owner);
+    const videosRead = api(`/api/short-videos?${params}`);
+    const usersRead = !append && state.shortVideo.query && !isShortVideoAuthorDetailPage()
+      ? startSearchUsers(state.shortVideo.query) : null;
+    const data = await settleShortVideoLoad(videosRead, currentRequest).catch(error => {
+      cancelSearchUsers(usersRead);
+      return handleShortVideoListFailure(error, owner);
+    });
+    if (data === SHORT_VIDEO_LOAD_STALE) {
+      cancelSearchUsers(usersRead);
+      return staleShortVideoListResult(owner);
+    }
     if (data === false) return false;
     if (captureListPerformance) {
       markShortVideoPerformance("short-video-list-request-finish", {
@@ -887,6 +895,7 @@ export function createShortVideoPage(deps) {
       });
     }
     if (!currentRequest()) {
+      cancelSearchUsers(usersRead);
       if (captureListPerformance) {
         markShortVideoPerformance("short-video-list-request-stale", {
           append,
@@ -927,7 +936,7 @@ export function createShortVideoPage(deps) {
       state.shortVideo.data = {
         ...data,
         videos: receivedVideos,
-        usersLoading: Boolean(state.shortVideo.query && !isShortVideoAuthorDetailPage())
+        usersLoading: Boolean(usersRead)
       };
     }
     if (!isShortVideoAuthorDetailPage()) {
@@ -994,31 +1003,39 @@ export function createShortVideoPage(deps) {
     }
     if (!append) {
       loadShortVideoSummary().catch(handleSummaryLoadError);
-      if (state.shortVideo.data?.usersLoading) loadSearchUsers(state.shortVideo.query);
+      if (usersRead) publishSearchUsers(usersRead);
     }
   }
 
-  async function loadSearchUsers(query) {
-    const generation = ++searchUsersGeneration;
-    const current = () => generation === searchUsersGeneration
-      && state.activeView === "shortVideos"
-      && state.shortVideo.query === query
-      && !state.shortVideo.authorPage;
-    try {
-      const params = new URLSearchParams({ q: query, limit: "6", offset: "0" });
-      const result = await api(`/api/short-videos/authors?${params}`);
-      if (!current()) return;
-      Object.assign(state.shortVideo.data, {
+  function startSearchUsers(query) {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ q: query, limit: "6", offset: "0" });
+    const result = api(`/api/short-videos/authors?${params}`, { signal: controller.signal })
+      .then(result => ({
         users: result.authors || [],
         usersTotal: Number(result.total || 0),
         usersHasMore: Boolean(result.hasMore),
         usersLoading: false,
         usersError: ""
-      });
-    } catch {
-      if (!current()) return;
-      Object.assign(state.shortVideo.data, { usersLoading: false, usersError: "用户读取失败" });
-    }
+      }))
+      .catch(() => ({ usersLoading: false, usersError: "用户读取失败" }));
+    searchUsersRequest = { controller, query, result };
+    return searchUsersRequest;
+  }
+
+  function cancelSearchUsers(request = searchUsersRequest) {
+    if (!request || request !== searchUsersRequest) return;
+    searchUsersRequest = null;
+    request.controller.abort();
+  }
+
+  async function publishSearchUsers(request) {
+    const users = await request.result;
+    if (request !== searchUsersRequest) return;
+    searchUsersRequest = null;
+    if (state.activeView !== "shortVideos" || state.shortVideo.query !== request.query
+        || state.shortVideo.authorPage || !state.shortVideo.data?.usersLoading) return;
+    Object.assign(state.shortVideo.data, users);
     // Keep video cards, player nodes and scroll position mounted.
     els.workGrid?.querySelector?.(".short-video-aggregate-results")
       ?.replaceWith(renderAggregateSearchResults(state.shortVideo.data));

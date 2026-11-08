@@ -72,6 +72,15 @@ try {
       assert(catalog.modules.some((module) => module.id === "short-videos"));
       assert.equal((await fetch(`${base}/api/fanhao/file-workflows/config`)).status, 200);
       assert.equal((await fetch(`${base}/api/short-videos?limit=1`)).status, 200);
+      const warm = await fetch(`${base}/api/photo-cover-warm`);
+      assert.equal(warm.status, 200, `suite must mount the gallery cover job route\n${output}`);
+      assert.deepEqual(await warm.json(), { status: "idle" });
+      const maintenance = await fetch(`${base}/photo/maintenance`);
+      assert.equal(maintenance.status, 200);
+      assert.match(await maintenance.text(), /modules\/photos\/maintenance\/maintenance\.js/);
+      assert.equal((await fetch(`${base}/photo/maintenance`, { headers: { Origin: "https://example.invalid" } })).status, 403);
+      const scan = await fetch(`${base}/api/photo-maintenance/index`);
+      assert.deepEqual(await scan.json(), { task: null });
       for (const mode of ["movie", "tv", "media"]) {
         for (const offset of [0, 48]) {
           const response = await fetch(`${base}/api/image-library/items?mode=${mode}&limit=48&offset=${offset}`);

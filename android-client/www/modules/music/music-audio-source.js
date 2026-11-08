@@ -1,6 +1,11 @@
 export async function fetchMusicAudioSource(url, options = {}) {
+  const blob = await readMusicAudioBlob(url, options);
+  if (options.signal?.aborted) throw abortError();
+  return musicAudioSource(blob, options.createObjectURL);
+}
+
+async function readMusicAudioBlob(url, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
-  const createObjectURL = options.createObjectURL || ((blob) => URL.createObjectURL(blob));
   if (typeof fetchImpl !== "function") throw new Error("当前环境无法读取音频");
 
   const response = await fetchImpl(url, {
@@ -15,8 +20,12 @@ export async function fetchMusicAudioSource(url, options = {}) {
   const blob = await response.blob();
   if (options.signal?.aborted) throw abortError();
   if (!blob || !Number.isFinite(blob.size) || blob.size <= 0) throw new Error("音频文件为空");
+  return blob;
+}
+
+function musicAudioSource(blob, createObjectURL) {
   return {
-    objectUrl: createObjectURL(blob),
+    objectUrl: createObjectURL ? createObjectURL(blob) : URL.createObjectURL(blob),
     size: blob.size,
     type: String(blob.type || "")
   };
@@ -40,13 +49,25 @@ export function createMusicAudioSourceStore(options = {}) {
     requests.delete(slot);
   }
 
+  function prepare(url, signal, authorized) {
+    const blob = authorized.then(allowed => allowed && !signal.aborted
+      ? readMusicAudioBlob(url, { signal, fetchImpl }) : null).catch(() => null);
+    return { url, signal, blob };
+  }
+
   async function load(slot, target, url, loadOptions = {}) {
     cancel(slot);
     const record = { controller: new AbortController() };
     requests.set(slot, record);
     if (loadOptions.clearBefore) release(target);
     try {
-      const source = await fetchMusicAudioSource(url, { signal: record.controller.signal, fetchImpl });
+      let blob = null;
+      if (loadOptions.prepared?.url === url) {
+        blob = await loadOptions.prepared.blob;
+        if (record.controller.signal.aborted || loadOptions.guard?.() === false) return false;
+        if (loadOptions.prepared.signal?.aborted) blob = null;
+      }
+      const source = blob ? musicAudioSource(blob) : await fetchMusicAudioSource(url, { signal: record.controller.signal, fetchImpl });
       if (requests.get(slot) !== record || record.controller.signal.aborted || loadOptions.guard?.() === false) {
         releaseMusicAudioSource(source, { revokeObjectURL });
         return false;
@@ -77,7 +98,7 @@ export function createMusicAudioSourceStore(options = {}) {
     if (source) releaseMusicAudioSource(source, { revokeObjectURL });
   }
 
-  return { cancel, load, release };
+  return { cancel, load, prepare, release };
 }
 
 function abortError() {

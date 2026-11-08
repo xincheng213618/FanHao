@@ -18,7 +18,7 @@ function take(name) {
 }
 const names = ["shortVideoNavigationScope", "shortVideoFeedParams", "shortVideoListScope", "needsAuthorFirstPageRetry", "invalidateShortVideoListWork",
   "captureShortVideoListOwner", "ownsShortVideoListOwner", "shortVideoListHasViewer", "staleShortVideoListResult", "handleShortVideoListFailure",
-  "loadVideos", "loadSearchUsers", "openVideo", "refreshShortVideoHome", "renderView", "applyRouteState", "openRouteTarget"];
+  "loadVideos", "startSearchUsers", "cancelSearchUsers", "publishSearchUsers", "openVideo", "refreshShortVideoHome", "renderView", "applyRouteState", "openRouteTarget"];
 const implementation = names.map(take).join("\n");
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const settle = async () => { for (let turn = 0; turn < 30; turn++) await Promise.resolve(); };
@@ -46,7 +46,7 @@ function fixture({ code = implementation, authorIndex = false, authorPage = "" }
     window: { scrollY: 0, scrollTo() {}, history: { length: 1 }, requestAnimationFrame: callback => { frames.push(callback); return frames.length; } },
     // This VM has no mounted home DOM; the actual retention helper takes its null-view fallback.
     shortVideoHomePresentation: null, acceptedAuthorScope: null, failedAuthorScope: null,
-    els: { workGrid: root }, shortVideoListRequestId: 0, searchUsersGeneration: 0, shortVideoOpenRequestId: 0,
+    els: { workGrid: root }, shortVideoListRequestId: 0, searchUsersRequest: null, shortVideoOpenRequestId: 0,
     shortVideoOpeningId: "", shortVideoOpenError: "", shortVideoOpenReadController: null, shortVideoListCards: {}, initialVideoLimit: 36, appendVideoLimit: 48, AUTHOR_PAGE_SIZE: 36,
     ensureState() {}, syncAuthorCollectorRouteLifecycle() {}, cancelAuthorCollectorPolling() {}, cancelShortVideoNavigation() {},
     releaseAuthorIndex() {}, // This fixture has no mounted author DOM to retire.
@@ -117,6 +117,58 @@ async function oldFeedCannotReplaceCollection(code) {
   }
 }
 await oldFeedCannotReplaceCollection();
+
+{
+  const f = fixture();
+  f.state.shortVideo.query = "old";
+  const obsolete = f.env.loadVideos({ skipRoute: true });
+  const [oldVideos, oldUsers] = f.requests;
+  assert.match(oldUsers.url, /authors\?q=old/);
+  f.state.shortVideo.query = "current";
+  const active = f.env.loadVideos({ skipRoute: true });
+  const [, , activeVideos, activeUsers] = f.requests;
+  assert(oldUsers.options.signal.aborted, "a new query must cancel the previous user's lookup");
+  oldUsers.resolve({ authors: [{ id: "old-user" }] });
+  activeUsers.resolve({ authors: [{ id: "current-user" }], total: 1 });
+  await settle();
+  assert.equal(f.state.shortVideo.data.users, undefined, "early hints cannot publish into the previous video list");
+  oldVideos.resolve(page(["old-video"]));
+  assert.equal(await obsolete, SHORT_VIDEO_LOAD_STALE);
+  activeVideos.resolve(page(["current-video"]));
+  await active; await settle();
+  assert.deepEqual(toJSON(f.state.shortVideo.data.users), [{ id: "current-user" }]);
+}
+
+{
+  const f = fixture();
+  f.state.shortVideo.query = "current";
+  const first = f.env.loadVideos({ skipRoute: true });
+  const [videos, users] = f.requests;
+  videos.resolve(page(["first"], { hasMore: true, nextCursor: "next" }));
+  await first;
+  const append = f.env.loadVideos({ append: true, keepCurrent: true, skipRoute: true });
+  assert.equal(f.requests.length, 3, "appending must leave the first-page user read alone");
+  assert.equal(users.options.signal.aborted, false);
+  f.requests[2].resolve(page(["next"]));
+  await append;
+  users.resolve({ authors: [{ id: "current-user" }], total: 1 });
+  await settle();
+  assert.deepEqual(toJSON(f.state.shortVideo.data.videos.map(video => video.id)), ["first", "next"]);
+  assert.deepEqual(toJSON(f.state.shortVideo.data.users), [{ id: "current-user" }]);
+}
+
+{
+  const f = fixture();
+  f.state.shortVideo.query = "failed";
+  const first = f.env.loadVideos({ skipRoute: true });
+  const [videos, users] = f.requests;
+  videos.reject(new Error("video search failed"));
+  await assert.rejects(first, /video search failed/);
+  assert(users.options.signal.aborted, "a failed primary search must retire its speculative user read");
+  users.reject(new Error("cancelled user lookup"));
+  await settle();
+  assert.equal(f.state.shortVideo.data.usersError, undefined);
+}
 
 async function sameScopeListPreservesPlayer(code) {
   for (const append of [false, true]) {

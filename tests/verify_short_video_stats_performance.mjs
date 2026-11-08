@@ -5,11 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
 import { createShortVideoCatalogWorkerClient } from "../src/modules/short-videos/server/catalog-worker-client.js";
 import { createShortVideoListStatsService } from "../src/modules/short-videos/server/list-stats-service.js";
 import { videoFilter } from "../src/modules/short-videos/server/query-contract.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
-import { normalizeShortVideoStatsFilter } from "../src/modules/short-videos/server/stats-query.js";
+import { normalizeShortVideoStatsFilter, queryShortVideoStats } from "../src/modules/short-videos/server/stats-query.js";
 import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
 import { authorFacet, searchAuthorFacet } from "../src/modules/short-videos/server/author-facets.js";
 
@@ -24,12 +25,14 @@ if (realDbPath) {
 }
 
 async function runFixtureVerification() {
+  verifyProjectedStatsNative();
   const fixture = createProductionShapeFixture(PRODUCTION_VIDEO_COUNT);
   let authorPageColdMs = 0;
   let authorResolveColdMs = 0;
   let authorSearchColdMs = 0;
   try {
     verifyAuthorFacetCoveringIndex(fixture.dbPath);
+    await verifyProjectedStatsRoutes(fixture);
     await verifyStatsZeroUsesWorker();
     await verifyRouteErrorMapping();
     await verifyRecommendedFailureMapping();
@@ -186,6 +189,143 @@ async function runFixtureVerification() {
   } finally {
     removeFixture(fixture.root);
   }
+}
+
+function verifyProjectedStatsNative() {
+  const store = createShortVideoStore({ dbPath: ":memory:", coverDbPath: ":memory:", roots: [], skipStartupMaintenance: true });
+  const native = DatabaseSync.prototype.prepare;
+  let db;
+  DatabaseSync.prototype.prepare = function(sql, ...args) { db = this; return native.call(this, sql, ...args); };
+  try { store.prepareSchema(); } finally { DatabaseSync.prototype.prepare = native; }
+  const params = new URLSearchParams("source=all");
+  let calls = [], fault = null;
+  const nativeExec = db.exec.bind(db);
+  db.exec = sql => {
+    if (fault === "savepoint" && sql.startsWith("SAVEPOINT")) throw new Error("private savepoint unavailable");
+    return nativeExec(sql);
+  };
+  db.prepare = sql => {
+    const projection = sql.includes("LIMIT -1 OFFSET 0");
+    const aggregate = sql.includes("SUM(digg_count)");
+    if (sql.startsWith("EXPLAIN")) {
+      if (projection && ["probe", "original-error"].includes(fault)) throw new Error("private projection probe failed");
+      return native.call(db, sql);
+    }
+    const stmt = native.call(db, sql);
+    if (!aggregate) return stmt;
+    return { get(...args) {
+      calls.push(projection ? "projection" : "original");
+      if (fault === "query-rollback") nativeExec("ROLLBACK");
+      if (["query", "query-rollback", "original-error"].includes(fault)) throw new Error("private stats read failed");
+      return stmt.get(...args);
+    } };
+  };
+  const compare = expected => {
+    calls = [];
+    const result = queryShortVideoStats(db, params);
+    assert.deepEqual(calls, [expected]);
+    assert.deepEqual(result, legacyVideoStats(db, params));
+    assert.equal(db.isTransaction, false);
+    return result;
+  };
+  try {
+    db.exec(`INSERT INTO short_videos (id, source_path, digg_count, comment_count, duration_ms, size_bytes, is_liked)
+      VALUES ('a','synthetic-a',1e20,10,20,11,1),('b','synthetic-b',0.25,20,40,22,1),('c','synthetic-c',-1e20,30,60,33,1);
+      INSERT INTO short_video_stats(video_id, digg_count,comment_count) VALUES('a',1e20,40);
+      INSERT INTO short_video_assets(id,video_id,asset_type,size_bytes) VALUES ('asset-a','a','video',5),('asset-b','b','video',0)`);
+    const mixed = compare("projection");
+    assert.equal(mixed.likes, 0.25);
+    assert.equal(mixed.bytes, 60);
+    db.exec("ANALYZE; PRAGMA reverse_unordered_selects = ON");
+    compare("projection");
+    db.exec("PRAGMA reverse_unordered_selects = OFF; BEGIN");
+    assert.deepEqual(queryShortVideoStats(db, params), legacyVideoStats(db, params));
+    assert.equal(db.isTransaction, true);
+    db.exec("ROLLBACK");
+    db.exec(`UPDATE short_video_stats SET digg_count=9223372036854775807 WHERE video_id='a';
+      UPDATE short_videos SET digg_count=1 WHERE id IN ('b','c')`);
+    const overflow = operation => {
+      try { operation(); } catch (error) { return { code: error.code, errcode: error.errcode, message: error.message }; }
+      assert.fail("the native SQLite sum must overflow");
+    };
+    assert.deepEqual(overflow(() => queryShortVideoStats(db, params)), overflow(() => legacyVideoStats(db, params)));
+    assert.equal(db.isTransaction, false);
+    db.exec(`UPDATE short_video_stats SET digg_count=100 WHERE video_id='a'`);
+    for (fault of ["probe", "savepoint"]) compare("original");
+    for (fault of ["query", "query-rollback", "original-error"]) {
+      assert.throws(() => queryShortVideoStats(db, params), { message: "private stats read failed" });
+      assert.equal(db.isTransaction, false);
+    }
+    fault = null;
+
+    // The engine must retain a legacy optional join that multiplies rows.
+    db.exec(`DROP TABLE short_video_sounds;
+      CREATE TABLE short_video_sounds(video_id TEXT,sound_key TEXT,sound_id TEXT,title TEXT,author TEXT,
+        cover_url TEXT,preview_url TEXT,local_available INTEGER);
+      INSERT INTO short_video_sounds(video_id) VALUES ('a'),('a');`);
+    const duplicate = queryShortVideoStats(db, params);
+    assert.deepEqual(duplicate, legacyVideoStats(db, params));
+    assert.equal(duplicate.likes, 202);
+    db.exec(`DROP VIEW short_video_catalog;
+      CREATE VIEW short_video_catalog AS SELECT * FROM short_video_catalog_base`);
+    compare("original");
+  } finally { store.close(); }
+}
+
+async function verifyProjectedStatsRoutes(fixture) {
+  const moduleUrl = new URL("../src/modules/short-videos/server/", import.meta.url);
+  const source = name => fs.readFileSync(new URL(name, moduleUrl), "utf8").replaceAll("\r\n", "\n");
+  const absolute = text => text.replace(/from "(\.\.?\/[^"\n]+)"/gu, (_, relative) =>
+    "from " + JSON.stringify(new URL(relative, moduleUrl).href));
+  const statsSource = source("stats-query.js");
+  const original = statsSource.replace(/const row = simple\n[\s\S]*?: database\.prepare\(sql\)\.get\(\.\.\.filter\.args\);/u,
+    "const row = database.prepare(sql).get(...filter.args);");
+  assert.notEqual(original, statsSource);
+  const statsUrl = pathToFileURL(path.join(fixture.root, "baseline-stats.mjs"));
+  const workerUrl = pathToFileURL(path.join(fixture.root, "baseline-worker.mjs"));
+  fs.writeFileSync(statsUrl, absolute(original));
+  fs.writeFileSync(workerUrl, absolute(source("list-worker.js").replace('"./stats-query.js"', JSON.stringify(statsUrl.href))));
+  const clients = [
+    createShortVideoCatalogWorkerClient({ dbPath: fixture.dbPath, workerUrl }),
+    createShortVideoCatalogWorkerClient({ dbPath: fixture.dbPath })
+  ];
+  let stamp = 0;
+  const services = clients.map(catalogWorker => createShortVideoListStatsService({ catalogWorker, store: {
+    catalogStamp: () => String(stamp),
+    listVideos() { assert.fail("fixture must use the actual worker route"); }
+  } }));
+  async function route(service, query) {
+    const res = {};
+    const url = new URL(`http://fixture/api/short-videos?limit=48&facets=0${query}`);
+    const start = performance.now();
+    assert(await routeShortVideoApi({ method: "GET" }, res, url, {
+      listVideos: input => service.list(input),
+      sendJson: (response, status, data) => Object.assign(response, { status, data })
+    }));
+    assert.equal(res.status, 200);
+    return { res, elapsed: performance.now() - start };
+  }
+  try {
+    const metrics = {};
+    for (const [name, query] of [["liked", ""], ["all", "&source=all"], ["video", "&source=all&media=video"],
+      ["following", "&source=following&media=video"]]) {
+      stamp++;
+      assert.deepEqual((await route(services[0], query)).res, (await route(services[1], query)).res);
+      const times = [[], []];
+      for (let pair = 0; pair < 5; pair++) {
+        stamp++;
+        const replies = [];
+        for (const mode of pair % 2 ? [1, 0] : [0, 1]) {
+          replies[mode] = await route(services[mode], query);
+          times[mode].push(replies[mode].elapsed);
+        }
+        assert.deepEqual(replies[0].res, replies[1].res);
+      }
+      metrics[name] = times.map(values => round(values.sort((a, b) => a - b)[2]));
+    }
+    console.log(JSON.stringify({ check: "short-video-stats-projection", videos: PRODUCTION_VIDEO_COUNT,
+      medianPairedRouteMs: metrics, floatingPointAndOverflow: true, duplicateLegacyJoin: true }));
+  } finally { await Promise.all(clients.map(client => client.stop())); }
 }
 
 function verifyAuthorPageColdPerformance(store) {

@@ -221,7 +221,7 @@ async function searchAndEmpty(f) {
   for (const source of ["authors", "following"]) {
     const pending = f.module.routes.find(route => route.view === "shortVideoSearch").render({ source, query: "作者", tab: "authors" }, () => true);
     await f.respond(f.requests.length - 1, envelope(range(0, 24))); await pending; snapshots.push(f.snapshot());
-    await f.clickMore(envelope(range(24, 18), { total: 999, scopeTotal: 1200, bannedTotal: 31, unlikedTotal: 101 }));
+    await f.clickMore(envelope(range(24, 18), { offset: 24, total: 999, scopeTotal: 1200, bannedTotal: 31, unlikedTotal: 101 }));
     snapshots.push(f.snapshot());
     assert.equal(f.content.querySelector(".short-video-search-result-meta").textContent, "999 位相关用户");
     await f.load(source, envelope([], { total: 0, hasMore: false })); snapshots.push(f.snapshot());

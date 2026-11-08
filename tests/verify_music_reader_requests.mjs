@@ -23,11 +23,11 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
     assert.equal(result.status, 0, result.stderr); overrides.set(`/${relative.slice(7)}`, result.stdout);
   }
   if (legacySearchAppend) {
-    // Only remove the new query guard in memory: use the actual previous raw
-    // append branch without changing request ownership or playback behavior.
+    // Send a search page through the raw append branch without changing ownership.
     const source = fs.readFileSync(path.join(publicRoot, "modules/music/actions.js"), "utf8");
-    assert.match(source, /!music\(\)\.query && Boolean\(music\(\)\.current\) && view\.appendLibraryTrackPage/);
-    overrides.set("/modules/music/actions.js", source.replace("!music().query && Boolean(music().current) && view.appendLibraryTrackPage", "Boolean(music().current) && view.appendLibraryTrackPage"));
+    const marker = "view.appendSearchTrackPage?.(mergedTracks, previousSearchCount)";
+    assert.equal(source.split(marker).length, 2);
+    overrides.set("/modules/music/actions.js", source.replace(marker, "view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length)"));
   }
   const held = new Set(), requests = new Map(), faults = [], unexpected = [];
   const pageStartupFailures = new WeakMap();
@@ -247,7 +247,9 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       });
       if (ignoreAbort) await run("list more keyboard query fallback retains a wheel accepted while pending", async () => {
         const { page, endpoint, firstCount } = await newMoreKeyboardPage("library", { data: moreKeyboardData("library", 0, 120, true), query: "Needle" });
-        const read = hold(url => url.pathname === endpoint && url.searchParams.get("offset") === String(firstCount), "", moreKeyboardData("library", firstCount, 120, true));
+        const data = moreKeyboardData("library", firstCount, 120, true);
+        data.tracks[0] = { ...track("MORE-0"), id: "MORE-0-other-version" };
+        const read = hold(url => url.pathname === endpoint && url.searchParams.get("offset") === String(firstCount), "", data);
         try {
           const playing = await playlistPlaybackState(page), more = page.locator(".music-load-more");
           await more.focus(); await more.scrollIntoViewIfNeeded();
@@ -267,7 +269,9 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       });
       if (ignoreAbort) await run("list more keyboard query fallback yields to a newer search selection", async () => {
         const { page, endpoint, firstCount } = await newMoreKeyboardPage("library", { data: moreKeyboardData("library", 0, 120, true), query: "Needle" });
-        const read = hold(url => url.pathname === endpoint && url.searchParams.get("offset") === String(firstCount), "", moreKeyboardData("library", firstCount, 120, true));
+        const data = moreKeyboardData("library", firstCount, 120, true);
+        data.tracks[0] = { ...track("MORE-0"), id: "MORE-0-other-version" };
+        const read = hold(url => url.pathname === endpoint && url.searchParams.get("offset") === String(firstCount), "", data);
         try {
           const playing = await playlistPlaybackState(page);
           await page.locator(".music-load-more").focus(); await page.keyboard.press("Space"); await requested(read);
@@ -1984,6 +1988,86 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
           assert.deepEqual(await page.evaluate(id => ({ current: fixture.state.music.current.id, position: __audios[0].currentTime, paused: __audios[0].paused, index: fixture.state.music.queue.findIndex(track => track.id === id) }), id), { current: "P", position: 42, paused: false, index: index - 1 });
         } finally { await page.close(); }
       });
+      if (ignoreAbort) await run("long queue track switch retains mounted rows at scale", async () => {
+        const measurements = [];
+        for (const size of [240, 2400]) {
+          const page = await newLongQueuePage(ignoreAbort, 1440);
+          try {
+            const index = Math.floor(size * .8), target = `Q${index + 1}`;
+            await page.evaluate(size => {
+              const music = fixture.state.music;
+              music.queue = Array.from({ length: size }, (_, index) => index ? { ...music.current, id: `Q${index + 1}`, title: `Queued synthetic ${index + 1}` } : music.current);
+              music.queueVisibleLimit = size;
+              fixture.page.renderView();
+              const rows = [...document.querySelectorAll(".music-queue-row")];
+              const createElement = Document.prototype.createElement;
+              let current = music.current;
+              fixture.switchSamples = [];
+              Object.defineProperty(music, "current", { configurable: true, get: () => current, set(track) {
+                if (track === current) return;
+                current = track;
+                let created = 0;
+                const start = performance.now();
+                Document.prototype.createElement = function (...args) { created++; return createElement.apply(this, args); };
+                queueMicrotask(() => {
+                  const elapsedMs = performance.now() - start;
+                  Document.prototype.createElement = createElement;
+                  fixture.switchSamples.push({ elapsedMs, created, retainedRows: rows.filter(row => row.isConnected).length });
+                });
+              } });
+            }, size);
+            const play = page.locator(`.music-queue-row[data-music-track-id="${target}"] .music-queue-play`);
+            await play.focus();
+            const before = await page.locator(".music-queue-list").evaluate(list => list.scrollTop);
+            await play.press("Enter");
+            for (const [sample, current, previous] of [[1, target, "P"], [2, `Q${index + 2}`, target], [3, `Q${index + 3}`, `Q${index + 2}`]]) {
+              if (sample > 1) await page.evaluate(() => __audios[0].dispatchEvent(new Event("ended")));
+              await page.waitForFunction(sample => fixture.switchSamples.length === sample, sample);
+              assert.deepEqual(await page.locator(".music-queue-row.active").evaluateAll(rows => rows.map(row => row.dataset.musicTrackId)), [current]);
+              const remove = id => page.locator(`.music-queue-row[data-music-track-id="${id}"] [aria-label="移出队列"]`);
+              assert.equal(await remove(previous).isEnabled(), true);
+              assert.equal(await remove(current).isDisabled(), true);
+              assert.equal(await page.evaluate(id => __audios.length === 1 && __audios[0].src.endsWith(`/synthetic/audio/${id}`) && !__audios[0].paused, current), true);
+              assert.equal(await play.evaluate(button => document.activeElement === button), true);
+            }
+            assert(Math.abs(await page.locator(".music-queue-list").evaluate(list => list.scrollTop) - before) < 2);
+            assert.deepEqual(await page.locator(".music-queue-row").evaluateAll(rows => rows.map(row => row.dataset.musicTrackId)), await page.evaluate(() => fixture.state.music.queue.map(track => track.id)));
+            measurements.push({ size, samples: await page.evaluate(() => fixture.switchSamples) });
+          } finally { await page.close(); }
+        }
+        console.log(`QUEUE_SWITCH_MEASUREMENT ${JSON.stringify(measurements)}`);
+        for (const { size, samples } of measurements) {
+          assert(samples.every(sample => sample.retainedRows === size), "track switches must retain the existing queue rows");
+          assert(samples.every(sample => sample.created <= 100), "track switches must avoid creating elements proportional to queue length");
+        }
+      });
+      if (ignoreAbort) await run("long queue track switch refreshes an out-of-page current row", async () => {
+        const page = await newLongQueuePage(ignoreAbort, 1440, { all: false });
+        try {
+          const row = id => page.locator(`.music-queue-row[data-music-track-id="${id}"]`);
+          await row("L120").locator(".music-queue-play").press("Enter");
+          await page.waitForFunction(() => fixture.state.music.current?.id === "L120");
+          await page.evaluate(() => __audios[0].dispatchEvent(new Event("ended")));
+          await page.waitForFunction(() => fixture.state.music.current?.id === "L121");
+          assert.equal(await row("L121").getAttribute("data-queue-context-current"), "true");
+          assert.equal(await page.locator(".music-queue-row.active").getAttribute("data-music-track-id"), "L121");
+          await row("L120").locator(".music-queue-play").press("Enter");
+          await page.waitForFunction(() => fixture.state.music.current?.id === "L120");
+          assert.equal(await row("L121").count(), 0, "returning to the mounted prefix must remove the old current context row");
+          assert.equal(await page.locator(".music-queue-row.active").getAttribute("data-music-track-id"), "L120");
+          assert.equal(await page.locator(".music-queue-load-more").count(), 1);
+        } finally { await page.close(); }
+      });
+      if (ignoreAbort) await run("long queue track switch restores focus when removal becomes disabled", async () => {
+        const page = await newLongQueuePage(ignoreAbort, 1440);
+        try {
+          await page.locator('.music-queue-row[data-music-track-id="A"] [aria-label="移出队列"]').focus();
+          await page.evaluate(() => __audios[0].dispatchEvent(new Event("ended")));
+          await page.waitForFunction(() => fixture.state.music.current?.id === "A");
+          assert.deepEqual(await page.evaluate(() => [document.activeElement?.closest(".music-queue-row")?.dataset.musicTrackId, document.activeElement?.disabled]), ["A", false],
+            "track switches must move focus from the newly disabled remove action to an enabled action on the same song");
+        } finally { await page.close(); }
+      });
       for (const operation of ["play", "remove"]) await run(`queue move retained row ${operation} targets the same song ${transport}`, async () => {
         const page = await newLongQueuePage(ignoreAbort, 1440);
         try {
@@ -3124,6 +3208,175 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
         });
       }
 
+      if (ignoreAbort) await run("stage visualizer steady drawing reuses static canvas work", async () => {
+        const page = await newPage({ real: true, route: "/music/track/P" });
+        try {
+          await stageTitle(page, "Track P"); await tick(page);
+          await page.evaluate(() => {
+            const canvas = document.querySelector(".music-stage-wave"), audio = __audios[0];
+            const probe = window.__waveProbe = { canvas, draws: 0, geometry: 0, contexts: 0, gradients: 0, paused: 0, bars: 0, samples: 0 };
+            const rect = canvas.getBoundingClientRect.bind(canvas), getContext = canvas.getContext.bind(canvas);
+            const context = getContext("2d"), clear = context.clearRect.bind(context), fill = context.fillRect.bind(context);
+            const gradient = context.createLinearGradient.bind(context);
+            canvas.getBoundingClientRect = () => { probe.geometry++; return rect(); };
+            canvas.getContext = (...args) => { probe.contexts++; return getContext(...args); };
+            context.clearRect = (...args) => { probe.draws++; return clear(...args); };
+            context.fillRect = (...args) => { probe.bars++; return fill(...args); };
+            context.createLinearGradient = (...args) => { probe.gradients++; return gradient(...args); };
+            let paused = audio.paused;
+            Object.defineProperty(audio, "paused", { configurable: true, get() { probe.paused++; return paused; }, set(value) { paused = value; } });
+            window.AudioContext = class {
+              state = "running";
+              createAnalyser() { return { frequencyBinCount: 64, connect() {}, getByteFrequencyData(bins) { bins.fill(++probe.samples % 255); } }; }
+              createMediaElementSource() { return { connect() {} }; }
+            };
+          });
+          const player = page.locator(".music-stage-player");
+          await player.getByRole("button", { name: "播放", exact: true }).click();
+          await page.waitForFunction(() => __waveProbe.draws >= 16);
+          const measured = await page.evaluate(() => { const { canvas, ...counters } = __waveProbe; return counters; });
+          console.log(`MEASURE music native canvas steady playback: ${JSON.stringify(measured)}`);
+          assert(measured.samples >= 16 && measured.bars >= measured.draws * 36, "the active spectrum must keep sampling and drawing its bars");
+          assert(measured.geometry <= 1 && measured.contexts <= 1 && measured.gradients <= 1,
+            "steady playback must reuse canvas geometry, context and gradient");
+          assert(measured.paused < measured.bars / 3, "audio playback state must not be reread for every bar");
+
+          await player.getByRole("button", { name: "暂停", exact: true }).click();
+          const pausedDraws = await page.evaluate(() => __waveProbe.draws);
+          await page.waitForTimeout(130);
+          assert.equal(await page.evaluate(() => __waveProbe.draws), pausedDraws);
+          const desktopWidth = await page.evaluate(() => __waveProbe.canvas.width);
+          await page.setViewportSize({ width: 390, height: 844 });
+          await page.waitForFunction(({ desktopWidth, pausedDraws }) => {
+            const { canvas, draws } = __waveProbe;
+            const rect = canvas.getBoundingClientRect();
+            const ratio = Math.max(1, Math.min(2, devicePixelRatio || 1));
+            return draws > pausedDraws && canvas.dataset.visualizerRunning === "false" && canvas.width !== desktopWidth
+              && canvas.width === Math.round(rect.width * ratio) && canvas.height === Math.round(rect.height * ratio);
+          }, { desktopWidth, pausedDraws });
+
+          await player.getByRole("button", { name: "播放", exact: true }).click();
+          await page.waitForFunction(() => __waveProbe.canvas.dataset.visualizerRunning === "true");
+          const hiddenDraws = await page.evaluate(() => {
+            Object.defineProperty(document, "hidden", { configurable: true, value: true });
+            document.dispatchEvent(new Event("visibilitychange"));
+            return __waveProbe.draws;
+          });
+          await page.waitForTimeout(130);
+          assert.equal(await page.evaluate(() => __waveProbe.draws), hiddenDraws);
+          await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event("visibilitychange")); });
+          await page.waitForFunction(hiddenDraws => __waveProbe.draws > hiddenDraws, hiddenDraws);
+
+          await navigateRoute(page, "/music/library");
+          await page.waitForFunction(() => !__waveProbe.canvas.isConnected);
+          const detachedDraws = await page.evaluate(() => __waveProbe.draws);
+          await navigateRoute(page, "/music/track/B");
+          await stageTitle(page, "Track B"); await tick(page);
+          assert(await page.evaluate(detachedDraws => {
+            const canvas = document.querySelector(".music-stage-wave");
+            const rect = canvas.getBoundingClientRect();
+            const ratio = Math.max(1, Math.min(2, devicePixelRatio || 1));
+            return canvas !== __waveProbe.canvas && __waveProbe.draws === detachedDraws
+              && canvas.width === Math.round(rect.width * ratio) && canvas.height === Math.round(rect.height * ratio);
+          }, detachedDraws), "returning to the stage must initialize only the replacement canvas");
+        } finally { await page.close(); }
+      });
+
+      if (ignoreAbort) await run("music discovery first screen is independent of playlist reads", async () => {
+        const home = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("sort") === "played");
+        const playlists = hold(url => url.pathname === "/api/music/playlists");
+        const smart = hold(url => url.pathname === "/api/music/smart-playlists");
+        const delay = 300;
+        for (const side of [playlists, smart]) side.requested.then(() => setTimeout(side.release, delay));
+        const page = await newPage({ real: true, route: "/music", waitReady: false });
+        try {
+          await requested(home); home.release();
+          const visibleAt = await (await page.waitForFunction(() => {
+            const track = document.querySelector(".music-home-track");
+            if (!track || getComputedStyle(track).visibility !== "visible") return null;
+            const rect = track.getBoundingClientRect();
+            return rect.top < innerHeight && rect.bottom > 0 ? performance.now() : null;
+          })).jsonValue();
+          const timings = await page.evaluate(visibleAt => {
+            const entries = performance.getEntriesByType("resource");
+            const first = entries.find(entry => new URL(entry.name).pathname === "/api/music/tracks");
+            const sideReads = entries.filter(entry => ["/api/music/playlists", "/api/music/smart-playlists"].includes(new URL(entry.name).pathname) && entry.responseEnd <= visibleAt).length;
+            return { afterHomeResponseMs: Math.round(visibleAt - first.responseEnd), fromHomeRequestMs: Math.round(visibleAt - first.startTime), sideReads };
+          }, visibleAt);
+          console.log(`MEASURE music discovery first track: ${JSON.stringify({ delay, ...timings })}`);
+          assert.match(await page.locator(".music-home-track").first().innerText(), /Track P/);
+          assert.equal(timings.sideReads, 0, "music discovery must publish its first track while both playlist reads are pending");
+        } finally { for (const gate of [home, playlists, smart]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
+      await run(`catalog first screen is independent of playlist reads ${transport}`, async () => {
+        const tracks = hold(url => url.pathname === "/api/music/tracks");
+        const playlists = hold(url => url.pathname === "/api/music/playlists", "", { playlists: [
+          { id: "new", name: "New playlist", trackCount: 2 },
+          ...Array.from({ length: 30 }, (_, index) => ({ id: `p-${index}`, name: `Synthetic playlist ${index}`, trackCount: 0 }))
+        ] });
+        const smart = hold(url => url.pathname === "/api/music/smart-playlists");
+        const page = await newPage({ real: true, ignoreAbort, waitReady: false });
+        try {
+          await Promise.all([tracks, playlists, smart].map(gate => requested(gate)));
+          const started = Date.now();
+          await settle(page, tracks);
+          const song = page.locator('.music-track-table [data-music-track-id="P"]');
+          const firstRows = await song.count();
+          console.log(`MEASURE music catalog before playlist responses: first-track rows=${firstRows} after ${Date.now() - started}ms`);
+          assert.equal(firstRows, 1, "music rows must render while both sidebar reads are pending");
+          await ready(page);
+          await song.locator(".music-track-title").click();
+          await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P") && !__audios[0].paused);
+          const playing = await audioState(page);
+          const sidebar = page.locator(".music-sidebar.embedded");
+          const playlistSummary = sidebar.locator("summary").filter({ hasText: /^歌单/ });
+          await playlistSummary.click();
+          await sidebar.getByRole("button", { name: "新建歌单", exact: true }).focus();
+          await song.evaluate(row => { window.__catalogFirstRow = row; window.__catalogSidebarFocus = document.activeElement; });
+          await settle(page, playlists);
+          await sidebar.getByRole("button", { name: /^New playlist/ }).waitFor();
+          assert.equal(await sidebar.getByText("New smart", { exact: true }).count(), 0);
+          await settle(page, smart);
+          assert.equal(await sidebar.getByText("New smart", { exact: true }).count(), 1);
+          assert.equal(await song.evaluate(row => row === __catalogFirstRow && document.activeElement === __catalogSidebarFocus), true,
+            "late side lists must preserve the first music row and the active sidebar control");
+          const scrollTop = await sidebar.evaluate(side => { window.__catalogSidebar = side; side.scrollTop = 71; return side.scrollTop; });
+          assert(scrollTop > 0);
+          const sort = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("sort") === "title");
+          try {
+            await page.locator(".music-sort").evaluate(select => { select.value = "title"; select.dispatchEvent(new Event("change")); });
+            await requested(sort); await settle(page, sort);
+            assert.deepEqual(await sidebar.evaluate(side => ({ same: side === __catalogSidebar, focused: document.activeElement === __catalogSidebarFocus, scrollTop: side.scrollTop })),
+              { same: true, focused: true, scrollTop }, "a subsequent catalog refresh must retain an already current sidebar");
+          } finally { sort.release(); held.delete(sort); }
+          assert.deepEqual(await audioState(page), playing);
+        } finally { for (const gate of [tracks, playlists, smart]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
+      for (const destination of ["navigation", "sort", "dialog"]) await run(`catalog first screen replaces late playlist reads on ${destination} ${transport}`, async () => {
+        const old = hold(url => url.pathname === "/api/music/playlists", "", { playlists: [{ id: "old", name: "Old playlist" }] });
+        const page = await newPage({ real: true, ignoreAbort, waitReady: false });
+        try {
+          await requested(old);
+          await page.locator('.music-track-table [data-music-track-id="P"]').waitFor();
+          const fresh = hold(url => url.pathname === "/api/music/playlists");
+          const sidebar = page.locator(".music-sidebar.embedded");
+          try {
+            if (destination === "navigation") await navigateRoute(page, "/music/albums");
+            else if (destination === "sort") await page.locator(".music-sort").evaluate(select => { select.value = "title"; select.dispatchEvent(new Event("change")); });
+            else await sidebar.locator(".music-create-playlist").first().evaluate(button => button.click());
+            await requested(fresh);
+            await settle(page, fresh);
+            await finishOld(page, old, ignoreAbort);
+            assert.equal(await sidebar.getByText("New playlist", { exact: true }).count(), 1);
+            assert.equal(await sidebar.getByText("Old playlist", { exact: true }).count(), 0);
+            assert.equal(new URL(page.url()).pathname, destination === "navigation" ? "/music/albums" : "/music/library");
+            if (destination === "dialog") await page.getByRole("dialog", { name: "新建歌单" }).waitFor();
+          } finally { fresh.release(); held.delete(fresh); }
+        } finally { old.release(); held.delete(old); await page.close(); }
+      });
+
       await run(`side lists belong to newest selection ${transport}`, async () => {
         const page = await newPage({ ignoreAbort });
         try {
@@ -3564,6 +3817,53 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
     }
   }
   async function verifySearchDuplicateSessions() {
+    await run('search append preserves a large unchanged result prefix', async () => {
+      const count = 1200, nextCount = 120;
+      const data = moreKeyboardData('library', 0, count, true);
+      data.tracks.push({ ...data.tracks[0], id: 'same-version', fileName: 'same-version.mp3' });
+      data.total = count + nextCount + 1;
+      data.relevance = true;
+      const { page, endpoint, firstCount, rows } = await newMoreKeyboardPage('library', { data, query: 'Synthetic' });
+      const next = hold(url => url.pathname === endpoint && url.searchParams.get('offset') === String(firstCount), '',
+        { ...moreKeyboardData('library', count, nextCount, false), total: data.total, relevance: true });
+      try {
+        await page.waitForFunction(count => document.querySelectorAll('.music-track-row:not(.head)').length === count, count);
+        await page.locator(rows).evaluateAll(items => { window.__searchPrefixRows = items; });
+        const playing = await playlistPlaybackState(page);
+        await page.evaluate(({ firstCount, count }) => {
+          const fetch = window.fetch;
+          let acceptedAt;
+          window.fetch = async (path, options) => {
+            const response = await fetch(path, options);
+            const url = new URL(path, location.href);
+            if (url.pathname === '/api/music/tracks' && url.searchParams.get('offset') === String(firstCount)) {
+              const json = response.json.bind(response);
+              response.json = async () => { const data = await json(); acceptedAt = performance.now(); return data; };
+            }
+            return response;
+          };
+          const observer = new MutationObserver(() => {
+            if (acceptedAt == null || !document.querySelector(`.music-track-table [data-music-track-id="MORE-${count}"]`)) return;
+            window.__searchAppendElapsedMs = performance.now() - acceptedAt;
+            observer.disconnect(); window.fetch = fetch;
+          });
+          observer.observe(document.querySelector('#workGrid'), { childList: true, subtree: true });
+        }, { firstCount, count });
+        await page.locator('.music-load-more').focus(); await page.keyboard.press('Space'); await requested(next);
+        await beginMusicRenderMeasurement(page);
+        await settle(page, next);
+        const measured = await endMusicRenderMeasurement(page);
+        const retained = await page.locator(rows).evaluateAll(items => __searchPrefixRows.filter((row, index) => items[index] === row).length);
+        console.log(`MUSIC_SEARCH_APPEND_RENDER ${JSON.stringify({ prefix: count, incoming: nextCount, retained, ...measured,
+          elapsedMs: await page.evaluate(() => __searchAppendElapsedMs) })}`);
+        assert.equal(retained, count, 'a search append with the same accepted result prefix must keep its existing rows');
+        assert(measured.elements <= 3000 && measured.fullRenders === 0, 'a search append must only build elements for the incoming result groups');
+        assert.equal(await page.locator(rows).count(), count + nextCount);
+        assert.equal(await page.locator('.music-panel-heading small').first().textContent(), '1,320 首 · 1,321 个文件 · 按匹配度');
+        await assertMoreFocus(page, 'library', count);
+        assert.deepEqual(await playlistPlaybackState(page), playing);
+      } finally { next.release(); held.delete(next); await page.close(); }
+    });
     await run('search append confirmed writes preserve raw metadata and current playback', async () => {
       for (const ignoreAbort of [true, false]) for (const field of ['favorite', 'rating']) {
         const primary = { ...track('same-flac'), title: 'Confirmed duplicate song', artist: 'Synthetic Artist', fileName: 'same.flac', codec: 'flac', bitDepth: 24, sampleRate: 96000, favorite: false, rating: 0, playCount: 3 };

@@ -6,6 +6,7 @@ import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } 
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
+import { captureAccountOwner, rememberAccountPayload, setAccountOwner } from "../android-client/www/js/account-owner.js";
 
 // Complete channel factory and media adapter execute, including cached/fresh
 // detail rendering and actual play buttons. The shell's real render-generation
@@ -205,6 +206,45 @@ test("source replacement while cached detail is pending does not create a stale 
   const h = harness(input), cached = deferred(); h.setCache(cached.promise); const rendering = h.startRender(); await h.settle();
   h.setSource(B); cached.resolve({ payload: { item: item() } }); await rendering; await h.settle();
   assert.equal(h.button(), null); assert.equal(h.calls.fetch.length, 0); assert.equal(h.calls.bridge.length, 0);
+});
+
+test("a late cached detail from a retired account cannot mount before current fresh detail", async input => {
+  setAccountOwner(A, "account:old_media_fixture", { force: true });
+  try {
+    const h = harness(input), cached = deferred(), fresh = deferred();
+    const payload = rememberAccountPayload({ item: item() }, captureAccountOwner(A));
+    h.setCache(cached.promise); h.queue("detail", fresh);
+    const rendering = h.startRender(); await h.settle();
+    setAccountOwner(A, "account:new_media_fixture");
+    cached.resolve({ payload }); await h.settle();
+    assert.equal(h.button(), null, "retired cached DTO cannot create a play surface");
+    fresh.resolve(rememberAccountPayload({ item: item("movie", 125) }, captureAccountOwner(A)));
+    await rendering; await h.settle();
+    assert.match(h.button().textContent, /2:05/);
+  } finally {
+    setAccountOwner(A, "guest", { force: true });
+  }
+});
+
+test("account change retires the mounted play intent and drops the old identical detail", async input => {
+  setAccountOwner(A, "account:old_media_fixture", { force: true });
+  try {
+    const h = harness(input), fresh = deferred();
+    const payload = rememberAccountPayload({ item: item() }, captureAccountOwner(A));
+    h.setCache({ updatedAt: "synthetic", payload }); h.queue("detail", fresh);
+    const rendering = h.startRender(); await h.settle();
+    const oldButton = h.button();
+    assert.match(h.els.viewMeta.textContent, /缓存/u);
+    setAccountOwner(A, "account:new_media_fixture");
+    await h.click();
+    fresh.resolve(payload); await rendering; await h.settle();
+    assert.equal(h.button(), oldButton);
+    assert.match(h.els.viewMeta.textContent, /缓存/u, "retired fresh DTO cannot confirm the old presentation");
+    assert.equal(h.calls.fetch.length, 1, "retired button cannot start a native launch");
+    assert.equal(h.calls.bridge.length, 0); assert.equal(h.calls.cacheWrites.length, 0);
+  } finally {
+    setAccountOwner(A, "guest", { force: true });
+  }
 });
 
 const mutations = [], mutate = (name, testName, change) => mutations.push({ name, testName, change });

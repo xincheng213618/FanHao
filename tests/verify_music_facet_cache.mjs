@@ -31,6 +31,7 @@ assert(process.argv.slice(2).every(argument => ["--legacy-album-count", "--legac
 // old-response/error/schema oracles finish before any existing disk fixture.
 const albumFacetProjection = await verifyAlbumFacetProjection();
 const albumListProjection = await verifyAlbumListProjection();
+const updatedAlbumPage = await verifyUpdatedAlbumPage();
 
 // Synthetic catalog metadata only: no media files, probe, worker, server,
 // existing database, browser profile or network access.
@@ -74,7 +75,7 @@ try {
   verifyWeakOwnership();
   await verifyAlbumCountJoins();
   await verifyArtistCacheProjection();
-  console.log(JSON.stringify({ ok: true, scenarios: 13, ...metrics, albumFacetProjection, albumListProjection }, null, 2));
+  console.log(JSON.stringify({ ok: true, scenarios: 14, ...metrics, albumFacetProjection, albumListProjection, updatedAlbumPage }, null, 2));
 } finally {
   DatabaseSync.prototype.prepare = originalPrepare;
   await store.stop();
@@ -1515,6 +1516,120 @@ async function verifyAlbumListProjection() {
       }));
       return response;
     } finally { console.error = log; }
+  }
+}
+
+async function verifyUpdatedAlbumPage() {
+  const storeUrl = new URL("../src/modules/music/server/store.js", import.meta.url);
+  const source = fs.readFileSync(storeUrl, "utf8");
+  const guard = '!where && sort === "updated" && total >= 4096';
+  assert.equal(source.split(guard).length, 2);
+  const previousSource = source.replace(guard, "false")
+    .replace(/from "(\.\/[^"\n]+)"/gu, (_match, relative) => `from ${JSON.stringify(new URL(relative, storeUrl).href)}`);
+  const { createMusicStore: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(previousSource).toString("base64")}`);
+  const { routeMusicApi } = await import("../src/modules/music/server/routes.js");
+  const prepare = DatabaseSync.prototype.prepare, now = Date.now;
+  let opening = null, measurement = null;
+  const owners = [];
+  Date.now = () => 1800000000000;
+  DatabaseSync.prototype.prepare = function(sql, ...args) {
+    if (opening && !opening.db) opening.db = this;
+    const native = prepare.call(this, sql, ...args);
+    if (measurement?.db !== this || /^EXPLAIN/u.test(sql) || !sql.includes("a.name AS artist_name")
+      || !sql.includes("ORDER BY al.updated_at DESC, al.title COLLATE NOCASE ASC")) return native;
+    const db = this, all = native.all.bind(native);
+    native.all = (...values) => {
+      const probe = sql.replace("a.id = al.artist_id", "a.id = fixture_album_artist(al.artist_id)");
+      const plan = query => prepare.call(db, `EXPLAIN QUERY PLAN ${query}`).all(...values).map(row => row.detail);
+      const result = all(...values);
+      measurement.plan = plan(sql);
+      assert.deepEqual(plan(probe), measurement.plan, "artist visit probe keeps the native plan");
+      assert.deepEqual(prepare.call(db, probe).all(...values), result);
+      return result;
+    };
+    return native;
+  };
+  function open(factory) {
+    const owner = { store: factory({ dbPath: ":memory:", roots: [], scanWorker: {
+      start() { assert.fail("no worker start"); }, scan() { assert.fail("no scan"); }, async stop() {}
+    } }) };
+    owners.push(owner); opening = owner;
+    try { owner.store.summary(); } finally { opening = null; }
+    const { db } = owner;
+    db.function("fixture_album_artist", value => { measurement.lookups++; return value; });
+    db.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+      INSERT INTO music_artists(id,name,source_root,source_path,relative_path,track_count,updated_at)
+      SELECT 'a'||i,'Artist '||i,'fixture','fixture','fixture',10,'2026' FROM n;
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+      INSERT INTO music_albums(id,artist_id,title,year,source_root,source_path,relative_path,track_count,duration_ms,size_bytes,updated_at)
+      SELECT CASE WHEN i%101=0 THEN NULL ELSE 'al'||i END,
+        CASE WHEN i%100=0 THEN 'orphan' ELSE 'a'||(i%10000+1) END,
+        CASE WHEN i%3=0 THEN 'ALBUM ' ELSE 'Album ' END || i%200, '2026', 'fixture', 'fixture', 'fixture',
+        10,2400,10000,printf('2026-%06d',(i*17)%30) FROM n;`);
+    return owner;
+  }
+  async function route(owner, query = "limit=80") {
+    const result = {};
+    assert(await routeMusicApi({ method: "GET" }, result, new URL(`http://fixture/api/music/albums?${query}`), {
+      musicStore: owner.store, sendJson: (res, status, data) => Object.assign(res, { status, data })
+    }));
+    assert.equal(result.status, 200);
+    return result;
+  }
+  async function measure(owner, query) {
+    measurement = { db: owner.db, lookups: 0, plan: null };
+    try { const result = await route(owner, query); return { result, lookups: measurement.lookups, plan: measurement.plan }; }
+    finally { measurement = null; }
+  }
+  try {
+    const previous = open(previousFactory), current = open(createMusicStore);
+    let oracles = 0;
+    for (const setup of ["", "ANALYZE; PRAGMA reverse_unordered_selects=ON"]) {
+      if (setup) for (const { db } of owners) db.exec(setup);
+      for (const query of ["limit=80", "limit=1&offset=79", "limit=80&offset=400", "limit=80&offset=99960", "offset=100001", "artist=a10", "sort=title", "q=orphan"]) {
+        assert.equal(JSON.stringify(await route(current, query)), JSON.stringify(await route(previous, query)), `${setup}/${query}: exact album page`);
+        oracles++;
+      }
+    }
+    const before = await measure(previous), after = await measure(current);
+    assert.deepEqual(after.result, before.result);
+    assert.equal(before.lookups, 100000); assert.equal(after.lookups, 80);
+    assert(after.plan.includes("MATERIALIZE page"));
+    const oldSamples = [], newSamples = [];
+    for (let round = 0; round < 7; round++) for (const owner of (round % 2 ? [current, previous] : [previous, current])) {
+      const start = performance.now(); await route(owner);
+      (owner === previous ? oldSamples : newSamples).push(performance.now() - start);
+    }
+    for (const setup of [
+      "CREATE TEMP VIEW music_albums AS SELECT * FROM main.music_albums",
+      "DROP VIEW temp.music_albums; CREATE INDEX idx_fixture_albums_order ON music_albums(updated_at DESC,title COLLATE NOCASE)",
+      "DROP INDEX idx_fixture_albums_order; DROP INDEX idx_music_albums_artist; CREATE INDEX idx_music_albums_artist ON music_albums(artist_id DESC,title)"
+    ]) {
+      for (const { db } of owners) db.exec(setup);
+      const oldPlan = await measure(previous), newPlan = await measure(current);
+      assert.deepEqual(newPlan.result, oldPlan.result);
+      assert.deepEqual(newPlan.plan, oldPlan.plan, "TEMP, other indexes and altered tie index keep the original query");
+      oracles++;
+    }
+    for (const { db } of owners) db.exec("DROP INDEX idx_music_albums_artist");
+    const tableBefore = await measure(previous), tableAfter = await measure(current);
+    assert.equal(tableBefore.plan[0], "SCAN al");
+    assert(tableAfter.plan.includes("MATERIALIZE page"));
+    assert.deepEqual(tableAfter.result, tableBefore.result, "table scans preserve rowid tie order");
+    for (const { db } of owners) db.exec("ALTER TABLE music_albums ADD COLUMN _rowid_ TEXT GENERATED ALWAYS AS (title)");
+    const shadowBefore = await measure(previous), shadowAfter = await measure(current);
+    assert.deepEqual(shadowAfter.result, shadowBefore.result);
+    assert.deepEqual(shadowAfter.plan, shadowBefore.plan, "a generated rowid shadow keeps the original query");
+    oracles += 2;
+    assert.equal(current.db.isTransaction, false);
+    const median = values => +values.sort((a, b) => a - b)[3].toFixed(3);
+    const result = { albums: 100000, completeRouteOracles: oracles + 1, artistLookups: [before.lookups, after.lookups],
+      beforeMedianMs: median(oldSamples), afterMedianMs: median(newSamples) };
+    console.log(JSON.stringify({ check: "music-updated-album-page", ...result }));
+    return result;
+  } finally {
+    Date.now = now; DatabaseSync.prototype.prepare = prepare;
+    for (const { store } of owners) await store.stop();
   }
 }
 

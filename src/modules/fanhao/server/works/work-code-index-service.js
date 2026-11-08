@@ -47,7 +47,7 @@ export function createWorkCodeIndexService({
 
     const keys = [];
     const seen = new Set();
-    for (const value of values) {
+    for (const value of new Set(values)) {
       const key = looseWorkCodeKey(value);
       if (!key || seen.has(key)) continue;
       seen.add(key);

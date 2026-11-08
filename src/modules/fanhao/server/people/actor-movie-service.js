@@ -1,3 +1,13 @@
+const LOCAL_ACTOR_INFO_ROWS = `
+  SELECT CAST(wp.person_id AS TEXT) AS person_id,
+         w.code, w.code_search AS code_key, w.title, wref.url AS detail_url,
+         w.release_date, w.rating, w.rating_count, w.has_magnet, w.is_streamable,
+         w.has_subtitles, w.javdb_tags_json, wp.sort_order AS position_index
+  FROM works w
+  JOIN work_people wp ON wp.work_id = w.id
+  LEFT JOIN work_external_refs wref ON wref.work_id = w.id AND wref.provider = 'javdb-video'
+`;
+
 export function createActorMovieService({
   createId,
   dbBoolOrNull,
@@ -306,28 +316,7 @@ export function createActorMovieService({
         const placeholders = batch.map(() => "?").join(", ");
         const rows = getCoreDb()
           .prepare(`
-            SELECT
-              CAST(wp.person_id AS TEXT) AS person_id,
-              CAST(w.id AS TEXT) AS work_id,
-              w.code,
-              w.code_search AS code_key,
-              w.title,
-              wref.url AS detail_url,
-              w.release_date,
-              w.rating,
-              w.rating_count,
-              w.has_magnet,
-              w.is_streamable,
-              w.has_subtitles,
-              w.javdb_tags_json,
-              wp.sort_order AS position_index,
-              wp.created_at AS fetched_at,
-              wp.updated_at
-            FROM works w
-            JOIN work_people wp ON wp.work_id = w.id
-            LEFT JOIN work_external_refs wref
-              ON wref.work_id = w.id
-             AND wref.provider = 'javdb-video'
+            ${LOCAL_ACTOR_INFO_ROWS}
             WHERE w.code_search IN (${placeholders})
               AND wp.source = 'actor_movies'
             ORDER BY person_id, COALESCE(position_index, 999999), w.code
@@ -400,30 +389,12 @@ export function createActorMovieService({
   function legacyLooseInfoRowsByCodeKey(cache) {
     if (cache.looseRows) return cache.looseRows;
     const rowsByCodeKey = new Map();
+    // For a canonical stored key, the indexed lookup already sees the row
+    // even when the display code disagrees. GLOB can stop at an embedded NUL,
+    // so those keys still need the original display-code check.
     const rows = getCoreDb()
       .prepare(`
-        SELECT
-          CAST(wp.person_id AS TEXT) AS person_id,
-          CAST(w.id AS TEXT) AS work_id,
-          w.code,
-          w.code_search AS code_key,
-          w.title,
-          wref.url AS detail_url,
-          w.release_date,
-          w.rating,
-          w.rating_count,
-          w.has_magnet,
-          w.is_streamable,
-          w.has_subtitles,
-          w.javdb_tags_json,
-          wp.sort_order AS position_index,
-          wp.created_at AS fetched_at,
-          wp.updated_at
-        FROM works w
-        JOIN work_people wp ON wp.work_id = w.id
-        LEFT JOIN work_external_refs wref
-          ON wref.work_id = w.id
-         AND wref.provider = 'javdb-video'
+        ${LOCAL_ACTOR_INFO_ROWS}
         WHERE wp.source = 'actor_movies'
           AND (
             w.code_search IS NULL
@@ -431,10 +402,10 @@ export function createActorMovieService({
             OR w.code_search NOT GLOB '*[A-Za-z0-9]*'
             OR w.code_search GLOB '*[^A-Za-z0-9]*'
             OR w.code_search <> LOWER(w.code_search)
-            OR LOWER(
+            OR (INSTR(w.code_search, CHAR(0)) > 0 AND LOWER(
               REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
                 w.code, '-', ''), '_', ''), '.', ''), ' ', ''), '﹣', ''), '－', ''), '–', ''), '—', ''), '/', '')
-            ) != LOWER(w.code_search)
+            ) != LOWER(w.code_search))
           )
         ORDER BY person_id, COALESCE(position_index, 999999), w.code
       `)

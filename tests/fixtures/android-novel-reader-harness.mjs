@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { reconcileLocalNovelEntry } from "../../android-client/www/js/novel-chapter-identity.js";
 
 const collectionDependencies = [
-  ["account-owner.js", "captureAccountOwner, isAccountOwnerCurrent"],
+  ["account-owner.js", "accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, rememberAccountPayload, setAccountOwner"],
   ["auto-load.js", "enhanceAutoLoadMore"]
 ].map(([file, exports]) => {
   const source = readFileSync(new URL(`../../android-client/www/js/${file}`, import.meta.url), "utf8");
@@ -271,7 +271,8 @@ export function createReaderHarness(productionSource, { historical = null, defer
         || (options.chapterId !== undefined && options.chapterId !== entry.chapters[offset].id)) return null;
       const catalog = catalogOf(entry);
       return { book: catalog.book, generation: catalog.generation, chapter: structuredClone(entry.chapters[offset]),
-        chapters: catalog.chapters, prev: catalog.chapters[offset - 1] || null, next: catalog.chapters[offset + 1] || null };
+        chapters: options.includeCatalog === false ? [] : catalog.chapters,
+        prev: catalog.chapters[offset - 1] || null, next: catalog.chapters[offset + 1] || null };
     }
     return { ...structuredClone(entry), ...summaryOf(entry) };
   };
@@ -385,6 +386,8 @@ export function createReaderHarness(productionSource, { historical = null, defer
     api, state: api.__test.readerState, window, document, els, books, reads, saves, posts, fetches, cached, cacheKey, cacheCalls, savedEntries, navigations, frames, timers, scrolls, nativeCalls, statuses, storageCalls, recoveryCalls, objectUrls,
     event: (name, options) => new FakeEvent(name, options),
     setActiveUrl(value) { activeUrl = value; },
+    setAccount(owner) { sandbox.setAccountOwner(activeUrl, owner); },
+    ownRemotePayload(data) { return sandbox.rememberAccountPayload(data, sandbox.captureAccountOwner(activeUrl)); },
     queueRead(id) { const wait = deferred(); if (!queuedReads.has(id)) queuedReads.set(id, []); queuedReads.get(id).push(wait); return wait; },
     queueListRead() { const wait = deferred(); queuedListReads.push(wait); return wait; },
     queueRecoveryList() { const wait = deferred(); recoveryLists.push(wait); return wait; },

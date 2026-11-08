@@ -73,7 +73,8 @@ const archiveTaskPoolSource = fs.readFileSync(path.join(platformDir, "server", "
 assert(archiveImageServiceSource.includes("createArchiveTaskPool") && archiveImageServiceSource.includes("await runArchiveChild") && archiveTaskPoolSource.includes('import { spawn } from "node:child_process"') && archiveTaskPoolSource.includes("shared.get(key)"), "archive image work must use asynchronous deduplicated subprocesses through the bounded shared pool");
 assert(!archiveImageServiceSource.includes("spawnSync") && !archiveImageServiceSource.includes("execFileSync"), "archive image service must not restore synchronous subprocesses");
 const photoSetServiceSource = fs.readFileSync(path.join(modulesDir, "photos", "server", "photo-set-service.js"), "utf8");
-assert(photoSetServiceSource.includes("async function publicDetail") && photoSetServiceSource.includes("await archiveImagesPayload") && photoSetServiceSource.includes("async function serveCover"), "photo-set routes must await asynchronous archive and cover work");
+const photoDetailAwaitsImages = /async function publicDetail[\s\S]*?const imageRequest = archiveImagesPayload\([\s\S]*?await Promise\.all\(\[\s*imageRequest,/.test(photoSetServiceSource);
+assert(photoDetailAwaitsImages && photoSetServiceSource.includes("async function serveCover"), "photo-set routes must await asynchronous archive and cover work");
 assert.equal(staticCacheControl("/short-video-app.min.js?v=bundle-c16c469a4009", ".js"), "public, max-age=31536000, immutable", "content-hashed assets must be immutable");
 assert.equal(staticCacheControl("/app.js?v=20260715-manual-label", ".js"), "no-store", "human-managed cache labels must not make changed bytes immutable forever");
 assert.equal(staticCacheControl("/index.html?v=bundle-c16c469a4009", ".html"), "no-store", "HTML route shells must never be immutable");
@@ -211,7 +212,7 @@ const androidNovelListRender = androidNovelViews.slice(
 );
 const androidNovelCardRender = androidNovelViews.slice(
   androidNovelViews.indexOf("function createNovelCard"),
-  androidNovelViews.indexOf("function secondaryBookActionLabel")
+  androidNovelViews.indexOf("function installNovelLongPress")
 );
 assert(androidNovelViews.includes("novel-mobile-search-page-head") && androidNovelEntry.includes('{ view: "novelSearch"'), "novels must open search as a dedicated module page");
 advisories.check(androidNovelEntry.includes('nav.setAttribute("aria-label", "小说分类")') && !androidNovelEntry.includes('{ label: "本地", source: "local" }'), "novel navigation changed from the former category-only top chrome; review the new hierarchy");
@@ -221,8 +222,11 @@ advisories.check(
   androidNovelCardRender.includes("card.append(cover, body)") && androidNovelCardRender.includes('meta.textContent = book.author'),
   "novel shelf card markup changed from the compact cover-and-author baseline; review the new information hierarchy"
 );
-assert(androidNovelCardRender.includes("openReader(book)") && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "tapping a novel must open its last reading position directly");
-assert(androidNovelCardRender.includes("installNovelLongPress") && androidNovelCardRender.includes("consumeClick()") && androidNovelViews.includes('title: "小说操作"'), "long-pressing a novel must open management without changing the tap-to-read behavior");
+assert(androidNovelCardRender.includes('detail.className = "novel-mobile-book-detail"')
+  && androidNovelCardRender.includes('showView("novelDetail", { id: detailBookId(current) }'), "tapping the novel card must open its details");
+assert(androidNovelCardRender.includes('read.className = "novel-mobile-book-read"') && androidNovelCardRender.includes("openReader(current)")
+  && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "the separate reading button must resume the saved chapter");
+assert(androidNovelCardRender.includes("installNovelLongPress") && androidNovelCardRender.includes("consumeClick()") && androidNovelViews.includes('title: "小说操作"'), "long-pressing the detail button must open management and consume the follow-up click");
 assert(androidNovelViews.includes('label: "查看详情"') && androidNovelViews.includes('label: localBook ? "从手机书架移除" : "删除小说"')
   && androidNovelViews.includes("deleteJson(operation.sourceUrl, novelDetailPath(book.id) + suffix)")
   && androidNovelViews.includes("requireRemoteOperation(operation)")

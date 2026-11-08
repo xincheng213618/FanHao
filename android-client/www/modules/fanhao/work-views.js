@@ -1,23 +1,23 @@
-import { fetchJson } from "../../js/api.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8af3642624a3";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8af3642624a3";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8faf7a80cb7b";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=assets-8af3642624a3";
-import { createWorkCards } from "./features/works/cards.js?v=assets-8af3642624a3";
-import { workCollectionPath } from "./features/works/collection-request.js?v=assets-8af3642624a3";
-import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-8af3642624a3";
-import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-8af3642624a3";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-8af3642624a3";
-import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-8af3642624a3";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-8af3642624a3";
-import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-8af3642624a3";
-import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-8af3642624a3";
-import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-8af3642624a3";
-import { createFanhaoSearchPage } from "./search-page.js?v=assets-8af3642624a3";
-import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-8af3642624a3";
-import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-8af3642624a3";
-import { createCategoryViews } from "./features/categories/category-views.js?v=assets-8af3642624a3";
+import { createWorkListState } from "../../js/work-filtering.js?v=assets-8faf7a80cb7b";
+import { createWorkCards } from "./features/works/cards.js?v=assets-8faf7a80cb7b";
+import { workCollectionPath } from "./features/works/collection-request.js?v=assets-8faf7a80cb7b";
+import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-8faf7a80cb7b";
+import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-8faf7a80cb7b";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-8faf7a80cb7b";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-8faf7a80cb7b";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-8faf7a80cb7b";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-8faf7a80cb7b";
+import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-8faf7a80cb7b";
+import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-8faf7a80cb7b";
+import { createFanhaoSearchPage } from "./search-page.js?v=assets-8faf7a80cb7b";
+import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-8faf7a80cb7b";
+import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-8faf7a80cb7b";
+import { createCategoryViews } from "./features/categories/category-views.js?v=assets-8faf7a80cb7b";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
@@ -29,6 +29,7 @@ export function createWorkViews(context) {
     getCurrentParams = () => ({}),
     getCurrentView = () => "",
     getWorksLimit,
+    getSearchFirstLimit = () => null,
     increaseWorksLimit,
     onUserStateChange,
     showView,
@@ -58,7 +59,10 @@ export function createWorkViews(context) {
     showView,
     preserveQuery: (query) => replaceViewParams("search", { query, category: activeSearchCategory }),
     getSearchParams: () => ({ category: activeSearchCategory }),
-    warmSearch: (query) => searchDataService.warm(query, activeSearchCategory),
+    warmSearch(query, { signal }) {
+      const limit = getSearchFirstLimit();
+      if (limit) return searchDataService.warm(query, activeSearchCategory, { limit, signal });
+    },
     fetchSuggestions: (query, options = {}) => searchDataService.suggestions(query, { ...options, category: activeSearchCategory }),
     getActiveUrl,
     getLibrary

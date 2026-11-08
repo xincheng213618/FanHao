@@ -23,6 +23,8 @@ const queueOrderOnly = process.argv.includes("--queue-order") || legacyQueueOrde
 const legacyContainment = process.argv.includes("--legacy-containment");
 const legacyCoverOrder = process.argv.includes("--legacy-cover-order");
 const legacyAuxiliary = process.argv.includes("--legacy-auxiliary");
+const measureStartupPlayback = process.argv.includes("--measure-startup-playback");
+const startupCatalogueOnly = process.argv.includes("--startup-catalogue-only");
 const legacySearchOverview = process.argv.includes("--legacy-search-overview");
 const legacySearchOverviewServer = process.argv.includes("--legacy-search-overview-server");
 const searchOverviewOnly = process.argv.includes("--search-overview-only") || legacySearchOverview || legacySearchOverviewServer;
@@ -352,6 +354,10 @@ try {
     await verifyQueueOrderRendering();
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log(`${measureQueueOrder || measureQueueRemoval ? "DIAGNOSTIC" : "PASS"} Android music queue rendering: ${checks} actual Chromium scenarios`);
+  } else if (startupCatalogueOnly || measureStartupPlayback) {
+    await verifyStartupPlayback();
+    if (!measureStartupPlayback) await verifyStartupCatalogue();
+    assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
   } else {
   if (!measureOnly && !searchOverviewOnly) await verifyMusicSearchComposition();
   if (searchOverviewOnly) {
@@ -503,6 +509,7 @@ try {
     await verifyMusicTrackRows();
     await verifyMusicTrackWrites();
     await verifyContainedRows();
+    await verifyStartupPlayback();
     await verifyStartupCatalogue();
     await verifySearchOverviewOwnership();
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
@@ -707,7 +714,7 @@ async function verifyMusicSearchComposition() {
     }
   });
 }
-async function newPage({ ignoreAbort = false, containment = true, width = 430, waitReady = true, params = null, routeNavigation = false, touch = false } = {}) {
+async function newPage({ ignoreAbort = false, containment = true, width = 430, waitReady = true, params = null, routeNavigation = false, touch = false, savedPlayback = null } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: touch }); page.on("pageerror", error => errors.push(error.message));
   if (!containment) await page.route("**/styles.css", route => route.fulfill({ contentType: "text/css", body: baselineStyles }));
   await page.addInitScript(({ ignoreAbort }) => {
@@ -732,6 +739,9 @@ async function newPage({ ignoreAbort = false, containment = true, width = 430, w
     };
     window.identities = () => ({ rowConnected: __row.isConnected, miniConnected: __mini.isConnected, observerStillMounted: __row === document.querySelector(".music-mobile-list .music-mobile-track"), observedChanges: __observerCount });
   }, { ignoreAbort });
+  if (savedPlayback) await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(`fanhao.android.music.${key}`, JSON.stringify({ activeUrl: location.origin, accountOwner: "guest", ...value }));
+  }, savedPlayback);
   const url = new URL(`${base}/probe`); if (params) url.searchParams.set("params", JSON.stringify(params));
   if (routeNavigation) url.searchParams.set("routeNavigation", "1");
   await page.goto(url.href, { waitUntil: waitReady ? "load" : "domcontentloaded" });
@@ -2773,15 +2783,20 @@ async function heldStartup({ params = { mode: "library", dashboard: "0" }, body 
   const primary = hold(url => url.pathname === primaryPath && url.origin === base, body);
   const smart = hold(url => url.pathname === "/api/music/smart-playlists" && url.origin === base, smartBody, error);
   const playlists = hold(url => url.pathname === "/api/music/playlists" && url.origin === base, playlistBody, error);
+  const detail = params.trackId ? hold(url => url.pathname === `/api/music/tracks/${params.trackId}` && url.origin === base) : null;
   const page = await newPage({ params, waitReady: false, ignoreAbort });
+  const group = { page, primary, smart, playlists, detail };
   try {
     await Promise.all([requested(primary), requested(smart), requested(playlists)]);
-    primary.release(); await page.waitForFunction(() => __musicListFixture.state.data && !__musicListFixture.state.loading); await frames(page);
-    return { page, primary, smart, playlists };
-  } catch (failure) { primary.release(); smart.release(); playlists.release(); await page.close(); throw failure; }
+    primary.release();
+    if (detail) await requested(detail);
+    else await page.waitForFunction(() => __musicListFixture.state.data && !__musicListFixture.state.loading);
+    await frames(page);
+    return group;
+  } catch (failure) { await closeStartup(group); throw failure; }
 }
-async function closeStartup(group) { group.primary.release(); group.smart.release(); group.playlists.release(); await group.page.close(); }
-async function settleStartup(group) { group.smart.release(); group.playlists.release(); await group.page.evaluate(() => __startupTask); await frames(group.page); }
+async function closeStartup(group) { group.primary.release(); group.smart.release(); group.playlists.release(); group.detail?.release(); await group.page.close(); }
+async function settleStartup(group) { group.smart.release(); group.playlists.release(); group.detail?.release(); await group.page.evaluate(() => __startupTask); await frames(group.page); }
 async function snapshotStartup(page) {
   await page.evaluate(() => {
     const f = __musicListFixture; f.state.current = f.state.data.tracks[0]; f.audio().paused = false; f.audio().currentTime = 37; f.render();
@@ -2790,6 +2805,55 @@ async function snapshotStartup(page) {
 }
 async function startupSnapshot(page) {
   return page.evaluate(() => ({ row: __row.isConnected, mini: __mini.isConnected, focused: document.activeElement?.dataset.trackId || "", scroll: scrollY, sameAudio: __startupAudio === __musicListFixture.audio(), time: __musicListFixture.audio().currentTime, paused: __musicListFixture.audio().paused, rows: document.querySelectorAll('.music-mobile-list .music-mobile-track').length, current: __musicListFixture.state.current?.id, created: __created, calls: __shellCalls.slice() }));
+}
+async function verifyStartupPlayback() {
+  const selected = track(50);
+  const cases = [
+    { name: "explicit track", params: { mode: "library", dashboard: "0", trackId: selected.id } },
+    { name: "saved queue", savedPlayback: { key: "playbackQueue", value: { currentTrackId: selected.id, queue: [track(51), selected, track(52)] } } },
+    { name: "last track", savedPlayback: { key: "lastTrack", value: { trackId: selected.id, track: selected } } }
+  ];
+  for (const scenario of cases) await run(`startup playback: ${scenario.name} prepares audio during side catalogue requests`, async () => {
+    const primary = hold(url => url.pathname === "/api/music/tracks", data(80));
+    const smart = hold(url => url.pathname === "/api/music/smart-playlists", auxiliarySmart);
+    const playlists = hold(url => url.pathname === "/api/music/playlists", auxiliaryPlaylists);
+    const isSelectedDetail = value => new URL(value, base).pathname === `/api/music/tracks/${selected.id}`;
+    const firstRequest = requests.length;
+    const page = await newPage({ waitReady: false, params: scenario.params || { mode: "library" }, savedPlayback: scenario.savedPlayback });
+    let timer;
+    try {
+      await Promise.all([requested(primary), requested(smart), requested(playlists)]);
+      const started = performance.now();
+      const measureSideReplies = measureStartupPlayback && new Promise(resolve => {
+        timer = setTimeout(() => {
+          const detailsBeforeSides = requests.slice(firstRequest).filter(isSelectedDetail).length;
+          smart.release(); playlists.release();
+          resolve(detailsBeforeSides);
+        }, 600);
+      });
+      primary.release();
+      await page.waitForFunction(id => __musicListFixture.state.current?.id === id && __musicListFixture.audio().src.startsWith("blob:"), selected.id, { timeout: 5000 });
+      const audioReadyMs = performance.now() - started;
+      const readyBeforeSides = await page.evaluate(() => !window.__ready && !__musicListFixture.state.playlists.length && !__musicListFixture.state.smartPlaylists.length);
+      const detailsBeforeSides = measureStartupPlayback ? await measureSideReplies : requests.slice(firstRequest).filter(isSelectedDetail).length;
+      smart.release(); playlists.release();
+      await page.evaluate(() => __startupTask);
+      assert.match(await page.locator(".music-mobile-mini-text").innerText(), /Synthetic Track 50/);
+      assert.equal(requests.slice(firstRequest).filter(isSelectedDetail).length, 1, "startup must request the song once");
+      assert.equal(await page.evaluate(() => __musicListFixture.audio().paused), true);
+      assert.deepEqual(await page.evaluate(() => [__musicListFixture.state.smartPlaylists[0]?.id, __musicListFixture.state.playlists[0]?.id]), ["S-late", "P-late"]);
+      if (scenario.name === "saved queue") {
+        assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(item => item.id)), ["T51", "T50", "T52"]);
+      }
+      if (!measureStartupPlayback) {
+        assert.equal(detailsBeforeSides, 1, "song detail must start while both catalogue replies are held");
+        assert.equal(readyBeforeSides, true, "audio must be ready while both catalogue replies are held");
+      }
+      console.log(JSON.stringify({ mode: "startup-playback", case: scenario.name, detailsBeforeSides, readyBeforeSides, audioReadyMs: Math.round(audioReadyMs) }));
+    } finally {
+      clearTimeout(timer); primary.release(); smart.release(); playlists.release(); await page.close();
+    }
+  });
 }
 async function verifyStartupCatalogue() {
   for (const [count, error] of [[80, ""], [1000, ""], [80, "controlled side failure"]]) await run(`startup ${count}: primary first, side ${error ? "failure" : "success"} keeps rows/focus/player`, async () => {
@@ -2865,16 +2929,16 @@ async function verifyStartupCatalogue() {
         await page.evaluate(() => { window.__newStartup = __fixtureRoute({ mode: "library", dashboard: "0", favorite: "1" }); });
         await Promise.all([requested(smart), requested(playlists)]); smart.release(); playlists.release(); await page.evaluate(() => __newStartup); await frames(page);
       }
-      const read = () => page.evaluate(() => ({ smart: __musicListFixture.state.smartPlaylists.map(item => item.id), playlists: __musicListFixture.state.playlists.map(item => item.id), status: __musicListFixture.state.status, loading: __musicListFixture.state.loading, rows: document.querySelectorAll('.music-mobile-track').length, title: document.querySelector('#viewTitle').textContent }));
+      const read = () => page.evaluate(() => ({ smart: __musicListFixture.state.smartPlaylists.map(item => item.id), playlists: __musicListFixture.state.playlists.map(item => item.id), status: __musicListFixture.state.status, loading: __musicListFixture.state.loading, rows: document.querySelectorAll('.music-mobile-track').length, title: document.querySelector('#viewTitle').textContent, current: __musicListFixture.state.current?.id }));
       const before = await read(), count = requests.filter(key => /^\/api\/music\/tracks\/T999/.test(key)).length;
       await page.evaluate(() => { window.__keptRow = document.querySelector('.music-mobile-track'); window.__keptMini = document.querySelector('.music-mobile-mini-player'); __shellCalls.length = 0; });
       await settleStartup(group); assert.deepEqual(await read(), before);
       assert.equal(await page.evaluate(() => __keptRow.isConnected && __keptMini.isConnected && __shellCalls.length === 0), true);
-      assert.equal(requests.filter(key => /^\/api\/music\/tracks\/T999/.test(key)).length, count, "old outer track continuation must not issue a detail GET");
+      assert.equal(requests.filter(key => /^\/api\/music\/tracks\/T999/.test(key)).length, count, "old track continuation must not retry its detail GET");
     } finally { await closeStartup(group); }
   });
-  await run("new user selection during held startup is not replaced by old deep-link continuation", async () => {
-    const group = await heldStartup({ params: { mode: "library", dashboard: "0", trackId: "T999" } });
+  await run("new user selection during held startup ignores a late deep-link detail", async () => {
+    const group = await heldStartup({ params: { mode: "library", dashboard: "0", trackId: "T999" }, ignoreAbort: true });
     const detail = hold(url => url.pathname === "/api/music/tracks/T2", { track: track(2), lyrics: { lines: [] } }); try {
       const { page } = group; await page.locator('[data-track-id="T2"]').click(); await requested(detail);
       const reads = requests.filter(key => /^\/api\/music\/tracks\/T999/.test(key)).length;

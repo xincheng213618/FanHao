@@ -671,11 +671,17 @@ async function verifyFirstCatalogRendering() {
       await page.getByRole('button', { name: '目录', exact: true }).click();
       await page.locator('.novel-reader-catalog-drawer .novel-mobile-chapter').first().waitFor(); await catalogFrames(page);
       const result = await catalogStats(page);
-      assert.equal(result.renders.length, 0, "the chapter DTO already includes the complete local catalog");
-      assert.equal(result.overlays.length, 1); assert.equal(result.overlays[0].loading, false); assert.equal(result.overlays[0].open, true);
+      assert.equal(result.renders.length, 0, "loading the local catalog must preserve the mounted chapter");
+      assert.deepEqual(result.overlays.map(({ loading, open }) => [loading, open]), [[true, true], [false, true]]);
       assert.equal(result.paragraphsCreated, 0); assert.equal(result.paragraphs, 1000); assert.equal(result.chapters, 80);
       assert(result.sameScreen && result.sameContent && result.sameToolbar && result.sameParagraphs);
       assert.equal(result.scroll, scroll); assert.equal(requests.length, requestCount);
+      await page.getByRole('button', { name: '关闭', exact: true }).click();
+      await resetCatalogProbe(page);
+      await page.getByRole('button', { name: '目录', exact: true }).click(); await catalogFrames(page);
+      const reopened = await catalogStats(page);
+      assert.deepEqual(reopened.overlays.map(({ loading, open }) => [loading, open]), [[false, true]]);
+      assert.equal(reopened.chapters, 80);
       assert.deepEqual(page.catalogErrors, []);
     } finally { await page.close(); }
   });

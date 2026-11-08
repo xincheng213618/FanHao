@@ -14,6 +14,11 @@ export const PHOTO_ALBUM_SORT_OPTIONS = [
   ["title", "名称排序"]
 ];
 
+export const PHOTO_PEOPLE_SORT_OPTIONS = [
+  ["count", "套图数量"],
+  ["title", "姓名排序"]
+];
+
 export function photoCatalogCollections(categoryItems = [], sort = "updated") {
   const collections = new Map();
   for (const category of Array.isArray(categoryItems) ? categoryItems : []) {

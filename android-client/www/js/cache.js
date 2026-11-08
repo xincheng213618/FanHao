@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=assets-8af3642624a3";
+import { CLIENT_VERSION } from "./config.js?v=assets-8faf7a80cb7b";
 import { accountPayloadOwner, captureAccountOwner, confirmAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload } from "./account-owner.js";
 
 const DB_NAME = "fanhao-android-cache";
@@ -184,11 +184,17 @@ export async function clearCachedJson(baseUrl = "") {
   return clearCachedData(baseUrl);
 }
 
-export async function clearCachedJsonByPrefix(baseUrl, pathPrefix, { accountScope = null } = {}) {
+export async function clearCachedJsonByPrefix(baseUrl, pathPrefix, options = {}) {
+  return clearCachedJsonByPrefixes(baseUrl, [pathPrefix], options);
+}
+
+export async function clearCachedJsonByPrefixes(baseUrl, pathPrefixes, { accountScope = null } = {}) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
-  const normalizedPrefix = String(pathPrefix || "").trim();
-  if (!normalizedBase || !normalizedPrefix) return;
-  if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
+  const normalizedPrefixes = Array.isArray(pathPrefixes)
+    ? [...new Set(pathPrefixes.map(prefix => String(prefix || "").trim()).filter(Boolean))]
+    : [];
+  if (!normalizedBase || !normalizedPrefixes.length) return;
+  if (accountScope && (accountScope.origin !== captureAccountOwner(normalizedBase).origin || !isAccountOwnerCurrent(accountScope))) return;
   invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
   if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
@@ -197,8 +203,8 @@ export async function clearCachedJsonByPrefix(baseUrl, pathPrefix, { accountScop
     if (accountScope && !isAccountOwnerCurrent(accountScope)) return;
     await Promise.all(
       entries
-        .filter((entry) => String(entry?.path || "").startsWith(normalizedPrefix))
         .filter((entry) => !accountScope || (entry.accountOwner || "guest") === accountScope.owner)
+        .filter((entry) => normalizedPrefixes.some(prefix => String(entry?.path || "").startsWith(prefix)))
         .map((entry) => requestToPromise(store.delete(entry.key)))
     );
   });

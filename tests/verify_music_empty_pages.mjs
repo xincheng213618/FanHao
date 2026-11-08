@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createMusicStore } from "../src/modules/music/server/store.js";
+import { routeMusicApi } from "../src/modules/music/server/routes.js";
 import { MUSIC_FACET_CACHE } from "../src/modules/music/server/constants.js";
 import { insertMusicShortSearchRow, insertMusicPhoneticSearchRow } from "../src/modules/music/server/search.js";
 
@@ -21,6 +22,9 @@ async function factoryFrom(text) {
   return (await import("data:text/javascript;base64," + Buffer.from(resolved).toString("base64"))).createMusicStore;
 }
 const previousFactory = await factoryFrom(previousSource);
+const totalCacheGate = "const reusableCount = !database.isTransaction;";
+assert.equal(source.split(totalCacheGate).length, 2);
+const withoutTotalCacheFactory = await factoryFrom(source.replace(totalCacheGate, "const reusableCount = false;"));
 const zeroOnlyFactory = await factoryFrom(source.replace(guard, "const emptyPage = total === 0;"));
 const unsafeFactory = await factoryFrom(source.replace(guard, "const emptyPage = total <= offset;"));
 const referenceProof = 'return ["artist_id", "album_id"].every(key => trackColumns.some(column => column.name === key && column.type.toUpperCase() === "TEXT"));';
@@ -42,6 +46,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
   const kind = sql.includes("FROM music_track_state s INDEXED BY") ? "helper"
     : sql.includes("FROM music_tracks t") && sql.includes("LIMIT ? OFFSET ?") && sql.includes("LEFT JOIN music_artists") ? "page"
       : /^SELECT COUNT\(\*\) AS count FROM music_(tracks|track_state)\b/u.test(sql) ? "count"
+        : sql.includes("FROM pragma_data_version()") ? "totalStamp"
         : sql.startsWith("SELECT name, sql FROM sqlite_schema") || sql === "PRAGMA table_info(music_tracks)" ? "schema" : "other";
   const ownedFault = fault?.db === this && fault.kind === kind && (!fault.sql || fault.sql === sql);
   if (ownedFault && fault.phase === "prepare") throw fault.error;
@@ -59,7 +64,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
     return (...parameters) => {
       if (ownedFault && key === fault.phase) throw fault.error;
       if (ownedFault && fault.phase === "bind" && ["get", "all"].includes(key)) parameters[0] = Symbol("invalid fixture binding");
-      if (measurement?.db === connection && ((kind === "page" || kind === "helper") && key === "all" || kind === "count" && key === "get" || kind === "schema" && key === "all")) {
+      if (measurement?.db === connection && ((kind === "page" || kind === "helper") && key === "all" || (kind === "count" || kind === "totalStamp") && key === "get" || kind === "schema" && key === "all")) {
         measurement.executions.push({ kind, sql, parameters });
       }
       const result = value.apply(target, parameters);
@@ -74,6 +79,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
 
 try {
   const scale = pair(100000);
+  await verifyCatalogueCountReuse(scale.current);
   for (const query of ["favorite=1", "favorite=1&sort=played", "minRating=4", "smart=recent"]) {
     const work = compare(scale, query + "&limit=80");
     assert.equal(work.current.result.total, 0);
@@ -203,6 +209,55 @@ function budget(query, work) {
     executedPages: pages.length, executedHelpers: work.current.executions.filter(entry => entry.kind === "helper").length };
 }
 
+async function verifyCatalogueCountReuse(current) {
+  const previous = open(withoutTotalCacheFactory);
+  seed(previous, 100000);
+  refresh({ current, previous });
+  const countQueries = execution => execution.kind === "count";
+  const cold = measure(current, "limit=80", false);
+  assert.equal(cold.executions.filter(countQueries).length, 1);
+  const warm = measure(current, "limit=80&offset=80", false);
+  assert.equal(warm.executions.filter(countQueries).length, 0);
+  assert.equal(warm.executions.filter(item => item.kind === "totalStamp").length, 1);
+  for (const query of ["artist=a&limit=80", "genre=Pop&limit=80"]) {
+    const filtered = measure(current, query, false);
+    assert.equal(filtered.executions.filter(countQueries).length, 1);
+    assert.equal(filtered.executions.filter(item => item.kind === "totalStamp").length, 0);
+  }
+  async function route(owner, query) {
+    const response = {};
+    assert(await routeMusicApi({ method: "GET" }, response, new URL("http://fixture/api/music/tracks?" + query), {
+      musicStore: owner.store,
+      sendJson: (target, status, data) => Object.assign(target, { status, data })
+    }));
+    return response;
+  }
+  for (const query of ["limit=80", "limit=80&offset=80", "limit=80&offset=100000", "limit=80&sort=duration", "limit=80&artist=all&album=all"]) {
+    assert.equal(JSON.stringify(await route(current, query)), JSON.stringify(await route(previous, query)), "complete catalogue route equals uncached count");
+  }
+  const beforeTimes = [], afterTimes = [];
+  async function sample(owner, offset, expectedCounts, times) {
+    const start = performance.now();
+    measurement = { db: owner.db, visits: 0, executions: [], probe: false };
+    try {
+      const response = await route(owner, `limit=80&offset=${offset}`);
+      times.push(performance.now() - start);
+      assert.equal(response.status, 200);
+      assert.equal(response.data.total, 100000);
+      assert.equal(measurement.executions.filter(countQueries).length, expectedCounts);
+    } finally { measurement = null; }
+  }
+  for (let round = 0; round < 11; round++) {
+    const offset = round * 80;
+    if (round % 2) await sample(current, offset, 0, afterTimes);
+    await sample(previous, offset, 1, beforeTimes);
+    if (!(round % 2)) await sample(current, offset, 0, afterTimes);
+  }
+  const median = values => +values.sort((a, b) => a - b)[5].toFixed(3);
+  console.log(JSON.stringify({ check: "music-catalogue-count-reuse", tracks: 100000, pageSize: 80, requests: 11,
+    beforeCountExecutions: 11, afterCountExecutions: 0, beforeMedianMs: median(beforeTimes), afterMedianMs: median(afterTimes), fullRouteOracle: true }));
+}
+
 function verifyLegacyJoinMultiplication() {
   for (const table of ["music_track_state", "music_artists", "music_albums"]) for (const keyType of ["BLOB", "NOCASE-column-BINARY-primary-key"]) {
     const current = open(factory), previous = open(previousFactory), unsafe = open(unsafeFactory);
@@ -301,6 +356,7 @@ function verifyErrors(pair) {
       const error = Object.assign(new Error("controlled " + kind + " " + phase), { code: "ERR_SQLITE_ERROR", errcode: 5 });
       const errors = [];
       for (const owner of [pair.current, pair.previous]) {
+        if (kind === "count" && query.includes("sort=played")) owner.db.exec("UPDATE music_tracks SET status=status WHERE id='t000001'");
         fault = { db: owner.db, kind, phase, error };
         let caught;
         try { read(owner, query); } catch (failure) { caught = failure; }
@@ -359,6 +415,36 @@ async function verifyWalRaces() {
     assert.equal(interleave, null); assert.deepEqual(pinned, before);
     assert.equal(read(current, "sort=played&limit=1").tracks[0].positionMs, 999);
     races.push({ playedIdToDtoSnapshot: true, nextRequestSeesNewPosition: true });
+
+    const query = "sort=title&limit=1";
+    const beforeCountReuse = read(current, query);
+    interleave = { db: current.db, kind: "totalStamp", method: "get", run() {
+      writer.prepare("UPDATE music_tracks SET status='missing' WHERE id=?").run(beforeCountReuse.tracks[0].id);
+    } };
+    assert.deepEqual(read(current, query), beforeCountReuse, "a warm exact total and its page remain in the same WAL snapshot");
+    assert.equal(interleave, null);
+    const afterCommit = read(current, query);
+    assert.equal(afterCommit.total, 2);
+    assert.notEqual(afterCommit.tracks[0].id, beforeCountReuse.tracks[0].id);
+
+    current.db.exec("BEGIN; UPDATE music_tracks SET status='missing';");
+    try {
+      assert.equal(read(current, query).total, 0, "nested read sees the outer transaction's current changes");
+      assert.equal(current.db.isTransaction, true);
+    } finally { current.db.exec("ROLLBACK"); }
+    assert.equal(read(current, query).total, 2, "a rolled-back total cannot leak from the nested snapshot");
+
+    current.db.exec("CREATE TEMP VIEW music_tracks AS SELECT * FROM main.music_tracks WHERE id='t000002';");
+    try {
+      const shadow = measure(current, query, false);
+      const expected = current.db.prepare("SELECT COUNT(*) AS count FROM temp.music_tracks WHERE status='ok'").get().count;
+      assert.equal(shadow.result.total, expected);
+      assert.equal(shadow.executions.filter(item => item.kind === "count").length, 1, "a TEMP source uses the original COUNT");
+    } finally { current.db.exec("DROP VIEW temp.music_tracks"); }
+    assert.equal(read(current, query).total, 2);
+    current.db.exec("UPDATE music_tracks SET status='ok'");
+    assert.equal(read(current, query).total, 3, "same-connection writes invalidate the exact total");
+    races.push({ catalogueCountHitPinsSnapshot: true, externalCommit: true, localCommit: true, nestedRollback: true, tempShadow: true });
   } finally {
     interleave = null;
     for (const owner of [current, previous, unpinned]) await owner.store.stop();

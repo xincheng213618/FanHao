@@ -61,7 +61,10 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
       if (url.pathname.startsWith("/api/")) { faults.push(`unexpected API ${req.method} ${url.pathname}`); json({}, 404); return; }
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
       if (url.pathname === "/fixture-away") { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>Away</title><p>Private navigation target</p>"); return; }
-      if (sourceOverrides[url.pathname] !== undefined) { res.writeHead(200, { "content-type": "text/javascript" }); res.end(sourceOverrides[url.pathname]); return; }
+      if (sourceOverrides[url.pathname] !== undefined) {
+        res.writeHead(200, { "content-type": url.pathname.endsWith(".html") ? "text/html" : "text/javascript" });
+        res.end(sourceOverrides[url.pathname]); return;
+      }
       // Plyr is a UI boundary here; the real player page, controls and subtitle
       // module still run. Native media is controlled by the browser init script.
       if (!realPlyr && url.pathname === "/vendor/plyr/plyr.min.js") { res.writeHead(200, { "content-type": "text/javascript" }); res.end(""); return; }
@@ -94,7 +97,7 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
     held.add(gate); return gate;
   };
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
-  async function open(ignoreAbort = true, query = "", { waitForSource = true } = {}) {
+  async function open(ignoreAbort = true, query = "", { waitForSource = true, beforeNavigate } = {}) {
     const page = await browser.newPage();
     page.on("pageerror", error => faults.push(String(error)));
     await page.addInitScript(({ ignoreAbort }) => {
@@ -155,6 +158,7 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         }, error => { __readFinished.push(String(url)); throw error; });
       };
     }, { ignoreAbort });
+    await beforeNavigate?.(page);
     await page.goto(`${base}/player.html?workId=fixture-work${query}`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"));
     const initialId = new URLSearchParams(query).get("videoId");
@@ -174,7 +178,61 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
       __fileObserver.observe(document.querySelector("#playerFiles"), { childList: true, subtree: true });
     });
   }
+  async function measureFileSelection(page) {
+    await page.evaluate(() => {
+      const rows = new Set(__fileRows), metadata = new Set(__fileRows.flatMap(row => [...row.children]));
+      const classList = Object.getOwnPropertyDescriptor(Element.prototype, "classList");
+      const textContent = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+      const list = document.querySelector("#playerFiles");
+      const profile = { classes: 0, metadata: 0, ms: 0 };
+      let started;
+      list.addEventListener("click", () => {
+        Object.defineProperty(Element.prototype, "classList", { ...classList, get() {
+          if (rows.has(this)) profile.classes++;
+          return classList.get.call(this);
+        } });
+        Object.defineProperty(Node.prototype, "textContent", { ...textContent, get() {
+          if (metadata.has(this)) profile.metadata++;
+          return textContent.get.call(this);
+        } });
+        started = performance.now();
+      }, { once: true, capture: true });
+      list.addEventListener("click", () => {
+        profile.ms = Number((performance.now() - started).toFixed(2));
+        Object.defineProperty(Element.prototype, "classList", classList);
+        Object.defineProperty(Node.prototype, "textContent", textContent);
+        window.__fileSelectionProfile = profile;
+      }, { once: true });
+    });
+  }
   try {
+    if (realPlyr) await run("real Plyr startup overlaps the host module download", async () => {
+      const starts = { controls: [], module: [] };
+      let controlsReleasedAt = 0;
+      const page = await open(true, "&videoId=B", { async beforeNavigate(page) {
+        await page.route(url => ["/vendor/plyr/plyr.min.js", "/js/player-page.js"].includes(url.pathname), async route => {
+          const asset = new URL(route.request().url()).pathname === "/js/player-page.js" ? "module" : "controls";
+          starts[asset].push(performance.now());
+          await new Promise(resolve => setTimeout(resolve, 300));
+          if (asset === "controls") controlsReleasedAt = performance.now();
+          await route.continue();
+        });
+      } });
+      try {
+        assert.equal(starts.controls.length, 1);
+        assert.equal(starts.module.length, 1, "the import must reuse its preloaded player module");
+        const firstRequestAt = Math.min(starts.controls[0], starts.module[0]);
+        const elapsed = value => Math.round(value - firstRequestAt);
+        console.log(`MEASURE standalone player cold asset starts: ${JSON.stringify({
+          controlsMs: elapsed(starts.controls[0]), moduleMs: elapsed(starts.module[0]),
+          controlsReleasedMs: elapsed(controlsReleasedAt), readyMs: elapsed(performance.now())
+        })}`);
+        assert(starts.module[0] < controlsReleasedAt, "player module must request while Plyr is still downloading");
+        assert.equal(await page.locator("#playerFilePosition").textContent(), "2 / 3");
+        assert.equal(await page.evaluate(() => document.querySelector("#playerVideo").plyr?.ready), true);
+      } finally { await page.close(); }
+    });
+
     await run("adjacent files navigate from the collapsed player with bounded native controls", async () => {
       const page = await open();
       try {
@@ -240,17 +298,35 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
       const page = await open();
       try {
         await probeFileList(page);
+        await measureFileSelection(page);
         const button = page.locator(".player-file-button").filter({ hasText: "Video B" });
         await button.focus(); await page.keyboard.press("Enter"); await sourceIs(page, "B"); await tick(page);
         const measured = await page.evaluate(() => ({ retained: __fileRows.filter(row => row.isConnected).length, added: __fileAddedElements,
-          focus: document.activeElement === __fileRows[1], blurs: __fileBlurs }));
+          focus: document.activeElement === __fileRows[1], blurs: __fileBlurs, selection: __fileSelectionProfile }));
         console.log(`MEASURE file list ${realPlyr ? "bundled Plyr" : "controlled UI"}: ${JSON.stringify(measured)}`);
         assert.equal(measured.retained, 1000, "choosing one file must preserve all 1000 existing file rows");
         assert.deepEqual([measured.added, measured.focus, measured.blurs], [0, true, 0], "file switching must retain its native button focus without rebuilding or transient blur");
+        assert.deepEqual([measured.selection.classes, measured.selection.metadata], [2, 0], "file switching must update only the outgoing and incoming rows without rereading file metadata");
         assert.equal(await button.getAttribute("aria-current"), "true", "the selected file must be exposed as the current item");
         await page.keyboard.press("Tab");
         assert.equal(await page.locator(".player-file-button").filter({ hasText: "Video C" }).evaluate(button => document.activeElement === button), true, "Tab must continue from the chosen file to its next row");
         await page.keyboard.press("Enter"); await sourceIs(page, "C");
+        assert.equal(await button.getAttribute("aria-current"), null);
+        assert.equal(await page.locator(".player-file-button[aria-current='true']").textContent(), "Video C");
+      } finally { work.videos = original; await page.close(); }
+    });
+    await run("file list duplicate IDs keep their shared selection and first position", async () => {
+      const original = work.videos;
+      work.videos = [original[0], original[1], { ...original[1], name: "Alternate B" }, original[2]];
+      const page = await open();
+      try {
+        await choose(page, "B"); await sourceIs(page, "B");
+        const currentRows = page.locator(".player-file-button[aria-current='true'] strong");
+        assert.deepEqual(await currentRows.allTextContents(), ["Video B", "Alternate B"]);
+        assert.equal(await page.locator("#playerFilePosition").textContent(), "2 / 4");
+        await choose(page, "C"); await sourceIs(page, "C");
+        assert.deepEqual(await currentRows.allTextContents(), ["Video C"]);
+        assert.equal(await page.locator("#playerFilePosition").textContent(), "4 / 4");
       } finally { work.videos = original; await page.close(); }
     });
     await run("file list pending keyboard selection keeps the latest file owner", async () => {

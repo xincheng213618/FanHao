@@ -113,6 +113,51 @@ test("failed empty local shelf says unknown, never claims empty library", async 
   assert(!h.els.viewContent.textContent.includes("暂时没有小说"));
   assert(!h.els.viewMeta.textContent.includes("0 本"));
 });
+test("settled shelf payloads are rechecked after a same-URL account change during local IO", async (h) => {
+  h.setAccount("account:old");
+  const cached = h.ownRemotePayload({ books: [{ id: "old-cache", title: "旧账号缓存" }], total: 1 });
+  h.cached.set("/api/novels?limit=80", { payload: cached });
+  const local = h.queueListRead();
+  const pending = h.api.renderNovelList();
+  await settle(); assert.equal(h.fetches.length, 1);
+  h.fetches[0].wait.resolve(h.ownRemotePayload({ books: [{ id: "old-fresh", title: "旧账号新鲜结果" }], total: 1 }));
+  await settle();
+  h.setAccount("account:new"); // No route change in this fixture.
+  local.resolve([]); await pending;
+  assert(!h.els.viewContent.textContent.includes("旧账号"));
+  assert(!h.cacheCalls.some(call => call.kind === "write"));
+}, replaceOnce("return !owner || isAccountOwnerCurrent(owner);", "return true;"));
+test("first resolved account may publish its own fresh DTO after local IO", async (h) => {
+  h.setAccount("pending");
+  const local = h.queueListRead();
+  const pending = h.api.renderNovelList();
+  await settle(); assert.equal(h.fetches.length, 1);
+  h.setAccount("account:first");
+  h.fetches[0].wait.resolve(h.ownRemotePayload({ books: [{ id: "new-book", title: "首个已确认账号" }], total: 1 }));
+  local.resolve([]); await pending;
+  assert(h.els.viewContent.textContent.includes("首个已确认账号"));
+});
+test("early cache read failure leaves the independently settled fresh list usable", async (h) => {
+  const cache = deferred(), local = h.queueListRead();
+  h.cached.set("/api/novels?limit=80", cache.promise);
+  const pending = h.api.renderNovelList();
+  await settle(); assert.equal(h.fetches.length, 1);
+  cache.reject(new Error("合成远端缓存失败"));
+  h.fetches[0].wait.resolve({ books: [{ id: "fresh-book", title: "远端正常" }], total: 1 });
+  await settle(); assert(!h.els.viewContent.textContent.includes("远端正常"));
+  local.resolve([]); await pending;
+  assert(h.els.viewContent.textContent.includes("远端正常"));
+});
+test("early HTTP failure preserves cached shelf and shows offline notice after local IO", async (h) => {
+  h.cached.set("/api/novels?limit=80", { payload: { books: [{ id: "cached-book", title: "离线远端缓存" }], total: 1 } });
+  const local = h.queueListRead();
+  const pending = h.api.renderNovelList();
+  await settle(); assert.equal(h.fetches.length, 1);
+  h.fetches[0].wait.reject(new Error("合成断线")); await settle();
+  local.resolve([]); await pending;
+  assert(h.els.viewContent.textContent.includes("离线远端缓存"));
+  assert(h.els.viewContent.textContent.includes("电脑端暂时连不上"));
+});
 test("list retry is single-flight and a later remote response uses retried summaries", async (h) => {
   h.api.__test.listState.source = "all";
   const first = h.queueListRead(); const pending = h.api.__test.renderNovelCollection();

@@ -8,6 +8,7 @@ import { installFixtureSyncJournal } from "./fixtures/short-video-sync-journal.m
 
 import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
+import { routeShortVideoApi } from "../src/modules/short-videos/server/routes.js";
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
 import { createShortVideoPublicVideoMapper, shortVideoStatisticsKnown } from "../src/modules/short-videos/server/public-video-mapper.js";
 import { createShortVideoListPageQueries } from "../src/modules/short-videos/server/list-page-queries.js";
@@ -186,6 +187,10 @@ assert.doesNotMatch(contentStructureSource, /v\.(?:title|share_url|published_at|
 assert.match(contentStructureSource, /rows\.sort\(\(left, right\) => Number\(left\.engagement_score/, "content-structure analytics must compute the equivalent tied percentile in one in-memory numeric sort");
 assert.match(contentStructureSource, /medianSorted\(collectRatios\)/, "content-structure analytics must reuse its sorted ratio arrays instead of repeatedly sorting the full sample");
 
+if (process.argv.includes("--related-only")) {
+  await verifyRelatedCandidates();
+  process.exit(0);
+}
 await verifyNavigationListOrder();
 if (process.argv.includes("--navigation-only")) {
   console.log("short-video-store: navigation-only ok");
@@ -193,6 +198,260 @@ if (process.argv.includes("--navigation-only")) {
 }
 await verifySuggestionQueryBudget();
 await verifyFallbackCountQueries();
+await verifyAuthorMentionCounts();
+await verifyRelatedCandidates();
+
+async function verifyRelatedCandidates() {
+  const moduleUrl = new URL("../src/modules/short-videos/server/store.js", import.meta.url);
+  const optimized = /indexedRelatedCandidates\(database, \{\s+currentTags, authorSecUid, id: current\.id, candidateLimit, candidateColumns, affinity, affinityArgs\s+\}\) \?\? /u;
+  assert.match(shortVideoStoreSource, optimized);
+  const oldSource = shortVideoStoreSource.replace(optimized, "")
+    .replace(/from "(\.\.?\/[^"\n]+)"/gu, (_, relative) => "from " + JSON.stringify(new URL(relative, moduleUrl).href));
+  const { createShortVideoStore: previous } = await import("data:text/javascript;base64," + Buffer.from(oldSource).toString("base64"));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-related-"));
+  const dbPath = path.join(directory, "catalog.sqlite");
+  const options = { dbPath, coverDbPath: path.join(directory, "unopened.sqlite"), roots: [], skipStartupMaintenance: true };
+  const bootstrap = createShortVideoStore(options);
+  const owners = [];
+  let writer;
+  function open(factory) {
+    const owner = { store: factory({ ...options, readOnly: true }), work: null };
+    owners.push(owner);
+    const native = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.prepare = function (sql) { owner.db = this; return native.call(this, sql); };
+    try { owner.store.prepareSchema(); } finally { DatabaseSync.prototype.prepare = native; }
+    const prepare = owner.db.prepare.bind(owner.db);
+    owner.db.prepare = sql => {
+      const statement = prepare(sql);
+      const kind = sql.includes("WITH tag_ids AS MATERIALIZED") ? "indexed"
+        : sql.includes("FROM short_videos v") && sql.includes("v.tags_text LIKE") ? "original" : null;
+      if (!kind || !owner.work) return statement;
+      return { all(...args) {
+        owner.work.operations.push(kind);
+        if (owner.work.failure === kind) throw new Error("synthetic related read failed");
+        if (kind === "indexed") owner.work.beforeIndexed?.();
+        if (owner.work.explain && kind === "indexed") owner.work.plan = prepare("EXPLAIN QUERY PLAN " + sql).all(...args).map(row => row.detail);
+        const rows = statement.all(...args);
+        if (kind === "indexed") owner.work.total = rows[0].total;
+        return rows;
+      } };
+    };
+    return owner;
+  }
+  async function route(owner, id, limit = 24, work = null) {
+    owner.work = work;
+    const response = {};
+    try {
+      const url = new URL(`http://fixture/api/short-videos/${id}/related?limit=${limit}`);
+      assert(await routeShortVideoApi({ method: "GET" }, response, url, {
+        shortVideoStore: owner.store,
+        sendJson: (res, status, data) => Object.assign(res, { status, data }),
+        notFound: res => { res.status = 404; }
+      }));
+      return response;
+    } finally { owner.work = null; }
+  }
+  const median = values => +values.sort((a, b) => a - b)[Math.floor(values.length / 2)].toFixed(2);
+  try {
+    bootstrap.prepareSchema();
+    bootstrap.close();
+    writer = new DatabaseSync(dbPath);
+    writer.prepare(`WITH RECURSIVE rows(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM rows WHERE i<70000)
+      INSERT INTO short_videos(id,aweme_id,author_sec_uid,author_name,title,description,tags_json,tags_text,
+        visibility,media_type,published_at,liked_at,source_path,digg_count)
+      SELECT 'v-'||i,'a-'||i,'author-'||(i%2000),'Author '||(i%2000),'Title '||i,?,
+        CASE WHEN i%131=0 THEN '["RareTopic"]' ELSE '["普通视频"]' END,
+        CASE WHEN i%131=0 THEN 'prefixraretopicsuffix' ELSE '普通视频' END,
+        CASE WHEN i%17=0 THEN 'download_pending' ELSE 'local_only' END,
+        CASE WHEN i%5=0 THEN 'gallery' ELSE 'video' END,printf('%08d',i),printf('%08d',i),'synthetic/'||i,i%15000 FROM rows
+    `).run("合成元数据".repeat(50));
+    const factories = [previous, createShortVideoStore];
+    const cold = [[], []];
+    for (let pair = 0; pair < 3; pair++) {
+      const replies = [];
+      for (const mode of pair % 2 ? [1, 0] : [0, 1]) {
+        const owner = open(factories[mode]);
+        const start = performance.now();
+        replies[mode] = await route(owner, "v-131");
+        cold[mode].push(performance.now() - start);
+        owner.store.close();
+      }
+      assert.deepEqual(replies[0], replies[1]);
+    }
+    const [before, after] = factories.map(open);
+    const equivalent = async (id, limit, operations, extra = {}) => {
+      const work = { operations: [], ...extra };
+      const response = await route(after, id, limit, work);
+      assert.deepEqual(response, await route(before, id, limit));
+      assert.deepEqual(work.operations, operations);
+      return { response, work };
+    };
+    const sparse = await equivalent("v-131", 24, ["indexed"], { explain: true });
+    assert.equal(sparse.response.status, 200);
+    assert.equal(sparse.response.data.videos.length, 24);
+    assert(sparse.work.plan.some(line => line.includes("short_video_search VIRTUAL TABLE INDEX")));
+    assert(sparse.work.plan.some(line => /COVERING INDEX idx_short_videos_author_published.*author_sec_uid=\?/u.test(line)));
+    const dense = await equivalent("v-132", 24, ["indexed", "original"]);
+    assert.equal(dense.work.total, 1025);
+    await equivalent("v-131", 24, ["indexed", "original"], { failure: "indexed" });
+    assert.equal((await equivalent("missing", 24, [])).response.status, 404);
+    const warm = {};
+    for (const [name, id, limit] of [["sparse", "v-131", 24], ["sparse72", "v-131", 72], ["dense", "v-132", 24]]) {
+      const samples = [[], []];
+      for (let pair = 0; pair < 5; pair++) {
+        const replies = [];
+        for (const mode of pair % 2 ? [1, 0] : [0, 1]) {
+          const start = performance.now();
+          replies[mode] = await route([before, after][mode], id, limit);
+          samples[mode].push(performance.now() - start);
+        }
+        assert.deepEqual(replies[0], replies[1]);
+      }
+      warm[name] = samples.map(median);
+    }
+    writer.exec(`UPDATE short_videos SET tags_json='["RareTopic","少见词"]' WHERE id='v-131';
+      UPDATE short_videos SET tags_json='["少见词"]',tags_text='前少见词后',media_type='video',digg_count=100000000 WHERE id='v-70000';
+      UPDATE short_videos SET published_at='00070000',liked_at='00070000' WHERE id='v-69823';
+      DELETE FROM short_videos WHERE id='v-69954';
+      UPDATE short_videos SET tags_json='["短词"]',tags_text='短词' WHERE id='v-133';
+      UPDATE short_videos SET tags_json='["literal%"]',tags_text='literal%' WHERE id='v-134';
+      UPDATE short_videos SET author_sec_uid='',tags_json='["RareTopic"]' WHERE id='v-135';`);
+    assert((await equivalent("v-131", 24, ["indexed"])).response.data.videos.some(row => row.id === "v-70000"));
+    await equivalent("v-133", 24, ["original"]);
+    await equivalent("v-134", 24, ["original"]);
+    await equivalent("v-135", 24, ["original"]);
+    await equivalent("v-131", 24, ["indexed", "original"], { beforeIndexed() {
+      writer.exec(`DROP TRIGGER short_video_search_au;
+        UPDATE short_videos SET tags_json='["少见词"]',tags_text='少见词' WHERE id='v-69999';`);
+    } });
+    await equivalent("v-131", 24, ["original"]);
+    for (const owner of [before, after]) await assert.rejects(route(owner, "v-131", 24, { operations: [], failure: "original" }),
+      { name: "Error", message: "synthetic related read failed" });
+    console.log(JSON.stringify({ check: "short-video-related-candidates", videos: 70000, coldMedianMs: cold.map(median), warmMedianMs: warm }));
+  } finally {
+    writer?.close();
+    bootstrap.close();
+    for (const { store } of owners) store.close();
+    const owned = fs.realpathSync(directory);
+    assert.equal(path.dirname(owned), fs.realpathSync(os.tmpdir()));
+    assert(path.basename(owned).startsWith("fanhao-short-related-"));
+    for (const item of fs.readdirSync(owned, { withFileTypes: true })) {
+      assert(item.isFile());
+      fs.unlinkSync(path.join(owned, item.name));
+    }
+    fs.rmdirSync(owned);
+  }
+}
+
+async function verifyAuthorMentionCounts() {
+  const moduleUrl = new URL("../src/modules/short-videos/server/store.js", import.meta.url);
+  const optimized = "exactSecUid ? database.prepare(sql) : prepareAuthorMentionQuery(database, sql, countSql, queryArgs)";
+  assert.equal(shortVideoStoreSource.split(optimized).length, 2);
+  const legacySource = shortVideoStoreSource.replace(optimized, "database.prepare(sql)")
+    .replace(/from "(\.\.?\/[^"\n]+)"/gu, (_match, relative) => `from ${JSON.stringify(new URL(relative, moduleUrl).href)}`);
+  const { createShortVideoStore: previous } = await import(`data:text/javascript;base64,${Buffer.from(legacySource).toString("base64")}`);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-author-mention-"));
+  const dbPath = path.join(directory, "catalog.sqlite"), coverDbPath = path.join(directory, "unopened.sqlite"), owners = [];
+  let observe = false, failRead = false;
+  function open(factory = createShortVideoStore, readOnly = true) {
+    const owner = { store: factory({ dbPath, coverDbPath, roots: [], readOnly, skipStartupMaintenance: true }) };
+    owners.push(owner);
+    const original = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.prepare = function(sql) { owner.db = this; return original.call(this, sql); };
+    try { owner.store.prepareSchema(); } finally { DatabaseSync.prototype.prepare = original; }
+    const prepare = owner.db.prepare.bind(owner.db);
+    owner.db.prepare = sql => {
+      const statement = prepare(sql);
+      if (!(observe || failRead) || /^EXPLAIN/u.test(sql) || !sql.includes("FROM short_video_users users") || !sql.includes("AS following")) return statement;
+      return { get(...args) {
+        if (failRead) throw new Error("private synthetic mention read failure");
+        owner.plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map(row => row.detail);
+        return statement.get(...args);
+      } };
+    };
+    return owner;
+  }
+  async function route(owner, mention, expected = 200) {
+    const response = {};
+    const url = new URL(`http://fixture/api/short-videos/authors/resolve?mention=${encodeURIComponent(mention)}`);
+    assert(await routeShortVideoApi({ method: "GET" }, response, url, {
+      shortVideoStore: owner.store, sendJson: (res, status, data) => Object.assign(res, { status, data })
+    }));
+    assert.equal(response.status, expected);
+    return response;
+  }
+  const median = samples => +samples.sort((a, b) => a - b)[Math.floor(samples.length / 2)].toFixed(3);
+  try {
+    const writer = open(createShortVideoStore, false);
+    writer.db.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1000)
+      INSERT INTO short_video_users(id,sec_uid,nickname) SELECT 'u'||i,'sec'||i,CASE WHEN i<=40 THEN 'Shared Name' ELSE 'Author '||i END FROM n;
+      UPDATE short_video_users SET nickname_history_json='[{"value":"Earlier Name"}]', unique_id='legacy-handle', short_id='1234' WHERE id='u500';
+      INSERT INTO short_video_users(id,sec_uid,nickname) VALUES('','empty-sec','Empty Owner'),('u-exact','MS4wLjABfixture','Exact');
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+      INSERT INTO short_videos(id,aweme_id,owner_user_id,author_sec_uid,title,source_path,visibility)
+      SELECT 'v'||i,'v'||i,CASE WHEN i%7=0 THEN '' ELSE 'u'||(i%1000+1) END,'sec'||(i%1000+1),'Synthetic '||i,'',
+        CASE WHEN i%41=0 THEN 'download_pending' ELSE 'local_only' END FROM n;`);
+    writer.store.close();
+    const factories = [previous, createShortVideoStore], cold = [[], []];
+    for (let round = 0; round < 3; round++) {
+      const responses = [];
+      for (const i of (round % 2 ? [1, 0] : [0, 1])) {
+        const owner = open(factories[i]), start = performance.now();
+        responses[i] = await route(owner, "Shared Name"); cold[i].push(performance.now() - start); owner.store.close();
+      }
+      assert.deepEqual(responses[1], responses[0]);
+    }
+    const before = open(previous), after = open();
+    for (const [mention, status] of [["Shared Name",200],["@Author 500",200],["Earlier Name",200],["legacy-handle",200],
+      ["1234",200],["MS4wLjABfixture",200],["not present",404]]) assert.deepEqual(await route(after, mention, status), await route(before, mention, status));
+    observe = true;
+    assert.deepEqual(await route(after, "Shared Name"), await route(before, "Shared Name"));
+    observe = false;
+    assert(before.plan.some(line => /idx_short_videos_author_facet \(visibility=\?\)/u.test(line)));
+    assert(after.plan.some(line => /owner_user_id=\?/u.test(line)) && after.plan.some(line => /author_sec_uid=\?/u.test(line)));
+    const warm = {};
+    for (const mention of ["Author 500", "Shared Name"]) {
+      const samples = [[], []];
+      for (let round = 0; round < 7; round++) for (const i of (round % 2 ? [1, 0] : [0, 1])) {
+        const start = performance.now(); await route([before, after][i], mention); samples[i].push(performance.now() - start);
+      }
+      warm[mention] = samples.map(median);
+    }
+    const mutation = new DatabaseSync(dbPath), log = console.error;
+    try {
+      console.error = () => {}; failRead = true;
+      assert.deepEqual(await route(after, "Shared Name", 500), await route(before, "Shared Name", 500));
+      failRead = false;
+      mutation.exec(`UPDATE short_video_users SET nickname_history_json='["bad item"]' WHERE id='u1000'`);
+      assert.deepEqual(await route(after, "Shared Name", 503), await route(before, "Shared Name", 503));
+      mutation.exec(`UPDATE short_video_users SET nickname_history_json='[]' WHERE id='u1000';
+        DROP INDEX idx_short_videos_owner; DROP INDEX idx_short_videos_owner_visibility; DROP INDEX idx_short_videos_following_stats;`);
+      before.store.close(); after.store.close();
+      const legacyBefore = open(previous), legacyAfter = open();
+      observe = true;
+      assert.deepEqual(await route(legacyAfter, "Shared Name"), await route(legacyBefore, "Shared Name"));
+      assert.deepEqual(legacyAfter.plan, legacyBefore.plan, "legacy storage without an owner seek retains the original statement");
+      observe = false;
+    } finally { failRead = false; console.error = log; mutation.close(); }
+    const nullable = factories.map(factory => open(factory, false));
+    for (const { db } of nullable) db.exec(`CREATE TEMP TABLE short_videos(owner_user_id TEXT, author_sec_uid TEXT, visibility TEXT);
+      CREATE INDEX temp.fixture_owner ON short_videos(owner_user_id,visibility);
+      CREATE INDEX temp.fixture_sec ON short_videos(author_sec_uid,visibility);
+      INSERT INTO short_videos VALUES(NULL,'empty-sec','local_only'),('','empty-sec','local_only'),
+        ('','other','local_only'),(NULL,'other','local_only'),('other','empty-sec','local_only'),('','empty-sec','download_pending');`);
+    observe = true;
+    const old = await route(nullable[0], "Empty Owner"), next = await route(nullable[1], "Empty Owner");
+    assert.deepEqual(next, old); assert.equal(next.data.author.count, 3);
+    assert(nullable[1].plan.some(line => line.includes("fixture_owner")) && nullable[1].plan.some(line => line.includes("fixture_sec")));
+    console.log(JSON.stringify({ check: "short-video-author-mention-counts", videos: 100000, sameNameAuthors: 40,
+      completeRouteOracles: 13, errorOracles: 2, coldSameNameMedianMs: cold.map(median), warmMedianMs: warm }));
+  } finally {
+    for (const { store } of owners) store.close();
+    assert(!fs.existsSync(coverDbPath));
+    for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
+    fs.rmdirSync(directory);
+  }
+}
 
 async function verifySuggestionQueryBudget() {
   const moduleUrl = new URL("../src/modules/short-videos/server/store.js", import.meta.url);

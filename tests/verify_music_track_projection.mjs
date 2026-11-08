@@ -42,7 +42,8 @@ assert.deepEqual(kernelFunctions(currentKernel), ["listTracks", "trackCountBound
 assert.deepEqual(kernelFunctions(historicalKernel), ["listTracks"], "the pinned historical replacement contains only the page owner");
 assert.match(currentKernel, /function trackCountBoundsPageRows\(database\)/, "include the current nonzero-page eligibility proof with its page owner");
 const wideChanges = [
-  ["rows = prepareTrackList(database,", "rows = database\n      .prepare("],
+  ["rows = prepareTrackList(database, pageSql)", "rows = database.prepare(pageSql)"],
+  ["order, pageSql, pageArgs, prepareTrackList)", "order, pageSql, pageArgs)"],
   ["SELECT ${TRACK_LIST_COLUMNS}, a.name AS artist_name", "SELECT t.*, a.name AS artist_name"]
 ];
 let wideKernel = currentKernel;
@@ -56,7 +57,9 @@ assert.equal(restoredKernel, currentKernel, "page adapter preserves every curren
 const historicalStore = snapshots[0].replace(historicalKernel, wideKernel);
 assert.equal(historicalStore.replace(wideKernel, historicalKernel), snapshots[0], "the adapted owner round-trips to the complete pinned historical snapshot");
 const oldLyricUrl = moduleUrl(absolute(snapshots[1], lyricPath));
-const oldStoreUrl = moduleUrl(absolute(historicalStore.replace("from " + JSON.stringify("./lyrics-search.js"), `from ${JSON.stringify(oldLyricUrl)}`), storePath));
+const historicalImports = `import { readSparseFavoriteAlbumRows } from ${JSON.stringify(new URL("track-query.js", storePath).href)};\n`;
+const oldStoreUrl = moduleUrl(absolute(historicalImports + historicalStore
+  .replace("from " + JSON.stringify("./lyrics-search.js"), `from ${JSON.stringify(oldLyricUrl)}`), storePath));
 const { createMusicStore: previousStore } = await import(oldStoreUrl);
 const subject = negative ? previousStore : createMusicStore;
 const prepare = DatabaseSync.prototype.prepare, originalNow = Date.now;
@@ -134,8 +137,12 @@ function seed(owner, count = 48, order = "forward", pathWidth = 1) {
 }
 const url = values => { const result = new URL("http://fixture/api/music/tracks"); for (const [key, value] of Object.entries(values)) result.searchParams.set(key, String(value)); return result; };
 function read(owner, action) {
+  // The projection oracle compares every SQL body against a frozen owner.
+  // An outer snapshot leaves catalogue totals to the independent cache gate.
+  owner.db.exec("SAVEPOINT fixture_projection");
   measurement = { db: owner.db, prepares: 0, metadataReads: 0, queries: [], rows: 0, fields: 0, unusedBytes: 0 };
-  try { return { result: action(owner.store), ...measurement }; } finally { measurement = null; }
+  try { return { result: action(owner.store), ...measurement }; }
+  finally { measurement = null; owner.db.exec("RELEASE fixture_projection"); }
 }
 function compare(value, action, label) {
   const before = read(value.old, action), after = read(value.current, action);

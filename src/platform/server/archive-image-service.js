@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { types } from "node:util";
+import { extractCoverFrameAsync } from "../../../lib/cover-frame.js";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "./archive-task-pool.js";
 
 export const ARCHIVE_IMAGE_INDEXER_VERSION = 3;
@@ -16,7 +17,9 @@ export function archiveDiskSignature(archivePath, stat) {
 
 export function createArchiveImageService(options) {
   const pool = createArchiveTaskPool({ concurrency: options.concurrency, capacity: options.capacity, stopTimeoutMs: options.stopTimeoutMs });
+  const videoPool = createArchiveTaskPool({ concurrency: 2, capacity: 32, stopTimeoutMs: options.stopTimeoutMs });
   const listCache = new Map(), children = new Set();
+  const videoLists = new Map();
   const statFile = options.statFile || (value => fs.promises.stat(value));
   let listCacheBytes = 0;
   const warn = options.warn || console.warn;
@@ -174,10 +177,40 @@ export function createArchiveImageService(options) {
     });
   }
   async function listArchiveImages(archivePath, request = {}) { return (await archiveImagesPayload(archivePath, request)).images; }
-  function cacheFile(sourceType, source, memberPath) {
+
+  function archiveVideosPayload(archivePath, request = {}) {
+    return pool.run(`list-videos:${path.resolve(archivePath)}`, async context => {
+      const source = await signature(archivePath);
+      if (!source) return { videos: [] };
+      if (!context.isCurrent()) throw archiveStoppedError();
+      const cached = videoLists.get(source.archiveIdentity);
+      if (cached) {
+        videoLists.delete(source.archiveIdentity);
+        videoLists.set(source.archiveIdentity, cached);
+        return cached;
+      }
+      const result = await helper(["list-videos", source.archivePath], context, request);
+      const videos = [];
+      const seen = new Set();
+      for (const entry of result.videos || []) {
+        const member = String(entry.path || ""), ext = options.normalizeExt(member);
+        if (!member || !options.archiveVideoExts?.has(ext) || seen.has(member)) continue;
+        seen.add(member);
+        const id = crypto.createHash("sha256").update(JSON.stringify([source.archiveIdentity, member])).digest("hex").slice(0, 32);
+        videos.push({ id, path: member, name: entry.name || path.basename(member), size: Number(entry.bytes) || 0, ext });
+      }
+      await verifySource(source, context);
+      const payload = { archiveIdentity: source.archiveIdentity, videos };
+      videoLists.set(source.archiveIdentity, payload);
+      if (videoLists.size > 64) videoLists.delete(videoLists.keys().next().value);
+      return payload;
+    }, request);
+  }
+
+  function cacheFile(sourceType, source, memberPath, videoExt = "") {
     const archiveHash = crypto.createHash("sha1").update(source.archiveIdentity).digest("hex").slice(0, 24);
     const memberHash = crypto.createHash("sha1").update(memberPath).digest("hex").slice(0, 24);
-    const ext = options.archiveImageExts.has(options.normalizeExt(memberPath)) ? options.normalizeExt(memberPath) : ".img";
+    const ext = videoExt || (options.archiveImageExts.has(options.normalizeExt(memberPath)) ? options.normalizeExt(memberPath) : ".img");
     return path.join(options.imageReaderCacheService.rootDir, String(sourceType || "common").replace(/[^a-zA-Z0-9_-]/g, "_"), archiveHash, `${memberHash}${ext}`);
   }
   async function safeTarget(target, context, { create = true, checkCurrent = true } = {}) {
@@ -202,14 +235,16 @@ export function createArchiveImageService(options) {
     catch(error) { if(error.code !== "ENOENT") throw error; }
     if (checkCurrent && !context.isCurrent()) throw archiveStoppedError();
   }
-  async function extract(archivePath, memberPath, cachePath, context, expected) {
+  async function extract(archivePath, memberPath, cachePath, context, expected, videoByteLimit = 0) {
     const source = expected || await signature(archivePath);
     if (!source) throw Object.assign(new Error("Archive does not exist"), { code: "ENOENT", statusCode: 404 });
     if (!context.isCurrent()) throw archiveStoppedError();
     await safeTarget(cachePath,context);
     const staging = `${cachePath}.${crypto.randomUUID()}.tmp`;
     try {
-      await helper(["extract", source.archivePath, memberPath, staging], context);
+      const args = videoByteLimit ? ["extract-video", source.archivePath, memberPath, staging, String(videoByteLimit)]
+        : ["extract", source.archivePath, memberPath, staging];
+      await helper(args, context);
       await verifySource(source, context);
       await safeTarget(cachePath,context);
       fs.renameSync(staging, cachePath);
@@ -297,9 +332,83 @@ export function createArchiveImageService(options) {
       }
     } finally { res.removeListener?.("close", disconnect); }
   }
-  function clearListCache() { listCache.clear(); listCacheBytes = 0; pool.invalidate(); }
-  return { archiveSignature, archiveImagesPayload, clearListCache, compressImageFileToJpeg, extractArchiveMemberToCache,
-    listArchiveImages, serveArchiveMemberImage, start: pool.start, beginStop: pool.beginStop, stop: pool.stop,
+
+  function prepareArchiveMemberVideo({ archivePath, archiveIdentity, video, signal, waitForCloseOnAbort }) {
+    return videoPool.run(`video:${video.id}`, async context => {
+      const source = await signature(archivePath);
+      if (!source || source.archiveIdentity !== archiveIdentity) throw changedError();
+      const target = cacheFile("photo-video", source, video.path, video.ext);
+      await safeTarget(target, context);
+      let exists = false;
+      try { exists = (await statFile(target)).isFile(); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (!exists) {
+        const limit = options.archiveVideoMaxBytes();
+        if (!Number.isSafeInteger(limit) || limit < 1 || video.size > limit) {
+          throw Object.assign(new Error("视频超出读取缓存容量"), { statusCode: 413 });
+        }
+        await extract(source.archivePath, video.path, target, context, source, limit);
+      }
+      await options.imageReaderCacheService.touch(target);
+      options.imageReaderCacheService.scheduleCleanup();
+      return { source, target, current: context.isCurrent };
+    }, { signal, waitForCloseOnAbort });
+  }
+
+  async function extractArchiveVideoCover(request) {
+    const { video, signal } = request;
+    const prepared = await prepareArchiveMemberVideo({ ...request, waitForCloseOnAbort: true });
+    return videoPool.run(`video-cover:${video.id}`, async context => {
+      if (!prepared.current()) throw archiveStoppedError();
+      await safeTarget(prepared.target, context, { create: false });
+      await verifySource(prepared.source, context);
+      const sourceBytes = (await statFile(prepared.target)).size;
+      const frameOptions = {
+        ffmpegPath: options.ffmpegPath, ffprobePath: options.ffprobePath, spawnFn: options.spawnProcess,
+        signal: context.signal, boxSize: options.coverBoxSize, maxBytes: options.coverMaxBytes, quality: 5,
+        inputFormat: video.ext === ".webm" ? "matroska" : "mov"
+      };
+      let blob;
+      try { blob = await extractCoverFrameAsync(prepared.target, frameOptions); }
+      catch (error) {
+        if (!context.isCurrent() || error.code === "COVER_TIMEOUT") throw error;
+        await safeTarget(prepared.target, context, { create: false });
+        blob = await extractCoverFrameAsync(prepared.target, { ...frameOptions, seekSeconds: 0 });
+      }
+      await verifySource(prepared.source, context);
+      await safeTarget(prepared.target, context, { create: false });
+      return { blob, mime: "image/jpeg", sourceBytes };
+    }, { signal, waitForCloseOnAbort: true });
+  }
+
+  async function serveArchiveMemberVideo(req, res, request) {
+    const { video, signal } = request;
+    if (signal?.aborted || res.destroyed || res.writableEnded) return;
+    const prepared = await prepareArchiveMemberVideo(request);
+    if (signal?.aborted || res.destroyed || res.writableEnded) return;
+    if (!prepared.current()) throw archiveStoppedError();
+    await safeTarget(prepared.target, { isCurrent: prepared.current }, { create: false });
+    await options.serveRangedFile(req, res, {
+      path: prepared.target, ext: video.ext, fullResponse: true
+    }, {
+      signal, isCurrent: prepared.current,
+      validateFile: async () => {
+        const context = { isCurrent: prepared.current };
+        await verifySource(prepared.source, context);
+        await safeTarget(prepared.target, context, { create: false });
+      }
+    });
+  }
+
+  function clearListCache() { listCache.clear(); listCacheBytes = 0; videoLists.clear(); pool.invalidate(); videoPool.invalidate(); }
+  return { archiveSignature, archiveImagesPayload, archiveVideosPayload, clearListCache, compressImageFileToJpeg, extractArchiveMemberToCache, extractArchiveVideoCover,
+    listArchiveImages, serveArchiveMemberImage, serveArchiveMemberVideo,
+    start: () => Promise.all([pool.start(), videoPool.start()]),
+    beginStop: () => { pool.beginStop(); videoPool.beginStop(); },
+    stop: async () => {
+      const results = await Promise.allSettled([pool.stop(), videoPool.stop()]);
+      const failed = results.find(result => result.status === "rejected");
+      if (failed) throw failed.reason;
+    },
     diagnostics: () => ({ ...pool.diagnostics(), children: children.size, listEntries: listCache.size, listCacheBytes }) };
 }
 

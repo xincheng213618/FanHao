@@ -61,7 +61,7 @@ try {
   };
   const deps = { maxItemLimit: 12000, clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number.parseInt(value, 10) || fallback)),
     getImageLibraryIndex: owner.getIndex, getImageLibraryRevision: owner.listRevision, metadataService: measuredMetadata,
-    photoSetService: { coverUrl: () => "" }, mangaService: { cacheDirs: () => [], rootStatus: () => ({}) },
+    photoSetService: { coverUrl: () => "" }, mangaService: { publicSummaries: () => [], rootStatus: () => ({}) },
     galleryMediaRootStatuses: () => [], photoSetRootStatuses: () => [], imageReaderCacheStatus: () => ({}) };
   const fresh = createImageLibraryService(deps), cached = createImageLibraryService({ ...deps, cachePreparedQueries: !process.argv.includes("--disable-query-cache") });
   const request = params => new URL(`http://synthetic/items?${new URLSearchParams(params)}`);
@@ -87,6 +87,10 @@ try {
   }
   const url = request({ mode: "movie", sort: "rating", limit: "48" });
   const first = cached.itemsPayload(url);
+  counts = freshCounts();
+  cached.itemsPayload(request({ mode: "manga" }));
+  assert.equal(cached.itemsPayload(url).listRevision, first.listRevision);
+  assert.equal(counts.bulk, 0, "opening manga must not evict the prepared movie list");
   const mutated = cached.itemsPayload(url); mutated.items[0].movieMetadata.title = "poison"; mutated.facets.categories[0].value = "poison";
   assert.equal(legacy(cached.itemsPayload(url)), legacy(fresh.itemsPayload(url)));
   counts = freshCounts(); writer.prepare("INSERT INTO gallery_media_covers(media_id,source_path,updated_at) VALUES('cover-only','synthetic.mp4','same')").run();

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { createMusicStore } from "../src/modules/music/server/store.js";
+import { routeMusicApi } from "../src/modules/music/server/routes.js";
 import { writeScanRecords } from "../src/modules/music/server/scan.js";
 import { ALBUM_FACET_COLUMNS } from "../src/modules/music/server/facets.js";
 import { publicAlbum } from "../src/modules/music/server/serializers.js";
@@ -43,13 +44,19 @@ const originalBlock = `    const topAlbums = database
 const start = source.indexOf("    const topAlbums = "), end = source.indexOf("    const topTracks = ", start);
 assert(start > 0 && end > start);
 const currentBlock = source.slice(start, end);
-assert.equal(originalBlock.replace("const topAlbums = database\n      .prepare(", "const topAlbums = prepareAlbumFacet(database,")
-  .replace("al.*,", "${ALBUM_FACET_COLUMNS},"), currentBlock, "captured complete original report algorithm changes only this projection/prepare");
+assert.equal(originalBlock.replace("const topAlbums = database\n      .prepare(", "const topAlbums = (rankings?.albums ?? prepareAlbumFacet(database,")
+  .replace("al.*,", "${ALBUM_FACET_COLUMNS},").replace("      .all()", "      .all())"), currentBlock,
+  "captured full-catalogue report algorithm changes only this projection/prepare");
 const previousSource = source.replace(currentBlock, originalBlock);
 assert.equal(previousSource.replace(originalBlock, currentBlock), source, "all non-report code restores byte-for-byte");
 const absolute = previousSource.replace(/from "(\.\/[^"]+)"/gu, (_, value) => `from ${JSON.stringify(new URL(value, storePath).href)}`);
 const { createMusicStore: previousStore } = await import(`data:text/javascript;base64,${Buffer.from(absolute).toString("base64")}`);
+const sparseGate = "const rankings = sparseMusicReportRankings(database, trackCountBoundsPageRows);";
+assert.equal(source.split(sparseGate).length, 2);
+const { createMusicStore: withoutSparseRankings } = await import(moduleUrl(absoluteImports(source.replace(sparseGate, "const rankings = null;"))));
 const subjectFactory = negative ? previousStore : createMusicStore;
+function moduleUrl(text) { return "data:text/javascript;base64," + Buffer.from(text).toString("base64"); }
+function absoluteImports(text) { return text.replace(/from "(\.\/[^"\n]+)"/gu, (_, value) => `from ${JSON.stringify(new URL(value, storePath).href)}`); }
 const nativePrepare = DatabaseSync.prototype.prepare, realNow = Date.now;
 const owners = [], connections = [];
 let measurement = null, fault = null, clock = 1791800000000;
@@ -122,9 +129,12 @@ function seed(owner, { albums = 16, width = 0, order = "forward", orphan = true 
   if (orphan && tracks.length > 8) owner.db.exec("UPDATE music_tracks SET album_id='missing',artist_id='missing' WHERE id IN ('t1','t2');"
     + "UPDATE music_tracks SET status='missing' WHERE id='t3';UPDATE music_artists SET status='missing' WHERE id='a3'");
 }
-function read(owner, operation = value => value.store.report()) {
+function read(owner, operation = value => value.store.report(), projectionOnly = true) {
+  // Keep this projection-only oracle on the historical catalogue driver.
+  if (projectionOnly) owner.db.exec("SAVEPOINT fixture_report_projection");
   measurement = { db: owner.db, prepares: 0, queries: [], rows: 0, fields: 0, unusedBytes: 0, introBytes: 0 };
-  try { return { result: operation(owner), ...measurement }; } finally { measurement = null; }
+  try { return { result: operation(owner), ...measurement }; }
+  finally { measurement = null; if (projectionOnly) owner.db.exec("RELEASE fixture_report_projection"); }
 }
 function equal(after, before, label, extra = 0) {
   assert.deepEqual(after.result, before.result, label + " complete report");
@@ -149,6 +159,112 @@ function compare(value, label, extra = 0, operation) {
 function caught(run) { try { run(); } catch(error) { return error; } assert.fail("report failure must remain observable"); }
 function shape(error) { return { name: error.name, message: error.message, code: error.code, errcode: error.errcode }; }
 function median(values) { return values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)]; }
+
+async function verifySparseRankings() {
+  const scale = { old: open(withoutSparseRankings), current: open(createMusicStore) };
+  each(scale, ({ db }) => db.exec(`
+    WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500)
+    INSERT INTO music_artists(id,name,source_root,source_path,relative_path,track_count,updated_at)
+    SELECT 'a'||x,'Artist '||x,'fixture','fixture','fixture',200,'fixture' FROM n;
+    WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000)
+    INSERT INTO music_albums(id,artist_id,title,source_root,source_path,relative_path,track_count,updated_at)
+    SELECT 'al'||x,'a'||((x-1)/10+1),'Album '||x,'fixture','fixture','fixture',20,'fixture' FROM n;
+    WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+    INSERT INTO music_tracks(id,artist_id,album_id,title,album_title,track_no,source_root,source_path,relative_path,file_name,ext,updated_at)
+    SELECT printf('t%06d',x),'a'||((x-1)/200+1),'al'||((x-1)/20+1),printf('Song %06d',x),'Fixture',x,'fixture',printf('fixture/%06d.mp3',x),'fixture','fixture.mp3','.mp3','fixture' FROM n;
+    WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<40)
+    INSERT INTO music_track_state(track_id,play_count,last_played_at,updated_at)
+    SELECT printf('t%06d',x*200),1,printf('2026-01-01T00:00:%02d.000Z',x),'fixture' FROM n;
+    UPDATE music_tracks SET artist_id='a2' WHERE id='t000199';
+    UPDATE music_tracks SET artist_id='a3' WHERE id='t000198';
+    INSERT INTO music_track_state(track_id,play_count,last_played_at,updated_at) VALUES
+      ('t000199',0,'2099-01-01','fixture'),('t000198',NULL,'2099-01-02','fixture'),('t000197',0,NULL,'fixture'),
+      ('t000196',3,'2026-01-01T00:00:00.000Z','fixture');
+  `));
+  clock += 6000;
+  function actual(owner) { return read(owner, value => value.store.report(), false); }
+  function rankings(result) {
+    return result.queries.filter(({ sql }) => /GROUP BY (a|al)\.id\s+HAVING plays > 0/u.test(sql));
+  }
+  function compareDrivers(value, eligible) {
+    const before = actual(value.old), after = actual(value.current);
+    assert.deepEqual(after.result, before.result, "complete report agrees with the original catalogue-driven query");
+    assert.equal(JSON.stringify(after.result), JSON.stringify(before.result));
+    const queries = rankings(after);
+    assert.equal(queries.length, 2);
+    assert.equal(queries.every(({ sql }) => sql.includes("FROM music_track_state s CROSS JOIN music_tracks t")), eligible);
+    return { before, after, queries };
+  }
+  const measured = compareDrivers(scale, true);
+  assert.equal(measured.after.result.topAlbums[0].artistName, "Artist 3", "dated NULL and zero play rows still participate in album MAX and artist selection");
+  assert.equal(measured.after.result.topAlbums[0].plays, 4);
+  assert.equal(measured.after.result.topArtists.find(row => row.id === "a1").plays, 4);
+  assert.equal(measured.after.result.topArtists.find(row => row.id === "a2").lastPlayedAt, "2099-01-01");
+  assert.equal(measured.after.result.topArtists.find(row => row.id === "a3").trackCount, 201, "the deferred artist count includes active unplayed tracks");
+  const plans = measured.queries.map(({ sql, input }) => nativePrepare.call(scale.current.db, "EXPLAIN QUERY PLAN " + sql).all(...input).map(row => row.detail));
+  for (const plan of plans) {
+    assert(plan.some(line => /SCAN s\b/u.test(line)));
+    assert(plan.some(line => /SEARCH t USING INDEX sqlite_autoindex_music_tracks_1/u.test(line)), "state drives indexed track lookups");
+  }
+  assert(plans[0].some(line => /SEARCH counted USING INDEX idx_music_tracks_artist/u.test(line)), "selected artist totals use indexed track ranges");
+
+  async function route(owner) {
+    const response = {};
+    assert(await routeMusicApi({ method: "GET" }, response, new URL("http://fixture.invalid/api/music/report"), {
+      musicStore: owner.store, sendJson: (target, status, data) => Object.assign(target, { status, data })
+    }));
+    return response;
+  }
+  assert.equal(JSON.stringify(await route(scale.current)), JSON.stringify(await route(scale.old)));
+  const times = { old: [], current: [] };
+  for (let round = 0; round < 9; round++) for (const key of round % 2 ? ["current", "old"] : ["old", "current"]) {
+    const start = performance.now();
+    assert.equal((await route(scale[key])).status, 200);
+    times[key].push(performance.now() - start);
+  }
+
+  for (const [change, restore] of [
+    ["UPDATE music_track_state SET last_played_at='2099-01-02' WHERE track_id='t000199'", "UPDATE music_track_state SET last_played_at='2099-01-01' WHERE track_id='t000199'"],
+    ["UPDATE music_track_state SET play_count=1.5 WHERE track_id='t000200'", "UPDATE music_track_state SET play_count=1 WHERE track_id='t000200'"],
+    ["UPDATE music_tracks SET album_id='orphan' WHERE id='t000200'", "UPDATE music_tracks SET album_id='al10' WHERE id='t000200'"]
+  ]) {
+    each(scale, ({ db }) => db.exec(change)); compareDrivers(scale, false);
+    each(scale, ({ db }) => db.exec(restore));
+  }
+  each(scale, ({ db }) => db.exec(`INSERT OR REPLACE INTO music_track_state(track_id,play_count,last_played_at,updated_at)
+    SELECT id,1,'dense-'||id,'fixture' FROM music_tracks LIMIT 1025`));
+  const dense = compareDrivers(scale, false);
+  assert(dense.after.queries.some(({ sql }) => sql.includes("FROM music_track_state LIMIT 1025")), "dense eligibility stays bounded");
+
+  const collation = { old: open(withoutSparseRankings), current: open(createMusicStore) };
+  each(collation, owner => {
+    seed(owner, { orphan: false });
+    const declaration = owner.db.prepare("SELECT sql FROM sqlite_schema WHERE name='music_tracks'").get().sql;
+    assert.match(declaration, /artist_id TEXT NOT NULL/u);
+    owner.db.exec(`ALTER TABLE music_tracks RENAME TO prior_music_tracks;
+      ${declaration.replace("artist_id TEXT NOT NULL", "artist_id TEXT COLLATE NOCASE NOT NULL")};
+      INSERT INTO music_tracks SELECT * FROM prior_music_tracks; DROP TABLE prior_music_tracks;
+      CREATE INDEX idx_music_tracks_artist ON music_tracks(artist_id, album_id, track_no, title);
+      DELETE FROM music_track_state; UPDATE music_tracks SET artist_id='A0' WHERE id='t4';
+      INSERT INTO music_track_state(track_id,play_count,last_played_at,updated_at) VALUES('t0',1,'2026-11-01','fixture');`);
+  });
+  clock += 6000;
+  compareDrivers(collation, false);
+  each(collation, ({ db }) => db.exec(`DROP INDEX idx_music_tracks_artist;
+    CREATE INDEX idx_music_tracks_artist ON music_tracks(artist_id COLLATE BINARY, album_id, track_no, title);`));
+  assert.equal(compareDrivers(collation, true).after.result.topArtists[0].trackCount, 15,
+    "artist counts preserve the original a.id BINARY operand even on a legacy NOCASE reference");
+  each(collation, ({ db }) => db.exec(`UPDATE music_track_state SET play_count=9223372036854775807 WHERE track_id='t0';
+    INSERT INTO music_track_state(track_id,play_count,last_played_at,updated_at) VALUES('t8',1,'2026-11-02','fixture');`));
+  const previousError = shape(caught(() => collation.old.store.report()));
+  assert.match(previousError.message, /integer overflow/u);
+  assert.deepEqual(shape(caught(() => collation.current.store.report())), previousError, "the sparse path retains native integer overflow");
+  assert.equal(collation.current.db.isTransaction, false, "ranking errors release their snapshot");
+  console.log(JSON.stringify({ check: "music-sparse-report-rankings", tracks: 100000, stateRows: 44, beforeDriver: "catalogue", afterDriver: "state",
+    beforeMedianMs: +median(times.old).toFixed(3), afterMedianMs: +median(times.current).toFixed(3),
+    fullRouteOracle: true, nonPlayingTimestampWinner: true, denseTieNumericAndOrphanFallback: true, legacyBinaryJoinCount: true, plans }));
+}
+
 const distributions = [];
 try {
   for (const order of ["forward", "reverse", "shuffled"]) {
@@ -231,6 +347,7 @@ try {
     assert.equal(value.introBytes, 0, "report reads zero unused intro bytes");
     assert.equal(value.unusedBytes, 0, "report reads zero unused path/intro/sort bytes");
   }
+  if (!negative) await verifySparseRankings();
 } finally {
   measurement = fault = null;
   DatabaseSync.prototype.prepare = nativePrepare; Date.now = realNow;

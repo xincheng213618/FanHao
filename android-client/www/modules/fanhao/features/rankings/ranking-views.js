@@ -1,7 +1,8 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-8af3642624a3";
-import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-8af3642624a3";
+import { fetchJson } from "../../../../js/api.js?v=assets-8faf7a80cb7b";
+import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-8faf7a80cb7b";
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-8af3642624a3";
+import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-8faf7a80cb7b";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";
@@ -18,20 +19,40 @@ export function createRankingViews(deps) {
   let sortMode = "ranking";
   let renderSequence = 0;
   let activeSignal;
+  let activeGuard;
+  let mountedRanking = null;
   const rankingDataByKey = new Map();
   const responseCacheFences = new WeakMap();
 
-  const renderData = (summary, data, summaryCache = null, dataCache = null, options = {}) => {
+  const renderData = (summary, data, dataCache = null, options = {}) => {
+    const activeUrl = getActiveUrl();
+    const account = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
+    const summaryAccount = accountPayloadOwner(summary);
+    if (!isAccountOwnerCurrent(account) || (summaryAccount && !isAccountOwnerCurrent(summaryAccount))) return false;
     lists = summary?.lists || [];
     const dataKey = chooseKey(lists, rankingDataKey(data, selectedKey));
     const activeKey = options.displayKey === undefined ? dataKey : normalizeKey(options.displayKey);
-    if (dataKey) rememberRankingData(dataKey, data);
+    const fence = options.cacheFence || responseCacheFences.get(data) || captureCachedJsonFence(activeUrl, account);
+    if (dataKey) rememberRankingData(dataKey, data, fence);
     if (options.persistSelection !== false) {
       selectedKey = dataKey;
       localStorage.setItem(STORAGE_KEY, selectedKey);
     } else {
       selectedKey = activeKey;
     }
+    paintRanking({ activeUrl, account, fence, data, dataCache, sequence: renderSequence, notice: "" });
+    return true;
+  };
+
+  function ownsRanking(presentation) {
+    return presentation === mountedRanking && presentation.sequence === renderSequence
+      && activeGuard?.() && !activeSignal?.aborted && presentation.activeUrl === getActiveUrl()
+      && isAccountOwnerCurrent(presentation.account);
+  }
+
+  function paintRanking(presentation) {
+    mountedRanking = presentation;
+    const { data, dataCache } = presentation;
     const works = data?.works || [];
     const resultTotal = Number(data?.total || data?.rankingTotal || works.length);
     const suffix = dataCache ? ` · 缓存 ${cacheAgeText(dataCache.updatedAt)}` : "";
@@ -47,28 +68,38 @@ export function createRankingViews(deps) {
       allowRankingSort: true,
       filterMode,
       sortMode,
-      onFilterChange: setFilterMode,
+      onFilterChange: value => setFilterMode(value, presentation),
       onSortChange: setSortMode,
       total: resultTotal,
       hasServerMore: works.length < resultTotal,
       onLoadMore: () => {
+        if (!ownsRanking(presentation)) return;
         requestedLimit = Math.min(resultTotal, requestedLimit + PAGE_SIZE);
         return renderCurrentViewPreservingScroll();
       }
     });
+    if (presentation.notice) renderMessage(presentation.notice, "quiet", false);
     refreshChrome();
-    return activeKey;
-  };
+  }
+
+  function showRankingNotice(message) {
+    if (mountedRanking?.sequence === renderSequence) mountedRanking.notice = message;
+    renderMessage(message, "quiet", false);
+  }
 
   async function renderRankings(isActive = () => true) {
     const sequence = ++renderSequence;
     activeSignal = isActive.signal;
+    activeGuard = isActive;
+    mountedRanking = null;
     setActiveBottom("rankings");
     els.viewKicker.textContent = "排行榜";
     els.viewTitle.textContent = "JavDB TOP250";
     els.viewMeta.textContent = "正在读取榜单";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载排行榜</div>`;
     const activeUrl = getActiveUrl();
+    const cacheFence = captureCachedJsonFence(activeUrl);
+    const isCurrent = () => isActive() && sequence === renderSequence && getActiveUrl() === activeUrl;
     let renderedCache = false;
 
     const anticipatedKey = normalizeKey(selectedKey || DEFAULT_KEY);
@@ -80,30 +111,28 @@ export function createRankingViews(deps) {
     const cachedData = requestedKey === anticipatedKey
       ? anticipatedCache
       : await readCachedJson(activeUrl, topPath(requestedKey)).catch(() => null);
-    if (!isActive() || sequence !== renderSequence) return;
+    if (!isCurrent()) return;
     if (cachedData?.payload) {
-      renderedCache = true;
-      renderData(cachedSummary?.payload || { lists: [] }, cachedData.payload, cachedSummary, cachedData);
+      renderedCache = renderData(cachedSummary?.payload || { lists: [] }, cachedData.payload, cachedData, { cacheFence });
     }
     try {
       const fresh = await fetchBundle(activeUrl, requestedKey, isActive.signal);
-      if (!isActive() || sequence !== renderSequence) return;
-      renderData(fresh.summary, fresh.data);
+      if (!isCurrent() || !renderData(fresh.summary, fresh.data)) return;
       precacheImages(fresh.data?.works || [], activeUrl, isActive.signal).catch(() => {});
       warmRankingYears(activeUrl, fresh.summary?.lists || [], selectedKey, isActive.signal).catch(() => {});
     } catch (error) {
-      if (!isActive() || sequence !== renderSequence) return;
+      if (!isCurrent()) return;
       if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存排行榜。", "quiet", false);
+        showRankingNotice("电脑端暂时连不上，当前显示的是本地缓存排行榜。");
       } else {
         const fallback = await readFallback(activeUrl, cachedSummary, requestedKey);
-        if (!isActive()) return;
-        if (fallback?.data?.payload) {
-          renderData(fallback.summary?.payload || { lists: [] }, fallback.data.payload, fallback.summary, fallback.data, {
-            displayKey: rankingDataKey(fallback.data.payload, ""),
-            persistSelection: false
-          });
-          renderMessage("当前榜单还没有缓存，已显示其它本地缓存排行榜。", "quiet", false);
+        if (!isCurrent()) return;
+        if (fallback?.data?.payload && renderData(fallback.summary?.payload || { lists: [] }, fallback.data.payload, fallback.data, {
+          displayKey: rankingDataKey(fallback.data.payload, ""),
+          persistSelection: false,
+          cacheFence
+        })) {
+          showRankingNotice("当前榜单还没有缓存，已显示其它本地缓存排行榜。");
         } else {
           renderMessage(error.message || "排行榜读取失败", "error");
         }
@@ -136,9 +165,12 @@ export function createRankingViews(deps) {
   }
 
   async function loadRankingYear(key, previousKey) {
+    const previousPresentation = mountedRanking;
     const sequence = ++renderSequence;
     const signal = activeSignal;
     const activeUrl = getActiveUrl();
+    const cacheFence = captureCachedJsonFence(activeUrl);
+    const isCurrent = () => !signal?.aborted && sequence === renderSequence && getActiveUrl() === activeUrl && activeGuard?.();
     const summary = { lists };
     let rendered = false;
     els.viewContent.setAttribute("aria-busy", "true");
@@ -146,30 +178,28 @@ export function createRankingViews(deps) {
 
     const remembered = rememberedRankingData(key);
     if (remembered) {
-      renderData(summary, remembered);
-      rendered = true;
+      rendered = renderData(summary, remembered.data, null, { cacheFence: remembered.fence });
     } else {
       const cached = await readCachedJson(activeUrl, topPath(key)).catch(() => null);
-      if (signal?.aborted || sequence !== renderSequence) return;
+      if (!isCurrent()) return;
       if (cached?.payload) {
-        renderData(summary, cached.payload, null, cached);
-        rendered = true;
+        rendered = renderData(summary, cached.payload, cached, { cacheFence });
       }
     }
 
     try {
       const data = await fetchTop(activeUrl, key, signal);
-      if (signal?.aborted || sequence !== renderSequence) return;
-      renderData(summary, data);
+      if (!isCurrent() || !renderData(summary, data)) return;
       precacheImages(data?.works || [], activeUrl, signal).catch(() => {});
       warmRankingYears(activeUrl, lists, key, signal).catch(() => {});
     } catch (error) {
-      if (signal?.aborted || sequence !== renderSequence) return;
+      if (!isCurrent()) return;
       if (rendered) {
-        renderMessage("网络刷新稍慢，当前先显示已缓存的年代榜单。", "quiet", false);
+        showRankingNotice("网络刷新稍慢，当前先显示已缓存的年代榜单。");
       } else {
         selectedKey = previousKey;
         localStorage.setItem(STORAGE_KEY, selectedKey);
+        if (previousPresentation && previousPresentation === mountedRanking) previousPresentation.sequence = sequence;
         refreshChrome();
         els.viewContent.removeAttribute("aria-busy");
         renderMessage(error.message || "年代榜单切换失败", "error", false);
@@ -218,8 +248,8 @@ export function createRankingViews(deps) {
     return data;
   }
 
-  function rememberRankingData(key, data) {
-    rankingDataByKey.set(key, { data, fence: responseCacheFences.get(data) || captureCachedJsonFence(getActiveUrl()) });
+  function rememberRankingData(key, data, fence = responseCacheFences.get(data) || captureCachedJsonFence(getActiveUrl())) {
+    rankingDataByKey.set(key, { data, fence });
   }
 
   function rememberedRankingData(key) {
@@ -229,7 +259,7 @@ export function createRankingViews(deps) {
       rankingDataByKey.delete(key);
       return null;
     }
-    return entry.data;
+    return entry;
   }
 
   async function cacheLists(activeUrl, items, alreadyCachedKey) {
@@ -263,10 +293,14 @@ export function createRankingViews(deps) {
     return null;
   }
 
-  function setFilterMode(value) {
-    if (filterMode === value) return;
+  function setFilterMode(value, presentation) {
+    if (!ownsRanking(presentation) || filterMode === value) return;
     filterMode = value;
-    renderCurrentView();
+    if (!isCachedJsonFenceCurrent(presentation.fence)) {
+      renderCurrentView();
+      return;
+    }
+    paintRanking({ ...presentation });
   }
 
   function setSortMode(value) {
@@ -277,6 +311,7 @@ export function createRankingViews(deps) {
   }
 
   function leaveRankingSort() {
+    mountedRanking = null;
     requestedLimit = PAGE_SIZE;
     if (workListState.getSortMode() === "ranking") workListState.setSortMode("updated", { rerender: false });
   }

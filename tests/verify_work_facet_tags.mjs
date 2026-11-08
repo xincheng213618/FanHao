@@ -31,7 +31,6 @@ for (const [key, relative] of Object.entries(paths)) {
   assert.equal(createHash("sha256").update(old[key]).digest("hex"), hashes[key]);
   sources[key] = fs.readFileSync(urls[key], "utf8").replaceAll("\r\n", "\n");
 }
-assert.equal(sources.codes, old.codes, "the historical code parser dependency is unchanged");
 assert.equal(sources.nfo, old.nfo, "the historical NFO dependency is unchanged");
 const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 function imports(source, url, overrides = {}) {
@@ -41,12 +40,14 @@ function imports(source, url, overrides = {}) {
   });
 }
 const codeSlot = "export function extractWorkCodes(value) {";
-assert.equal(sources.codes.split(codeSlot).length, 2);
-const codeUrl = dataUrl(sources.codes.replace(codeSlot, `${codeSlot}
+function instrumentCodeParser(source) {
+  assert.equal(source.split(codeSlot).length, 2);
+  return dataUrl(source.replace(codeSlot, `${codeSlot}
   const fixture = globalThis.__workFacetTagCost;
   if (fixture) { fixture.codeScans++; if (typeof value === "string") fixture.codeChars += value.length; }`));
-const beforeMetadataUrl = dataUrl(imports(old.metadata, urls.metadata, { [urls.codes.href]: codeUrl }));
-const currentMetadataUrl = dataUrl(imports(sources.metadata, urls.metadata, { [urls.codes.href]: codeUrl }));
+}
+const beforeMetadataUrl = dataUrl(imports(old.metadata, urls.metadata, { [urls.codes.href]: instrumentCodeParser(old.codes) }));
+const currentMetadataUrl = dataUrl(imports(sources.metadata, urls.metadata, { [urls.codes.href]: instrumentCodeParser(sources.codes) }));
 const beforeMetadata = await import(beforeMetadataUrl), currentMetadata = await import(currentMetadataUrl);
 const beforeFactory = (await import(dataUrl(imports(old.info, urls.info, { [urls.metadata.href]: beforeMetadataUrl })))).createWorkInfoService;
 let candidateSource = sources.info;
