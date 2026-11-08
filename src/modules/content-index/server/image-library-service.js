@@ -397,13 +397,17 @@ export function createImageLibraryService({
     const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
     const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
     const peopleView = mode === "photo" && photoView === "people";
-    const requestedSort = String(url.searchParams.get("sort") || "updated").trim();
+    let collection = String(url.searchParams.get("collection") || "").trim();
+    const requestedSort = String(url.searchParams.get("sort") || "").trim();
+    const hasPhotoCollection = mode === "photo" && Boolean(collection);
+    const albumSort = requestedSort === "issue" && !hasPhotoCollection ? "updated" : requestedSort;
     let sort = peopleView ? (requestedSort === "title" ? "title" : "count")
-      : query && ["photo", "manga"].includes(mode) ? "relevance" : requestedSort;
+      : query && ["photo", "manga"].includes(mode) ? "relevance"
+        : albumSort || (hasPhotoCollection ? "issue" : "updated");
     const requestedDirection = String(url.searchParams.get("direction") || "").trim().toLowerCase();
-    const explicitDirection = mode === "photo" && PHOTO_COLLECTION_SORTS.includes(sort) && ["asc", "desc"].includes(requestedDirection)
+    const explicitDirection = mode === "photo" && (sort === "issue" || PHOTO_COLLECTION_SORTS.includes(sort)) && ["asc", "desc"].includes(requestedDirection)
       ? requestedDirection : "";
-    const direction = explicitDirection || (peopleView ? defaultPhotoDirection(sort) : "");
+    let direction = explicitDirection || (peopleView ? defaultPhotoDirection(sort) : "");
     const tvView = normalizeTvLibraryView(url.searchParams.get("tvView") || url.searchParams.get("view"));
     const category = String(url.searchParams.get("category") || "all").trim() || "all";
     const publisherId = mode === "photo" && category.startsWith("publisher:") ? category.slice("publisher:".length) : "";
@@ -417,7 +421,6 @@ export function createImageLibraryService({
     const subCategory = String(url.searchParams.get("subCategory") || "all").trim() || "all";
     const person = String(url.searchParams.get("person") || "all").trim() || "all";
     const date = String(url.searchParams.get("date") || "all").trim() || "all";
-    let collection = String(url.searchParams.get("collection") || "").trim();
     const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
     let collectionPage = mode === "photo" && photoView === "collections" && !collection && !query
       && url.searchParams.get("collectionPage") === "1";
@@ -454,7 +457,10 @@ export function createImageLibraryService({
         collection = first.items[0].collectionId;
         categoryDirect = true;
         collectionPage = false;
-        if (sort === "count") sort = "updated";
+        if (sort === "count" || !requestedSort || requestedSort === "issue") {
+          sort = "issue";
+          direction = requestedSort === "issue" ? explicitDirection || "desc" : "desc";
+        }
       }
     }
     if (page && !categoryDirect) {
@@ -704,7 +710,8 @@ export function createImageLibraryService({
       const filtered = searchResults ? searchResults.map((result) => result.item) : source;
       let sorted = sort === "relevance" && searchResults
         ? [...searchResults].sort(compareImageSearchResults).map((result) => result.item)
-        : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);
+        : sort === "issue" ? sortPhotoIssues(filtered, direction)
+          : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);
       if (photoSortIsReversed(sort, direction)) sorted = [...sorted].reverse();
       const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
       const items = sorted.slice(offset, offset + limit).map((item) => {
@@ -1843,6 +1850,22 @@ export function createImageLibraryService({
         return itemTime > latestTime ? item.updatedAt : latest;
       }, "")
     };
+  }
+
+  function sortPhotoIssues(items, direction) {
+    const sign = direction === "asc" ? 1 : -1;
+    return items.map(item => {
+      const digits = /\d+$/u.exec(item.albumNumber || "")?.[0];
+      return { item, number: digits ? Number(digits) : null, updatedAt: Date.parse(item.updatedAt) };
+    }).sort((left, right) => {
+      if (left.number !== right.number) {
+        if (left.number === null) return 1;
+        if (right.number === null) return -1;
+        return (left.number - right.number) * sign;
+      }
+      return right.updatedAt - left.updatedAt
+        || compareImageNames(left.item.title, right.item.title) || compareImageNames(left.item.id, right.item.id);
+    }).map(({ item }) => item);
   }
 
   function sortImageLibraryItems(items, sort) {

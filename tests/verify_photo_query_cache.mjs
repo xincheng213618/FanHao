@@ -136,9 +136,9 @@ function verifyContracts() {
     { search: "主题特写" }, { q: "主题", sort: "title" }, { sort: "title" }, { sort: "count" }, { sort: "size" }, { sort: "year" }, { sort: "rating" },
     { category: "C1" }, { subCategory: "Sub1" }, { person: "Person 1" }, { date: "2026-01" }, { date: "2026-01-01" },
     { category: "missing" }, { person: "missing" }, { date: "missing" }, { category: "C1", subCategory: "Sub1", person: "Person 1", q: "主题" },
-    { collection: "synthetic|C1/Sub1" }, { collection: "synthetic|C1/Sub1", category: "C1", q: "主题" },
+    { collection: "synthetic|C1/Sub1", sort: "updated" }, { collection: "synthetic|C1/Sub1", category: "C1", q: "主题" },
     { photoView: "collections" }, { photoView: "collections", category: "C1" }, { photoView: "collections", q: "Synthetic" },
-    { photoView: "collections", collection: "synthetic|C1/Sub1" }, { photoView: "unknown" }, { limit: "1", offset: "99999" }];
+    { photoView: "collections", collection: "synthetic|C1/Sub1", sort: "updated" }, { photoView: "unknown" }, { limit: "1", offset: "99999" }];
   for (const params of matrix) {
     equal(measured(() => value.request(params)).value, measured(() => value.expected(params)).value, `cold ${JSON.stringify(params)}`);
     const window = { ...params, offset: "3", limit: "7" };
@@ -264,7 +264,7 @@ function verifyCollectionProjection() {
     ...(index === 72 ? { rating: 3, movieMetadata: { rating: "0", year: "2005" }, tvSeries: { rating: 8 } } : {})
   }));
   const view = { photoView: "collections", sort: "count" };
-  const selected = { collection: "synthetic|合辑 0", date: "2026-01" };
+  const selected = { collection: "synthetic|合辑 0", date: "2026-01", sort: "updated" };
   const value = fixture(rows);
   const compact = measured(() => value.request(view));
   equal(compact.value, value.expected(view), "compact collection grouping retains complete legacy data");
@@ -307,7 +307,7 @@ function verifyClones() {
   const groupExpected = measured(() => value.expected({ photoView: "collections" })).value;
   groups.items[0].collections[0].title = "poison"; groups.items[0].collections.push({ title: "poison" });
   equal(measured(() => value.request({ photoView: "collections" })).value, groupExpected, "nested collection DTOs are detached");
-  const collection = { collection: "synthetic|C1/Sub1" };
+  const collection = { collection: "synthetic|C1/Sub1", sort: "updated" };
   const selected = measured(() => value.request(collection)).value, selectedExpected = measured(() => value.expected(collection)).value;
   selected.collectionSummary.title = "poison"; selected.facets.dates[0].value = "poison";
   equal(measured(() => value.request(collection)).value, selectedExpected, "collection summary and date facets are detached");

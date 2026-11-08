@@ -224,6 +224,7 @@ export function normalizeRoute(route = {}) {
   const galleryQuery = view === "gallery" ? String(route.galleryQuery || "").trim() : "";
   const galleryBrowse = view === "gallery" && !galleryQuery;
   const galleryPhotoView = galleryBrowse && galleryMode === "photo" ? normalizeGalleryPhotoView(route.galleryPhotoView) : "albums";
+  const galleryPhotoCollection = galleryBrowse && galleryPhotoView !== "people" ? String(route.galleryPhotoCollection || "").trim() : "";
   const peopleScope = view === "people" && PEOPLE_SCOPE_NAMES.has(route.peopleScope) ? route.peopleScope : "main";
   const codePrefix = view === "codes" ? String(route.codePrefix || "").trim().toUpperCase() : "";
   return {
@@ -233,7 +234,7 @@ export function normalizeRoute(route = {}) {
     codePrefix,
     codePrefixFamily: Boolean(codePrefix && route.codePrefixFamily),
     galleryPhotoView,
-    galleryPhotoCollection: galleryBrowse && galleryPhotoView !== "people" ? String(route.galleryPhotoCollection || "").trim() : "",
+    galleryPhotoCollection,
     galleryAlbumId: view === "gallery" ? String(route.galleryAlbumId || "").trim() : "",
     galleryComicId: view === "gallery" ? String(route.galleryComicId || "").trim() : "",
     galleryChapterIndex: view === "gallery" ? String(route.galleryChapterIndex || "").trim() : "",
@@ -245,7 +246,7 @@ export function normalizeRoute(route = {}) {
     galleryPerson: galleryBrowse ? String(route.galleryPerson || "all").trim() || "all" : "all",
     gallerySeriesKey: galleryBrowse && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
     galleryPhotoDate: galleryBrowse ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
-    gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView) : "updated",
+    gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView, galleryMode === "photo" && galleryPhotoCollection ? "issue" : "updated") : "updated",
     gallerySortDirection: galleryBrowse && galleryMode === "photo" ? normalizeGallerySortDirection(route.gallerySortDirection) : "",
     mangaComicId: view === "manga" ? String(route.mangaComicId || "").trim() : "",
     mangaChapterIndex: view === "manga" ? String(route.mangaChapterIndex || "").trim() : "",
@@ -326,7 +327,7 @@ export function routeUrl(route, options = {}) {
     }
     if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
     if (photo && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
-    const defaultGallerySort = photo && (next.galleryPhotoView === "people"
+    const defaultGallerySort = photo && next.galleryPhotoCollection ? "issue" : photo && (next.galleryPhotoView === "people"
       || (next.galleryPhotoView === "collections" && !next.galleryPhotoCollection && !next.galleryQuery))
       ? "count"
       : "updated";
@@ -479,10 +480,10 @@ function normalizeGalleryPhotoView(value) {
   return value === "albums" || value === "people" ? value : "collections";
 }
 
-function normalizeGallerySort(value, photoView) {
-  const sort = String(value || "updated").trim();
+function normalizeGallerySort(value, photoView, fallback = "updated") {
+  const sort = String(value || fallback).trim();
   if (photoView === "people") return sort === "title" ? "title" : "count";
-  return ["updated", "count", "rating", "year", "size", "title"].includes(sort) ? sort : "updated";
+  return ["updated", "count", "rating", "year", "size", "title", "issue"].includes(sort) ? sort : fallback;
 }
 
 function normalizeGallerySortDirection(value) {
@@ -634,6 +635,8 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     if (route.galleryPhotoView === "people" && !photoSearch) {
       route.galleryPhotoCollection = "";
       route.gallerySort = normalizeGallerySort(params.get("sort"), "people");
+    } else if (route.galleryPhotoCollection && !photoSearch) {
+      route.gallerySort = normalizeGallerySort(params.get("sort"), route.galleryPhotoView, "issue");
     } else if (!params.get("sort") && route.galleryPhotoView === "collections" && !route.galleryPhotoCollection && !photoSearch) {
       route.gallerySort = "count";
     }

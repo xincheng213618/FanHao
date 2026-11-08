@@ -12,6 +12,7 @@ const fetish = "恋足恋物";
 const galli = "[GALLI嘉丽]舞蹈生日记";
 const kitty = "kittyWawa袜小喵";
 const likes = "我喜欢的";
+const issueCategory = "期号样例";
 const favorites = [
   ["Milena D (Sunna)_33Sets", "Milena D"],
   ["paloma b", "Paloma B"],
@@ -38,7 +39,11 @@ const photoSets = [
     ...album(`person-${index}-${siteIndex}`, likes, folder, site),
     personName: site
   }))),
-  album("ungrouped", likes, "")
+  album("ungrouped", likes, ""),
+  ...["VOL.2 作品", "VOL.010 作品", "NO.100 作品", "VOL.010 另一份", "没有期号"].map((title, index) => ({
+    ...album(`issue-${index}`, issueCategory, "单个合集"),
+    title, updatedAt: `2026-11-0${index + 1}T00:00:00Z`
+  }))
 ];
 const db = createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir() {} });
 const browse = createPhotoBrowseCategoryStore({ getDb: db.getDb });
@@ -100,6 +105,19 @@ try {
   });
   const albumDetail = await reader.publicDetail(store.byId("person-0-0"));
   assert.equal(albumDetail.personName, "Milena D");
+
+  const issueCollection = `${root}|${issueCategory}/单个合集`;
+  const issues = filters => page(issueCategory, { photoView: "albums", collection: issueCollection, ...filters });
+  const issueIds = result => result.items.map(item => item.id);
+  assert.equal(issues().sort, "issue");
+  assert.deepEqual(issueIds(issues({ limit: 2 })), ["issue-2", "issue-3"]);
+  assert.deepEqual(issueIds(issues({ offset: 2 })), ["issue-1", "issue-0", "issue-4"]);
+  assert.deepEqual(issueIds(issues({ sort: "issue", direction: "asc" })), ["issue-0", "issue-3", "issue-1", "issue-2", "issue-4"]);
+  assert.deepEqual(issueIds(issues({ sort: "updated" })), ["issue-4", "issue-3", "issue-2", "issue-1", "issue-0"]);
+  const directIssues = page(issueCategory, { sort: "issue", direction: "asc", categoryContents: "1" });
+  assert.equal(directIssues.categoryDirect, true);
+  assert.equal(directIssues.direction, "asc");
+  assert.deepEqual(issueIds(directIssues), issueIds(issues({ sort: "issue", direction: "asc" })));
 
   const restore = sqlite.prepare("INSERT INTO photo_browse_category_folders(category_id, source_category, sub_category) VALUES(?,?,?)");
   for (const row of mappings) restore.run(row.category_id, row.source_category, row.sub_category);

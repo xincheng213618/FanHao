@@ -76,9 +76,12 @@ const collectionId = "V:\\套图卷|韩国演艺圈/菠萝社 📷";
 const legacyDetail = from(`/photo/collection/${encodeURIComponent(collectionId)}?${new URLSearchParams({ category: "韩国演艺圈" })}`);
 assert.equal(legacyDetail.galleryCategory, "韩国演艺圈");
 assert.equal(legacyDetail.galleryPhotoCollection, collectionId);
+assert.equal(legacyDetail.gallerySort, "issue");
 const detailUrl = routeUrl(legacyDetail);
 assert.match(detailUrl, /^\/photo\/collection\/raw-[A-Za-z0-9_-]+\?categoryKey=raw-[A-Za-z0-9_-]+$/);
 assert.deepEqual(from(detailUrl), legacyDetail);
+assert.equal(from(`${detailUrl}&dir=asc`).gallerySort, "issue");
+assert.equal(routeUrl(from(`${detailUrl}&sort=updated`)), `${detailUrl}&sort=updated`);
 
 assert.equal(routeUrl(from("/photo/albums")), "/photo/albums");
 assert.equal(routeUrl(from("/photo/set/album-123")), "/photo/set/album-123");
@@ -163,6 +166,11 @@ gallery.applyRouteState(people);
 await gallery.loadImageLibraryItems({ renderStart: false });
 assert.equal(requests.at(-1).get("sort"), "count");
 assert.equal(requests.at(-1).has("direction"), false);
+gallery.applyRouteState(from(`${detailUrl}&dir=asc`));
+await gallery.loadImageLibraryItems({ renderStart: false });
+assert.equal(requests.at(-1).get("sort"), "issue");
+assert.equal(requests.at(-1).get("collection"), collectionId);
+assert.equal(requests.at(-1).get("direction"), "asc");
 gallery.applyRouteState(from(`/photo/albums?${new URLSearchParams({ person: filters.person, q: searchText, dir: "asc" })}`));
 // A request can start before the renderer writes its canonical search route.
 Object.assign(state.gallery, { photoView: "people", photoCollection: collectionId, category: filters.category, person: filters.person,

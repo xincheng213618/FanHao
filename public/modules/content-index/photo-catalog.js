@@ -14,6 +14,8 @@ export const PHOTO_ALBUM_SORT_OPTIONS = [
   ["title", "名称排序"]
 ];
 
+export const PHOTO_COLLECTION_ALBUM_SORT_OPTIONS = [["issue", "按期号排序（VOL / NO）"], ...PHOTO_ALBUM_SORT_OPTIONS];
+
 export const PHOTO_PEOPLE_SORT_OPTIONS = [
   ["count", "套图数量"],
   ["title", "姓名排序"]

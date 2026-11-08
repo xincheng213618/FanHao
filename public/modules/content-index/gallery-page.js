@@ -79,7 +79,8 @@ export function createGalleryPage(deps) {
     state.gallery.seriesKey = ["media", "tv"].includes(state.gallery.mode) ? route.gallerySeriesKey || "" : "";
     state.gallery.photoDate = route.galleryPhotoDate || "all";
     state.gallery.sort = state.gallery.query ? "updated"
-      : state.gallery.photoView === "people" ? photoPeopleSort(route.gallerySort) : route.gallerySort || "updated";
+      : state.gallery.photoView === "people" ? photoPeopleSort(route.gallerySort)
+        : route.gallerySort || (state.gallery.photoCollection ? "issue" : "updated");
     state.gallery.sortDirection = !state.gallery.query && state.gallery.mode === "photo" && ["asc", "desc"].includes(route.gallerySortDirection)
       ? route.gallerySortDirection : "";
     state.gallery.visibleLimit = listPosition?.key === imageLibraryListKey() && Number.isSafeInteger(listPosition.limit)

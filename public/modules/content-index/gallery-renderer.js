@@ -1,9 +1,10 @@
 import {
   PHOTO_ALBUM_SORT_OPTIONS,
+  PHOTO_COLLECTION_ALBUM_SORT_OPTIONS,
   PHOTO_COLLECTION_SORT_OPTIONS,
   PHOTO_PEOPLE_SORT_OPTIONS,
   photoCatalogCollections
-} from "./photo-catalog.js?v=20260810-photo-catalog-01";
+} from "./photo-catalog.js?v=20261108-photo-issue-sort-01";
 
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const PHOTO_CATEGORY_LABELS = new Map([
@@ -617,7 +618,8 @@ function createPhotoSortControls(options, fallback, list) {
     button.setAttribute("aria-pressed", String(active));
     button.title = label;
     button.disabled = relevance;
-    button.append(photoControlIcon(key));
+    if (key === "issue") button.append("期号");
+    else button.append(photoControlIcon(key));
     if (active && !relevance) {
       const arrow = document.createElement("span");
       const directionLabel = direction === "asc" ? "升序" : "降序";
@@ -3078,10 +3080,8 @@ function createPhotoCollectionCard(collection, publisher) {
         if (publisher) state.gallery.category = "all";
         state.gallery.photoView = "collections";
         state.gallery.photoCollection = collectionId;
-        if (!PHOTO_ALBUM_SORT_OPTIONS.some(([value]) => value === state.gallery.sort)) {
-          state.gallery.sort = "updated";
-          state.gallery.sortDirection = "";
-        }
+        state.gallery.sort = "issue";
+        state.gallery.sortDirection = "";
         state.gallery.person = "all";
         state.gallery.photoDate = "all";
         state.gallery.visibleLimit = 80;
@@ -3322,7 +3322,7 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
     container.append(page);
     return;
   }
-  if (!state.gallery.query) bar.append(createPhotoSortControls(PHOTO_ALBUM_SORT_OPTIONS, "updated", list));
+  if (!state.gallery.query) bar.append(createPhotoSortControls(PHOTO_COLLECTION_ALBUM_SORT_OPTIONS, "issue", list));
 
   const items = Array.isArray(list.items) ? list.items : [];
   const grid = renderPagedPhotoCards(items, { collection: true });

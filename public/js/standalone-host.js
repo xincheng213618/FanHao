@@ -1,7 +1,7 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
 import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260813-tv-series-identity-01";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20261108-photo-issue-sort-01";
 
 const MODULE_VIEWS = new Set(["gallery", "manga", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -59,8 +59,8 @@ function beginPhotoOverview(api) {
 async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
-      import("../modules/content-index/gallery-page.js?v=20261004-gallery-reader-owner-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-cover-warm-01")
+      import("../modules/content-index/gallery-page.js?v=20261108-photo-issue-sort-01"),
+      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-issue-sort-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,

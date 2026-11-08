@@ -208,7 +208,7 @@
         window.__fanhaoStylesReady = loadStyleUrls(styleUrls)
           .finally(() => document.documentElement.classList.remove("app-styles-loading"));
         if (standaloneStyleEntry) {
-          preloadEntryModule("/standalone-app.js?v=20261108-photo-cover-warm-01");
+          preloadEntryModule("/standalone-app.js?v=20261108-photo-issue-sort-01");
         } else if (!shortVideoEntry) {
           // The shell imports the core dynamically, so preload both module URLs.
           preloadEntryModule("/fanhao-app.js?v=20261106-card-cover-01");
@@ -366,7 +366,7 @@
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
         try {
-          await import("/standalone-app.js?v=20261108-photo-cover-warm-01");
+          await import("/standalone-app.js?v=20261108-photo-issue-sort-01");
         } catch {
           window.__fanhaoReportStartupFailure?.();
         } finally {
