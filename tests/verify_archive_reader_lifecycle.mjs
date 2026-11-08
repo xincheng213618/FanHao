@@ -706,12 +706,17 @@ async function verifyPhotoArchiveVideoCover() {
     VALUES (?, ?, ?, ?, ?, 3, 'error', '图包里没有可用图片', 'legacy')`)
     .run(album.id, source, signature.archiveSize, signature.archiveMtimeMs, signature.archiveIdentity);
   const frames = [], jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
-  let extractions = 0, videoLists = 0;
+  const cacheRoot = path.join(temporary, "video-cover-cache");
+  let extractions = 0, videoLists = 0, failFrame = false;
   const archive = archiveService({
     pythonPath: process.env.PYTHON || "python", helperPath: path.join(projectRoot, "tools/archive_image_reader.py"),
     ffmpegPath: "fixture-ffmpeg", ffprobePath: "fixture-ffprobe", coverBoxSize: 480,
     getImageGalleryDb: () => database, archiveVideoExts: new Set([".mp4"]), archiveVideoMaxBytes: () => 100,
-    imageReaderCacheService: { rootDir: path.join(temporary, "video-cover-cache"), touch: async () => {}, scheduleCleanup() {} },
+    imageReaderCacheService: {
+      rootDir: cacheRoot,
+      touch: async () => assert.fail("cover extraction must not register a playback cache entry"),
+      scheduleCleanup: () => assert.fail("cover extraction owns its temporary file")
+    },
     spawnProcess: (exe, args, options) => {
       if (exe !== "fixture-ffmpeg" && exe !== "fixture-ffprobe") {
         if (args.includes("extract-video")) extractions++;
@@ -725,7 +730,7 @@ async function verifyPhotoArchiveVideoCover() {
         else {
           const seeking = args.includes("-ss");
           frames.push(seeking);
-          if (!seeking) child.stdout.write(jpeg);
+          if (!seeking && !failFrame) child.stdout.write(jpeg);
         }
         child.emit("close", 0);
       });
@@ -750,6 +755,7 @@ async function verifyPhotoArchiveVideoCover() {
   assert.deepEqual(concurrent.body, jpeg);
   assert.deepEqual(frames, [true, false], "fall back to the first frame if the preferred seek yields nothing");
   assert.equal(extractions, 1);
+  assert.deepEqual(fs.readdirSync(cacheRoot), [], "a saved JPEG must not leave the extracted MP4 on disk");
   assert.equal(await service.warmImageCover(album.id), "cached");
   const stored = database.prepare("SELECT member_path, source_bytes, status FROM photo_set_covers WHERE album_id=?").get(album.id);
   assert.equal(stored.status, "ok");
@@ -759,6 +765,11 @@ async function verifyPhotoArchiveVideoCover() {
   await service.serveCover(warm, album.id);
   assert.deepEqual(warm.body, jpeg);
   assert.equal(frames.length, 2, "the stored JPEG serves subsequent requests");
+  failFrame = true;
+  const { archiveIdentity, videos } = await archive.archiveVideosPayload(source);
+  await assert.rejects(archive.extractArchiveVideoCover({ archivePath: source, archiveIdentity, video: videos[0] }), /FFmpeg 抽帧失败/);
+  assert.equal(extractions, 2);
+  assert.deepEqual(fs.readdirSync(cacheRoot), [], "a failed frame extraction must also remove the temporary video");
   scenarios++;
 }
 

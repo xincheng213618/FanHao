@@ -333,7 +333,15 @@ export function createArchiveImageService(options) {
     } finally { res.removeListener?.("close", disconnect); }
   }
 
-  function prepareArchiveMemberVideo({ archivePath, archiveIdentity, video, signal, waitForCloseOnAbort }) {
+  function videoByteLimit(video) {
+    const limit = options.archiveVideoMaxBytes();
+    if (!Number.isSafeInteger(limit) || limit < 1 || video.size > limit) {
+      throw Object.assign(new Error("视频超出读取缓存容量"), { statusCode: 413 });
+    }
+    return limit;
+  }
+
+  function prepareArchiveMemberVideo({ archivePath, archiveIdentity, video, signal }) {
     return videoPool.run(`video:${video.id}`, async context => {
       const source = await signature(archivePath);
       if (!source || source.archiveIdentity !== archiveIdentity) throw changedError();
@@ -342,41 +350,47 @@ export function createArchiveImageService(options) {
       let exists = false;
       try { exists = (await statFile(target)).isFile(); } catch (error) { if (error.code !== "ENOENT") throw error; }
       if (!exists) {
-        const limit = options.archiveVideoMaxBytes();
-        if (!Number.isSafeInteger(limit) || limit < 1 || video.size > limit) {
-          throw Object.assign(new Error("视频超出读取缓存容量"), { statusCode: 413 });
-        }
-        await extract(source.archivePath, video.path, target, context, source, limit);
+        await extract(source.archivePath, video.path, target, context, source, videoByteLimit(video));
       }
       await options.imageReaderCacheService.touch(target);
       options.imageReaderCacheService.scheduleCleanup();
       return { source, target, current: context.isCurrent };
-    }, { signal, waitForCloseOnAbort });
+    }, { signal });
   }
 
-  async function extractArchiveVideoCover(request) {
-    const { video, signal } = request;
-    const prepared = await prepareArchiveMemberVideo({ ...request, waitForCloseOnAbort: true });
+  function extractArchiveVideoCover({ archivePath, archiveIdentity, video, signal }) {
     return videoPool.run(`video-cover:${video.id}`, async context => {
-      if (!prepared.current()) throw archiveStoppedError();
-      await safeTarget(prepared.target, context, { create: false });
-      await verifySource(prepared.source, context);
-      const sourceBytes = (await statFile(prepared.target)).size;
+      const source = await signature(archivePath);
+      if (!source || source.archiveIdentity !== archiveIdentity) throw changedError();
+      const limit = videoByteLimit(video);
+      // FFmpeg needs a seekable input. Keep it outside playback cache inventory.
+      const target = path.join(options.imageReaderCacheService.rootDir, `photo-video-cover-${crypto.randomUUID()}.tmp`);
       const frameOptions = {
         ffmpegPath: options.ffmpegPath, ffprobePath: options.ffprobePath, spawnFn: options.spawnProcess,
         signal: context.signal, boxSize: options.coverBoxSize, maxBytes: options.coverMaxBytes, quality: 5,
         inputFormat: video.ext === ".webm" ? "matroska" : "mov"
       };
-      let blob;
-      try { blob = await extractCoverFrameAsync(prepared.target, frameOptions); }
-      catch (error) {
-        if (!context.isCurrent() || error.code === "COVER_TIMEOUT") throw error;
-        await safeTarget(prepared.target, context, { create: false });
-        blob = await extractCoverFrameAsync(prepared.target, { ...frameOptions, seekSeconds: 0 });
+      try {
+        await extract(source.archivePath, video.path, target, context, source, limit);
+        const sourceBytes = (await statFile(target)).size;
+        let blob;
+        try { blob = await extractCoverFrameAsync(target, frameOptions); }
+        catch (error) {
+          if (!context.isCurrent() || error.code === "COVER_TIMEOUT") throw error;
+          await safeTarget(target, context, { create: false });
+          blob = await extractCoverFrameAsync(target, { ...frameOptions, seekSeconds: 0 });
+        }
+        await verifySource(source, context);
+        await safeTarget(target, context, { create: false });
+        return { blob, mime: "image/jpeg", sourceBytes };
+      } finally {
+        try {
+          await safeTarget(target, context, { create: false, checkCurrent: false });
+          await fs.promises.unlink(target);
+        } catch (error) {
+          if (error.code !== "ENOENT") warn("[archive-video-cover-temp]", error.message);
+        }
       }
-      await verifySource(prepared.source, context);
-      await safeTarget(prepared.target, context, { create: false });
-      return { blob, mime: "image/jpeg", sourceBytes };
     }, { signal, waitForCloseOnAbort: true });
   }
 
