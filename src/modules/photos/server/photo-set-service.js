@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
 import { parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
+import { photoPersonShelfName } from "../../../../lib/photo-person-shelf.js";
 import { officialPhotoCoverRevision, photoCoverHintScore } from "./photo-cover-source.js";
 
 const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">
@@ -478,8 +479,10 @@ export function createPhotoSetService({
     const official = !manual && getImageGalleryDb && withDatabase(getImageGalleryDb(), db => db.prepare(`SELECT official_source
       FROM photo_set_covers WHERE album_id=? AND official_source IS NOT NULL AND member_path IS NULL AND status='ok'`).get(album.id));
     const officialRevision = officialPhotoCoverRevision(official);
+    const shelfPerson = photoPersonShelfName(album);
     return {
       ...album,
+      ...(shelfPerson ? { personName: shelfPerson } : {}),
       ...(getImageGalleryDb ? { coverEditable: true } : {}),
       ...(manual ? publicCoverOverride(album, override) : officialRevision
         ? { coverUrl: versionedCoverUrl(album.coverUrl, officialRevision) } : {}),

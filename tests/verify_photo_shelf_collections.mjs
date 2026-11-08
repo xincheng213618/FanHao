@@ -3,6 +3,7 @@ import { createImageGalleryDbService } from "../src/modules/content-index/server
 import { createImageLibraryService, photoShelfCollectionScope } from "../src/modules/content-index/server/image-library-service.js";
 import { createPhotoBrowseCategoryStore } from "../src/modules/content-index/server/photo-browse-category-store.js";
 import { createPhotoLibraryStore } from "../src/modules/content-index/server/photo-library-store.js";
+import { createPhotoSetService } from "../src/modules/photos/server/photo-set-service.js";
 
 const root = "T:\\";
 const loli = "萝莉系列";
@@ -10,6 +11,12 @@ const others = "小众系列";
 const fetish = "恋足恋物";
 const galli = "[GALLI嘉丽]舞蹈生日记";
 const kitty = "kittyWawa袜小喵";
+const likes = "我喜欢的";
+const favorites = [
+  ["Milena D (Sunna)_33Sets", "Milena D"],
+  ["paloma b", "Paloma B"],
+  ["Emily Bloom", "Emily Bloom"]
+];
 const folders = ["[战前女神]", "风之领域", "喵糖映画", "喵写真", "纳丝摄影", "轻兰映画", "森萝财团", "少女映画", "少女秩序", "兔玩映画", "妖精视觉"];
 const coverUrl = id => `/fixture-cover/${id}`;
 const timestamp = "2026-11-08T00:00:00Z";
@@ -26,7 +33,12 @@ const photoSets = [
   album("qinglan", loli, "轻兰映画", "Grand"),
   album("galli-a", others, galli, "Folder A"), album("galli-b", others, galli, "Folder B"),
   album("other-a", others, "Others A"), album("other-b", others, "Others B"),
-  album("kitty", fetish, kitty), album("fetish", fetish, "现有合集")
+  album("kitty", fetish, kitty), album("fetish", fetish, "现有合集"),
+  ...favorites.flatMap(([folder], index) => ["Met-Art", "FemJoy/2011"].map((site, siteIndex) => ({
+    ...album(`person-${index}-${siteIndex}`, likes, folder, site),
+    personName: site
+  }))),
+  album("ungrouped", likes, "")
 ];
 const db = createImageGalleryDbService({ dbPath: ":memory:", ensureDataDir() {} });
 const browse = createPhotoBrowseCategoryStore({ getDb: db.getDb });
@@ -63,6 +75,31 @@ try {
   const legacyId = `${root}|${loli}/兔玩映画/1301-1400/1380`;
   assert.deepEqual(page(loli, { collection: legacyId }).items.map(item => item.id), ["rabbit-b"]);
   assert.equal(page("all", { collection: "shelf:invalid" }).total, 0);
+
+  const peopleShelves = page("catalog:likes", { sort: "title" });
+  assert.equal(peopleShelves.total, 4, "each person appears once, including when sites nest further");
+  assert.equal(peopleShelves.stats.albumCount, 7);
+  assert(peopleShelves.items.some(item => item.albumCount === 1), "archives directly under the category still have a collection");
+  for (const [index, [folder, person]] of favorites.entries()) {
+    const shelf = peopleShelves.items.find(item => item.title === person);
+    assert.deepEqual(photoShelfCollectionScope(shelf.collectionId), { sourceRoot: root, category: likes, subCategory: folder });
+    const detail = page("catalog:likes", { collection: shelf.collectionId });
+    assert.equal(detail.collectionSummary.title, person);
+    assert.equal(detail.total, 2);
+    assert(detail.items.every(item => item.personName === person));
+    const siteLink = page("catalog:likes", { collection: `${root}|${likes}/${folder}/Met-Art` });
+    assert.equal(siteLink.collectionSummary.title, person);
+    assert.deepEqual(siteLink.items.map(item => item.id), [`person-${index}-0`], "old publisher links keep their original contents");
+    assert.equal(page("catalog:likes", { photoView: "albums", person }).total, 2);
+  }
+  const people = page("catalog:likes", { photoView: "people" });
+  for (const [, name] of favorites) assert(people.items.some(item => item.name === name && item.count === 2));
+  const reader = createPhotoSetService({
+    safeChildPath: (_root, relativePath) => relativePath,
+    archiveImagesPayload: async () => ({ images: [] })
+  });
+  const albumDetail = await reader.publicDetail(store.byId("person-0-0"));
+  assert.equal(albumDetail.personName, "Milena D");
 
   const restore = sqlite.prepare("INSERT INTO photo_browse_category_folders(category_id, source_category, sub_category) VALUES(?,?,?)");
   for (const row of mappings) restore.run(row.category_id, row.source_category, row.sub_category);
