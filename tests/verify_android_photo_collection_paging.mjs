@@ -120,6 +120,7 @@ async function verifyPagingAndCompatibility(origin, entry) {
   for (const scenario of ["append and revision", "response shape transition", "old server and offline cache", "flat offline append", "album and search routes"]) {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const requests = [], details = [], errors = [];
+    const initialSnapshot = snapshot;
     let protocol = scenario === "old server and offline cache" ? "reject" : "flat";
     page.on("pageerror", error => errors.push(error.message));
     try {
@@ -222,15 +223,50 @@ async function verifyPagingAndCompatibility(origin, entry) {
         await cards.first().waitFor();
         assert.equal(requests.at(-1).searchParams.get("sort"), "title");
         assert.deepEqual(await titles(), oracle.itemsPayload(requests.at(-1)).items.map(item => item.title));
+        const selected = oracle.itemsPayload(requests.at(-1)).items[0];
+        const selectedAlbums = rows.filter(item => item.collectionId === selected.collectionId);
+        const totalIssues = limit + 4;
+        snapshot = { ...snapshot, photoSets: [...rows, ...Array.from({ length: totalIssues - selectedAlbums.length }, (_, index) => {
+          const number = index + selectedAlbums.length + 1;
+          return { ...selectedAlbums[0], id: `extra-issue-${number}`, title: `VOL.${number} 期号样例`,
+            updatedAt: "2025-01-01T00:00:00Z" };
+        })] };
+        revision++;
         await cards.first().click();
         const albumCards = page.locator(".photo-album-card");
-        await albumCards.first().waitFor();
-        assert.equal(await albumCards.count(), 2);
-        assert(requests.at(-1).searchParams.get("collection"));
+        const firstAlbumTitle = albumCards.first().locator("strong");
+        await albumCards.getByText(`VOL.${totalIssues} 期号样例`, { exact: true }).waitFor();
+        assert.equal(await firstAlbumTitle.textContent(), `VOL.${totalIssues} 期号样例`);
+        assert.equal(await albumCards.count(), limit);
+        assert.equal(requests.at(-1).searchParams.get("collection"), selected.collectionId);
+        assert.equal(requests.at(-1).searchParams.get("sort"), "issue");
+        assert.equal(requests.at(-1).searchParams.get("direction"), null);
         assert.equal(opted(requests.at(-1)), false);
+        const ascending = "期号正序（VOL / NO）";
+        const descending = "期号倒序（VOL / NO）";
+        const selectIssueOrder = async label => {
+          await page.locator(".photo-sort-action").click();
+          await page.getByRole("dialog").getByRole("button", { name: label, exact: true }).click();
+        };
+        await selectIssueOrder(ascending);
+        await albumCards.getByText(selectedAlbums[0].title, { exact: true }).waitFor();
+        assert.equal(await firstAlbumTitle.textContent(), selectedAlbums[0].title);
+        assert.equal(requests.at(-1).searchParams.get("direction"), "asc");
+        assert.equal(offset(requests.at(-1)), 0);
+        await more.click();
+        await page.waitForFunction(total => document.querySelectorAll(".photo-album-card").length === total, totalIssues);
+        assert.equal(requests.at(-1).searchParams.get("direction"), "asc");
+        assert.equal(offset(requests.at(-1)), limit);
         await albumCards.first().click(); await page.locator(".photo-detail-summary").waitFor();
         assert.equal(details.length, 1); assert(details[0].searchParams.has("imageLimit"));
         await page.locator("#viewBack").click(); await albumCards.first().waitFor();
+        await page.getByRole("button", { name: `套图排序，当前${ascending}` }).waitFor();
+        assert.equal(await firstAlbumTitle.textContent(), selectedAlbums[0].title);
+        await selectIssueOrder(descending);
+        await albumCards.getByText(`VOL.${totalIssues} 期号样例`, { exact: true }).waitFor();
+        assert.equal(await firstAlbumTitle.textContent(), `VOL.${totalIssues} 期号样例`);
+        assert.equal(requests.at(-1).searchParams.get("direction"), null);
+        assert.equal(offset(requests.at(-1)), 0);
         await page.getByRole("button", { name: "返回分类", exact: true }).click(); await cards.first().waitFor();
         await page.locator(".photo-search-action").click();
         const input = page.locator("#searchInput");
@@ -242,6 +278,9 @@ async function verifyPagingAndCompatibility(origin, entry) {
       }
       assert.deepEqual(errors, []);
       console.log(`PASS ${scenario}`);
-    } finally { await page.close(); }
+    } finally {
+      if (snapshot !== initialSnapshot) { snapshot = initialSnapshot; revision++; }
+      await page.close();
+    }
   }
 }

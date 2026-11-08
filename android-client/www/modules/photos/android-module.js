@@ -1,6 +1,6 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-8faf7a80cb7b";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-0a663c3bea5d";
 import { PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS } from "../../platform/content-index/photo-catalog.js";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8faf7a80cb7b";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-0a663c3bea5d";
 
 const DEFAULT_CATEGORY = "我喜欢的";
 const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];
@@ -227,9 +227,13 @@ function createPhotoCategoryButton(categories, activeCategory, selectCategory, c
 }
 
 function createPhotoSortButton(host, params) {
-  const collections = !params.collection && params.photoView !== "albums";
-  const options = collections ? PHOTO_COLLECTION_SORT_OPTIONS : PHOTO_ALBUM_SORT_OPTIONS;
-  const value = params.sort || (collections ? "count" : "updated");
+  const collection = Boolean(params.collection);
+  const collections = !collection && params.photoView !== "albums";
+  const options = collection
+    ? [["issue", "期号倒序（VOL / NO）"], ["issue-asc", "期号正序（VOL / NO）"], ...PHOTO_ALBUM_SORT_OPTIONS]
+    : collections ? PHOTO_COLLECTION_SORT_OPTIONS : PHOTO_ALBUM_SORT_OPTIONS;
+  const sort = params.sort || (collection ? "issue" : collections ? "count" : "updated");
+  const value = sort === "issue" && params.direction === "asc" ? "issue-asc" : sort;
   const label = options.find(([key]) => key === value)?.[1] || "最近更新";
   const button = document.createElement("button");
   button.type = "button";
@@ -241,7 +245,9 @@ function createPhotoSortButton(host, params) {
     options: options.map(([key, text]) => ({
       value: key, label: text,
       select: () => {
-        host.contentIndex.updateChannelParams({ sort: key });
+        host.contentIndex.updateChannelParams(collection
+          ? { sort: key === "issue-asc" ? "issue" : key, direction: key === "issue-asc" ? "asc" : "" }
+          : { sort: key });
         host.ui.scrollToTop();
       }
     }))

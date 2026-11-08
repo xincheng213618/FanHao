@@ -1,10 +1,10 @@
-import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-0a663c3bea5d";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-0a663c3bea5d";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-8faf7a80cb7b";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-8faf7a80cb7b";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-0a663c3bea5d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-0a663c3bea5d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8faf7a80cb7b";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-0a663c3bea5d";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";

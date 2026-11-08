@@ -1,4 +1,4 @@
-import { createViewportImageLoader } from "../shared/viewport-image-loader.js?v=assets-8faf7a80cb7b";
+import { createViewportImageLoader } from "../shared/viewport-image-loader.js?v=assets-0a663c3bea5d";
 
 const WORK_COVER_ROOT_MARGIN = "720px 0px";
 

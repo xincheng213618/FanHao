@@ -1,4 +1,4 @@
-import { fetchJson } from "./api.js?v=assets-8faf7a80cb7b";
+import { fetchJson } from "./api.js?v=assets-0a663c3bea5d";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
 import { formatBytes, formatNumber } from "./format.js";
 import { createDetailSectionTitle } from "./detail-ui.js";

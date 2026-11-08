@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-8faf7a80cb7b";
-import { fetchJson } from "./js/api.js?v=assets-8faf7a80cb7b";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-0a663c3bea5d";
+import { fetchJson } from "./js/api.js?v=assets-0a663c3bea5d";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-8faf7a80cb7b";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-8faf7a80cb7b";
-import { getElements } from "./js/dom.js?v=assets-8faf7a80cb7b";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-8faf7a80cb7b";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-8faf7a80cb7b";
+import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-0a663c3bea5d";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-0a663c3bea5d";
+import { getElements } from "./js/dom.js?v=assets-0a663c3bea5d";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-0a663c3bea5d";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-0a663c3bea5d";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-8faf7a80cb7b";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-8faf7a80cb7b";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-8faf7a80cb7b";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-8faf7a80cb7b";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-0a663c3bea5d";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-0a663c3bea5d";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-0a663c3bea5d";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-0a663c3bea5d";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-8faf7a80cb7b";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-8faf7a80cb7b";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-8faf7a80cb7b";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-8faf7a80cb7b";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-0a663c3bea5d";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-0a663c3bea5d";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-0a663c3bea5d";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-0a663c3bea5d";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -358,15 +358,22 @@ function sanitizeViewParams(view, params = {}) {
     const seriesKey = String(params.seriesKey || "").trim();
     const tvView = mode === "anime" && !seriesKey ? "series" : requestedTvView;
     const rawSort = String(params.sort || "").trim();
+    const photoCollection = mode === "photo" && Boolean(collection) && !query;
     const isSeriesMode = mode === "tv" || mode === "anime" || mode === "media";
     const mediaSearch = Boolean(query && ["movie", "tv", "anime", "media"].includes(mode));
     const mediaTrail = isSeriesMode && (seriesKey || tvView === "episodes") ? normalizeMediaTrail(params.mediaTrail, mode) : "";
-    const defaultSort = mode === "photo" && photoView === "collections" && !collection && !query ? "count" : mediaSearch ? "relevance" : isSeriesMode && seriesKey ? "title" : "updated";
-    const sort = mediaSearch && (rawSort || defaultSort) === "relevance" ? "relevance" : normalizeChannelSort(rawSort || defaultSort);
+    const defaultSort = photoCollection ? "issue"
+      : mode === "photo" && photoView === "collections" && !collection && !query ? "count"
+        : mediaSearch ? "relevance" : isSeriesMode && seriesKey ? "title" : "updated";
+    const requestedSort = rawSort || defaultSort;
+    const sort = (photoCollection && requestedSort === "issue") || (mediaSearch && requestedSort === "relevance")
+      ? requestedSort : normalizeChannelSort(requestedSort);
+    const issueAscending = photoCollection && sort === "issue" && params.direction === "asc";
     return {
       mode,
       ...(query ? { query } : {}),
       ...(sort !== "updated" || defaultSort !== "updated" || mediaSearch ? { sort } : {}),
+      ...(issueAscending ? { direction: "asc" } : {}),
       ...(mode === "photo" ? { photoView: collection ? "albums" : photoView } : {}),
       ...(isSeriesMode && tvView === "episodes" && !seriesKey ? { tvView } : {}),
       ...(isSeriesMode && seriesKey ? { tvView: "episodes", seriesKey } : {}),

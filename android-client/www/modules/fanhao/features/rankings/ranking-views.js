@@ -1,7 +1,7 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-8faf7a80cb7b";
-import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-8faf7a80cb7b";
+import { fetchJson } from "../../../../js/api.js?v=assets-0a663c3bea5d";
+import { cacheAgeText, captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-0a663c3bea5d";
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-8faf7a80cb7b";
+import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=assets-0a663c3bea5d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 const STORAGE_KEY = "fanhao.android.rankingKey";

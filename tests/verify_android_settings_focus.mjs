@@ -111,7 +111,7 @@ function fixture(input = product) {
   };
   const no = () => {};
   const context = vm.createContext({
-    window, document, HTMLElement: Element, Element, console, URL, URLSearchParams, normalizeUrl, captureAccountOwner, isAccountOwnerCurrent,
+    window, document, HTMLElement: Element, Element, CustomEvent, console, URL, URLSearchParams, normalizeUrl, captureAccountOwner, isAccountOwnerCurrent,
     els, activeUrl: A, currentView: "tools", currentViewParams: {}, viewRenderToken: 7, viewStack: [{ view: "works", marker: "keep-stack" }],
     HISTORY_MARKER: "settings-fixture", DEFAULT_VIEW: "people", STORAGE_KEY: "synthetic-server",
     RESTORABLE_VIEWS: new Set(["tools", "works", "people", "novels", "channel", "music"]),

@@ -1,4 +1,4 @@
-import { reconcileLocalNovelEntry, safeLocalProgressRecovery } from "./novel-chapter-identity.js?v=assets-8faf7a80cb7b";
+import { reconcileLocalNovelEntry, safeLocalProgressRecovery } from "./novel-chapter-identity.js?v=assets-0a663c3bea5d";
 
 const LOCAL_NOVEL_DB_NAME = "fanhao-local-novels";
 const LOCAL_NOVEL_DB_VERSION = 3;

@@ -1,4 +1,4 @@
-import { FOLLOWING_AUTHOR_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort } from "../shared.js?v=assets-8faf7a80cb7b";
+import { FOLLOWING_AUTHOR_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort } from "../shared.js?v=assets-0a663c3bea5d";
 
 export function renderFollowingAuthorTools({ listState, onChange }) {
   const data = listState.data || {};

@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-8faf7a80cb7b";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-8faf7a80cb7b";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-8faf7a80cb7b";
+import { fetchJson } from "../../js/api.js?v=assets-0a663c3bea5d";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-0a663c3bea5d";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-0a663c3bea5d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -616,13 +616,17 @@ export function createChannelViews(context) {
     const tvView = String(typeof params === "object" ? params.tvView || "" : "").trim() === "episodes" ? "episodes" : "series";
     const seriesKey = String(typeof params === "object" ? params.seriesKey || "" : "").trim();
     const mediaMode = ["movie", "tv", "anime", "media"].includes(normalizedMode);
-    const defaultSort = normalizedMode === "photo" && photoView === "collections" && !collection && !query ? "count" : mediaMode && query ? "relevance" : "updated";
+    const photoCollection = normalizedMode === "photo" && Boolean(collection) && !query;
+    const defaultSort = photoCollection ? "issue"
+      : normalizedMode === "photo" && photoView === "collections" && !collection && !query ? "count"
+        : mediaMode && query ? "relevance" : "updated";
     const requestedSort = normalizeChannelSort(typeof params === "object" ? params.sort || defaultSort : defaultSort);
     const sort = mediaMode && !query && requestedSort === "relevance" ? "updated" : requestedSort;
     const channel = channelConfig(normalizedMode);
     const limit = getChannelLimit();
     const collectionPage = normalizedMode === "photo" && photoView === "collections" && !collection && !query;
-    const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort, collectionPage };
+    const direction = photoCollection && sort === "issue" && params.direction === "asc" ? "asc" : "";
+    const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort, direction, collectionPage };
     const activeUrl = getActiveUrl();
     const startedAccount = captureAccountOwner(activeUrl);
     let accountScope = null;
@@ -875,7 +879,8 @@ export function createChannelViews(context) {
       collection: filters.collection || "",
       tvView: filters.tvView || "",
       seriesKey: filters.seriesKey || "",
-      sort: normalizeChannelSort(filters.sort)
+      sort: normalizeChannelSort(filters.sort),
+      ...(filters.direction ? { direction: filters.direction } : {})
     });
   }
 
@@ -1176,7 +1181,8 @@ export function createChannelViews(context) {
     card.addEventListener("click", () => {
       if (options.isCurrent && !options.isCurrent(card)) return;
       if (photoCollection) {
-        updateChannelParams({ photoView: "albums", collection: item.collectionId || item.id, person: "", query: "", sort: "updated" }, { push: true, skipHistory: false, replaceHistory: false });
+        updateChannelParams({ photoView: "albums", collection: item.collectionId || item.id, person: "", query: "", sort: "issue", direction: "" },
+          { push: true, skipHistory: false, replaceHistory: false });
         return;
       }
       const tvSeriesNavigation = tvSeriesCardNavigation(mode, item);
@@ -2279,7 +2285,10 @@ export function createChannelViews(context) {
       }
       if (filters.category && filters.category !== "all") params.set("category", filters.category);
       if (filters.person && filters.person !== "all") params.set("person", filters.person);
-      if (filters.collection) params.set("collection", filters.collection);
+      if (filters.collection) {
+        params.set("collection", filters.collection);
+        if (params.get("sort") === "issue" && filters.direction === "asc") params.set("direction", "asc");
+      }
     } else if (["western", "media", "movie", "tv", "anime"].includes(mode)) {
       if (filters.category && filters.category !== "all") params.set("category", filters.category);
       if (mode === "tv" || mode === "anime" || mode === "media") {
@@ -2315,7 +2324,7 @@ export function createChannelViews(context) {
 
   function normalizeChannelSort(value) {
     const sort = String(value || "").trim();
-    return ["updated", "count", "title", "size", "rating", "relevance"].includes(sort) ? sort : "updated";
+    return ["updated", "count", "title", "size", "rating", "relevance", "issue"].includes(sort) ? sort : "updated";
   }
 
   function createCollectionContextRow(summary = null, state = {}) {
