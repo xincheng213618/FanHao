@@ -14,8 +14,35 @@ const concurrency = Math.min(8, Math.max(1, Number.parseInt(option("--concurrenc
 const scope = option("--scope", "all") === "collections" ? "collections" : "all";
 const listLimit = 5000;
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const busyRetries = 3;
+const downLimitMs = Number(process.env.WARM_DOWN_LIMIT_MS) || 10 * 60 * 1000;
+const retryUnitMs = Number(process.env.WARM_RETRY_UNIT_MS) || 5000;
+
+// 503 means one archive timed out or the pool is busy or stopping, so retry a
+// few times and let the caller count it. A network error means the service is
+// down (restart, or the machine just woke), so wait for it to return.
+async function fetchWithRetry(pathname) {
+  let downSince = 0;
+  for (let busy = 0; ;) {
+    try {
+      const response = await fetch(`${baseUrl}${pathname}`);
+      downSince = 0;
+      if (response.status !== 503 || busy >= busyRetries) return response;
+      await response.arrayBuffer();
+      busy += 1;
+      await delay(retryUnitMs * busy);
+    } catch (error) {
+      downSince ||= Date.now();
+      if (Date.now() - downSince >= downLimitMs) throw new Error(`cover service unreachable: ${error.cause?.code || error.message}`);
+      console.log(`[photo-covers] service unreachable (${error.cause?.code || error.message}), retrying`);
+      await delay(retryUnitMs * 3);
+    }
+  }
+}
+
 async function getJson(pathname) {
-  const response = await fetch(`${baseUrl}${pathname}`);
+  const response = await fetchWithRetry(pathname);
   if (!response.ok) throw new Error(`${pathname} -> HTTP ${response.status}`);
   return response.json();
 }
@@ -64,20 +91,11 @@ async function warm(urls, label) {
   async function worker() {
     while (next < queue.length) {
       const url = queue[next++];
-      try {
-        const response = await fetch(`${baseUrl}${url}`);
-        await response.arrayBuffer();
-        if (response.ok) stats.ok += 1;
-        else if (response.status === 404) stats.missing += 1;
-        else {
-          stats.failed += 1;
-          // 503 means the cover pool is stopping (service restart); stop cleanly.
-          if (response.status === 503) throw new Error("cover service is stopping");
-        }
-      } catch (error) {
-        if (error.message === "cover service is stopping") throw error;
-        stats.failed += 1;
-      }
+      const response = await fetchWithRetry(url);
+      await response.arrayBuffer();
+      if (response.ok) stats.ok += 1;
+      else if (response.status === 404) stats.missing += 1;
+      else stats.failed += 1;
       stats.done += 1;
       report(label);
     }
