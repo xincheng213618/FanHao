@@ -3,6 +3,24 @@ export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media",
 export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 
+const PHOTO_CATEGORY_IDS = new Map([
+  ["sites", "catalog:sites"],
+  ["xiuren", "catalog:xiuren"],
+  ["yituyu", "catalog:yituyu"],
+  ["mslass", "catalog:mslass"],
+  ["korean-entertainment", "catalog:korean-entertainment"],
+  ["bololi", "publisher:bololi"],
+  ["cos", "[COS]"]
+]);
+const PHOTO_CATEGORY_SLUGS = new Map([...PHOTO_CATEGORY_IDS].map(([slug, id]) => [id, slug]));
+const LEGACY_PHOTO_BROWSE_CATEGORIES = new Map([
+  ["名站套图", "catalog:sites"],
+  ["[XIUREN] 秀人网", "catalog:xiuren"],
+  ["[YITUYU艺图语]", "catalog:yituyu"],
+  ["[MSLASS梦丝女神]", "catalog:mslass"],
+  ["韩国演艺圈", "catalog:korean-entertainment"]
+]);
+
 const GALLERY_MODE_PATHS = {
   photo: "/photo",
   manga: "/photo/manga",
@@ -214,14 +232,22 @@ export function routeUrl(route, options = {}) {
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
     if (next.galleryMode === "media" && next.galleryMediaKind !== "all") params.set("kind", next.galleryMediaKind);
-    if (next.galleryCategory && shouldWriteGalleryCategory(next)) params.set("category", next.galleryCategory);
-    if (next.gallerySubCategory && next.gallerySubCategory !== "all") params.set("subCategory", next.gallerySubCategory);
+    const photo = next.galleryMode === "photo";
+    if (next.galleryCategory !== "all" && !pathname.startsWith("/photo/categories/")) {
+      if (photo) writePhotoFilter(params, "category", next.galleryCategory);
+      else params.set("category", next.galleryCategory);
+    }
+    if (next.gallerySubCategory !== "all") {
+      if (photo) writePhotoFilter(params, "subCategory", next.gallerySubCategory);
+      else params.set("subCategory", next.gallerySubCategory);
+    }
     if (next.galleryPerson && next.galleryPerson !== "all") {
-      params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
+      if (photo) writePhotoFilter(params, "person", next.galleryPerson);
+      else params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
     if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
-    if (next.galleryMode === "photo" && next.galleryPhotoDate && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
-    const defaultGallerySort = next.galleryMode === "photo"
+    if (photo && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
+    const defaultGallerySort = photo
       && next.galleryPhotoView === "collections"
       && !next.galleryPhotoCollection
       && !next.galleryQuery
@@ -297,6 +323,33 @@ function decodeRouteSegment(value) {
   }
 }
 
+export function normalizePhotoBrowseCategory(value) {
+  const category = String(value || "").trim() || DEFAULT_GALLERY_PHOTO_CATEGORY;
+  return LEGACY_PHOTO_BROWSE_CATEGORIES.get(category) || category;
+}
+
+function encodePhotoToken(value) {
+  const bytes = new TextEncoder().encode(value);
+  const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join("");
+  return `raw-${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
+}
+
+function decodePhotoToken(token) {
+  if (!/^raw-[A-Za-z0-9_-]+$/.test(token || "")) return "";
+  try {
+    const binary = atob(token.slice(4).replace(/-/g, "+").replace(/_/g, "/"));
+    const value = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+    return encodePhotoToken(value) === token ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function writePhotoFilter(params, key, value) {
+  if (/^[A-Za-z0-9_.:-]+$/.test(value)) params.set(key, value);
+  else params.set(`${key}Key`, encodePhotoToken(value));
+}
+
 function normalizeGalleryCategory(route = {}) {
   const category = String(route.galleryCategory || "").trim();
   if (category) return category;
@@ -339,12 +392,6 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
     workId: params.get("workId") || params.get("work") || "",
     videoId: params.get("videoId") || params.get("video") || ""
   };
-}
-
-function shouldWriteGalleryCategory(route = {}) {
-  if (route.galleryMode !== "photo") return route.galleryCategory !== "all";
-  if (String(route.galleryQuery || "").trim()) return route.galleryCategory !== "all";
-  return route.galleryCategory !== DEFAULT_GALLERY_PHOTO_CATEGORY;
 }
 
 function normalizeGallerySort(value) {
@@ -433,9 +480,13 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     rest = rest.slice(1);
   }
   if (!galleryMode) return null;
+  const photo = galleryMode === "photo";
+  const photoFilter = key => photo ? decodePhotoToken(params.get(`${key}Key`)) : "";
+  const encodedCategory = photoFilter("category");
+  const category = encodedCategory || params.get("category");
   const galleryQuery = params.get("q") || params.get("search") || "";
-  const photoSearch = galleryMode === "photo" && Boolean(String(galleryQuery).trim());
-  const galleryPhotoView = galleryMode === "photo" && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections";
+  const photoSearch = photo && Boolean(String(galleryQuery).trim());
+  const galleryPhotoView = photo && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections";
 
   const route = {
     view: "gallery",
@@ -448,32 +499,43 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryMediaId: "",
     galleryQuery,
     galleryMediaKind: galleryMode === "media" ? normalizeGalleryMediaKind(params.get("kind") || params.get("mediaKind") || params.get("category")) : "all",
-    galleryCategory: params.has("category") && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__", "__fanhao_media_kind_anime__"].includes(params.get("category")) ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
-    gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
-    galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
+    galleryCategory: category && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__", "__fanhao_media_kind_anime__"].includes(category) ? category : "all",
+    gallerySubCategory: photoFilter("subCategory") || params.get("subCategory") || params.get("folder") || "all",
+    galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : photoFilter("person") || params.get("person") || "all",
     gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
-    gallerySort: normalizeGallerySort(params.get("sort") || (galleryMode === "photo" && galleryPhotoView === "collections" && !photoSearch ? "count" : "updated")),
+    gallerySort: normalizeGallerySort(params.get("sort")),
     personId: "",
     q: "",
     workId: "",
     videoId: ""
   };
 
-  if (galleryMode === "photo") {
+  if (photo) {
     const section = rest[0] || "";
-    if (section === "collections") {
+    if (section === "categories") {
+      const slug = rest[1] || "";
+      route.galleryPhotoView = "collections";
+      route.galleryCategory = PHOTO_CATEGORY_IDS.get(slug) || decodePhotoToken(slug) || DEFAULT_GALLERY_PHOTO_CATEGORY;
+    } else if (section === "collections") {
       route.galleryPhotoView = "collections";
     } else if (section === "albums" && !rest[1]) {
       route.galleryPhotoView = "albums";
     } else if (section === "collection") {
       route.galleryPhotoView = "collections";
-      route.galleryPhotoCollection = decodeRouteSegment(rest.slice(1).join("/"));
-      if (!params.has("category")) route.galleryCategory = "all";
+      const collection = rest.slice(1).join("/");
+      route.galleryPhotoCollection = decodePhotoToken(collection) || decodeRouteSegment(collection);
     } else if (["set", "sets", "album", "albums", "photo-set"].includes(section)) {
       route.galleryAlbumId = decodeRouteSegment(rest[1] || "");
     } else if (section) {
       route.galleryAlbumId = decodeRouteSegment(section);
+    }
+    if (section !== "categories" && !photoSearch && !encodedCategory && route.galleryPhotoView === "collections"
+      && !route.galleryPhotoCollection && !route.galleryAlbumId) {
+      route.galleryCategory = normalizePhotoBrowseCategory(route.galleryCategory);
+    }
+    if (!params.get("sort") && route.galleryPhotoView === "collections" && !route.galleryPhotoCollection && !photoSearch) {
+      route.gallerySort = "count";
     }
   } else if (galleryMode === "manga") {
     route.galleryComicId = decodeRouteSegment(rest[0] || "");
@@ -661,8 +723,11 @@ function routePath(route) {
     const base = GALLERY_MODE_PATHS[mode] || "/photo";
     if (mode === "photo") {
       if (route.galleryAlbumId) return `${base}/set/${encodeRouteSegment(route.galleryAlbumId)}`;
-      if (route.galleryPhotoCollection) return `${base}/collection/${encodeRouteSegment(route.galleryPhotoCollection)}`;
-      if (route.galleryPhotoView === "collections") return `${base}/collections`;
+      if (route.galleryPhotoCollection) return `${base}/collection/${encodePhotoToken(route.galleryPhotoCollection)}`;
+      if (route.galleryPhotoView === "collections") {
+        if (route.galleryCategory === DEFAULT_GALLERY_PHOTO_CATEGORY) return `${base}/collections`;
+        return `${base}/categories/${PHOTO_CATEGORY_SLUGS.get(route.galleryCategory) || encodePhotoToken(route.galleryCategory)}`;
+      }
       return `${base}/albums`;
     }
     if (mode === "manga" && route.galleryComicId) {

@@ -95,17 +95,19 @@ function legacyServiceModuleUrl(source) {
   legacySource = replaceOnce(legacySource, `      const compact = Boolean(collection) || date === "all" && (photoView === "collections" || !query);
       const catalog = preparedPhotoCatalog(index, compact);
       compactAlbumRows = catalog.compact && !collection && photoView === "albums";
-      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
+      const defaultPhotoFilters = !categorySources && photoFiltersAreDefault({ category: photoSourceCategory, subCategory, person, date });
       const collectionItems = collection ? preparedPhotoCollectionAlbums(catalog, collection) : null;
       const albums = collectionItems || catalog.items;
-      const filteredPhotoSets = defaultPhotoFilters ? albums : filterPhotoSetsForList(albums, { category, subCategory, person, date });
+      const filteredPhotoSets = defaultPhotoFilters ? albums : filterPhotoSetsForList(albums, {
+        category: photoSourceCategory, categorySources, subCategory, person, date
+      });
       if (collectionItems) {
         collectionSummary = photoCollectionSummary(collectionItems, collection);
         photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
-      } else photoFacets = preparedPhotoFacets(catalog, category);
+      } else photoFacets = preparedPhotoFacets(catalog, photoSourceCategory);
 `, `      const catalog = preparedPhotoCatalog(index);
-      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
-      photoFacets = preparedPhotoFacets(catalog, category);
+      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category: photoSourceCategory, categorySources, subCategory, person, date, collection });
+      photoFacets = preparedPhotoFacets(catalog, photoSourceCategory);
       if (collection) {
         const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all", date: "all" });
         collectionSummary = photoCollectionSummary(collectionItems, collection);
@@ -121,7 +123,7 @@ function legacyServiceModuleUrl(source) {
           : filteredPhotoSets;
       sourceIsSorted = photoView === "albums" && defaultPhotoFilters && !collection && !query;
 `, `      source = photoView === "collections" && !collection
-        ? photoFiltersAreDefault({ category, subCategory, person, date })
+        ? !categorySources && photoFiltersAreDefault({ category: photoSourceCategory, subCategory, person, date })
           ? catalog.collectionCategories
           : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
         : filteredPhotoSets;

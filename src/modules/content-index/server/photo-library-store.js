@@ -1,9 +1,35 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { ARCHIVE_IMAGE_INDEXER_VERSION } from "../../../platform/server/archive-image-service.js";
+import { safeChildPath } from "../../../platform/server/request-io.js";
 import { imageLibraryCacheIdentity } from "./image-library-index-contract.js";
 import { PHOTO_COLLECTION_SORTS } from "./image-library-service.js";
 
 const defaultLocale = new Intl.Collator().resolvedOptions().locale;
 const collectionLocales = ["zh-CN", "en-US"];
+
+function contentImageCount(row) {
+  if (!Number.isSafeInteger(row.image_count) || row.image_count < 0 || !Number.isFinite(row.archive_mtime_ms)) return null;
+  try {
+    const signature = JSON.parse(row.archive_identity);
+    if (!Array.isArray(signature) || signature.length !== 5 || signature[0] !== row.archive_path
+      || signature[1] !== row.archive_size || signature[2] !== row.archive_mtime_ms
+      || typeof signature[3] !== "string" || typeof signature[4] !== "string") return null;
+
+    const images = JSON.parse(row.images_json);
+    if (!Array.isArray(images) || images.length !== row.image_count) return null;
+    let count = images.length;
+    for (const image of images) {
+      if (typeof image?.path !== "string" || image.path.includes("\0")) return null;
+      const basename = image.path.split(/[\\/]/).at(-1);
+      if (!basename?.trim() || basename === "." || basename === "..") return null;
+      if (basename.toLowerCase() === "cover.jpg") count--;
+    }
+    return count;
+  } catch {
+    return null;
+  }
+}
 
 export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, directVideoExts, galleryMediaSources, videoExts, project }) {
   const identity = imageLibraryCacheIdentity({ archiveExts, photoSetRoots });
@@ -165,5 +191,46 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     return row.data_json ? JSON.parse(row.data_json) : null;
   }
 
-  return { byId, collectionPage, hasSnapshot, index, mediaIndex, mediaRevision, publish, revision, summary };
+  function contentImageCounts(ids, expectedRevision = null) {
+    const counts = new Map();
+    const wanted = [...new Set(ids)].filter(id => typeof id === "string" && id.length > 0);
+    if (!wanted.length) return counts;
+
+    return readSnapshot(db => {
+      const archives = db.prepare(`SELECT a.id, a.data_json FROM photo_library_snapshot s
+        CROSS JOIN json_each(?) requested JOIN photo_library_archives a ON a.id=requested.value
+        WHERE s.id=1 AND s.identity=? AND (? IS NULL OR s.revision=?)`);
+      const targets = [];
+      for (const row of archives.iterate(JSON.stringify(wanted), identity, expectedRevision, expectedRevision)) {
+        let album;
+        try { album = JSON.parse(row.data_json); } catch { continue; }
+        const { sourceRoot, relativePath, archiveIdentity, size, updatedAt } = album ?? {};
+        if (typeof sourceRoot !== "string" || !path.isAbsolute(sourceRoot) || typeof relativePath !== "string"
+          || !relativePath || path.isAbsolute(relativePath) || !Number.isSafeInteger(size) || size < 0
+          || (archiveIdentity != null && typeof archiveIdentity !== "string") || typeof updatedAt !== "string") continue;
+        const archivePath = safeChildPath(sourceRoot, relativePath);
+        const modifiedAt = Date.parse(updatedAt);
+        if (archivePath && !archivePath.includes("\0") && Number.isFinite(modifiedAt)) {
+          targets.push([row.id, archivePath, archiveIdentity || "", size, modifiedAt]);
+        }
+      }
+      if (!targets.length) return counts;
+
+      // Both joins are key lookups for the current page. The fallback is for
+      // imported snapshots that only recorded file size and an ISO mtime.
+      const indexed = db.prepare(`SELECT json_extract(target.value,'$[0]') AS id,
+          i.archive_path, i.archive_identity, i.archive_size, i.archive_mtime_ms, i.image_count, i.images_json
+        FROM json_each(?) target JOIN photo_set_image_indexes i ON i.archive_path=json_extract(target.value,'$[1]')
+        WHERE i.indexer_version=? AND i.archive_size=json_extract(target.value,'$[3]')
+          AND cast(i.archive_mtime_ms AS INTEGER)=json_extract(target.value,'$[4]')
+          AND (json_extract(target.value,'$[2]')='' OR i.archive_identity=json_extract(target.value,'$[2]'))`);
+      for (const row of indexed.iterate(JSON.stringify(targets), ARCHIVE_IMAGE_INDEXER_VERSION)) {
+        const count = contentImageCount(row);
+        if (count !== null) counts.set(row.id, count);
+      }
+      return counts;
+    });
+  }
+
+  return { byId, collectionPage, contentImageCounts, hasSnapshot, index, mediaIndex, mediaRevision, publish, revision, summary };
 }

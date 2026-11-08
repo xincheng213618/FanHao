@@ -309,6 +309,13 @@ body.gallery-view .gallery-browse-shell .gallery-controls {
 .gallery-browse-shell .gallery-photo-catalog-card .gallery-card-body span { color: var(--gallery-muted); font-size: 11px; font-weight: 400; text-align: left; }
 .gallery-browse-shell .gallery-photo-catalog-card .gallery-card-body small { color: var(--gallery-muted); text-align: left; }
 
+.gallery-browse-shell .gallery-photo-album-card .gallery-card-badges.has-leading-badge { left: 8px; }
+.gallery-photo-album-card .gallery-card-leading-badge { margin-inline-end: auto; }
+.gallery-browse-shell .gallery-photo-album-card .gallery-card-body { min-height: 64px; gap: 5px; padding-block: 10px; }
+.gallery-browse-shell .gallery-photo-album-card .gallery-card-body strong { display: block; white-space: nowrap; }
+.gallery-photo-album-card .gallery-card-date-row { display: flex; gap: 7px; }
+.gallery-photo-album-card .gallery-card-date-row time { flex-shrink: 0; }
+
 .gallery-browse-shell .gallery-movie-explore { display: block; width: 100%; margin: 0; }
 .gallery-browse-shell .gallery-movie-explore-main { gap: 0; }
 .gallery-browse-shell .gallery-movie-explore-header { border: 0; padding: 0; }

@@ -142,13 +142,64 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
           assert.match(await missing.locator('.gallery-card-cover').evaluate(cover => getComputedStyle(cover, '::after').content), /^(?:none|normal|"")$/);
 
           await breadcrumb.getByRole('button', { name: publisher?.name || '秀人网' }).click();
-          await page.waitForURL(url => url.searchParams.get('category') === categoryValue);
+          await page.waitForURL(url => publisher ? url.pathname === '/photo/categories/bololi' : /^\/photo\/categories\/raw-[A-Za-z0-9_-]+$/.test(url.pathname));
           if (!publisher) await settle(page, overview);
           await requested(parent);
           assert.equal(new URL(parent.url, base).searchParams.get('category'), categoryValue);
         } finally { releaseCovers(); releaseSummaryGates(overview, detail, parent); await page.close(); }
       });
     }
+    await run('photo direct category shows card counts while overview and cover are pending', async () => {
+      const path = '/photo/categories/yituyu';
+      const overview = hold(isSummary);
+      const category = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('category') === 'catalog:yituyu', '', {
+        categoryDirect: true,
+        collectionSummary: {
+          title: '艺图语', count: 1,
+          browseCategory: { id: 'yituyu', name: '艺图语' },
+          browseParent: { id: 'sites', name: '名站套图' }
+        },
+        items: [{ ...listItem('yituyu-fixture'), title: '[YITUYU艺图语] VOL.2754 冷暖光影[23P／85.5MB]',
+          albumNumber: 'VOL.2754', albumSubject: '冷暖光影', personName: '夏铃蔓', archiveDate: '2026-10-05', size: 89_653_248,
+          contentImageCount: 23,
+          coverUrl: '/media/gallery-cover/yituyu-fixture?v=fixture' }],
+        count: 1, total: 1, facets: {}
+      });
+      const page = await newPage({ real: true, route: path, waitReady: false });
+      let coverStarted = false, releaseCover;
+      const coverPending = new Promise(resolve => { releaseCover = resolve; });
+      try {
+        await page.route('**/media/gallery-cover/yituyu-fixture*', async route => {
+          coverStarted = true;
+          await coverPending;
+          await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' });
+        });
+        await Promise.all([requested(overview), requested(category)]);
+        await settle(page, category);
+
+        const heading = page.locator('.gallery-collection-hero-copy > strong');
+        const card = page.locator('[data-gallery-album-id="yituyu-fixture"]');
+        await heading.waitFor({ state: 'visible' });
+        await card.waitFor({ state: 'visible' });
+        await until(() => coverStarted, 'the category cover must start without waiting for the overview');
+        assert.equal(await heading.innerText(), '艺图语');
+        assert.deepEqual(await page.locator('.gallery-collection-breadcrumb button').allTextContents(), ['图库', '名站套图']);
+        const body = card.locator('.gallery-card-body');
+        assert.equal(await body.locator('strong').innerText(), '冷暖光影');
+        assert.equal(await body.locator('time').innerText(), '2026-10-05');
+        assert.match(await body.innerText(), /夏铃蔓/);
+        assert.doesNotMatch(await body.innerText(), /MB|VOL\.2754/);
+        assert.equal(await body.locator(':scope > *').count(), 2);
+        const issue = card.getByText('VOL.2754', { exact: true });
+        const count = card.getByText('23 张', { exact: true });
+        assert(await issue.isVisible() && await count.isVisible(), 'the issue and image count show while the cover is pending');
+        assert((await issue.boundingBox()).x < (await count.boundingBox()).x, 'issue number appears to the left of the image count');
+        assert.equal(await card.locator('img').evaluate(img => img.complete), false);
+        assert.equal(overview.closed, false);
+        assert.equal(await page.evaluate(url => __transport.settled.some(item => item.url === url), overview.url), false);
+        assert.equal(page.url(), `${base}${path}`);
+      } finally { releaseCover(); releaseSummaryGates(overview, category); await page.close(); }
+    });
     await run('summary recovery: a cold failure exposes an actionable read-only retry', async () => {
       const failed = hold(isSummary, 'Synthetic cold summary unavailable');
       const beforeItems = countRequests(url => url.pathname === '/api/image-library/items'), methodStart = apiMethods.length;

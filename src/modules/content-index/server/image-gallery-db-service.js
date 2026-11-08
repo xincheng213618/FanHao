@@ -149,6 +149,20 @@ function ensureSchema(db) {
       data_json TEXT NOT NULL,
       PRIMARY KEY(category, sort, locale, position)
     ) WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS photo_browse_categories (
+      id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+      parent_id TEXT REFERENCES photo_browse_categories(id), source_category TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_photo_browse_categories_parent ON photo_browse_categories(parent_id, position, id);
+    INSERT OR IGNORE INTO photo_browse_categories (id, name, parent_id, source_category, position) VALUES
+      ('sites', '名站套图', NULL, '', 0),
+      ('xiuren', '秀人网', 'sites', '[XIUREN] 秀人网', 0),
+      ('yituyu', '艺图语', 'sites', '[YITUYU艺图语]', 1),
+      ('mslass', '梦丝女神', 'sites', '[MSLASS梦丝女神]', 2),
+      ('korean-entertainment', '韩国演艺圈', NULL, '韩国演艺圈', 1);
+
     CREATE TABLE IF NOT EXISTS photo_publishers (
       id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, code TEXT NOT NULL DEFAULT ''
     );

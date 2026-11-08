@@ -260,6 +260,7 @@ export function createGalleryPage(deps) {
       if (photoView === "collections" && !query) {
         params.set("collectionPage", "1");
         params.set("collectionLocale", PHOTO_CATALOG_LOCALE);
+        if (state.gallery.category && state.gallery.category !== "all") params.set("categoryContents", "1");
       }
       if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
       if (state.gallery.subCategory && state.gallery.subCategory !== "all") params.set("subCategory", state.gallery.subCategory);
@@ -385,6 +386,7 @@ export function createGalleryPage(deps) {
         ...(currentList || {}),
         ...data,
         collectionPage: data.collectionPage === true,
+        categoryDirect: data.categoryDirect === true,
         items,
         count: items.length,
         limit: items.length,

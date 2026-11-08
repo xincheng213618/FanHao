@@ -100,6 +100,7 @@ const sharedWorkSorter = createWorkSorter({
 const { createImageGalleryDbService } = withGallery ? await import("./src/modules/content-index/server/image-gallery-db-service.js") : {};
 const { createImageLibraryIndexService } = withGallery ? await import("./src/modules/content-index/server/image-library-index-service.js") : {};
 const { createImageLibraryService } = withGallery ? await import("./src/modules/content-index/server/image-library-service.js") : {};
+const { createPhotoBrowseCategoryStore } = withGallery ? await import("./src/modules/content-index/server/photo-browse-category-store.js") : {};
 const { createPhotoLibraryStore } = withGallery ? await import("./src/modules/content-index/server/photo-library-store.js") : {};
 const { createPhotoPublisherStore } = withGallery ? await import("./src/modules/content-index/server/photo-publisher-store.js") : {};
 const { createGalleryMediaService } = withGallery ? await import("./src/modules/media/server/gallery-media-service.js") : {};
@@ -224,6 +225,7 @@ const getImageGalleryDb = () => {
   return imageGalleryDbService.getDb();
 };
 const photoPublisherStore = withGallery ? createPhotoPublisherStore({ getDb: getImageGalleryDb }) : null;
+const photoBrowseCategoryStore = withGallery ? createPhotoBrowseCategoryStore({ getDb: getImageGalleryDb }) : null;
 const photoLibraryStore = withGallery ? createPhotoLibraryStore({
   getDb: getImageGalleryDb,
   archiveExts: ARCHIVE_EXTS,
@@ -360,6 +362,7 @@ const imageLibraryService = withGallery ? createImageLibraryService({
   mangaService,
   maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT,
   metadataService: galleryMetadataService,
+  photoBrowseCategoryStore,
   photoLibraryStore,
   photoPublisherStore,
   photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,

@@ -239,6 +239,9 @@ function createGalleryFilterField(label, control, className = "") {
 function photoCategoryDisplayName(value) {
   const text = String(value || "").trim();
   if (!text) return "未归类";
+  const category = (state.gallery.data?.browseCategories || []).find(entry =>
+    text === `catalog:${entry.id}` || text === entry.sourceCategory);
+  if (category) return category.name;
   if (PHOTO_CATEGORY_LABELS.has(text)) return PHOTO_CATEGORY_LABELS.get(text);
   const prefix = text.match(/^\[([^\]]+)\]\s*(.*)$/u);
   const abbreviation = (prefix?.[1] || text).trim().toLowerCase();
@@ -274,20 +277,24 @@ function createPhotoCategoryButton(record, value, withCount) {
   button.addEventListener("click", () => {
     if (!entry.alive || !button.isConnected || !record.strip.contains(button) || !currentPhotoCategoryStrip(record)) return;
     if ((state.gallery.category || "all") === entry.value && !state.gallery.photoCollection) return;
-    state.gallery.photoView = "collections";
-    state.gallery.photoCollection = null;
-    state.gallery.sort = "count";
-    state.gallery.category = entry.value;
-    state.gallery.subCategory = "all";
-    state.gallery.person = "all";
-    state.gallery.seriesKey = "";
-    state.gallery.photoDate = "all";
-    state.gallery.visibleLimit = 80;
-    resetGalleryReader();
-    renderGalleryView();
-    syncGalleryRoute();
+    openPhotoCategory(entry.value);
   });
   return entry;
+}
+
+function openPhotoCategory(value) {
+  state.gallery.photoView = "collections";
+  state.gallery.photoCollection = null;
+  state.gallery.sort = "count";
+  state.gallery.category = value;
+  state.gallery.subCategory = "all";
+  state.gallery.person = "all";
+  state.gallery.seriesKey = "";
+  state.gallery.photoDate = "all";
+  state.gallery.visibleLimit = 80;
+  resetGalleryReader();
+  renderGalleryView();
+  syncGalleryRoute();
 }
 
 function updatePhotoCategoryButton(entry, label, count) {
@@ -322,7 +329,7 @@ function syncPhotoCategoryButtons(record, container, previous, facets, withCount
   for (const facet of facets) {
     const matches = available.get(facet.value);
     const entry = matches?.entries[matches.next++] || createPhotoCategoryButton(record, facet.value, withCount);
-    updatePhotoCategoryButton(entry, photoCategoryDisplayName(facet.value), facet.count);
+    updatePhotoCategoryButton(entry, facet.label || photoCategoryDisplayName(facet.value), facet.count);
     if (entry.button === document.activeElement && entry.button.parentElement === container) focused = entries.length;
     entries.push(entry); retained.add(entry);
   }
@@ -347,15 +354,21 @@ function syncPhotoCategoryStrip(record) {
   const ownedFocus = strip.contains(active), panel = record.menu?.panel;
   const focusedMenuButton = panel?.contains(active) && active.matches("button");
   const focusedTop = focusedMenuButton ? active.getBoundingClientRect().top : 0;
-  const facets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
+  const rawFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
+  const catalog = (state.gallery.data?.browseCategories || []).filter(entry => entry.issueCount > 0);
+  const bySource = new Map(catalog.filter(entry => entry.sourceCategory).map(entry => [entry.sourceCategory, entry]));
+  const activeCategory = catalog.find(entry => state.gallery.category === `catalog:${entry.id}`);
+  const facets = [
+    ...catalog.filter(entry => !entry.sourceCategory).map(catalogCategoryFacet),
+    ...rawFacets.filter(facet => !bySource.get(facet.value)?.parentId).map(facet => {
+      const entry = bySource.get(facet.value);
+      return entry ? catalogCategoryFacet(entry) : facet;
+    })
+  ];
   const featured = facets.slice(0, 4);
-  let selected, total = 0;
-  for (const facet of facets) {
-    total += Number(facet.count || 0);
-    if (selected === undefined && facet.value === state.gallery.category) selected = facet;
-  }
+  const selected = activeCategory?.parentId ? catalogCategoryFacet(activeCategory) : facets.find(facet => facet.value === state.gallery.category);
   if (selected && !featured.includes(selected)) featured[featured.length - 1] = selected;
-  updatePhotoCategoryButton(record.all, "全部大类", total);
+  updatePhotoCategoryButton(record.all, "全部大类", rawFacets.reduce((total, facet) => total + Number(facet.count || 0), 0));
   const needsMenu = facets.length > featured.length;
   if (needsMenu && !record.menu) {
     const details = document.createElement("details");
@@ -392,6 +405,10 @@ function syncPhotoCategoryStrip(record) {
       if (delta) panel.scrollTop += delta;
     }
   };
+}
+
+function catalogCategoryFacet(entry) {
+  return { value: `catalog:${entry.id}`, label: entry.name, count: entry.issueCount };
 }
 
 function createPhotoCategoryStrip(options = {}) {
@@ -743,18 +760,20 @@ function renderGalleryControls(options = {}) {
   }
 
   const photoSearchActive = state.gallery.mode === "photo" && Boolean(String(state.gallery.query || "").trim());
+  const directCategory = state.gallery.mode === "photo" && currentImageLibraryList()?.categoryDirect === true;
   const sortOptions = photoSearchActive
     ? [["updated", "相关性排序"]]
     : state.gallery.mode === "photo"
-      ? state.gallery.photoView === "collections" && !state.gallery.photoCollection
+      ? state.gallery.photoView === "collections" && !state.gallery.photoCollection && !directCategory
         ? PHOTO_COLLECTION_SORT_OPTIONS
         : PHOTO_ALBUM_SORT_OPTIONS
       : MEDIA_SORT_OPTIONS;
-  if (!sortOptions.some(([value]) => value === state.gallery.sort)) state.gallery.sort = "updated";
+  let sortValue = directCategory && state.gallery.sort === "count" ? "updated" : state.gallery.sort;
+  if (!sortOptions.some(([value]) => value === sortValue)) sortValue = state.gallery.sort = "updated";
   let sort = null;
   if (["photo", "movie", "media"].includes(state.gallery.mode)) {
     sort = renderGallerySelectControl(controls, options, "sort", {
-      className: "gallery-select gallery-sort-select", label: "排序", disabled: photoSearchActive, value: state.gallery.sort || "updated",
+      className: "gallery-select gallery-sort-select", label: "排序", disabled: photoSearchActive, value: sortValue || "updated",
       options: sortOptions.map(([value, label]) => gallerySelectOption(label, value))
     }, select => {
       state.gallery.sort = select.value || "updated";
@@ -1020,7 +1039,10 @@ function renderGalleryResults(options = {}) {
 
 function currentGalleryCategoryFacets() {
   const facets = state.gallery.data?.facets || {};
-  if (state.gallery.mode === "photo") return currentImageLibraryList()?.facets?.categories || facets.categories || [];
+  if (state.gallery.mode === "photo") {
+    const list = currentImageLibraryList();
+    return (list?.categoryDirect ? facets.categories : list?.facets?.categories) || facets.categories || [];
+  }
   const listFacets = currentImageLibraryList()?.facets || {};
   const kind = galleryMediaKindForMode(state.gallery.mode);
   if (kind === "media") {
@@ -1994,7 +2016,7 @@ function refreshGalleryList(options = {}) {
   if (state.activeView !== "gallery" || state.gallery.album || state.gallery.comic || state.gallery.media) return false;
   if (!options.readerActive && refreshGallerySummaryContent(options)) return true;
   const registration = galleryListRegistration, list = currentImageLibraryList();
-  if (!options.readerActive && state.gallery.mode === "photo" && state.gallery.photoCollection
+  if (!options.readerActive && state.gallery.mode === "photo" && (state.gallery.photoCollection || list?.categoryDirect)
     && els.workGrid.querySelector(".gallery-collection-page")) {
     if (options.listChanged || options.loading === false && !list) {
       renderGalleryResults({ preserveScroll: true });
@@ -2365,10 +2387,17 @@ function createGalleryCard(item, options = {}) {
   } else {
     cover.classList.add("empty");
   }
-  if (Array.isArray(options.badges) && options.badges.length) {
+  if (options.leadingBadge || options.badges?.length) {
     const badges = document.createElement("div");
     badges.className = "gallery-card-badges";
-    for (const label of options.badges.slice(0, 2)) {
+    if (options.leadingBadge) {
+      const badge = document.createElement("span");
+      badge.className = "gallery-card-leading-badge";
+      badge.textContent = options.leadingBadge;
+      badges.classList.add("has-leading-badge");
+      badges.append(badge);
+    }
+    for (const label of (options.badges || []).slice(0, 2)) {
       const badge = document.createElement("span");
       badge.textContent = label;
       badges.append(badge);
@@ -2383,7 +2412,16 @@ function createGalleryCard(item, options = {}) {
   const meta = document.createElement("span");
   meta.textContent = options.meta || "";
   body.append(title);
-  if (options.meta) body.append(meta);
+  if (options.dateLabel) {
+    const row = document.createElement("span");
+    row.className = "gallery-card-date-row";
+    if (options.meta) row.append(meta);
+    const time = document.createElement("time");
+    time.dateTime = options.dateTime;
+    time.textContent = options.dateLabel;
+    row.append(time);
+    body.append(row);
+  } else if (options.meta) body.append(meta);
   if (options.extra) {
     const extra = document.createElement("small");
     extra.textContent = options.extra;
@@ -2396,8 +2434,10 @@ function createGalleryCard(item, options = {}) {
 function renderPagedImageLibrary(container) {
   const page = getGalleryPage();
   const list = currentImageLibraryList();
-  const collectionOpen = state.gallery.mode === "photo" && Boolean(state.gallery.photoCollection);
-  if (!state.gallery.data && !collectionOpen) {
+  const collectionOpen = state.gallery.mode === "photo" && Boolean(state.gallery.photoCollection || list?.categoryDirect);
+  const categoryOpen = state.gallery.mode === "photo" && state.gallery.photoView === "collections"
+    && state.gallery.category !== "all" && !state.gallery.query;
+  if (!state.gallery.data && !collectionOpen && !categoryOpen) {
     gallerySummaryRegistration = { content: container, key: page.imageLibraryListKey?.() || "", generation: gallerySummaryGeneration, panel: null, complete: false };
     renderGallerySummaryState(gallerySummaryRegistration);
     return;
@@ -2424,7 +2464,7 @@ function renderPagedImageLibrary(container) {
   if (state.gallery.mode === "manga") {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedMangaShelf(container, list);
-  } else if (state.gallery.photoCollection) {
+  } else if (collectionOpen) {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoCollectionPage(container, list);
   } else if (state.gallery.photoView === "collections") {
@@ -2590,8 +2630,9 @@ function renderPagedPhotoCollectionsShelf(container, list) {
   const paged = list.collectionPage === true;
   const items = paged ? list.items : photoCatalogCollections(list.items, state.gallery.sort || "updated");
   const visibleItems = paged ? items : items.slice(0, Math.max(1, Number(state.gallery.visibleLimit || 80)));
-  const category = list.publisher?.name || (state.gallery.category === "all" ? "全部合集" : photoCategoryDisplayName(state.gallery.category));
-  const formatTotals = (collections, albums) => `${formatNumber(collections)} 个合集 · ${formatNumber(albums)} 期`;
+  const category = list.browseCategory?.name || list.publisher?.name || (state.gallery.category === "all" ? "全部合集" : photoCategoryDisplayName(state.gallery.category));
+  const itemLabel = list.browseCategory && !list.browseCategory.sourceCategory ? "分类" : "合集";
+  const formatTotals = (collections, albums) => `${formatNumber(collections)} 个${itemLabel} · ${formatNumber(albums)} 期`;
   const pageTotals = next => formatTotals(next.total, next.stats?.albumCount);
   const detail = paged ? pageTotals(list) : formatTotals(items.length, items.reduce((sum, item) => sum + Number(item.albumCount || 0), 0));
   const header = createGalleryResultsHeader(category, detail);
@@ -2599,13 +2640,8 @@ function renderPagedPhotoCollectionsShelf(container, list) {
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "text-button gallery-filter-clear";
-    clear.textContent = "查看全部分类";
-    clear.addEventListener("click", () => {
-      state.gallery.category = "all";
-      state.gallery.visibleLimit = 80;
-      renderGalleryView();
-      syncGalleryRoute();
-    });
+    clear.textContent = list.browseParent?.name || "查看全部分类";
+    clear.addEventListener("click", () => openPhotoCategory(list.browseParent ? `catalog:${list.browseParent.id}` : "all"));
     header.append(clear);
   }
   container.append(header);
@@ -2616,11 +2652,11 @@ function renderPagedPhotoCollectionsShelf(container, list) {
   for (const collection of visibleItems) grid.append(createCard(collection));
   container.append(grid);
   activateGalleryLazyImages(grid);
-  if (!items.length) renderPagedImageLibraryMessage(container, "这个分类下还没有合集，可尝试其他分类。");
+  if (!items.length) renderPagedImageLibraryMessage(container, `这个分类下还没有${itemLabel}，可尝试其他分类。`);
   if (paged) {
-    appendPagedGalleryMore(container, list, "合集");
+    appendPagedGalleryMore(container, list, itemLabel);
     registerGalleryList(grid, list, createCard, {
-      label: "合集", moreParent: container,
+      label: itemLabel, moreParent: container,
       refreshMetadata: next => { header.querySelector("span").textContent = pageTotals(next); }
     });
   } else {
@@ -2660,6 +2696,11 @@ function createPhotoCollectionCard(collection, publisher) {
       meta: [categoryLabel === title ? "" : categoryLabel, formatBytes(collection.size)].filter(Boolean).join(" · "),
       placeholder: "暂无封面",
       onOpen: () => {
+        if (collection.browseCategoryId) {
+          openPhotoCategory(`catalog:${collection.browseCategoryId}`);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
         selectedPhotoCollectionCard = { id: collectionId, title, publisher,
           category: collection.catalogCategory || collection.category, count: collection.albumCount, size: collection.size };
         if (publisher) state.gallery.category = "all";
@@ -2713,6 +2754,7 @@ function renderPagedPhotoShelf(container, list) {
 
 function photoCollectionPreview() {
   const id = state.gallery.photoCollection;
+  if (!id) return { title: photoCategoryDisplayName(state.gallery.category) };
   if (selectedPhotoCollectionCard?.id === id) return selectedPhotoCollectionCard;
   const directory = id.slice(id.indexOf("|") + 1);
   const parts = directory.split(/[\\/]+/).filter(Boolean);
@@ -2723,7 +2765,8 @@ function photoCollectionPreview() {
 function renderPagedPhotoCollectionPage(container, list, error = "") {
   const summary = { ...photoCollectionPreview(), ...list?.collectionSummary };
   const publisher = summary.publisher;
-  const titleLabel = publisher?.collectionLabel || photoCategoryDisplayName(summary.title || "套图合集");
+  const titleLabel = list?.categoryDirect && summary.browseCategory?.name
+    || publisher?.collectionLabel || photoCategoryDisplayName(summary.title || "套图合集");
   const page = document.createElement("section");
   page.className = "gallery-collection-page";
 
@@ -2734,15 +2777,17 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   libraryCrumb.type = "button";
   libraryCrumb.className = "text-button";
   libraryCrumb.textContent = "图库";
-  libraryCrumb.addEventListener("click", () => leavePhotoCollection("collections"));
+  libraryCrumb.addEventListener("click", () => leavePhotoCollection("collections", list?.categoryDirect ? "all" : ""));
   breadcrumb.append(libraryCrumb);
-  if (publisher || summary.category) {
+  const parent = list?.categoryDirect ? summary.browseParent : summary.browseCategory;
+  if (parent || !list?.categoryDirect && (publisher || summary.category)) {
     const largeCrumb = document.createElement("button");
     largeCrumb.type = "button";
     largeCrumb.className = "text-button";
-    largeCrumb.textContent = publisher?.name || photoCategoryDisplayName(summary.category);
+    largeCrumb.textContent = parent?.name || publisher?.name || photoCategoryDisplayName(summary.category);
     if (publisher?.code) largeCrumb.title = publisher.code;
-    largeCrumb.addEventListener("click", () => leavePhotoCollection("collections", publisher ? `publisher:${publisher.id}` : summary.category));
+    largeCrumb.addEventListener("click", () => leavePhotoCollection("collections",
+      parent ? `catalog:${parent.id}` : publisher ? `publisher:${publisher.id}` : summary.category));
     breadcrumb.append(largeCrumb);
   }
   const smallCrumb = document.createElement("strong");
@@ -2756,7 +2801,7 @@ function renderPagedPhotoCollectionPage(container, list, error = "") {
   text.className = "gallery-collection-hero-copy";
   const eyebrow = document.createElement("span");
   eyebrow.className = "gallery-category-eyebrow";
-  eyebrow.textContent = "小分类";
+  eyebrow.textContent = list?.categoryDirect ? "分类" : "小分类";
   const title = document.createElement("strong");
   title.textContent = titleLabel;
   const meta = document.createElement("span");
@@ -2874,21 +2919,22 @@ function photoAlbumPersonName(item = {}) {
   return person && !structuralPeople.includes(normalize(person)) ? person : "";
 }
 
-function photoAlbumDisplayTitle(item = {}) {
-  const title = String(item.title || "").trim();
+function photoAlbumCardTitle(item, collectionView) {
+  const title = String(item.title || "").trim()
+    .replace(/\s*\[[^\]]*(?:\d+\s*[PV]|(?:MB|GB)\b|\d+(?:\.\d+)?\s*[MG]\b)[^\]]*\]\s*$/iu, "").trim();
   const sequence = title.match(/\b(VOL|N[O0])\.?\s*(\d+)\b/i);
   const albumNumber = String(item.albumNumber || (sequence ? `${/^VOL$/i.test(sequence[1]) ? "VOL." : "NO."}${sequence[2]}` : "")).trim();
   const meaningfulPerson = photoAlbumPersonName(item);
   const fallbackSubject = sequence
-    ? title.slice(Number(sequence.index || 0) + sequence[0].length).replace(/\s*\[[^\]]*(?:P|MB|GB)[^\]]*\]\s*$/iu, "").trim()
+    ? title.slice(Number(sequence.index || 0) + sequence[0].length).trim()
     : "";
   const subject = String(item.albumSubject || fallbackSubject || meaningfulPerson).trim();
-  if (albumNumber) return [albumNumber, subject].filter(Boolean).join(" · ");
-  if (subject) return subject;
-  return title
+  if (albumNumber) return { albumNumber, title: subject || "未命名" };
+  if (!collectionView) return { albumNumber, title };
+  const displayTitle = subject || title
     .replace(/^\[[^\]]+\]\s*/u, "")
-    .replace(/\s*\[[^\]]*(?:\d+\s*[PV]|(?:MB|GB)\b|\d+(?:\.\d+)?\s*M\b)[^\]]*\]\s*$/iu, "")
     .trim() || title || "未命名";
+  return { albumNumber, title: displayTitle };
 }
 
 function renderPagedPhotoCards(items, options = {}) {
@@ -2901,10 +2947,13 @@ function renderPagedPhotoCards(items, options = {}) {
 function createPagedPhotoCard(item, options = {}) {
   const collectionView = Boolean(options.collection);
   const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
-  const card = createGalleryCard(collectionView ? { ...item, title: photoAlbumDisplayTitle(item) } : item, {
-    badges: Number(item.imageCount || 0) ? [`${formatNumber(item.imageCount)} 张`] : [],
-    meta: collectionView ? collectionPerson : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
-    extra: [gallerySearchMatchText(item), collectionView ? item.archiveDate : "", formatBytes(item.size), collectionView ? "" : formatDateTime(item.updatedAt)].filter(Boolean).join(" · "),
+  const { albumNumber, title } = photoAlbumCardTitle(item, collectionView);
+  const card = createGalleryCard({ ...item, title }, {
+    leadingBadge: albumNumber,
+    badges: Number.isSafeInteger(item.contentImageCount) ? [`${formatNumber(item.contentImageCount)} 张`] : [],
+    meta: [collectionView ? collectionPerson : item.personName, gallerySearchMatchText(item)].filter(Boolean).join(" · "),
+    dateLabel: item.archiveDate || formatDateTime(item.updatedAt),
+    dateTime: item.archiveDate || item.updatedAt,
     placeholder: collectionView ? "" : "套图",
     coverFallback: collectionView ? "empty" : "1",
     onOpen: event => openPhotoSet(item.id, { listReturn: {
@@ -2914,6 +2963,7 @@ function createPagedPhotoCard(item, options = {}) {
   });
   card.classList.add("gallery-photo-album-card", "gallery-photo-catalog-card");
   card.dataset.galleryAlbumId = String(item.id);
+  if (title) card.title = title;
   return card;
 }
 
