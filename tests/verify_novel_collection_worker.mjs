@@ -30,6 +30,7 @@ let lockHolder;
 
 try {
   const adapter = service.createAdapter(adapterBody).adapter;
+  await verifyRejectedRunPreservesCheckpoint(adapter.id);
   const task = service.createTask({ url: "https://fixture.invalid/book", adapterId: adapter.id, mode: "test" }).task;
   for (const [name, mutate] of [
     ["adapter", () => service.createAdapter({ ...adapterBody, name: "locked adapter" })],
@@ -84,6 +85,76 @@ try {
   assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
   assert.ok(path.basename(resolved).startsWith("fanhao-collection-worker-"));
   removeOwnedTree(resolved);
+}
+
+async function verifyRejectedRunPreservesCheckpoint(adapterId) {
+  const input = { url: "https://fixture.invalid/checkpoint-retry", adapterId, mode: "collect" };
+  const post = async (suffix = "") => {
+    const response = {};
+    const url = new URL(`http://fixture/api/novels/collection/tasks${suffix}`);
+    assert.equal(await routeNovelApi({ method: "POST" }, response, url, {
+      collectionService: service, requireLocalAdmin: () => true, readJsonBody: async () => input,
+      sendJson: (res, status, body) => Object.assign(res, { status, body })
+    }), true);
+    return response;
+  };
+  const start = await post();
+  assert.equal(start.status, 201);
+  const { task } = start.body;
+  assert.equal(task.status, "queued");
+  const output = path.join(temporary, "jobs", task.id);
+  fs.mkdirSync(output, { recursive: true });
+  const checkpoint = path.join(output, "checkpoint.json");
+  const staging = `${checkpoint}.tmp`;
+  const checkpointText = JSON.stringify({
+    identity: { sourceUrl: task.startUrl, adapterId, mode: task.mode },
+    chapters: [{ url: `${task.startUrl}/1`, content: "Synthetic completed chapter" }]
+  });
+  const writeCheckpoints = () => {
+    fs.writeFileSync(checkpoint, checkpointText);
+    fs.writeFileSync(staging, "synthetic in-flight checkpoint");
+  };
+  const run = () => post(`/${task.id}/run`);
+  writeCheckpoints();
+
+  const queued = await run();
+  assert.equal(queued.status, 200);
+  assert.equal(queued.body.alreadyActive, true);
+  store.markRunning(task.id);
+  store.updateCheckpoint(task.id, { count: 1, total: 2 });
+  for (const status of ["running", "cancelling"]) {
+    if (status === "cancelling") store.markCancelling(task.id);
+    const before = store.getTask(task.id);
+    const rejected = await run();
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.body.error, "任务正在运行");
+    const duplicateStart = await post();
+    assert.equal(duplicateStart.status, 201);
+    assert.equal(duplicateStart.body.alreadyActive, true);
+    assert.deepEqual(store.getTask(task.id), before, `${status}: duplicate run must not mutate task state`);
+    assert.equal(fs.existsSync(checkpoint), true, `${status}: rejected run deleted the saved checkpoint`);
+    assert.equal(fs.readFileSync(checkpoint, "utf8"), checkpointText);
+    assert.equal(fs.readFileSync(staging, "utf8"), "synthetic in-flight checkpoint");
+  }
+  store.failTask(task.id, "fixture cancellation", { cancelled: true });
+  const resumed = await run();
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.body.resumed, true);
+  assert.equal(resumed.body.task.checkpointCount, 1);
+  assert.equal(fs.readFileSync(checkpoint, "utf8"), checkpointText);
+
+  for (const [restart, expectedStatus] of [[run, 200], [post, 201]]) {
+    store.markRunning(task.id);
+    store.completeTask(task.id);
+    writeCheckpoints();
+    const rerun = await restart();
+    assert.equal(rerun.status, expectedStatus);
+    assert.equal(rerun.body.task.status, "queued");
+    assert.equal(rerun.body.resumed, false);
+    assert.equal(rerun.body.task.checkpointCount, 0);
+    assert.equal(fs.existsSync(checkpoint), false);
+    assert.equal(fs.existsSync(staging), false);
+  }
 }
 
 function clientOptions(name, extra = {}) {

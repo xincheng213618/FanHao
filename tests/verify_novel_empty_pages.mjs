@@ -9,7 +9,8 @@ import { createNovelStore } from "../src/modules/novels/server/store.js";
 // Current, zero-total-only and unguarded stores read the same private SQLite
 // file. Restore only the guards; cache/count/snapshot behavior stays real.
 const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
-let source = fs.readFileSync(sourceUrl, "utf8");
+const currentSource = fs.readFileSync(sourceUrl, "utf8");
+let source = currentSource;
 let zeroOnlySource = source;
 for (const variable of ["countRow", "total"]) {
   const guard = '${where}${Number(' + variable + '?.count || 0) <= offset ? " AND 0" : ""}';
@@ -22,28 +23,41 @@ async function factoryFromSource(text) {
   return (await import(`data:text/javascript;base64,${Buffer.from(text).toString("base64")}`)).createNovelStore;
 }
 const previousFactory = await factoryFromSource(source), zeroOnlyFactory = await factoryFromSource(zeroOnlySource);
+const recentPageChoice = "? prepareRecentBookPage(database, pageSql, limit, offset) : null";
+assert.equal(currentSource.split(recentPageChoice).length, 2);
+const unrankedFactory = await factoryFromSource(currentSource.replace(recentPageChoice, "? null : null"));
 assert.ok(process.argv.slice(2).every(value => ["--legacy", "--legacy-zero-only"].includes(value)));
 const factory = process.argv.includes("--legacy") ? previousFactory : process.argv.includes("--legacy-zero-only") ? zeroOnlyFactory : createNovelStore;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-novel-empty-pages-"));
 const dbPath = path.join(temporary, "private.sqlite");
 const current = factory({ dbPath }), previous = previousFactory({ dbPath }), zeroOnly = zeroOnlyFactory({ dbPath });
+const unranked = unrankedFactory({ dbPath });
 const originalPrepare = DatabaseSync.prototype.prepare;
 const originalUuid = crypto.randomUUID;
 let writer = null, work = null, beforePage = null, fault = null;
 let responseOracles = 0, errorOracles = 0;
 const metrics = [];
 DatabaseSync.prototype.prepare = function (sql, ...args) {
-  const page = /SELECT b\.\*,[\s\S]*LIMIT \? OFFSET \?/u.test(sql)
-    || /TRIM\(author\) AS name,[\s\S]*LIMIT \? OFFSET \?/u.test(sql);
+  const ranked = sql.includes("WITH page AS MATERIALIZED (") && sql.includes("FROM page CROSS JOIN novel_books b");
+  const page = !sql.startsWith("EXPLAIN") && (ranked || /SELECT b\.\*,[\s\S]*LIMIT \? OFFSET \?/u.test(sql)
+    || /TRIM\(author\) AS name,[\s\S]*LIMIT \? OFFSET \?/u.test(sql));
   const count = /SELECT COUNT\(\*\) AS count FROM (?:novel_books b|novel_reading_state rs CROSS JOIN novel_books b)/u.test(sql)
     || /SELECT COUNT\(DISTINCT TRIM\(author\)\) AS count FROM novel_books /u.test(sql);
   if (page && beforePage) { const run = beforePage; beforePage = null; run(); }
   if (page && fault === "compile") sql = sql.replace("SELECT", "SELECT fixture_missing_column,");
+  if (sql.startsWith("EXPLAIN QUERY PLAN") && fault === "ranked-plan") throw new Error("controlled unavailable query plan");
+  const originalSql = sql;
+  const database = this;
   if (page && work) {
     work.prepared++;
     work.pageSql = sql;
     this.function("fixture_empty_page_visit", value => { if (work) work.visits++; return value; });
     sql = sql.replace(/((?:b\.)?status) = 'ok'/u, "$1 = 'ok' AND fixture_empty_page_visit($1) = 'ok'");
+    if (work.probeProgress) {
+      this.function("fixture_novel_progress_probe", value => { work.progressLookups++; return value; });
+      sql = sql.replace("s.book_id = b.id", "s.book_id = fixture_novel_progress_probe(b.id)");
+      work.ranked = ranked;
+    }
   }
   const statement = originalPrepare.call(this, sql, ...args);
   if (!page && !count) return statement;
@@ -54,6 +68,10 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
       if (count && key === "get" && work) work.counts++;
       if (page && key === "all") {
         if (work) { work.executed++; work.pageArgs = parameters; }
+        if (work?.probeProgress) {
+          const plan = text => originalPrepare.call(database, `EXPLAIN QUERY PLAN ${text}`).all(...parameters);
+          assert.deepEqual(plan(sql).map(row => row.detail), plan(originalSql).map(row => row.detail), "measurement preserves the page query plan");
+        }
         if (fault === "execute") throw Object.assign(new Error("controlled page execution failure"), { code: "SQLITE_BUSY" });
         if (fault === "bind") parameters[parameters.length - 1] = Symbol("invalid fixture offset");
       }
@@ -196,11 +214,12 @@ try {
     assert.deepEqual(next.pageArgs, old.pageArgs);
     assert.equal(next.visits, old.visits, "nonempty pages must retain their original SQLite work");
   }
-  console.log(JSON.stringify({ ok: true, responseOracles, errorOracles, books: 50000, metrics }, null, 2));
+  const recentPages = verifyRecentPages();
+  console.log(JSON.stringify({ ok: true, responseOracles, errorOracles, books: 50000, metrics, recentPages }, null, 2));
 } finally {
   work = null; beforePage = null; fault = null;
   DatabaseSync.prototype.prepare = originalPrepare; crypto.randomUUID = originalUuid;
-  current.invalidate(); previous.invalidate(); zeroOnly.invalidate(); writer?.close();
+  current.invalidate(); previous.invalidate(); zeroOnly.invalidate(); unranked.invalidate(); writer?.close();
   // Delete only known fixture-owned files, then the empty directory; never
   // recursively remove an inferred path or touch an application database.
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -241,8 +260,40 @@ function errorFrom(run) {
   try { run(); } catch (error) { return { name: error.name, message: error.message, code: error.code, errcode: error.errcode }; }
   assert.fail("the original page error must remain visible");
 }
-function measure(target, method, params) {
-  work = { visits: 0, counts: 0, prepared: 0, executed: 0 };
+function measure(target, method, params, probeProgress = false) {
+  work = { visits: 0, counts: 0, prepared: 0, executed: 0, probeProgress, progressLookups: 0 };
   try { return { result: call(target, method, params), ...work }; }
   finally { work = null; }
+}
+
+function verifyRecentPages() {
+  insertBook("tie-first", "AAA", "Fixture", 1);
+  insertBook("tie-second", "aaa", "Fixture", 2);
+  writer.exec("UPDATE novel_books SET updated_at='2099-01-01' WHERE id IN ('tie-first','tie-second')");
+  const check = (params, ranked) => {
+    const previous = measure(unranked, "listBooks", params, true);
+    const currentPage = measure(current, "listBooks", params, true);
+    assert.equal(JSON.stringify(currentPage.result), JSON.stringify(previous.result), "complete recent list response and order");
+    assert.equal(currentPage.ranked, ranked);
+    responseOracles++;
+    return { previous, currentPage };
+  };
+  const budgets = [];
+  for (const offset of [0, 1, 4000]) {
+    const { previous, currentPage } = check({ limit: "48", offset }, true);
+    if (offset === 0) assert.deepEqual(currentPage.result.books.slice(0, 2).map(book => book.id), ["tie-second", "tie-first"]);
+    assert.equal(currentPage.progressLookups, 48, "reading state should only be joined for returned books");
+    assert(previous.progressLookups > currentPage.progressLookups * 50);
+    budgets.push({ offset, previousProgressLookups: previous.progressLookups, currentProgressLookups: currentPage.progressLookups });
+  }
+  for (const guard of [{ q: "Book" }, { author: "Author 1" }, { category: "分类1" }, { reading: "1" }, { sort: "title" }, { limit: "257" }, { offset: "50001" }]) {
+    check({ limit: "48", ...guard }, false);
+  }
+  writer.exec("CREATE INDEX fixture_custom_book_index ON novel_books(chapter_count)");
+  try { check({ limit: "48" }, false); }
+  finally { writer.exec("DROP INDEX fixture_custom_book_index"); }
+  fault = "ranked-plan";
+  try { check({ limit: "48" }, false); }
+  finally { fault = null; }
+  return budgets;
 }

@@ -133,10 +133,9 @@ export function createNovelCollectionService({
           total: Math.max(updated.progressTotal, checkpointCount),
           message: `已找到 ${checkpointCount} 章断点记录`
         });
-      } else {
-        clearCheckpointFiles(updated.id);
       }
       const task = store.prepareTaskRun(updated.id, { preserveCheckpoint: checkpointCount > 0 });
+      if (checkpointCount === 0) clearCheckpointFiles(updated.id);
       schedulePump();
       return {
         ok: true,
@@ -168,10 +167,10 @@ export function createNovelCollectionService({
         total: Math.max(current.progressTotal, checkpointCount),
         message: `已找到 ${checkpointCount} 章断点记录`
       });
-    } else {
-      clearCheckpointFiles(current.id);
     }
     const task = store.prepareTaskRun(id, { preserveCheckpoint: checkpointCount > 0 });
+    // A rejected run can still have a collector writing these checkpoints.
+    if (checkpointCount === 0) clearCheckpointFiles(current.id);
     schedulePump();
     return {
       ok: true,

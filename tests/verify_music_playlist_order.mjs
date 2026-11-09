@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { routeMusicApi } from "../src/modules/music/server/routes.js";
 import { createMusicStore } from "../src/modules/music/server/store.js";
 
 assert(process.argv.slice(2).every(value => value === "--legacy-playlist-order"));
@@ -69,6 +70,7 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
     return (...input) => {
       if (measuring?.db === db) {
         if (name === "get" || name === "all") measuring.reads++;
+        if (name === "all" && sql.includes("FROM music_playlist_items i")) measuring.playlistDetails++;
         if (name === "run" && kind) measuring[kind]++;
       }
       if (fault?.db === db && name === "run" && kind === fault.kind && --fault.remaining === 0) throw fault.error;
@@ -104,7 +106,7 @@ function snapshot(owner) {
   };
 }
 function read(owner, input, id = "p") {
-  measuring = { db: owner.db, item: 0, metadata: 0, reads: 0 };
+  measuring = { db: owner.db, item: 0, metadata: 0, reads: 0, playlistDetails: 0 };
   try { return { response: owner.store.reorderPlaylist(id, input), ...measuring }; }
   finally { measuring = null; }
 }
@@ -122,6 +124,62 @@ function compare(value, input, id = "p") {
   return { old, current };
 }
 function caught(action) { try { action(); } catch (error) { return error; } assert.fail("expected failure"); }
+
+async function membershipRoute(owner, method, playlistId, trackId, query = "") {
+  const tracks = `/api/music/playlists/${playlistId}/tracks`;
+  const url = new URL(`${tracks}${method === "DELETE" ? `/${trackId}` : ""}${query}`, "http://fixture");
+  const response = {};
+  measuring = { db: owner.db, metadata: 0, reads: 0, playlistDetails: 0 };
+  try {
+    assert(await routeMusicApi({ method }, response, url, {
+      musicStore: owner.store,
+      readJsonBody: () => ({ trackId }),
+      notFound: target => { target.status = 404; },
+      sendJson: (target, status, data) => Object.assign(target, { status, data })
+    }));
+    return { ...response, playlistDetails: measuring.playlistDetails };
+  } finally { measuring = null; }
+}
+
+async function verifyMembershipReceipts() {
+  const full = open(createMusicStore, 1000);
+  const receipt = open(createMusicStore, 1000);
+  const metrics = [];
+  clock += 5000; // Expire the summary from before the fixture was seeded.
+  for (const [method, query, total] of [
+    ["DELETE", "", 999],
+    ["POST", "?return=unknown", 1000],
+    ["POST", "", 1000],
+    ["DELETE", "", 999],
+    ["DELETE", "", 999]
+  ]) {
+    clock += 1000;
+    const legacy = await membershipRoute(full, method, "p", "t0", query);
+    const compact = await membershipRoute(receipt, method, "p", "t0", "?return=receipt");
+    assert.equal(legacy.status, 200);
+    assert.equal(legacy.playlistDetails, 1);
+    assert.equal(legacy.data.tracks.length, total);
+    assert.deepEqual(legacy.data, full.store.playlistDetail("p"));
+    assert.deepEqual(compact, { status: 200, data: { ok: true }, playlistDetails: 0 });
+    assert.deepEqual(snapshot(receipt), snapshot(full), "receipt writes must persist the same membership and timestamp");
+    metrics.push({ method, legacyBytes: Buffer.byteLength(JSON.stringify(legacy.data)), receiptBytes: Buffer.byteLength(JSON.stringify(compact.data)) });
+  }
+  for (const [method, playlistId, trackId] of [["POST", "absent", "t0"], ["DELETE", "absent", "t0"], ["POST", "p", "absent"], ["POST", "p", ""]]) {
+    const before = snapshot(receipt);
+    const legacy = await membershipRoute(full, method, playlistId, trackId);
+    assert(legacy.status >= 400);
+    assert.deepEqual(await membershipRoute(receipt, method, playlistId, trackId, "?return=receipt"), legacy);
+    assert.deepEqual(snapshot(receipt), before);
+  }
+  const before = snapshot(receipt);
+  const error = new Error("controlled receipt timestamp failure");
+  fault = { db: receipt.db, kind: "metadata", remaining: 1, error };
+  try { assert.equal(caught(() => receipt.store.addToPlaylist("p", "t0", { receiptOnly: true })), error); }
+  finally { fault = null; }
+  assert.deepEqual(snapshot(receipt), before, "failed receipt writes must roll back membership");
+  return metrics;
+}
+
 const metrics = [];
 try {
   const large = pair(1000);
@@ -170,7 +228,8 @@ try {
     });
     compare(value, { trackIds: ["t5", "t4"] });
   }
-  console.log(JSON.stringify({ musicPlaylistOrder: "ok", comparisons, privateDatabases: owners.length, metrics }));
+  const membership = negative ? [] : await verifyMembershipReceipts();
+  console.log(JSON.stringify({ musicPlaylistOrder: "ok", comparisons, privateDatabases: owners.length, metrics, membership }));
 } finally {
   fault = null; measuring = null;
   try { for (const owner of owners) await owner.store.stop(); }

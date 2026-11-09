@@ -293,7 +293,8 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function performMusicLoad(request, options, appendScrollTop) {
     const { controller, append, artistMode, albumMode, background } = request;
     const signal = controller.signal;
-    const deferSideLists = !append && !background && (artistMode || albumMode || music().mode === "library");
+    const deferSideLists = !append && !background
+      && (artistMode || albumMode || ["home", "library"].includes(music().mode));
     if (background) {
       const hadLoading = music().loading || music().loadingMore;
       music().loading = false;

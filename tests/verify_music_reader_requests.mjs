@@ -71,6 +71,7 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       if (historyDelete) assert.equal(await readBody(req), "", "history DELETE must not send a body");
       if (playlistMutation) {
         assert(playlistState?.has("new"), "playlist mutation requires its private case state");
+        if (playlistAdd || playlistRemove) assert.equal(url.searchParams.get("return"), "receipt", "Web playlist membership writes request compact receipts");
         if (playlistEdit) assert.deepEqual(body, { name: "Renamed playlist", description: "Edited in fixture" });
         else if (playlistAdd) assert.deepEqual(body, { trackId: "B" });
         else if (playlistOrder) {
@@ -105,7 +106,7 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
         else if (playlistRemove) playlist.trackIds = playlist.trackIds.filter(id => id !== "P");
         else if (playlistDelete) playlistState.delete("new");
         else if (playlistOrder) playlist.trackIds = [...body.trackIds, ...playlist.trackIds.filter(id => !body.trackIds.includes(id))];
-        sendJson(res, playlistDelete ? { ok: true } : playlistDetail("new")); return;
+        sendJson(res, playlistAdd || playlistRemove || playlistDelete ? { ok: true } : playlistDetail("new")); return;
       }
       const playlistRead = /^\/api\/music\/playlists\/([^/]+)$/.exec(url.pathname);
       if (playlistRead && playlistState) {
@@ -3286,27 +3287,59 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
         const home = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("sort") === "played");
         const playlists = hold(url => url.pathname === "/api/music/playlists");
         const smart = hold(url => url.pathname === "/api/music/smart-playlists");
-        const delay = 300;
-        for (const side of [playlists, smart]) side.requested.then(() => setTimeout(side.release, delay));
         const page = await newPage({ real: true, route: "/music", waitReady: false });
         try {
-          await requested(home); home.release();
-          const visibleAt = await (await page.waitForFunction(() => {
+          await Promise.all([home, playlists, smart].map(gate => requested(gate)));
+          home.release();
+          await page.waitForFunction(() => {
             const track = document.querySelector(".music-home-track");
-            if (!track || getComputedStyle(track).visibility !== "visible") return null;
+            if (!track || getComputedStyle(track).visibility !== "visible") return false;
             const rect = track.getBoundingClientRect();
-            return rect.top < innerHeight && rect.bottom > 0 ? performance.now() : null;
-          })).jsonValue();
-          const timings = await page.evaluate(visibleAt => {
-            const entries = performance.getEntriesByType("resource");
-            const first = entries.find(entry => new URL(entry.name).pathname === "/api/music/tracks");
-            const sideReads = entries.filter(entry => ["/api/music/playlists", "/api/music/smart-playlists"].includes(new URL(entry.name).pathname) && entry.responseEnd <= visibleAt).length;
-            return { afterHomeResponseMs: Math.round(visibleAt - first.responseEnd), fromHomeRequestMs: Math.round(visibleAt - first.startTime), sideReads };
-          }, visibleAt);
-          console.log(`MEASURE music discovery first track: ${JSON.stringify({ delay, ...timings })}`);
+            return rect.top < innerHeight && rect.bottom > 0;
+          }, null, { timeout: 5000 });
           assert.match(await page.locator(".music-home-track").first().innerText(), /Track P/);
-          assert.equal(timings.sideReads, 0, "music discovery must publish its first track while both playlist reads are pending");
+          assert([playlists, smart].every(gate => !gate.finished && !gate.closed),
+            "music discovery must publish its first track while both playlist reads are pending");
+          await page.locator(".music-home-track").first().click();
+          await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P") && !__audios[0].paused);
+          const search = page.locator(".music-home-search input");
+          await search.fill("Unsubmitted search");
+          await search.evaluate(input => { window.__discoverySearch = input; __audios[0].currentTime = 42; });
+          const playback = await audioState(page), route = page.url();
+          await settle(page, playlists);
+          await page.locator(".music-home-playlist").filter({ hasText: "New playlist" }).waitFor();
+          assert.equal(await page.locator(".music-home-smart").count(), 0);
+          await settle(page, smart);
+          await page.locator(".music-home-smart").filter({ hasText: "New smart" }).waitFor();
+          assert.equal(await page.locator(".music-home-card").filter({ hasText: "智能歌单" }).locator("strong").innerText(), "1");
+          assert.equal(await search.evaluate(input => input === __discoverySearch && input === document.activeElement && input.value === "Unsubmitted search"), true);
+          assert.deepEqual(await audioState(page), playback);
+          assert.equal(page.url(), route);
         } finally { for (const gate of [home, playlists, smart]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
+      if (ignoreAbort) await run("music discovery first screen retires pending playlist reads on navigation", async () => {
+        const playlists = hold(url => url.pathname === "/api/music/playlists", "", { playlists: [{ id: "old", name: "Old playlist" }] });
+        const smart = hold(url => url.pathname === "/api/music/smart-playlists", "", { smartPlaylists: [{ id: "old-smart", name: "Old smart" }] });
+        const page = await newPage({ real: true, route: "/music", waitReady: false });
+        try {
+          await Promise.all([playlists, smart].map(gate => requested(gate)));
+          await page.locator(".music-home-track").first().click({ timeout: 5000 });
+          await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P") && !__audios[0].paused);
+          await navigateRoute(page, "/music/library");
+          await page.locator('.music-track-table [data-music-track-id="P"]').waitFor();
+          const sidebar = page.locator(".music-sidebar.embedded");
+          await sidebar.getByText("New playlist", { exact: true }).waitFor({ state: "attached" });
+          await sidebar.getByText("New smart", { exact: true }).waitFor({ state: "attached" });
+          const playback = await audioState(page), route = page.url();
+          await finishOld(page, playlists, ignoreAbort);
+          await finishOld(page, smart, ignoreAbort);
+          assert.equal(await sidebar.getByText("Old playlist", { exact: true }).count(), 0);
+          assert.equal(await sidebar.getByText("Old smart", { exact: true }).count(), 0);
+          assert.equal(await page.locator(".music-home-panel").count(), 0);
+          assert.deepEqual(await audioState(page), playback);
+          assert.equal(page.url(), route);
+        } finally { for (const gate of [playlists, smart]) { gate.release(); held.delete(gate); } await page.close(); }
       });
 
       await run(`catalog first screen is independent of playlist reads ${transport}`, async () => {

@@ -89,10 +89,39 @@ function hasStandardAuthorIndexSchema(database, { allowMissingIndex = false } = 
 function installAuthorIndex(database) {
   if (hasStandardAuthorIndexSchema(database, { allowMissingIndex: true })) database.exec(AUTHOR_INDEX_SQL);
 }
-function canUseAuthorIndex(database) {
+function hasStandardIndexedBookSchema(database) {
   try { return hasStandardAuthorIndexSchema(database); }
   catch { return false; }
 }
+
+function prepareRecentBookPage(database, pageSql, limit, offset) {
+  if (!hasStandardIndexedBookSchema(database)) return null;
+  try {
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${pageSql}`).all(limit, offset).map(row => row.detail);
+    // The old partial sort reads the updated_at index backwards. Its implicit
+    // rowid order breaks equal timestamp/title ties, and state is one-to-one.
+    if (plan.length !== 3 || plan[0] !== "SCAN b USING INDEX idx_novel_books_updated"
+      || plan[1] !== "SEARCH s USING INDEX sqlite_autoindex_novel_reading_state_1 (book_id=?) LEFT-JOIN"
+      || !["USE TEMP B-TREE FOR LAST TERM OF ORDER BY", "USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"].includes(plan[2])) return null;
+    const order = `${bookOrderSql("updated")}, b.rowid DESC`;
+    return database.prepare(`
+      WITH page AS MATERIALIZED (
+        SELECT b.rowid AS book_rowid
+        FROM novel_books b
+        WHERE b.status = 'ok'
+        ${order}
+        LIMIT ? OFFSET ?
+      )
+      SELECT b.*, ${PROGRESS_COLUMNS}
+      FROM page CROSS JOIN novel_books b ON b.rowid = page.book_rowid
+      LEFT JOIN novel_reading_state s ON s.book_id = b.id
+      ${order}
+    `);
+  } catch {
+    return null;
+  }
+}
+
 export const NOVEL_WRITE_METHODS = Object.freeze(["saveProgress", "updateBookMetadata", "uploadBook", "reimportBook", "importCollectedBook", "deleteBook", "reimportLocalBook"]);
 const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index AS progress_chapter_index,
   s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
@@ -343,7 +372,7 @@ export function createNovelStore(options = {}) {
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
       const conditions = ["b.status = 'ok'"];
       const params = [];
-      const indexedAuthor = Boolean(author) && (authorIndexAvailable ?? canUseAuthorIndex(database));
+      const indexedAuthor = Boolean(author) && (authorIndexAvailable ?? hasStandardIndexedBookSchema(database));
       if (readingOnly) conditions.push("EXISTS (SELECT 1 FROM novel_reading_state rs WHERE rs.book_id = b.id)");
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
@@ -394,23 +423,25 @@ export function createNovelStore(options = {}) {
       const pageFrom = stateDrivenPage
         ? "novel_reading_state s CROSS JOIN novel_books b ON s.book_id = b.id"
         : "novel_books b LEFT JOIN novel_reading_state s ON s.book_id = b.id";
-      const rows = database
-        .prepare(
-          `
+      const pageSql = `
           SELECT b.*, ${PROGRESS_COLUMNS}
           FROM ${pageFrom}
           ${where}${Number(countRow?.count || 0) <= offset ? " AND 0" : ""}
           ${order}
           LIMIT ? OFFSET ?
-        `
-        )
-        .all(...params, limit, offset);
+        `;
+      const page = database.prepare(pageSql);
+      const total = Number(countRow?.count || 0);
+      const rankedPage = sort === "updated" && !query && !author && !readingOnly && category === "all"
+        && total >= 4096 && offset < total && limit <= 256
+        ? prepareRecentBookPage(database, pageSql, limit, offset) : null;
+      const rows = (rankedPage ?? page).all(...params, limit, offset);
       const summary = summaryFromDb(database, cachedSummary);
       return {
         sourceRealm,
         listRevision: listRevision(sourceRealm),
         books: rows.map((row) => publicBook(row, sourceRealm)),
-        total: Number(countRow?.count || 0),
+        total,
         limit,
         offset,
         nextOffset: offset + rows.length,
@@ -486,7 +517,7 @@ export function createNovelStore(options = {}) {
     const requestUrl = new URL(url.toString());
     requestUrl.searchParams.set("author", author);
     return withReadDb((database) => {
-      const indexedAuthor = canUseAuthorIndex(database);
+      const indexedAuthor = hasStandardIndexedBookSchema(database);
       const page = listBooks(requestUrl, database, indexedAuthor);
       const authorWhere = "status = 'ok' AND TRIM(COALESCE(author, '')) = ?";
       // An unfiltered page already counted this author's whole profile. Use

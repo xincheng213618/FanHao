@@ -1209,7 +1209,7 @@ export function createMusicStore(options = {}) {
     return deleted ? { ok: true } : null;
   }
 
-  function addToPlaylist(playlistId, trackId) {
+  function addToPlaylist(playlistId, trackId, { receiptOnly = false } = {}) {
     const added = mutate((database) => {
       const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
       if (!playlist) return false;
@@ -1221,18 +1221,18 @@ export function createMusicStore(options = {}) {
         .prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)")
         .run(playlistId, track.id, nextOrder, now);
       database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
-      return playlistDetail(playlistId);
+      return receiptOnly ? { ok: true } : playlistDetail(playlistId);
     });
     return added || null;
   }
 
-  function removeFromPlaylist(playlistId, trackId) {
+  function removeFromPlaylist(playlistId, trackId, { receiptOnly = false } = {}) {
     const removed = mutate((database) => {
       const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
       if (!playlist) return false;
       database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?").run(playlistId, trackId);
       database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), playlistId);
-      return playlistDetail(playlistId);
+      return receiptOnly ? { ok: true } : playlistDetail(playlistId);
     });
     return removed || null;
   }

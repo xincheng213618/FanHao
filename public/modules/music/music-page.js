@@ -866,6 +866,10 @@ export function createMusicPage(deps) {
 
   function refreshSidebarPlaylists(kind) {
     if (state.activeView !== "music") return;
+    if (state.music.mode === "home") {
+      const panel = els.workGrid?.querySelector(".music-home-panel");
+      if (panel) home.refreshPlaylists(panel, kind);
+    }
     const renderKey = musicSidebarItemsKey(state.music[kind]);
     for (const section of els.workGrid?.querySelectorAll(`[data-music-sidebar-playlists="${kind}"]`) || []) {
       if (section.dataset.musicSidebarPlaylistKey === renderKey) continue;

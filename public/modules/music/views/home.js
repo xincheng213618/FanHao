@@ -4,6 +4,8 @@
 import { formatDuration, formatClock } from "../format.js";
 
 export function createMusicHome({ music, actions, h, formatNumber, showError }) {
+  const playlistPanels = new WeakMap();
+
   function renderHero() {
     const summary = music.summary || music.data?.summary || {};
     const totals = summary.totals || {};
@@ -98,29 +100,54 @@ export function createMusicHome({ music, actions, h, formatNumber, showError }) 
     const topPlayed = summary.topPlayed?.length ? summary.topPlayed : [];
     const cards = document.createElement("div");
     cards.className = "music-home-cards";
+    const smartCard = homeActionCard("智能歌单", formatNumber(music.smartPlaylists?.length || 0), "自动整理", () => actions.selectFirstSmartPlaylist());
     cards.append(
       homeActionCard("全部歌曲", formatNumber(totals.tracks || music.data?.total || 0), "按专辑浏览", () => actions.selectMusicMode("library")),
       homeActionCard("最近播放", formatNumber(summary.recent?.length || 0), "继续听", () => actions.selectMusicMode("history")),
       homeActionCard("常听歌曲", formatNumber(totals.listenedTracks || topPlayed.length || 0), "按播放次数", () => actions.selectMusicMode("smart", { smartId: "topplayed" })),
       homeActionCard("听歌报告", formatNumber(totals.plays || 0), "播放统计", () => actions.selectMusicMode("report")),
-      homeActionCard("智能歌单", formatNumber((music.smartPlaylists || []).length), "自动整理", () => actions.selectFirstSmartPlaylist()),
+      smartCard,
       homeActionCard("我喜欢", "♥", "收藏歌曲", () => actions.selectMusicMode("library", { favorite: true }))
     );
 
     const sections = document.createElement("div");
     sections.className = "music-home-sections";
     const recent = summary.recent?.length ? summary.recent : (music.queue || []).slice(0, 8);
+    const smartList = homeSmartPlaylistList(), playlistList = homePlaylistList();
     sections.append(
       homeSection("最近播放", "继续刚才的顺序", homeTrackList(recent.slice(0, 8), "还没有最近播放")),
       homeSection("常听歌曲", "按播放次数", homeTrackList(topPlayed.slice(0, 8), "还没有播放统计")),
-      homeSection("智能歌单", "动态规则", homeSmartPlaylistList()),
-      homeSection("歌单", "自建列表", homePlaylistList()),
+      homeSection("智能歌单", "动态规则", smartList),
+      homeSection("歌单", "自建列表", playlistList),
       homeSection("风格", "按音乐类型进入", homeGenreList()),
       homeSection("歌手", "按歌手进入", homeArtistList()),
       homeSection("专辑", "按专辑进入", homeAlbumList())
     );
     panel.append(heading, search, cards, sections);
+    playlistPanels.set(panel, {
+      smartCard,
+      smartPlaylists: { list: smartList, items: music.smartPlaylists },
+      playlists: { list: playlistList, items: music.playlists }
+    });
     return panel;
+  }
+
+  function refreshPlaylists(panel, kind) {
+    const entry = playlistPanels.get(panel);
+    const view = entry?.[kind];
+    if (!view || view.items === music[kind]) return;
+    const smart = kind === "smartPlaylists";
+    const focused = document.activeElement;
+    const hadFocus = view.list.contains(focused);
+    const rows = smart ? homeSmartPlaylistList() : homePlaylistList();
+    view.list.replaceChildren(...rows.children);
+    view.items = music[kind];
+    if (smart) entry.smartCard.querySelector("strong").textContent = formatNumber(view.items?.length || 0);
+    if (hadFocus) {
+      const replacement = [...view.list.children].find(button => button.matches("button")
+        && button.dataset.musicHomePlaylistId === focused.dataset.musicHomePlaylistId);
+      (replacement || (smart ? entry.smartCard : view.list.lastElementChild))?.focus({ preventScroll: true });
+    }
   }
 
   function renderReportPanel() {
@@ -349,6 +376,7 @@ export function createMusicHome({ music, actions, h, formatNumber, showError }) 
       const button = document.createElement("button");
       button.type = "button";
       button.className = "music-home-playlist";
+      button.dataset.musicHomePlaylistId = playlist.id;
       const strong = document.createElement("strong");
       strong.textContent = playlist.name;
       const small = document.createElement("small");
@@ -378,6 +406,7 @@ export function createMusicHome({ music, actions, h, formatNumber, showError }) 
       const button = document.createElement("button");
       button.type = "button";
       button.className = "music-home-smart";
+      button.dataset.musicHomePlaylistId = smart.id;
       const badge = document.createElement("b");
       badge.textContent = smart.badge || "智能";
       const text = document.createElement("span");
@@ -482,5 +511,5 @@ export function createMusicHome({ music, actions, h, formatNumber, showError }) 
     return empty;
   }
 
-  return { renderHero, renderHomePanel, renderReportPanel };
+  return { renderHero, renderHomePanel, renderReportPanel, refreshPlaylists };
 }

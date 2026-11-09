@@ -241,7 +241,9 @@ export async function routeMusicApi(req, res, url, deps) {
         sendJson(res, 400, { error: "缺少歌曲 ID" });
         return true;
       }
-      const data = musicStore.addToPlaylist(decodeURIComponent(playlistTrackMatch[1]), trackId);
+      const data = musicStore.addToPlaylist(decodeURIComponent(playlistTrackMatch[1]), trackId, {
+        receiptOnly: url.searchParams.get("return") === "receipt"
+      });
       if (!data) {
         notFound(res);
         return true;
@@ -272,7 +274,11 @@ export async function routeMusicApi(req, res, url, deps) {
   const playlistTrackDeleteMatch = /^\/api\/music\/playlists\/([^/]+)\/tracks\/([^/]+)$/.exec(url.pathname);
   if (playlistTrackDeleteMatch && req.method === "DELETE") {
     try {
-      const data = musicStore.removeFromPlaylist(decodeURIComponent(playlistTrackDeleteMatch[1]), decodeURIComponent(playlistTrackDeleteMatch[2]));
+      const playlistId = decodeURIComponent(playlistTrackDeleteMatch[1]);
+      const trackId = decodeURIComponent(playlistTrackDeleteMatch[2]);
+      const data = musicStore.removeFromPlaylist(playlistId, trackId, {
+        receiptOnly: url.searchParams.get("return") === "receipt"
+      });
       if (!data) {
         notFound(res);
         return true;
