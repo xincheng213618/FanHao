@@ -72,6 +72,7 @@ try {
     db.exec("ROLLBACK");
     await api("/api/accounts/status", { token: current }); assert.equal(seen(), time);
   } finally { if (db.isTransaction) db.exec("ROLLBACK"); db.close(); }
+  verifyPreparedAccountReads(await login("device-alice"), current);
   const self = await api(`/api/accounts/sessions/${currentId}/revoke`, { token: current, body: {} });
   assert.equal(self.body.current, true); assert.match(self.cookie, /Max-Age=0/);
   assert.equal((await api("/api/accounts/sessions", { token: current })).status, 401);
@@ -87,8 +88,83 @@ try {
     assert.equal(store.session(newest.token), null);
   } finally { store.close(); }
   await verifyMigration();
-  console.log("account-sessions: ok (own-device scope, revocation, current-session clearing, activity contention/coalescing, cap, expiry, v1 migration)");
+  console.log("account-sessions: ok (own-device scope, revocation, current-session clearing, activity contention/coalescing, live prepared reads, reopen, cap, expiry, v1 migration)");
 } finally { await fixture.close(); }
+
+function verifyPreparedAccountReads(token, stillActiveToken) {
+  let observedTime = time;
+  const store = createAccountStore({ dbPath: fixture.dbPath, now: () => observedTime });
+  const side = new DatabaseSync(fixture.dbPath);
+  const nativePrepare = DatabaseSync.prototype.prepare;
+  const reads = new Map();
+  DatabaseSync.prototype.prepare = function prepare(sql) {
+    const statement = nativePrepare.call(this, sql);
+    const key = sql.includes("SELECT * FROM account_settings WHERE id=1") ? "settings"
+      : sql.includes("s.last_seen_at FROM account_sessions") ? "session" : null;
+    if (!key) return statement;
+    if (!reads.has(this)) reads.set(this, {
+      settings: { prepared: 0, executed: 0 }, session: { prepared: 0, executed: 0 }
+    });
+    const counts = reads.get(this)[key];
+    counts.prepared += 1;
+    return { get(...args) { counts.executed += 1; return statement.get(...args); } };
+  };
+  try {
+    const initial = store.session(token);
+    assert.equal(initial.username, "device-alice");
+    for (let index = 0; index < 3; index += 1) {
+      assert.equal(store.settings().accountLoginRequired, false);
+      assert.deepEqual(store.session(token), initial);
+    }
+    assert.equal(store.session("invalid"), null);
+    assert.equal(reads.size, 1);
+    const [connection] = reads.keys();
+    assert.deepEqual(reads.get(connection), {
+      settings: { prepared: 1, executed: 3 }, session: { prepared: 1, executed: 4 }
+    }, "warm calls reuse only SQLite statements and still execute every valid read");
+
+    side.exec("UPDATE account_settings SET account_login_required=1 WHERE id=1");
+    assert.equal(store.settings().accountLoginRequired, true, "a warm policy read sees a committed write on another connection");
+    side.prepare("UPDATE account_users SET disabled=1 WHERE id=?").run(initial.id);
+    assert.equal(store.session(token), null, "a warm session read sees an externally disabled user");
+    side.prepare("UPDATE account_users SET disabled=0 WHERE id=?").run(initial.id);
+    assert.deepEqual(store.session(token), initial);
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const seen = () => side.prepare("SELECT last_seen_at FROM account_sessions WHERE token_hash=?").get(tokenHash).last_seen_at;
+    const before = seen();
+    observedTime += 300001;
+    side.exec("BEGIN IMMEDIATE");
+    assert.deepEqual(store.session(token), initial, "writer contention still permits a prepared authentication read");
+    assert.equal(seen(), before, "busy telemetry is skipped");
+    assert.equal(connection.prepare("PRAGMA busy_timeout").get().timeout, 3000, "restore the connection's write timeout after contention");
+    side.exec("ROLLBACK");
+    assert.deepEqual(store.session(token), initial);
+    assert.equal(seen(), observedTime, "next authentication retries telemetry after writer release");
+    side.prepare("DELETE FROM account_sessions WHERE token_hash=?").run(tokenHash);
+    assert.equal(store.session(token), null, "a warm session read sees a committed revocation on another connection");
+    assert.deepEqual(reads.get(connection), {
+      settings: { prepared: 1, executed: 4 }, session: { prepared: 1, executed: 9 }
+    });
+
+    store.close();
+    assert.equal(connection.isOpen, false);
+    assert.equal(store.settings().accountLoginRequired, true);
+    assert.equal(store.session(token), null);
+    assert.equal(store.session(stillActiveToken).id, initial.id);
+    assert.equal(reads.size, 2);
+    const reopened = [...reads.keys()][1];
+    assert.deepEqual(reads.get(reopened), {
+      settings: { prepared: 1, executed: 1 }, session: { prepared: 1, executed: 2 }
+    }, "reopening the same store prepares new statements on the new connection");
+    side.exec("UPDATE account_settings SET account_login_required=0 WHERE id=1");
+  } finally {
+    DatabaseSync.prototype.prepare = nativePrepare;
+    store.close();
+    if (side.isTransaction) side.exec("ROLLBACK");
+    side.close();
+  }
+}
 
 async function verifyMigration() {
   const legacyPath = path.join(fixture.root, "legacy-accounts.sqlite");

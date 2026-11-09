@@ -149,7 +149,7 @@ export function createAccountServices({ dbPath, now = Date.now, readBodyText, se
         if (result.current) res.setHeader("Set-Cookie", cookie(req, "", 0));
         sendJson(res, 200, { ok: true, ...result });
       } else if (pathname === "/api/accounts/password" && req.method === "POST") {
-        limit(req, "password"); await store.changePassword(actor.id, payload);
+        limit(req, "password"); await store.changePassword(actor.id, payload, token(req));
         res.setHeader("Set-Cookie", cookie(req, "", 0)); sendJson(res, 200, { ok: true });
       } else if (pathname === "/api/accounts/admin/settings" && req.method === "GET") {
         sendJson(res, 200, store.settings());

@@ -121,8 +121,8 @@ export function createFavoriteStateService({
     state.favoriteFolders = folders;
     state.favorites = favorites;
     try {
-      // Account persistence is transactional; the legacy store opts into an
-      // atomic file replacement only for these new folder-management actions.
+      // Guest writes must surface persistence errors so we can restore these
+      // folder changes in memory. Account persistence already rolls back.
       userStateService.save({ strict: true });
     } catch (error) {
       state.favoriteFolders = previousFolders;

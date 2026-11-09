@@ -36,6 +36,8 @@ function integer(value, fallback, min, max, label) {
 
 export function createAccountStore({ dbPath, now = Date.now }) {
   let db;
+  let settingsRead;
+  let sessionRead;
   let hashing = 0;
   const audit = createAccountAudit({ database, now, accountError });
   function database() {
@@ -118,7 +120,8 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     return actual.length === expectedBytes.length && crypto.timingSafeEqual(actual, expectedBytes);
   }
   function settings() {
-    const row = database().prepare("SELECT * FROM account_settings WHERE id=1").get();
+    settingsRead ??= database().prepare("SELECT * FROM account_settings WHERE id=1");
+    const row = settingsRead.get();
     return { registrationEnabled: Boolean(row.registration_enabled), invitationRequired: Boolean(row.invitation_required),
       accountLoginRequired: Boolean(row.account_login_required) };
   }
@@ -129,8 +132,9 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     const timestamp = Number(now());
     const tokenHash = hash(token);
     const connection = database();
-    const row = connection.prepare(`SELECT u.*,s.last_seen_at FROM account_sessions s JOIN account_users u ON u.id=s.user_id
-      WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`).get(tokenHash, timestamp);
+    sessionRead ??= connection.prepare(`SELECT u.*,s.last_seen_at FROM account_sessions s JOIN account_users u ON u.id=s.user_id
+      WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`);
+    const row = sessionRead.get(tokenHash, timestamp);
     if (row && timestamp - row.last_seen_at >= ACTIVITY_INTERVAL_MS) {
       // Recording approximate activity must never wait on a writer and stall media authentication.
       connection.exec("PRAGMA busy_timeout = 0");
@@ -232,7 +236,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     database().prepare("UPDATE account_users SET display_name=? WHERE id=?").run(displayName(body.displayName), id);
     return publicUser(userById(id));
   }
-  async function changePassword(id, body) {
+  async function changePassword(id, body, token) {
     credentials({ username: "validation", password: body.newPassword });
     requireValue(typeof body.currentPassword === "string" && body.currentPassword.length <= 128, "当前密码不正确");
     const row = userById(id);
@@ -241,6 +245,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     transaction((connection) => {
       const fresh = userById(id);
       if (fresh.disabled || fresh.password_hash !== row.password_hash) throw accountError(409, "账号状态已改变，请重新登录");
+      requireSession(id, token);
       connection.prepare("UPDATE account_users SET password_hash=? WHERE id=?").run(encoded, id);
       connection.prepare("DELETE FROM account_sessions WHERE user_id=?").run(id);
       connection.prepare("DELETE FROM account_password_resets WHERE user_id=?").run(id);
@@ -404,8 +409,14 @@ export function createAccountStore({ dbPath, now = Date.now }) {
       }
     });
   }
+  function close() {
+    db?.close();
+    db = undefined;
+    settingsRead = undefined;
+    sessionRead = undefined;
+  }
   return { settings, hasAdmin, session, revoke, register, login, updateProfile, changePassword, updateUser,
     createPasswordReset, resetPassword, listAudit: audit.list,
     listSessions, revokeSession, revokeOtherSessions,
-    listUsers, updateSettings, createInvites, listInvites, inviteDetails, disableInvite, close() { db?.close(); db = undefined; } };
+    listUsers, updateSettings, createInvites, listInvites, inviteDetails, disableInvite, close };
 }

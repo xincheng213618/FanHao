@@ -1,5 +1,12 @@
+export function normalizeVideoProgressOrder(value) {
+  if (typeof value?.sessionId !== "string" || !/^[a-f0-9]{32}$/i.test(value.sessionId)
+    || !Number.isSafeInteger(value.sequence) || value.sequence < 1) return null;
+  return { sessionId: value.sessionId.toLowerCase(), sequence: value.sequence };
+}
+
 export function createPlaybackProgressService({
   getLibrary,
+  getLibraryRevision = (library) => library.scannedAt,
   publicFavoriteFolders,
   recentWatchedDays,
   userState,
@@ -110,11 +117,13 @@ export function createPlaybackProgressService({
 
   function cachedHistoryEntries() {
     const library = getLibrary();
+    const libraryRevision = getLibraryRevision(library);
     const userState = getUserState();
     const progress = userState.progress || {};
     const revision = currentProgressRevision();
     if (
       historyCache?.library === library
+      && historyCache.libraryRevision === libraryRevision
       && historyCache.progress === progress
       && historyCache.revision === revision
     ) {
@@ -190,7 +199,7 @@ export function createPlaybackProgressService({
     }
 
     const entries = [...byWorkId.values()].sort((a, b) => b.updatedTime - a.updatedTime || String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-    historyCache = { entries, library, progress, revision };
+    historyCache = { entries, library, libraryRevision, progress, revision };
     return entries;
   }
 
@@ -205,17 +214,29 @@ export function createPlaybackProgressService({
     const duration = Number(body.duration || body.total || 0);
     const bodyWorkId = String(body.workId || "");
     const workId = bodyWorkId && library.worksById.has(bodyWorkId) ? bodyWorkId : null;
+    const order = normalizeVideoProgressOrder(body.progressOrder);
+    const resetAtStart = body.resetAtStart === true;
 
     if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) {
       const error = new Error("播放进度无效");
       error.statusCode = 400;
       throw error;
     }
+    if ((Object.hasOwn(body, "progressOrder") && !order)
+      || (Object.hasOwn(body, "resetAtStart") && (!resetAtStart || !order || body.position !== 0 || position !== 0))) {
+      throw Object.assign(new Error("播放进度标识无效"), { statusCode: 400 });
+    }
 
+    const existing = userState.progress[videoId];
+    const previousOrder = normalizeVideoProgressOrder(existing?.progressOrder);
+    // The latest ordered producer gets a per-video high-water mark. Other
+    // documents and legacy clients keep their existing arrival-order behavior.
+    if (order && previousOrder?.sessionId === order.sessionId && order.sequence <= previousOrder.sequence) {
+      return getVideoProgress(videoId);
+    }
     const normalizedPosition = Math.max(0, position);
-    if (normalizedPosition === 0) {
-      const existing = userState.progress[videoId];
-      if (Number(existing?.position || 0) > 0) {
+    if (normalizedPosition === 0 && !resetAtStart) {
+      if (Number(existing?.position || 0) > 0 || previousOrder) {
         return getVideoProgress(videoId, library.worksById.get(existing.workId || workId));
       }
       if (existing) {
@@ -226,11 +247,13 @@ export function createPlaybackProgressService({
       return null;
     }
 
+    const progressOrder = order || previousOrder;
     userState.progress[videoId] = {
       workId,
       position: normalizedPosition,
       duration,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      ...(progressOrder ? { progressOrder } : {})
     };
     progressRevision += 1;
     userStateService.save();

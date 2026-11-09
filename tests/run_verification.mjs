@@ -169,6 +169,7 @@ const RULES = [
   [/^tests\/verify_music_empty_pages\.mjs$/, ['verify:music-empty-pages', 'verify:imports']],
   [/^tests\/verify_collection_query_reuse\.mjs$/, ['verify:collection-query-cache', 'verify:work-cache-budget', 'verify:imports']],
   [/^tests\/verify_collection_history_window\.mjs$/, ['verify:collection-history-window', 'verify:collection-query-cache', 'verify:imports']],
+  [/^tests\/verify_account_recovery\.mjs$/, ['verify:accounts', 'verify:imports']],
   [/^tests\/verify_account_state_revision_read\.mjs$/, ['verify:account-state-revision', 'verify:account-folders', 'verify:imports']],
   [/^src\/modules\/fanhao\/server\/collections\/account-user-state-service\.js$/, ['verify:account-folders', 'verify:imports']],
   [/^tests\/verify_music_lyric_search\.mjs$/, ['verify:music-lyric-search', 'verify:imports']],
@@ -471,6 +472,7 @@ const RULES = [
   [/^server\.js$/, ['verify:auth', 'verify:mutation-auth', 'verify:startup', 'verify:shutdown', 'verify:static-files', 'verify:fanhao', 'verify:studio-cache', 'verify:works-performance', 'verify:video-probe-cache', 'verify:music-cover-async', 'verify:gallery-cover-async', 'verify:media-images', 'verify:media-streams', 'verify:file-streams', 'verify:android-update-streams', 'verify:manga-streams', 'verify:archive-images', 'verify:products', 'verify:image-library', 'verify:gallery-rendering', 'verify:android-channel-rendering', 'verify:imports']],
   [/^src\/platform\/server\/video-probe(?:(?:-cache)?-service|-task-pool)\.js$/, ['verify:video-probe-cache', 'verify:video-playback', 'verify:fanhao', 'verify:imports']],
   [/^src\/platform\/server\/(?:archive-image-service|archive-task-pool|image-reader-cache-service)\.js$/, ['verify:archive-images', 'verify:gallery-db', 'verify:photo-reader', 'verify:imports']],
+  [/^src\/platform\/server\/accounts\//, ['verify:auth', 'verify:mutation-auth', 'verify:startup', 'verify:accounts', 'verify:imports']],
   [/^(src\/platform\/server\/|server\.js$)/, ['verify:auth', 'verify:mutation-auth', 'verify:startup', 'verify:imports']],
   [/^(package(-lock)?\.json|tests\/run_verification\.mjs|tests\/verify_verification_runner\.mjs)$/, FULL_SCRIPTS],
 ];

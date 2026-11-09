@@ -141,19 +141,22 @@ export function createUserStateService({
   }
 
   function save(options = {}) {
-    if (options.strict) return saveStrict();
+    let writeError;
+    try {
+      writeStateAtomically();
+    } catch (error) {
+      if (options.strict) throw error;
+      writeError = error;
+    }
+    // Best-effort callers still publish the current in-memory revision when
+    // storage fails. The prior on-disk snapshot remains available on restart.
     stateRevision += 1;
     updateCoverRevision();
-    try {
-      ensureDataDir();
-      fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
-    } catch (error) {
-      warn("[state]", error.message);
-    }
+    if (writeError) warn("[state]", writeError.message);
     return state;
   }
 
-  function saveStrict() {
+  function writeStateAtomically() {
     const temporaryPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       ensureDataDir();
@@ -164,9 +167,6 @@ export function createUserStateService({
       catch (cleanupError) { if (cleanupError.code !== "ENOENT") warn("[state-cleanup]", cleanupError.message); }
       throw error;
     }
-    stateRevision += 1;
-    updateCoverRevision();
-    return state;
   }
 
   function revision() {

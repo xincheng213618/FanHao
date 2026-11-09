@@ -5,7 +5,7 @@ import http from "node:http";
 import { createAuthServices } from "../../src/platform/server/auth.js";
 import { createRequestHandler } from "../../src/platform/server/http-app.js";
 import { readBodyText } from "../../src/platform/server/request-io.js";
-import { sendJson, sendHtml, sendText, redirect } from "../../src/platform/server/responses.js";
+import { sendJson, sendJsonParts, sendHtml, sendText, redirect } from "../../src/platform/server/responses.js";
 import { createUserStateService } from "../../src/modules/fanhao/server/collections/user-state-service.js";
 import { createAccountUserStateService } from "../../src/modules/fanhao/server/collections/account-user-state-service.js";
 import { createFavoriteStateService } from "../../src/modules/fanhao/server/collections/favorite-state-service.js";
@@ -16,6 +16,7 @@ import { createWorkFilterService } from "../../src/modules/fanhao/server/works/w
 import { createWorkDetailService } from "../../src/modules/fanhao/server/works/work-detail-service.js";
 import { createPersonDetailService } from "../../src/modules/fanhao/server/people/person-detail-service.js";
 import { createCollectionQueryService } from "../../src/modules/fanhao/server/user-state/collection-query-service.js";
+import { routeLibraryReadApi } from "../../src/modules/fanhao/server/library/routes.js";
 import { routeUserStateApi } from "../../src/modules/fanhao/server/user-state/routes.js";
 import { createRankingService } from "../../src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "../../src/modules/fanhao/server/catalog/studio-service.js";
@@ -112,6 +113,18 @@ export function createAccountLibraryFixture() {
     createId: (prefix, value) => `${prefix}-${value}`, dbBoolOrNull: (value) => value == null ? null : Boolean(value) });
   const studio = createStudioService(catalogDeps);
   const prefix = createCodePrefixService(catalogDeps);
+  const libraryPeople = [person];
+  const libraryReadDeps = {
+    ...shared,
+    appConfigService: { publicConfig: () => ({}) },
+    getLastScanError: () => null,
+    peopleScopeService: { ...shared.peopleScopeService, cacheKey: () => "fixture" },
+    personListService: { mainLibraryPeople: () => libraryPeople },
+    requestAccess: () => ({}),
+    sendJson,
+    sendJsonParts,
+    userStateSummary: progress.userStateSummary
+  };
   let holdBody = null;
   const auth = createAuthServices({ authSecretPath: path.join(root, "auth-secret.txt"), accountsDbPath: path.join(root, "accounts.sqlite"),
     remoteWebPassword: "", ensureDataDir: noop, readBodyText, sendJson, sendHtml, redirect });
@@ -125,8 +138,8 @@ export function createAccountLibraryFixture() {
       };
       if (await routeUserStateApi(req, res, url, { ...shared, collectionQueryService: collection, readJsonBody,
         resolvePlayableVideoFile: (id) => library.filesById.get(id), sendJson, notFound: () => sendText(res, 404, "missing") })) return true;
+      if (await routeLibraryReadApi(req, res, url, libraryReadDeps)) return true;
       let result;
-      if (url.pathname === "/api/library") result = { user: progress.userStateSummary() };
       if (url.pathname === "/api/works") result = query.listPayload(url);
       if (url.pathname === "/api/search") result = query.searchPayload(url);
       if (url.pathname.startsWith("/api/works/")) result = detail.detailPayload(url.pathname.split("/").at(-1));

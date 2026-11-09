@@ -27,7 +27,8 @@ const listenerSource = appSource.slice(appSource.indexOf("let accountReloadPendi
 const sheetSource = fs.readFileSync(new URL("../android-client/www/js/mobile-action-sheet.js", import.meta.url), "utf8").replace(/^export /gm, "");
 function accountPage() {
   const listeners = {}; const calls = { reload: 0, load: 0, render: 0 };
-  const env = { URL, activeUrl: base, library: null, libraryLoadGeneration: 0, libraryLoadPromise: null, workViews: null, androidModuleRegistry: {},
+  const env = { URL, activeUrl: base, library: null, libraryLoadGeneration: 0, libraryLoadPromise: null,
+    libraryLoadError: new Error("retired library load"), workViews: null, androidModuleRegistry: {},
     window: { addEventListener: (name, fn) => { listeners[name] = fn; }, location: { reload: () => { calls.reload += 1; } } },
     document: { querySelectorAll: () => [], querySelector: () => null }, els: Object.fromEntries(["viewContent", "personPreview", "continuePreview"].map(key => [key, { replaceChildren() {} }])),
     invalidateViewRender() {}, renderUserState() {}, queueMicrotask: fn => fn(), loadDashboard: () => { calls.load += 1; }, renderCurrentView: () => { calls.render += 1; } };
@@ -35,14 +36,22 @@ function accountPage() {
   // Bind the actual shared-sheet close contract in this isolated account page.
   env.closeMobileActionSheet = vm.runInContext(`(function(){${sheetSource}\nreturn closeMobileActionSheet;})()`, env);
   vm.runInContext(listenerSource, env);
-  return { calls, change: value => listeners.fanhaoAccountOwnerChanged({ detail: { current: { origin: base, owner: value } } }),
+  return { calls, get libraryLoadError() { return env.libraryLoadError; },
+    change: value => listeners.fanhaoAccountOwnerChanged({ detail: { current: { origin: base, owner: value } } }),
     confirm: value => listeners.fanhaoAccountOwnerConfirmed({ detail: { origin: base, owner: value } }) };
 }
-const coldPage = accountPage(); coldPage.change("pending"); coldPage.change("account:alpha");
-assert.equal(coldPage.calls.reload, 0, "initial owner confirmation never loops the WebView when token digests are unavailable");
-assert.equal(coldPage.calls.load, 1);
-coldPage.confirm("account:alpha"); coldPage.change("pending"); coldPage.change("account:beta");
-assert.equal(coldPage.calls.reload, 1, "switching a page that displayed the old account discards all module closures");
+for (const initialOwner of ["guest", "account:alpha"]) {
+  const coldPage = accountPage();
+  coldPage.change("pending");
+  assert.equal(coldPage.libraryLoadError, null, "a pending owner retires the old library error before any render");
+  assert.deepEqual(coldPage.calls, { reload: 0, load: 0, render: 0 });
+  coldPage.change(initialOwner);
+  assert.deepEqual(coldPage.calls, { reload: 0, load: 0, render: 1 }, "the first confirmed owner renders once and leaves library demand to the active route");
+  coldPage.confirm(initialOwner);
+  coldPage.change("pending");
+  coldPage.change("account:beta");
+  assert.deepEqual(coldPage.calls, { reload: 1, load: 0, render: 1 }, "switching a page that displayed the old owner discards all module closures");
+}
 
 await cache.writeCachedJson(base, "/api/favorites", { works: [{ id: "guest", favorite: true }] });
 owner.setAccountOwner(base, "account:alpha");

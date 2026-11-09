@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { removeLocalWorksFromLibrary } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { createCollectionQueryService } from "../src/modules/fanhao/server/user-state/collection-query-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
+import { routeUserStateApi } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkSorter } from "../src/modules/fanhao/server/works/work-sorter.js";
 
@@ -39,15 +41,19 @@ class FixtureDate extends RealDate {
   static now() { return clock; }
 }
 globalThis.Date = FixtureDate;
-function fixture(create, timestamps, timed = true) {
+function fixture(create, timestamps, timed = true, monotonicLibraryRevision = false) {
   const works = timestamps.map((_, index) => ({ id: String(index), title: "Work " + String(index).padStart(5, "0"),
     videos: [{ id: "video-" + index }], infoSummary: { code: "FIX-" + index }, playableCount: 1 }));
   const library = { scannedAt: "scan-1", worksById: new Map(works.map(work => [work.id, work])), filesById: new Map() };
-  let userState = { progress: Object.fromEntries(timestamps.map((time, index) => ["video-" + index,
+  let userState = { favorites: {}, progress: Object.fromEntries(timestamps.map((time, index) => ["video-" + index,
     { workId: String(index), position: 5, duration: 100, updatedAt: typeof time === "number" ? new Date(time).toISOString() : time }])) };
-  const state = { user: 1, info: 1, cacheable: true, fail: false,
+  const state = { user: 1, info: 1, libraryRevision: 0, cacheable: true, fail: false,
     calls: { source: 0, filter: 0, sort: 0, facets: 0, trait: 0 } };
   const progress = createPlaybackProgressService({ getLibrary: () => library, getUserState: () => userState,
+    getLibraryRevision: monotonicLibraryRevision ? (currentLibrary) => {
+      assert.equal(currentLibrary, library, "history uses the revision of the captured library");
+      return state.libraryRevision;
+    } : undefined,
     userStateService: { revision: () => state.user, save() { state.user++; } }, publicFavoriteFolders: () => [], recentWatchedDays: 7 });
   const info = id => ({ rating: Number(id) % 5, releaseDate: "2026-01-01" });
   const favorites = { isFavoriteWork: () => false, publicFavoriteFolders: () => [], normalizeFavoriteFolderId: id => id, favoriteWorks: () => [] };
@@ -80,6 +86,61 @@ function compare(owners, values = {}) {
   assert.equal(JSON.stringify(actual), JSON.stringify(expected), "complete history JSON"); comparisons++;
   return actual;
 }
+
+async function readHistoryRoute(owner, days) {
+  const response = {};
+  const url = new URL(`http://fixture.invalid/api/history?days=${days}`);
+  assert(await routeUserStateApi({ method: "GET" }, response, url, {
+    library: owner.library,
+    collectionQueryService: owner.collection,
+    sendJson: (res, status, body) => Object.assign(res, { status, body })
+  }));
+  assert.equal(response.status, 200);
+  return response.body;
+}
+
+async function verifyInPlaceLibraryRemoval(monotonicLibraryRevision) {
+  const owner = fixture(subject, [fixedNow - DAY, fixedNow - 8 * DAY], true, monotonicLibraryRevision);
+  const { library, state, progress } = owner;
+  library.people = [];
+  library.totals = { works: 2, videos: 2, playableVideos: 2 };
+  for (const work of owner.works) {
+    const video = work.videos[0];
+    Object.assign(video, { type: "video", playable: true });
+    library.filesById.set(video.id, video);
+  }
+  if (monotonicLibraryRevision) library.scannedAt = new Date().toISOString();
+  const originalScannedAt = library.scannedAt;
+  const personalRevision = state.user;
+  const retainedProgress = owner.userState.progress;
+  const all = await readHistoryRoute(owner, "all");
+  const recent = await readHistoryRoute(owner, "7");
+  assert.deepEqual(all.works.map(work => work.id), ["0", "1"]);
+  assert.deepEqual(recent.works.map(work => work.id), ["0"]);
+  assert.equal(progress.userStateSummary().historyCount, 2);
+
+  assert.deepEqual(removeLocalWorksFromLibrary(library, ["0"], () => 0).removedWorkIds, ["0"]);
+  state.libraryRevision++;
+  state.info++; // The production mutation invalidates the upper collection query stamp too.
+  assert.equal(state.user, personalRevision);
+  assert.equal(owner.userState.progress, retainedProgress);
+  assert(Object.hasOwn(retainedProgress, "video-0"), "deletion does not change the saved progress rows");
+  if (monotonicLibraryRevision) assert.equal(library.scannedAt, originalScannedAt, "deletion happened in the same clock tick");
+  else assert.notEqual(library.scannedAt, originalScannedAt);
+
+  const nextAll = await readHistoryRoute(owner, "all");
+  const nextRecent = await readHistoryRoute(owner, "7");
+  assert.notEqual(nextAll, all);
+  assert.notEqual(nextRecent, recent);
+  assert.deepEqual(nextAll.works.map(work => work.id), ["1"], "a warmed history cannot keep a deleted work");
+  assert.equal(nextAll.total, 1);
+  assert.equal(nextRecent.total, 0);
+  const summary = progress.userStateSummary();
+  assert.equal(summary.historyCount, 1);
+  assert.equal(summary.recentWatchedCount, 0);
+  assert.equal(summary.latestProgressAt, retainedProgress["video-1"].updatedAt);
+}
+
 try {
   const scale = pair(Array.from({ length: 5000 }, (_, index) => fixedNow - 3 * DAY - index * 1000));
   for (let page = 0; page < 10; page++) { clock++; compare(scale, { offset: page * 48, sort: "title" }); }
@@ -129,6 +190,8 @@ try {
     const reads = owners.current.state.calls.source; each(owners, change); compare(owners);
     assert.equal(owners.current.state.calls.source, reads + 1, "existing source/account/metadata revisions retire timed queries and pages");
   }
+  await verifyInPlaceLibraryRemoval(false);
+  await verifyInPlaceLibraryRemoval(true);
   const recovery = pair([fixedNow - DAY]); each(recovery, owner => { owner.state.cacheable = false; });
   compare(recovery); each(recovery, owner => { owner.state.cacheable = true; }); compare(recovery); compare(recovery, { offset: 1 });
   assert.equal(recovery.current.state.calls.source, withoutReuse ? 3 : 2, "degraded metadata is retried on the same version and healthy queries may then be reused");

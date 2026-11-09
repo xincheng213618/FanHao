@@ -926,6 +926,16 @@ for (const file of ['src/fanhao/module-registry.js', 'src/platform/server/server
 }
 for (const script of ['verify:shutdown', 'verify:static-files', 'verify:android-update-streams', 'verify:manga-streams']) assert(selectScripts(['server.js']).scripts.includes(script));
 const actualScripts = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).scripts;
+for (const file of ['audit.js', 'service.js', 'store.js']) {
+  assert.deepEqual(selectScripts([`src/platform/server/accounts/${file}`]), {
+    scripts: ['verify:auth', 'verify:mutation-auth', 'verify:startup', 'verify:accounts', 'verify:imports'],
+    unknownSourceFiles: [],
+  });
+}
+assert.deepEqual(selectScripts(['tests/verify_account_recovery.mjs']), {
+  scripts: ['verify:accounts', 'verify:imports'],
+  unknownSourceFiles: [],
+});
 for (const file of ['file_stream_lifecycle', 'file_server_async', 'file_server_conditional']) {
   assert.deepEqual(selectScripts([`tests/verify_${file}.mjs`]).scripts, ['verify:file-streams', 'verify:imports']);
 }

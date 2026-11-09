@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createAccountLibraryFixture } from "./fixtures/account-library.mjs";
+import { createUserStateService } from "../src/modules/fanhao/server/collections/user-state-service.js";
 
 const fixture = createAccountLibraryFixture();
 const base = await fixture.listen();
@@ -225,10 +226,50 @@ try {
   assert.equal((await good("/api/works/102", options(again))).body.work.progress.position, 72);
   assert.equal((await good("/api/library", options(again))).body.user.favoriteCount, 2);
   await verifyFolderManagement(alice, again);
+  await verifyGuestInterruptedWrite(guestFolder);
   assert.equal(fixture.errors.length, 0);
   console.log("Account personal library HTTP fixtures passed: account isolation, cache projections, owner assertions, folder rename/delete, hidden favorites and storage rollback.");
 } finally {
   await fixture.close();
+}
+
+async function verifyGuestInterruptedWrite(folderId) {
+  const statePath = path.join(fixture.root, "user-state.json");
+  const committedText = fs.readFileSync(statePath, "utf8");
+  const committed = JSON.parse(committedText);
+  const revision = fixture.legacy.revision();
+  const reload = () => createUserStateService({ statePath, ensureDataDir() {} }).load();
+  const writeFile = fs.writeFileSync;
+  let failures = 0;
+  fs.writeFileSync = function (file, data, ...args) {
+    if (file === statePath || typeof file === "string" && file.startsWith(`${statePath}.`) && file.endsWith(".tmp")) {
+      failures += 1;
+      writeFile.call(this, file, String(data).slice(0, 25), ...args);
+      throw Object.assign(new Error("fixture storage filled during state write"), { code: "ENOSPC" });
+    }
+    return writeFile.call(this, file, data, ...args);
+  };
+  try {
+    const progress = await good("/api/progress/v102", { body: { workId: "102", position: 33, duration: 120 } });
+    assert.equal(progress.body.progress.position, 33, "guest progress remains best effort during storage failure");
+    assert.equal(fixture.legacy.revision(), revision + 1);
+    assert.equal(fs.readFileSync(statePath, "utf8"), committedText, "partial writes must preserve the previously committed guest file");
+
+    const rename = await api(`/api/favorite-folders/${encodeURIComponent(folderId)}`, { method: "PATCH", body: { name: "Must not rename" } });
+    assert.equal(rename.status, 500, "strict folder mutations still report persistence errors");
+    assert.deepEqual(fixture.legacy.state.favoriteFolders[folderId], committed.favoriteFolders[folderId]);
+    assert.equal(fixture.legacy.revision(), revision + 1, "a rejected strict write must not publish a revision");
+  } finally { fs.writeFileSync = writeFile; }
+
+  assert.equal(failures, 2);
+  assert.deepEqual(reload(), committed, "restart retains guest favorites, history and manual covers");
+  assert.equal(fs.readdirSync(fixture.root).some((name) => name.startsWith("user-state.json.") && name.endsWith(".tmp")), false);
+  await good("/api/progress/v102", { body: { workId: "102", position: 34, duration: 120 } });
+  const recovered = reload();
+  assert.equal(recovered.progress.v102.position, 34);
+  assert.deepEqual(recovered.progress.v101, committed.progress.v101);
+  assert.deepEqual(recovered.favorites, committed.favorites);
+  assert.deepEqual(recovered.manualCovers, committed.manualCovers);
 }
 
 async function verifyFolderManagement(alice, bob) {

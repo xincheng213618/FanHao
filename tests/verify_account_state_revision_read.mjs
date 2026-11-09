@@ -11,11 +11,12 @@ import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 // are counted after native get(), independently of the query's advertised shape.
 // No services, account credentials, application databases or media are opened.
 const OWNER = "src/modules/fanhao/server/collections/account-user-state-service.js";
+const ownerUrl = new URL(`../${OWNER}`, import.meta.url);
 const BEFORE = "63c5fab243233e142cfd62c4eaf13812feb92405";
 const BEFORE_SHA = "9b1fbf9cfa3522eb698b687d83e2444a5c284b454c5af0da01253aa664a479b2";
 const oldSource = execFileSync("git", ["show", `${BEFORE}:${OWNER}`], { encoding: "utf8" }).replaceAll("\r\n", "\n");
 assert.equal(createHash("sha256").update(oldSource).digest("hex"), BEFORE_SHA);
-const currentSource = fs.readFileSync(new URL(`../${OWNER}`, import.meta.url), "utf8").replaceAll("\r\n", "\n");
+const currentSource = fs.readFileSync(ownerUrl, "utf8").replaceAll("\r\n", "\n");
 const FULL = "SELECT revision, state_json FROM account_user_state WHERE account_id = ?";
 const narrowMatch = /\? `(WITH body_policy AS MATERIALIZED[\s\S]+?)`\n        : "SELECT revision, state_json FROM account_user_state WHERE account_id = \?"/.exec(currentSource);
 assert.ok(narrowMatch, "locate the complete actual warm SQL");
@@ -28,7 +29,10 @@ assert.equal(NARROW.split(OMIT_BODY).length, 2);
 const WIDE_WARM = NARROW.replace(OMIT_BODY, "THEN state_json");
 assert.ok(process.argv.slice(2).every(value => value === "--legacy-wide-read"));
 const negative = process.argv.includes("--legacy-wide-read");
-const load = async (source, name) => (await import(`data:text/javascript;base64,${Buffer.from(`${source}\n//# sourceURL=${name}.js\n`).toString("base64")}`)).createAccountUserStateService;
+const load = async (source, name) => {
+  const rebased = source.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) => "from " + JSON.stringify(new URL(relative, ownerUrl).href));
+  return (await import(`data:text/javascript;base64,${Buffer.from(`${rebased}\n//# sourceURL=${name}.js\n`).toString("base64")}`)).createAccountUserStateService;
+};
 const beforeFactory = await load(oldSource, "account-revision-before");
 const currentFactory = await load(negative ? currentSource.replace(NARROW, WIDE_WARM) : currentSource, "account-revision-current");
 const temp = createVerifiedTempDir("fanhao-account-revision-read-");

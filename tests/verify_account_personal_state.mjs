@@ -246,6 +246,50 @@ try {
   assert(!Object.hasOwn(guestAfterDelete.favoriteFolders, guestFolder.id));
   assert.equal(guestAfterDelete.favorites[work2.id].createdAt, JSON.parse(guestFavoritesSnapshot)[work2.id].createdAt);
 
+  const orderedOwner = { id: "ordered-web-playback" };
+  const sessionId = "9".repeat(32);
+  const report = (sequence, position, intent = {}) => ({
+    workId: work1.id, position, duration: 120, progressOrder: { sessionId, sequence }, ...intent
+  });
+  const checkOrderedProgress = () => {
+    const save = (body) => restarted.playback.saveVideoProgress("video-1", body);
+    assert.equal(save(report(2, 77)).position, 77);
+    const revision = service.revision();
+    assert.equal(save(report(1, 23)).position, 77, "an older report from this player must return the committed checkpoint");
+    assert.equal(save(report(2, 24)).position, 77, "replaying a sequence must not replace the checkpoint");
+    assert.equal(service.revision(), revision, "stale reports must not invalidate list revisions");
+    assert.equal(save({ workId: work1.id, position: 0, duration: 120 }).position, 77, "legacy startup zero remains a no-op");
+    assert.equal(save({ workId: work1.id, position: 76, duration: 120 }).position, 76, "legacy positive checkpoints still apply");
+    assert.equal(save(report(1, 23)).position, 76, "legacy updates must not drop the current producer's receipt");
+    for (const invalid of [report(-1, 77), report(Number.MAX_SAFE_INTEGER + 1, 77),
+      report(3, 77, { progressOrder: { sessionId: "invalid", sequence: 3 } }), report(3, 77, { resetAtStart: true }),
+      report(3, "0", { resetAtStart: true }),
+      { position: 0, duration: 120, resetAtStart: true }]) {
+      assert.throws(() => save(invalid), { statusCode: 400 });
+    }
+    assert.equal(save(report(3, 55)).position, 55, "a newer intentional backwards seek is valid");
+    assert.equal(save(report(4, 0, { resetAtStart: true })).position, 0);
+    assert.equal(save(report(3, 55)).position, 0, "late playback must not undo the explicit reset");
+    assert.equal(save(report(5, 0)).position, 0, "unmarked zero must retain the deliberate zero checkpoint");
+    assert(restarted.playback.historyWorks().some((work) => work.id === work1.id), "a deliberate reset must retain watch history");
+  };
+  checkOrderedProgress();
+  service.runForUser(orderedOwner, checkOrderedProgress);
+
+  const reloadedGuest = createUserStateService({ statePath, ensureDataDir() {} });
+  reloadedGuest.load();
+  const reloadedScope = createAccountUserStateService({ dbPath, legacyStateService: reloadedGuest });
+  otherServices.push(reloadedScope);
+  const reloadedPlayback = createServices(reloadedScope).playback;
+  const checkReloaded = () => {
+    const persisted = reloadedPlayback.getVideoProgress("video-1");
+    assert.equal(persisted.position, 0);
+    assert.equal(Object.hasOwn(persisted, "progressOrder"), false, "public progress must not expose producer metadata");
+    assert.deepEqual(reloadedPlayback.saveVideoProgress("video-1", report(3, 55)), persisted, "receipt survives a fresh guest/account reader");
+  };
+  checkReloaded();
+  reloadedScope.runForUser(orderedOwner, checkReloaded);
+
   const future = new DatabaseSync(futurePath);
   future.exec("PRAGMA user_version=99;");
   future.close();

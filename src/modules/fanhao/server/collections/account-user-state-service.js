@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { normalizeVideoProgressOrder } from "../playback/playback-progress-service.js";
 
 const MAX_CACHED_ACCOUNTS = 32;
 // Preserve the original CREATE text so existing tables qualify for narrow reads.
@@ -79,11 +80,13 @@ export function createAccountUserStateService({ dbPath, legacyStateService }) {
     const favoriteFolders = legacyStateService.normalizeFavoriteFolders(recordObject(value?.favoriteFolders));
     const progress = Object.fromEntries(Object.entries(recordObject(value?.progress)).flatMap(([videoId, row]) => {
       if (!videoId || !row || !Number.isFinite(row.position) || row.position < 0 || !Number.isFinite(row.duration) || row.duration <= 0) return [];
+      const progressOrder = normalizeVideoProgressOrder(row.progressOrder);
       return [[videoId, {
         workId: row.workId ? String(row.workId) : null,
         position: row.position,
         duration: row.duration,
-        updatedAt: String(row.updatedAt || "")
+        updatedAt: String(row.updatedAt || ""),
+        ...(progressOrder ? { progressOrder } : {})
       }]];
     }));
     return { favoriteFolders, favorites: normalizeFavorites(value?.favorites, favoriteFolders), progress };

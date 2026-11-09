@@ -72,7 +72,18 @@ try {
   assert.equal((await reset(alice.user.username, roleCode)).status, 400);
   store.updateUser(alice.user.id, { role: "user" }, admin.user.id);
   const changed = await issue(admin, bob);
-  await store.changePassword(bob.user.id, { currentPassword: password, newPassword });
+  const secondDevice = await store.login({ username: bob.user.username, password });
+  const passwordChange = store.changePassword(bob.user.id, { currentPassword: password, newPassword }, secondDevice.token);
+  assert.deepEqual(store.revokeOtherSessions(bob.user.id, bob.token), { revoked: 1 });
+  await assert.rejects(passwordChange, { statusCode: 401 }, "a device revoked during scrypt cannot change the password");
+  assert.equal(await valid(secondDevice.token), 401);
+  assert.equal(await valid(bob.token), 200, "the rejected change keeps the other device signed in");
+  assert.equal(db.prepare("SELECT code_hash FROM account_password_resets WHERE user_id=?").get(bob.user.id).code_hash,
+    crypto.createHash("sha256").update(changed).digest("hex"));
+  const passwordResponse = await api("/password", { token: bob.token, body: { currentPassword: password, newPassword } });
+  assert.equal(passwordResponse.status, 200);
+  assert.deepEqual(passwordResponse.body, { ok: true });
+  assert.match(passwordResponse.cookie, /Max-Age=0/);
   assert.equal((await reset(bob.user.username, changed)).status, 400);
 
   // Inserting the audit record is part of the same transaction as consuming the code.

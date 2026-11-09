@@ -333,6 +333,7 @@ const favoriteStateService = createFavoriteStateService({
 });
 const playbackProgressService = createPlaybackProgressService({
   getLibrary: () => library,
+  getLibraryRevision: () => libraryPeopleCacheVersion,
   publicFavoriteFolders: () => favoriteStateService.publicFavoriteFolders(),
   recentWatchedDays: RECENT_WATCHED_DAYS,
   getUserState: accountUserStateService.state,
