@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { archiveImageRevision } from "../../../platform/server/archive-image-service.js";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "../../../platform/server/archive-task-pool.js";
 import { parseBoBoSocksAlbum } from "../../../../lib/bobosocks-album.js";
 import { photoPersonShelfName } from "../../../../lib/photo-person-shelf.js";
@@ -13,6 +14,13 @@ const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3
   <text x="150" y="225" fill="#555a91" font-size="15" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">暂无封面</text>
 </svg>`;
 const missingImageCover = "图包里没有可用图片";
+// Older negative cache rows kept the helper message without its HTTP status.
+const archiveBackpressureMessages = new Set([
+  "Archive reader queue is full",
+  "Archive reader is stopping",
+  "Archive helper timed out",
+  "Archive helper output exceeds its limit"
+]);
 
 function archiveMemberDepth(memberPath) {
   return String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean).length;
@@ -189,12 +197,13 @@ export function createPhotoSetService({
       Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs &&
       row.archive_identity && row.archive_identity === signature.archiveIdentity &&
       (officialPhotoCoverRevision(row) || Number(row.generator_version || 1) === coverGeneratorVersion) &&
-      !needsVideoCoverRetry(row)
+      !needsCoverRetry(row)
     );
   }
 
-  function needsVideoCoverRetry(row) {
-    return videoCoversEnabled && row.status === "error" && row.error === missingImageCover;
+  function needsCoverRetry(row) {
+    return row.status === "error" && (archiveBackpressureMessages.has(row.error)
+      || (videoCoversEnabled && row.error === missingImageCover));
   }
 
   function upsertCoverError(album, signature, error, database) {
@@ -426,8 +435,8 @@ export function createPhotoSetService({
       if (!latest || latest.archiveIdentity !== signature.archiveIdentity || !captured.current()) throw archiveStoppedError();
       return upsertCover(album, signature, member, cover, captured.db);
     } catch (error) {
-      // A video may be playable again after a transient cache or decoder error.
-      if (!video && context.isCurrent()) {
+      // The archive worker may recover from a 503, and video decoding can be retried.
+      if (!video && error.statusCode !== 503 && context.isCurrent()) {
         const latest = await archiveSignature(targetArchivePath, { signal: context.signal, waitForCloseOnAbort: true });
         if (latest?.archiveIdentity === signature.archiveIdentity && captured.current()) upsertCoverError(album, signature, error, captured.db);
       }
@@ -459,6 +468,7 @@ export function createPhotoSetService({
     const imageRequest = archiveImagesPayload(targetArchivePath, {
       // The archive cache already owns the full list; copy only the visible page.
       limit: 0,
+      includeArchiveIdentity: true,
       signal: options.signal
     });
     const [payload, videoPayload] = await Promise.all([
@@ -482,8 +492,14 @@ export function createPhotoSetService({
     const officialRevision = officialPhotoCoverRevision(official);
     const shelfPerson = photoPersonShelfName(album);
     const western = parseWesternPhotoAlbum(album);
+    const archiveIdentity = payload.archiveIdentity;
     return {
       ...album,
+      // The published album may predate a replacement at the same path.
+      ...(archiveIdentity ? {
+        ...(album.archiveIdentity ? { archiveIdentity } : {}),
+        imageRevision: archiveImageRevision(archiveIdentity)
+      } : {}),
       ...(shelfPerson ? { personName: shelfPerson } : {}),
       ...(getImageGalleryDb ? { coverEditable: true } : {}),
       ...(manual ? publicCoverOverride(album, override) : officialRevision
@@ -512,7 +528,7 @@ export function createPhotoSetService({
     };
   }
 
-  async function serveImage(res, albumId, imageIndex) {
+  async function serveImage(res, albumId, imageIndex, expectedImageRevision) {
     if (res.destroyed || res.writableEnded) return;
     const album = byId(decodeURIComponent(albumId));
     if (!album) {
@@ -524,13 +540,14 @@ export function createPhotoSetService({
     res.once?.("close",disconnect);
     try {
       const targetArchivePath = archivePath(album);
-      const images = await listArchiveImages(targetArchivePath,{signal:controller.signal});
+      const revision = expectedImageRevision === undefined ? {} : { expectedImageRevision };
+      const images = await listArchiveImages(targetArchivePath, { signal: controller.signal, ...revision });
       if (controller.signal.aborted || res.destroyed || res.writableEnded) return;
       const image = images[index];
       if (!image?.path) { notFound(res); return; }
       await serveArchiveMemberImage(res, {
         sourceType: "photo-set", archivePath: targetArchivePath, memberPath: image.path,
-        contentType: mimeTypes[normalizeExt(image.path)] || ""
+        contentType: mimeTypes[normalizeExt(image.path)] || "", ...revision
       });
     } catch(error) {
       if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) throw error;
@@ -587,7 +604,7 @@ export function createPhotoSetService({
   function publishedCover(album) {
     const cached = coverRow(album);
     if (cached && (officialPhotoCoverRevision(cached) || Number(cached.generator_version) === coverGeneratorVersion)
-      && !needsVideoCoverRetry(cached) && matchesPublishedArchive(album, {
+      && !needsCoverRetry(cached) && matchesPublishedArchive(album, {
       archivePath: cached.archive_path, archiveSize: Number(cached.archive_size),
       archiveMtimeMs: Number(cached.archive_mtime_ms), archiveIdentity: cached.archive_identity
     })) return cached;

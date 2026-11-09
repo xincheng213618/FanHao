@@ -76,13 +76,17 @@ try {
     eventLoopReleased = true;
     resolve();
   }, 20));
-  const [left, right] = await Promise.all([
+  const [left, right, identified] = await Promise.all([
     service.archiveImagesPayload(archivePath),
-    service.archiveImagesPayload(archivePath)
+    service.archiveImagesPayload(archivePath),
+    service.archiveImagesPayload(archivePath, { includeArchiveIdentity: true })
   ]);
   await loopProbe;
   assert(eventLoopReleased, "archive helper execution must not block the Node event loop");
   assert.deepEqual(left, right);
+  assert.deepEqual(Object.keys(left), ["imageCount", "images"], "ordinary archive lists retain their original payload");
+  assert.deepEqual(identified, { ...left, archiveIdentity: persistedIndex.archive_identity },
+    "a coalesced opt-in list exposes the identity that owns the returned image index");
   assert.equal(left.images[0]?.path, "cover.jpg");
   assert.equal(persistedIndex.indexer_version, ARCHIVE_IMAGE_INDEXER_VERSION, "an older archive indexer version must re-list and replace its persisted row");
   assert.equal(countInvocations(`${archivePath}.list.count`), 1, "concurrent archive lists must share one subprocess");

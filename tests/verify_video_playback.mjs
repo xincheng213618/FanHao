@@ -2,16 +2,19 @@ import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { createFileServer, entityValidators, ifRangeMatches, parseRange } from "../src/platform/server/file-server.js";
+import { createFanhaoDependencies } from "../src/modules/fanhao/server/composition.js";
 import { createMediaFileRelocationService } from "../src/modules/fanhao/server/works/media-file-relocation-service.js";
 import { createMediaStreamService } from "../src/platform/server/media-stream-service.js";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
-import { routeWorksMedia } from "../src/modules/fanhao/server/works/routes-media.js";
+import { createWorksRuntime } from "../src/modules/fanhao/server/works/runtime.js";
+import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -149,6 +152,7 @@ async function verifyFileServerRangeContract() {
       notFound: (res) => { res.writeHead(404); res.end(); },
       safeStat: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })
     });
+    await verifyComposedVideoRangeRelocation(fileServer, fixturePath);
 
     const full = await captureFileResponse(fileServer, "serveRangedFile", "GET", {}, file);
     assert.equal(full.status, 200);
@@ -499,6 +503,9 @@ function assertPlaybackMode({ ext, videoCodec, audioCodec, expected }) {
 await verifyFileServerRangeContract();
 await verifyVideoRouteForwarding();
 await verifyTranscodeResponseContract();
+await verifyWorkTranscodeRelocation();
+await verifyTranscodeRelocationCancellation();
+await verifyWorkPlayInfoSourceChecks();
 console.log("video-playback: ok (range contract, awaited video routes, direct fallback, bounded transcode, truthful failures)");
 
 async function verifyVideoRouteForwarding() {
@@ -507,11 +514,13 @@ async function verifyVideoRouteForwarding() {
   for (const method of ["GET", "HEAD"]) {
     const gate = controlledRangeGate(), entered = controlledRangeGate();
     let rangeWork;
-    const fixture = videoRouteFixture((req, res, file) => {
+    const fixture = videoRouteFixture((req, res, file, options) => {
       assert.equal(fixture.realm.getStore()?.id, "fixture-user");
       assert.equal(req.method, method);
-      assert.equal(file.id, "fixture-video");
+      assert.equal(file.id, "fixture video/%");
+      assert.equal(file.path, "controlled-route.mp4");
       assert.equal(file.cacheControl, "no-store");
+      assert.equal(options.resolveMissingSource, fixture.resolveMissingVideoSource);
       entered.resolve();
       rangeWork = gate.promise.then(() => {
         assert.equal(fixture.realm.getStore()?.id, "fixture-user", "the awaited transport must retain the authenticated realm");
@@ -521,7 +530,7 @@ async function verifyVideoRouteForwarding() {
       rangeWork.catch(() => {});
       return rangeWork;
     });
-    const req = capturedVideoRequest(method), res = new CaptureResponse();
+    const req = capturedVideoRequest(method, fixture.url), res = new CaptureResponse();
     let settled = false;
     const pending = fixture.handler(req, res).then(() => { settled = true; });
     try {
@@ -547,7 +556,7 @@ async function verifyVideoRouteForwarding() {
     rangeWork.catch(() => {});
     return rangeWork;
   });
-  const req = capturedVideoRequest("GET"), res = new CaptureResponse();
+  const req = capturedVideoRequest("GET", fixture.url), res = new CaptureResponse();
   const pending = fixture.handler(req, res);
   try {
     await entered.promise; assert.equal(res.headersSent, false);
@@ -560,6 +569,11 @@ async function verifyVideoRouteForwarding() {
   } finally { gate.resolve(); await Promise.allSettled([pending, rangeWork]); }
 
   const unmatched = videoRouteFixture(() => assert.fail("unmatched paths must not start a video transport"));
+  for (const id of ["missing-video", "fixture-image"]) {
+    const missing = new CaptureResponse();
+    await unmatched.handler(capturedVideoRequest("GET", `/media/video/${id}`), missing);
+    assert.equal(missing.status, 404, "unknown and non-video IDs must not reach the range transport");
+  }
   const unmatchedReq = capturedVideoRequest("GET", "/unmatched-video-fixture");
   assert.equal(await unmatched.route(unmatchedReq, new CaptureResponse(), new URL(unmatchedReq.url, "http://fixture.local")), false);
   const fallback = new CaptureResponse();
@@ -574,13 +588,16 @@ async function verifyVideoRouteForwarding() {
 function videoRouteFixture(serveRangedFile) {
   const realm = new AsyncLocalStorage(), errors = [];
   const mediaStreamService = createRoutedMediaStreamService({ serveRangedFile });
+  const file = { id: "fixture video/%", type: "video", path: "controlled-route.mp4", ext: ".mp4" };
+  const library = { filesById: new Map([[file.id, file], ["fixture-image", { type: "image" }]]) };
+  const resolveMissingVideoSource = () => assert.fail("only the shared range owner may call the resolver");
   let staticCalls = 0;
-  const route = (req, res, url) => routeWorksMedia(req, res, url, {
-    library: { filesById: new Map() }, mediaResponseService: {}, mediaStreamService,
-    notFound: () => assert.fail("controlled routed video must exist"),
-    resolveVideoFileByPublicId: id => id === "fixture-video" ? { id, type: "video", path: "controlled-route.mp4", ext: ".mp4" } : null,
-    resolveLibraryPersonByPublicId: () => null
+  const runtime = createWorksRuntime({
+    getLibrary: () => library, mediaStreamService,
+    notFound(res) { res.writeHead(404); res.end(); }, resolveMissingVideoSource,
+    resolveVideoFileByPublicId() { assert.fail("direct video routing must not synchronously resolve a file"); }
   });
+  const route = runtime.routeMedia;
   const handler = createRequestHandler({
     attachAccessAnalytics() {}, attachAccessLogger() {}, requestCorsOrigin: () => "",
     requestAuthState: () => ({ allowed: true, user: { id: "fixture-user" } }),
@@ -590,10 +607,59 @@ function videoRouteFixture(serveRangedFile) {
     sendJson(res, status, payload) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(payload)); },
     logError(_prefix, error) { errors.push(error); }
   });
-  return { handler, route, realm, errors, staticCalls: () => staticCalls };
+  return { handler, route, realm, errors, resolveMissingVideoSource, url: `/media/video/${encodeURIComponent(file.id)}`, staticCalls: () => staticCalls };
 }
 
-function capturedVideoRequest(method, url = "/media/video/fixture-video") {
+async function verifyComposedVideoRangeRelocation(fileServer, fixturePath) {
+  const original = Object.freeze({
+    id: "relocated video/%", path: path.join(path.dirname(fixturePath), "work-missing.mp4"),
+    type: "video", ext: ".mp4", size: 10, entityTag: '"route-relocation-v1"',
+    responseHeaders: { "X-Fixture": "catalog descriptor" }
+  });
+  const present = { ...original, id: "present-video", path: fixturePath };
+  const library = { filesById: new Map([[original.id, original], [present.id, present]]) };
+  const relocations = [];
+  const grouped = createFanhaoDependencies(new Proxy({
+    diskUsage: {}, getLibrary: () => library,
+    mediaStreamService: createMediaStreamService({ serveRangedFile: fileServer.serveRangedFile }),
+    notFound(res) { res.writeHead(404); res.end(); },
+    resolveVideoFileByPublicId() { assert.fail("the composed range route must not use the synchronous resolver"); },
+    async resolveMissingVideoSource(file, signal) {
+      assert.equal(signal.aborted, false);
+      relocations.push(file.path);
+      assert.equal(file.path, original.path);
+      return { ...file, path: fixturePath, cacheControl: "public", entityTag: '"resolver-ignored"', responseHeaders: {} };
+    }
+  }, { get: (source, key) => source[key] ?? (() => {}) }));
+  const runtime = createWorksRuntime(grouped.works);
+  const request = async (method, id) => {
+    const url = `/media/video/${encodeURIComponent(id)}`;
+    const res = new CaptureResponse();
+    assert.equal(await runtime.routeMedia(capturedVideoRequest(method, url), res, new URL(url, "http://fixture.local")), true);
+    if (!res.writableFinished) await once(res, "finish");
+    return res;
+  };
+  const direct = await request("GET", present.id);
+  assert.equal(direct.status, 206);
+  assert.deepEqual(relocations, [], "an available indexed file needs no relocation work");
+
+  const relocated = await request("GET", original.id);
+  assert.equal(relocated.status, 206);
+  assert.equal(Buffer.concat(relocated.chunks).toString(), "3456");
+  assert.equal(relocated.responseHeaders["Content-Range"], "bytes 3-6/10");
+  assert.equal(relocated.responseHeaders["Cache-Control"], "no-store");
+  assert.equal(relocated.responseHeaders["X-Fixture"], "catalog descriptor");
+  assert.equal(relocated.responseHeaders.ETag, original.entityTag);
+  const head = await request("HEAD", original.id);
+  assert.equal(head.status, 200);
+  assert.equal(head.responseHeaders["Content-Length"], 10);
+  assert.equal(head.chunks.length, 0);
+  assert.deepEqual(relocations, [original.path, original.path]);
+  assert.equal(fileServer.diagnostics().active, 0);
+  console.log("PASS composed video range (indexed and relocated GET/HEAD, response metadata, descriptor drain)");
+}
+
+function capturedVideoRequest(method, url) {
   const req = new EventEmitter(); req.method = method; req.url = url; req.headers = { host: "fixture.local", range: "bytes=3-" };
   return req;
 }
@@ -655,7 +721,7 @@ function createTranscodeFixtureService(spawnProcess) {
     maxInfoBytes: 1024,
     notFound: () => assert.fail("transcode fixture must exist"),
     parseInfoMetadata: () => null,
-    safeStat: () => ({ size: 8 }),
+    statFile: async () => ({ isFile: () => true }),
     sendJson(res, status, payload) {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
@@ -676,4 +742,214 @@ function fakeTranscodeChild() {
     child.killed = true;
   };
   return child;
+}
+
+async function verifyWorkTranscodeRelocation() {
+  const file = Object.freeze({ id: "fixture video/1", type: "video", path: staleVideoPath, ext: ".mp4", size: 2048 });
+  const otherPath = "R:\\Other\\nested\\movie.mp4";
+  const stats = new Map([[relocatedVideoPath, relocatedFileStat]]);
+  const calls = [], warnings = [];
+  const relocation = createMediaFileRelocationService({
+    safeStat() { assert.fail("work transcode must never inspect a path synchronously"); },
+    async statFile(candidate) { calls.push(candidate); return stats.get(candidate); },
+    async readRootDirectoryNamesAsync(rootPath) { calls.push(rootPath); return ["Other", "Polly Yangs"]; },
+    warn: (message) => warnings.push(message)
+  });
+  const firstStat = controlledRangeGate();
+  const child = fakeTranscodeChild();
+  let inputPath;
+  const mediaStreamService = createMediaStreamService({
+    ffmpegPath: "ffmpeg-fixture",
+    async statFile(source) { calls.push(source); return firstStat.promise; },
+    notFound(res) { res.writeHead(404); res.end(); },
+    sendJson(res, status, payload) { res.writeHead(status); res.end(JSON.stringify(payload)); },
+    spawnProcess(_command, args) {
+      inputPath = args[args.indexOf("-i") + 1];
+      setImmediate(() => { child.stdout.end("fixture-transcode"); child.exitCode = 0; child.emit("close", 0); });
+      return child;
+    },
+    warn() {}
+  });
+  const library = { filesById: new Map([[file.id, file]]) };
+  const composition = createFanhaoDependencies(new Proxy({
+    diskUsage: {}, getLibrary: () => library, mediaStreamService, notFound: (res) => { res.writeHead(404); res.end(); },
+    resolveMissingVideoSource: relocation.resolveMissingSource,
+    resolveVideoFileByPublicId() { assert.fail("transcode must use the indexed descriptor directly"); }
+  }, { get: (source, key) => source[key] ?? (() => {}) }));
+  const runtime = createWorksRuntime(composition.works);
+  const route = `/media/video/${encodeURIComponent(file.id)}/transcode`;
+  const res = new CaptureResponse();
+  try {
+    assert.equal(await runtime.routeMedia(capturedVideoRequest("GET", route), res, new URL(route, "http://fixture.local")), true);
+    assert.deepEqual(calls, [staleVideoPath], "only the occupied transcode slot may try the original path first");
+    assert.equal(inputPath, undefined);
+    firstStat.resolve(null);
+    if (!res.writableFinished) await once(res, "finish");
+    assert.equal(res.status, 200);
+    assert.equal(inputPath, relocatedVideoPath);
+    assert.equal(file.path, staleVideoPath, "relocation must not mutate the indexed descriptor");
+    assert.deepEqual(calls, [staleVideoPath, "R:\\", otherPath, relocatedVideoPath]);
+    assert.equal(warnings.length, 1);
+    calls.length = 0;
+    assert.equal((await relocation.resolveMissingSource(file)).path, relocatedVideoPath);
+    assert.deepEqual(calls, [relocatedVideoPath], "a cached relocation is checked without another directory scan");
+    assert.equal(await relocation.resolveMissingSource({ ...file, size: 1024 }), null, "relocation must reject mismatched sizes");
+    stats.set(otherPath, relocatedFileStat);
+    assert.equal(await relocation.resolveMissingSource(file), null, "multiple matching files must not select an arbitrary source");
+  } finally { firstStat.resolve(null); await mediaStreamService.stop(); }
+}
+
+async function verifyTranscodeRelocationCancellation() {
+  const file = { path: staleVideoPath, size: 2048 };
+  for (const phase of ["before-scan", "scan", "stat"]) {
+    const controller = new AbortController();
+    const gate = controlledRangeGate();
+    const calls = [];
+    const relocation = createMediaFileRelocationService({
+      async readRootDirectoryNamesAsync() { calls.push("scan"); return phase === "scan" ? gate.promise : ["Polly Yangs", "Other"]; },
+      async statFile() { calls.push("stat"); return gate.promise; },
+      warn() { assert.fail("cancelled relocation must not publish a path"); }
+    });
+    if (phase === "before-scan") controller.abort();
+    const pending = relocation.resolveMissingSource(file, controller.signal);
+    if (phase === "stat") await new Promise(resolve => setImmediate(resolve));
+    controller.abort();
+    gate.resolve(phase === "scan" ? ["Polly Yangs", "Other"] : relocatedFileStat);
+    assert.equal(await pending, null);
+    assert.deepEqual(calls, phase === "before-scan" ? [] : phase === "scan" ? ["scan"] : ["scan", "stat"],
+      "an abort must prevent the next relocation IO");
+  }
+}
+
+async function verifyWorkPlayInfoSourceChecks() {
+  const workId = "work %id", overlapId = "work-and-gallery";
+  const workGate = controlledRangeGate(), disconnectGate = controlledRangeGate();
+  const events = new EventEmitter();
+  const event = name => once(events, name, { signal: AbortSignal.timeout(5000) });
+  const stat = { isFile: () => true, size: 2048, mtimeMs: 12345 };
+  const forbidden = () => assert.fail("play-info fixture must not perform synchronous IO or start ffprobe");
+  const paths = [], galleryLookups = [], relocations = [], sent = [];
+  const file = (id, name) => ({ id, type: "video", path: `work/${name}.mp4`, ext: ".mp4", size: 2048 });
+  const files = [file(workId, "healthy"), file("relocated", "rename-old"), file(overlapId, "moved"),
+    file("missing", "missing"), file("disconnect", "disconnect"), file("source-error", "source-error")];
+  const library = { filesById: new Map(files.map(item => [item.id, item])) };
+  const galleryIndex = { mediaItems: [workId, overlapId, "offline", "source-error"].map((id, index) => ({
+    id, sourceRoot: "gallery", relativePath: `${index}.mp4`, size: 2048
+  })) };
+  const gallery = createGalleryMediaService({
+    getImageLibraryIndex: () => galleryIndex, directVideoExts: new Set([".mp4"]),
+    safeChildPath: (root, relative) => `${root}/${relative}`, safeStat: forbidden,
+    normalizeExt: value => path.extname(value)
+  });
+  const probe = createVideoProbeService({
+    directVideoExts: new Set([".mp4"]), safeStat: forbidden, spawnSyncFn: forbidden, execFileFn: forbidden,
+    statTimeoutMs: 4000,
+    async statFile(candidate) {
+      paths.push(candidate);
+      if (candidate === "work/healthy.mp4") { events.emit("work-stat"); return workGate.promise; }
+      if (candidate === "work/disconnect.mp4") { events.emit("disconnect-stat"); return disconnectGate.promise; }
+      if (candidate === "work/rename-new.mp4") return stat;
+      if (candidate === "work/source-error.mp4") throw Object.assign(new Error("synthetic source IO failure"), { code: "EIO" });
+      return candidate.startsWith("gallery/") && candidate !== "gallery/2.mp4" ? stat : null;
+    },
+    persistentCache: { get: () => ({ hit: true, value: { videoCodec: "h264", audioCodec: "aac", duration: 600 } }) }
+  });
+  const responsePaths = new WeakMap();
+  const sendJson = (res, status, payload) => {
+    sent.push(responsePaths.get(res));
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(payload));
+  };
+  const runtime = createWorksRuntime({
+    getLibrary: () => library,
+    galleryMediaService: { byId(id) { galleryLookups.push(id); return gallery.byId(id); }, videoFile: gallery.videoFile },
+    videoProbeService: probe, resolveVideoFileByPublicId: forbidden, sendJson,
+    async resolveMissingVideoSource(file, signal) {
+      assert.equal(signal.aborted, false);
+      relocations.push(file.id);
+      return file.id === "relocated" ? { ...file, path: "work/rename-new.mp4" } : null;
+    }
+  });
+  const errors = [];
+  const handler = createRequestHandler({
+    attachAccessAnalytics() {}, attachAccessLogger() {}, requestCorsOrigin: () => "",
+    requestAuthState: () => ({ allowed: true }), routeAuth: async () => false, routeMedia: async () => false,
+    async routeApi(req, res, url) {
+      responsePaths.set(res, url.pathname);
+      if (url.pathname === "/health") { sendJson(res, 200, { ok: true }); return true; }
+      try { return await runtime.routeApi(req, res, url); }
+      finally { if (url.pathname === "/api/playinfo/disconnect") events.emit("disconnect-finished"); }
+    },
+    serveStatic: forbidden, sendJson, logError: (_label, error) => errors.push(error)
+  });
+  const server = createServer(handler);
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const playInfo = (id, query = "", signal = AbortSignal.timeout(5000)) => fetch(`${base}/api/playinfo/${encodeURIComponent(id)}${query}`, { signal });
+  try {
+    const entered = event("work-stat");
+    const opening = playInfo(workId);
+    await entered;
+    const health = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
+    assert.deepEqual(await health.json(), { ok: true }, "health must respond while a work source lookup is held");
+    assert.deepEqual(galleryLookups, []);
+    workGate.resolve(stat);
+    const healthy = await opening;
+    assert.equal(healthy.status, 200);
+    assert.match((await healthy.json()).streamUrl, /^\/media\/video\//);
+
+    const relocated = await playInfo("relocated");
+    assert.equal(relocated.status, 200);
+    assert.match((await relocated.json()).streamUrl, /^\/media\/video\/relocated\?/);
+    assert.deepEqual(paths.slice(-2), ["work/rename-old.mp4", "work/rename-new.mp4"]);
+    assert.deepEqual(galleryLookups, []);
+    const fallback = await playInfo(overlapId);
+    assert.equal(fallback.status, 200);
+    assert.match((await fallback.json()).streamUrl, /^\/media\/gallery-video\//);
+    assert.deepEqual(relocations, ["relocated", overlapId]);
+    const beforeExplicit = paths.length;
+    const explicit = await playInfo(workId, "?source=gallery");
+    assert.equal(explicit.status, 200);
+    assert.match((await explicit.json()).streamUrl, /^\/media\/gallery-video\//);
+    assert.deepEqual(paths.slice(beforeExplicit), ["gallery/0.mp4"], "explicit gallery play-info must bypass work file lookup");
+
+    const offline = await playInfo("offline", "?source=gallery");
+    assert.equal(offline.status, 200, "a known offline gallery video retains fallback play-info");
+    const offlinePayload = await offline.json();
+    assert.equal(offlinePayload.duration, null);
+    assert.match(offlinePayload.streamUrl, /^\/media\/gallery-video\//);
+    const missing = await playInfo("missing");
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { error: "视频文件不存在或已移动，请刷新作品资料" });
+    const sourceError = await playInfo("source-error");
+    assert.equal(sourceError.status, 503, "a failed stat must not report an absent video or fall back to a different source");
+    assert.equal(sourceError.headers.get("retry-after"), "1");
+    assert.deepEqual(await sourceError.json(), { error: "暂时无法检查视频文件，请稍后重试", code: "PROBE_SOURCE_UNAVAILABLE", retryable: true });
+    assert.equal(relocations.includes("source-error"), false);
+    assert.equal(galleryLookups.includes("source-error"), false);
+
+    const enteredDisconnect = event("disconnect-stat"), disconnected = event("disconnect-finished");
+    const controller = new AbortController();
+    const pending = assert.rejects(playInfo("disconnect", "", controller.signal), { name: "AbortError" });
+    await enteredDisconnect; controller.abort(); await pending; await disconnected;
+    disconnectGate.resolve(null);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(galleryLookups.includes("disconnect"), false);
+    assert.equal(sent.includes("/api/playinfo/disconnect"), false);
+    assert.deepEqual(errors, []);
+
+    await probe.stop();
+    const stopped = await playInfo(workId);
+    assert.equal(stopped.status, 503);
+    assert.equal(stopped.headers.get("retry-after"), "1");
+    const error = await stopped.json();
+    assert.equal(error.code, "PROBE_STOPPED");
+    assert.equal(error.retryable, true);
+    console.log("PASS play-info (held source/health, relocation, gallery fallback, 404/503, disconnect)");
+  } finally {
+    workGate.resolve(null); disconnectGate.resolve(null);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await probe.stop();
+  }
 }

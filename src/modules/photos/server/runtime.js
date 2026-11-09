@@ -59,7 +59,16 @@ export function createPhotosRuntime(deps) {
 
     const photoSetImageMatch = /^\/media\/gallery\/([^/]+)\/([^/]+)$/.exec(url.pathname);
     if (photoSetImageMatch && req.method === "GET") {
-      await deps.photoSetService.serveImage(res, photoSetImageMatch[1], photoSetImageMatch[2]);
+      const revision = url.searchParams.get("archive");
+      if (revision !== null) {
+        // The inline image response sets its cache policy after verification.
+        res.setHeader("Cache-Control", "no-store");
+        if (!/^[a-f0-9]{24}$/u.test(revision)) {
+          deps.sendJson(res, 400, { error: "归档图片版本无效" });
+          return true;
+        }
+      }
+      await deps.photoSetService.serveImage(res, photoSetImageMatch[1], photoSetImageMatch[2], revision ?? undefined);
       return true;
     }
 
@@ -82,18 +91,30 @@ export function createPhotosRuntime(deps) {
   return { routeApi, routeMedia, settings,
     start: async () => {
       await deps.photoSetService.start?.();
+      await deps.mangaService?.startChapterReads?.();
       coverWarmJob?.start();
     },
     beginStop: () => {
       coverWarmJob?.beginStop();
+      deps.mangaService?.beginStopChapterReads?.();
       deps.photoSetService.beginStop?.();
     },
     stop: async () => {
       catalogIntake?.clear();
-      deps.mangaService?.clearReaderLookupCaches?.();
-      await deps.photoSetService.stop?.();
-      await coverWarmJob?.stop();
-      deps.releasePhotoSetLookup?.();
+      const stopMangaReaders = async () => {
+        const draining = deps.mangaService?.stopChapterReads?.();
+        deps.mangaService?.clearReaderLookupCaches?.();
+        await draining;
+      };
+      const stopPhotoReaders = async () => {
+        await deps.photoSetService.stop?.();
+        await coverWarmJob?.stop();
+        deps.releasePhotoSetLookup?.();
+      };
+      const stopped = await Promise.allSettled([stopMangaReaders(), stopPhotoReaders()]);
+      const errors = stopped.filter(result => result.status === "rejected").map(result => result.reason);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length) throw new AggregateError(errors, "Reader services have not finished stopping");
     }
   };
 }

@@ -6,13 +6,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib, { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
-import { sendJson as actualSendJson, sendText } from "../src/platform/server/responses.js";
+import { sendJson as actualSendJson, sendJsonParts, sendText } from "../src/platform/server/responses.js";
 
 // A supplied sender permits an isolated negative control without changing the
 // production module. Every response still crosses an actual loopback socket.
 export async function runJsonResponseFixture({ sendJson = actualSendJson } = {}) {
   const large = { text: "合成 JSON response\n".repeat(1024), count: 1024 };
   const small = { text: "合成", ok: true };
+  const textParts = ({ text, count }) => [Buffer.from('{"text":'), Buffer.from(JSON.stringify(text)), Buffer.from(`,"count":${count}}`)];
+  const largeParts = textParts(large);
   const origin = "https://fixture.invalid";
   const logs = [], completed = [];
   let scenario;
@@ -28,7 +30,8 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
       current.response = res;
       if (current.vary !== undefined) res.setHeader("Vary", current.vary);
       current.onResponse?.(res);
-      sendJson(res, current.status ?? 201, current.payload ?? large);
+      if (current.parts) sendJsonParts(res, current.status ?? 201, current.parts);
+      else sendJson(res, current.status ?? 201, current.payload ?? large);
       return true;
     },
     routeMedia: async () => false,
@@ -69,6 +72,7 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
     assert.equal(response.headers["content-encoding"] || "", encoding);
     assert.equal(Number(response.headers["content-length"]), response.body.length, "Content-Length must describe transmitted bytes");
     assert.equal(response.headers["cache-control"], "no-store");
+    assert.equal(response.headers["x-fanhao-account-owner"], "account:json-fixture");
     if (cors) assert.equal(response.headers["access-control-allow-origin"], origin);
     const actualVary = String(response.headers.vary || "").split(",").map(value => value.trim().toLowerCase()).filter(Boolean);
     assert.equal(new Set(actualVary).size, actualVary.length, "Vary must not duplicate fields ignoring case");
@@ -121,6 +125,57 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
       ["identity;q=0, identity;q=1", large]
     ]) await run(`no acceptable representation ${accepted} / ${payload === small ? "small" : "large"}`, async () => {
       check(await start({ accepted, payload }).promise, { status: 406, empty: true });
+    });
+
+    await run("identity writes original JSON parts in order", async () => {
+      const chunks = [];
+      const response = await start({ accepted: "identity", parts: largeParts, onResponse(res) {
+        const write = res.write, end = res.end;
+        res.write = function (chunk, ...args) { chunks.push(chunk); return write.call(this, chunk, ...args); };
+        res.end = function (chunk, ...args) { chunks.push(chunk); return end.call(this, chunk, ...args); };
+      } }).promise;
+      check(response);
+      assert.equal(chunks.length, largeParts.length);
+      for (const [index, chunk] of chunks.entries()) assert.equal(chunk, largeParts[index], "identity must not join or copy parts");
+    });
+    for (const [accepted, encoding] of [["br, gzip", "br"], ["br;q=0, gzip", "gzip"]]) {
+      await run(`compressed UTF-8 JSON parts ${encoding}`, async () => {
+        check(await start({ accepted, parts: largeParts }).promise, { encoding });
+      });
+    }
+    for (const size of [4095, 4096]) await run(`parts compression threshold ${size} bytes`, async () => {
+      const count = 1;
+      const textBytes = size - Buffer.byteLength(JSON.stringify({ text: "", count }));
+      const payload = { text: "合".repeat(Math.floor(textBytes / 3)) + "x".repeat(textBytes % 3), count };
+      const parts = textParts(payload);
+      assert.equal(parts.reduce((bytes, part) => bytes + part.length, 0), size);
+      check(await start({ accepted: "gzip", parts }).promise, { payload, encoding: size === 4096 ? "gzip" : "" });
+    });
+    await run("parts reject all excluded representations", async () => {
+      check(await start({ accepted: "br;q=0, gzip;q=0, identity;q=0", parts: largeParts }).promise, { status: 406, empty: true });
+    });
+    for (const identityAllowed of [true, false]) await run(`parts compression failure / identity ${identityAllowed}`, async () => {
+      await withCompressionGate("br", async gate => {
+        const pending = start({ accepted: `br, identity;q=${identityAllowed ? 1 : 0}`, parts: largeParts, status: 202 });
+        await bounded(gate.entered, "parts compression entry");
+        gate.finish(new Error("controlled parts compression failure"));
+        check(await pending.promise, { status: identityAllowed ? 202 : 500, empty: !identityAllowed });
+      });
+    });
+    await run("disconnect before parts compression callback", async () => {
+      await withCompressionGate("gzip", async gate => {
+        const closed = deferred(), calls = { head: 0, end: 0 };
+        const pending = start({ accepted: "gzip", parts: largeParts, onResponse(res) {
+          countWrites(res, calls);
+          res.once("close", closed.resolve);
+        } });
+        await bounded(gate.entered, "parts compression entry");
+        pending.request.destroy();
+        await bounded(closed.promise, "server response close");
+        await assert.rejects(pending.promise);
+        gate.finish(new Error("late parts compression failure"));
+        assert.deepEqual(calls, { head: 0, end: 0 });
+      });
     });
 
     for (const encoding of ["br", "gzip"]) {

@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { PassThrough, Writable } from "node:stream";
+import { createFileServer } from "../src/platform/server/file-server.js";
+import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { createMediaStreamService } from "../src/platform/server/media-stream-service.js";
 import { createServerHost } from "../src/platform/server/server-host.js";
+import { createDiskUsageRoutes } from "../src/modules/fanhao/server/disk-usage/routes.js";
+import { createWorkDetailService } from "../src/modules/fanhao/server/works/work-detail-service.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
+import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
+import { createMediaRuntime } from "../src/modules/media/server/runtime.js";
 
 // No media, FFmpeg, database, or application service is opened. Real children
 // below are private Node processes; private HTTP servers bind loopback port 0.
@@ -71,11 +79,12 @@ async function closeFake(child, code = 0, signal = null) {
 }
 
 function fixture(options = {}) {
+  const { statFile = () => ({ isFile: () => true }), ...overrides } = options;
   const children = [], responses = [], requests = [], warnings = [], args = [];
   let statCalls = 0;
   const service = createMediaStreamService({
     ffmpegPath: "ffmpeg-fixture-never-executed", hasNvenc: true,
-    safeStat: () => { statCalls++; return { size: 1 }; },
+    statFile: (filePath) => { statCalls++; return statFile(filePath); },
     notFound: () => assert.fail("synthetic source exists"),
     sendJson(res, status, payload) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(payload)); },
     serveRangedFile: () => {},
@@ -87,11 +96,14 @@ function fixture(options = {}) {
       const child = fakeChild(); children.push(child); return child;
     },
     startupTimeoutMs: 1000, childCloseTimeoutMs: 100, queueTimeoutMs: 1000,
-    ...options
+    ...overrides
   });
-  const context = { service, children, responses, requests, warnings, args, get statCalls() { return statCalls; }, request({ method = "GET", query = "", slow = false, req = new EventEmitter(), res = new CaptureResponse({ slow }) } = {}) {
+  const context = { service, children, responses, requests, warnings, args, get statCalls() { return statCalls; }, async child(index = 0) {
+    await until(() => children.length > index, `child ${index} starts after source stat`);
+    return children[index];
+  }, request({ method = "GET", query = "", slow = false, filePath = "synthetic-source.mp4", resolveMissingSource, req = new EventEmitter(), res = new CaptureResponse({ slow }) } = {}) {
     req.method = method; requests.push(req); responses.push(res);
-    service.serveTranscodedVideo(req, res, { path: "synthetic-source.mp4" }, new URL(`http://fixture/transcode${query}`));
+    service.serveTranscodedVideo(req, res, { path: filePath }, new URL(`http://fixture/transcode${query}`), { resolveMissingSource });
     return { req, res };
   } };
   fixtures.push(context);
@@ -120,11 +132,226 @@ async function closeServer(server) {
   servers.delete(server);
 }
 
+async function verifyInfoPreview() {
+  const entries = new Map(), handles = [], library = { filesById: new Map() };
+  const open = fs.promises.open;
+  const closeResponse = (res, status) => { res.writeHead(status, { "Content-Length": 0 }); res.end(); };
+  const notFound = res => closeResponse(res, 404);
+  const sendJson = (res, status, body) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+  const files = createFileServer({ mimeTypes: {}, normalizeExt: () => ".txt", notFound, stopTimeoutMs: 1000 });
+  const mediaStreamService = createMediaStreamService({
+    maxInfoBytes: 32,
+    decodeInfoBuffer: buffer => buffer.toString("utf8"),
+    isSubtitleLikeInfoText: text => text === "subtitle",
+    parseInfoMetadata: (text, options) => ({ text, ...options }),
+    sendJson, notFound, serveFilePreview: files.serveFilePreview
+  });
+  const workDetailService = createWorkDetailService({ library, mediaStreamService });
+  function add(id, text, options = {}) {
+    const file = { id, path: `synthetic-info:${id}`, name: `${id}.txt`, ext: ".txt", relativePath: `fixture/${id}.txt`, type: "info", size: text.length };
+    const entry = { file, bytes: Buffer.from(text), ...options };
+    library.filesById.set(id, file); entries.set(file.path, entry);
+    return entry;
+  }
+  const delayedReads = [];
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  fs.promises.open = async (target, ...args) => {
+    const entry = entries.get(target);
+    if (!entry) return open(target, ...args);
+    const record = { target, reads: 0, bytes: 0, closed: 0 };
+    handles.push(record);
+    return {
+      async stat() { return { size: entry.statSize ?? entry.bytes.length, isFile: () => true }; },
+      async read(buffer, offset, length, position) {
+        record.reads++;
+        entry.onRead?.();
+        if (entry.held && record.reads === 1) { delayedReads.push(record); await gate; }
+        const bytesRead = entry.bytes.copy(buffer, offset, position, position + Math.min(3, length));
+        record.bytes += bytesRead;
+        return { bytesRead };
+      },
+      async close() { record.closed++; }
+    };
+  };
+  const server = http.createServer(createRequestHandler({
+    attachAccessAnalytics() {}, attachAccessLogger() {}, requestCorsOrigin: () => "", requestAuthState: () => ({ allowed: true }),
+    routeAuth: () => false, routeMedia: () => false, serveStatic: (_req, res) => notFound(res), sendJson,
+    logError(_tag, error) { assert.equal(error.statusCode, 409); },
+    async routeApi(req, res, url) {
+      if (url.pathname === "/api/health") { sendJson(res, 200, { ok: true }); return true; }
+      return routeWorksApi(req, res, url, { sendJson, notFound, workDetailService });
+    }
+  }));
+  const controllers = [], pending = [];
+  try {
+    add("normal", "example text");
+    add("caption", "subtitle");
+    add("grown", "x".repeat(96), { statSize: 5 });
+    add("short", "123", { statSize: 5 });
+    add("oversized", "x".repeat(33));
+    // Retarget the existing index key during the asynchronous read.
+    add("remapped", "old", { onRead: () => {
+      library.filesById.set("remapped", { type: "info", path: "synthetic-info:new-source" });
+    } });
+    add("held", "held payload", { held: true });
+    const address = await listenPrivate(server);
+    const request = (id, options) => fetch(`${address}/api/info/${id}`, options);
+    const normal = await request("normal");
+    assert.equal(normal.status, 200);
+    assert.deepEqual(await normal.json(), { id: "normal", name: "normal.txt", ext: ".txt", size: 12, relativePath: "fixture/normal.txt", content: "example text",
+      metadata: { text: "example text", title: "", fileName: "normal.txt", directoryName: "fixture" } });
+    assert.equal((await (await request("caption")).json()).metadata, null);
+    for (const id of ["grown", "short"]) assert.equal((await request(id)).status, 409);
+    assert.equal(handles.find(handle => handle.target === "synthetic-info:grown").bytes, 6, "growth is detected without reading the unbounded tail");
+    const oversized = await request("oversized");
+    assert.equal(oversized.status, 413); assert.equal((await oversized.json()).size, 33);
+    assert.equal(handles.find(handle => handle.target === "synthetic-info:oversized").reads, 0);
+    assert.equal((await request("remapped")).status, 404);
+    assert.equal((await request("missing")).status, 404);
+    await until(() => files.diagnostics().active === 0, "finished previews release their descriptors");
+
+    for (let index = 0; index < 8; index++) {
+      const controller = new AbortController(); controllers.push(controller);
+      pending.push(request("held", { signal: controller.signal }).then(response => response.status, error => error.name));
+    }
+    await until(() => delayedReads.length === 8, "the preview read slots are physically occupied");
+    assert.deepEqual(await (await fetch(`${address}/api/health`)).json(), { ok: true });
+    controllers[0].abort();
+    assert.equal(await pending[0], "AbortError");
+    const full = await request("held"); assert.equal(full.status, 503);
+    assert.equal(full.headers.get("retry-after"), "1");
+    assert.equal(delayedReads.length, 8, "disconnect cannot release an active file read slot");
+    const stopping = files.stop();
+    let stopped = false;
+    stopping.then(() => { stopped = true; });
+    await tick(); assert.equal(stopped, false);
+    assert.equal(delayedReads.some(handle => handle.closed), false);
+    release(); await stopping; await Promise.all(pending);
+    assert(handles.every(handle => handle.closed === 1));
+    assert.equal(files.diagnostics().active, 0);
+  } finally {
+    release(); controllers.forEach(controller => controller.abort());
+    await Promise.all(pending); await files.stop().catch(() => {});
+    fs.promises.open = open;
+    server.closeAllConnections(); await closeServer(server);
+  }
+}
+
 try {
+  await scenario("info route uses a bounded asynchronous preview and retains physical read slots", verifyInfoPreview);
+  await scenario("slow transcode metadata does not block health or HEAD, and stop waits for it", async () => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const f = fixture({ concurrency: 1, capacity: 4, childCloseTimeoutMs: 500,
+      statFile: filename => filename === "/slow" ? held : { isFile: () => true } });
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url, "http://fixture");
+      if (url.pathname === "/health") { res.writeHead(200); res.end("ok"); return; }
+      f.service.serveTranscodedVideo(req, res, { path: url.pathname }, url);
+    });
+    const address = await listenPrivate(server), controller = new AbortController();
+    const first = fetch(`${address}/slow`, { signal: controller.signal }).then(response => response.status, error => error.name);
+    let queued;
+    try {
+      await until(() => f.statCalls === 1, "first metadata read is pending");
+      queued = fetch(`${address}/queued`);
+      await until(() => f.service.diagnostics().queued === 1, "GET waits for the physical metadata slot");
+      assert.equal(f.statCalls, 1);
+      assert.equal(await (await fetch(`${address}/health`)).text(), "ok");
+      const head = await fetch(`${address}/head`, { method: "HEAD" });
+      assert.equal(head.status, 200); assert.equal(await head.text(), "");
+      assert.equal(f.statCalls, 2); assert.equal(f.children.length, 0);
+
+      controller.abort(); assert.equal(await first, "AbortError");
+      const stopping = f.service.stop();
+      let stopped = false; stopping.then(() => { stopped = true; });
+      assert.equal((await queued).status, 503);
+      assert.equal(stopped, false); assert.equal(f.service.diagnostics().active, 1);
+      release({ isFile: () => true }); await stopping;
+      assert.equal(f.children.length, 0, "late metadata never launches a retired child");
+      assert.equal(f.service.diagnostics().jobs, 0);
+      await f.service.start();
+      assert.equal((await fetch(`${address}/head`, { method: "HEAD" })).status, 200);
+    } finally {
+      controller.abort(); release({ isFile: () => true });
+      await f.service.stop().catch(() => {});
+      await queued?.catch(() => {}); await first;
+      server.closeAllConnections(); await closeServer(server);
+    }
+  });
+
+  await scenario("queued requests check current file availability before spawning", async () => {
+    let removed = false;
+    const f = fixture({ concurrency: 1, capacity: 2,
+      statFile: filename => filename === "second.mp4" && removed ? null : { isFile: () => true },
+      notFound: res => { res.writeHead(404); res.end(); } });
+    f.request(); const queued = f.request({ filePath: "second.mp4" }).res;
+    const child = await f.child();
+    assert.equal(f.statCalls, 1, "queued work has not checked an old path yet");
+    removed = true;
+    child.stdout.write("ok"); await closeFake(child);
+    await until(() => queued.writableFinished, "vanished source finishes with a missing response");
+    assert.equal(queued.status, 404); assert.equal(f.children.length, 1);
+    assert.equal(f.service.diagnostics().jobs, 0);
+  });
+
+  await scenario("gallery and disk compatibility routes defer the source check to the queue", async () => {
+    const checked = [];
+    const f = fixture({ statFile: file => { checked.push(file); return { isFile: () => true }; } });
+    const notFound = () => assert.fail("synthetic source is present");
+    const safeStat = () => assert.fail("compatibility routes must not stat synchronously");
+    const index = { mediaItems: [{ id: "fixture", sourceRoot: "fixture", relativePath: "gallery.mp4", size: 20 }] };
+    const galleryMediaService = createGalleryMediaService({ getImageLibraryIndex: () => index,
+      safeChildPath: (root, relative) => `${root}/${relative}`, safeStat, normalizeExt: () => ".mp4",
+      directVideoExts: new Set([".mp4"]), notFound });
+    const gallery = createMediaRuntime({ galleryMediaService, mediaStreamService: f.service, notFound });
+    const disk = createDiskUsageRoutes({ store: { cachedNode: () => ({ node: { path: "fixture/disk.mp4" } }) },
+      mediaStreamService: f.service, normalizeExt: () => ".mp4", videoExtensions: new Set([".mp4"]), safeStat, notFound });
+    for (const [router, pathname] of [[gallery, "/media/gallery-video/fixture/transcode?mode=remux"], [disk, "/api/disk-usage/media?mode=transcode"]]) {
+      const req = Object.assign(new EventEmitter(), { method: "GET" }), res = new CaptureResponse();
+      assert.equal(await router.routeMedia(req, res, new URL(pathname, "http://fixture")), true);
+      const child = await f.child(checked.length - 1);
+      child.stdout.write("ok"); await closeFake(child);
+      assert.equal(res.body, "ok");
+    }
+    assert.deepEqual(checked, ["fixture/gallery.mp4", "fixture/disk.mp4"]);
+  });
+
+  await scenario("cancelled relocation cannot launch a late child", async () => {
+    let release, started;
+    const held = new Promise(resolve => { release = resolve; });
+    const f = fixture({ concurrency: 1, statFile: () => null });
+    const { res } = f.request({ resolveMissingSource: (_file, signal) => { started = signal; return held; } });
+    try {
+      await until(() => started, "missing source entered relocation");
+      res.destroy(); await until(() => started.aborted, "disconnect aborts further relocation work");
+      assert.equal(f.service.diagnostics().active, 1, "the unresolved metadata operation still owns its slot");
+    } finally { release({ path: "late-relocation.mp4" }); }
+    await until(() => f.service.diagnostics().jobs === 0, "late relocation physically settles");
+    assert.equal(f.children.length, 0);
+  });
+
+  await scenario("startup deadline retains the metadata slot until physical completion", async () => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const f = fixture({ concurrency: 1, capacity: 2, startupTimeoutMs: 20, statFile: () => held });
+    const res = f.request().res;
+    try {
+      await until(() => res.writableFinished, "held source metadata times out");
+      assert.equal(res.status, 504);
+      assert.equal(f.service.diagnostics().active, 1);
+      assert.equal(f.children.length, 0);
+      await assert.rejects(f.service.start(), { code: "TRANSCODE_CLOSE_UNCONFIRMED" });
+    } finally { release({ isFile: () => true }); }
+    await until(() => f.service.diagnostics().jobs === 0, "late physical stat settles without spawning");
+    assert.equal(f.children.length, 0);
+  });
+
   await scenario("finite admission, FIFO, actual-close ownership", async () => {
     const f = fixture({ concurrency: 2, capacity: 3 });
     const first = f.request(), second = f.request(), queued = f.request(), rejected = f.request();
-    assert.equal(f.children.length, 2);
+    await f.child(1);
     assert.equal(f.service.diagnostics().queued, 1);
     await until(() => rejected.res.writableFinished, "full admission responds");
     assert.equal(rejected.res.status, 503);
@@ -134,7 +361,7 @@ try {
     assert.equal(f.children.length, 2, "a kill request does not release the process slot");
     assert.equal(f.service.diagnostics().active, 2);
     await closeFake(f.children[0], null, "SIGKILL");
-    assert.equal(f.children.length, 3);
+    await f.child(2);
     assert.equal(f.service.diagnostics().queued, 0);
     for (const child of f.children.slice(1)) { child.stdout.write("ftypmdat"); await closeFake(child); }
     await until(() => second.res.writableFinished && queued.res.writableFinished, "remaining accepted streams complete");
@@ -157,7 +384,7 @@ try {
   });
 
   await scenario("EOF does not finish until successful child close", async () => {
-    const f = fixture(); const { res } = f.request(); const child = f.children[0];
+    const f = fixture(); const { res } = f.request(); const child = await f.child();
     assert.equal(res.headersSent, false);
     child.stdout.end("ftypmdat"); await tick();
     assert.equal(res.status, 200);
@@ -170,7 +397,7 @@ try {
   });
 
   await scenario("successful close also waits for buffered EOF", async () => {
-    const f = fixture(); const { res } = f.request({ slow: true }); const child = f.children[0];
+    const f = fixture(); const { res } = f.request({ slow: true }); const child = await f.child();
     child.stdout.write("first"); child.stdout.end("second"); await tick();
     child.actualClosed = true; child.exitCode = 0; child.emit("close", 0); await tick();
     assert.equal(res.writableEnded, false, "close alone must not truncate unread bytes");
@@ -181,7 +408,7 @@ try {
   });
 
   await scenario("output failure destroys instead of clean 200 EOF", async () => {
-    const f = fixture(); const { res } = f.request(); const child = f.children[0];
+    const f = fixture(); const { res } = f.request(); const child = await f.child();
     child.stdout.end("partial"); await tick();
     await closeFake(child, 17);
     assert.equal(res.status, 200);
@@ -193,7 +420,7 @@ try {
 
   await scenario("pre-output and synchronous spawn failures preserve 500", async () => {
     const f = fixture(); const { res } = f.request();
-    f.children[0].stderr.write("synthetic codec error");
+    (await f.child()).stderr.write("synthetic codec error");
     await closeFake(f.children[0], 1);
     await until(() => res.writableFinished, "failure responds");
     assert.equal(res.status, 500); assert.match(res.body, /视频转码失败/);
@@ -207,7 +434,7 @@ try {
   await scenario("pipe errors are handled and retain live ownership", async () => {
     for (const stream of ["stdout", "stderr"]) {
       const f = fixture({ concurrency: 1, capacity: 2 }); const { res } = f.request(); f.request();
-      const child = f.children[0];
+      const child = await f.child();
       assert.doesNotThrow(() => child[stream].emit("error", new Error(`synthetic ${stream} error`)));
       await until(() => res.writableFinished, "pipe error responds");
       assert.equal(res.status, 500);
@@ -215,18 +442,19 @@ try {
       assert.equal(f.children.length, 1);
       assert.doesNotThrow(() => child[stream].emit("error", new Error("repeat while closing")));
       await closeFake(child, null, "SIGKILL");
-      assert.equal(f.children.length, 2);
-      f.children[1].stdout.write("ok"); await closeFake(f.children[1]);
+      const next = await f.child(1);
+      next.stdout.write("ok"); await closeFake(next);
     }
   });
 
   await scenario("request abort and response errors cancel child", async () => {
     const f = fixture(); const aborted = f.request();
+    await f.child();
     aborted.req.aborted = true; aborted.req.emit("aborted"); await tick();
     assert.deepEqual(f.children[0].killCalls, ["SIGKILL"]);
     assert.equal(f.service.diagnostics().active, 1);
     await closeFake(f.children[0], null, "SIGKILL");
-    const response = f.request().res; f.children[1].stdout.write("partial"); await tick();
+    const response = f.request().res; (await f.child(1)).stdout.write("partial"); await tick();
     response.emit("error", new Error("synthetic response error")); await tick();
     assert.deepEqual(f.children[1].killCalls, ["SIGKILL"]);
     await closeFake(f.children[1], null, "SIGKILL");
@@ -234,7 +462,7 @@ try {
   });
 
   await scenario("backpressure pauses and preserves all chunk bytes", async () => {
-    const f = fixture(); const { res } = f.request({ slow: true }); const child = f.children[0];
+    const f = fixture(); const { res } = f.request({ slow: true }); const child = await f.child();
     const pieces = ["first", "second", "third", "fourth"];
     child.stdout.write(pieces[0]); await tick();
     for (const piece of pieces.slice(1)) child.stdout.write(piece);
@@ -264,7 +492,7 @@ try {
 
   await scenario("EOF with a still-live child is bounded and killed", async () => {
     const f = fixture({ childCloseTimeoutMs: 20 }); const { res } = f.request();
-    f.children[0].stdout.end("partial");
+    (await f.child()).stdout.end("partial");
     await until(() => res.destroyed, "post-EOF close timeout destroys response");
     assert.deepEqual(f.children[0].killCalls, ["SIGKILL"]);
     assert.equal(f.service.diagnostics().active, 1);
@@ -273,6 +501,7 @@ try {
 
   await scenario("stop drains actual close and fences a newer stop intent", async () => {
     const f = fixture({ concurrency: 1, capacity: 2 }); f.request(); const queued = f.request().res;
+    await f.child();
     const stopping = f.service.stop(); let stopped = false; stopping.then(() => { stopped = true; });
     const restarting = f.service.start(); const rejectedRestart = assert.rejects(restarting, { code: "TRANSCODE_STOPPED" });
     f.service.beginStop(); await tick();
@@ -282,12 +511,13 @@ try {
     await closeFake(f.children[0], null, "SIGKILL"); await stopping; await rejectedRestart;
     assert.equal(f.service.diagnostics().accepting, false);
     await f.service.start();
-    const restarted = f.request().res; f.children[1].stdout.write("ok"); await closeFake(f.children[1]);
+    const restarted = f.request().res; (await f.child(1)).stdout.write("ok"); await closeFake(f.children[1]);
     await until(() => restarted.writableFinished, "explicit later start resumes service");
   });
 
   await scenario("unconfirmed close fails closed, keeps owner, blocks queued spawn", async () => {
     const f = fixture({ concurrency: 1, capacity: 2, childCloseTimeoutMs: 20 }); const active = f.request(); const queued = f.request().res;
+    await f.child();
     active.res.destroy(); await tick();
     await assert.rejects(f.service.start(), { code: "TRANSCODE_CLOSE_UNCONFIRMED" });
     await until(() => !f.service.diagnostics().accepting, "close timeout fails closed");
@@ -305,13 +535,14 @@ try {
 
   await scenario("bounded stderr logging and unchanged codec/remux arguments", async () => {
     const f = fixture(); f.request({ query: "?mode=remux&audio=copy&t=12.8" });
+    await f.child();
     const args = f.args[0]; assert.equal(args[args.indexOf("-ss") + 1], "12");
     assert.equal(args[args.indexOf("-c:v") + 1], "copy"); assert.equal(args[args.indexOf("-c:a") + 1], "copy");
     assert.equal(args.includes("-vf"), false);
     for (let index = 0; index < 10; index++) f.children[0].stderr.write("x".repeat(2000));
     assert.equal(f.warnings.join("").length, 8000);
     await closeFake(f.children[0], 1);
-    f.request(); const transcodeArgs = f.args[1];
+    f.request(); await f.child(1); const transcodeArgs = f.args[1];
     assert.equal(transcodeArgs[transcodeArgs.indexOf("-c:v") + 1], "h264_nvenc");
     assert.match(transcodeArgs[transcodeArgs.indexOf("-vf") + 1], /min\(iw,4096\).*min\(ih,4096\)/);
     f.children[1].stdout.write("ok"); await closeFake(f.children[1]);

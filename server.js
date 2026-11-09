@@ -72,7 +72,7 @@ import { createMediaBlobWorkerClient } from "./src/platform/server/media-blob-wo
 import { createMediaResponseService } from "./src/platform/server/media-response-service.js";
 import { createMediaStreamService } from "./src/platform/server/media-stream-service.js";
 import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/platform/server/request-io.js";
-import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/platform/server/responses.js";
+import { sendJson, sendJsonParts, sendText, sendHtml, redirect, notFound } from "./src/platform/server/responses.js";
 import { createServerHost } from "./src/platform/server/server-host.js";
 import { createStaticFileServer } from "./src/platform/server/static-files.js";
 import { createVideoProbeCacheService } from "./src/platform/server/video-probe-cache-service.js";
@@ -430,8 +430,8 @@ const mediaStreamService = createMediaStreamService({
   maxInfoBytes: MAX_INFO_BYTES,
   notFound,
   parseInfoMetadata,
-  safeStat,
   sendJson,
+  serveFilePreview: fileServer.serveFilePreview,
   serveRangedFile
 });
 const mediaFileRelocationService = createMediaFileRelocationService({ safeStat });
@@ -1248,9 +1248,10 @@ const moduleRegistry = await discoverFanHaoModules({
         resolveLibraryPersonByPublicId,
         resolveLibraryWorkByPublicId,
         resolvePlayableVideoFile,
-        resolveVideoFileByPublicId,
+        resolveMissingVideoSource: mediaFileRelocationService.resolveMissingSource,
         searchPeople,
         sendJson,
+        sendJsonParts,
         sortWorkList,
         storedWorkCodeKey,
         studioService,
@@ -1273,6 +1274,12 @@ const moduleRegistry = await discoverFanHaoModules({
       }),
       contentIndex: {
         imageLibraryService,
+        mangaListConfig: withGallery ? {
+          workerUrl: new URL("./src/apps/manga-list-worker.js", import.meta.url),
+          root: MANGA_LIBRARY_ROOT,
+          databasePath: MANGA_DATABASE_PATH,
+          maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT
+        } : null,
         photoCategoryCoverStore,
         photoLibraryStore,
         photoSetService,

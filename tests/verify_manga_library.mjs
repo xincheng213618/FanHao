@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { createMangaService, mangaWholeDownloadReady as serverMangaWholeDownloadReady } from "../src/modules/photos/server/manga-service.js";
 import { streamStoredZip } from "../src/modules/photos/server/stored-zip-stream.js";
 import { mangaJobChapterStats, mangaTaskMonitorDelayMs, mangaWholeDownloadReady, mergeMangaTaskState, photoIndexTaskProgress, selectMangaTaskDisplayJobs } from "../android-client/www/platform/content-index/channel-views.js?verify-manga-tasks=1";
+import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1))), "..");
 const routerSource = fs.readFileSync(path.join(projectRoot, "public", "js", "router.js"), "utf8");
@@ -184,9 +184,10 @@ assert.doesNotMatch(androidAppSource, /window\.confirm/);
 assert.match(androidMangaSource, /renderMangaLibraryFailure/);
 assert.match(androidMangaSource, /韩漫书库暂时打不开/);
 assert.match(androidMangaSource, /if \(pageComplete \|\| loadingMore\) \{\s*renderChannelData\(normalizedMode, currentPage, null, pendingPaging\);\s*renderedCache = true;\s*if \(!loadingMore\) renderedCacheSignature = channelDataSignature\(currentPage\);\s*\} else \{/s, "pending pages must remain rendered; only a full refresh needs the cached page signature");
-assert.match(androidMangaSource, /let cached = pageComplete && !loadingMore \? null : await readCachedJson\(activeUrl, path\)\.catch\(\(\) => null\);\s*if \(!cached && offset === 0 && requestLimit > 5000 && !pageComplete && isCurrent\(\)\) \{\s*cached = await readCachedJson\(activeUrl, channelItemsPath\(normalizedMode, 5000, filters, 0\)\)\.catch\(\(\) => null\);\s*\}\s*if \(!isCurrent\(\)\) return;/s, "complete pages must skip redundant cache reads; large cold ranges may use the same-source first page only while their request owner is current");
+assert.match(androidMangaSource, /let cached = pageComplete && !loadingMore \? null : await readCachedJson\(activeUrl, cachePath\)\.catch\(\(\) => null\);\s*if \(!cached && offset === 0 && requestLimit > 5000 && !pageComplete && isCurrent\(\)\) \{\s*cached = await readCachedJson\(activeUrl, channelItemsPath\(normalizedMode, 5000, filters, 0\)\)\.catch\(\(\) => null\);\s*\}/s, "complete pages skip redundant cache reads and large cold ranges use only the current source's first cached page");
+assert.match(androidMangaSource, /if \(!isCurrent\(\)\) return;\s*if \(cached\?\.payload && !\(offset > 0 && channelRevisionChanged\(basePage, cached\.payload\)\)\)/s, "after all cache fallbacks, the page must still own the request before rendering cached data");
 assert.match(androidMangaSource, /当前书库来自手机缓存/);
-assert.match(androidMangaSource, /const data = await fetchJson\(request\.activeUrl, path, \{\s*timeoutMs: mode === "manga" \? 10000 : 12000, signal: request\.signal,\s*\.\.\.\(request\.accountScope \? \{ accountScope: request\.accountScope \} : \{\}\)\s*\}\);\s*if \(!request\.isCurrent\(\)\) return null;/s, "consistent page reads must keep the manga timeout, cancellation signal and captured account scope, then reject stale replies");
+assert.match(androidMangaSource, /data = await fetchJson\(request\.activeUrl, path, \{\s*timeoutMs: mode === "manga" \? 10000 : 12000, signal: request\.signal,\s*\.\.\.\(request\.accountScope \? \{ accountScope: request\.accountScope \} : \{\}\)\s*\}\);\s*\} catch \(error\) \{\s*if \([^\r\n]+\) throw error;\s*collectionPage = false;\s*continue;\s*\}\s*if \(!request\.isCurrent\(\)\) return null;/s, "consistent page reads must keep the manga timeout, cancellation signal and captured account scope, then reject stale replies");
 assert.match(androidAppSource, /currentView === "mangaDetail"/);
 assert.match(androidAppSource, /showView\("channel", \{ mode: "manga" \}/);
 
@@ -261,7 +262,7 @@ assert.doesNotMatch(androidMangaSource, /createPhotoIndexManager|\/api\/admin\/t
 assert.match(androidMangaSource, /if \(!loadingMore && renderedCache && channelDataSignature\(mergedData\) === renderedCacheSignature\) \{\s*applyChannelHeader\(normalizedMode, mergedData\);\s*return;\s*\}/s, "unchanged full refresh responses must still refresh the content header; appends must render their new page");
 assert.doesNotMatch(androidMangaCssSource, /\.photo-index-manager|\.photo-index-progress-track/);
 
-const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-zip-"));
+const { tempDir: temporaryRoot, cleanup: cleanupZipFixture } = createVerifiedTempDir("fanhao-manga-zip-");
 try {
   const firstPath = path.join(temporaryRoot, "first.zip");
   const secondPath = path.join(temporaryRoot, "second.zip");
@@ -280,10 +281,10 @@ try {
   assert.equal(archive.readUInt32LE(archive.length - 22), 0x06054b50);
   assert.equal(archive.readUInt16LE(archive.length - 14), 2);
 } finally {
-  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  cleanupZipFixture();
 }
 
-const updateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-update-service-"));
+const { tempDir: updateRoot, cleanup: cleanupUpdateFixture } = createVerifiedTempDir("fanhao-manga-update-service-");
 try {
   const cacheRoot = path.join(updateRoot, "55comic_cache_3980");
   fs.mkdirSync(cacheRoot, { recursive: true });
@@ -364,14 +365,14 @@ try {
   assert.equal(initialStorage.imageCount, 2);
   assert.equal(initialStorage.trash.itemCount, 0);
   assert.ok(initialStorage.bytes >= pngHeader.length * 2);
-  const firstChapter = mangaService.publicChapter(cacheRoot, 1);
+  const firstChapter = await mangaService.publicChapter(cacheRoot, 1);
   assert.equal(firstChapter.images[0].width, 720);
   assert.equal(firstChapter.images[0].height, 800);
   assert.equal(firstChapter.navigation.position, 1);
   assert.equal(firstChapter.navigation.total, 2);
   assert.equal(firstChapter.navigation.previous, null);
   assert.equal(firstChapter.navigation.next.index, 2);
-  const secondChapter = mangaService.publicChapter(cacheRoot, 2);
+  const secondChapter = await mangaService.publicChapter(cacheRoot, 2);
   assert.equal(secondChapter.navigation.previous.index, 1);
   assert.equal(secondChapter.navigation.next, null);
 
@@ -531,10 +532,10 @@ try {
   assert.equal(purged.storage.trash.itemCount, 0);
   assert.equal(fs.existsSync(restoredTrashRoot), false);
 } finally {
-  fs.rmSync(updateRoot, { recursive: true, force: true });
+  cleanupUpdateFixture();
 }
 
-const persistenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-job-history-"));
+const { tempDir: persistenceRoot, cleanup: cleanupPersistenceFixture } = createVerifiedTempDir("fanhao-manga-job-history-");
 try {
   class PersistentFakeChild extends EventEmitter {
     constructor() {
@@ -632,10 +633,10 @@ try {
   assert.deepEqual(afterRepairRestart.listJobs(), []);
   assert.deepEqual(createPersistentService().listJobs(), [], "cleared terminal history must stay cleared after restart");
 } finally {
-  fs.rmSync(persistenceRoot, { recursive: true, force: true });
+  cleanupPersistenceFixture();
 }
 
-const malformedHistoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-job-history-invalid-"));
+const { tempDir: malformedHistoryRoot, cleanup: cleanupMalformedHistoryFixture } = createVerifiedTempDir("fanhao-manga-job-history-invalid-");
 try {
   const options = {
     root: malformedHistoryRoot,
@@ -686,7 +687,7 @@ try {
   assert.equal(bounded.length, 50, "restored task history must stay bounded");
   assert.equal(bounded[0].id, jobs.at(-1).id, "restored task history must retain newest jobs first");
 } finally {
-  fs.rmSync(malformedHistoryRoot, { recursive: true, force: true });
+  cleanupMalformedHistoryFixture();
 }
 
 console.log("Manga library verification passed.");

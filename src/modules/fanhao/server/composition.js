@@ -22,6 +22,7 @@ export function createFanhaoDependencies(deps) {
       "requestAccess",
       "requireLocalAdmin",
       "sendJson",
+      "sendJsonParts",
       "userStateSummary"
     ]), createPublicPersonPresenter: deps.createPublicPersonPresenter },
     settings: pick(deps, ["appConfigService"]),
@@ -107,7 +108,7 @@ export function createFanhaoDependencies(deps) {
       "requireTrustedFileMutation",
       "resolveLibraryPersonByPublicId",
       "resolveLibraryWorkByPublicId",
-      "resolveVideoFileByPublicId",
+      "resolveMissingVideoSource",
       "searchPeople",
       "sendJson",
       "storedWorkCodeKey",

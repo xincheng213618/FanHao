@@ -37,9 +37,9 @@ const runtimeFunction = name => {
 };
 const runtimeContext = vm.createContext({
   fs: { ...fs, statSync(file, ...args) { if (file === fractional) { sourceLookupStats++; throw new Error("unexpected source lookup stat"); } return fs.statSync(file, ...args); } },
-  path, crypto, SHORT_VIDEO_STARTUP_CACHE_BYTES: 4, sharedCache: { rootDir: root, touch() {} }
+  path, crypto, SHORT_VIDEO_STARTUP_CACHE_BYTES: 4, sharedCache: { rootDir: root, touch() {} }, videoCacheActiveJob: null
 });
-vm.runInContext(`${["cachedStartupVideoFile", "startupVideoCacheDescriptor", "safeStat", "hashText", "safeFilePart"].map(runtimeFunction).join("\n")}\nglobalThis.startup = { cachedStartupVideoFile, startupVideoCacheDescriptor };`, runtimeContext);
+vm.runInContext(`${["cachedStartupVideoFile", "isStartupPrefixPublishing", "startupVideoCacheDescriptor", "safeStat", "hashText", "safeFilePart"].map(runtimeFunction).join("\n")}\nglobalThis.startup = { cachedStartupVideoFile, startupVideoCacheDescriptor };`, runtimeContext);
 const startupDescriptor = runtimeContext.startup.startupVideoCacheDescriptor(fractionalFile.id, fractionalFile);
 fs.mkdirSync(startupDescriptor.cacheDir, { recursive: true }); fs.writeFileSync(startupDescriptor.cachePath, original.subarray(0, 4));
 const fractionalPrefix = runtimeContext.startup.cachedStartupVideoFile(fractionalFile.id, fractionalFile);

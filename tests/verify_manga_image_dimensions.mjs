@@ -8,11 +8,11 @@ import { createMangaService } from "../src/modules/photos/server/manga-service.j
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-manga-dimensions-"));
 const book = path.join(root, "smtt6_cache_dimensions");
 fs.mkdirSync(book);
-const real = { open: fs.openSync, read: fs.readSync, close: fs.closeSync };
+const real = { open: fs.promises.open, stat: fs.promises.stat, openSync: fs.openSync, statSync: fs.statSync };
 const owned = new Set();
 const files = new Set();
-const handles = new Map();
-let observed = null, shortReadLimit = Infinity, failRead = false;
+const handles = new Set();
+let observed = null, shortReadLimit = Infinity, failRead = false, closeGate = null, failClose = false;
 const cases = [
   ["png", image("png"), { width: 720, height: 1080 }, 4096],
   ["gif", image("gif"), { width: 720, height: 1080 }, 4096],
@@ -34,25 +34,41 @@ try {
     fs.writeFileSync(file, bytes); owned.add(file); files.add(file);
     return { index: index + 1, title: name, status: "done", images: [{ index: 1, local_path: local, status: "downloaded" }] };
   });
+  const longChapter = cases.length + 1;
+  chapters.push({ index: longChapter, title: "concurrent fixture", status: "done", images: cases.slice(0, 8).map(([name], index) => ({
+    index: index + 1, local_path: `${name}.bin`, status: "downloaded"
+  })) });
   for (const [name, data] of [["manifest.json", { chapters }], ["catalog.json", { title: "Dimensions", url: "https://synthetic.invalid/dimensions" }]]) {
     const file = path.join(book, name); fs.writeFileSync(file, JSON.stringify(data)); owned.add(file);
   }
-  fs.openSync = (...args) => {
-    const descriptor = real.open(...args);
-    if (files.has(args[0])) { handles.set(descriptor, args[0]); if (observed) observed.opens++; }
-    return descriptor;
+  fs.openSync = (source, ...args) => {
+    assert.equal(files.has(source), false, "chapter page opens must be asynchronous");
+    return real.openSync(source, ...args);
   };
-  fs.readSync = (descriptor, buffer, offset, length, position) => {
-    if (!handles.has(descriptor)) return real.read(descriptor, buffer, offset, length, position);
-    if (failRead) throw Object.assign(new Error("controlled image read failure"), { code: "EIO" });
-    const count = real.read(descriptor, buffer, offset, Math.min(length, shortReadLimit), position);
-    if (observed) { observed.calls++; observed.bytes += count; }
-    return count;
+  fs.statSync = (source, ...args) => {
+    assert.equal(files.has(source), false, "chapter page stats must be asynchronous");
+    return real.statSync(source, ...args);
   };
-  fs.closeSync = descriptor => {
-    const result = real.close(descriptor);
-    if (handles.delete(descriptor) && observed) observed.closes++;
-    return result;
+  fs.promises.open = async (source, ...args) => {
+    const handle = await real.open(source, ...args);
+    if (!files.has(source)) return handle;
+    const read = handle.read.bind(handle), close = handle.close.bind(handle);
+    handles.add(handle);
+    if (observed) observed.opens++;
+    handle.read = async (buffer, offset, length, position) => {
+      if (failRead) throw Object.assign(new Error("controlled image read failure"), { code: "EIO" });
+      const result = await read(buffer, offset, Math.min(length, shortReadLimit), position);
+      if (observed) { observed.calls++; observed.bytes += result.bytesRead; }
+      return result;
+    };
+    handle.close = async () => {
+      if (closeGate) await closeGate;
+      await close();
+      handles.delete(handle);
+      if (observed) observed.closes++;
+      if (failClose) throw Object.assign(new Error("controlled image close failure"), { code: "EIO" });
+    };
+    return handle;
   };
   const service = createMangaService({ root, safeStat(file) { try { return fs.statSync(file); } catch { return null; } } });
   for (let index = 0; index < cases.length; index++) {
@@ -60,7 +76,7 @@ try {
     shortReadLimit = name.startsWith("short-") ? 37 : Infinity;
     failRead = name === "read-error";
     observed = { name, bytes: 0, calls: 0, opens: 0, closes: 0 };
-    const first = service.publicChapter(book, index + 1);
+    const first = await service.publicChapter(book, index + 1);
     assert.equal(first.images.length, 1);
     assert.equal(first.images[0].width, dimensions.width, `${name} width`);
     assert.equal(first.images[0].height, dimensions.height, `${name} height`);
@@ -68,26 +84,102 @@ try {
     assert.equal(observed.opens, observed.closes, `${name}: every opened descriptor must close`);
     stats.push({ ...observed });
     observed = { bytes: 0, calls: 0, opens: 0, closes: 0 };
-    assert.deepEqual(service.publicChapter(book, index + 1), first, `${name}: cached response stays identical`);
-    assert.equal(observed.opens, 0, "unchanged files must reuse cached dimensions, including unsupported formats");
+    assert.deepEqual(await service.publicChapter(book, index + 1), first, `${name}: repeated response stays identical`);
+    assert.equal(observed.opens, name === "read-error" ? 1 : 0,
+      "only transient read errors should reopen an unchanged file");
   }
   failRead = false; shortReadLimit = Infinity;
   const changed = Buffer.concat([image("png"), Buffer.from([0])]);
   changed.writeUInt32BE(721, 16);
-  fs.writeFileSync(path.join(book, "png.bin"), changed);
+  await fs.promises.writeFile(path.join(book, "png.bin"), changed);
   observed = { bytes: 0, calls: 0, opens: 0, closes: 0 };
-  const refreshed = service.publicChapter(book, 1);
+  const refreshed = await service.publicChapter(book, 1);
   assert.equal(refreshed.images[0].width, 721, "file signature changes must invalidate cached dimensions");
   assert.equal(observed.bytes, 4096);
+  assert.equal((await service.publicChapter(book, cases.length)).images[0].width, 720, "a transient read failure is retryable");
+  observed = null;
+  await verifyReplacement();
+  await verifyAdmissionAndStop(longChapter);
+  await verifyUnconfirmedClose();
   assert.equal(handles.size, 0);
-  console.log(JSON.stringify({ ok: true, stats, cacheInvalidation: true }));
+  console.log(JSON.stringify({ ok: true, stats, cacheInvalidation: true, chapterAdmissionAndPhysicalClose: true }));
 } finally {
-  fs.openSync = real.open; fs.readSync = real.read; fs.closeSync = real.close;
-  for (const descriptor of handles.keys()) { try { real.close(descriptor); } catch {} }
+  fs.openSync = real.openSync; fs.statSync = real.statSync;
+  fs.promises.open = real.open; fs.promises.stat = real.stat;
+  closeGate = null; failClose = false;
+  for (const handle of handles) { try { await handle.close(); } catch {} }
   for (const file of owned) { assert.equal(path.dirname(file), book); fs.unlinkSync(file); }
   fs.rmdirSync(book);
   assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
   fs.rmdirSync(root);
+}
+
+async function verifyReplacement() {
+  const source = path.join(book, "png.bin");
+  const service = createMangaService({ root });
+  let checks = 0;
+  fs.promises.stat = async (target, ...args) => {
+    if (target === source && ++checks === 2) {
+      assert.equal(handles.size, 0, "rechecking a path must follow the actual handle close");
+      const before = await real.stat(source);
+      const replacement = Buffer.concat([image("png"), Buffer.from([0])]);
+      replacement.writeUInt32BE(722, 16);
+      const sibling = path.join(book, "replacement.bin");
+      fs.writeFileSync(sibling, replacement);
+      owned.add(sibling);
+      fs.utimesSync(sibling, before.atime, before.mtime);
+      fs.renameSync(sibling, source);
+      owned.delete(sibling);
+    }
+    return real.stat(target, ...args);
+  };
+  try {
+    assert.equal((await service.publicChapter(book, 1)).images[0].width, undefined, "replacement cannot publish the old handle's dimensions");
+    assert.equal((await service.publicChapter(book, 1)).images[0].width, 722, "same-sized replacement is readable on retry");
+  } finally {
+    fs.promises.stat = real.stat;
+    await service.stopChapterReads();
+  }
+}
+
+async function verifyAdmissionAndStop(index) {
+  const service = createMangaService({ root });
+  const controllers = Array.from({ length: 16 }, () => new AbortController());
+  let release, stopped = false;
+  closeGate = new Promise(resolve => { release = resolve; });
+  const tasks = controllers.map(({ signal }) => service.publicChapter(book, index, undefined, {}, { signal }).catch(error => error.code));
+  try {
+    await assert.rejects(service.publicChapter(book, index), { code: "MANGA_DIMENSIONS_BUSY", statusCode: 503 });
+    for (let i = 0; handles.size < 4 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 2));
+    assert.equal(handles.size, 4, "two chapters may open no more than two pages each");
+    controllers.forEach(controller => controller.abort());
+    assert.deepEqual(await Promise.all(tasks), Array(16).fill("MANGA_DIMENSIONS_STOPPED"));
+    const stopping = service.stopChapterReads().then(() => { stopped = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, false);
+    assert.equal(handles.size, 4, "disconnected operations still own held physical closes");
+    release();
+    await stopping;
+    assert.equal(handles.size, 0);
+    closeGate = null;
+    await service.startChapterReads();
+    const resumed = await service.publicChapter(book, index);
+    assert.deepEqual(resumed.images.map(page => page.index), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(resumed.images.map(page => page.width), [722, 720, 720, 720, 720, undefined, undefined, 720]);
+  } finally {
+    release(); closeGate = null;
+    await service.stopChapterReads();
+  }
+}
+
+async function verifyUnconfirmedClose() {
+  const service = createMangaService({ root });
+  failClose = true;
+  try {
+    await assert.rejects(service.publicChapter(book, 1), { code: "MANGA_DIMENSIONS_STOPPED", statusCode: 503 });
+    await assert.rejects(service.stopChapterReads(), { code: "MANGA_DIMENSIONS_CLOSE_INCOMPLETE" });
+    await assert.rejects(service.startChapterReads(), { code: "MANGA_DIMENSIONS_CLOSE_INCOMPLETE" });
+  } finally { failClose = false; }
 }
 
 function image(format, marker = 20) {

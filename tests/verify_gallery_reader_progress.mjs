@@ -73,7 +73,14 @@ try {
     // tuple against the original linear rule on that same current native DOM.
     const visible = rows => rows.map(({ index: _index, text: _text, percentage: _percentage, ...row }) => ({ ...row,
       figures: row.figures.map(({ loading: _loading, ...figure }) => figure) }));
-    assert.deepEqual(visible(actual), visible(expected), "complete renderer static visible DOM"); comparisons = actual.length;
+    // These controls were added after the pinned progress baseline.
+    const archiveControls = [
+      { text: "[A]", pressed: "false", disabled: false },
+      { text: "定位文件", pressed: null, disabled: false }
+    ];
+    const expectedVisible = visible(expected).map(row => ({ ...row,
+      controls: [row.controls[0], ...archiveControls, ...row.controls.slice(1)] }));
+    assert.deepEqual(visible(actual), expectedVisible, "complete renderer static visible DOM"); comparisons = actual.length;
     const measurements = [];
     for (const count of [200, 1000, 3000]) {
       const previous = await measure(before, count), next = await measure(current, count);

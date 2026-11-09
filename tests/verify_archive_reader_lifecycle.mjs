@@ -162,10 +162,35 @@ async function verifyOldSchemaAndZipIdentity() {
   const readerCache = createImageReaderCacheService({ rootDir:path.join(temporary,"zip-cache"),getMaxBytes:()=>1e6,cleanupTargetRatio:.8,cleanupIntervalMs:60000,warn() {} }); services.push(readerCache);
   const database = galleryDb(); const make = () => archiveService({ pythonPath:process.env.PYTHON || "python", helperPath:path.join(projectRoot,"tools/archive_image_reader.py"),getImageGalleryDb:()=>database,
     imageReaderCacheService:readerCache,serveInlineFile: (_res,file) => { served.push(fs.readFileSync(file,"utf8")); return true; } });
-  const first = make(); await first.serveArchiveMemberImage(response(),{archivePath:source,memberPath:"cover.jpg",sourceType:"synthetic"}); await first.stop();
+  const album = { id: "same-count", sourceRoot: temporary, relativePath: path.basename(source),
+    archiveIdentity: archiveDiskSignature(source, original).archiveIdentity, updatedAt: original.mtime.toISOString() };
+  const { archiveIdentity: _published, ...legacyAlbum } = album;
+  const detail = (archive, item) => createPhotoSetService({ archiveImagesPayload: archive.archiveImagesPayload,
+    safeChildPath: path.join }).publicDetail(item, { imageLimit: 1 });
+  const first = make();
+  const before = await detail(first, album);
+  const legacyBefore = await detail(first, legacyAlbum);
+  await first.serveArchiveMemberImage(response(),{archivePath:source,memberPath:"cover.jpg",sourceType:"synthetic"}); await first.stop();
   fs.writeFileSync(replacement,storedZip("cover.jpg","BBB")); fs.utimesSync(replacement,original.atime,original.mtime); fs.renameSync(replacement,source);
   const changed = fs.statSync(source); assert.equal(changed.size,original.size); assert(Math.abs(changed.mtimeMs-original.mtimeMs)<1,"fixture preserves milliseconds"); assert.notEqual(String(changed.ino),String(original.ino));
-  const second = make(); await second.serveArchiveMemberImage(response(),{archivePath:source,memberPath:"cover.jpg",sourceType:"synthetic"}); assert.deepEqual(served,["AAA","BBB"]);
+  const second = make();
+  const after = await detail(second, album);
+  assert.equal(before.archiveIdentity, album.archiveIdentity);
+  assert.equal(after.imageCount, before.imageCount);
+  assert.equal(after.updatedAt, before.updatedAt, "the fixture keeps the last published album");
+  assert.equal(after.archiveIdentity, archiveDiskSignature(source, changed).archiveIdentity,
+    "details use the verified identity from the read even before the gallery rescans");
+  assert.notEqual(after.archiveIdentity, before.archiveIdentity);
+  assert.match(before.imageRevision, /^[a-f0-9]{24}$/u);
+  assert.match(after.imageRevision, /^[a-f0-9]{24}$/u);
+  assert.notEqual(after.imageRevision, before.imageRevision);
+  assert.equal((await detail(second, album)).imageRevision, after.imageRevision, "the verified revision is stable across reads");
+  assert.equal(after.images[0].url, before.images[0].url, "the shared numbered media URL remains compatible with Android");
+  const legacyDetail = await detail(second, legacyAlbum);
+  assert.equal(Object.hasOwn(legacyDetail, "archiveIdentity"), false, "older album metadata does not gain a new raw identity field");
+  assert.equal(legacyBefore.imageRevision, before.imageRevision);
+  assert.equal(legacyDetail.imageRevision, after.imageRevision, "older album metadata gets the same live opaque revision");
+  await second.serveArchiveMemberImage(response(),{archivePath:source,memberPath:"cover.jpg",sourceType:"synthetic"}); assert.deepEqual(served,["AAA","BBB"]);
   await second.stop(); scenarios += 2;
 }
 
@@ -721,6 +746,119 @@ async function verifyPhotoArchiveVideo() {
   scenarios++;
 }
 
+async function verifyPhotoImageRevision() {
+  const source = path.join(temporary, "versioned-photo.zip");
+  const replacement = path.join(temporary, "replacement-photo.zip");
+  const cacheRoot = path.join(temporary, "versioned-photo-cache");
+  const member = "page.jpg";
+  const replace = content => {
+    const previous = fs.statSync(source);
+    fs.writeFileSync(replacement, storedZip(member, content));
+    fs.utimesSync(replacement, previous.atime, previous.mtime);
+    fs.renameSync(replacement, source);
+    const next = fs.statSync(source);
+    assert.equal(next.size, previous.size);
+    assert(Math.abs(next.mtimeMs - previous.mtimeMs) < 1);
+    assert.notEqual(String(next.ino), String(previous.ino));
+  };
+  fs.writeFileSync(source, storedZip(member, "AAA"));
+  const db = galleryDb();
+  const album = { id: "revision", sourceRoot: temporary, relativePath: path.basename(source), updatedAt: "published" };
+  const normalizeExt = file => path.extname(file).toLowerCase();
+  const mimeTypes = { ".jpg": "image/jpeg" };
+  const notFound = res => { res.writeHead(404); res.end(); };
+  const sendJson = (res, status, body) => {
+    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify(body));
+  };
+  const files = createFileServer({ mimeTypes, normalizeExt, notFound });
+  let replacementDuringExtraction = "";
+  const archive = archiveService({
+    pythonPath: process.env.PYTHON || "python", helperPath: path.join(projectRoot, "tools/archive_image_reader.py"),
+    getImageGalleryDb: () => db, imageReaderCacheService: { rootDir: cacheRoot, touch: async () => {}, scheduleCleanup() {} },
+    serveInlineFile: files.serveInlineFile, notFound,
+    spawnProcess(command, args, options) {
+      if (args[1] === "extract" && replacementDuringExtraction) {
+        replace(replacementDuringExtraction);
+        replacementDuringExtraction = "";
+      }
+      return spawn(command, args, options);
+    }
+  });
+  let replacementAfterListing = "";
+  const photoSetService = createPhotoSetService({
+    photoSetById: id => id === album.id ? album : null, safeChildPath: path.join, normalizeExt, mimeTypes, notFound,
+    archiveImagesPayload: archive.archiveImagesPayload, serveArchiveMemberImage: archive.serveArchiveMemberImage,
+    listArchiveImages: async (...args) => {
+      const images = await archive.listArchiveImages(...args);
+      if (replacementAfterListing) {
+        replace(replacementAfterListing);
+        replacementAfterListing = "";
+      }
+      return images;
+    }
+  });
+  services.push(photoSetService);
+  const runtime = createPhotosRuntime({ photoSetService, notFound, sendJson, imageReaderCacheStatus: async () => null });
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://fixture");
+    try {
+      if (!await runtime.routeApi(req, res, url) && !await runtime.routeMedia(req, res, url)) notFound(res);
+    } catch (error) { sendJson(res, error.statusCode || 500, { error: error.message }); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const detail = async () => {
+    const res = await fetch(`${base}/api/photo-sets/${album.id}?imageLimit=1`);
+    assert.equal(res.status, 200);
+    return (await res.json()).album;
+  };
+  const image = value => `${base}${value.images[0].url}?archive=${value.imageRevision}`;
+  const rejectImage = async (url, status) => {
+    const res = await fetch(url);
+    const body = await res.text();
+    assert.equal(res.status, status, `unexpected ${res.status} response with body ${JSON.stringify(body)}`);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert(!res.headers.get("content-type")?.startsWith("image/"));
+  };
+  const bytes = async (url, expected) => {
+    const res = await fetch(url);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "image/jpeg");
+    assert.equal(res.headers.get("cache-control"), "public, max-age=3600");
+    assert.equal(await res.text(), expected);
+  };
+  try {
+    const before = await detail();
+    assert.equal(before.imageCount, 1);
+    assert(!fs.existsSync(cacheRoot), "the old manifest has not cached an image yet");
+    replace("BBB");
+    await rejectImage(image(before), 409);
+    assert(!fs.existsSync(cacheRoot), "an obsolete manifest must not extract replacement bytes");
+    const after = await detail();
+    assert.equal(after.images[0].url, before.images[0].url);
+    assert.equal(after.images[0].archivePath, before.images[0].archivePath);
+    assert.equal(after.imageCount, before.imageCount);
+    assert.notEqual(after.imageRevision, before.imageRevision);
+    await rejectImage(`${base}${after.images[0].url}?archive=`, 400);
+    await bytes(image(after), "BBB");
+    await Promise.all([rejectImage(image(before), 409), bytes(`${base}${after.images[0].url}`, "BBB")]);
+    replacementAfterListing = "CCC";
+    await rejectImage(image(after), 409);
+    const during = await detail();
+    replacementDuringExtraction = "DDD";
+    await rejectImage(image(during), 409);
+    assert.equal(replacementDuringExtraction, "", "the real helper was about to extract when the archive changed");
+    const latest = await detail();
+    await bytes(image(latest), "DDD");
+    await bytes(`${base}${latest.images[0].url}`, "DDD");
+    scenarios++;
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await files.stop();
+  }
+}
+
 async function verifyPhotoArchiveVideoCover() {
   const source = path.join(temporary, "video-cover.zip");
   const member = "clip.mp4";
@@ -798,6 +936,62 @@ async function verifyPhotoArchiveVideoCover() {
   assert.equal(extractions, 2);
   assert.deepEqual(fs.readdirSync(cacheRoot), [], "a failed frame extraction must also remove the temporary video");
   scenarios++;
+}
+
+async function verifyPhotoCoverBusyRecovery() {
+  const db = galleryDb();
+  const album = { id: "busy-cover", sourceRoot: temporary, relativePath: "busy.zip", archiveIdentity: "busy-source" };
+  const empty = { id: "empty-cover", sourceRoot: temporary, relativePath: "empty.zip", archiveIdentity: "empty-source" };
+  const byId = id => [album, empty].find(item => item.id === id);
+  const busy = "Archive reader queue is full";
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  let extractions = 0, emptyLists = 0;
+  const service = createPhotoSetService({
+    getImageGalleryDb: () => db, photoSetById: byId, publishedPhotoSetById: byId,
+    safeChildPath: path.join, archiveImageExts: new Set([".jpg"]), normalizeExt: path.extname,
+    archiveImageSignature: async target => ({
+      archivePath: target, archiveSize: 7, archiveMtimeMs: 123.5,
+      archiveIdentity: path.basename(target) === album.relativePath ? album.archiveIdentity : empty.archiveIdentity
+    }),
+    listArchiveImages: async target => {
+      if (path.basename(target) === album.relativePath) return [{ path: "cover.jpg" }];
+      emptyLists++;
+      return [];
+    },
+    extractArchiveMemberToCache: async (_archive, _member, target) => {
+      if (++extractions === 1) throw Object.assign(new Error(busy), { code: "ARCHIVE_READER_BUSY", statusCode: 503 });
+      await fs.promises.writeFile(target, jpeg);
+    },
+    compressImageFileToJpeg: fs.promises.readFile, coverGeneratorVersion: 3,
+    notFound: res => { res.writeHead(404); res.end(); }
+  });
+  services.push(service);
+  const readRow = db.prepare("SELECT status, error FROM photo_set_covers WHERE album_id=?");
+  async function request(id) {
+    const res = response();
+    await service.serveCover(res, id, { fallback: "empty" });
+    return res;
+  }
+
+  assert.equal((await request(album.id)).statusCode, 503);
+  assert.equal(readRow.get(album.id), undefined, "archive backpressure must not create a negative cover row");
+  db.prepare(`INSERT INTO photo_set_covers
+    (album_id,archive_path,archive_size,archive_mtime_ms,archive_identity,generator_version,status,error,updated_at)
+    VALUES (?,?,?,?,?,3,'error',?,'legacy')`)
+    .run(album.id, path.join(album.sourceRoot, album.relativePath), 7, 123.5, album.archiveIdentity, busy);
+  assert.equal(await service.warmImageCover(album.id), "generated", "warm-up must recover an existing backpressure row");
+  const recovered = await request(album.id);
+  assert.equal(recovered.statusCode, 200);
+  assert.deepEqual(recovered.body, jpeg);
+  assert.equal(readRow.get(album.id).status, "ok");
+  assert.equal(extractions, 2);
+
+  assert.equal((await request(empty.id)).statusCode, 204);
+  assert.equal((await request(empty.id)).statusCode, 204);
+  assert.equal(await service.warmImageCover(empty.id), "missing");
+  assert.equal(readRow.get(empty.id).status, "error");
+  assert.equal(emptyLists, 1, "a confirmed absence stays cached for the current archive");
+  scenarios += 3;
 }
 
 async function verifyManualPhotoCover() {
@@ -1525,7 +1719,9 @@ try {
   if (!inlineCase || inlineCase === "photo-reveal") await verifyPhotoReveal();
   if (!inlineCase || inlineCase === "manual-photo-cover") await verifyManualPhotoCover();
   if (!inlineCase || inlineCase === "photo-archive-video") await verifyPhotoArchiveVideo();
+  if (!inlineCase || inlineCase === "photo-image-revision") await verifyPhotoImageRevision();
   if (!inlineCase || inlineCase === "photo-archive-video-cover") await verifyPhotoArchiveVideoCover();
+  if (!inlineCase || inlineCase === "photo-cover-busy-recovery") await verifyPhotoCoverBusyRecovery();
   await verifyAsyncInlineOwnership();
   assert(scenarios > 0, `No async inline scenario matched ${inlineCase}`);
   console.log(`archive-reader-lifecycle: ok (${scenarios} scenarios; controlled children/stat, synthetic ZIP, private SQLite)`);

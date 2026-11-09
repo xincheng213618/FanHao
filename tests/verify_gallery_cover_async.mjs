@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
@@ -7,14 +9,19 @@ import { PassThrough } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
 import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
 import { createMediaRuntime } from "../src/modules/media/server/runtime.js";
+import { createFileServer } from "../src/platform/server/file-server.js";
+import { createMediaStreamService } from "../src/platform/server/media-stream-service.js";
+import { safeChildPath } from "../src/platform/server/request-io.js";
+import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
-// Synthetic stats, in-memory SQLite, owned Node children and random-loopback
-// HTTP only. Never opens actual media, FFmpeg, credentials or an app service.
+// Temporary fixtures, synthetic stats, in-memory SQLite, owned Node children
+// and random-loopback HTTP. No library media or app service is involved.
 const jpeg = Buffer.from([255, 216, 255, 217]);
 const unhandled = [];
 const onUnhandled = (error) => unhandled.push(error);
 process.on("unhandledRejection", onUnhandled);
 try {
+  await directRangeRoute();
   await realRoutes(); await queueLifecycle(); await identities(); await failures();
   await immediate(); assert.deepEqual(unhandled, []);
   console.log("gallery-cover-async: ok (route/health, async probe/frame, seek/scale/q, coalescing, bounds, warm/error cache, source/cache/DB identity, disconnect, timeout/overflow/JPEG, held-close stop and stale start)");
@@ -79,6 +86,61 @@ function children({ held = false, frameDelay = 120, mode = "ok", probeMode = "ok
     return child;
   };
   return { records, spawnFn, closeAll() { for (const item of records) item.close(); }, assertClosed() { assert.ok(records.every((item) => item.closed)); } };
+}
+async function directRangeRoute() {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-gallery-range-"));
+  const item = { id: "video/range", sourceRoot, relativePath: "video.mp4", size: 999, updatedAt: "1999-01-01" };
+  const source = path.join(sourceRoot, item.relativePath), replacement = path.join(sourceRoot, "next.mp4");
+  const notFound = res => { res.writeHead(404); res.end(); };
+  const normalizeExt = file => path.extname(file).toLowerCase();
+  const files = createFileServer({ mimeTypes: { ".mp4": "video/mp4" }, normalizeExt, notFound });
+  const mediaStreamService = createMediaStreamService({ serveRangedFile: files.serveRangedFile, notFound });
+  const index = { mediaItems: [item] };
+  const galleryMediaService = createGalleryMediaService({ getImageLibraryIndex: () => index, mediaStreamService, normalizeExt, notFound,
+    safeChildPath, safeStat: () => assert.fail("the direct gallery route must not stat synchronously"), directVideoExts: new Set([".mp4"]) });
+  const runtime = createMediaRuntime({ galleryMediaService });
+  const server = http.createServer(async (req, res) => {
+    try { if (!await runtime.routeMedia(req, res, new URL(req.url, "http://fixture"))) notFound(res); }
+    catch (error) { res.writeHead(500); res.end(error.message); }
+  });
+  try {
+    fs.writeFileSync(source, "abcdefgh");
+    const originalTime = new Date("2026-05-01T00:00:00Z");
+    fs.utimesSync(source, originalTime, originalTime);
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+    const url = `http://127.0.0.1:${server.address().port}/media/gallery-video/${encodeURIComponent(item.id)}`;
+    const original = await fetch(url, { headers: { Range: "bytes=2-4" } });
+    const originalBytes = await original.text();
+    assert.equal(original.status, 206, originalBytes);
+    assert.equal(original.headers.get("content-type"), "video/mp4");
+    assert.equal(original.headers.get("content-range"), "bytes 2-4/8");
+    assert.equal(original.headers.get("last-modified"), originalTime.toUTCString());
+    assert.equal(originalBytes, "cde");
+    const originalEtag = original.headers.get("etag");
+    assert.match(originalEtag, /^W\/"8-[a-f0-9]+"$/u);
+    assert.equal((await fetch(url, { headers: { "If-None-Match": originalEtag } })).status, 304);
+
+    fs.writeFileSync(replacement, "new!");
+    const nextTime = new Date("2026-05-02T00:00:00Z");
+    fs.utimesSync(replacement, nextTime, nextTime);
+    fs.renameSync(replacement, source);
+    const changed = await fetch(url, { headers: { Range: "bytes=0-0", "If-Range": originalTime.toUTCString() } });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.headers.get("content-length"), "4");
+    assert.equal(changed.headers.get("last-modified"), nextTime.toUTCString());
+    assert.notEqual(changed.headers.get("etag"), originalEtag);
+    assert.equal(await changed.text(), "new!");
+    const unsatisfiable = await fetch(url, { headers: { Range: "bytes=6-7" } });
+    assert.equal(unsatisfiable.status, 416);
+    assert.equal(unsatisfiable.headers.get("content-range"), "bytes */4");
+    fs.unlinkSync(source);
+    assert.equal((await fetch(url)).status, 404);
+    console.log("gallery direct range: handle size/validators, replacement, missing source, zero synchronous stat");
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await Promise.all([runtime.stop(), mediaStreamService.stop(), files.stop()]);
+    removeVerifiedTempDir(sourceRoot);
+  }
 }
 async function realRoutes() {
   const owned = children({ frameDelay: 300 }); const env = environment({ spawnFn: owned.spawnFn });

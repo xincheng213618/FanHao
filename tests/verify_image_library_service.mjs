@@ -276,6 +276,10 @@ const westernFixtures = [
 const westernRows = westernFixtures.map(([id, folder, title]) => ({
   ...photo(id, "我喜欢的", folder, folder, `我喜欢的/${folder}/${title}.rar`, 100, "2026-07-01T00:00:00.000Z"), title
 }));
+westernRows.push({
+  ...photo("western-undated", "我喜欢的", "Faina Bona", "Faina Bona", "我喜欢的/Faina Bona/undated.rar", 100, "2026-07-10T00:00:00.000Z"),
+  title: "SexArt - Faina Bona - Undated"
+});
 imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets: [...photoSets, ...westernRows], mediaItems: [] };
 const albums = service.itemsPayload(url({ mode: "photo", photoView: "albums", limit: "30" })).items;
 for (const [id, , archiveTitle, title, photoSite, archiveDate, personName] of westernFixtures) {
@@ -287,6 +291,14 @@ const westernSearch = service.itemsPayload(url({ mode: "photo", photoView: "albu
 assert.deepEqual(westernSearch.items.map(item => item.id), ["western-ra"]);
 const westernCollection = service.itemsPayload(url({ mode: "photo", collection: albums.find(item => item.id === "western-shaded").collectionId, date: "2019-12" }));
 assert.deepEqual(westernCollection.items.map(item => item.title), ["Shaded"]);
+const fainaCollection = albums.find(item => item.id === "western-faina").collectionId;
+const faina = (filters = {}) => service.itemsPayload(url({ mode: "photo", photoView: "albums", collection: fainaCollection, ...filters }));
+const ids = response => response.items.map(item => item.id);
+assert.equal(faina().collectionSummary.issueSortField, "archiveDate");
+assert.deepEqual(ids(faina({ limit: "2" })), ["western-multiple", "western-faina"]);
+assert.deepEqual(ids(faina({ offset: "2" })), ["western-undated"]);
+assert.deepEqual(ids(faina({ sort: "issue", direction: "asc" })), ["western-faina", "western-multiple", "western-undated"]);
+assert.equal(faina({ sort: "updated" }).items[0].id, "western-undated");
 const siteAlbums = service.itemsPayload(url({ mode: "photo", site: "metart", limit: "1", offset: "1" }));
 assert.equal(siteAlbums.total, 2);
 assert.equal(siteAlbums.items[0].photoSite, "MetArt");

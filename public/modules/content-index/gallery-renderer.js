@@ -612,15 +612,17 @@ function createPhotoSortControls(options, fallback, list) {
   const listKey = getGalleryPage().imageLibraryListKey();
   for (const [key, label] of relevance ? [["relevance", "相关性排序"]] : options) {
     const active = key === sort;
+    const releaseDate = key === "issue" && list?.collectionSummary?.issueSortField === "archiveDate";
+    const sortLabel = releaseDate ? "按发行日期排序" : label;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "gallery-photo-sort-button";
     button.dataset.photoSort = key;
-    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-label", sortLabel);
     button.setAttribute("aria-pressed", String(active));
-    button.title = label;
+    button.title = sortLabel;
     button.disabled = relevance;
-    if (key === "issue") button.append("期号");
+    if (key === "issue") button.append(releaseDate ? "发行日期" : "期号");
     else button.append(photoControlIcon(key));
     if (active && !relevance) {
       const arrow = document.createElement("span");
@@ -629,7 +631,7 @@ function createPhotoSortControls(options, fallback, list) {
       arrow.textContent = direction === "asc" ? "↑" : "↓";
       arrow.setAttribute("aria-hidden", "true");
       button.setAttribute("aria-description", `当前${directionLabel}，再次点击切换`);
-      button.title = `${label} · ${directionLabel}`;
+      button.title = `${sortLabel} · ${directionLabel}`;
       button.append(arrow);
     }
     button.addEventListener("click", event => {
@@ -2590,22 +2592,25 @@ function activateGalleryReaderImages(root) {
   loadNearViewport();
 }
 
-function enqueueGalleryReaderFigure(figure, { keepQueued = false } = {}) {
-  if (!figure?.isConnected || !figure.dataset.gallerySrc || figure.classList.contains("loaded") || figure.dataset.galleryLoading === "1") return;
+function enqueueGalleryReaderFigure(figure, { keepQueued = false, onSettled } = {}) {
+  if (!figure?.isConnected || !figure.dataset.gallerySrc || figure.classList.contains("loaded") || figure.dataset.galleryLoading === "1"
+      || figure.dataset.galleryArchiveRetry === "1" && !onSettled) return false;
   const pending = galleryReaderImageQueue.get(figure);
   if (pending) {
     pending.keepQueued ||= keepQueued;
-    return;
+    pending.onSettled ||= onSettled;
+    return true;
   }
   figure.dataset.galleryQueued = "1";
-  galleryReaderImageQueue.set(figure, { generation: galleryReaderImageGeneration, keepQueued });
+  galleryReaderImageQueue.set(figure, { generation: galleryReaderImageGeneration, keepQueued, onSettled });
   drainGalleryReaderImageQueue();
+  return true;
 }
 
 function drainGalleryReaderImageQueue() {
   const concurrency = galleryReaderStartupFigure ? 1 : GALLERY_READER_IMAGE_CONCURRENCY;
   while (activeGalleryReaderImageLoads < concurrency && galleryReaderImageQueue.size) {
-    const [figure, { generation }] = galleryReaderImageQueue.entries().next().value;
+    const [figure, { generation, onSettled }] = galleryReaderImageQueue.entries().next().value;
     galleryReaderImageQueue.delete(figure);
     delete figure.dataset.galleryQueued;
     if (generation !== galleryReaderImageGeneration || !figure.isConnected || !figure.dataset.gallerySrc) continue;
@@ -2614,7 +2619,7 @@ function drainGalleryReaderImageQueue() {
 
     activeGalleryReaderImageLoads += 1;
     figure.dataset.galleryLoading = "1";
-    figure.classList.remove("failed");
+    if (!onSettled) figure.classList.remove("failed");
     const retry = figure.querySelector(".gallery-reader-retry");
     if (retry) retry.hidden = true;
     const imageUrl = figure.dataset.gallerySrc;
@@ -2646,6 +2651,7 @@ function drainGalleryReaderImageQueue() {
         if (retry) retry.hidden = false;
       }
       drainGalleryReaderImageQueue();
+      onSettled?.(loaded);
     };
     const onLoad = () => settle(true);
     const onError = () => settle(false);
@@ -3196,6 +3202,17 @@ function photoCollectionPreview() {
   const id = state.gallery.photoCollection;
   if (!id) return { title: photoCategoryDisplayName(state.gallery.category) };
   if (selectedPhotoCollectionCard?.id === id) return selectedPhotoCollectionCard;
+  if (id.startsWith("shelf:")) {
+    try {
+      const token = id.slice("shelf:".length).replace(/-/g, "+").replace(/_/g, "/");
+      const bytes = Uint8Array.from(atob(token), char => char.charCodeAt(0));
+      const parts = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      if (Array.isArray(parts) && parts.length === 3 && parts.every(value => typeof value === "string" && value.trim())) {
+        return { category: parts[1], title: parts[2] };
+      }
+    } catch { /* A malformed shelf link has no preview title. */ }
+    return {};
+  }
   const directory = id.slice(id.indexOf("|") + 1);
   const parts = directory.split(/[\\/]+/).filter(Boolean);
   return { title: parts.at(-1) === "__fanhao_photo_collection_root__" ? "根目录合集" : parts.at(-1),
@@ -4054,21 +4071,49 @@ function captureGalleryReaderScrollAnchor(viewer) {
   return target ? { target, top: target.getBoundingClientRect().top } : null;
 }
 
-function restoreGalleryReaderScrollAnchor(anchor, viewer) {
+function restoreGalleryReaderScrollAnchor(anchor, viewer, { waitForImage = false } = {}) {
   const target = anchor?.target;
   if (!target) return;
   const owner = { anchor, viewer, generation: galleryReaderImageGeneration };
   galleryReaderWidthRestore = owner;
-  window.requestAnimationFrame(() => {
+  const schedule = (finish) => window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
       if (galleryReaderWidthRestore !== owner) return;
-      galleryReaderWidthRestore = null;
+      if (finish) galleryReaderWidthRestore = null;
       if (owner.generation !== galleryReaderImageGeneration || !viewer.isConnected || state.activeView !== "gallery"
           || els.workGrid.querySelector(".gallery-reader-images") !== viewer) return;
       if (target.parentElement !== viewer) return;
       window.scrollBy({ top: target.getBoundingClientRect().top - Number(anchor.top || 0), behavior: "auto" });
     });
   });
+  const image = waitForImage && target.querySelector("img");
+  if (image && !target.classList.contains("loaded")) {
+    // A fresh archive starts with placeholder geometry. Keep this anchor
+    // through the target's decode unless newer input has retired it.
+    const settle = () => {
+      image.removeEventListener("load", settle);
+      image.removeEventListener("error", settle);
+      schedule(true);
+    };
+    image.addEventListener("load", settle);
+    image.addEventListener("error", settle);
+    schedule(false);
+  } else schedule(true);
+}
+
+function restorePhotoArchiveViewport(anchor) {
+  const viewer = els.workGrid.querySelector(".gallery-reader-images[data-photo-album-id]");
+  if (!viewer || !anchor) return;
+  const figureAt = index => viewer.querySelector(`[data-image-index="${index}"]`);
+  const target = figureAt(anchor.index) || viewer.lastElementChild;
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  const top = Math.max(anchor.top, Math.min(0, 1 - rect.height));
+  window.scrollBy({ top: rect.top - top, behavior: "instant" });
+  if (anchor.focusIndex && document.activeElement === document.body) {
+    (figureAt(anchor.focusIndex) || target).focus({ preventScroll: true });
+  }
+  restoreGalleryReaderScrollAnchor({ target, top }, viewer, { waitForImage: true });
 }
 
 function photoReaderBatchSize() {
@@ -4230,6 +4275,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   let zoomLevel = 1;
   let imageFailed = false;
   let imageRetrying = false;
+  let imageRetryRequest = null;
+  let recoveryIndex = options.recoveryIndex;
   let preserveImageScroll = false;
   let restoreRetryFocus = false;
   let fullscreenOperation = null;
@@ -4617,6 +4664,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       finishImagePan();
       imageFailed = false;
       imageRetrying = false;
+      imageRetryRequest = null;
       preserveImageScroll = false;
       restoreRetryFocus = false;
       imageError.hidden = true;
@@ -4645,6 +4693,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     if (coverSaving) return;
     if (!jumpPanel.hidden) closeJump();
     const nextIndex = clampPagerIndex(index);
+    if (nextIndex !== currentIndex) recoveryIndex = undefined;
     rangeScrubbing = false;
     if (pendingRangeImages) {
       const pending = pendingRangeImages;
@@ -4740,8 +4789,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
         const images = await options.fullImages();
         if (abortController.signal.aborted || !overlay.isConnected) return;
         catalog.hidden = true;
-        if (Array.isArray(images) && images.length) updateImages(images, { sourceKey });
-        else applyZoom(zoomLevel, { preserveScroll: true });
+        if (Array.isArray(images) && images.length) {
+          updateImages(images, { sourceKey, index: recoveryIndex });
+          recoveryIndex = undefined;
+        } else applyZoom(zoomLevel, { preserveScroll: true });
       } catch {
         if (abortController.signal.aborted || !overlay.isConnected) return;
         catalogFailed = true;
@@ -4842,6 +4893,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     if (!currentImage() || !imageNode.complete || !imageNode.naturalWidth) return;
     imageFailed = false;
     imageRetrying = false;
+    imageRetryRequest = null;
     imageError.hidden = true;
     imageRetry.disabled = false;
     imageRetry.textContent = "重试当前图片";
@@ -4850,11 +4902,34 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     preserveImageScroll = false;
     restoreRetryFocus = false;
   }, listenerOptions);
-  imageNode.addEventListener("error", () => {
+  imageNode.addEventListener("error", async () => {
     if (!currentImage() || !imageNode.complete || imageNode.naturalWidth) return;
+    const retry = imageRetryRequest;
+    if (retry && options.refreshArchive) {
+      if (retry.checking) return;
+      retry.checking = true;
+      imageErrorText.textContent = "正在检查套图是否已更新";
+      const isCurrent = () => currentImage() && imageRetryRequest === retry;
+      let album;
+      try { album = await options.refreshArchive(isCurrent); } catch { /* The current image stays retryable. */ }
+      if (album) {
+        if (state.activeView === "gallery" && state.gallery.album === album && !galleryPagerCleanup && album.images.length) {
+          const fresh = photoReaderOptions(album);
+          const target = Math.min(retry.index, fresh.totalCount - 1);
+          els.workGrid.querySelector(".gallery-reader-open")?.focus({ preventScroll: true });
+          openGalleryImagePager(album.images, target, fresh.title, fresh.meta, {
+            ...fresh, deferFullImages: fresh.totalCount > album.images.length,
+            recoveryIndex: target >= album.images.length ? target : undefined
+          });
+        }
+        return;
+      }
+      if (!isCurrent()) return;
+    }
     const returnFocus = restoreRetryFocus && document.activeElement === stage;
     imageFailed = true;
     imageRetrying = false;
+    imageRetryRequest = null;
     preserveImageScroll = false;
     restoreRetryFocus = false;
     imageError.hidden = false;
@@ -4868,6 +4943,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   imageRetry.addEventListener("click", () => {
     if (!currentImage() || !imageFailed || imageRetrying) return;
     imageRetrying = true;
+    imageRetryRequest = options.refreshArchive ? { index: currentIndex } : null;
     preserveImageScroll = true;
     restoreRetryFocus = document.activeElement === imageRetry;
     if (restoreRetryFocus) stage.focus({ preventScroll: true });
@@ -5038,7 +5114,12 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   document.body.append(overlay);
   update();
   stage.focus({ preventScroll: true });
-  void loadCatalog();
+  if (options.deferFullImages) {
+    catalog.hidden = false;
+    catalogText.textContent = `套图已更新，当前可浏览 ${formatNumber(list.length)} 张。`;
+    catalogRetry.hidden = false;
+    catalogRetry.textContent = "读取完整目录";
+  } else void loadCatalog();
   return {
     updateImages,
     close: closeGalleryImagePager,
@@ -5067,8 +5148,9 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
   figure.dataset.galleryAriaLabel = figureLabel;
   figure.setAttribute("aria-label", figureLabel);
   const openImage = () => {
+    if (figure.dataset.galleryArchiveRetry === "1") return;
     if (figure.classList.contains("failed")) {
-      enqueueGalleryReaderFigure(figure, { keepQueued: true });
+      retryGalleryReaderFigure(figure, options.refreshArchive);
       return;
     }
     const sourceKey = options.sourceKey || "";
@@ -5082,7 +5164,7 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
       Math.min(currentList.length - 1, fallbackIndex),
       options.title || "",
       options.meta || "",
-      { sourceKey, fullImages: options.fullImages, saveCover: options.saveCover }
+      { sourceKey, fullImages: options.fullImages, refreshArchive: options.refreshArchive, saveCover: options.saveCover }
     );
   };
   figure.addEventListener("click", openImage);
@@ -5104,6 +5186,46 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
   retry.hidden = true;
   figure.append(img, caption, retry);
   return figure;
+}
+
+function retryGalleryReaderFigure(figure, refreshArchive) {
+  if (!refreshArchive) {
+    enqueueGalleryReaderFigure(figure, { keepQueued: true });
+    return;
+  }
+  const viewer = figure.parentElement, generation = galleryReaderImageGeneration;
+  const retry = figure.querySelector(".gallery-reader-retry");
+  const isCurrent = () => figure.isConnected && figure.parentElement === viewer && generation === galleryReaderImageGeneration
+    && state.activeView === "gallery" && !galleryPagerCleanup;
+  const finish = () => {
+    delete figure.dataset.galleryArchiveRetry;
+    figure.removeAttribute("aria-busy");
+  };
+  figure.dataset.galleryArchiveRetry = "1";
+  figure.setAttribute("aria-busy", "true");
+  const started = enqueueGalleryReaderFigure(figure, { keepQueued: true, onSettled: async loaded => {
+    if (loaded || !isCurrent()) { finish(); return; }
+    const failureLabel = figure.getAttribute("aria-label"), retryLabel = retry.textContent;
+    const checking = "正在检查套图是否已更新";
+    figure.setAttribute("aria-label", checking);
+    retry.textContent = checking;
+    let anchor;
+    try {
+      const album = await refreshArchive(isCurrent, () => {
+        const position = captureGalleryReaderScrollAnchor(viewer);
+        const focused = document.activeElement;
+        anchor = { index: Number(position?.target.dataset.imageIndex) || 1, top: position?.top || 0,
+          focusIndex: viewer.contains(focused) ? Number(focused.closest(".gallery-reader-figure")?.dataset.imageIndex) || 0 : 0 };
+      });
+      if (album && state.activeView === "gallery" && state.gallery.album === album && !galleryPagerCleanup) restorePhotoArchiveViewport(anchor);
+    } catch { /* The current image stays retryable. */ }
+    finally {
+      finish();
+      figure.setAttribute("aria-label", failureLabel);
+      retry.textContent = retryLabel;
+    }
+  } });
+  if (!started) finish();
 }
 
 function renderReaderImages(container, images, options = {}) {
@@ -5143,6 +5265,7 @@ function photoReaderOptions(album) {
   const albumId = album.id;
   return { albumId, title: album.title, meta: photoReaderMeta(album), totalCount: Number(album.imageCount || album.images?.length || 0),
     sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }),
+    refreshArchive: album.imageRevision ? (isCurrent, beforeReplace) => getGalleryPage().refreshPhotoReaderArchive(albumId, album.imageRevision, isCurrent, beforeReplace) : null,
     saveCover: album.coverEditable && ["local", "lan"].includes(state.accessMode) ? (image, signal) => savePhotoReaderCover(albumId, image, signal) : null };
 }
 

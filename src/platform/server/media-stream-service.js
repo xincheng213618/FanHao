@@ -12,9 +12,10 @@ export function createMediaStreamService({
   maxInfoBytes,
   notFound,
   parseInfoMetadata,
-  safeStat,
   sendJson,
+  serveFilePreview,
   serveRangedFile,
+  statFile = (filePath) => fs.promises.stat(filePath),
   spawnProcess = spawn,
   warn = console.warn,
   concurrency = 2,
@@ -39,33 +40,31 @@ export function createMediaStreamService({
     return serveRangedFile(req, res, file, options);
   }
 
-  function serveTranscodedVideo(req, res, file, url) {
+  function serveTranscodedVideo(req, res, file, url, { resolveMissingSource } = {}) {
     if (req.aborted || res.destroyed || res.writableEnded) return;
     if (!accepting) {
       rejectRequest(res, "视频转码服务正在停止", "TRANSCODE_STOPPED");
       return;
     }
-    if (jobs.size >= capacity) {
+    const headOnly = req.method === "HEAD";
+    if (jobs.size >= capacity || (headOnly && activeCount(true) >= concurrency)) {
       rejectRequest(res, "视频转码任务繁忙，请稍后重试", "TRANSCODE_BUSY");
       return;
     }
-    const stat = safeStat(file.path);
-    if (!stat) {
-      notFound(res);
-      return;
-    }
-    if (req.method === "HEAD") {
-      res.writeHead(200, videoHeaders());
-      res.end();
-      return;
-    }
 
-    const job = { req, res, file, url, started: false, closed: false, responseDone: false, failureHandled: false, outputStarted: false, stdoutEnded: false, killRequested: false, closeUnconfirmed: false, stderrText: "", loggedBytes: 0 };
+    const job = {
+      req, res, file, url, headOnly, resolveMissingSource,
+      controller: new AbortController(),
+      started: false, closed: false, responseDone: false, failureHandled: false,
+      outputStarted: false, stdoutEnded: false, killRequested: false, closeUnconfirmed: false,
+      stderrText: "", loggedBytes: 0
+    };
     job.closedPromise = new Promise((resolve) => { job.resolveClosed = resolve; });
     job.onResponseClose = () => {
       job.responseDone = true;
       if (!job.failureHandled) {
         job.failureHandled = true;
+        job.controller.abort();
         removeQueued(job);
         cancelChild(job);
       }
@@ -74,7 +73,10 @@ export function createMediaStreamService({
     job.onResponseFinish = () => {
       job.responseDone = true;
       // Only our successful close+EOF path may finish an active response.
-      if (!job.closed) cancelChild(job);
+      if (!job.closed) {
+        job.controller.abort();
+        cancelChild(job);
+      }
       dispose(job);
     };
     job.onResponseError = (error) => failJob(job, "视频转码失败", error);
@@ -87,23 +89,77 @@ export function createMediaStreamService({
     res.on("error", job.onResponseError);
     req.on?.("aborted", job.onRequestAbort);
     jobs.add(job);
+    // HEAD checks the source in a small separate lane without waiting for a
+    // long-running GET or taking one of its child-process slots.
+    if (headOnly) {
+      void launch(job);
+      return;
+    }
     queue.push(job);
     job.queueTimer = setTimeout(() => failJob(job, "等待视频转码超时，请稍后重试", transcodeError("TRANSCODE_BUSY"), 503), queueTimeoutMs);
     job.queueTimer.unref?.();
     pump();
   }
 
-  function launch(job) {
-    const { req, res, file, url } = job;
+  async function launch(job) {
+    const { req, res, file } = job;
     job.started = true;
     clearTimeout(job.queueTimer);
     if (req.aborted || res.destroyed || res.writableEnded) {
-      job.closed = true;
-      job.resolveClosed();
+      closePreparation(job);
       job.onResponseClose();
       return;
     }
+    job.startupTimer = setTimeout(() => failJob(job, "视频转码启动超时", transcodeError("TRANSCODE_START_TIMEOUT"), 504), startupTimeoutMs);
+    job.startupTimer.unref?.();
 
+    let source;
+    const { signal } = job.controller;
+    const unavailable = () => signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+    try {
+      const stat = await statFile(file.path);
+      if (stat?.isFile()) source = file;
+    } catch { /* Preserve the missing-source response. */ }
+    if (!source && !unavailable() && job.resolveMissingSource) {
+      try { source = await job.resolveMissingSource(file, signal); }
+      catch { /* Relocation is best effort. */ }
+    }
+    // A cancelled OS query still occupies its slot until it settles, and
+    // cannot launch FFmpeg or publish a late response after that boundary.
+    if (unavailable()) {
+      closePreparation(job);
+      if (job.failureHandled) dispose(job);
+      else job.onResponseClose();
+      pump();
+      return;
+    }
+    try {
+      if (source && !job.headOnly) {
+        job.file = source;
+        launchTranscoder(job);
+        return;
+      }
+      closePreparation(job);
+      if (!source) notFound(res);
+      else {
+        res.writeHead(200, videoHeaders());
+        res.end();
+      }
+    } catch (error) {
+      if (!job.child && !job.closed) closePreparation(job);
+      failJob(job, "视频转码失败", error);
+    }
+    pump();
+  }
+
+  function closePreparation(job) {
+    clearTimeout(job.startupTimer);
+    job.closed = true;
+    job.resolveClosed();
+  }
+
+  function launchTranscoder(job) {
+    const { res, file, url } = job;
     const mode = url.searchParams.get("mode") === "remux" ? "remux" : "transcode";
     const audio = url.searchParams.get("audio") === "copy" ? "copy" : "aac";
     const startAt = Math.max(0, Number(url.searchParams.get("t") || 0) || 0);
@@ -139,9 +195,9 @@ export function createMediaStreamService({
     try {
       child = spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
-      job.closed = true;
-      job.resolveClosed();
+      closePreparation(job);
       failJob(job, "FFmpeg 启动失败", error);
+      pump();
       return;
     }
     job.child = child;
@@ -208,8 +264,6 @@ export function createMediaStreamService({
     child.stderr.on("error", job.onPipeError);
     child.on("error", job.onChildError);
     child.on("close", job.onChildClose);
-    job.startupTimer = setTimeout(() => failJob(job, "视频转码启动超时", transcodeError("TRANSCODE_START_TIMEOUT"), 504), startupTimeoutMs);
-    job.startupTimer.unref?.();
   }
 
   function pipeOutput(job) {
@@ -228,6 +282,7 @@ export function createMediaStreamService({
   function failJob(job, message, error, status = 500) {
     if (job.failureHandled) return;
     job.failureHandled = true;
+    job.controller.abort();
     clearTimeout(job.queueTimer);
     clearTimeout(job.startupTimer);
     clearTimeout(job.eofTimer);
@@ -288,13 +343,15 @@ export function createMediaStreamService({
     pump();
   }
 
-  function activeCount() { return [...jobs].filter((job) => job.started && !job.closed).length; }
+  function activeCount(headOnly) {
+    return [...jobs].filter((job) => job.started && !job.closed && (headOnly === undefined || job.headOnly === headOnly)).length;
+  }
 
   function pump() {
     if (pumping) return;
     pumping = true;
     try {
-      while (accepting && activeCount() < concurrency && queue.length) launch(queue.shift());
+      while (accepting && activeCount(false) < concurrency && queue.length) void launch(queue.shift());
     } finally { pumping = false; }
   }
 
@@ -321,47 +378,43 @@ export function createMediaStreamService({
       try { await stopTask; } catch (error) { if (activeCount()) throw error; }
     }
     if (intent !== generation) throw transcodeError("TRANSCODE_STOPPED");
-    if ([...jobs].some((job) => job.killRequested && !job.closed)) throw transcodeError("TRANSCODE_CLOSE_UNCONFIRMED");
+    if ([...jobs].some((job) => job.started && !job.closed && (job.killRequested || job.failureHandled))) {
+      throw transcodeError("TRANSCODE_CLOSE_UNCONFIRMED");
+    }
     stopTask = null;
     accepting = true;
     pump();
   }
 
-  function serveInfo(res, file) {
-    const stat = safeStat(file.path);
-    if (!stat) {
-      notFound(res);
-      return;
-    }
-
-    if (stat.size > maxInfoBytes) {
-      sendJson(res, 413, { error: "资料文件太大，已跳过预览。", size: stat.size });
-      return;
-    }
-
-    const buffer = fs.readFileSync(file.path);
-    const content = decodeInfoBuffer(buffer);
-    let metadata = null;
-    if (!isSubtitleLikeInfoText(content)) {
-      try {
-        metadata = parseInfoMetadata(content, {
-          title: "",
-          fileName: file.name || "",
-          directoryName: path.basename(path.dirname(file.relativePath || file.path || ""))
-        });
-      } catch {
-        metadata = null;
+  function serveInfo(req, res, file, options) {
+    return serveFilePreview(req, res, file.path, maxInfoBytes, (buffer, size) => {
+      if (buffer === null) {
+        sendJson(res, 413, { error: "资料文件太大，已跳过预览。", size });
+        return;
       }
-    }
-    sendJson(res, 200, {
-      id: file.id,
-      name: file.name,
-      ext: file.ext,
-      size: file.size,
-      relativePath: file.relativePath,
-      content,
-      metadata
-    });
+      const content = decodeInfoBuffer(buffer);
+      let metadata = null;
+      if (!isSubtitleLikeInfoText(content)) {
+        try {
+          metadata = parseInfoMetadata(content, {
+            title: "",
+            fileName: file.name || "",
+            directoryName: path.basename(path.dirname(file.relativePath || file.path || ""))
+          });
+        } catch {
+          metadata = null;
+        }
+      }
+      sendJson(res, 200, {
+        id: file.id,
+        name: file.name,
+        ext: file.ext,
+        size: file.size,
+        relativePath: file.relativePath,
+        content,
+        metadata
+      });
+    }, options);
   }
 
   return {

@@ -1471,7 +1471,6 @@ export function createMangaPage(deps) {
   function trackReaderPosition(page, position, { keepScroll = false } = {}) {
     const comicId = state.manga.comic.id, chapter = state.manga.chapter, view = readerView;
     const figures = [...page.querySelectorAll(".manga-reader-image")];
-    const images = figures.map(figure => figure.querySelector("img"));
     if (!figures.length || position?.atStart) position = null;
     const events = new AbortController(), restoreEvents = new AbortController();
     let restoring = Boolean(position), canSave = !position, stopped = false, timer = null, frame = null, settleFrame = null, indicatorFrame = null, observer = null;
@@ -1537,14 +1536,12 @@ export function createMangaPage(deps) {
     const apply = () => {
       if (!current() || !restoring || state.activeView !== "manga") return false;
       const rect = target?.getBoundingClientRect();
-      // Reaching a zero-height lazy target starts its request; its final ratio
-      // can be applied when the image supplies the missing geometry.
       window.scrollTo({ top: window.scrollY + rect.top + rect.height * position.ratio - (position.pageJump || position.fitChange ? readerTopInset(page) : 0), left: 0, behavior: "auto" });
       return true;
     };
-    const geometryReady = () => images.slice(0, index + 1).every((image, offset) =>
-      Number(image.getAttribute("width")) > 0 && Number(image.getAttribute("height")) > 0
-      || image.complete && (image.naturalWidth > 0 || figures[offset].classList.contains("load-failed")));
+    // A distant earlier page may still be lazy. Its reserved space gives the
+    // browser a scroll anchor while the target resolves its own final ratio.
+    const geometryReady = () => !target.classList.contains("awaiting-size") || target.classList.contains("load-failed");
     const queueRestore = () => {
       if (!restoring || frame != null) return;
       if (settleFrame != null) window.cancelAnimationFrame(settleFrame);
@@ -1583,14 +1580,15 @@ export function createMangaPage(deps) {
     const img = document.createElement("img");
     const width = Number(image.width);
     const height = Number(image.height);
+    const hasDimensions = Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0;
     let compactFailure = false;
-    if (Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0) {
+    if (hasDimensions) {
       // Reserve the page before decoding so distant pages remain lazy.
       img.width = width;
       img.height = height;
       img.style.setProperty("--manga-original-width", `${width}px`);
       compactFailure = height < 60 || height / width < .25;
-    }
+    } else figure.classList.add("awaiting-size");
     img.alt = `${comic.title} · ${chapter.title} · 第 ${index + 1} 页`;
     img.loading = index < 2 ? "eager" : "lazy";
     img.decoding = "async";
@@ -1656,6 +1654,7 @@ export function createMangaPage(deps) {
     img.addEventListener("load", () => {
       if (!current() || !img.complete || !img.naturalWidth) return;
       img.style.setProperty("--manga-original-width", `${img.naturalWidth}px`);
+      if (!hasDimensions) figure.classList.remove("awaiting-size");
       if (!failure) return;
       const returnFocus = ownsRecoveryFocus();
       retrying = false;
@@ -1765,23 +1764,26 @@ function writeReadingPosition(id, position) {
 }
 
 function saveProgress(id, chapterIndex) {
-  const data = readJsonStorage(PROGRESS_KEY, {});
-  data[id] = Number(chapterIndex || 0);
-  localStorage.setItem(PROGRESS_KEY, JSON.stringify(data));
+  try {
+    const data = readJsonStorage(PROGRESS_KEY, {});
+    data[id] = Number(chapterIndex || 0);
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify(data));
+  } catch { /* Reading can continue when local storage is unavailable. */ }
 }
 
 function forgetComicState(id) {
-  const favorites = favoriteIds();
-  favorites.delete(String(id));
-  localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
-  const progress = readJsonStorage(PROGRESS_KEY, {});
-  delete progress[id];
-  localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
   try {
-    const positions = readJsonStorage(POSITION_KEY, {});
-    delete positions[id];
-    localStorage.setItem(POSITION_KEY, JSON.stringify(positions));
+    const favorites = favoriteIds();
+    favorites.delete(String(id));
+    localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
   } catch { /* The comic is already removed even if local storage is unavailable. */ }
+  for (const key of [PROGRESS_KEY, POSITION_KEY]) {
+    try {
+      const data = readJsonStorage(key, {});
+      delete data[id];
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch { /* Continue cleaning other keys after an individual failure. */ }
+  }
 }
 
 function siteLabel(site) {

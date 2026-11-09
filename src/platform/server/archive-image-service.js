@@ -7,12 +7,26 @@ import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "./a
 
 export const ARCHIVE_IMAGE_INDEXER_VERSION = 3;
 
+export function archiveImageRevision(archiveIdentity) {
+  return crypto.createHash("sha256").update(archiveIdentity).digest("hex").slice(0, 24);
+}
+
 export function archiveDiskSignature(archivePath, stat) {
   if (!stat?.isFile?.()) return null;
   const archiveMtimeMs = Number(stat.mtimeMs ?? stat.mtime?.getTime?.());
   const archiveSize = Number(stat.size || 0), resolved = path.resolve(archivePath);
   return { archivePath: resolved, archiveSize, archiveMtimeMs,
     archiveIdentity: JSON.stringify([resolved, archiveSize, archiveMtimeMs, String(stat.dev ?? ""), String(stat.ino ?? "")]) };
+}
+
+function imageTaskPath(archivePath, revision) {
+  const resolved = path.resolve(archivePath);
+  // An unversioned owner must not satisfy a versioned waiter (or vice versa).
+  return revision === undefined ? resolved : `${revision}:${resolved}`;
+}
+
+function verifyImageRevision(source, expected) {
+  if (expected !== undefined && (!source || archiveImageRevision(source.archiveIdentity) !== expected)) throw changedError();
 }
 
 export function createArchiveImageService(options) {
@@ -133,10 +147,12 @@ export function createArchiveImageService(options) {
     return payload;
   }
   function archiveImagesPayload(archivePath, request = {}) {
-    return pool.run(`list:${path.resolve(archivePath)}`, async context => {
+    const { expectedImageRevision } = request;
+    return pool.run(`list:${imageTaskPath(archivePath, expectedImageRevision)}`, async context => {
       const source = await signature(archivePath);
-      if (!source) return { imageCount: 0, images: [] };
       if (!context.isCurrent()) throw archiveStoppedError();
+      verifyImageRevision(source, expectedImageRevision);
+      if (!source) return { imageCount: 0, images: [] };
       const key = source.archiveIdentity, cached = listCache.get(key);
       let authority = indexAuthority(source), payload;
       const sameNativeAuthority = context.isCurrent() && authority.valid && authority.native && cached?.authority.native
@@ -170,10 +186,11 @@ export function createArchiveImageService(options) {
       }
       await verifySource(source, context);
       remember(key, source, payload, authority, context, !persisted);
-      return payload;
+      return { ...payload, archiveIdentity: key };
     }, request).then(payload => {
       const limit = Math.max(0, Math.floor(Number(request.limit) || 0));
-      return { imageCount: payload.imageCount, images: limit > 0 ? payload.images.slice(0, limit) : payload.images };
+      return { imageCount: payload.imageCount, images: limit > 0 ? payload.images.slice(0, limit) : payload.images,
+        ...(request.includeArchiveIdentity && payload.archiveIdentity ? { archiveIdentity: payload.archiveIdentity } : {}) };
     });
   }
   async function listArchiveImages(archivePath, request = {}) { return (await archiveImagesPayload(archivePath, request)).images; }
@@ -281,9 +298,11 @@ export function createArchiveImageService(options) {
     const disconnect = () => { if (!res.writableEnded) controller.abort(); };
     res.once?.("close", disconnect);
     try {
-      const prepared = await pool.run(`serve:${path.resolve(request.archivePath)}:${request.sourceType || "common"}:${request.memberPath}:${request.fallbackPath || ""}:${request.contentType || ""}`, async context => {
-        const source = await signature(request.archivePath), member = String(request.memberPath || "").replace(/[\\/]+/g, "/");
+      const { archivePath, expectedImageRevision } = request;
+      const prepared = await pool.run(`serve:${imageTaskPath(archivePath, expectedImageRevision)}:${request.sourceType || "common"}:${request.memberPath}:${request.fallbackPath || ""}:${request.contentType || ""}`, async context => {
+        const source = await signature(archivePath), member = String(request.memberPath || "").replace(/[\\/]+/g, "/");
         if (!context.isCurrent()) throw archiveStoppedError();
+        verifyImageRevision(source, expectedImageRevision);
         if (!source || !member || !options.archiveImageExts.has(options.normalizeExt(member))) {
           return request.fallbackPath ? { filePath: request.fallbackPath, contentType: request.contentType, current: context.isCurrent } : null;
         }

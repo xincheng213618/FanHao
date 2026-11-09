@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { scheduleLocalPathAction } from "../../../../platform/server/local-path-action.js";
 
+const NON_PLAYABLE_VIDEO = "该缓存项目不是可播放的视频";
+
 export function createDiskUsageRoutes({
   getLibrary = () => null,
   mediaStreamService,
   normalizeExt,
-  notFound,
   readJsonBody,
   requireLocalAdmin = () => true,
   requireTrustedNetworkPage = requireLocalAdmin,
@@ -64,9 +65,7 @@ export function createDiskUsageRoutes({
         return true;
       }
       if (url.pathname === "/api/disk-usage/playinfo" && req.method === "GET") {
-        const { cached, file } = requireCachedVideo(url.searchParams.get("drive"), url.searchParams.get("path"));
-        const playInfo = await videoProbeService.playInfoForFileAsync(file, file.id);
-        sendJson(res, 200, diskPlayInfo(playInfo, cached.drive.id, file.path));
+        await sendCachedVideoPlayInfo(req, res, url.searchParams);
         return true;
       }
       if (url.pathname === "/api/disk-usage/refresh" && req.method === "POST") {
@@ -97,26 +96,18 @@ export function createDiskUsageRoutes({
     if (url.pathname !== "/api/disk-usage/media" || !["GET", "HEAD"].includes(req.method)) return false;
     try {
       const cached = store.cachedNode(url.searchParams.get("drive"), url.searchParams.get("path"));
-      const stat = safeStat(cached.node.path);
-      if (!stat?.isFile()) {
-        notFound(res);
+      const filePath = cached.node.path;
+      const extension = normalizeExt(filePath);
+      if (["remux", "transcode"].includes(url.searchParams.get("mode")) && videoExtensions.has(extension)) {
+        mediaStreamService.serveTranscodedVideo(req, res, { path: filePath }, url);
         return true;
       }
-      const extension = normalizeExt(cached.node.path);
-      const file = {
+      await serveRangedFile(req, res, {
         cacheControl: "private, no-store",
         ext: extension,
         fullResponse: false,
-        modifiedAt: stat.mtime?.toISOString?.() || "",
-        name: path.basename(cached.node.path),
-        path: cached.node.path,
-        size: stat.size
-      };
-      if (["remux", "transcode"].includes(url.searchParams.get("mode")) && videoExtensions.has(extension)) {
-        mediaStreamService.serveTranscodedVideo(req, res, file, url);
-      } else {
-        await serveRangedFile(req, res, file);
-      }
+        path: filePath
+      });
     } catch (error) {
       if (!res.headersSent && !res.destroyed && !res.writableEnded) {
         sendJson(res, Number(error?.statusCode) || 500, { error: error?.message || "文件播放失败" });
@@ -125,11 +116,37 @@ export function createDiskUsageRoutes({
     return true;
   }
 
+  async function sendCachedVideoPlayInfo(req, res, searchParams) {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const disconnected = () => signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+    if (disconnected()) return;
+    const abort = () => controller.abort();
+    const onClose = () => { if (!res.writableEnded) abort(); };
+    req.once?.("aborted", abort);
+    res.once?.("close", onClose);
+    try {
+      const { drive, node } = store.cachedNode(searchParams.get("drive"), searchParams.get("path"));
+      const ext = normalizeExt(node.path);
+      if (!videoExtensions.has(ext)) throw publicError(NON_PLAYABLE_VIDEO, 400);
+      const id = diskVideoId(node.path);
+      const playInfo = await videoProbeService.playInfoForFileAsync({ id, path: node.path, ext }, id, { signal, requireSource: true });
+      if (disconnected()) return;
+      if (!playInfo) throw publicError(NON_PLAYABLE_VIDEO, 400);
+      sendJson(res, 200, diskPlayInfo(playInfo, drive.id, node.path));
+    } catch (error) {
+      if (!disconnected()) throw error;
+    } finally {
+      req.off?.("aborted", abort);
+      res.off?.("close", onClose);
+    }
+  }
+
   function requireCachedVideo(driveId, requestedPath) {
     const cached = store.cachedNode(driveId, requestedPath);
     const stat = safeStat(cached.node.path);
     const extension = normalizeExt(cached.node.path);
-    if (!stat?.isFile() || !videoExtensions.has(extension)) throw publicError("该缓存项目不是可播放的视频", 400);
+    if (!stat?.isFile() || !videoExtensions.has(extension)) throw publicError(NON_PLAYABLE_VIDEO, 400);
     return {
       cached,
       file: {

@@ -28,6 +28,8 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     assert.equal(result.status, 0, result.stderr); overrides.set("/js/standalone-host.js", result.stdout);
   }
   let browser = null, checks = 0, fullscreenDenied = false, collectionShelf = null;
+  let firstPhotoFill = "#729b7c";
+  let rejectedPhotoRevision = null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture"), key = `${url.pathname}${url.search}`;
     requests.set(key, (requests.get(key) || 0) + 1);
@@ -66,7 +68,11 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       if (url.pathname === "/api/modules") { sendJson(res, { product: { id: "suite" }, modules: [] }); return; }
       if (url.pathname === "/api/image-library/summary") { sendJson(res, { totals: { photoSets: 2, manga: 1 }, facets: {}, scannedAt: "synthetic", cache: null }); return; }
       if (url.pathname.startsWith("/synthetic/")) {
-        sendText(res, '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="#729b7c"/></svg>', "image/svg+xml", "public, max-age=86400"); return;
+        if (rejectedPhotoRevision && url.pathname.startsWith("/synthetic/A/") && url.searchParams.get("archive") === rejectedPhotoRevision.token) {
+          sendJson(res, { error: "Synthetic archive image unavailable" }, rejectedPhotoRevision.status); return;
+        }
+        const fill = url.pathname === "/synthetic/A/1.svg" ? firstPhotoFill : "#729b7c";
+        sendText(res, `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="${fill}"/></svg>`, "image/svg+xml", "public, max-age=86400"); return;
       }
       const target = url.pathname === "/photo/maintenance" ? path.join(publicRoot, "modules/photos/maintenance/index.html")
         : /^\/(?:photo|manga|media|western)(?:\/|$)/.test(url.pathname) ? path.join(publicRoot, "index.html")
@@ -275,6 +281,26 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         } finally { releaseCovers(); releaseSummaryGates(overview, detail, parent); await page.close(); }
       });
     }
+    await run('photo shelf collection uses a readable title while the list is loading', async () => {
+      const category = '我喜欢的', previewTitle = '合成目录', title = '正式合集名称';
+      const collection = `shelf:${Buffer.from(JSON.stringify(['T:\\', category, previewTitle])).toString('base64url')}`;
+      const token = Buffer.from(collection).toString('base64url');
+      const detail = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('collection') === collection,
+        '', { items: [], count: 0, total: 0, facets: {}, collectionSummary: { title, category } });
+      const page = await newPage({ real: true, route: `/photo/collection/raw-${token}?category=catalog%3Alikes`, waitReady: false });
+      try {
+        await requested(detail);
+        const heading = page.locator('.gallery-collection-hero-copy > strong');
+        const breadcrumb = page.locator('.gallery-collection-breadcrumb');
+        await heading.waitFor({ state: 'visible' });
+        assert.equal(await heading.innerText(), previewTitle);
+        assert.deepEqual(await breadcrumb.locator('button').allTextContents(), ['图库', category]);
+        assert.equal(await breadcrumb.locator('strong').innerText(), previewTitle);
+        await settle(page, detail);
+        assert.equal(await heading.innerText(), title);
+        assert.equal(await breadcrumb.locator('strong').innerText(), title);
+      } finally { releaseSummaryGates(detail); await page.close(); }
+    });
     await run('photo direct category shows card counts while overview and cover are pending', async () => {
       const path = '/photo/categories/yituyu';
       const overview = hold(isSummary);
@@ -2050,6 +2076,173 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.locator(".gallery-reader-open").evaluate(button => button === document.activeElement), true);
       } finally { retryRead.release(); broken?.full.release(); await page.close(); }
     });
+    for (const outcome of ["replacement", "closed pager", "same revision", "reopened pager", "deep index"]) await run(`versioned pager image retry: ${outcome}`, async () => {
+      const page = await newPage(), detail = url => url.pathname === "/api/photo-sets/A";
+      const directory = url => detail(url) && url.searchParams.get("imageLimit") === "all";
+      const prefix = url => detail(url) && !directory(url) && !url.searchParams.has("imageOffset");
+      const before = "1".repeat(24), after = "2".repeat(24), same = outcome === "same revision", deep = outcome === "deep index";
+      const total = deep ? 180 : 1;
+      const snapshot = (imageRevision, count = total) => ({ album: { ...album("A", 0, count), imageCount: total, imageRevision } });
+      const first = hold(prefix, "", snapshot(before, deep ? 160 : 1));
+      const oldDirectory = deep ? hold(directory, "", snapshot(before)) : null;
+      let refresh, newDirectory;
+      const retry = page.locator(".gallery-image-pager-retry");
+      const stageImage = page.locator(".gallery-image-pager-stage img");
+      const counter = page.locator(".gallery-image-pager-counter");
+      const mountedRevision = () => page.evaluate(() => fixture.state.gallery.album?.imageRevision);
+      const openPager = () => page.locator(".gallery-reader-open").click();
+      try {
+        const opening = open(page, "A"); await requested(first);
+        rejectedPhotoRevision = { token: before, status: same ? 503 : 409 };
+        first.release(); await opening;
+        const route = await page.evaluate(() => ({ url: location.href, history: history.length }));
+        await openPager();
+        if (deep) {
+          await requested(oldDirectory); await settle(page, oldDirectory);
+          await page.keyboard.press("End");
+          assert.match(await counter.textContent(), /第 180 \/ 180 张/);
+        } else assert.equal(await page.locator(".gallery-more").count(), 0);
+        await retry.waitFor({ state: "visible" });
+        const reads = countRequests(prefix), directoryReads = countRequests(directory);
+        refresh = hold(prefix, "", snapshot(same ? before : after, deep ? 160 : 1));
+        if (deep) newDirectory = hold(directory, "", snapshot(after));
+        firstPhotoFill = "#b13e53";
+        await retry.click(); await requested(refresh);
+        assert.equal(new URL(refresh.url, base).searchParams.get("imageLimit"), "160");
+        assert.equal(countRequests(prefix), reads + 1);
+        assert.equal(await retry.isDisabled(), true);
+        if (outcome === "closed pager" || outcome === "reopened pager") await page.keyboard.press("Escape");
+        if (outcome === "reopened pager") {
+          await openPager(); await retry.click();
+          await page.getByText("正在检查套图是否已更新", { exact: true }).waitFor();
+          assert.equal(countRequests(prefix), reads + 1, "both explicit retries must share the held lookup");
+        }
+        await settle(page, refresh);
+        if (outcome === "closed pager") {
+          assert.equal(await mountedRevision(), before, "a closed pager cannot publish the refresh");
+          assert.equal(await stageImage.count(), 0);
+        } else if (same) {
+          assert.equal(await mountedRevision(), before);
+          assert.equal(await retry.isDisabled(), false);
+          rejectedPhotoRevision = null;
+          await retry.click(); await stageImage.evaluate(image => image.decode());
+          assert.equal(countRequests(prefix), reads + 1, "same-revision transient errors remain directly retryable");
+        } else {
+          assert.equal(await mountedRevision(), after);
+          await stageImage.evaluate(image => image.decode());
+          const imageUrl = new URL(await stageImage.getAttribute("src"), base);
+          assert.equal(imageUrl.searchParams.get("archive"), after);
+          assert.equal(countRequests(directory), directoryReads, "recovery must use only the bounded prefix");
+          if (deep) {
+            assert.match(await counter.textContent(), /第 160 \/ 160 张/);
+            await page.getByRole("button", { name: "读取完整目录" }).click();
+            await requested(newDirectory); await settle(page, newDirectory);
+            assert.match(await counter.textContent(), /第 180 \/ 180 张/);
+          } else {
+            const pixel = await stageImage.evaluate(image => {
+              const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+              const context = canvas.getContext("2d"); context.drawImage(image, 0, 0, 1, 1);
+              return [...context.getImageData(0, 0, 1, 1).data];
+            });
+            assert.deepEqual(pixel, [177, 62, 83, 255]);
+          }
+          await page.keyboard.press("Escape");
+          assert.equal(await page.locator(".gallery-reader-open").evaluate(button => button === document.activeElement), true);
+        }
+        assert.deepEqual(await page.evaluate(() => ({ url: location.href, history: history.length })), route);
+      } finally { rejectedPhotoRevision = null; firstPhotoFill = "#729b7c"; first.release(); oldDirectory?.release(); refresh?.release(); newDirectory?.release(); await page.close(); }
+    });
+    for (const outcome of ["replacement", "same revision", "newer album", "viewport", "legacy"]) await run(`flat reader image retry: ${outcome}`, async () => {
+      const real = outcome === "replacement";
+      const page = await newPage({ real, observer: outcome !== "same revision" }), path = "/api/photo-sets/A";
+      const listRoute = page.url(), card = page.locator('[data-gallery-album-id="A"]');
+      const isDetail = url => url.pathname === path;
+      const isDirectory = url => isDetail(url) && url.searchParams.get("imageLimit") === "all";
+      const isPrefix = url => isDetail(url) && !isDirectory(url) && !url.searchParams.has("imageOffset");
+      const legacy = outcome === "legacy", same = outcome === "same revision", preserveViewport = outcome === "viewport";
+      const before = legacy ? null : "1".repeat(24), after = "2".repeat(24), count = preserveViewport ? 18 : 1;
+      const snapshot = imageRevision => ({ album: { ...album("A", 0, count), imageCount: count, ...(imageRevision ? { imageRevision } : {}) } });
+      const oldImage = url => url.pathname === "/synthetic/A/1.svg" && url.searchParams.get("archive") === before;
+      const figure = index => page.locator(`.gallery-reader-figure[data-image-index="${index}"]`);
+      const first = hold(isPrefix, "", snapshot(before));
+      let refresh;
+      try {
+        const opening = real ? card.press("Enter") : open(page, "A"); await requested(first);
+        rejectedPhotoRevision = { token: before, status: legacy || same ? 503 : 409 };
+        first.release(); await opening;
+        await figure(1).locator(".gallery-reader-retry").waitFor({ state: "visible" });
+        const origin = page.url(), previous = await figure(1).elementHandle();
+        const detailReads = countRequests(isDetail), directoryReads = countRequests(isDirectory), imageReads = countRequests(oldImage);
+        if (!legacy) refresh = hold(isPrefix, "", snapshot(same ? before : after));
+        firstPhotoFill = "#b13e53";
+        await figure(1).click();
+        await until(() => countRequests(oldImage) > imageReads, "explicit retry must first try its original image");
+        if (legacy) {
+          await figure(1).locator(".gallery-reader-retry").waitFor({ state: "visible" });
+        } else {
+          await requested(refresh);
+          assert.equal(new URL(refresh.url, base).searchParams.get("imageLimit"), "160");
+          assert.equal(await figure(1).getAttribute("aria-busy"), "true");
+          await figure(1).evaluate(node => { node.click(); node.click(); });
+          assert.equal(await page.locator(".gallery-image-pager").count(), 0, "repeated activation while refreshing cannot open a pager");
+          if (outcome === "newer album") await open(page, "B");
+        }
+        let anchorTop;
+        if (preserveViewport) {
+          await figure(3).locator(".gallery-reader-retry").waitFor({ state: "visible" });
+          await figure(3).click();
+          await figure(3).getByText("正在检查套图是否已更新", { exact: true }).waitFor();
+          assert.equal(countRequests(isDetail), detailReads + 1, "two failed explicit retries must share one directory request");
+          await figure(6).evaluate(node => {
+            node.focus({ preventScroll: true });
+            window.scrollBy({ top: node.getBoundingClientRect().top + 36, behavior: "instant" });
+          });
+          await tick(page);
+          anchorTop = await figure(6).evaluate(node => node.getBoundingClientRect().top);
+        }
+        if (refresh) await settle(page, refresh);
+        assert.equal(countRequests(isDetail), detailReads + (legacy ? 0 : 1));
+        assert.equal(countRequests(isDirectory), directoryReads, "flat recovery must never request the complete directory");
+        if (outcome === "newer album") {
+          assert.equal(await page.evaluate(() => fixture.state.gallery.album.id), "B");
+          assert.equal(await previous.evaluate(node => node.isConnected), false);
+        } else if (legacy || same) {
+          assert.equal(await previous.evaluate(node => node.isConnected), true);
+          await figure(1).getByText("加载失败，点按重试", { exact: true }).waitFor();
+          assert.equal(await figure(1).getAttribute("aria-busy"), null);
+          rejectedPhotoRevision = null;
+          await figure(1).click(); await figure(1).locator("img").evaluate(img => img.decode());
+          assert.equal(countRequests(isDetail), detailReads + (legacy ? 0 : 1));
+        } else {
+          const current = figure(preserveViewport ? 6 : 1);
+          const image = current.locator("img[src]");
+          await image.evaluate(img => img.decode());
+          const url = new URL(await image.getAttribute("src"), base);
+          assert.equal(url.searchParams.get("archive"), after);
+          assert.equal(await previous.evaluate(node => node.isConnected), false);
+          if (preserveViewport) {
+            await tick(page);
+            const restoredTop = await current.evaluate(node => node.getBoundingClientRect().top);
+            assert(Math.abs(restoredTop - anchorTop) < 3,
+              `the live viewport must restore the same numbered image and offset (${anchorTop} -> ${restoredTop})`);
+            assert.equal(await current.evaluate(node => document.activeElement === node), true);
+          } else {
+            const pixel = await current.locator("img").evaluate(image => {
+              const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+              const context = canvas.getContext("2d"); context.drawImage(image, 0, 0, 1, 1);
+              return [...context.getImageData(0, 0, 1, 1).data];
+            });
+            assert.deepEqual(pixel, [177, 62, 83, 255]);
+          }
+          assert.equal(page.url(), origin);
+          if (real) {
+            await page.locator(".gallery-reader-back").click();
+            await page.waitForURL(listRoute); await card.waitFor(); await tick(page);
+            assert.equal(await card.evaluate(node => document.activeElement === node), true, "returning keeps the original list opener");
+          }
+        }
+      } finally { rejectedPhotoRevision = null; firstPhotoFill = "#729b7c"; first.release(); refresh?.release(); await page.close(); }
+    });
     await run("pager image retry survives late full metadata and preserves newer focus", async () => {
       const page = await newPage(); let broken;
       const retryRead = hold(url => url.pathname === "/synthetic/A/1.svg", "Synthetic retry failure");
@@ -2344,6 +2537,76 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.evaluate(() => fixture.state.gallery.album.id), "B"); assert.equal(await page.evaluate(() => Boolean(fixture.state.gallery.album.fullImages)), false); assert.equal(await page.locator(".gallery-image-pager").count(), 0);
       } finally { await page.close(); }
     });
+    for (const shrink of [false, true]) await run(`photo archive change: ${shrink ? "shrink retries from the first page" : "same-count replacement retires the old directory"}`, async () => {
+      const page = await newPage(), path = "/api/photo-sets/A";
+      const prefix = url => url.pathname === path && !url.searchParams.has("imageOffset") && url.searchParams.get("imageLimit") !== "all";
+      const append = url => url.pathname === path && url.searchParams.has("imageOffset");
+      const snapshot = (offset, limit, replacement) => {
+        const count = replacement && shrink ? 10 : 400;
+        const payload = album("A", offset, Math.min(limit, Math.max(0, count - offset)));
+        return { album: { ...payload,
+          imageCount: count, imageOffset: offset, updatedAt: "same-timestamp",
+          ...(shrink ? { archiveIdentity: replacement ? "after" : "before" }
+            : { imageRevision: replacement ? "2".repeat(24) : "1".repeat(24) }),
+          images: replacement ? payload.images.map(image => ({ ...image, name: `replacement ${image.index}` })) : payload.images } };
+      };
+      const first = hold(prefix, "", snapshot(0, 160, false));
+      const continuation = hold(append, "", snapshot(160, 160, true));
+      const restart = hold(prefix, shrink ? "Synthetic first page unavailable" : "", shrink ? null : snapshot(0, 160, true));
+      const full = shrink ? null : hold(url => url.pathname === path && url.searchParams.get("imageLimit") === "all", "", snapshot(0, 400, false));
+      const firstImage = page.locator(".gallery-reader-figure img").first();
+      const readPixel = async () => {
+        await page.waitForFunction(() => document.querySelector(".gallery-reader-figure img")?.naturalWidth > 0);
+        return firstImage.evaluate(image => {
+          const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+          const context = canvas.getContext("2d"); context.drawImage(image, 0, 0, 1, 1);
+          return [...context.getImageData(0, 0, 1, 1).data];
+        });
+      };
+      try {
+        first.release(); await open(page, "A");
+        if (!shrink) {
+          assert.deepEqual(await readPixel(), [114, 155, 124, 255]);
+          firstPhotoFill = "#b13e53";
+        }
+        if (full) {
+          await page.evaluate(() => { fixture.oldFull = fixture.page.fullPhotoReaderImages(); });
+          await requested(full);
+        }
+        const previous = await page.locator(".gallery-reader-figure").first().elementHandle();
+        const before = countRequests(prefix), appended = countRequests(append);
+        await more(page); await requested(continuation); await settle(page, continuation);
+        assert.equal(countRequests(prefix), before + 1, "an obsolete offset must restart from the first page");
+        assert.equal(await previous.evaluate(node => node.isConnected), true, "old figures stay mounted until a fresh first page is ready");
+        if (full) {
+          await settle(page, full);
+          assert.equal(await page.evaluate(async () => (await fixture.oldFull).length), 0, "a late old directory must be retired during the restart");
+        }
+        await settle(page, restart);
+        if (shrink) {
+          assert.equal(await page.locator(".gallery-more").textContent(), "Synthetic first page unavailable");
+          assert.equal(await page.locator(".gallery-reader-figure").count(), 160);
+          const retry = hold(prefix, "", snapshot(0, 160, true));
+          try { await more(page); await requested(retry); await settle(page, retry); }
+          finally { retry.release(); }
+        }
+        assert.equal(countRequests(append), appended + 1, "retry must not ask for the obsolete offset again");
+        assert.equal(await previous.evaluate(node => node.isConnected), false);
+        assert.equal(await page.locator(".gallery-reader-figure").count(), shrink ? 10 : 160);
+        assert.deepEqual(await page.evaluate(() => ({
+          revision: fixture.state.gallery.album.imageRevision || fixture.state.gallery.album.archiveIdentity,
+          names: fixture.state.gallery.album.images.every(image => image.name.startsWith("replacement ")),
+          hasOldDirectory: Boolean(fixture.state.gallery.album.fullImages)
+        })), { revision: shrink ? "after" : "2".repeat(24), names: true, hasOldDirectory: false });
+        if (shrink) assert.equal(await page.locator(".gallery-more").count(), 0);
+        else {
+          assert.deepEqual(await readPixel(), [177, 62, 83, 255], "the same member URL must decode fresh bytes after archive replacement");
+          const imageUrl = new URL(await firstImage.getAttribute("src"), base);
+          assert.equal(imageUrl.pathname, "/synthetic/A/1.svg");
+          assert.equal(imageUrl.searchParams.get("archive"), "2".repeat(24));
+        }
+      } finally { firstPhotoFill = "#729b7c"; first.release(); continuation.release(); restart.release(); full?.release(); await page.close(); }
+    });
     for (const observer of [true, false]) await run(`append retains DOM queue ${observer ? "observer" : "fallback"}`, async () => {
       const page = await newPage({ observer });
       try {
@@ -2454,6 +2717,16 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await readerTitle(page, "Album A110");
         assert.equal(await page.evaluate(() => scrollY), 0, "entering an album must start at the top immediately");
         const albumUrl = page.url();
+        if (inPage) {
+          const directory = hold(url => url.pathname === "/api/photo-sets/A110" && url.searchParams.get("imageLimit") === "all", "",
+            { album: { ...album("A110", 0, 2), imageCount: 2 } });
+          try {
+            await page.locator(".gallery-reader-open").click(); await requested(directory); await settle(page, directory);
+            assert.equal(await page.locator(".gallery-reader-figure").count(), 2, "a changed full directory can supply the replacement prefix");
+            assert.equal(await page.locator(".gallery-image-pager").count(), 0, "the old archive pager must retire");
+            assert.equal(page.url(), albumUrl, "a replacement must not add a different route");
+          } finally { directory.release(); }
+        }
         if (inPage) await page.locator(".gallery-reader-back").click();
         else await page.goBack();
         await page.waitForURL(collectionUrl);

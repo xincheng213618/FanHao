@@ -1148,9 +1148,29 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
         const last = await page.evaluate(() => __progressSends.at(-1));
         assert.equal(last.body.position, 0, "a genuine replay at zero must replace completed progress on pagehide");
+        assert.equal(last.body.resetAtStart, true, "replaying a completed file must signal a deliberate reset");
         assert.equal(last.body.duration, 90);
         assert.equal(last.keepalive, true);
       } finally { short.release(); await page.close(); }
+    });
+    await run("ordered progress distinguishes loaded zero from an explicit seek to zero", async () => {
+      const page = await open(true, "&t=0");
+      try {
+        await page.evaluate(() => {
+          __emitMedia("loadedmetadata");
+          window.dispatchEvent(new Event("beforeunload"));
+          document.querySelector("#playerVideo").currentTime = 5;
+        });
+        await page.keyboard.press("ArrowLeft");
+        const [loaded, seek] = await page.evaluate(() => __progressSends.slice(-2));
+        assert.equal(loaded.body.position, 0);
+        assert.equal(loaded.body.resetAtStart, undefined, "initial zero must keep its legacy no-op semantics");
+        assert.equal(seek.body.position, 0);
+        assert.equal(seek.body.resetAtStart, true);
+        assert.match(loaded.body.progressOrder.sessionId, /^[0-9a-f]{32}$/);
+        assert.equal(seek.body.progressOrder.sessionId, loaded.body.progressOrder.sessionId);
+        assert.ok(seek.body.progressOrder.sequence > loaded.body.progressOrder.sequence);
+      } finally { await page.close(); }
     });
     await run("final progress actual navigation delivers the latest current snapshot", async () => {
       const page = await open();
@@ -1161,7 +1181,10 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         const delivered = waitForProgressWrite(write => write.path === "/api/progress/A" && write.body.position === 52.75);
         await page.goto(`${base}/fixture-away`);
         const final = await delivered;
-        assert.deepEqual(final.body, { workId: "fixture-work", position: 52.75, duration: 600 });
+        const { progressOrder, ...checkpoint } = final.body;
+        assert.deepEqual(checkpoint, { workId: "fixture-work", position: 52.75, duration: 600 });
+        assert.match(progressOrder.sessionId, /^[0-9a-f]{32}$/);
+        assert.ok(progressOrder.sequence >= 2, "the teardown-safe checkpoint follows the earlier seek in this document");
         assert.equal(new URL(page.url()).pathname, "/fixture-away");
       } finally { await page.close(); }
     });

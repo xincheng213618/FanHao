@@ -61,7 +61,7 @@ export function createWorkDetailService({
   publicPerson,
   publicWork,
   resolveLibraryWorkByPublicId,
-  resolveVideoFileByPublicId,
+  resolveMissingVideoSource,
   userStateStamp = () => "",
   videoProbeService,
   withWorkInfoReadStatus = (callback) => ({ value: callback(), cacheable: true }),
@@ -112,16 +112,28 @@ export function createWorkDetailService({
     return payload;
   }
 
-  async function playInfoPayload(videoId, options = {}) {
-    const preferGallery = options.source === "gallery";
-    const libraryFile = preferGallery
-      ? null
-      : (resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId));
-    const galleryItem = libraryFile ? null : galleryMediaService.byId(videoId);
-    const file = libraryFile || (galleryItem ? galleryMediaService.videoFile(galleryItem) : null);
-    if (!file || file.type !== "video") return null;
+  async function playInfoPayload(videoId, { source, signal } = {}) {
+    if (signal?.aborted) return null;
+    if (source !== "gallery") {
+      const file = library.filesById.get(videoId);
+      if (file?.type === "video") {
+        const info = await videoProbeService.playInfoForFileAsync(file, videoId, {
+          signal,
+          requireSource: true,
+          resolveMissingSource: resolveMissingVideoSource
+        });
+        if (signal?.aborted) return null;
+        if (info) return info;
+      }
+    }
 
-    return videoProbeService.playInfoForFileAsync(file, videoId, galleryItem ? { streamBase: "/media/gallery-video" } : {});
+    const galleryItem = galleryMediaService.byId(videoId);
+    const file = galleryItem ? galleryMediaService.videoFile(galleryItem, { useIndexedSize: true }) : null;
+    if (file?.type !== "video") return null;
+    // Catalogued gallery videos have historically returned fallback play-info
+    // even when their media is offline. Keep that response for gallery callers.
+    const info = await videoProbeService.playInfoForFileAsync(file, videoId, { signal, streamBase: "/media/gallery-video" });
+    return signal?.aborted ? null : info;
   }
 
   function playbackPrewarmPayload(workId) {
@@ -145,11 +157,15 @@ export function createWorkDetailService({
     return { ok: true, detailReady: true, workId: work.id, videoId: video.id, ...prepared };
   }
 
-  function serveInfoFile(res, fileId) {
+  async function serveInfoFile(req, res, fileId) {
     const file = library.filesById.get(fileId);
     if (!file || file.type !== "info") return false;
 
-    mediaStreamService.serveInfo(res, file);
+    const sourcePath = file.path;
+    await mediaStreamService.serveInfo(req, res, file, { isCurrent: () => {
+      const current = library.filesById.get(fileId);
+      return current?.type === "info" && current.path === sourcePath;
+    } });
     return true;
   }
 

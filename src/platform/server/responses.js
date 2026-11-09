@@ -3,26 +3,32 @@ import { constants as zlibConstants, brotliCompress, gzip } from "node:zlib";
 const JSON_COMPRESSION_MIN_BYTES = 4 * 1024;
 
 export function sendJson(res, status, payload) {
-  const body = Buffer.from(JSON.stringify(payload));
-  const { encoding, identityAllowed } = acceptedJsonEncoding(res, body.length);
+  sendJsonParts(res, status, [Buffer.from(JSON.stringify(payload))]);
+}
+
+export function sendJsonParts(res, status, parts) {
+  if (res.destroyed || res.writableEnded) return;
+  const size = parts.reduce((bytes, part) => bytes + part.length, 0);
+  const { encoding, identityAllowed } = acceptedJsonEncoding(res, size);
   if (encoding === null) {
-    writeJson(res, 406, Buffer.alloc(0));
+    writeJson(res, 406, [], 0);
     return;
   }
   if (!encoding) {
-    writeJson(res, status, body);
+    writeJson(res, status, parts, size);
     return;
   }
 
+  const body = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
   const finish = (error, compressed) => {
     if (res.destroyed || res.writableEnded) return;
     if (error) {
       // A compressor failure may only fall back to a representation the
       // client accepts. Negotiation succeeded, so this is not a 406.
-      writeJson(res, identityAllowed ? status : 500, identityAllowed ? body : Buffer.alloc(0));
+      writeJson(res, identityAllowed ? status : 500, identityAllowed ? [body] : [], identityAllowed ? size : 0);
       return;
     }
-    writeJson(res, status, compressed, encoding);
+    writeJson(res, status, [compressed], compressed.length, encoding);
   };
   if (encoding === "br") {
     brotliCompress(body, {
@@ -62,17 +68,18 @@ function acceptedJsonEncoding(res, size) {
   return { encoding: identityAllowed ? "" : null, identityAllowed };
 }
 
-function writeJson(res, status, body, encoding = "") {
+function writeJson(res, status, parts, size, encoding = "") {
   const vary = String(res.getHeader?.("Vary") || "").split(",").map(value => value.trim()).filter(Boolean);
   if (!vary.some(value => value === "*" || value.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    "Content-Length": body.length,
+    "Content-Length": size,
     Vary: vary.join(", "),
     ...(encoding ? { "Content-Encoding": encoding } : {})
   });
-  res.end(body);
+  for (let index = 0; index < parts.length - 1; index += 1) res.write(parts[index]);
+  res.end(parts.at(-1));
 }
 
 export function sendText(res, status, text) {

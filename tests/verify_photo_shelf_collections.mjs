@@ -153,6 +153,26 @@ try {
   assert.equal(fetishPage.stats.albumCount, 2);
   assert.equal(fetishPage.items[0].browseCategoryId, "lady-antebellum");
   assert.deepEqual(page("catalog:fetish", { photoView: "albums" }).items.map(item => item.id).sort(), ["base-0", "fetish"]);
+
+  const personAlbums = [
+    { ...album("western-credit", likes, "Faina Bona"), personName: "Faina Bona",
+      title: "SexArt - 2018-10-11 - Faina Bona & Lena Raz - Girlfriends" },
+    { ...album("direct-credit", "其他", "无别名"), personName: "\u3000Lena Raz " },
+    { ...album("partial-credit", "其他", "无别名"), personName: "Lena Razer" }
+  ];
+  store.publish({ scannedAt: timestamp, roots: [], photoSets: [...photoSets, ...personAlbums] });
+  const options = { ...baseOptions, cachePreparedQueries: true, getImageLibraryRevision: store.revision };
+  const scoped = createImageLibraryService({ ...options, photoLibraryStore: { ...store, index: () => assert.fail("direct person lists should not load the full catalog") } });
+  const full = createImageLibraryService({ ...options, photoLibraryStore: { ...store, indexForPerson: undefined } });
+  const personUrl = new URL("http://fixture/api/image-library/items?mode=photo&photoView=albums&person=Lena+Raz&sort=title");
+  const result = scoped.itemsPayload(personUrl);
+  const { listRevision: _scopedRevision, ...scopedPage } = result;
+  const { listRevision: _fullRevision, ...fullPage } = full.itemsPayload(personUrl);
+  assert.deepEqual(scopedPage, fullPage, "scope keeps exact credits and the full gallery facets");
+  assert.deepEqual(result.items.map(item => item.id).sort(), ["direct-credit", "western-credit"]);
+
+  store.publish({ scannedAt: timestamp, roots: [], photoSets: [...photoSets, personAlbums[0]] });
+  assert.deepEqual(scoped.itemsPayload(personUrl).items.map(item => item.id), ["western-credit"]);
   console.log("photo shelf collections: first-level groups, nested issues, taxonomy membership, reverse pages and old links verified");
 } finally {
   db.close();

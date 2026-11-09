@@ -1,4 +1,5 @@
 import { PHOTO_CATALOG_LOCALE } from "./photo-catalog.js?v=20260810-photo-catalog-01";
+import { addQueryParam } from "../../js/api.js?v=20260701-gallery-merge-01";
 
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const IMAGE_LIBRARY_PAGE_LIMIT = 5000;
@@ -535,8 +536,9 @@ export function createGalleryPage(deps) {
       }
       const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }), { signal: owner.controller.signal });
       if (!readerRequestCurrent(owner)) return null;
+      const album = photoReaderAlbum(data, albumId);
       clearReaderState();
-      state.gallery.album = data.album;
+      state.gallery.album = album;
       state.gallery.cache = data.cache || state.gallery.cache;
       clearReaderRequestStatus(owner, owner);
       renderGalleryStats();
@@ -582,6 +584,56 @@ export function createGalleryPage(deps) {
     return PHOTO_READER_LIMITS.fallback;
   }
 
+  function samePhotoArchive(left, right) {
+    if (left.imageRevision && right.imageRevision) return left.imageRevision === right.imageRevision;
+    if (left.archiveIdentity && right.archiveIdentity) return left.archiveIdentity === right.archiveIdentity;
+    return !left.updatedAt || !right.updatedAt || left.updatedAt === right.updatedAt;
+  }
+
+  function photoImageRevision(album) {
+    return /^[a-f0-9]{24}$/u.test(album?.imageRevision || "") ? album.imageRevision : "";
+  }
+
+  function photoReaderAlbum(data, id) {
+    const album = data?.album;
+    if (album?.id !== id || !Array.isArray(album.images)) throw new Error("套图读取响应无效");
+    const revision = photoImageRevision(album);
+    if (!revision) return album;
+    return { ...album, images: album.images.map(image => typeof image?.url === "string" && image.url
+      ? { ...image, url: addQueryParam(image.url, "archive", revision) } : image) };
+  }
+
+  function replacePhotoReaderArchive(owner, album, cache) {
+    const replacement = beginReaderRequest("photo", album.id);
+    replacement.listReturn = owner.listReturn;
+    state.gallery.album = album;
+    state.gallery.cache = cache || state.gallery.cache;
+    setStatus("");
+    renderGalleryStats();
+    renderGalleryView();
+    window.scrollTo({ top: 0, behavior: "instant" });
+    return album;
+  }
+
+  async function refreshPhotoReaderArchive(albumId, revision, isCurrent, beforeReplace) {
+    const owner = readerOwner;
+    const ownsRefresh = () => readerRequestCurrent(owner, albumId)
+      && photoImageRevision(state.gallery.album) === revision && isCurrent();
+    if (!revision || !ownsRefresh()) return null;
+    // Share the read, while each retry keeps ownership of its own UI intent.
+    owner.photoArchiveRefresh ||= api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }), {
+      signal: owner.controller.signal, cache: "no-store"
+    }).finally(() => { owner.photoArchiveRefresh = null; });
+    const data = await owner.photoArchiveRefresh;
+    if (!ownsRefresh()) return null;
+    const album = photoReaderAlbum(data, albumId);
+    const nextRevision = photoImageRevision(album);
+    if (!nextRevision || nextRevision === revision) return null;
+    if (Number(album.imageOffset || 0) !== 0) throw new Error("套图首页响应无效");
+    beforeReplace?.();
+    return replacePhotoReaderArchive(owner, album, data.cache);
+  }
+
   function mergePhotoReaderImages(existing = [], incoming = []) {
     const merged = new Map();
     for (const image of [...existing, ...incoming]) {
@@ -607,14 +659,27 @@ export function createGalleryPage(deps) {
     setReaderRequestStatus(owner, request, "正在继续读取图片");
     request.promise = (async () => {
       try {
-        const data = await api(photoSetPath(album.id, { imageLimit: nextLimit, imageOffset: currentImages.length }), { signal: owner.controller.signal });
+        const options = { signal: owner.controller.signal, cache: "no-store" };
+        if (!owner.restartPhotoArchive) {
+          const data = await api(photoSetPath(album.id, { imageLimit: nextLimit, imageOffset: currentImages.length }), options);
+          if (!readerRequestCurrent(owner, album.id)) return null;
+          const nextAlbum = photoReaderAlbum(data, album.id);
+          if (samePhotoArchive(album, nextAlbum) && Number(nextAlbum.imageCount ?? totalCount) === totalCount) {
+            const images = mergePhotoReaderImages(currentImages, nextAlbum.images);
+            if (images.length <= currentImages.length) throw new Error("没有读到更多图片，点一下重试");
+            state.gallery.album = { ...state.gallery.album, ...nextAlbum, images, imageOffset: 0, imageLimit: images.length,
+              imagesTruncated: images.length < totalCount };
+            state.gallery.cache = data.cache || state.gallery.cache;
+            return state.gallery.album;
+          }
+          owner.restartPhotoArchive = true;
+          photoFullRequest = null;
+        }
+        const fresh = await api(photoSetPath(album.id, { imageLimit: batchSize }), options);
         if (!readerRequestCurrent(owner, album.id)) return null;
-        const nextAlbum = data.album || {};
-        const images = mergePhotoReaderImages(currentImages, nextAlbum.images || []);
-        state.gallery.album = { ...state.gallery.album, ...nextAlbum, images, imageOffset: 0, imageLimit: images.length,
-          imagesTruncated: images.length < Math.max(Number(nextAlbum.imageCount || 0), totalCount) };
-        state.gallery.cache = data.cache || state.gallery.cache;
-        return state.gallery.album;
+        const firstPage = photoReaderAlbum(fresh, album.id);
+        if (Number(firstPage.imageOffset || 0) !== 0) throw new Error("套图首页响应无效");
+        return replacePhotoReaderArchive(owner, firstPage, fresh.cache);
       } catch (error) {
         if (!readerRequestCurrent(owner, album.id)) return null;
         throw error;
@@ -629,6 +694,7 @@ export function createGalleryPage(deps) {
   function fullPhotoReaderImages(album = state.gallery.album) {
     const owner = readerOwner;
     if (!album?.id || !readerRequestCurrent(owner, album.id)) return Promise.resolve([]);
+    if (owner.restartPhotoArchive) return Promise.reject(new Error("套图已变化，请继续读取以刷新目录"));
     const currentAlbum = state.gallery.album;
     const images = Array.isArray(currentAlbum.images) ? currentAlbum.images : [];
     const total = Number(currentAlbum.imageCount || images.length || 0);
@@ -639,13 +705,22 @@ export function createGalleryPage(deps) {
     photoFullRequest = request;
     request.promise = (async () => {
       try {
-        const data = await api(photoSetPath(album.id, { imageLimit: "all" }), { signal: owner.controller.signal });
-        if (!readerRequestCurrent(owner, album.id)) return [];
-        const fullImages = Array.isArray(data.album?.images) ? data.album.images : images;
+        const data = await api(photoSetPath(album.id, { imageLimit: "all" }), { signal: owner.controller.signal, cache: "no-store" });
+        if (photoFullRequest !== request || !readerRequestCurrent(owner, album.id)) return [];
+        const nextAlbum = photoReaderAlbum(data, album.id);
+        const fullImages = nextAlbum.images;
+        const count = Number(nextAlbum.imageCount ?? fullImages.length);
+        if (count !== fullImages.length) throw new Error("套图完整目录响应无效");
+        if (!samePhotoArchive(currentAlbum, nextAlbum) || count !== total) {
+          const firstPage = fullImages.slice(0, photoReaderInitialLimit());
+          replacePhotoReaderArchive(owner, { ...nextAlbum, images: firstPage, fullImages, imageOffset: 0,
+            imageLimit: firstPage.length, imagesTruncated: firstPage.length < count }, data.cache);
+          return [];
+        }
         state.gallery.album.fullImages = fullImages;
         return fullImages;
       } catch (error) {
-        if (!readerRequestCurrent(owner, album.id)) return [];
+        if (photoFullRequest !== request || !readerRequestCurrent(owner, album.id)) return [];
         throw error;
       } finally {
         if (photoFullRequest === request) photoFullRequest = null;
@@ -735,6 +810,7 @@ export function createGalleryPage(deps) {
     loadImageLibraryItems,
     loadPhotoReaderImages,
     fullPhotoReaderImages,
+    refreshPhotoReaderArchive,
     openGalleryMedia,
     openMangaChapter,
     openMangaComic,

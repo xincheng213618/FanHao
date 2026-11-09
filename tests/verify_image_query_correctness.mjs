@@ -11,14 +11,11 @@ import { createGalleryMetadataService } from "../src/modules/media/server/galler
 import { createGalleryMediaService } from "../src/modules/media/server/gallery-media-service.js";
 import { createGalleryIndexSource } from "./fixtures/gallery-index-source.mjs";
 import { createMangaService } from "../src/modules/photos/server/manga-service.js";
-import { sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-source-adapter.mjs";
+import { readImageLibrarySource, sourceBeforeMovieColdScope } from "./fixtures/image-library-legacy-source-adapter.mjs";
 
 // Current production code versus the previous eager/N+1/grouping algorithms,
 // restored in memory. All rows and SQLite state are private synthetic doubles.
-const source = fs.readFileSync(new URL("../src/modules/content-index/server/image-library-service.js", import.meta.url), "utf8").replaceAll("\r\n", "\n")
-  .replace('"./image-query-cache.js"', JSON.stringify(new URL("../src/modules/content-index/server/image-query-cache.js", import.meta.url).href))
-  .replace('"./photo-album-number.js"', JSON.stringify(new URL("../src/modules/content-index/server/photo-album-number.js", import.meta.url).href))
-  .replace('"../../../../lib/photo-person-shelf.js"', JSON.stringify(new URL("../lib/photo-person-shelf.js", import.meta.url).href));
+const source = readImageLibrarySource();
 export function previousQuerySource(current) {
   let previous = sourceBeforeMovieColdScope(current)
     .replaceAll("metadataService.tvSeriesRow(sourceSeriesKey, { forPublication: true })", "metadataService.tvSeriesRow(sourceSeriesKey)")
@@ -473,10 +470,7 @@ async function verifyTvJsonLdProjection() {
   const load=async(source,name)=> (await import("data:text/javascript;base64,"+Buffer.from(source+"\n//"+name).toString("base64")));
   const oldFactory=(await load(previousMetadataSource,"old")).createGalleryMetadataService;
   const thinFactory=(await load(legacyWide ? previousMetadataSource : metadataSource,"thin")).createGalleryMetadataService;
-  const librarySource=read("src/modules/content-index/server/image-library-service.js")
-   .replace('"./image-query-cache.js"',JSON.stringify(uri("src/modules/content-index/server/image-query-cache.js")))
-   .replace('"./photo-album-number.js"',JSON.stringify(uri("src/modules/content-index/server/photo-album-number.js")))
-   .replace('"../../../../lib/photo-person-shelf.js"',JSON.stringify(uri("lib/photo-person-shelf.js")))
+  const librarySource = source
    .replace("const listRealm = randomUUID();",'const listRealm = "private-tv-jsonld-audit";');
   const publicationCall = "metadataService.tvSeriesRowsMap({ forPublication: true })";
   assert.equal(librarySource.split(publicationCall).length - 1, 2, "only payload and cold items opt into TV publication");

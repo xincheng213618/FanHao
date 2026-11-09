@@ -1,5 +1,8 @@
 import fs from "node:fs";
 
+const MAX_ACTIVE_FILE_PREVIEWS = 8;
+const MAX_ACTIVE_FILE_RELOCATIONS = 2;
+
 export function parseRange(rangeHeader, size) {
   const match = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || "").trim());
   if (!match) return null;
@@ -99,7 +102,7 @@ function entityTagConditionMatches(value, etag, weak) {
   return sawTag && matched;
 }
 
-function readPreconditionStatus(req, validators) {
+export function readPreconditionStatus(req, validators) {
   if (req?.method !== "GET" && req?.method !== "HEAD") return 0;
   const headers = req.headers || {}, etag = validators.ETag;
   const modified = Date.parse(validators["Last-Modified"]);
@@ -172,6 +175,8 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
   const normalizedDefaultChunkBytes = Math.max(0, Math.floor(Number(defaultChunkBytes || 0)));
   const normalizedStopTimeoutMs = Math.max(1, Math.floor(Number(stopTimeoutMs) || 2000));
   const owners = new Set();
+  let activePreviews = 0;
+  let activeRelocations = 0;
   let accepting = true, lifecycleGeneration = 0, stopTask = null;
 
   const incompleteStop = () => Object.assign(new Error("File descriptors have not finished closing"), {
@@ -276,30 +281,23 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
   }
 
   async function runOpenedFile(req, res, filePath, respond, options, owner) {
-    const { signal, isCurrent, validateFile } = options;
+    const { signal, isCurrent, validateFile, resolveAlternate } = options;
     let handle, stream, streamClosed;
-    let interrupted = false;
-    const unavailable = () => interrupted || signal?.aborted || req?.aborted || res.destroyed || res.writableEnded;
+    const unavailable = () => signal.aborted || req?.aborted || res.destroyed || res.writableEnded;
     const current = () => {
       try { return !isCurrent || isCurrent(); }
       catch { return false; }
     };
-    const disconnect = () => {
-      interrupted = true;
+    const disconnect = () => owner.controller.abort();
+    const onAbort = () => {
       stream?.destroy();
       if (!res.destroyed && !res.writableEnded) res.destroy();
     };
-    req?.once?.("aborted", disconnect);
-    res.once?.("close", disconnect);
-    signal?.addEventListener("abort", disconnect, { once: true });
-    try {
-      if (signal?.aborted || req?.aborted) disconnect();
-      if (unavailable()) return false;
-      if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
-      let stat;
+    const openSource = async (sourcePath) => {
       try {
-        handle = await fs.promises.open(filePath, "r");
+        handle = await fs.promises.open(sourcePath, "r");
         owner.handle = handle;
+        owner.closed = false;
         const closeHandle = handle.close.bind(handle);
         // Node marks fd=-1 and emits FileHandle.close before its native close
         // finishes. Later close() calls can already resolve. Capture the first
@@ -307,19 +305,65 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
         handle.close = () => owner.closePromise ||= Promise.resolve().then(closeHandle);
         // An ignored abort during open must close its late descriptor without
         // starting more filesystem work or publishing headers.
-        if (unavailable()) return false;
-        if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
-        stat = await handle.stat();
-        if (unavailable()) return false;
-        if (!stat.isFile()) throw Object.assign(new Error("File path is not a file"), { code: "ENOTDIR" });
+        if (unavailable() || !current()) return {};
+        const stat = await handle.stat();
+        return stat.isFile() ? { stat } : { missing: true };
       } catch (error) {
-        if (!unavailable()) {
-          if (options.throwFileErrors && error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
-          await finishResponse(res, () => notFound(res));
-        }
-        return false;
+        if (unavailable()) return {};
+        const missing = error?.code === "ENOENT" || error?.code === "ENOTDIR";
+        if (options.throwFileErrors && !missing) throw error;
+        return { missing: missing || error?.code === "EISDIR" };
       }
+    };
+    const closeSource = async () => {
+      if (!handle || owner.closeFailed) return;
+      try { await handle.close(); }
+      catch (error) {
+        // A rejected native close cannot prove descriptor release, even when
+        // Node's JS handle already reports fd=-1.
+        owner.closeFailed = true;
+        throw error;
+      }
+      owner.closed = true;
+      owner.handle = handle = null;
+      owner.closePromise = null;
+    };
+    const openAlternate = async () => {
+      if (!current()) return null;
+      let alternate;
+      try { alternate = await resolveAlternate(signal); }
+      catch (error) { if (!unavailable()) throw error; }
+      if (!alternate || unavailable() || !current()) return null;
+      const { stat } = await openSource(alternate.path);
+      return stat && (!(alternate.size > 0) || stat.size === alternate.size) ? stat : null;
+    };
+    req?.once?.("aborted", disconnect);
+    res.once?.("close", disconnect);
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      if (req?.aborted) disconnect();
+      if (signal.aborted) onAbort();
+      if (unavailable()) return false;
       if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+      let { stat, missing } = await openSource(filePath);
+      if (missing && resolveAlternate && !unavailable() && current()) {
+        // A directory can open successfully. Close it before inspecting or
+        // opening a replacement so the request only owns one descriptor.
+        await closeSource();
+        if (unavailable()) return false;
+        if (activeRelocations >= MAX_ACTIVE_FILE_RELOCATIONS) {
+          await finishResponse(res, () => {
+            res.writeHead(503, { "Content-Length": 0, "Cache-Control": "no-store", "Retry-After": "1" });
+            res.end();
+          });
+          return false;
+        }
+        activeRelocations++;
+        try { stat = await openAlternate(); }
+        finally { activeRelocations--; }
+      }
+      if (unavailable()) return false;
+      if (!stat || !current()) { await finishResponse(res, () => notFound(res)); return false; }
       // Archive callers recheck source and path safety after the asynchronous
       // open/stat boundary. Validation failures belong to their route handler.
       if (validateFile) await validateFile(stat);
@@ -363,28 +407,59 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
           failed();
         }
       };
-      return await respond(stat, pipe);
+      return await respond(stat, pipe, { handle, unavailable, current });
     } finally {
       // Keep the serving promise pending through physical stream/FD closure,
       // including ignored open/stat cancellation and autoClose stream errors.
       try {
         stream?.destroy();
         if (stream && !stream.closed) await streamClosed;
-        try {
-          await handle?.close();
-          owner.closed = true;
-        } catch (error) {
-          // A rejected native close cannot prove descriptor release, even if
-          // Node's JS handle now says fd=-1. Keep shutdown failed instead of
-          // retrying an unknown descriptor number.
-          owner.closeFailed = true;
-          throw error;
-        }
+        await closeSource();
       } finally {
         req?.off?.("aborted", disconnect);
         res.off?.("close", disconnect);
-        signal?.removeEventListener("abort", disconnect);
+        signal.removeEventListener("abort", onAbort);
       }
+    }
+  }
+
+  async function serveFilePreview(req, res, filePath, maxBytes, respond, options = {}) {
+    if (req?.aborted || res.destroyed || res.writableEnded) return false;
+    if (activePreviews >= MAX_ACTIVE_FILE_PREVIEWS) {
+      await finishResponse(res, () => {
+        res.writeHead(503, { "Content-Length": 0, "Cache-Control": "no-store", "Retry-After": "1" });
+        res.end();
+      });
+      return false;
+    }
+    activePreviews++;
+    try {
+      return await withOpenedFile(req, res, filePath, async (stat, _pipe, { handle, unavailable, current }) => {
+        if (stat.size > maxBytes) {
+          await finishResponse(res, () => respond(null, stat.size));
+          return true;
+        }
+        // Read at most the opened size plus one byte, even if the file grows.
+        const buffer = Buffer.allocUnsafe(stat.size + 1);
+        let offset = 0;
+        try {
+          while (offset < buffer.length && !unavailable()) {
+            const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+            if (!bytesRead) break;
+            offset += bytesRead;
+          }
+        } catch (error) {
+          if (unavailable()) return false;
+          throw error;
+        }
+        if (unavailable()) return false;
+        if (!current()) { await finishResponse(res, () => notFound(res)); return false; }
+        if (offset !== stat.size) throw Object.assign(new Error("资料文件读取期间发生变化，请重试"), { statusCode: 409 });
+        await finishResponse(res, () => respond(buffer.subarray(0, offset), stat.size));
+        return true;
+      }, options);
+    } finally {
+      activePreviews--;
     }
   }
 
@@ -407,6 +482,11 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
   }
 
   function serveRangedFile(req, res, file, options = {}) {
+    const { resolveMissingSource } = options;
+    const resolveAlternate = resolveMissingSource && (async (signal) => {
+      const candidate = await resolveMissingSource(file, signal);
+      return candidate?.path && candidate.path !== file.path ? { path: candidate.path, size: Number(file.size) } : null;
+    });
     return withOpenedFile(req, res, file?.path, async (stat, pipe) => {
       // A short-video startup cache may contain only the first chunk while still
       // representing the original media entity. Keep the HTTP range total and
@@ -516,10 +596,11 @@ export function createFileServer({ defaultChunkBytes = 0, mimeTypes, normalizeEx
       });
       await pipe(responseRange);
       return;
-    }, { ...options, isCurrent: options.isCurrent || file?.isCurrentSource }).then(() => undefined);
+    }, { ...options, resolveAlternate, isCurrent: options.isCurrent || file?.isCurrentSource }).then(() => undefined);
   }
 
   return {
+    serveFilePreview,
     serveWholeFile,
     serveDownloadFile,
     serveInlineFile,

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -158,6 +160,7 @@ try {
     if (!legacy) await verifyChapterSummaryReuse();
     if (!legacy) await verifyChapterNavigationCache();
     if (!legacy) await verifyManifestImageChapterCache();
+    if (!legacy) await verifyChapterHttpLifecycle();
   }
   console.log(`PASS manga lookup performance: ${checks} groups; actual service/collector SQLite, synthetic catalog and controlled image continuation${diagnose ? " (diagnostic mode: performance gates omitted)" : ""}`);
 } finally {
@@ -169,7 +172,7 @@ try {
   assert.equal(path.dirname(resolved).toLowerCase(), fs.realpathSync(os.tmpdir()).toLowerCase());
   assert.ok(path.basename(resolved).startsWith("fanhao-manga-lookups-"));
   // Delete only explicit files, then validated empty leaf directories. No
-  // recursive operation, collector process, real server or real media is used.
+  // recursive operation, collector process, production server or real media is used.
   for (const directory of [...ownedDirectories].reverse().concat(resolved)) {
     assert.ok(directory === resolved || directory.startsWith(resolved + path.sep));
     for (const name of fs.readdirSync(directory)) {
@@ -290,11 +293,11 @@ async function repeatedChapterSummaryModules() {
   assert(summaryStart >= 0 && summaryEnd > summaryStart);
   const uncachedService = service.replace(cacheBinding, "const metadataInputs = readMangaMetadataInputs;")
     .replace(service.slice(summaryStart, summaryEnd), "  function readManifestSummary(cacheDir, context) {\n    return summarizeManifest(readMangaManifest(cacheDir, context));\n  }\n");
-  const currentChapter = "  function publicChapter(cacheDir, requestedIndex, manga, manifestContext = {}) {\n    if (manga === undefined) manga = publicSummary(cacheDir, manifestContext);";
-  const oldChapter = "  function publicChapter(cacheDir, requestedIndex) {\n    const manifestContext = {};\n    const manga = publicSummary(cacheDir, manifestContext);";
-  assert.equal(service.split(currentChapter).length, 2);
-  const previousService = uncachedService.replace(currentChapter, oldChapter);
-  assert.equal(previousService.replace(oldChapter, currentChapter), uncachedService, "the oracle restores only the former chapter signature and summary call");
+  const currentSummary = "    if (manga === undefined) manga = publicSummary(cacheDir, manifestContext);";
+  const oldSummary = "    manifestContext = {};\n    manga = publicSummary(cacheDir, manifestContext);";
+  assert.equal(service.split(currentSummary).length, 2);
+  const previousService = uncachedService.replace(currentSummary, oldSummary);
+  assert.equal(previousService.replace(oldSummary, currentSummary), uncachedService, "the oracle restores only the former chapter summary call");
   const moduleSource = previousService.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
     "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href));
   const previousFactory = (await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"))).createMangaService;
@@ -302,14 +305,16 @@ async function repeatedChapterSummaryModules() {
     "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href));
   const uncachedFactory = (await import("data:text/javascript;base64," + Buffer.from(uncachedModule).toString("base64"))).createMangaService;
   const route = fs.readFileSync(routesPath, "utf8").replaceAll("\r\n", "\n");
-  const currentCall = "    const manifestContext = {};\n    const comic = cacheDir ? mangaService.publicSummary(cacheDir, manifestContext) : null;\n    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic, manifestContext) : null;";
-  const oldCall = "    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;";
-  const currentSend = "    sendJson(res, 200, { comic, chapter, cache: await imageReaderCacheStatus() });";
-  const oldSend = "    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: await imageReaderCacheStatus() });";
-  assert.equal(route.split(currentCall).length, 2); assert.equal(route.split(currentSend).length, 2);
-  const previousRoute = route.replace(currentCall, oldCall).replace(currentSend, oldSend);
-  assert.equal(previousRoute.replace(oldCall, currentCall).replace(oldSend, currentSend), route, "the route oracle restores only repeated summary work");
-  return { factory: previousFactory, uncachedFactory, route: (await import("data:text/javascript;base64," + Buffer.from(previousRoute).toString("base64"))).routePhotosApi };
+  const currentCall = "      const manifestContext = {};\n      const comic = cacheDir ? mangaService.publicSummary(cacheDir, manifestContext) : null;\n      const chapter = cacheDir ? await mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic, manifestContext, { signal: controller.signal }) : null;";
+  const oldCall = "      const chapter = cacheDir ? await mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), undefined, undefined, { signal: controller.signal }) : null;";
+  const currentCache = "      const cache = await imageReaderCacheStatus();\n      if (!unavailable()) sendJson(res, 200, { comic, chapter, cache });";
+  const oldCache = "      const comic = mangaService.publicSummary(cacheDir);\n" + currentCache;
+  assert.equal(route.split(currentCall).length, 2); assert.equal(route.split(currentCache).length, 2);
+  const previousRoute = route.replace(currentCall, oldCall).replace(currentCache, oldCache);
+  assert.equal(previousRoute.replace(oldCall, currentCall).replace(oldCache, currentCache), route, "the route oracle restores only repeated summary work");
+  const routeModule = previousRoute.replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, relative) =>
+    "from " + JSON.stringify(pathToFileURL(path.resolve(path.dirname(routesPath), relative)).href));
+  return { factory: previousFactory, uncachedFactory, route: (await import("data:text/javascript;base64," + Buffer.from(routeModule).toString("base64"))).routePhotosApi };
 }
 
 async function verifyChapterSummaryReuse() {
@@ -424,7 +429,12 @@ async function verifyChapterSummaryReuse() {
     mangaService: {
       cacheById(id) { assert.equal(id, "legacy-alias"); events.push("lookup"); return "private-directory"; },
       publicSummary(directory, context) { assert.equal(directory, "private-directory"); manifestContext = context; events.push("summary"); return summary; },
-      publicChapter(directory, index, comic, context) { assert.equal(directory, "private-directory"); assert.equal(index, "7"); assert.strictEqual(comic, summary); assert.strictEqual(context, manifestContext); events.push("chapter"); return { id: comic.id }; }
+      async publicChapter(directory, index, comic, context, { signal }) {
+        assert.equal(directory, "private-directory"); assert.equal(index, "7"); assert.strictEqual(comic, summary); assert.strictEqual(context, manifestContext);
+        assert(signal instanceof AbortSignal && !signal.aborted);
+        events.push("chapter");
+        return { id: comic.id };
+      }
     },
     imageReaderCacheStatus: async () => { events.push("cache"); return {}; },
     sendJson(_res, status, data) { assert.equal(status, 200); assert.strictEqual(data.comic, summary); assert.equal(data.chapter.id, summary.id); events.push("send"); }
@@ -432,6 +442,134 @@ async function verifyChapterSummaryReuse() {
   assert.deepEqual(events, ["lookup", "summary", "chapter", "cache", "send"], "summary remains before chapter reads, using the same canonical identity within one request");
   console.log(JSON.stringify({ check: "manga-chapter-summary-contract", completeResponseOracles: oracles, standaloneDefaults: true,
     sparseAndMissingChapters: true, missingDirectoryAndManifest: true, malformedJson: true, externalWrites: true, responseIsolation: true, identityAndOrder: true, chapterSummaryReuseIsRequestLocal: true, fileInputCacheBypassedForThisGate: true }));
+  checks++;
+}
+
+async function verifyChapterHttpLifecycle() {
+  const fixture = fresh("chapter-http");
+  const directory = addBook(fixture, 1);
+  const chapters = path.join(directory, "chapters");
+  const chapterDirectory = path.join(chapters, "001");
+  const imageDirectory = path.join(chapterDirectory, "images");
+  for (const owned of [chapters, chapterDirectory, imageDirectory]) mkdir(owned);
+  const imagePath = path.join(imageDirectory, "001.png");
+  const png = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(720, 16);
+  png.writeUInt32BE(1080, 20);
+  write(imagePath, png);
+
+  const events = new EventEmitter();
+  const event = name => once(events, name, { signal: AbortSignal.timeout(5000) });
+  const releaseStat = Promise.withResolvers();
+  const { stat, open } = fs.promises;
+  let heldStat;
+  let imageOpens = 0;
+  let cacheReads = 0;
+  const writes = [];
+  const routeErrors = [];
+  fs.promises.stat = function (file, ...args) {
+    if (file === imagePath && !heldStat) {
+      heldStat = releaseStat.promise.then(() => stat.call(this, file, ...args));
+      events.emit("image-stat");
+      return heldStat;
+    }
+    return stat.call(this, file, ...args);
+  };
+  fs.promises.open = function (file, ...args) {
+    if (file === imagePath) imageOpens++;
+    return open.call(this, file, ...args);
+  };
+  const client = new AbortController();
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, "http://fixture");
+    if (url.pathname === "/health") {
+      res.end("ok");
+      return;
+    }
+    const send = (status, data) => {
+      writes.push(status);
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(data));
+    };
+    void routePhotosApi(req, res, url, {
+      mangaService: fixture.service,
+      imageReaderCacheStatus: async () => { cacheReads++; return { synthetic: true }; },
+      notFound: () => send(404, { error: "missing" }),
+      sendJson: (_res, status, data) => send(status, data)
+    }).catch(error => {
+      routeErrors.push(error);
+      res.destroy(error);
+    }).finally(() => {
+      if (url.searchParams.has("held")) events.emit("held-settled");
+    });
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening", { signal: AbortSignal.timeout(5000) });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const chapter = `${base}/api/manga/${fixture.service.publicSummary(directory).id}/chapters/`;
+    const entered = event("image-stat");
+    const pending = fetch(chapter + "1?held", { signal: AbortSignal.any([client.signal, AbortSignal.timeout(5000)]) })
+      .then(response => ({ response }), error => ({ error }));
+    await entered;
+    const health = await fetch(base + "/health", { signal: AbortSignal.timeout(2000) });
+    assert.equal(await health.text(), "ok", "a held page stat must leave the event loop responsive");
+    assert.deepEqual(writes, []);
+    const settled = event("held-settled");
+    client.abort();
+    await settled;
+    assert.equal((await pending).error?.name, "AbortError");
+    assert.deepEqual(writes, [], "an aborted chapter must not send a late response");
+    assert.equal(cacheReads, 0, "an aborted chapter skips reader cache status");
+
+    releaseStat.resolve();
+    await heldStat;
+    const found = await fetch(chapter + "1", { signal: AbortSignal.timeout(5000) });
+    assert.equal(found.status, 200);
+    const payload = await found.json();
+    assert.equal(payload.chapter.images[0].width, 720);
+    assert.equal(payload.chapter.images[0].height, 1080);
+    assert.deepEqual(payload.cache, { synthetic: true });
+    assert.equal(imageOpens, 1, "only the live retry opens the image after the held stat resolves");
+    const missing = await fetch(chapter + "777", { signal: AbortSignal.timeout(5000) });
+    assert.equal(missing.status, 404);
+    await missing.json();
+    assert.deepEqual(writes, [200, 404]);
+    assert.deepEqual(routeErrors, []);
+  } finally {
+    client.abort();
+    releaseStat.resolve();
+    await heldStat?.catch(() => {});
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    fs.promises.stat = stat;
+    fs.promises.open = open;
+  }
+
+  for (const code of ["MANGA_DIMENSIONS_BUSY", "MANGA_DIMENSIONS_STOPPED"]) {
+    const req = Object.assign(new EventEmitter(), { method: "GET" });
+    const headers = {};
+    const res = Object.assign(new EventEmitter(), { setHeader: (name, value) => { headers[name] = value; } });
+    let response;
+    const route = await routePhotosApi(req, res, new URL("http://fixture/api/manga/test/chapters/1"), {
+      mangaService: {
+        cacheById: () => directory,
+        publicSummary: () => ({ id: "test" }),
+        async publicChapter() { throw Object.assign(new Error("private disk path"), { statusCode: 503, code }); }
+      },
+      imageReaderCacheStatus: () => assert.fail("no cache lookup on retryable admission failure"),
+      notFound: () => assert.fail("admission failures must not look like missing chapters"),
+      sendJson: (_res, status, payload) => { response = { status, payload }; }
+    });
+    assert.equal(route, true);
+    assert.deepEqual(headers, { "Retry-After": "1" });
+    assert.deepEqual(response, { status: 503, payload: { error: "暂时无法读取漫画章节，请稍后重试", code, retryable: true } });
+    assert.equal(req.listenerCount("aborted"), 0);
+    assert.equal(res.listenerCount("close"), 0);
+  }
+  console.log(JSON.stringify({ check: "manga-chapter-http-lifecycle", asyncPageStat: true, unrelatedHealth: true,
+    disconnectCancelsRead: true, retryWithDimensions: true, missingIs404: true, admissionFailuresAre503: true }));
   checks++;
 }
 
@@ -638,7 +776,12 @@ async function verifyChapterNavigationCache() {
     await sample(service, total, total, []);
     db.prepare("UPDATE manga_chapters SET title='Legacy ordinal' WHERE cache_key=? AND chapter_index=0").run(dir);
     await compare(total);
-    await createPhotosRuntime({ mangaService: service, photoSetService: {} }).stop();
+    const runtime = createPhotosRuntime({ mangaService: service, photoSetService: {} });
+    await runtime.stop();
+    const stopped = await request(service, total);
+    assert.equal(stopped.status, 503);
+    assert.equal(stopped.data.code, "MANGA_DIMENSIONS_STOPPED");
+    await runtime.start();
     await sample(service, total, total, []);
     console.log(JSON.stringify({ check: "manga-chapter-navigation-cache", chapters: total, beforeRows: total, afterRows: 0,
       beforeMedianMs: median(before), afterMedianMs: median(after), completeResponseOracle: true,

@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { pipeline } from "node:stream";
+import { pipeline, Transform } from "node:stream";
 import { finished } from "node:stream/promises";
 import { constants as zlibConstants, createBrotliCompress, createGzip } from "node:zlib";
+import { readPreconditionStatus } from "./file-server.js";
 
 const COMPRESSIBLE_EXTENSIONS = new Set([
   ".css",
@@ -17,6 +18,7 @@ const COMPRESSIBLE_EXTENSIONS = new Set([
 ]);
 const STATIC_COMPRESSION_MIN_BYTES = 1024;
 const CONTENT_HASH_VERSION = /^(?:bundle-|sha256-)[a-f0-9]{12,64}$/i;
+const REVALIDATE_ASSET = "private, no-cache";
 
 const APP_PAGE_PATHS = new Set([
   "/fanhao",
@@ -97,7 +99,7 @@ export function staticCacheControl(requestUrl, ext) {
   try {
     if (CONTENT_HASH_VERSION.test(decodeURIComponent(version))) return "public, max-age=31536000, immutable";
   } catch {}
-  return "no-store";
+  return ext === ".js" || ext === ".mjs" || ext === ".css" ? REVALIDATE_ASSET : "no-store";
 }
 
 export function createStaticFileServer({
@@ -246,9 +248,29 @@ export function createStaticFileServer({
         res.end();
         return;
       }
+      const cacheControl = staticCacheControl(req.url, ext);
+      let etag;
+      if (cacheControl === REVALIDATE_ASSET) {
+        // Use the opened entity and the selected encoding. Change time and
+        // file identity also cover edits or replacements that preserve mtime.
+        const revision = [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join("-");
+        etag = `W/"${revision}-${encoding || "identity"}"`;
+        const status = readPreconditionStatus(req, { ETag: etag });
+        if (status) {
+          res.writeHead(status, {
+            ETag: etag,
+            Vary: vary.join(", "),
+            "Cache-Control": status === 304 ? cacheControl : "no-store",
+            ...(status === 412 ? { "Content-Length": 0 } : {})
+          });
+          res.end();
+          return;
+        }
+      }
       const headers = {
         "Content-Type": mimeTypes[ext] || "application/octet-stream",
-        "Cache-Control": staticCacheControl(req.url, ext),
+        "Cache-Control": cacheControl,
+        ...(etag ? { ETag: etag } : {}),
         Vary: vary.join(", "),
         ...(encoding ? { "Content-Encoding": encoding } : { "Content-Length": stat.size })
       };
@@ -258,7 +280,7 @@ export function createStaticFileServer({
         return;
       }
       // Metadata and bytes share the opened file even if its path is replaced.
-      source = handle.createReadStream({ autoClose: true, emitClose: true });
+      source = handle.createReadStream({ start: 0, end: stat.size - 1, autoClose: true, emitClose: true });
       sourceClosed = new Promise(resolve => source.once("close", resolve));
       compressor = encoding === "br"
         ? createBrotliCompress({ params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 } })
@@ -271,11 +293,24 @@ export function createStaticFileServer({
         return;
       }
       res.writeHead(200, headers);
+      // Reject an early EOF before the compressor can finish a truncated body.
+      let remaining = stat.size;
+      const verifyLength = new Transform({
+        transform(chunk, _encoding, callback) {
+          remaining -= chunk.length;
+          if (remaining < 0) callback(new Error("Static file exceeded its opened size"));
+          else callback(null, chunk);
+        },
+        flush(callback) {
+          if (remaining !== 0) callback(new Error("Static file ended before its opened size"));
+          else callback();
+        }
+      });
       await new Promise(resolve => {
         // Pipeline owns post-header errors and response disconnects. A failed
         // body must destroy the response rather than append a JSON error.
-        if (compressor) pipeline(source, compressor, res, () => resolve());
-        else pipeline(source, res, () => resolve());
+        const streams = [source, verifyLength, ...(compressor ? [compressor] : []), res];
+        pipeline(streams, () => resolve());
       });
     } catch (error) {
       if (source) {

@@ -60,11 +60,11 @@ export function createGalleryMediaService({
     return safeChildPath(item.sourceRoot, item.relativePath);
   }
 
-  function videoFile(item) {
+  function videoFile(item, { useIndexedSize = false } = {}) {
     const filePath = mediaPath(item);
     if (!item || !filePath) return null;
     const ext = normalizeExt(filePath);
-    const stat = safeStat(filePath);
+    const stat = useIndexedSize ? null : safeStat(filePath);
     return {
       id: item.id,
       type: "video",
@@ -377,7 +377,7 @@ export function createGalleryMediaService({
 
   function serveMedia(req, res, mediaId) {
     const item = byId(decodeURIComponent(mediaId));
-    const file = videoFile(item);
+    const file = videoFile(item, { useIndexedSize: true });
     if (!file) {
       notFound(res);
       return;

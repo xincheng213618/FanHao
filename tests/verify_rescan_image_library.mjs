@@ -200,7 +200,7 @@ async function verifyPhotoSetLookup(photoRoot) {
     return res;
   }
   function fixture(indexed) {
-    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, coverOverrideReads: 0, markReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
+    const counts = { elements: 0, lookupCalls: 0, signatures: 0, dbReads: 0, coverOverrideReads: 0, officialCoverReads: 0, markReads: 0, imageLists: 0, mediaSends: 0, releases: 0 };
     const raw = Array.from({ length: 12000 }, (_, index) => ({ id: `album-${index}`, title: `Synthetic album ${index}`, sourceRoot: photoRoot, relativePath: `${index}.zip`, updatedAt: "before", imageCount: 20, size: 32, archiveIdentity: "synthetic", coverUrl: "" }));
     raw[0].id = "duplicate"; raw[1].id = "duplicate"; raw[2].id = 123;
     const counted = rows => new Proxy(rows, { get(target, key, receiver) { if (typeof key === "string" && /^\d+$/u.test(key)) counts.elements++; return Reflect.get(target, key, receiver); } });
@@ -220,6 +220,7 @@ async function verifyPhotoSetLookup(photoRoot) {
     owner.clearPhotoSetLookup = () => { counts.releases++; release(); };
     const db = { prepare(sql) { return { get(id) {
       if (sql.includes("FROM photo_set_cover_overrides")) { counts.coverOverrideReads++; return undefined; }
+      if (sql.includes("SELECT official_source")) { counts.officialCoverReads++; return undefined; }
       counts.dbReads++; const album = raw.find(value => value.id === id); return {
       album_id: id, archive_path: path.resolve(album.sourceRoot, album.relativePath), archive_size: 32, archive_mtime_ms: 1,
       archive_identity: "synthetic", generator_version: 2, cover_mime: "image/jpeg", cover_blob: Buffer.from("SYNTHETIC_COVER"), status: "ok"
@@ -230,14 +231,18 @@ async function verifyPhotoSetLookup(photoRoot) {
       ARCHIVE_IMAGE_EXTS: new Set([".jpg"]), PHOTO_SET_COVER_GENERATOR_VERSION: 2, COVER_HINTS: new Set(), IMAGE_GALLERY_COVER_MAX_BYTES: 1024,
       archiveImageSignature: async archivePath => { counts.signatures++; return { archivePath, archiveSize: 32, archiveMtimeMs: 1, archiveIdentity: "synthetic" }; },
       archiveImagesPayload: async (_archive, options) => ({ images: options.limit ? imageRows.slice(0, options.limit) : imageRows, imageCount: 20 }),
+      archiveVideosPayload: async () => ({ videos: [] }),
       compressImageFileToJpeg: () => assert.fail("cached fixture cover cannot compress media"), extractArchiveMemberToCache: () => assert.fail("cached fixture cover cannot extract media"),
+      extractArchiveVideoCover: () => assert.fail("cached fixture cover cannot extract video"),
       fileBase: value => path.parse(value).name, getImageGalleryDb: () => db,
       listArchiveImages: async () => { counts.imageLists++; return imageRows; }, MIME_TYPES: { ".jpg": "image/jpeg" }, normalizeExt: value => path.extname(value).toLowerCase(),
       notFound: res => { res.writeHead(404); res.end("missing"); }, safeStat: () => assert.fail("photo serving cannot stat synchronously"),
       safeChildPath(root, relative) { const target = path.resolve(root, relative); assert(target.startsWith(`${path.resolve(root)}${path.sep}`), "fixture source remains inside its owned photo root"); return target; },
       serveArchiveMemberImage: async (res, options) => { counts.mediaSends++; res.writeHead(200, { "Content-Type": options.contentType }); res.end(JSON.stringify(options)); },
+      serveArchiveMemberVideo: () => assert.fail("fixture contains no archive video"),
       appConfigService: {}, imageLibraryService: {}, mangaService: {}, cleanupImageReaderCache() {}, imageReaderCacheService: { statusAsync: async () => ({ synthetic: true }) },
-      readJsonBody() {}, requireLocalAdmin() {}, sendJson(res, status, value) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); }
+      readJsonBody() {}, requireLocalAdmin() {}, serveStatic() { assert.fail("fixture uses only photo API and media routes"); },
+      sendJson(res, status, value) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); }
     };
     vm.runInNewContext(serviceAssembly.replace("const photoSetService =", "globalThis.photoSetService ="), context);
     vm.runInNewContext(`globalThis.runtime = createPhotosRuntime({${runtimeAssembly}});`, context);
@@ -261,6 +266,7 @@ async function verifyPhotoSetLookup(photoRoot) {
       assert.equal(f.counts.lookupCalls, indexed ? 39 : 0, "one point lookup serves each indexed detail, image and warm cover request");
       assert.equal(f.counts.imageLists, 32); assert.equal(f.counts.signatures, indexed ? 0 : 12); assert.equal(f.counts.dbReads, indexed ? 6 : 24);
       assert.equal(f.counts.coverOverrideReads, 7); assert.equal(f.counts.markReads, 1);
+      assert.equal(f.counts.officialCoverReads, 1, "only photo detail looks up an official cover revision");
       console.log(`photo-set lookup ${indexed ? "indexed" : "fallback"}: ${f.counts.elements} elements, ${f.counts.lookupCalls} owner lookups, 39 actual runtime responses`);
       results.push(responses);
       assert.equal(f.service.byId("duplicate").title, "Synthetic album 0"); assert.equal(f.service.byId("123"), null); assert.equal(f.service.byId(""), null);

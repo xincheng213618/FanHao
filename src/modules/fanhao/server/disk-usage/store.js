@@ -9,11 +9,14 @@ const MAX_SEARCH_LIMIT = 200;
 const TREEMAP_CHILD_LIMIT = 320;
 const TREEMAP_MAX_DEPTH = 7;
 const TREEMAP_NODE_BUDGET = 12000;
+const CACHED_NODE_SQL = "SELECT * FROM nodes WHERE path = ?";
+const POINT_READER_IDLE_MS = 1500;
 
 export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [], warn = console.warn } = {}) {
   const drives = createDriveCatalog(sources);
   const drivesById = new Map(drives.map((drive) => [drive.id, drive]));
   const lastTasks = new Map();
+  const pointReaders = new Map();
   let active = null;
   let stopping = false;
 
@@ -27,10 +30,14 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
   }
 
   async function stop() {
-    stopping = true;
+    beginStop();
     const worker = active?.worker;
     active = null;
-    if (worker) await worker.terminate().catch(() => {});
+    try {
+      for (const driveId of pointReaders.keys()) closePointReader(driveId);
+    } finally {
+      if (worker) await worker.terminate().catch(() => {});
+    }
   }
 
   function summary() {
@@ -158,7 +165,8 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
   function cachedNode(driveId, requestedPath) {
     const drive = requireDrive(driveId);
     const targetPath = normalizeTargetPath(drive, requestedPath);
-    const manifest = readManifest(drive);
+    const snapshot = readCacheSnapshot(drive);
+    const manifest = snapshot?.manifest;
     if (!manifest && targetPath === drive.root) {
       return {
         drive,
@@ -179,11 +187,27 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
       };
     }
     if (!manifest) throw publicError("该磁盘还没有缓存，请先手动刷新", 404);
-    return withCacheDatabase(drive, manifest, (database) => {
-      const row = database.prepare("SELECT * FROM nodes WHERE path = ?").get(targetPath);
-      if (!row) throw publicError("缓存中没有这个路径，请手动刷新磁盘缓存", 404);
-      return { drive, manifest, node: publicNode(row) };
-    });
+    let row;
+    if (stopping) {
+      row = withCacheDatabase(drive, manifest, database => database.prepare(CACHED_NODE_SQL).get(targetPath));
+    } else {
+      let reader = pointReaders.get(drive.id);
+      if (!reader) {
+        reader = { identity: snapshot.identity, database: new DatabaseSync(manifest.databasePath, { readOnly: true }) };
+        pointReaders.set(drive.id, reader);
+      }
+      try {
+        reader.statement ??= reader.database.prepare(CACHED_NODE_SQL);
+        row = reader.statement.get(targetPath);
+        refreshPointReaderIdleClose(drive.id, reader);
+      } catch (error) {
+        closePointReader(drive.id);
+        if (error?.statusCode) throw error;
+        throw publicError(`无法读取 ${drive.name} 的磁盘缓存`, 500);
+      }
+    }
+    if (!row) throw publicError("缓存中没有这个路径，请手动刷新磁盘缓存", 404);
+    return { drive, manifest, node: publicNode(row) };
   }
 
   function refresh(driveId) {
@@ -256,6 +280,7 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
         skipped: Number(result.skipped || 0),
         startedAt: result.startedAt
       };
+      closePointReader(task.drive.id);
       writeManifest(task.drive, manifest);
       task.completedAt = manifest.completedAt;
       task.state = "complete";
@@ -310,16 +335,47 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
   }
 
   function readManifest(drive) {
+    return readCacheSnapshot(drive)?.manifest || null;
+  }
+
+  function readCacheSnapshot(drive) {
+    let identity;
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath(drive), "utf8"));
       const databaseFile = path.basename(String(manifest.databaseFile || ""));
       if (!databaseFile || !databaseFile.startsWith(`${drive.id.toLocaleLowerCase("en-US")}-`) || !databaseFile.endsWith(".sqlite")) return null;
       const databasePath = path.join(cacheDir, databaseFile);
-      if (!fs.statSync(databasePath, { throwIfNoEntry: false })?.isFile()) return null;
-      return { ...manifest, databaseFile, databasePath };
+      const stat = fs.statSync(databasePath, { throwIfNoEntry: false });
+      if (!stat?.isFile()) return null;
+      identity = JSON.stringify([databasePath, manifest.scanId, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+      return { manifest: { ...manifest, databaseFile, databasePath }, identity };
     } catch {
       return null;
+    } finally {
+      // Summary, search and cleanup can discover a retired snapshot too.
+      const reader = pointReaders.get(drive.id);
+      if (reader && reader.identity !== identity) closePointReader(drive.id);
     }
+  }
+
+  function refreshPointReaderIdleClose(driveId, reader) {
+    if (reader.idleClose) {
+      reader.idleClose.refresh();
+      return;
+    }
+    reader.idleClose = setTimeout(() => {
+      if (pointReaders.get(driveId) !== reader) return;
+      try { closePointReader(driveId); }
+      catch (error) { warn("[disk-usage-reader-close]", error?.message || error); }
+    }, POINT_READER_IDLE_MS).unref();
+  }
+
+  function closePointReader(driveId) {
+    const reader = pointReaders.get(driveId);
+    if (!reader) return;
+    reader.database.close();
+    clearTimeout(reader.idleClose);
+    pointReaders.delete(driveId);
   }
 
   function writeManifest(drive, manifest) {

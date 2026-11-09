@@ -1,4 +1,14 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const libraryUrl = new URL("../../src/modules/content-index/server/image-library-service.js", import.meta.url);
+
+export function readImageLibrarySource() {
+  // The instrumented copies run as data URLs, with no base for relative imports.
+  return fs.readFileSync(libraryUrl, "utf8").replaceAll("\r\n", "\n")
+    .replace(/\bfrom\s+(["'])(\.{1,2}\/[^"'\r\n]+)\1/g,
+      (_match, _quote, relative) => "from " + JSON.stringify(new URL(relative, libraryUrl).href));
+}
 
 // Earlier algorithm oracles restore exact source fragments inside the list
 // builder. Keep those fragments independent of the new optional read scope;

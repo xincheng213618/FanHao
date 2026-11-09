@@ -212,7 +212,7 @@ body.manga-reader-active { background: #08090b; }
 .manga-reader-pages:focus-visible,
 .manga-reader-recovery:focus-visible,
 .manga-reader-recovery .manga-reader-image-error:focus-visible { outline: 2px solid var(--manga-accent); outline-offset: -2px; }
-.manga-reader-image.load-failed:has(img:not([width])) { min-height: 160px; }
+.manga-reader-image.awaiting-size { min-height: clamp(320px, 55vh, 500px); }
 .manga-reader-image-error { position: absolute; inset: 0; z-index: 1; display: flex; min-height: 60px; align-items: flex-start; justify-content: center; gap: 8px; padding: 8px; background: rgba(8, 9, 11, .88); color: var(--manga-ink); text-align: center; }
 .manga-reader-image-error > span { min-width: 0; padding-block: 12px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .manga-reader-image-error[hidden] { display: none; }

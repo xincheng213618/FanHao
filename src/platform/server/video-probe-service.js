@@ -29,6 +29,7 @@ export function createVideoProbeService({
   const asyncInflight = new Map();
   const inflightTasks = new Map();
   const taskPool = createVideoProbeTaskPool({ concurrency: asyncConcurrency, capacity: asyncCapacity });
+  const sourcePool = createVideoProbeTaskPool({ concurrency: asyncConcurrency, capacity: asyncCapacity });
   const physicalStats = new Set();
   const children = new Set();
   const prewarmQueue = [];
@@ -135,12 +136,13 @@ export function createVideoProbeService({
       }
 
       const stat = safeStat(file.path);
+      if (!stat || stat.isFile?.() === false) return null;
       const cacheKey = diskCacheKey(file, stat);
       if (cache.has(cacheKey)) return touchCached(cacheKey);
 
-      const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
-      const result = persisted.hit ? persisted.value : stat ? probe(file) : null;
-      if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
+      const persisted = readPersistentProbe(file, stat);
+      const result = persisted.hit ? persisted.value : probe(file);
+      if (!persisted.hit || fileSignature) writePersistentProbe(file, fileSignature || stat, result);
       cacheValue(cache, fileCacheKey || cacheKey, result);
       cacheValue(resolvedProbeByFile, inflightKey(file), result);
       return result;
@@ -208,11 +210,16 @@ export function createVideoProbeService({
     catch (error) { return Promise.reject(error); }
   }
 
-  function probeCachedAsync(file, { background = false } = {}) {
+  function probeCachedAsync(file, { background = false, verifiedStat } = {}) {
     if (stopping) return Promise.reject(transientError("PROBE_STOPPED"));
     file = { ...file };
-    const key = inflightKey(file);
-    if (libraryFileSignature(file) && resolvedProbeByFile.has(key)) {
+    const indexed = libraryFileSignature(file);
+    const indexMatches = !verifiedStat || (indexed?.size === Number(verifiedStat.size) &&
+      Date.parse(file.modifiedAt) === Math.trunc(verifiedStat.mtimeMs));
+    const signature = indexMatches ? indexed : null;
+    const fileCacheKey = signature ? cacheKeyForSignature(file, signature) : verifiedStat ? diskCacheKey(file, verifiedStat) : "";
+    const key = fileCacheKey || inflightKey(file);
+    if (fileCacheKey && resolvedProbeByFile.has(key)) {
       const owner = claimSource(file);
       const value = resolvedProbeByFile.get(key);
       cacheValue(resolvedProbeByFile, key, value);
@@ -226,13 +233,12 @@ export function createVideoProbeService({
     }
 
     // Library signatures retain the zero-stat warm path even under load.
-    const signature = libraryFileSignature(file);
-    const libraryKey = signature ? cacheKeyForSignature(file, signature) : "";
-    const persisted = signature ? readPersistentProbe(file, signature) : { hit: false };
-    if ((libraryKey && cache.has(libraryKey)) || persisted.hit) {
+    const identity = signature || verifiedStat;
+    const persisted = identity ? readPersistentProbe(file, identity) : { hit: false };
+    if ((fileCacheKey && cache.has(fileCacheKey)) || persisted.hit) {
       const owner = claimSource(file);
-      const value = cache.has(libraryKey) ? touchCached(libraryKey) : persisted.value;
-      cacheValue(cache, libraryKey, value);
+      const value = cache.has(fileCacheKey) ? touchCached(fileCacheKey) : persisted.value;
+      cacheValue(cache, fileCacheKey, value);
       cacheValue(resolvedProbeByFile, key, value);
       releaseSource(file, owner);
       return Promise.resolve(value);
@@ -241,7 +247,8 @@ export function createVideoProbeService({
 
     const owner = claimSource(file);
     const generation = cacheGeneration;
-    const operation = taskPool.submit((signal) => loadProbeAsync(file, key, owner, generation, signal), { background });
+    const lookup = { key, fileCacheKey, signature, verifiedStat };
+    const operation = taskPool.submit((signal) => loadProbeAsync(file, lookup, owner, generation, signal), { background });
     owner.task = operation;
     const task = operation.promise;
     asyncInflight.set(key, task);
@@ -255,42 +262,40 @@ export function createVideoProbeService({
     return task;
   }
 
-  async function loadProbeAsync(file, fileKey, owner, generation, signal) {
+  async function loadProbeAsync(file, lookup, owner, generation, signal) {
     const current = () => !signal.aborted && !stopping && generation === cacheGeneration && sourceOwners.get(sourceKey(file)) === owner;
     try {
-      return await loadProbeForSource(file, fileKey, current, signal);
+      return await loadProbeForSource(file, lookup, current, signal);
     } catch (error) {
       if (!current()) return null;
       throw error;
     }
   }
 
-  async function loadProbeForSource(file, fileKey, current, signal) {
+  async function loadProbeForSource(file, { key: fileKey, fileCacheKey, signature, verifiedStat }, current, signal) {
     if (!current()) return null;
-    const fileSignature = libraryFileSignature(file);
-    const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
     if (fileCacheKey && cache.has(fileCacheKey)) {
       const cached = touchCached(fileCacheKey);
       if (current()) cacheValue(resolvedProbeByFile, fileKey, cached);
       return cached;
     }
-    const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
-    if (persistedFromLibrary.hit) {
+    const identity = signature || verifiedStat;
+    const persistedFromIdentity = identity ? readPersistentProbe(file, identity) : { hit: false, value: null };
+    if (persistedFromIdentity.hit) {
       if (current()) {
-        cacheValue(cache, fileCacheKey, persistedFromLibrary.value);
-        cacheValue(resolvedProbeByFile, fileKey, persistedFromLibrary.value);
+        cacheValue(cache, fileCacheKey, persistedFromIdentity.value);
+        cacheValue(resolvedProbeByFile, fileKey, persistedFromIdentity.value);
       }
-      return persistedFromLibrary.value;
+      return persistedFromIdentity.value;
     }
 
-    let stat = null;
-    try {
-      stat = await trackedStat(file.path, signal);
-    } catch (error) {
-      if (String(error.code || "").startsWith("PROBE_")) throw error;
-      stat = null;
+    let stat = verifiedStat;
+    if (!stat) {
+      try { stat = await trackedStat(file.path, signal); }
+      catch (error) { if (String(error.code || "").startsWith("PROBE_")) throw error; }
     }
-    if (!current()) return null;
+    // The path may come back with its old indexed size and timestamp after a reconnect.
+    if (!stat || stat.isFile?.() === false || !current()) return null;
     const cacheKey = diskCacheKey(file, stat);
     if (cache.has(cacheKey)) {
       const cached = touchCached(cacheKey);
@@ -298,16 +303,16 @@ export function createVideoProbeService({
       return cached;
     }
 
-    const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
-    const result = persisted.hit ? persisted.value : stat ? await runProbeAsync(file, signal) : null;
+    const persisted = identity !== stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
+    const result = persisted.hit ? persisted.value : await runProbeAsync(file, signal);
     if (!current()) return null;
-    if (stat && !persisted.hit) {
+    if (!persisted.hit) {
       let after;
       try { after = await trackedStat(file.path, signal); }
       catch (error) { if (String(error.code || "").startsWith("PROBE_")) throw error; return null; }
       if (!current() || diskSignature(after) !== diskSignature(stat)) return null;
     }
-    if (stat && (!persisted.hit || fileSignature) && current()) writePersistentProbe(file, fileSignature || stat, result);
+    if ((!persisted.hit || signature) && current()) writePersistentProbe(file, signature || stat, result);
     if (current()) {
       cacheValue(cache, fileCacheKey || cacheKey, result);
       cacheValue(resolvedProbeByFile, fileKey, result);
@@ -327,7 +332,7 @@ export function createVideoProbeService({
   }
 
   function diskCacheKey(file, stat) {
-    return JSON.stringify([file.id, file.path, stat ? diskSignature(stat) : "missing"]);
+    return JSON.stringify([file.id, file.path, diskSignature(stat)]);
   }
 
   function diskSignature(stat) {
@@ -407,6 +412,7 @@ export function createVideoProbeService({
     prewarmQueue.length = 0;
     prewarmQueuedKeys.clear();
     taskPool.cancelAll();
+    sourcePool.cancelAll();
   }
 
   function beginStop() {
@@ -422,7 +428,7 @@ export function createVideoProbeService({
       let timer;
       try {
         await Promise.race([
-          taskPool.drain(),
+          Promise.all([taskPool.drain(), sourcePool.drain()]),
           new Promise((_, reject) => { timer = setTimeout(() => reject(transientError("PROBE_CLOSE_TIMEOUT")), Math.max(1, Number(stopTimeoutMs) || 2000)); })
         ]);
       } finally { clearTimeout(timer); }
@@ -434,30 +440,95 @@ export function createVideoProbeService({
     const revision = lifecycleRevision;
     if (stopPromise) {
       try { await stopPromise; }
-      catch (error) { if (taskPool.diagnostics().active || children.size) throw error; }
+      catch (error) { if (hasActiveWork()) throw error; }
     }
     if (revision !== lifecycleRevision) throw transientError("PROBE_STOPPED");
-    if (taskPool.diagnostics().active || children.size) throw transientError("PROBE_CLOSE_TIMEOUT");
+    if (hasActiveWork()) throw transientError("PROBE_CLOSE_TIMEOUT");
     stopping = false;
     stopPromise = null;
   }
 
-  async function boundedProbe(file) {
-    const task = probeCachedAsync(file);
-    const waitMs = Math.max(0, Number(probeWaitMs) || 0);
-    if (!waitMs) return { mediaProbe: await task.catch(() => null), pending: false };
+  function hasActiveWork() {
+    return taskPool.diagnostics().active || sourcePool.diagnostics().active || children.size;
+  }
 
-    let timer = null;
+  function playbackSourceError(code) {
+    return Object.assign(new Error("视频源暂时无法读取，请稍后重试"), { code, statusCode: 503 });
+  }
+
+  async function playbackSourceStat(filePath) {
+    try {
+      const stat = await statFile(filePath);
+      return stat?.isFile() ? stat : null;
+    } catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes(error?.code)) return null;
+      throw playbackSourceError("PROBE_SOURCE_UNAVAILABLE");
+    }
+  }
+
+  async function lookupPlaybackSource(file, resolveMissingSource, signal) {
+    let stat = await playbackSourceStat(file.path);
+    if (!stat && !signal.aborted && resolveMissingSource) {
+      file = await resolveMissingSource(file, signal);
+      if (file?.path && !signal.aborted) stat = await playbackSourceStat(file.path);
+    }
+    return !signal.aborted && stat ? { file, stat } : null;
+  }
+
+  async function verifyPlaybackSource(file, { signal, resolveMissingSource }) {
+    if (signal?.aborted || !file.path) return null;
+    if (stopping) throw playbackSourceError("PROBE_STOPPED");
+    let task;
+    try {
+      const indexedFile = { ...file };
+      task = sourcePool.submit((taskSignal) => lookupPlaybackSource(indexedFile, resolveMissingSource, taskSignal));
+    } catch (error) {
+      if (error.code === "PROBE_BUSY") throw playbackSourceError(error.code);
+      throw error;
+    }
+    // A timed-out or disconnected request can return before the OS settles,
+    // but its source lookup keeps the slot until the actual work is done.
+    const taskSignal = task.controller.signal;
+    let timer, onAbort, onTaskAbort;
+    const interrupted = new Promise((resolve, reject) => {
+      onAbort = () => { resolve(null); task.cancel(); };
+      onTaskAbort = () => reject(playbackSourceError("PROBE_STOPPED"));
+      signal?.addEventListener("abort", onAbort, { once: true });
+      taskSignal.addEventListener("abort", onTaskAbort, { once: true });
+      timer = setTimeout(() => {
+        reject(playbackSourceError("PROBE_STAT_TIMEOUT"));
+        task.cancel();
+      }, Math.max(1, Number(statTimeoutMs) || 2000));
+      if (signal?.aborted) onAbort();
+      else if (taskSignal.aborted) onTaskAbort();
+    });
+    try { return await Promise.race([task.promise, interrupted]); }
+    finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      taskSignal.removeEventListener("abort", onTaskAbort);
+    }
+  }
+
+  async function boundedProbe(file, verifiedStat, signal) {
+    if (signal?.aborted) return { mediaProbe: null, pending: false };
+    const task = probeCachedAsync(file, { verifiedStat });
+    const waitMs = Math.max(0, Number(probeWaitMs) || 0);
     const settled = task.then(
       (mediaProbe) => ({ mediaProbe, pending: false }),
       () => ({ mediaProbe: null, pending: false })
     );
-    const pending = new Promise((resolve) => {
-      timer = setTimeout(() => resolve({ mediaProbe: null, pending: true }), waitMs);
+    if (!waitMs && !signal) return settled;
+
+    let timer, onAbort;
+    const interrupted = new Promise((resolve) => {
+      onAbort = () => resolve({ mediaProbe: null, pending: false });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (waitMs) timer = setTimeout(() => resolve({ mediaProbe: null, pending: true }), waitMs);
+      if (signal?.aborted) onAbort();
     });
-    const result = await Promise.race([settled, pending]);
-    if (timer) clearTimeout(timer);
-    return result;
+    try { return await Promise.race([settled, interrupted]); }
+    finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
   }
 
   function playInfoForFile(file, publicVideoId = file.id, options = {}) {
@@ -465,7 +536,15 @@ export function createVideoProbeService({
   }
 
   async function playInfoForFileAsync(file, publicVideoId = file.id, options = {}) {
-    const { mediaProbe, pending } = await boundedProbe(file);
+    let verifiedStat;
+    if (options.requireSource) {
+      const source = await verifyPlaybackSource(file, options);
+      if (!source) return null;
+      file = source.file;
+      verifiedStat = source.stat;
+    }
+    const { mediaProbe, pending } = await boundedProbe(file, verifiedStat, options.signal);
+    if (options.signal?.aborted) return null;
     return playInfoFromProbe(file, publicVideoId, options, mediaProbe || {}, pending);
   }
 
@@ -533,6 +612,6 @@ export function createVideoProbeService({
     probeCached,
     prewarm,
     diagnostics: () => ({ cached: cache.size, resolved: resolvedProbeByFile.size, owners: sourceOwners.size, inflight: asyncInflight.size }),
-    asyncDiagnostics: () => ({ ...taskPool.diagnostics(), children: children.size, physicalStats: physicalStats.size, stopping })
+    asyncDiagnostics: () => ({ ...taskPool.diagnostics(), sourceLookup: sourcePool.diagnostics(), children: children.size, physicalStats: physicalStats.size, stopping })
   };
 }

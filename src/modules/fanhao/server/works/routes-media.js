@@ -5,7 +5,7 @@ export async function routeWorksMedia(req, res, url, deps) {
     mediaStreamService,
     notFound,
     resolveLibraryPersonByPublicId,
-    resolveVideoFileByPublicId
+    resolveMissingVideoSource
   } = deps;
 
   const personCoverMatch = /^\/media\/person\/([^/]+)\/cover$/.exec(url.pathname);
@@ -53,19 +53,19 @@ export async function routeWorksMedia(req, res, url, deps) {
 
   const transcodeMatch = /^\/media\/video\/([^/]+)\/transcode$/.exec(url.pathname);
   if (transcodeMatch && req.method === "GET") {
-    const file = resolveVideoFileByPublicId(transcodeMatch[1]);
+    const file = library.filesById.get(decodeURIComponent(transcodeMatch[1]));
     if (!file || file.type !== "video") {
       notFound(res);
       return true;
     }
 
-    mediaStreamService.serveTranscodedVideo(req, res, file, url);
+    mediaStreamService.serveTranscodedVideo(req, res, file, url, { resolveMissingSource: resolveMissingVideoSource });
     return true;
   }
 
   const videoMatch = /^\/media\/video\/([^/]+)$/.exec(url.pathname);
   if (videoMatch && (req.method === "GET" || req.method === "HEAD")) {
-    const file = resolveVideoFileByPublicId(videoMatch[1]);
+    const file = library.filesById.get(decodeURIComponent(videoMatch[1]));
     if (!file || file.type !== "video") {
       notFound(res);
       return true;
@@ -74,7 +74,7 @@ export async function routeWorksMedia(req, res, url, deps) {
     await mediaStreamService.serveVideo(req, res, {
       ...file,
       cacheControl: "no-store"
-    });
+    }, { resolveMissingSource: resolveMissingVideoSource });
     return true;
   }
 

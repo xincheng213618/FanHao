@@ -97,6 +97,50 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    await run("storage failure: chapters remain readable with a full progress store", async () => {
+      const page = await newPage({ real: true, route: "/manga/C" });
+      try {
+        await detailTitle(page, "Comic C");
+        await denyMangaProgressWrites(page);
+        await clickChapter(page, 1);
+        await page.waitForFunction(() => __transport.settled.some(item => item.url === "/api/manga/C/chapters/1" && item.ok));
+        await tick(page);
+        assert.equal(await page.locator(".manga-reader").count(), 1, "successful chapter data must render despite a quota failure");
+        assert.equal(new URL(page.url()).pathname, "/manga/C/read/1");
+        await page.locator('.manga-reader-bar [data-action="next"]').click();
+        await readerTitle(page, "Comic C", "Chapter 2");
+        assert.equal(new URL(page.url()).pathname, "/manga/C/read/2");
+        await page.goBack();
+        await readerTitle(page, "Comic C", "Chapter 1");
+        await page.goBack();
+        await detailTitle(page, "Comic C");
+        assert.equal(await progress(page, "C"), null);
+      } finally { await page.close(); }
+    });
+
+    await run("storage failure: a completed deletion still returns to the library", async () => {
+      const page = await newPage({ real: true, route: "/manga/C" });
+      try {
+        await detailTitle(page, "Comic C");
+        await page.evaluate(() => {
+          localStorage.setItem("fanhao.manga.favorites", JSON.stringify(["C", "D"]));
+          localStorage.setItem("fanhao.manga.progress", JSON.stringify({ C: 1, D: 2 }));
+          localStorage.setItem("fanhao.manga.positions", JSON.stringify({ C: { page: 2 }, D: { page: 4 } }));
+        });
+        await denyMangaProgressWrites(page);
+        const completed = page.waitForResponse(response => response.request().method() === "DELETE" && new URL(response.url()).pathname === "/api/manga/C");
+        await page.locator('[data-action="delete"]').click();
+        assert.equal((await completed).status(), 200);
+        await tick(page);
+        assert.equal(await page.locator(".manga-delete-error").count(), 0, "local cleanup cannot report a completed server deletion as failed");
+        assert.equal(new URL(page.url()).pathname, "/manga");
+        assert.deepEqual(await page.evaluate(() => [
+          JSON.parse(localStorage.getItem("fanhao.manga.favorites")),
+          JSON.parse(localStorage.getItem("fanhao.manga.positions"))
+        ]), [["D"], { D: { page: 4 } }], "one blocked storage key must not prevent other local cleanup");
+      } finally { await page.close(); }
+    });
+
     await run('cold chapter direct route overlaps catalog and image metadata', async () => {
       const detailPath = '/api/manga/C', chapterPath = `${detailPath}/chapters/1`;
       const { chapters, ...summary } = currentComic('C');
@@ -1204,11 +1248,14 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       readerImageCount = 80;
       readerImageDimensions = Array.from({ length: 80 }, (_, index) => index < 6 ? { width: 800, height: 1400 } : {});
       let releaseImages; readerImageWait = new Promise(resolve => { releaseImages = resolve; });
+      const targetImage = url => url.pathname === '/synthetic/C/1/8.svg';
+      const targetReads = countRequests(targetImage);
       const page = await newPage({ real: true, route: '/manga/C' });
       try {
         await detailTitle(page, 'Comic C');
         await page.evaluate(() => { localStorage.setItem('fanhao.manga.progress', '{"C":1}'); localStorage.setItem('fanhao.manga.positions', '{"C":{"chapter":1,"page":7,"ratio":0.35,"atStart":false}}'); });
         await page.locator('.manga-detail [data-action="read"]').click(); await readerTitle(page, 'Comic C', 'Chapter 1'); await tick(page);
+        await until(() => countRequests(targetImage) > targetReads, 'the restored target must start decoding before testing newer user intent');
         await page.evaluate(() => { window.__positionReader = document.querySelector('.manga-reader'); window.__positionImages = [...document.querySelectorAll('.manga-reader-image img')]; });
         if (intent === 'wheel') {
           const previousScroll = await page.evaluate(() => scrollY);
@@ -1224,7 +1271,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         // Free the old image responses before waiting for the new JSON read:
         // HTTP/1 per-origin connections are deliberately occupied by this fixture.
         if (intent === 'navigation') await readerTitle(page, 'Comic D', 'Chapter 2');
-        await page.waitForFunction(navigation => [...document.querySelectorAll('.manga-reader-image img')].slice(navigation ? 0 : 6, navigation ? 2 : 14)
+        await page.waitForFunction(navigation => [...document.querySelectorAll('.manga-reader-image img')].slice(navigation ? 0 : 7, navigation ? 2 : 8)
           .every(image => image.complete && image.naturalWidth > 0), intent === 'navigation', { timeout: 5000 });
         await tick(page); await tick(page);
         if (intent === 'complete') {
@@ -1259,8 +1306,8 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await assertReadingAnchor(page, 7, .35);
         const after = await page.locator('.manga-reader-image').nth(index).evaluate(figure => figure.getBoundingClientRect().height);
         console.log(JSON.stringify({ mode: 'manga-resume-late-geometry', result, before, after }));
-        if (known) assert.equal(after, before, 'declared image geometry must retain the restored anchor even when a late image fails');
-        else assert(after > before, 'missing preceding geometry must actually grow after success or error before verifying its target anchor');
+        if (result.includes('failure')) assert.equal(after, before, 'a failed image must retain its known or provisional geometry');
+        else assert(after > before, 'a decoded predecessor must replace its provisional geometry while preserving the reading anchor');
       } finally { image.release(); readerImageCount = 3; readerImageDimensions = null; await page.close(); }
     });
     await run('library filter controls: sorting preserves the unsubmitted search and native focus', async () => {
@@ -2004,6 +2051,49 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
     }));
   }
   async function verifyImageDimensions() {
+    await run("missing dimensions: a long chapter bounds predecode requests and can jump to a lazy target", async () => {
+      readerImageCount = 1000;
+      let release;
+      readerImageWait = new Promise(resolve => { release = resolve; });
+      const metadata = hold(url => url.pathname === "/api/manga/C/chapters/1");
+      const page = await newPage({ real: true, route: "/manga/C/read/1", waitReady: false });
+      const started = new Set();
+      page.on("request", request => {
+        const pathname = new URL(request.url()).pathname;
+        if (pathname.startsWith("/synthetic/C/1/")) started.add(pathname);
+      });
+      try {
+        await requested(metadata); metadata.release();
+        await readerTitle(page, "Comic C", "Chapter 1"); await ready(page); await tick(page);
+        await until(() => started.size >= 2, "native eager images must start while bodies are held");
+        await page.waitForTimeout(200);
+        const startup = started.size;
+        assert(startup <= 12, `only nearby images may enter the browser's loading queue before decode, got ${startup}`);
+        const figures = page.locator(".manga-reader-image");
+        assert.equal(await figures.count(), 1000);
+        const placeholder = await figures.first().evaluate(node => node.getBoundingClientRect().height);
+        assert(placeholder >= 320);
+        assert.equal(await figures.nth(850).evaluate(node => node.querySelector("img").complete), false);
+        release();
+        await figures.first().locator("img").evaluate(image => image.decode());
+        const decoded = await figures.first().evaluate(figure => {
+          const { width, height } = figure.querySelector("img").getBoundingClientRect();
+          return { ratio: height / width, reserved: figure.classList.contains("awaiting-size") };
+        });
+        assert.equal(decoded.reserved, false);
+        assert(Math.abs(decoded.ratio - 1.75) < .005, "decoded geometry must use the actual image ratio");
+        await page.locator(".manga-page-indicator").click();
+        const jump = page.locator(".manga-page-jump input");
+        await jump.fill("851"); await jump.press("Enter");
+        await figures.nth(850).locator("img").evaluate(image => image.decode());
+        // The stored anchor uses the top of the viewport; the floating page
+        // indicator uses the reading line below the toolbar.
+        await page.waitForFunction(() => JSON.parse(localStorage.getItem("fanhao.manga.positions") || "{}").C?.page >= 849, null, { timeout: 5000 });
+        assert.equal(await page.locator(".manga-page-indicator").getAttribute("data-page"), "851");
+        assert(!started.has("/synthetic/C/1/400.svg"), "jump and progress commit must not fetch or wait for all earlier unknown pages");
+        console.log(JSON.stringify({ mode: "manga-missing-dimensions", pages: 1000, startupRequests: startup, placeholder, jump: 851 }));
+      } finally { release(); metadata.release(); await page.close(); readerImageCount = 3; readerImageWait = null; }
+    });
     for (const count of [300, 1000]) await run(`image dimensions ${count} pages reserve geometry and bound startup reads`, async () => {
       readerImageCount = count;
       readerImageDimensions = { width: 800, height: 1400 };
@@ -2322,6 +2412,15 @@ async function detailTitle(page, title) { await page.waitForFunction(value => do
 async function readerTitle(page, title, chapterTitle) { await page.waitForFunction(([title, chapter]) => document.querySelector(".manga-reader-identity strong")?.textContent === title && document.querySelector(".manga-reader-identity span")?.textContent === chapter, [title, chapterTitle], { timeout: 5000 }); }
 async function stateSnapshot(page) { return page.evaluate(() => ({ comic: fixture.state.manga.comic?.id ?? null, chapter: fixture.state.manga.chapter?.index ?? null, loading: fixture.state.manga.loading, status: fixture.state.manga.status })); }
 async function progress(page, id) { return page.evaluate(id => JSON.parse(localStorage.getItem("fanhao.manga.progress") || "{}")[id] ?? null, id); }
+async function denyMangaProgressWrites(page) {
+  await page.evaluate(() => {
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === "fanhao.manga.progress") throw new DOMException("Synthetic progress storage is full", "QuotaExceededError");
+      return setItem.call(this, key, value);
+    };
+  });
+}
 function openingLibraryShelf() {
   const comics = Array.from({ length: 1000 }, (_, index) => ({ ...comic(`OpeningShelf${String(index + 1).padStart(4, '0')}`), title: `Synthetic opening shelf ${String(index + 1).padStart(4, '0')}` }));
   comics[499] = comic('C'); comics[500] = comic('D');

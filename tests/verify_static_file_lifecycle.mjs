@@ -41,7 +41,9 @@ if (legacyHttp) {
 if (withoutNativeCloseProof) {
   const statement = "handle.close = () => owner.closePromise ||= Promise.resolve().then(closeHandle);";
   assert.equal(realStaticSource.split(statement).length, 2, "negative must remove the actual first native close capture");
-  staticModule = await import(`data:text/javascript;base64,${Buffer.from(realStaticSource.replace(statement, "// Native close capture omitted in the behavioral negative.")).toString("base64")}`);
+  const source = realStaticSource.replace(statement, "// Native close capture omitted in the behavioral negative.")
+    .replace('"./file-server.js"', JSON.stringify(new URL("../src/platform/server/file-server.js", import.meta.url).href));
+  staticModule = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 }
 
 const codeError = (code, message = code) => Object.assign(new Error(message), { code });
@@ -73,15 +75,15 @@ function request(url = "/asset.bin", options = {}) {
 
 function virtualFs() {
   const files = new Map(), handles = [], events = [], realm = new AsyncLocalStorage();
-  let nextFd = 10, syncCalls = 0;
+  let nextFd = 10, nextInode = 1, syncCalls = 0;
   const target = route => path.join(virtualRoot, route);
   function add(route, bytes = "synthetic bytes", options = {}) {
-    const entry = { bytes: Buffer.from(bytes), isFile: true, ...options };
+    const entry = { bytes: Buffer.from(bytes), isFile: true, ino: nextInode++, mtimeMs: 1000, ctimeMs: 1000, ...options };
     files.set(target(route), entry); return entry;
   }
   function stat(entry) {
     if (entry.statError) throw entry.statError;
-    return { size: entry.bytes.length, isFile: () => entry.isFile };
+    return { size: entry.bytes.length, isFile: () => entry.isFile, dev: 1, ino: entry.ino, mtimeMs: entry.mtimeMs, ctimeMs: entry.ctimeMs };
   }
   function handle(filePath, entry) {
     const record = { path: filePath, entry, fd: nextFd++, physicallyClosed: false, closeCount: 0, statCalls: 0, streamCalls: 0, stream: null };
@@ -109,7 +111,8 @@ function virtualFs() {
           started = true;
           if (entry.holdStream) return;
           if (entry.readError) { this.destroy(entry.readError); return; }
-          this.push(entry.bytes); this.push(null);
+          this.push(entry.bytes.subarray(options.start ?? 0, options.end === undefined ? undefined : options.end + 1));
+          this.push(null);
         },
         destroy(error, done) {
           Promise.resolve(entry.streamCloseGate?.promise).then(() => record.close()).then(() => done(error), done);
@@ -217,6 +220,25 @@ add("identity:replacement-after-headers-cannot-mix-size-and-new-bytes", async f 
   assert.equal(f.active(), 0); assert.equal(f.handles.length, 1); assert.equal(f.handles[0].closeCount, 1);
 });
 
+add("identity-and-compression:in-place-changes-respect-the-opened-size", async f => {
+  const payload = Buffer.from("synthetic source\n".repeat(200));
+  for (const [encoding, decode] of [["", bytes => bytes], ["gzip", gunzipSync], ["br", brotliDecompressSync]]) {
+    const req = request("/asset.js", { headers: { "accept-encoding": encoding } });
+    const growing = f.add("asset.js", payload);
+    const appended = new ResponseSink(() => { growing.bytes = Buffer.concat([payload, Buffer.from("appended")]); });
+    await direct(f, req, appended);
+    assert.deepEqual(decode(appended.body), payload, `${encoding || "identity"}: file growth cannot extend the selected body`);
+
+    const shrinking = f.add("asset.js", payload);
+    const truncated = new ResponseSink(() => { shrinking.bytes = payload.subarray(0, 8); });
+    await f.fileserver.serveStatic(req, truncated, "/asset.js");
+    assert.equal(truncated.destroyed, true);
+    assert.equal(truncated.writableFinished, false, `${encoding || "identity"}: an early EOF cannot finish normally`);
+    assert.equal(f.active(), 0);
+  }
+  assert(f.handles.every(handle => handle.closeCount === 1));
+});
+
 add("headers:head-and-empty-file-close-without-creating-a-reader", async f => {
   f.add("asset.bin", "nonempty"); const head = await direct(f, request("/asset.bin", { method: "HEAD" }));
   assert.equal(head.body.length, 0); assert.equal(head.headers["Content-Length"], 8);
@@ -304,6 +326,52 @@ add("compression:negotiated-variants-preserve-existing-vary", async f => {
   }
 });
 
+add("cache:ordinary-asset-revalidation-is-authorized-and-representation-specific", async f => {
+  const asset = f.add("asset.js", "const value = 1;\n".repeat(200));
+  f.add("index.html", "shell");
+  const server = http.createServer(handler(f.fileserver, { auth: req => ({ allowed: req.headers.owner !== "denied" }) }));
+  try {
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const port = server.address().port, route = "/asset.js?v=ordinary";
+    const first = await rawHttp(port, route, { headers: { "accept-encoding": "gzip" } });
+    assert.equal(first.status, 200);
+    assert.equal(first.headers["cache-control"], "private, no-cache");
+    const etag = first.headers.etag;
+    assert.match(etag, /^W\/"[^"\r\n]+"$/);
+    const headers = { "accept-encoding": "gzip", "if-none-match": `"other,tag", ${etag.slice(2)}` };
+    for (const method of ["GET", "HEAD"]) {
+      const cached = await rawHttp(port, route, { method, headers });
+      assert.equal(cached.status, 304);
+      assert.equal(cached.headers.etag, etag);
+      assert.equal(cached.headers.vary, "Accept-Encoding");
+      assert.equal(cached.headers["cache-control"], "private, no-cache");
+      assert.equal(cached.headers["content-length"], undefined);
+      assert.equal(cached.body.length, 0);
+      assert.equal(f.handles.at(-1).streamCalls, 0);
+    }
+    const denied = await rawHttp(port, route, { headers: { ...headers, owner: "denied" } });
+    assert.equal(denied.status, 401);
+    assert.equal(f.handles.length, 3, "authentication still precedes cache validation and file open");
+    const identity = await rawHttp(port, route, { headers: { ...headers, "accept-encoding": "identity" } });
+    assert.equal(identity.status, 200);
+    assert.notEqual(identity.headers.etag, etag);
+    assert.deepEqual(identity.body, asset.bytes);
+
+    asset.bytes = Buffer.from("const value = 2;\n".repeat(200));
+    asset.ctimeMs += 0.001;
+    const changed = await rawHttp(port, route, { headers });
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.etag, etag);
+    assert.deepEqual(gunzipSync(changed.body), asset.bytes);
+    const shell = await rawHttp(port, "/", { headers: { "if-none-match": "*" } });
+    assert.equal(shell.status, 200);
+    assert.equal(shell.headers.etag, undefined);
+    assert.equal(shell.headers["cache-control"], "no-store");
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
 add("mapping:app-standalone-cache-and-outside-root-contracts-remain", async f => {
   f.add("index.html", "app"); f.add("admin.html", "admin");
   f.add("modules/fanhao/disk-usage/index.html", "disk"); f.add("modules/system/computer-control/index.html", "control");
@@ -315,7 +383,7 @@ add("mapping:app-standalone-cache-and-outside-root-contracts-remain", async f =>
   const encodedTraversal = "/%2e%2e%2f%2e%2e%2foutside.bin";
   assert.equal(f.fileserver.publicFilePath(encodedTraversal), f.target("outside.bin"), "existing normalization maps root traversal inside the public directory");
   const outside = await direct(f, request(encodedTraversal)); assert.equal(outside.statusCode, 404);
-  assert.equal(staticModule.staticCacheControl("/asset.js?v=ordinary", ".js"), "no-store");
+  assert.equal(staticModule.staticCacheControl("/asset.js?v=ordinary", ".js"), "private, no-cache");
   assert.equal(staticModule.staticCacheControl("/index.html?v=bundle-abcdef123456", ".html"), "no-store");
 });
 

@@ -107,6 +107,7 @@
     "verify:manga-streams": "node tests/verify_manga_file_streams.mjs && node tests/verify_stored_zip_stream_lifecycle.mjs",
     "verify:manga-image-dimensions": "node tests/verify_manga_image_dimensions.mjs",
     "verify:manga-lookup": "node tests/verify_manga_lookup_performance.mjs && npm run verify:manga-metadata-cache && npm run verify:manga-comic-statements && npm run verify:manga-summary-reads && npm run verify:manga-detail-first-images",
+    "verify:manga-list-worker": "node tests/verify_manga_list_worker.mjs",
     "verify:manga-detail-first-images": "node tests/verify_manga_detail_first_images.mjs",
     "verify:manga-metadata-cache": "node tests/verify_manga_metadata_file_cache.mjs",
     "verify:manga-comic-statements": "node tests/verify_manga_comic_statement_cache.mjs",

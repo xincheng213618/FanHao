@@ -161,6 +161,125 @@ async function verifyStatBoundaries() {
   await closeAll(h);
 }
 
+async function verifyRequiredPlaybackSource() {
+  const file = { ...source("verified"), modifiedAt: new Date(stat.mtimeMs).toISOString() };
+  const { path } = file;
+  const live = { ...stat, isFile: () => true };
+  let checked = [], actual = live;
+  const saved = { duration: 71, videoCodec: "h264", audioCodec: "aac" };
+  const f = fixture({ asyncConcurrency: 1, probeWaitMs: 0,
+    statFile: async (filePath) => { checked.push(filePath); return actual; },
+    persistentCache: { get: (_file, identity) => identity.cacheMtime
+      ? { hit: true, value: saved } : { hit: false } }
+  });
+  const background = f.service.probeAsync(source("occupied-probe"));
+  try {
+    assert.equal((await f.service.playInfoForFileAsync(file, file.id, { requireSource: true })).duration, 71);
+    assert.deepEqual(checked, [path], "a matching validated source reuses warm metadata even while FFprobe is occupied");
+    assert.equal(f.calls.length, 1);
+
+    actual = null;
+    assert.equal(await f.service.playInfoForFileAsync(file, file.id, { requireSource: true }), null,
+      "a warm row cannot validate a missing file");
+    actual = { ...live, isFile: () => false };
+    assert.equal(await f.service.playInfoForFileAsync(file, file.id, { requireSource: true }), null,
+      "a directory at the old path is not a valid media source");
+
+    actual = { ...live, size: 2, mtimeMs: 2, ino: 2 };
+    checked = [];
+    const changed = f.service.playInfoForFileAsync(file, file.id, { requireSource: true });
+    await until(() => f.service.asyncDiagnostics().queued === 1, "a changed disk source cannot use the stale index row");
+    assert.deepEqual(checked, [path]);
+    f.calls[0].finish(); f.calls[0].close(); await background;
+    await until(() => f.calls.length === 2, "verified source runs FFprobe after child slot opens");
+    assert.deepEqual(checked, [path], "cold playback reuses its checked stat before FFprobe");
+    f.calls[1].finish(); f.calls[1].close();
+    assert.equal((await changed).duration, 42);
+    assert.deepEqual(checked, [path, path], "a cold result is checked again before publication");
+    assert.equal((await f.service.playInfoForFileAsync(file, file.id, { requireSource: true })).duration, 42);
+    assert.equal(f.calls.length, 2, "the verified disk signature keeps the new result warm");
+  } finally { await closeAll(f); }
+
+  const restored = { ...file, id: "restored", path: "fixture/restored.mp4" };
+  let available = false;
+  const g = fixture({ probeWaitMs: 0, safeStat: () => null, statFile: async () => available ? live : null });
+  try {
+    assert.equal(g.service.probeCached(restored), null);
+    assert.equal(await g.service.probeCachedAsync(restored), null);
+    assert.equal(g.service.diagnostics().resolved, 0, "absence must not occupy the warm probe cache");
+    available = true;
+    const requested = g.service.playInfoForFileAsync(restored, restored.id, { requireSource: true });
+    await until(() => g.calls.length === 1, "reconnected source with unchanged index identity is probed again");
+    g.calls[0].finish(); g.calls[0].close();
+    assert.equal((await requested).duration, 42);
+  } finally { await closeAll(g); }
+}
+
+async function verifyPlaybackSourceCancellation() {
+  const live = { ...stat, isFile: () => true };
+  let releaseLookup, lookupCalls = 0;
+  const f = fixture({ asyncConcurrency: 1, asyncCapacity: 2, statTimeoutMs: 35, stopTimeoutMs: 30,
+    statFile: () => { lookupCalls++; return new Promise(resolve => { releaseLookup = resolve; }); }
+  });
+  const required = (id, options) => f.service.playInfoForFileAsync(source(id), id, { requireSource: true, ...options });
+  try {
+    const held = required("held");
+    const aborted = new AbortController();
+    const queued = required("queued", { signal: aborted.signal });
+    await assert.rejects(required("overflow"), { code: "PROBE_BUSY", statusCode: 503 });
+    aborted.abort();
+    assert.equal(await queued, null);
+    await assert.rejects(held, { code: "PROBE_STAT_TIMEOUT", statusCode: 503 });
+    assert.equal(lookupCalls, 1, "disconnecting a queued lookup never stats its path");
+    assert.equal(f.service.asyncDiagnostics().sourceLookup.active, 1);
+    await assert.rejects(f.service.stop(), { code: "PROBE_CLOSE_TIMEOUT" });
+    await assert.rejects(f.service.start(), { code: "PROBE_CLOSE_TIMEOUT" });
+    releaseLookup(live);
+    await tick();
+    assert.equal(f.calls.length, 0, "a late result cannot start FFprobe after timeout or stop");
+    assert.equal(f.service.asyncDiagnostics().sourceLookup.active, 0);
+    await f.service.start();
+  } finally {
+    releaseLookup?.(live);
+    await closeAll(f);
+  }
+
+  const moved = { ...source("relocation"), path: "fixture/moved.mp4" };
+  const checked = [];
+  let releaseRelocation, relocationSignal;
+  const g = fixture({ probeWaitMs: 0, statFile: async (filePath) => {
+    checked.push(filePath);
+    return filePath === moved.path ? live : null;
+  } });
+  try {
+    const controller = new AbortController();
+    const options = { requireSource: true, signal: controller.signal, resolveMissingSource: (_file, signal) => {
+      relocationSignal = signal;
+      return new Promise(resolve => { releaseRelocation = resolve; });
+    } };
+    const cancelled = g.service.playInfoForFileAsync(source("relocation"), moved.id, options);
+    await until(() => Boolean(releaseRelocation), "the missing source reaches async relocation");
+    controller.abort();
+    assert.equal(await cancelled, null);
+    assert.equal(relocationSignal.aborted, true);
+    assert.equal(g.service.asyncDiagnostics().sourceLookup.active, 1);
+    releaseRelocation(moved);
+    await tick();
+    assert.deepEqual(checked, [source("relocation").path]);
+    const recovered = g.service.playInfoForFileAsync(source("relocation"), moved.id, {
+      requireSource: true, resolveMissingSource: async () => moved
+    });
+    await until(() => g.calls.length === 1, "relocated source is checked and probed");
+    assert.equal(g.calls[0].path, moved.path);
+    g.calls[0].finish(); g.calls[0].close();
+    assert.equal((await recovered).duration, 42);
+    assert.deepEqual(checked.slice(1), [source("relocation").path, moved.path, moved.path]);
+  } finally {
+    releaseRelocation?.(moved);
+    await closeAll(g);
+  }
+}
+
 async function verifyProcessClosure() {
   for (const failure of ["callback", "stdout", "stderr", "process", "timeout"]) {
     const f = fixture({ asyncConcurrency: 1, processTimeoutMs: failure === "timeout" ? 20 : 1000 });
@@ -236,7 +355,9 @@ await verifySharedCapacity();
 await verifyDefaultBurst();
 await verifyPromotionAndSnapshot();
 await verifyStatBoundaries();
+await verifyRequiredPlaybackSource();
+await verifyPlaybackSourceCancellation();
 await verifyProcessClosure();
 await verifyLifecycle();
 await verifyActualShutdown();
-console.log("Video probe shared capacity, foreground priority, filesystem bounds, actual process closure and shutdown checks passed.");
+console.log("Video probe shared capacity, foreground priority, verified playback sources, filesystem bounds, actual process closure and shutdown checks passed.");

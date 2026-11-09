@@ -204,6 +204,121 @@ try {
     }
   });
 
+  await run("ranged relocation closes a non-file source before opening and validating the replacement", async () => {
+    const alternate = `${sourcePath}.alternate`;
+    const original = harness({ notFile: true, holdClose: true });
+    const openOriginal = fs.promises.open;
+    const replacement = harness();
+    const openReplacement = fs.promises.open;
+    const attempts = [];
+    fs.promises.open = (filePath, flags) => {
+      attempts.push(filePath);
+      return (filePath === sourcePath ? openOriginal : openReplacement)(filePath, flags);
+    };
+    const req = request("GET", { range: "bytes=2-10" }), res = response(req);
+    let lookups = 0;
+    const task = invoke("range", req, res, { size: bytes.length }, { resolveMissingSource: async file => {
+      lookups++;
+      assert.equal(file.path, sourcePath);
+      assert.equal(original.count.physicalCloses, 1);
+      return { ...file, path: alternate };
+    } });
+    try {
+      await tick();
+      assert.deepEqual(attempts, [sourcePath]);
+      assert.equal(lookups, 0, "held close must precede the relocation scan");
+      assert.equal(res.status, undefined);
+      original.close.resolve();
+      await task;
+      assert.deepEqual(attempts, [sourcePath, alternate]);
+      assert.equal(lookups, 1);
+      assert.equal(res.status, 206);
+      assert.equal(res.headers["Content-Range"], `bytes 2-5/${bytes.length}`);
+      assert.deepEqual(res.body(), bytes.subarray(2, 6));
+      assert.equal(replacement.count.physicalCloses, 1);
+      assertDetached(req, res);
+    } finally { original.close.resolve(); await replacement.release(task); await original.release(); }
+  });
+
+  await run("ranged relocation rejects a changed replacement size and skips genuine open errors", async () => {
+    const candidate = harness({ size: bytes.length + 1 });
+    const openCandidate = fs.promises.open;
+    let initialError = "ENOENT", lookups = 0;
+    const alternate = `${sourcePath}.changed`;
+    fs.promises.open = (filePath, flags) => filePath === sourcePath
+      ? Promise.reject(Object.assign(new Error("source unavailable"), { code: initialError })) : openCandidate(filePath, flags);
+    const options = { resolveMissingSource: async file => {
+      lookups++;
+      return { ...file, path: alternate };
+    } };
+    try {
+      for (const code of ["ENOENT", "EIO"]) {
+        initialError = code;
+        const req = request("HEAD"), res = response(req);
+        await invoke("range", req, res, { size: bytes.length }, options);
+        assert.equal(res.status, 404);
+        assertDetached(req, res);
+      }
+      assert.equal(lookups, 1, "only a missing original should inspect a replacement");
+      assert.equal(candidate.count.opens, 1);
+      assert.equal(candidate.count.physicalCloses, 1);
+      assert.equal(candidate.count.readers, 0);
+    } finally { await candidate.release(); }
+  });
+
+  await run("cancelled relocation retains its slot until settlement and cannot open late", async () => {
+    const service = makeService({ stopTimeoutMs: 20 });
+    const requests = [], held = [], opens = [];
+    fs.promises.open = async (filePath) => {
+      opens.push(filePath);
+      throw Object.assign(new Error("controlled missing source"), { code: "ENOENT" });
+    };
+    const requestRange = (resolveMissingSource = (_file, signal) => {
+      const gate = deferred();
+      held.push({ gate, signal });
+      return gate.promise;
+    }) => {
+      const req = request(), res = response(req);
+      const task = invoke("range", req, res, {}, { resolveMissingSource }, service);
+      requests.push(task);
+      return { req, res, task };
+    };
+    try {
+      const first = requestRange(), second = requestRange();
+      await tick();
+      assert.equal(held.length, 2);
+      first.req.aborted = true;
+      first.req.emit("aborted");
+      assert.equal(held[0].signal.aborted, true);
+      assert.equal(first.res.destroyed, true);
+      const overflow = requestRange();
+      await overflow.task;
+      assert.equal(overflow.res.status, 503);
+      assert.equal(overflow.res.headers["Retry-After"], "1");
+      assert.equal(held.length, 2, "disconnect cannot release an outstanding OS lookup");
+      await assert.rejects(service.stop(), { code: "FILE_SERVER_STOP_INCOMPLETE" });
+      await assert.rejects(service.start(), { code: "FILE_SERVER_STOP_INCOMPLETE" });
+      assert.equal(held[1].signal.aborted, true);
+      for (const { gate } of held) gate.resolve({ path: `${sourcePath}.late` });
+      await Promise.all(requests);
+      assert.deepEqual(opens, [sourcePath, sourcePath, sourcePath]);
+      assert.equal(first.res.status, undefined);
+      assert.equal(second.res.status, undefined);
+      assertDetached(first.req, first.res);
+      assertDetached(second.req, second.res);
+      assert.equal(service.diagnostics().active, 0);
+      assert.equal(await service.start(), true);
+      const miss = requestRange(async () => null);
+      await miss.task;
+      assert.equal(miss.res.status, 404);
+    } finally {
+      for (const { gate } of held) gate.resolve(null);
+      await Promise.allSettled(requests);
+      fs.promises.open = realOpen;
+      await service.stop();
+    }
+  });
+
   await run("HEAD, empty, 416 and startup-prefix 503 still await descriptor closure", async () => {
     for (const [mode, method, headers, file, size, expected] of [
       ["inline", "HEAD", {}, {}, bytes.length, 200],

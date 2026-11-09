@@ -79,6 +79,8 @@ let currentPlayInfo = null;
 let progressTimer = null;
 let lastProgressReport = 0;
 let lastKeepaliveProgress = null;
+const progressSessionId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+let progressSequence = 0;
 let playbackOffset = 0;
 let isSeeking = false;
 let player = null;
@@ -93,6 +95,7 @@ let pendingMoveJob = null;
 let pendingMoveRequestKey = "";
 let movePollController = null;
 let playbackSourceController = null;
+let replayedSource = null;
 let playbackAttempt = 0;
 let sourceAutoPlay = false;
 let pendingSourcePosition = null;
@@ -332,7 +335,7 @@ function handlePlayerKeyboard(event) {
     event.preventDefault();
     if (els.video.paused && streamNeedsActivation && usesCustomControls()) {
       startDeferredStream();
-    } else if (els.video.paused) requestVideoPlayback();
+    } else if (els.video.paused) requestVideoPlayback({ restartEnded: true });
     else pauseVideoPlayback();
   } else if (key === "arrowleft") {
     event.preventDefault();
@@ -686,6 +689,7 @@ async function playVideo(video, options = {}) {
 function resetPlaybackSource() {
   playbackSourceController?.abort();
   playbackSourceController = null;
+  replayedSource = null;
   playbackAttempt += 1;
   sourceAutoPlay = false;
   pendingSourcePosition = null;
@@ -799,6 +803,7 @@ function updateSubtitleContext(media = els.video) {
 function requestVideoPlayback(options = {}) {
   const source = playbackSourceController;
   if (!source || source.signal.aborted) return;
+  if (options.restartEnded && els.video?.ended) replayedSource = source;
   sourceAutoPlay = true;
   if (pendingSourcePosition != null) pendingSourceAutoPlay = true;
   const attemptId = ++playbackAttempt;
@@ -910,7 +915,7 @@ function configurePlyrForCurrentMode() {
     const shouldPlay = typeof playing === "boolean" ? playing : els.video.paused;
     if (shouldPlay) {
       if (streamNeedsActivation && usesCustomControls()) startDeferredStream();
-      else requestVideoPlayback();
+      else requestVideoPlayback({ restartEnded: true });
     } else {
       pauseVideoPlayback();
     }
@@ -1029,6 +1034,7 @@ function reloadCurrentStream() {
 function seekTo(position) {
   if (!currentVideo || !currentPlayInfo || !els.video) return;
   const target = clampSeekTime(position);
+  const progressOptions = { force: true, resetAtStart: target === 0 };
   if (pendingLinkStart !== null && pendingLinkVideoId === currentVideo.id) pendingLinkStart = target;
   const wasPaused = els.video.paused;
   isSeeking = false;
@@ -1042,11 +1048,11 @@ function seekTo(position) {
       pendingSourcePosition = target;
     }
     updateSeekControl(target);
-    reportProgress(target, { force: true });
+    reportProgress(target, progressOptions);
     return;
   }
 
-  reportProgress(target, { force: true });
+  reportProgress(target, progressOptions);
   setVideoSourceAt(target, { autoPlay: !wasPaused, holdFrame: true });
 }
 
@@ -2415,12 +2421,14 @@ function reportProgress(positionOverride = null, options = {}) {
     position: positionOverride == null ? mediaPosition() : clampSeekTime(positionOverride),
     duration
   };
+  if (body.position === 0 && (options.resetAtStart || replayedSource === playbackSourceController)) body.resetAtStart = true;
   const key = JSON.stringify([currentVideo.id, body]);
   if (options.keepalive && lastKeepaliveProgress?.source === playbackSourceController
       && lastKeepaliveProgress.key === key && now - lastKeepaliveProgress.at < 1000) return;
   lastProgressReport = now;
   const attempt = options.keepalive ? { source: playbackSourceController, key, at: now } : null;
   if (attempt) lastKeepaliveProgress = attempt;
+  body.progressOrder = { sessionId: progressSessionId, sequence: ++progressSequence };
   api(`/api/progress/${encodeURIComponent(currentVideo.id)}`, {
     method: "POST",
     ...(options.keepalive ? { keepalive: true } : {}),

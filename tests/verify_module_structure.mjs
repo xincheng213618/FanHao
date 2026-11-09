@@ -76,7 +76,7 @@ const photoSetServiceSource = fs.readFileSync(path.join(modulesDir, "photos", "s
 const photoDetailAwaitsImages = /async function publicDetail[\s\S]*?const imageRequest = archiveImagesPayload\([\s\S]*?await Promise\.all\(\[\s*imageRequest,/.test(photoSetServiceSource);
 assert(photoDetailAwaitsImages && photoSetServiceSource.includes("async function serveCover"), "photo-set routes must await asynchronous archive and cover work");
 assert.equal(staticCacheControl("/short-video-app.min.js?v=bundle-c16c469a4009", ".js"), "public, max-age=31536000, immutable", "content-hashed assets must be immutable");
-assert.equal(staticCacheControl("/app.js?v=20260715-manual-label", ".js"), "no-store", "human-managed cache labels must not make changed bytes immutable forever");
+assert.equal(staticCacheControl("/app.js?v=20260715-manual-label", ".js"), "private, no-cache", "human-managed cache labels must revalidate before reuse");
 assert.equal(staticCacheControl("/index.html?v=bundle-c16c469a4009", ".html"), "no-store", "HTML route shells must never be immutable");
 
 for (const filePath of sourceFiles(bootstrapDir)) {

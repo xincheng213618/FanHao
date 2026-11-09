@@ -4,6 +4,8 @@ import { ARCHIVE_IMAGE_INDEXER_VERSION } from "../../../platform/server/archive-
 import { safeChildPath } from "../../../platform/server/request-io.js";
 import { imageLibraryCacheIdentity } from "./image-library-index-contract.js";
 import { PHOTO_COLLECTION_SORTS, photoShelfCollectionScope, photoSortIsReversed } from "./image-library-service.js";
+import { BOBO_SOCKS_CATEGORY } from "./photo-album-number.js";
+import { PHOTO_PERSON_SHELF_CATEGORY } from "../../../../lib/photo-person-shelf.js";
 
 const defaultLocale = new Intl.Collator().resolvedOptions().locale;
 const collectionLocales = ["zh-CN", "en-US"];
@@ -37,6 +39,7 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
   let cachedIndex = null;
   let cachedCollection = null;
   let cachedCategory = null;
+  let cachedPerson = null;
   let cachedMedia = null;
 
   function header(db) {
@@ -231,6 +234,28 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
+  function indexForPerson(person) {
+    return readSnapshot(db => {
+      const state = header(db);
+      if (!state) return null;
+      if (cachedPerson?.revision === state.revision && cachedPerson.person === person) return cachedPerson;
+      const facets = JSON.parse(state.facets_json);
+      const subCategories = JSON.parse(state.scopes_json)?.all?.subCategories;
+      if (!Array.isArray(facets?.categories) || !Array.isArray(facets.people) || !Array.isArray(subCategories)) return null;
+
+      // Only these categories can derive other names from the folder or title.
+      // Keep them as candidates and leave the exact person match to the service.
+      const rows = db.prepare(`SELECT data_json FROM photo_library_archives
+        WHERE instr(json_extract(data_json, '$.personName'), ?) > 0
+          OR json_type(data_json, '$.personName') NOT IN ('text', 'null')
+          OR json_extract(data_json, '$.category') IN (?, ?) ORDER BY position`)
+        .all(person, BOBO_SOCKS_CATEGORY, PHOTO_PERSON_SHELF_CATEGORY);
+      cachedPerson = { person, collectionId: "", revision: state.revision, scannedAt: state.scanned_at,
+        photoSets: rows.map(row => JSON.parse(row.data_json)), personFacets: { ...facets, subCategories } };
+      return cachedPerson;
+    });
+  }
+
   function mediaIndex() {
     return readSnapshot(db => {
       const state = db.prepare("SELECT revision, scanned_at, roots_json FROM gallery_media_library_snapshot WHERE id=1 AND identity=?").get(mediaIdentity);
@@ -319,5 +344,5 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
-  return { archiveMarks, byId, collectionPage, contentImageCounts, coverWarmPlan, hasSnapshot, index, indexForCategory, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
+  return { archiveMarks, byId, collectionPage, contentImageCounts, coverWarmPlan, hasSnapshot, index, indexForCategory, indexForPerson, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
 }

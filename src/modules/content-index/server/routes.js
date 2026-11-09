@@ -1,4 +1,5 @@
 import { readJsonBody } from "../../../platform/server/request-io.js";
+import { sendJsonParts as writeJsonParts } from "../../../platform/server/responses.js";
 import { PHOTO_CATEGORY_COVER_MAX_BYTES, PHOTO_CATEGORY_COVER_ROUTE } from "./photo-category-cover-store.js";
 
 const categoryCoverBodyLimit = 4 * Math.ceil(PHOTO_CATEGORY_COVER_MAX_BYTES / 3) + 1024;
@@ -80,6 +81,9 @@ export async function routeContentIndexApi(req, res, url, deps) {
   }
 
   if (url.pathname === "/api/image-library/items" && req.method === "GET") {
+    if (deps.mangaListWorker && String(url.searchParams.get("mode") || "").trim().toLowerCase() === "manga") {
+      return routeMangaItems(req, res, url, deps);
+    }
     try {
       const payload = imageLibraryService.itemsPayload(url);
       if (payload.mode === "photo" && photoSetService) {
@@ -117,4 +121,27 @@ export async function routeContentIndexApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+async function routeMangaItems(req, res, url, { mangaListWorker, sendJson, sendJsonParts = writeJsonParts }) {
+  const controller = new AbortController();
+  const disconnect = () => controller.abort();
+  const unavailable = () => controller.signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+  if (unavailable()) return true;
+  req.once?.("aborted", disconnect);
+  res.once?.("close", disconnect);
+  try {
+    const body = await mangaListWorker.query(url, { signal: controller.signal });
+    if (!unavailable()) sendJsonParts(res, 200, [Buffer.from(body.buffer, body.byteOffset, body.byteLength)]);
+  } catch (error) {
+    if (unavailable()) return true;
+    if (error?.retryable === true) {
+      res.setHeader?.("Retry-After", "1");
+      sendJson(res, 503, { error: error.message, code: error.code, retryable: true });
+    } else sendJson(res, error.statusCode || 500, { error: error.message || "频道列表读取失败" });
+  } finally {
+    req.off?.("aborted", disconnect);
+    res.off?.("close", disconnect);
+  }
+  return true;
 }

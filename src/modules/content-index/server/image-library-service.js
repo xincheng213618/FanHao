@@ -71,7 +71,7 @@ export function createImageLibraryService({
   photoSetRootStatuses,
   photoSetService
 }) {
-  let cachedPhotoCatalog = null;
+  const photoCatalogs = new WeakMap();
   let cachedPhotoShelves = null;
   let cachedSummaryStatic = null;
   let imageSearchDocumentCache = new WeakMap();
@@ -502,7 +502,10 @@ export function createImageLibraryService({
       collections: new Set(sourcePublishers.length ? photoPublisherStore?.collectionIds?.(sourcePublishers) : [])
     } : null;
     const categoryScope = categorySources ? JSON.stringify(Object.values(categorySources).map(values => [...values])) : "";
-    const index = mode === "photo" ? getPhotoIndex(options, collection) : mode === "manga" ? null : getImageLibraryIndex(options);
+    const personIndex = mode === "photo" && photoView === "albums" && !query && !collection
+      && category === "all" && subCategory === "all" && date === "all" && !site && person !== "all"
+      ? photoLibraryStore?.indexForPerson?.(person) : null;
+    const index = mode === "photo" ? personIndex || getPhotoIndex(options, collection) : mode === "manga" ? null : getImageLibraryIndex(options);
     if (peopleView) return photoPeoplePage(index, {
       category, photoSourceCategory, categorySources, categoryScope, browseCategory, browseParent,
       subCategory, date, site, collection, query, sort, direction, limit, offset
@@ -633,7 +636,7 @@ export function createImageLibraryService({
         if (collectionItems) {
           collectionSummary = photoCollectionSummary(collectionItems, collection);
           photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
-        } else photoFacets = preparedPhotoFacets(catalog, photoSourceCategory);
+        } else photoFacets = personIndex?.personFacets || preparedPhotoFacets(catalog, photoSourceCategory);
         source = photoView === "collections" && !collection
           ? defaultPhotoFilters
             ? preparedPhotoCollectionCategories(catalog)
@@ -710,9 +713,10 @@ export function createImageLibraryService({
       const searchSpec = createImageSearchQuery(query);
       const searchResults = searchSpec ? searchImageLibraryItems(source, searchSpec) : null;
       const filtered = searchResults ? searchResults.map((result) => result.item) : source;
+      const sortPhotoCollection = collectionSummary?.issueSortField === "archiveDate" ? sortPhotoReleaseDates : sortPhotoIssues;
       let sorted = sort === "relevance" && searchResults
         ? [...searchResults].sort(compareImageSearchResults).map((result) => result.item)
-        : sort === "issue" ? sortPhotoIssues(filtered, direction)
+        : sort === "issue" ? sortPhotoCollection(filtered, direction)
           : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);
       if (photoSortIsReversed(sort, direction)) sorted = [...sorted].reverse();
       const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
@@ -1479,7 +1483,8 @@ export function createImageLibraryService({
   }
 
   function preparedPhotoCatalog(index, compact) {
-    const catalog = cachedPhotoCatalog?.index === index ? cachedPhotoCatalog : null;
+    index ??= emptyPhotoIndex;
+    const catalog = photoCatalogs.get(index);
     if (catalog && (!catalog.compact || compact)) return catalog;
     const rawItems = Array.isArray(index?.photoSets) ? index.photoSets : [];
     const options = { deferPhotoSubject: true, compact };
@@ -1498,7 +1503,7 @@ export function createImageLibraryService({
       return catalog;
     }
     imageSearchDocumentCache = new WeakMap();
-    cachedPhotoCatalog = {
+    const value = {
       compact,
       index,
       items,
@@ -1507,7 +1512,8 @@ export function createImageLibraryService({
       subCategories: new Map(),
       sortedItems: new Map()
     };
-    return cachedPhotoCatalog;
+    photoCatalogs.set(index, value);
+    return value;
   }
 
   function preparedPhotoCollectionCategories(catalog) {
@@ -1855,6 +1861,7 @@ export function createImageLibraryService({
       category: first.category || "",
       subCategory: first.subCategory || first.collectionTitle || "",
       largeCategoryTitle: [first.rootLabel, first.category].filter(Boolean).join(" / "),
+      ...(items.some(item => item.archiveDate) && !items.some(item => item.albumNumber) ? { issueSortField: "archiveDate" } : {}),
       count: items.length,
       size: items.reduce((sum, item) => sum + Number(item.size || 0), 0),
       imageCount: items.reduce((sum, item) => sum + Number(item.imageCount || 0), 0),
@@ -1880,6 +1887,17 @@ export function createImageLibraryService({
       return right.updatedAt - left.updatedAt
         || compareImageNames(left.item.title, right.item.title) || compareImageNames(left.item.id, right.item.id);
     }).map(({ item }) => item);
+  }
+
+  function sortPhotoReleaseDates(items, direction) {
+    const sign = direction === "asc" ? 1 : -1;
+    return [...items].sort((left, right) => {
+      const leftDate = left.archiveDate || "";
+      const rightDate = right.archiveDate || "";
+      if (Boolean(leftDate) !== Boolean(rightDate)) return leftDate ? -1 : 1;
+      return sign * leftDate.localeCompare(rightDate)
+        || compareImageNames(left.title, right.title) || compareImageNames(left.id, right.id);
+    });
   }
 
   function sortImageLibraryItems(items, sort) {

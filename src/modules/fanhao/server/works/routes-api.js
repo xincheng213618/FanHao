@@ -1,5 +1,7 @@
 import { safeWorkMoveRetryError, sanitizeWorkMoveJob } from "./work-move-job-query-service.js";
 
+const PLAY_INFO_RETRYABLE_CODES = new Set(["PROBE_BUSY", "PROBE_STAT_TIMEOUT", "PROBE_STOPPED", "PROBE_SOURCE_UNAVAILABLE"]);
+
 function safeWorkMoveRouteError(error, fallback, { retry = false } = {}) {
   return {
     error: retry ? safeWorkMoveRetryError(error) : fallback,
@@ -525,21 +527,36 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const playInfoMatch = /^\/api\/playinfo\/([^/]+)$/.exec(url.pathname);
   if (playInfoMatch && req.method === "GET") {
-    const payload = await workDetailService.playInfoPayload(decodeURIComponent(playInfoMatch[1]), {
-      source: url.searchParams.get("source") || "fanhao"
-    });
-    if (!payload) {
-      sendJson(res, 404, { error: "视频文件不存在或已移动，请刷新作品资料" });
-      return true;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => { if (!res.writableEnded) abort(); };
+    const unavailable = () => controller.signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+    if (unavailable()) return true;
+    req.once?.("aborted", abort);
+    res.once?.("close", onClose);
+    try {
+      const payload = await workDetailService.playInfoPayload(decodeURIComponent(playInfoMatch[1]), {
+        source: url.searchParams.get("source") || "fanhao",
+        signal: controller.signal
+      });
+      if (unavailable()) return true;
+      if (payload) sendJson(res, 200, payload);
+      else sendJson(res, 404, { error: "视频文件不存在或已移动，请刷新作品资料" });
+    } catch (error) {
+      if (unavailable()) return true;
+      if (error?.statusCode !== 503 || !PLAY_INFO_RETRYABLE_CODES.has(error.code)) throw error;
+      res.setHeader?.("Retry-After", "1");
+      sendJson(res, 503, { error: "暂时无法检查视频文件，请稍后重试", code: error.code, retryable: true });
+    } finally {
+      req.off?.("aborted", abort);
+      res.off?.("close", onClose);
     }
-
-    sendJson(res, 200, payload);
     return true;
   }
 
   const infoMatch = /^\/api\/info\/([^/]+)$/.exec(url.pathname);
   if (infoMatch && req.method === "GET") {
-    if (!workDetailService.serveInfoFile(res, infoMatch[1])) {
+    if (!(await workDetailService.serveInfoFile(req, res, infoMatch[1]))) {
       notFound(res);
     }
     return true;

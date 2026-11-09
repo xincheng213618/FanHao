@@ -2,6 +2,8 @@ import { stat } from "node:fs/promises";
 import { ensureRealPathWithinRoots } from "../../../platform/server/library-path-safety.js";
 import { scheduleLocalPathAction } from "../../../platform/server/local-path-action.js";
 
+const MANGA_DIMENSIONS_RETRYABLE_CODES = new Set(["MANGA_DIMENSIONS_BUSY", "MANGA_DIMENSIONS_STOPPED"]);
+
 export async function routePhotosApi(req, res, url, deps) {
   const {
     catalog,
@@ -243,15 +245,34 @@ export async function routePhotosApi(req, res, url, deps) {
 
   const mangaChapterMatch = /^\/api\/manga\/([^/]+)\/chapters\/([^/]+)$/.exec(url.pathname);
   if (mangaChapterMatch && req.method === "GET") {
-    const cacheDir = mangaService.cacheById(decodeURIComponent(mangaChapterMatch[1]));
-    const manifestContext = {};
-    const comic = cacheDir ? mangaService.publicSummary(cacheDir, manifestContext) : null;
-    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic, manifestContext) : null;
-    if (!cacheDir || !chapter) {
-      notFound(res);
-      return true;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => { if (!res.writableEnded) abort(); };
+    const unavailable = () => controller.signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+    if (unavailable()) return true;
+    req.once?.("aborted", abort);
+    res.once?.("close", onClose);
+    try {
+      const cacheDir = mangaService.cacheById(decodeURIComponent(mangaChapterMatch[1]));
+      const manifestContext = {};
+      const comic = cacheDir ? mangaService.publicSummary(cacheDir, manifestContext) : null;
+      const chapter = cacheDir ? await mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2]), comic, manifestContext, { signal: controller.signal }) : null;
+      if (unavailable()) return true;
+      if (!cacheDir || !chapter) {
+        notFound(res);
+        return true;
+      }
+      const cache = await imageReaderCacheStatus();
+      if (!unavailable()) sendJson(res, 200, { comic, chapter, cache });
+    } catch (error) {
+      if (unavailable()) return true;
+      if (error?.statusCode !== 503 || !MANGA_DIMENSIONS_RETRYABLE_CODES.has(error.code)) throw error;
+      res.setHeader?.("Retry-After", "1");
+      sendJson(res, 503, { error: "暂时无法读取漫画章节，请稍后重试", code: error.code, retryable: true });
+    } finally {
+      req.off?.("aborted", abort);
+      res.off?.("close", onClose);
     }
-    sendJson(res, 200, { comic, chapter, cache: await imageReaderCacheStatus() });
     return true;
   }
 

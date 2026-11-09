@@ -360,7 +360,8 @@ for (const obsolete of ["success", "error", "server", "deactivate"]) {
 }
 console.log(`android-channel-paging: ${pagingGroups} actual-source groups PASS (raw cursor/EOF, rebase, bounded changing snapshots, original-range retry, cancelled late success/error)`);
 assert.match(androidViews, /\{ requireScrollIntent: mode === "photo"[, }]/, "Android photo list pagination must require fresh downward scroll intent");
-assert(androidViews.includes("}, { requireScrollIntent: true });"), "Android photo reader pagination must require fresh downward scroll intent");
+assert.match(androidFunction("appendPhotoDetailLoadMore"), /createLoadMoreButton\([\s\S]*?\}, \{[^{}]*\brequireScrollIntent:\s*true\b[^{}]*\}\);/,
+  "Android photo reader pagination must require fresh downward scroll intent");
 
 const androidAutoLoad = read("android-client", "www", "js", "auto-load.js");
 for (const marker of [

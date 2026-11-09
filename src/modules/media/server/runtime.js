@@ -35,7 +35,8 @@ export function createMediaRuntime(deps) {
 
     const galleryVideoTranscodeMatch = /^\/media\/gallery-video\/([^/]+)\/transcode$/.exec(url.pathname);
     if (galleryVideoTranscodeMatch && req.method === "GET") {
-      const file = deps.galleryMediaService.videoFile(deps.galleryMediaService.byId(decodeURIComponent(galleryVideoTranscodeMatch[1])));
+      const item = deps.galleryMediaService.byId(decodeURIComponent(galleryVideoTranscodeMatch[1]));
+      const file = deps.galleryMediaService.videoFile(item, { useIndexedSize: true });
       if (!file || file.type !== "video") {
         deps.notFound(res);
         return true;
