@@ -22,11 +22,21 @@ final class NativeShortVideoFeedTransport {
     final T value;
     final boolean hasMore;
     final String nextCursor;
+    final NativeShortVideoFeedPaging.Failure failure;
 
     Parsed(T value, boolean hasMore, String nextCursor) {
+      this(value, hasMore, nextCursor, null);
+    }
+
+    private Parsed(T value, boolean hasMore, String nextCursor, NativeShortVideoFeedPaging.Failure failure) {
       this.value = value;
       this.hasMore = hasMore;
       this.nextCursor = nextCursor;
+      this.failure = failure;
+    }
+
+    static <T> Parsed<T> reject(NativeShortVideoFeedPaging.Failure failure) {
+      return new Parsed<>(null, false, "", failure);
     }
   }
 
@@ -60,7 +70,9 @@ final class NativeShortVideoFeedTransport {
       if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
       Parsed<T> parsed = parser.parse(body);
       if (cancellation != null && cancellation.isCancelled()) return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
-      if (parsed == null || parsed.value == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);
+      if (parsed == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);
+      if (parsed.failure != null) return failure(parsed.failure);
+      if (parsed.value == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);
       return NativeShortVideoFeedPaging.ReadResult.success(parsed.value, parsed.hasMore, parsed.nextCursor);
     } catch (java.net.SocketTimeoutException error) {
       return failure(NativeShortVideoFeedPaging.Failure.TIMEOUT);

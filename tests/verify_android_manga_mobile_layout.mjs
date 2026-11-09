@@ -131,6 +131,77 @@ try {
         await assertHorizontalBounds(page, true); profiles.push({ profile, case: "reader", heading, resumedPage: 2 });
       } finally { await page.close(); }
     });
+    if (viewport.width === 390) await run(`reader: ${profile} image retry keeps the current chapter and retires old controls`, async () => {
+      const page = await launch(viewport, "manga-layout", "", { isMobile: true, hasTouch: true });
+      const held = { 2: Promise.withResolvers(), 3: Promise.withResolvers() };
+      const reads = { 2: 0, 3: 0 };
+      const chapterReads = () => network.get(page).filter(record => /\/api\/manga\/[^/]+\/chapters\/1$/u.test(new URL(record.url).pathname)).length;
+      const figure = index => page.locator(`.manga-reader-page[data-manga-page-position="${index}"]`);
+      const retryFor = index => figure(index).locator(".manga-reader-page-retry");
+      const imageRequest = index => page.waitForRequest(request => new URL(request.url()).pathname.endsWith(`/1/${index}.svg`));
+      const fail = route => route.fulfill({ status: 503, headers: { "Cache-Control": "no-store" }, json: { error: "合成图片暂不可用" } });
+      try {
+        await page.route(url => /\/fixture\/manga-page\/[^/]+\/[^/]+\/1\/[23]\.svg$/u.test(url.pathname), async route => {
+          const index = Number(new URL(route.request().url()).pathname.match(/([23])\.svg$/u)[1]);
+          const request = ++reads[index];
+          if (request === 1) return fail(route);
+          if (request === 2) {
+            await held[index].promise;
+            if (index === 2) return fail(route);
+          }
+          await route.continue().catch(() => {});
+        });
+        await page.locator(".channel-card.manga").first().tap();
+        await page.locator(".manga-chapter-open").first().tap();
+        await waitReader(page, 1);
+        await scrollToSecondPage(page, viewport);
+        const retry = retryFor(2), image = figure(2).locator("img");
+        await retry.waitFor(); await assertTargets(page, ".manga-reader-page-retry", "manga image retry");
+        assert.equal(await image.evaluate(node => node.naturalWidth), 0);
+        const before = await page.evaluate(() => ({ url: location.href, history: history.length, scroll: scrollY,
+          page: document.querySelector(".manga-reader-progress-track").getAttribute("aria-valuenow") }));
+        const first = await figure(1).locator("img").elementHandle(), second = await image.elementHandle();
+        assert.equal(chapterReads(), 1);
+        await Promise.all([imageRequest(2), retry.press("Enter")]);
+        assert.equal(await retry.getAttribute("aria-busy"), "true");
+        await retry.evaluate(button => { button.click(); button.click(); });
+        await frames(page);
+        assert.equal(reads[2], 2, "pending image retry suppresses duplicate activation");
+        held[2].resolve();
+        await figure(2).getByRole("button", { name: "重试第 2 张", exact: true }).waitFor();
+        assert.equal(await retry.evaluate(button => button === document.activeElement), true);
+        await Promise.all([imageRequest(2), retry.press("Enter")]);
+        await image.evaluate(node => node.decode());
+        await retry.waitFor({ state: "detached" });
+        assert.equal(await image.evaluate(node => node.naturalWidth), 720);
+        assert.equal(await figure(2).evaluate(node => node === document.activeElement), true);
+        for (const node of [first, second]) assert.equal(await node.evaluate(img => img.isConnected), true);
+        assert.deepEqual(await page.evaluate(() => ({ url: location.href, history: history.length, scroll: scrollY,
+          page: document.querySelector(".manga-reader-progress-track").getAttribute("aria-valuenow") })), before);
+        assert.equal(chapterReads(), 1, "one recovered image must not refetch chapter metadata");
+        assert.equal(reads[2], 3);
+
+        await figure(3).scrollIntoViewIfNeeded();
+        const oldRetry = retryFor(3);
+        await oldRetry.waitFor();
+        await figure(3).evaluate(node => { window.retiredMangaImage = node.querySelector("img"); window.retiredMangaRetry = node.querySelector("button"); });
+        await Promise.all([imageRequest(3), oldRetry.press("Enter")]);
+        await page.getByRole("navigation", { name: "章节导航", exact: true }).getByRole("button", { name: /^下一话：/ }).click();
+        await waitReader(page, 2);
+        held[3].resolve();
+        await page.evaluate(() => {
+          retiredMangaImage.dispatchEvent(new Event("load"));
+          retiredMangaImage.dispatchEvent(new Event("error"));
+          retiredMangaRetry.click();
+        });
+        await frames(page);
+        assert.equal(reads[3], 2);
+        assert.equal(await page.locator(".manga-reader-page-retry").count(), 0, "retired image callbacks cannot change the next chapter");
+      } finally {
+        held[2].resolve(); held[3].resolve();
+        await page.close();
+      }
+    });
     await run(`panels: ${profile} accessible add controls, full task text and poll focus stay usable without writes`, async () => {
       const page = await launch(viewport, "manga-panels");
       try {
@@ -196,8 +267,8 @@ try {
   await browser?.close(); service.kill("SIGTERM"); await Promise.race([serviceExit, new Promise(resolve => setTimeout(resolve, 3000))]);
 }
 
-async function launch(viewport, scenario = "manga-layout", profile = "") {
-  const page = await browser.newPage({ viewport }); network.set(page, []);
+async function launch(viewport, scenario = "manga-layout", profile = "", options = {}) {
+  const page = await browser.newPage({ viewport, ...options }); network.set(page, []);
   page.on("pageerror", error => faults.push(error.message));
   page.on("request", request => network.get(page).push({ method: request.method(), url: request.url() }));
   await page.route("**/*", async route => {

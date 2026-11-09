@@ -1,6 +1,7 @@
 import { accountChangedError, registerAccountSessionResolver, synchronizeAccountToken } from "./account-owner.js";
 
 const sessions = new Map();
+const pendingSessionWaiters = new WeakMap();
 const registeredServers = new Set();
 
 function nativeAuth() {
@@ -14,7 +15,7 @@ export function serverOrigin(value) {
   } catch { return ""; }
 }
 
-async function sessionFor(origin) {
+function sessionFor(origin) {
   if (!sessions.has(origin)) {
     const plugin = nativeAuth();
     const pending = plugin
@@ -30,6 +31,11 @@ async function sessionFor(origin) {
         })
       : Promise.resolve("");
     sessions.set(origin, pending);
+    if (plugin) {
+      pendingSessionWaiters.set(pending, { count: 0 });
+      const settle = () => pendingSessionWaiters.delete(pending);
+      void pending.then(settle, settle);
+    }
   }
   return sessions.get(origin);
 }
@@ -40,24 +46,37 @@ export function registerServerAuthentication(serverUrl) {
 }
 
 async function waitForSession(origin, signal) {
-  if (!signal) return sessionFor(origin);
-  if (signal.aborted) throw new DOMException("Request aborted", "AbortError");
+  if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
   const lookup = sessionFor(origin);
-  const entry = sessions.get(origin);
+  const waiters = pendingSessionWaiters.get(lookup);
+  if (waiters) waiters.count += 1;
+  let released = false;
+  const release = (cancelled = false) => {
+    if (!waiters || released) return;
+    released = true;
+    waiters.count -= 1;
+    if (cancelled && !waiters.count && pendingSessionWaiters.has(lookup) && sessions.get(origin) === lookup) {
+      sessions.delete(origin);
+    }
+  };
   let onAbort;
   try {
+    if (!signal) return await lookup;
     return await Promise.race([
       lookup,
-      new Promise((resolve, reject) => {
+      new Promise((_resolve, reject) => {
         onAbort = () => {
-          if (sessions.get(origin) === entry) sessions.delete(origin);
+          release(true);
           reject(new DOMException("Request aborted", "AbortError"));
         };
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) onAbort();
       })
     ]);
-  } finally { signal.removeEventListener("abort", onAbort); }
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    release();
+  }
 }
 
 export function installServerAuthentication(getServerUrl, host = globalThis) {
@@ -74,7 +93,12 @@ export function installServerAuthentication(getServerUrl, host = globalThis) {
     const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
     const origin = serverOrigin(url);
     if (!origin || (origin !== serverOrigin(getServerUrl()) && !registeredServers.has(origin) && !sessions.has(origin))) return originalFetch(input, options);
-    const token = await waitForSession(origin, options.signal || input?.signal);
+    const signal = options.signal || input?.signal;
+    const lookup = waitForSession(origin, signal);
+    const pending = sessions.get(origin);
+    const token = await lookup;
+    if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+    if (sessions.get(origin) !== pending) throw accountChangedError();
     if (!token) return originalFetch(input, options);
     const headers = new Headers(options.headers || (typeof input === "object" ? input.headers : undefined));
     headers.set("Authorization", `Bearer ${token}`);

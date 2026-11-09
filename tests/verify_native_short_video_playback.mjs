@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createVerificationAdvisories } from "./verification_advisories.mjs";
+import { createShortVideoNativeFeed } from "../android-client/www/modules/short-videos/player/native-feed.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const advisories = createVerificationAdvisories("native-short-video-playback");
@@ -13,6 +14,81 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-native-playback-"
 const javaHome = String(process.env.JAVA_HOME || "").trim() || "C:\\Program Files\\Android\\openjdk\\jdk-21.0.8";
 const executable = (name) => fs.existsSync(path.join(javaHome, "bin", `${name}.exe`))
   ? path.join(javaHome, "bin", `${name}.exe`) : name;
+
+async function captureNativeFeedUrls() {
+  const base = "http://127.0.0.1:29998";
+  const selected = {
+    id: "selected", streamUrl: "/media/short-video/selected", mobileStreamUrl: "/media/short-video-smooth/selected",
+    author: { name: "Fixture author" }, actions: { liked: true }, stats: { likes: 17 }
+  };
+  const listState = {
+    query: "A+B & C", author: "author-fixture", sort: "likes",
+    data: { hasMore: true, videos: [{ id: "unplayable" }, selected, { id: "next", streamUrl: "/media/short-video/next" }] }
+  };
+  const explicitPath = "/api/short-videos/collections/fixture/videos?q=A%26B&stats=1&users=1&facets=1&source=all&limit=9#fixture";
+  const calls = [], originalWindow = globalThis.window;
+  globalThis.window = { Capacitor: { Plugins: { FanHaoPlayer: { playShortFeed(payload) { calls.push(payload); } } } } };
+  try {
+    const feed = createShortVideoNativeFeed({
+      listState, getActiveUrl: () => base, shortVideoApiSource: () => "liked", shortVideoToast: assert.fail
+    });
+    assert.equal(await feed.openNativeShortVideoFeed(selected), true);
+    assert.equal(await feed.openNativeShortVideoFeed(selected, { feedUrl: explicitPath }), true);
+    assert.equal(calls.length, 2);
+    const [standard, custom] = calls;
+    const generated = new URL(standard.feedUrl);
+    assert.equal(generated.origin, base);
+    assert.equal(generated.pathname, "/api/short-videos");
+    assert.deepEqual(Object.fromEntries(generated.searchParams), {
+      q: "A+B & C", author: "author-fixture", source: "liked", sort: "likes", facets: "0", stats: "0", users: "0"
+    });
+    assert.equal(custom.feedUrl, new URL(explicitPath, base).href, "an explicit feed URL retains its requested aggregates");
+    const { startId, startIndex, nextOffset, nextCursor, hasMore } = standard;
+    assert.deepEqual({ startId, startIndex, nextOffset, nextCursor, hasMore }, {
+      startId: "selected", startIndex: 0, nextOffset: 3, nextCursor: "", hasMore: true
+    });
+    const seed = JSON.parse(standard.videos);
+    assert.deepEqual(seed.videos.map(item => item.id), ["selected", "next"]);
+    assert.equal(seed.videos[0].streamUrl, selected.mobileStreamUrl);
+    assert.equal(seed.videos[0].stats.likes, selected.stats.likes);
+    assert.equal(seed.videos[0].actions.liked, true);
+    assert.equal(seed.videos[0].author.name, selected.author.name);
+    assert.deepEqual(JSON.parse(custom.videos), seed);
+    return [standard.feedUrl, custom.feedUrl];
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+}
+
+function nativeFeedUriDouble(shared) {
+  return shared.replace("      public java.util.Set<String> getQueryParameterNames()", `      public String getEncodedQuery() { return URI.create(value).getRawQuery(); }
+      public boolean isHierarchical() { return !URI.create(value).isOpaque(); }
+      public static String decode(String value) {
+        return java.net.URLDecoder.decode(value.replace("+", "%2B"), java.nio.charset.StandardCharsets.UTF_8);
+      }
+      public String getQueryParameter(String name) {
+        String query = getEncodedQuery();
+        if (query != null) for (String part : query.split("&")) {
+          String[] pair = part.split("=", 2);
+          if (decode(pair[0]).equals(name)) return pair.length > 1 ? java.net.URLDecoder.decode(pair[1], java.nio.charset.StandardCharsets.UTF_8) : "";
+        }
+        return null;
+      }
+      public java.util.Set<String> getQueryParameterNames()`)
+    // Android's plural query accessor keeps raw '+' as a literal plus.
+    .replace("values.add(pair.length > 1 ? java.net.URLDecoder.decode(pair[1], java.nio.charset.StandardCharsets.UTF_8)", "values.add(pair.length > 1 ? decode(pair[1])")
+    .replace("        public Builder clearQuery()", `        public Builder encodedQuery(String value) { query = value; return this; }
+        public Builder appendPath(String value) {
+          path = (path == null ? "" : path.replaceFirst("/$", "")) + "/" + encode(value);
+          return this;
+        }
+        private static String encode(String value) {
+          return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
+        }
+        public Builder clearQuery()`)
+    .replace('java.net.URLEncoder.encode(key, java.nio.charset.StandardCharsets.UTF_8) + "=" + java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8)', 'encode(key) + "=" + encode(value)');
+}
 
 // Deterministic Android/Media3 doubles execute the real retry controller and Activity
 // pause/resume methods without a device, network, Gradle, or wall-clock sleeps.
@@ -543,15 +619,76 @@ try {
   for (const [relative, source] of Object.entries(doubles)) {
     const target = path.join(tempRoot, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, source);
+    fs.writeFileSync(target, relative === "android/net/Uri.java" ? nativeFeedUriDouble(source) : source);
     sources.push(target);
   }
+  const feedUrls = await captureNativeFeedUrls();
+  const urlBuilder = activity.match(/  private Uri\.Builder feedUrlWithoutParameters\([^\n]*\) \{[\s\S]*?\n  \}/)?.[0];
+  assert(urlBuilder, "fixture needs the Activity's encoded query builder");
+  const urlFixturePath = path.join(tempRoot, "local/fanhao/library/NativeShortVideoFeedUrlFixture.java");
+  fs.writeFileSync(urlFixturePath, `package local.fanhao.library;
+    import android.net.Uri;
+    import java.util.Arrays;
+    import java.util.List;
+    final class NativeShortVideoFeedUrlFixture {
+      ${activity.match(/private static final int (?:FEED|SEARCH)_PAGE_LIMIT = \d+;/g).join("\n      ")}
+      String apiBase() { return "http://127.0.0.1:29998"; }
+      ${urlBuilder}
+      ${["normalizeFeedUrl", "pagedFeedUrl", "feedUrlWithSort", "feedUrlWithQuery", "normalizeSortParam"].map(member).join("\n")}
+    }`);
+  sources.push(urlFixturePath);
   sources.push(path.join(nativeRoot, "NativeShortVideoPlaybackFallback.java"));
   sources.push(path.join(nativeRoot, "NativeShortVideoScreenState.java"));
   sources.push(path.join(nativeRoot, "NativeShortVideoFeedPlayback.java"));
   const feedPlaybackLineCount = fs.readFileSync(path.join(nativeRoot, "NativeShortVideoFeedPlayback.java"), "utf8").split(/\r?\n/).length;
   advisories.check(feedPlaybackLineCount <= 180, `native feed playback intent owner is over 180 lines (${feedPlaybackLineCount}); review its responsibilities`);
   const playbackRegressions = `
+    check("JS playback feed keeps aggregate exclusions through native paging, sort and search", () -> {
+      NativeShortVideoFeedUrlFixture f = new NativeShortVideoFeedUrlFixture();
+      String standard = args[0];
+      android.net.Uri first = android.net.Uri.parse(f.normalizeFeedUrl(standard));
+      String priorPage = standard + "&cursor=old-cursor&offset=42&limit=9";
+      android.net.Uri paged = android.net.Uri.parse(f.pagedFeedUrl(priorPage, 3, "", 18));
+      android.net.Uri cursor = android.net.Uri.parse(f.pagedFeedUrl(priorPage, 3, "next-cursor", 18));
+      android.net.Uri sorted = android.net.Uri.parse(f.feedUrlWithSort(priorPage, "size"));
+      android.net.Uri searched = android.net.Uri.parse(f.feedUrlWithQuery(priorPage, "下一页&A"));
+      for (android.net.Uri url : List.of(first, paged, cursor, sorted, searched)) {
+        require(url.getQueryParameters("stats").equals(List.of("0")), "native rewrite lost stats=0: " + url);
+        require(url.getQueryParameters("users").equals(List.of("0")), "native rewrite lost users=0: " + url);
+        require(url.getQueryParameters("facets").equals(List.of("0")), "native rewrite lost facets=0");
+        require(url.getQueryParameters("source").equals(List.of("liked")) && url.getQueryParameters("author").equals(List.of("author-fixture")),
+          "native rewrite lost source or author filter");
+      }
+      require(first.getQueryParameters("limit").equals(List.of("18")), "first native read needs the native page limit");
+      android.net.Uri misleading = android.net.Uri.parse(f.normalizeFeedUrl(standard + "&notlimit=7#limit=91"));
+      require(misleading.getQueryParameters("limit").equals(List.of("18")) && misleading.toString().endsWith("#limit=91"),
+        "only a real query parameter counts as limit, and a fragment must stay outside the query");
+      require(f.normalizeFeedUrl(args[1]).equals(args[1]), "normalization must preserve an explicit limit and an encoded search value");
+      for (android.net.Uri url : List.of(first, paged, cursor, sorted)) {
+        require("A+B & C".equals(url.getQueryParameter("q")), "native rewrite changed a search value containing plus, space and ampersand: " + url);
+      }
+      require(paged.getQueryParameters("offset").equals(List.of("3")) && paged.getQueryParameters("cursor").isEmpty(),
+        "native offset paging lost the seed boundary");
+      require(cursor.getQueryParameters("cursor").equals(List.of("next-cursor")) && cursor.getQueryParameters("offset").isEmpty(),
+        "native cursor paging must supersede offset");
+      for (android.net.Uri url : List.of(sorted, searched)) {
+        require(url.getQueryParameters("cursor").isEmpty() && url.getQueryParameters("offset").equals(List.of("0"))
+          && url.getQueryParameters("limit").equals(List.of("24")),
+          "a new sort or query cannot reuse the old cursor");
+      }
+      require(sorted.getQueryParameters("sort").equals(List.of("size")), "native sort did not apply");
+      require(searched.getQueryParameters("q").equals(List.of("下一页&A")) && searched.getQueryParameters("sort").equals(List.of("likes")),
+        "native search changed the original sort");
+      android.net.Uri custom = android.net.Uri.parse(f.pagedFeedUrl(args[1], 0, "collection-cursor", 18));
+      require(custom.getPath().equals("/api/short-videos/collections/fixture/videos")
+        && custom.getQueryParameters("stats").equals(List.of("1")) && custom.getQueryParameters("users").equals(List.of("1"))
+        && custom.getQueryParameters("q").equals(List.of("A&B"))
+        && custom.getQueryParameters("cursor").equals(List.of("collection-cursor")), "native pagination changed explicit feed controls");
+      android.net.Uri fallback = android.net.Uri.parse(f.feedUrlWithQuery("", "A&B"));
+      require(fallback.getPath().equals("/api/short-videos") && fallback.getQueryParameters("q").equals(List.of("A&B"))
+        && fallback.getQueryParameters("stats").equals(List.of("0")) && fallback.getQueryParameters("users").equals(List.of("0"))
+        && fallback.getQueryParameters("facets").equals(List.of("0")), "native search fallback must build a lightweight standard feed URL");
+    });
     for (int state : List.of(Player.STATE_READY, Player.STATE_BUFFERING)) {
       for (boolean requested : List.of(false, true)) {
         check("ordinary same-page pager callback retains intent: state=" + state + ", requested=" + requested, () -> {
@@ -659,7 +796,7 @@ try {
     cwd: root, encoding: "utf8"
   });
   assert.equal(compiled.status, 0, `native playback harness must compile:\n${compiled.stderr || compiled.stdout}`);
-  const executed = spawnSync(executable("java"), ["-cp", tempRoot, "local.fanhao.library.NativeShortVideoPlaybackHarness"], {
+  const executed = spawnSync(executable("java"), ["-cp", tempRoot, "local.fanhao.library.NativeShortVideoPlaybackHarness", ...feedUrls], {
     cwd: root, encoding: "utf8"
   });
   assert.equal(executed.status, 0, `native playback harness must pass:\n${executed.stderr || executed.stdout}`);

@@ -381,6 +381,46 @@ try {
       assert.equal(result.version, 3);
     } finally { await testPage.close(); }
   });
+  await run("two due response touches update the same record only once", async () => {
+    const testPage = await sandbox("same-record-response-touch");
+    try {
+      const result = await testPage.evaluate(async () => {
+        await test.load();
+        const aged = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const entry = { ...test.row("responses", 0), recordId: "fixture-record", accessedAt: aged };
+        await test.replace("responses", [entry]);
+
+        const touches = [];
+        const options = {
+          touchIntervalMs: 30 * 60 * 1000,
+          scheduleTouch(touch) { touches.push(touch); }
+        };
+        await test.api.readCachedJson(test.base, entry.path, options);
+        await test.api.readCachedJson(test.base, entry.path, options);
+        const due = touches.length;
+        const [before] = await test.all("responses");
+        const put = IDBObjectStore.prototype.put;
+        let puts = 0;
+        IDBObjectStore.prototype.put = function (row, ...args) {
+          if (this.name === "responses" && row.key === entry.key) puts++;
+          return put.call(this, row, ...args);
+        };
+        try {
+          await Promise.all(touches.map(touch => touch()));
+          await test.api.readCachedJson(test.base, entry.path, options);
+          const [current] = await test.all("responses");
+          return { due, scheduled: touches.length, puts, before, current };
+        } finally { IDBObjectStore.prototype.put = put; }
+      });
+      assert.equal(result.due, 2, "both readers observed an aged record");
+      assert.equal(result.scheduled, 2, "a subsequent recent read schedules no touch");
+      assert.equal(result.puts, 1, "the later transaction observes the first touch and skips its put");
+      const { accessedAt, ...current } = result.current;
+      const { accessedAt: previousAccess, ...previous } = result.before;
+      assert(Date.parse(accessedAt) > Date.parse(previousAccess));
+      assert.deepEqual(current, previous);
+    } finally { await testPage.close(); }
+  });
   for (const store of ["responses", "images"]) for (const action of ["overwrite", "clear", "touch"]) await run(`${store} external ${action} serializes with a real same-origin trim transaction`, async () => {
     const first = await sandbox(`external-${store}-${action}`), second = await context.newPage();
     try {

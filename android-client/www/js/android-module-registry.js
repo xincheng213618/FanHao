@@ -50,7 +50,7 @@ export function mergeAndroidModuleCatalog(remoteModules = []) {
   return merged.sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
 }
 
-export async function loadAndroidModules(definitions, host, preparedImports) {
+export async function loadAndroidModules(definitions, host, preparedImports, { onProgress } = {}) {
   const modules = [];
   let batch = [];
   for (const definition of definitions) {
@@ -74,6 +74,7 @@ export async function loadAndroidModules(definitions, host, preparedImports) {
 
   async function createBatch(entries) {
     for (const { definition, imported } of entries) {
+      let module;
       try {
         const loaded = await imported;
         if (Object.hasOwn(loaded, "error")) throw loaded.error;
@@ -82,10 +83,18 @@ export async function loadAndroidModules(definitions, host, preparedImports) {
           throw new Error(`Android module '${definition.id}' does not export createAndroidModule()`);
         }
         const instance = await namespace.createAndroidModule({ definition, host });
-        modules.push(normalizeModule(instance, definition));
+        module = normalizeModule(instance, definition);
+        modules.push(module);
       } catch (error) {
         host.onModuleError?.(definition, error);
         console.error(`[android-module:${definition.id}]`, error);
+        continue;
+      }
+      if (onProgress) {
+        const prefixLength = modules.length;
+        let registry;
+        // Keep this publication fixed even if the observer asks for it later.
+        await onProgress(module, () => registry ??= createRegistry(modules.slice(0, prefixLength)));
       }
     }
   }

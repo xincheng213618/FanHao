@@ -1,5 +1,5 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-0a663c3bea5d";
-import { clearCachedJsonByPrefixes } from "../../../../js/cache.js?v=assets-0a663c3bea5d";
+import { fetchJson } from "../../../../js/api.js?v=assets-76f4b0fadf4d";
+import { clearCachedJsonByPrefixes } from "../../../../js/cache.js?v=assets-76f4b0fadf4d";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 export const FAVORITE_FOLDER_RETRY_DELAYS_MS = Object.freeze([180]);

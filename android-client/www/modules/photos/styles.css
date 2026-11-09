@@ -139,6 +139,21 @@
   overflow-wrap: anywhere;
 }
 
+.manga-reader-page-retry {
+  position: absolute;
+  z-index: 2;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+
 @media (max-width: 390px) {
   .content-panel[data-view="mangaChapter"] {
     width: calc(100% + 24px);

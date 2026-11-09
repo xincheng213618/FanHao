@@ -15,7 +15,9 @@ final class NativeShortVideoFeedPaging {
     HTTP,
     OFFLINE,
     TIMEOUT,
-    PARSE
+    PARSE,
+    STALE_CACHE,
+    OFFLINE_CACHE
   }
 
   static final class ReadResult<T> {
@@ -49,6 +51,8 @@ final class NativeShortVideoFeedPaging {
       if (failure == Failure.TIMEOUT) return "短视频加载超时，请重试";
       if (failure == Failure.OFFLINE) return "网络不可用，短视频加载失败，请重试";
       if (failure == Failure.PARSE) return "短视频响应格式异常，请重试";
+      if (failure == Failure.STALE_CACHE) return "短视频列表正在更新，请重试";
+      if (failure == Failure.OFFLINE_CACHE) return "短视频目录暂时离线，请重试";
       return "短视频服务暂时不可用，请重试";
     }
   }

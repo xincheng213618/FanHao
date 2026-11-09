@@ -1,4 +1,4 @@
-import { captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-0a663c3bea5d";
+import { captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=assets-76f4b0fadf4d";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 export async function updateCachedWorkDetail(work, baseUrl, accountScope = captureAccountOwner(baseUrl)) {

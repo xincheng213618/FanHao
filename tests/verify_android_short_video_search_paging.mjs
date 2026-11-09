@@ -150,6 +150,29 @@ try {
       console.log("Videos tab: keyboard retry repeats offset 12 once, then loads offset 24 and moves focus to the final card.");
     } finally { await manual.close(); }
 
+    let offline = true;
+    const fallback = await open({ tab: "videos", height: 2400, searchPage(kind, offset) {
+      if (!offline || kind !== "videos" || offset !== 12) return null;
+      return { videos: [{ ...videos[12], id: "obsolete-offline-row" }], total: 13, hasMore: false, cacheState: "offline" };
+    } });
+    try {
+      const { page } = fallback;
+      const more = page.getByRole("button", { name: "加载更多", exact: true });
+      await more.focus(); await page.keyboard.press("Enter");
+      const retry = page.getByRole("button", { name: /暂时离线.*重试/ });
+      await retry.waitFor();
+      assert.equal(await page.locator(videoCards).count(), 12, "offline false EOF must leave the visible prefix unchanged");
+      assert.equal(await page.locator("[data-video-id=obsolete-offline-row]").count(), 0);
+      assert.equal(await retry.evaluate(node => node === document.activeElement), true);
+      assert.deepEqual(offsets(fallback, "videos"), [0, 12], "offline fallback must not cause another automatic query");
+      offline = false;
+      await page.keyboard.press("Enter"); await rows(page, videoCards, 24);
+      assert.deepEqual(offsets(fallback, "videos"), [0, 12, 12]);
+      assert.deepEqual(await page.locator(videoCards).evaluateAll(cards => cards.map(card => card.dataset.videoId)), videos.slice(0, 24).map(video => video.id));
+      assert.equal(await more.evaluate(node => node === document.activeElement), true);
+      console.log("Offline search continuation: preserved 12 rows and focus, then recovered from the same offset on explicit retry.");
+    } finally { await fallback.close(); }
+
     const retired = await open({ tab: "videos", holdAppend: true });
     try {
       const { page } = retired;

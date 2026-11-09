@@ -1,6 +1,6 @@
 import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-0a663c3bea5d";
-import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-0a663c3bea5d";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-76f4b0fadf4d";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-76f4b0fadf4d";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
 const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;
@@ -11,7 +11,7 @@ export function createShortVideoNativeFeed(context = {}) {
   const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const cancelShortVideoNativeOpen = (...args) => context.cancelShortVideoNativeOpen?.(...args);
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
-  const searchFeedNextOffset = (...args) => context.searchFeedNextOffset?.(...args);
+  const listFeedNextOffset = (...args) => context.listFeedNextOffset?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
 
   // This module lives for the WebView lifetime. A restored player has no old
@@ -67,21 +67,22 @@ export function createShortVideoNativeFeed(context = {}) {
     const start = Math.max(0, index - 20);
     const feedEntries = playableEntries.slice(start, end);
     const lastEntry = feedEntries.at(-1);
-    const searchOffset = !Array.isArray(options.videos) && lastEntry
-      ? searchFeedNextOffset(lastEntry.item, end === playableEntries.length) : undefined;
+    const listOffset = !Array.isArray(options.videos) && lastEntry
+      ? listFeedNextOffset(lastEntry.item, end === playableEntries.length) : undefined;
     const feedUrl = nativeShortVideoFeedUrl(options);
     const payload = stringifyNativeShortVideoFeed(feedEntries.map(({ item }) => item));
-    const cursorAtEnd = boundary?.nextCursor || "";
-    const hasMoreAtEnd = boundary
+    const canContinue = options.allowContinuation !== false;
+    const cursorAtEnd = canContinue ? boundary?.nextCursor || "" : "";
+    const hasMoreAtEnd = canContinue && (boundary
       ? boundary.hasMore || end < playableEntries.length
-      : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length);
+      : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length));
     try {
       if (options.isCurrent?.() === false || normalizeServerBase(getActiveUrl()) !== launchServerBase) return false;
       const result = await plugin.playShortFeed({
         baseUrl: launchServerBase,
         feedUrl,
         hasMore: hasMoreAtEnd,
-        nextOffset: searchOffset ?? (lastEntry ? lastEntry.apiIndex + 1 : videos.length),
+        nextOffset: canContinue ? listOffset ?? (lastEntry ? lastEntry.apiIndex + 1 : videos.length) : 0,
         nextCursor: cursorAtEnd,
         startIndex: index - start,
         startId: video.id,
@@ -146,6 +147,8 @@ export function createShortVideoNativeFeed(context = {}) {
     url.searchParams.set("source", source || "all");
     url.searchParams.set("sort", sort || DEFAULT_SORT);
     url.searchParams.set("facets", "0");
+    url.searchParams.set("stats", "0");
+    url.searchParams.set("users", "0");
     return url.toString();
   }
 

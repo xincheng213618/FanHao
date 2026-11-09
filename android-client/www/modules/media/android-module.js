@@ -1,5 +1,5 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-0a663c3bea5d";
-import { captureMediaTrail, mediaBackTarget } from "../../js/media-navigation-state.js?v=assets-0a663c3bea5d";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-76f4b0fadf4d";
+import { captureMediaTrail, mediaBackTarget } from "../../js/media-navigation-state.js?v=assets-76f4b0fadf4d";
 
 export function createAndroidModule({ host }) {
   const search = createSearchController(host);

@@ -20,6 +20,8 @@ function restoreBaseline(name, next, currentNext = next) {
 }
 const legacy = [
   restoreBaseline("renderPhotoDetail", "renderPhotoAlbum"),
+  restoreBaseline("renderPhotoAlbum", "applyPhotoAlbumHeader"),
+  restoreBaseline("appendPhotoDetailLoadMore", "mergePhotoDetailImages"),
   restoreBaseline("createPhotoTile", "photoViewerItems"),
   restoreBaseline("photoViewerItems", "hydratePhotoViewerItems", "rememberPhotoViewerRange")
 ].reduce((source, replace) => replace(source), current);

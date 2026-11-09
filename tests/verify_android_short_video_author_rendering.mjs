@@ -27,7 +27,7 @@ if (legacy) {
   tested.view = tested.view.replace(marker, `${marker}\n    return false; // Controlled full-render fallback.`);
 }
 if (process.argv.includes("--legacy-author-scope-append")) {
-  const marker = "const retryFirstPage = Boolean(options.append && needsFirstPageRetry());";
+  const marker = "const retryFirstPage = Boolean(options.append && (needsFirstPageRetry() || !authorIndex && videoPrefixError));";
   assert.equal(tested.controller.split(marker).length, 2, "one scope-mismatch first-page boundary");
   tested.controller = tested.controller.replace(marker, "const retryFirstPage = false; // Controlled former mixed-scope append.");
 }
@@ -114,7 +114,13 @@ async function fixture(code = current) {
     navigation: { showView: (...args) => navigation.push(copy(args)), goBack() {} }, ui: { setActiveBottom() {}, openSettings() {}, scrollToTop() {} } } });
   delete globalThis[key];
   const context = capture.context, state = context.listState;
-  const respond = async (index, data, revalidation = null) => { requests[index].resolve(requests[index].kind === "revalidated" ? { data, revalidation } : data); await flush(); };
+  const respond = async (index, data, revalidation = null, source = "network") => {
+    const request = requests[index];
+    const response = request.kind === "revalidated" ? { data, revalidation }
+      : request.options?.withSource ? { data, source } : data;
+    request.resolve(response);
+    await flush();
+  };
   const load = async (source = "authors", data = envelope(range(0, 24)), params = {}) => {
     const promise = module.routes.find(route => route.view === "shortVideos").render({ source, ...params }, () => true);
     await respond(requests.length - 1, data); await promise;
@@ -337,11 +343,18 @@ async function verifyFailedScopeRecovery() {
     await f.load("all", { videos: oldVideos, authors: [], source: "all", total: 54, hasMore: true });
     const refresh = f.module.routes.find(route => route.view === "shortVideos").render({ source: "liked", query: "new" }, () => true);
     await f.fail(f.requests.length - 1); await refresh;
+    assert.equal(await f.context.openShortVideoFromList(f.state.data.videos[0]), false,
+      "retained cards cannot start native playback under the new query");
+    assert.equal(f.native.length, 0);
+    const failedCount = f.requests.length;
     f.scroll(0);
+    assert.equal(f.requests.length, failedCount, "a failed video prefix waits for explicit retry");
+    f.content.querySelector("button.short-video-mobile-load-more").onclick();
     const request = f.requests.at(-1), query = params(request);
     assert.equal(query.get("source"), "liked"); assert.equal(query.get("q"), "new");
     assert.equal(Number(query.get("offset") || 0), 0, "ordinary video scope retry also starts at the first page");
-    assert.equal(request.kind, "revalidated");
+    assert.equal(request.kind, "cached");
+    assert.equal(request.options.requireAuthoritative, true);
     await f.respond(f.requests.length - 1, { videos: newVideos, authors: [], source: "liked", total: 54, hasMore: true });
     assert.deepEqual(f.state.data.videos.map(row => row.id), newVideos.map(row => row.id), "video scope recovery replaces old IDs");
     recoveryCases++;
@@ -358,6 +371,77 @@ async function verifyFailedScopeRecovery() {
     recoveryCases++;
   });
 }
+
+async function verifyAuthorOpenAuthority() {
+  const localVideo = { id: "author-seed", title: "Author fixture seed", streamUrl: "/synthetic/author-seed.mp4" };
+  const localPage = { videos: [localVideo], total: 30, hasMore: true };
+  const empty = { videos: [], total: 0, hasMore: false };
+  const profile = "https://profile.fixture.invalid/author";
+  const loadedAuthor = author(0, { profileUrl: profile });
+  const open = async f => {
+    await f.load("authors", envelope([loadedAuthor], { total: 1, hasMore: false }));
+    f.cards()[0].querySelector("button").click();
+    const request = f.requests.at(-1);
+    assert.equal(request.options.withSource, true);
+    assert.equal(new URL(request.path, request.base).searchParams.get("author"), loadedAuthor.secUid);
+    return request;
+  };
+
+  await run(tested, async f => {
+    await open(f);
+    await f.respond(f.requests.length - 1, { ...empty, cacheState: "offline" }, null, "fallback");
+    assert.deepEqual(f.external, [], "an empty offline author response cannot open a browser profile");
+    assert.deepEqual(f.native, []);
+    assert.equal(f.requests.length, 2, "an offline fallback does not immediately repeat its failed read");
+    recoveryCases++;
+  });
+
+  for (const malformed of [{}, { videos: [null] }]) await run(tested, async f => {
+    await open(f);
+    await f.respond(f.requests.length - 1, malformed);
+    assert.deepEqual(f.external, [], "a malformed network response cannot confirm an empty author page");
+    assert.deepEqual(f.native, []);
+    recoveryCases++;
+  });
+
+  for (const networkPage of [empty, localPage]) await run(tested, async f => {
+    const cached = await open(f);
+    await f.respond(f.requests.length - 1, empty, null, "cache");
+    assert.deepEqual(f.external, [], "an empty browser cache cannot decide external navigation");
+    assert.deepEqual(f.native, []);
+    assert.equal(f.requests.length, 3);
+    const confirming = f.requests.at(-1);
+    assert.equal(confirming.base, cached.base);
+    assert.equal(confirming.path, cached.path, "confirmation reads the same author and sort");
+    assert.equal(confirming.options.signal, cached.options.signal, "confirmation retains the author open owner");
+    assert.equal(confirming.options.requireAuthoritative, true);
+    await f.respond(f.requests.length - 1, networkPage);
+    if (!networkPage.videos.length) {
+      assert.deepEqual(f.external, [[profile, "_blank", "noreferrer"]], "a confirmed empty author may open the original profile");
+      assert.deepEqual(f.native, []);
+    } else {
+      assert.deepEqual(f.external, []);
+      assert.equal(f.native.length, 1);
+      assert.equal(f.native[0].startId, localVideo.id);
+      assert.equal(f.native[0].hasMore, true, "confirmed author page can continue");
+    }
+    recoveryCases++;
+  });
+
+  for (const source of ["cache", "fallback"]) await run(tested, async f => {
+    await open(f);
+    await f.respond(f.requests.length - 1, localPage, null, source);
+    assert.deepEqual(f.external, []);
+    assert.equal(f.native.length, 1);
+    const [launch] = f.native;
+    assert.equal(launch.openAuthorPanel, true);
+    assert.equal(launch.startId, localVideo.id, "cached local media still seeds the author player");
+    assert.equal(launch.hasMore, false, "provisional author page cannot supply native continuation");
+    assert.equal(launch.nextOffset, 0);
+    recoveryCases++;
+  });
+}
+
 async function scale(code, source) {
   return run(code, async f => {
     await f.load(source, envelope(range(0, 24))); const first = f.cards()[0], shell = f.content.querySelector(".short-video-mobile-list");
@@ -378,6 +462,7 @@ try {
   await compare("search-author metadata and initial empty tabs", searchAndEmpty);
   await verifyMountedOwners();
   await verifyFailedScopeRecovery();
+  await verifyAuthorOpenAuthority();
   console.log(`Author rendering contracts passed (${comparisons} complete state/DOM/route comparisons).`);
   const results = {};
   for (const source of ["authors", "following"]) {

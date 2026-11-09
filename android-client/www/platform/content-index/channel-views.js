@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-0a663c3bea5d";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-0a663c3bea5d";
-import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-0a663c3bea5d";
+import { fetchJson } from "../../js/api.js?v=assets-76f4b0fadf4d";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-76f4b0fadf4d";
+import { cacheAgeText, captureCachedJsonFence, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-76f4b0fadf4d";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../../js/format.js";
@@ -163,6 +163,7 @@ function photoAlbumDataSignature(album = {}) {
   const images = Array.isArray(album.images) ? album.images : [];
   return JSON.stringify({
     id: album.id || "",
+    archiveIdentity: album.archiveIdentity || "",
     updatedAt: album.updatedAt || "",
     imageCount: Number(album.imageCount || images.length || 0),
     imageOffset: Number(album.imageOffset || 0),
@@ -170,6 +171,11 @@ function photoAlbumDataSignature(album = {}) {
     coverUrl: album.coverUrl || "",
     images: images.map((image) => [image.index || 0, image.url || "", image.name || "", Number(image.bytes || 0)])
   });
+}
+
+function samePhotoArchive(left, right) {
+  if (left.archiveIdentity && right.archiveIdentity) return left.archiveIdentity === right.archiveIdentity;
+  return !left.updatedAt || !right.updatedAt || left.updatedAt === right.updatedAt;
 }
 
 export function normalizeChannelMode(value) {
@@ -2535,10 +2541,19 @@ export function createChannelViews(context) {
     const activeUrl = getActiveUrl();
     let cachedAlbum = null;
     let renderedCacheSignature = "";
+    let albumRevision = 0;
     const ownsPayload = (payload) => {
       const account = accountPayloadOwner(payload);
       return isActive() && getActiveUrl() === activeUrl && (!account || isAccountOwnerCurrent(account));
     };
+    function showAlbum(data, cacheEntry) {
+      const revision = ++albumRevision;
+      const account = accountPayloadOwner(data) || captureAccountOwner(activeUrl);
+      renderPhotoAlbum(data.album, cacheEntry, {
+        activeUrl, account, signal: isActive.signal, showAlbum,
+        isCurrent: () => revision === albumRevision && ownsPayload(data) && isAccountOwnerCurrent(account)
+      });
+    }
 
     setActiveBottom("photo");
     els.viewKicker.textContent = "套图";
@@ -2556,22 +2571,23 @@ export function createChannelViews(context) {
     if (cached?.payload?.album && ownsPayload(cached.payload)) {
       cachedAlbum = cached.payload.album;
       renderedCacheSignature = photoAlbumDataSignature(cachedAlbum);
-      renderPhotoAlbum(cachedAlbum, cached);
+      showAlbum(cached.payload, cached);
     }
 
+    const initialRevision = albumRevision;
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 20000, signal: isActive.signal });
+      if (initialRevision !== albumRevision || !ownsPayload(data)) return;
       writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!ownsPayload(data)) return;
       const unchanged = cachedAlbum && photoAlbumDataSignature(data.album) === renderedCacheSignature;
       rememberPhotoViewerRange(unchanged ? cachedAlbum : data.album, data, activeUrl);
       if (unchanged) {
         applyPhotoAlbumHeader(data.album);
         return;
       }
-      renderPhotoAlbum(data.album);
+      showAlbum(data);
     } catch (error) {
-      if (!ownsPayload()) return;
+      if (initialRevision !== albumRevision || !ownsPayload()) return;
       if (cachedAlbum) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存套图。", "quiet", false);
       } else {
@@ -2580,9 +2596,9 @@ export function createChannelViews(context) {
     }
   }
 
-  function renderPhotoAlbum(album = {}, cacheEntry = null) {
+  function renderPhotoAlbum(album = {}, cacheEntry = null, scope) {
     const loadedImages = Array.isArray(album.images) ? album.images.slice() : [];
-    let totalImages = Number(album.imageCount || loadedImages.length || 0);
+    const totalImages = Number(album.imageCount || loadedImages.length || 0);
     applyPhotoAlbumHeader(album, cacheEntry);
     resetPreviewImageObserver();
     els.viewContent.innerHTML = "";
@@ -2599,9 +2615,7 @@ export function createChannelViews(context) {
     loadedImages.forEach((image, index) => grid.append(createPhotoTile(album, image, loadedImages, { index })));
     els.viewContent.append(grid);
 
-    appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, (nextTotal) => {
-      totalImages = nextTotal;
-    });
+    appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, scope);
   }
 
   function applyPhotoAlbumHeader(album = {}, cacheEntry = null) {
@@ -2613,30 +2627,52 @@ export function createChannelViews(context) {
     els.viewMeta.textContent = `${formatNumber(totalImages)} 张 · ${formatBytes(album.size)}${suffix}`;
   }
 
-  function appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, updateTotalImages) {
+  function appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, scope) {
     if (!grid?.isConnected || loadedImages.length >= totalImages || !album?.id) return;
     const text = `向下滑动继续显示 ${formatNumber(loadedImages.length)} / ${formatNumber(totalImages)}`;
+    const isCurrent = () => grid.isConnected && scope.isCurrent();
+    let imageLimit = 0;
+    let restartPath = "";
     const more = createLoadMoreButton(text, async () => {
+      if (!isCurrent()) return;
       const imageOffset = loadedImages.length;
-      increasePhotoImageLimit(24);
-      const imageLimit = Math.max(1, getPhotoImageLimit() - imageOffset);
-      const path = photoDetailPath(album.id, { imageLimit, imageOffset });
-      const data = await fetchJson(getActiveUrl(), path, { timeoutMs: 26000 });
-      if (!grid.isConnected) return;
+      if (!imageLimit) {
+        increasePhotoImageLimit(24);
+        imageLimit = Math.max(1, getPhotoImageLimit() - imageOffset);
+      }
+      const request = { timeoutMs: 26000, signal: scope.signal, accountScope: scope.account, cache: "no-store" };
+      if (!restartPath) {
+        const data = await fetchJson(scope.activeUrl, photoDetailPath(album.id, { imageLimit, imageOffset }), request);
+        if (!isCurrent()) return;
 
-      const nextAlbum = data.album || {};
-      const mergedImages = mergePhotoDetailImages(loadedImages, nextAlbum.images || []);
-      const appendedImages = mergedImages.slice(loadedImages.length);
-      loadedImages.splice(0, loadedImages.length, ...mergedImages);
-      Object.assign(album, nextAlbum, { images: loadedImages, imageOffset: 0, imageLimit: loadedImages.length });
-      const nextTotal = Math.max(Number(nextAlbum.imageCount || 0), totalImages, loadedImages.length);
-      updateTotalImages(nextTotal);
-      appendedImages.forEach((image, offset) => {
-        grid.append(createPhotoTile(album, image, loadedImages, { index: imageOffset + offset }));
-      });
-      more.remove();
-      appendPhotoDetailLoadMore(album, loadedImages, grid, nextTotal, updateTotalImages);
-    }, { requireScrollIntent: true });
+        const nextAlbum = data.album;
+        if (nextAlbum?.id !== album.id || !Array.isArray(nextAlbum.images)) throw new Error("套图分页响应无效");
+        if (samePhotoArchive(album, nextAlbum) && Number(nextAlbum.imageCount ?? totalImages) === totalImages) {
+          const mergedImages = mergePhotoDetailImages(loadedImages, nextAlbum.images);
+          const appendedImages = mergedImages.slice(imageOffset);
+          if (!appendedImages.length) throw new Error("套图分页未返回新图片");
+          loadedImages.splice(0, loadedImages.length, ...mergedImages);
+          Object.assign(album, nextAlbum, { images: loadedImages, imageOffset: 0, imageLimit: loadedImages.length });
+          appendedImages.forEach((image, offset) => {
+            grid.append(createPhotoTile(album, image, loadedImages, { index: imageOffset + offset }));
+          });
+          more.remove();
+          appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, scope);
+          return;
+        }
+        restartPath = photoDetailPath(album.id, { imageLimit: imageOffset + imageLimit });
+      }
+
+      const fence = captureCachedJsonFence(scope.activeUrl, scope.account);
+      const fresh = await fetchJson(scope.activeUrl, restartPath, request);
+      if (!isCurrent()) return;
+      if (fresh.album?.id !== album.id || !Array.isArray(fresh.album.images) || Number(fresh.album.imageOffset || 0) !== 0) {
+        throw new Error("套图首页响应无效");
+      }
+      rememberPhotoViewerRange(fresh.album, fresh, scope.activeUrl);
+      writeCachedJson(scope.activeUrl, restartPath, fresh, { fence }).catch(() => {});
+      scope.showAlbum(fresh);
+    }, { canAutoLoad: isCurrent, signal: scope.signal, requireScrollIntent: true });
     els.viewContent.append(more);
   }
 
@@ -2776,8 +2812,10 @@ export function createChannelViews(context) {
     const indexedRead = range ? readCachedJson(activeUrl, photoViewerRangeCachePath(album.id)).catch(() => null) : null;
     const cached = await cachedRead;
     if (!request.isCurrent()) return [];
-    if (cached?.payload?.album?.images?.length >= totalImages) {
-      return photoViewerItemsFromImages(cached.payload.album, cached.payload.album.images);
+    const cachedAlbum = cached?.payload?.album;
+    if (cachedAlbum?.id === album.id && Array.isArray(cachedAlbum.images)
+      && cachedAlbum.images.length === totalImages && samePhotoArchive(album, cachedAlbum)) {
+      return photoViewerItemsFromImages(cachedAlbum, cachedAlbum.images);
     }
     if (indexedRead) {
       const saved = (await indexedRead)?.payload;
@@ -4550,6 +4588,7 @@ export function createChannelViews(context) {
       resumeRequest, signal,
       pendingResumePage: cacheEntry && requestedPage > images.length ? requestedPage : null
     });
+    bindMangaImageRetry(list, ownsReader);
     restoreRequestedMangaPage(resumeRequest, list, tracker);
   }
 
@@ -4841,6 +4880,51 @@ export function createChannelViews(context) {
     }
 
     return page;
+  }
+
+  function bindMangaImageRetry(list, ownsReader) {
+    const selector = ".manga-reader-page-retry";
+    // Image load/error do not bubble. Capture once on the chapter list, also
+    // covering pages that are appended later.
+    const settle = ({ target: image, type }) => {
+      if (image.tagName !== "IMG" || !ownsReader() || !image.complete) return;
+      const page = image.parentElement;
+      const loaded = type === "load";
+      if (page?.parentElement !== list || loaded !== Boolean(image.naturalWidth)) return;
+      let retry = page.querySelector(selector);
+      if (loaded) {
+        if (!retry) return;
+        if (document.activeElement === retry) {
+          page.tabIndex = -1;
+          page.focus({ preventScroll: true });
+        }
+        retry.remove();
+        return;
+      }
+      if (!retry) {
+        retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "manga-reader-page-retry";
+        page.append(retry);
+      }
+      retry.removeAttribute("aria-disabled");
+      retry.removeAttribute("aria-busy");
+      retry.textContent = `重试第 ${formatNumber(page.dataset.mangaPagePosition)} 张`;
+    };
+    list.addEventListener("load", settle, true);
+    list.addEventListener("error", settle, true);
+    list.addEventListener("click", event => {
+      const retry = event.target.closest?.(selector);
+      if (!retry || retry.getAttribute("aria-disabled") === "true" || !ownsReader()) return;
+      const image = retry.parentElement?.querySelector("img[src]");
+      if (!image?.complete || image.naturalWidth) return;
+      retry.setAttribute("aria-disabled", "true");
+      retry.setAttribute("aria-busy", "true");
+      retry.textContent = "正在重试…";
+      const source = image.getAttribute("src");
+      image.removeAttribute("src");
+      image.src = source;
+    });
   }
 
   function mangaDetailPath(id) {

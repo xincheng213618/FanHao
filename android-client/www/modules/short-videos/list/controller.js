@@ -1,4 +1,5 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-0a663c3bea5d";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-76f4b0fadf4d";
+import { isStaleResponseEnvelope } from "../api.js?v=assets-76f4b0fadf4d";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -9,9 +10,12 @@ export function createShortVideoListController(context = {}) {
   let listRenderGuard = null;
   let acceptedListScope = null;
   let nativeOpenOwner = null;
-  let searchNextOffset = 0;
-  let searchAppendPause = "";
-  let searchVideoOffsets = new WeakMap();
+  let listNextOffset = 0;
+  let listAppendPause = "";
+  let listVideoOffsets = new WeakMap();
+  let videoPrefixCheck = null;
+  let videoPrefixError = "";
+  let videoAppendError = "";
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
@@ -23,6 +27,7 @@ export function createShortVideoListController(context = {}) {
   const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const updateSearchAuthorMatches = (...args) => context.updateSearchAuthorMatches?.(...args);
   const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
+  const syncVideoPaging = (...args) => context.syncVideoPaging?.(...args);
   const setListRefreshing = (...args) => context.setListRefreshing?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
 
@@ -35,6 +40,10 @@ export function createShortVideoListController(context = {}) {
     listState.loadingMore = false;
     listState.allowLoadMore = false;
     listRenderGuard = null;
+    videoPrefixCheck = null;
+    videoPrefixError = "";
+    videoAppendError = "";
+    listAppendPause = "";
     releaseAuthorIndex();
   }
 
@@ -59,6 +68,16 @@ export function createShortVideoListController(context = {}) {
 
   function needsAuthorIndexRetry() {
     return isAuthorIndexView() && needsFirstPageRetry();
+  }
+
+  function getVideoPagingStatus() {
+    const retryFirstPage = Boolean(videoPrefixError || needsFirstPageRetry());
+    return {
+      checking: Boolean(videoPrefixCheck),
+      retryFirstPage,
+      pause: listAppendPause,
+      message: videoPrefixError || videoAppendError || (retryFirstPage ? "短视频列表暂未更新" : "")
+    };
   }
 
   function cancelShortVideoNativeOpen(preserveOwner = null) {
@@ -122,11 +141,19 @@ export function createShortVideoListController(context = {}) {
   }
 
   async function loadList(renderGuard = null, options = {}) {
-    const retryFirstPage = Boolean(options.append && needsFirstPageRetry());
+    const authorIndex = isAuthorIndexView();
+    if (options.append && !authorIndex && videoPrefixCheck) {
+      // All scroll and button intents share the same first-page confirmation.
+      const check = videoPrefixCheck;
+      check.continuation ??= check.done.then((confirmed) => {
+        if (confirmed && check.isCurrent() && listState.data?.hasMore) return loadList(null, { append: true });
+      });
+      return check.continuation;
+    }
+    const retryFirstPage = Boolean(options.append && (needsFirstPageRetry() || !authorIndex && videoPrefixError));
     const append = Boolean(options.append && !retryFirstPage);
     const preserveShell = Boolean((options.preserveShell || retryFirstPage) && !append);
     const preservedAuthorIndex = preserveShell && hasAuthorIndexShell();
-    const authorIndex = isAuthorIndexView();
     const isSearch = listState.searchPage;
     const entryKey = authorIndex ? "authors" : "videos";
     if (options.append && (listState.loading || listState.loadingMore || !retryFirstPage && !listState.data?.hasMore)) return;
@@ -140,7 +167,7 @@ export function createShortVideoListController(context = {}) {
     const requestRenderGuard = renderGuard || listRenderGuard;
     const appendedVideos = [];
     const previousCount = listState.data?.[entryKey]?.length || 0;
-    const pageOffset = append ? (isSearch ? searchNextOffset : previousCount) : 0;
+    const pageOffset = append ? (!authorIndex || isSearch ? listNextOffset : previousCount) : 0;
     if (listState.query) params.set("q", listState.query);
     if (authorIndex) {
       params.set("limit", String(append ? AUTHOR_APPEND_COUNT : AUTHOR_INITIAL_COUNT));
@@ -169,8 +196,15 @@ export function createShortVideoListController(context = {}) {
     } else {
       listState.allowLoadMore = false;
       listState.loading = true;
+      videoPrefixCheck = null;
+      if (!retryFirstPage) videoPrefixError = "";
+      videoAppendError = "";
+      listAppendPause = "";
       listState.status = listState.data ? "" : "正在读取短视频";
-      if (preserveShell) setListRefreshing(true);
+      if (preserveShell) {
+        setListRefreshing(true);
+        if (retryFirstPage && !authorIndex) syncVideoPaging();
+      }
       else renderListShell();
     }
     const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
@@ -183,7 +217,8 @@ export function createShortVideoListController(context = {}) {
       && (!requestRenderGuard || requestRenderGuard())
       && (!append || !authorIndex || isAuthorIndexMounted());
     try {
-      const primaryResult = api.fetchCachedRevalidated && !append
+      const requireAuthoritative = !authorIndex && (append || retryFirstPage);
+      const primaryResult = api.fetchCachedRevalidated && !append && !requireAuthoritative
         ? await api.fetchCachedRevalidated(requestUrl, requestPath, {
             timeoutMs: 16000
           })
@@ -191,28 +226,27 @@ export function createShortVideoListController(context = {}) {
             data: await api.fetchCached(requestUrl, requestPath, {
               timeoutMs: 16000,
               cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
-              forceRefresh: append && isSearch && searchAppendPause === "retry",
+              forceRefresh: append && isSearch && authorIndex && listAppendPause === "retry",
+              requireAuthoritative,
               staleWhileRevalidate: false
             }),
             revalidation: null
           };
       const data = primaryResult.data;
-      const revalidationContext = primaryResult.revalidation
-        ? captureListRevalidationContext(data, authorIndex)
-        : null;
-      if (primaryResult.revalidation) {
-        primaryResult.revalidation.then((freshData) => {
-          if (!isCurrentRequest()) return;
-          if (isSearch) readSearchPageRows(freshData, entryKey, 0);
-          const renderMode = applyRevalidatedListData(freshData, authorIndex, revalidationContext);
-          acceptedListScope = listDataScope(requestUrl);
-          if (renderMode === "full") renderListShell();
-        }).catch(() => {});
-      }
+      const revalidation = primaryResult.revalidation;
+      revalidation?.catch(() => {});
       if (!isCurrentRequest()) return;
+      const marked = isStaleResponseEnvelope(data);
+      if (requireAuthoritative && marked) throw new Error("电脑端列表暂未更新，请重试");
       applyLoadedListData(data, { append, authorIndex, appendedVideos, pageOffset });
       acceptedListScope = listDataScope(requestUrl);
-      if (append) listAppendRevision += 1;
+      if (append && authorIndex) listAppendRevision += 1;
+      if (!append && !authorIndex) videoPrefixError = "";
+      if (revalidation) startListRevalidation(revalidation, data, authorIndex, entryKey, isSearch, isCurrentRequest);
+      else if (!authorIndex && (marked || primaryResult.fromCache || primaryResult.nonAuthoritative)) {
+        videoPrefixError = "电脑端列表暂未更新";
+        listState.allowLoadMore = false;
+      }
       // Enqueue author hints after the video page: both queries share the
       // catalogue worker, so starting authors first would delay the first page.
       const relatedAuthorsRequest = listState.searchPage
@@ -236,19 +270,20 @@ export function createShortVideoListController(context = {}) {
       else if (append && authorIndex) {
         if (!appendListAuthors()) renderListShell();
       }
-      else renderListShell();
+      else renderListShell({ preserveVideoPagingFocus: retryFirstPage && !authorIndex });
     } catch (error) {
       if (!isCurrentRequest()) return;
       listState.loading = false;
       listState.loadingMore = false;
       const message = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
       listState.status = preserveShell ? "" : message;
-      if (append && isSearch) {
+      if (append && (!authorIndex || isSearch)) {
         listState.allowLoadMore = false;
-        searchAppendPause = "retry";
+        listAppendPause = "retry";
+        if (!authorIndex) videoAppendError = message;
       }
       if (append && !authorIndex) {
-        setListLoadingMore(false, listState.status);
+        setListLoadingMore(false, message);
       }
       else if (append && authorIndex) {
         if (!setAuthorIndexLoading(false, isSearch ? listState.status : "")) renderListShell();
@@ -257,23 +292,52 @@ export function createShortVideoListController(context = {}) {
         setListRefreshing(false);
         // The preserved author controls were retired when navigation began.
         // A failed refresh needs a fresh mount for the retained data.
+        if (!authorIndex) videoPrefixError = message;
         if (authorIndex || preservedAuthorIndex) renderListShell();
+        else syncVideoPaging();
         shortVideoToast(`${message}，已保留当前内容`);
-      } else renderListShell();
+      } else {
+        if (!authorIndex) videoPrefixError = message;
+        renderListShell();
+      }
     }
   }
 
-  function applyRevalidatedListData(data, authorIndex, context = {}) {
+  function startListRevalidation(revalidation, data, authorIndex, entryKey, isSearch, isCurrentRequest) {
+    const snapshot = captureListRevalidationContext(data, authorIndex);
+    const check = authorIndex ? null : { isCurrent: isCurrentRequest, continuation: null, done: null };
+    if (check) videoPrefixCheck = check;
+    const done = revalidation.then((freshData) => {
+      if (!isCurrentRequest()) return false;
+      if (check && isStaleResponseEnvelope(freshData)) throw new Error("电脑端列表暂未更新，请重试");
+      if (!authorIndex || isSearch) readListPageRows(freshData, entryKey, 0);
+      const renderMode = applyRevalidatedListData(freshData, authorIndex, snapshot);
+      acceptedListScope = listDataScope();
+      if (check) videoPrefixCheck = null;
+      if (renderMode === "full") renderListShell({ preserveVideoPagingFocus: Boolean(check) });
+      else if (check) syncVideoPaging();
+      return true;
+    }).catch((error) => {
+      if (check && videoPrefixCheck === check && isCurrentRequest()) {
+        videoPrefixCheck = null;
+        videoPrefixError = shortVideoErrorMessage(error, "短视频列表校验失败");
+        listState.allowLoadMore = false;
+        syncVideoPaging();
+      }
+      return false;
+    });
+    if (check) check.done = done;
+  }
+
+  function applyRevalidatedListData(data, authorIndex, snapshot) {
     const previousVideos = listState.data?.videos;
     const nextVideos = data?.videos;
     if (authorIndex || !Array.isArray(previousVideos) || !Array.isArray(nextVideos)
-      || listEnvelopeSignature(data, false) !== context.envelope
-      || JSON.stringify(nextVideos.map(revalidationVideoId)) !== context.ids
-      || JSON.stringify(nextVideos.map(videoContent)) !== context.content) {
-      // A search continuation belongs to the displayed prefix's raw offsets.
-      // Revalidation may still update metrics or refresh the cache.
-      if (listState.searchPage && listAppendRequestId !== context.appendRequestId) return "retained";
-      replaceWithRevalidatedList(data, authorIndex, context);
+      || listEnvelopeSignature(data) !== snapshot.envelope
+      || JSON.stringify(nextVideos.map(revalidationVideoId)) !== snapshot.ids
+      || JSON.stringify(nextVideos.map(videoContent)) !== snapshot.content) {
+      if (authorIndex && listState.searchPage && listAppendRequestId !== snapshot.appendRequestId) return "retained";
+      replaceWithRevalidatedList(data, authorIndex, snapshot);
       return "full";
     }
     const currentById = new Map(previousVideos.map((video) => [revalidationVideoId(video), video]));
@@ -293,48 +357,44 @@ export function createShortVideoListController(context = {}) {
   function captureListRevalidationContext(data, authorIndex) {
     const source = authorIndex ? data?.authors : data?.videos;
     const entries = Array.isArray(source) ? source : [];
+    if (authorIndex) {
+      return { appendRequestId: listAppendRequestId, appendRevision: listAppendRevision, baseCount: entries.length };
+    }
     return {
-      appendRequestId: listAppendRequestId,
-      appendRevision: listAppendRevision,
-      baseCount: entries.length,
-      envelope: listEnvelopeSignature(data, authorIndex),
-      ids: authorIndex ? "[]" : JSON.stringify(entries.map(revalidationVideoId)),
-      content: authorIndex ? "[]" : JSON.stringify(entries.map(videoContent))
+      envelope: listEnvelopeSignature(data),
+      ids: JSON.stringify(entries.map(revalidationVideoId)),
+      content: JSON.stringify(entries.map(videoContent))
     };
   }
 
   function replaceWithRevalidatedList(data, authorIndex, context = {}) {
+    if (!authorIndex) {
+      applyLoadedListData(data, { append: false, authorIndex: false, pageOffset: 0 });
+      return;
+    }
     const appendAdvanced = listAppendRevision !== context.appendRevision;
     const currentData = listState.data && typeof listState.data === "object" ? listState.data : {};
     let nextData = data;
-    if (appendAdvanced && authorIndex) {
+    if (appendAdvanced) {
       const tail = (currentData.authors || []).slice(Math.max(0, Number(context.baseCount || 0)));
       const merged = mergeUniqueEntries(data?.authors, tail, shortVideoAuthorFilterValue);
       nextData = { ...data, ...currentData, authors: merged, offset: 0 };
-    } else if (appendAdvanced) {
-      const tail = (currentData.videos || []).slice(Math.max(0, Number(context.baseCount || 0)));
-      const merged = mergeUniqueEntries(data?.videos, tail, revalidationVideoId);
-      nextData = { ...data, ...currentData, videos: merged, offset: 0, limit: merged.length };
     }
     if (listState.searchPage) {
-      const entryKey = authorIndex ? "authors" : "videos";
-      const rows = data[entryKey];
-      listState.data = { ...nextData, [entryKey]: mergeUniqueEntries(rows, [], authorIndex ? shortVideoAuthorFilterValue : revalidationVideoId) };
-      recordSearchPage(rows, entryKey, 0, 0);
+      const rows = data.authors;
+      listState.data = { ...nextData, authors: mergeUniqueEntries(rows, [], shortVideoAuthorFilterValue) };
+      recordListPage(rows, "authors", 0, 0);
     } else listState.data = nextData;
-    if (!authorIndex) listState.source = normalizeSource(nextData.source || listState.source);
     listState.loading = false;
-    const finalEntries = authorIndex ? nextData?.authors : nextData?.videos;
+    const finalEntries = nextData?.authors;
     const hasResults = Number(nextData?.total || 0) > 0 || Boolean(finalEntries?.length);
-    listState.status = hasResults ? "" : authorIndex
-      ? listState.source === "following" && listState.authorFilter === "unliked"
+    listState.status = hasResults ? "" : listState.source === "following" && listState.authorFilter === "unliked"
         ? "没有未点赞的关注账号。"
         : listState.source === "following"
           ? "还没有关注账号。"
           : listState.authorAccountStatus === "banned"
             ? "没有已封禁的作者。"
-            : "还没有作者数据。"
-      : "还没有短视频。";
+            : "还没有作者数据。";
   }
 
   function mergeUniqueEntries(primary = [], tail = [], keyOf = () => "") {
@@ -349,12 +409,8 @@ export function createShortVideoListController(context = {}) {
     return merged;
   }
 
-  function listEnvelopeSignature(data, authorIndex) {
+  function listEnvelopeSignature(data) {
     if (!data || typeof data !== "object") return "null";
-    if (authorIndex) {
-      const { authors: _authors, ...envelope } = data;
-      return JSON.stringify(envelope);
-    }
     const { videos: _videos, ...envelope } = data;
     return JSON.stringify(envelope);
   }
@@ -363,16 +419,18 @@ export function createShortVideoListController(context = {}) {
     return String(video?.id || "");
   }
 
-  function videoContent(video = {}) {
-    const { actions: _actions, stats: _stats, ...content } = video;
+  function videoContent(video) {
+    const { actions: _actions, stats: _stats, ...content } = video || {};
     return content;
   }
 
   function applyLoadedListData(data, { append, authorIndex, appendedVideos, pageOffset }) {
     const entryKey = authorIndex ? "authors" : "videos";
-    const searchRows = listState.searchPage ? readSearchPageRows(data, entryKey, pageOffset) : null;
+    const rawRows = !authorIndex || listState.searchPage ? readListPageRows(data, entryKey, pageOffset) : null;
     const previousCount = append ? listState.data?.[entryKey]?.length || 0 : 0;
-    if (searchRows && append && data.hasMore && !searchRows.length) throw new Error("搜索续页没有返回结果");
+    if (rawRows && append && data.hasMore && !rawRows.length) {
+      throw new Error(listState.searchPage ? "搜索续页没有返回结果" : "列表续页没有返回结果");
+    }
     if (append && listState.data && authorIndex) {
       const merged = [...(listState.data.authors || [])];
       const seen = new Set(merged.map((author) => shortVideoAuthorFilterValue(author)).filter(Boolean));
@@ -384,21 +442,22 @@ export function createShortVideoListController(context = {}) {
       }
       listState.data = { ...data, authors: merged, offset: 0 };
     } else if (append && listState.data) {
-      const seen = new Set((listState.data.videos || []).map((video) => video.id));
+      const seen = new Set((listState.data.videos || []).map(revalidationVideoId));
       const merged = [...(listState.data.videos || [])];
-      for (const video of data.videos || []) {
-        if (seen.has(video.id)) continue;
-        seen.add(video.id);
+      for (const video of rawRows) {
+        const id = revalidationVideoId(video);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
         merged.push(video);
         appendedVideos.push(video);
       }
       listState.data = { ...data, videos: merged, offset: 0, limit: merged.length };
-    } else if (searchRows) {
-      listState.data = { ...data, [entryKey]: mergeUniqueEntries(searchRows, [], authorIndex ? shortVideoAuthorFilterValue : revalidationVideoId) };
+    } else if (rawRows) {
+      listState.data = { ...data, [entryKey]: mergeUniqueEntries(rawRows, [], authorIndex ? shortVideoAuthorFilterValue : revalidationVideoId) };
     } else {
       listState.data = data;
     }
-    if (searchRows) recordSearchPage(searchRows, entryKey, pageOffset, previousCount);
+    if (rawRows) recordListPage(rawRows, entryKey, pageOffset, previousCount);
     if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
     listState.loading = false;
     listState.loadingMore = false;
@@ -415,34 +474,35 @@ export function createShortVideoListController(context = {}) {
         : "还没有短视频。";
   }
 
-  function readSearchPageRows(data, entryKey, offset) {
+  function readListPageRows(data, entryKey, offset) {
     const rows = data?.[entryKey];
     if (!Array.isArray(rows) || (data.offset != null && Number(data.offset) !== offset)) {
-      throw new Error("搜索续页位置不一致");
+      throw new Error(listState.searchPage ? "搜索续页位置不一致" : "列表续页位置不一致");
     }
     return rows;
   }
 
-  function recordSearchPage(rows, entryKey, offset, previousCount) {
-    if (offset === 0) searchVideoOffsets = new WeakMap();
+  function recordListPage(rows, entryKey, offset, previousCount) {
+    if (offset === 0) listVideoOffsets = new WeakMap();
     if (entryKey === "videos") {
       rows.forEach((video, index) => {
-        if (video && typeof video === "object" && !searchVideoOffsets.has(video)) {
-          searchVideoOffsets.set(video, offset + index + 1);
+        if (video && typeof video === "object" && !listVideoOffsets.has(video)) {
+          listVideoOffsets.set(video, offset + index + 1);
         }
       });
     }
-    searchNextOffset = offset + rows.length;
-    searchAppendPause = "";
+    listNextOffset = offset + rows.length;
+    listAppendPause = "";
+    videoAppendError = "";
     if (listState.data.hasMore && listState.data[entryKey].length === previousCount) {
-      searchAppendPause = rows.length ? "no-new-items" : "retry";
+      listAppendPause = rows.length ? "no-new-items" : "retry";
       listState.allowLoadMore = false;
     }
   }
 
-  function searchFeedNextOffset(video, atLoadedEnd) {
-    if (!listState.searchPage || !searchVideoOffsets.has(video)) return undefined;
-    return atLoadedEnd ? searchNextOffset : searchVideoOffsets.get(video);
+  function listFeedNextOffset(video, atLoadedEnd) {
+    if (!listVideoOffsets.has(video)) return undefined;
+    return atLoadedEnd ? listNextOffset : listVideoOffsets.get(video);
   }
 
   function listScopeKey(baseUrl) {
@@ -559,8 +619,8 @@ export function createShortVideoListController(context = {}) {
     const observer = new IntersectionObserver((entries) => {
       if (listLoadMoreObserver !== observer || !owner.isCurrent()) return;
       if (!entries.some((entry) => entry.isIntersecting)) return;
-      if (!listState.allowLoadMore || listState.searchPage && searchAppendPause) return;
-      if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
+      if (!listState.allowLoadMore || listAppendPause || videoPrefixError || needsFirstPageRetry()) return;
+      if ((!listState.data?.hasMore && !videoPrefixCheck) || listState.loading || listState.loadingMore) return;
       loadList(null, { append: true }).catch((error) => {
         listState.loadingMore = false;
         listState.status = shortVideoErrorMessage(error, "加载失败，请稍后重试");
@@ -579,13 +639,13 @@ export function createShortVideoListController(context = {}) {
         && document.body.classList.contains("short-video-search-page-view");
       if (!document.body.classList.contains("short-video-mobile-view") && !isSearchResults) return;
       if (listRenderGuard && !listRenderGuard()) return;
-      if (isSearchResults && searchAppendPause) return;
+      if (listAppendPause || videoPrefixError || !isAuthorIndexView() && needsFirstPageRetry()) return;
       listState.allowLoadMore = true;
       if (isAuthorIndexView()) {
         appendVisibleAuthors();
         return;
       }
-      if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
+      if ((!listState.data?.hasMore && !videoPrefixCheck) || listState.loading || listState.loadingMore) return;
       const doc = document.documentElement;
       const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
       if (remaining < 700) loadList(null, { append: true }).catch(() => {
@@ -596,8 +656,17 @@ export function createShortVideoListController(context = {}) {
   }
 
   async function openShortVideoFromList(video) {
+    if (needsFirstPageRetry()) {
+      shortVideoToast("短视频列表暂未更新，请重试");
+      return false;
+    }
     const owner = beginNativeOpen();
-    const opened = await openNativeShortVideoFeed(video, { owner, baseUrl: owner.baseUrl, isCurrent: owner.isCurrent });
+    const opened = await openNativeShortVideoFeed(video, {
+      owner,
+      baseUrl: owner.baseUrl,
+      isCurrent: owner.isCurrent,
+      allowContinuation: !listState.loading && !videoPrefixCheck && !videoPrefixError
+    });
     if (!opened && owner.isCurrent()) shortVideoToast("当前设备无法打开原生短视频播放器");
     return opened;
   }
@@ -618,14 +687,24 @@ export function createShortVideoListController(context = {}) {
       stats: "0"
     });
     try {
-      const data = await api.fetchCached(owner.baseUrl, `/api/short-videos?${params}`, {
+      const routePath = `/api/short-videos?${params}`;
+      const readOptions = {
         signal: owner.controller.signal,
         timeoutMs: 16000,
         cacheMaxAgeMs: 5 * 60 * 1000
-      });
+      };
+      let { data, source } = await api.fetchCached(owner.baseUrl, routePath, { ...readOptions, withSource: true });
       if (!owner.isCurrent()) return false;
-      const first = data.videos?.[0];
-      if (!first) {
+      if (source === "cache" && Array.isArray(data?.videos) && !data.videos.length) {
+        // A cached empty page does not establish that the author has no works.
+        data = await api.fetchCached(owner.baseUrl, routePath, { ...readOptions, requireAuthoritative: true });
+        if (!owner.isCurrent()) return false;
+        source = "network";
+      }
+      if (!Array.isArray(data?.videos)) throw new Error("作者列表响应格式异常，请重试");
+      const authoritative = source === "network" && !isStaleResponseEnvelope(data);
+      if (!data.videos.length) {
+        if (!authoritative) throw new Error("电脑端暂时无法确认作者作品，请重试");
         const profileUrl = authorOriginalUrl(author);
         if (!profileUrl) {
           shortVideoToast("该作者还没有本地作品或可打开的主页");
@@ -635,12 +714,15 @@ export function createShortVideoListController(context = {}) {
         window.open(profileUrl, "_blank", "noreferrer");
         return true;
       }
+      const first = data.videos[0];
+      if (!first?.id) throw new Error("作者列表响应格式异常，请重试");
       const opened = await openNativeShortVideoFeed(first, {
         owner,
         baseUrl: owner.baseUrl,
         isCurrent: owner.isCurrent,
-        videos: data.videos || [],
+        videos: data.videos,
         hasMore: data.hasMore,
+        allowContinuation: authoritative,
         query: "",
         author: authorFilter,
         source: "all",
@@ -675,6 +757,7 @@ export function createShortVideoListController(context = {}) {
     cancelShortVideoNativeOpen,
     captureListRenderOwner,
     needsAuthorIndexRetry,
+    getVideoPagingStatus,
     applyListParams,
     loadList,
     sortedAuthorFacets,
@@ -690,7 +773,7 @@ export function createShortVideoListController(context = {}) {
     installListEvents,
     openShortVideoFromList,
     openShortVideoAuthor,
-    searchFeedNextOffset,
+    listFeedNextOffset,
     shortVideoErrorMessage,
     shortVideoApiSource
   };

@@ -38,6 +38,7 @@ doubles[feed] = doubles[feed]
     String pagedFeedUrl(String url,int offset,String cursor,int limit){return url+"?cursor="+cursor;}
     NativeShortVideoFeedPaging.ReadResult<FeedPage> readFeedPage(String url,ReadRequests.Token token){readCount++;return response;}
     void acceptServerActionSnapshots(List<ShortVideoItem> items,long revision){}void showTransientStatus(String message){status=message;}
+    void showFeedReadRetry(String message,Runnable retry){status=message;}
     void writeControlPreference(String key,boolean value){}void refreshVisibleRails(){}
     final RootView rootView=new RootView();class RootView{void removeView(Object view){}}
     ${member("toggleAutoNext")}${member("applyPlaybackControlState")}

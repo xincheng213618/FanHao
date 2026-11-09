@@ -37,6 +37,24 @@ final class NativeShortVideoFeedReader {
       return cancelled(cancellation) ? NativeShortVideoFeedPaging.ReadResult.failure(NativeShortVideoFeedPaging.Failure.OFFLINE)
         : NativeShortVideoFeedPaging.ReadResult.success(page, page.hasMore, page.nextCursor);
     }
+    NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readUncached(feedUrl, cancellation);
+    if (result.failure == NativeShortVideoFeedPaging.Failure.STALE_CACHE && !cancelled(cancellation)) {
+      String refreshUrl = forceRefreshUrl(feedUrl);
+      if (refreshUrl != null) result = readUncached(refreshUrl, cancellation);
+    }
+    if (cancelled(cancellation)) return NativeShortVideoFeedPaging.ReadResult.failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
+    if (result.succeeded() && !result.value.items.isEmpty()) {
+      FeedPage page = result.value;
+      // A successful refresh belongs to the original page key. Neither the
+      // stale response nor a retired request may populate the local cache.
+      Runnable publish = () -> cache.put(feedUrl, new CachedFeedPage(page.copy(), SystemClock.elapsedRealtime()));
+      if (cancellation == null) publish.run();
+      else if (!cancellation.publish(publish)) return NativeShortVideoFeedPaging.ReadResult.failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
+    }
+    return result;
+  }
+
+  private NativeShortVideoFeedPaging.ReadResult<FeedPage> readUncached(String feedUrl, NativeShortVideoFeedTransport.Cancellation cancellation) {
     FeedPage page = new FeedPage();
     try {
       Uri uri = Uri.parse(feedUrl);
@@ -46,6 +64,13 @@ final class NativeShortVideoFeedReader {
     return transport.read(feedUrl, body -> {
       if (cancelled(cancellation)) throw new java.io.InterruptedIOException("feed read cancelled");
       JSONObject data = new JSONObject(body);
+      String cacheState = data.optString("cacheState", "");
+      if (data.optBoolean("offline", false) || "offline".equals(cacheState)) {
+        return NativeShortVideoFeedTransport.Parsed.reject(NativeShortVideoFeedPaging.Failure.OFFLINE_CACHE);
+      }
+      if (data.optBoolean("stale", false) || "stale-refreshing".equals(cacheState)) {
+        return NativeShortVideoFeedTransport.Parsed.reject(NativeShortVideoFeedPaging.Failure.STALE_CACHE);
+      }
       page.offset = Math.max(0, data.optInt("offset", page.offset));
       page.limit = Math.max(1, data.optInt("limit", page.limit));
       page.total = Math.max(0, data.optInt("total", 0));
@@ -62,17 +87,22 @@ final class NativeShortVideoFeedReader {
       if (page.total == 0) page.total = page.items.size();
       if (page.stats.isEmpty()) page.stats = FeedStats.fromItems(page.items);
       if (cancelled(cancellation)) throw new java.io.InterruptedIOException("feed read cancelled");
-      if (!page.items.isEmpty()) {
-        Runnable publish = () -> cache.put(feedUrl, new CachedFeedPage(page.copy(), SystemClock.elapsedRealtime()));
-        if (cancellation == null) publish.run();
-        else if (!cancellation.publish(publish)) throw new java.io.InterruptedIOException("feed read cancelled");
-      }
       return new NativeShortVideoFeedTransport.Parsed<>(page, page.hasMore, page.nextCursor);
     }, cancellation);
   }
 
   private boolean cancelled(NativeShortVideoFeedTransport.Cancellation cancellation) {
     return cancellation != null && cancellation.isCancelled();
+  }
+
+  private String forceRefreshUrl(String feedUrl) {
+    try {
+      Uri uri = Uri.parse(feedUrl);
+      if (!"/api/short-videos".equals(uri.getPath()) || uri.getQueryParameter("refresh") != null) return null;
+      return uri.buildUpon().appendQueryParameter("refresh", "1").build().toString();
+    } catch (Exception ignored) {
+      return null;
+    }
   }
 
   private String baseFromUrl(String value) {

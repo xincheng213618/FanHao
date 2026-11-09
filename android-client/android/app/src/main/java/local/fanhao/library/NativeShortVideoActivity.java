@@ -81,6 +81,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -4277,12 +4278,17 @@ public class NativeShortVideoActivity extends Activity {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(feedUrl, token);
       mainHandler.post(() -> {
         if (!token.isCurrent()) return;
+        boolean resumeAutoAdvance = galleryContinuation == null && feedPaging.isPendingAutoAdvance(index);
         NativeShortVideoFeedPaging.Completion completion = feedPaging.complete(request, result);
         if (completion == NativeShortVideoFeedPaging.Completion.STALE) return;
         loadingMoreVideos = feedPaging.isLoading();
         if (completion == NativeShortVideoFeedPaging.Completion.FAILED) {
           if (galleryContinuation != null) { cancelGalleryContinuation(); hideStatus(); }
-          showTransientStatus(result == null ? "短视频服务暂时不可用，请重试" : result.publicMessage());
+          showFeedReadRetry(result == null ? "短视频服务暂时不可用，请重试" : result.publicMessage(), () -> {
+            if (!token.isCurrent() || currentIndex < 0) return;
+            if (resumeAutoAdvance && canAdvanceAfterEnded(index)) feedPaging.markPendingAutoAdvance(index);
+            loadMoreIfNeeded(currentIndex);
+          });
           return;
         }
         FeedPage page = result.value;
@@ -4687,13 +4693,18 @@ public class NativeShortVideoActivity extends Activity {
   private void showStatus(String text) {
     statusGeneration++;
     if (statusView == null) return;
+    statusView.setOnClickListener(null);
+    statusView.setClickable(false);
     statusView.setText(text);
     statusView.setVisibility(View.VISIBLE);
   }
 
   private void hideStatus() {
     statusGeneration++;
-    if (statusView != null) statusView.setVisibility(View.GONE);
+    if (statusView == null) return;
+    statusView.setOnClickListener(null);
+    statusView.setClickable(false);
+    statusView.setVisibility(View.GONE);
   }
 
   private void showTransientStatus(String text) {
@@ -4702,6 +4713,19 @@ public class NativeShortVideoActivity extends Activity {
     mainHandler.postDelayed(() -> {
       if (generation == statusGeneration && !restoreGalleryPlaybackStatus()) hideStatus();
     }, 1400);
+  }
+
+  private void showFeedReadRetry(String text, Runnable retry) {
+    String suffix = "请重试";
+    String message = text.endsWith(suffix) ? text.substring(0, text.length() - suffix.length()) : text + "，";
+    showStatus(message + "点此重试");
+    if (statusView == null) return;
+    long generation = statusGeneration;
+    statusView.setOnClickListener(view -> {
+      if (generation != statusGeneration || destroying || isFinishing()) return;
+      hideStatus();
+      retry.run();
+    });
   }
 
   private void showPersistentDeleteStatus(String text, String actionLabel, @Nullable Runnable action) {
@@ -4796,15 +4820,19 @@ public class NativeShortVideoActivity extends Activity {
     cancelVideoPrefetch();
     String normalizedFeedUrl = normalizeFeedUrl(feedUrl);
     long replacementGeneration = feedPaging.beginFeedReplacement(normalizedFeedUrl);
+    loadingMoreVideos = true;
     long actionRevision = actionSnapshots.revision();
     feedRequests.replace(token -> {
       NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(normalizedFeedUrl, token);
       mainHandler.post(() -> {
         if (!token.isCurrent()) return;
         if (!feedPaging.finishFeedReplacement(replacementGeneration, normalizedFeedUrl)) return;
+        loadingMoreVideos = feedPaging.isLoading();
         if (!result.succeeded()) {
-          loadingMoreVideos = false;
-          showStatus(result.publicMessage());
+          feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
+          showFeedReadRetry(result.publicMessage(), () -> {
+            if (token.isCurrent()) loadFeedAsync(normalizedFeedUrl, startIndex);
+          });
           return;
         }
         FeedPage page = result.value;
@@ -4832,29 +4860,39 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private String normalizeFeedUrl(String feedUrl) {
-    String normalized = String.valueOf(feedUrl == null ? "" : feedUrl).replace("%26", "&");
-    if (!normalized.contains("limit=")) {
-      normalized += normalized.contains("?") ? "&limit=" + FEED_PAGE_LIMIT : "?limit=" + FEED_PAGE_LIMIT;
-    }
-    return normalized;
+    String raw = feedUrl == null ? "" : feedUrl;
+    Uri uri = Uri.parse(raw);
+    if (!uri.isHierarchical() || uri.getQueryParameter("limit") != null) return raw;
+    return uri.buildUpon().appendQueryParameter("limit", String.valueOf(FEED_PAGE_LIMIT)).build().toString();
   }
 
   private String pagedFeedUrl(String feedUrl, int offset, String cursor, int limit) {
-    Uri uri = Uri.parse(normalizeFeedUrl(feedUrl));
-    Uri.Builder builder = uri.buildUpon().clearQuery();
-    try {
-      for (String name : uri.getQueryParameterNames()) {
-        if ("offset".equals(name) || "cursor".equals(name) || "limit".equals(name)) continue;
-        List<String> values = uri.getQueryParameters(name);
-        if (values.isEmpty()) builder.appendQueryParameter(name, "");
-        else for (String value : values) builder.appendQueryParameter(name, value);
-      }
-    } catch (Exception ignored) {}
+    Uri.Builder builder = feedUrlWithoutParameters(feedUrl, "offset", "cursor", "limit");
     String normalizedCursor = cursor == null ? "" : cursor.trim();
     if (normalizedCursor.length() > 0) builder.appendQueryParameter("cursor", normalizedCursor);
     else builder.appendQueryParameter("offset", String.valueOf(Math.max(0, offset)));
     builder.appendQueryParameter("limit", String.valueOf(Math.max(1, limit)));
     return builder.build().toString();
+  }
+
+  private Uri.Builder feedUrlWithoutParameters(String raw, String... excluded) {
+    Uri uri = Uri.parse(raw == null ? "" : raw);
+    Uri.Builder builder = uri.buildUpon().clearQuery();
+    String query = uri.getEncodedQuery();
+    if (query == null || query.isEmpty()) return builder;
+    List<String> excludedNames = Arrays.asList(excluded);
+    StringBuilder kept = new StringBuilder();
+    // Keep the original value encoding, including form-encoded spaces.
+    for (String field : query.split("&")) {
+      if (field.isEmpty()) continue;
+      int separator = field.indexOf('=');
+      String name = Uri.decode(separator < 0 ? field : field.substring(0, separator));
+      if (excludedNames.contains(name)) continue;
+      if (kept.length() > 0) kept.append('&');
+      kept.append(field);
+    }
+    if (kept.length() > 0) builder.encodedQuery(kept.toString());
+    return builder;
   }
 
   private NativeShortVideoFeedPaging.ReadResult<FeedPage> readFeedPage(String feedUrl) {
@@ -6590,7 +6628,9 @@ public class NativeShortVideoActivity extends Activity {
         loadingMoreVideos = feedPaging.isLoading();
         if (!result.succeeded()) {
           feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
-          showTransientStatus(result.publicMessage());
+          showFeedReadRetry(result.publicMessage(), () -> {
+            if (token.isCurrent()) applyFeedSort(normalized);
+          });
           return;
         }
         FeedPage page = result.value;
@@ -6635,14 +6675,7 @@ public class NativeShortVideoActivity extends Activity {
     String raw = feedUrl == null ? "" : feedUrl.trim();
     if (raw.length() == 0) return "";
     try {
-      Uri uri = Uri.parse(normalizeFeedUrl(raw));
-      Uri.Builder builder = uri.buildUpon().clearQuery();
-      for (String name : uri.getQueryParameterNames()) {
-        if ("offset".equals(name) || "limit".equals(name) || "sort".equals(name)) continue;
-        List<String> values = uri.getQueryParameters(name);
-        if (values.isEmpty()) builder.appendQueryParameter(name, "");
-        else for (String value : values) builder.appendQueryParameter(name, value);
-      }
+      Uri.Builder builder = feedUrlWithoutParameters(raw, "offset", "cursor", "limit", "sort");
       builder.appendQueryParameter("sort", normalizeSortParam(sort));
       builder.appendQueryParameter("offset", "0");
       builder.appendQueryParameter("limit", String.valueOf(SEARCH_PAGE_LIMIT));
@@ -6674,7 +6707,9 @@ public class NativeShortVideoActivity extends Activity {
         loadingMoreVideos = feedPaging.isLoading();
         if (!result.succeeded()) {
           feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
-          showTransientStatus(result.publicMessage());
+          showFeedReadRetry(result.publicMessage(), () -> {
+            if (token.isCurrent()) applyFeedSearch(normalizedQuery);
+          });
           return;
         }
         FeedPage page = result.value;
@@ -6696,17 +6731,14 @@ public class NativeShortVideoActivity extends Activity {
     if (raw.length() == 0) {
       String base = apiBase();
       if (base.length() == 0) return "";
-      raw = Uri.parse(base).buildUpon().appendPath("api").appendPath("short-videos").build().toString();
+      raw = Uri.parse(base).buildUpon().appendPath("api").appendPath("short-videos")
+        .appendQueryParameter("facets", "0")
+        .appendQueryParameter("stats", "0")
+        .appendQueryParameter("users", "0")
+        .build().toString();
     }
     try {
-      Uri uri = Uri.parse(normalizeFeedUrl(raw));
-      Uri.Builder builder = uri.buildUpon().clearQuery();
-      for (String name : uri.getQueryParameterNames()) {
-        if ("q".equals(name) || "offset".equals(name) || "limit".equals(name)) continue;
-        List<String> values = uri.getQueryParameters(name);
-        if (values.isEmpty()) builder.appendQueryParameter(name, "");
-        else for (String value : values) builder.appendQueryParameter(name, value);
-      }
+      Uri.Builder builder = feedUrlWithoutParameters(raw, "q", "offset", "cursor", "limit");
       if (query != null && query.trim().length() > 0) builder.appendQueryParameter("q", query.trim());
       builder.appendQueryParameter("offset", "0");
       builder.appendQueryParameter("limit", String.valueOf(SEARCH_PAGE_LIMIT));

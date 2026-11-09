@@ -1,6 +1,6 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=assets-0a663c3bea5d";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-76f4b0fadf4d";
 import { formatNumber } from "../../../../js/format.js";
-import { createBrandModeSwitch } from "../brands/brand-switch.js?v=assets-0a663c3bea5d";
+import { createBrandModeSwitch } from "../brands/brand-switch.js?v=assets-76f4b0fadf4d";
 
 const PREFIX_PAGE_SIZE = 64;
 const PREFIX_SORT_STORAGE_KEY = "fanhao.android.codePrefixSort";

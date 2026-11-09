@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-0a663c3bea5d";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-76f4b0fadf4d";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=assets-0a663c3bea5d";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-0a663c3bea5d";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-0a663c3bea5d";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-0a663c3bea5d";
+import { DEFAULT_SORT, initials } from "../shared.js?v=assets-76f4b0fadf4d";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-76f4b0fadf4d";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-76f4b0fadf4d";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-76f4b0fadf4d";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -14,6 +14,7 @@ export function createShortVideoListView(context = {}) {
   const currentAuthorFacet = (...args) => context.currentAuthorFacet(...args);
   const fetchSearchSuggestions = (...args) => context.fetchSearchSuggestions(...args);
   const cancelSearchSuggestions = (...args) => context.cancelSearchSuggestions(...args);
+  const getVideoPagingStatus = (...args) => context.getVideoPagingStatus?.(...args);
   const isAuthorFeedView = (...args) => context.isAuthorFeedView(...args);
   const isAuthorIndexView = (...args) => context.isAuthorIndexView(...args);
   const needsAuthorIndexRetry = (...args) => context.needsAuthorIndexRetry?.(...args);
@@ -31,7 +32,9 @@ export function createShortVideoListView(context = {}) {
   let searchSuggestionTimer = 0;
   let mountedAuthorIndex = null;
 
-  function renderListShell() {
+  function renderListShell({ preserveVideoPagingFocus = false } = {}) {
+    const focusedPaging = preserveVideoPagingFocus && els.viewContent.contains(document.activeElement)
+      && document.activeElement.matches("button.short-video-mobile-load-more");
     releaseAuthorIndex();
     els.viewContent.innerHTML = "";
     resetListLoadMoreObserver();
@@ -92,6 +95,11 @@ export function createShortVideoListView(context = {}) {
     shell.append(grid);
     syncListLoadMoreSentinel(shell);
     els.viewContent.append(shell);
+    if (focusedPaging) {
+      const pagingButton = shell.querySelector("button.short-video-mobile-load-more");
+      if (pagingButton) pagingButton.focus({ preventScroll: true });
+      else focusLastVideo(shell);
+    }
   }
 
   function appendListVideos(videos = []) {
@@ -104,18 +112,9 @@ export function createShortVideoListView(context = {}) {
     syncListLoadMoreSentinel(shell);
   }
 
-  function setListLoadingMore(loading, message = "", sentinel = els.viewContent.querySelector(".short-video-mobile-load-more")) {
-    if (!sentinel) return;
-    resetListLoadMoreObserver();
-    sentinel.classList.toggle("is-loading", Boolean(loading));
-    if (listState.searchPage) {
-      sentinel.setAttribute("aria-disabled", String(Boolean(loading)));
-      sentinel.textContent = loading ? "正在加载" : message ? `${message} · 点击重试` : "加载更多";
-    } else {
-      sentinel.textContent = loading ? "正在加载" : String(message || "");
-      sentinel.toggleAttribute("aria-hidden", !sentinel.textContent);
-    }
-    if (!loading && listState.data?.hasMore && !(listState.searchPage && message)) observeListLoadMore(sentinel);
+  function syncVideoPaging(loading = listState.loadingMore, message = "") {
+    const shell = els.viewContent.querySelector(".short-video-mobile-list");
+    if (shell?.querySelector(".short-video-mobile-grid")) syncListLoadMoreSentinel(shell, loading, message);
   }
 
   function setListRefreshing(refreshing) {
@@ -131,29 +130,59 @@ export function createShortVideoListView(context = {}) {
     }
   }
 
-  function syncListLoadMoreSentinel(shell) {
-    let sentinel = shell.querySelector(".short-video-mobile-load-more");
-    if (!listState.data?.hasMore) {
-      resetListLoadMoreObserver();
-      if (sentinel && listState.searchPage && sentinel === document.activeElement) {
-        shell.querySelector(".short-video-mobile-card-wrap:last-child .short-video-mobile-card")?.focus({ preventScroll: true });
-      }
-      sentinel?.remove();
+  function syncListLoadMoreSentinel(shell, loading = listState.loadingMore, message = "") {
+    const status = getVideoPagingStatus() || {};
+    const retryMessage = status.message || message;
+    const manual = Boolean(status.checking || status.retryFirstPage || status.pause || retryMessage);
+    const previous = shell.querySelector(".short-video-mobile-load-more");
+    const focused = previous && previous === document.activeElement;
+    resetListLoadMoreObserver();
+    if (!listState.data?.hasMore && !manual) {
+      previous?.remove();
+      if (focused) focusLastVideo(shell);
       return;
     }
-    if (!sentinel) {
-      sentinel = document.createElement(listState.searchPage ? "button" : "div");
+
+    const busy = Boolean(loading || listState.loading && status.retryFirstPage);
+    const interactive = listState.searchPage || manual || busy && previous?.tagName === "BUTTON";
+    const tagName = interactive ? "BUTTON" : "DIV";
+    let sentinel = previous;
+    if (sentinel?.tagName !== tagName) {
+      sentinel = document.createElement(tagName.toLowerCase());
       sentinel.className = "short-video-mobile-load-more";
-      if (listState.searchPage) {
-        sentinel.type = "button";
-        const owner = captureListRenderOwner();
-        sentinel.addEventListener("click", () => {
-          if (sentinel.isConnected && owner.isCurrent()) void loadList(null, { append: true });
-        });
-      }
-      shell.append(sentinel);
+      if (previous) previous.replaceWith(sentinel);
+      else shell.append(sentinel);
     }
-    setListLoadingMore(false, "", sentinel);
+    sentinel.classList.toggle("is-loading", busy);
+    if (interactive) {
+      sentinel.type = "button";
+      sentinel.setAttribute("aria-disabled", String(busy));
+      sentinel.textContent = busy ? "正在加载" : videoPagingLabel(status, retryMessage);
+      const owner = captureListRenderOwner();
+      sentinel.onclick = () => {
+        if (!busy && sentinel.isConnected && owner.isCurrent()) void loadList(null, { append: true });
+      };
+    } else {
+      sentinel.textContent = busy ? "正在加载" : "";
+      sentinel.toggleAttribute("aria-hidden", !busy);
+    }
+    if (focused && sentinel !== previous) {
+      if (interactive) sentinel.focus({ preventScroll: true });
+      else focusLastVideo(shell);
+    }
+    if (!busy && !manual && listState.data?.hasMore) observeListLoadMore(sentinel);
+  }
+
+  function videoPagingLabel(status, message) {
+    if (status.checking) return "列表正在更新 · 点击后加载更多";
+    if (message) return `${message} · 点击重试`;
+    if (status.retryFirstPage) return "重试读取列表";
+    if (status.pause === "retry") return "加载失败 · 点击重试";
+    return "加载更多";
+  }
+
+  function focusLastVideo(shell) {
+    shell.querySelector(".short-video-mobile-card-wrap:last-child .short-video-mobile-card")?.focus({ preventScroll: true });
   }
 
   function renderDedicatedSearchHeader() {
@@ -783,7 +812,8 @@ export function createShortVideoListView(context = {}) {
     releaseAuthorIndex,
     isAuthorIndexMounted,
     hasAuthorIndexShell,
-    setListLoadingMore,
+    setListLoadingMore: syncVideoPaging,
+    syncVideoPaging,
     setListRefreshing,
     updateSearchAuthorMatches,
     renderListToolbar,

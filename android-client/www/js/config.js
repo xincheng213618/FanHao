@@ -7,7 +7,7 @@ export const STORAGE_KEY = "fanhao.serverUrl";
 export const THEME_STORAGE_KEY = "fanhao.theme";
 export const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 export const LAST_VIEW_STORAGE_KEY = "fanhao.android.lastView";
-export const CLIENT_VERSION = "assets-0a663c3bea5d";
+export const CLIENT_VERSION = "assets-76f4b0fadf4d";
 
 
 

@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=assets-0a663c3bea5d";
+import { CLIENT_VERSION } from "./config.js?v=assets-76f4b0fadf4d";
 import { accountPayloadOwner, captureAccountOwner, confirmAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, rememberAccountPayload } from "./account-owner.js";
 
 const DB_NAME = "fanhao-android-cache";
@@ -28,10 +28,12 @@ const imageInvalidationState = globalThis.__fanhaoImageCacheInvalidationState ||
   baseGenerations: new Map()
 };
 
-export async function readCachedJson(baseUrl, path) {
-  await prepareAccountOwner(baseUrl);
-  const fence = captureCachedJsonFence(baseUrl);
-  if (fence.account.owner === "pending") return null;
+export async function readCachedJson(baseUrl, path, { fence, touchIntervalMs = 0, scheduleTouch } = {}) {
+  if (!fence) {
+    await prepareAccountOwner(baseUrl);
+    fence = captureCachedJsonFence(baseUrl);
+  }
+  if (fence.baseUrl !== normalizeBaseUrl(baseUrl) || fence.account.owner === "pending" || !isCachedJsonFenceCurrent(fence)) return null;
   const db = await openCacheDb();
   const entry = await runCacheTransaction(
     db,
@@ -40,13 +42,22 @@ export async function readCachedJson(baseUrl, path) {
     (store) => requestToPromise(store.get(cacheKey(baseUrl, path, fence.account)))
   );
   if (!isCachedJsonFenceCurrent(fence) || !entry || !entry.payload || !isCurrentResponseCache(entry)) return null;
-  touchCachedResponse(entry, fence).catch(() => {});
+  if (responseTouchDue(entry, touchIntervalMs)) {
+    const { key, recordId, updatedAt } = entry;
+    const touch = (isCurrent = () => true) => touchCachedResponse(
+      { key, recordId, updatedAt }, fence, touchIntervalMs, isCurrent
+    ).catch(() => {});
+    if (scheduleTouch) scheduleTouch(touch, entry);
+    else void touch();
+  }
   rememberAccountPayload(entry.payload, fence.account);
   confirmAccountOwner(fence.account);
   return entry;
 }
 
 export async function writeCachedJson(baseUrl, path, payload, options = {}) {
+  const signal = options.signal;
+  if (signal?.aborted) return null;
   const payloadOwner = accountPayloadOwner(payload);
   if (payloadOwner && !isAccountOwnerCurrent(payloadOwner)) return null;
   const fence = options.fence || captureCachedJsonFence(baseUrl, payloadOwner || captureAccountOwner(baseUrl));
@@ -56,7 +67,7 @@ export async function writeCachedJson(baseUrl, path, payload, options = {}) {
   if (!payloadOwner && !options.fence && (fence.account.owner !== "guest" || fence.account.revision > 0)) return null;
   if (fence.account.owner === "pending") return null;
   const db = await openCacheDb();
-  if (!isCachedJsonFenceCurrent(fence)) return null;
+  if (signal?.aborted || !isCachedJsonFenceCurrent(fence)) return null;
   const entry = {
     key: cacheKey(baseUrl, path, fence.account),
     baseUrl: normalizeBaseUrl(baseUrl),
@@ -67,10 +78,22 @@ export async function writeCachedJson(baseUrl, path, payload, options = {}) {
     accessedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
+  if (options.withRecordId) entry.recordId = crypto.getRandomValues(new Uint32Array(4)).join("-");
   entry.bytes = estimateEntrySize(entry);
   if (entry.bytes > MAX_CACHED_RESPONSE_BYTES) return null;
 
-  await runCacheTransaction(db, RESPONSE_STORE, "readwrite", (store) => requestToPromise(store.put(entry)));
+  let abortWrite;
+  try {
+    await runCacheTransaction(db, RESPONSE_STORE, "readwrite", (store, transaction) => {
+      if (signal) {
+        abortWrite = () => { try { transaction.abort(); } catch {} };
+        signal.addEventListener("abort", abortWrite, { once: true });
+      }
+      return requestToPromise(store.put(entry));
+    });
+  } finally {
+    if (abortWrite) signal.removeEventListener("abort", abortWrite);
+  }
   scheduleResponseCacheTrim().catch(() => {});
   return entry;
 }
@@ -371,13 +394,18 @@ async function deleteByBaseUrl(db, storeName, normalizedBase) {
   });
 }
 
-async function touchCachedResponse(entry, fence) {
-  if (!entry?.key) return;
+function responseTouchDue(entry, intervalMs) {
+  return !intervalMs || Date.now() - (Date.parse(entry.accessedAt || entry.updatedAt) || 0) >= intervalMs;
+}
+
+async function touchCachedResponse({ key, recordId, updatedAt }, fence, intervalMs, isCurrent) {
+  if (!key || !isCurrent() || !isCachedJsonFenceCurrent(fence)) return;
   const db = await openCacheDb();
-  if (!isCachedJsonFenceCurrent(fence)) return;
+  if (!isCurrent() || !isCachedJsonFenceCurrent(fence)) return;
   await runCacheTransaction(db, RESPONSE_STORE, "readwrite", async (store) => {
-    const current = await requestToPromise(store.get(entry.key));
-    if (!current || !isCachedJsonFenceCurrent(fence)) return;
+    const current = await requestToPromise(store.get(key));
+    if (!current || !isCurrent() || !isCachedJsonFenceCurrent(fence)) return;
+    if (intervalMs && (current.recordId !== recordId || current.updatedAt !== updatedAt || !responseTouchDue(current, intervalMs))) return;
     await requestToPromise(store.put({
       ...current,
       accessedAt: new Date().toISOString(),

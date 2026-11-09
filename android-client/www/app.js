@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-0a663c3bea5d";
-import { fetchJson } from "./js/api.js?v=assets-0a663c3bea5d";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-76f4b0fadf4d";
+import { fetchJson } from "./js/api.js?v=assets-76f4b0fadf4d";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-0a663c3bea5d";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-0a663c3bea5d";
-import { getElements } from "./js/dom.js?v=assets-0a663c3bea5d";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-0a663c3bea5d";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-0a663c3bea5d";
-import { captureAccountOwner, isAccountOwnerCurrent } from "./js/account-owner.js";
+import { cacheAgeText, captureCachedJsonFence, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-76f4b0fadf4d";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-76f4b0fadf4d";
+import { getElements } from "./js/dom.js?v=assets-76f4b0fadf4d";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-76f4b0fadf4d";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-76f4b0fadf4d";
+import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-0a663c3bea5d";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-0a663c3bea5d";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-0a663c3bea5d";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-0a663c3bea5d";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-76f4b0fadf4d";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-76f4b0fadf4d";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-76f4b0fadf4d";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-76f4b0fadf4d";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-0a663c3bea5d";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-0a663c3bea5d";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-0a663c3bea5d";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-0a663c3bea5d";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-76f4b0fadf4d";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-76f4b0fadf4d";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-76f4b0fadf4d";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-76f4b0fadf4d";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -43,6 +43,7 @@ window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
   invalidateViewRender();
   ++libraryLoadGeneration;
   libraryLoadPromise = null;
+  libraryLoadError = null;
   library = null;
   workViews?.pageDataService?.invalidate(activeUrl, "/");
   workViews?.favoriteFolders?.reset?.();
@@ -58,7 +59,6 @@ window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
     // without a saved digest. Continue in this page rather than reload-looping.
     queueMicrotask(() => {
       if (!androidModuleRegistry || accountReloadPending) return;
-      void loadDashboard();
       renderCurrentView();
     });
     return;
@@ -167,6 +167,10 @@ let searchSurfaceExpanded = initialViewState.view === "search" || (initialViewSt
 let searchPrepareTimer = 0;
 const HISTORY_MARKER = "fanhao-android";
 const LIBRARY_CACHE_PATH = "/api/library";
+const LIBRARY_METADATA_CACHE_PATH = "/api/library?peopleRevision=metadata";
+const LIBRARY_CACHE_TOUCH_INTERVAL_MS = 30 * 60 * 1000;
+const LIBRARY_CACHE_WRITE_MIN_PEOPLE = 4096;
+const LIBRARY_CACHE_WRITE_MAX_DELAY_MS = 150;
 const MODULE_CATALOG_CACHE_PATH = "/api/modules";
 const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary?cache=0";
 const NOVEL_SUMMARY_CACHE_PATH = "/api/novels/summary";
@@ -575,6 +579,10 @@ function currentScrollY() {
   return Math.max(0, Math.round(window.scrollY || document.documentElement.scrollTop || 0));
 }
 
+function requestedViewScrollY() {
+  return pendingScrollRestore?.token === viewRenderToken ? pendingScrollRestore.target : currentScrollY();
+}
+
 function scrollToTopInstant() {
   window.scrollTo({ top: 0, behavior: "auto" });
 }
@@ -591,7 +599,7 @@ function queueScrollRestore(value = 0) {
 
 function restorePendingScroll() {
   const pending = pendingScrollRestore;
-  if (!pending || pending.token !== viewRenderToken) return;
+  if (!pending || pending.token !== viewRenderToken || !androidModuleRegistry) return;
 
   const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   window.scrollTo({ top: Math.min(pending.target, maxScroll), behavior: "auto" });
@@ -1671,10 +1679,9 @@ function decodeRouteSegment(value) {
   }
 }
 
-function loadDashboard() {
+function loadDashboard(bootReady = null) {
   if (libraryLoadPromise) return libraryLoadPromise;
   const requestUrl = activeUrl;
-  const previousLibrary = isLibrarySnapshot(library) ? library : null;
   const generation = ++libraryLoadGeneration;
   const isCurrent = () => generation === libraryLoadGeneration && requestUrl === activeUrl;
   libraryLoadError = null;
@@ -1685,25 +1692,108 @@ function loadDashboard() {
   if (currentView === "home") loadHomeSummaries();
 
   const request = (async () => {
-    let cached = null;
+    let cachedLibrary = null;
+    let cachedAt = null;
+    let fence;
     try {
-      cached = await readCachedJson(requestUrl, LIBRARY_CACHE_PATH).catch(() => null);
+      const account = await prepareAccountOwner(requestUrl).catch(() => null);
       if (!isCurrent()) return false;
-      if (!isLibrarySnapshot(cached?.payload)) cached = null;
-      if (cached?.payload) {
-        library = cached.payload;
+      fence = captureCachedJsonFence(requestUrl, account || captureAccountOwner(requestUrl));
+      const deferPeopleTouch = currentView === "people" && currentViewNeedsLibrary();
+      let deferredTouch;
+      const cached = account && await readCachedJson(requestUrl, LIBRARY_CACHE_PATH, {
+        fence,
+        touchIntervalMs: LIBRARY_CACHE_TOUCH_INTERVAL_MS,
+        scheduleTouch(touch, entry) {
+          if (deferPeopleTouch && isLibrarySnapshot(entry.payload)
+            && entry.payload.people.length >= LIBRARY_CACHE_WRITE_MIN_PEOPLE) {
+            deferredTouch = touch;
+          } else {
+            void touch();
+          }
+        }
+      }).catch(() => null);
+      if (!isCurrent()) return false;
+      const snapshot = cached?.payload;
+      const revision = isLibrarySnapshot(snapshot) && snapshot.scope === "main"
+        && typeof snapshot.peopleRevision === "string" && /^[a-f0-9]{64}$/.test(snapshot.peopleRevision)
+        && typeof cached.recordId === "string" && cached.recordId
+        && accountPayloadOwner(snapshot) === fence.account
+        && isCachedJsonFenceCurrent(fence) ? snapshot.peopleRevision : "";
+      const overlay = revision && await readCachedJson(requestUrl, LIBRARY_METADATA_CACHE_PATH, {
+        fence, touchIntervalMs: Infinity
+      }).catch(() => null);
+      if (!isCurrent()) return false;
+      const showCachedLibrary = () => {
+        if (!isCachedJsonFenceCurrent(fence) || !isLibrarySnapshot(snapshot)) return;
+        // The overlay belongs to the stored snapshot that was revalidated.
+        const merged = overlay?.payload && overlay.payload.snapshotRecordId === cached.recordId
+          ? mergeLibraryMetadata(snapshot, overlay.payload.metadata) : null;
+        cachedLibrary = merged || snapshot;
+        cachedAt = merged ? overlay.updatedAt : cached.updatedAt;
+        library = cachedLibrary;
         renderDashboard(library);
         workViews?.renderContinuePreview({ preferCache: true });
         const targetMode = connectionModeLabel(requestUrl);
         setConnection(`${targetMode} · 缓存`, false);
-        setStatus(`已显示${targetMode}服务的本地缓存：${cacheAgeText(cached.updatedAt)}，正在连接电脑端。`);
+        setStatus(`已显示${targetMode}服务的本地缓存：${cacheAgeText(cachedAt)}，正在连接电脑端。`);
         refreshLibraryDependentView();
+        if (deferredTouch) {
+          const touch = () => void deferredTouch(() => isCurrent() && Boolean(library));
+          if (currentView === "people" && currentViewNeedsLibrary()) scheduleLibraryCacheWrite(touch);
+          else touch();
+        }
+      };
+      if (!bootReady) showCachedLibrary();
+      const conditionalRevision = isCachedJsonFenceCurrent(fence) ? revision : "";
+      const path = `${LIBRARY_CACHE_PATH}?peopleRevision=`;
+      const responseFence = captureCachedJsonFence(requestUrl, fence.account);
+      const pendingData = fetchJson(requestUrl, path + conditionalRevision);
+      if (bootReady) {
+        // Start I/O during module setup and keep both paints behind the same gate.
+        void pendingData.catch(() => {});
+        if (!await bootReady || !isCurrent()) return false;
+        showCachedLibrary();
       }
-      const data = await fetchJson(requestUrl, LIBRARY_CACHE_PATH);
+      let data = await pendingData;
       if (!isCurrent()) return false;
-      if (!isLibrarySnapshot(data)) throw new Error("地址已响应，但未返回有效资料库，请确认电脑端服务和端口。");
-      library = data;
-      writeCachedJson(requestUrl, LIBRARY_CACHE_PATH, library).catch(() => {});
+      const responseCurrent = isCachedJsonFenceCurrent(responseFence);
+      const responseOwner = accountPayloadOwner(data);
+      const merged = conditionalRevision && responseCurrent && responseOwner && isAccountOwnerCurrent(responseOwner)
+        && responseOwner.origin === fence.account.origin
+        ? mergeLibraryMetadata(snapshot, data) : null;
+      if (!responseCurrent || (!merged && conditionalRevision && !isLibrarySnapshot(data))) {
+        const retryFence = captureCachedJsonFence(requestUrl, fence.account);
+        if (!isCachedJsonFenceCurrent(retryFence)) return false;
+        data = await fetchJson(requestUrl, path);
+        if (!isCurrent()) return false;
+        if (!isCachedJsonFenceCurrent(retryFence)) {
+          libraryLoadError = new Error("资料库状态再次变化，请重试。");
+          setConnection("等待刷新", false);
+          setStatus(libraryLoadError.message, "error");
+          if (!library) {
+            renderOffline();
+            refreshLibraryDependentView();
+          }
+          return false;
+        }
+      }
+      const nextLibrary = merged || data;
+      if (!isLibrarySnapshot(nextLibrary)) throw new Error("地址已响应，但未返回有效资料库，请确认电脑端服务和端口。");
+      const deferCacheWrite = !library && !merged && nextLibrary.people.length >= LIBRARY_CACHE_WRITE_MIN_PEOPLE
+        && currentView === "people" && currentViewNeedsLibrary();
+      library = nextLibrary;
+      if (isCachedJsonFenceCurrent(fence)) {
+        const cachePath = merged ? LIBRARY_METADATA_CACHE_PATH : LIBRARY_CACHE_PATH;
+        const payload = merged ? { snapshotRecordId: cached.recordId, metadata: data } : data;
+        const write = () => {
+          if (!isCurrent() || !isCachedJsonFenceCurrent(fence)) return;
+          void writeCachedJson(requestUrl, cachePath, payload, { fence, withRecordId: !merged }).catch(() => {});
+        };
+        // Start the deadline after the synchronous People render.
+        if (deferCacheWrite) queueMicrotask(() => scheduleLibraryCacheWrite(write));
+        else write();
+      }
       renderDashboard(library);
       workViews?.renderContinuePreview();
       setConnection(connectionModeLabel(requestUrl, library.access), true);
@@ -1712,6 +1802,7 @@ function loadDashboard() {
       refreshLibraryDependentView();
       return true;
     } catch (error) {
+      if (bootReady && !await bootReady) return false;
       if (!isCurrent()) return false;
       libraryLoadError = error;
       if (isServerAuthenticationError(error)) {
@@ -1724,12 +1815,22 @@ function loadDashboard() {
         updateServiceHealth();
         return false;
       }
+      if (error?.code === "ACCOUNT_CHANGED") {
+        library = null;
+        setConnection("账号已切换", false);
+        setStatus(error.message, "error");
+        renderOffline();
+        refreshLibraryDependentView();
+        return false;
+      }
       const targetMode = connectionModeLabel(requestUrl);
       setConnection(`${targetMode} · 离线`, false);
-      if (cached?.payload || previousLibrary) {
-        library = cached?.payload || previousLibrary;
-        setStatus(cached?.payload
-          ? `电脑端暂时连不上，继续显示本地缓存：${cacheAgeText(cached.updatedAt)}。`
+      const currentCache = isCachedJsonFenceCurrent(fence) ? cachedLibrary : null;
+      const displayedLibrary = isLibrarySnapshot(library) ? library : null;
+      if (currentCache || displayedLibrary) {
+        library = currentCache || displayedLibrary;
+        setStatus(currentCache
+          ? `电脑端暂时连不上，继续显示本地缓存：${cacheAgeText(cachedAt)}。`
           : "电脑端暂时连不上，继续显示已加载内容。", "error");
       } else {
         library = null;
@@ -1753,16 +1854,59 @@ function loadDashboard() {
   return request;
 }
 
+function scheduleLibraryCacheWrite(write) {
+  if (document.hidden) {
+    write();
+    return;
+  }
+  let settled = false;
+  let frame = window.requestAnimationFrame(() => {
+    // A second callback gives the new cards a rendering opportunity.
+    frame = window.requestAnimationFrame(flush);
+  });
+  const timeout = window.setTimeout(flush, LIBRARY_CACHE_WRITE_MAX_DELAY_MS);
+  document.addEventListener("visibilitychange", flushWhenHidden);
+  window.addEventListener("pagehide", flush);
+
+  function flushWhenHidden() {
+    if (document.hidden) flush();
+  }
+
+  function flush() {
+    if (settled) return;
+    settled = true;
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(timeout);
+    document.removeEventListener("visibilitychange", flushWhenHidden);
+    window.removeEventListener("pagehide", flush);
+    write();
+  }
+}
+
 function isLibrarySnapshot(value) {
   return Boolean(value && Array.isArray(value.people) && value.totals && typeof value.totals === "object" && !Array.isArray(value.totals));
+}
+
+function mergeLibraryMetadata(snapshot, metadata) {
+  if (metadata?.peopleUnchanged !== true || metadata.peopleRevision !== snapshot.peopleRevision
+    || metadata.scope !== snapshot.scope || Object.hasOwn(metadata, "people")
+    || metadata.totals?.people !== snapshot.people.length) return null;
+  const { peopleUnchanged, ...fresh } = metadata;
+  return { ...fresh, people: snapshot.people };
 }
 
 function currentViewNeedsLibrary() {
   return currentView === "home" || (currentView === "people" && currentViewParams.scope !== "western");
 }
 
+function currentViewUsesLibrary() {
+  return currentViewNeedsLibrary() || currentView === "personDetail" || currentView === "workDetail"
+    || (currentView === "search" && currentViewParams.category !== "western");
+}
+
 function refreshLibraryDependentView() {
-  if (currentViewNeedsLibrary()) renderCurrentViewPreservingScroll();
+  if (!currentViewNeedsLibrary()) return;
+  renderCurrentView({ restoreScrollY: requestedViewScrollY() });
 }
 
 function renderDashboard(data) {
@@ -2180,8 +2324,13 @@ function restoreFromHistoryState(historyState) {
 }
 
 function renderCurrentView(options = {}) {
+  if (!androidModuleRegistry) return;
   const restoreScrollY = Number.isFinite(Number(options.restoreScrollY)) ? Math.max(0, Math.round(Number(options.restoreScrollY))) : null;
   const restoreIntent = scrollRestoreIntent;
+  const startup = androidModuleRegistry?.startup;
+  const routeMissing = currentView === "home"
+    ? startup && !androidModuleRegistry.get("fanhao")
+    : androidModuleRegistry?.resolve && !androidModuleRegistry.resolve(currentView, currentViewParams);
   const preserveShortVideoHome = Boolean(
     options.preserveShortVideoHome
     && currentView === "shortVideos"
@@ -2209,7 +2358,10 @@ function renderCurrentView(options = {}) {
   }));
   androidModuleRegistry?.deactivateExcept(currentView, currentViewParams);
 
-  if (currentView === "home") {
+  if (!routeMissing && !library && androidModuleRegistry && currentViewUsesLibrary()
+    && !libraryLoadPromise && !libraryLoadError && !connectionPending) void loadDashboard();
+
+  if (currentView === "home" && !routeMissing) {
     return showHome({ restoreScrollY: restoreScrollY ?? 0 });
   }
   els.statusCard.hidden = true;
@@ -2236,6 +2388,14 @@ function renderCurrentView(options = {}) {
     setActiveBottom();
     const renderGuard = beginViewRender(currentView, currentViewParams);
     finishAppStartup();
+    if (routeMissing) {
+      if (startup) {
+        startup.pendingRender = { renderGuard, restoreScrollY, restoreIntent };
+      } else {
+        renderModuleUnavailable("页面模块未能加载，可以返回或切换到其他页面。");
+      }
+      return;
+    }
     if (!library && currentViewNeedsLibrary()) {
       renderLibraryAvailability();
       return;
@@ -2246,6 +2406,12 @@ function renderCurrentView(options = {}) {
     // not leave the old presentation exempt from its aborted route guard.
     if (preserveChannelList) { try { options.preserveChannelList(false); } catch {} }
   }
+}
+
+function renderModuleUnavailable(text) {
+  const message = createLoadingRow(text);
+  message.classList.remove("route-loading");
+  els.viewContent.replaceChildren(message);
 }
 
 function renderLibraryAvailability() {
@@ -3100,25 +3266,27 @@ function searchContext() {
   return { view: currentView, params: currentViewParams };
 }
 
-async function initializeAndroidModules(definitions, preparedImports) {
-  androidModuleRegistry = await loadAndroidModules(definitions, createAndroidModuleHost(), preparedImports);
-  const fanhaoApi = androidModuleRegistry.get("fanhao")?.api || {};
-  const photoApi = androidModuleRegistry.get("photos")?.api || {};
-  const mediaApi = androidModuleRegistry.get("media")?.api || {};
+function publishAndroidModules(registry, startup) {
+  androidModuleRegistry = startup ? Object.freeze({ ...registry, startup }) : registry;
+  const fanhaoApi = registry.get("fanhao")?.api || {};
+  const photoApi = registry.get("photos")?.api || {};
+  const mediaApi = registry.get("media")?.api || {};
   workViews = fanhaoApi.workViews || null;
   peopleViews = fanhaoApi.peopleViews || null;
   detailViews = fanhaoApi.detailViews || null;
-  novelViews = androidModuleRegistry.get("novels")?.api.novelViews || null;
-  musicViews = androidModuleRegistry.get("music")?.api.musicViews || null;
-  shortVideoViews = androidModuleRegistry.get("short-videos")?.api.shortVideoViews || null;
-  toolViews = androidModuleRegistry.get("tools")?.api.toolViews || null;
+  novelViews = registry.get("novels")?.api.novelViews || null;
+  musicViews = registry.get("music")?.api.musicViews || null;
+  shortVideoViews = registry.get("short-videos")?.api.shortVideoViews || null;
+  toolViews = registry.get("tools")?.api.toolViews || null;
   channelViews = createChannelViewsFacade(photoApi.channelViews, mediaApi.channelViews);
 }
 
 function createAndroidModuleHost() {
   return Object.freeze({
     clientVersion: CLIENT_VERSION,
-    onModuleError: (definition, error) => setStatus(`模块 ${definition.title || definition.id} 加载失败：${error.message || error}`, "error"),
+    onModuleError(definition, error) {
+      if (!androidModuleRegistry) setStatus(`模块 ${definition.title || definition.id} 加载失败：${error.message || error}`, "error");
+    },
     els,
     mediaViewer,
     getActiveUrl: () => activeUrl,
@@ -3725,26 +3893,80 @@ async function bootApp() {
   if (els.appStartupMessage) els.appStartupMessage.textContent = initialSettingsRequested ? "正在打开设置" : routeLoadingCopy().message;
   updateServer(activeUrl);
   const preparedImports = prepareAndroidModuleImports(CLIENT_VERSION);
-  const cachedCatalog = await readCachedJson(activeUrl, MODULE_CATALOG_CACHE_PATH).catch(() => null);
-  const modules = cachedCatalog?.payload?.modules
-    ? mergeAndroidModuleCatalog(cachedCatalog.payload.modules)
-    : androidModuleFallbackCatalog();
-  await initializeAndroidModules(modules, preparedImports);
-  els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
-  bottomLayout.refresh();
-  void loadDashboard();
-  renderCurrentView();
-  void refreshModuleCatalog(activeUrl);
-  void checkAndroidUpdate({ silent: true });
-  if (initialSettingsRequested && els.settingsOverlay?.hidden) showSettings({ skipHistory: true });
+  const startup = { pendingRender: null };
+  let revealLibrary;
+  const firstViewReady = new Promise((resolve) => { revealLibrary = resolve; });
+  let firstViewShown = false;
+  if (currentView === "people" && currentViewNeedsLibrary()) void loadDashboard(firstViewReady);
+
+  try {
+    const cachedCatalog = await readCachedJson(activeUrl, MODULE_CATALOG_CACHE_PATH).catch(() => null);
+    const modules = cachedCatalog?.payload?.modules
+      ? mergeAndroidModuleCatalog(cachedCatalog.payload.modules)
+      : androidModuleFallbackCatalog();
+    els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
+    bottomLayout.refresh();
+    const registry = await loadAndroidModules(modules, createAndroidModuleHost(), preparedImports, {
+      onProgress(_module, getRegistry) { publish(getRegistry(), startup); }
+    });
+    publish(registry);
+  } finally {
+    revealLibrary(false);
+  }
+
+  function publish(registry, loading) {
+    if (accountReloadPending) return;
+    const routeReady = currentView === "home" ? registry.get("fanhao") : registry.resolve(currentView, currentViewParams);
+    if (!firstViewShown && loading && !routeReady) return;
+    publishAndroidModules(registry, loading);
+    if (!firstViewShown) {
+      renderCurrentView({ restoreScrollY: requestedViewScrollY() });
+      firstViewShown = true;
+      revealLibrary(true);
+      void refreshModuleCatalog(activeUrl, { promptForAccount: !currentViewUsesLibrary() });
+      void checkAndroidUpdate({ silent: true });
+      if (initialSettingsRequested && currentView === "tools" && els.settingsOverlay?.hidden) showSettings({ skipHistory: true });
+      return;
+    }
+
+    const waiting = startup.pendingRender;
+    if (!waiting) return;
+    if (!waiting.renderGuard()) {
+      startup.pendingRender = null;
+      return;
+    }
+    if (loading && !routeReady) return;
+    startup.pendingRender = null;
+    // Carry the waiting route's position only while its original scroll intent survives.
+    const restoreScrollY = waiting.restoreIntent === scrollRestoreIntent ? waiting.restoreScrollY : currentScrollY();
+    const view = currentView;
+    const params = currentViewParams;
+    try {
+      renderCurrentView({ restoreScrollY });
+    } catch (error) {
+      console.error("[android-route]", error);
+      if (!accountReloadPending && currentView === view && currentViewParams === params) {
+        invalidateViewRender();
+        renderModuleUnavailable("页面暂时无法显示，可以返回或切换到其他页面。");
+      }
+    }
+  }
 }
 
-async function refreshModuleCatalog(serviceBase) {
+async function refreshModuleCatalog(serviceBase, { promptForAccount = false } = {}) {
+  const attempt = connectionAttempt;
+  const sourceRevision = settingsSourceRevision;
   try {
     const modules = await loadModuleCatalog(() => fetchJson(serviceBase, MODULE_CATALOG_CACHE_PATH));
     // Keep active readers and local tools intact; apply metadata on next launch.
     await writeCachedJson(serviceBase, MODULE_CATALOG_CACHE_PATH, { modules });
   } catch (error) {
+    if (promptForAccount && isServerAuthenticationError(error) && serviceBase === activeUrl && sourceRevision === settingsSourceRevision
+      && attempt === connectionAttempt && !connectionPending && !accountReloadPending
+      && !library && !libraryLoadPromise && !libraryLoadError && !currentViewUsesLibrary()) {
+      showAccountLogin(serviceBase, error);
+      return;
+    }
     console.warn("[modules]", error.message || error);
   }
 }

@@ -32,7 +32,12 @@ java=java.replace("final Map<String,Bitmap> frameCache=new HashMap<>();","final 
  .replace("Bitmap loadBitmap(String url,int width,int height){return new Bitmap();}",`Bitmap loadBitmap(String url,int width,int height){reads++;ImageRead next=planned.poll();if(next==null)throw new AssertionError("unscripted decode "+url);next.entered.countDown();try{if(!next.release.await(4,java.util.concurrent.TimeUnit.SECONDS))throw new AssertionError("decoder gate timeout");}catch(InterruptedException e){throw new AssertionError(e);}if(next.throwing)throw new IllegalStateException("controlled decode failure");return next.value;}`)
  .replace("class ShortVideoHolder {", "class ShortVideoHolder {float lastTapX,lastTapY;")
  .replace("public class SurfaceCoverProbe {",`public class SurfaceCoverProbe {
-   static class TextView extends View{String text="";TextView(){visibility=View.GONE;}void setText(String value){text=value;}}
+   static class TextView extends View{
+     interface OnClickListener{void onClick(View view);}
+     String text="";TextView(){visibility=View.GONE;}
+     void setText(String value){text=value;}
+     void setOnClickListener(OnClickListener listener){}void setClickable(boolean value){}
+   }
    final TextView statusView=new TextView();
    static final class ImageRead {final Bitmap value;final boolean throwing;final java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);ImageRead(Bitmap value,boolean throwing,boolean held){this.value=value;this.throwing=throwing;if(!held)release.countDown();}}
    final java.util.concurrent.BlockingQueue<ImageRead> planned=new java.util.concurrent.LinkedBlockingQueue<>();

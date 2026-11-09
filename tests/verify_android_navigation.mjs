@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(root, "android-client/www/app.js"), "ut
 // Exercise the real shell functions without bootstrapping unrelated modules,
 // network requests or device plugins. Only the renderer and DOM are fixtures.
 function appFunction(name) {
-  const start = source.indexOf(`function ${name}(`);
+  const start = new RegExp(`^(?:async )?function ${name}\\(`, "m").exec(source)?.index ?? -1;
   assert.notEqual(start, -1, `Android shell must define ${name}`);
   const remaining = source.slice(start);
   const next = /\r?\n(?:async )?function\s/.exec(remaining);
@@ -80,8 +80,10 @@ function shell() {
     }
   };
   vm.runInNewContext([
-    "invalidateViewRender", "beginViewRender", "sameViewParams", "currentScrollY",
-    "queueScrollRestore", "restorePendingScroll", "cancelPendingScrollRestore", "cancelScrollRestoreFromKeydown", "renderCurrentView"
+    "invalidateViewRender", "beginViewRender", "sameViewParams", "currentScrollY", "requestedViewScrollY",
+    "queueScrollRestore", "restorePendingScroll", "cancelPendingScrollRestore", "cancelScrollRestoreFromKeydown", "renderCurrentView",
+    "renderCurrentViewPreservingScroll", "refreshLibraryDependentView", "renderModuleUnavailable", "createLoadingRow",
+    "publishAndroidModules", "createChannelViewsFacade", "bootApp"
   ].map(appFunction).join("\n"), context, { filename: "android-app-navigation-fixture.js" });
   return { context, frames, timers };
 }
@@ -89,6 +91,169 @@ function shell() {
 async function flushPromises() {
   await new Promise((resolve) => setImmediate(resolve));
 }
+
+async function startBoot(context) {
+  const progress = deferred();
+  const finalRegistry = deferred();
+  Object.assign(context, {
+    androidModuleRegistry: null,
+    accountReloadPending: false,
+    initialSettingsRequested: false,
+    CLIENT_VERSION: "fixture",
+    activeUrl: "http://127.0.0.1:1",
+    MODULE_CATALOG_CACHE_PATH: "/api/modules",
+    bottomLayout: { refresh() {} },
+    watchAndroidUpdateReturn() {},
+    routeLoadingCopy: () => ({}),
+    updateServer() {},
+    prepareAndroidModuleImports() {},
+    readCachedJson: async () => null,
+    androidModuleFallbackCatalog: () => [],
+    renderAndroidModuleNavigation: () => [],
+    createAndroidModuleHost() {},
+    currentViewUsesLibrary: () => false,
+    refreshModuleCatalog() {},
+    checkAndroidUpdate() {},
+    loadAndroidModules(_modules, _host, _imports, { onProgress }) {
+      progress.resolve(onProgress);
+      return finalRegistry.promise;
+    }
+  });
+  const done = context.bootApp();
+  const publish = await Promise.race([
+    progress.promise,
+    done.then(() => { throw new Error("Android startup finished before module registration began"); })
+  ]);
+  return { publish: (registry) => publish({}, () => registry), finish: finalRegistry.resolve, done };
+}
+
+function moduleRegistry(context, resolve, renders = []) {
+  return {
+    get: () => null,
+    deactivateExcept() {},
+    resolve,
+    render(view, params) {
+      renders.push([view, params.category]);
+      return context.task;
+    }
+  };
+}
+
+for (const canceled of [false, true]) {
+  test(`pre-prefix navigation ${canceled ? "respects canceled" : "retains"} scroll restoration through first mount`, async () => {
+    const { context, frames, timers } = shell();
+    const boot = await startBoot(context);
+    const request = deferred();
+    context.task = request.promise;
+    const renders = [];
+    const registry = moduleRegistry(context, () => ({}), renders);
+    try {
+      context.document.documentElement.scrollHeight = 820;
+      // Match showView's render and restore calls while startup is still held.
+      context.renderCurrentView({ restoreScrollY: 840 });
+      context.queueScrollRestore(840);
+      frames.shift()();
+      assert.equal(context.events.length, 0, "the loading shell has not mounted a route");
+      assert.equal(context.pendingScrollRestore.attempts, 0, "waiting for a module consumes no scroll retries");
+      assert.deepEqual(timers, []);
+
+      if (canceled) context.cancelPendingScrollRestore();
+      boot.publish(registry);
+      assert.deepEqual(renders, [["channel", "first"]]);
+      context.document.documentElement.scrollHeight = 4000;
+      request.resolve();
+      await flushPromises();
+      if (canceled) {
+        assert.equal(context.pendingScrollRestore, null);
+        assert.equal(frames.length, 0);
+      } else {
+        assert.equal(context.pendingScrollRestore.target, 840);
+        assert.equal(context.pendingScrollRestore.token, context.viewRenderToken);
+        frames.shift()();
+        assert.equal(context.window.scrollY, 840);
+      }
+    } finally {
+      boot.finish(registry);
+      await boot.done;
+    }
+    assert.equal(renders.length, 1, "terminal registration leaves the mounted route intact");
+  });
+}
+
+test("the latest parameters and scroll own a pending suffix route", async () => {
+  const { context } = shell();
+  context.currentView = "works";
+  const boot = await startBoot(context);
+  const renders = [];
+  const prefix = moduleRegistry(context, (view) => view === "works" ? {} : null, renders);
+  const final = moduleRegistry(context, () => ({}), renders);
+  try {
+    boot.publish(prefix);
+    context.currentView = "channel";
+    context.currentViewParams = { mode: "movie", category: "old" };
+    context.renderCurrentView({ restoreScrollY: 840 });
+    const old = context.androidModuleRegistry.startup.pendingRender;
+    context.currentViewParams = { mode: "movie", category: "latest" };
+    context.renderCurrentView({ restoreScrollY: 260 });
+    assert.equal(old.renderGuard(), false);
+
+    boot.publish(final);
+    await flushPromises();
+    assert.deepEqual(renders, [["works", "first"], ["channel", "latest"]]);
+    assert.equal(context.pendingScrollRestore.target, 260);
+  } finally {
+    boot.finish(final);
+    await boot.done;
+  }
+  assert.equal(renders.length, 2, "finishing the registry does not remount the suffix route");
+});
+
+test("a throwing deferred route stays local and later modules still publish", async () => {
+  const { context } = shell();
+  context.currentView = "works";
+  const boot = await startBoot(context);
+  const renders = [];
+  const errors = [];
+  const rows = [];
+  const removedClasses = [];
+  context.console = { error: (...args) => errors.push(args) };
+  context.document.createElement = () => ({
+    children: [],
+    classList: { remove: (name) => removedClasses.push(name) },
+    append(child) { this.children.push(child); }
+  });
+  context.els.viewContent.replaceChildren = (row) => rows.push(row.children[0].textContent);
+  const prefix = moduleRegistry(context, (view) => view === "works" ? {} : null, renders);
+  const later = moduleRegistry(context, () => ({}), renders);
+  const failure = new Error("synthetic route render failure");
+  let failedGuard;
+  try {
+    boot.publish(prefix);
+    context.currentView = "channel";
+    context.renderCurrentView();
+    boot.publish({
+      ...later,
+      render(_view, _params, guard) {
+        failedGuard = guard;
+        throw failure;
+      }
+    });
+    assert.equal(failedGuard(), false, "work started by the failed route no longer owns the view");
+    assert.equal(failedGuard.signal.aborted, true);
+    assert.deepEqual(errors, [["[android-route]", failure]]);
+    assert.deepEqual(removedClasses, ["route-loading"]);
+    assert.deepEqual(rows, ["页面暂时无法显示，可以返回或切换到其他页面。"]);
+
+    boot.publish(later);
+    assert.deepEqual(renders, [["works", "first"]], "tail registration must not retry the failed view");
+    context.currentView = "works";
+    context.renderCurrentView();
+    assert.deepEqual(renders, [["works", "first"], ["works", "first"]]);
+  } finally {
+    boot.finish(later);
+    await boot.done;
+  }
+});
 
 test("reader lifecycle is notified before route layout and content are replaced", () => {
   const { context } = shell();
@@ -115,6 +280,24 @@ test("current async render restores its requested position once content arrives"
   await flushPromises();
   assert.equal(context.pendingScrollRestore.target, 840);
   assert.equal(context.pendingScrollRestore.token, context.viewRenderToken);
+});
+
+test("library arrival preserves a pending People scroll unless the user canceled it", async () => {
+  for (const canceled of [false, true]) {
+    const { context } = shell();
+    context.currentView = "people";
+    context.currentViewParams = { scope: "main" };
+    context.currentViewNeedsLibrary = () => true;
+    context.queueScrollRestore(840);
+    if (canceled) {
+      context.cancelPendingScrollRestore();
+      context.window.scrollY = 150;
+    }
+    context.refreshLibraryDependentView();
+    await flushPromises();
+    assert.equal(context.pendingScrollRestore.target, canceled ? 150 : 840);
+    assert.equal(context.pendingScrollRestore.token, context.viewRenderToken);
+  }
 });
 
 for (const outcome of ["success", "failure"]) {

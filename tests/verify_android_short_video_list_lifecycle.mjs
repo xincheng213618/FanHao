@@ -61,7 +61,9 @@ async function fixture({ entry = entrySource, controller = controllerSource } = 
   context.isAuthorIndexMounted = () => mounted;
   context.appendListVideos = (rows) => writes.push({ append: rows.map((row) => row.id) });
   context.refreshVideoCards = (row) => writes.push({ refresh: row.id });
-  context.setListLoadingMore = (...args) => writes.push({ loadingMore: args });
+  const recordLoadingMore = (...args) => writes.push({ loadingMore: args });
+  context.setListLoadingMore = recordLoadingMore;
+  context.syncVideoPaging = recordLoadingMore;
   context.setListRefreshing = (...args) => writes.push({ refreshing: args });
   context.shortVideoToast = (message) => writes.push({ toast: message });
   const load = async (source = "all", ids = ["A", "B"], options = {}) => {
@@ -93,6 +95,131 @@ async function staleAppendCannotPublish(options = {}) {
       cases += 1;
     }
   }
+}
+
+function requestedOffset(request) {
+  const [baseUrl, route] = request.args;
+  return new URL(route, baseUrl).searchParams.get("offset");
+}
+
+function captureNativeLaunches() {
+  const launches = [];
+  globalThis.window.Capacitor = { Plugins: { FanHaoPlayer: {
+    async playShortFeed(payload) { launches.push(payload); return { opened: true, canceled: false }; }
+  } } };
+  return launches;
+}
+
+async function verifyLikedGridPagination() {
+  const f = await fixture(), fresh = deferred();
+  const previous = Array.from({ length: 35 }, (_, index) => `video-${index + 1}`);
+  const current = ["new-first", ...previous];
+  const limit = 12;
+  const response = (rows, offset = 0) => page(rows.slice(offset, offset + limit), "liked", {
+    offset, limit, total: rows.length, hasMore: offset + limit < rows.length
+  });
+  const visible = () => f.state.data.videos.map((row) => row.id);
+  const opening = f.views.renderList({ source: "liked", sort: "published" });
+  const initial = f.requests.at(-1);
+  initial.resolve({ data: response(previous), fromCache: true, revalidation: fresh.promise });
+  await opening;
+  assert.deepEqual(visible(), previous.slice(0, limit), "the cached liked prefix remains visible during revalidation");
+  const provisionalLaunches = captureNativeLaunches();
+  assert.equal(await f.context.openShortVideoFromList(f.state.data.videos[0]), true);
+  assert.equal(provisionalLaunches[0]?.hasMore, false, "cached rows can play while their continuation waits for authority");
+  assert.equal(provisionalLaunches[0]?.nextOffset, 0);
+
+  const firstAppend = f.context.loadList(null, { append: true });
+  const repeatedAppend = f.context.loadList(null, { append: true });
+  await settle();
+  assert.equal(f.requests.length, 1, "a cached liked prefix cannot start an offset read before revalidation");
+  fresh.resolve(response(current));
+  await settle();
+  assert.deepEqual(visible(), current.slice(0, limit), "the authoritative prefix replaces the stale prefix before append");
+  assert.equal(f.requests.length, 2, "the staged append resumes when its prefix becomes authoritative");
+  assert.equal(requestedOffset(f.requests.at(-1)), "12");
+  f.requests.at(-1).resolve(response(current, 12));
+  await Promise.all([firstAppend, repeatedAppend]);
+  await settle();
+
+  const finalAppend = f.context.loadList(null, { append: true });
+  assert.equal(f.requests.length, 3);
+  assert.equal(requestedOffset(f.requests.at(-1)), "24");
+  f.requests.at(-1).resolve(response(current, 24));
+  await finalAppend;
+  assert.deepEqual(visible(), current, "all 36 rows remain reachable after a new first item shifts the cached prefix");
+  assert.equal(f.state.data.hasMore, false);
+  cases += 1;
+
+  const overlapping = await fixture();
+  const prefix = previous.slice(0, limit);
+  await overlapping.load("liked", prefix);
+  const duplicatePage = overlapping.context.loadList(null, { append: true });
+  assert.equal(requestedOffset(overlapping.requests.at(-1)), "12");
+  overlapping.requests.at(-1).resolve(page(prefix, "liked", { offset: 12, limit, total: 36 }));
+  await duplicatePage;
+  assert.deepEqual(overlapping.state.data.videos.map((row) => row.id), prefix, "an overlapping raw page adds no duplicate cards");
+  assert.equal(overlapping.state.data.hasMore, true);
+
+  const nativeLaunches = captureNativeLaunches();
+  const opened = await overlapping.context.openShortVideoFromList(overlapping.state.data.videos.at(-1));
+  assert.equal(opened, true);
+  assert.equal(nativeLaunches[0]?.hasMore, true);
+  assert.equal(nativeLaunches[0]?.nextOffset, 24, "native handoff uses the consumed raw offset rather than the visible card count");
+
+  const offlineContinuation = overlapping.context.loadList(null, { append: true });
+  const heldContinuation = overlapping.requests.at(-1);
+  assert.equal(requestedOffset(heldContinuation), "24", "pagination advances by raw rows even when every row was already visible");
+  assert.equal(heldContinuation.args[2].requireAuthoritative, true);
+  assert.equal(overlapping.state.loadingMore, true);
+  assert.deepEqual(overlapping.state.data.videos.map((row) => row.id), prefix);
+  heldContinuation.reject(Object.assign(new Error("offline continuation"), {
+    fallbackData: page(["offline-tail"], "liked", { offset: 24, offline: true, hasMore: false })
+  }));
+  await offlineContinuation;
+  assert.deepEqual(overlapping.state.data.videos.map((row) => row.id), prefix, "offline fallback cannot replace or extend the accepted prefix");
+  assert.equal(overlapping.state.data.hasMore, true, "offline false EOF cannot close an authoritative continuation");
+
+  const afterOverlap = overlapping.context.loadList(null, { append: true });
+  assert.equal(requestedOffset(overlapping.requests.at(-1)), "24", "failed authority leaves the requested raw offset retryable");
+  const tail = previous.slice(limit, limit * 2);
+  overlapping.requests.at(-1).resolve(page(tail, "liked", { offset: 24, limit, total: 36, hasMore: false }));
+  await afterOverlap;
+  assert.deepEqual(overlapping.state.data.videos.map((row) => row.id), [...prefix, ...tail]);
+  assert.equal(overlapping.state.data.hasMore, false);
+  cases += 1;
+}
+
+async function verifyOfflineLikedGridRetry() {
+  const f = await fixture();
+  const cached = page(["offline-first"], "liked", { offset: 0, hasMore: false, offline: true, cacheState: "offline" });
+  const opening = f.views.renderList({ source: "liked", sort: "published" });
+  f.requests.at(-1).resolve({ data: cached, nonAuthoritative: true, revalidation: null });
+  await opening;
+  assert.deepEqual(f.state.data.videos.map((row) => row.id), ["offline-first"]);
+  const nativeLaunches = captureNativeLaunches();
+  assert.equal(await f.context.openShortVideoFromList(f.state.data.videos[0]), true);
+  assert.equal(nativeLaunches[0]?.hasMore, false, "an offline prefix cannot authorize native continuation");
+  assert.equal(nativeLaunches[0]?.nextOffset, 0, "an offline prefix cannot supply a native offset");
+
+  const failed = f.context.loadList(null, { append: true });
+  assert.equal(f.requests.length, 2, "a marked offline false EOF still offers an authoritative first-page retry");
+  const firstRetry = f.requests.at(-1);
+  assert.equal(requestedOffset(firstRetry) ?? "0", "0");
+  assert.equal(firstRetry.args[2].requireAuthoritative, true);
+  firstRetry.reject(new Error("still offline"));
+  await failed;
+  assert.deepEqual(f.state.data.videos.map((row) => row.id), ["offline-first"], "failed retry preserves the visible offline rows");
+
+  const retry = f.context.loadList(null, { append: true });
+  assert.equal(f.requests.length, 3);
+  const secondRetry = f.requests.at(-1);
+  assert.equal(requestedOffset(secondRetry) ?? "0", "0");
+  assert.equal(secondRetry.args[2].requireAuthoritative, true);
+  secondRetry.resolve(page(["online-first"], "liked", { offset: 0, hasMore: false }));
+  await retry;
+  assert.deepEqual(f.state.data.videos.map((row) => row.id), ["online-first"], "a successful retry accepts the authoritative prefix");
+  cases += 1;
 }
 
 async function verify() {
@@ -128,14 +255,18 @@ async function verify() {
   for (const failure of [false, true]) {
     const f = await fixture(), fresh = deferred();
     const pending = f.views.renderList({ source: "all", sort: "published" });
-    f.requests.at(-1).resolve({ data: page(["cached"]), revalidation: fresh.promise });
+    f.requests.at(-1).resolve({ data: page(["cached"]), fromCache: true, revalidation: fresh.promise });
     await pending;
+    const staged = f.context.loadList(null, { append: true });
+    assert.equal(f.requests.length, 1);
     f.leave();
     const before = f.snapshot();
     if (failure) fresh.reject(new Error("late revalidation failure"));
     else fresh.resolve(page(["fresh-after-leave"]));
+    await staged;
     await settle();
     assert.deepEqual(f.snapshot(), before, "cache revalidation is owned by the deactivated list generation");
+    assert.equal(f.requests.length, 1, "deactivated revalidation cannot dispatch its staged append");
     cases += 1;
   }
 
@@ -207,29 +338,35 @@ async function verify() {
     const f = await fixture(), fresh = deferred();
     const initial = page(["A", "B"], "all", { offset: 0 });
     const opening = f.views.renderSearch({ source: "all", query: "query", searchTab: "videos" });
-    f.requests.at(-1).resolve({ data: initial, revalidation: fresh.promise });
+    f.requests.at(-1).resolve({ data: initial, fromCache: true, revalidation: fresh.promise });
     await opening;
     if (timing === "before") {
       fresh.resolve(page(["A", "B", "C"], "all", { offset: 0 }));
       await settle();
     }
-    const offset = timing === "before" ? 3 : 2;
+    const prefix = timing === "before" ? ["A", "B", "C"] : timing === "during" ? ["changed-prefix"] : ["A", "B"];
+    const offset = prefix.length;
     const append = f.context.loadList(null, { append: true });
-    const request = f.requests.at(-1);
-    assert.equal(new URL(request.args[1], request.args[0]).searchParams.get("offset"), String(offset));
-    if (timing === "during") {
-      fresh.resolve(page(["changed-prefix"], "all", { offset: 0 }));
+    if (timing !== "before") {
       await settle();
-      assert.deepEqual(f.state.data.videos.map(row => row.id), ["A", "B"], "an in-flight raw offset retains its accepted search prefix");
-      assert.equal(f.state.loadingMore, true);
+      assert.equal(f.requests.length, 1, "search continuation waits for its authoritative prefix");
+    }
+    if (timing === "during") {
+      fresh.resolve(page(prefix, "all", { offset: 0 }));
+      await settle();
+      assert.deepEqual(f.state.data.videos.map(row => row.id), prefix, "the staged search append accepts the changed prefix before deriving its offset");
     } else if (timing === "metrics") {
       fresh.resolve({ ...initial, videos: [{ ...initial.videos[0], stats: { likes: 99 } }, initial.videos[1]] });
       await settle();
-      assert.equal(f.state.data.videos[0].stats.likes, 99, "compatible metric revalidation still applies during continuation");
+      assert.equal(f.state.data.videos[0].stats.likes, 99, "compatible metrics still apply before continuation");
     }
-    request.resolve(page(["B", "tail"], "all", { offset }));
+    assert.equal(f.requests.length, 2);
+    assert.equal(f.state.loadingMore, true);
+    const request = f.requests.at(-1);
+    assert.equal(requestedOffset(request), String(offset));
+    request.resolve(page([prefix[0], "tail"], "all", { offset }));
     await append;
-    assert.deepEqual(f.state.data.videos.map(row => row.id), timing === "before" ? ["A", "B", "C", "tail"] : ["A", "B", "tail"]);
+    assert.deepEqual(f.state.data.videos.map(row => row.id), [...prefix, "tail"]);
     const final = f.context.loadList(null, { append: true });
     const finalRequest = f.requests.at(-1);
     assert.equal(new URL(finalRequest.args[1], finalRequest.args[0]).searchParams.get("offset"), String(offset + 2));
@@ -238,6 +375,9 @@ async function verify() {
     assert.equal(f.state.data.hasMore, false);
     cases += 1;
   }
+
+  await verifyLikedGridPagination();
+  await verifyOfflineLikedGridRetry();
 
   for (const staleFailure of [false, true]) {
     for (const refreshFailure of [false, true]) {

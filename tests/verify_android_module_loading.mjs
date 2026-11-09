@@ -95,6 +95,7 @@ try {
     return { errors: run.errors, factories: run.factories };
   });
   await verifyBlockedRejection(selected);
+  await verifyPrefixProgress(selected);
   console.log(`android module loading: ${comparisons} complete old-owner contracts passed`);
   const seven = await verifyConcurrency(selected, 7);
   const bounded = await verifyConcurrency(selected, 15);
@@ -168,12 +169,12 @@ async function scenario(loader, name, specs, action) {
         .replaceAll(pathToFileURL(temporary.tempDir).href, "<temp-url>").replaceAll(temporary.tempDir, "<temp>")
         .replace(/(?:before|current|selected)\.mjs/g, "owner.mjs");
     },
-    load(overrides = {}) {
+    load(overrides = {}, options) {
       assert.equal(this.loading, null, "one load per private module namespace");
       this.host = { clientVersion: "fixture-v1", onModuleError: (definition, error) => {
         this.errors.push({ id: definition.id, error: this.errorValue(error) }); this.events.push(`error:${definition.id}`);
       }, ...overrides };
-      this.loading = loader.loadAndroidModules(definitions, this.host);
+      this.loading = loader.loadAndroidModules(definitions, this.host, undefined, options);
       return this.loading;
     },
     snapshot(registry) {
@@ -322,6 +323,55 @@ async function verifyBlockedRejection(loader) {
     assert.deepEqual(registry.modules.map(module => module.id), ["first"]);
     assert.deepEqual(run.errors.map(error => error.id), ["early-rejection"]);
   });
+}
+
+async function verifyPrefixProgress(loader) {
+  await scenario(loader, "ordered-prefix", [
+    { id: "owner", tag: "preferred", view: "shared", matchFirst: true },
+    { id: "failed", factoryError: "fixture factory failure" },
+    { id: "fallback", view: "shared", factoryGate: true },
+    { id: "owner", tag: "last", view: "other" }
+  ], async (run) => {
+    const progress = [];
+    const loading = run.load({}, { onProgress(module, getRegistry) {
+      progress.push({ module, getRegistry });
+    } });
+    await until(() => run.factories.includes("fallback"), "the suffix factory starts and remains held");
+    assert.deepEqual(progress.map(({ module }) => module.api.tag), ["preferred"], "only normalized successes are published");
+    assert.deepEqual(run.errors.map(({ id }) => id), ["failed"]);
+    const first = progress[0].getRegistry();
+    assert(Object.isFrozen(first) && Object.isFrozen(first.modules));
+    assert.equal(first.resolve("shared", { which: "first" }).module, progress[0].module);
+    assert.equal(first.resolve("shared", { which: "second" }), null);
+
+    run.factoryGates[2].resolve();
+    const complete = await loading;
+    assert.deepEqual(run.factories, ["owner", "failed", "fallback", "owner"]);
+    assert.deepEqual(progress.map(({ module }) => module.api.tag), ["preferred", "fallback", "last"]);
+    assert.equal(complete.resolve("shared", { which: "first" }).module, progress[0].module, "a later match cannot take over an earlier route");
+    assert.equal(complete.get("owner").api.tag, "last", "the final registry retains last duplicate ID lookup");
+    assert.equal(first, progress[0].getRegistry());
+    assert.equal(first.get("owner").api.tag, "preferred");
+    assert.equal(first.resolve("shared", { which: "second" }), null, "an existing prefix never acquires suffix routes");
+
+    const second = progress[1].getRegistry();
+    assert.deepEqual(second.modules.map((module) => module.api.tag), ["preferred", "fallback"], "a deferred getter remains anchored to the reported prefix");
+    assert.equal(second.resolve("shared", { which: "second" }).module, progress[1].module);
+    assert.equal(second.resolve("other"), null);
+    assert.equal(second, progress[1].getRegistry());
+  });
+
+  const failure = new Error("progress observer stopped loading");
+  for (const asynchronous of [false, true]) {
+    await scenario(loader, `observer-failure-${asynchronous}`, [{ id: "first" }, { id: "unreached" }], async (run) => {
+      const onProgress = asynchronous ? () => Promise.reject(failure) : () => { throw failure; };
+      await assert.rejects(run.load({}, { onProgress }), (error) => error === failure);
+      assert.deepEqual(run.factories, ["first"]);
+      assert.deepEqual(run.errors, [], "observer failure is not a module failure");
+      assert.deepEqual(run.consoleErrors, []);
+    });
+  }
+  console.log("android module progress: ordered, immutable lazy prefixes and observer error propagation passed");
 }
 
 async function verifyConcurrency(loader, count) {
