@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createWorkSearchCacheFixture, searchUrl } from "./fixtures/work-search-cache-recovery.mjs";
 import { deriveWorkTraits } from "../lib/work-traits.js";
+import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 
 assert.ok(process.argv.slice(2).every(value => ["--legacy-poison", "--legacy-consumers-only"].includes(value)));
 const legacy = process.argv.includes("--legacy-poison");
@@ -19,6 +20,218 @@ function equal(actual, expectedValue, message, fallback = false) {
 }
 function fault(target, reader, phase, extra = {}) { target.state.failure = { reader, phase, ...extra }; }
 function matches(target, query) { const matcher = target.text.createMatcher(query); return target.works.map(work => matcher(work)); }
+function verifySearchSourceCategories() {
+  const target = expected();
+  target.works[1].personName = "Anime";
+  target.state.db.prepare("UPDATE works SET title=? WHERE id=3").run("FC2 PPV 333");
+  let categoryReads = 0, account = "first";
+  const dependencies = target.grouped.works;
+  const query = createWorkQueryService({
+    ...dependencies,
+    library: target.library,
+    workQueryStamp: () => target.state.stamp,
+    userStateStamp: () => account,
+    favoriteStateService: {
+      ...dependencies.favoriteStateService,
+      isFavoriteWork: id => account === "second" && id === "1"
+    },
+    peopleScopeService: {
+      ...dependencies.peopleScopeService,
+      workMatcher: scope => scope === "western" ? work => work.id === "2" : () => true,
+      workMatchesDirect(work, scope) {
+        assert.equal(scope, "western");
+        categoryReads++;
+        return work.id === "1";
+      }
+    }
+  });
+  const page = (filter = "all", sort = "codeAsc", offset = 0, category = "all") =>
+    query.searchPayload(searchUrl("AA", filter, sort, 1, offset, category));
+  const counts = payload => Object.fromEntries(payload.categories.map(({ value, count }) => [value, count]));
+  const first = page();
+  const initial = { censored: 3, western: 1, fc2: 1, anime: 1 };
+  assert.deepEqual(counts(first), initial, "summary uses direct classification across the full source");
+  assert.equal(categoryReads, 6);
+  assert.equal(first.facets.favorite, 0);
+  assert.equal(page("all", "codeAsc", 1).offset, 1);
+  assert.deepEqual(counts(page("localOnly")), initial);
+  assert.deepEqual(counts(page("all", "releaseDesc")), initial);
+  const western = page("all", "codeAsc", 0, "western");
+  assert.deepEqual(western.works.map(work => work.id), ["2"], "selected category uses indexed membership");
+  assert.deepEqual(counts(western), initial, "selected category still reports direct source-wide counts");
+  assert.equal(categoryReads, 6, "paging, filter, sort and selected category reuse the source summary");
+
+  account = "second";
+  const second = page();
+  assert.equal(second.facets.favorite, 1, "the same page reads the new account's favorites");
+  assert.equal(first.facets.favorite, 0);
+  assert.deepEqual(page("favorite").works.map(work => work.id), ["1"]);
+  assert.deepEqual(counts(second), initial);
+  assert.equal(categoryReads, 6, "account changes refresh user facets without rescanning categories");
+
+  target.state.db.exec("UPDATE works SET status='unavailable' WHERE id=3");
+  target.state.stamp = "next-catalog";
+  fault(target, "prefix", "all");
+  for (const offset of [0, 1]) {
+    const failed = target.adapters.withWorkSearchReadStatus(() => page("all", "codeAsc", offset));
+    assert.equal(failed.cacheable, false);
+    assert.deepEqual(counts(failed.value), { censored: 0, western: 1, fc2: 0, anime: 1 });
+    assert.equal(categoryReads, 6 + 2 * (offset + 1), "each incomplete source computes its own fallback summary");
+  }
+  target.state.failure = null;
+  const refreshed = { censored: 3, western: 1, fc2: 0, anime: 1 };
+  assert.deepEqual(counts(page()), refreshed, "the new catalog source excludes the removed FC2 work after same-stamp repair");
+  assert.equal(categoryReads, 15);
+  assert.deepEqual(counts(page("all", "codeAsc", 1)), refreshed);
+  assert.deepEqual(counts(first), initial, "source replacement does not mutate old responses");
+  assert.equal(categoryReads, 15, "the recovered source reuses its fresh summary");
+}
+function verifySearchPersonProfileRecovery() {
+  const target = expected();
+  let profileAvailable = false, searchReads = 0, profileReads = 0, searchReader;
+  const query = createWorkQueryService({
+    ...target.grouped.works,
+    library: target.library,
+    searchPeople() {
+      searchReads++;
+      const row = profileAvailable ? { displayName: "Recovered profile" } : { displayName: "Older profile" };
+      searchReader = Object.assign(() => {
+        profileReads++;
+        return row;
+      }, { cacheable: profileAvailable });
+      return { exact: [], people: [target.person], readProfile: searchReader };
+    },
+    publicPerson() {
+      assert.fail("search chips should not retry an independent point profile read");
+    },
+    createPublicPersonPresenter(readProfile) {
+      assert.equal(readProfile, searchReader, "the chip presenter uses the matching attempt's reader");
+      return (person, options) => {
+        assert.equal(options.skipFallbackAvatar, true);
+        return { id: person.id, displayName: readProfile(person.id).displayName };
+      };
+    }
+  });
+  const page = offset => query.searchPayload(searchUrl("needle phrase", "all", "codeAsc", 1, offset));
+  assert.deepEqual(page(0).people, [{ id: target.person.id, displayName: "Older profile" }]);
+  profileAvailable = true;
+  const recovered = page(1).people;
+  assert.deepEqual(recovered, [{ id: target.person.id, displayName: "Recovered profile" }],
+    "another page at the same stamp retries an incomplete people source");
+  assert.deepEqual(page(0).people, recovered, "the original incomplete page also retries");
+  assert.equal(searchReads, 2, "only the successful source is retained");
+  assert.equal(profileReads, 2, "each search attempt projects the chip from its shared profile reader");
+}
+function createReleaseSortFixture() {
+  const target = expected({ count: 0, localCount: 0 });
+  const dependencies = target.grouped.works;
+  let account = "first", metadataReads = 0, titleReads = 0, presenting = false;
+  for (let index = 0; index < 4800; index++) {
+    const id = String(index < 2 ? 2 - index : index + 1);
+    const group = Math.floor(index / 2);
+    const date = index < 2 ? "2099-12-31" : `2026-${String(group % 12 + 1).padStart(2, "0")}-01`;
+    const work = {
+      id, personId: "1", title: `Fixture title ${group % 91}`, directoryName: `Fixture ${id}`,
+      modifiedAt: "2026-01-01", playableCount: index < 2400 || (index >= 4600 && index < 4760) ? 1 : 0,
+      videos: [], images: [], infos: [],
+      infoSummary: {
+        hasMagnet: index < 1150,
+        get releaseDate() {
+          if (!presenting) metadataReads++;
+          return id === "2400" && target.state.stamp === "catalog-next" ? "2100-01-01" : date;
+        }
+      }
+    };
+    target.works.push(work);
+    target.library.worksById.set(id, work);
+  }
+  const isWestern = work => Number(work.id) > 4600;
+  const favorites = dependencies.favoriteStateService;
+  favorites.isFavoriteWork = id => account === "first" ? Number(id) % 2 === 0 : Number(id) < 4000 && Number(id) % 2 === 1;
+  favorites.publicFavoriteForWork = id => favorites.isFavoriteWork(id) ? { folderId: account, folderName: account } : null;
+  const query = createWorkQueryService({
+    ...dependencies,
+    library: target.library,
+    workQueryStamp: () => target.state.stamp,
+    userStateStamp: () => account,
+    localWorksByCodePrefix: () => target.works,
+    fastMissingCodeSearch: () => [],
+    workHasLocalMarker: work => Number(work.id) <= 1100,
+    displayWorkTitle(title) { titleReads++; return String(title); },
+    peopleScopeService: {
+      ...dependencies.peopleScopeService,
+      workMatcher: scope => scope === "western" ? isWestern : () => true,
+      workMatchesDirect: isWestern
+    },
+    publicWork(...args) {
+      presenting = true;
+      try { return dependencies.publicWork(...args); }
+      finally { presenting = false; }
+    }
+  });
+  return {
+    page(filter = "all", { sort = "releaseDesc", category = "censored", offset = 0 } = {}) {
+      metadataReads = titleReads = 0;
+      const url = searchUrl("AA", filter, sort, 48, offset, category);
+      if (sort === "releaseDesc") url.searchParams.delete("sort");
+      const data = query.searchPayload(url);
+      return { data, metadataReads, titleReads };
+    },
+    nextAccount() { account = "second"; },
+    nextCatalog() { target.state.stamp = "catalog-next"; }
+  };
+}
+function verifySearchReleaseSortReuse() {
+  const actual = createReleaseSortFixture(), oracle = createReleaseSortFixture();
+  function compare(filter, options, message) {
+    const result = actual.page(filter, options), baseline = oracle.page(filter, options);
+    equal(result.data, baseline.data, message);
+    return { result, baseline };
+  }
+  function sorted(page, total, message) {
+    assert.equal(page.data.total, total);
+    assert.equal(page.metadataReads, total, message);
+    assert.ok(page.titleReads > 0, "the fixture exercises tied title keys");
+  }
+  function reused(page, message) {
+    assert.equal(page.metadataReads, 0, message);
+    assert.equal(page.titleReads, 0, message);
+  }
+
+  sorted(actual.page(), 4600, "prime the category parent through the normal first page");
+  const dense = compare("playable", {}, "dense release subset has full DTO and order parity");
+  sorted(dense.baseline, 2400, "a dense subset with no warmed parent still sorts directly");
+  reused(dense.result, "a dense subset reuses the warmed parent's release ordering");
+  assert.deepEqual(dense.result.data.works.slice(0, 2).map(work => work.id), ["2", "1"], "stable ties keep source order");
+  const next = compare("playable", { offset: 48 }, "release subset continuation keeps order and metadata");
+  reused(next.result, "continuation reuses the ordered subset");
+  sorted(compare("playable", { sort: "releaseAsc" }, "ascending request retains independent ordering").result,
+    2400, "the descending parent cannot serve ascending results");
+  sorted(compare("localMarkedA", {}, "minority subset retains direct-sort parity").result,
+    1100, "a minority subset does not scan the larger parent order");
+  const quarter = compare("hasMagnet", {}, "a quarter of the parent retains full order parity");
+  sorted(quarter.baseline, 1150, "the quarter-size oracle sorts directly");
+  reused(quarter.result, "a subset exactly at 25 percent reuses the parent order");
+  sorted(actual.page("all", { category: "western" }), 200, "warm the small category separately");
+  sorted(compare("playable", { category: "western" }, "small dense subset retains direct-sort parity").result,
+    160, "a small subset still sorts even when it is most of its parent");
+
+  const first = compare("favorite", {}, "initial favorite filter preserves full DTO parity").result;
+  reused(first, "the first account reuses the category order");
+  for (const fixture of [actual, oracle]) fixture.nextAccount();
+  const second = compare("favorite", {}, "account switch refreshes favorite membership and cards").result;
+  reused(second, "the second account can use the same release order");
+  assert.equal(first.data.facets.favorite, 2300);
+  assert.equal(second.data.facets.favorite, 2000);
+  assert.equal(first.data.works[0].favoriteFolderId, "first");
+  assert.equal(second.data.works[0].favoriteFolderId, "second");
+  assert.notEqual(second.data.works[0].id, first.data.works[0].id);
+
+  for (const fixture of [actual, oracle]) fixture.nextCatalog();
+  const changed = compare("playable", {}, "catalog revision invalidates the old category release order").result;
+  sorted(changed, 2400, "a catalog revision cannot reuse the prior parent's order");
+  assert.equal(changed.data.works[0].id, "2400", "the new release date appears before old ties");
+}
 function verifyConsumerNegativeControl() {
   const results = [], failures = [];
   const cases = [
@@ -72,6 +285,11 @@ try {
   if (legacyConsumersOnly) {
     verifyConsumerNegativeControl();
   } else {
+  if (!legacy) {
+    verifySearchSourceCategories();
+    verifySearchPersonProfileRecovery();
+    verifySearchReleaseSortReuse();
+  }
   // Compact prefix records carry labels before detail hydration. Full-source
   // facets and tag filters must include later pages without reading details.
   const lateTraits = fixture();

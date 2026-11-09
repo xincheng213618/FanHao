@@ -26,6 +26,7 @@ import { createLatestRequestGate } from "./modules/fanhao/latest-request.js?v=20
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20261105-media-classification-01";
+import { captureWebAccount } from "./platform/accounts/session-context.js";
 
 const browseTextCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -841,11 +842,41 @@ function formatLibraryPaths(values) {
 async function loadLibrary(options = {}) {
   const request = libraryRequests.begin();
   const scope = normalizePeopleScope(state.peopleScope);
+  const isCurrent = () => request.isCurrent() && state.peopleScope === scope;
   const params = new URLSearchParams();
   if (scope !== "main") params.set("scope", scope);
+  const read = (revision = "") => {
+    params.set("peopleRevision", revision);
+    return api(`/api/library?${params}`, { signal: request.signal });
+  };
+  const isFull = (data) => Array.isArray(data?.people) && data.peopleUnchanged !== true
+    && (!data.scope || data.scope === scope);
   try {
-    const data = await api(`/api/library${params.toString() ? `?${params}` : ""}`, { signal: request.signal });
-    if (!request.isCurrent() || state.peopleScope !== scope) return null;
+    const account = captureWebAccount();
+    if (libraryPeopleAccount && !sameLibraryAccount(libraryPeopleAccount, account)) libraryPeopleSnapshots.clear();
+    retireEditedLibraryPeople();
+    const cached = options.force ? null : libraryPeopleSnapshots.get(scope);
+    const ownsResponse = (owner) => owner.revision === account.revision && (!account.owner || owner.owner === account.owner);
+    let data = await read(cached?.revision);
+    if (!isCurrent()) return null;
+    let owner = captureWebAccount();
+    if (!ownsResponse(owner)) return null;
+    retireEditedLibraryPeople();
+    const merged = cached && libraryPeopleSnapshots.get(scope) === cached && mergeLibraryPeople(cached, data, scope);
+    if (merged) data = merged;
+    else if (cached && !isFull(data)) {
+      data = await read();
+      if (!isCurrent()) return null;
+      owner = captureWebAccount();
+      if (!ownsResponse(owner)) return null;
+      retireEditedLibraryPeople();
+    }
+    if (!isFull(data)) throw new Error("资料库响应无效，请重试。");
+    const sorted = merged ? cached.sorted : sortPeopleForList(data.people);
+    if (owner.owner && data.scope === scope && typeof data.peopleRevision === "string" && /^[a-f0-9]{64}$/.test(data.peopleRevision)) {
+      libraryPeopleAccount = owner;
+      libraryPeopleSnapshots.set(scope, { revision: data.peopleRevision, people: data.people, sorted });
+    } else libraryPeopleSnapshots.delete(scope);
     state.library = data;
     state.peopleScope = normalizePeopleScope(data.scope || state.peopleScope);
     state.accessMode = data.access?.mode || "local";
@@ -858,7 +889,7 @@ async function loadLibrary(options = {}) {
     state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
     state.personPageSize = peoplePage.personIndexPageSize();
     resetWorkPaging();
-    state.people = sortPeopleForList(data.people || []);
+    state.people = sorted;
     codePrefixPage.invalidateIndex();
     resetPersonPaging();
 
@@ -871,11 +902,33 @@ async function loadLibrary(options = {}) {
     }
     return data;
   } catch (error) {
-    if (!request.isCurrent()) return null;
+    if (!isCurrent()) return null;
     throw error;
   } finally {
     request.finish();
   }
+}
+
+const libraryPeopleSnapshots = new Map();
+let libraryPeopleAccount = null;
+
+function sameLibraryAccount(a, b) {
+  return a.owner === b.owner && a.revision === b.revision;
+}
+
+function retireEditedLibraryPeople() {
+  const scope = state.library?.scope;
+  const snapshot = libraryPeopleSnapshots.get(scope);
+  // A person can be present in both scopes.
+  if (snapshot && snapshot.sorted !== state.people) libraryPeopleSnapshots.clear();
+}
+
+function mergeLibraryPeople(snapshot, metadata, scope) {
+  if (metadata?.peopleUnchanged !== true || metadata.peopleRevision !== snapshot.revision
+    || metadata.scope !== scope || Object.hasOwn(metadata, "people")
+    || metadata.totals?.people !== snapshot.people.length) return null;
+  const { peopleUnchanged, ...fresh } = metadata;
+  return { ...fresh, people: snapshot.people };
 }
 
 let libraryLoadPromise = null;
@@ -914,7 +967,7 @@ async function setPeopleScope(scope, options = {}) {
     state.filterMode = "all";
   }
   const data = options.force
-    ? await loadLibrary({ deferMainRender: true })
+    ? await loadLibrary({ deferMainRender: true, force: true })
     : await ensureLibraryLoaded({ deferMainRender: true });
   return Boolean(data && state.peopleScope === nextScope);
 }
@@ -954,11 +1007,13 @@ function personSourcePriority(person) {
 }
 
 function sortPeopleForList(people) {
-  return [...people].sort((a, b) => {
-    const priority = personSourcePriority(a) - personSourcePriority(b);
-    if (priority) return priority;
-    return browseTextCollator.compare(displayPersonName(a), displayPersonName(b));
-  });
+  const entries = people.map((person) => ({
+    person,
+    priority: personSourcePriority(person),
+    name: displayPersonName(person)
+  }));
+  entries.sort((a, b) => a.priority - b.priority || browseTextCollator.compare(a.name, b.name));
+  return entries.map(({ person }) => person);
 }
 
 function productViewForActiveView(view = state.activeView) {

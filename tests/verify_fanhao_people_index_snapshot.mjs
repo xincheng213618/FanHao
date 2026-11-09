@@ -11,6 +11,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), p
 const executablePath = [process.env.CHROME_PATH, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"].filter(Boolean).find(file => fs.existsSync(file));
 assert(executablePath, "private Chromium required");
 
+const fixtureOwner = "account:people-fixture";
+const mainRevision = "a".repeat(64), westernRevision = "b".repeat(64), changedRevision = "c".repeat(64);
+
+function libraryRevisionReply(request, { revision = request.scope === "western" ? westernRevision : mainRevision,
+  accessMode = "local", changed = false } = {}) {
+  const prefix = request.scope === "western" ? "W Person" : changed ? "M Person Updated" : "M Person";
+  const people = Array.from({ length: 100 }, (_, index) => ({
+    id: `${request.scope}-${index}`, name: `${prefix} ${String(index).padStart(3, "0")}`, workCount: 1
+  }));
+  const metadata = { scope: request.scope, peopleRevision: revision, totals: { people: people.length },
+    user: {}, works: [], access: { mode: accessMode } };
+  return request.revision === revision ? { ...metadata, peopleUnchanged: true } : { ...metadata, people };
+}
+
 export async function runPeopleIndexSnapshot({ casePattern = "", sourceOverride = null } = {}) {
   const faults = [], reads = []; let checks = 0;
   const server = createServer(async (req, res) => {
@@ -33,6 +47,42 @@ export async function runPeopleIndexSnapshot({ casePattern = "", sourceOverride 
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`, browser = await chromium.launch({ executablePath, headless: true });
   try {
+    await run("people index sorts mixed sources with bounded inspections and stable ties", async () => {
+      const mixed = [
+        { name: "Unknown disk", relativePath: "X:/actors" },
+        { name: "V prefix boundary", relativePath: "V:\\[A] other\\actors" },
+        { name: "R root", relativePath: "R:/actors" },
+        { name: "10 V AV", relativePath: "v:\\Av\\actors" },
+        { name: "2 No path" },
+        { name: "V A1", relativePath: "V:/[A1]" },
+        { name: "V A", sourcePaths: ["V:\\[a]\\actors"] },
+        { name: "O prefix boundary", relativePath: "O:\\[珍藏] other\\actors" },
+        { name: "O Anime", relativePath: "o:/[动漫]" },
+        { name: "O Rare", relativePath: "O:\\[稀有]" },
+        { name: "O Second collection", relativePath: "O:/[珍藏1]/actors" },
+        { name: "O First collection", relativePath: "O:\\[珍藏]" },
+        { name: "F from source paths", relativePath: "R:/actors", sourcePaths: ["V:/[A1]", "F:\\actors"] },
+        { name: "Z raw name", displayName: "Tie 2", relativePath: "G:/actors" },
+        { name: "A raw name", displayName: "tie 2", sourcePaths: ["G:\\actors"], relativePath: "R:/actors" },
+        { name: "Person 10", relativePath: "G:/actors" },
+        { name: "Person 2", relativePath: "g:\\actors", sourcePaths: ["R:/actors", "V:/[A1]"] }
+      ];
+      const filler = Array.from({ length: 10000 - mixed.length }, (_, index) => ({ name: `Z filler ${index}`, relativePath: "X:/actors" }));
+      const people = [...mixed, ...filler].map(({ displayName, ...person }, index) => ({
+        ...person, id: `sort-${index}`, workCount: 1, sourceCount: 1, actorProfile: { gender: "female", displayName }
+      }));
+      const page = await open({ people });
+      try {
+        assert.deepEqual((await page.locator(".person-index-name").allTextContents()).slice(0, mixed.length), [
+          "Person 2", "Person 10", "Tie 2", "tie 2", "F from source paths", "O First collection", "O Second collection",
+          "O Rare", "O Anime", "O prefix boundary", "V A", "V A1", "2 No path", "10 V AV", "V prefix boundary", "R root", "Unknown disk"
+        ], "sorting keeps source priority, numeric display names and original order on collator ties");
+        const inspections = await page.evaluate(() => __sourcePathInspections);
+        console.log(`MEASURE people startup sort: ${inspections.sourcePaths} sourcePaths and ${inspections.relativePath} relativePath reads for ${people.length} rows`);
+        assert(inspections.sourcePaths <= people.length && inspections.relativePath <= people.length,
+          "sorting must inspect each source path field at most once per person");
+      } finally { await page.close(); }
+    });
     await run("people index appends inspect only the delivered page", async () => {
       const page = await open();
       try {
@@ -90,33 +140,145 @@ export async function runPeopleIndexSnapshot({ casePattern = "", sourceOverride 
         await page.locator(".people-index-load-more button").click(); assert.equal(await page.locator(".person-index-card").count(), 96);
       } finally { await page.close(); }
     });
+    await run("people revision revalidates each scope and accepts changed rows", async () => {
+      let updated = false, malformed = false;
+      const { page, requests } = await openVersioned((request) => {
+        if (request.scope === "western") return libraryRevisionReply(request);
+        const reply = libraryRevisionReply(request, { revision: updated ? changedRevision : mainRevision,
+          changed: updated, accessMode: !updated && request.revision === mainRevision ? "remote" : "local" });
+        if (!malformed || !reply.peopleUnchanged) return reply;
+        malformed = false;
+        return { ...reply, peopleRevision: westernRevision };
+      });
+      try {
+        await page.locator(".people-index-load-more button").click();
+        assert.equal(await page.locator(".person-index-card").count(), 96);
+        assert.equal(await page.locator("#topAdminLink").evaluate((link) => link.hidden), false);
+        await changeScope(page, "western");
+        await page.goBack();
+        await waitForScope(page, "main");
+        assert.equal(await page.locator(".person-index-card").count(), 48, "a matched scope gets its own first page");
+        assert.equal(await page.locator("#topAdminLink").evaluate((link) => link.hidden), true,
+          "metadata-only reply must apply current access mode");
+        assert.deepEqual(await page.evaluate(() => __libraryReplies.at(-1)), { scope: "main", revision: mainRevision, full: false });
+
+        await changeScope(page, "western");
+        updated = true;
+        await page.goBack();
+        await page.locator(".person-index-name", { hasText: "M Person Updated 000" }).waitFor();
+        assert.equal(await page.locator(".person-index-card").count(), 48);
+        assert.equal(await page.locator("#topAdminLink").evaluate((link) => link.hidden), false);
+        assert.deepEqual(await page.evaluate(() => __libraryReplies.at(-1)), { scope: "main", revision: changedRevision, full: true });
+
+        await changeScope(page, "western");
+        malformed = true;
+        await page.goBack();
+        await waitForScope(page, "main");
+        await page.locator(".person-index-name", { hasText: "M Person Updated 000" }).waitFor();
+        assert.deepEqual(await page.evaluate(() => __libraryReplies.slice(-2)), [
+          { scope: "main", revision: westernRevision, full: false },
+          { scope: "main", revision: changedRevision, full: true }
+        ]);
+        assert.deepEqual(requests.map(({ scope, revision }) => [scope, revision]), [
+          ["main", ""], ["western", ""], ["main", mainRevision], ["western", westernRevision],
+          ["main", mainRevision], ["western", westernRevision], ["main", changedRevision], ["main", ""]
+        ]);
+        assert(requests.slice(1).every(({ owner }) => owner === fixtureOwner), "revision reads retain the confirmed Web account owner");
+      } finally { await page.close(); }
+    });
+    await run("people revision rejects a late scope reply after newer navigation", async () => {
+      let holdMain = false, release;
+      const held = new Promise((resolve) => { release = resolve; });
+      const { page, requests } = await openVersioned(async (request) => {
+        if (request.scope !== "main" || !holdMain) return libraryRevisionReply(request);
+        holdMain = false;
+        await held;
+        return libraryRevisionReply(request, { revision: changedRevision, changed: true });
+      }, { ignoreLibraryAbort: true });
+      try {
+        await changeScope(page, "western");
+        const originalWestCard = await page.locator(".person-index-card").first().elementHandle();
+        holdMain = true;
+        const pending = page.waitForRequest((request) => {
+          const url = new URL(request.url());
+          return url.pathname === "/api/library" && (url.searchParams.get("scope") || "main") === "main";
+        });
+        await clickScope(page, "main");
+        await pending;
+        await changeScope(page, "western");
+        await page.waitForFunction((card) => !card.isConnected, originalWestCard);
+        const westCard = await page.locator(".person-index-card").first().elementHandle();
+        release();
+        await page.waitForFunction((revision) => __libraryReplies.some((reply) => reply.revision === revision), changedRevision);
+        assert.equal(new URL(page.url()).pathname, "/western");
+        assert.equal(await westCard.evaluate((card) => card === document.querySelector(".person-index-card")), true,
+          "a late reply cannot replace the active Western grid");
+        await changeScope(page, "main");
+        assert.equal(await page.locator(".person-index-name", { hasText: "M Person Updated 000" }).count(), 0);
+        assert.deepEqual(requests.map(({ scope, revision }) => [scope, revision]), [
+          ["main", ""], ["western", ""], ["main", mainRevision], ["main", mainRevision]
+        ], "the late full reply cannot replace the stored main revision");
+      } finally { release(); await page.close(); }
+    });
     assert(checks > 0); assert.deepEqual(faults, []); console.log(`People index snapshot passed (${checks} actual-shell cases).`);
   } finally { await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   async function run(name, action) { if (casePattern && !name.includes(casePattern)) return; await action(); checks++; console.log(`PASS ${name}`); }
-  async function open() {
+  async function open({ people = null, library = null, ignoreLibraryAbort = false } = {}) {
     const page = await browser.newPage({ viewport: { width: 390, height: 900 } }); page.setDefaultTimeout(5000); page.on("pageerror", error => faults.push(error.message));
-    await page.addInitScript(() => {
+    if (people || library) await page.route((url) => url.pathname === "/api/library", (route) => library ? library(route) : route.fulfill({
+      json: { scope: "main", people, works: [], totals: {}, user: {}, access: { mode: "local" } }
+    }));
+    await page.addInitScript(({ measureSourcePaths, ignoreLibraryAbort }) => {
       Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } });
       window.__peopleObservers = []; window.__profileInspections = 0;
+      window.__sourcePathInspections = { sourcePaths: 0, relativePath: 0 };
+      window.__libraryReplies = [];
       window.IntersectionObserver = class { constructor(callback) { this.callback = callback; __peopleObservers.push(this); } observe(target) { this.target = target; this.connected = true; } disconnect() { this.connected = false; } unobserve() {} };
       const fetch = window.fetch.bind(window);
       window.fetch = async (...args) => {
+        const isLibrary = String(args[0]).startsWith("/api/library");
+        if (isLibrary && ignoreLibraryAbort) args[1] = { ...args[1], signal: undefined };
         const response = await fetch(...args);
-        if (String(args[0]).includes("/api/library")) {
+        if (isLibrary) {
           const json = response.json.bind(response);
           response.json = async () => {
             const data = await json();
-            for (const person of data.people) { const profile = person.actorProfile; Object.defineProperty(person, "actorProfile", { configurable: true, get() { __profileInspections++; return profile; } }); }
+            if (data.peopleRevision) __libraryReplies.push({ scope: data.scope, revision: data.peopleRevision, full: Array.isArray(data.people) });
+            for (const person of data.people || []) {
+              const profile = person.actorProfile;
+              Object.defineProperty(person, "actorProfile", { configurable: true, get() { __profileInspections++; return profile; } });
+              if (measureSourcePaths) for (const field of ["sourcePaths", "relativePath"]) {
+                const value = person[field];
+                Object.defineProperty(person, field, { configurable: true, get() { __sourcePathInspections[field]++; return value; } });
+              }
+            }
             return data;
           };
         }
         return response;
       };
-    });
+    }, { measureSourcePaths: Boolean(people), ignoreLibraryAbort });
     await page.goto(`${base}/fanhao`); await page.locator(".person-index-card").first().waitFor(); return page;
   }
+  async function openVersioned(reply, options = {}) {
+    const requests = [];
+    const page = await open({ ...options, library: async (route) => {
+      const url = new URL(route.request().url());
+      const request = { scope: url.searchParams.get("scope") || "main", revision: url.searchParams.get("peopleRevision"),
+        owner: route.request().headers()["x-fanhao-account-owner"] };
+      requests.push(request);
+      return route.fulfill({ headers: { "X-FanHao-Account-Owner": fixtureOwner }, json: await reply(request) });
+    } });
+    return { page, requests };
+  }
   async function changeScope(page, scope) {
+    await clickScope(page, scope);
+    await waitForScope(page, scope);
+  }
+  async function clickScope(page, scope) {
     await page.locator("#fanhaoNavigationButton").click(); await page.locator(`[data-view="people"][data-people-scope="${scope}"]`).click();
+  }
+  async function waitForScope(page, scope) {
     await page.locator(".person-index-name").filter({ hasText: scope === "western" ? "W Person" : "M Person" }).first().waitFor();
     await page.waitForURL(url => url.pathname === (scope === "western" ? "/western" : "/fanhao"));
   }

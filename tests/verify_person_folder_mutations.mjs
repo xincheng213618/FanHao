@@ -360,6 +360,68 @@ function cleanup(fixture) {
 }
 
 {
+  const db = new DatabaseSync(":memory:");
+  const root = path.join(os.tmpdir(), "fanhao-folder-projection-fixture");
+  const sourcePathToAbsolute = (value) => value ? path.resolve(root, value) : "";
+  const coreLibrary = createCoreLibraryService({
+    getCoreDb: () => db,
+    hasCoreDb: () => true,
+    libraryRoots: [root],
+    normalizePersonSearchValue: (value) => String(value).toLowerCase(),
+    pathWithinRoot: withinRoot,
+    sourcePathToAbsolute,
+    uniquePersonNames: (values) => [...new Set(values.filter(Boolean))]
+  });
+  try {
+    db.exec(`
+      CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, display_name TEXT, folder_path TEXT);
+      CREATE TABLE person_redirects(source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL);
+      CREATE TABLE person_library_locations(id INTEGER PRIMARY KEY, person_id INTEGER NOT NULL, path TEXT);
+      CREATE INDEX person_locations_owner ON person_library_locations(person_id);
+      WITH RECURSIVE numbers(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM numbers WHERE id < 1000)
+      INSERT INTO people SELECT id, 'Person ' || id, NULL, 'legacy-' || id FROM numbers;
+      INSERT INTO person_redirects VALUES (2, 1);
+      INSERT INTO person_library_locations VALUES (30, 1, 'second'), (10, 1, 'first'), (20, 2, 'redirected');
+    `);
+    const prepare = db.prepare.bind(db);
+    let prepares = 0;
+    let failBulk = false;
+    db.prepare = (sql) => {
+      prepares += 1;
+      if (failBulk && /FROM\s+main\.person_library_locations\b/i.test(sql)) throw new Error("bulk location read unavailable");
+      return prepare(sql);
+    };
+    const folders = coreLibrary.peopleByFolderName(db);
+    assert(prepares <= 8, `1,000 people must use bounded SQLite preparations, received ${prepares}`);
+    assert.deepEqual(folders.locations.slice(0, 3).map((entry) => [entry.id, entry.path]), [
+      [1, sourcePathToAbsolute("first")], [1, sourcePathToAbsolute("second")], [3, sourcePathToAbsolute("legacy-3")]
+    ], "bound paths retain ID order, redirect sources are skipped, and unbound people use their declared path");
+
+    failBulk = true;
+    assert.deepEqual(coreLibrary.peopleByFolderName(db), folders, "bulk and original point reads build identical folder indexes");
+    failBulk = false;
+    db.exec("UPDATE person_library_locations SET path = 'updated' WHERE id = 10");
+    const next = coreLibrary.peopleByFolderName(db);
+    assert.equal(next.locations[0].path, sourcePathToAbsolute("updated"), "the next rebuild sees a changed binding");
+    db.exec(`CREATE TEMP TABLE person_library_locations(id INTEGER PRIMARY KEY, person_id INTEGER, path TEXT);
+      INSERT INTO temp.person_library_locations VALUES (1, 1, 'temp-override')`);
+    assert.equal(coreLibrary.peopleByFolderName(db).locations[0].path, sourcePathToAbsolute("temp-override"));
+
+    db.exec(`DROP TABLE temp.person_library_locations; DROP TABLE main.person_library_locations;
+      CREATE TABLE person_library_locations(id INTEGER PRIMARY KEY, person_id TEXT, path TEXT);`);
+    db.prepare("INSERT INTO person_library_locations VALUES (1, ?, 'text-owner')").run(1);
+    assert.equal(coreLibrary.peopleByFolderName(db).locations[0].path, sourcePathToAbsolute("text-owner"),
+      "legacy text owner IDs retain SQLite affinity in point lookups");
+    db.exec(`DROP TABLE person_library_locations;
+      CREATE TABLE person_library_locations(person_id INTEGER, path TEXT);
+      INSERT INTO person_library_locations VALUES (1, 'invalid')`);
+    assert.throws(() => coreLibrary.peopleByFolderName(db), /no such column: id/i, "a definitive point-read error is preserved");
+  } finally {
+    db.close();
+  }
+}
+
+{
   let response = null;
   let mutation = null;
   const handled = await routeAdminApi(

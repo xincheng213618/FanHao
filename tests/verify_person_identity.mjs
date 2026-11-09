@@ -68,6 +68,11 @@ function createSearchFixture(rows, redirects = []) {
   let sorting = false;
   let sortReadError = null;
   let identityBulkError = null;
+  let profileReadError = null;
+  let profileReads = 0;
+  let aliasProjections = 0;
+  let exactNormalizations = 0;
+  let fuzzyNormalizations = 0;
   let displayReads = new Map();
   let sortIdentityGets = 0;
   let identityGets = 0;
@@ -96,6 +101,10 @@ function createSearchFixture(rows, redirects = []) {
         },
         all(...args) {
           if (identityBulkError && sql === "SELECT source_id, target_id FROM main.person_redirects") throw identityBulkError;
+          if (sql.includes("AS avatar_candidate_present")) {
+            profileReads += 1;
+            if (profileReadError) throw profileReadError;
+          }
           return statement.all(...args);
         }
       };
@@ -106,6 +115,15 @@ function createSearchFixture(rows, redirects = []) {
     "parseActorAliasesJson", "actorProfileAliases", "preferredPersonDisplayName", "normalizeSourcePath", "isBracketedSearch"]) {
     vm.runInContext(serverFunction(name), context);
   }
+  function countBeforeSort(read, count) {
+    return (value) => {
+      if (!sorting) count();
+      return read(value);
+    };
+  }
+  context.actorProfileAliases = countBeforeSort(context.actorProfileAliases, () => { aliasProjections++; });
+  context.normalizePersonSearchValue = countBeforeSort(context.normalizePersonSearchValue, () => { exactNormalizations++; });
+  context.normalizeSearchValue = countBeforeSort(context.normalizeSearchValue, () => { fuzzyNormalizations++; });
   const profile = createActorProfileService({
     getCoreDb: () => measuredDb, getStamp: () => String(stamp)
   });
@@ -128,11 +146,11 @@ function createSearchFixture(rows, redirects = []) {
   const pointReader = { searchNames: merge.searchNames, record: merge.record, members: merge.members,
     displayName: measureDisplayName(merge.displayName) };
   Object.assign(context, {
-    actorProfileService: { createRowReader: () => pointSearchNames ? null : profile.createRowReader() },
+    actorProfileService: { createCatalogueRowReader: () => pointSearchNames ? undefined : profile.createCatalogueRowReader() },
     personMergeService: {
-      createSearchReader(readRow) {
+      createSearchReader(readRow, normalizeSearchValue) {
         if (!readRow) return pointReader;
-        const reader = merge.createSearchReader(readRow);
+        const reader = merge.createSearchReader(readRow, normalizeSearchValue);
         return { ...reader, displayName: measureDisplayName(reader.displayName) };
       }
     },
@@ -154,12 +172,15 @@ function createSearchFixture(rows, redirects = []) {
       displayReads = new Map();
       sortIdentityGets = 0;
       identityGets = 0;
+      profileReads = 0;
+      aliasProjections = exactNormalizations = fuzzyNormalizations = 0;
       pointSearchNames = pointNames;
       const payload = context[old ? "oldSearchPeople" : pointNames ? "pointSearchPeople" : "searchPeople"](query);
       return {
         payload: JSON.parse(JSON.stringify(payload)), json: JSON.stringify(payload),
         displayReadCount: [...displayReads.values()].reduce((sum, count) => sum + count, 0),
-        maxPersonReads: Math.max(0, ...displayReads.values()), sortIdentityGets, identityGets
+        maxPersonReads: Math.max(0, ...displayReads.values()), sortIdentityGets, identityGets,
+        profileReads, readProfile: payload.readProfile, aliasProjections, exactNormalizations, fuzzyNormalizations
       };
     },
     rename(personId, displayName) {
@@ -178,8 +199,26 @@ function createSearchFixture(rows, redirects = []) {
     makeCycle() {
       currentDb.exec("INSERT INTO person_redirects VALUES(1,2,'fixture','v1'),(2,1,'fixture','v1')");
     },
+    retarget(sourceId, targetId) {
+      currentDb.prepare("UPDATE main.person_redirects SET target_id=? WHERE source_id=?").run(targetId, sourceId);
+    },
+    shadowRedirect(sourceId, targetId) {
+      currentDb.exec("CREATE TEMP TABLE person_redirects(source_id INTEGER PRIMARY KEY, target_id INTEGER)");
+      currentDb.prepare("INSERT INTO temp.person_redirects VALUES(?,?)").run(sourceId, targetId);
+    },
+    clearRedirectShadow() {
+      currentDb.exec("DROP TABLE temp.person_redirects");
+    },
     failSortRead(error) { sortReadError = error; },
     failIdentityBatch(error) { identityBulkError = error; },
+    failProfileRead(error) { profileReadError = error; },
+    clearProfiles: profile.invalidate,
+    clearMerge: merge.invalidate,
+    addAlias(personId, alias) {
+      currentDb.prepare("INSERT INTO person_aliases(person_id,alias,alias_search,source) VALUES(?,?,?,'fixture')")
+        .run(personId, alias, alias.toLowerCase());
+      stamp += 1;
+    },
     close() { for (const connection of databases) connection.close(); }
   };
 }
@@ -272,11 +311,160 @@ function verifySearchDisplayNameReuse() {
     assert(fallback.identityGets > after.identityGets);
     fixture.failIdentityBatch(null);
     fixture.makeCycle();
-    for (const old of [true, false]) assert.throws(() => fixture.run("Match", old), {
-      code: "PERSON_REDIRECT_CYCLE", message: "人物合并关系存在循环"
-    });
+    for (const query of ["Match", "名字不存在"]) for (const old of [true, false]) {
+      assert.throws(() => fixture.run(query, old), { code: "PERSON_REDIRECT_CYCLE", message: "人物合并关系存在循环" });
+    }
   } finally { fixture.close(); }
   console.log("Person search sorting verification passed: full old-response oracle, bounded lazy reads, empty names, shared exact/fuzzy, fresh profiles/merges/connections, cycle and SQL errors.");
+}
+
+function verifySearchNameSnapshotReuse() {
+  const rows = Array.from({ length: 600 }, (_, index) => {
+    const id = index + 1;
+    const aliases = [`旧名-${id}`, `Archive.Alias ${id}`, id % 5 === 0 ? "Exact Alias" : `Alt ${id}`];
+    if (id === 1) aliases.push("[Literal Alias]");
+    return {
+      id, name: `Performer ${id}`, displayName: `Display ${(id * 491) % 600}`, workCount: id % 3 + 1,
+      aliases
+    };
+  });
+  const redirects = rows.filter(row => row.id % 10 === 0).map(row => [row.id, row.id - 1]);
+  const live = createSearchFixture(rows, redirects), oracle = createSearchFixture(rows, redirects);
+  const coldQuery = "名字不存在";
+  function verify(query) {
+    const actual = live.run(query);
+    assert.equal(actual.json, oracle.run(query, false, true).json, query + " retains the complete point-reader response");
+    return actual;
+  }
+  try {
+    const cold = verify(coldQuery);
+    assert.ok(cold.aliasProjections >= rows.length, "a cold search computes the name snapshot");
+    let warmAliasProjections = 0;
+    for (const [query, mode] of [
+      ["另一个不存在的名字", null], ["Archive Alias 121", "fuzzy"], ["Exact Alias", "exact"],
+      ["[Exact Alias]", null], ["[Literal Alias]", "exact"], ["Performer-599", "fuzzy"], ["旧名-599", "exact"]
+    ]) {
+      const warm = verify(query);
+      warmAliasProjections += warm.aliasProjections;
+      assert.equal(warm.payload.people.length > 0, Boolean(mode), query + " exercises the expected match path");
+      if (mode) assert.ok(warm.payload[mode].length > 0, query + " has " + mode + " matches");
+      assert.equal(warm.aliasProjections, 0, query + " reuses the alias projection");
+      assert.equal(warm.exactNormalizations, 1, query + " normalizes only the query for exact matching");
+      assert.equal(warm.fuzzyNormalizations, 1, query + " normalizes only the query for fuzzy matching");
+    }
+    live.failIdentityBatch(Object.assign(new Error("private fixture redirect read failed"), { code: "SQLITE_BUSY" }));
+    assert.ok(verify("第三个不存在的名字").aliasProjections > 0, "a failed redirect snapshot uses fresh point resolution");
+    live.failIdentityBatch(null);
+
+    live.clearProfiles();
+    live.failProfileRead(Object.assign(new Error("private fixture profile read failed"), { code: "SQLITE_BUSY" }));
+    const degraded = live.run("Exact Alias");
+    assert.equal(degraded.readProfile.cacheable, false);
+    assert.deepEqual(degraded.payload.people, [], "a new unavailable profile read bypasses the warm name snapshot at the same stamp");
+    live.failProfileRead(null);
+    assert.ok(verify("Exact Alias").payload.people.length > 0, "repaired profiles restore exact aliases at the same stamp");
+
+    const sourceAlias = "真实合并前的旧别名";
+    for (const fixture of [live, oracle]) {
+      fixture.addAlias(2, sourceAlias);
+      fixture.merge(1, [2]);
+    }
+    const merged = verify(sourceAlias);
+    assert.deepEqual(merged.payload.people.map(person => person.id), ["1"]);
+    assert.deepEqual(merged.payload.matchedPersonIds, ["1", "2"]);
+    assert.ok(merged.aliasProjections > 0, "a new stamp rebuilds the names after a durable merge");
+    assert.equal(verify("Performer-2").aliasProjections, 0, "the merged revision is reusable");
+
+    live.clearMerge();
+    assert.ok(verify(coldQuery).aliasProjections > 0, "explicit merge invalidation drops names even at the same stamp");
+    assert.equal(verify("Exact Alias").aliasProjections, 0);
+    console.log(`person-search-name-snapshot: people=${rows.length}, cold-alias-projections=${cold.aliasProjections}, warm-alias-projections=${warmAliasProjections}`);
+  } finally { live.close(); oracle.close(); }
+}
+
+function verifySearchNameSnapshotBudget() {
+  const padding = "x".repeat(720);
+  const rows = Array.from({ length: 600 }, (_, index) => {
+    const id = index + 1;
+    const aliases = Array.from({ length: 8 }, (_, alias) => `Long-Alias ${id}.${alias} ${padding}`);
+    if (id === 1) aliases.push("Usable alias");
+    return { id, name: `Person ${id}`, aliases };
+  });
+  const fixture = createSearchFixture(rows);
+  try {
+    const first = fixture.run("Usable alias");
+    assert.deepEqual(first.payload.people.map(person => person.id), ["1"]);
+    const distinct = fixture.run("另一个不存在的名字");
+    assert.deepEqual(distinct.payload.people, []);
+    assert.ok(distinct.aliasProjections >= rows.length, "oversized alias projections cannot occupy the name snapshot");
+    assert.equal(fixture.run("Usable alias").json, first.json, "the size ceiling preserves complete matching");
+  } finally { fixture.close(); }
+}
+
+function verifySearchRedirectChangesAtSameStamp() {
+  const fixture = createSearchFixture([
+    { id: 1, name: "Original target" },
+    { id: 2, name: "Shared source" },
+    { id: 3, name: "Alternate target" }
+  ], [[2, 1]]);
+  function sourceMatch(canonicalId, memberIds) {
+    const result = fixture.run("Shared source");
+    assert.deepEqual(result.payload.people.map(({ id, workCount, works }) => ({ id, workCount, works })),
+      [{ id: canonicalId, workCount: 2, works: [`work-${canonicalId}`, "work-2"] }]);
+    assert.deepEqual(result.payload.matchedPersonIds, memberIds);
+    return result;
+  }
+  try {
+    sourceMatch("1", ["1", "2"]);
+    assert.equal(sourceMatch("1", ["1", "2"]).aliasProjections, 0);
+    fixture.retarget(2, 3);
+    assert.ok(sourceMatch("3", ["2", "3"]).aliasProjections > 0, "raw redirect changes refresh normalized keys without a stamp bump");
+    assert.deepEqual(fixture.run("Original target").payload.people[0].works, ["work-1"], "the old target loses the moved source's work");
+
+    fixture.shadowRedirect(2, 1);
+    const shadowed = sourceMatch("1", ["1", "2"]);
+    assert.equal(shadowed.readProfile.cacheable, false);
+    assert.ok(shadowed.aliasProjections > 0, "the TEMP redirect uses current point lookup");
+    assert.deepEqual(fixture.run("Alternate target").payload.people[0].works, ["work-3"], "point fallback builds its own merge records");
+
+    fixture.clearRedirectShadow();
+    const restored = sourceMatch("3", ["2", "3"]);
+    assert.equal(restored.readProfile.cacheable, true);
+    assert.equal(restored.aliasProjections, 0, "the TEMP query cannot replace the prior complete name snapshot");
+  } finally { fixture.close(); }
+}
+
+function verifySearchProfileRecovery() {
+  const rows = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1, name: `Person ${index + 1}`, aliases: index === 0 ? ["旧的资料别名"] : []
+  }));
+  for (const warm of [false, true]) {
+    const fixture = createSearchFixture(rows);
+    try {
+      if (warm) assert.deepEqual(fixture.run("旧的资料别名").payload.people.map(person => person.id), ["1"]);
+      else fixture.clearProfiles();
+      const alias = "新增的资料别名";
+      fixture.addAlias(1, alias);
+      fixture.failProfileRead(Object.assign(new Error("private fixture profile busy"), { code: "SQLITE_BUSY" }));
+      const degraded = fixture.run(alias);
+      assert.equal(degraded.profileReads, 1, "one failed bulk read per query, independent of library size");
+      assert.ok(degraded.aliasProjections > 0, "an unavailable profile snapshot must fall back to fresh name projection");
+      assert.equal(degraded.readProfile.cacheable, false);
+      assert.deepEqual(degraded.payload.people, []);
+      assert.deepEqual(fixture.run("旧的资料别名").payload.people.map((person) => person.id), warm ? ["1"] : []);
+      fixture.failProfileRead(null);
+      const recovered = fixture.run(alias);
+      assert.equal(recovered.profileReads, 1, "retry the profile bulk read at the same revision");
+      assert.ok(recovered.aliasProjections > 0, "a failed projection cannot occupy the recovered name snapshot");
+      assert.equal(recovered.readProfile.cacheable, true);
+      assert.equal(recovered.readProfile("1").core_person_id, 1);
+      assert.deepEqual(recovered.payload.people.map((person) => person.id), ["1"]);
+      assert.equal(Object.hasOwn(recovered.payload, "readProfile"), false, "internal reader stays out of JSON");
+      const reused = fixture.run(alias);
+      assert.equal(reused.profileReads, 0, "healthy profiles remain reusable");
+      assert.equal(reused.aliasProjections, 0, "healthy name snapshots remain reusable");
+    } finally { fixture.close(); }
+  }
 }
 
 const temp = createVerifiedTempDir("fanhao-person-identity-");
@@ -379,5 +567,9 @@ conn.rollback(); conn.close()
   assert.equal(canonicalPersonId(db,6),"8");
   assert.equal(db.prepare("SELECT target_id FROM person_redirects WHERE source_id=6").get().target_id,8);
   verifySearchDisplayNameReuse();
+  verifySearchNameSnapshotReuse();
+  verifySearchNameSnapshotBudget();
+  verifySearchRedirectChangesAtSameStamp();
+  verifySearchProfileRecovery();
   console.log("Person identity verification passed: durable merge, rollback, reservations, conflicts, archive, scan stability, no virtual name merge.");
 } finally { db.close(); temp.cleanup(); }

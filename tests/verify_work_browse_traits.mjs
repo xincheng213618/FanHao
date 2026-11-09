@@ -160,7 +160,7 @@ check("classification search is paginated, local-only, and intersects with text 
   assert.deepEqual(search("class:ltx text fixture").works.map(({ id }) => id), ["work-1"]);
 });
 
-check("library projection reads only valid, version-matched dimensions across video IDs", () => {
+check("library hydration preserves natural person order and reads only version-matched video dimensions", () => {
   const db = new DatabaseSync(":memory:");
   try {
     db.exec(`
@@ -171,10 +171,14 @@ check("library projection reads only valid, version-matched dimensions across vi
       CREATE TABLE local_works(id, work_id, local_path, source_mtime);
       CREATE TABLE local_files(local_work_id, file_id, file_type, file_path, name, title, ext,
         relative_path, size INTEGER, modified_at, playable, sort_order);
-      INSERT INTO people VALUES (1, 'Fixture', 'Fixture', NULL);
-      INSERT INTO work_people VALUES (100, 1, 'actor', 0);
-      INSERT INTO works(id, code, title) VALUES (100, 'AB-100', 'AB-100');
-      INSERT INTO local_works VALUES (1, 100, 'fixture/AB-100', 'one');
+      INSERT INTO people VALUES (1, 'Echo 10', 'Echo 10', NULL), (2, 'Écho 2', 'Écho 2', NULL),
+        (3, 'ECHO 2', 'ECHO 2', NULL), (4, 'echo 2', 'echo 2', NULL);
+      INSERT INTO work_people VALUES (100, 1, 'actor', 0), (101, 2, 'actor', 0),
+        (102, 3, 'actor', 0), (103, 4, 'actor', 0);
+      INSERT INTO works(id, code, title) VALUES (100, 'AB-100', 'AB-100'), (101, 'AB-101', 'AB-101'),
+        (102, 'AB-102', 'AB-102'), (103, 'AB-103', 'AB-103');
+      INSERT INTO local_works VALUES (1, 100, 'fixture/AB-100', 'one'), (2, 101, 'fixture/AB-102', 'one'),
+        (3, 102, 'fixture/AB-103', 'one'), (4, 103, 'fixture/AB-101', 'one');
       INSERT INTO local_files VALUES (1, 'stored-1', 'video', 'fixture/AB-100-4K.mp4',
         'AB-100-4K.mp4', 'AB-100', '.mp4', 'fixture/AB-100-4K.mp4', 1234, 'one', 1, 1);
     `);
@@ -190,7 +194,11 @@ check("library projection reads only valid, version-matched dimensions across vi
     });
     const loadWork = () => service.loadLibrary().worksById.get("100");
     const mediaPath = "fixture/AB-100-4K.mp4";
-    assert.equal(deriveWorkTraits(loadWork()).flags.quality4k, true, "without a cache the explicit filename remains evidence");
+    const uncached = service.loadLibrary();
+    assert.deepEqual(uncached.people.map(({ id }) => id), ["4", "2", "3", "1"],
+      "natural sorting puts 2 before 10 and retains local-path order across case and accent ties");
+    assert.equal(deriveWorkTraits(uncached.worksById.get("100")).flags.quality4k, true,
+      "without a cache the explicit filename remains evidence");
     db.exec("CREATE TABLE video_probe_cache(file_id, file_path)");
     assert.equal(loadWork().videos[0].width, undefined, "a legacy optional schema does not block library loading");
     db.exec(`DROP TABLE video_probe_cache;

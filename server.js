@@ -192,6 +192,7 @@ const {
   WESTERN_LIBRARY_ROOTS
 } = SERVER_CONFIG;
 
+const naturalTextCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const staticFiles = createStaticFileServer({
   publicDir: PUBLIC_DIR,
   mimeTypes: MIME_TYPES,
@@ -652,6 +653,7 @@ const peopleScopeService = createPeopleScopeService({
 const personListService = createPersonListService({
   actorProfileRow,
   actorMovieService,
+  createCatalogueRowReader: actorProfileService.createCatalogueRowReader,
   getStamp: libraryPeopleStamp,
   getLibrary: () => library,
   peopleScopeService,
@@ -1045,7 +1047,7 @@ const adminPersonService = createAdminPersonService({
   corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
   enrichLocalWorksWithActorMovieInfo,
   getLibrary: () => library,
-  pagedWorksPayload,
+  pagedWorksPayload: (...args) => withWorkInfoReadStatus(() => pagedWorksPayload(...args)).value,
   personFolderMutationService,
   personLibraryService,
   publicPerson,
@@ -1232,6 +1234,7 @@ const moduleRegistry = await discoverFanHaoModules({
         prewarmRemoteImagesForWorks,
         prewarmVideoProbesForWorks,
         publicActorProfile,
+        createCatalogueRowReader: actorProfileService.createCatalogueRowReader,
         createPublicPersonPresenter: workPresenterService.createPersonPresenter,
         publicPerson,
         publicWork,
@@ -1452,11 +1455,11 @@ function safeStat(filePath) {
 }
 
 function compareNaturalName(a, b) {
-  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  return naturalTextCollator.compare(a.name, b.name);
 }
 
 function compareNaturalTitle(a, b) {
-  return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  return naturalTextCollator.compare(a.title, b.title);
 }
 
 function normalizeSearchValue(value) {
@@ -1609,7 +1612,8 @@ function searchPeople(rawQuery) {
   const exactCanonicalIds = new Set();
   const fuzzyCanonicalIds = new Set();
   const lowerQuery = query.toLowerCase();
-  const reader = personMergeService.createSearchReader(actorProfileService.createRowReader());
+  const readProfile = actorProfileService.createCatalogueRowReader();
+  const reader = personMergeService.createSearchReader(readProfile, normalizeSearchValue);
 
   const addPersonMatch = (list, canonicalIds, person) => {
     const merged = reader.record(person);
@@ -1618,22 +1622,31 @@ function searchPeople(rawQuery) {
     list.push(merged);
   };
 
-  for (const person of library.people) {
-    const names = reader.searchNames(person);
-    if (names.some((name) => normalizePersonSearchValue(name) === exactName)) {
+  const matchRawNames = (names) => {
+    if (names.some((name) => normalizePersonSearchValue(name) === exactName)) return "exact";
+    if (bracketed) return "";
+    return names.some((name) => name.toLowerCase().includes(lowerQuery)
+      || (normalizedQuery.length >= 2 && normalizeSearchValue(name).includes(normalizedQuery))) ? "fuzzy" : "";
+  };
+  const matchNameKeys = (keys) => {
+    let fuzzy = false;
+    for (let index = 0; index < keys.length; index += 3) {
+      if (keys[index + 1] === exactName) return "exact";
+      if (!bracketed && !fuzzy) {
+        fuzzy = keys[index].includes(lowerQuery) || (normalizedQuery.length >= 2 && keys[index + 2].includes(normalizedQuery));
+      }
+    }
+    return fuzzy ? "fuzzy" : "";
+  };
+
+  for (const [index, person] of library.people.entries()) {
+    const keys = reader.searchNameKeys?.(person, index);
+    const match = keys ? matchNameKeys(keys) : matchRawNames(reader.searchNames(person));
+    if (match === "exact") {
       exactSourceIds.add(person.id);
       for (const member of reader.members(person.id)) exactSourceIds.add(member.id);
       addPersonMatch(exact, exactCanonicalIds, person);
-      continue;
-    }
-
-    if (bracketed) continue;
-
-    if (names.some((name) => {
-      const lowerName = name.toLowerCase();
-      const normalizedName = normalizeSearchValue(name);
-      return lowerName.includes(lowerQuery) || (normalizedQuery.length >= 2 && normalizedName.includes(normalizedQuery));
-    })) {
+    } else if (match === "fuzzy") {
       fuzzySourceIds.add(person.id);
       for (const member of reader.members(person.id)) fuzzySourceIds.add(member.id);
       addPersonMatch(fuzzy, fuzzyCanonicalIds, person);
@@ -1651,11 +1664,13 @@ function searchPeople(rawQuery) {
 
   sortPeople(exact);
   sortPeople(fuzzy);
+  reader.finishSearchNameKeys?.();
   return {
     exact,
     fuzzy,
     matchedPersonIds: [...(exact.length ? exactSourceIds : fuzzySourceIds)],
-    people: exact.length ? exact : fuzzy.slice(0, 20)
+    people: exact.length ? exact : fuzzy.slice(0, 20),
+    readProfile
   };
 }
 
@@ -1739,8 +1754,7 @@ function publicActorProfileSnapshot(row) {
   return actorProfileService.publicSnapshot(row);
 }
 
-function createActorProfileSnapshotReader() {
-  const readRow = actorProfileService.createRowReader();
+function createActorProfileSnapshotReader(readRow = actorProfileService.createRowReader()) {
   let readAliases;
   const readAliasNames = (id) => (readAliases ??= personMergeService.createAliasNameReader(readRow))(id);
   return (id) => actorProfileService.publicSnapshot(readRow(id), readAliasNames);
@@ -1860,11 +1874,14 @@ function workInfoRow(workId) {
 }
 
 function withWorkInfoReadStatus(callback) {
-  return workInfoService.withReadStatus(callback);
+  const { value: info, cacheable: coversCacheable } = workImageService.withCoverStateReadStatus(
+    () => workInfoService.withReadStatus(callback)
+  );
+  return { value: info.value, cacheable: info.cacheable && coversCacheable };
 }
 
 function workInfoReadCacheable() {
-  return workInfoService.readCacheable();
+  return workInfoService.readCacheable() && workImageService.coverStateReadCacheable();
 }
 
 function workInfoFacetRow(workId) {

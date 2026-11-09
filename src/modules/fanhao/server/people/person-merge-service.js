@@ -1,3 +1,5 @@
+const PERSON_SEARCH_NAMES_MAX_BYTES = 16 * 1024 * 1024;
+
 export function createPersonMergeService({
   actorMovieRows,
   actorProfileAliases,
@@ -13,6 +15,7 @@ export function createPersonMergeService({
   uniquePersonNames
 }) {
   let personMergeCache = null;
+  let personSearchNameCache = null;
   const personRecordCache = new Map();
   let personRecordCacheStamp = "";
 
@@ -21,20 +24,34 @@ export function createPersonMergeService({
   }
 
   function mapsForStamp(stamp, resolve) {
-    if (personMergeCache?.stamp === stamp) return personMergeCache.maps;
-    const people = getLibrary().people;
+    const library = getLibrary();
+    if (mergeCacheMatches(stamp, library, resolve)) return personMergeCache.maps;
+    const people = library.people;
     const canonicalForId = resolve || (people.length ? batchCanonicalId() : canonicalId);
+    const maps = buildMergeMaps(people, canonicalForId);
+    personMergeCache = {
+      stamp, library: new WeakRef(library), people: new WeakRef(people),
+      identity: canonicalForId.identitySnapshot, maps
+    };
+    return maps;
+  }
+
+  function buildMergeMaps(people, resolve) {
     const aliasToCanonical = new Map();
     const groupsByCanonical = new Map();
     for (const person of people) {
-      const canonical = canonicalForId(person.id);
+      const canonical = resolve(person.id);
       aliasToCanonical.set(String(person.id), canonical);
       if (!groupsByCanonical.has(canonical)) groupsByCanonical.set(canonical, []);
       groupsByCanonical.get(canonical).push(String(person.id));
     }
-    const nextMaps = { aliasToCanonical, groupsByCanonical };
-    personMergeCache = { stamp, maps: nextMaps };
-    return nextMaps;
+    return { aliasToCanonical, groupsByCanonical };
+  }
+
+  function mergeCacheMatches(stamp, library, resolve) {
+    return personMergeCache?.stamp === stamp && personMergeCache.library.deref() === library
+      && personMergeCache.people.deref() === library.people
+      && (!resolve?.identitySnapshot || personMergeCache.identity === resolve.identitySnapshot);
   }
 
   // Names and aliases are search hints, never identity authority. Only a durable,
@@ -45,7 +62,9 @@ export function createPersonMergeService({
 
   function batchCanonicalId() {
     const resolve = createCanonicalIdReader?.() || resolveCanonicalId;
-    return (personId) => String(resolve(String(personId || "")));
+    const read = (personId) => String(resolve(String(personId || "")));
+    read.identitySnapshot = resolve.identitySnapshot;
+    return read;
   }
 
   function members(personId) {
@@ -67,13 +86,19 @@ export function createPersonMergeService({
     return (id) => aliasNamesForId(library, resolve(id), readRow, canonicalMembers);
   }
 
-  function createMergeReader() {
+  function createMergeReader({ isolateFallback = false } = {}) {
     const stamp = getStamp();
     const library = getLibrary();
     const resolve = batchCanonicalId();
+    const isolated = isolateFallback && !resolve.identitySnapshot;
+    if (!isolated && personMergeCache && !mergeCacheMatches(stamp, library, resolve)) {
+      personMergeCache = null;
+      personRecordCache.clear();
+    }
     let groups;
-    const canonicalMembers = (id) => membersForId(library, id, groups ??= mapsForStamp(stamp, resolve).groupsByCanonical);
-    return { stamp, library, resolve, canonicalMembers };
+    const mergeMaps = isolated ? () => buildMergeMaps(library.people, resolve) : () => mapsForStamp(stamp, resolve);
+    const canonicalMembers = (id) => membersForId(library, id, groups ??= mergeMaps().groupsByCanonical);
+    return { stamp, library, resolve, canonicalMembers, recordCache: isolated ? new Map() : personRecordCache };
   }
 
   function aliasNamesForId(library, canonicalPersonId, readRow, readMembers) {
@@ -109,17 +134,17 @@ export function createPersonMergeService({
     return people.map((person) => person ? recordAtStamp(person, library, stamp, resolve, readMembers) : null);
   }
 
-  function recordAtStamp(person, library, stamp, resolve, readMembers) {
-    if (personRecordCacheStamp !== stamp) {
+  function recordAtStamp(person, library, stamp, resolve, readMembers, recordCache = personRecordCache) {
+    if (recordCache === personRecordCache && personRecordCacheStamp !== stamp) {
       personRecordCacheStamp = stamp;
       personRecordCache.clear();
     }
     const canonicalPersonId = resolve(person.id);
-    if (personRecordCache.has(canonicalPersonId)) return personRecordCache.get(canonicalPersonId);
+    if (recordCache.has(canonicalPersonId)) return recordCache.get(canonicalPersonId);
     const canonical = library.peopleById.get(canonicalPersonId) || person;
     const mergedMembers = readMembers(canonicalPersonId);
     if (mergedMembers.length <= 1) {
-      personRecordCache.set(canonicalPersonId, canonical);
+      recordCache.set(canonicalPersonId, canonical);
       return canonical;
     }
 
@@ -166,7 +191,7 @@ export function createPersonMergeService({
       infoCount: workRows.reduce((sum, work) => sum + Number(work.infoCount || 0), 0),
       modifiedAt
     };
-    personRecordCache.set(canonicalPersonId, mergedRecord);
+    recordCache.set(canonicalPersonId, mergedRecord);
     return mergedRecord;
   }
 
@@ -183,15 +208,57 @@ export function createPersonMergeService({
     return searchNamesForPerson(person, actorProfileRow, aliasNames);
   }
 
-  function createSearchReader(readRow) {
-    const { stamp, library, resolve, canonicalMembers } = createMergeReader();
+  function createSearchReader(readRow, normalizeSearchValue) {
+    const { stamp, library, resolve, canonicalMembers, recordCache } = createMergeReader({ isolateFallback: true });
     const readMembers = (id) => canonicalMembers(resolve(id));
     const readAliases = (id) => aliasNamesForId(library, resolve(id), readRow, canonicalMembers);
+    const searchNames = (person) => searchNamesForPerson(person, readRow, readAliases);
+    const identity = resolve.identitySnapshot;
+    const profile = readRow.profileSnapshot;
+    if (profile && readRow.identitySnapshot !== identity) readRow.cacheable = false;
     return {
       displayName: (person) => displayNameForPerson(person, readRow),
       members: readMembers,
-      record: (person) => recordAtStamp(person, library, stamp, resolve, readMembers),
-      searchNames: (person) => searchNamesForPerson(person, readRow, readAliases)
+      record: (person) => recordAtStamp(person, library, stamp, resolve, readMembers, recordCache),
+      searchNames,
+      ...searchNameKeys({ stamp, library, identity, profile, readRow, searchNames, normalizeSearchValue })
+    };
+  }
+
+  function searchNameKeys({ stamp, library, identity, profile, readRow, searchNames, normalizeSearchValue }) {
+    if (!identity || !profile || readRow.cacheable === false || !normalizeSearchValue) return {};
+    const people = library.people;
+    const cached = personSearchNameCache;
+    if (cached?.stamp === stamp && cached.library.deref() === library && cached.people.deref() === people
+      && cached.identity === identity && cached.profile === profile && cached.normalizeSearchValue === normalizeSearchValue) {
+      return { searchNameKeys: (_person, index) => cached.keys?.[index] || null };
+    }
+    personSearchNameCache = null;
+    let bytes = people.length * 64;
+    let keys = bytes <= PERSON_SEARCH_NAMES_MAX_BYTES ? [] : null;
+    return {
+      searchNameKeys(person, index) {
+        if (!keys) return null;
+        const projected = [];
+        for (const name of searchNames(person)) {
+          const lower = name.toLowerCase();
+          const exact = normalizePersonSearchValue(name);
+          const fuzzy = normalizeSearchValue(name);
+          projected.push(lower, exact, fuzzy);
+          bytes += 80 + 2 * (lower.length + exact.length + fuzzy.length);
+        }
+        if (bytes > PERSON_SEARCH_NAMES_MAX_BYTES) keys = null;
+        else keys[index] = projected;
+        return projected;
+      },
+      finishSearchNameKeys() {
+        if (readRow.cacheable === false || (keys && keys.length !== people.length)) return;
+        // An oversized catalog keeps only its owner marker until the next revision.
+        personSearchNameCache = {
+          stamp, library: new WeakRef(library), people: new WeakRef(people),
+          identity, profile, normalizeSearchValue, keys
+        };
+      }
     };
   }
 
@@ -214,6 +281,7 @@ export function createPersonMergeService({
 
   function invalidate() {
     personMergeCache = null;
+    personSearchNameCache = null;
     personRecordCacheStamp = "";
     personRecordCache.clear();
   }

@@ -350,15 +350,17 @@ function shellFixture() {
   };
   const transport = deferredApi({ ignoreAbort: true });
   const state = { peopleScope: "main", activeView: "people", library: null };
+  let account = { owner: "guest", revision: "" };
   const context = vm.createContext({
     state, api: transport.api, URLSearchParams, libraryRequests: createLatestRequestGate(), console,
+    captureWebAccount: () => account,
     els: {}, normalizeUiConfig: (value) => value, WORK_PAGE_SIZE_BY_ACCESS: { local: 64, remote: 48 },
     preferredWorkPageSize: (value) => value, peoplePage: { personIndexPageSize: () => 64, cancelPendingSelection() {} },
     resetWorkPaging() {}, sortPeopleForList: (value) => value, codePrefixPage: { invalidateIndex() {} }, resetPersonPaging() {},
     PEOPLE_SCOPE_NAMES: new Set(["main", "western"])
   });
   vm.runInContext(`let navigationSequence = 0;\n${section("function beginNavigation(", "async function applyRoute(")}\n${section("async function loadLibrary(", "function normalizeSourcePath(")}\nfunction setActiveView(view, options = {}) { beginNavigation(options); state.activeView = view; }`, context);
-  return { ...transport, state, context };
+  return { ...transport, state, context, setAccount: (next) => { account = next; } };
 }
 
 async function verifyLibraryAndNavigation() {
@@ -391,6 +393,72 @@ async function verifyLibraryAndNavigation() {
   f.calls[2].resolve({ scope: "western", people: [{ id: "western-person" }] });
   assert.equal(await delayedNavigation, false);
   assert.equal(f.state.activeView, "favorites", "a completed scope request must not navigate over a newer user intent");
+}
+
+async function verifyScopedLibraryRevisions() {
+  const retained = shellFixture();
+  const revisions = { main: "a".repeat(64), western: "b".repeat(64) };
+  const full = (scope) => ({ scope, people: [{ id: scope }], peopleRevision: revisions[scope] });
+  const matched = (scope) => ({ scope, totals: { people: 1 }, peopleUnchanged: true, peopleRevision: revisions[scope] });
+  const revisionOf = (index) => new URL(retained.calls[index].path, "http://fixture").searchParams.get("peopleRevision");
+  const first = retained.context.setPeopleScope("main");
+  retained.calls[0].resolve(full("main"));
+  assert.equal(await first, true);
+  const leave = retained.context.setPeopleScope("western");
+  retained.state.people = [{ id: "locally-edited-main" }];
+  retained.calls[1].resolve(full("western"));
+  assert.equal(await leave, true);
+  const back = retained.context.setPeopleScope("main");
+  assert.equal(revisionOf(2), "", "an indexed array edited while leaving must retire its conditional snapshot");
+  retained.calls[2].resolve(full("main"));
+  assert.equal(await back, true);
+  const force = retained.context.setPeopleScope("main", { force: true });
+  assert.equal(revisionOf(3), "", "a forced library refresh must fetch the full list");
+  retained.calls[3].resolve(full("main"));
+  assert.equal(await force, true);
+
+  const oldOwner = retained.context.setPeopleScope("western");
+  assert.equal(revisionOf(4), revisions.western);
+  retained.setAccount({ owner: "account:new", revision: "2" });
+  retained.calls[4].resolve(matched("western"));
+  assert.equal(await oldOwner, false, "a pending match cannot publish after the account changes");
+  assert.equal(retained.state.library.scope, "main");
+  const newOwner = retained.context.setPeopleScope("western");
+  assert.equal(revisionOf(5), "", "a later account cannot send the prior account's revision");
+  retained.calls[5].resolve(full("western"));
+  assert.equal(await newOwner, true);
+
+  const mainForNewOwner = retained.context.setPeopleScope("main");
+  retained.calls[6].resolve(full("main"));
+  assert.equal(await mainForNewOwner, true);
+  retained.state.people = [{ id: "edited-shared-person" }];
+  const revisitWestern = retained.context.setPeopleScope("western");
+  assert.equal(revisionOf(7), "", "an edited person can invalidate both scope snapshots");
+  retained.calls[7].resolve(full("western"));
+  assert.equal(await revisitWestern, true);
+
+  for (const invalidatedBy of ["scope", "account"]) {
+    const fallback = shellFixture();
+    const main = fallback.context.setPeopleScope("main");
+    fallback.calls[0].resolve(full("main"));
+    assert.equal(await main, true);
+    const western = fallback.context.setPeopleScope("western");
+    fallback.calls[1].resolve(full("western"));
+    assert.equal(await western, true);
+    const returning = fallback.context.setPeopleScope("main");
+    fallback.calls[2].resolve({ ...matched("main"), totals: { people: 99 } });
+    await new Promise(setImmediate);
+    const fullRetry = fallback.calls[3];
+    assert.equal(new URL(fullRetry.path, "http://fixture").searchParams.get("peopleRevision"), "");
+    if (invalidatedBy === "scope") {
+      assert.equal(await fallback.context.setPeopleScope("western"), true);
+      assert.equal(fullRetry.signal.aborted, true);
+    } else fallback.setAccount({ owner: "account:new", revision: "2" });
+    fullRetry.resolve(full("main"));
+    assert.equal(await returning, false, `a fallback response must respect a newer ${invalidatedBy}`);
+    assert.equal(fallback.state.library.scope, "western");
+    assert.equal(fallback.calls.length, 4);
+  }
 }
 
 class FixtureElement {
@@ -751,5 +819,6 @@ verifyWorkSearchComposition();
 await verifySearchPaginationOwnership();
 await verifyPersonPaging();
 await verifyLibraryAndNavigation();
+await verifyScopedLibraryRevisions();
 await verifyCatalogRequests();
 console.log("FanHao request lifecycle fixtures passed (scope/navigation, person/prefix/studio paging, bounded/cancellable prefetch).");

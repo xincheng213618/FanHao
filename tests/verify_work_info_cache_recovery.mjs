@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
+import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
+import { createWorkPresenterService } from "../src/modules/fanhao/server/works/presenter-service.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createFanhaoDependencies } from "../src/modules/fanhao/server/composition.js";
-import { createWorkInfoCacheFixture, createWorkInfoDatabase, createActorMovieForWorkInfoFixture, workInfoUrl }
+import { createWorkInfoCacheFixture, createWorkInfoDatabase, createActorMovieForWorkInfoFixture, uniqueText, workInfoUrl }
   from "./fixtures/work-info-cache-recovery.mjs";
 
 // Native private SQLite plus actual provider, presentation, composition and
@@ -24,6 +28,13 @@ function fault(target, reader, phase, extra = {}) { target.state.failure = { rea
 function update(target) {
   target.state.db.exec("UPDATE works SET rating=4.9,title=title||' refreshed',release_date='2027-01-01',raw_text=raw_text||' refreshed'");
   target.state.stamp = "next";
+}
+async function readWorksRoute(url, deps) {
+  let payload;
+  assert(await routeWorksApi({ method: "GET" }, {}, url, {
+    ...deps, sendJson(_res, status, value) { assert.equal(status, 200); payload = value; }
+  }));
+  return payload;
 }
 try {
   for (const phase of ["prepare", "all"]) for (const reader of ["row", "facet"]) {
@@ -270,14 +281,105 @@ try {
 
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   const wrappers = server.slice(server.indexOf("function withWorkInfoReadStatus("), server.indexOf("function workInfoFacetRow("));
-  const connect = new Function("workInfoService", wrappers + "\nreturn {withWorkInfoReadStatus,workInfoReadCacheable};");
-  const production = connect(full.info);
+  const connect = new Function("workInfoService", "workImageService",
+    wrappers + "\nreturn {withWorkInfoReadStatus,workInfoReadCacheable};");
+  const production = connect(full.info, createWorkImageService({}));
   assert.deepEqual(production.withWorkInfoReadStatus(() => 7), { value: 7, cacheable: true });
   assert.equal(production.workInfoReadCacheable(), true);
   assert.equal(full.grouped.works.withWorkInfoReadStatus, full.info.withReadStatus);
   assert.equal(full.grouped.userState.withWorkInfoReadStatus, full.info.withReadStatus);
   assert.equal(full.grouped.works.workInfoReadCacheable, full.info.readCacheable);
   assert.equal(full.grouped.userState.workInfoReadCacheable, full.info.readCacheable);
+
+  for (const warm of [false, true]) {
+    const target = fixture({ count: 3 });
+    let blocked = false;
+    let coverReads = 0;
+    const imageDb = { prepare(sql) {
+      if (sql.includes("AS has_cover")) {
+        coverReads += 1;
+        if (blocked) throw Object.assign(new Error("controlled person cover failure"), { code: "SQLITE_BUSY" });
+      }
+      return target.state.db.prepare(sql);
+    } };
+    const imageService = createWorkImageService({ getCoreDb: () => imageDb,
+      getStamp: () => target.state.stamp, hasCoreDb: () => true });
+    const deps = { ...target.grouped.works, ...connect(target.info, imageService),
+      library: target.library, workHasCoreCover: imageService.workHasCoreCover };
+    const personDetailService = createPersonDetailService({ ...deps, workQueryService: createWorkQueryService(deps) });
+    function readPersonPage(offset = 0, filter = "missingCover") {
+      const url = new URL(`http://fixture.test/api/people/1?filter=${filter}&limit=1&offset=${offset}`);
+      return readWorksRoute(url, { personDetailService });
+    }
+    if (warm) {
+      target.state.db.exec("DELETE FROM fanhao_images.images WHERE owner_id = 1");
+      assert.equal((await readPersonPage()).total, 1);
+      target.state.db.exec(`INSERT INTO fanhao_images.images
+        VALUES(1,'work',1,'cover','https://fixture.test/1',NULL,'','fixture','2026',0)`);
+      target.state.stamp = "new cover stamp";
+    }
+    blocked = true;
+    const before = coverReads;
+    const degraded = await readPersonPage();
+    assert.equal(degraded.person.id, "1");
+    assert.equal(degraded.filmographyCount, 3);
+    assert.equal(degraded.total, warm ? 1 : 3);
+    assert.equal(degraded.facets.missingCover, degraded.total);
+    assert.equal(coverReads, before + 1, "person facets and filters share one failed cover read");
+    blocked = false;
+    for (const offset of [1, 0]) {
+      const recovered = await readPersonPage(offset);
+      assert.equal(recovered.total, 0, "person filter and page recover at the same cover stamp");
+      assert.equal(recovered.facets.missingCover, 0);
+    }
+    assert.equal((await readPersonPage(0, "all")).total, 3);
+    assert.equal(coverReads, before + 2, "successful person cover reads stay reusable");
+  }
+
+  const covers = fixture({ count: 202 });
+  covers.state.db.exec("DELETE FROM fanhao_images.images WHERE owner_id = 202");
+  let metadataBlocked = true;
+  const metadataBatches = [];
+  const metadataDb = { prepare(sql) {
+    const statement = covers.state.db.prepare(sql);
+    if (!sql.includes("image_blob IS NOT NULL AS has_image_blob") || !sql.includes("owner_id IN")) return statement;
+    return { all(...ids) {
+      metadataBatches.push(ids);
+      if (metadataBlocked && ids.includes(1)) {
+        throw Object.assign(new Error("controlled cover metadata failure"), { code: "SQLITE_BUSY" });
+      }
+      return statement.all(...ids);
+    } };
+  } };
+  const coverMetadata = createWorkImageService({ getCoreDb: () => metadataDb,
+    getStamp: () => covers.state.stamp, hasCoreDb: () => true, proxiedRemoteImageUrl: String });
+  const coverStatus = connect(covers.info, coverMetadata);
+  const presenter = createWorkPresenterService({ ...covers.dependencies, ...coverStatus,
+    displayPersonForWork: () => covers.person, actorProfileRow: () => null, publicActorProfile: () => null,
+    localWorkMarkers: () => [], manualCoverStateService: { manualCoverForWork: () => null },
+    publicCoreWorkCover: coverMetadata.publicCoreWorkCover, workInfoDetailRow: covers.info.detailRow,
+    publicWorkInfoSummary: covers.info.publicSummary, firstPresentValue: covers.info.firstPresentValue,
+    uniqueTextArray: uniqueText, dbBoolOrNull: value => value == null ? null : Boolean(Number(value)) });
+  const coverQuery = createWorkQueryService({ ...covers.grouped.works, ...coverStatus,
+    library: covers.library, workHasCoreCover: coverMetadata.workHasCoreCover,
+    prewarmCoreWorkCovers: coverMetadata.prewarmCoreWorkCovers, publicWork: presenter.publicWork });
+  const coverRequest = workInfoUrl("all", "title", 0, 202);
+  const coverPage = url => readWorksRoute(url, { workQueryService: coverQuery });
+  const degradedCovers = await coverPage(coverRequest);
+  assert.equal(degradedCovers.works[0].id, "1");
+  assert.equal(degradedCovers.works[0].cachedCover, null);
+  assert.equal(degradedCovers.works[200].cachedCover.coverUrl, "https://fixture.test/201");
+  assert.deepEqual(metadataBatches.map(ids => ids.length), [200, 2], "prewarm and nested presenters share one failed batch");
+  assert.equal(coverMetadata.publicCoreWorkCover("202"), null, "confirmed absence retains the existing null DTO");
+  assert.equal(metadataBatches.length, 2, "a healthy missing cover is cached");
+  metadataBlocked = false;
+  const firstCover = await coverPage(workInfoUrl("all", "title", 0, 1));
+  assert.equal(firstCover.works[0].cachedCover.coverUrl, "https://fixture.test/1", "alternate page retries metadata at the same stamp");
+  const recoveredCovers = await coverPage(coverRequest);
+  assert.equal(recoveredCovers.works[199].cachedCover.coverUrl, "https://fixture.test/200");
+  assert.equal(recoveredCovers.works[201].cachedCover, null);
+  assert.deepEqual(metadataBatches.map(ids => ids.length), [200, 2, 1, 199], "only the failed IDs need another read");
+  assert.equal(await coverPage(coverRequest), recoveredCovers, "healthy cover metadata pages are cacheable");
   console.log(JSON.stringify({ ok: true, comparisons, fallbackComparisons, warnings: warnings.length,
     privateDatabases: fixtures.length + 1, failedFacetPrewarmQueries: 1, healthyPrewarmQueries: { facet: 1, detail: 1 },
     warmPrewarmQueries: 0, normalDetailOneShotQueries: 3,

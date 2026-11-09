@@ -41,7 +41,7 @@ import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works
 import { comparePopularityMetadata, compareRatingCountMetadata } from "../src/modules/fanhao/server/works/work-sort-metadata.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
-import { sendJson } from "../src/platform/server/responses.js";
+import { sendJson, sendJsonParts } from "../src/platform/server/responses.js";
 import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
@@ -221,7 +221,7 @@ assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSo
 assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
 assert(workDetailServiceSource.includes("const detailCache = new Map()") && workDetailServiceSource.includes("detailCacheStamp"), "work details must stay reusable across card intent and player startup");
 assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") && workDetailServiceSource.includes("detailReady: true"), "playback preparation must hydrate the complete work detail before player navigation");
-assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId)"), "FanHao play-info must validate or relocate indexed media before touching the gallery catalog");
+assert(workDetailServiceSource.includes("library.filesById.get(videoId)") && workDetailServiceSource.includes("requireSource: true") && workDetailServiceSource.includes("resolveMissingSource: resolveMissingVideoSource"), "FanHao play-info must validate or relocate indexed media through the asynchronous probe service");
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes('class="app-module-loading"') && playerHtmlSource.includes('html.app-module-loading body'), "the standalone player must hide its incomplete shell during startup");
@@ -749,7 +749,7 @@ assert(androidApp.includes("const FAST_PEOPLE_LIMIT = 64"), "Android people inde
 assert(androidApp.includes("const FAST_PEOPLE_STEP = 64"), "Android people index must grow in bounded pages");
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
 assert(androidPeopleViews.includes("avatarLoader.schedule(visual, imagePath)"), "Android people avatars must wait until their cards approach the viewport");
-assert(androidPeopleViews.includes("appendPeopleCards(grid, people.slice(start, nextLimit)"), "Android people continuation must append only the next page");
+assert(androidPeopleViews.includes("appendPeopleCards(grid, cache.rankUntil(nextLimit).slice(start, nextLimit)"), "Android people continuation must rank through and append only the next page");
 assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, scope, sortMode, filterMode)") && androidPeopleViews.includes("cache.sourcePeople !== sourcePeople") && androidPeopleViews.includes("cache.scope !== scope") && androidPeopleViews.includes("cache.filterMode !== filterMode"), "Android people navigation must restore only the matching library scope, actor category, and sort without rebuilding it");
 assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") && androidPeopleViews.includes("syncPeopleLimit(cache.grid.children.length)"), "Android people restoration must retain loaded cards and synchronize continuation with the rendered count");
 assert(androidPeopleViews.includes("getSortOptions:") && androidPeopleViews.includes("setSortMode: setPeopleSortMode") && !androidPeopleViews.includes("createPeopleSortControls"), "Android author sorting must be owned by the active chrome tag instead of a permanent row");
@@ -1506,7 +1506,7 @@ assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge m
 assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
 assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery"), "search responses must use the versioned matched-work cache");
 assert(workQueryServiceSource.includes("source.facetsStamp !== stamp") && workQueryServiceSource.includes("source.facetsByCategory.clear()"), "search category facets must only refresh after user state changes");
-assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("categories: categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset]"), "search responses must filter and cache by the selected work category while retaining all category counts");
+assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("source.categories ??= categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset]"), "search responses must filter and cache by the selected work category while reusing all category counts from the matched source");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("return { stamp, keys, rows, searchRows, prefixRows }")
   && workCodeIndexServiceSource.includes("if (result.cacheable !== false) localWorkCodeIndexCache = result.value"),
@@ -1704,6 +1704,89 @@ assert.deepEqual(
   ["cover-a1", "cover-a2"],
   "people-cover warming must match the first desktop page while skipping male entries and actor avatars"
 );
+{
+  // Fixture priorities are explicit so the full-sort oracle does not share
+  // the production path classifier or bounded selection implementation.
+  const cases = [
+    { path: "X:/Actors", rank: 12, label: "Unknown", otherPath: "G:/Actors" },
+    { path: "V:\\[A] other\\Actors", rank: 10, label: "V prefix boundary" },
+    { path: "R:/Actors", rank: 11, label: "R root" },
+    { path: "v:\\Av\\Actors", rank: 9, label: "Performer 10" },
+    { path: "", rank: 9, label: "Performer 2" },
+    { path: "V:/[A1]", rank: 8, label: "V A1" },
+    { path: "V:\\[a]\\Actors", rank: 7, label: "V A" },
+    { path: "O:\\[珍藏] other\\Actors", rank: 6, label: "O prefix boundary" },
+    { path: "o:/[动漫]", rank: 5, label: "O Anime" },
+    { path: "O:\\[稀有]", rank: 4, label: "O Rare" },
+    { path: "O:/[珍藏1]/Actors", rank: 3, label: "O Second collection" },
+    { path: "O:\\[珍藏]", rank: 2, label: "O First collection" },
+    { path: "G:/Actors", rank: 0, label: "Artist 10" },
+    { path: "G:/Actors", rank: 0, label: "Artist 1", kind: "actor-avatar" },
+    { path: "G:/Actors", rank: 0, label: "A", male: true }
+  ];
+  const gaps = ["missing", "video", "no-cover", "shared-id", "shared-id", "shared-path", "shared-path"];
+  for (let index = 0; index < 75; index++) {
+    const label = index % 2 ? "Artist 2" : "artist 2";
+    cases.push({ path: "F:/Actors", rank: 1, label, rawName: `F ${75 - index}` });
+    if (index < 72) cases.push({ path: "g:\\Actors", rank: 0, label, rawName: `G ${72 - index}`, kind: gaps[index] });
+  }
+  const filesById = new Map();
+  const rows = cases.map(({ path, rank, label, otherPath, rawName, kind, male }, index) => {
+    const coverId = kind === "no-cover" ? "" : `bounded-cover-${index}`;
+    const file = {
+      id: kind === "shared-id" ? "duplicate-image" : kind === "shared-path" ? "" : coverId,
+      path: kind === "shared-path" ? "fixture/shared.jpg" : `fixture/${index}.jpg`,
+      type: kind === "video" ? "video" : "image"
+    };
+    if (coverId && kind !== "missing") filesById.set(coverId, file);
+    const person = { id: `bounded-person-${index}`, name: rawName || label, relativePath: path, coverId,
+      sourcePaths: otherPath ? [otherPath] : [],
+      actorProfile: { displayName: rawName ? label : "", gender: male ? "male" : "female" },
+      avatarUrl: kind === "actor-avatar" ? "/media/actor/fixture/avatar" : kind === "no-cover" ? "/media/person/fixture/cover" : "" };
+    const eligible = !["missing", "video", "no-cover", "actor-avatar"].includes(kind);
+    return { person, rank, label, male, file: eligible ? file : null };
+  });
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const ranked = rows.filter((row) => !row.male).sort((a, b) => a.rank - b.rank || collator.compare(a.label, b.label));
+  const expected = (limit = 64) => {
+    const seen = new Set();
+    const files = [];
+    for (const { file } of ranked.slice(0, Math.max(0, Math.floor(Number(limit) || 0)))) {
+      if (!file || seen.has(file.id || file.path)) continue;
+      seen.add(file.id || file.path);
+      files.push(file);
+    }
+    return files;
+  };
+  const people = rows.map(({ person }) => person);
+  const library = { scannedAt: "bounded-cover-fixture", filesById };
+  const deps = {
+    getLibrary: () => library,
+    peopleScopeService: { cacheKey: () => "bounded-cover-scope", personMatches: () => false },
+    personListService: { mainLibraryPeople: () => people },
+    publicPerson: (person) => person
+  };
+  assert.equal(expected(1).length, 0, "the first ranked row consumes a slot without warming its actor avatar");
+  assert.equal(expected(129).length, expected(128).length + 1, "the fixture crosses the bounded selection cutoff");
+  for (const limit of [0, 1, 64, 128, 129, Infinity, -3, NaN, null, "64.9"]) {
+    assert.deepEqual(personIndexCoverFiles(deps, limit), expected(limit), `cover prewarm matches the stable full-sort prefix at ${limit}`);
+  }
+
+  const sort = Array.prototype.sort;
+  const sizes = [];
+  let defaultFiles;
+  try {
+    Array.prototype.sort = function (...args) {
+      sizes.push(this.length);
+      return sort.apply(this, args);
+    };
+    defaultFiles = personIndexCoverFiles(deps);
+  } finally {
+    Array.prototype.sort = sort;
+  }
+  assert.deepEqual(defaultFiles, expected());
+  assert(sizes.every((size) => size <= 128), "default cover prewarm must not sort more than twice its 64-row prefix");
+}
 let sharedCoverPeople = [{ id: "cover-person-a", name: "Artist 2", relativePath: "G:/A", coverId: "cover-a1" }];
 let sharedCoverStamp = "cover-first";
 let sharedCoverBatches = 0;
@@ -1743,6 +1826,137 @@ assert.deepEqual(personIndexCoverFiles(sharedCoverDeps).map(file => file.id), ["
 assert.equal((await readSharedCoverPeople())[0].id, "cover-person-b");
 assert.equal(sharedCoverPresentations, 3);
 assert.equal(sharedCoverBatches, 3, "each new list projection takes one profile snapshot reader");
+
+{
+  const peopleByScope = Object.fromEntries(["main", "western"].map((scope) => [scope,
+    Array.from({ length: 256 }, (_, index) => ({
+      id: `${scope}-${index}`, name: `人物 ${index}`, relativePath: `${scope}/path-${index}`,
+      actorProfile: { aliases: ['别名 "测试" \\'] }
+    }))
+  ]));
+  let peopleStamp = 1;
+  let westernStamp = 1;
+  let config = { layout: "initial" };
+  let scanError = null;
+  const routeDeps = {
+    library: { root: "fixture", roots: ["fixture"], scannedAt: "parts-fixture", totals: { works: 90 } },
+    getLastScanError: () => scanError,
+    peoplePayloadStamp: () => `parts:${peopleStamp}`,
+    peopleScopeService: {
+      normalize: (scope) => scope === "western" ? "western" : "main",
+      cacheKey: () => `parts-western:${westernStamp}`,
+      personMatcher: () => (person) => westernStamp > 1 || person.id.startsWith("western-")
+    },
+    personListService: { mainLibraryPeople: (scope) => peopleByScope[scope] },
+    publicPerson: (person) => person,
+    appConfigService: { publicConfig: () => config },
+    requestAccess: (request) => ({ mode: request.account === "account-a" ? "local" : "lan" }),
+    sendJson
+  };
+
+  async function requestLibrary(scope, account, prepared, { revision, readRoute = routeLibraryReadApi } = {}) {
+    const url = new URL(`/api/library?scope=${scope}`, "http://fixture");
+    if (revision !== undefined) url.searchParams.set("peopleRevision", revision);
+    const req = { method: "GET", headers: {}, account };
+    const chunks = [];
+    let status, headers, parts;
+    const res = {
+      req,
+      writeHead(nextStatus, nextHeaders) { status = nextStatus; headers = nextHeaders; },
+      write(chunk) { chunks.push(chunk); },
+      end(chunk) { if (chunk) chunks.push(chunk); }
+    };
+    assert(await readRoute(req, res, url, {
+      ...routeDeps,
+      userStateSummary: () => ({ favoriteFolders: [{ id: account, name: `${account} folder` }] }),
+      ...(prepared ? { sendJsonParts(response, code, buffers) {
+        parts = buffers;
+        sendJsonParts(response, code, buffers);
+      } } : {})
+    }));
+    return { status, headers, body: Buffer.concat(chunks), parts };
+  }
+
+  async function checkLibraryParts(scope, account) {
+    const expected = await requestLibrary(scope, account, false);
+    const { parts, ...actual } = await requestLibrary(scope, account, true);
+    assert.deepEqual(actual, { status: expected.status, headers: expected.headers, body: expected.body },
+      "prepared /api/library parts retain the exact legacy response");
+    assert.equal(parts?.length, 2);
+    assert(parts.every((part) => Buffer.isBuffer(part)));
+    return { tail: parts[1], data: JSON.parse(actual.body) };
+  }
+
+  const first = await checkLibraryParts("main", "account-a");
+  config = { layout: "changed" };
+  scanError = new Error("fixture rescan failed");
+  const second = await checkLibraryParts("main", "account-b");
+  assert.equal(second.tail, first.tail, "accounts share the same prepared people bytes");
+  assert.equal(second.data.user.favoriteFolders[0].id, "account-b");
+  assert.equal(second.data.access.mode, "lan");
+  assert.deepEqual(second.data.uiConfig, config);
+  assert.equal(second.data.lastScanError, scanError.message);
+  assert(!second.tail.includes("account-a") && !second.tail.includes("account-b"));
+
+  const western = await checkLibraryParts("western", "account-b");
+  assert.notEqual(western.tail, first.tail, "equal-length scopes use their own people bytes");
+  assert.equal(western.data.people[0].id, "western-0");
+  assert.equal((await checkLibraryParts("main", "account-a")).tail, first.tail);
+
+  peopleByScope.main = peopleByScope.main.map((person, index) => index ? person : { ...person, name: "source replacement" });
+  const replaced = await checkLibraryParts("main", "account-a");
+  assert.notEqual(replaced.tail, first.tail);
+  assert.equal(replaced.data.people[0].name, "source replacement");
+  peopleByScope.main[0].name = "profile change";
+  peopleStamp += 1;
+  const newStamp = await checkLibraryParts("main", "account-a");
+  assert.notEqual(newStamp.tail, replaced.tail);
+  assert.equal(newStamp.data.people[0].name, "profile change");
+  westernStamp += 1;
+  const newMembership = await checkLibraryParts("main", "account-b");
+  assert.notEqual(newMembership.tail, newStamp.tail);
+  assert.equal(newMembership.data.people[0].isWestern, true);
+
+  const cold = await requestLibrary("main", "account-b", true, { revision: "" });
+  const { peopleRevision, ...coldData } = JSON.parse(cold.body);
+  assert.match(peopleRevision, /^[a-f0-9]{64}$/);
+  assert.deepEqual(coldData, newMembership.data, "a cold opt-in adds only the people revision to the legacy body");
+  assert(!Object.hasOwn(newMembership.data, "peopleRevision"), "legacy callers keep their exact body fields");
+  assert.equal(cold.parts[1], newMembership.tail, "the digest uses the already encoded people projection");
+
+  config = { layout: "fresh metadata" };
+  scanError = null;
+  const matched = await requestLibrary("main", "account-a", true, { revision: peopleRevision });
+  const matchedData = JSON.parse(matched.body);
+  assert.equal(matched.status, 200);
+  assert.equal(matched.headers["Cache-Control"], "no-store");
+  assert.equal(matched.parts, undefined, "matching clients skip the people bytes");
+  const { people: _legacyPeople, ...liveMetadata } = (await checkLibraryParts("main", "account-a")).data;
+  assert.deepEqual(matchedData, { ...liveMetadata, peopleRevision, peopleUnchanged: true },
+    "matching a shared projection still returns current account, access, config and scan metadata");
+  assert(matched.body.length < cold.body.length / 10);
+
+  const { routeLibraryReadApi: restartedReadRoute } = await import(new URL("../src/modules/fanhao/server/library/routes.js?people-restart-fixture", import.meta.url));
+  const restarted = await requestLibrary("main", "account-a", true, { revision: peopleRevision, readRoute: restartedReadRoute });
+  assert.deepEqual(JSON.parse(restarted.body), matchedData, "equal wire people bytes match across a fresh server module instance");
+
+  peopleByScope.western = peopleByScope.main;
+  const otherScope = await requestLibrary("western", "account-a", true, { revision: peopleRevision });
+  const otherScopeData = JSON.parse(otherScope.body);
+  assert.deepEqual(otherScopeData.people, coldData.people, "fixture scopes have identical people bytes");
+  assert.notEqual(otherScopeData.peopleRevision, peopleRevision, "people revisions are bound to normalized scope");
+  assert(!Object.hasOwn(otherScopeData, "peopleUnchanged"));
+
+  peopleByScope.main[0].name = "changed under the same count";
+  peopleStamp += 1;
+  const changed = await requestLibrary("main", "account-a", true, { revision: peopleRevision });
+  const changedData = JSON.parse(changed.body);
+  assert.notEqual(changedData.peopleRevision, peopleRevision, "the revision changes when the public DTO changes without a count change");
+  assert.equal(changedData.people.length, coldData.people.length);
+  assert.equal(changedData.people[0].name, "changed under the same count");
+  assert(!Object.hasOwn(changedData, "peopleUnchanged"));
+}
+
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -3375,7 +3589,10 @@ const workDetailService = createWorkDetailService({
       galleryPlayInfoLookups += 1;
       return videoId === "gallery-video" ? { id: videoId } : null;
     },
-    videoFile: () => indexedGalleryVideo
+    videoFile: (_item, options) => {
+      assert.equal(options.useIndexedSize, true, "gallery play-info must not perform a synchronous stat");
+      return indexedGalleryVideo;
+    }
   },
   library: {
     filesById: new Map([[indexedLibraryVideo.id, indexedLibraryVideo]]),
@@ -3399,13 +3616,14 @@ const workDetailService = createWorkDetailService({
         ]
       }
     : null,
-  resolveVideoFileByPublicId: (videoId) => {
+  resolveMissingVideoSource: async (file) => {
     libraryPlayInfoLookups += 1;
-    return videoId === indexedLibraryVideo.id ? relocatedIndexedLibraryVideo : null;
+    return file === indexedLibraryVideo ? relocatedIndexedLibraryVideo : null;
   },
   userStateStamp: () => "user-1",
   videoProbeService: {
     async playInfoForFileAsync(file, videoId, options) {
+      if (options.requireSource) file = await options.resolveMissingSource(file);
       return { file, streamBase: options.streamBase || "/media/video", videoId };
     },
     prewarm(files, options) {
@@ -3429,7 +3647,7 @@ assert.equal(detailMaterializations, 2, "work detail cache entries must invalida
 assert.equal(workDetailService.playbackPrewarmPayload("missing-work"), null, "playback preparation must preserve missing-work semantics");
 const indexedLibraryPlayInfo = await workDetailService.playInfoPayload("library-video");
 assert.equal(indexedLibraryPlayInfo.file, relocatedIndexedLibraryVideo, "FanHao play-info must use the validated or relocated library file path");
-assert.equal(libraryPlayInfoLookups, 1, "FanHao play-info must validate the indexed media path exactly once");
+assert.equal(libraryPlayInfoLookups, 1, "FanHao play-info must pass a resolver for a missing indexed path");
 assert.equal(galleryPlayInfoLookups, 0, "FanHao play-info must not hydrate the unrelated gallery catalog");
 const indexedGalleryPlayInfo = await workDetailService.playInfoPayload("gallery-video", { source: "gallery" });
 assert.equal(indexedGalleryPlayInfo.file, indexedGalleryVideo, "explicit gallery play-info must preserve gallery media resolution");

@@ -1,6 +1,7 @@
 export function createPersonListService({
   actorProfileRow,
   actorMovieService,
+  createCatalogueRowReader = () => actorProfileRow,
   getStamp = () => "",
   getLibrary,
   peopleScopeService,
@@ -16,13 +17,19 @@ export function createPersonListService({
   }
 
   function mainLibraryPeople(scope = "main") {
+    return mainLibraryPeopleResult(scope).people;
+  }
+
+  function mainLibraryPeopleResult(scope = "main", getProfileReader = createCatalogueRowReader) {
     const library = getLibrary();
     const normalizedScope = peopleScopeService.normalize(scope);
-    const cacheKey = `${normalizedScope}:${getStamp()}:${library.people?.length || 0}`;
+    const scopeStamp = peopleScopeService.cacheKey();
+    const cacheKey = `${normalizedScope}:${getStamp()}:${scopeStamp}:${library.people?.length || 0}`;
     const cached = mainPeopleCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) return { people: cached, cacheable: true };
     const candidates = [];
     const seen = new Set();
+    let readProfile;
     const matchesScope = peopleScopeService.personMatcher?.(normalizedScope)
       || ((person) => peopleScopeService.personMatches(person, normalizedScope));
     const mergedPeople = personMergeService.records?.(library.people)
@@ -31,7 +38,8 @@ export function createPersonListService({
       if (!merged || seen.has(merged.id)) continue;
       seen.add(merged.id);
       if (!matchesScope(merged)) continue;
-      candidates.push({ person: merged, known: Number(merged.workCount || 0) > 0 || Boolean(actorProfileRow(merged.id)) });
+      const known = Number(merged.workCount || 0) > 0 || Boolean((readProfile ??= getProfileReader())(merged.id));
+      candidates.push({ person: merged, known });
     }
     const pending = candidates.filter(candidate => !candidate.known);
     // One membership read per list also bounds retries while the DB is failing.
@@ -41,17 +49,19 @@ export function createPersonListService({
           .map(candidate => String(candidate.person.id))), cacheable: true };
     const people = candidates.filter(candidate => candidate.known || membership.matches.has(String(candidate.person.id)))
       .map(candidate => candidate.person);
-    if (membership.cacheable !== false) {
+    const cacheable = readProfile?.cacheable !== false && membership.cacheable !== false;
+    if (cacheable) {
       mainPeopleCache.set(cacheKey, people);
       while (mainPeopleCache.size > 6) {
         mainPeopleCache.delete(mainPeopleCache.keys().next().value);
       }
     }
-    return people;
+    return { people, cacheable };
   }
 
   return {
     mainLibraryPeople,
+    mainLibraryPeopleResult,
     shouldShowPersonInMainList
   };
 }

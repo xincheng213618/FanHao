@@ -234,7 +234,7 @@ export function ensureActorProfileImageStagingTable(db, schema = "fanhao_images"
   `);
 }
 
-export function hasActorProfilePublicationReadModel(db) {
+export function hasActorProfilePublicationReadModel(db, { throwOnError = false } = {}) {
   try {
     return hasSqliteTables(db, "main", [
       ACTOR_PROFILE_PUBLICATION_TABLE,
@@ -245,7 +245,8 @@ export function hasActorProfilePublicationReadModel(db) {
       ACTOR_PROFILE_IMAGE_STAGING_TABLE,
       "cross_store_receipts"
     ]);
-  } catch {
+  } catch (error) {
+    if (throwOnError) throw error;
     return false;
   }
 }

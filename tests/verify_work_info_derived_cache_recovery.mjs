@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createWorkCodeIndexService } from "../src/modules/fanhao/server/works/work-code-index-service.js";
+import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
+import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createCollectionQueryService } from "../src/modules/fanhao/server/user-state/collection-query-service.js";
 import { createWorkInfoCacheFixture, createWorkInfoDatabase, codeKey, looseCodeKey } from "./fixtures/work-info-cache-recovery.mjs";
 
@@ -13,6 +17,7 @@ console.warn = (...values) => warnings.push(values);
 let comparisons = 0, cases = 0;
 try {
   if (!args.includes("--collections-only")) {
+    if (!legacy) await verifyCoverStateRoutes();
     for (const phase of ["prepare", "all"]) {
       for (const reader of [owner => codeSnapshot(owner), owner => owner.code.workCodeKeys(owner.works[0]),
         owner => [...owner.code.keySetForWorks(owner.works)]]) {
@@ -136,6 +141,83 @@ function fixture({ count = 2, status = !legacy } = {}) {
   owner.collection = createCollectionQueryService({ ...owner.grouped.userState,
     withWorkInfoReadStatus: readStatus, workInfoReadCacheable: status ? owner.info.readCacheable : undefined });
   return owner;
+}
+async function verifyCoverStateRoutes() {
+  const server = readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const scopeStart = server.indexOf("function withWorkInfoReadStatus(");
+  const scopeEnd = server.indexOf("function workInfoFacetRow(", scopeStart);
+  assert.ok(scopeStart >= 0 && scopeEnd > scopeStart, "actual server read scope adapters exist");
+  const createReadScope = new Function("workImageService", "workInfoService",
+    server.slice(scopeStart, scopeEnd) + "return { withWorkInfoReadStatus, workInfoReadCacheable };");
+  for (const route of ["/api/works", "/api/fanhao/search"]) {
+    for (const age of ["cold", "aged"]) for (const phase of ["prepare", "all"]) {
+      const owner = fixture();
+      let coverReads = 0, failCover = false;
+      const fault = () => { throw Object.assign(new Error("private cover state read failed"), { code: "SQLITE_BUSY" }); };
+      const image = createWorkImageService({
+        getStamp: () => owner.state.stamp,
+        hasCoreDb: () => true,
+        getCoreDb: () => ({
+          prepare(sql) {
+            const coverState = sql.includes("AS has_cover");
+            if (coverState) coverReads++;
+            if (coverState && failCover && phase === "prepare") fault();
+            const statement = owner.state.db.prepare(sql);
+            if (!coverState) return statement;
+            return { all(...params) {
+              if (failCover && phase === "all") fault();
+              return statement.all(...params);
+            } };
+          }
+        })
+      });
+      const workQueryService = createWorkQueryService({
+        ...owner.grouped.works,
+        library: owner.library,
+        workHasCoreCover: image.workHasCoreCover,
+        ...createReadScope(image, owner.info)
+      });
+      async function request(filter = "all", offset = 0) {
+        const url = new URL(route, "http://fixture.test");
+        url.search = new URLSearchParams({ q: "fixture words", filter, sort: "codeAsc", limit: "1", offset });
+        let body;
+        const handled = await routeWorksApi({ method: "GET" }, {}, url, {
+          workQueryService,
+          sendJson(_response, status, payload) {
+            assert.equal(status, 200);
+            body = payload;
+          }
+        });
+        assert.equal(handled, true);
+        return body;
+      }
+      const aged = age === "aged";
+      if (aged) {
+        assert.equal((await request()).facets.missingCover, 0, "prime the old complete cover map");
+        owner.state.db.exec("DELETE FROM fanhao_images.images WHERE owner_id=1");
+        owner.state.stamp = "changed covers";
+      }
+      const before = coverReads;
+      failCover = true;
+      const fallback = aged ? 0 : 2;
+      assert.equal((await request()).facets.missingCover, fallback, route + " preserves its fallback facets");
+      assert.equal(coverReads, before + 1, route + " uses one failed cover read across a complete page");
+      assert.equal((await request("missingCover")).total, fallback, route + " preserves fallback membership");
+      assert.equal(coverReads, before + 2, route + " shares a failure across nested filter and facet reads");
+
+      failCover = false;
+      const missing = aged ? 1 : 0;
+      assert.equal((await request("all", 1)).facets.missingCover, missing,
+        route + " a different page retries cover facets at the same stamp");
+      assert.equal((await request()).facets.missingCover, missing, route + " the original page also recovers");
+      const recovered = await request("missingCover");
+      assert.equal(recovered.total, missing, route + " the original cover selection recovers");
+      assert.deepEqual(recovered.works.map(work => work.id), aged ? ["1"] : []);
+      assert.equal(coverReads, before + 3, route + " healthy pages reuse the complete cover map");
+      assert.equal(await request("missingCover"), recovered, route + " healthy pages retain identity");
+      cases++;
+    }
+  }
 }
 function emptyCodeSnapshot() { return { keys: [], rows: [], search: [["local1", "1"], ["local2", "2"]], prefix: ["1", "2"] }; }
 function codeSnapshot(owner) {

@@ -1,5 +1,5 @@
 import { hasActorProfilePublicationReadModel } from "./actor-profile-publication-schema.js";
-import { canonicalPersonId, createCanonicalPersonReader, hasIdentityTable } from "./person-identity.js";
+import { canonicalPersonId, createCanonicalPersonReader } from "./person-identity.js";
 
 const PUBLISHED_PROFILE_ROWS_SQL = `
   WITH avatar_candidates AS (
@@ -112,16 +112,19 @@ export function createActorProfileService({
   let actorProfileCache = null;
 
   function rowsById() {
-    return rowsAtStamp(getStamp());
+    return rowsAtStamp(getStamp()).rows;
   }
 
-  function rowsAtStamp(stamp) {
-    if (actorProfileCache?.stamp === stamp) return actorProfileCache.rows;
+  function rowsAtStamp(stamp, catalogue = null) {
+    const requestedIdentity = catalogue?.resolve.identitySnapshot;
+    if (actorProfileCache?.stamp === stamp
+      && (!catalogue || (requestedIdentity && actorProfileCache.identitySnapshot === requestedIdentity))) return actorProfileCache;
 
     const rows = new Map();
+    let identitySnapshot;
     try {
-      const db = getCoreDb();
-      const query = hasActorProfilePublicationReadModel(db)
+      const db = catalogue?.db || getCoreDb();
+      const query = hasActorProfilePublicationReadModel(db, { throwOnError: true })
         ? PUBLISHED_PROFILE_ROWS_SQL
         : `
           SELECT
@@ -201,11 +204,15 @@ export function createActorProfileService({
       for (const row of db.prepare(query).all()) {
         rows.set(String(row.core_person_id), { ...row, person_id: String(row.core_person_id) });
       }
-      if (hasIdentityTable(db, "person_redirects")) {
-        const resolve = createCanonicalPersonReader(db);
-        for (const redirect of db.prepare("SELECT source_id, target_id FROM person_redirects ORDER BY source_id").all()) {
-          const source = rows.get(String(redirect.source_id));
-          const target = rows.get(resolve(redirect.target_id));
+      const resolve = catalogue?.resolve || createCanonicalPersonReader(db);
+      identitySnapshot = resolve.identitySnapshot;
+      if (identitySnapshot?.hasTable !== false) {
+        const redirects = identitySnapshot?.redirects || db.prepare(
+          "SELECT source_id, target_id FROM person_redirects ORDER BY source_id"
+        ).all().map(({ source_id, target_id }) => [source_id, target_id]);
+        for (const [sourceId, targetId] of redirects) {
+          const source = rows.get(String(sourceId));
+          const target = rows.get(resolve(targetId));
           if (target && !target.avatar_candidate_present && source?.avatar_candidate_present) {
             for (const [key, value] of Object.entries(source)) if (key.startsWith("avatar_")) target[key] = value;
             target.avatar_owner_id = source.avatar_owner_id || source.core_person_id;
@@ -215,11 +222,13 @@ export function createActorProfileService({
       }
     } catch (error) {
       console.warn("[core-actor-profile]", error.message);
-      if (actorProfileCache?.rows) return actorProfileCache.rows;
+      return { rows: actorProfileCache?.rows || rows, cacheable: false };
     }
 
-    actorProfileCache = { stamp, rows };
-    return rows;
+    const result = { stamp, rows, cacheable: true, identitySnapshot,
+      profileSnapshot: identitySnapshot ? Symbol("actor profile catalogue") : undefined };
+    if (!catalogue || identitySnapshot) actorProfileCache = result;
+    return result;
   }
 
   function row(personId) {
@@ -227,12 +236,57 @@ export function createActorProfileService({
   }
 
   function createRowReader() {
-    const stamp = getStamp();
-    const rows = rowsAtStamp(stamp);
+    const { rows, cacheable } = rowsAtStamp(getStamp());
     // Retry a failed refresh through the existing point reader.
-    if (actorProfileCache?.stamp !== stamp) return row;
+    if (!cacheable) return row;
     const resolve = createCanonicalPersonReader(getCoreDb());
     return (personId) => rows.get(resolve(personId)) || null;
+  }
+
+  function createCatalogueRowReader() {
+    let rows;
+    let resolve;
+    let cacheable = false;
+    let profileSnapshot;
+    try {
+      const stamp = getStamp();
+      const db = getCoreDb();
+      resolve = createCanonicalPersonReader(db);
+      const result = rowsAtStamp(stamp, { db, resolve });
+      cacheable = result.cacheable && Boolean(result.profileSnapshot);
+      profileSnapshot = result.profileSnapshot;
+      // A failed redirect pass can leave partial rows for direct lookups.
+      // A catalogue read must fall back to the last complete map or none.
+      rows = result.cacheable ? result.rows : actorProfileCache?.rows;
+    } catch (error) {
+      console.warn("[core-actor-profile]", error.message);
+      cacheable = false;
+    }
+    rows ??= actorProfileCache?.rows || new Map();
+
+    function read(personId) {
+      if (!rows.size) return null;
+      if (resolve) {
+        try {
+          return rows.get(resolve(personId)) || null;
+        } catch (error) {
+          console.warn("[core-actor-profile]", error.message);
+          read.cacheable = false;
+          read.profileSnapshot = undefined;
+          read.identitySnapshot = undefined;
+          resolve = null;
+        }
+      }
+      // The catalogue already holds canonical people. Keep known rows usable
+      // if identity resolution failed, without repeating that read per person.
+      const id = Number(personId);
+      return Number.isSafeInteger(id) && id > 0 ? rows.get(String(id)) || null : null;
+    }
+
+    read.cacheable = cacheable;
+    read.profileSnapshot = profileSnapshot;
+    read.identitySnapshot = resolve?.identitySnapshot;
+    return read;
   }
 
   function avatarForProfileRow(profileRow) {
@@ -302,6 +356,7 @@ export function createActorProfileService({
   }
 
   return {
+    createCatalogueRowReader,
     createRowReader,
     invalidate,
     publicProfile,

@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { canonicalPersonId, hasIdentityTable, personLocations, personPathKey } from "../people/person-identity.js";
+import { canonicalPersonId, createCanonicalPersonReader, hasIdentityTable, personLocations, personPathKey } from "../people/person-identity.js";
+
+const personNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function linkedLocalWorkIdsForPeople(db, personIds = []) {
   const ids = [...new Set((personIds || [])
@@ -46,6 +48,29 @@ function cachedVideoSizes(db) {
     }
   }
   return sizes;
+}
+
+function folderLocationsByPerson(db) {
+  const locations = new Map();
+  try {
+    if (!hasIdentityTable(db, "person_library_locations")) return locations;
+    if (db.prepare("SELECT 1 FROM temp.sqlite_schema WHERE name = 'person_library_locations' COLLATE NOCASE").get()) return null;
+    const columns = db.prepare("PRAGMA main.table_info(person_library_locations)").all();
+    if (!columns.some((column) => column.name === "id" && column.type === "INTEGER" && column.pk === 1)
+      || columns.some((column) => column.pk > 1)
+      || !columns.some((column) => column.name === "person_id" && column.type === "INTEGER")) return null;
+    for (const row of db.prepare(`
+      SELECT id, person_id, path FROM main.person_library_locations ORDER BY person_id, id
+    `).all()) {
+      if (!Number.isSafeInteger(row.id) || !Number.isSafeInteger(row.person_id)) return null;
+      if (!locations.has(row.person_id)) locations.set(row.person_id, []);
+      locations.get(row.person_id).push(row);
+    }
+    return locations;
+  } catch {
+    // Keep the original per-person reads for unusual schemas or bulk read failures.
+    return null;
+  }
 }
 
 export function createCoreLibraryService({
@@ -172,9 +197,12 @@ export function createCoreLibraryService({
     const rows = db.prepare("SELECT id, name, display_name, folder_path FROM people").all();
     people.locations = [];
     people.locationOwners = new Map();
+    if (!rows.length) return people;
+    const resolvePersonId = createCanonicalPersonReader(db);
+    const locationsByPerson = folderLocationsByPerson(db);
     for (const row of rows) {
-      if (canonicalPersonId(db, row.id) !== String(row.id)) continue;
-      const locations = personLocations(db, row.id);
+      if (resolvePersonId(row.id) !== String(row.id)) continue;
+      const locations = locationsByPerson ? locationsByPerson.get(Number(row.id)) || [] : personLocations(db, row.id);
       if (!locations.length && row.folder_path) locations.push({ path: row.folder_path });
       for (const location of locations) {
         const entry = { id: row.id, name: row.name, displayName: row.display_name || row.name,
@@ -479,7 +507,7 @@ export function createCoreLibraryService({
       index.peopleById.set(person.id, person);
     }
 
-    index.people.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    index.people.sort((a, b) => personNameCollator.compare(a.name, b.name));
     index.scannedAt = new Date().toISOString();
     index.totals.people = index.people.length;
     index.totals.works = index.worksById.size;

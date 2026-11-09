@@ -13,6 +13,31 @@ export function createWorkImageService({
 }) {
   let localWorkCoreCoverCache = null;
   let workCoverMetadataCache = null;
+  let coverStateReadScope = null;
+
+  function withCoverStateReadStatus(callback) {
+    // Nested consumers share fallbacks only within one synchronous operation.
+    const previous = coverStateReadScope;
+    const scope = {
+      cacheable: true,
+      stateFailures: previous?.stateFailures || new Map(),
+      metadataFailures: previous?.metadataFailures || new WeakMap()
+    };
+    coverStateReadScope = scope;
+    try {
+      return { value: callback(), cacheable: scope.cacheable };
+    } catch (error) {
+      scope.cacheable = false;
+      throw error;
+    } finally {
+      coverStateReadScope = previous;
+      if (previous && !scope.cacheable) previous.cacheable = false;
+    }
+  }
+
+  function coverStateReadCacheable() {
+    return coverStateReadScope?.cacheable !== false;
+  }
 
   function coreImageUrl(row) {
     if (!row) return "";
@@ -252,17 +277,25 @@ export function createWorkImageService({
 
   function prewarmCoreWorkCoverMetadata(workIds = []) {
     const cache = ensureWorkCoverMetadataCache();
+    const scope = coverStateReadScope;
+    let failed = scope?.metadataFailures.get(cache);
     const pending = [...new Set((Array.isArray(workIds) ? workIds : [])
       .map(normalizeWorkId)
-      .filter((workId) => workId && !cache.rows.has(workId)))];
+      .filter((workId) => {
+        if (!workId || cache.rows.has(workId)) return false;
+        if (!failed?.has(workId)) return true;
+        scope.cacheable = false;
+        return false;
+      }))];
     if (!pending.length) return cache.rows;
 
     for (let offset = 0; offset < pending.length; offset += WORK_COVER_METADATA_BATCH_SIZE) {
       const batch = pending.slice(offset, offset + WORK_COVER_METADATA_BATCH_SIZE);
       if (hasCoreDb()) {
+        let rows;
         try {
           const placeholders = batch.map(() => "?").join(", ");
-          const rows = getCoreDb()
+          rows = getCoreDb()
             .prepare(
               `
               SELECT id, CAST(owner_id AS TEXT) AS work_id, owner_id, remote_url, local_path, source, updated_at,
@@ -275,11 +308,20 @@ export function createWorkImageService({
               `
             )
             .all(...batch.map(Number));
-          for (const row of rows) {
-            if (!cache.rows.has(row.work_id)) cache.rows.set(row.work_id, row);
-          }
         } catch (error) {
           console.warn("[core-image]", error.message);
+          if (scope) {
+            scope.cacheable = false;
+            if (!failed) {
+              failed = new Set();
+              scope.metadataFailures.set(cache, failed);
+            }
+            for (const workId of batch) failed.add(workId);
+          }
+          continue;
+        }
+        for (const row of rows) {
+          if (!cache.rows.has(row.work_id)) cache.rows.set(row.work_id, row);
         }
       }
       for (const workId of batch) {
@@ -333,6 +375,11 @@ export function createWorkImageService({
   function localWorkCoreCoverStates() {
     const stamp = getStamp();
     if (localWorkCoreCoverCache?.stamp === stamp) return localWorkCoreCoverCache.states;
+    const failed = coverStateReadScope?.stateFailures.get(stamp);
+    if (failed) {
+      coverStateReadScope.cacheable = false;
+      return failed;
+    }
     const states = new Map();
     if (hasCoreDb()) {
       try {
@@ -356,7 +403,12 @@ export function createWorkImageService({
         }
       } catch (error) {
         console.warn("[core-image]", error.message);
-        if (localWorkCoreCoverCache?.states) return localWorkCoreCoverCache.states;
+        const fallback = localWorkCoreCoverCache?.states || new Map();
+        if (coverStateReadScope) {
+          coverStateReadScope.cacheable = false;
+          coverStateReadScope.stateFailures.set(stamp, fallback);
+        }
+        return fallback;
       }
     }
     localWorkCoreCoverCache = { stamp, states };
@@ -370,6 +422,7 @@ export function createWorkImageService({
   function invalidate() {
     localWorkCoreCoverCache = null;
     workCoverMetadataCache = null;
+    coverStateReadScope?.stateFailures.clear();
   }
 
   function coreImageRow(imageId) {
@@ -427,12 +480,14 @@ export function createWorkImageService({
     corePersonAvatarMetadataRow,
     coreWorkCoverRow,
     coreWorkCoverMetadataRow,
+    coverStateReadCacheable,
     invalidate,
     prewarmCoreWorkCoverMetadata,
     prewarmCoreWorkCovers,
     publicCoreWorkCover,
     publicPersonAvatar,
     publicWorkCover,
+    withCoverStateReadStatus,
     workCoverRow,
     workHasCoreCover
   };

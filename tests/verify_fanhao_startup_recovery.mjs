@@ -120,7 +120,7 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
           return Math.round(visibleAt - first.startTime);
         }, visibleAt);
         console.log("MEASURE western cold people", JSON.stringify({ delay, libraryReads: runtime.reads, visibleMs }));
-        assert.deepEqual(runtime.reads, ["?scope=western"], "western cold entry must read only its requested library scope");
+        assert.deepEqual(runtime.reads, ["?scope=western&peopleRevision="], "western cold entry must read only its requested library scope");
         assert.equal(await page.locator(".person-index-card").count(), 3);
         assert.equal(new URL(page.url()).pathname, "/western");
       } finally { await page.close(); }
@@ -190,10 +190,10 @@ export async function runStartupRecovery({ casePattern = "", sourceOverrides = {
       const page = await open("/western", [{ error: "Synthetic western scope failure" }]);
       try {
         await errorVisible(page, "Synthetic western scope failure");
-        assert.deepEqual(runtime.reads, ["?scope=western"]);
+        assert.deepEqual(runtime.reads, ["?scope=western&peopleRevision="]);
         runtime.plans = [{}]; await page.locator(".library-retry-button").click();
         await page.locator(".person-index-card").first().waitFor();
-        assert.deepEqual(runtime.reads, ["?scope=western", "?scope=western"], "scope recovery must only retry the failed scope");
+        assert.deepEqual(runtime.reads, ["?scope=western&peopleRevision=", "?scope=western&peopleRevision="], "scope recovery must only retry the failed scope");
         assert.equal(await page.locator("#currentTitle").textContent(), "欧美人物");
         assert.equal(new URL(page.url()).pathname, "/western");
       } finally { await page.close(); }

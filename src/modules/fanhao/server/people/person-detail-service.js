@@ -206,16 +206,19 @@ export function createPersonDetailService({
       const year = normalizePersonWorkYear(url.searchParams.get("year"));
       const yearWorks = source.filterCache.get(requestKeys.filter)?.sourceWorks
         || worksForPersonYear(source.works, year);
-      const facets = workQueryService.lightweightFacets(yearWorks);
-      mark("facets");
-      worksPayload = workQueryService.listFromWorksPayload(yearWorks, url, {
-        filter,
-        facets
-      }, { lightweightInfo: true, includeCoreCovers: scope === "western" }, {
-        cache: source.filterCache,
-        key: requestKeys.filter
+      const page = withWorkInfoReadStatus(() => {
+        const facets = workQueryService.lightweightFacets(yearWorks);
+        mark("facets");
+        return workQueryService.listFromWorksPayload(yearWorks, url, {
+          filter,
+          facets
+        }, { lightweightInfo: true, includeCoreCovers: scope === "western" }, {
+          cache: source.filterCache,
+          key: requestKeys.filter
+        });
       });
-      if (source.cacheable !== false) cachePage(source, pageCacheKey, worksPayload);
+      worksPayload = page.value;
+      if (source.cacheable !== false && page.cacheable !== false) cachePage(source, pageCacheKey, worksPayload);
       mark("payload");
     }
     if (!source.person) source.person = publicPerson(source.personSource, source.personOptions);

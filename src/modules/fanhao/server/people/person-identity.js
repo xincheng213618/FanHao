@@ -5,6 +5,7 @@ import { isProxy } from "node:util/types";
 import { assertActorProfileMutationAllowed } from "./actor-profile-mutation-guard.js";
 
 const identityStatements = new WeakMap();
+const identitySnapshots = new WeakMap();
 
 function readIdentityStatement(db, sql, value) {
   // Facades and proxies may switch backing connections; only native objects are
@@ -128,11 +129,13 @@ function followPersonRedirects(id, rowForId) {
 export function createCanonicalPersonReader(db) {
   const lookup = (personId) => canonicalPersonId(db, personId);
   const redirects = new Map();
-  if (hasIdentityTable(db, "person_redirects")) {
+  const hasTable = hasIdentityTable(db, "person_redirects");
+  if (hasTable) {
     try {
       if (db.prepare("SELECT 1 FROM temp.sqlite_schema WHERE name = 'person_redirects' COLLATE NOCASE").get()) return lookup;
       for (const row of db.prepare("SELECT source_id, target_id FROM main.person_redirects").all()) {
-        if (!Number.isSafeInteger(row.source_id) || redirects.has(row.source_id)) return lookup;
+        if (!Number.isSafeInteger(row.source_id) || row.source_id <= 0
+          || !Number.isSafeInteger(row.target_id) || row.target_id <= 0 || redirects.has(row.source_id)) return lookup;
         redirects.set(row.source_id, row);
       }
     } catch {
@@ -140,10 +143,25 @@ export function createCanonicalPersonReader(db) {
     }
   }
   const rowForId = (id) => redirects.get(id);
-  return (personId) => {
+  const reader = (personId) => {
     const id = positivePersonId(personId);
     return id ? followPersonRedirects(id, rowForId) : "";
   };
+  Object.defineProperty(reader, "identitySnapshot", { value: internIdentitySnapshot(db, hasTable, redirects) });
+  return reader;
+}
+
+function internIdentitySnapshot(db, hasTable, redirects) {
+  const previous = identitySnapshots.get(db);
+  if (previous?.hasTable === hasTable && previous.redirects.length === redirects.size
+    && previous.redirects.every(([source, target]) => redirects.get(source)?.target_id === target)) return previous;
+
+  // Keep source order for consumers that transfer a redirected avatar to its target.
+  const pairs = [...redirects.values()].sort((a, b) => a.source_id - b.source_id)
+    .map(({ source_id, target_id }) => Object.freeze([source_id, target_id]));
+  const snapshot = Object.freeze({ hasTable, redirects: Object.freeze(pairs) });
+  identitySnapshots.set(db, snapshot);
+  return snapshot;
 }
 
 export function personIdentityMembers(db, personId) {

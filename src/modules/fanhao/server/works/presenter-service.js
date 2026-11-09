@@ -124,8 +124,8 @@ export function createWorkPresenterService({
     return personWithSnapshot(person, options, publicActorProfileSnapshot(actorProfileRow(person.id)));
   }
 
-  function createPersonPresenter() {
-    const readSnapshot = createActorProfileSnapshotReader();
+  function createPersonPresenter(readRow) {
+    const readSnapshot = createActorProfileSnapshotReader(readRow);
     return (person, options = {}) => personWithSnapshot(person, options, readSnapshot(person.id));
   }
 

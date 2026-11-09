@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createActorMovieService } from "../src/modules/fanhao/server/people/actor-movie-service.js";
+import { createActorProfileService } from "../src/modules/fanhao/server/people/actor-profile-service.js";
+import { createPeopleScopeService } from "../src/modules/fanhao/server/people/people-scope-service.js";
+import { createWorkPresenterService } from "../src/modules/fanhao/server/works/presenter-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { createPersonListService } from "../src/modules/fanhao/server/people/person-list-service.js";
 import { createFanhaoDependencies } from "../src/modules/fanhao/server/composition.js";
+import { routeLibraryReadApi } from "../src/modules/fanhao/server/library/routes.js";
 
 // Actual service-owned state and private SQLite metadata, including the
 // attached cover database. No service, worker, media or filesystem fixture.
@@ -34,7 +38,9 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
   const state = owners.get(this);
   const kind = /SELECT DISTINCT CAST\(person_id AS TEXT\)/u.test(sql) ? "ids"
     : sql.includes("FROM work_people wp") ? sql.includes("wp.person_id IN") ? "person" : "rows"
-      : sql.includes("SELECT DISTINCT w.code_search") ? "local" : null;
+      : sql.includes("SELECT DISTINCT w.code_search") ? "local"
+        : sql.includes("AS core_person_id") && sql.includes("AS aliases_json") ? "profiles"
+          : sql.includes("SELECT name FROM fanhao_images.sqlite_schema") ? "profileSchema" : null;
   if (state && kind) {
     state.counts[kind]++;
     if (fails(state, kind, "prepare")) throw state.failure.error;
@@ -148,6 +154,8 @@ try {
 
   verifyEmptyAndOwnership();
   verifyPersonListRecovery();
+  await verifyActorOnlyMembershipRevision();
+  await verifyActorProfileCatalogueRecovery();
   for (const phase of ["prepare", "all"]) for (const exact of [false, true]) {
     const actual = fixture(factory), expected = fixture(createActorMovieService);
     const read = chain(actual, { exact }).search, cold = chain(expected, { exact }).search;
@@ -188,7 +196,8 @@ try {
   assert.ok(warnings.length > 20);
   console.log(JSON.stringify({ ok: true, comparisons, fallbackComparisons, phases: 2, laterLocalBatch: true,
     nativeClosedRecovery: true, nativeCoverSchemaRecovery: true, successfulEmptyCaches: true, actualCompositionQueryDetail: true, exactEnrichmentRetry: true,
-    actualPersonListRecovery: true, pendingPeoplePerRequest: 1000, membershipReadsPerFailedRequest: 1 }));
+    actualPersonListRecovery: true, actorOnlyMembershipRevision: true, actorProfileCatalogueRecovery: true,
+    pendingPeoplePerRequest: 1000, membershipReadsPerFailedRequest: 1 }));
 } finally {
   DatabaseSync.prototype.prepare = prepare; console.warn = warn;
   for (const db of databases) if (db.isOpen) db.close();
@@ -212,19 +221,20 @@ function fails(state, kind, phase) {
 function seed(count = 3, local = false) {
   const db = new DatabaseSync(":memory:"); databases.push(db);
   db.exec(`ATTACH DATABASE ':memory:' AS fanhao_images;
-    CREATE TABLE people(id INTEGER PRIMARY KEY,name TEXT);
+    CREATE TABLE people(id INTEGER PRIMARY KEY,name TEXT,display_name TEXT,gender TEXT,movie_count INTEGER,source TEXT,status TEXT,error TEXT,created_at TEXT,updated_at TEXT);
     CREATE TABLE works(id INTEGER PRIMARY KEY,code TEXT,code_search TEXT,title TEXT,release_date TEXT,rating REAL,rating_count INTEGER,has_magnet INTEGER,is_streamable INTEGER,has_subtitles INTEGER,javdb_tags_json TEXT);
     CREATE TABLE work_people(work_id INTEGER,person_id INTEGER,source TEXT,sort_order INTEGER,created_at TEXT,updated_at TEXT);
     CREATE TABLE person_external_refs(id INTEGER PRIMARY KEY,person_id INTEGER,provider TEXT,external_key TEXT,url TEXT);
+    CREATE TABLE person_aliases(person_id INTEGER,alias TEXT);
     CREATE TABLE work_external_refs(id INTEGER PRIMARY KEY,work_id INTEGER,provider TEXT,url TEXT);
     CREATE TABLE local_works(work_id INTEGER);
-    CREATE TABLE fanhao_images.images(id INTEGER PRIMARY KEY,owner_type TEXT,owner_id INTEGER,kind TEXT,remote_url TEXT,local_path TEXT,source TEXT,updated_at TEXT,image_blob BLOB,sort_order INTEGER);
-    INSERT INTO people VALUES(1,'Person 1'),(2,'Person 2');
+    CREATE TABLE fanhao_images.images(id INTEGER PRIMARY KEY,owner_type TEXT,owner_id INTEGER,kind TEXT,remote_url TEXT,local_path TEXT,source TEXT,updated_at TEXT,image_blob BLOB,sort_order INTEGER,mime TEXT,legacy_key TEXT);
+    INSERT INTO people(id,name) VALUES(1,'Person 1'),(2,'Person 2');
     INSERT INTO person_external_refs VALUES(1,1,'javdb-actor','fixture-actor','https://fixture.invalid/actor');`);
   const work = db.prepare("INSERT INTO works VALUES(?,?,?,?,?,4.1,10,1,1,0,'[\"fixture\"]')");
   const relation = db.prepare("INSERT INTO work_people VALUES(?,?,'actor_movies',?,'2026','2026')");
   const ref = db.prepare("INSERT INTO work_external_refs VALUES(?,?,'javdb-video',?)");
-  const cover = db.prepare("INSERT INTO fanhao_images.images VALUES(?,'work',?,'cover',?,'','fixture','v1',?,0)");
+  const cover = db.prepare("INSERT INTO fanhao_images.images(id,owner_type,owner_id,kind,remote_url,local_path,source,updated_at,image_blob,sort_order) VALUES(?,'work',?,'cover',?,'','fixture','v1',?,0)");
   for (let id = 1; id <= count; id++) {
     work.run(id, `ABC-${String(id).padStart(3, "0")}`, `abc${String(id).padStart(3, "0")}`, `Actor title ${id}`, "2026-01-01");
     relation.run(id, id === count ? 2 : 1, id);
@@ -235,7 +245,8 @@ function seed(count = 3, local = false) {
   return db;
 }
 function fixture(create, { count = 3, local = false, members = null } = {}) {
-  const state = { db: seed(count, local), stamp: "v1", user: "u1", failure: null, counts: { rows: 0, person: 0, ids: 0, local: 0 } };
+  const state = { db: seed(count, local), stamp: "v1", user: "u1", failure: null,
+    counts: { rows: 0, person: 0, ids: 0, local: 0, profiles: 0, profileSchema: 0 } };
   owners.set(state.db, state);
   const people = [{ id: "1", name: "Person 1", works: local ? ["local1"] : [] }, { id: "2", name: "Person 2", works: [] }];
   const localWork = { id: "local1", personId: "1", personName: "Person 1", title: "ABC-001", directoryName: "ABC-001",
@@ -328,7 +339,8 @@ function verifyPersonListRecovery() {
   const noPeople = fixture(factory); noPeople.library.people = [];
   const emptyList = createPersonListService({ actorMovieService: noPeople.service, actorProfileRow: () => null,
     getStamp: () => noPeople.state.stamp, getLibrary: () => noPeople.library,
-    peopleScopeService: { normalize: value => value, personMatches: () => true }, personMergeService: { record: value => value } });
+    peopleScopeService: { cacheKey: () => "fixture-scope", normalize: value => value, personMatches: () => true },
+    personMergeService: { record: value => value } });
   const none = emptyList.mainLibraryPeople(); assert.deepEqual(none, []); assert.equal(emptyList.mainLibraryPeople(), none);
   assert.equal(noPeople.state.counts.ids, 0);
 
@@ -341,10 +353,231 @@ function verifyPersonListRecovery() {
     ];
     return createPersonListService({ actorMovieService: target.service, actorProfileRow: id => id === "known-profile" ? { id } : null,
       getStamp: () => target.state.stamp, getLibrary: () => target.library,
-      peopleScopeService: { normalize: value => value, personMatches: (person, scope) => scope === "western" ? person.scope === "western" : person.scope !== "western" },
+      peopleScopeService: { cacheKey: () => "fixture-scope", normalize: value => value,
+        personMatches: (person, scope) => scope === "western" ? person.scope === "western" : person.scope !== "western" },
       personMergeService: { record: person => person.mergeInto ? { ...person, id: person.mergeInto } : person } });
   }
 }
+
+async function verifyActorOnlyMembershipRevision() {
+  const { state, library, service } = fixture(createActorMovieService);
+  library.people[1].relativePath = "western/Person 2";
+  const getStamp = () => library.scannedAt;
+  const libraryStamp = getStamp();
+  const record = person => person;
+  const peopleScopeService = createPeopleScopeService({
+    getLibrary: () => library,
+    getRevision: () => `${library.scannedAt}:${state.stamp}`,
+    mergedPersonRecord: record,
+    pathWithinRoot: (value, root) => value === root || value.startsWith(`${root}/`),
+    sourcePathToAbsolute: value => value || "",
+    westernRoots: ["western"]
+  });
+  const scopeStamp = peopleScopeService.cacheKey();
+  const personListService = createPersonListService({
+    actorProfileRow: () => null,
+    actorMovieService: service,
+    getStamp,
+    getLibrary: () => library,
+    peopleScopeService,
+    personMergeService: { record }
+  });
+  const deps = { library, peoplePayloadStamp: getStamp, peopleScopeService, personListService, publicPerson: record };
+  const read = (scope, revision) => readLibraryRoute(deps, scope, revision);
+
+  const main = await read("main", "");
+  const western = await read("western", "");
+  assert.deepEqual(main.people.map(person => person.id), ["1"]);
+  assert.deepEqual(western.people.map(person => person.id), ["2"]);
+  assert.match(western.peopleRevision, /^[a-f0-9]{64}$/);
+  const oldWestern = personListService.mainLibraryPeople("western");
+  assert.deepEqual(oldWestern.map(person => person.id), ["2"]);
+  assert.equal(personListService.mainLibraryPeople("western"), oldWestern);
+
+  // A remote catalogue update changes actor membership without changing the
+  // local library, scope classification, or number of work relations.
+  state.db.exec("UPDATE work_people SET person_id=1 WHERE person_id=2");
+  state.stamp = "v2";
+  assert.equal(getStamp(), libraryStamp);
+  assert.notEqual(peopleScopeService.cacheKey(), scopeStamp);
+  assert.equal(peopleScopeService.personMatches(library.people[1], "western"), true);
+  const next = personListService.mainLibraryPeople("western");
+  assert.deepEqual(next, [], "actor-only membership changes must invalidate the warm people list");
+  assert.equal(personListService.mainLibraryPeople("western"), next);
+
+  const refreshed = await read("western", western.peopleRevision);
+  assert.deepEqual(refreshed.people, []);
+  assert.equal(refreshed.totals.people, 0);
+  assert.notEqual(refreshed.peopleRevision, western.peopleRevision);
+  assert(!Object.hasOwn(refreshed, "peopleUnchanged"));
+  const matched = await read("western", refreshed.peopleRevision);
+  assert.equal(matched.peopleRevision, refreshed.peopleRevision);
+  assert.equal(matched.peopleUnchanged, true);
+  assert(!Object.hasOwn(matched, "people"));
+  const sameMain = await read("main", main.peopleRevision);
+  assert.equal(sameMain.peopleRevision, main.peopleRevision);
+  assert.equal(sameMain.peopleUnchanged, true);
+}
+
+async function readLibraryRoute(deps, scope = "main", revision = "") {
+  const url = new URL("/api/library", "http://fixture.invalid");
+  url.searchParams.set("scope", scope);
+  url.searchParams.set("peopleRevision", revision);
+  let result;
+  assert(await routeLibraryReadApi({ method: "GET" }, {}, url, {
+    ...deps,
+    appConfigService: { publicConfig: () => ({}) },
+    getLastScanError: () => null,
+    requestAccess: () => ({ mode: "local" }),
+    userStateSummary: () => ({}),
+    sendJson(_response, status, body) { result = { status, body }; },
+    sendJsonParts(_response, status, parts) {
+      result = { status, body: JSON.parse(Buffer.concat(parts).toString("utf8")) };
+    }
+  }));
+  assert.equal(result.status, 200);
+  return result.body;
+}
+
+function profileCatalogueFixture(count, { profiles = true, local = true } = {}) {
+  const target = fixture(createActorMovieService, { count: 0 });
+  const { library, service, state } = target;
+  const { db } = state;
+  db.exec("DELETE FROM person_external_refs; DELETE FROM people");
+  const insert = db.prepare("INSERT INTO people(id,name,display_name,gender) VALUES(?,?,?,?)");
+  library.people = Array.from({ length: count }, (_, index) => {
+    const id = String(index + 1);
+    const name = `Person ${id}`;
+    insert.run(Number(id), name, `Profile ${id}`, profiles ? "female" : "unknown");
+    return { id, name, works: [], workCount: local && index === 0 ? 1 : 0 };
+  });
+  library.peopleById = new Map(library.people.map(person => [person.id, person]));
+  const profile = createActorProfileService({
+    getCoreDb: () => db,
+    getStamp: () => state.stamp,
+    actorProfileAliases: row => JSON.parse(row.aliases_json || "[]"),
+    actorProfileJavdbRefs: row => JSON.parse(row.javdb_refs_json || "[]"),
+    coreImageUrl: row => row.actor_profile_operation_id ? `/fixture/staged/${row.actor_profile_operation_id}` : row.remote_url || "",
+    mergedPersonAliasNames: () => [],
+    normalizePersonGender: value => value || "unknown",
+    preferredPersonDisplayName: (row, fallback) => row.display_name || fallback,
+    uniquePersonNames: names => [...new Set(names)]
+  });
+  const getLibrary = () => library;
+  const getStamp = () => `${library.scannedAt}:${state.stamp}`;
+  const record = person => person;
+  const peopleScopeService = createPeopleScopeService({
+    getLibrary,
+    getRevision: getStamp,
+    mergedPersonRecord: record,
+    pathWithinRoot: () => false,
+    sourcePathToAbsolute: () => "",
+    westernRoots: []
+  });
+  const personListService = createPersonListService({
+    actorProfileRow: profile.row,
+    actorMovieService: service,
+    getStamp,
+    getLibrary,
+    peopleScopeService,
+    personMergeService: { record }
+  });
+  const presenter = createWorkPresenterService({
+    actorProfileRow: profile.row,
+    createActorProfileSnapshotReader: (readRow = profile.createRowReader()) => id => profile.publicSnapshot(readRow(id)),
+    getLibrary,
+    isGPerson: () => false,
+    publicActorProfileSnapshot: profile.publicSnapshot
+  });
+  return { ...target, profile, deps: {
+    library, peoplePayloadStamp: getStamp, peopleScopeService, personListService,
+    publicPerson: presenter.publicPerson,
+    createPublicPersonPresenter: presenter.createPersonPresenter,
+    createCatalogueRowReader: profile.createCatalogueRowReader
+  } };
+}
+
+async function verifyActorProfileCatalogueRecovery() {
+  for (const warm of [false, true]) {
+    const target = profileCatalogueFixture(1000);
+    const { state, deps, profile } = target;
+    const baseline = warm ? await readLibraryRoute(deps) : null;
+    if (baseline) {
+      assert.equal(baseline.people.length, 1000);
+      state.db.exec("UPDATE people SET display_name='New profile' WHERE id=1; UPDATE people SET gender='unknown' WHERE id=2");
+      state.stamp = "v2";
+    }
+    const stamp = state.stamp;
+    const revision = baseline?.peopleRevision || "";
+    const before = state.counts.profiles;
+    fail(target, "profiles", warm ? "all" : "prepare", { remaining: 1 });
+    const fallback = await readLibraryRoute(deps, "main", revision);
+    assert.equal(state.counts.profiles, before + 1, "membership and DTO fallback share one failed profile read per request");
+    assert.equal(fallback.people.length, warm ? 1000 : 1, "cold profile-only people remain recoverable, warm fallback stays complete");
+    assert.equal(fallback.people[0].actorProfile?.displayName, warm ? "Profile 1" : undefined);
+    assert(!Object.hasOwn(fallback, "peopleRevision"), "a degraded profile result must not mint a people revision");
+    assert(!Object.hasOwn(fallback, "peopleUnchanged"));
+
+    state.failure = null;
+    assert.equal(state.stamp, stamp);
+    const recovered = await readLibraryRoute(deps, "main", revision);
+    assert.equal(state.counts.profiles, before + 2, "a failed profile read must retry at the same stamp");
+    assert.equal(recovered.people.length, warm ? 999 : 1000);
+    assert.equal(recovered.people.some(person => person.id === "2"), !warm);
+    assert.equal(recovered.people[0].actorProfile.displayName, warm ? "New profile" : "Profile 1");
+    assert.match(recovered.peopleRevision, /^[a-f0-9]{64}$/);
+    assert.notEqual(recovered.peopleRevision, revision);
+    const matched = await readLibraryRoute(deps, "main", recovered.peopleRevision);
+    assert.equal(matched.peopleUnchanged, true);
+    assert(!Object.hasOwn(matched, "people"));
+    assert.equal(state.counts.profiles, before + 2, "healthy recovered profile rows remain reusable");
+    const catalogueRow = profile.createCatalogueRowReader();
+    assert.equal(catalogueRow.cacheable, true);
+    assert.equal(catalogueRow("01"), profile.row("1"));
+    assert.equal(profile.createRowReader()("01"), profile.row("1"), "legacy point and batch readers retain canonical IDs");
+  }
+
+  const empty = profileCatalogueFixture(1, { profiles: false, local: false });
+  const emptyData = await readLibraryRoute(empty.deps);
+  assert.deepEqual(emptyData.people, []);
+  assert.match(emptyData.peopleRevision, /^[a-f0-9]{64}$/);
+  assert.equal((await readLibraryRoute(empty.deps, "main", emptyData.peopleRevision)).peopleUnchanged, true);
+  assert.equal(empty.state.counts.profiles, 1, "successful empty profile catalogues are cacheable");
+
+  const point = profileCatalogueFixture(1);
+  fail(point, "profiles", "prepare", { remaining: 1 });
+  const readPoint = point.profile.createRowReader();
+  assert.equal(point.state.counts.profiles, 1);
+  assert.equal(readPoint("01")?.display_name, "Profile 1", "a legacy point reader can retry an unavailable batch");
+  assert.equal(point.state.counts.profiles, 2);
+
+  const staged = profileCatalogueFixture(1, { profiles: false });
+  staged.state.db.exec(`
+    CREATE TABLE actor_profile_publications(person_id INTEGER,operation_id TEXT,intent_sha256 TEXT);
+    CREATE TABLE actor_profile_image_revocations(person_id INTEGER,operation_id TEXT,intent_sha256 TEXT);
+    CREATE TABLE cross_store_operation_state(op_id TEXT,status TEXT);
+    CREATE TABLE cross_store_main_receipts(op_id TEXT,step TEXT,intent_sha256 TEXT);
+    CREATE TABLE fanhao_images.actor_profile_image_staging(operation_id TEXT,person_id INTEGER,intent_sha256 TEXT,remote_url TEXT,local_path TEXT,mime TEXT,image_blob BLOB,source TEXT,updated_at TEXT,legacy_key TEXT);
+    CREATE TABLE fanhao_images.cross_store_receipts(op_id TEXT);
+    INSERT INTO actor_profile_publications VALUES(1,'profile-1','fixture-hash');
+    INSERT INTO cross_store_operation_state VALUES('profile-1','completed');
+    INSERT INTO cross_store_main_receipts VALUES('profile-1','visibility_switch','fixture-hash');
+    INSERT INTO fanhao_images.actor_profile_image_staging VALUES('profile-1',1,'fixture-hash','https://fixture.invalid/avatar','','image/png',X'01','actor_profiles','old','');
+  `);
+  fail(staged, "profileSchema", "all", { remaining: 1 });
+  const fallback = await readLibraryRoute(staged.deps);
+  assert.equal(staged.state.counts.profileSchema, 1, "the publication schema probe is attempted only once");
+  assert.equal(staged.state.counts.profiles, 0, "a failed publication probe must not read legacy rows as authoritative");
+  assert.equal(fallback.people[0].avatarUrl, "");
+  assert(!Object.hasOwn(fallback, "peopleRevision"));
+  staged.state.failure = null;
+  const recovered = await readLibraryRoute(staged.deps);
+  assert.equal(recovered.people[0].avatarUrl, "/fixture/staged/profile-1");
+  assert.match(recovered.peopleRevision, /^[a-f0-9]{64}$/);
+  assert.equal(staged.state.counts.profileSchema, 2);
+  assert.equal(staged.state.counts.profiles, 1);
+}
+
 function chain(target, { exact = false } = {}) {
   const service = target.service, person = target.library.people[0];
   const dependencies = { library: target.library, getLibrary: () => target.library, diskUsage: {},

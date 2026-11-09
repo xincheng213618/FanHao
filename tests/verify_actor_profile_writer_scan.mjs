@@ -57,7 +57,9 @@ assert.match(mediaResponse, /version \? "private, no-store" : "no-store"/, "vers
 assert.match(mediaResponse, /row = await blobStore\.actorAvatar\(personId, ""\)/, "unversioned current avatars must bypass the process media cache");
 
 const publicPersonBody = presenter.slice(presenter.indexOf("function publicPerson("), presenter.indexOf("function publicMediaFile("));
-assert.match(publicPersonBody, /publicActorProfileSnapshot\(profileRow\)/);
+assert.match(publicPersonBody, /publicActorProfileSnapshot\(actorProfileRow\(person\.id\)\)/);
+assert.match(publicPersonBody, /createActorProfileSnapshotReader\(readRow\)[\s\S]*personWithSnapshot\(person, options, readSnapshot\(person\.id\)\)/);
+assert.match(publicPersonBody, /const actorProfile = snapshot\.profile;\s*const avatar = snapshot\.avatar;/);
 assert.equal(publicPersonBody.includes("publicPersonAvatar"), false, "person presentation must not mix a cached profile row with a second avatar read");
 assert.match(profileClient, /const refreshed = await waitForActorProfileOperation[\s\S]*data = refreshed;/, "the async client must consume the completed GET payload without discarding merge candidates");
 assert.equal(profileClient.includes("mergeCandidates: []"), false, "the async client must not invent an empty merge-candidate list");

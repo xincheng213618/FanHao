@@ -24,7 +24,7 @@ export function createFanhaoDependencies(deps) {
       "sendJson",
       "sendJsonParts",
       "userStateSummary"
-    ]), createPublicPersonPresenter: deps.createPublicPersonPresenter },
+    ]), createCatalogueRowReader: deps.createCatalogueRowReader, createPublicPersonPresenter: deps.createPublicPersonPresenter },
     settings: pick(deps, ["appConfigService"]),
     userState: { ...pick(deps, [
       "clampInteger",
@@ -124,6 +124,7 @@ export function createFanhaoDependencies(deps) {
       "workMoveJobService",
       "workQueryStamp"
     ]), cancelCoverGeneration: deps.cancelCoverGeneration, scheduleBackground: deps.scheduleBackground,
+      createPublicPersonPresenter: deps.createPublicPersonPresenter,
       rankingMissingSearchResult: deps.rankingMissingSearchResult,
       actorMissingSearchResult: deps.actorMissingSearchResult,
       actorMissingSearchResultForPeople: deps.actorMissingSearchResultForPeople,

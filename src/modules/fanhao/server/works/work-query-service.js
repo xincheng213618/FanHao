@@ -55,6 +55,7 @@ export function createWorkQueryService({
   prewarmWorkInfoDetails = () => {},
   prewarmRemoteImagesForWorks,
   prewarmVideoProbesForWorks = () => {},
+  createPublicPersonPresenter,
   publicPerson,
   publicWork,
   publicWorkAvailability = () => ({}),
@@ -222,7 +223,9 @@ export function createWorkQueryService({
     if (cached?.stamp === stamp) return cached.works;
 
     const sortStarted = recordPerformanceSpan ? performance.now() : 0;
-    const list = sharedWorkSorter(works, sort, { ...options, workStamp });
+    const reused = sort === "releaseDesc" && options.lightweightInfo
+      ? releaseOrderForSubset(works, options.releaseOrderSource, stamp) : null;
+    const list = reused || sharedWorkSorter(works, sort, { ...options, workStamp });
     const nextCachedBySort = cachedBySort || new Map();
     if (workInfoReadCacheable() && workSearchReadCacheable()) {
       derivedBudget.write(nextCachedBySort, cacheKey, { stamp, works: list }, list.length, SORTED_SOURCE_CACHE_LIMIT);
@@ -230,6 +233,17 @@ export function createWorkQueryService({
     }
     if (recordPerformanceSpan) recordPerformanceSpan("sort", performance.now() - sortStarted);
     return list;
+  }
+
+  function releaseOrderForSubset(works, source, stamp) {
+    if (!source || source === works || works.length < 1000 || works.length * 4 < source.length) return null;
+    const sorted = sortedWorksCache.get(source);
+    const cached = sorted && derivedBudget.read(sorted, "releaseDesc:light");
+    if (cached?.stamp !== stamp) return null;
+    // Filtering preserves source order, including rows tied by the stable sorter.
+    const included = new Set(works);
+    const ordered = cached.works.filter((work) => included.has(work));
+    return ordered.length === works.length ? ordered : null;
   }
 
   function numericSummaryRating(work) {
@@ -767,11 +781,12 @@ export function createWorkQueryService({
     mark("facets");
     const filteredWorks = cachedSearchFilter(source, category, categoryWorks, filter);
     mark("filter");
-    const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true });
+    const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true, releaseOrderSource: categoryWorks });
     mark("sort");
+    const categories = source.categories ??= categorySummaryForWorks(source.works);
     const payload = pagedWorksPayload(works, url, {
       category,
-      categories: categorySummaryForWorks(source.works),
+      categories,
       filter,
       q: rawQuery,
       facets,
@@ -932,9 +947,12 @@ export function createWorkQueryService({
     ]).filter(workMatcher("main"));
     mark("dedupe");
     // Person chips open the full person endpoint on selection.
-    const source = makeSearchSource(matchedWorks,
-      peopleSearch.people.map((person) => publicPerson(person, { skipFallbackAvatar: true })),
-      rankingResult.cacheable !== false && actorResult.cacheable !== false
+    const { readProfile } = peopleSearch;
+    const presentPerson = readProfile && peopleSearch.people.length && createPublicPersonPresenter
+      ? createPublicPersonPresenter(readProfile) : publicPerson;
+    const people = peopleSearch.people.map((person) => presentPerson(person, { skipFallbackAvatar: true }));
+    const source = makeSearchSource(matchedWorks, people,
+      readProfile?.cacheable !== false && rankingResult.cacheable !== false && actorResult.cacheable !== false
         && actorRowResults.every((result) => result.cacheable !== false));
     mark("publicPeople");
     source.cacheable = source.cacheable !== false && workInfoReadCacheable() && workSearchReadCacheable();
@@ -945,7 +963,7 @@ export function createWorkQueryService({
   function makeSearchSource(works, people, cacheable) {
     const stamp = userStateStamp();
     return {
-      works, people, cacheable,
+      works, people, cacheable, categories: null,
       categoryWorks: new Map(),
       facetsByCategory: new Map(), facetsStamp: stamp,
       filteredByMode: new Map(), filteredByModeStamp: stamp
@@ -969,7 +987,7 @@ export function createWorkQueryService({
     }
     if (source.facetsByCategory.has(category)) return source.facetsByCategory.get(category);
     const facets = lightweightWorkFacets(categoryWorks);
-    source.facetsByCategory.set(category, facets);
+    if (workInfoReadCacheable() && workSearchReadCacheable()) source.facetsByCategory.set(category, facets);
     return facets;
   }
 

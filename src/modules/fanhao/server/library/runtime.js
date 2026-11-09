@@ -1,13 +1,13 @@
 import {
-  cachedPublicPeople,
   prewarmLibraryPeoplePayloads,
+  readLibraryPeople,
   routeLibraryApi,
   routeLibraryMutationApi,
   routeLibraryReadApi
 } from "./routes.js";
-import { publicPersonListItem } from "../people/person-list-presenter.js";
 
 const PERSON_INDEX_COVER_PREWARM_LIMIT = 64;
+const MAX_BOUNDED_COVER_LIMIT = 128;
 const personNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function normalizedSourcePath(value) {
@@ -39,22 +39,47 @@ function personSourcePriority(person) {
   return person?.relativePath ? sourcePriority(person.relativePath) : 9;
 }
 
+function compareVisiblePeople(a, b) {
+  return a.priority - b.priority || personNameCollator.compare(a.name, b.name);
+}
+
 export function personIndexCoverFiles(deps, limit = PERSON_INDEX_COVER_PREWARM_LIMIT) {
+  const visibleLimit = Math.max(0, Math.floor(Number(limit) || 0));
+  if (!visibleLimit) return [];
+  const bounded = visibleLimit <= MAX_BOUNDED_COVER_LIMIT;
   const library = deps.getLibrary();
-  const people = deps.personListService.mainLibraryPeople("main");
-  const items = typeof deps.peopleScopeService?.cacheKey === "function"
-    ? cachedPublicPeople(people, "main", { ...deps, library })
-    : people.map(person => publicPersonListItem(deps.publicPerson(person, { skipFallbackAvatar: true })));
+  const { people, publicPeople: items } = readLibraryPeople("main", { ...deps, library });
   const visible = [];
+  let descending = bounded;
   for (const [index, item] of items.entries()) {
     if (!item || item.actorProfile?.gender === "male") continue;
-    visible.push({ person: people[index], item, priority: personSourcePriority(item), name: displayPersonName(item) });
+    const candidate = { person: people[index], item, priority: personSourcePriority(item), name: displayPersonName(item) };
+    if (descending) {
+      const previous = visible.at(-1);
+      if (!previous || compareVisiblePeople(candidate, previous) < 0) {
+        visible.push(candidate);
+        if (visible.length === visibleLimit * 2) visible.splice(0, visibleLimit);
+        continue;
+      }
+      // Every later row in a strict descending run outranks its predecessors.
+      descending = false;
+      visible.reverse();
+      visible.length = Math.min(visible.length, visibleLimit);
+    }
+    // Keep the previous sorted prefix as the cutoff while collecting better candidates.
+    if (bounded && visible.length >= visibleLimit && compareVisiblePeople(candidate, visible[visibleLimit - 1]) >= 0) continue;
+    visible.push(candidate);
+    if (bounded && (visible.length === visibleLimit || visible.length === visibleLimit * 2)) {
+      visible.sort(compareVisiblePeople);
+      visible.length = visibleLimit;
+    }
   }
-  visible.sort((a, b) => a.priority - b.priority || personNameCollator.compare(a.name, b.name));
+  if (descending) visible.reverse();
+  else if (!bounded || visible.length !== visibleLimit) visible.sort(compareVisiblePeople);
 
   const files = [];
   const seen = new Set();
-  for (const { person, item } of visible.slice(0, Math.max(0, Math.floor(Number(limit) || 0)))) {
+  for (const { person, item } of visible.slice(0, visibleLimit)) {
     if (!String(item.avatarUrl || "").startsWith("/media/person/")) continue;
     const file = person.coverId ? library.filesById.get(person.coverId) : null;
     if (!file || file.type !== "image" || seen.has(file.id || file.path)) continue;
