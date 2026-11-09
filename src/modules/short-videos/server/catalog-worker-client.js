@@ -7,6 +7,10 @@ import {
 const DEFAULT_STATS_CACHE_LIMIT = 32;
 const DEFAULT_STATS_RETRY_LIMIT = 1;
 const DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS = 30000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+const DEFAULT_PENDING_REQUEST_LIMIT = 32;
+const DEFAULT_BACKGROUND_REQUEST_LIMIT = 4;
+const QUEUE_FULL = "SHORT_VIDEO_CATALOG_QUEUE_FULL";
 
 export function createShortVideoCatalogWorkerClient({
   dbPath,
@@ -16,11 +20,14 @@ export function createShortVideoCatalogWorkerClient({
   statsCacheLimit = DEFAULT_STATS_CACHE_LIMIT,
   statsRetryLimit = DEFAULT_STATS_RETRY_LIMIT,
   likeDistributionTimeoutMs = DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  pendingRequestLimit = DEFAULT_PENDING_REQUEST_LIMIT,
+  backgroundRequestLimit = DEFAULT_BACKGROUND_REQUEST_LIMIT,
   workerFactory = (url, options) => new Worker(url, options),
   workerUrl = new URL("./list-worker.js", import.meta.url),
   extraWorkerData = {}
 }) {
-  const requests = new Map();
+  const queue = [];
   const statsCache = new Map();
   const statsFlights = new Map();
   const likeDistributionCache = new Map();
@@ -28,11 +35,16 @@ export function createShortVideoCatalogWorkerClient({
   const cacheLimit = clampInteger(statsCacheLimit, DEFAULT_STATS_CACHE_LIMIT, 1, 256);
   const retryLimit = clampInteger(statsRetryLimit, DEFAULT_STATS_RETRY_LIMIT, 0, 3);
   const distributionTimeoutMs = clampInteger(likeDistributionTimeoutMs, DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS, 100, 120000);
+  const timeoutMs = clampInteger(requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 100, 120000);
+  const pendingLimit = clampInteger(pendingRequestLimit, DEFAULT_PENDING_REQUEST_LIMIT, 1, 256);
+  const backgroundLimit = clampInteger(backgroundRequestLimit, DEFAULT_BACKGROUND_REQUEST_LIMIT, 0, pendingLimit - 1);
   let worker = null;
-  let readyPromise = null;
-  let readyResolve = null;
+  let active = null;
+  let retirement = null;
+  let pendingReset = "";
   let requestId = 0;
   let generation = 0;
+  let lifecycle = 0;
   let closed = false;
   let workerStarts = 0;
   let statsDispatches = 0;
@@ -41,75 +53,89 @@ export function createShortVideoCatalogWorkerClient({
   let likeDistributionRetries = 0;
   let likeDistributionGeneration = 0;
 
-  function start() {
+  async function start() {
+    const starting = lifecycle;
+    if (retirement) await retireWorker(worker);
+    if (starting !== lifecycle) return false;
     reopen();
-    return Promise.resolve(true);
+    return true;
   }
 
   function reopen() {
+    if (retirement) throw stoppedError();
     closed = false;
   }
 
-  function query(url, operation = "list") {
-    return request(operation, { url: url.href });
+  function query(url, operation = "list", options = {}) {
+    return request(operation, { url: url.href }, options);
   }
 
   function queryStats(input = {}, options = {}) {
+    if (closed) return Promise.reject(stoppedError());
     if (options.signal?.aborted) return Promise.reject(abortError());
     const filter = normalizeShortVideoStatsFilter(input);
     const cacheKey = `${String(options.catalogStamp || "")}::${shortVideoStatsFilterKey(filter)}`;
     const cached = cacheGet(cacheKey);
     if (cached) return abortable(Promise.resolve(cached), options.signal);
     const existing = statsFlights.get(cacheKey);
-    if (existing) return abortable(existing, options.signal);
+    if (existing) {
+      if (!options.background) existing.background = false;
+      return attachFlightWaiter(existing, options.signal);
+    }
 
     const flightGeneration = generation;
-    const flight = executeStats(filter).then((stats) => {
+    const flight = createFlight(statsFlights, cacheKey, options.background);
+    flight.promise = executeStats(filter, flight, flightGeneration).then((stats) => {
       if (closed) throw stoppedError();
       if (generation !== flightGeneration) throw staleStatsError();
       cacheSet(cacheKey, stats);
       return stats;
-    }).finally(() => {
-      if (statsFlights.get(cacheKey) === flight) statsFlights.delete(cacheKey);
-    });
-    statsFlights.set(cacheKey, flight);
-    return abortable(flight, options.signal);
+    }).finally(flight.remove);
+    return attachFlightWaiter(flight, options.signal);
   }
 
   function queryLikeDistribution(options = {}) {
+    if (closed) return Promise.reject(publicLikeDistributionError(stoppedError()));
     if (options.signal?.aborted) return Promise.reject(abortError());
     const cacheKey = String(options.catalogStamp || "default");
     const cached = cacheGetFrom(likeDistributionCache, cacheKey);
     if (cached) return abortable(Promise.resolve(cached), options.signal);
     const existing = likeDistributionFlights.get(cacheKey);
-    if (existing) return attachLikeDistributionWaiter(existing, options.signal);
+    if (existing) return attachFlightWaiter(existing, options.signal);
 
     const flightGeneration = likeDistributionGeneration;
-    const flight = { promise: null, settled: false, waiters: 0 };
-    flight.promise = executeLikeDistribution(cacheKey).then((result) => {
+    const flight = createFlight(likeDistributionFlights, cacheKey);
+    flight.promise = executeLikeDistribution(cacheKey, flight, flightGeneration).then((result) => {
       if (closed) throw stoppedError();
       if (likeDistributionGeneration !== flightGeneration) throw staleLikeDistributionError();
       cacheSetIn(likeDistributionCache, cacheKey, result);
       return result;
-    }).finally(() => {
-      flight.settled = true;
-      if (likeDistributionFlights.get(cacheKey) === flight) likeDistributionFlights.delete(cacheKey);
-    });
-    likeDistributionFlights.set(cacheKey, flight);
-    return attachLikeDistributionWaiter(flight, options.signal);
+    }).finally(flight.remove);
+    return attachFlightWaiter(flight, options.signal);
   }
 
-  async function executeLikeDistribution(catalogStamp) {
+  function createFlight(flights, key, background = false) {
+    const flight = { background, entry: null, waiters: 0, promise: null, remove };
+    flights.set(key, flight);
+    return flight;
+
+    function remove() {
+      if (flights.get(key) === flight) flights.delete(key);
+    }
+  }
+
+  async function executeLikeDistribution(catalogStamp, flight, flightGeneration) {
     let lastError = null;
     const deadline = Date.now() + distributionTimeoutMs;
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       try {
         const remainingMs = Math.max(0, deadline - Date.now());
         if (!remainingMs) throw workerTimeoutError("likeDistribution");
-        return await request("likeDistribution", { catalogStamp }, { timeoutMs: remainingMs });
+        return await request("likeDistribution", { catalogStamp }, { timeoutMs: remainingMs, flight });
       } catch (error) {
         lastError = error;
-        if (error?.retryable !== true || attempt >= retryLimit || closed || Date.now() >= deadline) {
+        if (error?.retryable !== true || error.code === QUEUE_FULL || attempt >= retryLimit || closed || !flight.waiters
+          || likeDistributionGeneration !== flightGeneration || Date.now() >= deadline) {
           throw publicLikeDistributionError(error);
         }
         likeDistributionRetries += 1;
@@ -118,15 +144,20 @@ export function createShortVideoCatalogWorkerClient({
     throw publicLikeDistributionError(lastError);
   }
 
-  async function executeStats(filter) {
+  async function executeStats(filter, flight, flightGeneration) {
     let lastError = null;
+    const deadline = Date.now() + timeoutMs;
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       try {
-        return await request("stats", { filter });
+        const remainingMs = Math.max(0, deadline - Date.now());
+        if (!remainingMs) throw workerTimeoutError("stats");
+        return await request("stats", { filter }, { timeoutMs: remainingMs, flight });
       } catch (error) {
+        if (error?.name === "AbortError") throw error;
         const safeError = shortVideoStatsWorkerError(error);
         lastError = safeError;
-        if (!safeError.retryable || attempt >= retryLimit || closed) throw safeError;
+        if (!safeError.retryable || safeError.code === QUEUE_FULL || attempt >= retryLimit || closed || !flight.waiters
+          || generation !== flightGeneration || Date.now() >= deadline) throw safeError;
         statsRetries += 1;
       }
     }
@@ -134,80 +165,110 @@ export function createShortVideoCatalogWorkerClient({
   }
 
   function request(operation, payload = {}, options = {}) {
+    if (closed) return Promise.reject(stoppedError());
+    if (options.signal?.aborted) return Promise.reject(abortError());
+    if (retirement && !retirement.attempt) return Promise.reject(workerExitError());
+    const background = options.flight ? options.flight.background : options.background;
+    if (queue.length >= pendingLimit || (background && (active || retirement || queue.length)
+      && queue.filter(isBackground).length >= backgroundLimit)) return Promise.reject(queueFullError());
+
     return new Promise((resolve, reject) => {
-      let activeWorker;
-      try {
-        activeWorker = ensureWorker();
-      } catch (error) {
-        reject(error);
-        return;
+      const delay = options.timeoutMs ?? timeoutMs;
+      const entry = {
+        id: ++requestId, operation, payload, resolve, reject, background,
+        signal: options.signal, flight: options.flight, deadline: Date.now() + delay,
+        timer: null, onAbort
+      };
+      function onAbort() {
+        if (removeQueued(entry)) {
+          finishRequest(entry, abortError());
+          return;
+        }
+        // SQLite is synchronous inside the worker. Detach the caller without
+        // releasing the physical slot or its deadline.
+        settleWaiter(entry, abortError());
       }
-      const id = ++requestId;
-      const requestEntry = { operation, resolve, reject, timer: null };
-      requests.set(id, requestEntry);
-      if (operation === "stats") statsDispatches += 1;
-      if (operation === "likeDistribution") likeDistributionDispatches += 1;
-      const timeoutMs = Math.max(0, Number(options.timeoutMs || 0));
-      if (timeoutMs) {
-        requestEntry.timer = setTimeout(() => {
-          if (!requests.has(id)) return;
-          const error = workerTimeoutError(operation);
-          failWorker(activeWorker, error);
-          activeWorker.terminate().catch(() => undefined);
-        }, timeoutMs);
-        requestEntry.timer.unref?.();
-      }
-      try {
-        activeWorker.postMessage({ type: operation, id, ...payload });
-      } catch (error) {
-        requests.delete(id);
-        cleanupRequestEntry(requestEntry);
-        reject(error);
-      }
+      if (entry.flight) entry.flight.entry = entry;
+      entry.signal?.addEventListener("abort", onAbort, { once: true });
+      entry.timer = setTimeout(() => {
+        const error = workerTimeoutError(operation);
+        if (removeQueued(entry)) finishRequest(entry, error);
+        else if (active === entry) failWorker(worker, error);
+      }, delay);
+      entry.timer.unref?.();
+      queue.push(entry);
+      pump();
     });
   }
 
-  function reset() {
-    invalidateStats();
-    try {
-      worker?.postMessage({ type: "reset" });
-    } catch {}
+  function isBackground(entry) {
+    return entry.flight ? entry.flight.background : entry.background;
+  }
+
+  function removeQueued(entry) {
+    const index = queue.indexOf(entry);
+    if (index < 0) return false;
+    queue.splice(index, 1);
+    return true;
+  }
+
+  function pump() {
+    while (!closed && !active && !retirement && queue.length) {
+      const foreground = queue.findIndex(entry => !isBackground(entry));
+      const [entry] = queue.splice(Math.max(0, foreground), 1);
+      if (entry.deadline <= Date.now()) {
+        finishRequest(entry, workerTimeoutError(entry.operation));
+        continue;
+      }
+      active = entry;
+      try {
+        const owner = ensureWorker();
+        if (pendingReset) {
+          // Multiple mutations can accumulate behind one SQLite operation.
+          // Flush one ordered reset before dispatching the next query.
+          owner.postMessage({ type: pendingReset });
+          pendingReset = "";
+        }
+        if (entry.operation === "stats") statsDispatches += 1;
+        if (entry.operation === "likeDistribution") likeDistributionDispatches += 1;
+        owner.postMessage({ type: entry.operation, id: entry.id, ...entry.payload });
+      } catch (error) {
+        active = null;
+        finishRequest(entry, error);
+      }
+    }
   }
 
   function invalidateStats() {
     generation += 1;
     statsCache.clear();
     statsFlights.clear();
+    rejectQueued(staleStatsError(), "stats");
     invalidateLikeDistribution();
-    try {
-      worker?.postMessage({ type: "resetStats" });
-    } catch {}
+    if (worker) pendingReset = "reset";
   }
 
   function invalidateLikeDistribution() {
     likeDistributionGeneration += 1;
     likeDistributionCache.clear();
     likeDistributionFlights.clear();
-    try {
-      worker?.postMessage({ type: "resetLikeDistribution" });
-    } catch {}
+    rejectQueued(staleLikeDistributionError(), "likeDistribution");
+    if (worker && !pendingReset) pendingReset = "resetLikeDistribution";
   }
 
   function stop() {
     closed = true;
+    lifecycle += 1;
     generation += 1;
     likeDistributionGeneration += 1;
     statsCache.clear();
     statsFlights.clear();
     likeDistributionCache.clear();
     likeDistributionFlights.clear();
-    const activeWorker = worker;
-    worker = null;
-    readyResolve?.(false);
-    readyResolve = null;
-    readyPromise = null;
-    rejectRequests(stoppedError());
-    return activeWorker ? activeWorker.terminate().catch(() => undefined) : Promise.resolve();
+    const error = stoppedError();
+    rejectQueued(error);
+    if (active) finishRequest(active, error);
+    return worker ? retireWorker(worker) : Promise.resolve();
   }
 
   function diagnostics() {
@@ -222,7 +283,9 @@ export function createShortVideoCatalogWorkerClient({
       singleFlights: statsFlights.size,
       likeDistributionCacheEntries: likeDistributionCache.size,
       likeDistributionSingleFlights: likeDistributionFlights.size,
-      pendingRequests: requests.size,
+      pendingRequests: queue.length + Number(Boolean(active)),
+      activeRequests: Number(Boolean(active)),
+      queuedRequests: queue.length,
       closed
     };
   }
@@ -230,9 +293,6 @@ export function createShortVideoCatalogWorkerClient({
   function ensureWorker() {
     if (closed) throw stoppedError();
     if (worker) return worker;
-    readyPromise = new Promise((resolve) => {
-      readyResolve = resolve;
-    });
     const nextWorker = workerFactory(workerUrl, {
       workerData: {
         dbPath,
@@ -245,42 +305,59 @@ export function createShortVideoCatalogWorkerClient({
     workerStarts += 1;
     worker = nextWorker;
     nextWorker.on("message", (message) => {
-      if (message?.type === "ready") {
-        readyResolve?.(Boolean(message.ok));
-        readyResolve = null;
-        return;
-      }
-      const id = Number(message?.id || 0);
-      const requestEntry = requests.get(id);
-      if (!requestEntry) return;
-      requests.delete(id);
-      cleanupRequestEntry(requestEntry);
-      if (message?.ok) requestEntry.resolve(message.data);
-      else requestEntry.reject(workerMessageError(message, requestEntry.operation));
+      if (worker !== nextWorker || retirement || !active || Number(message?.id || 0) !== active.id) return;
+      const entry = active;
+      active = null;
+      finishRequest(entry, message.ok ? null : workerMessageError(message, entry.operation), message.data);
+      pump();
     });
     nextWorker.on("error", (error) => failWorker(nextWorker, error));
-    nextWorker.on("exit", (code) => {
-      if (worker !== nextWorker) return;
-      failWorker(nextWorker, workerExitError(code));
-    });
+    nextWorker.once("exit", (code) => finishWorkerExit(nextWorker, code));
     return nextWorker;
   }
 
   function failWorker(failedWorker, error) {
-    if (worker !== failedWorker) return;
-    worker = null;
-    readyResolve?.(false);
-    readyResolve = null;
-    readyPromise = null;
-    rejectRequests(error);
+    if (!failedWorker || worker !== failedWorker || retirement) return;
+    if (active) finishRequest(active, error);
+    void retireWorker(failedWorker).catch(() => undefined);
   }
 
-  function rejectRequests(error) {
-    for (const requestEntry of requests.values()) {
-      cleanupRequestEntry(requestEntry);
-      requestEntry.reject(error);
+  function retireWorker(owner) {
+    // Keep the owner and slot until native termination or the exit event.
+    // A rejected termination leaves the same owner available for a stop retry.
+    retirement ??= { attempt: null };
+    if (retirement.attempt) return retirement.attempt.promise;
+    const attempt = Promise.withResolvers();
+    retirement.attempt = attempt;
+    void Promise.resolve().then(() => {
+      if (worker === owner) return owner.terminate();
+    }).then(code => finishWorkerExit(owner, code), error => {
+      if (worker !== owner || retirement?.attempt !== attempt) return;
+      retirement.attempt = null;
+      rejectQueued(workerExitError());
+      attempt.reject(error);
+    });
+    return attempt.promise;
+  }
+
+  function finishWorkerExit(owner, code) {
+    if (worker !== owner) return;
+    const attempt = retirement?.attempt;
+    retirement = null;
+    worker = null;
+    pendingReset = "";
+    if (active) finishRequest(active, workerExitError(code));
+    active = null;
+    attempt?.resolve();
+    pump();
+  }
+
+  function rejectQueued(error, operation) {
+    for (let index = queue.length - 1; index >= 0; index--) {
+      if (operation && queue[index].operation !== operation) continue;
+      const [entry] = queue.splice(index, 1);
+      finishRequest(entry, error);
     }
-    requests.clear();
   }
 
   function cacheGet(key) {
@@ -305,11 +382,22 @@ export function createShortVideoCatalogWorkerClient({
     while (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
   }
 
-  function cleanupRequestEntry(requestEntry) {
-    if (requestEntry.timer) clearTimeout(requestEntry.timer);
+  function finishRequest(entry, error, data) {
+    clearTimeout(entry.timer);
+    if (entry.flight?.entry === entry) entry.flight.entry = null;
+    settleWaiter(entry, error, data);
   }
 
-  function attachLikeDistributionWaiter(flight, signal) {
+  function settleWaiter(entry, error, data) {
+    if (!entry.resolve) return;
+    const { resolve, reject } = entry;
+    entry.resolve = entry.reject = null;
+    entry.signal?.removeEventListener("abort", entry.onAbort);
+    if (error) reject(error);
+    else resolve(data);
+  }
+
+  function attachFlightWaiter(flight, signal) {
     if (signal?.aborted) return Promise.reject(abortError());
     flight.waiters += 1;
     return new Promise((resolve, reject) => {
@@ -322,7 +410,13 @@ export function createShortVideoCatalogWorkerClient({
       };
       const onAbort = () => {
         release();
-        reject(abortError());
+        const error = abortError();
+        const entry = flight.entry;
+        if (!flight.waiters && entry && removeQueued(entry)) {
+          flight.remove();
+          finishRequest(entry, error);
+        }
+        reject(error);
       };
       signal?.addEventListener?.("abort", onAbort, { once: true });
       flight.promise.then(
@@ -348,7 +442,7 @@ export function createShortVideoCatalogWorkerClient({
     queryLikeDistribution,
     queryStats,
     reopen,
-    reset,
+    reset: invalidateStats,
     start,
     stop
   };
@@ -416,6 +510,17 @@ function workerTimeoutError(operation) {
     ? "SHORT_VIDEO_LIKE_DISTRIBUTION_TIMEOUT"
     : "SHORT_VIDEO_WORKER_TIMEOUT";
   error.retryable = true;
+  error.statusCode = 503;
+  error.expose = true;
+  return error;
+}
+
+function queueFullError() {
+  const error = new Error("短视频目录查询繁忙，请稍后重试");
+  error.code = QUEUE_FULL;
+  error.retryable = true;
+  error.statusCode = 503;
+  error.expose = true;
   return error;
 }
 

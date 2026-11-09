@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +19,9 @@ const commitWorkerUrl = new URL("./fixtures/short_video_watch_write_commit_worke
 
 try {
   verifyClientPendingMerge();
+  for (const committed of [false, true]) await verifyLateReceiptDuringRetirement(committed);
+  await verifyExitDuringGracefulClose();
+  await verifyStopRetriesRetirementOfPendingWrite();
   await verifyLockReleaseRecovery();
   await verifySustainedLockContract();
   await verifyLatestSameVideoSemantics();
@@ -56,6 +60,216 @@ function verifyClientPendingMerge() {
     { progressMs: 100, completed: false },
     "pending progress must use the latest accepted value rather than MAX(progressMs)"
   );
+}
+
+async function verifyLateReceiptDuringRetirement(committed) {
+  const workers = [];
+  let releaseRetirement = false;
+  const service = fixtureService({
+    busyRetryBudgetMs: 500,
+    workerResponseTimeoutMs: 25,
+    transportRetryLimit: 0,
+    workerFactory() {
+      const worker = new EventEmitter();
+      const index = workers.length;
+      worker.messages = [];
+      worker.terminateCalls = 0;
+      const exit = Promise.withResolvers();
+      worker.exited = exit.promise;
+      worker.finishExit = (evidence = "both") => {
+        if (evidence !== "promise" && !worker.exitEmitted) {
+          worker.exitEmitted = true;
+          worker.emit("exit", 1);
+        }
+        if (evidence !== "event") exit.resolve(1);
+      };
+      worker.postMessage = message => {
+        worker.messages.push(message);
+        if (index === 1) return; // Hold the receipt worker until the fixture confirms physical exit.
+        if (message.type === "close") {
+          queueMicrotask(() => worker.emit("message", { type: "closed", id: message.id, ok: true }));
+        } else if (index > 1 && message.type === "record") {
+          const data = { watch: { progressMs: message.options.progressMs } };
+          queueMicrotask(() => worker.emit("message", { id: message.id, ok: true, data }));
+        }
+      };
+      workers.push(worker);
+      queueMicrotask(() => worker.emit("message", { type: "ready", ok: true }));
+      return worker;
+    },
+    terminateWorker(worker) {
+      worker.terminateCalls++;
+      if (worker !== workers[1] || releaseRetirement) queueMicrotask(worker.finishExit);
+      return worker.exited;
+    }
+  });
+  let write, stopping, restarting;
+  try {
+    await service.start();
+    write = service.record("video-a", { progressMs: 1200, completed: true });
+    write.catch(() => {});
+    await waitFor(() => workers[1]?.terminateCalls > 0, 1500, "receipt worker never entered retirement");
+    const retiring = workers[1];
+    assert.equal(retiring.terminateCalls, 1);
+    assert.deepEqual(retiring.messages.map(message => message.type), ["receipt"]);
+    const receipt = retiring.messages[0];
+    assert.equal(receipt.acceptedAt, workers[0].messages[0].options.acceptedAt);
+    const data = committed ? { ok: true, videoId: "video-a", watch: {
+      progressMs: 1200, completedCount: 1, completed: true, lastWatchedAt: receipt.acceptedAt
+    } } : null;
+    retiring.emit("message", { id: receipt.id, ok: true, data });
+
+    let stopSettled = false, restartSettled = false;
+    stopping = service.stop().finally(() => { stopSettled = true; });
+    stopping.catch(() => {});
+    restarting = service.start().finally(() => { restartSettled = true; });
+    restarting.catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(retiring.messages.map(message => message.type), ["receipt"], "a late receipt must not make stop close a retiring worker");
+    assert.equal(stopSettled, false, "stop remains pending until the retiring worker physically exits");
+    assert.equal(restartSettled, false, "restart must await the old physical exit");
+    assert.equal(workers.length, 2);
+
+    retiring.emit("error", new Error("competing retirement while termination is pending"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(retiring.terminateCalls, 1, "competing retirement requests share the native terminate");
+    retiring.finishExit(committed ? "event" : "promise");
+    await waitFor(() => stopSettled && restartSettled, 1500, "physical exit evidence did not release stop and restart");
+    if (committed) {
+      assert.deepEqual(await write, data, "a matching committed receipt remains authoritative during retirement");
+      assert.equal(service.diagnostics().receiptsRecovered, 1);
+    } else await assert.rejects(write, { code: "SHORT_VIDEO_WATCH_WORKER_TIMEOUT" });
+    await stopping;
+    assert.equal(await restarting, true);
+    assert.equal(workers.length, 3);
+    assert.equal(retiring.terminateCalls, 1);
+    assert.equal(service.diagnostics().stopFailures, 0);
+    assert.equal((await service.record("video-a", { progressMs: 3400 })).watch.progressMs, 3400);
+  } finally {
+    releaseRetirement = true;
+    workers[1]?.finishExit();
+    await Promise.allSettled([write, stopping, restarting]);
+    await service.stop().catch(() => {});
+  }
+}
+
+async function verifyExitDuringGracefulClose() {
+  const worker = new EventEmitter();
+  let closeRequests = 0, terminations = 0;
+  worker.postMessage = message => {
+    assert.equal(message.type, "close");
+    closeRequests++;
+  };
+  const service = fixtureService({
+    workerFactory() {
+      queueMicrotask(() => worker.emit("message", { type: "ready", ok: true }));
+      return worker;
+    },
+    terminateWorker() { terminations++; return Promise.resolve(1); }
+  });
+  let stopping;
+  try {
+    await service.start();
+    stopping = service.stop();
+    stopping.catch(() => {});
+    await waitFor(() => closeRequests === 1, 1500, "worker never received the graceful close");
+    worker.emit("exit", 1);
+    await stopping;
+    assert.equal(terminations, 0, "a spontaneous exit already released the physical worker");
+    assert.equal(service.diagnostics().stopFailures, 0);
+  } finally {
+    worker.emit("exit", 1);
+    await stopping?.catch(() => {});
+    await service.stop().catch(() => {});
+  }
+}
+
+async function verifyStopRetriesRetirementOfPendingWrite() {
+  const workers = [], terminating = [];
+  const firstTermination = Promise.withResolvers(), nextTermination = Promise.withResolvers();
+  const failedTermination = new Error("fixture could not terminate the write worker");
+  const committed = { progressMs: 4800, completed: true, completedCount: 1 };
+  const service = fixtureService({
+    workerResponseTimeoutMs: 50,
+    transportRetryLimit: 0,
+    workerFactory() {
+      const worker = new EventEmitter(), messages = [];
+      const index = workers.length;
+      workers.push({ worker, messages });
+      worker.postMessage = message => {
+        messages.push(message);
+        if (index === 0) return;
+        const { type, id } = message;
+        const reply = type === "close" ? { type: "closed", id, ok: true } : {
+          id, ok: true, data: { watch: type === "receipt"
+            ? { ...committed, lastWatchedAt: message.acceptedAt }
+            : { progressMs: message.options.progressMs } }
+        };
+        queueMicrotask(() => worker.emit("message", reply));
+      };
+      queueMicrotask(() => worker.emit("message", { type: "ready", ok: true }));
+      return worker;
+    },
+    terminateWorker(worker) {
+      terminating.push(worker);
+      if (worker !== workers[0].worker) {
+        queueMicrotask(() => worker.emit("exit", 1));
+        return Promise.resolve(1);
+      }
+      return terminating.length === 1 ? firstTermination.promise : nextTermination.promise;
+    }
+  });
+  let write, firstStop, retryStop;
+  try {
+    await service.start();
+    let writeSettled = false, firstStopSettled = false, retryStopSettled = false;
+    write = service.record("video-a", { progressMs: committed.progressMs, completed: true }).finally(() => { writeSettled = true; });
+    write.catch(() => {});
+    await waitFor(() => terminating.length === 1, 1500, "write timeout did not start native termination");
+    const owner = workers[0];
+    const { acceptedAt } = owner.messages[0].options;
+    firstStop = service.stop().finally(() => { firstStopSettled = true; });
+    firstStop.catch(() => {});
+    assert.equal(firstStopSettled, false);
+    firstTermination.reject(failedTermination);
+    await waitFor(() => firstStopSettled, 1500, "stop must report a rejected termination while the write remains pending");
+    await assert.rejects(firstStop, error => error?.code === "SHORT_VIDEO_WATCH_WORKER_STOP_FAILED" && error.cause === failedTermination);
+    assert.equal(writeSettled, false);
+    assert.equal(service.diagnostics().stopIncomplete, true);
+    await assert.rejects(service.start(), { code: "SHORT_VIDEO_WATCH_WORKER_STOP_INCOMPLETE" });
+
+    const stop = service.stop();
+    assert.equal(service.stop(), stop, "a concurrent explicit stop shares the pending retry");
+    retryStop = stop.finally(() => { retryStopSettled = true; });
+    retryStop.catch(() => {});
+    await waitFor(() => terminating.length >= 2, 1500, "explicit stop did not retry physical termination");
+    assert.deepEqual(terminating, [owner.worker, owner.worker]);
+    assert.equal(workers.length, 1);
+    assert.deepEqual(owner.messages.map(message => message.type), ["record"]);
+    assert.equal(retryStopSettled, false);
+    assert.equal(writeSettled, false);
+
+    owner.worker.emit("exit", 1);
+    nextTermination.resolve(1);
+    await waitFor(() => writeSettled && retryStopSettled, 1500, "confirmed exit did not allow receipt recovery and graceful stop");
+    assert.deepEqual((await write).watch, { ...committed, lastWatchedAt: acceptedAt });
+    await retryStop;
+    assert.equal(workers.length, 2);
+    assert.deepEqual(workers[1].messages.map(message => message.type), ["receipt", "close"]);
+    assert.equal(workers[1].messages[0].acceptedAt, acceptedAt);
+    assert.equal(service.diagnostics().receiptsRecovered, 1);
+    assert.equal(service.diagnostics().stopFailures, 1);
+    assert.equal(service.diagnostics().stopIncomplete, false);
+    assert.equal(await service.start(), true);
+    assert.equal(workers.length, 3);
+    assert.equal((await service.record("video-a", { progressMs: 7200 })).watch.progressMs, 7200);
+    await service.stop();
+  } finally {
+    workers[0]?.worker.emit("exit", 1);
+    firstTermination.resolve(1); nextTermination.resolve(1);
+    await Promise.allSettled([write, firstStop, retryStop]);
+    await service.stop().catch(() => {});
+  }
 }
 
 async function verifyLockReleaseRecovery() {
@@ -480,6 +694,32 @@ async function verifyWorkerStartFailure() {
   } finally {
     await service.stop();
   }
+
+  const worker = new EventEmitter();
+  const physicalExit = Promise.withResolvers();
+  let terminateCalls = 0, settled = false;
+  const racing = fixtureService({
+    workerFactory() {
+      queueMicrotask(() => {
+        worker.emit("message", { type: "ready", ok: true });
+        worker.emit("error", new Error("fixture worker failed immediately after ready"));
+      });
+      return worker;
+    },
+    terminateWorker() { terminateCalls++; return physicalExit.promise; }
+  });
+  const start = assert.rejects(racing.start(), { code: "SHORT_VIDEO_WATCH_WORKER_UNAVAILABLE", statusCode: 503 })
+    .finally(() => { settled = true; });
+  start.catch(() => {});
+  try {
+    await waitFor(() => settled, 1500, "ready followed by error must reject start before physical exit");
+    await start;
+    assert.equal(terminateCalls, 1);
+  } finally {
+    worker.emit("exit", 1);
+    physicalExit.resolve(1);
+    await racing.stop();
+  }
 }
 
 async function verifyRuntimeWorkerStartFailure() {
@@ -541,6 +781,7 @@ async function verifyCloseFailuresRemainRetryable() {
 
 async function verifyTerminateFailureRemainsRetryable() {
   let failTerminate = true;
+  let closeRequestsAfterAck = 0;
   const fixture = createDatabaseFixture("terminate-failure", ["video-a"]);
   const service = createShortVideoWatchWriteService({
     dbPath: fixture.dbPath,
@@ -553,7 +794,14 @@ async function verifyTerminateFailureRemainsRetryable() {
       recordLogPath: path.join(tempRoot, "terminate-failure-records.log")
     },
     terminateWorker(activeWorker) {
-      if (failTerminate) return Promise.reject(new Error("fixture terminate failure"));
+      if (failTerminate) {
+        const postMessage = activeWorker.postMessage.bind(activeWorker);
+        activeWorker.postMessage = (message, ...args) => {
+          if (message.type === "close") closeRequestsAfterAck++;
+          return postMessage(message, ...args);
+        };
+        return Promise.reject(new Error("fixture terminate failure"));
+      }
       return activeWorker.terminate();
     }
   });
@@ -575,6 +823,7 @@ async function verifyTerminateFailureRemainsRetryable() {
     assert.equal(service.diagnostics().workerStarts, starts);
     failTerminate = false;
     await service.stop();
+    assert.equal(closeRequestsAfterAck, 0, "after close was acknowledged, stop retries physical termination alone");
     assert.equal(service.diagnostics().stopFailures, 1);
     assert.equal(service.diagnostics().stopIncomplete, false);
     await service.start();

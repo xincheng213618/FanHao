@@ -13,6 +13,7 @@ export function defaultShortVideoCoverDbPath(shortVideoDbPath) {
 export function createShortVideoCoverDatabase(options = {}) {
   const dbPath = path.resolve(options.dbPath || defaultShortVideoCoverDbPath(options.shortVideoDbPath));
   let db = null;
+  let readCoverStatement = null;
 
   function database() {
     if (db) return db;
@@ -223,7 +224,7 @@ export function createShortVideoCoverDatabase(options = {}) {
   function get(videoId) {
     const id = normalizeVideoId(videoId);
     if (!id) return null;
-    const row = databaseOrOpen().prepare(`
+    const statement = readCoverStatement ??= databaseOrOpen().prepare(`
       SELECT
         video_id,
         source_fingerprint,
@@ -236,9 +237,14 @@ export function createShortVideoCoverDatabase(options = {}) {
         updated_at
       FROM short_video_covers
       WHERE video_id = ?
-    `).get(id);
-    if (!row?.image_blob) return null;
-    const buffer = Buffer.from(row.image_blob);
+    `);
+    const row = statement.get(id);
+    const blob = row?.image_blob;
+    if (!blob) return null;
+    // SQLite has already copied this BLOB into a fresh view for this read.
+    const buffer = blob instanceof Uint8Array
+      ? Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength)
+      : Buffer.from(blob);
     if (!isJpegBuffer(buffer) || buffer.length !== Number(row.byte_length || 0)) return null;
     return {
       videoId: row.video_id,
@@ -379,6 +385,7 @@ export function createShortVideoCoverDatabase(options = {}) {
 
   function close() {
     if (!db) return;
+    readCoverStatement = null;
     try {
       db.close();
     } catch {}

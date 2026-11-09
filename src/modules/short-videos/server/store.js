@@ -216,6 +216,7 @@ export function createShortVideoStore(options = {}) {
   const coverGenerateLimit = clampInt(options.coverGenerateLimit, DEFAULT_COVER_GENERATE_LIMIT, 0, MAX_LIMIT);
   if (!dbPath) throw new Error("short video dbPath is required");
   let db = null;
+  const videoFileIdStatements = new WeakMap();
   const {
     createLocalComment,
     deleteLocalComment,
@@ -1124,7 +1125,7 @@ function summary() {
         : database.prepare(`SELECT COUNT(*) AS count FROM ${countSource} ${countWhere}`).get(...filter.args)?.count || 0;
     const relationshipTotal = !filter.q && !filter.topic && !filter.soundKey
       && !filter.author && filter.media === "all"
-      ? shortVideoRelationshipTotal(database, filter.source)
+      ? fastPage?.relationshipTotal ?? shortVideoRelationshipTotal(database, filter.source)
       : null;
     const stats = !includeStats || recommendationIds ? null : queryShortVideoStats(database, params);
     let rows;
@@ -2536,7 +2537,8 @@ function summary() {
     const row = videoCatalogRowByAnyId(
       databaseOrOpen(),
       id,
-      "id, source_path, file_name, title, author_name, duration_ms, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"
+      "id, source_path, file_name, title, author_name, duration_ms, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate",
+      videoFileIdStatements
     );
     if (options.allowMissing && row?.source_path) {
       return {
@@ -4863,10 +4865,15 @@ function shortVideoRecommendationAuthorKey(row = {}) {
   return name && name !== "未知作者" ? `name:${name}` : "";
 }
 
-function videoCatalogRowByAnyId(db, id, columns = "*") {
+function videoCatalogRowByAnyId(db, id, columns = "*", exactStatements) {
   const lookup = String(id || "").trim();
   if (!lookup) return null;
-  const exactId = db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE id = ?`).get(lookup);
+  let exactStatement = exactStatements?.get(db);
+  if (!exactStatement) {
+    exactStatement = db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE id = ?`);
+    exactStatements?.set(db, exactStatement);
+  }
+  const exactId = exactStatement.get(lookup);
   if (exactId) return exactId;
   const exactAwemeId = db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE aweme_id = ? LIMIT 1`).get(lookup);
   if (exactAwemeId) return exactAwemeId;

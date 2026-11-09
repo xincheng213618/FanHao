@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -25,6 +26,7 @@ if (realDbPath) {
 }
 
 async function runFixtureVerification() {
+  await verifyCatalogRequestScheduler();
   verifyProjectedStatsNative();
   const fixture = createProductionShapeFixture(PRODUCTION_VIDEO_COUNT);
   let authorPageColdMs = 0;
@@ -354,9 +356,103 @@ function verifyAuthorPageColdPerformance(store) {
   return { authorPageColdMs: elapsedMs, authorResolveColdMs, authorSearchColdMs };
 }
 
-function verifyStatsZeroUsesWorker() {
+async function verifyCatalogRequestScheduler() {
+  const workers = [], requests = [];
+  const client = createShortVideoCatalogWorkerClient({
+    dbPath: "unused-by-controlled-worker", pendingRequestLimit: 3, backgroundRequestLimit: 2, requestTimeoutMs: 2000,
+    workerFactory() {
+      const worker = new EventEmitter(), posted = [], exit = Promise.withResolvers();
+      const transport = { worker, posted, exit, terminateCalls: 0 };
+      workers.push(transport);
+      worker.postMessage = message => { if (message.id) posted.push(message); };
+      worker.terminate = () => { transport.terminateCalls++; return exit.promise; };
+      queueMicrotask(() => worker.emit("message", { type: "ready", ok: true }));
+      return worker;
+    }
+  });
+  function query(name, options, operation = "list") {
+    const result = client.query(new URL(`http://fixture/api/short-videos?q=${name}`), operation, options);
+    result.catch(() => {});
+    requests.push(result);
+    return result;
+  }
+  function reply(transport, index, name, operation = "list") {
+    const message = transport.posted[index];
+    assert.equal(message?.type, operation);
+    assert.equal(new URL(message.url).searchParams.get("q"), name);
+    transport.worker.emit("message", { id: message.id, ok: true, data: { name } });
+  }
+  function finish(transport) {
+    transport.worker.emit("exit", 1);
+    transport.exit.resolve(1);
+  }
+  const activeAbort = new AbortController(), queuedAbort = new AbortController();
+  const full = { code: "SHORT_VIDEO_CATALOG_QUEUE_FULL", statusCode: 503, retryable: true };
+  try {
+    const active = query("held", { signal: activeAbort.signal });
+    const cancelled = query("cancel-queued", { signal: queuedAbort.signal, background: true });
+    const background = query("background", { background: true });
+    const tooMuchBackground = query("background-overflow", { background: true });
+    const first = query("foreground-first", {}, "authors");
+    const fullQueue = query("foreground-overflow");
+    await delay(0);
+    const transport = workers[0];
+    assert.equal(transport.posted.length, 1, "only one data request may be posted while the worker is held");
+    const held = client.diagnostics();
+    assert.deepEqual([held.pendingRequests, held.activeRequests, held.queuedRequests], [4, 1, 3]);
+    await assert.rejects(tooMuchBackground, full);
+    await assert.rejects(fullQueue, full);
+
+    queuedAbort.abort();
+    await assert.rejects(cancelled, { name: "AbortError", code: "ABORT_ERR" });
+    const second = query("foreground-second", {}, "facets");
+    activeAbort.abort();
+    await assert.rejects(active, { name: "AbortError", code: "ABORT_ERR" });
+    assert.equal(transport.posted.length, 1, "active cancellation does not release the physical slot");
+    assert.equal(client.diagnostics().activeRequests, 1);
+    reply(transport, 0, "held");
+    await delay(0);
+    reply(transport, 1, "foreground-first", "authors");
+    assert.deepEqual(await first, { name: "foreground-first" });
+    await delay(0);
+    reply(transport, 2, "foreground-second", "facets");
+    assert.deepEqual(await second, { name: "foreground-second" });
+    await delay(0);
+    assert.equal(new URL(transport.posted[3].url).searchParams.get("q"), "background");
+
+    const queued = query("queued-before-stop");
+    let drained = false;
+    const stopping = client.stop().then(() => { drained = true; });
+    const alsoStopping = client.stop();
+    await assert.rejects(background, { statusCode: 503 });
+    await assert.rejects(queued, { statusCode: 503 });
+    const draining = client.diagnostics();
+    assert.deepEqual([draining.pendingRequests, draining.activeRequests, draining.queuedRequests], [1, 1, 0]);
+    assert.equal(transport.posted.length, 4, "queued work cannot post after stop");
+    assert.equal(transport.terminateCalls, 1);
+    assert.equal(drained, false, "stop must await native termination");
+    finish(transport);
+    await Promise.all([stopping, alsoStopping]);
+    assert.equal(client.diagnostics().pendingRequests, 0);
+    assert.equal(await client.start(), true);
+    assert.equal(workers.length, 1, "reopen remains lazy");
+    const next = query("after-stop");
+    await delay(0);
+    reply(workers[1], 0, "after-stop");
+    assert.deepEqual(await next, { name: "after-stop" });
+  } finally {
+    const closing = client.stop();
+    workers.forEach(finish);
+    await closing;
+    await Promise.allSettled(requests);
+  }
+}
+
+async function verifyStatsZeroUsesWorker() {
   let workerQueries = 0;
   let storeQueries = 0;
+  const options = { signal: new AbortController().signal, background: true };
+  const shared = { stats: null, worker: true, videos: [] };
   const store = {
     catalogStamp: () => "fixture-stamp",
     listVideos: () => {
@@ -367,29 +463,49 @@ function verifyStatsZeroUsesWorker() {
   const service = createShortVideoListStatsService({
     store,
     catalogWorker: {
-      query: async () => {
+      query: async (_url, operation, workerOptions) => {
+        assert.equal(operation, "list");
+        assert.deepEqual(workerOptions, options);
         workerQueries += 1;
-        return { stats: null, worker: true, videos: [] };
+        return shared;
       },
-      queryStats: async () => {
+      queryStats: async (_filter, workerOptions) => {
+        assert(workerOptions.signal instanceof AbortSignal);
+        assert.equal(workerOptions.signal.aborted, false);
+        assert.equal(workerOptions.background, true);
+        assert.equal(workerOptions.catalogStamp, "fixture-stamp");
         workerQueries += 1;
         return {};
       }
     }
   });
-  return Promise.all([
-    service.list({ searchParams: new URLSearchParams("stats=0") }),
-    service.list({ searchParams: new URLSearchParams("source=recommended&stats=0") }),
-    service.list({ searchParams: new URLSearchParams("source=recommended") }),
-    service.list({ searchParams: new URLSearchParams("source=all") })
-  ]).then(([withoutStats, recommendedWithoutStats, recommended, withStats]) => {
-    assert.equal(workerQueries, 5, "list construction and heavy stats must both use the catalog worker");
-    assert.equal(storeQueries, 0, "list construction must never block the HTTP thread, including stats-enabled requests");
-    assert.deepEqual(withoutStats, { stats: null, worker: true, videos: [] });
-    assert.deepEqual(recommendedWithoutStats, { stats: null, worker: true, videos: [] });
-    assert.deepEqual(recommended, { stats: null, worker: true, videos: [] });
-    assert.deepEqual(withStats, { stats: {}, worker: true, videos: [] });
+  const [withoutStats, recommendedWithoutStats, recommended, withStats] = await Promise.all([
+    service.list({ searchParams: new URLSearchParams("stats=0") }, options),
+    service.list({ searchParams: new URLSearchParams("source=recommended&stats=0") }, options),
+    service.list({ searchParams: new URLSearchParams("source=recommended") }, options),
+    service.list({ searchParams: new URLSearchParams("source=all") }, options)
+  ]);
+  assert.equal(workerQueries, 5, "list construction and heavy stats must both use the catalog worker");
+  assert.equal(storeQueries, 0, "list construction must never block the HTTP thread, including stats-enabled requests");
+  assert.deepEqual(withoutStats, { stats: null, worker: true, videos: [] });
+  assert.deepEqual(recommendedWithoutStats, { stats: null, worker: true, videos: [] });
+  assert.deepEqual(recommended, { stats: null, worker: true, videos: [] });
+  assert.deepEqual(withStats, { stats: {}, worker: true, videos: [] });
+  assert.equal(shared.stats, null, "attaching heavy stats does not mutate another worker response consumer");
+
+  let detachedSignal;
+  const overloaded = createShortVideoListStatsService({ store, catalogWorker: {
+    async query() { throw Object.assign(new Error("private queue detail"), { code: "SHORT_VIDEO_CATALOG_QUEUE_FULL" }); },
+    queryStats(_filter, { signal }) {
+      detachedSignal = signal;
+      return new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    }
+  } });
+  await assert.rejects(overloaded.list({ searchParams: new URLSearchParams("source=all") }, options), {
+    code: "SHORT_VIDEO_CATALOG_QUEUE_FULL", statusCode: 503, retryable: true
   });
+  assert.equal(detachedSignal.aborted, true, "a rejected page detaches its private aggregate waiter");
+  assert.equal(options.signal.aborted, false);
 }
 
 function verifyAuthorFacetCoveringIndex(dbPath) {

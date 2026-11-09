@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { once } from "node:events";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { pipeline } from "node:stream/promises";
 import vm from "node:vm";
+import { createShortVideosRuntime } from "../src/modules/short-videos/server/runtime.js";
+import { notFound, sendJson } from "../src/platform/server/responses.js";
 
 // Actual startup queue/copy/runtime lifecycle over real temporary files,
 // FileHandles and pipeline streams. Metadata, native open/close and rename can
-// settle independently; unrelated DB/workers/processes are boundary doubles.
+// settle independently. Extracted cases use boundary doubles, and the
+// loopback case uses a private SQLite catalog and real HTTP.
 const source = fs.readFileSync(new URL("../src/modules/short-videos/server/runtime.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 function take(name) {
   const start = new RegExp(`^  (?:async )?function ${name}\\(`, "m").exec(source)?.index;
@@ -17,7 +23,7 @@ function take(name) {
 const globals = source.slice(source.indexOf("  const videoCacheQueue ="), source.indexOf("  const smoothVideoQueue ="));
 const implementation = source.slice(source.indexOf("  function tryQueueStartupVideoCache("), source.indexOf("  function sortAndScheduleSmoothVideoQueue("));
 assert(globals && implementation);
-const names = ["startupVideoCacheDescriptor", "safeStat", "hashText", "safeFilePart", "stopVideoCacheQueue",
+const names = ["startupVideoCacheDescriptor", "isStartupPrefixPublishing", "safeStat", "hashText", "safeFilePart", "stopVideoCacheQueue",
   "stopDownloadManagerSync", "startDownloadManagerSync", "runtimeStartStillCurrent"];
 const pendingLimit = vm.runInNewContext(/^const SHORT_VIDEO_STARTUP_CACHE_PENDING_LIMIT = ([^;]+);/m.exec(source)[1]);
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-startup-cache-"));
@@ -28,9 +34,9 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-async function bounded(promise, label) {
+async function bounded(promise, label, milliseconds = 1500) {
   let timeout;
-  try { return await Promise.race([promise, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`timed out: ${label}`)), 1500); })]); }
+  try { return await Promise.race([promise, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`timed out: ${label}`)), milliseconds); })]); }
   finally { clearTimeout(timeout); }
 }
 
@@ -101,6 +107,7 @@ function fixture({ stage = "", closeFailure = false, rollbackFailure = false } =
       recoverDeleteJobs: async () => { closed = false; calls.push(["store-open"]); return { pending: 0, active: 0 }; } },
     sharedCache: { rootDir: path.join(root, "cache"), touch: target => calls.push(["touch", target, stopRequested]), scheduleCleanup: () => calls.push(["cleanup", stopRequested]) },
     runtimeStarted: true, runtimeDesiredStarted: true, runtimeLifecycleGeneration: 0, runtimeStartPromise: null, runtimeStopPromise: null,
+    listCacheFiles: null, listCacheAccepting: true,
     runtimeTestHooks: {}, imageAccepting: true, smoothPlaybackAccepting: true, smoothVideoExecutions: new Set(),
     beginStopImageRequests: async () => {}, beginStopSmoothPlaybackRequests: async () => {}, stopSmoothVideoQueue: async () => {},
     downloadManagerSync: { start() {}, stop: () => holdOtherStop ? otherStop.promise : Promise.resolve() }, stopListServices: async () => {},
@@ -134,7 +141,7 @@ function fixture({ stage = "", closeFailure = false, rollbackFailure = false } =
     },
     async dispose() {
       mainGate.resolve(); readerCloseGate.resolve(); otherStop.resolve();
-      await context.api.stopDownloadManagerSync().catch(() => {});
+      await Promise.resolve().then(() => context.api.stopDownloadManagerSync()).catch(() => {});
       for (const record of handles) if (record.handle.fd >= 0) await record.nativeClose();
       for (const descriptor of createdDescriptors) {
         if (!fs.existsSync(descriptor.cacheDir)) continue;
@@ -159,6 +166,172 @@ function assertNoDescriptors(f) {
   for (const record of f.handles) { assert.equal(record.handle.fd, -1); assert.equal(record.closes, 1); }
   f.readers.forEach(({ stream }) => assert.equal(stream.closed, true));
   f.writers.forEach(stream => assert.equal(stream.closed, true));
+}
+
+async function verifyFeedCandidateScan() {
+  const root = path.join(tempRoot, String(sequence++));
+  const dbPath = path.join(root, "catalog.sqlite"), cache = path.join(root, "cache");
+  const shortCache = path.join(cache, "short-videos"), prefixDir = path.join(shortCache, "startup");
+  fs.mkdirSync(prefixDir, { recursive: true });
+  const firstPage = ["warm", "first", "second", "third", "extra"];
+  const waiting = ["batch-1", "batch-2", "batch-3", "batch-4"];
+  const latest = waiting.slice(-2), plannedCopies = firstPage.slice(1, 4);
+  const generationPage = ["generation", "generation-tail"];
+  const gates = new Map(["warm", "barrier", "generation", "late"].map(id => [id, { reached: deferred(), release: deferred() }]));
+  const sourceOwners = new Map(), prefixOwners = new Map();
+  const copies = [], published = new Set(), asyncChecks = [], syncChecks = [], generationTouches = [];
+  const foregroundOpen = deferred(), backgroundPublished = deferred(), latestScanned = deferred(), generationScanned = deferred();
+  const readStat = fs.promises.stat, readSyncStat = fs.statSync, open = fs.promises.open;
+  let activeChecks = 0, peakChecks = 0, firstFeedSettled = false, firstLookupInRoute;
+  const runtime = createShortVideosRuntime({
+    dbPath, roots: [], ffmpegPath: "must-not-spawn", notFound, sendJson,
+    sharedCache: { rootDir: cache, scheduleCleanup() {}, touch(filePath) {
+      const id = prefixOwners.get(filePath);
+      if (copies.includes(id)) published.add(id);
+      if (plannedCopies.every(candidate => published.has(candidate))) backgroundPublished.resolve();
+      if (generationPage.includes(id)) generationTouches.push(id);
+      if (id === "generation-tail") generationScanned.resolve();
+    } },
+    async listQuery(url) {
+      const q = url.searchParams.get("q");
+      const ids = q === "generation" ? generationPage : q ? [q] : firstPage;
+      return { source: "liked", sort: "published", total: ids.length,
+        videos: ids.map(id => ({ id, mediaType: "video" })) };
+    }
+  });
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://fixture");
+    if (url.pathname === "/health") { sendJson(res, 200, { ready: true }); return; }
+    runtime.routeApi(req, res, url).then(handled => {
+      if (!handled) notFound(res);
+      if (url.pathname === "/api/short-videos" && !url.searchParams.has("q")) firstFeedSettled = true;
+    }).catch(error => res.destroy(error));
+  });
+  const wait = (promise, label) => bounded(promise, label, 5000);
+  let stop;
+  try {
+    const db = new DatabaseSync(dbPath);
+    try {
+      const insert = db.prepare(`INSERT INTO short_videos (id, aweme_id, source_path, media_type, visibility, size_bytes, mtime_ms)
+        VALUES (?, ?, ?, 'video', 'local_only', ?, ?)`);
+      const bytes = Buffer.from("private startup prefix fixture");
+      const warmPrefixes = new Set(["warm", "barrier", ...waiting, ...generationPage]);
+      for (const id of [...firstPage, "current", "barrier", ...waiting, ...generationPage, "late"]) {
+        const filePath = path.join(root, `${id}.mp4`);
+        fs.writeFileSync(filePath, bytes);
+        const mtime = Math.floor(readSyncStat(filePath).mtimeMs);
+        const hash = crypto.createHash("sha1").update(`${filePath}:${bytes.length}:${mtime}`).digest("hex").slice(0, 18);
+        const prefix = path.join(prefixDir, `${id}-${hash}.mp4.start`);
+        sourceOwners.set(filePath, id); prefixOwners.set(prefix, id);
+        insert.run(id, id, filePath, bytes.length, mtime);
+        if (warmPrefixes.has(id)) fs.writeFileSync(prefix, bytes);
+        if (id === "second") fs.writeFileSync(prefix, bytes.subarray(0, 1));
+      }
+    } finally { db.close(); }
+    const videoFile = runtime.store.videoFile;
+    runtime.store.videoFile = (id, ...args) => {
+      if (id === "warm" && firstLookupInRoute === undefined) firstLookupInRoute = !firstFeedSettled;
+      return videoFile(id, ...args);
+    };
+    fs.statSync = (filePath, ...args) => {
+      const id = prefixOwners.get(filePath) || sourceOwners.get(filePath);
+      if (id && id !== "current" && !copies.includes(id)) syncChecks.push(id);
+      return readSyncStat(filePath, ...args);
+    };
+    fs.promises.stat = async (filePath, ...args) => {
+      const id = prefixOwners.get(filePath);
+      if (!id || copies.includes(id)) return readStat(filePath, ...args);
+      asyncChecks.push(id);
+      activeChecks++; peakChecks = Math.max(peakChecks, activeChecks);
+      const gate = gates.get(id);
+      try {
+        if (gate) { gate.reached.resolve(); await gate.release.promise; }
+        return await readStat(filePath, ...args);
+      } finally {
+        activeChecks--;
+        if (latest.every(candidate => asyncChecks.includes(candidate))) latestScanned.resolve();
+      }
+    };
+    fs.promises.open = (filePath, ...args) => {
+      const id = sourceOwners.get(filePath);
+      if (id) copies.push(id);
+      if (id === "current") foregroundOpen.resolve();
+      return open(filePath, ...args);
+    };
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    async function request(route) {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}${route}`);
+      return { status: response.status, data: await response.json() };
+    }
+    const feed = "/api/short-videos";
+    const initial = await wait(request(feed), "feed before releasing its speculative prefix stat");
+    assert.equal(initial.status, 200);
+    assert.deepEqual(initial.data.videos.map(video => video.id), firstPage);
+    assert.deepEqual(syncChecks, [], "the feed cannot synchronously inspect candidate prefixes");
+    await wait(gates.get("warm").reached.promise, "first speculative prefix stat");
+    assert.equal((await wait(request(feed), "same feed while the prefix is held")).status, 200);
+    assert.deepEqual(await wait(request("/health"), "health during held prefix stat"), { status: 200, data: { ready: true } });
+    assert.equal(firstLookupInRoute, false);
+    assert.deepEqual(syncChecks, []);
+    assert.deepEqual(asyncChecks, ["warm"]);
+    assert.equal((await wait(request(`${feed}/current`), "foreground detail")).status, 200);
+    await wait(foregroundOpen.promise, "foreground copy ahead of held speculative stat");
+    assert.deepEqual(copies, ["current"]);
+
+    assert.equal((await wait(request(`${feed}?q=barrier`), "barrier feed")).status, 200);
+    gates.get("warm").release.resolve();
+    await wait(gates.get("barrier").reached.promise, "next batch after the first page");
+    assert.deepEqual(asyncChecks, [...firstPage.slice(0, 4), "barrier"], "duplicate feed coalesces and scanning stops after three eligible copies");
+    for (const id of waiting) assert.equal((await wait(request(`${feed}?q=${id}`), id)).status, 200);
+    assert.equal(peakChecks, 1, "a held prefix stat retains the only speculative slot");
+    assert.equal(asyncChecks.at(-1), "barrier");
+    gates.get("barrier").release.resolve();
+    await wait(latestScanned.promise, "latest two pending batches");
+    await wait(backgroundPublished.promise, "first three eligible background copies");
+    assert.deepEqual(new Set(asyncChecks.slice(5)), new Set(latest), "only the two newest pending batches are kept");
+    assert.deepEqual(copies, ["current", ...plannedCopies]);
+    assert.deepEqual(syncChecks, []);
+
+    const generationStart = asyncChecks.length, generationUrl = `${feed}?q=generation`;
+    assert.equal((await wait(request(generationUrl), "first generation feed")).status, 200);
+    await wait(gates.get("generation").reached.promise, "held stat across list invalidation");
+    runtime.clearListCache();
+    assert.equal((await wait(request(generationUrl), "same feed after invalidation")).status, 200);
+    gates.get("generation").release.resolve();
+    await wait(generationScanned.promise, "current generation rechecks the same page");
+    assert.deepEqual(asyncChecks.slice(generationStart), ["generation", ...generationPage], "old scan cannot continue after its stat");
+    assert.deepEqual(generationTouches, generationPage, "only the current generation touches cached prefixes");
+
+    assert.equal((await wait(request(`${feed}?q=late`), "late feed")).status, 200);
+    await wait(gates.get("late").reached.promise, "held stat before stop");
+    let stopped = false;
+    stop = runtime.stop().then(() => { stopped = true; });
+    await tick();
+    assert.equal(stopped, false, "stop waits for the physical prefix stat");
+    gates.get("late").release.resolve();
+    await wait(stop, "stop drains the speculative stat");
+    assert.deepEqual(copies, ["current", ...plannedCopies], "late stat cannot admit a copy after stop");
+    assert.deepEqual(syncChecks, []);
+    assert.equal(peakChecks, 1);
+  } finally {
+    for (const gate of gates.values()) gate.release.resolve();
+    try { await (stop || runtime.stop()); }
+    finally {
+      fs.statSync = readSyncStat; fs.promises.stat = readStat; fs.promises.open = open;
+      if (server.listening) {
+        const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed;
+      }
+      for (const directory of [prefixDir, path.join(shortCache, "lists"), shortCache, cache, root]) {
+        if (!fs.existsSync(directory)) continue;
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+          assert(entry.isFile(), "private fixture cleanup expects only files");
+          fs.unlinkSync(path.join(directory, entry.name));
+        }
+        fs.rmdirSync(directory);
+      }
+    }
+  }
 }
 
 try {
@@ -321,6 +494,7 @@ try {
     } finally { f.release(); await stopping?.catch(() => {}); await f.dispose(); }
   });
 
+  await scenario("loopback feed defers bounded speculative scans and preserves foreground priority and stop drain", verifyFeedCandidateScan);
   console.log(`short-video-startup-cache: PASS (${checks} real-file lifecycle/queue groups; ${nativeOpens} FileHandles, ${nativeReaders} read streams, ${nativeWriters} write streams; physical close and failure gates)`);
 } finally {
   assert.equal(path.dirname(path.resolve(tempRoot)), path.resolve(os.tmpdir())); assert(path.basename(tempRoot).startsWith("fanhao-startup-cache-"));

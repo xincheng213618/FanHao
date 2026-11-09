@@ -26,6 +26,10 @@ const managerDbPath = path.join(fixtureRoot, "download-manager.sqlite");
 const cacheRoot = path.join(fixtureRoot, "cache");
 let runtime = null;
 let listQueryHook = null;
+let listCacheTouchHook = null;
+let listCacheReadGate = null;
+let listCacheWriteGate = null;
+let listCacheRenameFailure = null;
 const touchedListCachePaths = [];
 
 try {
@@ -55,6 +59,9 @@ try {
   await verifyPublicReadSurfaces();
   await verifyActionStatistics();
   await verifyListCacheAuthorityContract();
+  await verifyBackgroundListRefreshLifecycle();
+  await verifyAsyncListCacheIo();
+  await verifyListCacheRuntimeEpoch();
   await verifyMetadataSyncPreservesExplicitFalse();
   await verifyDownloadImportPreservesExplicitFalse();
   await verifyRecommendedRecoversAfterLockedPreflight();
@@ -335,7 +342,7 @@ function downgradeCatalogView(db) {
     .run(LEGACY_SCHEMA_VERSION);
 }
 
-function createFixtureRuntime() {
+function createFixtureRuntime(options = {}) {
   return createShortVideosRuntime({
     dbPath,
     downloadManagerDbPath: "",
@@ -361,6 +368,7 @@ function createFixtureRuntime() {
       touch(filePath) {
         if (String(filePath).includes(`${path.sep}short-videos${path.sep}lists${path.sep}`)) {
           touchedListCachePaths.push(filePath);
+          listCacheTouchHook?.(filePath);
         }
       }
     },
@@ -368,7 +376,9 @@ function createFixtureRuntime() {
       return typeof listQueryHook === "function"
         ? listQueryHook(url, options, fallback)
         : fallback();
-    }
+    },
+    runtimeTestHooks: { listCacheFileOps: { open: openListCacheFixtureFile, rename: renameListCacheFixtureFile } },
+    ...options
   });
 }
 
@@ -457,6 +467,326 @@ async function verifyListCacheAuthorityContract() {
 
   await verifyWatchGenerationAuthorityFence();
   await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
+}
+
+async function verifyBackgroundListRefreshLifecycle() {
+  async function waitForStart(started) {
+    let timer;
+    try {
+      return await Promise.race([started, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("stale list refresh did not start")), 2000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+  for (const restart of [false, true]) {
+    const query = restart ? "background-refresh-restart" : "background-refresh-stop";
+    const requestPath = `/api/short-videos?q=${query}&source=all&sort=published&limit=1&stats=0`;
+    const oldStarted = Promise.withResolvers(), newStarted = Promise.withResolvers();
+    const releaseOld = Promise.withResolvers(), releaseNew = Promise.withResolvers();
+    const snapshot = cacheMarker => ({ source: "all", sort: "published", videos: [], cacheMarker });
+    let reads = 0;
+    listQueryHook = async (url, options, fallback) => {
+      if (url.searchParams.get("q") !== query) return fallback();
+      if (url.searchParams.get("refresh") === "1") return snapshot("seed");
+      if (++reads === 1) {
+        oldStarted.resolve(options.signal);
+        await releaseOld.promise; // Simulate a provider that ignores cancellation.
+        return snapshot("retired");
+      }
+      if (reads === 2) {
+        newStarted.resolve(options.signal);
+        await releaseNew.promise;
+        return snapshot("current");
+      }
+      return snapshot("duplicate");
+    };
+    try {
+      assert.equal((await request("GET", `${requestPath}&refresh=1`)).data?.cacheMarker, "seed");
+      const cachePath = touchedListCachePaths.at(-1);
+      const cached = () => JSON.parse(fs.readFileSync(cachePath, "utf8"));
+      fs.writeFileSync(cachePath, JSON.stringify({ ...cached(), cachedAt: "2000-01-01T00:00:00.000Z" }));
+      assert.equal((await request("GET", requestPath)).data?.cacheState, "stale-refreshing");
+      assert.equal(reads, 0, "stale paint must return before its background query starts");
+      await runtime.stop();
+      await new Promise(resolve => setTimeout(resolve, 45));
+      assert.equal(reads, 0, "stopping must cancel an unstarted stale refresh timer");
+
+      assert.equal(await runtime.start(), true);
+      assert.equal((await request("GET", requestPath)).data?.cacheState, "stale-refreshing");
+      const oldSignal = await waitForStart(oldStarted.promise);
+      await runtime.stop();
+
+      let newSignal;
+      if (restart) {
+        assert.equal(await runtime.start(), true);
+        assert.equal((await request("GET", requestPath)).data?.cacheState, "stale-refreshing");
+        newSignal = await waitForStart(newStarted.promise);
+      }
+      releaseOld.resolve();
+      await nextTurn();
+      assert.equal(cached().cacheMarker, "seed", "an old background query must not publish after stopping, even after a restart");
+      assert.equal(oldSignal?.aborted, true, "an active stale query receives cancellation when the runtime stops");
+      if (restart) {
+        assert.equal(newSignal?.aborted, false);
+        assert.equal((await request("GET", requestPath)).data?.cacheState, "stale-refreshing");
+        await new Promise(resolve => setTimeout(resolve, 45));
+        assert.equal(reads, 2, "retired finally must not remove the new same-key refresh owner");
+        const published = Promise.withResolvers();
+        listCacheTouchHook = (filePath) => { if (filePath === cachePath) published.resolve(); };
+        releaseNew.resolve();
+        await waitForListCache(published.promise, "current background refresh publication");
+        assert.equal(cached().cacheMarker, "current");
+        const fresh = await request("GET", requestPath);
+        assert.equal(fresh.data?.cacheState, "fresh");
+        assert.equal(fresh.data?.cacheMarker, "current");
+      } else {
+        const unavailable = await request("GET", requestPath);
+        assert.equal(unavailable.status, 503);
+        assert.equal(unavailable.data?.retryable, true);
+        await new Promise(resolve => setTimeout(resolve, 45));
+        assert.equal(reads, 1, "a stopped runtime must not admit a new stale refresh");
+        assert.equal(await runtime.start(), true);
+      }
+    } finally {
+      releaseOld.resolve();
+      releaseNew.resolve();
+      listCacheTouchHook = null;
+      listQueryHook = null;
+    }
+  }
+}
+
+function listCacheIoGate(filePath) {
+  return { filePath: path.resolve(filePath), opens: 0, entered: Promise.withResolvers(), release: Promise.withResolvers() };
+}
+
+async function waitForListCache(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), 4000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function openListCacheFixtureFile(filePath, ...options) {
+  const handle = await fs.promises.open(filePath, ...options);
+  const target = path.resolve(filePath);
+  const readGate = listCacheReadGate;
+  if (readGate?.filePath === target && ++readGate.opens === 1) {
+    const read = handle.read.bind(handle);
+    let held = false;
+    handle.read = async (...args) => {
+      const result = await read(...args);
+      if (!held) {
+        held = true;
+        readGate.entered.resolve(result.bytesRead);
+        await readGate.release.promise;
+      }
+      return result;
+    };
+  }
+  const writeGate = listCacheWriteGate;
+  if (writeGate && options[0] === "wx" && target.startsWith(`${writeGate.filePath}.`) && target.endsWith(".tmp") && ++writeGate.opens === 1) {
+    const write = handle.writeFile.bind(handle);
+    handle.writeFile = async (...args) => {
+      const result = await write(...args);
+      writeGate.entered.resolve(target);
+      await writeGate.release.promise;
+      return result;
+    };
+  }
+  return handle;
+}
+
+async function renameListCacheFixtureFile(from, to) {
+  if (listCacheRenameFailure?.filePath === path.resolve(to)) {
+    listCacheRenameFailure.stagePath = from;
+    throw Object.assign(new Error("fixture cache rename failed"), { code: "EIO" });
+  }
+  await fs.promises.rename(from, to);
+}
+
+async function verifyAsyncListCacheIo() {
+  const pathFor = (q, source = "all", sort = "published") =>
+    `/api/short-videos?q=${q}&source=${source}&sort=${sort}&limit=1&stats=0`;
+  const list = pathFor("async-cache-read"), history = pathFor("async-cache-watch", "history", "watched");
+  const markers = new Map([["async-cache-read", "seed"], ["async-cache-watch", "watch-seed"]]);
+  const outstanding = [];
+  let forcedQuery, queries = 0;
+  function track(task) { outstanding.push(task); task.catch(() => {}); return task; }
+  function get(url, force = false) { return track(request("GET", force ? `${url}&refresh=1` : url)); }
+  async function seed(url) {
+    const response = await waitForListCache(get(url, true), "forced seed publication");
+    assert.equal(response.status, 200);
+    const cachePath = touchedListCachePaths.at(-1);
+    assert.equal(JSON.parse(fs.readFileSync(cachePath, "utf8")).cacheMarker, response.data.cacheMarker);
+    return cachePath;
+  }
+  listQueryHook = async (url, options, fallback) => {
+    const marker = markers.get(url.searchParams.get("q"));
+    if (!marker) return fallback();
+    queries++;
+    if (url.searchParams.get("refresh") === "1") forcedQuery?.resolve();
+    return { source: url.searchParams.get("source"), sort: url.searchParams.get("sort"), videos: [], cacheMarker: marker };
+  };
+  try {
+    const cachePath = await seed(list);
+    const diskMarker = () => JSON.parse(fs.readFileSync(cachePath, "utf8")).cacheMarker;
+    listCacheReadGate = listCacheIoGate(cachePath);
+    const first = get(list);
+    assert(await waitForListCache(listCacheReadGate.entered.promise, "physical list read reached"));
+    const duplicate = get(list);
+    const summary = await waitForListCache(request("GET", "/api/short-videos/summary"), "unrelated route during held list read");
+    assert.equal(summary.status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(queries, 1, "same-key warm consumers wait for disk without querying the catalog");
+    const independent = await waitForListCache(get(history, true), "different cache key during held list read");
+    assert.equal(independent.data?.cacheMarker, "watch-seed");
+    listCacheReadGate.release.resolve();
+    for (const response of await waitForListCache(Promise.all([first, duplicate]), "coalesced disk reads")) {
+      assert.equal(response.data?.cacheState, "fresh");
+      assert.equal(response.data?.cacheMarker, "seed");
+    }
+    assert.equal(listCacheReadGate.opens, 1, "same-key warm reads share a physical file open");
+
+    listCacheReadGate = listCacheIoGate(cachePath);
+    const old = get(list);
+    await waitForListCache(listCacheReadGate.entered.promise, "old catalog bytes held");
+    markers.set("async-cache-read", "catalog-current");
+    await waitForListCache(assertPutAction(TARGET_ID, "like", true, "liked", "likes", 100), "mutation during cache read");
+    forcedQuery = Promise.withResolvers();
+    const forced = get(list, true);
+    await waitForListCache(forcedQuery.promise, "force bypasses the held cache read");
+    listCacheReadGate.release.resolve();
+    const [oldResponse, forcedResponse] = await waitForListCache(Promise.all([old, forced]), "catalog authority after old read");
+    assert.equal(oldResponse.data?.cacheMarker, "catalog-current");
+    assert.equal(oldResponse.data?.stale, undefined);
+    assert.equal(forcedResponse.data?.cacheMarker, "catalog-current");
+    assert.equal(forcedResponse.data?.cached, undefined);
+    await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
+
+    const historyCachePath = await seed(history);
+    listCacheReadGate = listCacheIoGate(historyCachePath);
+    const oldHistory = get(history);
+    await waitForListCache(listCacheReadGate.entered.promise, "old history bytes held");
+    markers.set("async-cache-watch", "watch-current");
+    const watched = await waitForListCache(request("PUT", `/api/short-videos/${encodeURIComponent(TARGET_ID)}/watch`, {
+      progressMs: 4321, lastWatchedAt: "2026-08-12T14:00:00.000Z"
+    }), "watch mutation during history cache read");
+    assert.equal(watched.status, 200);
+    listCacheReadGate.release.resolve();
+    const historyResponse = await waitForListCache(oldHistory, "history read after watch invalidation");
+    assert.equal(historyResponse.data?.cacheMarker, "watch-current");
+    assert.equal(historyResponse.data?.cached, undefined);
+    listCacheReadGate = null;
+
+    listCacheWriteGate = listCacheIoGate(cachePath);
+    markers.set("async-cache-read", "old-stage");
+    const oldStage = get(list, true);
+    const stagePath = await waitForListCache(listCacheWriteGate.entered.promise, "old catalog stage written");
+    assert.equal(diskMarker(), "catalog-current");
+    runtime.clearListCache();
+    markers.set("async-cache-read", "stage-current");
+    listCacheWriteGate.release.resolve();
+    assert.equal((await waitForListCache(oldStage, "foreground retry after stage invalidation")).data?.cacheMarker, "stage-current");
+    assert.equal(diskMarker(), "stage-current");
+    assert.equal(fs.existsSync(stagePath), false);
+
+    listCacheWriteGate = listCacheIoGate(cachePath);
+    markers.set("async-cache-read", "pre-stop-stage");
+    const preStop = get(list, true);
+    const preStopPath = await waitForListCache(listCacheWriteGate.entered.promise, "pre-stop stage written");
+    let stopped = false, restarted = false;
+    const stop = track(runtime.stop().finally(() => { stopped = true; }));
+    const restart = track(runtime.start().finally(() => { restarted = true; }));
+    const whileStopped = await waitForListCache(get(list), "list admission while cache is stopping");
+    assert.equal(whileStopped.status, 503);
+    assert.equal(whileStopped.data?.retryable, true);
+    assert.equal(stopped, false, "stop drains the physical write");
+    assert.equal(restarted, false);
+    assert.equal(diskMarker(), "stage-current");
+    listCacheWriteGate.release.resolve();
+    const [abandoned, , started] = await waitForListCache(Promise.all([preStop, stop, restart]), "drained stop and restart");
+    assert.equal(abandoned.status, 503);
+    assert.equal(abandoned.data?.retryable, true);
+    assert.equal(started, true);
+    assert.equal(fs.existsSync(preStopPath), false);
+    assert.equal(diskMarker(), "stage-current", "old stage cannot publish after stop or restart");
+    const freshAfterRestart = await waitForListCache(get(list), "current cache after restart");
+    assert.equal(freshAfterRestart.data?.cacheState, "fresh");
+    assert.equal(freshAfterRestart.data?.cacheMarker, "stage-current");
+
+    const previousBytes = fs.readFileSync(cachePath);
+    listCacheRenameFailure = { filePath: path.resolve(cachePath), stagePath: null };
+    markers.set("async-cache-read", "authoritative-despite-rename-failure");
+    const unpersisted = await waitForListCache(get(list, true), "authoritative list after failed atomic replacement");
+    assert.equal(unpersisted.status, 200);
+    assert.equal(unpersisted.data?.cacheMarker, "authoritative-despite-rename-failure");
+    assert.equal(unpersisted.data?.cached, undefined);
+    assert.deepEqual(fs.readFileSync(cachePath), previousBytes, "failed rename preserves the original cache bytes");
+    assert(listCacheRenameFailure.stagePath, "the fixture must reach the atomic replacement");
+    assert.equal(fs.existsSync(listCacheRenameFailure.stagePath), false, "failed replacement removes its staging file");
+  } finally {
+    listCacheReadGate?.release.resolve();
+    listCacheWriteGate?.release.resolve();
+    listCacheReadGate = listCacheWriteGate = null;
+    listCacheRenameFailure = null;
+    await Promise.allSettled(outstanding);
+    listQueryHook = null;
+  }
+}
+
+async function verifyListCacheRuntimeEpoch() {
+  const root = path.join(fixtureRoot, "cache-epoch");
+  const requestPath = "/api/short-videos?q=runtime-epoch&source=all&sort=published&limit=1&stats=0";
+  let publishedPath, marker = "prior-runtime", offline = false, queries = 0;
+  function owner() {
+    return createFixtureRuntime({
+      dbPath: path.join(root, "catalog.sqlite"),
+      sharedCache: { rootDir: path.join(root, "cache"), scheduleCleanup() {}, touch(filePath) { publishedPath = filePath; } },
+      async listQuery() {
+        queries++;
+        if (offline) throw new Error("fixture authority unavailable");
+        return { source: "all", sort: "published", videos: [], cacheMarker: marker };
+      }
+    });
+  }
+  const first = owner();
+  try {
+    const seeded = await request("GET", `${requestPath}&refresh=1`, null, first);
+    assert.equal(seeded.data?.cacheMarker, "prior-runtime");
+  } finally { await first.stop(); }
+  const cached = () => JSON.parse(fs.readFileSync(publishedPath, "utf8"));
+  const oldEpoch = cached().cacheEpoch;
+  assert.equal(typeof oldEpoch, "string");
+  assert(oldEpoch.length > 0);
+  const second = owner();
+  try {
+    offline = true;
+    const prior = await request("GET", requestPath, null, second);
+    assert.equal(queries, 2, "reconstructed runtime queries authority before accepting an old cache");
+    assert.equal(prior.data?.cacheState, "offline");
+    assert.equal(prior.data?.cacheMarker, "prior-runtime");
+    assert.equal(prior.data?.cacheEpoch, undefined);
+    offline = false;
+    marker = "current-runtime";
+    const current = await request("GET", requestPath, null, second);
+    assert.equal(current.data?.cached, undefined);
+    assert.equal(current.data?.cacheMarker, "current-runtime");
+    assert.notEqual(cached().cacheEpoch, oldEpoch);
+    const legacy = cached();
+    delete legacy.cacheEpoch;
+    fs.writeFileSync(publishedPath, JSON.stringify(legacy));
+    offline = true;
+    const oldEnvelope = await request("GET", requestPath, null, second);
+    assert.equal(queries, 4, "an epoch-less envelope must also try authority first");
+    assert.equal(oldEnvelope.data?.cacheState, "offline");
+    assert.equal(oldEnvelope.data?.cacheMarker, "current-runtime");
+    second.clearListCache();
+    assert.equal(fs.existsSync(path.join(root, "short-video-list-cache-generation.json")), false);
+  } finally { await second.stop(); }
 }
 
 async function verifyWatchGenerationAuthorityFence() {
@@ -842,9 +1172,9 @@ function writeAction(db, videoId, actionType, active, source) {
   `).run(videoId, actionType, active ? 1 : 0, source, baselineActive, now, now);
 }
 
-async function request(method, pathname, body = null) {
+async function request(method, pathname, body = null, owner = runtime) {
   const response = {};
-  const handled = await runtime.routeApi(
+  const handled = await owner.routeApi(
     { method, body },
     response,
     new URL(`http://fixture${pathname}`)

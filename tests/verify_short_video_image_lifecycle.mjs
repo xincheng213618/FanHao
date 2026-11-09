@@ -251,7 +251,14 @@ try {
       close.resolve(); await Promise.all(pending);
       assert.equal(f.io.peak, 4); assert.equal(f.io.closed, 128); assert.equal(f.io.streams, 128); assert.equal(f.state.writes, 0, "independent product must not adopt a FanHao BLOB cache");
       assert.ok(responses.slice(0, 128).every(res => res.status === 200 && Buffer.concat(res.chunks).toString() === "IMAGE"));
-      assert.deepEqual(responses[0].headers, { "Content-Type": "image/jpeg", "Content-Length": 5, "Cache-Control": "public, max-age=3600", "Content-Disposition": "inline" });
+      assert.deepEqual(responses[0].headers, {
+        "Content-Type": "image/jpeg",
+        "Content-Length": 5,
+        "Cache-Control": "public, max-age=3600",
+        "Content-Disposition": "inline",
+        "Last-Modified": "Sun, 04 Oct 2026 00:00:00 GMT",
+        ETag: 'W/"5-65cf87253c000"'
+      });
     } finally { body.resolve(); close.resolve(); await f.close(); }
   });
   for (const stage of ["open", "stat"]) await run(`configured product disconnect during ignored ${stage} waits for actual close and stop`, async () => {
@@ -493,7 +500,7 @@ async function productFixture({ bodyGate, closeGate, openGate, statGate, statCha
     dependencies.mediaResponseService.serveImageAsync = (res, file, options) => { io.signals.push(options.signal); return original(res, file, options); };
     return createShortVideosRuntime(dependencies);
   };
-  for (const [name, body] of [["createShortVideosRuntime", `(...args) => globalThis[${JSON.stringify(owner)}].productRuntime(...args)`], ["createImageReaderCacheService", "() => ({ stop() {}, startCleanupTimer() {} })"]]) {
+  for (const [name, body] of [["createShortVideosRuntime", `(...args) => globalThis[${JSON.stringify(owner)}].productRuntime(...args)`], ["createImageReaderCacheService", "({ rootDir }) => ({ rootDir, stop() {}, startCleanupTimer() {} })"]]) {
     const pattern = new RegExp(`import \\{ ${name} \\} from \\"[^\\"]+\\";`);
     assert.ok(pattern.test(source)); source = source.replace(pattern, `const ${name} = ${body};`);
   }

@@ -3576,9 +3576,10 @@ async function verifyAndroidRestartActionConvergence(browser) {
       const appendState = createControllerState();
       const appendObservations = {};
       const appendController = createControllerFixture({
-        async fetchCached(_base, requestPath) {
+        async fetchCached(_base, requestPath, options) {
           const offset = new URL(requestPath, location.href).searchParams.get("offset");
-          if (offset !== "2") throw new Error(`unexpected append fixture path: ${requestPath}`);
+          if (offset !== "2" || !options.requireAuthoritative) throw new Error(`unexpected append fixture path: ${requestPath}`);
+          appendObservations.dispatches = (appendObservations.dispatches || 0) + 1;
           return appendPage.promise;
         },
         async fetchCachedRevalidated() {
@@ -3592,23 +3593,25 @@ async function verifyAndroidRestartActionConvergence(browser) {
         }
       }, appendState, appendObservations);
       await appendController.loadList();
+      const appendRenderBeforeFresh = appendObservations.renders;
       const appendRequest = appendController.loadList(null, { append: true });
+      if (appendObservations.dispatches) throw new Error("cached prefix dispatched an append before confirmation");
+      appendFresh.resolve(controllerFeed([
+        video("append-b", false, false),
+        video("append-a", true, true)
+      ], { hasMore: true, total: 3 }));
       appendPage.resolve(controllerFeed([video("append-c", false, false)], {
         hasMore: false,
         offset: 2,
         total: 3
       }));
       await appendRequest;
-      const appendRenderBeforeFresh = appendObservations.renders;
-      appendFresh.resolve(controllerFeed([
-        video("append-b", false, false),
-        video("append-a", true, true)
-      ], { hasMore: true, total: 0 }));
       await waitFor(
         () => appendState.data?.videos?.find((item) => item.id === "append-a")?.actions?.liked,
-        "initial cached revalidation did not converge after append"
+        "first-page confirmation did not apply the authoritative prefix"
       );
       const appendConvergence = {
+        dispatches: appendObservations.dispatches,
         freshRendered: appendObservations.renders > appendRenderBeforeFresh,
         hasMore: appendState.data?.hasMore,
         ids: (appendState.data?.videos || []).map((item) => item.id),
@@ -3677,6 +3680,28 @@ async function verifyAndroidRestartActionConvergence(browser) {
       const transactionCompletion = await observeTransaction("complete");
       const transactionAbort = await observeTransaction("abort", new DOMException("fixture abort", "AbortError"));
       const transactionError = await observeTransaction("error", new DOMException("fixture error", "UnknownError"));
+
+      const cancelledWritePath = pathFor("cancelled-cache-write");
+      await cache.writeCachedJson(active.value, cancelledWritePath, feed(video("confirmed-cache", true, true)));
+      const cancelledWrite = new AbortController();
+      const put = IDBObjectStore.prototype.put;
+      let putStarted = false;
+      IDBObjectStore.prototype.put = function (entry, ...args) {
+        const request = put.call(this, entry, ...args);
+        if (entry.path === cancelledWritePath && entry.payload.videos?.[0]?.id === "retired-cache") {
+          putStarted = true;
+          cancelledWrite.abort();
+        }
+        return request;
+      };
+      let cancelledWriteRejected;
+      try {
+        cancelledWriteRejected = await cache.writeCachedJson(active.value, cancelledWritePath,
+          feed(video("retired-cache", false, false)), { signal: cancelledWrite.signal }).then(() => false, () => true);
+      } finally {
+        IDBObjectStore.prototype.put = put;
+      }
+      const retainedWrite = await cache.readCachedJson(active.value, cancelledWritePath);
 
       const quotaQuery = "quota-write";
       const quotaPath = pathFor(quotaQuery);
@@ -3785,6 +3810,7 @@ async function verifyAndroidRestartActionConvergence(browser) {
         emptyAfterLateWrite: emptyAfterLateWrite === null,
         exactSearch: exact.pathname + exact.search,
         canonicalRestartCacheActions: canonicalRestartCache?.payload?.videos?.[0]?.actions || null,
+        cancelledCacheWrite: { putStarted, rejected: cancelledWriteRejected, retainedId: retainedWrite?.payload?.videos?.[0]?.id },
         transportRestartCacheMissing: transportRestartCache === null,
         freshState,
         freshModelActions,
@@ -3827,6 +3853,7 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.equal(metrics.emptyAfterLateWrite, true, "a pre-invalidation refresh/touch must not resurrect its response after clear completes");
     assert.equal(metrics.freshWriteAfterFence, true, "a post-invalidation request must use a new generation instead of deduplicating onto the rejected old refresh");
     assert.deepEqual(metrics.appendConvergence, {
+      dispatches: 1,
       freshRendered: true,
       hasMore: false,
       ids: ["append-b", "append-a", "append-c"],
@@ -3834,7 +3861,7 @@ async function verifyAndroidRestartActionConvergence(browser) {
       loadingMore: false,
       status: "",
       total: 3
-    }, "initial revalidation must converge fresh actions/order without dropping a successful append or regressing its pagination envelope");
+    }, "a staged append must run once against the confirmed order and settle the pagination envelope");
     assert.deepEqual(metrics.envelopeConvergence, {
       freshRendered: true,
       hasMore: true,
@@ -3848,6 +3875,8 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.deepEqual(metrics.transactionCompletion, { resolved: true }, "cache transactions must resolve only from their completion event");
     assert.deepEqual(metrics.transactionAbort, { name: "AbortError", resolved: false }, "cache transaction aborts must reject with their transaction error");
     assert.deepEqual(metrics.transactionError, { name: "UnknownError", resolved: false }, "cache transaction errors must reject with their transaction error");
+    assert.deepEqual(metrics.cancelledCacheWrite, { putStarted: true, rejected: true, retainedId: "confirmed-cache" },
+      "a caller cancelled after queuing an IndexedDB write must leave the previous response intact");
   } finally {
     await page.close();
   }

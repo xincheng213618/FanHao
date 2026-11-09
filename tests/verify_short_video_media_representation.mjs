@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import vm from "node:vm";
 import { createFileServer } from "../src/platform/server/file-server.js";
 
@@ -21,7 +22,9 @@ function take(name) {
 }
 const names = ["routeMedia", "beginSmoothPlaybackRequest", "beginStopSmoothPlaybackRequests", "sendSmoothPlaybackUnavailable",
   "sameSmoothPlaybackSource", "sendSmoothPlaybackSourceChanged",
-  "isInitialVideoRange", "hasIfRange", "cachedStartupVideoFile", "startupVideoCacheDescriptor", "smoothVideoCacheDescriptor",
+  "isInitialVideoRange", "hasIfRange", "cachedStartupVideoFile", "isStartupPrefixPublishing", "startupVideoCacheDescriptor", "smoothVideoCacheDescriptor",
+  "copyVideoStartupToSharedCache", "readStartupPrefixStat", "assertStartupVideoCatalog", "isCurrentStartupVideoJob",
+  "assertCurrentStartupVideoJob", "validateStartupVideoSource", "startupVideoSourceIdentity",
   "cachedSmoothVideoFile", "isSmoothVideoSourceCompatible", "safeStat", "hashText", "safeFilePart", "smoothVideoMetadataNeedsRendition",
   "tryQueueSmoothVideoCache", "queueSmoothVideoCache", "waitForSmoothVideoPlayback", "buildSmoothVideoCache", "executeSmoothVideoJob", "storedSmoothVideoProbe",
   "isCurrentSmoothVideoJob", "assertCurrentSmoothVideoJob", "assertSmoothVideoCatalog", "smoothVideoDiskIdentity", "validateSmoothVideoSource", "removeSmoothJobArtifact", "forgetSmoothVideoJobResolution",
@@ -32,6 +35,7 @@ const constants = Object.fromEntries(["SHORT_VIDEO_STREAM_CHUNK_BYTES", "SHORT_V
   "SHORT_VIDEO_SMOOTH_CACHE_DELAY_MS", "SHORT_VIDEO_SMOOTH_CURRENT_DELAY_MS", "SHORT_VIDEO_SMOOTH_ON_DEMAND_WAIT_MS", "SHORT_VIDEO_SMOOTH_ON_DEMAND_POLL_MS"]
   .map(name => [name, vm.runInNewContext(new RegExp(`^const ${name} = ([^;]+);`, "m").exec(source)[1])]));
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-media-representation-"));
+const directories = [tempRoot];
 let sequence = 0;
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 function deferred() {
@@ -42,6 +46,7 @@ function deferred() {
 
 function fixture({ metadata = {}, timeout = 60, holdProcess = false, probe = null, filesystem = fs, cleanup = async () => {} } = {}) {
   const root = path.join(tempRoot, String(sequence++)); fs.mkdirSync(root);
+  directories.push(root);
   const original = Buffer.from("ORIGINAL-source-bytes"), preferred = Buffer.from("PREFERRED-h264-bytes"), legacy = Buffer.from("LEGACY-different-layout");
   const sourcePath = path.join(root, "original.mp4"); fs.writeFileSync(sourcePath, original);
   const initialVersion = String(Math.floor(fs.statSync(sourcePath).mtimeMs));
@@ -53,7 +58,7 @@ function fixture({ metadata = {}, timeout = 60, holdProcess = false, probe = nul
     notFound(res) { res.writeHead(404); res.end(); } });
   const processGate = deferred(), processStarted = deferred();
   const context = vm.createContext({
-    ...constants, fs: filesystem, path, crypto, Date, AbortController, Promise, URLSearchParams, process: { pid: process.pid }, console: { log() {}, warn() {} },
+    ...constants, fs: filesystem, path, crypto, pipeline, Date, AbortController, Promise, URLSearchParams, process: { pid: process.pid }, console: { log() {}, warn() {} },
     SHORT_VIDEO_SMOOTH_ON_DEMAND_WAIT_MS: timeout,
     // A four-byte prefix exercises the same virtual-entity behavior without
     // allocating a multi-megabyte source file for every race permutation.
@@ -68,7 +73,8 @@ function fixture({ metadata = {}, timeout = 60, holdProcess = false, probe = nul
     smoothPlaybackRequests: requests, smoothPlaybackAccepting: true,
     smoothVideoJobs: jobs, smoothVideoQueue: [], smoothVideoActiveJobs: new Map(), smoothVideoChildren: children,
     smoothVideoExecutions: executions, smoothVideoJobGeneration: 0,
-    videoCacheExecutions: new Set(), videoCacheAccepting: true,
+    videoCacheExecutions: new Set(), videoCacheAccepting: true, startupScan: null,
+    videoCacheJobs: new Map(), videoCacheActiveJob: null, videoCacheGeneration: 0,
     smoothVideoCandidateBacklog: [], smoothVideoCandidateIds: new Set(), smoothVideoResolvedVersions: new Map(), smoothVideoRenditionVersions: new Map(),
     smoothVideoCacheEntryNames: new Set(), smoothVideoPausedByUser: false, smoothVideoWarmupGeneration: 0,
     smoothVideoWarmupTimer: null, smoothVideoCandidateFillImmediate: null, smoothVideoCandidateRefill: null, smoothVideoTimer: null,
@@ -89,13 +95,17 @@ function fixture({ metadata = {}, timeout = 60, holdProcess = false, probe = nul
     mediaStreamService: { serveVideo: (...args) => { servedFiles.push(args[2]); return fileServer.serveRangedFile(...args); } },
     notFound(res) { res.writeHead(404); res.end(); },
     runtimeStarted: true, runtimeDesiredStarted: true, runtimeLifecycleGeneration: 0, runtimeStartPromise: null, runtimeStopPromise: null,
+    listCacheFiles: null, listCacheAccepting: true,
     runtimeTestHooks: {}, imageAccepting: true, beginStopImageRequests: async () => {}, stopVideoCacheQueue() {},
     downloadManagerSync: { start() {}, stop: async () => {} }, stopListServices: async () => {}, autoSmoothWarmup: false,
     catalogWorker: { reopen() {} }, smoothWarmupWorker: { reopen() {} }, watchWriter: { start: async () => {} }
   });
   vm.runInContext(`${names.map(take).join("\n")}\nglobalThis.api={${names.join(", ")}};`, context);
   const descriptor = context.api.smoothVideoCacheDescriptor("A", file), startup = context.api.startupVideoCacheDescriptor("A", file);
-  fs.mkdirSync(descriptor.cacheDir, { recursive: true }); fs.mkdirSync(startup.cacheDir, { recursive: true });
+  for (const directory of [path.dirname(descriptor.cacheDir), descriptor.cacheDir, startup.cacheDir]) {
+    fs.mkdirSync(directory);
+    directories.push(directory);
+  }
   fs.writeFileSync(startup.cachePath, original.subarray(0, 4));
   const publish = (kind = "preferred") => fs.writeFileSync(kind === "legacy" ? descriptor.legacyCachePath : descriptor.cachePath, kind === "legacy" ? legacy : preferred);
   const request = ({ method = "GET", range = "bytes=0-3", query = "wait=0", sourceRoute = false, headers = {}, version = initialVersion } = {}) => {
@@ -121,7 +131,154 @@ function fixture({ metadata = {}, timeout = 60, holdProcess = false, probe = nul
     } };
 }
 
+function ownStartupPrefix(fixture) {
+  const descriptor = fixture.api.startupVideoCacheDescriptor("A", fixture.file);
+  const job = { id: "A", key: descriptor.cachePath, descriptor, file: fixture.file, generation: 0, controller: new AbortController() };
+  fixture.context.videoCacheActiveJob = job;
+  fixture.context.videoCacheJobs.set(job.key, job);
+  return job;
+}
+
+function replaceStartupSource(sourcePath, replacement) {
+  const stat = fs.statSync(sourcePath);
+  fs.renameSync(sourcePath, `${sourcePath}.retired`);
+  fs.writeFileSync(sourcePath, replacement);
+  fs.utimesSync(sourcePath, stat.atime, stat.mtime);
+}
+
+function beforeSettled(gate, operation) {
+  return Promise.race([gate.promise, operation.then(error => {
+    if (error instanceof Error) throw error;
+    throw new Error("prefix operation settled before reaching the controlled I/O");
+  })]);
+}
+
+async function verifyStartupPrefixPublication(outcome) {
+  const renameReached = deferred(), releaseRename = deferred();
+  const rollbackReached = deferred(), releaseRollback = deferred();
+  let cachePath, renamed = false;
+  const filesystem = { ...fs, promises: { ...fs.promises,
+    async rename(from, to) {
+      await fs.promises.rename(from, to);
+      if (to !== cachePath) return;
+      renamed = true;
+      renameReached.resolve();
+      await releaseRename.promise;
+      if (outcome === "rename-rejected") throw Object.assign(new Error("controlled rename failure"), { code: "PREFIX_RENAME_FAILED" });
+    },
+    async rm(file, options) {
+      if (renamed && file === cachePath) {
+        rollbackReached.resolve();
+        await releaseRollback.promise;
+        if (outcome === "rollback-failed") throw Object.assign(new Error("controlled rollback failure"), { code: "PREFIX_ROLLBACK_FAILED" });
+      }
+      await fs.promises.rm(file, options);
+    }
+  } };
+  const f = fixture({ filesystem });
+  const job = ownStartupPrefix(f);
+  cachePath = job.key;
+  fs.unlinkSync(cachePath);
+  const copy = f.api.copyVideoStartupToSharedCache(job).catch(error => error);
+  const replacement = outcome === "accepted" ? f.original : Buffer.alloc(f.original.length, 0x78);
+  async function verifyPlayback(cache, expected) {
+    const response = await f.complete({ sourceRoute: true });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers["X-FanHao-Media-Cache"], cache);
+    assert.deepEqual(response.body(), expected.subarray(0, 4));
+  }
+  try {
+    await beforeSettled(renameReached, copy);
+    assert.deepEqual(fs.readFileSync(cachePath), f.original.subarray(0, 4), "the final cache path is already visible");
+    if (outcome !== "accepted") replaceStartupSource(f.file.path, replacement);
+    await verifyPlayback("source", replacement);
+    releaseRename.resolve();
+    if (outcome === "accepted") {
+      assert.equal(await copy, undefined);
+      await verifyPlayback("startup", replacement);
+      return;
+    }
+    await beforeSettled(rollbackReached, copy);
+    assert.equal(fs.existsSync(cachePath), true, "rollback has yet to remove the old prefix");
+    await verifyPlayback("source", replacement);
+    releaseRollback.resolve();
+    const failedRollback = outcome === "rollback-failed";
+    const expectedError = { "rollback-failed": "PREFIX_ROLLBACK_FAILED", "rename-rejected": "PREFIX_RENAME_FAILED" }[outcome]
+      || "SHORT_VIDEO_STARTUP_SOURCE_CHANGED";
+    assert.equal((await copy)?.code, expectedError);
+    assert.equal(fs.existsSync(cachePath), failedRollback);
+    assert.equal(f.api.isStartupPrefixPublishing(cachePath), failedRollback, "an unconfirmed rollback keeps the prefix fenced");
+    await verifyPlayback("source", replacement);
+  } finally {
+    releaseRename.resolve();
+    releaseRollback.resolve();
+    await copy;
+    await f.close();
+  }
+}
+
+async function verifyStartupPrefixReplacementDuringOpen() {
+  const openReached = deferred(), releaseOpen = deferred();
+  const statReached = deferred(), releaseStat = deferred();
+  const renameReached = deferred(), releaseRename = deferred();
+  const filesystem = { ...fs, promises: { ...fs.promises,
+    async rename(from, to) {
+      await fs.promises.rename(from, to);
+      renameReached.resolve();
+      await releaseRename.promise;
+    }
+  } };
+  const f = fixture({ filesystem });
+  const job = ownStartupPrefix(f), cachePath = job.key;
+  const open = fs.promises.open;
+  let prefixClosed = false, copy, pending;
+  fs.promises.open = async function (file, ...args) {
+    if (file !== cachePath) return open.call(this, file, ...args);
+    openReached.resolve();
+    await releaseOpen.promise;
+    const handle = await open.call(this, file, ...args);
+    const stat = handle.stat.bind(handle), close = handle.close.bind(handle);
+    handle.stat = async () => { statReached.resolve(); await releaseStat.promise; return stat(); };
+    handle.close = async () => { await close(); prefixClosed = true; };
+    return handle;
+  };
+  try {
+    pending = f.request({ sourceRoute: true });
+    await beforeSettled(openReached, pending.task);
+    fs.renameSync(cachePath, `${cachePath}.retired`);
+    copy = f.api.copyVideoStartupToSharedCache(job).catch(error => error);
+    await beforeSettled(renameReached, copy);
+    releaseOpen.resolve();
+    await beforeSettled(statReached, pending.task);
+    const replacement = Buffer.alloc(f.original.length, 0x78);
+    replaceStartupSource(f.file.path, replacement);
+    releaseRename.resolve();
+    assert.equal((await copy)?.code, "SHORT_VIDEO_STARTUP_SOURCE_CHANGED");
+    assert.equal(fs.existsSync(cachePath), false);
+    assert.equal(f.api.isStartupPrefixPublishing(cachePath), false, "rollback completes while the reader still owns the unaccepted inode");
+    releaseStat.resolve();
+    await pending.task;
+    assert.equal(prefixClosed, true);
+    assert.deepEqual(f.servedFiles.map(file => file.path), [cachePath, f.file.path]);
+    assert.equal(pending.res.status, 206);
+    assert.equal(pending.res.headers["X-FanHao-Media-Cache"], "source");
+    assert.equal(pending.res.headers["Content-Range"], `bytes 0-3/${replacement.length}`);
+    assert.equal(pending.res.headers["Cache-Control"], "private, max-age=31536000, immutable");
+    assert.deepEqual(pending.res.body(), replacement.subarray(0, 4));
+  } finally {
+    releaseOpen.resolve();
+    releaseStat.resolve();
+    releaseRename.resolve();
+    await copy;
+    await pending?.task.catch(() => {});
+    fs.promises.open = open;
+    await f.close();
+  }
+}
+
 try {
+  for (const outcome of ["accepted", "rolled-back", "rollback-failed", "rename-rejected"]) await verifyStartupPrefixPublication(outcome);
+  await verifyStartupPrefixReplacementDuringOpen();
   {
     const f = fixture();
     try {
@@ -492,9 +649,17 @@ try {
     assert.equal(physicallyClosed, true, "spawn failures also retain the process promise through physical close");
   }
 
-  console.log("short-video-media-representation: passed actual pinned preferred/legacy/source ranges, HEAD/If-Range, pending 503, shared jobs, forced compatibility, request/stop cancellation and restart");
+  console.log("short-video-media-representation: passed startup prefix publication and rollback, actual pinned preferred/legacy/source ranges, HEAD/If-Range, pending 503, shared jobs, forced compatibility, request/stop cancellation and restart");
 } finally {
-  const resolved = path.resolve(tempRoot), parent = path.resolve(os.tmpdir());
+  const resolved = fs.realpathSync(tempRoot), parent = fs.realpathSync(os.tmpdir());
   assert.equal(path.dirname(resolved), parent); assert(path.basename(resolved).startsWith("fanhao-media-representation-"));
-  fs.rmSync(resolved, { recursive: true, force: true });
+  for (const directory of directories.reverse()) {
+    const relative = path.relative(resolved, fs.realpathSync(directory));
+    assert(relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      assert(entry.isFile(), "only synthetic fixture files may remain");
+      fs.unlinkSync(path.join(directory, entry.name));
+    }
+    fs.rmdirSync(directory);
+  }
 }

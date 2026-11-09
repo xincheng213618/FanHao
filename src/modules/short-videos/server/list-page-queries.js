@@ -7,6 +7,7 @@ import {
 import { hasCanonicalShortVideoCatalogViews, hasCanonicalShortVideoSearchIndex } from "./schema.js";
 
 const RELATED_TAG_CANDIDATE_LIMIT = 1024;
+const LIKED_FEED_INDEX = "idx_short_videos_liked_sort_all";
 
 export function indexedAuthorVideoScope(authorValue) {
   const author = String(authorValue || "").trim();
@@ -98,6 +99,29 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     // catalogue rows. Keep the original preparation and its schema errors.
     try { return database.prepare(sql.replace("INDEXED BY idx_short_videos_actual_pixels", "")); }
     catch { return original; }
+  }
+
+  function prepareLikedFeedCounts(database, localCountSql) {
+    // Keep the local total and the three disjoint nonlocal ranges in one
+    // snapshot. The cast retains a visibility seek in the plan even when
+    // the current schema declares visibility NOT NULL.
+    const liked = `FROM short_videos v INDEXED BY ${LIKED_FEED_INDEX} WHERE v.is_liked = 1`;
+    const sql = `SELECT count, count
+      + (SELECT COUNT(*) ${liked} AND v.visibility < 'local_only')
+      + (SELECT COUNT(*) ${liked} AND v.visibility > 'local_only')
+      + (SELECT COUNT(*) ${liked} AND v.visibility IS CAST(NULL AS TEXT)) AS relationship_total
+      FROM (${localCountSql})`;
+    try {
+      const searches = database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all()
+        .map(row => row.detail).filter(detail => /^(?:SCAN|SEARCH) v\b/u.test(detail));
+      const prefix = `SEARCH v USING COVERING INDEX ${LIKED_FEED_INDEX} (is_liked=? AND visibility`;
+      const ranges = ["=?)", "<?)", ">?)", "=?)"];
+      // An older index with the same name may not support visibility ranges.
+      if (searches.length !== ranges.length || searches.some((detail, index) => detail !== prefix + ranges[index])) return null;
+      return database.prepare(sql);
+    } catch {
+      return null;
+    }
   }
 
   function publishedQualityPrefix(database, qualityWhere, orderBy, limit, offset) {
@@ -407,20 +431,27 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
               ? "INDEXED BY idx_short_videos_media_published"
               : sort === "liked" && filter.source === "liked"
                 ? filter.media === "all"
-                  ? "INDEXED BY idx_short_videos_liked_sort_all"
+                  ? `INDEXED BY ${LIKED_FEED_INDEX}`
                   : "INDEXED BY idx_short_videos_liked_sort"
                 : "";
     const publishedQuality = Boolean(qualityWhere) && filter.quality !== "unknown" && filter.source === "all"
       && filter.media === "video" && !filter.includePending && sort === "published";
-    const total = listCursor
-      ? listCursor.total
-      : Number.isFinite(totalOverride)
-      ? Number(totalOverride)
-      : Number(prepareQualityCount(database, `
+    let total = listCursor ? listCursor.total : totalOverride;
+    let relationshipTotal;
+    if (!listCursor && !Number.isFinite(totalOverride)) {
+      const countSql = `
         SELECT COUNT(*) AS count
         FROM short_videos v ${indexHint}
         ${where}
-      `, publishedQuality).get(...args)?.count || 0);
+      `;
+      const count = prepareQualityCount(database, countSql, publishedQuality);
+      const unfilteredLikes = sort === "liked" && filter.source === "liked" && filter.media === "all" && !qualityWhere;
+      const combined = unfilteredLikes && !filter.includePending ? prepareLikedFeedCounts(database, countSql) : null;
+      const counts = (combined ?? count).get(...args);
+      total = Number(counts?.count || 0);
+      if (unfilteredLikes && filter.includePending) relationshipTotal = total;
+      else if (combined) relationshipTotal = Number(counts?.relationship_total || 0);
+    }
     const remaining = listCursor ? Math.max(0, listCursor.total - listCursor.seen) : limit;
     if (listCursor && remaining <= 0) {
       return { total, rows: [], hasMore: false, nextCursor: "" };
@@ -445,7 +476,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
     const ids = pageRows.map((row) => String(row.id || "")).filter(Boolean);
     const hasExtraRow = listCursor && ids.length > requestedRows;
     const pageIds = ids.slice(0, requestedRows);
-    if (!pageIds.length) return { total, rows: [], hasMore: false, nextCursor: "" };
+    if (!pageIds.length) return { total, relationshipTotal, rows: [], hasMore: false, nextCursor: "" };
 
     const rows = orderedCatalogRows(database, pageIds);
     const seen = listCursor ? listCursor.seen + rows.length : effectiveOffset + rows.length;
@@ -454,6 +485,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       : seen < total;
     return {
       total,
+      relationshipTotal,
       rows,
       hasMore,
       nextCursor: sort === "likes" && rows.length

@@ -2,7 +2,8 @@ import { createShortVideoStore } from "./store.js";
 import { routeShortVideoAuthorCleanup } from "./author-cleanup-route.js";
 import { routeShortVideoApi } from "./routes.js";
 import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js";
-import { createShortVideoListStatsService } from "./list-stats-service.js";
+import { createShortVideoListCacheFiles } from "./list-cache-files.js";
+import { createShortVideoListStatsService, shortVideoCatalogAdmissionError } from "./list-stats-service.js";
 import { createShortVideoSmoothWarmupWorkerClient } from "./smooth-warmup-worker-client.js";
 import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
@@ -26,6 +27,9 @@ const SHORT_VIDEO_STARTUP_CACHE_BYTES = 2 * 1024 * 1024;
 const SHORT_VIDEO_STARTUP_CACHE_CANDIDATES = 3;
 const SHORT_VIDEO_STARTUP_CACHE_PENDING_LIMIT = 6;
 const SHORT_VIDEO_STARTUP_CACHE_DELAY_MS = 240;
+const SHORT_VIDEO_STARTUP_SCAN_PENDING_LIMIT = 2;
+const SHORT_VIDEO_STARTUP_SCAN_PAGE_LIMIT = 300;
+const SHORT_VIDEO_STARTUP_SCAN_YIELD_INTERVAL = 16;
 const SHORT_VIDEO_SMOOTH_CACHE_CANDIDATES = 3;
 const SHORT_VIDEO_SMOOTH_CONCURRENCY = 2;
 const SHORT_VIDEO_SMOOTH_MAX_CONCURRENCY = 4;
@@ -178,6 +182,9 @@ export function createShortVideosRuntime({
   let videoCacheGeneration = 0;
   let videoCacheSequence = 0;
   const videoCacheExecutions = new Set();
+  const startupScanPending = new Map();
+  let startupScanImmediate = null;
+  let startupScan = null;
   const smoothVideoQueue = [];
   const smoothVideoJobs = new Map();
   const smoothVideoCandidateBacklog = [];
@@ -208,7 +215,17 @@ export function createShortVideosRuntime({
   let lastSmoothVideoCacheIndexEntries = 0;
   let smoothVideoCacheEntryNames = new Set();
   const listCacheRefreshJobs = new Map();
-  let shortVideoListCacheGeneration = readShortVideoListCacheGeneration();
+  let listCacheAccepting = true;
+  let listCacheLifecycle = 0;
+  const listCacheFiles = sharedCache ? createShortVideoListCacheFiles({
+    rootDir: sharedCache.rootDir,
+    fsOps: { ...fs.promises, ...runtimeTestHooks.listCacheFileOps },
+    touch: (filePath) => sharedCache.touch(filePath)
+  }) : null;
+  // A previous process may have committed a mutation just before stopping.
+  // Its disk snapshots can still serve an explicit offline fallback.
+  const listCacheEpoch = crypto.randomUUID();
+  let shortVideoListCacheGeneration = 0;
   const initialWatchCacheState = readShortVideoWatchCacheState();
   let shortVideoWatchCacheGeneration = initialWatchCacheState.generation;
   const shortVideoWatchOverlays = new Map(initialWatchCacheState.entries.map((entry) => [entry.id, entry]));
@@ -296,12 +313,26 @@ export function createShortVideosRuntime({
         }[url.pathname]
       : "";
     if (workerCatalogRead) {
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      const connected = () => !req.aborted && !controller.signal.aborted && !res.destroyed && !res.writableEnded;
+      if (!connected()) return true;
+      req.once?.("aborted", onAbort);
+      res.once?.("close", onAbort);
       try {
-        const data = await catalogWorker.query(url, workerCatalogRead);
-        sendJson(res, 200, data);
+        const data = await catalogWorker.query(url, workerCatalogRead, { signal: controller.signal });
+        if (connected()) sendJson(res, 200, data);
         return true;
       } catch (error) {
+        if (!connected() || sendCatalogAdmissionError(res, error)) return true;
+        if (error?.name === "AbortError") {
+          sendShortVideoPublicError(res, sendJson, error, "短视频目录读取失败");
+          return true;
+        }
         console.warn("[short-video-catalog-worker-fallback]", error.message || error);
+      } finally {
+        req.off?.("aborted", onAbort);
+        res.off?.("close", onAbort);
       }
     }
     const collectorMatch = /^\/api\/short-videos\/authors\/([^/]+)\/collector$/.exec(url.pathname);
@@ -399,43 +430,8 @@ export function createShortVideosRuntime({
       return true;
     }
 
-    if (url.pathname === "/api/short-videos" && req.method === "GET" && sharedCache) {
-      const cachePath = listCachePath(url);
-      const forceRefresh = String(url.searchParams.get("refresh") || "").trim() === "1";
-      if (!forceRefresh) {
-        const cached = readJsonCache(cachePath);
-        if (cached?.fresh) {
-          const data = applyShortVideoWatchOverlays(cached.data);
-          sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, cacheState: "fresh" }));
-          queueStartupVideoCandidates(data.videos);
-          queueSmoothVideoCandidates(data.videos);
-          return true;
-        }
-        if (cached?.data && cached.generationCurrent) {
-          const data = applyShortVideoWatchOverlays(cached.data);
-          sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, cacheState: "stale-refreshing" }));
-          queueStartupVideoCandidates(data.videos);
-          queueSmoothVideoCandidates(data.videos);
-          queueListCacheRefresh(url, cachePath);
-          return true;
-        }
-      }
-      try {
-        const { data, generation, watchGeneration } = await queryStableShortVideoListForRequest(req, url);
-        writeJsonCache(cachePath, data, generation, watchGeneration);
-        sendJson(res, 200, applyMobilePlaybackHints(data));
-        queueStartupVideoCandidates(data.videos);
-        queueSmoothVideoCandidates(data.videos);
-      } catch (error) {
-        const cached = readJsonCache(cachePath);
-        if (cached?.data) {
-          const data = applyShortVideoWatchOverlays(cached.data);
-          sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, offline: true, cacheState: "offline" }));
-        } else {
-          sendShortVideoPublicError(res, sendJson, error, "短视频列表读取失败", { includeRetryable: true });
-        }
-      }
-      return true;
+    if (url.pathname === "/api/short-videos" && req.method === "GET") {
+      return routeShortVideoList(req, res, url);
     }
 
     const detailPlaybackMatch = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
@@ -462,7 +458,6 @@ export function createShortVideosRuntime({
         requireLocalAdmin,
         sendJson,
         shortVideoStore: routeStore,
-        listVideos: (requestUrl) => queryShortVideoListForRequest(req, requestUrl),
         recordWatch: (videoId, options) => watchWriter.record(videoId, options),
         onMutation: clearShortVideoListCache,
         onWatchMutation: (...args) => {
@@ -654,22 +649,29 @@ export function createShortVideosRuntime({
       const selectedFile = !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
-      const file = { ...selectedFile, entityMtimeResolutionMs: 1 };
       const requestedVersion = String(url.searchParams.get("v") || "").trim();
       const currentVersion = String(sourceFile.cacheVersion || "").trim();
-      file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
+      const cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
         ? "private, max-age=31536000, immutable"
         : "private, max-age=0, must-revalidate";
-      file.maxRangeBytes = mediaCacheRequest
+      const maxRangeBytes = mediaCacheRequest
         ? 0
         : isInitialVideoRange(req.headers?.range)
           ? SHORT_VIDEO_INITIAL_STREAM_CHUNK_BYTES
           : SHORT_VIDEO_STREAM_CHUNK_BYTES;
-      file.fullResponse = mediaCacheRequest;
-      file.responseHeaders = {
-        "X-FanHao-Media-Cache": file.cachedStartup ? "startup" : "source"
+      const serveRepresentation = (representation) => {
+        const file = {
+          ...representation, entityMtimeResolutionMs: 1, cacheControl, maxRangeBytes, fullResponse: mediaCacheRequest
+        };
+        file.responseHeaders = { "X-FanHao-Media-Cache": file.cachedStartup ? "startup" : "source" };
+        return mediaStreamService.serveVideo(req, res, file, file.cachedStartup ? { validateFile: file.validateStartupPrefix } : undefined);
       };
-      await mediaStreamService.serveVideo(req, res, file);
+      try {
+        await serveRepresentation(selectedFile);
+      } catch (error) {
+        if (!selectedFile.cachedStartup || error?.code !== "SHORT_VIDEO_STARTUP_PREFIX_CHANGED" || res.headersSent) throw error;
+        if (!req.aborted && !res.destroyed && !res.writableEnded) await serveRepresentation(sourceFile);
+      }
       return true;
     }
 
@@ -793,6 +795,73 @@ export function createShortVideosRuntime({
     return Promise.all([...imageRequests].map(task => task.promise));
   }
 
+  function sendCatalogAdmissionError(res, error) {
+    const publicError = shortVideoCatalogAdmissionError(error);
+    if (!publicError) return false;
+    sendJson(res, publicError.statusCode, { error: publicError.message, retryable: publicError.retryable });
+    return true;
+  }
+
+  async function routeShortVideoList(req, res, url) {
+    const lifecycle = listCacheLifecycle;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    const connected = () => !req.aborted && !controller.signal.aborted && !res.destroyed && !res.writableEnded;
+    const isCurrent = () => connected() && listCacheAccepting && lifecycle === listCacheLifecycle;
+    const finishStopped = () => {
+      if (connected()) sendJson(res, 503, { error: "短视频列表服务正在停止，请稍后重试", retryable: true });
+      return true;
+    };
+    if (!isCurrent()) return finishStopped();
+    const cachePath = listCacheFiles ? listCachePath(url) : null;
+    const forceRefresh = String(url.searchParams.get("refresh") || "").trim() === "1";
+    req.once?.("aborted", onAbort);
+    res.once?.("close", onAbort);
+    try {
+      const cached = cachePath && !forceRefresh ? await readJsonCache(cachePath, controller.signal) : null;
+      if (!isCurrent()) return finishStopped();
+      if (cached?.epoch === listCacheEpoch
+        && cached.generation === shortVideoListCacheGeneration
+        && (!isWatchSensitiveShortVideoRequest(url, cached.data) || cached.watchGeneration === shortVideoWatchCacheGeneration)) {
+        const fresh = Date.now() - Date.parse(String(cached.data.cachedAt || "")) <= SHORT_VIDEO_LIST_CACHE_FRESH_MS;
+        const data = applyShortVideoWatchOverlays(cached.data);
+        sendJson(res, 200, applyMobilePlaybackHints({
+          ...data,
+          cached: true,
+          ...(fresh ? { cacheState: "fresh" } : { stale: true, cacheState: "stale-refreshing" })
+        }));
+        queueStartupVideoCandidates(data.videos);
+        queueSmoothVideoCandidates(data.videos);
+        if (!fresh) queueListCacheRefresh(url, cachePath);
+        return true;
+      }
+
+      try {
+        if (cachePath) {
+          if (!await sendStableShortVideoList(res, url, cachePath, controller.signal, isCurrent)) return finishStopped();
+        } else {
+          const data = await queryShortVideoList(url, { signal: controller.signal });
+          if (!isCurrent()) return finishStopped();
+          sendJson(res, 200, data);
+        }
+      } catch (error) {
+        if (!isCurrent()) return finishStopped();
+        const fallback = cached || (cachePath && await readJsonCache(cachePath, controller.signal));
+        if (!isCurrent()) return finishStopped();
+        if (fallback) {
+          const data = applyShortVideoWatchOverlays(fallback.data);
+          sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, offline: true, cacheState: "offline" }));
+        } else if (!sendCatalogAdmissionError(res, error)) {
+          sendShortVideoPublicError(res, sendJson, error, "短视频列表读取失败", { includeRetryable: Boolean(cachePath) });
+        }
+      }
+    } finally {
+      req.off?.("aborted", onAbort);
+      res.off?.("close", onAbort);
+    }
+    return true;
+  }
+
   function listCachePath(url) {
     const normalized = new URLSearchParams(url.searchParams);
     normalized.delete("refresh");
@@ -801,85 +870,25 @@ export function createShortVideosRuntime({
     return path.join(sharedCache.rootDir, "short-videos", "lists", `${hash}.json`);
   }
 
-  function writeJsonCache(
-    filePath,
-    data,
-    generation = shortVideoListCacheGeneration,
-    watchGeneration = shortVideoWatchCacheGeneration
-  ) {
-    const tempPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-    try {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(tempPath, JSON.stringify({
-        ...data,
-        cachedAt: new Date().toISOString(),
-        cacheGeneration: generation,
-        watchCacheGeneration: watchGeneration
-      }));
-      fs.rmSync(filePath, { force: true });
-      fs.renameSync(tempPath, filePath);
-      sharedCache.touch(filePath);
-      sharedCache.scheduleCleanup();
-    } catch (error) {
-      console.warn("[short-video-list-cache]", error.message || error);
-    } finally {
-      try {
-        fs.rmSync(tempPath, { force: true });
-      } catch {}
+  async function writeJsonCache(filePath, data, generation, watchGeneration, isCurrent) {
+    const written = await listCacheFiles.write(filePath, {
+      ...data,
+      cachedAt: new Date().toISOString(),
+      cacheEpoch: listCacheEpoch,
+      cacheGeneration: generation,
+      watchCacheGeneration: watchGeneration
+    }, { isCurrent });
+    if (written && isCurrent()) {
+      try { sharedCache.scheduleCleanup(); }
+      catch (error) { console.warn("[short-video-list-cache]", error.message || error); }
     }
   }
 
-  function readJsonCache(filePath) {
-    try {
-      if (!fs.existsSync(filePath)) return null;
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      const cachedAtMs = Date.parse(String(parsed?.cachedAt || ""));
-      const generation = Number(parsed?.cacheGeneration || 0);
-      const watchGeneration = Number(parsed?.watchCacheGeneration || 0);
-      const data = { ...parsed };
-      delete data.cacheGeneration;
-      delete data.watchCacheGeneration;
-      sharedCache.touch(filePath);
-      return {
-        data,
-        generationCurrent: generation === shortVideoListCacheGeneration
-          && (!isWatchSensitiveShortVideoList(data) || watchGeneration === shortVideoWatchCacheGeneration),
-        fresh: generation === shortVideoListCacheGeneration
-          && (!isWatchSensitiveShortVideoList(data) || watchGeneration === shortVideoWatchCacheGeneration)
-          && Number.isFinite(cachedAtMs)
-          && Date.now() - cachedAtMs <= SHORT_VIDEO_LIST_CACHE_FRESH_MS
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function listCacheGenerationPath() {
-    return path.join(path.dirname(dbPath), "short-video-list-cache-generation.json");
-  }
-
-  function readShortVideoListCacheGeneration() {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(listCacheGenerationPath(), "utf8"));
-      return Math.max(0, Number(parsed?.generation || 0));
-    } catch {
-      return 0;
-    }
-  }
-
-  function persistShortVideoListCacheGeneration() {
-    const filePath = listCacheGenerationPath();
-    const tempPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-    try {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(tempPath, JSON.stringify({ generation: shortVideoListCacheGeneration }));
-      fs.rmSync(filePath, { force: true });
-      fs.renameSync(tempPath, filePath);
-    } finally {
-      try {
-        fs.rmSync(tempPath, { force: true });
-      } catch {}
-    }
+  async function readJsonCache(filePath, signal) {
+    const snapshot = await listCacheFiles.read(filePath, { signal });
+    if (!Array.isArray(snapshot?.videos)) return null;
+    const { cacheEpoch: epoch, cacheGeneration, watchCacheGeneration, ...data } = snapshot;
+    return { data, epoch, generation: Number(cacheGeneration || 0), watchGeneration: Number(watchCacheGeneration || 0) };
   }
 
   function shortVideoWatchCacheStatePath() {
@@ -924,7 +933,6 @@ export function createShortVideosRuntime({
         generation: shortVideoWatchCacheGeneration,
         entries: [...shortVideoWatchOverlays.values()].slice(-128)
       }));
-      fs.rmSync(filePath, { force: true });
       fs.renameSync(tempPath, filePath);
     } catch (error) {
       console.warn("[short-video-watch-cache]", error.message || error);
@@ -1178,26 +1186,35 @@ export function createShortVideosRuntime({
   }
 
   function queueListCacheRefresh(url, cachePath) {
-    if (listCacheRefreshJobs.has(cachePath)) return;
+    if (!listCacheAccepting || listCacheRefreshJobs.has(cachePath)) return;
     const generation = shortVideoListCacheGeneration;
     const watchGeneration = shortVideoWatchCacheGeneration;
     const requestUrl = new URL(url.href);
-    const timer = setTimeout(async () => {
+    const controller = new AbortController();
+    const job = { controller, timer: null };
+    const ownsJob = () => listCacheRefreshJobs.get(cachePath) === job;
+    const isCurrent = () => ownsJob() && !controller.signal.aborted && generation === shortVideoListCacheGeneration;
+    job.timer = setTimeout(async () => {
       try {
-        const data = await queryShortVideoList(requestUrl);
-        if (generation !== shortVideoListCacheGeneration) return;
-        if (isWatchSensitiveShortVideoList(data) && watchGeneration !== shortVideoWatchCacheGeneration) return;
-        writeJsonCache(cachePath, data, generation, watchGeneration);
+        if (!isCurrent()) return;
+        const data = await queryShortVideoList(requestUrl, { signal: controller.signal, background: true });
+        const watchSensitive = isWatchSensitiveShortVideoRequest(requestUrl, data);
+        const canPublish = () => isCurrent() && (!watchSensitive || watchGeneration === shortVideoWatchCacheGeneration);
+        if (!canPublish()) return;
+        await writeJsonCache(cachePath, data, generation, watchGeneration, canPublish);
+        if (!canPublish()) return;
         queueStartupVideoCandidates(data.videos);
         queueSmoothVideoCandidates(data.videos);
       } catch (error) {
-        console.warn("[short-video-list-refresh]", error.message || error);
+        if (isCurrent() && !shortVideoCatalogAdmissionError(error)) {
+          console.warn("[short-video-list-refresh]", error.message || error);
+        }
       } finally {
-        listCacheRefreshJobs.delete(cachePath);
+        if (ownsJob()) listCacheRefreshJobs.delete(cachePath);
       }
     }, 25);
-    timer.unref?.();
-    listCacheRefreshJobs.set(cachePath, timer);
+    job.timer.unref?.();
+    listCacheRefreshJobs.set(cachePath, job);
   }
 
   async function queryShortVideoList(url, options = {}) {
@@ -1213,26 +1230,23 @@ export function createShortVideosRuntime({
       || String(url?.searchParams?.get("sort") || "").toLowerCase() === "watched";
   }
 
-  async function queryShortVideoListForRequest(req, url) {
-    const controller = new AbortController();
-    const onAbort = () => controller.abort();
-    req?.once?.("aborted", onAbort);
-    try {
-      return await queryShortVideoList(url, { signal: controller.signal });
-    } finally {
-      req?.off?.("aborted", onAbort);
-    }
-  }
-
-  async function queryStableShortVideoListForRequest(req, url) {
+  async function sendStableShortVideoList(res, url, cachePath, signal, isCurrent) {
     for (let attempt = 0; attempt < SHORT_VIDEO_LIST_STABLE_QUERY_ATTEMPTS; attempt += 1) {
+      if (!isCurrent()) return false;
       const generation = shortVideoListCacheGeneration;
       const watchGeneration = shortVideoWatchCacheGeneration;
-      const data = await queryShortVideoListForRequest(req, url);
-      const generationStable = generation === shortVideoListCacheGeneration;
-      const watchGenerationStable = !isWatchSensitiveShortVideoRequest(url, data)
-        || watchGeneration === shortVideoWatchCacheGeneration;
-      if (generationStable && watchGenerationStable) return { data, generation, watchGeneration };
+      const data = await queryShortVideoList(url, { signal });
+      const watchSensitive = isWatchSensitiveShortVideoRequest(url, data);
+      const canPublish = () => isCurrent() && generation === shortVideoListCacheGeneration
+        && (!watchSensitive || watchGeneration === shortVideoWatchCacheGeneration);
+      if (!canPublish()) continue;
+      await writeJsonCache(cachePath, data, generation, watchGeneration, canPublish);
+      if (!isCurrent()) return false;
+      if (!canPublish()) continue;
+      sendJson(res, 200, applyMobilePlaybackHints(data));
+      queueStartupVideoCandidates(data.videos);
+      queueSmoothVideoCandidates(data.videos);
+      return true;
     }
     const error = new Error("短视频列表正在更新，请稍后重试");
     error.code = "SHORT_VIDEO_LIST_UNSTABLE";
@@ -1243,15 +1257,22 @@ export function createShortVideosRuntime({
   }
 
   async function stopListServices() {
-    const workerStops = [catalogWorker.stop(), smoothWarmupWorker.stop(), watchWriter.stop()];
-    for (const timer of listCacheRefreshJobs.values()) clearTimeout(timer);
+    listCacheAccepting = false;
+    listCacheLifecycle += 1;
+    for (const job of listCacheRefreshJobs.values()) {
+      clearTimeout(job.timer);
+      job.controller.abort();
+    }
     listCacheRefreshJobs.clear();
+    const stops = [listCacheFiles?.stop(), catalogWorker.stop(), smoothWarmupWorker.stop(), watchWriter.stop()];
     if (shortVideoWatchCachePersistTimer) {
       clearTimeout(shortVideoWatchCachePersistTimer);
       shortVideoWatchCachePersistTimer = null;
       persistShortVideoWatchCacheState();
     }
-    await Promise.all(workerStops);
+    const results = await Promise.allSettled(stops);
+    const failed = results.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   function startDownloadManagerSync() {
@@ -1262,7 +1283,7 @@ export function createShortVideosRuntime({
     const stopping = runtimeStopPromise;
     const startWork = (async () => {
       if (stopping) await stopping;
-      await Promise.all([...videoCacheExecutions].map(execution => execution.done));
+      await Promise.all([startupScan?.done, ...Array.from(videoCacheExecutions, execution => execution.done)]);
       await Promise.all([...smoothVideoExecutions].map(execution => execution.done));
       if (!runtimeStartStillCurrent(generation)) return false;
       try {
@@ -1310,9 +1331,12 @@ export function createShortVideosRuntime({
       if (!runtimeStartStillCurrent(generation)) return false;
       downloadManagerSync.start();
       if (!runtimeStartStillCurrent(generation)) return false;
+      await listCacheFiles?.start();
+      if (!runtimeStartStillCurrent(generation)) return false;
       imageAccepting = true;
       smoothPlaybackAccepting = true;
       videoCacheAccepting = true;
+      listCacheAccepting = true;
       runtimeStarted = true;
       runtimeTestHooks.onRuntimeStartedChange?.(true);
       if (!runtimeStartStillCurrent(generation)) return false;
@@ -1350,13 +1374,18 @@ export function createShortVideosRuntime({
     const stopWork = (async () => {
       let stopError = null;
       try {
-        const syncStop = downloadManagerSync.stop();
-        await Promise.all([syncStop, stopListServices()]);
+        const results = await Promise.allSettled([
+          Promise.resolve().then(() => downloadManagerSync.stop()),
+          stopListServices()
+        ]);
+        stopError = results.find(result => result.status === "rejected")?.reason || null;
       } catch (error) {
         stopError = error;
       }
       // A failed background stop must not bypass an outstanding OS stat/read.
-      await Promise.all([imageDrain, smoothPlaybackDrain, smoothJobDrain, startupDrain]);
+      const drains = await Promise.allSettled([imageDrain, smoothPlaybackDrain, smoothJobDrain, startupDrain]);
+      const failedDrain = drains.find(result => result.status === "rejected");
+      if (failedDrain) throw failedDrain.reason;
       try {
         await deleteDrain;
       } catch (error) {
@@ -1459,11 +1488,7 @@ export function createShortVideosRuntime({
 
   function clearShortVideoListCache() {
     shortVideoListCacheGeneration = Math.max(Date.now(), shortVideoListCacheGeneration + 1);
-    try {
-      persistShortVideoListCacheGeneration();
-    } catch (error) {
-      console.warn("[short-video-list-invalidate-persist]", error.message || error);
-    }
+    startupScanPending.clear();
     try {
       catalogWorker.reset();
     } catch (error) {
@@ -1504,12 +1529,15 @@ export function createShortVideosRuntime({
     });
   }
 
+  function isStartupPrefixPublishing(cachePath) {
+    return videoCacheActiveJob?.publicationPending === true && videoCacheActiveJob.key === cachePath;
+  }
+
   function cachedStartupVideoFile(id, file) {
     const descriptor = startupVideoCacheDescriptor(id, file);
-    if (!descriptor?.cachePath || descriptor.prefixSize <= 0) return null;
+    if (!descriptor?.cachePath || descriptor.prefixSize <= 0 || isStartupPrefixPublishing(descriptor.cachePath)) return null;
     const cachedStat = safeStat(descriptor.cachePath);
     if (!cachedStat?.isFile() || cachedStat.size !== descriptor.prefixSize) return null;
-    sharedCache.touch(descriptor.cachePath);
     return {
       ...file,
       path: descriptor.cachePath,
@@ -1518,7 +1546,14 @@ export function createShortVideosRuntime({
       totalSize: descriptor.expectedSize,
       entityMtimeMs: descriptor.expectedMtimeMs,
       entityMtimeResolutionMs: 1,
-      cachedStartup: true
+      cachedStartup: true,
+      validateStartupPrefix(stat) {
+        if (isStartupPrefixPublishing(descriptor.cachePath) || stat.dev !== cachedStat.dev
+          || stat.ino !== cachedStat.ino || stat.size !== cachedStat.size) {
+          throw Object.assign(new Error("启动片段在打开期间发生变化"), { code: "SHORT_VIDEO_STARTUP_PREFIX_CHANGED" });
+        }
+        sharedCache.touch(descriptor.cachePath);
+      }
     };
   }
 
@@ -1650,15 +1685,73 @@ export function createShortVideosRuntime({
   }
 
   function queueStartupVideoCandidates(videos = []) {
+    if (!videoCacheAccepting || !sharedCache?.rootDir || !Array.isArray(videos)) return;
+    const ids = [];
+    for (const video of videos.slice(0, SHORT_VIDEO_STARTUP_SCAN_PAGE_LIMIT)) {
+      if (video?.id && String(video.mediaType || "video").toLowerCase() === "video") ids.push(String(video.id));
+    }
+    if (!ids.length) return;
+    const listGeneration = shortVideoListCacheGeneration;
+    const key = JSON.stringify([listGeneration, ids]);
+    if (startupScan?.key === key || startupScanPending.has(key)) return;
+    if (startupScanPending.size >= SHORT_VIDEO_STARTUP_SCAN_PENDING_LIMIT) {
+      startupScanPending.delete(startupScanPending.keys().next().value);
+    }
+    startupScanPending.set(key, { ids, listGeneration, generation: videoCacheGeneration });
+    scheduleStartupVideoScan();
+  }
+
+  function scheduleStartupVideoScan() {
+    if (!videoCacheAccepting || startupScan || startupScanImmediate || !startupScanPending.size) return;
+    startupScanImmediate = setImmediate(() => {
+      startupScanImmediate = null;
+      if (!videoCacheAccepting || !startupScanPending.size) return;
+      const [key, batch] = startupScanPending.entries().next().value;
+      startupScanPending.delete(key);
+      const task = { key, done: null };
+      startupScan = task;
+      task.done = Promise.resolve().then(() => scanStartupVideoCandidates(batch))
+        .catch(error => console.warn("[short-video-startup-scan]", error.message || error))
+        .finally(() => {
+          startupScan = null;
+          scheduleStartupVideoScan();
+        });
+    });
+    startupScanImmediate.unref?.();
+  }
+
+  async function scanStartupVideoCandidates(batch) {
+    const current = () => videoCacheAccepting && batch.generation === videoCacheGeneration
+      && batch.listGeneration === shortVideoListCacheGeneration;
     let queued = 0;
-    for (const video of Array.isArray(videos) ? videos : []) {
-      if (queued >= SHORT_VIDEO_STARTUP_CACHE_CANDIDATES) break;
-      if (!video?.id || String(video.mediaType || "video").toLowerCase() !== "video") continue;
-      const result = tryQueueStartupVideoCache(video.id, {
-        delayMs: SHORT_VIDEO_STARTUP_CACHE_DELAY_MS + queued * 80,
-        kind: "background"
-      });
-      if (["queued", "copying"].includes(result?.state)) queued += 1;
+    for (let index = 0; index < batch.ids.length && queued < SHORT_VIDEO_STARTUP_CACHE_CANDIDATES; index++) {
+      if (index && index % SHORT_VIDEO_STARTUP_SCAN_YIELD_INTERVAL === 0) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      if (!current()) return;
+      const id = batch.ids[index];
+      try {
+        const file = store.videoFile(id, { allowMissing: true });
+        const descriptor = startupVideoCacheDescriptor(id, file);
+        if (file?.type !== "video" || !descriptor?.cachePath) continue;
+        const stat = isStartupPrefixPublishing(descriptor.cachePath) ? null : await readStartupPrefixStat(descriptor.cachePath);
+        if (!current()) return;
+        if (!isStartupPrefixPublishing(descriptor.cachePath) && stat?.isFile() && stat.size === descriptor.prefixSize) {
+          sharedCache.touch(descriptor.cachePath);
+          continue;
+        }
+        // Recheck an actual copy candidate after the cache lookup yielded.
+        const latest = store.videoFile(id, { allowMissing: true });
+        const latestDescriptor = startupVideoCacheDescriptor(id, latest);
+        if (latest?.type !== "video" || latestDescriptor?.cachePath !== descriptor.cachePath) continue;
+        const result = enqueueStartupVideoCache(id, latest, latestDescriptor, {
+          delayMs: SHORT_VIDEO_STARTUP_CACHE_DELAY_MS + queued * 80,
+          kind: "background"
+        });
+        if (["queued", "copying"].includes(result?.state)) queued += 1;
+      } catch (error) {
+        if (current()) console.warn("[short-video-startup-cache]", id, error.message || error);
+      }
     }
   }
 
@@ -1877,10 +1970,19 @@ export function createShortVideosRuntime({
     const file = store.videoFile(id, { allowMissing: true });
     const descriptor = startupVideoCacheDescriptor(id, file);
     if (!file?.path || !descriptor?.cachePath) return { state: "missing" };
-    if (safeStat(descriptor.cachePath)?.size === descriptor.prefixSize) {
+    if (!isStartupPrefixPublishing(descriptor.cachePath) && safeStat(descriptor.cachePath)?.size === descriptor.prefixSize) {
       sharedCache.touch(descriptor.cachePath);
       return { state: "cached", path: descriptor.cachePath };
     }
+    return enqueueStartupVideoCache(id, file, descriptor, options);
+  }
+
+  async function readStartupPrefixStat(filePath) {
+    try { return await fs.promises.stat(filePath); }
+    catch { return null; }
+  }
+
+  function enqueueStartupVideoCache(id, file, descriptor, options) {
     const key = descriptor.cachePath;
     const readyAt = Date.now() + Math.max(0, Number(options.delayMs || 0));
     const kind = options.kind === "current" ? "current" : "background";
@@ -2014,13 +2116,14 @@ export function createShortVideosRuntime({
     const { cacheDir, cachePath, expectedSize, prefixSize } = job.descriptor;
     if (expectedSize <= 0 || prefixSize <= 0) return;
     let handle = null, sourceStream = null, targetStream = null, sourceClosed = null, targetClosed = null;
-    let tempPath = null, published = false, accepted = false;
+    let tempPath = null;
     try {
       assertStartupVideoCatalog(job);
       handle = await fs.promises.open(job.file.path, "r");
       await validateStartupVideoSource(job, handle);
       assertStartupVideoCatalog(job);
-      const cachedStat = safeStat(cachePath);
+      const cachedStat = await readStartupPrefixStat(cachePath);
+      assertStartupVideoCatalog(job);
       if (cachedStat?.isFile() && cachedStat.size === prefixSize) {
         sharedCache.touch(cachePath);
         return;
@@ -2042,20 +2145,23 @@ export function createShortVideosRuntime({
       await fs.promises.rm(cachePath, { force: true });
       await validateStartupVideoSource(job, handle);
       assertStartupVideoCatalog(job);
+      // The final path can be visible before rename returns or validation finishes.
+      job.publicationPending = true;
       await fs.promises.rename(tempPath, cachePath);
-      published = true;
       await validateStartupVideoSource(job, handle);
       assertStartupVideoCatalog(job);
-      accepted = true;
+      job.publicationPending = false;
       sharedCache.touch(cachePath);
       sharedCache.scheduleCleanup();
     } finally {
       sourceStream?.destroy(); targetStream?.destroy();
       if (sourceStream && !sourceStream.closed) await sourceClosed;
       if (targetStream && !targetStream.closed) await targetClosed;
-      if (published && !accepted) {
-        try { await fs.promises.rm(cachePath, { force: true }); }
-        catch (error) { job.drainFailure = error; }
+      if (job.publicationPending) {
+        try {
+          await fs.promises.rm(cachePath, { force: true });
+          job.publicationPending = false;
+        } catch (error) { job.drainFailure = error; }
       }
       if (tempPath) await fs.promises.rm(tempPath, { force: true }).catch(() => {});
       try { await handle?.close(); }
@@ -2568,12 +2674,15 @@ export function createShortVideosRuntime({
     videoCacheGeneration += 1;
     if (videoCacheTimer != null) clearTimeout(videoCacheTimer);
     videoCacheTimer = null;
+    if (startupScanImmediate != null) clearImmediate(startupScanImmediate);
+    startupScanImmediate = null;
+    startupScanPending.clear();
     videoCacheQueue.length = 0;
     const executions = [...videoCacheExecutions];
     for (const job of videoCacheJobs.values()) job.controller.abort();
     for (const execution of executions) execution.job.controller.abort();
     videoCacheJobs.clear();
-    const drain = Promise.all(executions.map(execution => execution.done));
+    const drain = Promise.all([startupScan?.done, ...executions.map(execution => execution.done)]);
     // Other runtime workers may still be stopping when a native close fails.
     // Observe it immediately while preserving the rejection for the caller.
     drain.catch(() => {});

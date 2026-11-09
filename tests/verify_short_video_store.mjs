@@ -14,6 +14,7 @@ import { createShortVideoPublicVideoMapper, shortVideoStatisticsKnown } from "..
 import { createShortVideoListPageQueries } from "../src/modules/short-videos/server/list-page-queries.js";
 import * as navigationQueries from "../src/modules/short-videos/server/navigation-queries.js";
 import { videoFilter } from "../src/modules/short-videos/server/query-contract.js";
+import { recreateShortVideoCatalogView } from "../src/modules/short-videos/server/schema.js";
 
 const shortVideoStoreSource = fs.readFileSync(new URL("../src/modules/short-videos/server/store.js", import.meta.url), "utf8");
 const advisories = createVerificationAdvisories("short-video-store");
@@ -955,7 +956,7 @@ async function verifyNavigationListOrder() {
       for (const item of schema.filter(item=>item.type === "table")) {
         if (item.name.startsWith("sqlite_") || item.name.startsWith("short_video_search_")) continue;
         let sql=item.sql;
-        if (nullableLegacy && item.name === "short_videos") for (const column of ["published_at","liked_at","liked_sort_at","size_bytes"]) {
+        if (nullableLegacy && item.name === "short_videos") for (const column of ["published_at","liked_at","liked_sort_at","size_bytes","visibility"]) {
           sql=sql.replace(new RegExp(`(${column} (?:TEXT|INTEGER)) NOT NULL`),"$1");
         }
         db.exec(sql);
@@ -1038,9 +1039,133 @@ async function verifyNavigationListOrder() {
         queries.length=0; navigation.fastMetricAdjacentRows(observed,db.prepare(`SELECT ${columns} FROM short_video_catalog WHERE id='B'`).get(),1,videoFilter(metricParams),navigation.adjacentOrder({searchParams:metricParams}),6);
         assert.equal(queries.filter(sql=>/AS value FROM short_videos/.test(sql)).length,1,"overlaid metric anchor needs one bounded scalar read");
       }
+      verifyLikedFeedCounts(db, list, nullableLegacy);
     } finally { db.close(); }
   }
   console.log(`short-video-store: ${checks} in-memory navigation/list order checks passed`);
+}
+
+function verifyLikedFeedCounts(db, list, nullableLegacy) {
+  db.exec("UPDATE short_videos SET visibility = 'z-hidden' WHERE id = 'A'");
+  if (nullableLegacy) db.exec("UPDATE short_videos SET visibility = NULL WHERE id = 'B'");
+  const local = db.prepare("SELECT COUNT(*) AS count FROM short_videos WHERE is_liked = 1 AND visibility = 'local_only'").get().count;
+  const all = db.prepare("SELECT COUNT(*) AS count FROM short_videos WHERE is_liked = 1").get().count;
+  assert.equal(all - local, nullableLegacy ? 3 : 2, "pending, hidden and legacy NULL rows are distinct from visible likes");
+  let visits = 0;
+  db.function("fixture_liked_count_visit", () => { visits++; return 1; });
+  function read(includePending, offset, legacy = false) {
+    visits = 0;
+    let plan;
+    const observed = { prepare(sql) {
+      if (sql.startsWith("EXPLAIN QUERY PLAN") && sql.includes("AS relationship_total")) {
+        if (legacy) throw new Error("no optional plan");
+        const rows = db.prepare(sql).all();
+        plan = rows.map(row => row.detail);
+        return { all: () => rows };
+      }
+      if (sql.startsWith("EXPLAIN") || !sql.includes("COUNT(*)")) return db.prepare(sql);
+      return db.prepare(sql.replaceAll(/\bis_liked = 1\b/gu, "$& AND fixture_liked_count_visit()"));
+    } };
+    const filter = videoFilter(new URLSearchParams({ source: "liked", includePending: includePending ? "1" : "0" }));
+    const page = list.fastFilteredVideoPage(observed, filter, "liked", 2, offset);
+    const relationshipTotal = (legacy ? null : page.relationshipTotal) ?? list.shortVideoRelationshipTotal(observed, "liked");
+    return { data: { ...page, relationshipTotal }, visits, plan };
+  }
+  for (const includePending of [false, true]) for (const offset of [0, 4, 100]) {
+    const old = read(includePending, offset, true), current = read(includePending, offset);
+    assert.deepEqual(current.data, old.data, "complete liked page and both totals must match the separate queries");
+    assert.equal(current.data.total, includePending ? all : local);
+    assert.equal(current.data.relationshipTotal, all);
+    assert.equal(old.visits, all + current.data.total, "the previous count path revisits all visible likes");
+    assert.equal(current.visits, all, `each liked row is counted in only one range (${JSON.stringify(current.plan)})`);
+  }
+  const normal = read(false, 0);
+  db.exec(`DROP INDEX idx_short_videos_liked_sort_all;
+    CREATE INDEX idx_short_videos_liked_sort_all ON short_videos(is_liked, liked_sort_time DESC, liked_sort_at DESC, published_at DESC, id DESC, visibility)`);
+  const legacyIndex = read(false, 0);
+  assert.deepEqual(legacyIndex.data, normal.data);
+  assert(legacyIndex.visits > all, "an index without the visibility prefix must use the separate counts");
+}
+
+async function verifyLikedFeedRoute(store) {
+  const url = new URL("http://fixture/api/short-videos?source=liked&limit=10&stats=0&facets=0");
+  const prepare = DatabaseSync.prototype.prepare;
+  let separateCounts = 0, forceFallback = false;
+  DatabaseSync.prototype.prepare = function (sql, ...args) {
+    if (forceFallback && sql.startsWith("EXPLAIN QUERY PLAN") && sql.includes("AS relationship_total")) throw new Error("controlled plan failure");
+    if (sql === "SELECT COUNT(*) AS count FROM short_videos WHERE is_liked = 1") separateCounts++;
+    return prepare.call(this, sql, ...args);
+  };
+  const read = async () => {
+    let response;
+    assert(await routeShortVideoApi({ method: "GET" }, {}, url, {
+      shortVideoStore: store,
+      sendJson(_res, status, body) { assert.equal(status, 200); response = body; }
+    }));
+    return response;
+  };
+  try {
+    const current = await read();
+    assert.equal(separateCounts, 0, "the route must consume the relationship total from its page query");
+    forceFallback = true;
+    assert.equal(JSON.stringify(await read()), JSON.stringify(current));
+    assert.equal(separateCounts, 1, "the legacy route still reads its separate relationship total");
+    return current;
+  } finally { DatabaseSync.prototype.prepare = prepare; }
+}
+
+function verifyVideoFileLookup(tempDir) {
+  const dbPath = path.join(tempDir, "video-file-lookup.sqlite");
+  const store = createShortVideoStore({ dbPath, roots: [], skipStartupMaintenance: true });
+  const id = "fixture-video-file";
+  const awemeId = "1234567890123456789";
+  const prefix = awemeId.slice(0, 12);
+  const original = path.join(tempDir, "first-source.mp4");
+  const replacement = path.join(tempDir, "replacement-source.mp4");
+  const allowMissing = { allowMissing: true };
+  const prepare = DatabaseSync.prototype.prepare;
+  const readers = [];
+  DatabaseSync.prototype.prepare = function(sql, ...args) {
+    if (sql.includes("actual_frame_rate FROM short_video_catalog WHERE id = ?")) readers.push(this);
+    return prepare.call(this, sql, ...args);
+  };
+  let writer;
+  try {
+    store.prepareSchema();
+    writer = new DatabaseSync(dbPath);
+    const insert = writer.prepare(`INSERT INTO short_videos(id, aweme_id, source_path, visibility, size_bytes, mtime_ms)
+      VALUES (?, ?, ?, 'local_only', ?, ?)`);
+    insert.run(id, awemeId, original, 10, 1000);
+    assert.equal(store.videoFile(id, allowMissing)?.path, original);
+    assert.equal(store.videoFile(awemeId, allowMissing)?.id, id);
+    assert.equal(store.videoFile(prefix, allowMissing)?.id, id);
+    assert.equal(store.videoFile(id), null, "default file lookup still requires an existing path");
+    assert.equal(store.videoFile("unknown", allowMissing), null);
+    assert.equal(readers.length, 1, "all exact-id probes use one prepared statement on the live connection");
+
+    writer.prepare("UPDATE short_videos SET source_path = ?, size_bytes = ?, mtime_ms = ? WHERE id = ?")
+      .run(replacement, 20, 2000, id);
+    recreateShortVideoCatalogView(writer);
+    const current = store.videoFile(id, allowMissing);
+    assert.equal(current?.path, replacement);
+    assert.equal(current?.size, 20);
+    assert.equal(current?.cacheVersion, "2000");
+    assert.deepEqual(store.videoFile(awemeId, allowMissing), current);
+    insert.run("fixture-video-ambiguous", `${prefix}9999999`, original, 10, 1000);
+    assert.equal(store.videoFile(prefix, allowMissing), null, "the numeric alias stays ambiguous when a second match appears");
+    assert.equal(readers.length, 1, "view recreation uses the existing JavaScript statement");
+
+    assert.equal(store.close(), true);
+    assert.equal(readers[0].isOpen, false);
+    assert.deepEqual(store.videoFile(id, allowMissing), current);
+    assert.equal(readers.length, 2);
+    assert.notEqual(readers[1], readers[0], "reopen prepares against the new owner");
+    console.log("short-video-store: video file statement reuse, aliases and live catalog changes passed");
+  } finally {
+    DatabaseSync.prototype.prepare = prepare;
+    writer?.close();
+    store.close();
+  }
 }
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-store-"));
@@ -1075,6 +1200,7 @@ async function runSyncWorker(workerData) {
 }
 
 try {
+  verifyVideoFileLookup(tempDir);
   fs.mkdirSync(galleryDir, { recursive: true });
   const galleryPaths = [1, 2, 3].map((index) => path.join(galleryDir, `gallery_${galleryId}_${index}.jpg`));
   for (const filePath of galleryPaths) fs.writeFileSync(filePath, Buffer.from(`image:${filePath}`));
@@ -1164,6 +1290,13 @@ try {
   assert.equal(fs.existsSync(legacyGeneratedCover), true, "migration must retain legacy files until the caller completes verification");
   const migratedCover = store.coverFile(legacyGeneratedId);
   assert.equal(migratedCover?.buffer?.equals(jpegBuffer), true, "migrated covers should be read directly from SQLite BLOB storage");
+  const asyncMigratedCover = await store.coverFileAsync(legacyGeneratedId);
+  assert.deepEqual(asyncMigratedCover?.buffer, jpegBuffer);
+  migratedCover.buffer[2] = 0;
+  assert.deepEqual(asyncMigratedCover.buffer, jpegBuffer, "cover responses should own independent bytes");
+  assert.deepEqual(store.coverFile(legacyGeneratedId)?.buffer, jpegBuffer, "response changes should not reach SQLite");
+  assert.equal(store.close(), true);
+  assert.deepEqual((await store.coverFileAsync(legacyGeneratedId))?.buffer, jpegBuffer, "cover reads should reopen with a new statement");
   const migratedCoverDb = new DatabaseSync(targetDbPath, { readOnly: true });
   const migratedCoverRow = migratedCoverDb.prepare("SELECT cover_path, cover_source FROM short_videos WHERE id = ?").get(legacyGeneratedId);
   migratedCoverDb.close();
@@ -1485,9 +1618,7 @@ try {
   });
   assert.equal(authorSuggestions.suggestions[0]?.kind, "author", "indexed author suggestions should take the fast path");
   assert.equal(authorSuggestions.suggestions[0]?.label, "测试作者");
-  const importedLikes = store.listVideos({
-    searchParams: new URLSearchParams("source=liked&limit=10&stats=0&facets=0")
-  });
+  const importedLikes = await verifyLikedFeedRoute(store);
   assert.equal(importedLikes.total, 1, "only the downloader like profile should populate My Likes");
   assert.equal(importedLikes.relationshipTotal, 1);
   assert.equal(importedLikes.videos[0]?.id, liveId);

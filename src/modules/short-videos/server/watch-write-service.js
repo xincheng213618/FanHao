@@ -33,7 +33,7 @@ export function createShortVideoWatchWriteService({
   const readyQueue = [];
   const workerRequests = new Map();
   const closeRequests = new Map();
-  const workerRetirementErrors = new Map();
+  const workerRetirements = new WeakMap();
   let worker = null;
   let readyPromise = null;
   let readyResolve = null;
@@ -76,16 +76,21 @@ export function createShortVideoWatchWriteService({
       }
     }
     if (!desiredStarted || generation !== lifecycleGeneration) return false;
+    while (!stoppingError && worker && workerRetirements.has(worker)) {
+      const result = await retireWorker(worker);
+      if (!desiredStarted || generation !== lifecycleGeneration) return false;
+      if (!result.retired) stoppingError = result.error;
+    }
     if (stoppingError || incompleteStopWorker) {
       desiredStarted = false;
       accepting = false;
       throw workerStopIncompleteError(stoppingError);
     }
     accepting = true;
-    ensureWorker();
+    const startedWorker = ensureWorker();
     const ready = await readyPromise;
     if (!desiredStarted || generation !== lifecycleGeneration) return false;
-    if (!ready) throw workerUnavailableError();
+    if (!ready || worker !== startedWorker || workerRetirements.has(startedWorker)) throw workerUnavailableError();
     return true;
   }
 
@@ -131,6 +136,7 @@ export function createShortVideoWatchWriteService({
       stopReject = reject;
     });
     const result = stoppingPromise;
+    if (worker && workerRetirements.has(worker)) void retireWorker(worker);
     schedulePump();
     finishStopIfDrained();
     return result;
@@ -308,7 +314,25 @@ export function createShortVideoWatchWriteService({
     }
   }
 
-  function requestWorkerMessage(type, payload, timeoutMs) {
+  async function requestWorkerMessage(type, payload, timeoutMs) {
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    // A matching late acknowledgement can settle a write without making its
+    // terminating worker safe for the next record or receipt.
+    while (worker && workerRetirements.has(worker)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw workerTimeoutError();
+      let timer;
+      try {
+        const timedOut = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(workerTimeoutError()), remaining);
+          timer.unref?.();
+        });
+        const result = await Promise.race([retireWorker(worker), timedOut]);
+        if (!result.retired) throw workerUnavailableError(result.error);
+      } finally { clearTimeout(timer); }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw workerTimeoutError();
     return new Promise((resolve, reject) => {
       let activeWorker;
       try {
@@ -323,19 +347,13 @@ export function createShortVideoWatchWriteService({
       request.timer = setTimeout(() => {
         if (!workerRequests.has(id)) return;
         workerTimeouts += 1;
-        const timeoutError = workerTimeoutError();
-        void retireWorker(activeWorker, timeoutError).then((retired) => {
-          if (retired) rejectWorkerRequest(id, timeoutError);
-        });
-      }, Math.max(1, timeoutMs));
+        void retireWorker(activeWorker, workerTimeoutError());
+      }, remaining);
       request.timer.unref?.();
       try {
         activeWorker.postMessage({ type, id, ...payload });
       } catch (error) {
-        const unavailableError = workerUnavailableError(error);
-        void retireWorker(activeWorker, unavailableError).then((retired) => {
-          if (retired) rejectWorkerRequest(id, unavailableError);
-        });
+        void retireWorker(activeWorker, workerUnavailableError(error));
       }
     });
   }
@@ -369,6 +387,7 @@ export function createShortVideoWatchWriteService({
         return;
       }
       if (message?.type === "ready") {
+        if (worker !== nextWorker || workerRetirements.has(nextWorker)) return;
         readyResolve?.(Boolean(message.ok));
         readyResolve = null;
         return;
@@ -376,7 +395,6 @@ export function createShortVideoWatchWriteService({
       const id = Number(message?.id || 0);
       const request = workerRequests.get(id);
       if (!request || request.worker !== nextWorker) return;
-      workerRetirementErrors.delete(nextWorker);
       workerRequests.delete(id);
       clearTimeout(request.timer);
       if (message?.ok) request.resolve(message.data);
@@ -385,38 +403,50 @@ export function createShortVideoWatchWriteService({
     nextWorker.on("error", (error) => {
       void retireWorker(nextWorker, workerUnavailableError(error));
     });
-    nextWorker.on("exit", (code) => {
-      if (worker !== nextWorker) return;
-      const exitError = workerRetirementErrors.get(nextWorker) || workerExitError(code);
-      workerRetirementErrors.delete(nextWorker);
-      detachWorker(nextWorker);
-      rejectWorkerRequests(nextWorker, exitError);
-      rejectCloseRequests(nextWorker, exitError);
-    });
+    nextWorker.once("exit", (code) => finishWorkerExit(nextWorker, code));
     return nextWorker;
   }
 
-  async function retireWorker(failedWorker, error) {
-    if (!workerRetirementErrors.has(failedWorker)) workerRetirementErrors.set(failedWorker, error);
-    try {
-      await terminateWorker(failedWorker);
-    } catch (terminationError) {
-      retirementTerminationFailures += 1;
-      testHooks.onRetireTerminateFailure?.({ error: terminationError, worker: failedWorker });
-      return false;
+  function retireWorker(activeWorker, error) {
+    if (worker !== activeWorker) return Promise.resolve({ retired: true });
+    let retirement = workerRetirements.get(activeWorker);
+    if (!retirement) {
+      retirement = { error, attempt: null, resolveAttempt: null };
+      workerRetirements.set(activeWorker, retirement);
+    } else if (error && !retirement.error) {
+      retirement.error = error;
     }
-    workerRetirementErrors.delete(failedWorker);
-    if (worker === failedWorker) detachWorker(failedWorker);
-    rejectWorkerRequests(failedWorker, error);
-    return true;
+    if (retirement.attempt) return retirement.attempt;
+    const attempt = new Promise(resolve => { retirement.resolveAttempt = resolve; });
+    retirement.attempt = attempt;
+    void Promise.resolve().then(() => {
+      if (worker === activeWorker) return terminateWorker(activeWorker);
+    }).then(code => finishWorkerExit(activeWorker, code), (terminationError) => {
+      if (worker !== activeWorker || retirement.attempt !== attempt) return;
+      const resolve = retirement.resolveAttempt;
+      retirement.attempt = retirement.resolveAttempt = null;
+      resolve({ retired: false, error: terminationError });
+      if (stoppingPromise && !stopCompleting) failStop(activeWorker, terminationError);
+      if (retirement.error) {
+        retirementTerminationFailures += 1;
+        testHooks.onRetireTerminateFailure?.({ error: terminationError, worker: activeWorker });
+      }
+    });
+    return attempt;
   }
 
-  function detachWorker(failedWorker) {
-    if (worker !== failedWorker) return;
+  function finishWorkerExit(exitedWorker, code) {
+    if (worker !== exitedWorker) return;
+    const retirement = workerRetirements.get(exitedWorker);
+    const error = retirement?.error || workerExitError(code);
     worker = null;
+    if (incompleteStopWorker === exitedWorker) incompleteStopWorker = null;
     readyResolve?.(false);
     readyResolve = null;
     readyPromise = null;
+    rejectWorkerRequests(exitedWorker, error);
+    rejectCloseRequests(exitedWorker, error);
+    retirement?.resolveAttempt?.({ retired: true });
   }
 
   function rejectWorkerRequest(id, error) {
@@ -476,18 +506,27 @@ export function createShortVideoWatchWriteService({
 
   async function completeStop(activeWorker) {
     try {
-      if (activeWorker) {
-        await requestWorkerClose(activeWorker);
-        await terminateWorker(activeWorker);
-        if (worker === activeWorker) detachWorker(activeWorker);
+      if (activeWorker && !workerRetirements.has(activeWorker)) {
+        try { await requestWorkerClose(activeWorker); }
+        catch (cause) {
+          if (worker === activeWorker && !workerRetirements.has(activeWorker)) throw cause;
+        }
+      }
+      if (activeWorker && worker === activeWorker) {
+        const result = await retireWorker(activeWorker);
+        if (!result.retired) throw result.error;
       }
       incompleteStopWorker = null;
       settleStop();
     } catch (cause) {
-      stopFailures += 1;
-      incompleteStopWorker = activeWorker || worker || incompleteStopWorker;
-      settleStop(workerStopError(cause));
+      failStop(activeWorker, cause);
     }
+  }
+
+  function failStop(activeWorker, cause) {
+    stopFailures += 1;
+    incompleteStopWorker = worker === activeWorker ? activeWorker : null;
+    settleStop(workerStopError(cause));
   }
 
   function settleStop(error = null) {

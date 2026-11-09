@@ -604,6 +604,7 @@ async function verifyBoundedFailures(fixture) {
   bounds.crash = round(await verifyCrashRecovery());
   bounds.corrupt = round(await verifyCorruptFailure());
   bounds.timeout = round(await verifyTimeoutFailure());
+  await verifyTimeoutRetainsWorkerOwner();
   bounds.redacted = round(await verifyPathRedaction());
   await verifyStopStart(fixture);
   return bounds;
@@ -694,6 +695,82 @@ async function verifyTimeoutFailure() {
     return elapsed;
   } finally {
     await client.stop();
+  }
+}
+
+async function verifyTimeoutRetainsWorkerOwner() {
+  const workers = [];
+  const firstTerminate = Promise.withResolvers(), retryTerminate = Promise.withResolvers();
+  const retiring = Promise.withResolvers(), retrying = Promise.withResolvers(), replacementPosted = Promise.withResolvers();
+  const deadline = Promise.withResolvers();
+  const watchdog = setTimeout(() => deadline.reject(new Error("retiring catalog worker fixture timed out")), 3000);
+  const within = promise => Promise.race([promise, deadline.promise]);
+  let terminationCalls = 0;
+  const client = createShortVideoCatalogWorkerClient({
+    dbPath: "fixture-only", likeDistributionTimeoutMs: 100, statsRetryLimit: 0,
+    workerFactory() {
+      const worker = new EventEmitter();
+      const replacement = workers.length > 0;
+      workers.push(worker);
+      worker.postMessage = message => {
+        if (replacement && message.type === "likeDistribution") replacementPosted.resolve(message);
+        else if (!replacement && message.id) worker.lastRequest = message;
+      };
+      worker.terminate = () => {
+        if (replacement) return Promise.resolve(0);
+        if (++terminationCalls === 1) {
+          retiring.resolve();
+          return firstTerminate.promise;
+        }
+        retrying.resolve();
+        return retryTerminate.promise;
+      };
+      queueMicrotask(() => worker.emit("message", { type: "ready", ok: true }));
+      return worker;
+    }
+  });
+  const timedOut = assert.rejects(client.queryLikeDistribution({ catalogStamp: "retired" }), assertGenericDistribution503);
+  void timedOut.catch(() => {});
+  try {
+    await within(retiring.promise);
+    const owner = workers[0];
+    const timedOutId = owner.lastRequest.id;
+    const queued = client.query(new URL("http://fixture/api/short-videos")).catch(() => undefined);
+    owner.emit("error", new Error("duplicate transport failure while retiring"));
+    owner.emit("message", { id: timedOutId, ok: true, data: { total: 99 } });
+    let settled = false;
+    const stopping = client.stop().finally(() => { settled = true; });
+    const failedStop = assert.rejects(stopping);
+    void failedStop.catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(workers.length, 1, "a timed-out physical Worker must block a replacement");
+    assert.equal(owner.lastRequest.id, timedOutId, "a retiring Worker cannot receive another query");
+    assert.equal(terminationCalls, 1, "timeout, transport error and stop must share one termination");
+    assert.equal(settled, false, "stop must remain pending while the old Worker can still execute");
+
+    firstTerminate.reject(new Error("controlled native terminate failure"));
+    await within(failedStop);
+    const stopped = client.stop();
+    await within(retrying.promise);
+    assert.equal(workers.length, 1);
+    owner.emit("exit", 0);
+    await within(stopped);
+    await within(timedOut);
+    await within(queued);
+
+    await client.start();
+    const next = client.queryLikeDistribution({ catalogStamp: "retired" });
+    const { id } = await within(replacementPosted.promise);
+    retryTerminate.resolve(0);
+    await new Promise(resolve => setImmediate(resolve));
+    owner.emit("message", { id, ok: true, data: { total: 99 } });
+    workers[1].emit("message", { id, ok: true, data: { total: 1 } });
+    assert.equal((await within(next)).total, 1, "a late retired-worker message must not settle the replacement");
+  } finally {
+    clearTimeout(watchdog);
+    firstTerminate.resolve(0);
+    retryTerminate.resolve(0);
+    await client.stop().catch(() => {});
   }
 }
 

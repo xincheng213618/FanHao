@@ -36,7 +36,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 
 这些运行数据已被 Git 忽略。`data/short-videos.sqlite` 仍是 FanHao 展示层的短视频库，服务会从下载管理器数据库做增量同步；备份或迁移机器时，两份 SQLite 都应保留。
 
-`data/short-video-list-cache-generation.json` 与 `data/short-video-list-watch-overlays.json` 是短视频列表缓存的失效标记和临时观看覆盖，可由 SQLite 状态重新生成，也已被 Git 忽略；它们不是需要随源码发布的数据。
+`data/short-video-list-watch-overlays.json` 保存可由 SQLite 状态重新生成的临时观看覆盖，已被 Git 忽略。短视频列表缓存只在写入它的运行时内可直接命中。新进程会先查询 SQLite，查询失败时仍可把旧快照作为离线结果返回。旧版 `data/short-video-list-cache-generation.json` 已退出读写路径。
 
 ## 核心库（`fanhao-core-v2.sqlite`）
 
