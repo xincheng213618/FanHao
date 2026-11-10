@@ -206,12 +206,13 @@ PARALLEL_BY_DRIVE = True
 
 
 def main(argv=None):
-    from movefile_plan import build_plan, collect_consolidation_tasks, validate_plan, write_plan
+    from movefile_plan import collect_consolidation_tasks, validate_plan
     parser = argparse.ArgumentParser(description="Move staged folders into existing libraries, resolving confirmed person identities.")
     parser.add_argument("--db", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "fanhao-core-v2.sqlite", help="FanHao core database; matching is read-only, execution updates local paths")
     parser.add_argument("--dry-run", action="store_true", help="Print the matching plan without moving files")
     parser.add_argument("--plan", type=Path, help="Save an immutable plan and stop before moving files")
     parser.add_argument("--execute", type=Path, help="Execute or resume a previously saved plan")
+    parser.add_argument("--vr-only", action="store_true", help="Only archive VR; skip the normal library and reject saved plans containing non-VR tasks")
     parser.add_argument("--consolidate", action="store_true", help="Also merge formal alias directories for explicitly selected people")
     parser.add_argument("--person-id", type=int, action="append", default=[], help="Limit matching to this canonical person ID; repeatable")
     parser.add_argument("--serial", action="store_true", help="Process target drives serially")
@@ -223,6 +224,8 @@ def main(argv=None):
     if args.execute:
         with args.execute.open(encoding="utf-8-sig") as stream:
             plan = json.load(stream)
+        if args.vr_only and any(task.get("kind") != "vr" for task in plan["tasks"]):
+            parser.error("--vr-only cannot execute a plan containing non-VR tasks")
         validate_plan(plan, PersonDirectoryIndex(plan["dbPath"]))
         if args.dry_run:
             print(f"[DRY RUN] Approved plan: {plan['totalFiles']} files; no files moved")
@@ -234,45 +237,31 @@ def main(argv=None):
     else:
         parser.error(f"Identity database does not exist: {args.db}")
     args.person_id = list({identity_index.person_ids.get(person_id, person_id) for person_id in args.person_id})
-    roots_normal = DEFAULT_ROOTS_NORMAL
-    roots_vr = DEFAULT_ROOTS_VR
-    print("[MODE] Project move mode: parallel by target drive")
+    groups = [("vr", DEFAULT_ROOTS_VR, SOURCE_ONLY_ROOTS_VR)]
+    if not args.vr_only:
+        groups.insert(0, ("normal", DEFAULT_ROOTS_NORMAL, SOURCE_ONLY_ROOTS_NORMAL))
+    print(f"[MODE] {'VR only' if args.vr_only else 'Normal and VR'}; parallel by target drive")
 
-    if args.consolidate:
-        tasks = collect_consolidation_tasks(identity_index, roots_normal, SOURCE_ONLY_ROOTS_NORMAL, args.person_id, "normal")
-        tasks += collect_consolidation_tasks(identity_index, roots_vr, SOURCE_ONLY_ROOTS_VR, args.person_id, "vr")
-        finish_plan(tasks, args, identity_index)
-        return
-
-    # 常规任务
-    mover_normal = FileMover(roots_normal, SOURCE_ONLY_ROOTS_NORMAL, identity_index)
-    tasks_normal = mover_normal.collect_tasks()
-    print(f"[INFO] Collected {len(tasks_normal)} normal tasks")
-
-    # VR 任务
-    mover_vr = FileMover(roots_vr, SOURCE_ONLY_ROOTS_VR, identity_index)
-    tasks_vr = mover_vr.collect_tasks()
-    print(f"[INFO] Collected {len(tasks_vr)} VR tasks")
-
-    if len(tasks_vr) == 0:
-        print("[WARN] No VR tasks found! Check if VR directories exist and contain valid folders")
-        for dir in roots_vr:
-            if os.path.exists(dir):
-                print(f"  - {dir}: exists")
-            else:
-                print(f"  - {dir}: MISSING")
-
-    combined = tasks_normal + tasks_vr
     tasks = []
-    for task in combined:
-        owners = identity_index.owners(task.src_folder)
-        if len(owners) != 1:
-            print(f"[SKIP] No unique database identity: {task.src_folder}")
+    for kind, roots, source_roots in groups:
+        if args.consolidate:
+            tasks.extend(collect_consolidation_tasks(identity_index, roots, source_roots, args.person_id, kind))
             continue
-        person_id = next(iter(owners))
-        if args.person_id and person_id not in args.person_id:
-            continue
-        tasks.append({"personId": person_id, "source": task.src_folder, "target": task.dst_folder, "kind": "vr" if task.is_vr() else "normal"})
+        matches = FileMover(roots, source_roots, identity_index).collect_tasks()
+        print(f"[INFO] Collected {len(matches)} {kind} tasks")
+        if kind == "vr" and not matches:
+            print("[WARN] No VR tasks found; check the staging and destination directories")
+            for root in roots:
+                print(f"  - {root}: {'exists' if os.path.exists(root) else 'MISSING'}")
+        for task in matches:
+            owners = identity_index.owners(task.src_folder)
+            if len(owners) != 1:
+                print(f"[SKIP] No unique database identity: {task.src_folder}")
+                continue
+            person_id = next(iter(owners))
+            if args.person_id and person_id not in args.person_id:
+                continue
+            tasks.append({"personId": person_id, "source": task.src_folder, "target": task.dst_folder, "kind": kind})
     finish_plan(tasks, args, identity_index)
 
 
